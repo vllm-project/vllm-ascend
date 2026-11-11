@@ -41,6 +41,10 @@ The target checkpoint directory must contain the model configuration, tokenizer,
 
 For each role, `draft_tensor_parallel_size` must match the target model's `--tensor-parallel-size`; Prefill and Decode may use different TP sizes.
 
+On 950DT Products (A5), Model Runner V2 automatically selects FlashMLA for a compatible `K3DSparkModel` draft when the existing operator, attention-shape, query-dtype, and KV-cache requirements are met. The K3.1 target keeps its SFA/KDA attention backends. FlashMLA's private PROLOG V3 writer uses blocks of at most 1024 tokens, independently of the history KV-cache page size, so a history page size of 1536 does not exceed the writer operator's limit.
+
+For colocated serving with PP1, PCP1, and initialized K3.1 device metadata, the FlashMLA draft can use device sequence lengths with DCP enabled, including TP8/DCP8/EP8. This avoids a main-thread sequence-length synchronization between the draft and the next target step. KV transfer, sparse KV offload, adaptive verification, and consumers requiring exact CPU counts retain synchronization. The PD separation templates below retain their existing synchronization requirements.
+
 **Paths:** Download the target checkpoint for your platform from the table above. The commands below use example local directories: `/root/.cache/Kimi-K3.1-Pro-w4a8` on A3 and `/root/.cache/Kimi-K3.1-Pro-w4a8-mxfp` on 950DT Products. Download the complete checkpoint into the corresponding directory; if you use another directory, update the `vllm serve` path in every template for that platform. `<YOUR_DRAFT_MODEL_PATH>` still denotes the local directory of the compatible DSpark draft checkpoint. Use the same paths on every node and mount the weight directories inside every container. Weight directory names are independent of the API service name; keep `kimi-k3.1-pro` for both the served model name and the request `model` field.
 
 ### 3.2 Verify Multi-node Communication {#32-verify-multi-node-communication}

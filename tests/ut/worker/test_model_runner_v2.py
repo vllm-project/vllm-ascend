@@ -2187,6 +2187,60 @@ def test_glm_mla_dspark_requires_cpu_length_sync(unsupported):
     assert runner._can_skip_spec_cpu_length_sync() is False
 
 
+def _kimi_k31_device_length_runner():
+    runner, output, batch = _glm_mla_device_length_runner()
+    runner.model_config.architecture = "KimiK31ForConditionalGeneration"
+    runner.speculative_config.draft_model_config.architectures = ["K3DSparkModel"]
+    runner.parallel_config.decode_context_parallel_size = 8
+    runner.model_state.device_metadata = object()
+    return runner, output, batch
+
+
+@pytest.mark.parametrize("eager", [False, True])
+def test_kimi_k31_dspark_flashmla_dcp_device_lengths(eager):
+    runner, _, _ = _kimi_k31_device_length_runner()
+    runner.speculative_config.enforce_eager = eager
+    assert runner._can_skip_spec_cpu_length_sync() is True
+
+
+@pytest.mark.parametrize(
+    "unsupported",
+    [
+        "draft_arch",
+        "draft_fia",
+        "no_device_metadata",
+        "no_backends",
+        "pipeline_parallel_size",
+        "prefill_context_parallel_size",
+        "kv_transfer",
+        "sparse_offload",
+        "adaptive",
+        "pp_exact_counts",
+    ],
+)
+def test_kimi_k31_dspark_keeps_exact_cpu_lengths_for_unsupported_consumers(unsupported):
+    runner, _, _ = _kimi_k31_device_length_runner()
+    if unsupported == "draft_arch":
+        runner.speculative_config.draft_model_config.architectures = ["Qwen3DSparkModel"]
+    elif unsupported == "draft_fia":
+        runner.speculator.use_flashmla = False
+    elif unsupported == "no_device_metadata":
+        runner.model_state.device_metadata = None
+    elif unsupported == "no_backends":
+        runner.speculator.attn_backends = {}
+    elif unsupported.endswith("parallel_size"):
+        setattr(runner.parallel_config, unsupported, 2)
+    elif unsupported == "kv_transfer":
+        runner.vllm_config.kv_transfer_config = object()
+    elif unsupported == "sparse_offload":
+        runner.ascend_config.sparse_kv_offload_config.enabled = True
+    elif unsupported == "adaptive":
+        runner.speculative_config.enable_adaptive_verification = True
+    elif unsupported == "pp_exact_counts":
+        runner.sync_spec_pp_cpu_counts = True
+    assert runner._can_skip_spec_cpu_length_sync() is False
+
+
 def test_glm_mla_dspark_fallback_copies_and_waits():
     runner, output, batch = _glm_mla_device_length_runner()
     runner.speculator.use_flashmla = False
@@ -2206,13 +2260,15 @@ def test_glm_mla_dspark_fallback_copies_and_waits():
 
 
 @pytest.mark.parametrize("rejected", [0, 1, 5])
-@pytest.mark.parametrize("draft", ["dflash", "m3_dspark", "glm_dspark", "glm_mla_dspark"])
+@pytest.mark.parametrize("draft", ["dflash", "m3_dspark", "glm_dspark", "glm_mla_dspark", "kimi_k31_dspark"])
 def test_rejection_reorder_and_padding_keep_device_lengths_without_d2h(rejected, draft):
     runner, output, _ = _device_length_runner() if draft == "dflash" else _m3_device_length_runner()
     if draft == "glm_dspark":
         runner.model_config.architecture = "GlmMoeDsaForCausalLM"
     elif draft == "glm_mla_dspark":
         runner, output, _ = _glm_mla_device_length_runner()
+    elif draft == "kimi_k31_dspark":
+        runner, output, _ = _kimi_k31_device_length_runner()
     runner.num_computed_tokens_cpu.fill_(-99)  # An old staging snapshot must never be read.
     runner.input_buffers.seq_lens_cpu.fill_(777)
     runner.req_states.num_computed_tokens_cpu[:] = torch.tensor([100, 200, 0, 0])

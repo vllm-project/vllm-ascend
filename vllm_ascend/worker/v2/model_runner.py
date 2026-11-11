@@ -1331,23 +1331,29 @@ class NPUModelRunner(GPUModelRunner):
         ):
             return True
 
-        if (
-            spec is None
-            or self.speculator is None
-            or spec.method != "dspark"
-            or self.model_config.architecture
+        if spec is None or self.speculator is None or spec.method != "dspark" or spec.draft_model_config is None:
+            return False
+
+        draft_architectures = spec.draft_model_config.architectures or ()
+        use_flashmla = getattr(self.speculator, "use_flashmla", False)
+        # K3.1 SFA/KDA and the FlashMLA draft consume corrected device lengths.
+        # The initialized target producer also covers sharded SFA DCP metadata.
+        kimi_k31_device_lengths = (
+            self.model_config.architecture == "KimiK31ForConditionalGeneration"
+            and "K3DSparkModel" in draft_architectures
+            and use_flashmla
+            and getattr(self.model_state, "device_metadata", None) is not None
+        )
+        if not kimi_k31_device_lengths and (
+            self.model_config.architecture
             not in (
                 "MiniMaxM3SparseForCausalLM",
                 "MiniMaxM3SparseForConditionalGeneration",
                 "GlmMoeDsaForCausalLM",
             )
-            or spec.draft_model_config is None
             or (
-                "Qwen3DSparkModel" not in (spec.draft_model_config.architectures or ())
-                and (
-                    "Glm5DSparkForCausalLM" not in (spec.draft_model_config.architectures or ())
-                    or not getattr(self.speculator, "use_flashmla", False)
-                )
+                "Qwen3DSparkModel" not in draft_architectures
+                and ("Glm5DSparkForCausalLM" not in draft_architectures or not use_flashmla)
             )
         ):
             return False
@@ -1356,7 +1362,7 @@ class NPUModelRunner(GPUModelRunner):
         # rules for hardware, Q dtype and KV dtype. Before set_attn, keep syncing.
         draft_backends = getattr(self.speculator, "attn_backends", {})
         parallel_config = self.parallel_config
-        # Keep parallel, transfer, offload and adaptive paths on host counts.
+        # Keep unverified parallel, transfer, offload and adaptive paths on host counts.
         return (
             bool(draft_backends)
             and (
@@ -1365,7 +1371,7 @@ class NPUModelRunner(GPUModelRunner):
             )
             and parallel_config.pipeline_parallel_size == 1
             and parallel_config.prefill_context_parallel_size == 1
-            and parallel_config.decode_context_parallel_size == 1
+            and (parallel_config.decode_context_parallel_size == 1 or kimi_k31_device_lengths)
             and self.vllm_config.kv_transfer_config is None
             and not self.ascend_config.sparse_kv_offload_config.enabled
             and not spec.enable_adaptive_verification
