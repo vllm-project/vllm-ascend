@@ -410,9 +410,10 @@ class QuantizedAllReduceConfig:
     """Configuration Object for ``additional_config["quantized_all_reduce_config"]``.
 
     Opt-in quantized all-reduce for large bf16 collectives. ``quant_dtype``
-    selects shared-scale int8 (default, A2/A5) or MXFP8 AllToAll/AllGather
-    with BF16 dequantization and local SUM output (A5 only). Both select calls
-    by group size, dtype, shape and payload rather than forward phase.
+    selects shared-scale int8 (default on A2) or MXFP8 AllToAll/AllGather
+    with BF16 dequantization and local SUM output (default on A5). An explicit
+    value overrides the hardware default. Both select calls by group size,
+    dtype, shape and payload rather than forward phase.
     A collective takes the selected path only when its payload reaches
     ``min_numel`` elements, i.e. ``min_numel * 2`` bytes of bf16 data. The
     default is 16,777,216 elements (32 MiB), retained from the INT8 crossover
@@ -425,7 +426,7 @@ class QuantizedAllReduceConfig:
 
     enable: bool = False
     min_numel: int = 16777216
-    quant_dtype: Literal["int8", "mxfp8"] = "int8"
+    quant_dtype: Literal["int8", "mxfp8"] = dataclasses.field(default_factory=lambda: "mxfp8" if is_950() else "int8")
 
     @field_validator("min_numel")
     @classmethod
@@ -501,6 +502,9 @@ class AscendConfig:
     are optional; the values below show every supported key with its default
     value (see the mutex/validation notes below before copying).
 
+    ``quantized_all_reduce_config.quant_dtype`` is omitted below because its
+    default depends on the hardware: ``mxfp8`` on A5 and ``int8`` on A2.
+
         {
             "refresh": false,
             "enable_cpu_binding": true,
@@ -568,8 +572,7 @@ class AscendConfig:
             },
             "quantized_all_reduce_config": {
                 "enable": false,
-                "min_numel": 16777216,
-                "quant_dtype": "int8"
+                "min_numel": 16777216
             },
             "xlite_graph_config": {
                 "enabled": false,

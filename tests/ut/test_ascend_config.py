@@ -148,10 +148,13 @@ class TestRlConfig(TestBase):
 
 class TestQuantizedAllReduceConfig(TestBase):
     def test_defaults(self):
-        config = QuantizedAllReduceConfig()
-        self.assertFalse(config.enable)
-        self.assertEqual(config.min_numel, 16777216)
-        self.assertEqual(config.quant_dtype, "int8")
+        for is_a5, expected_dtype in ((False, "int8"), (True, "mxfp8")):
+            with self.subTest(is_a5=is_a5), patch("vllm_ascend.ascend_config.is_950", return_value=is_a5):
+                config = QuantizedAllReduceConfig()
+                self.assertFalse(config.enable)
+                self.assertEqual(config.min_numel, 16777216)
+                self.assertEqual(config.quant_dtype, expected_dtype)
+                self.assertEqual(dataclasses.asdict(config)["quant_dtype"], expected_dtype)
 
     def test_explicit_values_and_lax_bool(self):
         config = QuantizedAllReduceConfig(enable="true", min_numel="2097152")  # type: ignore[arg-type]
@@ -168,7 +171,14 @@ class TestQuantizedAllReduceConfig(TestBase):
                 QuantizedAllReduceConfig(min_numel=value)
 
     def test_quant_dtype_selection(self):
-        self.assertEqual(QuantizedAllReduceConfig(quant_dtype="mxfp8").quant_dtype, "mxfp8")
+        for is_a5 in (False, True):
+            for quant_dtype in ("int8", "mxfp8"):
+                with (
+                    self.subTest(is_a5=is_a5, quant_dtype=quant_dtype),
+                    patch("vllm_ascend.ascend_config.is_950", return_value=is_a5),
+                ):
+                    config = QuantizedAllReduceConfig(quant_dtype=quant_dtype)
+                    self.assertEqual(config.quant_dtype, quant_dtype)
         for value in ("fp16", "alltoall", "auto"):
             with self.subTest(quant_dtype=value), self.assertRaises(ValueError):
                 QuantizedAllReduceConfig(quant_dtype=value)
@@ -195,18 +205,30 @@ class TestQuantizedAllReduceConfig(TestBase):
                 config._validate_preconditions(vllm_config)
 
     def test_rejects_tp_above_common_limit(self):
-        config = QuantizedAllReduceConfig(enable=True)
+        config = QuantizedAllReduceConfig(enable=True, quant_dtype="int8")
         vllm_config = VllmConfig()
         vllm_config.parallel_config.tensor_parallel_size = 16
         with self.assertRaisesRegex(ValueError, "tensor_parallel_size <= 8"):
             config._validate_preconditions(vllm_config)
 
     def test_accepts_same_tp_sizes_on_a5(self):
-        config = QuantizedAllReduceConfig(enable=True)
         with patch("vllm_ascend.ascend_config.is_950", return_value=True):
+            config = QuantizedAllReduceConfig(enable=True)
+            self.assertEqual(config.quant_dtype, "mxfp8")
             for tp_size in (1, 2, 4, 8):
                 vllm_config = VllmConfig()
                 vllm_config.parallel_config.tensor_parallel_size = tp_size
+                config._validate_preconditions(vllm_config)
+            vllm_config.parallel_config.tensor_parallel_size = 3
+            with self.assertRaisesRegex(ValueError, "TP=2/4/8"):
+                config._validate_preconditions(vllm_config)
+
+    def test_disabled_defaults_bypass_tp_validation(self):
+        for is_a5 in (False, True):
+            with self.subTest(is_a5=is_a5), patch("vllm_ascend.ascend_config.is_950", return_value=is_a5):
+                config = QuantizedAllReduceConfig()
+                vllm_config = VllmConfig()
+                vllm_config.parallel_config.tensor_parallel_size = 16
                 config._validate_preconditions(vllm_config)
 
 

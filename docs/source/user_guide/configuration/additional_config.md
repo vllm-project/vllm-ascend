@@ -340,9 +340,9 @@ PCP gathers prefill KV before cache writes. KVPP layer broadcasts restore prior-
 
 ### Quantized all-reduce
 
-`quantized_all_reduce_config` selects an opt-in communication backend for large BF16 collectives. `quant_dtype="int8"` is the default on A2/A5; `quant_dtype="mxfp8"` selects the experimental MXFP8 AllToAll/AllGather path on A5. The feature is disabled by default and the default threshold is 32 MiB. Existing configurations without `quant_dtype` retain INT8 behavior.
+`quantized_all_reduce_config` selects an opt-in communication backend for large BF16 collectives. When `quant_dtype` is omitted, A5 defaults to `"mxfp8"` and A2 defaults to `"int8"`. An explicit `quant_dtype` overrides this hardware default, so A5 can still select INT8 with `"quant_dtype": "int8"`. The feature is disabled by default and the default threshold is 32 MiB.
 
-#### INT8 (default)
+#### INT8 (default on A2)
 
 ```json
 {
@@ -378,19 +378,18 @@ For routing diagnostics, enable debug logging for `distributed.device_communicat
 
 #### MXFP8 AllToAll/AllGather (A5)
 
-Select this backend explicitly while keeping INT8 available through the same configuration:
+This is the default backend on A5 when `quant_dtype` is omitted:
 
 ```json
 {
     "quantized_all_reduce_config": {
         "enable": true,
-        "min_numel": 16777216,
-        "quant_dtype": "mxfp8"
+        "min_numel": 16777216
     }
 }
 ```
 
-This mode uses ordinary collectives on the existing process group:
+You can also select it explicitly with `"quant_dtype": "mxfp8"`. This mode uses ordinary collectives on the existing process group:
 
 ```text
 BF16 activation -> dynamic MXFP8 E4M3FN + E8M0 scales
