@@ -70,8 +70,6 @@ def _cfg(tmp_path: Path, **rare_kw) -> RuntimeConfig:
     )
     sec = cfg._data["detector"]["rare_chars"]
     sec["enabled"] = True
-    sec.setdefault("table", "auto")
-    sec.setdefault("think_end", "none")
     sec.update(rare_kw)
     cfg._invalidate_hot_path_gates()
     return cfg
@@ -83,10 +81,7 @@ def test_catalog_includes_rare_chars_defaults():
 
     assert "rare_chars" in DETECTOR_SECTIONS
     sec = _DEFAULTS["detector"]["rare_chars"]
-    assert sec["enabled"] is False
-    assert sec["table"] == "auto"
-    assert sec["think_end"] == "auto"
-    assert sec["alert_monitor"] is False
+    assert sec == {"enabled": False}
 
 
 def test_narrow_collect_formula_matches_log_softmax():
@@ -110,12 +105,13 @@ def test_rare_chars_feed_precomputed_bad_utf8(tmp_path: Path):
     logits[0, tid] = 5.0
     top1, chosen = _top1_chosen(logits, torch.tensor([tid]))
 
-    cfg = _cfg(tmp_path, table=key, think_end="none")
+    cfg = _cfg(tmp_path)
     det = RareCharsDetector(runtime_config=cfg, runner=SimpleNamespace(tp_rank=0))
     # Point corpus at the registered synthetic table without a real tokenizer.
-    det._table = key
     det._corpus_key = key
+    det._think_end_cfg = "none"
     det._think_end_id = None
+    det._alert_monitor = False
     det._warmed = True
     det._ensure_engine_locked()
 

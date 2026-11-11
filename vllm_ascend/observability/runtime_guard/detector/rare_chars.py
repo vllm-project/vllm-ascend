@@ -18,13 +18,13 @@
 Collects ``(top1_logprob, chosen_logprob)`` via sampler-side narrow collect on
 Guard-stashed pre-sample logits + sampled ids (v35 Triton). Does **not**
 require ``SamplingParams.logprobs``. Per-tokenizer tables are built at warmup
-from the served tokenizer (``table: auto``).
+from the served tokenizer. Algorithm knobs (``think_end``, ``alert_monitor``)
+live in ``rc4.json``; runtime_config only exposes ``enabled``.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import threading
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -53,6 +53,15 @@ if TYPE_CHECKING:
 logger = init_logger_ascend(__name__)
 
 _SERVED_TABLE_KEY = "served"
+
+
+def _algo_knobs() -> tuple[dict[str, Any], str, bool]:
+    """Load rc4.json once for RareDetector + Guard knobs."""
+    with open(CONFIG_RC4, encoding="utf-8") as f:
+        cfg = json.load(f)
+    think_end = str(cfg.get("think_end", "auto"))
+    alert_monitor = bool(cfg.get("alert_monitor", False))
+    return cfg, think_end, alert_monitor
 
 
 def device_chosen_token_ids(sampled_token_ids: torch.Tensor) -> torch.Tensor:
@@ -162,29 +171,10 @@ class RareCharsDetector(ConfigBackedDetector):
             "illegal UTF-8, low-confidence rare tokens. Guard uses sampler-side "
             "v35 Triton narrow collect on stashed pre-sample logits "
             "for (top1, chosen) — API SamplingParams.logprobs not required. "
-            "Per-tokenizer tables are built at warmup (table=auto)."
+            "Per-tokenizer table is built at warmup; think_end / alert_monitor "
+            "come from detector/rare/rc4.json."
         ),
-        fields=(
-            ConfigField("enabled", False, "bool", help="Master switch"),
-            ConfigField(
-                "table",
-                "auto",
-                "str",
-                help="auto = build from served tokenizer at warmup; or path to *_rare.npz",
-            ),
-            ConfigField(
-                "think_end",
-                "auto",
-                "str",
-                help="'</think>' token id, 'auto' (resolve from tokenizer), or 'none' (chat)",
-            ),
-            ConfigField(
-                "alert_monitor",
-                False,
-                "bool",
-                help="Also alert on rc4 monitor-tier rules (looser false-positive band)",
-            ),
-        ),
+        fields=(ConfigField("enabled", False, "bool", help="Master switch"),),
     )
 
     def __init__(
@@ -194,14 +184,12 @@ class RareCharsDetector(ConfigBackedDetector):
         runner: Any | None = None,
     ) -> None:
         super().__init__(runtime_config=runtime_config, runner=runner, enabled=False)
-        defaults = self.schema.defaults_dict()
-        self._table = str(defaults["table"])
-        self._think_end_cfg = str(defaults["think_end"])
-        self._alert_monitor = bool(defaults["alert_monitor"])
         self._engine: RareDetector | None = None
         self._engine_key: tuple[str, int | None] | None = None
         self._corpus_key: str | None = None
+        self._think_end_cfg = "auto"
         self._think_end_id: int | None = None
+        self._alert_monitor = False
         self._warmed = False
         self._states: dict[str, RareCharsReqState] = {}
         self._row_batch: RareRowBatch | None = None
@@ -213,19 +201,11 @@ class RareCharsDetector(ConfigBackedDetector):
             self.refresh_from_config()
 
     def _apply_detector_values(self, getter) -> None:
-        self._table = str(getter("table", self._table))
-        self._think_end_cfg = str(getter("think_end", self._think_end_cfg))
-        self._alert_monitor = bool(getter("alert_monitor", self._alert_monitor))
-        # Config change invalidates the warm engine; next warmup / ensure rebuilds.
-        key = (self._table, self._think_end_cfg)
-        if getattr(self, "_cfg_key", None) != key:
-            self._cfg_key = key
-            self._engine = None
-            self._engine_key = None
-            self._warmed = False
+        # Only ``enabled`` is runtime-configurable; algorithm knobs live in rc4.json.
+        return
 
     def warmup(self, tokenizer: Any | None = None) -> None:
-        """Build / load the rare table before serving (called from model warmup)."""
+        """Build the rare table from the served tokenizer (model warmup)."""
         self.refresh_from_config()
         if not self._enabled:
             return
@@ -233,29 +213,23 @@ class RareCharsDetector(ConfigBackedDetector):
             self._warmup_locked(tokenizer)
 
     def _warmup_locked(self, tokenizer: Any | None) -> None:
-        table_cfg = (self._table or "auto").strip()
-        if table_cfg.endswith(".npz"):
-            if not os.path.isfile(table_cfg):
-                raise FileNotFoundError(f"rare_chars table not found: {table_cfg}")
-            self._corpus_key = table_cfg
-        else:
-            # auto (and legacy shipped names) → build from served tokenizer.
-            if tokenizer is None:
-                from vllm_ascend.observability.runtime_guard.io import load_model_tokenizer
+        if tokenizer is None:
+            from vllm_ascend.observability.runtime_guard.io import load_model_tokenizer
 
-                tokenizer = load_model_tokenizer(self._runner)
-            if tokenizer is None:
-                raise RuntimeError("rare_chars warmup needs a served tokenizer (table=auto)")
-            built = build_from_tokenizer(tokenizer)
-            self._corpus_key = register_rare_table(_SERVED_TABLE_KEY, built)
-            logger.info(
-                "[runtime_guard: rare_chars] built table vocab=%s partial=%s key=%s",
-                len(built["rcls"]),
-                int(built["u8"].sum()),
-                self._corpus_key,
-            )
+            tokenizer = load_model_tokenizer(self._runner)
+        if tokenizer is None:
+            raise RuntimeError("rare_chars warmup needs a served tokenizer")
+        built = build_from_tokenizer(tokenizer)
+        self._corpus_key = register_rare_table(_SERVED_TABLE_KEY, built)
+        logger.info(
+            "[runtime_guard: rare_chars] built table vocab=%s partial=%s key=%s",
+            len(built["rcls"]),
+            int(built["u8"].sum()),
+            self._corpus_key,
+        )
+        _cfg, self._think_end_cfg, self._alert_monitor = _algo_knobs()
         self._think_end_id = resolve_think_end_id(tokenizer, self._think_end_cfg)
-        self._ensure_engine_locked()
+        self._ensure_engine_locked(_cfg)
         self._warmed = True
 
     def clear_finished(self, req_id: str) -> None:
@@ -270,23 +244,24 @@ class RareCharsDetector(ConfigBackedDetector):
                 batch.release(row)
             self._states.pop(req_id, None)
 
-    def _ensure_engine_locked(self) -> RareDetector:
+    def _ensure_engine_locked(self, algo_cfg: dict[str, Any] | None = None) -> RareDetector:
         if self._corpus_key is None:
             raise RuntimeError("rare_chars engine used before warmup (table not registered)")
         key = (self._corpus_key, self._think_end_id)
         if self._engine is not None and self._engine_key == key:
             return self._engine
-        with open(CONFIG_RC4, encoding="utf-8") as f:
-            cfg = json.load(f)
-        self._engine = RareDetector(self._corpus_key, cfg, think_end=self._think_end_id)
+        if algo_cfg is None:
+            algo_cfg, self._think_end_cfg, self._alert_monitor = _algo_knobs()
+        self._engine = RareDetector(self._corpus_key, algo_cfg, think_end=self._think_end_id)
         self._engine_key = key
         # RareRowBatch requires rare_feed_native (built by setuptools Extension).
         self._row_batch = RareRowBatch(self._engine)
         self._row_of.clear()
         logger.info(
-            "[runtime_guard: rare_chars] loaded rc4 table=%s think_end=%s",
+            "[runtime_guard: rare_chars] loaded rc4 table=%s think_end=%s alert_monitor=%s",
             self._corpus_key,
             self._think_end_id,
+            self._alert_monitor,
         )
         return self._engine
 
@@ -463,7 +438,7 @@ class RareCharsDetector(ConfigBackedDetector):
             "reason": st.last_reason,
             "fired_at": int(getattr(res, "fired_at", -1)),
             "tokens_seen": st.tokens_seen,
-            "table": self._corpus_key or self._table,
+            "table": self._corpus_key or _SERVED_TABLE_KEY,
             "recent": list(st.recent),
             "source": source,
             "api_logprobs_required": False,
