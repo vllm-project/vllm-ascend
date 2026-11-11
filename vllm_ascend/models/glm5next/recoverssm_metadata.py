@@ -160,8 +160,7 @@ class AscendKDARecoverSSMMetadataBuilder(KimiK3KDAMetadataBuilder):
         count = metadata.num_spec_decodes
         if not 0 <= count <= batch_size:
             raise ValueError(
-                "Invalid RecoverSSM speculative metadata: "
-                f"num_spec_decodes={count} is outside batch_size={batch_size}"
+                f"Invalid RecoverSSM speculative metadata: num_spec_decodes={count} is outside batch_size={batch_size}"
             )
         # TODO: Fuse staging with an Ascend Triton kernel; upstream currently requires CUDA tensors.
         states = self.spec_state_indices_tensor[:batch_size]
@@ -176,4 +175,3 @@ class AscendKDARecoverSSMMetadataBuilder(KimiK3KDAMetadataBuilder):
         metadata.spec_query_start_loc = starts
         metadata.num_accepted_tokens = accepted
         metadata.recoverssm_commit = replace(metadata.recoverssm_commit, state_indices=states, query_start_loc=starts)
-
