@@ -1,0 +1,11 @@
+# Release note fragment. See release_notes/README.md.
+pr: 22054
+entries:
+  - category: feature
+    text: >
+      Add sequence-parallel and MoE communication metrics (detail level):
+      parallel:sp_padding_ratio samples the ratio of rows padded away by
+      sequence-parallel sharding once per forward, and
+      parallel:moe_comm_selection_total counts the MoE communication method
+      chosen for each forward context. The level gate runs before the
+      host-side token math so disabled levels add no per-step overhead.
