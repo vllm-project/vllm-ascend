@@ -74,7 +74,8 @@ def make_inputs(rows, world, owner, interleave, distribution, edge):
         blocks = selected // interleave
         local = blocks // world * interleave + selected - blocks * interleave
         expected[row, 0, : local.numel()] = local.int()
-    return packed, expected
+    # The public API receives concatenated rank rows: [WORLD*rows,K,2].
+    return packed.reshape(world * rows, k, 2), expected
 
 
 @pytest.mark.parametrize("rows,world,owner,interleave,distribution", CASES)

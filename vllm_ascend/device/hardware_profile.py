@@ -260,6 +260,8 @@ class HardwareProfile:
 
     # NZ mm/addmm is supported, but batched matmul rejects NZ weights.
     requires_2d_nz_linear_input: bool = False
+    # Stack tuning policy: adaptive peer counts are validated on A3 only.
+    prefer_parallel_owner_prefix: bool = False
     # A5 uses mixed softmax for compatibility with CANN GBSA packages that
     # reject BF16 precision 0. A3 retains FP32 online softmax.
     minimax_m3_gbsa_bf16_softmax_precision: int = 0
@@ -334,6 +336,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
         ),
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
+            prefer_parallel_owner_prefix=True,
             attention_backend_family=AttentionBackendFamily.STANDARD,
             cpu_binding_mode=CPUBindingMode.GLOBAL_SLICE,
             default_worker_cls=_DEFAULT_WORKER_CLS,

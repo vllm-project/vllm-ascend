@@ -96,9 +96,11 @@ def main():
                 scores[rank, :, count:] = -torch.inf
         by_id = torch.where(ids >= 0, ids, torch.iinfo(torch.int64).max).argsort(stable=True)
         order = by_id.gather(-1, scores.gather(-1, by_id).argsort(descending=True, stable=True))
-        packed = torch.stack(
-            (ids.gather(-1, order).int(), scores.gather(-1, order).contiguous().view(torch.int32)), -1
-        ).npu()
+        packed = (
+            torch.stack((ids.gather(-1, order).int(), scores.gather(-1, order).contiguous().view(torch.int32)), -1)
+            .reshape(world * rows, k, 2)
+            .npu()
+        )
         name = f"rows={rows},world={world},owner={owner},distribution={distribution}"
         report["cases"][name] = measure(
             lambda packed=packed,

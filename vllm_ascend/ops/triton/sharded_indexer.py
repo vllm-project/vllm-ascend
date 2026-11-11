@@ -5,8 +5,7 @@
 import torch
 from vllm.triton_utils import tl, triton
 
-from vllm_ascend.device.device_config import get_ascend_device_type
-from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_current_hardware_profile
 from vllm_ascend.ops.triton.sparse_index_remap import _sort
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
@@ -695,7 +694,7 @@ def merge_packed_candidates(
             tile = min(block, triton.next_power_of_2(max(1, 2 * block // world_size)))
             # Adaptive parallel peer counts are validated on A3. Preserve the
             # original implementation on other architectures.
-            if get_ascend_device_type() == AscendDeviceType.A3:
+            if get_current_hardware_profile().prefer_parallel_owner_prefix:
                 owner_kernel = _merge_owner_prefix_adaptive
                 tile = min(block, triton.next_power_of_2(max(1, block // world_size)))
             else:
