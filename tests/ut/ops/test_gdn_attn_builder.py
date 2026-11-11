@@ -2045,18 +2045,36 @@ def test_forward_core_uses_checkpoint_recurrence_for_cold_and_cache_hit_prefills
 
 
 @pytest.mark.parametrize("speculative", [False, True])
-def test_checkpoint_rows_exclude_non_spec_decodes_and_spec_requests(speculative):
-    builder = _make_builder(device=torch.device("cpu"), num_heads=32, num_speculative_tokens=3 if speculative else 0)
+def test_checkpoint_rows_match_non_spec_prefill_inputs(speculative):
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=3 if speculative else 0,
+    )
     builder._ascend_gdn_checkpoints = True
     builder.checkpoint_builder = SimpleNamespace(build=Mock(return_value=None))
     lengths = [1, 4, 130] if speculative else [1, 130]
     common = create_common_attn_metadata(
-        BatchSpec(seq_lens=lengths, query_lens=lengths), block_size=16, device=torch.device("cpu")
+        BatchSpec(seq_lens=lengths, query_lens=lengths),
+        block_size=16,
+        device=torch.device("cpu"),
     )
     if speculative:
-        builder.build(
-            0, common, torch.ones(3, dtype=torch.int32), torch.tensor([-1, 3, -1], dtype=torch.int32), num_actual_reqs=3
+        metadata = builder.build(
+            0,
+            common,
+            torch.ones(3, dtype=torch.int32),
+            torch.tensor([-1, 3, -1], dtype=torch.int32),
+            num_actual_reqs=3,
         )
     else:
-        builder.build(0, common, num_actual_reqs=2)
-    builder.checkpoint_builder.build.assert_called_once_with(common, [2] if speculative else [1])
+        metadata = builder.build(0, common, num_actual_reqs=2)
+    # With speculative requests, ordinary one-token rows also execute through
+    # the non-spec prefill branch and must retain their planner row.
+    expected_rows = [0, 2] if speculative else [1]
+    expected_starts = [0, 1, 131] if speculative else [0, 130]
+    builder.checkpoint_builder.build.assert_called_once_with(common, expected_rows)
+    assert metadata.num_decodes == (0 if speculative else 1)
+    assert metadata.num_prefills == len(expected_rows)
+    assert metadata.prefill_state_indices.numel() == len(expected_rows)
+    assert metadata.prefill_query_start_loc.tolist() == expected_starts
