@@ -1,0 +1,4 @@
+pr: 21574
+entries:
+  - category: bugfix
+    text: Fixed Memcache layerwise pooling with prefill context parallelism so each PCP rank stores and reloads its own cache and state shards.
