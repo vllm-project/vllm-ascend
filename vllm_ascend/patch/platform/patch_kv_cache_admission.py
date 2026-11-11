@@ -28,8 +28,10 @@ def get_num_blocks_to_allocate(
     """Apply recycling caps to physical blocks, excluding the null prefix."""
     cap = self.max_admission_blocks_per_request
     if apply_admission_cap and cap is not None:
-        if request_id in self.num_cached_block:
-            blocks = self.req_to_blocks.get(request_id, ())
+        blocks = self.req_to_blocks.get(request_id, ())
+        if blocks:
+            # Requests can hold blocks without a num_cached_block entry when
+            # prefix caching is disabled. Use the actual allocation state.
             # SWA/chunked-local tables contain a null prefix followed by real
             # blocks. Find that boundary in O(log(context)) without scanning
             # or copying the long logical block table.

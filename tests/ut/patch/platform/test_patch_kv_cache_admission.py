@@ -27,7 +27,7 @@ from vllm.v1.request import Request
 from vllm_ascend.patch.platform import patch_kv_cache_admission  # noqa: F401
 
 
-def _manager(kind="sliding", cap=8197):
+def _manager(kind="sliding", cap=8197, enable_caching=True):
     register_all_kvcache_specs(None)
     kwargs = dict(block_size=2, num_kv_heads=1, head_size=8, dtype=torch.float16)
     if kind == "sliding":
@@ -44,7 +44,7 @@ def _manager(kind="sliding", cap=8197):
     return cls(
         kv_cache_spec=spec,
         block_pool=SimpleNamespace(null_block=null),
-        enable_caching=True,
+        enable_caching=enable_caching,
         kv_cache_group_id=0,
         scheduler_block_size=2,
         max_admission_blocks_per_request=cap,
@@ -67,7 +67,8 @@ def _loaded_prefix(manager, skipped=51196, held=4):
     manager.req_to_blocks["request"] = [manager._null_block] * skipped + [
         KVCacheBlock(block_id=i + 1, ref_cnt=1) for i in range(held)
     ]
-    manager.num_cached_block["request"] = skipped + held
+    if manager.enable_caching:
+        manager.num_cached_block["request"] = skipped + held
 
 
 @pytest.mark.parametrize("kind", ["sliding", "chunked"])
@@ -95,19 +96,67 @@ def test_local_hit_counts_only_evictable_blocks_inside_window():
     assert _required(manager, new_blocks=blocks, local=102400) == 5542
 
 
-def test_async_inflight_blocks_remain_physically_held():
-    manager = _manager()
+@pytest.mark.parametrize("kind", ["sliding", "chunked"])
+@pytest.mark.parametrize("enable_caching", [True, False])
+def test_async_inflight_blocks_remain_physically_held(kind, enable_caching):
+    manager = _manager(kind, enable_caching=enable_caching)
     _loaded_prefix(manager, held=4100)
+    assert ("request" in manager.num_cached_block) == enable_caching
     # Optimistic computed tokens include a still-running 8192-token chunk.
     # Its blocks cannot be treated as freed until the worker completes it.
     assert _required(manager, tokens=200000, computed=110592) == 4097
 
 
 @pytest.mark.parametrize("skipped, held, expected", [(0, 0, 8197), (0, 4, 8193), (51200, 0, 8197)])
-def test_null_prefix_boundaries(skipped, held, expected):
-    manager = _manager()
+@pytest.mark.parametrize("kind", ["sliding", "chunked"])
+@pytest.mark.parametrize("enable_caching", [True, False])
+def test_null_prefix_boundaries(skipped, held, expected, kind, enable_caching):
+    manager = _manager(kind, enable_caching=enable_caching)
     _loaded_prefix(manager, skipped=skipped, held=held)
-    assert _required(manager, tokens=200000) == expected
+    computed = (skipped + held) * manager.block_size
+    assert _required(manager, tokens=200000, computed=computed) == expected
+
+
+@pytest.mark.parametrize("kind", ["sliding", "chunked"])
+def test_uncached_inflight_prefill_reserves_only_remaining_capacity(kind):
+    # A cold prefill takes the ordinary allocation path, which does not create
+    # a num_cached_block entry when prefix caching is disabled.
+    max_model_len = 128
+    chunk_tokens = 16
+    num_blocks = 256
+    spec = _manager(kind).kv_cache_spec
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer"], kv_cache_spec=spec)],
+    )
+    cache = KVCacheManager(
+        config,
+        max_model_len=max_model_len,
+        scheduler_block_size=spec.block_size,
+        hash_block_size=spec.block_size,
+        max_in_flight_tokens=2 * chunk_tokens,
+        enable_caching=False,
+    )
+    request = Request("request", [1] * max_model_len, SamplingParams(max_tokens=1), None)
+    assert cache.allocate_slots(request, num_new_tokens=chunk_tokens) is not None
+    manager = cache.coordinator.single_type_managers[0]
+    assert request.request_id not in manager.num_cached_block
+    blocks = manager.req_to_blocks[request.request_id]
+    assert len(blocks) == chunk_tokens // spec.block_size
+    assert all(not block.is_null for block in blocks)
+
+    # Scheduling advances this count before the worker finishes the chunk.
+    # All of its blocks are still held and must count against the cap.
+    request.num_computed_tokens = chunk_tokens
+    request.num_in_flight_tokens = chunk_tokens
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.kv_cache_manager = cache
+    scheduler.max_model_len = max_model_len
+    scheduler.num_spec_tokens = 0
+    scheduler._inflight_prefills = {request}
+    expected = manager.max_admission_blocks_per_request - len(blocks)
+    assert scheduler._inflight_prefill_reserved_blocks() == expected
 
 
 def test_uncapped_and_full_attention_preserve_logical_accounting():
