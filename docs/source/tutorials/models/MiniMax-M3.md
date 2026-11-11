@@ -2954,7 +2954,7 @@ Reuse the accuracy evaluation configuration from [Section 7](#7-accuracy-evaluat
 ais_bench --models vllm_api_stream_chat --datasets gsm8k_gen_0_shot_cot_str_perf --debug --summarizer default_perf --mode perf
 ```
 
-**Expected output:**
+**Expected result:**
 
 AISBench prints one line per finished request and then a summary table. Check the following fields; the exact values depend on hardware, concurrency, and input/output lengths:
 

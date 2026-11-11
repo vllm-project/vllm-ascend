@@ -286,7 +286,7 @@ Single-node deployment runs Prefill and Decode on the same host. The A3 example 
         --write-out '%{http_code}\n' http://127.0.0.1:11223/health
     ```
 
-    Expected output: `200`. Send requests to port `11223` with model name `minimax-m3.1-flash`. If startup is still in progress or fails, follow [Startup Troubleshooting](#102-model-loading-is-still-in-progress-or-startup-fails).
+    Expected result: `200`. Send requests to port `11223` with model name `minimax-m3.1-flash`. If startup is still in progress or fails, follow [Startup Troubleshooting](#102-model-loading-is-still-in-progress-or-startup-fails).
 
 === "950DT products"
 
@@ -351,7 +351,7 @@ Single-node deployment runs Prefill and Decode on the same host. The A3 example 
         --write-out '%{http_code}\n' http://127.0.0.1:11223/health
     ```
 
-    Expected output: `200`. Send requests to port `11223` with model name `minimax-m3.1-flash`. If startup is still in progress or fails, follow [Startup Troubleshooting](#102-model-loading-is-still-in-progress-or-startup-fails).
+    Expected result: `200`. Send requests to port `11223` with model name `minimax-m3.1-flash`. If startup is still in progress or fails, follow [Startup Troubleshooting](#102-model-loading-is-still-in-progress-or-startup-fails).
 
 ### 5.2 Multi-Node Deployment
 
@@ -533,7 +533,7 @@ There are two A2 nodes, DP4 × TP4 / EP16 in total. The following values match t
         --write-out '%{http_code}\n' http://127.0.0.1:11223/health
     ```
 
-    Expected output: `200`. Send requests to port `11223` on node 0 with model name `minimax-m3.1-flash`.
+    Expected result: `200`. Send requests to port `11223` on node 0 with model name `minimax-m3.1-flash`.
 
 ### 5.3 PD Disaggregation (1P1D)
 
@@ -2907,7 +2907,7 @@ models = [
 ais_bench --models vllm_api_stream_chat --datasets gsm8k_gen_0_shot_cot_str_perf --debug --summarizer default_perf --mode perf --num-prompts 128
 ```
 
-Expected output: the run prints a performance summary that includes request throughput (req/s), output-token throughput (token/s), mean and P99 TTFT, mean and P99 TPOT, and the number of completed and failed requests. A run is valid when the failed-request count is zero and the sample count matches `--num-prompts`.
+Expected result: the run prints a performance summary that includes request throughput (req/s), output-token throughput (token/s), mean and P99 TTFT, mean and P99 TPOT, and the number of completed and failed requests. A run is valid when the failed-request count is zero and the sample count matches `--num-prompts`.
 
 ## 9 Performance Tuning
 

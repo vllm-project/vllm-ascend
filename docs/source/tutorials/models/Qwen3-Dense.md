@@ -495,7 +495,7 @@ models = [
 ais_bench --models vllm_api_stream_chat --datasets gsm8k_gen_0_shot_cot_str_perf --debug --summarizer default_perf --mode perf --num-prompts 360
 ```
 
-**Expected output:**
+**Expected result:**
 
 AISBench prints one line per finished request and then a summary table. Check the following fields in the summary; the exact values depend on hardware, model size, and input/output lengths:
 

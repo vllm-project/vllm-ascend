@@ -237,7 +237,7 @@ curl --noproxy '*' --fail --silent --show-error --output /dev/null \
     --write-out '%{http_code}\n' "http://${NODE0_IP}:10086/health"
 ```
 
-Expected output: `200`. The headless node does not expose its own HTTP API. If startup fails or the health check does not return `200`, inspect both nodes' logs, confirm the weight path and network settings, and follow the [Public FAQs](../../faqs.md) before sending requests.
+Expected result: `200`. The headless node does not expose its own HTTP API. If startup fails or the health check does not return `200`, inspect both nodes' logs, confirm the weight path and network settings, and follow the [Public FAQs](../../faqs.md) before sending requests.
 
 Key Parameter Descriptions:
 
@@ -313,7 +313,7 @@ Configure `vllm_api_stream_chat` for the service started in Section 5. Set `stre
 ais_bench --models vllm_api_stream_chat --datasets gsm8k_gen_0_shot_cot_str_perf --debug --summarizer default_perf --mode perf
 ```
 
-**Expected output:**
+**Expected result:**
 
 AISBench prints one line per finished request and then a summary table. Check the following fields; the exact values depend on hardware, concurrency, and input/output lengths:
 
