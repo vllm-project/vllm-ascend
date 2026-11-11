@@ -83,6 +83,11 @@ on:
         type: boolean
         default: false
         description: "If true, the base image build does not dispatch the quay.io sync. Used by presmoke builds, whose images are for issue localization only and must not be mirrored to quay.io."
+      tag_suffix:
+        required: false
+        type: string
+        default: ''
+        description: "Suffix applied to both the runtime base image tag and the published nightly image tag, including the leading dash (e.g. '-presmoke'). Isolates a build from the standard nightly artifacts; callers that set it must pass the same value to their test jobs, otherwise the tests pull the standard nightly image. Default '' keeps the standard tags."
     secrets:
       SWR_USERNAME:
         required: false
@@ -105,6 +110,7 @@ jobs:
       branch_ref: ${{ inputs.vllm_ascend_branch || 'main' }}
       swr_registry: ${{ inputs.swr_registry }}
       skip_sync: ${{ inputs.skip_sync }}
+      tag_suffix: ${{ inputs.tag_suffix }}
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
@@ -123,6 +129,8 @@ jobs:
       build_type: ${{ inputs.build_type }}
       should_push: ${{ inputs.should_push }}
       soc: ${{ inputs.soc }}
+      base_tag_suffix: ${{ inputs.tag_suffix }}
+      image_tag_suffix: ${{ inputs.tag_suffix }}
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
