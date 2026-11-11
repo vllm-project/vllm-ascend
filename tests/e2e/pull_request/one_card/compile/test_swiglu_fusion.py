@@ -110,9 +110,7 @@ def test_swiglu_fusion(dtype: torch.dtype, hidden_size: int, num_tokens: int):
         init_distributed_environment()
         ensure_model_parallel_initialized(1, 1)
 
-    with vllm.config.set_current_vllm_config(vllm_config), set_ascend_forward_context(
-        None, vllm_config
-    ):
+    with vllm.config.set_current_vllm_config(vllm_config), set_ascend_forward_context(None, vllm_config):
         backend = get_or_create_backend(vllm_config)
         model = TestSwigluModel(hidden_size, dtype, device="npu")
         model = model.to("npu")
