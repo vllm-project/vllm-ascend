@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Raw-request scheduler regression; model compute and the remote ACK are fake."""
 
+from unittest.mock import patch
+
 import pytest
 import torch
 from vllm import SamplingParams
@@ -18,6 +20,10 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 from tests.ut.kv_offload.utils import assert_scheduler_empty, create_model_runner_output, create_vllm_config
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector import (
+    KVConnectorRole,
+    MooncakeLayerwiseConnector,
+)
 
 
 @pytest.mark.parametrize("speculative_method", [None, "mtp", "dspark"])
@@ -127,9 +133,13 @@ def test_layerwise_prefill_truncation_precedes_local_prefix_lookup():
     config.cache_config.num_gpu_blocks = plan.num_blocks
     register_all_kvcache_specs(None)
     init_none_hash(sha256)
-    scheduler = Scheduler(
-        config, plan, StructuredOutputManager(config), block_size=block_size, hash_block_size=block_size
-    )
+    # Other connector tests reload the upstream connector modules during collection.
+    # Use the connector and role from the same module to avoid mixed class identities.
+    connector = MooncakeLayerwiseConnector(config, KVConnectorRole.SCHEDULER, plan)
+    with patch.object(KVConnectorFactory, "create_connector", return_value=connector):
+        scheduler = Scheduler(
+            config, plan, StructuredOutputManager(config), block_size=block_size, hash_block_size=block_size
+        )
     request = Request(
         request_id="prefill",
         prompt_token_ids=list(range(block_size + 1)),
