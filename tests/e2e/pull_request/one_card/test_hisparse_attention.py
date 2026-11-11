@@ -4,6 +4,7 @@
 
 import math
 from functools import partial
+from importlib import import_module
 from types import SimpleNamespace
 
 import pytest
@@ -27,7 +28,7 @@ def _require_npu_sfa():
         pytest.skip("The native SFA operation is not registered for Ascend 310P")
     torch.npu.set_device(0)
     # Load the required SFA extension without changing custom-op selection.
-    import vllm_ascend.vllm_ascend_C  # noqa: F401
+    import_module("vllm_ascend.vllm_ascend_C")
 
 
 @pytest.mark.parametrize("capture", [False, True])
@@ -258,6 +259,8 @@ def test_preprocess_writes_hisparse_mapping_once(cache_dtype, capture):
     )
     impl = AscendHiSparseImpl.__new__(AscendHiSparseImpl)
     impl.enable_sparse_sfa_c8 = c8
+    impl.pcp_enabled = False
+    impl.use_rope = True
     impl.enable_sparse_sfa_turboquant = False
     impl.c8_cache_dtype = torch.float8_e4m3fn
     impl.sfa_qsfa_tile_size = 128
@@ -343,6 +346,7 @@ def test_c8_prolog_keeps_parent_outputs_and_hisparse_destination(rows, capture, 
     device, block, width = "npu", 128, 656
     impl = AscendHiSparseImpl.__new__(AscendHiSparseImpl)
     impl._quant_type = AscendW8A8MXFP8DynamicLinearMethod
+    impl.use_rope = True
     impl.enable_sparse_sfa_c8 = True
     impl.c8_cache_dtype = torch.float8_e4m3fn
     impl.q_lora_rank, impl.kv_lora_rank, impl.qk_rope_head_dim = 2048, 512, 64
