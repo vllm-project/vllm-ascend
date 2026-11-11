@@ -221,6 +221,8 @@ class MooncakeMetadataThread(threading.Thread):
                             f"PP rank {pp_rank}, PCP/TP rank {pcp_rank}/{tp_rank}"
                         )
                     for local_layer_index, layer_name in enumerate(worker_metadata.layer_names):
+                        # Metadata initialization materializes missing inner strides.
+                        assert worker_metadata.block_inner_strides is not None
                         layer_signature = (
                             worker_metadata.group_indices[local_layer_index],
                             worker_metadata.dcp_sharded[local_layer_index],
@@ -271,6 +273,7 @@ class MooncakeMetadataThread(threading.Thread):
             indexer_replication_sizes: list[int] = []
             for layer_name in layer_names:
                 worker_metadata, local_layer_index = layer_source_by_name[layer_name]
+                assert worker_metadata.block_inner_strides is not None
                 layer_block_sizes.append(worker_metadata.layer_block_sizes[local_layer_index])
                 group_indices.append(worker_metadata.group_indices[local_layer_index])
                 dcp_sharded.append(worker_metadata.dcp_sharded[local_layer_index])
