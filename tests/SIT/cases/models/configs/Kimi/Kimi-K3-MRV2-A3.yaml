@@ -165,8 +165,8 @@ benchmarks:
     thinking: true
     temperature: 1.0
     top_p: 0.95
-    baseline: 93
-    threshold: 3
+    baseline: 95
+    threshold: 5
   perf_16k_prefix0:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs200_kimi
