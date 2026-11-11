@@ -1540,7 +1540,7 @@ class KVPoolWorker(BaseKVPoolWorker):
         with queue.all_tasks_done:
             while queue.unfinished_tasks:
                 send_thread.raise_if_failed()
-                if not send_thread.is_alive() and send_thread._fatal_error is not None:
+                if not send_thread.is_alive():
                     break
                 queue.all_tasks_done.wait(timeout=0.1)
         if queue.unfinished_tasks:

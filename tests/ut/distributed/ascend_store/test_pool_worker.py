@@ -1476,7 +1476,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
 
     def test_drain_queued_saves_waits_until_queue_is_empty(self):
         worker = self._make_worker()
-        request_queue = queue.Queue()
+        request_queue: queue.Queue[str] = queue.Queue()
         request_queue.put("batch")
         send_thread = MagicMock(spec=KVCacheStoreSendingThread)
         send_thread.name = "KVCacheSendingThread"
@@ -1502,7 +1502,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
 
     def test_drain_queued_saves_raises_when_dead_thread_leaves_work(self):
         worker = self._make_worker()
-        request_queue = queue.Queue()
+        request_queue: queue.Queue[str] = queue.Queue()
         request_queue.put("batch")
         send_thread = MagicMock(spec=KVCacheStoreSendingThread)
         send_thread.name = "KVCacheSendingThread"
