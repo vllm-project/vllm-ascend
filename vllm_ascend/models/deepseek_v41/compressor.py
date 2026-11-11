@@ -65,8 +65,10 @@ class DeepseekV41Compressor(nn.Module):
             num_cores=self._ring_num_cores,
             prev_rows=prev_rows,
             prev_row_indices=prev_row_indices,
+            norm_w=self.norm.weight,
+            rms_eps=self.norm.variance_epsilon,
         )
-        return self.norm(pooled)
+        return pooled
 
     def forward(self, x):
         """Project an uncompressed source; ratio-2 uses ``pool_projected``."""

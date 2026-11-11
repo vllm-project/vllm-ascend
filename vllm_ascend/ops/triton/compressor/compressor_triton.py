@@ -238,11 +238,12 @@ def _pool_kernel(
     NO_PAD: tl.constexpr,
     HAS_PREV_ROWS: tl.constexpr,
     TOKEN_ALIGNED: tl.constexpr = False,
+    FUSE_TOKEN_NORM: tl.constexpr = False,
     NUM_CACHE_BLOCKS: tl.constexpr = 0,
 ):
     pid = tl.program_id(0)
     offs_h = tl.arange(0, HEAD_DIM)
-    if not TOKEN_ALIGNED:
+    if not TOKEN_ALIGNED or FUSE_TOKEN_NORM:
         norm_w = tl.load(norm_w_ptr + offs_h).to(tl.float32)
     for task_id in range(pid, total_group_slots, tl.num_programs(0)):
         batch = task_id // GROUP_SLOTS_PER_BATCH
@@ -338,9 +339,14 @@ def _pool_kernel(
                         False,
                     )
             if TOKEN_ALIGNED:
-                # Keep Aurora's existing RMSNorm outside this kernel. Place
-                # each completed pair at its original completion-token row.
+                # Place each completed pair at its completion-token row.
+                # Optionally normalize before publishing the BF16 result.
                 out_row = seg_row_base + (group_idx + 1) * RATIO - 1 - start_pos
+                if FUSE_TOKEN_NORM:
+                    # Preserve the original BF16 pooling output boundary.
+                    p = pooled.to(tl.bfloat16).to(tl.float32)
+                    variance = tl.sum(p * p, axis=0) / HEAD_DIM
+                    pooled = p * tl.rsqrt(variance + eps) * norm_w
                 tl.store(out_ptr + out_row * HEAD_DIM + offs_h, pooled.to(tl.bfloat16))
             else:
                 pooled_bf16 = pooled.to(tl.bfloat16).to(tl.float32)
@@ -733,12 +739,15 @@ def write_pcp_ring_rows(
 
 
 def compressor_from_projected(
-    kv, scores, state_cache, metadata, out, *, max_query_len, num_cores, prev_rows, prev_row_indices
+    kv, scores, state_cache, metadata, out, *, max_query_len, num_cores, prev_rows, prev_row_indices,norm_w=None, rms_eps=1e-20,
 ):
     """Pool C2 into token-aligned BF16 rows; PCP updates the ring after gathering.
 
     metadata is contiguous device INT32 [5, requests]: start positions, used
     lengths, output bases (reserved), input bases, and actual global block IDs.
+    Optional norm_w fuses RMSNorm after the BF16 pooling round-trip;
+    omit it to preserve the original unnormalized output for reference tests.
+    Positive rms_eps and finite weights are required for zero padding.
     Controls must be bounded by the input rows and request table; padded requests
     have used length and block ID zero. No tensor contents are read by the host.
     With prev_rows, chunk predecessors come from the gather or the old ring,
@@ -772,6 +781,11 @@ def compressor_from_projected(
         raise ValueError("Compressor tensors must share one device")
     if num_cores <= 0 or not 0 <= max_query_len <= tokens:
         raise ValueError("Invalid compressor launch bounds")
+    if norm_w is not None:
+        if (norm_w.shape != (width,) or norm_w.device != kv.device
+                or norm_w.dtype not in (torch.bfloat16, torch.float32)
+                or not norm_w.is_contiguous() or not 0 < rms_eps < float("inf")):
+            raise ValueError("Invalid C2 RMSNorm weight or epsilon")
     out.zero_()
     batches = metadata.shape[1]
     if tokens == 0 or batches == 0 or max_query_len == 0:
@@ -788,7 +802,7 @@ def compressor_from_projected(
         state_cache,
         prev_rows,
         prev_row_indices,
-        out,
+        norm_w if norm_w is not None else out,
         metadata,
         metadata[4],
         batches * groups,
@@ -799,10 +813,11 @@ def compressor_from_projected(
         RATIO=2,
         RATIO_PAD=2,
         CHUNK_ROWS=2,
-        eps=0.0,
+        eps=rms_eps,
         SINGLE_BLOCK=True,
         NO_PAD=True,
         TOKEN_ALIGNED=True,
+        FUSE_TOKEN_NORM=norm_w is not None,
         NUM_CACHE_BLOCKS=state_cache.shape[0],
         HAS_PREV_ROWS=prev_rows is not None,
     )
