@@ -1,0 +1,5 @@
+pr: 20484
+entries:
+  - category: performance
+    text: Avoided redundant zero initialization of fully overwritten DeepSeek V4 attention outputs.
+    model: deepseek-v4
