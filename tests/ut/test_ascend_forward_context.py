@@ -665,3 +665,48 @@ def test_extra_ctx_env_true_uses_additional_kwargs(monkeypatch):
     assert afc._EXTRA_CTX.capturing is False
     assert forward_context.capturing is True
     assert forward_context.additional_kwargs["capturing"] is False
+
+
+@pytest.mark.parametrize(
+    ("cudagraph_mode", "expected"),
+    [
+        ("NONE", True),
+        ("PIECEWISE", False),
+        ("FULL", False),
+        ("FULL_DECODE_ONLY", False),
+    ],
+)
+def test_lora_ep_keeps_alltoall_only_when_cudagraph_is_off(cudagraph_mode, expected):
+    from vllm.config.compilation import CUDAGraphMode
+
+    vllm_config = SimpleNamespace(
+        compilation_config=SimpleNamespace(cudagraph_mode=getattr(CUDAGraphMode, cudagraph_mode))
+    )
+
+    assert afc._lora_ep_keeps_alltoall(vllm_config) is expected
+
+
+def test_lora_ep_keeps_alltoall_defaults_to_alltoall_without_compilation_config():
+    assert afc._lora_ep_keeps_alltoall(SimpleNamespace()) is True
+
+
+@pytest.mark.parametrize(
+    ("cudagraph_mode", "expected"),
+    [
+        ("NONE", MoECommType.ALLTOALL),
+        ("PIECEWISE", MoECommType.ALLGATHER),
+    ],
+)
+def test_select_moe_comm_method_lora_with_expert_parallel_follows_cudagraph(monkeypatch, cudagraph_mode, expected):
+    from vllm.config.compilation import CUDAGraphMode
+
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=AscendDeviceType.A3,
+        ep_world_size=8,
+    )
+    vllm_config = _make_vllm_config(enable_expert_parallel=True)
+    vllm_config.lora_config = SimpleNamespace(max_loras=1)
+    vllm_config.compilation_config.cudagraph_mode = getattr(CUDAGraphMode, cudagraph_mode)
+
+    assert afc.select_moe_comm_method(16, vllm_config) == expected
