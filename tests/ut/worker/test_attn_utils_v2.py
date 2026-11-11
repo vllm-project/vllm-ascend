@@ -677,6 +677,9 @@ def test_v2_single_raw_mla_path_excludes_unsupported_modes(monkeypatch):
 
     attn_module.impl.fa_quant_layer = True
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
+    attn_module.impl.use_flashmla = True
+    assert attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
+    attn_module.impl.use_flashmla = False
     attn_module.impl.fa_quant_layer = False
 
     attn_module.impl.use_pcp = True

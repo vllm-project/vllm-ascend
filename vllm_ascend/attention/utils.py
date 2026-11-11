@@ -121,6 +121,31 @@ def get_flashmla_ops() -> tuple[Callable, Callable] | None:
     return None
 
 
+def get_quant_flashmla_ops() -> tuple[Callable, Callable] | None:
+    """Find the two full-quant FlashMLA APIs in ops-transformer.
+
+    QuantFlashMLA is delivered independently from the floating-point operator,
+    so backend selection must test its own attention and device-metadata APIs.
+    Keep import failures from an installed package visible for the same reason
+    as :func:`get_flashmla_ops`.
+    """
+    if not _has_flashmla_module():
+        return None
+
+    try:
+        ops = import_module("cann_ops_transformer.ops")
+    except ModuleNotFoundError as exc:
+        if exc.name in ("cann_ops_transformer", "cann_ops_transformer.ops"):
+            return None
+        raise
+
+    attention_op = getattr(ops, "quant_flash_mla", None)
+    metadata_op = getattr(ops, "quant_flash_mla_metadata", None)
+    if callable(attention_op) and callable(metadata_op):
+        return attention_op, metadata_op
+    return None
+
+
 class PreprocessType(enum.Enum):
     NATIVE = "native"
     PROLOG_V3 = "prolog_v3"

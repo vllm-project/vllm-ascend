@@ -276,7 +276,7 @@ class FlashMLAImpl:
 class FlashMLACurrent:
     """Replicated current chunk, independent of persistent KV and prefix pages."""
 
-    adapter: FlashMLAImpl
+    adapter: Any
     query: torch.Tensor
     schedule: torch.Tensor
     cache: torch.Tensor
@@ -287,7 +287,7 @@ class FlashMLACurrent:
 
 @dataclass
 class FlashMLADecode:
-    adapter: FlashMLAImpl
+    adapter: Any
     query: torch.Tensor
     schedule: torch.Tensor
     cu: torch.Tensor
@@ -305,7 +305,14 @@ class FlashMLADecode:
 
 
 class FlashMLAMetadataBuilder:
-    def __init__(self, impl, device: torch.device, max_num_reqs: int, attn_mask: torch.Tensor):
+    def __init__(
+        self,
+        impl,
+        device: torch.device,
+        max_num_reqs: int,
+        attn_mask: torch.Tensor,
+        adapter: Any | None = None,
+    ):
         self.dcp_size = getattr(impl, "dcp_size", 1)
         self.dcp_rank = getattr(impl, "dcp_rank", 0)
         # Materialize once: an integer rank would trigger a blocking H2D copy
@@ -318,7 +325,10 @@ class FlashMLAMetadataBuilder:
         # speculative causal queries need the replicated current chunk.
         self.use_spec_decode = impl.vllm_config.speculative_config is not None
         self.cp_interleave = impl.vllm_config.parallel_config.cp_kv_cache_interleave_size if self.dcp_size > 1 else 1
-        adapter = FlashMLAImpl.load(FlashMLAConfig(impl.num_heads, impl.scale, return_softmax_lse=self.dcp_size > 1))
+        if adapter is None:
+            adapter = FlashMLAImpl.load(
+                FlashMLAConfig(impl.num_heads, impl.scale, return_softmax_lse=self.dcp_size > 1)
+            )
         self.current_adapter = adapter
         history_adapter = replace(
             adapter,
@@ -327,6 +337,7 @@ class FlashMLAMetadataBuilder:
         self.adapters = {True: history_adapter if self.dcp_size > 1 else adapter, False: history_adapter}
         self.device = device
         self.dtype = impl.dtype
+        self.rope_dtype = getattr(getattr(impl.vllm_config, "model_config", None), "dtype", impl.dtype)
         self.use_rope = impl.use_mla_rope
         self.max_num_reqs = max_num_reqs
         self.buffers: dict[tuple, FlashMLADecode] = {}
@@ -359,8 +370,8 @@ class FlashMLAMetadataBuilder:
             token_live=torch.zeros(tokens, dtype=torch.bool, device=self.device),
             live_boundaries=torch.zeros(tokens + 1, **ints),
             attn_mask=self.attn_mask if adapter.config.mask_mode == 3 else None,
-            cos=torch.empty(rope_shape, dtype=self.dtype, device=self.device) if self.use_rope else None,
-            sin=torch.empty(rope_shape, dtype=self.dtype, device=self.device) if self.use_rope else None,
+            cos=torch.empty(rope_shape, dtype=self.rope_dtype, device=self.device) if self.use_rope else None,
+            sin=torch.empty(rope_shape, dtype=self.rope_dtype, device=self.device) if self.use_rope else None,
         )
         if self.dcp_size > 1 and causal and self.use_spec_decode:
             # As in split DCP attention, each rank retains every current row.
