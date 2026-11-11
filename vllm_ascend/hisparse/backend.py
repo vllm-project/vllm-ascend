@@ -77,14 +77,12 @@ class AscendHiSparseBackend(HiSparseBackend):
         self._failed_dma_batches: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
 
     def check_available(self) -> None:
+        from vllm_ascend.hisparse.cache_ops import _load_resolver
         from vllm_ascend.hisparse.host_pool import install
-        from vllm_ascend.hisparse.resolver import _load_resolver
         from vllm_ascend.hisparse.row_dma import install as install_row_dma
         from vllm_ascend.utils import bootstrap_custom_op_env
 
         install()
-        # Import the device kernels before the connector allocates Host storage.
-        importlib.import_module("vllm_ascend.hisparse.cache_ops")
         if not hasattr(torch.ops._C_ascend, "swap_blocks_batch"):
             # A5 disables the global custom-op selection policy. HiSparse still
             # needs its explicit DMA dependency; load the extension lazily here

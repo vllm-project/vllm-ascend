@@ -48,7 +48,6 @@ curated_tests:
     - tests/e2e/pull_request/one_card/test_flash_attn_precision.py
     - tests/e2e/pull_request/one_card/test_swiglu_mx_quant.py
     - tests/e2e/pull_request/one_card/test_hisparse_attention.py
-    - tests/e2e/pull_request/one_card/test_hisparse_kv_preprocess.py
     - tests/e2e/pull_request/one_card/test_hisparse_ops.py
     - tests/e2e/pull_request/one_card/test_hisparse_prefill_staging.py
 
@@ -123,7 +122,7 @@ runner_mapping:
     default: a5-4
   tests/e2e/pull_request/one_card/test_swiglu_mx_quant\.py$:
     default: a5-4
-  tests/e2e/pull_request/one_card/test_hisparse_(attention|kv_preprocess|ops|prefill_staging)\.py$:
+  tests/e2e/pull_request/one_card/test_hisparse_(attention|ops|prefill_staging)\.py$:
     default: a5-4
   tests/e2e/pull_request/one_card:
     default: a2-1

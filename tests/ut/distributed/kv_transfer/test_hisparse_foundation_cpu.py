@@ -173,12 +173,10 @@ def test_mapped_addresses_retain_offsets_and_reject_expired_or_external_views():
 def test_resolver_scratch_follows_group_geometry_and_is_not_shared_across_groups(
     monkeypatch, max_rows, hot_rows, union_rows, prepare_workspaces
 ):
-    from vllm_ascend.hisparse import resolver
-
     # Loading a device extension is the only mocked boundary; the group-owned
     # tensors below are real CPU storage, not a replacement resolver algorithm.
     native = NS(hisparse_resolver_validate_scratch=lambda hot, union: None)
-    monkeypatch.setattr(resolver, "_load_resolver", lambda: native)
+    monkeypatch.setattr(hisparse_ops, "_load_resolver", lambda: native)
     backend = AscendHiSparseBackend()
 
     def group():
@@ -233,11 +231,9 @@ def test_resolver_scratch_rejects_topk_outside_hot_capacity(topk):
 
 
 def test_missing_native_resolver_raises_instead_of_falling_back(monkeypatch):
-    from vllm_ascend.hisparse import resolver
-
-    monkeypatch.setattr(resolver.torch.ops, "_C_ascend", NS())
+    monkeypatch.setattr(hisparse_ops.torch.ops, "_C_ascend", NS())
     with pytest.raises(RuntimeError, match="requires its compiled AscendC resolver"):
-        resolver._load_resolver()
+        hisparse_ops._load_resolver()
 
 
 @pytest.fixture
@@ -275,34 +271,40 @@ def test_expanded_indexer_alias_preserves_shared_slab_offsets(indexer_spec, bloc
     assert original[-1, 0, 1, 2] == -73
 
 
-def test_alignment_updates_only_indexer_specs_without_changing_inputs(indexer_spec):
+@pytest.mark.parametrize("c8", [False, True])
+def test_indexer_page_alignment_preserves_input_specs(indexer_spec, c8):
     source = MLAAttentionSpec(block_size=4, num_kv_heads=1, head_size=4, dtype=torch.float32)
-    indexer = indexer_spec
-    values = {"source": source, "indexer": indexer}
-    result = align_hisparse_indexer_specs(values)
+    specs = {"source": source, "indexer": indexer_spec}
+    packed_row_bytes = None
+    if c8:
+        indexer_spec = replace(
+            indexer_spec,
+            block_size=128,
+            head_size=128,
+            dtype=torch.float8_e4m3fn,
+            scale_dim=1,
+            scale_dtype=torch.float32,
+            cache_sparse_li_c8=True,
+        )
+        packed_row_bytes = 656
+        specs.update(
+            indexer=indexer_spec,
+            resident=HiSparseResidentSpec(block_size=128, page_size=128 * 656, block_stride_alignment=128),
+            hot=HiSparseHotSpec(block_size=128, page_size=128 * 656, blocks_per_request=1, block_stride_alignment=128),
+        )
+    result = align_hisparse_indexer_specs(specs, packed_row_bytes=packed_row_bytes)
     assert result["source"] is source
-    assert result["indexer"].get_block_stride_alignment() == math.lcm(3, indexer.page_size_bytes)
-    assert values["indexer"] is indexer and indexer.block_stride_alignment == 3
-
-
-def test_c8_page_alignment_reserves_scale_bytes_and_whole_main_rows(indexer_spec):
-    resident = HiSparseResidentSpec(block_size=128, page_size=128 * 656, block_stride_alignment=128)
-    hot = HiSparseHotSpec(block_size=128, page_size=128 * 656, blocks_per_request=1, block_stride_alignment=128)
-    indexer = replace(
-        indexer_spec,
-        block_size=128,
-        head_size=128,
-        dtype=torch.float8_e4m3fn,
-        scale_dim=1,
-        scale_dtype=torch.float32,
-        cache_sparse_li_c8=True,
-    )
-    result = align_hisparse_indexer_specs({"resident": resident, "hot": hot, "indexer": indexer}, packed_row_bytes=656)
-    stride_alignment = math.lcm(*(spec.get_block_stride_alignment() for spec in result.values()))
-    assert stride_alignment % 656 == 0 and stride_alignment % 128 == 0
-    assert result["indexer"].page_size_padded == 128 * (128 + 4)
-    assert resident.block_stride_alignment == hot.block_stride_alignment == 128
-    assert indexer.page_size_padded is None
+    assert specs["indexer"] is indexer_spec and indexer_spec.block_stride_alignment == 3
+    if c8:
+        alignment = math.lcm(*(spec.get_block_stride_alignment() for name, spec in result.items() if name != "source"))
+        assert alignment % 656 == 0 and alignment % 128 == 0
+        assert result["indexer"].page_size_padded == 128 * (128 + 4)
+        assert indexer_spec.page_size_padded is None
+        for name in ("resident", "hot"):
+            assert specs[name].block_stride_alignment == 128
+            assert result[name].block_stride_alignment == math.lcm(128, packed_row_bytes)
+    else:
+        assert result["indexer"].get_block_stride_alignment() == math.lcm(3, indexer_spec.page_size_bytes)
 
 
 @pytest.mark.parametrize("field", ["scale_dim", "cache_sparse_li_c8", "cache_sparse_li_c4"])
@@ -364,10 +366,8 @@ def test_c8_storage_mapping_preserves_shared_slab_offsets(stride_rows):
 def test_c8_decode_lengths_follow_binding_geometry_and_survive_rebind(
     monkeypatch, pages, stride_rows, max_rows, prepare_workspaces
 ):
-    from vllm_ascend.hisparse import resolver
-
     monkeypatch.setattr(
-        resolver, "_load_resolver", lambda: NS(hisparse_resolver_validate_scratch=lambda hot, union: None)
+        hisparse_ops, "_load_resolver", lambda: NS(hisparse_resolver_validate_scratch=lambda hot, union: None)
     )
     backend = AscendHiSparseBackend()
     group = NS(copy_stream=NS(device=torch.device("cpu")))

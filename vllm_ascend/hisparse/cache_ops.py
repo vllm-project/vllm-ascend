@@ -29,6 +29,15 @@ _SORT_MIN_DIRECT_TILES = 64 * 1024
 _SORT_BUFFER_LIMIT_BYTES = 768 * 1024
 
 
+def _load_resolver():
+    namespace = torch.ops._C_ascend
+    if not all(
+        hasattr(namespace, name) for name in ("hisparse_resolver_validate_scratch", "hisparse_resolve_residency")
+    ):
+        raise RuntimeError("HiSparse requires its compiled AscendC resolver. Rebuild vllm-ascend for this target.")
+    return namespace
+
+
 class ResolverWorkspace:
     """Fixed scratch shared by one index group on its ordered copy stream."""
 
@@ -43,8 +52,6 @@ class ResolverWorkspace:
         self.max_topk = hot_size if max_topk is None else max_topk
         if not 0 < self.max_topk <= hot_size:
             raise ValueError("HiSparse resolver TopK capacity must be positive and fit the Hot cache")
-        from vllm_ascend.hisparse.resolver import _load_resolver
-
         self.native = _load_resolver()
         self.native.hisparse_resolver_validate_scratch(hot_size, max_union_rows)
         # One resolved Host row per selected token, not per Hot-cache slot.
@@ -240,9 +247,48 @@ class HiSparseNPUOps:
             != 1
         ):
             raise ValueError("All three compact HiSparse swap outputs are required together")
-        from vllm_ascend.hisparse.resolver import resolve
+        self._resolve(locals())
 
-        resolve(self, locals())
+    def _resolve(self, arguments):
+        """Dispatch live tensors to the native request-union resolver.
+
+        During replay, external tensors remain owned by the runtime/workspace.
+        Callers must destroy graphs before releasing or rebinding those owners.
+        """
+        rows, topk = arguments["global_indices"].shape
+        workspace = self.workspace
+        resolved = arguments["resolved_global_indices"]
+        if resolved is None:
+            resolved = workspace.first_refs[: rows * topk].view(rows, topk)
+        workspace.native.hisparse_resolve_residency(
+            arguments["global_indices"],
+            arguments["request_ids"],
+            arguments["request_state_indices"],
+            arguments["source_block_table"],
+            arguments["resident_block_table"],
+            arguments["hot_block_table"],
+            arguments["device_global_indices"],
+            arguments["lru_slots"],
+            arguments["hot_indices"],
+            arguments["attention_indices"],
+            resolved,
+            arguments["valid_counts"],
+            arguments["swap_host_physical_rows"],
+            arguments["swap_device_physical_rows"],
+            arguments["swap_counts"],
+            arguments["miss_mask"],
+            arguments["stats"],
+            workspace.errors[:rows],
+            arguments["num_valid_rows"],
+            arguments["host_cache"].shape[0],
+            arguments["hot_cache"].shape[1],
+            arguments["source_block_size"],
+            arguments["resident_block_size"],
+            arguments["resident_null_block"],
+            arguments["attention_block_stride"] if self.attention_block_stride is None else self.attention_block_stride,
+            arguments["max_union_rows"],
+            self.attention_capacity,
+        )
 
     def hisparse_gather_compact(
         self, host_cache, hot_cache, miss_global_indices, miss_hot_indices, miss_counts

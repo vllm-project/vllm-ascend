@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Real-NPU HiSparse state and mapped-payload tests against a CPU oracle."""
 
+from contextlib import contextmanager
+
 import pytest
 import torch
 import torch_npu  # noqa: F401
@@ -725,6 +727,21 @@ def test_plan_gather_respects_request_state_padding():
         mapping.close()
 
 
+@contextmanager
+def _invalidation_graph(forward):
+    stream = torch.npu.Stream()
+    stream.wait_stream(torch.npu.current_stream())
+    with torch.npu.stream(stream):
+        forward()
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    try:
+        yield graph, stream
+    finally:
+        torch.npu.synchronize()
+        graph.reset()
+
+
 @pytest.mark.parametrize("hot_capacity", [4, 10240])
 def test_invalidate_hot_capacity_graph(hot_capacity):
     dgi = torch.arange(2 * hot_capacity, dtype=torch.int32, device="npu").view(2, hot_capacity)
@@ -742,13 +759,7 @@ def test_invalidate_hot_capacity_graph(hot_capacity):
     forward()
     torch.npu.synchronize()
     torch.testing.assert_close(dgi.cpu(), expected)
-    stream = torch.npu.Stream()
-    stream.wait_stream(torch.npu.current_stream())
-    with torch.npu.stream(stream):
-        forward()
-    torch.npu.synchronize()
-    graph = torch.npu.NPUGraph()
-    try:
+    with _invalidation_graph(forward) as (graph, stream):
         with torch.npu.graph(graph, stream=stream):
             forward()
         for _ in range(10):
@@ -756,9 +767,6 @@ def test_invalidate_hot_capacity_graph(hot_capacity):
             graph.replay()
             torch.npu.synchronize()
             torch.testing.assert_close(dgi.cpu(), expected)
-    finally:
-        torch.npu.synchronize()
-        graph.reset()
 
 
 @pytest.mark.parametrize(
@@ -815,11 +823,6 @@ def test_common_group_invalidation_changed_graph_replay(rows, hot_capacity, cros
                 torch.testing.assert_close(table.cpu(), expected)
 
     check_writes(forward)
-    stream = torch.npu.Stream()
-    stream.wait_stream(torch.npu.current_stream())
-    with torch.npu.stream(stream):
-        forward()
-    torch.npu.synchronize()
 
     sort = torch.sort
     sort_calls = 0
@@ -829,16 +832,12 @@ def test_common_group_invalidation_changed_graph_replay(rows, hot_capacity, cros
         sort_calls += 1
         return sort(*args, **kwargs)
 
-    monkeypatch.setattr(torch, "sort", count_sort)
-    graph = torch.npu.NPUGraph()
-    try:
+    with _invalidation_graph(forward) as (graph, stream):
+        monkeypatch.setattr(torch, "sort", count_sort)
         with torch.npu.graph(graph, stream=stream):
             forward()
         assert sort_calls == int(expect_sorted)
         check_writes(graph.replay)
-    finally:
-        torch.npu.synchronize()
-        graph.reset()
 
 
 @pytest.mark.parametrize("capture", [False, True])
