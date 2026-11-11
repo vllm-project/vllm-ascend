@@ -10,17 +10,16 @@ from unittest.mock import Mock, patch
 import pytest
 import torch
 
-pytest.importorskip("vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data")
+pytest.importorskip("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.recovery.data")
 
 try:
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import KeyMetadata
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.recovery.layout import KeyMetadata
 except ModuleNotFoundError as exc:
-    if exc.name != "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout":
+    if exc.name != "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.recovery.layout":
         raise
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import KeyMetadata
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.recovery.data import KeyMetadata
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import MooncakeStoreWorker
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
     AscendStoreConnector,
@@ -36,6 +35,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import
     _shares_mooncake_v2_engine,
     get_hash_store_worker_class,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.recovery.worker import StoreWorker
 
 AscendHashStoreWorker = get_hash_store_worker_class()
 AscendHashStoreLayout = get_hash_store_layout_class()
@@ -110,7 +110,7 @@ def test_shared_direct_only_is_automatic_for_v2(has_v2):
         worker.store = Mock()
 
     with (
-        patch.object(MooncakeStoreWorker, "__init__", autospec=True, side_effect=initialize),
+        patch.object(StoreWorker, "__init__", autospec=True, side_effect=initialize),
         patch(
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker._engine_transfer_config",
             return_value=parent,
@@ -245,7 +245,7 @@ def test_worker_uses_v2_collector_and_does_not_register_padding_twice(v2_first):
         patch(module + "kv_p2p.mooncake.utils.collect_configured_register_regions", return_value=regions) as collect,
         patch(module + "utils.mooncake_transfer_engine.global_te") as global_te,
         patch(module + "kv_pool.ascend_store.pool_worker._AlignedStore") as aligned,
-        patch.object(MooncakeStoreWorker, "register_kv_caches"),
+        patch.object(StoreWorker, "register_kv_caches"),
     ):
         global_te.registered_buffers = [(16, 32)] if v2_first else []
 
@@ -302,8 +302,8 @@ def test_store_checkpoint_policy_matches_existing_ascend_role_policy(role):
 
 
 def test_pd_tail_uses_same_attention_and_mamba_hash_boundary():
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import BoundaryPut
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import _partial_tail_non_mamba_puts
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.recovery.data import BoundaryPut
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.recovery.scheduler import _partial_tail_non_mamba_puts
 
     coord = SimpleNamespace(
         use_eagle=True,
@@ -526,7 +526,7 @@ def test_mrv2_registration_uses_core_capacity_without_mutating_config():
     worker._kv_cache_groups = []
     worker.token_dbs = []
     worker.store = Mock()
-    with patch.object(MooncakeStoreWorker, "register_kv_caches") as register:
+    with patch.object(StoreWorker, "register_kv_caches") as register:
         worker.register_kv_caches({})
         register.assert_called_once_with({})
     assert worker.cache_config.num_gpu_blocks == 3
@@ -567,7 +567,7 @@ def test_worker_binds_all_components_before_upstream_registration():
 
     with (
         patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker._AlignedStore"),
-        patch.object(MooncakeStoreWorker, "register_kv_caches", side_effect=legacy_registration),
+        patch.object(StoreWorker, "register_kv_caches", side_effect=legacy_registration),
     ):
         worker.register_kv_caches({"attention": attention, "mamba": state})
     assert len(attn_layout._views) == len(state_layout._views) == 2
@@ -642,21 +642,14 @@ def test_core_unresolved_or_whole_page_never_guesses_from_pmu(alignment):
         assert not _uses_partial_hash_hits(config, plan)
 
 
-@pytest.mark.parametrize("allowed", [False, True])
-def test_partial_recovery_uses_actual_core_coordinator_result(allowed):
-    config, plan = Mock(), SimpleNamespace(cache_hit_alignment_tokens=64)
-    with (
-        patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.resolve_kv_cache_block_sizes",
-            return_value=(1152, 64),
-        ),
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator.MooncakeStoreCoordinator.from_kv_cache_config",
-            return_value=SimpleNamespace(enable_partial_hash_hits=allowed),
-        ) as core,
+@pytest.mark.parametrize("alignment,expected", [(64, True), (1152, False)])
+def test_partial_recovery_uses_core_resolved_alignment(alignment, expected):
+    config, plan = Mock(), SimpleNamespace(cache_hit_alignment_tokens=alignment)
+    with patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.resolve_kv_cache_block_sizes",
+        return_value=(1152, 64),
     ):
-        assert _uses_partial_hash_hits(config, plan) is allowed
-    core.assert_called_once_with(plan, config, 1152, 64)
+        assert _uses_partial_hash_hits(config, plan) is expected
 
 
 def test_metrics_dispatch_uses_records_not_configuration():
@@ -667,7 +660,7 @@ def test_metrics_dispatch_uses_records_not_configuration():
         metrics = _AutomaticStorePromMetrics()
     records = {"load_get": [{"status": "ok"}]}
     with (
-        patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector._core_store") as core,
+        patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector._store_metrics") as core,
         patch(
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.AscendStorePromMetrics.observe"
         ) as legacy,
@@ -676,7 +669,7 @@ def test_metrics_dispatch_uses_records_not_configuration():
         metrics.observe(records, 1)
         metrics.observe({"load_get_keys": 3}, 0)
         metrics.observe({}, 0)
-    core.return_value.MooncakeStoreConnector.build_prom_metrics.assert_called_once_with()
+    core.return_value.StorePromMetrics.assert_called_once_with()
     metrics._core_metrics.observe.assert_called_once_with(records, 1)
     assert legacy.call_count == 3
 

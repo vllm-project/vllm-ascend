@@ -235,13 +235,14 @@ class _AlignedStore:
 @cache_factory
 def get_hash_store_worker_class():
     # Keep the old bulk/layerwise Store independent of new Core APIs.
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
-        ChunkedTokenDatabase as CoreChunkedTokenDatabase,
-    )
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import MooncakeStoreWorker
     from vllm.v1.kv_cache_interface import group_kernel_blocks
 
-    class AscendHashStoreWorker(MooncakeStoreWorker):
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.recovery.data import (
+        ChunkedTokenDatabase as RecoveryChunkedTokenDatabase,
+    )
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.recovery.worker import StoreWorker
+
+    class AscendHashStoreWorker(StoreWorker):
         @property
         def store(self):
             return self._ascend_store
@@ -252,7 +253,7 @@ def get_hash_store_worker_class():
                 value = _SharedEngineStore(value, direct_only=getattr(self, "_shared_direct_only", False))
             self._ascend_store = value
 
-        def __init__(self, vllm_config, kv_cache_config):
+        def __init__(self, vllm_config, kv_cache_config, geometry=None):
             # This worker is selected only by Core's resolved partial-hit plan.
             # A V2 sibling must share the registration owner, not re-export it
             # through an independent Fabric engine. Native setup validates the
@@ -261,10 +262,10 @@ def get_hash_store_worker_class():
             self._shared_direct_only = self._shared_engine
             self._bootstrap_shared_engine = self._shared_engine
             try:
-                super().__init__(vllm_config, kv_cache_config)
+                super().__init__(vllm_config, kv_cache_config, geometry)
             finally:
                 self._bootstrap_shared_engine = False
-            _align_store_eagle_policy(self.coord, _engine_transfer_config(vllm_config, kv_cache_config))
+            # Producer policy is already part of the shared geometry.
 
         def _select_store_layout(self, extra_config):
             # Never mix partial attention objects with legacy whole-page keys.
@@ -289,7 +290,7 @@ def get_hash_store_worker_class():
                     group_metadata, spec.block_size, self.hash_block_size, is_state=is_state, head_major=head_major
                 )
                 databases.append(
-                    CoreChunkedTokenDatabase(
+                    RecoveryChunkedTokenDatabase(
                         group_metadata,
                         spec.block_size,
                         hash_block_size=self.hash_block_size,

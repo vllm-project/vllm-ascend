@@ -36,14 +36,7 @@ def dense_cache_segments(
 @cache
 def get_hash_store_layout_class():
     # Lazy import keeps the original modes independent of the Core Store API.
-    try:
-        from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import RankLocalStoreLayout
-    except ModuleNotFoundError as exc:
-        if exc.name != "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout":
-            raise
-        # Before Core split the layout module, the same public Store layout
-        # protocol lived in data.py. Reuse it without changing Core.
-        from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import RankLocalStoreLayout
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.recovery.data import RankLocalStoreLayout
 
     class AscendHashStoreLayout(RankLocalStoreLayout):
         def __init__(self, metadata, block_size: int, hash_block_size: int, *, is_state: bool, head_major: bool):
