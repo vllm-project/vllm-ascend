@@ -24,7 +24,7 @@ model:
     - "pooling"
   base_env: {}
   docker_image:
-    ascend_910c: "quay.io/ascend/vllm-ascend:v0.23.0-a3"
+    ascend_910c: "quay.io/ascend/vllm-ascend:v0.23.0.post1-a3"
 
 variants:
   default:
@@ -33,7 +33,7 @@ variants:
     supported_hardware: [ascend_910c]
     hardware_overrides:
       ascend_910c:
-        docker_image: "quay.io/ascend/vllm-ascend:v0.23.0-a3"
+        docker_image: "quay.io/ascend/vllm-ascend:v0.23.0.post1-a3"
         docker_serve_command: "vllm serve"
         extra_args:
           - "--max-model-len"
@@ -58,11 +58,11 @@ guide: |
   ## Validation scope and support status
 
   The main tutorial marks this model discontinued since vLLM Ascend v0.30.0 and points at the
-  v0.23.0 documentation, so this recipe is pinned to the `v0.23.0-a3` image and only covers the
+  v0.23.0 documentation, so this recipe is pinned to the `v0.23.0.post1-a3` image and only covers the
   single-node pooling scenario that document describes. Atlas 800 A3 is declared `supported`
   rather than `verified`: the health, model-list and 100-request checks below were recorded on
   a pre-release nightly build (vLLM Ascend 0.19.1rc2.dev3230+g469c6c260), and have not been
-  repeated on the pinned `v0.23.0-a3` image. Full MTEB accuracy, long-context, and other
+  repeated on the pinned `v0.23.0.post1-a3` image. Full MTEB accuracy, long-context, and other
   hardware scenarios remain unverified.
 
   ## Client Usage
