@@ -55,6 +55,7 @@ env_common: &env_common
   OMP_PROC_BIND: "false"
   OMP_NUM_THREADS: "10"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  ASCEND_GLOBAL_RESOURCE_CONFIG: '{"comm_resource_config:protocol_desc":"hccs:device"}'
 
 env_prefill: &env_prefill
   <<: *env_common
