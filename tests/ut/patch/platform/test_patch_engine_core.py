@@ -145,10 +145,8 @@ def test_run_engine_core_patch_delegates_and_passes_rank_args(monkeypatch):
         return expected
 
     monkeypatch.setattr(_engine_core_patch, "_OriginalRunEngineCore", original)
-    init_ascend = MagicMock(return_value=_ascend_config(profiling_enabled=False))
+    init_ascend = MagicMock(return_value=_ascend_config())
     monkeypatch.setattr(_engine_core_patch, "init_ascend_config", init_ascend)
-    profiling = MagicMock()
-    monkeypatch.setattr(_engine_core_patch, "_apply_profiling_patches", profiling)
     dp_proc_patch = MagicMock()
     monkeypatch.setattr(_engine_core_patch, "_patch_dp_engine_core_proc", dp_proc_patch)
 

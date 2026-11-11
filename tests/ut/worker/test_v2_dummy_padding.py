@@ -105,6 +105,9 @@ def test_capture_without_dummy_scope_keeps_existing_layout(buffers):
     assert batch.num_scheduled_tokens.tolist() == [16]
 
 
+@pytest.mark.parametrize("is_hybrid", [False, True])
+@pytest.mark.parametrize("draft_mode", [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL_AND_PIECEWISE])
+@pytest.mark.parametrize("capture_size,uniform", [(16, 1), (16, 2), (16, 4), (32, 2), (32, 4)])
 def test_mixed_dp_dummy_keeps_graphs_and_reuses_sync(buffers, runner, draft_mode, uniform, capture_size, is_hybrid):
     runner.model_config.is_hybrid = is_hybrid
     runner.decode_query_len = uniform
@@ -195,6 +198,7 @@ def test_dummy_scope_restores_state_on_exception(buffers, runner, kwargs, mode, 
     assert buffers.dummy_num_tokens == 7
 
 
+@pytest.mark.parametrize("inner_mode,expected", [(CUDAGraphMode.PIECEWISE, 6), (CUDAGraphMode.NONE, None)])
 def test_nested_dummy_runs_restore_outer_query_tokens(buffers, runner, inner_mode, expected):
     buffers.dummy_num_tokens = 7
 

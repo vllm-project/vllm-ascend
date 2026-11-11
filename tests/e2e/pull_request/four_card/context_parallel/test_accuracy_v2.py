@@ -412,7 +412,6 @@ def test_dsv3_2_sfa_pcp_model_runner_v2_graph() -> None:
 
 
 @pytest.mark.e2e_model(DSV3_2_MODEL)
-@pytest.mark.e2e_model(DSV3_2_MODEL)
 @pytest.mark.e2e_coverage(
     arch="moe",
     feature="sfa_pcp,chunked_prefill,prefix_caching",

@@ -1368,7 +1368,6 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         with self.assertRaises(ValueError):
             AscendCompilationConfig(unknown_key=1)
 
-
     def test_short_request_first_config_unknown_key_forbidden(self):
         # Was hand-written unknown-key check; now extra="forbid".
         with self.assertRaises(ValueError):
