@@ -857,6 +857,9 @@ def test_common_group_invalidation_changed_graph_replay(rows, hot_capacity, cros
 def test_page_strided_indexer_write_preserves_bits_and_padding(capture):
     from types import SimpleNamespace
 
+    from vllm.v1.kv_cache_interface import KVCacheTensor, create_kv_cache_views
+    from vllm.v1.kv_cache_layout import KVCacheLayout
+
     from vllm_ascend.attention.indexer import AscendHiSparseIndexerBackend
     from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
     from vllm_ascend.hisparse.binding import _quantized_indexer_views
@@ -864,9 +867,6 @@ def test_page_strided_indexer_write_preserves_bits_and_padding(capture):
     pages, block, width, page_stride = 3, 128, 128, 419840
     size = (pages - 1) * page_stride + block * width + block * 4
     raw = torch.full((size,), 90, dtype=torch.uint8, device="npu")
-    packed = torch.as_strided(
-        raw.view(torch.float8_e4m3fn), (pages, 1, block, width), (page_stride, block * width, width, 1)
-    )
     spec = AscendSFAIndexerCacheSpec(
         block_size=block,
         num_kv_heads=1,
@@ -879,6 +879,10 @@ def test_page_strided_indexer_write_preserves_bits_and_padding(capture):
         cache_sparse_li_c4=False,
         sfa_dcp_replicated_indexer_size=1,
     )
+    tensor_config = KVCacheTensor(
+        size=size, layers=["indexer"], layer_stride=spec.page_size_bytes, block_stride=page_stride
+    )
+    (packed,) = create_kv_cache_views(raw.view(torch.int8), spec, pages, KVCacheLayout.BLNHC, tensor_config)
     key, scale = _quantized_indexer_views(packed, spec)
     writer = AscendHiSparseIndexerBackend.__new__(AscendHiSparseIndexerBackend)
     torch.nn.Module.__init__(writer)
