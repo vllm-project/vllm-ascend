@@ -7,6 +7,7 @@ import queue
 import threading
 import unittest
 from dataclasses import replace
+from itertools import product
 from types import MethodType, SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -245,14 +246,23 @@ class TestGLM53Store(unittest.TestCase):
                     stored[missing] = payload
 
     def test_memcache_layerwise_round_trip_keeps_each_tp_state(self):
+        self._check_memcache_layerwise_round_trip(tp_size=2, pcp_size=1)
+
+    def test_memcache_layerwise_round_trip_keeps_each_pcp_state(self):
+        self._check_memcache_layerwise_round_trip(tp_size=1, pcp_size=2)
+
+    def _check_memcache_layerwise_round_trip(self, *, tp_size, pcp_size):
         block_hash = bytes([1]) * 32
         buffers: dict[str, Any] = {}
         readable = set()
 
         def alloc(keys, sizes, ttl):
             for key, size in zip(keys, sizes):
-                self.assertNotIn(key, buffers)
-                buffers[key] = ctypes.create_string_buffer(size)
+                # Memcache allocation is idempotent: a colliding writer gets
+                # the existing region, so the payload round trip must catch it.
+                if key not in buffers:
+                    buffers[key] = ctypes.create_string_buffer(size)
+                self.assertEqual(len(buffers[key]), size)
             return [ctypes.addressof(buffers[key]) for key in keys]
 
         def infos(keys, **kwargs):
@@ -283,7 +293,7 @@ class TestGLM53Store(unittest.TestCase):
         source = [[1], [2], [3], [4], [5]]
         target = [[6], [7], [8], [9], [10]]
         workers = []
-        for rank, pp_rank in ((0, 0), (1, 0), (0, 1), (1, 1)):
+        for pp_rank, pcp_rank, rank in product(range(2), range(pcp_size), range(tp_size)):
             plan = make_glm53_plan(layer_offset=4 * pp_rank)
             worker = make_worker(
                 self,
@@ -291,8 +301,10 @@ class TestGLM53Store(unittest.TestCase):
                 use_layerwise=True,
                 use_mla=True,
                 num_layers=4,
-                tp_size=2,
+                tp_size=tp_size,
                 tp_rank=rank,
+                pcp_size=pcp_size,
+                pcp_rank=pcp_rank,
                 pp_size=2,
                 pp_rank=pp_rank,
                 layer_offset=4 * pp_rank,
@@ -306,7 +318,7 @@ class TestGLM53Store(unittest.TestCase):
             worker.m_store.store.batch_copy.side_effect = copy
             caches = make_glm53_caches(plan)
             worker.register_kv_caches(caches)
-            self.fill_caches(plan, caches, source, target, rank)
+            self.fill_caches(plan, caches, source, target, pcp_rank * tp_size + rank)
             metadata = self.make_metadata(source, [block_hash])
             request = metadata.requests[0]
             # Layerwise state is prepared when metadata is bound (#17487);
@@ -320,7 +332,6 @@ class TestGLM53Store(unittest.TestCase):
             workers.append((worker, caches))
             self.doCleanups()
 
-        self.assertEqual(len(readable), 14)  # Per PP stage: one MLA shard and three KDA groups on both TP ranks.
         self.assertFalse(any("@1@" in key.split(block_hash.hex())[0] for key in readable))
         start_patch(
             self,
@@ -337,7 +348,6 @@ class TestGLM53Store(unittest.TestCase):
             request_id="hit", prompt_token_ids=[1] * 513, num_tokens=513, block_hashes=[block_hash]
         )
         self.assertEqual(scheduler.get_num_new_matched_tokens(hit_request, 0), (512, False))
-        self.assertEqual(len(scheduler._make_layerwise_hit_check_keys(2, block_hash.hex())), 4)
 
         for worker, caches in workers:
             metadata = self.make_metadata(target, [block_hash], load=True)
@@ -347,9 +357,47 @@ class TestGLM53Store(unittest.TestCase):
             self.assertEqual(len(request.load_block_gvas_by_group_np[1]), 0)
             self.finish_layerwise_step(worker, metadata, load=True)
             self.assert_restored(worker, caches, source, target)
-        readable.remove(workers[1][0]._make_layerwise_full_key(4, block_hash.hex()))
-        hit_request.request_id = "missing"
-        self.assertEqual(scheduler.get_num_new_matched_tokens(hit_request, 0), (0, False))
+        # Each PCP rank owns one MLA object and every TP-sharded KDA state.
+        self.assertEqual(len(readable), 2 * pcp_size * (1 + 3 * tp_size))
+        self.assertEqual(len(scheduler._make_layerwise_hit_check_keys(2, block_hash.hex())), 2 * pcp_size * tp_size)
+        for index, (worker, _) in enumerate(workers):
+            for group_id in (2, 3, 4):
+                key = worker._make_layerwise_full_key(group_id, block_hash.hex())
+                readable.remove(key)
+                hit_request.request_id = f"missing-{index}-{group_id}"
+                self.assertEqual(scheduler.get_num_new_matched_tokens(hit_request, 0), (0, False))
+                readable.add(key)
+
+    def test_memcache_partial_keys_isolate_each_pcp_state_shard(self):
+        plan = make_glm53_plan()
+        request = SimpleNamespace(req_id="same-request")
+        topology_keys = []
+        for pcp_size in (1, 2, 4):
+            full_keys = []
+            partial_keys = []
+            for pcp_rank in range(pcp_size):
+                worker = make_worker(
+                    self,
+                    kv_cache_config=plan,
+                    use_layerwise=True,
+                    use_mla=True,
+                    num_layers=4,
+                    pcp_size=pcp_size,
+                    pcp_rank=pcp_rank,
+                    extra_config={"backend": "memcache"},
+                )
+                worker.metadata = {2: SimpleNamespace(head_or_tp_rank=0)}
+                full_keys.append(worker._make_layerwise_full_key(2, "hash"))
+                partial_keys.append(worker._make_layerwise_partial_key(request, 2, 0, 513))
+                self.doCleanups()
+            if pcp_size == 1:
+                self.assertEqual(full_keys, ["llama-7b@2@hash@0"])
+                self.assertEqual(partial_keys, ["llama-7b@partial@same-request@2@0@513@0"])
+            self.assertEqual(len(set(full_keys)), pcp_size)
+            self.assertEqual(len(set(partial_keys)), pcp_size)
+            topology_keys.append(set(full_keys + partial_keys))
+        for left, right in ((0, 1), (0, 2), (1, 2)):
+            self.assertTrue(topology_keys[left].isdisjoint(topology_keys[right]))
 
     def test_mooncake_layerwise_excludes_private_tail(self):
         plan = make_glm53_plan()

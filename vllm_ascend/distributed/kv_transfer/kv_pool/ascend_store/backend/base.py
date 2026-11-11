@@ -116,6 +116,8 @@ class Backend(ABC):
         head_or_tp_rank: int,
         pp_rank: int = 0,
         pp_size: int = 1,
+        pcp_rank: int = 0,
+        pcp_size: int = 1,
     ) -> str:
         raise NotImplementedError(f"{cls.__name__} does not support partial layerwise keys")
 

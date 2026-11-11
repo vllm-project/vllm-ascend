@@ -1507,6 +1507,16 @@ class TestLayerwiseKeyFormats(unittest.TestCase):
             "model@partial@r1@0@1@20@3",
         )
 
+    def test_partial_key_includes_pcp_coordinates(self):
+        self.assertEqual(
+            MemcacheBackend.make_partial_key("model", "r1", 0, 1, 20, 3, pcp_rank=1, pcp_size=2),
+            "model@partial@r1@0@1@20@3@pcp_size:2@pcp_rank:1",
+        )
+        self.assertEqual(
+            MemcacheBackend.make_partial_key("model", "r1", 0, 1, 20, 3, 1, 2, pcp_rank=1, pcp_size=2),
+            "model@partial@r1@0@1@20@pp1@3@pcp_size:2@pcp_rank:1",
+        )
+
     def test_pipeline_parallel_keys_include_stage(self):
         self.assertEqual(
             make_full_key("model", 2, "hash0", 3, 4, 1, 2),

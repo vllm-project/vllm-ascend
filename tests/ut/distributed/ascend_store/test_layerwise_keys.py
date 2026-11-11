@@ -20,6 +20,12 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_b
 
 class TestBoundLayerwiseKeys(unittest.TestCase):
     def test_pcp_keys_cover_all_workers_and_isolate_topologies(self):
+        self._check_pcp_keys(MooncakeBackend)
+
+    def test_memcache_pcp_keys_cover_all_workers_and_isolate_topologies(self):
+        self._check_pcp_keys(MemcacheBackend)
+
+    def _check_pcp_keys(self, backend_class):
         for pp_size in (1, 2):
             for num_groups in (1, 2):
                 with self.subTest(pp_size=pp_size, num_groups=num_groups):
@@ -29,7 +35,7 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
                     for pcp_size in (1, 2, 4):
                         config.parallel_config.prefill_context_parallel_size = pcp_size
                         builders.append(
-                            MooncakeBackend.bind_layerwise_keys(
+                            backend_class.bind_layerwise_keys(
                                 vllm_config=config,
                                 kv_cache_config=cache,
                                 model_name="model",
@@ -41,7 +47,8 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
                         # One saving MLA head or two independent TP state shards.
                         for heads in (1, 2):
                             sets = []
-                            for builder in builders:
+                            for pcp_size, builder in zip((1, 2, 4), builders):
+                                self.assertEqual(builder.pcp_size, pcp_size)
                                 keys = builder.make_hit_check_keys(group, "hash", heads)
                                 writers = [
                                     builder.make_full_key(group, "hash", head, stage, pcp_rank)
