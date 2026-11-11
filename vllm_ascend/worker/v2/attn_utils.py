@@ -286,7 +286,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
 
         if isinstance(attn_module, MLAAttention) and vllm_config.attention_config.hisparse_config is not None:
             # Keep Core's row-packed source spec and actual index-group ownership.
-            source_layout = {}
+            source_layout: dict[str, Any] = {}
             if getattr(attn_module.impl, "enable_sparse_sfa_c8", False):
                 from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
 

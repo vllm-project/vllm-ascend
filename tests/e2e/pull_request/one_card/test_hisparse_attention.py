@@ -296,7 +296,7 @@ def test_preprocess_writes_hisparse_mapping_once(cache_dtype, capture):
                 rope, latent, scales = custom_kv_rmsnorm_rope(
                     values.reshape(rows, 1, 1, 576), gamma, cos, sin, 512, 64, tile_size=128
                 )
-                components = (latent, rope, scales)
+                components: tuple[torch.Tensor, ...] = (latent, rope, scales)
             else:
                 # Reuse native SFA as the oracle; test only the new destination,
                 # strides, row mapping and padding, not RMSNorm arithmetic.

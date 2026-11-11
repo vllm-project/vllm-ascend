@@ -189,7 +189,7 @@ def reference(topk, requests, states, source, resident, hot_table, dgi, lru, blo
         hits = [slot for slot in order if int(dgi[state, slot]) in union]
         evict = [slot for slot in order if slot not in hits]
         mapping = {int(dgi[state, slot]): slot for slot in hits}
-        misses = []
+        misses: list[tuple[int, int]] = []
         for host in union:
             if host not in mapping:
                 slot = evict[len(misses)]
@@ -622,7 +622,10 @@ def test_random_request_unions(capture):
                 sh.fill_(-9)
                 sd.fill_(-9)
                 stats.zero_()
-            graph.replay() if capture else forward()
+            if graph is None:
+                forward()
+            else:
+                graph.replay()
             torch.npu.synchronize()
             for label, actual, wanted in zip(
                 ("indices", "counts", "swap_host", "swap_device", "swap_counts", "dgi", "lru", "stats"),
@@ -1020,13 +1023,13 @@ def test_direct_target_mirror_survives_legal_draft_writes(graph_producer, shared
             owners.append(owner)
             handles.append(handle)
         for leader, followers in ((owners[0], [owners[1]]), (owners[2], [])):
-            group = SimpleNamespace(
+            index_group = SimpleNamespace(
                 leader=leader,
                 followers=followers,
                 device_global_indices=torch.full((1, 16), -1, dtype=torch.int32, device=source.device),
             )
             for owner in [leader, *followers]:
-                owner.index_group = group
+                owner.index_group = index_group
         worker = HiSparseConnectorWorker.__new__(HiSparseConnectorWorker)
         worker.backend, worker._initialized = backend, False
         worker.vllm_config = SimpleNamespace(

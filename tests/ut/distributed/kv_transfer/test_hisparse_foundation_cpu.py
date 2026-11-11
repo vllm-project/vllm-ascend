@@ -304,6 +304,7 @@ def test_indexer_page_alignment_preserves_input_specs(indexer_spec, c8):
         assert indexer_spec.page_size_padded is None
         for name in ("resident", "hot"):
             assert specs[name].block_stride_alignment == 128
+            assert packed_row_bytes is not None
             assert result[name].block_stride_alignment == math.lcm(128, packed_row_bytes)
     else:
         assert result["indexer"].get_block_stride_alignment() == math.lcm(3, indexer_spec.page_size_bytes)
