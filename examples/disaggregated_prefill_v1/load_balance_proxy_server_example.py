@@ -206,6 +206,7 @@ class BackendServer:
     active_tokens: float = 0.0
     active_kv_cache: float = 0.0
     heap_seq: int = 0
+    rr_ticket: int = 0
 
 
 @dataclass
@@ -215,6 +216,7 @@ class RolePools:
     servers: dict[str, BackendServer] = field(default_factory=dict)
     heap: list[tuple[float, int, int, str]] = field(default_factory=list)
     tainted: set[str] = field(default_factory=set)
+    rr_counter: int = 0
 
 
 def setup_logging(log_level: str) -> None:
@@ -312,7 +314,7 @@ class SharedProxyScheduler:
         pool = self._pool(role)
         entry = pool.servers[key]
         entry.heap_seq += 1
-        heapq.heappush(pool.heap, (self._priority(role, entry, key), entry.ordinal, entry.heap_seq, key))
+        heapq.heappush(pool.heap, (self._priority(role, entry, key), entry.rr_ticket, entry.heap_seq, key))
         if len(pool.heap) > 2 * len(pool.servers):
             self._reset_heap(role)
 
@@ -333,7 +335,7 @@ class SharedProxyScheduler:
         for key, entry in pool.servers.items():
             if bump_seq:
                 entry.heap_seq += 1
-            heap.append((self._priority(role, entry, key), entry.ordinal, entry.heap_seq, key))
+            heap.append((self._priority(role, entry, key), entry.rr_ticket, entry.heap_seq, key))
         heapq.heapify(heap)
         pool.heap = heap
 
@@ -342,7 +344,10 @@ class SharedProxyScheduler:
         pool = self._pool(role)
         if key in pool.servers:
             return False
-        pool.servers[key] = BackendServer(host, int(port), self._next_ordinal())
+        entry = BackendServer(host, int(port), self._next_ordinal())
+        entry.rr_ticket = pool.rr_counter
+        pool.rr_counter += 1
+        pool.servers[key] = entry
         self._push_heap(role, key)
         return True
 
@@ -385,12 +390,15 @@ class SharedProxyScheduler:
         active_tokens: bool = False,
         kv_cache: bool = False,
     ) -> dict[str, Any]:
+        pool = self._pool(role)
         key = self._pop_valid(role)
-        entry = self._pool(role).servers[key]
+        entry = pool.servers[key]
         if active_tokens:
             entry.active_tokens += load
         if kv_cache:
             entry.active_kv_cache += load
+        entry.rr_ticket = pool.rr_counter
+        pool.rr_counter += 1
         self._push_heap(role, key)
         return {"key": key, "host": entry.host, "port": entry.port}
 
