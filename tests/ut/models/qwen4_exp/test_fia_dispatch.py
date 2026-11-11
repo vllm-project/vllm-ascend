@@ -208,7 +208,18 @@ def run_stub_batch(implementation, phases, query_lengths, kv_lengths):
         out.fill_(7)
         return out
 
-    implementation.update(prepare_qsa_fia_paged_kv=prepare, qsa_fia_attention=fia, qsa_gbsa_attention=gbsa)
+    def union(q, k, v, idx, table, requests, positions, lengths, out, *, request_index):
+        assert torch.all(requests == request_index)
+        calls.append(("union", q.flatten().tolist()))
+        out.fill_(7)
+        return out
+
+    implementation.update(
+        prepare_qsa_fia_paged_kv=prepare,
+        qsa_fia_attention=fia,
+        qsa_gbsa_attention=gbsa,
+        qsa_union_gbsa_attention=union,
+    )
     plan = implementation["build_qsa_request_plan"](
         torch.tensor(starts), torch.tensor(kv_lengths), total, torch.tensor(phases)
     )
@@ -241,7 +252,7 @@ def run_stub_batch(implementation, phases, query_lengths, kv_lengths):
 
 def test_pure_prefill_routes_by_logical_kv_length(implementation):
     calls = run_stub_batch(implementation, [True, True, True], [2, 4, 1], [4096, 24578, 24577])
-    assert calls == [("fia", [0, 1]), ("fia", [2, 3, 4, 5]), ("gbsa", [6])]
+    assert calls == [("fia", [0, 1]), ("fia", [2, 3, 4, 5]), ("union", [6])]
 
 
 def test_pure_decode_is_one_gbsa_call_including_mtp(implementation):
@@ -259,8 +270,9 @@ def test_mixed_batch_runs_prefill_first_then_contiguous_decode_spans(implementat
     assert calls == [
         ("fia", [1, 2]),
         ("fia", [9]),
+        ("union", [3]),
         ("gbsa", [0]),
-        ("gbsa", [3, 4, 5, 6, 7, 8]),
+        ("gbsa", [4, 5, 6, 7, 8]),
         ("gbsa", [10]),
     ]
 

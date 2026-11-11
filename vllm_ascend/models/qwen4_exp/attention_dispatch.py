@@ -7,6 +7,7 @@ import torch
 
 from .fia import prepare_qsa_fia_paged_kv, qsa_fia_attention
 from .gbsa import qsa_gbsa_attention
+from .gbsa_union import qsa_union_gbsa_attention
 
 QSA_FIA_MAX_LOGICAL_KV_LENGTH = 24 * 1024
 
@@ -165,7 +166,32 @@ def dispatch_qsa_attention(
     # Every Decode row and each Prefill chunk starting at/above the logical-KV
     # limit uses GBSA. Coalesce consecutive rows without gathering/copying K/V or
     # changing the original request IDs used to address block tables and lengths.
-    for start, end in request_plan.gbsa_spans:
+    # Union groups must never cross request boundaries. Keep the decode-only
+    # sentinel above unchanged, including graph capture and replay.
+    decode_spans: list[tuple[int, int]] = []
+    for request in request_plan.requests:
+        start, end = request.gbsa_query_start, request.query_end
+        if start >= end:
+            continue
+        if request.is_prefill:
+            rows = slice(start, end)
+            qsa_union_gbsa_attention(
+                query[rows],
+                key_cache,
+                value_cache,
+                compact_indices[rows],
+                block_table,
+                token_to_req[rows],
+                logical_positions[rows],
+                seq_lens,
+                output[rows],
+                request_index=request.request_index,
+            )
+        elif decode_spans and decode_spans[-1][1] == start:
+            decode_spans[-1] = (decode_spans[-1][0], end)
+        else:
+            decode_spans.append((start, end))
+    for start, end in decode_spans:
         rows = slice(start, end)
         qsa_gbsa_attention(
             query[rows],
