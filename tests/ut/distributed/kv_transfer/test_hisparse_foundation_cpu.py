@@ -24,7 +24,6 @@ from vllm_ascend.hisparse.backend import AscendHiSparseBackend
 from vllm_ascend.hisparse.binding import (
     _bind_indexer_views,
     align_hisparse_indexer_specs,
-    get_hisparse_indexer_specs,
 )
 from vllm_ascend.hisparse.c8 import (
     c8_storage_view,
@@ -311,7 +310,7 @@ def test_unsupported_indexer_formats_are_rejected_before_pool_binding(indexer_sp
     spec = replace(indexer_spec, **{field: 1})
     config = NS(kv_cache_groups=[NS(layer_names=["indexer"], kv_cache_spec=spec)])
     with pytest.raises(ValueError, match="C4|C8|scales"):
-        get_hisparse_indexer_specs(config)
+        AscendHiSparseBackend().validate_kv_cache_config(config)
 
 
 def test_capture_metadata_prevents_warmup_host_mirrors(monkeypatch):

@@ -397,12 +397,9 @@ class HiSparseNPUOps:
         )
 
 
-def gather_resident_rows(
-    source: torch.Tensor, destination: torch.Tensor, row_ids: torch.Tensor, *, skip_invalid: bool = False
-) -> None:
+def gather_resident_rows(source: torch.Tensor, destination: torch.Tensor, row_ids: torch.Tensor) -> None:
     """Copy packed Resident rows using Core's negative-ID-to-row0 convention.
 
-    With ``skip_invalid``, retain staged Host bytes at invalid IDs instead.
     Source and destination may use different dtypes with the same byte width.
     """
     _check_packed_cache(source)
@@ -438,7 +435,6 @@ def gather_resident_rows(
         ROW_BYTES=row_bytes,
         BLOCK_ROWS=block_rows,
         BLOCK_BYTES=block_bytes,
-        SKIP_INVALID=skip_invalid,
         multibuffer=False,
     )
 

@@ -169,9 +169,10 @@ class AscendHiSparseBackend(HiSparseBackend):
         return ops
 
     def validate_kv_cache_config(self, kv_cache_config: KVCacheConfig) -> None:
-        from .binding import get_hisparse_indexer_specs
+        from .binding import _validate_indexer_spec, get_hisparse_indexer_specs
 
-        get_hisparse_indexer_specs(kv_cache_config)
+        for spec in get_hisparse_indexer_specs(kv_cache_config).values():
+            _validate_indexer_spec(spec)
 
     def prepare_kv_cache_views(
         self,

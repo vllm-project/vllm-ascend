@@ -226,16 +226,14 @@ def gather_resident_rows_kernel(
     ROW_BYTES: tl.constexpr,
     BLOCK_ROWS: tl.constexpr,
     BLOCK_BYTES: tl.constexpr,
-    SKIP_INVALID: tl.constexpr,
 ):
     row = (tl.program_id(0) * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)).to(tl.int64)
     src = tl.load(row_ids + row, mask=row < ROWS, other=-1).to(tl.int64)
-    if not SKIP_INVALID:
-        src = tl.maximum(src, 0)
+    src = tl.maximum(src, 0)
     src_offset = src // SOURCE_BLOCK * SOURCE_STRIDE + src % SOURCE_BLOCK * ROW_BYTES
     dst_offset = row // DEST_BLOCK * DEST_STRIDE + row % DEST_BLOCK * ROW_BYTES
     byte = tl.program_id(1) * BLOCK_BYTES + tl.arange(0, BLOCK_BYTES)
-    valid = (row < ROWS) & (src >= 0) & (src < SOURCE_ROWS)
+    valid = (row < ROWS) & (src < SOURCE_ROWS)
     mask = valid[:, None] & (byte[None, :] < ROW_BYTES)
     payload = tl.load(source + src_offset[:, None] + byte[None, :], mask=mask, other=0)
     tl.store(destination + dst_offset[:, None] + byte[None, :], payload, mask=mask)

@@ -17,7 +17,6 @@ from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, Ascen
 from vllm_ascend.hisparse.prefill import (
     AscendHiSparsePrefillStagingPlan,
     build_hisparse_prefill_staging_plan,
-    stage_prefill_rows,
 )
 
 # Bound the temporary D2D packing workspace independently of prefill length.
@@ -140,7 +139,6 @@ class AscendHiSparseImpl(AscendSFAImpl):
         if not isinstance(self.index_group, HiSparseMLAIndexGroup):
             raise RuntimeError("Ascend HiSparse was initialized without a HiSparse index group")
         self.hisparse_cache = self.index_group.cache(self.index_group_index)
-        self.hisparse_cache._ascend_prefill_layer_name = self.layer_name
         self.topk = self.index_group.logical_topk_indices.shape[-1]
         if self.topk % 128:
             raise ValueError("Ascend HiSparse SFA requires top-k to be divisible by 128")
@@ -531,8 +529,8 @@ class AscendHiSparseImpl(AscendSFAImpl):
         self.index_group.set_logical_topk_ready(self.index_group_index)
         outputs = []
         num_decode = metadata.num_decode_tokens
+        cache = self.hisparse_cache
         if num_decode:
-            cache = self.hisparse_cache
             assert cache.source_block_table is not None
             # Keep mixed prefill/decode batches on the NPU residency resolver.
             # The generic index-group resident shortcut uses the CUDA sparse
@@ -565,21 +563,19 @@ class AscendHiSparseImpl(AscendSFAImpl):
                 query, query_rope, logical[num_decode:], metadata, actual_seq_lengths_query, actual_seq_lengths_key
             )
             if prefill_output is None:
-                staged, staged_table, req_ids, slot = stage_prefill_rows(
-                    self.index_group, self.index_group_index, metadata
+                host = cache.runtime.host_cache
+                host = host.view(-1, metadata.prefill.host_staging_plan.block_size, host.shape[-1])
+                staged, staged_table, req_ids = self.index_group.stage_prefill_rows(
+                    self.index_group_index, host, metadata
                 )
-                try:
-                    selected = logical[num_decode:]
-                    nonnegative = selected.clamp_min(0)
-                    block_ids = nonnegative.to(torch.int64) // metadata.block_size
-                    request_tables = staged_table[req_ids.to(torch.int64)]
-                    physical = torch.gather(request_tables, 1, block_ids) * metadata.block_size
-                    physical = physical + nonnegative % metadata.block_size
-                    physical = physical.masked_fill(selected < 0, -1).to(torch.int32)
-                    prefill_output = self._attention_physical(query, query_rope, staged, physical)
-                finally:
-                    if slot is not None:
-                        slot.finish()
+                selected = logical[num_decode:]
+                nonnegative = selected.clamp_min(0)
+                block_ids = nonnegative.to(torch.int64) // metadata.block_size
+                request_tables = staged_table[req_ids.to(torch.int64)]
+                physical = torch.gather(request_tables, 1, block_ids) * metadata.block_size
+                physical = physical + nonnegative % metadata.block_size
+                physical = physical.masked_fill(selected < 0, -1).to(torch.int32)
+                prefill_output = self._attention_physical(query, query_rope, staged, physical)
             outputs.append(prefill_output)
         if not outputs:
             return torch.zeros_like(ql_nope)

@@ -56,7 +56,7 @@ def align_hisparse_indexer_specs(
 def get_hisparse_indexer_specs(
     kv_cache_config: KVCacheConfig,
 ) -> dict[str, AscendSFAIndexerCacheSpec]:
-    """Validate the static indexer format before common storage allocation."""
+    """Collect the Ascend indexer specs keyed by layer."""
     indexer_specs = {}
     for group in kv_cache_config.kv_cache_groups:
         for name in group.layer_names:
@@ -64,7 +64,6 @@ def get_hisparse_indexer_specs(
             if isinstance(spec, UniformTypeKVCacheSpecs):
                 spec = spec.kv_cache_specs[name]
             if isinstance(spec, AscendSFAIndexerCacheSpec):
-                _validate_indexer_spec(spec)
                 indexer_specs[name] = spec
 
     return indexer_specs
@@ -90,7 +89,6 @@ def _validate_indexer_spec(spec: AscendSFAIndexerCacheSpec) -> None:
 
 def _quantized_indexer_views(cache: torch.Tensor, spec: AscendSFAIndexerCacheSpec):
     """Alias the current Core allocation; retain no additional storage owner."""
-    _validate_indexer_spec(spec)
     pages, heads, block, width = cache.shape
     stride = cache.stride(0)
     key_bytes = block * heads * width
