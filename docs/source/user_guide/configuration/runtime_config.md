@@ -132,13 +132,6 @@ D2H, then pack+feeds. Request finish flushes look-ahead only after those
 jobs drain. Prefer shadow/`report` first — strict-tier holdout false-positive
 rate can exceed 0.1% on some corpora.
 
-Each step runs a device ``isfinite`` reduction and one all-finite gate. Default
-path launches a non-blocking host copy of that gate and waits in
-``check_deferred``. On a hit only, bad rows / ``logits_indices`` / ``finite_kind``
-are resolved (indices are snapshotted at pre-sample when needed). Set
-``item_sync: true`` when you need kind/attribution against pristine pre-sample
-logits. Retired: ``check_every_tokens`` (multi-step window) — ignored if present.
-
 ### manual_trigger
 
 Not a detector — control-plane for `dump.manual_dump`. Always runs `dump_kv` over the live batch (`scope=all_requests`; configured `dump_kv.scope` is ignored). `on_trigger` may still list `report` / other actions; if omitted, `actions.defaults` apply and `dump_kv` is injected.

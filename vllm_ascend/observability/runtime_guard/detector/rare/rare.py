@@ -1,50 +1,34 @@
-"""Streaming rare_chars detector (DESIGN.md §17): token-level rules on the token id, the top-1 logprob and the generated token's
-logprob (what vLLM returns with logprobs=1); no top-20.
+"""Streaming rare_chars detector: token-level rules on token id, top-1 logprob,
+and chosen-token logprob (natural log; no top-k table).
 
     # table key from warmup register_rare_table; think_end from resolve_think_end_id
     det = RareDetector(table_key, CONFIG_RARE, think_end=think_end_id)  # id or None
     st = det.start()
-    for ids, top1_lp, chosen_lp in chunks:                  # natural-log logprobs, any chunk size
-        res = det.feed(st, ids, top1_lp, chosen_lp)         # Result once a strict-tier rule fires, else None
+    for ids, top1_lp, chosen_lp in chunks:
+        res = det.feed(st, ids, top1_lp, chosen_lp)  # Result on strict-tier hit, else None
     res = det.finish(st); mon = det.monitor(st)
 
-Per-token features (tables: detector/rare_vocab.py):
+Per-token features (tables from ``rare_vocab.py``):
   lp1, lpc      log10 of the top-1 / generated token's probability
-  fs            share of the token's script class among the preceding letter tokens, (count + 1) / (letters + 1); 1 for non-letters
+  fs            share of the token's script class among preceding letters
   cls           script / category class of the token
-  bad_utf8      the running UTF-8 decode emits a U+FFFD here that the token does not contain literally (an invalid byte sequence;
-                an incomplete sequence at the end of the stream is not one)
-  caseless_after_latin   a caseless letter (CJK, Arabic, ...) glued to a Latin letter on its left (no space)
-  letter_after_digit     a Latin letter glued to a digit on its left
+  bad_utf8      running UTF-8 decode emits U+FFFD that the token does not contain literally
+  caseless_after_latin   caseless letter glued to a Latin letter on its left
+  letter_after_digit     Latin letter glued to a digit on its left
   answer        at or after the first think-end token (chat mode: always)
-rc2 (DESIGN.md §24) adds, computed only when a config's rules use them:
-  fsw           share of the token's class among the last 64 letter tokens, (count + 1) / (min(letters, 64) + 1); 1 for non-letters
-                (fsw and fse are evaluated lazily: only at the tokens where the rule's other atoms hold)
-  ecls          class of the text the running UTF-8 decode emits at this token: the token's own class, except where it is or follows
-                a partial byte sequence (a character completed from byte tokens gets that character's class; 'partial' while pending)
-  fse           fs over ecls: share among the preceding emitted letters
-rc3 (runs/explore/rc3_report.md) adds, computed only when a config's rules use them:
-  gap           lp1 - lpc
-  nospace       the token does not start with whitespace
-  u             log10 frequency of the token in ordinary model output (static per-vocabulary tables, detector/rare_ref.py)
-  jp, jn        log10 frequency of the token right after / right before the character category of its actual neighbour
-  cp, cn        log10 P(that category | token)
-  gb            learned token score: gradient-boosted trees over GB_INPUTS (detector/rare_gb.py), computed only at the tokens
-                passing gb_gate (about 1% of tokens); -inf elsewhere
-rare_chars adds two config keys, both optional (absent = earlier behaviour):
-  "gate": "fs"   the learned score is evaluated only where fs < 0.05 (a letter of a minority class) or bad_utf8
-  "ref": "cats"  no reference count tables: only the character categories of each token's first / last character (pcat, ncat),
-                 built from the tokenizer at load, so they exist for every corpus (DeepSeek included); needs "gate": "fs", a model
-                 without u / cp / cn inputs and no rule on u / jp / jn / cp / cn
-A config using any of u ... gb sees each token's right neighbour: it runs one token behind the stream, and every one of its
-alerts (any rule) is raised when the token after the triggering one arrives (fired_at = position + 2), or at the end of the
-stream for the last token (fired_at = n). A corpus without a reference table (DeepSeek: no dev data) gets neutral values and
-gb never fires.
-A rule is a conjunction of atoms; a record fires at the first token satisfying a rule (fired_at = tokens consumed). Rules with
-"tier": "monitor" only record the monitoring tier's first alert; the monitoring tier includes every rule.
-Bounded state: per-class letter counts (token classes and emitted classes), the last 64 letter classes, the previous token's last
-character kind, the UTF-8 decoder's pending bytes (<= 3); rc3 adds the last decided token's id and the held-back token (id and
-two logprobs).
+Optional (only if rules use them):
+  fsw, ecls, fse   windowed / emitted-script shares
+  gap, nospace     lp1-lpc; token does not start with whitespace
+  u, jp, jn, cp, cn   frequency / neighbour features from optional ``rare_ref`` tables
+  gb            learned score over GB_INPUTS (``rare_gb.py``), gated tokens only; -inf elsewhere
+Config keys used by Guard's packaged ``rare.json``:
+  "gate": "fs"   score gb only where fs < 0.05 or bad_utf8
+  "ref": "cats"  character categories only (no frequency ``*_rcref.npz``)
+Configs that use u…gb look one token ahead (alerts fire on the next token, or
+at finish for the last). Rules without ``tier`` are strict; ``tier: monitor``
+records monitoring-tier alerts. Bounded state: letter counts, last-64 letter
+classes, previous last-char kind, UTF-8 pending bytes, plus held-back token
+for look-ahead.
 """
 import codecs
 import json
