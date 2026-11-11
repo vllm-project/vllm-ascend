@@ -1,0 +1,4 @@
+pr: 20932
+entries:
+  - category: performance
+    text: Improved Qwen3.8-Next QSA RMSNorm and MRoPE performance on Ascend by vectorizing rotary-cache loads.

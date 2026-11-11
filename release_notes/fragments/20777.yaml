@@ -1,0 +1,4 @@
+pr: 20777
+entries:
+  - category: bugfix
+    text: Fixed standalone compiled modules, including DFlash2 candidate scoring, failing when called without a forward context.
