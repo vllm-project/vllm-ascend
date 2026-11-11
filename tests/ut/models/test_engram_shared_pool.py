@@ -222,9 +222,9 @@ def test_shutdown_retry_after_model_deletion_releases_tcp_lease(pool_module, own
                 del self.model
                 raise RuntimeError("empty cache failed")
 
-    runner_class = ast.ClassDef(
-        name="Runner", bases=[ast.Name(id="Parent", ctx=ast.Load())], keywords=[], body=[shutdown], decorator_list=[]
-    )
+    runner_class = ast.parse("class Runner(Parent):\n    pass\n").body[0]
+    assert isinstance(runner_class, ast.ClassDef)
+    runner_class.body = [shutdown]
     tree = ast.fix_missing_locations(ast.Module(body=[runner_class], type_ignores=[]))
     ns = dict(Parent=Parent, C8KVBlockZeroer=type("C8KVBlockZeroer", (), {}))
     exec(compile(tree, str(path), "exec"), ns)
