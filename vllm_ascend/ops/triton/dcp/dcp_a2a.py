@@ -13,6 +13,7 @@ from vllm_ascend.ops.triton.dcp.dcp_a2a_batched import (
     _encode_lse_fields,
     _fused_dcp_lse_combine_batched_kernel,
     _pack_dcp_output_lse_batched_kernel,
+    _pack_dcp_output_lse_rectangular_kernel,
 )
 from vllm_ascend.ops.triton.dcp.dcp_jit import _launch_kernel
 from vllm_ascend.ops.triton.dcp.sfa_dcp_exchange import can_exchange, exchange
@@ -334,7 +335,7 @@ def _launch_pack_dcp_output_lse(partial_output, softmax_lse, softmax_sum, send, 
     )
     if batched:
         launch(
-            _pack_dcp_output_lse_batched_kernel,
+            _pack_dcp_output_lse_rectangular_kernel if head_dim == 512 else _pack_dcp_output_lse_batched_kernel,
             (grid_size,),
             partial_output,
             softmax_lse,
