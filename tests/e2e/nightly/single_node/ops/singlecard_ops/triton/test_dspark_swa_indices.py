@@ -25,6 +25,7 @@ from vllm_ascend.ops.triton.dspark_swa_indices import (
     build_dspark_swa_slot_indices_triton,
     dspark_swa_indices_supported,
 )
+from vllm_ascend.ops.triton.spec_decode.dspark_swa_indices import build_dspark_swa_indices_triton
 
 DEVICE = "npu"
 
@@ -672,3 +673,60 @@ def test_gate_rejects_non_pow2_block_size(bad_block_size):
 )
 def test_gate_accepts_valid_config():
     assert dspark_swa_indices_supported(128, 64)
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
+def test_logical_indices_triton_writes_persistent_outputs():
+    """The spec-decode logical variant writes caller-provided buffers in place.
+
+    The V4.1 draft metadata builder hands persistent views as
+    indices_output/lengths_output so ACL graph capture retains stable
+    addresses across per-step rebuilds; the kernel must overwrite the
+    sentinel-filled rows and return the same tensor objects instead of
+    freshly allocated temporaries.
+    """
+
+    num_reqs, num_speculative_tokens = 4, 4
+    window_size = 944
+    query_start_loc, seq_lens, _ = _make_inputs(num_reqs, num_speculative_tokens, window_size, 128, 2000, 32)
+    query_start_loc = query_start_loc.to(DEVICE)
+    seq_lens = seq_lens.to(DEVICE)
+
+    num_query_per_req = num_speculative_tokens + 1
+    T_active = num_reqs * num_query_per_req
+    index_width = ((window_size + num_speculative_tokens + 127) // 128) * 128
+
+    slots_buf = torch.full((T_active, 1, index_width), -7, dtype=torch.int32, device=DEVICE)
+    lens_buf = torch.full((T_active, 1), -7, dtype=torch.int32, device=DEVICE)
+
+    out_slots, out_lens = build_dspark_swa_indices_triton(
+        query_start_loc,
+        seq_lens,
+        T_active,
+        index_width,
+        window_size,
+        indices_output=slots_buf,
+        lengths_output=lens_buf,
+    )
+    assert out_slots is slots_buf
+    assert out_lens is lens_buf
+
+    # Eager logical reference: request-local positions, -1 padding.
+    query_lens = query_start_loc[1:] - query_start_loc[:-1]
+    prefix_lens = seq_lens - query_lens
+    start_pos = (prefix_lens - window_size).clamp(min=0)
+    visible_lens = seq_lens - start_pos
+    cols = torch.arange(index_width, device=DEVICE)
+    pos = (start_pos[:, None, None] + cols[None, None, :]).to(torch.int32)
+    ref_slots = torch.where(
+        cols[None, None, :] < visible_lens[:, None, None],
+        pos,
+        torch.full_like(pos, -1),
+    ).repeat_interleave(query_lens, dim=0)
+    ref_lens = visible_lens.repeat_interleave(query_lens, dim=0).to(torch.int32).unsqueeze(1)
+    torch.testing.assert_close(out_slots, ref_slots)
+    torch.testing.assert_close(out_lens, ref_lens)
+    assert not torch.equal(slots_buf, torch.full_like(slots_buf, -7)), "sentinel rows survived the rebuild"
