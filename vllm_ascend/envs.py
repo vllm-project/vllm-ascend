@@ -92,6 +92,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Enable the A2/A3 DSpark multi-layer context KV fusion. Set to 0 for the
+    # original per-layer path (baseline or diagnosis). Valid values: 0, 1.
+    # This is a non-sensitive performance switch; default: 1.
+    "VLLM_ASCEND_DSPARK_CONTEXT_KV_FUSION": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_DSPARK_CONTEXT_KV_FUSION", "1"))
+    ),
 }
 
 # end-env-vars-definition
