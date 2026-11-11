@@ -70,6 +70,7 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
+    WeightsMapper,
     is_pp_missing_parameter,
     make_layers,
     maybe_prefix,
@@ -1088,12 +1089,30 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
     }
     model_cls = DeepseekV4Model
 
+    @classmethod
+    def build_lora_weights_mapper(cls) -> WeightsMapper:
+        """Map HF adapter keys onto this module tree.
+
+        Adapters are trained against the HF text backbone, which spells the
+        attention block ``.attn.``; the module tree registers the same block as
+        ``.self_attn.`` (see ``DeepseekV4DecoderLayer``). The LoRA loader
+        resolves adapter keys before it walks the module tree, and a key that
+        misses its module is dropped without an error because the patched base
+        layer keeps answering ``weight``, so serving reports the adapter as
+        applied while its delta stays exactly zero.
+        """
+        return WeightsMapper(orig_to_new_substr={".attn.": ".self_attn."})
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
+        # Only the adapter loader reads this attribute, so it is set on the
+        # instance: the class-level mapper is also consumed by quantization and
+        # the base weight loader, which must keep seeing raw checkpoint names.
+        self.hf_to_vllm_mapper = self.build_lora_weights_mapper()
 
         self.model = self.model_cls(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
         if get_pp_group().is_last_rank:
