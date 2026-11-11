@@ -14,6 +14,10 @@ from vllm_ascend.observability.ms_metrics.handlers.eplb import (
     eplb_transfer_recv_handler,
     eplb_transfer_send_handler,
 )
+from vllm_ascend.observability.ms_metrics.handlers.parallel import (
+    moe_comm_selection_handler,
+    sp_padding_handler,
+)
 from vllm_ascend.observability.ms_metrics.handlers.rl_lifecycle import (
     sleep_handler,
     wake_handler,
@@ -29,8 +33,10 @@ __all__ = [
     "eplb_transfer_execute_handler",
     "eplb_transfer_recv_handler",
     "eplb_transfer_send_handler",
+    "moe_comm_selection_handler",
     "runtime_guard_handle_alert_handler",
     "sample_tokens_handler",
     "sleep_handler",
+    "sp_padding_handler",
     "wake_handler",
 ]
