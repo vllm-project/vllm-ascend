@@ -442,11 +442,26 @@ async def stream_service_response_with_retry(
     for attempt in range(1, max_retries + 1):
         try:
             async with client.stream("POST", endpoint, json=req_data, headers=headers) as response:
+                if response.status_code == 500:
+                    await response.aread()
+                    try:
+                        body = response.json()
+                    except ValueError:
+                        response.raise_for_status()
+                    match body:
+                        case {"error": {"type": "RecomputeRequiredError"}}:
+                            yield response.content
+                            return
                 response.raise_for_status()
                 first_chunk_sent = False
-                async for chunk in response.aiter_bytes():
-                    first_chunk_sent = True
-                    yield chunk
+                if req_data.get("stream", False):
+                    # vLLM emits one JSON data line per event; HTTP chunks may split it.
+                    async for line in response.aiter_lines():
+                        if line:
+                            first_chunk_sent = True
+                            yield (line + "\n\n").encode("utf-8")
+                else:
+                    yield await response.aread()
                 return  # Success, exit after streaming
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
             if attempt < max_retries:
@@ -532,17 +547,19 @@ async def _handle_completions(api: str, request: Request):
             retry = True
             completion_tokens = 0
             # Only one await per chunk, minimal logic in loop
+            gen = None
             try:
                 while retry:
                     retry = False
-                    async for chunk in stream_service_response_with_retry(
+                    gen = stream_service_response_with_retry(
                         decoder.client,
                         api,
                         req_data,
                         request_id=request_id,
                         max_retries=global_args.max_retries,
                         base_delay=global_args.retry_delay,
-                    ):
+                    )
+                    async for chunk in gen:
                         try:
                             chunk_str = chunk.decode("utf-8").strip()
                         except UnicodeDecodeError:
@@ -560,6 +577,11 @@ async def _handle_completions(api: str, request: Request):
                             logger.debug("Skipping chunk: %s", chunk_str)
                             yield chunk
                             continue
+                        recompute = False
+                        match chunk_json:
+                            case {"error": {"type": "RecomputeRequiredError"}, "partial_response": partial}:
+                                chunk_json = partial
+                                recompute = True
                         choices = chunk_json.get("choices", [])
                         if not choices:
                             yield chunk
@@ -571,14 +593,13 @@ async def _handle_completions(api: str, request: Request):
                         content = delta.get("content") or message.get("content") or choice.get("text") or ""
                         generated_token += content
 
-                        stop_reason = choice.get("stop_reason")
                         usage = chunk_json.get("usage", {})
                         completion_tokens = (
                             (completion_tokens + 1)
                             if stream_flag
                             else (completion_tokens + usage.get("completion_tokens"))
                         )
-                        if stop_reason == "recomputed":
+                        if recompute:
                             retry = True
                             retry_count += 1
                             if chat_flag:
@@ -591,6 +612,7 @@ async def _handle_completions(api: str, request: Request):
                             else:
                                 req_data["prompt"] = origin_prompt + generated_token
                             req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
+                            await gen.aclose()
                             break
                         if retry_count > 0 and not stream_flag:
                             if chat_flag:
@@ -608,9 +630,12 @@ async def _handle_completions(api: str, request: Request):
                     request_id,
                 )
             finally:
-                # After streaming done, release tokens
-                proxy_state.release_decoder(decoder_idx, decoder_score)
-                await proxy_state.cleanup_request_batch(request_id)
+                try:
+                    if gen is not None:
+                        await gen.aclose()
+                finally:
+                    proxy_state.release_decoder(decoder_idx, decoder_score)
+                    await proxy_state.cleanup_request_batch(request_id)
 
         if stream_flag:
             return StreamingResponse(generate_stream(), media_type="text/event-stream")

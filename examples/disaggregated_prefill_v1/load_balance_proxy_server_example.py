@@ -921,10 +921,24 @@ async def stream_service_response(
                     # dropping it into an empty 200. The body is unreadable once this
                     # streaming context exits, so read it before raising.
                     await response.aread()
+                    if response.status_code == 500:
+                        try:
+                            body = response.json()
+                        except ValueError:
+                            response.raise_for_status()
+                        match body:
+                            case {"error": {"type": "RecomputeRequiredError"}}:
+                                yield response.content
+                                return
                     response.raise_for_status()
-                async for chunk in response.aiter_bytes():
-                    first_chunk_sent = True
-                    yield chunk
+                if req_data.get("stream", False):
+                    # vLLM emits one JSON data line per event; HTTP chunks may split it.
+                    async for line in response.aiter_lines():
+                        if line:
+                            first_chunk_sent = True
+                            yield (line + "\n\n").encode("utf-8")
+                else:
+                    yield await response.aread()
                 return
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 400 or attempt == max_attempts:
@@ -1065,10 +1079,13 @@ async def _replay_first_chunk(first_chunk: bytes, gen: Any):
     returned with the real HTTP status; this replays that chunk so the client
     still receives the full stream.
     """
-    if first_chunk:
-        yield first_chunk
-    async for chunk in gen:
-        yield chunk
+    try:
+        if first_chunk:
+            yield first_chunk
+        async for chunk in gen:
+            yield chunk
+    finally:
+        await gen.aclose()
 
 
 async def handle_completions_impl(api: str, request: Request):
@@ -1158,6 +1175,7 @@ async def handle_completions_impl(api: str, request: Request):
                     )
                     released_kv = True
 
+            gen = None
             try:
                 while retry:
                     retry = False
@@ -1196,13 +1214,18 @@ async def handle_completions_impl(api: str, request: Request):
                             logger.debug("Skipping chunk: %s", chunk_str)
                             yield chunk
                             continue
+                        recompute = False
+                        match chunk_json:
+                            case {"error": {"type": "RecomputeRequiredError"}, "partial_response": partial}:
+                                chunk_json = partial
+                                recompute = True
                         choices = chunk_json.get("choices", [])
                         if not choices or not stream_flag:
                             if update_cached_tokens_in_chunk(chunk_json, reported_prefiller_cached_tokens):
                                 chunk = encode_response_chunk(chunk_json, is_sse)
-                                if not choices:
-                                    yield chunk
-                                    continue
+                            if not choices:
+                                yield chunk
+                                continue
 
                         choice = choices[0]
                         delta = choice.get("delta") or {}
@@ -1210,14 +1233,13 @@ async def handle_completions_impl(api: str, request: Request):
                         content = delta.get("content") or message.get("content") or choice.get("text") or ""
                         generated_token += content
 
-                        stop_reason = choice.get("stop_reason")
                         usage = chunk_json.get("usage", {})
                         completion_tokens = (
                             (completion_tokens + 1)
                             if stream_flag
                             else (completion_tokens + usage.get("completion_tokens", 0))
                         )
-                        if stop_reason == "recomputed":
+                        if recompute:
                             retry = True
                             retry_count += 1
                             if chat_flag:
@@ -1231,6 +1253,7 @@ async def handle_completions_impl(api: str, request: Request):
                                 req_data["prompt"] = origin_prompt + generated_token
                             req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
                             tmp_request_length = len(json.dumps(req_data).encode("utf-8"))
+                            await gen.aclose()
                             instance_info = await reassign_instances(
                                 api,
                                 req_data,
@@ -1264,9 +1287,13 @@ async def handle_completions_impl(api: str, request: Request):
                     instance_info.request_id,
                 )
             finally:
-                await _finish_instance(runtime, instance_info, release_prefill_kv=not released_kv)
-                released_kv = True
-                request_released = True
+                try:
+                    if gen is not None:
+                        await gen.aclose()
+                finally:
+                    await _finish_instance(runtime, instance_info, release_prefill_kv=not released_kv)
+                    released_kv = True
+                    request_released = True
 
         media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
         return StreamingResponse(generate_stream(), media_type=media_type)
