@@ -44,6 +44,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_wor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import LookupKeyServer
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendStoreKVConnectorWorkerMetadata,
+    get_sharded_mamba_group_ids,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
@@ -125,6 +126,13 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None):
         super().__init__(vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config)
         self.kv_role = vllm_config.kv_transfer_config.kv_role
+        parallel_config = vllm_config.parallel_config
+        if (
+            get_sharded_mamba_group_ids(kv_cache_config)
+            and parallel_config.tensor_parallel_size > 1
+            and parallel_config.prefill_context_parallel_size > 1
+        ):
+            raise ValueError("AscendStore sharded Mamba state transfer currently requires PCP=1 or TP=1")
 
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.use_layerwise = extra_config.get("use_layerwise", False)
