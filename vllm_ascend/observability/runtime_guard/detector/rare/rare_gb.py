@@ -1,13 +1,16 @@
-"""Learned token score of the rare_chars detector rc3 (runs/explore/rc3_report.md): gradient-boosted trees over per-token features
-(detector/rare.py GB_INPUTS), evaluated only at gated tokens. sklearn's HistGradientBoostingClassifier is exported to complete
-binary trees of one depth (as detector/trees.py, plus categorical splits) for storage; scoring uses the QuickScorer form built
-from them at load (GB._quickscorer).
-  feat  [T, 2^D - 1]  input index per internal node (heap order: children of k are 2k+1, 2k+2)
-  thr   [T, 2^D - 1]  numeric node: go right iff x > thr (+inf on padding nodes: always left)
-  cat   [T, 2^D - 1]  categorical node: go left iff bit x of mask is set (x: integer category code, 0..31)
-  mask  [T, 2^D - 1]  uint32 left-category mask (unknown categories follow sklearn: its missing-value direction)
-  leaf  [T, 2^D]      leaf values (an early leaf's value repeated over the leaves below it)
-score = base + sum of the reached leaves (sklearn's decision_function); quant: the step lp1 / lpc / gap inputs are rounded to.
+"""Learned token score (gb) for rare_chars: gradient-boosted trees over per-token
+features (``rare.py`` GB_INPUTS), evaluated only at gated tokens.
+
+sklearn HistGradientBoostingClassifier trees are exported to complete binary
+trees of one depth (plus categorical splits); scoring uses the QuickScorer
+form built at load (``GB._quickscorer``).
+
+  feat  [T, 2^D - 1]  input index per internal node (heap: children of k are 2k+1, 2k+2)
+  thr   [T, 2^D - 1]  numeric: go right iff x > thr (+inf padding → always left)
+  cat   [T, 2^D - 1]  categorical: go left iff bit x of mask is set (x in 0..31)
+  mask  [T, 2^D - 1]  uint32 left-category mask
+  leaf  [T, 2^D]      leaf values
+score = base + sum of reached leaves; quant rounds lp1 / lpc / gap inputs.
 """
 import numpy as np
 
