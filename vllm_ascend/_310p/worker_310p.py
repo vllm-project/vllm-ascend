@@ -24,16 +24,12 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
 from vllm.utils.torch_utils import set_random_seed  # noqa: E402
 
-from vllm_ascend._310p.kv_cache_sharing import get_310p_shared_cache_slots
-from vllm_ascend.utils import is_rc_device, vllm_version_is
-from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
+# KV-cache planning lives in kv_cache_planning on both supported versions.
+from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
 
-# vLLM #61183 moved `get_kv_cache_groups` to `kv_cache_planning` on main; the
-# v0.32.0 lane still ships it in `kv_cache_utils`.
-if vllm_version_is("0.32.0"):
-    from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
-else:
-    from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
+from vllm_ascend._310p.kv_cache_sharing import get_310p_shared_cache_slots
+from vllm_ascend.utils import is_rc_device
+from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
 
 
 class NPUWorker310(NPUWorker):
@@ -53,17 +49,10 @@ class NPUWorker310(NPUWorker):
         return super()._scale_kv_cache_memory_for_multi_group(available_memory)
 
     def _create_model_runner(self):
-        if self.use_v2_model_runner:
-            from vllm_ascend._310p.worker.v2.model_runner import NPUModelRunner310V2
+        from vllm_ascend._310p.worker.v2.model_runner import NPUModelRunner310V2
 
-            model_runner = NPUModelRunner310V2(self.vllm_config, self.device)
-            logger.info_once("Using NPUWorker310 and NPUModelRunner310V2.")
-            return model_runner
-
-        from vllm_ascend.worker.v1._310p.model_runner_310p import NPUModelRunner310
-
-        model_runner = NPUModelRunner310(self.vllm_config, self.device)
-        logger.info_once("Using NPUWorker310 and NPUModelRunner310.")
+        model_runner = NPUModelRunner310V2(self.vllm_config, self.device)
+        logger.info_once("Using NPUWorker310 and NPUModelRunner310V2.")
         return model_runner
 
     def init_device(self):

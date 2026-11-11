@@ -222,6 +222,8 @@ def test_raw_tokens_hybrid_roundtrip(memory_store, recurrent_type, wrapped):
     config.scheduler_config.max_model_len = 512
     config.scheduler_config.disable_hybrid_kv_cache_manager = False
     config.cache_config.mamba_cache_mode = "align"
+    # Retain every prefix boundary for the round-trip assertions below.
+    config.cache_config.prefix_cache_retention_interval = None
     config.cache_config.num_gpu_blocks = plan.num_blocks
     config.kv_transfer_config = KVTransferConfig(
         kv_connector="AscendStoreConnector",

@@ -465,6 +465,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         group_uses_align_state: list[bool] | None = None,
         enable_kv_event: bool = False,
         worker: Any = None,
+        sharded_mamba_group_ids: set[int] | None = None,
     ):
         super().__init__(
             m_store, token_database, block_size, tp_rank, tp_size, dcp_size, ready_event, name="KVCacheSendingThread"
@@ -478,6 +479,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.stored_requests: dict[str, set[int]] = {}
         self._next_local_store_job_id = -1
         self.group_uses_align_state = group_uses_align_state or []
+        self.sharded_mamba_group_ids = sharded_mamba_group_ids or set()
         self.enable_kv_event = enable_kv_event
         self.completed_events_lock = threading.Lock()
         self.completed_events: dict[int, int] = {}
@@ -820,6 +822,12 @@ class KVCacheStoreSendingThread(KVTransferThread):
             #  0        1 / 3            1      1, 5, ...
             #  1        0 / 2            2      2, 6, ...
             #  1        1 / 3            3      3, 7, ...
+            if group_id in self.sharded_mamba_group_ids:
+                # Each TP/PCP rank saves its own head shard for every candidate checkpoint.
+                shard_rank, shard_size = 0, 1
+            else:
+                shard_rank = self.pcp_rank * tp_replicas + self.tp_rank % tp_replicas
+                shard_size = self.pcp_size * tp_replicas
             iterator = self.token_database.process_token_key_strings_with_block_ids(
                 token_len,
                 req_meta.block_hashes,
@@ -827,8 +835,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 kv_cache_group_id=group_id,
                 skip_null_blocks=skip_null_blocks,
                 chunk_filter=chunk_filter,
-                shard_rank=self.pcp_rank * tp_replicas + self.tp_rank % tp_replicas,
-                shard_size=self.pcp_size * tp_replicas,
+                shard_rank=shard_rank,
+                shard_size=shard_size,
                 chunk_mask=group_store_mask,
             )
             for start, end, key, block_hash, block_id in iterator:

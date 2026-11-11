@@ -27,6 +27,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     set_scheduler_device,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import get_sharded_mamba_group_ids
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import get_global_rank
 
@@ -335,6 +336,7 @@ class MooncakeBackend(Backend):
         namespace = mooncake_layerwise.layerwise_topology_namespace(vllm_config, kv_cache_config)
         pp_size = parallel.pipeline_parallel_size
         pcp_size = parallel_size("prefill_context_parallel_size")
+        pcp_sharded_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
         if pcp_size > 1 and (getattr(vllm_config, "additional_config", None) or {}).get("enable_kvpp", False):
             raise ValueError("Mooncake layerwise PCP does not support enable_kvpp layer-sharded caches")
         if pp_size > 1:
@@ -365,12 +367,12 @@ class MooncakeBackend(Backend):
                     pp_rank=stage if pp_size > 1 else None,
                 )
 
-            return LayerwiseKeyBuilder(make_key, pp_size, pcp_size)
+            return LayerwiseKeyBuilder(make_key, pp_size, pcp_size, pcp_sharded_group_ids)
 
         def make_single_group_key(group: int, block_hash: str, head: int, stage: int) -> str:
             return mooncake_layerwise.make_block_key(model_name, block_hash, head, namespace=namespace, pp_rank=stage)
 
-        return LayerwiseKeyBuilder(make_single_group_key, pp_size, pcp_size)
+        return LayerwiseKeyBuilder(make_single_group_key, pp_size, pcp_size, pcp_sharded_group_ids)
 
     @classmethod
     def send_fence_backlog(cls) -> int:

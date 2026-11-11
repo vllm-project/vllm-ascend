@@ -128,7 +128,12 @@ __aicore__ inline void ComputeSouterParam(RunParamStr& runParam, const ConstInfo
         runParam.s1RealSize = Min(runParam.qSNumInOneBlock, runParam.actualS1Size - qsfaCubeSOuterOffset);
         runParam.mRealSize = runParam.s1RealSize * constInfo.gSize;
         if constexpr (IS_SPLIT_G) {
-            runParam.mRealSize = runParam.mRealSize >> 1;
+            uint32_t aicIdx = GetBlockIdx();
+            if ASCEND_IS_AIV {
+                aicIdx = constInfo.aivIdx >> 1U;
+            }
+            runParam.mRealSize =
+                (aicIdx % 2U == 0U) ? (runParam.mRealSize + 1) >> 1 : runParam.mRealSize >> 1;
         }
     }
 

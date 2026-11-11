@@ -555,6 +555,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         kv_role="kv_producer",
         enable_kv_event=False,
         block_size=16,
+        sharded_mamba_group_ids=None,
     ):
         store = FakeStore(exists_result or [0, 0, 0, 0])
         db = FakeTokenDatabase(block_size=block_size)
@@ -569,6 +570,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             ready_event=threading.Event(),
             group_uses_align_state=[False],
             enable_kv_event=enable_kv_event,
+            sharded_mamba_group_ids=sharded_mamba_group_ids,
         )
         return t, store
 
@@ -597,6 +599,19 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             [[key.rsplit("@", 1)[1] for key in call[0]] for call in store.put_calls],
             [["h1"], ["h0", "h2"]],
         )
+
+    def test_pcp_head_shards_save_every_checkpoint(self):
+        hashes = [f"h{i}" for i in range(4)]
+        for pcp_rank in range(2):
+            thread, store = self._make_thread(sharded_mamba_group_ids={0})
+            thread.pcp_rank, thread.pcp_size = pcp_rank, 2
+            thread.group_uses_align_state = [True]
+            req = ReqMeta(req_id="r1", token_len_chunk=64, block_ids=[1, 2, 3, 4], block_hashes=hashes)
+            thread.add_stored_request(req)
+            thread.request_queue.put(req)
+            thread._handle_request(req)
+            keys = [key for call in store.put_calls for key in call[0]]
+            self.assertEqual([key.rsplit("@", 1)[1] for key in keys], hashes)
 
     def test_write_shards_cover_filtered_blocks_once(self):
         hashes = [f"h{i}" for i in range(8)]

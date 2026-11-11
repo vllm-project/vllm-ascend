@@ -33,6 +33,7 @@ from vllm_ascend.ops.gdn_attn_builder import (
     AscendGDNHostMetadataBackend,
     AscendGDNHostMetadataBuilder,
 )
+from vllm_ascend.ops.kda_pcp import KimiKDAHostMetadataBackend
 from vllm_ascend.ops.triton.fla import utils as fla_utils
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_indices as runtime_prepare_chunk_indices,
@@ -385,7 +386,8 @@ def test_ascend_gdn_attention_uses_ascend_backend():
     kimi_backend = AscendKimiK3DeltaAttention.get_attn_backend(object())  # type: ignore[arg-type]
     glm_backend = Glm5NextLinearAttention.get_attn_backend(object())  # type: ignore[arg-type]
     assert fused_backend is AscendGDNFusedAttentionBackend
-    assert kimi_backend is AscendGDNHostMetadataBackend
+    assert kimi_backend is KimiKDAHostMetadataBackend
+    assert issubclass(kimi_backend, AscendGDNHostMetadataBackend)
     assert glm_backend is Glm5NextGDNHostMetadataBackend
     assert Glm5NextLinearAttention.use_contiguous_conv_indices
     assert AscendGDNAttentionBackend.get_builder_cls() is AscendGDNAttentionMetadataBuilder
