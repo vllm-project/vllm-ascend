@@ -96,6 +96,10 @@ class TestC8Quant5MultiTokenDecode(TestBase):
         )
         self.impl.key_cache = torch.zeros(NUM_BLOCKS, BLOCK_SIZE, NUM_KV_HEADS, HEAD_SIZE, dtype=torch.int8)
         self.impl.value_cache = torch.zeros(NUM_BLOCKS, BLOCK_SIZE, NUM_KV_HEADS, HEAD_SIZE, dtype=torch.int8)
+        # float kv_cache_dtype forces enable_c8_quant off in __init__; the
+        # capture-path tests exercise the C8 branch of full_graph_fia, so
+        # enable the INT8 KV recipe explicitly.
+        self.impl.enable_c8_quant = True
 
         self.layer = MagicMock()
         self.layer._c8_k_aq_scale_nz_bnsd = torch.ones(1, NUM_KV_HEADS, HEAD_SIZE)
