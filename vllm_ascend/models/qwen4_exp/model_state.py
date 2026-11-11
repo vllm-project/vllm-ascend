@@ -18,8 +18,16 @@ from __future__ import annotations
 
 from typing import Any
 
+import torch
+import torch.nn as nn
+from vllm.config import VllmConfig
+from vllm.config.compilation import CUDAGraphMode
 from vllm.models.qwen4_exp.amd.model_state import Qwen4ExpModelState
+from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 
+from vllm_ascend.models.qwen4_exp.input_adapter import (
+    Qwen4ExpPreparedInputAdapter,
+)
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
     AscendMambaHybridModelState,
 )
@@ -36,6 +44,39 @@ class AscendQwen4ExpModelState(Qwen4ExpModelState, AscendMambaHybridModelState):
     """
 
     _skip_spec_cpu_length_sync: bool
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        model: nn.Module,
+        encoder_cache: EncoderCache | None,
+        device: torch.device,
+    ) -> None:
+        super().__init__(vllm_config, model, encoder_cache, device)
+        self.qsa_prepared_input_adapter = Qwen4ExpPreparedInputAdapter(model)
+
+    def prepare_inputs(self, input_batch: Any, req_states: Any) -> dict[str, Any]:
+        model_inputs = super().prepare_inputs(input_batch, req_states)
+        self.qsa_prepared_input_adapter.prepare_inputs(input_batch)
+        return model_inputs
+
+    def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
+        model_inputs = super().prepare_dummy_inputs(num_reqs, num_tokens)
+        positions = model_inputs.get("positions")
+        if positions is not None:
+            self.qsa_prepared_input_adapter.prepare_positions(positions, num_tokens)
+        return model_inputs
+
+    def prepare_attn(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        metadata = super().prepare_attn(*args, **kwargs)
+        cudagraph_mode = kwargs.get("cudagraph_mode")
+        if cudagraph_mode is None and len(args) > 1:
+            cudagraph_mode = args[1]
+        self.qsa_prepared_input_adapter.prepare_attention_metadata(
+            metadata,
+            full_graph=cudagraph_mode == CUDAGraphMode.FULL,
+        )
+        return metadata
 
     def initialize_spec_cpu_length_sync(self, runner: Any) -> None:
         """Bind length consumers once, after target and draft KV initialization."""
