@@ -69,7 +69,7 @@ For non-performance PRs, avoid unjustified performance regressions. New function
     - [ ] Test files cover key space, registration windows, and runtime coverage.
     - [ ] The Markdown document describes warmup scope and related configuration.
 
-Reduce unnecessary specialization before warming up required variants. See the upstream [vLLM JIT kernel warmup guide](https://docs.vllm.ai/en/latest/contributing/jit_kernel_warmup/) for integration.
+Reduce unnecessary specialization before warming up required variants. See the upstream [vLLM JIT kernel warmup guide](https://docs.vllm.ai/en/latest/contributing/jit_kernel_warmup/) for integration. For Ascend registration and validation, see [Triton JIT warmup on Ascend](triton_jit_warmup.md).
 
 ## Appendix
 
