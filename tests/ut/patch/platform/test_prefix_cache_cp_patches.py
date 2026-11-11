@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_planning import _pool_bytes_per_block_from_builder
 from vllm.v1.core.kv_cache_utils import (
     BlockHashListWithBlockSize,
     generate_scheduler_kv_cache_config,
@@ -1739,7 +1740,7 @@ def test_native_draft_physical_pool_cannot_overwrite_target_or_state(dcp, layout
     config.cache_config.kv_cache_layout = layout
     bytes_per_block = kv_cache_utils_patch._ascend_pool_bytes_per_block(config, groups)
     assert bytes_per_block == target.page_size_bytes + draft.page_size_bytes
-    assert AscendKVCacheConfigBuilder()._get_pool_bytes_per_block(config, groups) == bytes_per_block
+    assert _pool_bytes_per_block_from_builder(AscendKVCacheConfigBuilder(), config, groups) == bytes_per_block
     budget = 11 * bytes_per_block + bytes_per_block // 2
     planned = kv_cache_utils_patch._ascend_get_kv_cache_config_from_groups(config, groups, budget)
     expected_blocks = 11 if num_blocks_override is None else num_blocks_override
