@@ -86,6 +86,8 @@ def test_registration_preserves_layout_and_d2rh_owns_host_regions(worker_cls, ro
         event = args[7] if role == "kv_producer" else args[11]
         thread = MagicMock()
         thread.start.side_effect = event.set
+        if role == "kv_producer":
+            thread.handshake_port = 1236
         return thread
 
     with (
