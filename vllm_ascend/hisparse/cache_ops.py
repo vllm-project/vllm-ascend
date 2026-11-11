@@ -321,45 +321,31 @@ class HiSparseNPUOps:
 
     @staticmethod
     def hisparse_invalidate_written_slots(
-        device_global_indices,
+        group_table,
         request_state_indices,
         req_id_per_token,
         written_slots,
-        num_state_rows=None,
-        region_stride=None,
+        num_state_rows,
+        region_stride,
     ) -> None:
-        device = device_global_indices.device
+        device = group_table.device
         if device.type != "npu":
             raise ValueError("HiSparse invalidation requires NPU state")
-        grouped = num_state_rows is not None or region_stride is not None
-        if grouped:
-            if num_state_rows is None or region_stride is None or num_state_rows < 0 or region_stride < 0:
-                raise ValueError("Grouped HiSparse invalidation requires nonnegative state and region sizes")
-            _check_tensor(device_global_indices, "group_table", device, (torch.int64,), ndim=1)
-            groups = device_global_indices.numel()
-            region = region_stride
-            state_rows = num_state_rows
-        else:
-            _check_tensor(device_global_indices, "device_global_indices", device, (torch.int32,), ndim=2)
-            groups = 1
-            region = device_global_indices.size(1)
-            state_rows = device_global_indices.size(0)
+        if num_state_rows < 0 or region_stride < 0:
+            raise ValueError("HiSparse invalidation requires nonnegative state and region sizes")
+        _check_tensor(group_table, "group_table", device, (torch.int64,), ndim=1)
+        groups = group_table.numel()
         _check_tensor(request_state_indices, "request_state_indices", device, (torch.int32,), ndim=1)
         _check_tensor(written_slots, "written_slots", device, (torch.int32, torch.int64), ndim=1)
         _check_tensor(req_id_per_token, "req_id_per_token", device, (torch.int32,), shape=written_slots.shape)
         num_tokens = written_slots.numel()
         if num_tokens == 0:
             return
-        if region == 0 or state_rows == 0 or groups == 0:
+        if region_stride == 0 or num_state_rows == 0 or groups == 0:
             return
         # The 8192-row Prefill chunk is the measured large shape. Keep scratch
         # bounded and preserve the existing path for capture and other shapes.
-        if (
-            grouped
-            and num_tokens == _SORTED_WRITTEN_SLOT_COUNT
-            and is_950()
-            and not torch.npu.is_current_stream_capturing()
-        ):
+        if num_tokens == _SORTED_WRITTEN_SLOT_COUNT and is_950() and not torch.npu.is_current_stream_capturing():
             keys = torch.empty((num_tokens,), dtype=torch.int64, device=device)
             sorted_keys = torch.empty_like(keys)
             order = torch.empty_like(keys)
@@ -370,31 +356,30 @@ class HiSparseNPUOps:
                 keys,
                 ROWS=num_tokens,
                 REQUESTS=request_state_indices.numel(),
-                STATES=state_rows,
+                STATES=num_state_rows,
                 TILE=256,
                 multibuffer=False,
             )
             torch.sort(keys, out=(sorted_keys, order))
-            invalidate_written_slots_sorted[(groups, state_rows, triton.cdiv(region, 256))](
-                device_global_indices,
+            invalidate_written_slots_sorted[(groups, num_state_rows, triton.cdiv(region_stride, 256))](
+                group_table,
                 sorted_keys,
                 ROWS=num_tokens,
-                HOT=region,
+                HOT=region_stride,
                 TILE=256,
                 STEPS=num_tokens.bit_length(),
                 multibuffer=False,
             )
             return
-        invalidate_kernel[(num_tokens, triton.cdiv(region, 256), groups)](
-            device_global_indices,
+        invalidate_kernel[(num_tokens, triton.cdiv(region_stride, 256), groups)](
+            group_table,
             request_state_indices,
             req_id_per_token,
             written_slots,
             REQUESTS=request_state_indices.numel(),
-            STATE_ROWS=state_rows,
-            REGION=region,
+            STATE_ROWS=num_state_rows,
+            REGION=region_stride,
             BLOCK=256,
-            GROUPED=grouped,
             multibuffer=False,
         )
 

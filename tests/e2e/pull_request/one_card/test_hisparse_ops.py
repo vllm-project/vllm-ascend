@@ -718,6 +718,7 @@ def test_plan_gather_respects_request_state_padding():
 @pytest.mark.parametrize("hot_capacity", [4, 10240])
 def test_invalidate_hot_capacity_graph(hot_capacity):
     dgi = torch.arange(2 * hot_capacity, dtype=torch.int32, device="npu").view(2, hot_capacity)
+    group_table = torch.tensor([dgi.data_ptr()], dtype=torch.int64, device=dgi.device)
     initial = dgi.cpu()
     states = torch.tensor([1, 0], dtype=torch.int32, device="npu")
     requests = torch.tensor([0, 1, 1, -1], dtype=torch.int32, device="npu")
@@ -726,7 +727,7 @@ def test_invalidate_hot_capacity_graph(hot_capacity):
     expected[1, -1] = expected[0, 0] = expected[0, -1] = -1
 
     def forward():
-        HiSparseNPUOps.hisparse_invalidate_written_slots(dgi, states, requests, written)
+        HiSparseNPUOps.hisparse_invalidate_written_slots(group_table, states, requests, written, *dgi.shape)
 
     forward()
     torch.npu.synchronize()

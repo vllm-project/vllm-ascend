@@ -80,7 +80,7 @@ def gather_rows_kernel(
 
 @triton.jit
 def invalidate_kernel(
-    dgi,
+    tables,
     states,
     requests,
     written,
@@ -88,10 +88,8 @@ def invalidate_kernel(
     STATE_ROWS: tl.constexpr,
     REGION: tl.constexpr,
     BLOCK: tl.constexpr,
-    GROUPED: tl.constexpr = False,
 ):
-    if GROUPED:
-        dgi = tl.load(dgi + tl.program_id(2)).to(tl.pointer_type(tl.int32))
+    dgi = tl.load(tables + tl.program_id(2)).to(tl.pointer_type(tl.int32))
     token = tl.program_id(0)
     offset = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     request = tl.load(requests + token)
