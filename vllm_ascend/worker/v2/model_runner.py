@@ -267,8 +267,22 @@ class NPUModelRunner(GPUModelRunner):
         return AscendPCPManager
 
     def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
+        previous_model = getattr(self, "model", None)
+        if previous_model is not None and getattr(previous_model, "uses_elastic_engram", False):
+            previous_model.destroy_engram()
         aux_layers = get_pd_dspark_aux_layer_ids(self.vllm_config)
-        super().load_model(load_dummy_weights, *args, **kwargs)
+        try:
+            # Elastic Engram initializes in the model's post-load hook, before
+            # the parent loads DSpark and allocates its device resources.
+            super().load_model(load_dummy_weights, *args, **kwargs)
+        except BaseException:
+            model = getattr(self, "model", None)
+            if model is not previous_model and getattr(model, "uses_elastic_engram", False):
+                try:
+                    model.destroy_engram()
+                except Exception:
+                    logger.exception("Failed to release Elastic Engram after model loading failed")
+            raise
         self.pd_dspark_aux_layer_ids = aux_layers
 
     def _restore_replicated_draft_target_states(self) -> None:

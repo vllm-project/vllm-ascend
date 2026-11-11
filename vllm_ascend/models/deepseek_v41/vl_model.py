@@ -235,6 +235,8 @@ class AscendDeepseekV41ForCausalLM(
         token_indices=None,
         force_dummy=False,
         cg_mode=None,
+        current_dead_mask=None,
+        multimodal_spans=None,
     ):
         return self.language_model.prepare_engram_inputs(
             input_ids,
@@ -247,7 +249,23 @@ class AscendDeepseekV41ForCausalLM(
             token_indices=token_indices,
             force_dummy=force_dummy,
             cg_mode=cg_mode,
+            **({"current_dead_mask": current_dead_mask} if current_dead_mask is not None else {}),
+            **({"multimodal_spans": multimodal_spans} if multimodal_spans is not None else {}),
         )
+
+    @property
+    def has_engram(self) -> bool:
+        return self.language_model.has_engram
+
+    @property
+    def uses_elastic_engram(self) -> bool:
+        return self.language_model.uses_elastic_engram
+
+    def initialize_engram(self):
+        self.language_model.initialize_engram()
+
+    def destroy_engram(self):
+        self.language_model.destroy_engram()
 
     @property
     def token_lookback_depth(self) -> int:

@@ -241,13 +241,17 @@ def test_shared_table_skips_per_step_dp_gather(monkeypatch):
     table = object.__new__(embedding_mod.AscendParallelEngramEmbedding)
     table.embed_gathered = lambda ids, count: ids[:count]
     table._shared_group = object()
+    table._replicate_across_dp = False
     ids = torch.tensor([[7, 8]])
     assert table.forward(ids).tolist() == [[7, 8]]
     table._shared_group = None
     table.dp_size = 2
     table.embed_gathered = lambda gathered, count: gathered[count : 2 * count]
     assert table.forward(ids).tolist() == [[7, 8]]
-    assert calls == [True, False]
+    table._replicate_across_dp = True
+    table.embed_gathered = lambda gathered, count: gathered[:count]
+    assert table.forward(ids).tolist() == [[7, 8]]
+    assert calls == [True, False, True]
 
 
 @pytest.mark.parametrize("num_tokens", [0, 2])

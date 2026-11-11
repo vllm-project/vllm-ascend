@@ -114,7 +114,7 @@ templates:
       - --engram-config
       - '{"cpu_offload": true, "dp_shared_memory": true}'
       - --additional-config
-      - '{"enable_cpu_binding": true, "enable_fused_mc2": 1, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_shared_expert_dp": true}'
+      - '{"enable_engram": true, "enable_cpu_binding": true, "enable_fused_mc2": 1, "enable_dsa_cp": true, "enable_flashcomm1": true, "enable_shared_expert_dp": true}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 4}, "decode": {"dp_size": 8, "tp_size": 2}}}'
 
@@ -174,7 +174,7 @@ templates:
       - --engram-config
       - '{"cpu_offload": true, "dp_shared_memory": true}'
       - --additional-config
-      - '{"ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}'
+      - '{"enable_engram": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}'
 
 benchmarks:
   acc-gpqa:
