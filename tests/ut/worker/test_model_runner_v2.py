@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import torch
 from vllm.config import CompilationMode, CUDAGraphMode
+from vllm.config.attention import AttentionConfig
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.offloader.base import NoopOffloader
@@ -1301,6 +1302,7 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
     runner.input_buffers = object()
     runner.compilation_config = SimpleNamespace(static_forward_context={})
     runner.vllm_config = SimpleNamespace(
+        attention_config=AttentionConfig(),
         compilation_config=runner.compilation_config,
         scheduler_config=SimpleNamespace(max_num_seqs=8),
         kv_transfer_config=None,
@@ -1368,6 +1370,7 @@ def test_initialize_kv_cache_forwards_allocation_context():
     runner = _make_runner()
     runner.compilation_config = SimpleNamespace(static_forward_context={})
     runner.vllm_config = SimpleNamespace(
+        attention_config=AttentionConfig(),
         compilation_config=runner.compilation_config,
         scheduler_config=SimpleNamespace(max_num_seqs=8),
         kv_transfer_config=None,
