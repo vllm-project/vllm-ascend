@@ -163,8 +163,51 @@ def test_kv_both_prefill_prefix_still_splits_at_checkpoint(
     assert result == 1152
 
 
+@pytest.mark.parametrize(
+    ("uses_sparse_index_kpool", "prefill_budget", "expected_chunks"),
+    [
+        (False, 2048, [1152, 1152, 1]),
+        (True, 1024, [1024, 1024, 256, 1]),
+        (True, 2048, [1152, 1152, 1]),
+        (True, 4608, [2304, 1]),
+    ],
+)
+def test_kv_both_chunked_prefill_materializes_last_checkpoint(uses_sparse_index_kpool, prefill_budget, expected_chunks):
+    chunks_by_role = []
+    for is_kv_consumer in (True, None):
+        scheduler = _scheduler(
+            is_kv_consumer=is_kv_consumer,
+            is_kv_producer=True if is_kv_consumer else None,
+            uses_sparse_index_kpool=uses_sparse_index_kpool,
+        )
+        scheduler.block_size = scheduler.cache_config.block_size = 1152
+        scheduler.use_eagle = scheduler.use_eagle_block_drop = False
+        scheduler.max_num_scheduled_tokens = prefill_budget
+        request = _request(num_computed_tokens=0, num_prompt_tokens=2305, num_tokens=2305)
+        chunks = []
+        positions = [request.num_computed_tokens]
+        while request.num_computed_tokens < request.num_tokens:
+            start = request.num_computed_tokens
+            assert positions[-1] == start
+            remaining = request.num_tokens - start
+            scheduled = _mamba_block_aligned_split(scheduler, request, min(prefill_budget, remaining))
+            assert request.num_computed_tokens == start
+            assert 0 < scheduled <= min(prefill_budget, remaining)
+            end = start + scheduled
+            assert start < end <= request.num_tokens
+            chunks.append(scheduled)
+            request.num_computed_tokens = end
+            positions.append(end)
+
+        assert sum(chunks) == request.num_tokens == 2305
+        assert positions[-2:] == [2304, 2305]
+        chunks_by_role.append(chunks)
+
+    assert chunks_by_role == [expected_chunks, expected_chunks]
+
+
 @pytest.mark.parametrize("uses_sparse_index_kpool", [False, True])
-def test_kv_both_chunked_prefill_materializes_last_checkpoint(uses_sparse_index_kpool):
+def test_kv_both_mixed_prefix_matches_async_completed_load(uses_sparse_index_kpool):
     scheduler = _scheduler(
         is_kv_consumer=True,
         is_kv_producer=True,
@@ -172,16 +215,36 @@ def test_kv_both_chunked_prefill_materializes_last_checkpoint(uses_sparse_index_
     )
     scheduler.block_size = scheduler.cache_config.block_size = 1152
     scheduler.use_eagle = scheduler.use_eagle_block_drop = False
-    request = _request(num_computed_tokens=0, num_prompt_tokens=2305, num_tokens=2305)
-    chunks = []
-    while request.num_computed_tokens < request.num_tokens:
-        remaining = request.num_tokens - request.num_computed_tokens
-        scheduled = _mamba_block_aligned_split(scheduler, request, min(2048, remaining))
-        assert scheduled > 0
-        chunks.append(scheduled)
-        request.num_computed_tokens += scheduled
+    waiting_request = _request(num_computed_tokens=0, num_prompt_tokens=3457, num_tokens=3457)
+    waiting_result = _mamba_block_aligned_split(
+        scheduler,
+        waiting_request,
+        num_new_tokens=1153,
+        num_new_local_computed_tokens=1152,
+        num_external_computed_tokens=1152,
+    )
 
-    assert chunks == [1152, 1152, 1]
+    # After async loading, the prefix is already in the request counter;
+    # the waiting scheduler passes no additional local or external hit.
+    loaded_request = _request(num_computed_tokens=2304, num_prompt_tokens=3457, num_tokens=3457)
+    loaded_result = _mamba_block_aligned_split(scheduler, loaded_request, num_new_tokens=1153)
+
+    assert waiting_result == loaded_result == 1152
+
+
+@pytest.mark.parametrize("uses_sparse_index_kpool", [False, True])
+def test_pd_consumer_preserves_async_output_placeholder_window(uses_sparse_index_kpool):
+    scheduler = _scheduler(is_kv_consumer=True, uses_sparse_index_kpool=uses_sparse_index_kpool)
+    scheduler.num_spec_tokens = 0
+    request = _request(num_computed_tokens=379, num_prompt_tokens=128, num_tokens=380)
+    request.spec_token_ids = []
+    request.num_tokens_with_spec = request.num_tokens + len(request.spec_token_ids)
+    request.num_output_placeholders = 7
+    # The running scheduler includes in-flight output even without spec tokens.
+    num_new_tokens = request.num_tokens_with_spec + request.num_output_placeholders - request.num_computed_tokens
+
+    assert num_new_tokens == 8
+    assert _mamba_block_aligned_split(scheduler, request, num_new_tokens) == 8
 
 
 def test_pd_consumer_preserves_window_after_local_cache_hit():

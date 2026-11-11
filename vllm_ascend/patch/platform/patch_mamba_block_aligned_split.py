@@ -100,9 +100,9 @@ def _mamba_block_aligned_split(
     the split off would only erase cacheable hit length.
     """
     kv_transfer_config = self.vllm_config.kv_transfer_config
-    # Only verifier rows beyond the committed tokens need an unsplit window.
-    # A computed prefix can also come from an earlier local prefill chunk,
-    # which must still stop at reusable Mamba state checkpoints.
+    # Rows beyond the available request tokens need an unsplit window, e.g.
+    # a consumer verifier or asynchronous output placeholders. A prefix from
+    # an earlier prefill chunk or cache hit must still stop at checkpoints.
     num_computed_tokens = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens
     remaining_tokens = max(request.num_tokens - num_computed_tokens, 0)
     if (
