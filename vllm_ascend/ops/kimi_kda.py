@@ -350,6 +350,12 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         loaded_weight = loaded_weight.reshape(-1)
         default_weight_loader(param, loaded_weight.narrow(0, self.tp_rank * param.numel(), param.numel()))
 
+    def process_weights_after_loading(self) -> None:
+        # A layerwise reload (e.g. after a level-2 sleep wake-up) re-materializes
+        # the layer from kernel tensors; the packed conv weight is derived and
+        # absent from checkpoints, so it must be rebuilt after all weights load.
+        self._pack_conv_weights()
+
     def get_attn_backend(self) -> type[AttentionBackend]:
         return KimiKDAHostMetadataBackend
 
