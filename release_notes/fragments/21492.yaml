@@ -1,0 +1,4 @@
+pr: 21492
+entries:
+  - category: feature
+    text: Added optional batched CPU M4 token-repeat detection with tokenizer-specific resources, preserving the existing single-window default.

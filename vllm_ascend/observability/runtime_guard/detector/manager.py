@@ -21,6 +21,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+from weakref import ReferenceType, ref
 
 from vllm_ascend.logger import init_logger_ascend
 from vllm_ascend.observability.runtime_guard.detector.base import (
@@ -37,6 +38,7 @@ from vllm_ascend.observability.runtime_guard.state import Incident, RequestGuard
 
 if TYPE_CHECKING:
     from vllm_ascend.observability.runtime_config.config import RuntimeConfig
+    from vllm_ascend.observability.runtime_guard.state import RequestGuardState
 
 logger = init_logger_ascend(__name__)
 
@@ -52,6 +54,9 @@ class AfterSampleCpuSnapshot:
     req_ids: list[str]
     has_nonempty_sampled: bool
     skip_req_ids: set[str] | None
+    detector_epoch: int | None = None
+    # Identity checks must not retain token buffers after a forced reap.
+    request_states: dict[str, ReferenceType[Any] | None] | None = None
 
 
 class DetectorManager:
@@ -92,14 +97,15 @@ class DetectorManager:
     def rebind_runner(self, runner: Any) -> None:
         """Point this manager and all detectors at a new runner."""
         self._runner = runner
+        self._runtime_config = runner.ascend_config.runtime_config
         for det in self._registry:
-            det._runner = runner
+            det.rebind_runner(runner, runtime_config=self._runtime_config)
 
     def get(self, incident_type: str) -> AnomalyDetector | None:
         """Resolve a detector for alert routing (``RuntimeGuardProcessor._handle_alert`` only)."""
         return self._registry.get(incident_type)
 
-    def clear_finished(self, req_id: str) -> None:
+    def clear_finished(self, req_id: str, *, expected_state: RequestGuardState | None = None) -> None:
         """Drop per-request detector state when a request finishes.
 
         Shared fields (IO / waves) are cleared by
@@ -108,10 +114,10 @@ class DetectorManager:
         Prefer Store.clear from ``RuntimeGuardProcessor._reap_finished_requests``.
         """
         state = RequestGuardStore.get().get_state(req_id)
-        if state is not None:
+        if state is not None and (expected_state is None or state is expected_state):
             state.detection_stopped = False
         for det in self._registry:
-            det.clear_finished(req_id)
+            det.clear_finished(req_id, expected_state=expected_state)
 
     def apply_runtime_config(self) -> None:
         """All-rank hook after runtime_config JSON sync — refresh detector deps."""
@@ -210,6 +216,11 @@ class DetectorManager:
 
         snap = AfterSampleCpuSnapshot(
             req_ids=list(resolved_ids),
+            detector_epoch=self._token_repeat_det.epoch,
+            request_states={
+                rid: ref(state) if (state := RequestGuardStore.get().get_state(rid)) is not None else None
+                for rid in resolved_ids
+            },
             has_nonempty_sampled=has_nonempty_sampled_row(resolved_ids, sampled_token_ids),
             skip_req_ids=skip,
         )
@@ -222,12 +233,17 @@ class DetectorManager:
         :meth:`after_sample_hot_path`. Passing the sampled rows here would
         append them again.
         """
-        skip = snap.skip_req_ids if snap.skip_req_ids is not None else RequestGuardStore.get().stopped_req_ids()
+        skip = RequestGuardStore.get().stopped_req_ids() | (snap.skip_req_ids or set())
         return self._token_repeat_det.check_all(
             sampled_token_ids=None,
             req_ids=snap.req_ids,
             skip_req_ids=skip,
+            expected_epoch=snap.detector_epoch,
+            expected_states=snap.request_states,
         )
+
+    def finish_requests(self, req_ids: list[str]) -> list[Incident]:
+        return self._token_repeat_det.finish_requests(req_ids)
 
     def _after_sample_setup(self, req_ids: list[str] | None) -> tuple[list[str], bool, bool, set[str]]:
         resolved_ids = resolve_batch_req_ids(self._runner, req_ids)
