@@ -9,6 +9,26 @@ from vllm.v1.worker.utils import defaultdict, extract_layer_index
 from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheLayer
 
 
+def _layers_unpacking_in_bind() -> tuple[type, ...]:
+    """Layer classes whose ``bind_kv_cache`` has binding side effects.
+
+    Direct assignment is the default for Ascend (per-layer (k, v) tuples),
+    but the Step5 CSA auxiliary layers unpack the raw allocation inside
+    ``bind_kv_cache`` -- the tail ring derives its capacity/rows view and the
+    summary page wires itself into the DSA impl -- so they must go through
+    the method. The import is lazy so this patch module stays model-agnostic.
+    """
+    try:
+        from vllm.models.step5.nvidia.csa_tail_ring import Step5CSATailRing
+        from vllm.models.step5.nvidia.sparse_summary_cache import (
+            Step5SparseSummaryCacheLayer,
+        )
+
+        return (DeepseekV41CacheLayer, Step5CSATailRing, Step5SparseSummaryCacheLayer)
+    except Exception:  # pragma: no cover - step5 upstream module unavailable
+        return (DeepseekV41CacheLayer,)
+
+
 # Without this patch, it will raise an exception when initialize kv_cache.
 # TODO To remove the patch, we need check why the original bind_kv_cache raises an NotImplementedError.
 def bind_kv_cache(
@@ -51,8 +71,13 @@ def bind_kv_cache(
             ordered_layer_names.append(layer_name)
 
     # Bind kv_caches to forward context
+    unpacking_layers = _layers_unpacking_in_bind()
     for layer_name, kv_cache in kv_caches.items():
-        forward_context[layer_name].kv_cache = kv_cache
+        layer = forward_context[layer_name]
+        if isinstance(layer, unpacking_layers):
+            layer.bind_kv_cache(kv_cache)
+        else:
+            layer.kv_cache = kv_cache
     # vLLM #52506 adds ReplaySSM ring trackers on main.
     utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
 
@@ -71,9 +96,10 @@ def bind_kv_cache_to_layers(
     allocates per-layer (k, v) tuples, so assign the raw allocation directly,
     matching the Ascend bind_kv_cache patch above.
     """
+    unpacking_layers = _layers_unpacking_in_bind()
     for layer_name, kv_cache in kv_caches.items():
         layer = forward_context[layer_name]
-        if isinstance(layer, DeepseekV41CacheLayer):
+        if isinstance(layer, unpacking_layers):
             layer.bind_kv_cache(kv_cache)
         else:
             layer.kv_cache = kv_cache

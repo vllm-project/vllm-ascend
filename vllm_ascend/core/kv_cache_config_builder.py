@@ -46,6 +46,10 @@ from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
 from vllm_ascend.models.qwen4_exp.cache_config import (
     get_qwen4_exp_pool_bytes_per_block,
 )
+from vllm_ascend.models.step5.cache_config import (
+    get_step5_pool_bytes_per_block,
+    is_step5_groups,
+)
 from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.quantization.methods.kv_cache.turboquant import cache as tq_cache
 
@@ -98,8 +102,11 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
 
         The default implementation materializes a one-block pool and requires a
         single device backing size, which the DSV4 shared-tuple, the TurboQuant
-        packed, the DSV4.1, and the GLM-Next layouts all violate.
+        packed, the DSV4.1, the GLM-Next, and the Step5 per-page-size layouts
+        all violate.
         """
+        if is_step5_groups(kv_cache_groups):
+            return get_step5_pool_bytes_per_block(kv_cache_groups)
         if is_deepseek_v41_cache(kv_cache_groups):
             return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
         if _get_glm5_next_cache_layout(kv_cache_groups) is not None:

@@ -234,6 +234,12 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
         assert self.input_batch is not None
         assert isinstance(self.input_batch, AscendInputBatch)
         is_prefilling = torch.from_numpy(self.input_batch.is_prefilling_np)
+        if batch_desc.cg_mode == CUDAGraphMode.FULL:
+            # A prefix hit can leave one target prefill token while the draft
+            # loop is eligible for a uniform decode graph. Its FIA metadata
+            # must describe decode padding, even though the target still marks
+            # the request as prefilling.
+            is_prefilling = torch.zeros_like(is_prefilling)
         if bool(is_prefilling[:num_reqs].any()):
             attn_state = AscendAttentionState.ChunkedPrefill
         else:

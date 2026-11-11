@@ -352,7 +352,7 @@ def rejection_sample(
     # An explicit flag bypasses configuration lookup for standalone callers.
     if use_fp64:
         raise NotImplementedError("FP64 rejection sampling is not supported on NPU.")
-    if vllm_version_is("0.32.0"):
+    if vllm_version_is("0.32.0") or vllm_version_is("0.33.0"):
         draft_logits_row_mapping = None
         if draft_logits_num_shards != 1:
             # vLLM main (#63554) can shard the draft logits cache across TP ranks;
@@ -433,7 +433,7 @@ def rejection_sample(
     target_local_sumexp = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
     draft_local_max = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
     draft_local_sumexp = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
-    if vllm_version_is("0.32.0"):
+    if vllm_version_is("0.32.0") or vllm_version_is("0.33.0"):
         _compute_block_stats_kernel[(num_logits, vocab_num_blocks)](
             target_local_argmax,
             target_local_argmax.stride(0),
@@ -515,7 +515,7 @@ def rejection_sample(
 
     if use_block_verification:
         cumulative_log_p = target_logits.new_empty(num_logits, dtype=torch.float32)
-        if vllm_version_is("0.32.0"):
+        if vllm_version_is("0.32.0") or vllm_version_is("0.33.0"):
             _compute_cumulative_log_p_kernel[(num_reqs,)](
                 cumulative_log_p,
                 target_logits,
@@ -569,7 +569,7 @@ def rejection_sample(
         if has_draft_logits:
             local_residual_mass = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
             if num_logits > 1:
-                if vllm_version_is("0.32.0"):
+                if vllm_version_is("0.32.0") or vllm_version_is("0.33.0"):
                     _compute_local_residual_mass_kernel[(num_logits - 1, vocab_num_blocks)](
                         local_residual_mass,
                         local_residual_mass.stride(0),

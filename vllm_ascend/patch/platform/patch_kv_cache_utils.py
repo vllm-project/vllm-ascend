@@ -48,6 +48,14 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     get_qwen4_exp_max_memory_usage,
     get_qwen4_exp_pool_bytes_per_block,
 )
+from vllm_ascend.models.step5.cache_config import (
+    get_step5_kv_cache_config_from_groups,
+    get_step5_kv_cache_groups,
+    get_step5_max_concurrency,
+    get_step5_max_memory_usage,
+    get_step5_pool_bytes_per_block,
+    is_step5_groups,
+)
 from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.quantization.methods.kv_cache.turboquant import cache as tq_cache
 from vllm_ascend.utils import vllm_version_is
@@ -658,6 +666,8 @@ def _ascend_pool_bytes_per_block(  # type: ignore[misc]
     """
     if tq_cache.uses_turboquant_groups(kv_cache_groups):
         return tq_cache.pool_bytes_per_block(kv_cache_groups)
+    if is_step5_groups(kv_cache_groups):
+        return get_step5_pool_bytes_per_block(kv_cache_groups)
     if is_deepseek_v41_cache(kv_cache_groups):
         return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
@@ -683,6 +693,8 @@ if vllm_version_is("0.32.0"):
         kv_cache_groups: list[KVCacheGroupSpec],
     ) -> int:
         """Keep the pre-#51718 DSV4 admission formula for its shared tuples."""
+        if is_step5_groups(kv_cache_groups):
+            return get_step5_max_memory_usage(vllm_config, kv_cache_groups)
         if tq_cache.uses_turboquant_groups(kv_cache_groups):
             return tq_cache.max_memory_usage(vllm_config, kv_cache_groups)
         if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
@@ -725,6 +737,8 @@ else:
         else:
             builder = None
             vllm_config, kv_cache_groups = args
+        if is_step5_groups(kv_cache_groups):
+            return get_step5_max_memory_usage(vllm_config, kv_cache_groups)
         if tq_cache.uses_turboquant_groups(kv_cache_groups):
             return tq_cache.max_memory_usage(vllm_config, kv_cache_groups)
         if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
@@ -757,6 +771,9 @@ def _get_ascend_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> list[KVCacheGroupSpec]:
+    step5_groups = get_step5_kv_cache_groups(vllm_config, kv_cache_spec, _orig_get_kv_cache_groups)
+    if step5_groups is not None:
+        return step5_groups
     if any(is_glm5_next_cache_spec(spec) for spec in kv_cache_spec.values()):
         return get_glm5_next_kv_cache_groups(vllm_config, kv_cache_spec)
     groups = get_qwen4_exp_kv_cache_groups(vllm_config, kv_cache_spec, _orig_get_kv_cache_groups)
@@ -785,7 +802,9 @@ def _ascend_get_kv_cache_config_from_groups(
         if vllm_version_is("0.28.0")
         else get_qwen4_exp_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     )
-    if qwen_config is not None:
+    if is_step5_groups(kv_cache_groups):
+        kv_cache_config = get_step5_kv_cache_config_from_groups(vllm_config, kv_cache_groups, available_memory)
+    elif qwen_config is not None:
         kv_cache_config = qwen_config
     elif is_deepseek_v41_cache(kv_cache_groups):
         kv_cache_config = get_deepseek_v41_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
@@ -833,7 +852,29 @@ def _ascend_get_kv_cache_config_from_groups(
     return kv_cache_config
 
 
+_orig_get_max_concurrency_for_kv_cache_config = vllm.v1.core.kv_cache_utils.get_max_concurrency_for_kv_cache_config
+
+
+def _ascend_get_max_concurrency_for_kv_cache_config(
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+) -> float:
+    """Honest capacity for Step5's per-page-size backings.
+
+    Upstream sums every group's block demand into one pool, but Step5's
+    backings are split by page size and each backing holds ``num_blocks``
+    ids of its own, so the binding constraint is the per-class sum and the
+    "KV cache size" line must not report tokens a single request can never
+    fit (sliding-window demand saturates once the window covers the chunk,
+    so linear scaling overstates the longest servable prompt).
+    """
+    if not is_step5_groups(kv_cache_config.kv_cache_groups):
+        return _orig_get_max_concurrency_for_kv_cache_config(vllm_config, kv_cache_config)
+    return get_step5_max_concurrency(vllm_config, kv_cache_config)
+
+
 vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
+vllm.v1.core.kv_cache_utils.get_max_concurrency_for_kv_cache_config = _ascend_get_max_concurrency_for_kv_cache_config
 assert _orig_get_packed_kv_cache_groups is not None
 if _orig_annotate_eagle_groups is not None:
     _kv_cache_planning._annotate_eagle_groups = _ascend_annotate_eagle_groups

@@ -59,6 +59,21 @@ def set_config(monkeypatch, **kwargs):
     return getter
 
 
+@pytest.mark.parametrize(
+    "version,num_args,stats_count",
+    [("0.32.0", 20, 1), ("0.33.0", 20, 2), ("main", 21, 2)],
+)
+def test_logits_stats_release_signatures(monkeypatch, inputs, launches, version, num_args, stats_count):
+    """v0.33 uses total logits but predates main's draft-row mapping argument."""
+    monkeypatch.setattr(utils, "vllm_version_is", lambda target: target == version)
+    utils.rejection_sample(**inputs, use_entropy_verify=False)
+    args = launches["_compute_block_stats_kernel"].call_args.args
+    assert len(args) == num_args
+    assert args[-1] == stats_count
+    mapping_position = 15 if version != "main" else 16
+    assert args[mapping_position] is inputs["expanded_idx_mapping"]
+
+
 def test_worker_config_is_resolved_per_call(monkeypatch, inputs, launches):
     # Reinitializing worker configuration must not reuse the previous thresholds.
     for enabled, threshold, alpha in ((True, 0.6, 0.0), (False, 0.95, 0.4), (True, 0.8, 1.2)):

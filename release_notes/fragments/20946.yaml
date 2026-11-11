@@ -1,0 +1,12 @@
+pr: 20946
+entries:
+  - category: feature
+    text: Added Step-5 model support with compact CSA summary and request-private tail ring caches on Ascend.
+    model: Step-5-Preview
+    hardware: [A5]
+  - category: bugfix
+    text: Fixed multi-module MTP graph padding after an external KV prefix hit and aligned sampler and QSA imports with vLLM v0.33.0.
+  - category: feature
+    text: Enabled memcache layerwise prefix reuse for Step-5 with eager execution, including CSA summaries and request-private tail ring exclusion.
+    model: Step-5-Preview
+    hardware: [A5]

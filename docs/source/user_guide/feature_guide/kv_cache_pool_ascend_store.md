@@ -62,6 +62,52 @@ For non-layerwise complete-block transfers, adjacent MLA components sharing one 
 
 This bulk fast path uses physical-page-major object contents instead of the previous component-major segmented contents. A fresh namespace is required even when upgrading from the earlier segmented version of this fix. Writers and readers must agree on transfer mode and cache layout; do not share these objects with layerwise readers or workers using a different component layout.
 
+## Step-5 Preview on 950DT
+
+Step-5 uses GQA main KV, sliding-window KV, compressed CSA summaries, and a
+request-private CSA tail ring. Ascend Store transfers the cacheable groups
+together when checking a prefix hit. The tail ring remains local to the request.
+A 128-token logical block contains 16 summary rows, each representing eight
+tokens; summary rows must not be interpreted as logical KV blocks.
+
+The following configuration was validated with vLLM v0.33.0, CANN 9.2.1,
+Memcache/MemFabric 1.3.0, and Step-5-Preview-w8a8-mxfp8 on eight 950DT devices.
+Prepare the Step-5 custom operators and a Memcache Meta service as described in
+the model deployment guide and Memcache section below. For Device UB, use
+`device_urma` and point `MMC_LOCAL_CONFIG_PATH` at the client configuration.
+Eight storage workers configured with 25 GiB each provide a 200 GiB DRAM pool.
+
+```bash
+export MMC_LOCAL_CONFIG_PATH=/path/to/mmc-local.conf
+export ASCEND_AUTO_CONNECT=1
+
+vllm serve /path/to/Step-5-Preview-w8a8-mxfp8 \
+    --served-model-name step \
+    --trust-remote-code \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel \
+    --enforce-eager \
+    --max-model-len 10000 \
+    --max-num-batched-tokens 8124 \
+    --max-num-seqs 16 \
+    --gpu-memory-utilization 0.96 \
+    --no-enable-prefix-caching \
+    --no-disable-hybrid-kv-cache-manager \
+    --speculative-config '{"method":"mtp","num_speculative_tokens":3}' \
+    --additional-config '{"enable_flashcomm1":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true}' \
+    --kv-transfer-config '{"kv_connector":"AscendStoreConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"backend":"memcache","use_layerwise":true,"load_async":false,"lookup_rpc_port":"0"}}'
+```
+
+Layerwise execution waits for both main KV and CSA summaries before computing
+the layer, and records its save only after summary updates and attention have
+been submitted. This configuration was validated in eager mode; it does not
+establish layerwise support for `FULL_DECODE_ONLY` graphs. Non-layerwise pooling
+uses `use_layerwise=false` and was also validated with MTP3 and
+`FULL_DECODE_ONLY`.
+
+The A5 DRAM pool is owned by the storage workers. Stopping all workers releases
+their cached data; retaining the Meta service alone does not preserve it.
+
 ## Scenario 1: Mooncake Backend
 
 ### Configuration Examples
