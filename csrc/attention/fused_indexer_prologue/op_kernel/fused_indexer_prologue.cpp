@@ -69,9 +69,16 @@ __aicore__ inline float ReduceSum128(const LocalTensor<float> &tensor)
 
 __aicore__ inline void ReduceMax128(const LocalTensor<float> &tensor)
 {
-    Max(tensor, tensor[FP32_VECTOR_LEN], tensor, FP32_VECTOR_LEN, 1, {1, 1, 1, 0, 8, 0});
+    AscendCUtils::SetMask<float>(FP32_VECTOR_LEN);
+    Max(tensor, tensor[FP32_VECTOR_LEN], tensor, MASK_PLACEHOLDER, 1, {1, 1, 1, 0, 8, 0});
     PipeBarrier<PIPE_V>();
-    WholeReduceMax(tensor, tensor, FP32_VECTOR_LEN, 1, 8, 1, 8);
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 220
+    if (g_coreType == AIV) {
+        WholeReduceMax<float, false>(tensor, tensor, MASK_PLACEHOLDER, 1, 0, 1, 0);
+    }
+#else
+    WholeReduceMax<float, false>(tensor, tensor, MASK_PLACEHOLDER, 1, 8, 1, 8);
+#endif
     PipeBarrier<PIPE_V>();
 }
 
@@ -213,6 +220,7 @@ private:
         PipeBarrier<PIPE_V>();
 
         // Preserve the BF16 boundary of npu_rms_norm before RoPE.
+        // AscendC CAST_RINT performs round-to-nearest-even for FP32 -> BF16.
         Cast(rounded, x, RoundMode::CAST_RINT, HEAD_DIM);
         PipeBarrier<PIPE_V>();
         Cast(x, rounded, RoundMode::CAST_NONE, HEAD_DIM);
@@ -237,6 +245,7 @@ private:
         PipeBarrier<PIPE_V>();
 
         // Match the BF16 in-place RoPE result consumed by dynamic quant.
+        // AscendC CAST_RINT performs round-to-nearest-even for FP32 -> BF16.
         Cast(rounded, x, RoundMode::CAST_RINT, HEAD_DIM);
         PipeBarrier<PIPE_V>();
         Cast(x, rounded, RoundMode::CAST_NONE, HEAD_DIM);
