@@ -1,0 +1,16 @@
+# Replace null with the new PR number and rename this file to <PR number>.yaml
+# when opening the A5 PR. This change is separate from the merged PR #19000.
+pr: null
+entries:
+  - category: feature
+    text: >-
+      Added opt-in INT8 quantized all-reduce on Atlas A5 with the same
+      payload, dtype, shape and group-size routing as A2, including
+      mixed prefill/decode batches.
+    hardware: [A5]
+  - category: feature
+    text: >-
+      Added an optional MXFP8 AllToAll/AllGather backend on Atlas A5,
+      selected with quantized_all_reduce_config.quant_dtype. It uses
+      BF16 dequantization and local SUM output on the existing process group.
+    hardware: [A5]
