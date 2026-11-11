@@ -47,6 +47,7 @@ import vllm.v1.worker.gpu.spec_decode.eagle.utils as eagle_utils
 from vllm.distributed.parallel_state import get_pp_group
 
 from vllm_ascend.ascend_config import draft_config_context
+from vllm_ascend.utils import get_rotation_path
 from vllm_ascend.worker.v2.pp_transport import resolve_spec_pp_support
 
 _original_get_draft_quant_config = model_utils.get_draft_quant_config
@@ -54,18 +55,41 @@ _original_load_dspark_model = dspark_utils.load_dspark_model
 _original_maybe_share_target_embed = eagle_utils.maybe_share_target_embed
 
 
-def _pp_safe_maybe_share_target_embed(draft_model, draft_inner, target_inner):
-    # PP stages past the first have no target embedding to alias. Drafts
-    # whose post_process loads this stage's own vocab shard (e.g. the
-    # Ascend DSpark align step) run after the share check, so skip the
-    # share here instead of letting upstream raise; every other case keeps
-    # the original behavior.
-    target_embed = getattr(target_inner, "embed_tokens", None) or getattr(target_inner, "embedding", None)
-    if isinstance(target_embed, model_utils.PPMissingLayer):
-        target_embed = None
-    if target_embed is None and get_pp_group().world_size > 1 and hasattr(draft_model, "post_process"):
-        return
-    return _original_maybe_share_target_embed(draft_model, draft_inner, target_inner)
+def _make_pp_safe_maybe_share_target_embed(mark_shared: bool):
+    """Build the PP-safe share check for one draft-load invocation.
+
+    ``mark_shared`` is False for QuaRot targets: there the draft's
+    post_process must rebuild the rotated embedding over the shared one, so
+    flagging the share would skip that rebuild and leave the draft with the
+    unrotated table.
+    """
+
+    def _pp_safe_maybe_share_target_embed(draft_model, draft_inner, target_inner):
+        # PP stages past the first have no target embedding to alias. Drafts
+        # whose post_process loads this stage's own vocab shard (e.g. the
+        # Ascend DSpark align step) run after the share check, so skip the
+        # share here instead of letting upstream raise; every other case
+        # keeps the original behavior.
+        target_embed = getattr(target_inner, "embed_tokens", None) or getattr(target_inner, "embedding", None)
+        if isinstance(target_embed, model_utils.PPMissingLayer):
+            target_embed = None
+        if target_embed is None and get_pp_group().world_size > 1 and hasattr(draft_model, "post_process"):
+            return
+        draft_embed = getattr(draft_inner, "embed_tokens", None)
+        _original_maybe_share_target_embed(draft_model, draft_inner, target_inner)
+        if not mark_shared:
+            return
+        # The upstream check swaps draft_inner.embed_tokens for the target's
+        # module without recording it, so align_draft_weights would reload a
+        # private copy over the shared one. Flag the draft to keep the shard.
+        if getattr(draft_inner, "embed_tokens", None) is not draft_embed:
+            draft_model.has_own_embed_tokens = True
+
+    return _pp_safe_maybe_share_target_embed
+
+
+# Unrotated default, also exercised directly by unit tests.
+_pp_safe_maybe_share_target_embed = _make_pp_safe_maybe_share_target_embed(mark_shared=True)
 
 
 def _load_dspark_model_with_target_quant(target_model, vllm_config):
@@ -79,7 +103,11 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
     spec_pp_support = resolve_spec_pp_support(vllm_config)
     if inherits_target_quant:
         model_utils.get_draft_quant_config = lambda _vllm_config: vllm_config.quant_config
-    eagle_utils.maybe_share_target_embed = _pp_safe_maybe_share_target_embed
+    # The PP-safe share check wraps every DSpark draft load (not only
+    # same-checkpoint ones); only the flag-on-share is rotation-dependent.
+    eagle_utils.maybe_share_target_embed = _make_pp_safe_maybe_share_target_embed(
+        mark_shared=get_rotation_path(vllm_config) is None
+    )
     try:
         # Native draft loading already sets PP=1, but still reads the target's
         # manual layer partition. Keep it scoped to the target model.

@@ -65,7 +65,10 @@ class IntermediateTensors:
 def config(tp=2, pp=2, dp=1, ep=True, architecture="KimiLinearForCausalLM", runner_v2=False):
     return SimpleNamespace(
         use_v2_model_runner=runner_v2,
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(architectures=[architecture])),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(architectures=[architecture]),
+            get_vocab_size=lambda: 16,
+        ),
         parallel_config=SimpleNamespace(
             tensor_parallel_size=tp,
             pipeline_parallel_size=pp,
@@ -222,6 +225,7 @@ def runtime(monkeypatch):
         "is_forward_context_available": lambda: True,
         "get_forward_context": lambda: context.forward,
         "get_pp_group": lambda: context.pp,
+        "get_rotation_path": lambda _: None,
         "get_tensor_model_parallel_world_size": lambda: context.tp,
         "get_tensor_model_parallel_rank": lambda: context.rank,
     }
@@ -270,7 +274,7 @@ def runtime(monkeypatch):
     monkeypatch.setattr(torch.ops._C_ascend, "attn_res_fwd", attn_res_fwd_cpu, raising=False)
     load_definitions(
         "vllm_ascend/models/kimi_k3/kimi_k3.py",
-        {"AscendKimiLinearModel", "AscendKimiDecoderLayer", "AscendKimiMLP"},
+        {"AscendKimiLinearModel", "AscendKimiDecoderLayer", "AscendKimiMLP", "_draft_needs_target_embed"},
         namespace,
         bases={
             "AscendKimiLinearModel": "BaseModel",
@@ -420,7 +424,7 @@ def test_pipeline_shards_match_unsplit_model(runtime, materialized, sp, tp, num_
 def test_aux_contract_selected_before_draft_load(runtime, stage, runner_v2, draft_type, draft_arch, materialized):
     namespace, context = runtime
     context.tp = 2
-    context.pp = SimpleNamespace(is_first_rank=stage == 0, is_last_rank=stage == 3)
+    context.pp = SimpleNamespace(is_first_rank=stage == 0, is_last_rank=stage == 3, world_size=4)
     cfg = config(tp=2, pp=4, runner_v2=runner_v2)
     cfg.model_config.hf_text_config = SimpleNamespace(
         vocab_size=16,
@@ -433,8 +437,10 @@ def test_aux_contract_selected_before_draft_load(runtime, stage, runner_v2, draf
     cfg.speculative_config = (
         SimpleNamespace(
             method="dspark",
+            uses_target_hidden_states=True,
             draft_model_config=SimpleNamespace(
-                hf_config=SimpleNamespace(model_type=draft_type, architectures=[draft_arch])
+                hf_config=SimpleNamespace(model_type=draft_type, architectures=[draft_arch]),
+                get_vocab_size=lambda: 16,
             ),
         )
         if draft_type is not None
