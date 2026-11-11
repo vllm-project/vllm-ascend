@@ -20,6 +20,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_b
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
     ReqMeta,
+    block_hash_to_str,
     get_block_hashes,
 )
 
@@ -322,11 +323,13 @@ class KVTransferThread(threading.Thread):
             request_data = None
             try:
                 request_data = self.request_queue.get()
-                if request_data is None or self._stopping.is_set():
+                if request_data is None:
                     self.request_queue.task_done()
-                    if request_data is None:
-                        return
-                    continue
+                    return
+                if self._stopping.is_set():
+                    with self._request_submit_lock:
+                        self._handle_cancelled_request(request_data)
+                    return
                 self._handle_request(request_data)
             except Exception as e:
                 with self._request_submit_lock:
@@ -349,6 +352,9 @@ class KVTransferThread(threading.Thread):
     def _handle_request_exception(self, request_data: Any):
         """Allow subclasses to complete queue/request bookkeeping on errors."""
         pass
+
+    def _handle_cancelled_request(self, request_data: Any) -> None:
+        self.request_queue.task_done()
 
     def lookup(
         self,
@@ -481,6 +487,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.enable_kv_event = enable_kv_event
         self.completed_events_lock = threading.Lock()
         self.completed_events: dict[int, int] = {}
+        self.failed_events: set[int] = set()
         self.worker = worker
         # Request-local durable high-water marks. They are advanced only after
         # the backend store succeeds, so a failed range is retried on the next
@@ -548,10 +555,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         # to a fatal state mutually exclusive. A failed consumer therefore
         # either drains this complete batch or rejects it before registration.
         with self._request_submit_lock:
-            if self._stopping.is_set():
-                save_batch.done.set()
-                return save_batch
-            if self._fatal_error is not None:
+            if self._stopping.is_set() or self._fatal_error is not None:
                 logger.error("Reject KV save batch to failed thread %s: %s", self.name, self._fatal_error)
                 # No source KV is read, but completion must release Scheduler pins.
                 # Reject without registering jobs, advancing offsets, or emitting BlockStored.
@@ -559,6 +563,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     for request in requests:
                         if request.event_id is not None:
                             self.completed_events[request.event_id] = self.completed_events.get(request.event_id, 0) + 1
+                            self.failed_events.add(request.event_id)
                 save_batch.done.set()
                 return save_batch
             for request in requests:
@@ -662,6 +667,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
             self.completed_events.clear()
         return completed_events
 
+    def take_save_outcomes(self) -> tuple[dict[int, int], set[int]]:
+        with self.completed_events_lock:
+            completed, failed = self.completed_events.copy(), self.failed_events.copy()
+            self.completed_events.clear()
+            self.failed_events.clear()
+        return completed, failed
+
     def _handle_request_exception(self, request_data: Any):
         def finish_failed_request(failed_request: Any) -> None:
             if isinstance(failed_request, ReqMeta):
@@ -673,6 +685,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                         self.completed_events[failed_request.event_id] = (
                             self.completed_events.get(failed_request.event_id, 0) + 1
                         )
+                        self.failed_events.add(failed_request.event_id)
             elif isinstance(failed_request, KVCacheStoreBatch):
                 # Complete the batch fence even after a fatal dispatch error.
                 # Request fences observe _fatal_error before allowing block reuse.
@@ -695,6 +708,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 break
             finish_failed_request(queued_request)
             self.request_queue.task_done()
+
+    def _handle_cancelled_request(self, request_data: Any) -> None:
+        # Only this consumer drains queued jobs, after any active device IO
+        # has returned. Each failed ACK can then safely release its source.
+        self._handle_request_exception(request_data)
 
     def _handle_request(self, req_meta: ReqMeta | KVCacheStoreBatch):
         if isinstance(req_meta, KVCacheStoreBatch):
@@ -728,6 +746,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
         req_id = req_meta.req_id
         tracked_request = False
+        succeeded = False
         try:
             tracked_request = self.is_live_store_job(req_meta)
             if not tracked_request:
@@ -749,6 +768,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if req_meta.event_id is not None:
                 with self.completed_events_lock:
                     self.completed_events[req_meta.event_id] = 1
+                    if succeeded is not True:
+                        self.failed_events.add(req_meta.event_id)
             self.request_queue.task_done()
 
     def _handle_stored_request(self, req_meta: ReqMeta) -> bool:
@@ -758,6 +779,38 @@ class KVCacheStoreSendingThread(KVTransferThread):
         token_len = req_meta.token_len_chunk
         req_id = req_meta.req_id
         current_event = req_meta.current_event
+        coord = self.token_database.cache_coordinator
+        if coord is not None and coord.enable_partial_hash_hits and req_meta.boundary_puts:
+            # A boundary value is a complete physical page/checkpoint, keyed by
+            # its logical hash boundary. Never slice a head-major page by bytes.
+            if current_event is not None:
+                current_event.synchronize()
+            boundary_values = {}
+            for group, block, boundary in req_meta.boundary_puts:
+                if block <= 0 or boundary <= 0 or boundary % self.token_database.hash_block_size:
+                    raise ValueError("Invalid Core boundary-state handoff")
+                index = boundary // self.token_database.hash_block_size - 1
+                if index >= len(req_meta.block_hashes):
+                    raise ValueError("Boundary state has no committed hash")
+                key = self.token_database._get_key_prefix(group) + block_hash_to_str(req_meta.block_hashes[index])
+                page = self._get_block_size(group)
+                addrs, sizes, _ = self._prepare_value(0, page, [], kv_cache_group_id=group, block_id=block)
+                if not addrs or len(addrs) != len(sizes):
+                    raise ValueError("Boundary state has no transferable buffers")
+                boundary_values[key] = (addrs, sizes)
+            keys = list(boundary_values)
+            exists = self.m_store.exists(keys)
+            if exists is None or len(exists) != len(keys):
+                return False
+            keys = [key for key, present in zip(keys, exists, strict=True) if present != 1]
+            if keys:
+                result = self.m_store.put(
+                    keys,
+                    [boundary_values[key][0] for key in keys],
+                    [boundary_values[key][1] for key in keys],
+                )
+                if result is False or isinstance(result, list) and (len(result) != len(keys) or not all(result)):
+                    return False
         try:
             store_masks = self.token_database.store_mask(token_len, req_meta.num_prompt_tokens)
         except AssertionError as exc:
@@ -1036,6 +1089,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             block_id_list: list[int] = []
             group_ids = req_meta.kv_cache_group_ids or [0]
             load_masks = self.token_database.load_mask(req_meta.block_hashes, token_len)
+            tail_boundaries = {boundary.group_id: boundary.num_tokens for boundary in load_spec.tail_key_boundaries}
             for group_id in group_ids:
                 block_ids = req_meta.block_ids_by_group[group_id]
                 group_block_size = self._get_block_size(group_id)
@@ -1052,11 +1106,17 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     kv_cache_group_id=group_id,
                     skip_null_blocks=self._skip_null_blocks(req_meta, group_id),
                     chunk_filter=chunk_filter,
+                    tail_key_boundary=tail_boundaries.get(group_id),
                 )
                 for start, end, key, _block_hash, block_id in token_iter:
                     addr, size, block_id = self._prepare_value(
                         start,
-                        end,
+                        (
+                            start + group_block_size
+                            if self.token_database.cache_coordinator is not None
+                            and self.token_database.cache_coordinator.enable_partial_hash_hits
+                            else end
+                        ),
                         block_ids,
                         kv_cache_group_id=group_id,
                         block_id=block_id,
@@ -1090,9 +1150,13 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     time.perf_counter() - load_get_start,
                     len(key_list_c),
                 )
-            if isinstance(self.m_store, MemcacheBackend) and (
-                ret is None or len(ret) != len(key_list_c) or any(r != 0 for r in ret)
-            ):
+            if (
+                isinstance(self.m_store, MemcacheBackend)
+                or (
+                    self.token_database.cache_coordinator is not None
+                    and self.token_database.cache_coordinator.enable_partial_hash_hits
+                )
+            ) and (ret is None or len(ret) != len(key_list_c) or any(r != 0 for r in ret)):
                 self._mark_failed_requests([req_meta])
                 self.set_finished_request(req_id)
                 return

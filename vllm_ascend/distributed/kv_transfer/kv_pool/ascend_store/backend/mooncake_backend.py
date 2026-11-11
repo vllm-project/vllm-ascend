@@ -307,6 +307,7 @@ def _inject_store_qos(extra_config: dict[str, Any] | None) -> None:
 class MooncakeBackend(Backend):
     layerwise_data_plane = "block_key"
     LAYERWISE_SEND_FENCE_BACKLOG = 8
+    _direct_only = False
 
     @classmethod
     def bind_layerwise_keys(
@@ -382,6 +383,7 @@ class MooncakeBackend(Backend):
         lazy_init: bool = False,
         contribute_memory: bool = True,
         extra_config: dict[str, Any] | None = None,
+        direct_only: bool = False,
     ):
         self.parallel_config = parallel_config
         self.config = MooncakeStoreConfig.load_from_env()
@@ -398,8 +400,17 @@ class MooncakeBackend(Backend):
         # operates independently of the global transfer engine; setup goes through store
         # and buffers are registered via store.register_buffer() instead of global_te.
         self._use_store_independent_te = bool(os.getenv("ASCEND_GLOBAL_RESOURCE_CONFIG")) and not self._use_fabric_mem
+        # A Store child of MooncakeConnectorV2 must borrow the same engine,
+        # including when the parent uses fabric memory. Do not mutate the
+        # parent process environment or allocate a second staging engine.
+        if direct_only:
+            self._use_fabric_mem = False
+            self._use_store_independent_te = False
         self._lazy_init = lazy_init and self._use_fabric_mem
         self._contribute_memory = contribute_memory
+        self._direct_only = direct_only
+        if direct_only and self.config.global_segment_size != 0:
+            raise ValueError("Shared P/D Store requires an external provider and the shared ascend engine")
         self._store_initialized = False
         self._store_init_lock = threading.Lock()
         self._prefetch_conf = SsdPrefetchConf.disabled()
@@ -435,6 +446,8 @@ class MooncakeBackend(Backend):
         local_hostname = get_ip()
         # Resolve prefetch once; everything below reads self._prefetch_conf.
         self._prefetch_conf = _resolve_ssd_prefetch(self.config, self._contribute_memory)
+        if self._direct_only and self._prefetch_conf.use_dict_setup:
+            raise ValueError("Shared direct-only Store cannot use an independent SSD staging engine")
         # Scheduler-only clients must not register SSD storage with Mooncake,
         # which would inflate the active client count and reported SSD usage.
         ssd_kwargs = _ssd_setup_kwargs(self.config) if self._contribute_memory else {}
@@ -532,7 +545,9 @@ class MooncakeBackend(Backend):
                 local_hostname=self.local_seg,
                 metadata_server=self.config.metadata_server,
                 global_segment_size=self.config.global_segment_size if self._contribute_memory else 0,
-                local_buffer_size=self.config.local_buffer_size if self._contribute_memory else 0,
+                local_buffer_size=(
+                    self.config.local_buffer_size if self._contribute_memory and not self._direct_only else 0
+                ),
                 protocol=self.config.protocol,
                 rdma_devices=self.config.device_name,
                 master_server_addr=self.config.master_server_address,
@@ -571,6 +586,7 @@ class MooncakeBackend(Backend):
                         length,
                         ret,
                     )
+                    raise RuntimeError(f"Mooncake buffer registration failed: {ret}")
         elif not self._use_fabric_mem:
             local_hostname = get_ip()
             global_te.get_transfer_engine(local_hostname, device_name=None)

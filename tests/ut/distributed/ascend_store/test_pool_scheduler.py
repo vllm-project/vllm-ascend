@@ -1961,9 +1961,9 @@ def test_layerwise_retry_discards_stale_load_spec(second_hit):
 
 @pytest.mark.parametrize(
     ("local_start", "pool_end", "expected"),
-    [(0, 672, 640), (640, 640, 0), (640, 1312, 640), (640, 1920, 640), (672, 1920, 0)],
+    [(0, 672, 672), (640, 640, 0), (640, 1312, 672), (640, 1888, 1248), (672, 1888, 1216)],
 )
-def test_block_only_uses_core_hash_and_whole_page_load_range(local_start, pool_end, expected):
+def test_hash_hit_preserves_subpage_boundary_and_local_apc(local_start, pool_end, expected):
     config = make_config(block_size=640, extra_config={"backend": "memcache"})
     config.cache_config.prefix_match_unit = 16
     group = KVCacheGroupSpec(
@@ -1976,11 +1976,8 @@ def test_block_only_uses_core_hash_and_whole_page_load_range(local_start, pool_e
     scheduler._lookup_external_hit_tokens = MagicMock(return_value=pool_end)
     request = SimpleNamespace(request_id="tail", num_tokens=1920)
     scheduler.load_specs["tail"] = LoadSpec(640, 1920, True)
-    assert scheduler.get_num_new_matched_tokens(request, local_start) == (expected, False)
-    if local_start % 640:
-        scheduler._lookup_external_hit_tokens.assert_not_called()
-    else:
-        scheduler._lookup_external_hit_tokens.assert_called_once_with(request, local_start)
+    assert scheduler.get_num_new_matched_tokens(request, local_start) == (expected, expected > 0)
+    scheduler._lookup_external_hit_tokens.assert_called_once_with(request, local_start)
     if expected:
         blocks = MagicMock()
         blocks.get_block_ids.return_value = (list(range(1, 1 + (local_start + expected) // 640)),)

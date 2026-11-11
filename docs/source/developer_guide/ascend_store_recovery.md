@@ -1,111 +1,66 @@
-# Ascend-owned Store recovery protocol
+# AscendStore hash-granular recovery
 
-## Scope and version
-
-The partial-hash path of `AscendStoreConnector` owns its coordinator, scheduler,
-worker and wire metadata in `kv_pool/ascend_store/recovery/`. It does not inherit
-the upstream Mooncake Store classes or access their private fields. The initial
-protocol port is based on vLLM v0.33.0, commit
-`4ba787ec9959e566d3b587a796dff07673324da5`, and Ascend baseline `d64d5967a`.
-Source attribution is retained in each ported module.
-
-This is an ownership change, not a new user-selectable cache mode. Core resolves
-`--prefix-match-unit` and the cache geometry. The connector selects the recovery
-stack when Core's recoverable hit alignment is finer than the scheduler block.
-The existing whole-block and layerwise implementations remain separate and retain
-their existing gates. There is no `pool_prefix_mode` switch.
+`AscendStoreConnector` uses its existing coordinator, scheduler and worker for
+both whole-block and hash-granular recovery. There is no separate recovery
+stack, upstream Store subclass, or user-selectable prefix mode. Only Core's
+resolved `--prefix-match-unit` and cache plan select the supported hit alignment.
+Layerwise transfers retain their existing implementation and physical-page gate.
 
 ## Responsibilities and Core contracts
 
-| Owner | Core contract and behavior |
+| Existing Ascend owner | Responsibility |
 | --- | --- |
-| `geometry.StoreGeometry` | Calls Core's `resolve_kv_cache_block_sizes`; captures the resolved scheduler/hash sizes, prefix-cacheable groups (including physical specs), hit alignment, retention and EAGLE policy. Scheduler and worker receive this plan, rather than deriving competing sizes. Producer-only EAGLE normalization copies group specs without mutating Core's plan. |
-| `coordinator.StoreCoordinator` | Uses Core's cache-spec registry, single-type cache managers, `replay_boundaries` and EAGLE proof rules to intersect group recoverability. A hit requires a common recoverable Attention/Mamba boundary, not merely an existing Attention key. |
-| `scheduler.StoreScheduler` | Implements connector lookup/allocation callbacks and consumes `SchedulerOutput`. Core still decides the final local APC/external hit and passes that decision into `update_state_after_alloc`. The scheduler never replaces that decision with its earlier lookup estimate. |
-| Scheduler boundary handoff | `_handle_boundary_state_offloads` consumes Core boundary snapshots; `register_finished_partial_tail` captures the final partial tail. `BoundaryPut` carries explicit group, physical block and token boundary into the save job. Attention and Mamba use the same prefix hash for that recoverable boundary. |
-| Scheduler block lifetime | `_reference_save_blocks` touches Core `BlockPool` blocks before request cleanup; monotonically numbered save jobs own those references. `update_connector_output` frees them only after all worker ranks acknowledge that IO has stopped. |
-| `worker.StoreWorker` | Orchestrates async lookup, receive and send queues. `ReqMeta`, `LoadSpec`, ordinary pool keys and `TailKeyBoundary` retain the upstream data contract. Invalid loads feed the connector's load-error reporting; save errors are reported in worker metadata and retire only after all ranks acknowledge. |
-| Ascend device adapter | `AscendHashStoreWorker` in `pool_worker.py` implements NPU registration, real storage/stride descriptors, event synchronization and the existing shared-engine/direct-only rules. It derives from the Ascend-owned worker. Native MooncakeConnectorV2 transport is unchanged. |
+| `metadata.PoolCacheGeometry` | Shares Core-resolved hash size, hit alignment, physical group sizes, scheduler size, retention and EAGLE policy between scheduler and worker. Does not change Core's plan. |
+| `coordinator.AscendStoreCoordinator` | Intersects group recoverability through Core's registered cache managers. Saving uses retention; lookup considers all externally available recovery points. |
+| `pool_scheduler.KVPoolScheduler` | Accepts Core's final local/external hit arbitration and constructs load/save metadata. A stronger local partial tail is not replaced by a shorter external hit. |
+| Scheduler `_prepare_boundary_saves` | Consumes `SchedulerOutput.kv_connector_block_state`: current block tables and exact recurrent `boundary_state_offloads`, never an append-only positional mirror. |
+| Scheduler `register_finished_partial_tail` | Pins the explicit final checkpoint before Core frees a finishing request, then publishes it on the next scheduler step. |
+| `in_flight_save_blocks.InFlightSaveBlockTracker` | Owns source-block references per save job. Releases only after all ranks acknowledge, deduplicating rank identities and handling out-of-order completion. Reset refuses outstanding saves. |
+| `pool_worker.KVPoolWorker` | Performs lookup and physical-page replay through existing backends and threads. Ordinary and boundary values share the group/rank-isolated key namespace and physical payload protocol. |
+| `kv_transfer` | Waits for device events, writes boundary values before ordinary pages, and acknowledges successful, failed or cancelled jobs. Failed saves never advance saved offsets. |
+| Ascend device adaptation | Owns NPU registration, real stride/segment descriptors and device events. A Store child sharing native MooncakeConnectorV2 borrows its engine without a second staging engine. Native P2P is unchanged. |
 
-`data.py`, `protocol.py`, `events.py` and `metrics.py` are shared support modules,
-not additional control layers. Runtime dependencies on vLLM remain its connector
-base contracts, Core cache/spec APIs, configuration and native Store setup/RDMA
-utilities. The differential tests alone import upstream Store classes as an oracle.
+## Hash hits versus physical replay
 
-## Save lifetime and failure ordering
+Lookup checks hash-unit keys and asks Core's group managers for the common
+recoverable token boundary. Attention and recurrent state must both prove that
+boundary, including any EAGLE proof margin. Lookup metadata carries each group's
+selected tail key to the existing load job.
 
-1. Core supplies a stable boundary snapshot and scheduler block IDs.
-2. Scheduler builds a save job and pins its physical blocks, including CoW tails.
-3. Worker waits for the NPU event and queues the immutable job metadata.
-4. IO completes, fails, or is cancelled before starting. The worker's `finally`
-   path always acknowledges the stopped job and completes the queue task.
-5. Worker metadata reports job IDs, rank identities and failures. Rank identities
-   are unioned so duplicates and out-of-order delivery cannot prematurely free
-   references.
-6. Scheduler releases the references after every expected rank has acknowledged.
+A fine-grained token boundary does not imply a fine-grained DMA allocation.
+Attention restores the complete containing physical page; Mamba restores the
+complete checkpoint selected by Core. Actual storage strides and dense payload
+segments prevent copying padding or adjacent views. Core resumes computation at
+the accepted token boundary.
 
-Cancellation invalidates work but does not authorize freeing a buffer still used
-by IO. `has_pending_push_work` keeps Core stepping to collect late completions.
-Reset is refused while save references, load specifications or lookup futures
-remain. Shutdown requires admission to have stopped and Core to have drained save
-completions before scheduler close. The worker drains queues before stopping
-threads and closing its native handle. A bounded close that cannot drain raises
-an error and keeps the registered buffers/handle alive; it does not pretend that
-a timeout makes DMA safe to free. The caller must retry close after draining.
+## Failure and lifetime ordering
 
-Lookup publication follows worker initialization. Lookup RPC send/receive waits
-are bounded; correlated relaxed REQ messages cannot accept a previous timed-out
-reply as the next lookup result.
+1. Core hands off a stable checkpoint and current block IDs.
+2. Scheduler pins sources before request teardown or block reuse.
+3. Worker waits for device readiness and performs asynchronous IO.
+4. Completion, failure or cancellation emits a stopped-job acknowledgement.
+5. Scheduler releases references only after all expected ranks acknowledge.
 
-## CPU validation snapshot
+Cancellation does not authorize freeing buffers still used by IO. Pending saves
+keep Core stepping; reset is rejected until acknowledgements are collected.
+Worker shutdown joins threads before closing the backend. Cancelled queued saves
+produce failed acknowledgements and complete fences. A native IO timeout is not
+treated as proof that DMA has stopped.
 
-Validated on Windows Python 3.12 / torch 2.10 CPU with the above local Core tree.
-The narrow bootstrap substitutes `uvloop` with `asyncio`, provides build metadata,
-and uses the existing `_mock_deps` NPU/native-dependency shim. Core cache managers,
-cache specs and recovery algorithms are real. This is not an NPU acceptance run.
+## Validation and maintenance
 
-Targeted suite: **255 passed** across:
+CPU tests cover byte-copy boundary save/replay, local-tail arbitration, exact
+Core handoffs, pin release, failure/cancellation, duplicate and out-of-order
+acknowledgements, and existing bulk/layerwise paths. Differential tests use
+upstream Store only as an oracle; production code does not import its three
+Store classes.
 
-- `test_hash_recovery.py` (existing connector/device-adapter isolation tests);
-- `test_recovery_coordinator.py`;
-- `test_recovery_scheduler.py`;
-- `test_recovery_protocol.py`.
+CPU tests do not establish native DMA or model accuracy. NPU acceptance must
+separately demonstrate mixed TP4 and native MooncakeConnectorV2 P/D TP2+TP2:
+cold reference, seed, local-only APC reset, and recovery with a non-page-aligned
+external hash hit, zero local-hit increment and matching cold-reference output.
+Each run retains requests, responses, metrics, versions and source hashes.
 
-The protocol suite compares 40 seed/EAGLE combinations against upstream group
-recovery, including missing keys. Three fixed seeds (0, 42, 1024) compare ordinary
-and boundary payload bytes, lookup boundaries and deterministic CPU state replay
-outputs. This uses byte-copy Store IO, not model generation or native RDMA.
-Additional tests exercise local-tail arbitration, Core boundary handoff, pin
-release, rank ordering/duplication, cancellation, failures, safe reset/close,
-metadata aggregation and legacy-path isolation.
-
-Compatible legacy regression: **445 passed, 282 subtests passed, 4 deselected**
-across connector, coordinator, metadata, pool scheduler/worker, Mooncake layerwise,
-pipeline, metrics and transfer tests. The exclusions are the two
-`joint_prefix_group_ownership` cases (missing Core API), the independent-DP IPC
-binding case (Windows transport), and the wrapped-Mamba post-compute mapping case
-(custom-spec registry initialization). They remain Linux/environment gates.
-
-The full Ascend Store directory is **not certified green** in this checkout:
-collection encounters newer GLM/Core APIs absent from v0.33.0; Windows ZMQ lacks
-IPC transport; the narrow bootstrap does not register all custom hybrid specs.
-The existing layerwise mock-layout failure and two missing-Core-API scheduler
-failures were reproduced with the three modified production modules loaded
-directly from baseline `HEAD`, without changing the working tree. These findings
-are not a substitute for Linux/NPU regression.
-
-## Maintenance and remaining gates
-
-Owning the three layers duplicates upstream protocol implementation deliberately.
-Future Core boundary fields, cache-manager semantics, job-completion contracts,
-key serialization or native Store API changes need an explicit port and renewed
-differential tests. This is more maintenance than subclass reuse. It does not make
-Core experimental connector interfaces stable or support arbitrary future Core
-versions automatically.
-
-Before merge, run Linux/NPU mixed and PD gates using the same model, seed and
-target: verify external sub-page hits, common recurrent-state boundaries, restored
-model output, stronger local partial-tail preservation, normal whole-block and
-layerwise behavior, async failures and task-owned resource cleanup. PD must retain
-the native MooncakeConnectorV2 implementation. Resource allocation requires user
-confirmation; none is performed by the CPU validation described here.
+Core's connector, boundary-state and cache-manager contracts remain dependencies.
+Their evolution requires renewed protocol and differential regression even though
+Store classes are not inherited.

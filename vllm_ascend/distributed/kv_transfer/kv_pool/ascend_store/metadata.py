@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-import itertools
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
-from functools import cache
+from copy import copy
+from dataclasses import dataclass, field, replace
 from itertools import compress
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 import numpy as np
 import torch
+from vllm.config import get_current_vllm_config_or_none
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata, KVConnectorWorkerMetadata
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
@@ -31,135 +31,6 @@ def dense_cache_segments(
     if scale == 1 or kernel_stride == kernel_bytes:
         return [(base, block_len, block_stride)]
     return [(base + index * kernel_stride, kernel_bytes, block_stride) for index in range(scale)]
-
-
-@cache
-def get_hash_store_layout_class():
-    # Lazy import keeps the original modes independent of the Core Store API.
-    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.recovery.data import RankLocalStoreLayout
-
-    class AscendHashStoreLayout(RankLocalStoreLayout):
-        def __init__(self, metadata, block_size: int, hash_block_size: int, *, is_state: bool, head_major: bool):
-            super().__init__(metadata, block_size, hash_block_size)
-            self.is_state = is_state
-            self.head_major = head_major
-            self._views: list[torch.Tensor] = []
-            self._group_views: Sequence[torch.Tensor] | None = None
-
-        def bind_group_views(self, views: Sequence[torch.Tensor]) -> None:
-            # Older Core workers pass one flattened representative-tensor list to
-            # every group, dropping recurrent components. Bind the actual group
-            # views before upstream registration starts its transfer threads.
-            self._group_views = views
-
-        def register_kv_caches(self, kv_caches: Sequence[torch.Tensor], num_blocks: int) -> None:
-            # The upstream worker already groups kernel blocks under manager dim 0.
-            # Retain logical views: raw-storage spans can include other layers.
-            views = [
-                view for view in (self._group_views if self._group_views is not None else kv_caches) if view.numel()
-            ]
-            if not views:
-                raise ValueError("Hash recovery requires every cache group to expose transferable views")
-            for view in views:
-                if view.shape[0] != num_blocks or any(stride <= 0 for stride in view.stride()):
-                    raise ValueError("Invalid block-major Ascend Store view")
-                # Permit inter-layer padding, but never alias two logical entries.
-                span = 1
-                for stride, size in sorted(zip(view.stride(), view.shape)):
-                    if size > 1:
-                        if stride < span:
-                            raise ValueError("Overlapping Ascend Store views are unsupported")
-                        span += (size - 1) * stride
-                if self.is_state:
-                    if not view[0].is_contiguous():
-                        raise ValueError("Hash recovery requires contiguous checkpoint components")
-                else:
-                    self._attention_parts(view)
-            self._views = views
-            self._num_blocks = num_blocks
-
-        def _attention_parts(self, view: torch.Tensor) -> tuple[int, int, int]:
-            # NHD/HND caches are exposed separately for K/V (and MLA components).
-            # group_kernel_blocks optionally inserts a kernel-block dimension.
-            if view.ndim not in (4, 5):
-                raise ValueError("Hash recovery supports NHD/HND attention views, not packed/NZ layouts")
-            scale = view.shape[1] if view.ndim == 5 else 1
-            token_axis = (3 if self.head_major else 2) if view.ndim == 5 else (2 if self.head_major else 1)
-            kernel_tokens = view.shape[token_axis]
-            if scale * kernel_tokens != self.block_size:
-                raise ValueError("Attention token axes do not match the Core-resolved manager page")
-            suffix_bytes = view.element_size()
-            expected_stride = 1
-            for axis in range(view.ndim - 1, token_axis, -1):
-                if view.stride(axis) != expected_stride:
-                    raise ValueError("Hash recovery requires dense attention features after the token axis")
-                expected_stride *= view.shape[axis]
-                suffix_bytes *= view.shape[axis]
-            if view.stride(token_axis) < expected_stride:
-                raise ValueError("Overlapping attention token strides are unsupported")
-            return token_axis, kernel_tokens, suffix_bytes
-
-        def _segments(self, view: torch.Tensor, block_id: int):
-            elem = view.element_size()
-            base = view.data_ptr() + block_id * view.stride(0) * elem
-            scale = view.shape[1] if not self.is_state and view.ndim == 5 else 1
-            if view[0].is_contiguous() or (scale > 1 and view[0, 0].is_contiguous()):
-                for address, size, _ in dense_cache_segments(
-                    base,
-                    view[0].numel() * elem,
-                    view.stride(0) * elem,
-                    scale,
-                    kernel_stride=(view.stride(1) * elem if scale > 1 else view.stride(0) * elem),
-                ):
-                    yield address, size
-                return
-            token_axis, kernel_tokens, suffix_bytes = self._attention_parts(view)
-            # Prefix axes are kernel-block and/or head. Enumerate only these axes;
-            # contiguous token ranges remain one descriptor where possible.
-            axes = range(1, token_axis)
-            for indices in itertools.product(*(range(view.shape[axis]) for axis in axes)):
-                offset = sum(index * view.stride(axis) for axis, index in zip(axes, indices)) * elem
-                token_stride = view.stride(token_axis) * elem
-                if token_stride == suffix_bytes:
-                    yield base + offset, kernel_tokens * suffix_bytes
-                else:
-                    for token in range(kernel_tokens):
-                        yield base + offset + token * token_stride, suffix_bytes
-
-        def prepare_value_for_block(self, block_id: int) -> tuple[list[int], list[int]]:
-            # Core publishes scheduler-pinned boundary checkpoints through this
-            # entrypoint, not prepare_values. A boundary object contains the whole
-            # logical block (all recurrent components), excluding slab padding.
-            if block_id <= 0 or block_id >= self._num_blocks:
-                raise ValueError("Cannot restore or publish a null checkpoint block")
-            segments = [segment for view in self._views for segment in self._segments(view, block_id)]
-            if not segments:
-                raise ValueError("Hash Store object has no payload")
-            return [address for address, _ in segments], [size for _, size in segments]
-
-        def prepare_values(self, chunks, block_ids, shard_ids):
-            if len(chunks) != len(shard_ids) or any(shard != 0 for shard in shard_ids):
-                raise ValueError("Ascend hash Store uses rank-local objects")
-            addresses, sizes, used_blocks = [], [], []
-            for start, end in chunks:
-                if start < 0 or end <= start or start % self.hash_block_size or end % self.hash_block_size:
-                    raise ValueError("Store transfer must cover positive, hash-aligned token ranges")
-                block_index = start // self.block_size
-                if (end - 1) // self.block_size != block_index:
-                    raise ValueError("A hash Store object cannot cross a manager page")
-                block_id = block_ids[block_index]
-                # Core keys both normal objects and pinned partial-tail objects by
-                # hash boundaries. Their payload schema must be identical: whole
-                # logical block, even when only its prefix will be reused. Splitting
-                # attention into PMU-sized objects conflicts with Core's group masks
-                # and boundary puts, and is not required for hash-grained hits.
-                address, size = self.prepare_value_for_block(block_id)
-                addresses.append(address)
-                sizes.append(size)
-                used_blocks.append(block_id)
-            return addresses, sizes, used_blocks
-
-    return AscendHashStoreLayout
 
 
 def is_kv_save_role(kv_role: str, consumer_is_to_put: bool) -> bool:
@@ -454,6 +325,14 @@ class PoolCacheGeometry:
     core_hit_alignment: int
     transfer_granularity: int
     block_only: bool
+    groups: tuple = ()
+    scheduler_block_size: int = 0
+    use_eagle: bool = False
+    retention_interval: int | None = None
+
+    @property
+    def partial_hits(self) -> bool:
+        return not self.block_only and self.core_hit_alignment < self.transfer_granularity
 
 
 def resolve_pool_cache_geometry(vllm_config, kv_cache_config, *, use_layerwise: bool) -> PoolCacheGeometry:
@@ -478,12 +357,21 @@ def resolve_pool_cache_geometry(vllm_config, kv_cache_config, *, use_layerwise: 
             raise ValueError("AscendStore requires a resolved KVCacheConfig with prefix_match_unit")
         hash_size = hit_alignment = page_alignment
     elif not (has_hash and has_alignment):
-        scheduler_size, resolved_hash = kv_cache_utils.resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
+        # Some Core versions resolve only leaf specs. Normalize uniform
+        # wrappers for the public resolver without mutating the planner's plan.
+        resolve_config = copy(kv_cache_config)
+        resolve_config.kv_cache_groups = [
+            replace(group, kv_cache_spec=next(iter(group.kv_cache_spec.kv_cache_specs.values())))
+            if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+            else group
+            for group in groups
+        ]
+        scheduler_size, resolved_hash = kv_cache_utils.resolve_kv_cache_block_sizes(resolve_config, vllm_config)
         if not has_hash:
             hash_size = resolved_hash
         if not has_alignment:
             hit_alignment = kv_cache_utils.resolve_cache_hit_alignment_tokens(
-                kv_cache_config, vllm_config, scheduler_size, hash_size
+                resolve_config, vllm_config, scheduler_size, hash_size
             )
     if any(block_sizes[i] % hash_size for i in group_ids):
         raise ValueError(
@@ -491,9 +379,25 @@ def resolve_pool_cache_geometry(vllm_config, kv_cache_config, *, use_layerwise: 
             f"{tuple(block_sizes[i] for i in group_ids)}"
         )
     extra = vllm_config.kv_transfer_config.kv_connector_extra_config
-    block_only = not use_layerwise and hit_alignment < page_alignment
-    if block_only and (use_layerwise or extra.get("discard_partial_chunks", True) is not True):
-        raise ValueError("AscendStore block_only requires bulk transfer and discard_partial_chunks=true")
+    partial_hits = not use_layerwise and hit_alignment < page_alignment
+    if partial_hits and extra.get("discard_partial_chunks", True) is not True:
+        raise ValueError("AscendStore hash recovery requires discard_partial_chunks=true")
+    speculative = getattr(vllm_config, "speculative_config", None)
+    eagle = getattr(speculative, "use_eagle_block_drop", None)
+    engine_transfer = getattr(kv_cache_config, "kv_transfer_config", None)
+    if engine_transfer is None:
+        current = get_current_vllm_config_or_none()
+        engine_transfer = (current if current is not None else vllm_config).kv_transfer_config
+    producer_only = bool(engine_transfer and engine_transfer.is_kv_producer and not engine_transfer.is_kv_consumer)
+    use_eagle = bool(callable(eagle) and eagle() is True and not producer_only)
+    resolved_groups = tuple(
+        replace(
+            group,
+            kv_cache_spec=kv_cache_utils.resolve_dcp_kv_cache_spec(group.kv_cache_spec, dcp),
+            is_eagle_group=False if producer_only else group.is_eagle_group,
+        )
+        for group in groups or []
+    )
     logger.info(
         "AscendStore prefix geometry: requested_pmu=%s core_hash=%d core_hit_alignment=%d "
         "pool_transfer_alignment=%d mode=%s group_pages=%s",
@@ -501,10 +405,21 @@ def resolve_pool_cache_geometry(vllm_config, kv_cache_config, *, use_layerwise: 
         hash_size,
         hit_alignment,
         page_alignment,
-        "block_only" if block_only else "existing",
+        "hash" if partial_hits else "existing",
         block_sizes,
     )
-    return PoolCacheGeometry(block_sizes, group_ids, hash_size, hit_alignment, page_alignment, block_only)
+    return PoolCacheGeometry(
+        block_sizes,
+        group_ids,
+        hash_size,
+        hit_alignment,
+        page_alignment,
+        False,
+        resolved_groups,
+        page_alignment,
+        use_eagle,
+        getattr(kv_cache_config, "prefix_cache_retention_interval", None),
+    )
 
 
 class ChunkedTokenDatabase:
@@ -753,6 +668,7 @@ class ChunkedTokenDatabase:
         shard_rank: int | None = None,
         shard_size: int | None = None,
         chunk_mask: Sequence[bool] | None = None,
+        tail_key_boundary: int | None = None,
     ) -> Iterable[tuple[int, int, BlockHash | str, int | None]]:
         # Private circular state has no prefix key, even when its block size
         # happens to be divisible by the request's hashing unit.
@@ -762,9 +678,18 @@ class ChunkedTokenDatabase:
             return
         logical_block_size = self.get_block_size(kv_cache_group_id)
         grouped_hashes = get_block_hashes(block_hashes, logical_block_size, self.hash_block_size)
-        if not grouped_hashes:
+        partial = bool(self.cache_coordinator is not None and self.cache_coordinator.enable_partial_hash_hits)
+        if not grouped_hashes and not partial:
             return
-        num_logical_blocks = min(len(grouped_hashes), cdiv(token_len, logical_block_size)) if token_len > 0 else 0
+        num_logical_blocks = (
+            (
+                cdiv(token_len, logical_block_size)
+                if partial
+                else min(len(grouped_hashes), cdiv(token_len, logical_block_size))
+            )
+            if token_len > 0
+            else 0
+        )
         block_id_offset = max(num_logical_blocks - len(block_ids), 0) if block_ids is not None else 0
         first_chunk = max(0, cdiv(mask_num, logical_block_size), block_id_offset)
         chunk_ids: Iterable[int] = range(first_chunk, num_logical_blocks)
@@ -798,7 +723,15 @@ class ChunkedTokenDatabase:
             candidate_index += 1
             if not shard_allows:
                 continue
-            yield start_idx, end_idx, grouped_hashes[chunk_id], block_id
+            if partial:
+                boundary = tail_key_boundary if end_idx == token_len and tail_key_boundary is not None else end_idx
+                hash_index = boundary // self.hash_block_size - 1
+                if hash_index < 0 or hash_index >= len(block_hashes):
+                    raise ValueError("Missing committed hash for a Store chunk")
+                chunk_hash = block_hashes[hash_index]
+            else:
+                chunk_hash = grouped_hashes[chunk_id]
+            yield start_idx, end_idx, chunk_hash, block_id
 
     def process_tokens(
         self,
@@ -862,6 +795,7 @@ class ChunkedTokenDatabase:
         shard_rank: int | None = None,
         shard_size: int | None = None,
         chunk_mask: Sequence[bool] | None = None,
+        tail_key_boundary: int | None = None,
     ) -> Iterable[tuple[int, int, str, BlockHash | str, int]]:
         """Yield cache key strings and resolved block ids without PoolKey allocation."""
         prefix = self._get_key_prefix(kv_cache_group_id)
@@ -876,6 +810,7 @@ class ChunkedTokenDatabase:
             shard_rank=shard_rank,
             shard_size=shard_size,
             chunk_mask=chunk_mask,
+            tail_key_boundary=tail_key_boundary,
         ):
             assert block_id is not None
             yield start, end, prefix + block_hash_to_str(hash_val), hash_val, block_id
@@ -967,6 +902,31 @@ def block_hash_to_bytes(block_hash: BlockHash | str) -> bytes:
     return bytes(block_hash)
 
 
+class TailKeyBoundary(NamedTuple):
+    """Hash key of a group's final restored page, independent of hit length.
+
+    Group arbitration can shorten a hit inside a page whose stored key names
+    a later hash boundary. This selects that value; it does not extend the hit.
+    """
+
+    group_id: int
+    num_tokens: int
+
+
+@dataclass
+class StoreLookupResult:
+    hit_length: int
+    tail_key_boundaries: tuple[TailKeyBoundary, ...] = ()
+
+
+class BoundaryPut(NamedTuple):
+    """Core-owned state snapshot or attention proof for an exact prefix key."""
+
+    group_id: int
+    block_id: int
+    num_tokens: int
+
+
 # Parameters related to the connector metadata
 @dataclass
 class LoadSpec:
@@ -989,6 +949,8 @@ class LoadSpec:
     layerwise_previous_step: bool = False
     # First block stored under request-scoped keys, including unhashed full blocks.
     layerwise_snapshot_start_block: int | None = None
+    # Append protocol extensions to preserve legacy positional construction.
+    tail_key_boundaries: tuple[TailKeyBoundary, ...] = ()
 
 
 @dataclass(init=False)
@@ -1030,6 +992,7 @@ class RequestTracker:
     num_speculative_blocks_by_group: dict[int, int] | None = None
 
     block_sizes: list[int] | None = None
+    partial_tail_sent: bool = False
 
     def __init__(
         self,
@@ -1050,6 +1013,7 @@ class RequestTracker:
         last_layerwise_snapshot_end_token: int | None = None,
         last_layerwise_snapshot_block_index: int | None = None,
         last_layerwise_snapshot_start_block: int | None = None,
+        partial_tail_sent: bool = False,
     ) -> None:
         self.req_id = req_id
         self.token_len = token_len
@@ -1070,6 +1034,7 @@ class RequestTracker:
         self.last_layerwise_snapshot_end_token = last_layerwise_snapshot_end_token
         self.last_layerwise_snapshot_block_index = last_layerwise_snapshot_block_index
         self.last_layerwise_snapshot_start_block = last_layerwise_snapshot_start_block
+        self.partial_tail_sent = partial_tail_sent
 
     @property
     def allocated_block_ids(self) -> list[int]:
@@ -1163,6 +1128,10 @@ class ReqMeta:
     # operation cannot update the save progress of a new request generation
     # that happens to reuse the same req_id.
     store_job_id: int | None = None
+    boundary_puts: list[BoundaryPut] | None = None
+    completed_token_len: int | None = None
+    publish_partial_tail: bool = False
+    prefill_end_tokens: int | None = None
 
     def __init__(
         self,
@@ -1204,6 +1173,10 @@ class ReqMeta:
         load_key_block_offset: int = 0,
         load_last_block_key: str | None = None,
         load_keys: list[str] | None = None,
+        boundary_puts: list[BoundaryPut] | None = None,
+        completed_token_len: int | None = None,
+        publish_partial_tail: bool = False,
+        prefill_end_tokens: int | None = None,
     ) -> None:
         if token_len_chunk is None:
             token_len_chunk = 0 if save_end_token is None else save_end_token
@@ -1227,6 +1200,10 @@ class ReqMeta:
         self.original_block_size = original_block_size
         self.event_id = event_id
         self.store_job_id = store_job_id
+        self.boundary_puts = boundary_puts
+        self.completed_token_len = completed_token_len
+        self.publish_partial_tail = publish_partial_tail
+        self.prefill_end_tokens = prefill_end_tokens
         self.last_block_gva = last_block_gva
         self.partial_block_index = partial_block_index
         self.block_ids_np = block_ids_np
@@ -1307,6 +1284,7 @@ class ReqMeta:
         kv_cache_group_families: list[str] | None = None,
         save_partial_block: bool = False,
         hash_block_size: int | None = None,
+        enable_partial_hash_hits: bool = False,
     ) -> ReqMeta | None:
         """Create the request metadata from a request tracker."""
         if block_hashes is None:
@@ -1355,8 +1333,18 @@ class ReqMeta:
         should_save_partial_block = save_partial_block and (
             target_token_len % cache_transfer_granularity != 0 or full_block_count > available_full_block_count
         )
+        prefill_end = tracker.prefill_end_tokens or tracker.num_prompt_tokens or target_token_len
+        publish_partial_tail = (
+            enable_partial_hash_hits
+            and not skip_save
+            and not tracker.partial_tail_sent
+            and target_token_len >= prefill_end
+        )
         skip_save = skip_save or (
-            num_tokens_to_save < chunk_boundary and partial_block_index is None and not should_save_partial_block
+            num_tokens_to_save < chunk_boundary
+            and partial_block_index is None
+            and not should_save_partial_block
+            and not publish_partial_tail
         )
         # A ReqMeta must never carry both a save AND a load.
         # The save would also be wasted work — the bytes are being looked up
@@ -1368,6 +1356,8 @@ class ReqMeta:
             return None
 
         if not skip_save:
+            if publish_partial_tail:
+                tracker.partial_tail_sent = True
             tracker.num_saved_tokens = max(
                 tracker.num_saved_tokens,
                 num_tokens_to_save,
@@ -1429,6 +1419,9 @@ class ReqMeta:
             else None,
             gva_block_offset=tracker.gva_block_offset,
             kv_cache_group_ids=list(range(len(tracker.allocated_block_ids_by_group))),
+            publish_partial_tail=publish_partial_tail and not skip_save,
+            completed_token_len=target_token_len,
+            prefill_end_tokens=prefill_end,
         )
 
 
@@ -1451,6 +1444,8 @@ class AscendConnectorMetadata(KVConnectorMetadata):
 class AscendStoreKVConnectorWorkerMetadata(KVConnectorWorkerMetadata):
     completed_events: dict[int, int] = field(default_factory=dict)
     """key: event_id, value: completed worker count"""
+    completed_ranks: dict[int, set[int]] = field(default_factory=dict)
+    failed_events: set[int] = field(default_factory=set)
 
     def aggregate(self, other: KVConnectorWorkerMetadata) -> KVConnectorWorkerMetadata:
         assert isinstance(other, AscendStoreKVConnectorWorkerMetadata), (
@@ -1463,4 +1458,11 @@ class AscendStoreKVConnectorWorkerMetadata(KVConnectorWorkerMetadata):
                 merged[event_id] = other.completed_events[event_id]
             else:
                 merged[event_id] = merged[event_id] + other.completed_events[event_id]
-        return AscendStoreKVConnectorWorkerMetadata(merged)
+        ranks = {event: workers.copy() for event, workers in self.completed_ranks.items()}
+        for event, workers in other.completed_ranks.items():
+            ranks.setdefault(event, set()).update(workers)
+        # Aggregation can include repeated delivery of one rank's ACK. Counts
+        # are authoritative only for legacy workers without rank identities.
+        for event, workers in ranks.items():
+            merged[event] = len(workers)
+        return AscendStoreKVConnectorWorkerMetadata(merged, ranks, self.failed_events | other.failed_events)

@@ -588,6 +588,37 @@ class TestMooncakeBackendSetup(unittest.TestCase):
                 self.assertNotIn("tenant_id", store.setup.call_args.kwargs)
                 set_device.assert_called_once_with(3)
 
+    def test_shared_direct_only_borrows_engine_without_staging(self):
+        config = _make_mooncake_store_config(global_segment_size=0)
+        with (
+            patch.dict(os.environ, {"ASCEND_ENABLE_USE_FABRIC_MEM": "1", "ASCEND_GLOBAL_RESOURCE_CONFIG": "{}"}),
+            patch.object(MooncakeStoreConfig, "load_from_env", return_value=config),
+            patch.object(MooncakeBackend, "_setup_store", return_value=MagicMock()),
+        ):
+            backend = MooncakeBackend(MagicMock(), direct_only=True)
+            self.assertFalse(backend._use_fabric_mem)
+            self.assertFalse(backend._use_store_independent_te)
+            self.assertEqual(os.environ["ASCEND_ENABLE_USE_FABRIC_MEM"], "1")
+            store = MagicMock()
+            engine = MagicMock()
+            with patch.object(mooncake_module, "global_te") as global_engine:
+                global_engine.get_transfer_engine.return_value = engine
+                backend._setup_store_kwargs(store, "host", {})
+                self.assertIs(store.setup.call_args.kwargs["engine"], engine.get_engine.return_value)
+                self.assertEqual(store.setup.call_args.kwargs["local_buffer_size"], 0)
+                backend.register_buffer([2**21], [4096])
+                global_engine.register_buffer.assert_called_once_with([2**21], [4096])
+            store.register_buffer.assert_not_called()
+
+    def test_shared_direct_only_rejects_second_pool_contributor(self):
+        with (
+            patch.object(MooncakeStoreConfig, "load_from_env", return_value=_make_mooncake_store_config()),
+            patch.object(MooncakeBackend, "_setup_store") as setup,
+            self.assertRaisesRegex(ValueError, "external provider"),
+        ):
+            MooncakeBackend(MagicMock(), direct_only=True)
+        setup.assert_not_called()
+
     def test_setup_forwards_tenant_for_all_memory_paths(self):
         for use_fabric_mem in (False, True):
             with self.subTest(use_fabric_mem=use_fabric_mem):

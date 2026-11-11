@@ -180,7 +180,7 @@ def make_worker(
 
 
 class TestPCPPoolWorker(unittest.TestCase):
-    def test_block_only_uses_core_hash_and_keeps_whole_pages(self):
+    def test_hash_hits_use_core_geometry_and_keep_physical_pages(self):
         spec = FullAttentionSpec(block_size=640, num_kv_heads=1, head_size=4, dtype=torch.bfloat16)
         core_config = SimpleNamespace(
             kv_cache_groups=[KVCacheGroupSpec(["layer.0"], spec)],
@@ -197,7 +197,8 @@ class TestPCPPoolWorker(unittest.TestCase):
         self.assertEqual(worker.hash_block_size, 32)
         self.assertEqual(worker.grouped_block_size, [640])
         self.assertEqual(worker.cache_transfer_granularity, 640)
-        self.assertTrue(worker.pool_cache_geometry.block_only)
+        self.assertFalse(worker.pool_cache_geometry.block_only)
+        self.assertTrue(worker.enable_partial_hash_hits)
 
     def test_dspark_draft_pool_exclusion_requires_layerwise_reuse(self):
         target_names = [f"model.layers.{index}.attn" for index in range(4)]
@@ -381,7 +382,9 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
                     self,
                     num_layers=2,
                     use_layerwise=True,
-                    kv_cache_config=SimpleNamespace(kv_cache_groups=groups),
+                    kv_cache_config=SimpleNamespace(
+                        kv_cache_groups=groups, hash_block_size=16, cache_hit_alignment_tokens=16
+                    ),
                     pp_rank=1,
                     pp_partition=(2, 2),
                 )

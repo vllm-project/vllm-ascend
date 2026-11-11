@@ -5,6 +5,7 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.logger import logger
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
@@ -12,6 +13,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
     UniformTypeKVCacheSpecs,
+    get_mamba_prefill_checkpoint_position,
 )
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
@@ -25,6 +27,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     AscendStoreKVConnectorWorkerMetadata,
+    BoundaryPut,
     LoadSpec,
     ReqMeta,
     RequestTracker,
@@ -47,6 +50,8 @@ def _new_req_prefill_tokens(request: NewRequestData) -> list[int]:
 
 class BaseKVPoolScheduler(ABC):
     """Shared request tracking, metadata, and cache lifecycle for pool schedulers."""
+
+    enable_partial_hash_hits = False
 
     def __init__(
         self,
@@ -104,6 +109,11 @@ class BaseKVPoolScheduler(ABC):
             vllm_config, kv_cache_config, use_layerwise=use_layerwise
         )
         self.cacheable_group_ids = list(self.pool_cache_geometry.cacheable_group_ids)
+        self.enable_partial_hash_hits = self.pool_cache_geometry.partial_hits
+        self._lookup_tail_boundaries = {}
+        if self.enable_partial_hash_hits:
+            self.use_eagle = self.pool_cache_geometry.use_eagle
+            self.load_async = extra_config.get("load_async", True)
         self.grouped_block_size = list(self.pool_cache_geometry.block_sizes)
         self.hash_block_size = self.pool_cache_geometry.hash_block_size
         self._block_size = self.grouped_block_size[0]
@@ -183,16 +193,17 @@ class BaseKVPoolScheduler(ABC):
 
     def _build_cache_coordinator(self) -> AscendStoreCoordinator | None:
         """Build the hybrid cache-hit/mask coordinator (mirrors the worker)."""
-        if self.kv_cache_config is None or not self.use_hybrid:
+        if self.kv_cache_config is None or not (self.use_hybrid or self.enable_partial_hash_hits):
             return None
         return AscendStoreCoordinator(
-            self.kv_cache_config.kv_cache_groups,
+            list(self.pool_cache_geometry.groups),
             scheduler_block_size=self.cache_transfer_granularity,
             hash_block_size=self.hash_block_size,
             group_block_sizes=self.grouped_block_size,
             group_cache_families=self.kv_cache_group_families,
             use_eagle=self.use_eagle,
             retention_interval=self.retention_interval,
+            enable_partial_hash_hits=self.enable_partial_hash_hits,
         )
 
     def _floor_to_cache_transfer_granularity(self, token_len: int) -> int:
@@ -254,7 +265,7 @@ class BaseKVPoolScheduler(ABC):
             return 0, False
 
         store_skip_tokens = num_external_hit_tokens
-        if self.use_eagle:
+        if self.use_eagle and not self.enable_partial_hash_hits:
             # Keep the draft model's recomputation zone intact: the
             # generation-point hidden states must be freshly computed, and the
             # local prefix-cache path already drops its trailing block
@@ -304,6 +315,7 @@ class BaseKVPoolScheduler(ABC):
             kvpool_cached_tokens=num_external_hit_tokens,
             can_load=process_hit_without_alloc,
             kvpool_store_skip_tokens=store_skip_tokens,
+            tail_key_boundaries=self._lookup_tail_boundaries.pop(request.request_id, ()),
         )
         logger.debug(
             "KV pool load spec created req=%s vllm_cached=%d kvpool_cached=%d "
@@ -419,6 +431,7 @@ class BaseKVPoolScheduler(ABC):
             kv_cache_group_families=self.kv_cache_group_families,
             save_partial_block=self.layerwise_offload,
             hash_block_size=self.hash_block_size,
+            enable_partial_hash_hits=self.enable_partial_hash_hits,
         )
 
     def _process_new_request(
@@ -566,8 +579,10 @@ class BaseKVPoolScheduler(ABC):
         if not load_spec:
             return None
         num_tokens_to_compute = load_spec.kvpool_cached_tokens
-        if (num_tokens_to_compute % self._block_size != 0) and (
-            num_tokens_to_compute == len(request.prompt_token_ids) - 1
+        if (
+            not self.enable_partial_hash_hits
+            and (num_tokens_to_compute % self._block_size != 0)
+            and (num_tokens_to_compute == len(request.prompt_token_ids) - 1)
         ):
             num_tokens_to_compute = num_tokens_to_compute + 1
         previous_tracker = self._request_trackers.get(request_id)
@@ -624,7 +639,6 @@ class BaseKVPoolScheduler(ABC):
         for request in scheduler_output.scheduled_new_reqs:
             req_meta = self._process_new_request(request, scheduler_output, force_skip_save)
             if req_meta is not None:
-                self.retain_blocks_for_save(req_meta)
                 meta.add_request(req_meta)
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
@@ -639,6 +653,7 @@ class BaseKVPoolScheduler(ABC):
                     and not self.tp_mismatch
                     and not self.layerwise_offload
                     and not self.save_decode_cache
+                    and not self.enable_partial_hash_hits
                 ):
                     continue
                 if req_id in self._preempted_req_ids:
@@ -662,7 +677,6 @@ class BaseKVPoolScheduler(ABC):
                         force_skip_save,
                     )
                 if req_meta is not None:
-                    self.retain_blocks_for_save(req_meta)
                     meta.add_request(req_meta)
 
         if self._unfinished_requests:
@@ -685,9 +699,12 @@ class BaseKVPoolScheduler(ABC):
                 if request_id in unscheduled_request_ids:
                     req_meta = self._process_async_load_request(request_id, request, block_ids)
                     if req_meta is not None:
-                        self.retain_blocks_for_save(req_meta)
                         meta.add_request(req_meta)
 
+        if self.enable_partial_hash_hits:
+            self._prepare_boundary_saves(meta, scheduler_output)
+        for req_meta in meta.requests:
+            self.retain_blocks_for_save(req_meta)
         return meta
 
     def retain_blocks_for_save(self, req_meta: ReqMeta) -> None:
@@ -764,12 +781,15 @@ class KVPoolScheduler(BaseKVPoolScheduler):
     ) -> None:
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
         self._in_flight_save_blocks = InFlightSaveBlockTracker(vllm_config.parallel_config.world_size)
+        self._finished_partial_tail_metas: dict[str, ReqMeta] = {}
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         super().update_connector_output(connector_output)
         meta = connector_output.kv_connector_worker_meta
         if isinstance(meta, AscendStoreKVConnectorWorkerMetadata) and self._block_pool is not None:
-            self._in_flight_save_blocks.complete(meta.completed_events, self._block_pool)
+            for event_id in meta.failed_events:
+                logger.error("AscendStore save event %s failed; releasing only after all ranks ACK", event_id)
+            self._in_flight_save_blocks.complete(meta.completed_events, self._block_pool, meta.completed_ranks)
 
     def has_pending_push_work(self) -> bool:
         return self._in_flight_save_blocks.has_pending_work()
@@ -787,11 +807,140 @@ class KVPoolScheduler(BaseKVPoolScheduler):
 
     def retain_blocks_for_save(self, req_meta: ReqMeta) -> None:
         """Keep non-null Mamba blocks alive until their bulk save completes."""
-        if self.use_hybrid:
-            self._in_flight_save_blocks.retain(req_meta, self.num_speculative_blocks_by_group, self._block_pool)
+        if self.use_hybrid or self.enable_partial_hash_hits:
+            self._in_flight_save_blocks.retain(
+                req_meta,
+                self.num_speculative_blocks_by_group,
+                self._block_pool,
+                retain_all=self.enable_partial_hash_hits,
+            )
+
+    def _partial_tail_puts(self, req_meta: ReqMeta) -> list[BoundaryPut]:
+        """Publish Attention proof under the same boundary as Core's state."""
+        coord = self.cache_coordinator
+        assert coord is not None
+        prompt = req_meta.prefill_end_tokens or req_meta.num_prompt_tokens or 0
+        boundary = get_mamba_prefill_checkpoint_position(prompt, self.hash_block_size, self.use_eagle)
+        mamba_tails = {
+            put.num_tokens
+            for put in req_meta.boundary_puts or []
+            if put.group_id in coord.mamba_group_ids and put.num_tokens % self.grouped_block_size[put.group_id]
+        }
+        if not req_meta.publish_partial_tail and boundary not in mamba_tails:
+            return []
+        if not boundary or boundary // self.hash_block_size > len(req_meta.block_hashes):
+            return []
+        start = boundary // self.lcm_block_size * self.lcm_block_size
+        puts = []
+        for group_id in self.cacheable_group_ids:
+            if group_id in coord.mamba_group_ids:
+                continue
+            proof_end = boundary + coord.eagle_proof_margin_by_group.get(group_id, 0)
+            if proof_end > (req_meta.completed_token_len or 0):
+                continue
+            if proof_end // self.hash_block_size > len(req_meta.block_hashes):
+                continue
+            page = self.grouped_block_size[group_id]
+            blocks = req_meta.block_ids_by_group[group_id]
+            for index in range(start // page, min(cdiv(proof_end, page), len(blocks))):
+                if blocks[index] > 0:
+                    puts.append(BoundaryPut(group_id, blocks[index], min((index + 1) * page, proof_end)))
+        return puts
+
+    def _prepare_boundary_saves(self, meta: AscendConnectorMetadata, output: SchedulerOutput) -> None:
+        """Use Core's current tables and exact checkpoint offloads, never a positional Mamba mirror."""
+        state = output.kv_connector_block_state
+        assert state is not None, "Hash recovery requires Core boundary-state handoff"
+        save_metas = {req.req_id: req for req in meta.requests if req.can_save}
+        for req_id, entries in state.boundary_state_offloads.items():
+            tracker = self._request_trackers.get(req_id)
+            request = self._unfinished_requests.get(req_id)
+            if tracker is None or request is None or not self.can_put:
+                continue
+            accepted = [
+                BoundaryPut(group, block, boundary)
+                for group, block, boundary in entries
+                if group in self.cache_coordinator.mamba_group_ids
+                and block > 0
+                and boundary <= (tracker.prefill_end_tokens or tracker.num_prompt_tokens or 0)
+            ]
+            if not accepted:
+                continue
+            req_meta = save_metas.get(req_id)
+            if req_meta is None:
+                req_meta = ReqMeta(
+                    req_id=req_id,
+                    token_len_chunk=0,
+                    can_save=True,
+                    block_hashes=list(request[0].block_hashes),
+                    num_prompt_tokens=tracker.num_prompt_tokens,
+                    prefill_end_tokens=tracker.prefill_end_tokens,
+                    completed_token_len=tracker.token_len,
+                )
+                meta.add_request(req_meta)
+                save_metas[req_id] = req_meta
+            req_meta.boundary_puts = accepted
+        for req_meta in save_metas.values():
+            block_ids = state.get_block_ids(req_meta.req_id)
+            assert block_ids is not None, f"Missing Core save block table: {req_meta.req_id}"
+            req_meta.block_ids_by_group = [list(group) for group in block_ids]
+            req_meta.boundary_puts = [*self._partial_tail_puts(req_meta), *(req_meta.boundary_puts or [])]
+        # These blocks were pinned in the finish callback before Core freed the
+        # request. They are intentionally independent of this step's tables.
+        for req_meta in self._finished_partial_tail_metas.values():
+            meta.add_request(req_meta)
+        self._finished_partial_tail_metas.clear()
+
+    def register_finished_partial_tail(self, request, block_ids, partial_tail_offloads) -> bool:
+        """Take job-owned references before Core tears down a finishing request."""
+        if not self.enable_partial_hash_hits or not self.can_put or not partial_tail_offloads:
+            return False
+        tracker = self._request_trackers.get(request.request_id)
+        if tracker is None or not any(block_ids):
+            return False
+        boundaries = {boundary for _, _, boundary in partial_tail_offloads}
+        if len(boundaries) != 1:
+            raise ValueError("A partial-tail handoff must have one common boundary")
+        if next(iter(boundaries)) > (tracker.prefill_end_tokens or tracker.num_prompt_tokens or 0):
+            return False
+        if any(
+            group not in self.cache_coordinator.mamba_group_ids or block <= 0
+            for group, block, _ in partial_tail_offloads
+        ):
+            return False
+        req_meta = ReqMeta(
+            req_id=request.request_id,
+            token_len_chunk=0,
+            can_save=True,
+            block_ids_by_group=[list(group) for group in block_ids],
+            block_hashes=list(request.block_hashes),
+            num_prompt_tokens=tracker.num_prompt_tokens,
+            prefill_end_tokens=tracker.prefill_end_tokens,
+            completed_token_len=request.num_computed_tokens,
+            boundary_puts=[BoundaryPut(*put) for put in partial_tail_offloads],
+        )
+        req_meta.boundary_puts = [*self._partial_tail_puts(req_meta), *req_meta.boundary_puts]
+        assert request.request_id not in self._finished_partial_tail_metas
+        self.retain_blocks_for_save(req_meta)
+        self._finished_partial_tail_metas[request.request_id] = req_meta
+        return False
 
     def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> int | None:
         prompt_token_len = len(request.prompt_token_ids)
+        if self.enable_partial_hash_hits:
+            token_len = self.cache_coordinator.align_lookup_length(prompt_token_len)
+            if token_len <= num_computed_tokens:
+                return None
+            if self.client is None or self.client.closed:
+                self.client = LookupKeyClient(self.vllm_config)
+            result = self.client.lookup_result(
+                prompt_token_len,
+                request.block_hashes,
+                self.kv_cache_group_ids,
+                hbm_hit_tokens=num_computed_tokens,
+            )
+            self._lookup_tail_boundaries[request.request_id] = result.tail_key_boundaries
+            return result.hit_length
         if len(self.cacheable_group_ids) != len(self.original_block_size):
             # Private compressor state is rebuilt from a whole token page.
             token_len = self._floor_to_cache_transfer_granularity(max(prompt_token_len - 1, 0))

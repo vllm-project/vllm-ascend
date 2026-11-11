@@ -20,6 +20,7 @@ from tests.ut.distributed.ascend_store.test_pool_worker import make_worker, star
 from tests.ut.models.test_glm5next_cache_config import make_config, make_specs
 from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import create_kv_pool_scheduler
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
@@ -137,6 +138,10 @@ class TestGLM53Store(unittest.TestCase):
     def finish_layerwise_step(worker, metadata, *, load=False):
         for _ in range(4):
             worker.wait_for_layer_load()
+            # Model attention opens the prefetch gate and drains its window.
+            # The CPU fixture must drive that same hook, not bypass the fence.
+            with attention_transfer_window():
+                pass
             worker.save_kv_layer(metadata)
         thread = worker.kv_recv_thread if load else worker.kv_send_thread
         thread.request_queue.join()
@@ -164,10 +169,16 @@ class TestGLM53Store(unittest.TestCase):
                     scheduler.client = MagicMock()
                     scheduler.client.closed = False
                     scheduler.client.lookup.return_value = hit
+                    scheduler.client.lookup_result.return_value = SimpleNamespace(
+                        hit_length=hit, tail_key_boundaries=()
+                    )
                     request = SimpleNamespace(
                         request_id="hit", prompt_token_ids=[1] * prompt_len, num_tokens=prompt_len, block_hashes=[]
                     )
-                    self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (expected, False))
+                    self.assertEqual(
+                        scheduler.get_num_new_matched_tokens(request, 0),
+                        (expected, scheduler.load_async if expected else False),
+                    )
                 self.doCleanups()
 
     def test_nonlayerwise_round_trip_keeps_each_tp_state_and_private_tail(self):

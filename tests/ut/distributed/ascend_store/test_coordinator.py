@@ -124,6 +124,41 @@ class _FakePrefixManager:
 
 
 class TestAscendStoreCoordinator(unittest.TestCase):
+    def test_partial_hash_hit_uses_existing_coordinator(self):
+        """Hit arbitration changes alignment, not the physical cache page."""
+        groups = [
+            KVCacheGroupSpec(["attention"], _full_spec(32)),
+            KVCacheGroupSpec(
+                ["state"], MambaSpec(block_size=32, shapes=((1, 1),), dtypes=(torch.float32,), mamba_cache_mode="align")
+            ),
+        ]
+        hashes = _hashes(4)
+        for partial, expected in ((False, 32), (True, 48)):
+            with self.subTest(partial=partial):
+                coord = AscendStoreCoordinator(groups, 32, 16, enable_partial_hash_hits=partial)
+                exists = {(group, hashes[index]) for group in (0, 1) for index in (1, 2)}
+                _, hit = coord.find_longest_cache_hit(hashes, 64, ExternalCachedBlockPool(16, exists))
+                self.assertEqual(hit, expected)
+                self.assertEqual(coord.group_effective_block_sizes, [32, 32])
+                # The second page must be populated even for a sub-page hit.
+                self.assertEqual(coord.load_mask(hashes, hit)[0], [True] * ((hit + 31) // 32))
+
+    def test_partial_hash_hit_requires_every_group_boundary(self):
+        groups = [
+            KVCacheGroupSpec(["attention"], _full_spec(32)),
+            KVCacheGroupSpec(
+                ["state"], MambaSpec(block_size=32, shapes=((1, 1),), dtypes=(torch.float32,), mamba_cache_mode="align")
+            ),
+        ]
+        coord = AscendStoreCoordinator(groups, 32, 16, enable_partial_hash_hits=True)
+        hashes = _hashes(4)
+        exists = {(0, hashes[1]), (1, hashes[1]), (0, hashes[2])}
+        _, hit = coord.find_longest_cache_hit(hashes, 64, ExternalCachedBlockPool(16, exists))
+        self.assertEqual(hit, 32)
+        # The positional recurrent table is never a valid source for a CoW
+        # boundary save: it is handled separately via Core's exact block ID.
+        self.assertEqual(coord.store_mask(48)[1], [False])
+
     def test_compressed_group_hits_on_effective_granularity(self):
         block_hashes = _hashes(128)
         grouped_hash = get_block_hashes(block_hashes, group_block_size=128 * 128, hash_block_size=128)[0]
@@ -237,7 +272,7 @@ class TestAscendStoreCoordinator(unittest.TestCase):
             masks = coord.lookup_mask(512)
 
         self.assertEqual(masks, ([False, False, False, True],))
-        self.assertEqual(reachable.call_args.kwargs["retention_interval"], 256)
+        self.assertIsNone(reachable.call_args.kwargs["retention_interval"])
 
     def test_reachable_mask_preserves_optional_kwargs_for_flexible_signature(self):
         class FlexibleManager:

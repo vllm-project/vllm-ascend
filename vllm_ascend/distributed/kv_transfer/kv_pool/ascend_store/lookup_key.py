@@ -17,6 +17,8 @@ from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import StoreLookupResult, TailKeyBoundary
+
 if TYPE_CHECKING:
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
@@ -63,8 +65,17 @@ class LookupKeyClient:
         kv_cache_group_ids: list[int] | None = None,
         hbm_hit_tokens: int = 0,
     ) -> int:
+        return self.lookup_result(token_len, block_hashes, kv_cache_group_ids, hbm_hit_tokens).hit_length
+
+    def lookup_result(
+        self,
+        token_len: int,
+        block_hashes: list[BlockHash],
+        kv_cache_group_ids: list[int] | None = None,
+        hbm_hit_tokens: int = 0,
+    ) -> StoreLookupResult:
         if self._closed:
-            return 0
+            return StoreLookupResult(0)
 
         kv_cache_group_ids = kv_cache_group_ids or [0]
         hash_strs = [h.hex() for h in block_hashes]
@@ -83,9 +94,17 @@ class LookupKeyClient:
         except zmq.ZMQError:  # type: ignore[attr-defined]
             logger.exception("KV pool lookup failed; reporting 0 hit tokens")
             self.close()
-            return 0
+            return StoreLookupResult(0)
 
-        return int.from_bytes(resp, "big")
+        if len(resp) < 4 or (len(resp) - 4) % 8:
+            raise ValueError("Invalid AscendStore lookup reply")
+        return StoreLookupResult(
+            int.from_bytes(resp[:4], "big"),
+            tuple(
+                TailKeyBoundary(int.from_bytes(resp[i : i + 4], "big"), int.from_bytes(resp[i + 4 : i + 8], "big"))
+                for i in range(4, len(resp), 8)
+            ),
+        )
 
     def reset(self) -> bool:
         """Ask rank 0 to drain queued puts, then ``remove_all(force=True)``."""
@@ -160,13 +179,18 @@ class LookupKeyServer:
                                 use_layerwise=False,
                                 hbm_hit_tokens=hbm_hit_tokens,
                             )
+                            if isinstance(result, int):
+                                result = StoreLookupResult(result)
                             logger.debug(
                                 "KV pool lookup response token_len=%d groups=%s hit_tokens=%d",
                                 token_len,
                                 kv_group_ids,
-                                result,
+                                result.hit_length,
                             )
-                            response = result.to_bytes(4, "big")
+                            response = result.hit_length.to_bytes(4, "big") + b"".join(
+                                boundary.group_id.to_bytes(4, "big") + boundary.num_tokens.to_bytes(4, "big")
+                                for boundary in result.tail_key_boundaries
+                            )
                         elif msg_type == RESET_MSG:
                             self.pool_worker.reset_store()
                             logger.info("AscendStore reset via remove_all succeeded.")
