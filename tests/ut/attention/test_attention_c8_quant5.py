@@ -101,7 +101,7 @@ class TestC8Quant5MultiTokenDecode(TestAscendAttentionBackendImpl):
 
     @patch("torch_npu.npu_fused_infer_attention_score", create=True)
     def test_multi_token_decode_routes_to_tnd_quant5(self, mock_fia):
-        calls = []
+        calls: list[dict] = []
         mock_fia.side_effect = _fake_fia_recorder(calls)
         query = torch.randn(6, NUM_HEADS, HEAD_SIZE)
         output = torch.empty_like(query)
@@ -130,7 +130,7 @@ class TestC8Quant5MultiTokenDecode(TestAscendAttentionBackendImpl):
 
     @patch("torch_npu.npu_fused_infer_attention_score", create=True)
     def test_single_token_decode_keeps_bnsd(self, mock_fia):
-        calls = []
+        calls: list[dict] = []
         mock_fia.side_effect = _fake_fia_recorder(calls)
         query = torch.randn(2, NUM_HEADS, HEAD_SIZE)
         output = torch.empty_like(query)
@@ -147,7 +147,7 @@ class TestC8Quant5MultiTokenDecode(TestAscendAttentionBackendImpl):
 
     @patch("torch_npu.npu_fused_infer_attention_score", create=True)
     def test_chunked_prefill_mixed_batch_runs_decode_segment_and_prefill(self, mock_fia):
-        calls = []
+        calls: list[dict] = []
         mock_fia.side_effect = _fake_fia_recorder(calls)
         query = torch.randn(9, NUM_HEADS, HEAD_SIZE)
         output = torch.empty_like(query)
@@ -175,7 +175,7 @@ class TestC8Quant5MultiTokenDecode(TestAscendAttentionBackendImpl):
 
     @patch("torch_npu.npu_fused_infer_attention_score", create=True)
     def test_quant5_rejection_falls_back_and_persists(self, mock_fia):
-        calls = []
+        calls: list[dict] = []
 
         def rejecting_fia(*args, **kwargs):
             calls.append(kwargs)
