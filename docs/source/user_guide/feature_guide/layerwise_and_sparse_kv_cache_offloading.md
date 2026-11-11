@@ -200,9 +200,12 @@ export VLLM_ASCEND_SELECTIVE_LIM_LIBRARY="$PWD/build/selective-lim/lib/libselect
 ```
 
 Export the library path in every Decode worker's environment before startup.
-The current kernel supports `TopK <= hot capacity <= 2048` and uses one
-compute core. Select `memfabric_transfer_protocol=sdma` in the P/D connector
-configuration on both nodes.
+The current kernel supports `TopK <= hot capacity <= 2048`. It assigns each
+captured request row to an independent vector-core owner. The owner retains cached
+GM reads for TopK and cache state, and publishes indices, cache updates and
+copy descriptors through batched DMA. Slot assignment within each
+row preserves TopK order, including repeated selections. Select
+`memfabric_transfer_protocol=sdma` in the P/D connector configuration on both nodes.
 
 The complete shared-layer KV pool is allocated by MemFabric. TP0 gathers
 missing rows into a small TP-shared Host buffer. Each rank registers its

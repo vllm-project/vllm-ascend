@@ -54,7 +54,7 @@ def prepare_selective_lim(launch, manager, layer_id, topk_indices, metadata, seq
         sizes,
     )
     result = launch(
-        1,
+        rows,
         torch_npu.npu.current_stream().npu_stream,
         *(tensor.data_ptr() for tensor in inputs_outputs),
         rows,

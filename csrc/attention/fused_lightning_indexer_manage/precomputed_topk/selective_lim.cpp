@@ -9,6 +9,15 @@ constexpr int kMaxHot = 2048;
 constexpr int kHashSize = 8192;
 constexpr int kTailWidth = 2;
 
+template <HardEvent event>
+__aicore__ inline void SyncPipes()
+{
+    const event_t id = static_cast<event_t>(GetTPipePtr()->FetchEventID(event));
+    SetFlag<event>(id);
+    WaitFlag<event>(id);
+}
+
+
 __aicore__ inline int Lookup(const LocalTensor<int32_t>& tokens, int token)
 {
     uint32_t i = (static_cast<uint32_t>(token) * 2654435761U) & (kHashSize - 1);
@@ -36,7 +45,11 @@ extern "C" __global__ __aicore__ void selective_lim_topk(
     }
     TPipe pipe;
     TBuf<TPosition::VECCALC> buf;
+    TBuf<TPosition::VECCALC> cacheBuf;
+    TBuf<TPosition::VECCALC> physicalBuf;
     pipe.InitBuffer(buf, (2 * kHashSize + 4 * kMaxHot) * sizeof(int32_t));
+    pipe.InitBuffer(cacheBuf, (kMaxHot + 4) * sizeof(int64_t));
+    pipe.InitBuffer(physicalBuf, kMaxHot * sizeof(int32_t));
     auto tokens = buf.Get<int32_t>();
     auto slots = tokens[kHashSize];
     auto resident = slots[kHashSize];
@@ -44,31 +57,39 @@ extern "C" __global__ __aicore__ void selective_lim_topk(
     auto free = used[kMaxHot];
     auto sources = free[kMaxHot];
     auto logical = reinterpret_cast<__gm__ int64_t*>(topk);
+    auto cache = reinterpret_cast<__gm__ int64_t*>(keys);
+    auto cacheLocal = cacheBuf.Get<int64_t>();
+    auto selectedLocal = physicalBuf.Get<int32_t>();
+    auto addresses = buf.Get<int64_t>();
+    auto sizesLocal = cacheBuf.Get<int32_t>();
+    GlobalTensor<int64_t> cacheGm, sourceGm, destinationGm, previousGm;
+    GlobalTensor<int32_t> physicalGm, sizeGm;
+    cacheGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(keys));
+    sourceGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(src));
+    destinationGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(dst));
+    previousGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(previous));
+    physicalGm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(indices));
+    sizeGm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(sizes));
     auto blocks = reinterpret_cast<__gm__ int32_t*>(table);
     auto seq = reinterpret_cast<__gm__ int32_t*>(lengths);
     auto req = reinterpret_cast<__gm__ int64_t*>(requests);
     auto tail = reinterpret_cast<__gm__ int32_t*>(tails);
-    auto cache = reinterpret_cast<__gm__ int64_t*>(keys);
     auto old = reinterpret_cast<__gm__ int64_t*>(previous);
-    auto physical = reinterpret_cast<__gm__ int32_t*>(indices);
-    auto from = reinterpret_cast<__gm__ int64_t*>(src);
-    auto to = reinterpret_cast<__gm__ int64_t*>(dst);
-    auto count = reinterpret_cast<__gm__ int32_t*>(sizes);
-    GlobalTensor<int32_t> anchor;
-    anchor.SetGlobalBuffer(physical);
-    DataCacheCleanAndInvalid<int32_t, CacheLine::ENTIRE_DATA_CACHE, DcciDst::CACHELINE_OUT>(anchor);
-    for (int row = 0; row < rows; ++row) {
+    DataCacheCleanAndInvalid<int32_t, CacheLine::ENTIRE_DATA_CACHE, DcciDst::CACHELINE_OUT>(physicalGm);
+    // Each owner publishes only its row through MTE3, including unaligned cache/request tails.
+    for (int row = GetBlockIdx(); row < rows; row += GetBlockNum()) {
         const int base = row * width;
         const int cacheBase = row * (hot + 1);
         const int length = seq[row];
         const int64_t request = req[row];
-        for (int i = 0; i < kHashSize; ++i) {
-            tokens.SetValue(i, -1);
-        }
+        const bool keep = request != 0 && old[row] == request;
+        const int alignedWidth = (width + 7) / 8 * 8;
+        Duplicate(tokens, -1, kHashSize);
+        Duplicate(used, 0, hot);
+        SyncPipes<HardEvent::V_S>();
         for (int i = 0; i < hot; ++i) {
-            const int token = request != 0 && old[row] == request ? cache[cacheBase + i] : -1;
+            const int token = keep ? static_cast<int>(cache[cacheBase + i]) : -1;
             resident.SetValue(i, token);
-            used.SetValue(i, 0);
             if (token >= 0) {
                 const int h = Lookup(tokens, token);
                 tokens.SetValue(h, token);
@@ -97,7 +118,7 @@ extern "C" __global__ __aicore__ void selective_lim_topk(
                     }
                 }
             }
-            physical[base + col] = selected;
+            selectedLocal.SetValue(col, selected);
             sources.SetValue(col, source);
         }
         int available = 0;
@@ -113,9 +134,8 @@ extern "C" __global__ __aicore__ void selective_lim_topk(
         }
         int next = 0;
         for (int col = 0; col < width; ++col) {
-            const int pos = base + col;
             const int source = sources.GetValue(col);
-            int selected = physical[pos];
+            int selected = selectedLocal.GetValue(col);
             bool miss = false;
             if (source >= 0 && selected < 0) {
                 const int h = Lookup(tokens, source);
@@ -128,23 +148,45 @@ extern "C" __global__ __aicore__ void selective_lim_topk(
                     slots.SetValue(h, selected);
                     miss = true;
                 }
-                physical[pos] = selected;
+                selectedLocal.SetValue(col, selected);
             }
-            const int64_t sourceRow = source < 0 ? 0 : source;
-            const int64_t targetRow = row * rowStride + (miss ? selected : 0);
-            const int vPos = rows * width + pos;
-            from[pos] = hostK + sourceRow * kBytes;
-            from[vPos] = hostV + sourceRow * vBytes;
-            to[pos] = hotK + targetRow * kBytes;
-            to[vPos] = hotV + targetRow * vBytes;
-            count[pos] = miss ? kBytes : 0;
-            count[vPos] = miss ? vBytes : 0;
+            used.SetValue(col, miss ? 1 : 0);
         }
         for (int i = 0; i < hot; ++i) {
-            cache[cacheBase + i] = resident.GetValue(i);
+            cacheLocal.SetValue(i, resident.GetValue(i));
         }
-        cache[cacheBase + hot] = -1;
-        old[row] = request;
+        cacheLocal.SetValue(hot, -1);
+        SyncPipes<HardEvent::S_MTE3>();
+        DataCopyPad(physicalGm[base], selectedLocal, {1, static_cast<uint32_t>(width * sizeof(int32_t)), 0, 0, 0});
+        DataCopyPad(cacheGm[cacheBase], cacheLocal, {1, static_cast<uint32_t>((hot + 1) * sizeof(int64_t)), 0, 0, 0});
+        SyncPipes<HardEvent::MTE3_S>();
+
+        // Lookup is finished, so reuse its hash storage for the four address vectors.
+        for (int col = 0; col < width; ++col) {
+            const int source = sources.GetValue(col);
+            const bool miss = used.GetValue(col) != 0;
+            const int64_t sourceRow = source < 0 ? 0 : source;
+            const int64_t targetRow = row * rowStride + (miss ? selectedLocal.GetValue(col) : 0);
+            addresses.SetValue(col, hostK + sourceRow * kBytes);
+            addresses.SetValue(alignedWidth + col, hostV + sourceRow * vBytes);
+            addresses.SetValue(2 * alignedWidth + col, hotK + targetRow * kBytes);
+            addresses.SetValue(3 * alignedWidth + col, hotV + targetRow * vBytes);
+            sizesLocal.SetValue(col, miss ? kBytes : 0);
+            sizesLocal.SetValue(alignedWidth + col, miss ? vBytes : 0);
+        }
+        SyncPipes<HardEvent::S_MTE3>();
+        const DataCopyExtParams addressCopy{1, static_cast<uint32_t>(width * sizeof(int64_t)), 0, 0, 0};
+        const DataCopyExtParams sizeCopy{1, static_cast<uint32_t>(width * sizeof(int32_t)), 0, 0, 0};
+        DataCopyPad(sourceGm[base], addresses, addressCopy);
+        DataCopyPad(sourceGm[rows * width + base], addresses[alignedWidth], addressCopy);
+        DataCopyPad(destinationGm[base], addresses[2 * alignedWidth], addressCopy);
+        DataCopyPad(destinationGm[rows * width + base], addresses[3 * alignedWidth], addressCopy);
+        DataCopyPad(sizeGm[base], sizesLocal, sizeCopy);
+        DataCopyPad(sizeGm[rows * width + base], sizesLocal[alignedWidth], sizeCopy);
+        SyncPipes<HardEvent::MTE3_S>();
+        addresses.SetValue(0, request);
+        SyncPipes<HardEvent::S_MTE3>();
+        DataCopyPad(previousGm[row], addresses, {1, sizeof(int64_t), 0, 0, 0});
+        SyncPipes<HardEvent::MTE3_S>();
     }
-    DataCacheCleanAndInvalid<int32_t, CacheLine::ENTIRE_DATA_CACHE, DcciDst::CACHELINE_OUT>(anchor);
 }
