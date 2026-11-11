@@ -167,7 +167,10 @@ class KVPoolWorker:
         self.original_block_size = self._infer_group_block_sizes(vllm_config, kv_cache_config)
         cp_scale = self.pcp_size * self.dcp_size
         self.grouped_block_size = [block_size * cp_scale for block_size in self.original_block_size]
-        requested_hash_block_size = vllm_config.cache_config.hash_block_size
+        requested_hash_block_size = getattr(vllm_config.cache_config, "hash_block_size", None)
+        if not isinstance(requested_hash_block_size, int):
+            # The CANN vLLM 0.30 lane names the hashing unit prefix_match_unit.
+            requested_hash_block_size = getattr(vllm_config.cache_config, "prefix_match_unit", None)
         if not isinstance(requested_hash_block_size, int):
             requested_hash_block_size = None
         self.hash_block_size = (
