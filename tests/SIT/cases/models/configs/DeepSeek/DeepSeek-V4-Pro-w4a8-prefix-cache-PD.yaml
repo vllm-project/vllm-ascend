@@ -100,9 +100,8 @@ templates:
       - ${CP_SIZE}
       - --tensor-parallel-size
       - ${TP_SIZE}
-      - --headless
       - --nnodes
-      - "2"
+      - ${NNODES}
       - --node-rank
       - ${NODE_RANK}
       - --master-addr
@@ -167,7 +166,7 @@ templates:
       - ${TP_SIZE}
       - --headless
       - --nnodes
-      - "2"
+      - ${NNODES}
       - --node-rank
       - ${NODE_RANK}
       - --master-addr
