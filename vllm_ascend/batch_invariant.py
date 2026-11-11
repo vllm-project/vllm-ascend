@@ -114,9 +114,9 @@ def override_envs_for_invariance():
     # do not have deterministic mode enabled by default and must be explicitly set.
     # Enable batch consistency (level 3) with torch-npu >= 2.10.0.post7 and CANN 9.2.0.
     if Version(torch_npu.__version__) < Version("2.10.0.post7"):
-    raise RuntimeError(
-        f"Expected torch-npu >= 2.10.0.post7, got {torch_npu.__version__}"
-    )
+        raise RuntimeError(
+            f"Expected torch-npu >= 2.10.0.post7, got {torch_npu.__version__}"
+        )
     torch_npu.npu.set_deterministic_level(3)
 
     logger.debug(
