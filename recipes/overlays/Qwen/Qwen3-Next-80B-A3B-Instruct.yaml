@@ -1,0 +1,30 @@
+# Source: https://github.com/vllm-project/vllm/blob/52a65d7b19e9e3ad86bf1e3b6954e4e11eeec7da/recipes/models/Qwen/Qwen3-Next-80B-A3B-Instruct.yaml
+# Extracted with vllm-project/recipes@b08ad73889f9e33319d8ac9c887dec6a0975c55d.
+meta:
+  hardware:
+    ascend_910c: supported
+variants:
+  ascend_bf16_a3:
+    model_id: Qwen/Qwen3-Next-80B-A3B-Instruct
+    precision: bf16
+    label: BF16
+    vram_minimum_gb: 192
+    supported_hardware:
+      - ascend_910c
+    tp: 4
+    min_vllm_version: 0.16.0
+    description: BF16 checkpoint on one Atlas 800 A3 node (16x 64G Ascend 910C NPUs), TP4 with full-decode ACLGraph — the single-node configuration of the v0.23.0 tutorial. That tutorial is discontinued since vLLM-Ascend v0.30.0, so keep the v0.23.0 image tag.
+    extra_args:
+      - '--max-model-len'
+      - '32768'
+      - '--gpu-memory-utilization'
+      - '0.8'
+      - '--max-num-batched-tokens'
+      - '4096'
+      - '--compilation-config'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+    extra_env:
+      VLLM_USE_MODELSCOPE: 'True'
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.23.0-a3
