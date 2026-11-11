@@ -49,6 +49,7 @@
 #include "attention/fused_lightning_indexer_manage/fused_lightning_indexer_manage_torch_adpt.h"
 #include "attention/fused_scatter_copy_sparse_flash_attention/fused_scatter_copy_sparse_flash_attention_torch_adpt.h"
 #include "attention/fused_quant_lightning_indexer_manage/fused_quant_lightning_indexer_manage_torch_adpt.h"
+#include "attention/fused_indexer_prologue/fused_indexer_prologue_torch_adpt.h"
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "attention/attn_res_fwd/attn_res_fwd_torch_adpt.h"
 #include "attention/kda_gate_cumsum_vllm/kda_gate_cumsum_vllm_torch_adpt.h"
@@ -3029,6 +3030,15 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_fused_quant_lightning_indexer_manage", torch::kPrivateUse1,
              &vllm_ascend::npu_fused_quant_lightning_indexer_manage);
+
+    ops.def(
+        "fused_indexer_prologue("
+        "Tensor latent, Tensor wk_weight, Tensor norm_weight, Tensor cos, "
+        "Tensor sin, Tensor slot_mapping, Tensor(a!) k_cache, "
+        "Tensor(b!) scale_cache, float epsilon=1e-6) -> ()"
+    );
+    ops.impl("fused_indexer_prologue", torch::kPrivateUse1,
+             &vllm_ascend::fused_indexer_prologue_npu);
 
     // k2q_csr: q2k -> k2q CSR (Meta/Hist/RowPrefix/TilePrefix/Scatter)
     ops.def(

@@ -195,7 +195,7 @@ private:
     struct PlatformInfo platformInfo_;
 };
 
-void PpMatmulTilingApi::GetTilingData(PpMatmulTilingData &tiling)
+inline void PpMatmulTilingApi::GetTilingData(PpMatmulTilingData &tiling)
 {
     GetTileSize();
     tiling.numBatch = numBatch_;
@@ -217,7 +217,7 @@ void PpMatmulTilingApi::GetTilingData(PpMatmulTilingData &tiling)
     tiling.b0matPingPongBufferLen = b0matPingPongBufferLen_;
 }
 
-void PpMatmulTilingApi::GetTileSize()
+inline void PpMatmulTilingApi::GetTileSize()
 {
     bool priFlag = !(m_ < n_);
     uint32_t roundBase = pow(2, ceil(log(CeilDiv(priFlag ? n_ : m_, CONST_16)))) * CONST_16;
@@ -252,7 +252,7 @@ void PpMatmulTilingApi::GetTileSize()
     kLoop_ = CeilDiv(k_, k0_);
 }
 
-uint32_t PpMatmulTilingApi::ComputeK0ForOnlyBpingpong(uint32_t l1AbSize)
+inline uint32_t PpMatmulTilingApi::ComputeK0ForOnlyBpingpong(uint32_t l1AbSize)
 {
     enLoadAllAmat_ = true;
     b0matPingPongBufferLen_ = static_cast<uint32_t>(
@@ -263,13 +263,13 @@ uint32_t PpMatmulTilingApi::ComputeK0ForOnlyBpingpong(uint32_t l1AbSize)
     return k0B0 > CONST_512 ? RoundDown(k0B0, CONST_512) : k0B0;
 }
 
-bool PpMatmulTilingApi::IsLoadAllAmat(uint32_t l1AbSize)
+inline bool PpMatmulTilingApi::IsLoadAllAmat(uint32_t l1AbSize)
 {
     return (coreLoop_ > blockDim_) && enDequant_ && (kLoop_ > 1) &&
            (l1AbSize > RoundUp(m_, CONST_16) * RoundUp(k_, CONST_32) * inDataSize_) && (mLoop_ == 1);
 }
 
-uint32_t PpMatmulTilingApi::ComputeK0ForABpingpong(uint32_t l1AbSize)
+inline uint32_t PpMatmulTilingApi::ComputeK0ForABpingpong(uint32_t l1AbSize)
 {
     uint32_t k0Max = static_cast<uint32_t>(static_cast<float>(l1AbSize / DIM_2) / ((m0_ + n0_) * inDataSize_));
     uint32_t tmpK0;
@@ -284,7 +284,7 @@ uint32_t PpMatmulTilingApi::ComputeK0ForABpingpong(uint32_t l1AbSize)
     return tmpK0;
 }
 
-uint32_t PpMatmulTilingApi::ComputeL1AbSize()
+inline uint32_t PpMatmulTilingApi::ComputeL1AbSize()
 {
     if (enDequant_ && deqOnTheFly_) {
         return L1_BUFFER_SIZE;
@@ -292,7 +292,7 @@ uint32_t PpMatmulTilingApi::ComputeL1AbSize()
     return enDequant_ ? (L1_BUFFER_SIZE - L1_BIAS_SIZE - L1_SCALE_SIZE) : L1_BUFFER_SIZE;
 }
 
-float PpMatmulTilingApi::GetCost(const uint32_t m0, const uint32_t n0)
+inline float PpMatmulTilingApi::GetCost(const uint32_t m0, const uint32_t n0)
 {
     float aCoef = 1.0;
     float bCoef = 1.0;
@@ -321,7 +321,7 @@ float PpMatmulTilingApi::GetCost(const uint32_t m0, const uint32_t n0)
     return 1 / (aCoef * static_cast<float>(n0)) + 1 / (bCoef * static_cast<float>(m0));
 }
 
-void PpMatmulTilingApi::UpdateTileSize(const uint32_t m0, const uint32_t n0)
+inline void PpMatmulTilingApi::UpdateTileSize(const uint32_t m0, const uint32_t n0)
 {
     m0_ = m0;
     n0_ = n0;
@@ -349,7 +349,7 @@ void PpMatmulTilingApi::UpdateTileSize(const uint32_t m0, const uint32_t n0)
     blockDim_ = Min(coreLoop_, maxNumCubeCore);
 }
 
-void PpMatmulTilingApi::Swizzle()
+inline void PpMatmulTilingApi::Swizzle()
 {
     float minCost = m_ * k_ + k_ * n_;
     for (uint32_t i = 1; i <= blockDim_; ++i) {
@@ -398,7 +398,7 @@ private:
     struct OpParam opParam;
 };
 
-void MlaPreprocessTiling::RmsNormQuantTiling()
+inline void MlaPreprocessTiling::RmsNormQuantTiling()
 {
     tilingData->rmsNumCore1 = platformInfo.coreNumAiv;
     tilingData->rmsNumCol1 = opParam.hiddenStateDim;
@@ -410,7 +410,7 @@ void MlaPreprocessTiling::RmsNormQuantTiling()
     tilingData->rmsQuantMin2 = -CONST_128;
 }
 
-void MlaPreprocessTiling::RopeConcatTiling()
+inline void MlaPreprocessTiling::RopeConcatTiling()
 {
     uint32_t ntokens = opParam.N;
     uint32_t hiddenSizeQ = opParam.qkRopeHeadDim * opParam.headNum;
@@ -458,7 +458,7 @@ void MlaPreprocessTiling::RopeConcatTiling()
     tilingData->lastCoreLoopNLast = lastCoreLoopNLast;
 }
 
-void MlaPreprocessTiling::EinSumQuantTiling()
+inline void MlaPreprocessTiling::EinSumQuantTiling()
 {
     uint32_t aivCore = platformInfo.coreNumAiv;
     uint32_t ubSize = UB_SIZE - 1024;
@@ -515,7 +515,7 @@ void MlaPreprocessTiling::EinSumQuantTiling()
     tilingData->esqColTail = esqColTail;
 }
 
-void MlaPreprocessTiling::SetMlapoWorkSpace()
+inline void MlaPreprocessTiling::SetMlapoWorkSpace()
 {
     uint32_t hiddenStrideRope = opParam.qkNopeHeadDim + opParam.qkRopeHeadDim;
     uint32_t hiddenStrateMm = opParam.qLoraRank + opParam.kvLoraRank + opParam.qkRopeHeadDim;
@@ -553,7 +553,7 @@ void MlaPreprocessTiling::SetMlapoWorkSpace()
     tilingData->s5Offset = tilingData->s4Offset + maxWorkspaceSize;
 }
 
-void MlaPreprocessTiling::SetTilingKey()
+inline void MlaPreprocessTiling::SetTilingKey()
 {
     uint64_t tilingKey = (static_cast<uint64_t>(opParam.enableInnerOut)) << 9;
     tilingKey |= (static_cast<uint64_t>(opParam.inDtype == OpParam::InputDtype::BFLOAT16)) << 8;
@@ -564,7 +564,7 @@ void MlaPreprocessTiling::SetTilingKey()
     tilingData->tilingKey = tilingKey;
 }
 
-void MlaPreprocessTiling::Init()
+inline void MlaPreprocessTiling::Init()
 {
     tilingData->numCore = platformInfo.coreNumAic;
     tilingData->n = opParam.N;
