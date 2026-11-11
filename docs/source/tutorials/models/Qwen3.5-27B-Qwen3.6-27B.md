@@ -20,6 +20,27 @@ Please refer to the [Supported Features List](../../user_guide/support_matrix/su
 
 Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for feature configuration information.
 
+### 2.1 Model Runner V2
+
+Model Runner V2 is the only model runner in vLLM-Ascend, so `Qwen3.6-27B` runs on it without any extra switch. An explicit `VLLM_USE_V2_MODEL_RUNNER=0` is rejected at startup.
+
+Verified configuration on Atlas 800T A3:
+
+| Item | Value |
+|------|-------|
+| Weights | `Qwen3.6-27B` BF16, weight revision `c53c4820996523bb6413f1002e24c5dfb0bad548` |
+| Parallelism | TP=2 |
+| Speculative decoding | `qwen3_5_mtp`, 3 speculative tokens |
+| Graph mode | `--compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE"}'` |
+| Serving | OpenAI-compatible server, batch=1, 128-token prompt |
+
+In that configuration the greedy output tokens are identical to the recorded Model Runner V1 output on vLLM-Ascend v0.30.0, and every generated token stays inside the logprob tolerance used for that comparison (`0.0689` for the first token, which is the default of the repository's logprob helper, and `0.1378` for the decode steps). A separate TP=1 FP16 eager check with speculative decoding disabled also reproduces the recorded tokens; the eager path is noticeably slower, so prefer ACL Graph for serving.
+
+Two limitations are tracked in the shared MoE sibling and apply to the same batched speculative-decoding path:
+
+- [#21741](https://github.com/vllm-project/vllm-ascend/issues/21741) — host-side prefill overhead that correlates with the CANN ACLNN operator cache filling up. `ACLNN_CACHE_LIMIT` is exposed as a diagnostic knob: measure before and after, and keep a larger value only if it actually helps.
+- [#21742](https://github.com/vllm-project/vllm-ascend/issues/21742) — batched speculative decoding is not self-consistent yet. For accuracy validation submit one request per `generate()` call.
+
 ## 3 Prerequisites
 
 ### 3.1 Model Weight

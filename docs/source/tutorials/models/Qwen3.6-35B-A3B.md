@@ -365,7 +365,7 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
     - `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
     - To enable MTP speculative decoding, use `--speculative_config '{"method": "mtp", "num_speculative_tokens": 1}'`. We recommend setting num_speculative_tokens to 1. If your usage scenario involves fewer than two concurrent requests, it is recommended to enable MTP. Otherwise, it is recommended not to enable MTP.
 
-Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [Public FAQs](../../faqs.md) first, and then check the model-specific FAQ in [Section 10](#10-faq).
+Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [Public FAQs](../../faqs.md) first, and then check the model-specific FAQ in [Section 11](#11-faq).
 
 **Service Verification:**
 
@@ -479,11 +479,46 @@ Recommended tuning order:
 | Prefix caching | `--enable-prefix-caching` | Improves repeated-prefix workloads. | Monitor HBM usage for long-context workloads; keep prefix caching disabled on Atlas 300I DUO (see [Section 5.1](#51-single-node-online-deployment)). |
 | Qwen3.6 MTP speculative decoding | `--speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'` | Can improve decode throughput when stable and accepted tokens are high. | In [Section 5.1](#51-single-node-online-deployment), 950DT Products and A2/A3 Series use 3 speculative tokens; the optional Atlas 300I DUO configuration uses 1. Validate stability, TTFT, TPOT, and throughput for your workload. |
 
-## 10 FAQ
+## 10 Known Issues on Model Runner V2
+
+Model Runner V2 is the only runner in vLLM-Ascend; the two items below are open and affect batched serving.
+
+### 10.1 Host-side prefill overhead when speculative decoding and ACL Graph are both enabled
+
+**Phenomenon:** prefill TTFT is tens of percent higher than the previous runner while NPU kernel time is flat or slightly lower.
+
+**Cause:** CANN caches at most `ACLNN_CACHE_LIMIT` compiled operator descriptors per worker process, and the default is `10000`. Speculative decoding with ACL Graph captures extra prefill and decode graphs, so the operator/shape working set grows past that ceiling. The executor then stops reusing descriptors and recomputes tiling and workspace on the host for every call. A torch profile of the affected configuration shows a large `aclnn*GetWorkspaceSize` and `*_Tiling` share; some operators keep the same call count but cost about 13x per call.
+
+**Diagnosis and mitigation:** the ceiling is configurable. Export a larger limit in the worker
+environment before startup, then re-measure the same workload:
+
+```bash
+export ACLNN_CACHE_LIMIT=100000
+```
+
+`ACLNN_CACHE_LIMIT` is a diagnostic knob rather than a guaranteed fix: in our own A/B runs on
+vLLM-Ascend `v0.30.0` (Qwen3.6-35B-A3B-w8a8, TP=2, MTP=3, 12-wave prefill at 2048 and 8192 tokens)
+raising it did not change the prefill wave time beyond run-to-run noise. Raising it also increases
+host memory usage, because more operator descriptors are retained per worker. Keep the larger value
+only if your own before/after comparison shows a reproducible gain. See
+[#21741](https://github.com/vllm-project/vllm-ascend/issues/21741) for the profile signature and the
+discussion.
+
+### 10.2 Batched speculative decoding is not self-consistent yet
+
+**Phenomenon:** with more than one sequence in a scheduler batch, two identical prompts can produce different final token sequences. The first divergent token is not fixed; it has been observed anywhere between index 10 and index 22 depending on scheduling and prefix-cache settings.
+
+**Additional observation:** token equality is not sufficient as a pass criterion. Even the request whose token ids do match shows same-token logprob differences of up to `0.57` nats against a single-request run, i.e. several decode steps fall outside the repository decode tolerance (`0.1378`).
+
+**Affected scope:** the batched speculative-decoding path. With one request at a time, or with speculative decoding disabled, the outputs are reproducible. Chunked prefill is mandatory for the `align` mamba cache mode, so a batch always mixes prefill and decode; this cannot be avoided by disabling chunked prefill.
+
+**Solution:** for accuracy validation, submit one request per `generate()` call and compare token ids together with same-token logprobs against the frozen reference (Model Runner V1 on vLLM-Ascend v0.30.0). Track progress in [#21742](https://github.com/vllm-project/vllm-ascend/issues/21742).
+
+## 11 FAQ
 
 For common environment, installation, and general parameter issues, refer to [Public FAQs](../../faqs.md). This section only covers model-specific issues for Qwen3.6-35B-A3B.
 
-### 10.1 Why does the service report OOM during startup or soon after accepting requests?
+### 11.1 Why does the service report OOM during startup or soon after accepting requests?
 
 **Phenomenon:** The service fails during profile run, or it starts successfully but reports OOM when real traffic arrives.
 
@@ -491,7 +526,7 @@ For common environment, installation, and general parameter issues, refer to [Pu
 
 **Solution:** Use the W8A8 model with `--quantization ascend` when possible, lower `--max-model-len`, lower `--max-num-seqs`, lower `--max-num-batched-tokens`, or reduce `--gpu-memory-utilization`. Keep `PYTORCH_NPU_ALLOC_CONF=expandable_segments:True`.
 
-### 10.2 Why does enabling prefix caching not improve performance?
+### 11.2 Why does enabling prefix caching not improve performance?
 
 **Phenomenon:** Prefix caching is enabled, but throughput or latency does not improve.
 

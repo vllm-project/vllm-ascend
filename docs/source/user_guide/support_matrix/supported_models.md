@@ -14,6 +14,16 @@
 |🔴|Unmaintained|Previously supported, but now discontinued and no longer maintained. Issues will not be fixed.|Do not use in new projects.|
 |❌|Unsupported|Not implemented in the current version and cannot be used.|Not available.|
 
+**Qwen3.5 / Qwen3.6 on Model Runner V2:**
+
+Model Runner V2 is the only model runner in this release, so the Qwen3.5/Qwen3.6 rows above are
+V2 results. Two known issues are tracked and do not affect single-request accuracy:
+[#21741](https://github.com/vllm-project/vllm-ascend/issues/21741) (host-side prefill overhead when
+speculative decoding and ACL Graph are both enabled; `ACLNN_CACHE_LIMIT` is exposed as a diagnostic
+knob — measure before and after before keeping a larger value) and
+[#21742](https://github.com/vllm-project/vllm-ascend/issues/21742) (batched speculative decoding is
+not self-consistent; use one request per `generate()` for accuracy checks).
+
 ## Text-Only Language Models
 
 ### Generative Models
