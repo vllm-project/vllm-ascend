@@ -14,10 +14,10 @@ keep serving topology and optimization flags fixed while changing request loads.
 The GLM cases retain their own datasets, request counts and TPOT targets rather
 than copying MiniMax performance baselines or claiming identical prefix ratios.
 
-| Platform | Allocation | P: nodes 0-1 | D: nodes 2-3 | KV format | Max context |
+| Platform | Allocation | P allocation | D allocation | KV format | Max context |
 | --- | --- | --- | --- | --- | --- |
-| A3 W8A8C8 | 4 x 16 logical devices | PP2, PCP16, TP1 | DP16, TP2 | INT8 | 131072 |
-| A5 W8A8C8 / W4A4C8 | 4 x 8 devices | PP2, PCP8, TP1 | DP16, TP1 | FP8 | 135000 |
+| A3 W8A8C8 | 4 x 16 logical devices | Nodes2-3: PP2, PCP16, TP1 | Nodes0-1: DP16, TP2 | INT8 | 131072 |
+| A5 W8A8C8 / W4A4C8 | 4 x 8 devices | Nodes0-1: PP2, PCP8, TP1 | Nodes2-3: DP16, TP1 | FP8 | 135000 |
 
 Each family uses one workload-sized serving configuration throughout all phases,
 with P prefix caching enabled and D prefix caching disabled. Both roles use
@@ -106,10 +106,14 @@ For each performance profile, one service lifecycle runs these steps:
    prompt set with output 1024 and no intervening reset.
 4. After all performance profiles, reset P prefix cache and run GPQA once.
 
-Cache resets use the existing `curl_cmd` benchmark type and the master P API at
-`http://127.0.0.1:7100/reset_prefix_cache`; they do not restart the service or
+Cache resets use the existing `curl_cmd` benchmark type and the non-headless P API at
+port7100 (`/reset_prefix_cache`); they do not restart the service or
 change compilation settings. HTTP errors fail the benchmark via `curl --fail`.
-The public test endpoint on node 0 must remain port 7100 if these commands are reused.
+A5 keeps P on node0 and uses the local endpoint. A3 puts D on nodes0-1 and
+P on nodes2-3; its resets target `${NODE_2_IP}:7100`, resolved by the config
+loader before execution. Node indices are logical allocation positions, not
+fixed physical hosts. The role swap does not fix dependency installation or
+establish that the earlier SuperKernel failure is resolved.
 
 The explicit resets prevent earlier full-prompt replays from warming the measured
 P/PD phases. AISBench can still perform its own internal warmup; inspect actual

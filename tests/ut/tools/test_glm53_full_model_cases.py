@@ -53,7 +53,7 @@ class FullModelConfigTests(unittest.TestCase):
                         self.assertEqual(connector["kv_role"], "kv_producer")
                         self.assertGreater(rank.cp_size, 1)
                         self.assertEqual(command.env["VLLM_PP_LAYER_PARTITION"], "42,36")
-                        self.assertEqual("--headless" in command.cmd, rank.node_index == 1)
+                        self.assertEqual("--headless" in command.cmd, rank.node_rank == 1)
                         caching = "--enable-prefix-caching" in command.cmd
                         self.assertTrue(caching)
                     else:
@@ -76,7 +76,7 @@ class FullModelConfigTests(unittest.TestCase):
                     max_len = int(args[args.index("--max-model-len") + 1])
                     self.assertEqual(max_len, 135000 if a5 else 131072)
                     self.assertNotIn("--enable-batch-sharded-sampling", args)
-                    if template["node_index"] < 2:
+                    if template["node_index"] in config["routing"]["groups"]["prefiller"]:
                         self.assertEqual(additional["enable_fused_mc2"], 1)
                         self.assertTrue(additional["enable_flashcomm1"])
                         self.assertIn("--enforce-eager", args)
@@ -121,7 +121,9 @@ class FullModelConfigTests(unittest.TestCase):
             self.assertEqual(case.get("tpot_threshold"), None if mode == "prefill" else 20)
         for path in sorted(CONFIG_DIR.glob("*.yaml")):
             config = ExternalDPConfigLoader.from_yaml(str(path), cluster_ips=[f"192.0.2.{i + 1}" for i in range(4)])
-            master_p = next(rank for rank in RankResolver(config).resolve() if rank.node_index == 0)
+            master_p = next(
+                rank for rank in RankResolver(config).resolve() if rank.role == "prefiller" and not rank.is_headless
+            )
             self.assertEqual(master_p.role, "prefiller")
             self.assertFalse(master_p.is_headless)
             self.assertEqual(master_p.port, 7100)
@@ -132,7 +134,8 @@ class FullModelConfigTests(unittest.TestCase):
                 if name.startswith("reset_before_"):
                     self.assertEqual(case["case_type"], "curl_cmd")
                     self.assertIn("--fail", case["cmds"][0])
-                    self.assertIn("http://127.0.0.1:7100/reset_prefix_cache", case["cmds"][0])
+                    reset_host = "192.0.2.3" if "-A3-" in path.stem else "127.0.0.1"
+                    self.assertIn(f"http://{reset_host}:7100/reset_prefix_cache", case["cmds"][0])
                 elif name.startswith(("prefill_", "pd_")) and not name.endswith("_warmup"):
                     self.assertEqual(names[index - 1], "reset_before_" + name)
                 elif name.startswith("decode_") and not name.endswith("_warmup"):
@@ -214,14 +217,17 @@ class FullModelConfigTests(unittest.TestCase):
                 for case in config["benchmarks"].values()
                 if case["case_type"] in ("performance", "accuracy")
             )
-            global_dp = config["config"][2]["dp_size"]
-            self.assertEqual(sum(node["dp_size_local"] for node in config["config"][2:]), global_dp)
+            decode_nodes = [
+                node for node in config["config"] if node["node_index"] in config["routing"]["groups"]["decoder"]
+            ]
+            global_dp = decode_nodes[0]["dp_size"]
+            self.assertEqual(sum(node["dp_size_local"] for node in decode_nodes), global_dp)
             balanced_peak = math.ceil(peak_clients / global_dp)
             for template in config["templates"]:
                 args = template["server_cmd_template"]
                 seqs = int(args[args.index("--max-num-seqs") + 1])
                 tokens = int(args[args.index("--max-num-batched-tokens") + 1])
-                if template["node_index"] < 2:
+                if template["node_index"] in config["routing"]["groups"]["prefiller"]:
                     # The P pipeline has DP1; PP and PCP do not divide its request load.
                     self.assertGreaterEqual(seqs, peak_clients)
                     self.assertGreaterEqual(tokens, seqs)
