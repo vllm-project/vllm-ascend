@@ -162,7 +162,7 @@ class TestMooncakeHybrid(unittest.TestCase):
             groups.append(KVCacheGroupSpec([name], UniformTypeKVCacheSpecs.from_specs({name: tail})))
         config = SimpleNamespace(num_blocks=8, kv_cache_groups=groups)
         with patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVPoolWorker._build_cache_coordinator",
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.BaseKVPoolWorker._build_cache_coordinator",
             return_value=None,
         ):
             worker = make_worker(

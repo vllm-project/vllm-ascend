@@ -25,7 +25,6 @@ from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     packed_npu_ipc_consumer,
     packed_npu_ipc_producer,
 )
-from vllm_ascend.utils import vllm_version_is
 
 if TYPE_CHECKING:
     from vllm.distributed.weight_transfer.base import (
@@ -268,9 +267,8 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
 
     def _send_packed(self, source: "WeightSource") -> None:
         """Send weights in bounded-memory chunks (packed mode)."""
-        # vLLM main replaced `WeightSource.__iter__` with `iter_full()`;
-        # v0.32.0 still iterates the source directly.
-        iterator = iter(source) if vllm_version_is("0.32.0") else source.iter_full()
+        # Both supported versions drive the WeightSource iter_full protocol.
+        iterator = source.iter_full()
         for chunk in packed_npu_ipc_producer(
             iterator=iterator,
             npu_uuid=self.npu_uuid,

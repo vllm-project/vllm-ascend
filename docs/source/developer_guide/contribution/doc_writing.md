@@ -6,13 +6,13 @@
 
 ## Guide to Writing Triton Operator Docs
 
-New Model Runner V2 Triton implementations belong under
+New Triton implementations belong under
 `vllm_ascend/ops/triton/`, with their operator documents under
 `vllm_ascend/ops/triton/docs/`. The `v2/` namespace is retired by the operator
 layout refactor.
 
 Use the [operator documentation template](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/ops/triton/docs/triton_description_specification.md)
-for V1/V2 placement rules and the operator inventory before adding or moving an
+for the placement rules and the operator inventory before adding or moving an
 operator document.
 
 ## Fullscreen tables

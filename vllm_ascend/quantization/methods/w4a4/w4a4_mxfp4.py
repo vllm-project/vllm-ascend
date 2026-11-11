@@ -77,6 +77,7 @@ class AscendW4A4MXFP4DynamicLinearMethod(AscendLinearScheme):
     weights are stored in packed FP4-compatible format with per-group scales.
     """
 
+    quant_type: QuantType = QuantType.W4A4MXFP
     model_dtype = None
     weight_switch_gather_specs = (
         WeightSwitchGatherSpec("weight"),
@@ -290,6 +291,8 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
             # MegaMoe consumes the non-transposed per-expert weight/scale lists
             # built in process_weights_after_loading (the non-mega path uses the
             # transposed single tensors below).
+            shared_fusion = getattr(layer, "ascend_megamoe_shared_fusion", None)
+            shared = shared_fusion.weights if shared_fusion is not None else None
             return MoEWeights(
                 w1=layer.cann_mega_moe_w13_weight_list,
                 w2=layer.cann_mega_moe_w2_weight_list,
@@ -297,6 +300,10 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
                 w2_scale=layer.cann_mega_moe_w2_weight_scale_list,
                 w1_scale_bias=None,
                 w2_scale_bias=None,
+                shared_w1=shared.w1 if shared else None,
+                shared_w2=shared.w2 if shared else None,
+                shared_w1_scale=shared.w1_scale if shared else None,
+                shared_w2_scale=shared.w2_scale if shared else None,
             )
         else:
             return MoEWeights(

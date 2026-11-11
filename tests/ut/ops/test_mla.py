@@ -16,8 +16,15 @@ from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention, IndexerWrapper
 
 
 class TestAscendSFAIndexerBackend(TestBase):
+    def setUp(self):
+        super().setUp()
+        sharded = patch("vllm_ascend.attention.indexer.enable_sfa_dcp_sharded_indexer", return_value=False)
+        sharded.start()
+        self.addCleanup(sharded.stop)
+
     def _make_vllm_indexer(self):
         mock_indexer = MagicMock()
+        mock_indexer.config = SimpleNamespace()
         mock_indexer.n_head = 64
         mock_indexer.head_dim = 128
         mock_indexer.topk_tokens = 2048
@@ -118,6 +125,8 @@ class TestAscendSFAIndexerBackend(TestBase):
         indexer.enable_sparse_li_c4 = False
         indexer.use_torch_npu_lightning_indexer = False
         indexer._use_fused_cache_store = False
+        indexer._sharded_dcp = False
+        indexer._local_topk = False
         indexer.wk_weights_proj = MagicMock(return_value=(torch.zeros(2, 128 + 4), None))
         indexer.wq_b = MagicMock(return_value=(torch.zeros(2, 2 * 128), None))
         indexer.use_pcp = False
@@ -129,6 +138,7 @@ class TestAscendSFAIndexerBackend(TestBase):
     def _make_indexer_metadata(self):
         return SimpleNamespace(
             slot_mapping=MagicMock(name="slot_mapping"),
+            cache_scatter_indices=MagicMock(name="cache_scatter_indices"),
             uses_pcp_sharded_layout=False,
             num_decode_tokens=0,
             actual_seq_lengths_query=MagicMock(),
@@ -186,6 +196,7 @@ class TestAscendSFAIndexerBackend(TestBase):
             k_li,
             None,
             indexer_metadata.slot_mapping,
+            indexer_metadata.cache_scatter_indices,
         )
 
     def test_forward_skip_topk_still_persists_cache(self):
