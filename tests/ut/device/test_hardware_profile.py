@@ -6,9 +6,9 @@ from typing import cast
 
 import pytest
 import torch
-
 from vllm_ascend.device.device_config import get_device_config
 from vllm_ascend.device.hardware import AscendDeviceType
+
 from vllm_ascend.device.hardware_profile import (
     AttentionBackendFamily,
     CPUBindingMode,
@@ -248,6 +248,19 @@ def test_gdn_fixed_spec_recurrent_fallback_policy(device_type, expected_min_quer
 )
 def test_minimax_m3_gbsa_bf16_softmax_precision_policy(device_type, expected_precision):
     assert get_hardware_profile(device_type).minimax_m3_gbsa_bf16_softmax_precision == expected_precision
+
+
+@pytest.mark.parametrize(
+    "device_type,expected",
+    [
+        (AscendDeviceType.A2, False),
+        (AscendDeviceType.A3, True),
+        (AscendDeviceType.A5, False),
+        (AscendDeviceType._310P, False),
+    ],
+)
+def test_row_weighted_dcp_combine_policy(device_type, expected):
+    assert get_hardware_profile(device_type).prefer_row_weighted_dcp_combine is expected
 
 
 def test_current_hardware_profile_uses_device_config() -> None:

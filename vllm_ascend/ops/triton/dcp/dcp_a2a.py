@@ -7,16 +7,18 @@ import torch.distributed as dist
 from vllm.distributed.parallel_state import GroupCoordinator, _groups
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
+from vllm_ascend.ops.triton.dcp.dcp_jit import _launch_kernel
+from vllm_ascend.ops.triton.dcp.sfa_dcp_exchange import can_exchange, exchange
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
+from vllm_ascend.device.hardware_profile import get_current_hardware_profile
 from vllm_ascend.ops.triton.dcp.dcp_a2a_batched import (
     MAX_UNROLLED_COMBINE_ELEMENTS,
     _encode_lse_fields,
     _fused_dcp_lse_combine_batched_kernel,
+    _fused_dcp_lse_combine_row_weights,
     _pack_dcp_output_lse_batched_kernel,
 )
-from vllm_ascend.ops.triton.dcp.dcp_jit import _launch_kernel
-from vllm_ascend.ops.triton.dcp.sfa_dcp_exchange import can_exchange, exchange
-from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
 
 @triton.jit
@@ -475,8 +477,19 @@ def _launch_fused_dcp_lse_combine(
             else 1
         )
         grid_size = min(vector_cores, triton.cdiv(total_rows, block_rows))
+        # Rank weights amortize decoding on wide rows with many contributors.
+        # Keep narrow rows and small worlds on the existing batched path.
+        row_weights = (
+            get_current_hardware_profile().prefer_row_weighted_dcp_combine
+            and dcp_size >= 8
+            and head_dim >= 256
+            and recv.stride(-1) == 1
+            and (local_output is None or local_output.stride(1) == head_dim)
+        )
+        if row_weights:
+            grid_size = min(vector_cores, total_rows)
         launch(
-            _fused_dcp_lse_combine_batched_kernel,
+            _fused_dcp_lse_combine_row_weights if row_weights else _fused_dcp_lse_combine_batched_kernel,
             (grid_size,),
             recv,
             output,
