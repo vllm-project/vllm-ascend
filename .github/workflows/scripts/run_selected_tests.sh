@@ -62,6 +62,11 @@ setup_coverage() {
   local covdata_dir="${project_root}/tests/outputs/${test_basename}/covdata"
   mkdir -p "${covdata_dir}"
   export COVERAGE_FILE="${covdata_dir}/coverage"
+  # coverage.py imports the Triton plugin from the repo, including in spawned workers.
+  case ":${PYTHONPATH:-}:" in
+    *":${project_root}:"*) ;;
+    *) export PYTHONPATH="${project_root}${PYTHONPATH:+:${PYTHONPATH}}" ;;
+  esac
   echo -e "  \033[33mCOVERAGE_FILE:\033[0m ${COVERAGE_FILE}"
 }
 
