@@ -2418,3 +2418,10 @@ class TestEngramSharedMemoryDefaults(TestBase):
         config.engram_config = None
         AscendConfig(sparse_kv_offload_config=SparseKVOffloadConfig()).derive_and_validate(config)
         self.assertIsNone(config.engram_config)
+
+
+def test_shared_ple_additional_config_is_accepted():
+    from vllm_ascend.ascend_config import AscendConfig
+
+    config = AscendConfig(sparse_kv_offload_config=None, shared_ple={"backend": "rdma"})
+    assert config.shared_ple == {"backend": "rdma"}
