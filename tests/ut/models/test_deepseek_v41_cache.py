@@ -572,11 +572,11 @@ def test_adaptive_v41_cache_planes_follow_device_boundaries(runtime, monkeypatch
         host_starts = [0, host_lengths[0], sum(lengths), sum(lengths), sum(lengths)]
         positions = [p for h, n in zip(histories, lengths) for p in range(h, h + n)]
         live_tokens = len(positions)
-        # Deliberately poison the tail with otherwise-valid addresses and odd
-        # positions: neither C1/SWA nor C2 may publish these padding rows.
+        # Slot mappings follow the common producer's PAD contract. Keep stale
+        # odd positions to verify C2 state updates also respect device lengths.
         positions += [299] * (16 - live_tokens)
         slots = [128 * (r + 1) + p % 64 for r, (h, n) in enumerate(zip(histories, lengths)) for p in range(h, h + n)]
-        slots += [999] * (16 - live_tokens)
+        slots += [-1] * (16 - live_tokens)
         common = SimpleNamespace(
             slot_mapping=torch.tensor(slots),
             block_table_tensor=torch.tensor([[1, 2, 3, 4, 5], [6, 7, 8, 9, 10], [0] * 5, [0] * 5]),

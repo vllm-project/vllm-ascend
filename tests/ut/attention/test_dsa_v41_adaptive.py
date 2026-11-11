@@ -6,7 +6,6 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.spec_decode import adaptive_verification
 
 from vllm_ascend.attention import dsa_v41
@@ -20,10 +19,9 @@ from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
 
 
 @pytest.mark.parametrize("num_drafts", [5, 7, 15, STATE_RING_ROWS - 1, STATE_RING_ROWS])
-def test_v41_adaptive_real_initialization_gate(monkeypatch, num_drafts):
+def test_v41_adaptive_real_initialization_gate(num_drafts):
     # All five role backends inherit the bounded graph capability. Exercise the real
     # upstream checks; only construction of device-side manager buffers is mocked.
-    monkeypatch.setattr(AttentionBackend, "supports_device_cpu_query_lens_mismatch", classmethod(lambda cls: False))
     config = SimpleNamespace(
         speculative_config=SimpleNamespace(
             method="dspark", enable_adaptive_verification=True, num_speculative_tokens=num_drafts

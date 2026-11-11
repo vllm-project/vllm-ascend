@@ -584,6 +584,12 @@ adaptive-verification restrictions above. Start validation with colocated
 serving and prefix caching disabled; PD, cache offload and prefix-cache reuse
 require separate qualification.
 
+Budget selection, draft allocation and sampling reuse the common adaptive
+verification implementation. The V4.1 backend supplies its graph capability
+and cache metadata; it does not implement a separate adaptive policy.
+The Ascend runner preserves the query-width bound supplied by the common
+graph descriptor. Slot mappings use the common producer's padding contract.
+
 V4.1 uses device query boundaries for SWA writes, compressed cache lengths,
 indexer/attention metadata, and C2 ring state. FULL graph capture preserves
 the maximum verification width even when its dummy queries have one token.
@@ -607,8 +613,9 @@ pytest -xq tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v41_ad
 
 Omit `DSV41_QUANTIZATION` when the checkpoint does not use Ascend
 quantization. The model regression compares plain, fixed DSpark and natural
-adaptive outputs, then changes only the test cost curves to exercise full
-and alternating full/zero budgets through the real allocator and sampler.
+adaptive outputs, then changes the test cost curves to exercise full,
+partial, and alternating full/partial/zero budgets through the real allocator
+and sampler. Partial-budget probes assert that the upstream device allocator runs.
 It also checks that TP workers agree on the admitted budgets.
 
 Validate each hardware/operator/weight combination before deployment. Measure

@@ -1195,14 +1195,14 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 else:
                     if compressed and req.compress_ratio != 1:
                         active_slots = compressed_slot_mapping(active_slots, req.compress_ratio)
-                    valid_end = common.query_start_loc[req.num_actual_reqs].clamp_max(req.num_actual_tokens)
-                    valid = (active_slots >= 0) & (
-                        torch.arange(req.num_input_tokens, device=active_slots.device) < valid_end
-                    )
+                    # The common slot-mapping producer already marks padding as PAD.
+                    valid = active_slots >= 0
                     if compressed and req.compress_ratio == 2:
                         if kwargs.get("skip_ring_state_update", False):
                             valid.zero_()
                         else:
+                            valid_end = common.query_start_loc[req.num_actual_reqs].clamp_max(req.num_actual_tokens)
+                            valid &= torch.arange(req.num_input_tokens, device=active_slots.device) < valid_end
                             if req.positions is not None:
                                 valid &= req.positions.remainder(2) == 1
                     physical = active_slots.clamp_min(0)
@@ -1756,12 +1756,6 @@ def _get_v41_role_builder(role: str):
 
 class DeepseekV41CacheBackend(AttentionBackend):
     """Cache-only backend: supplies layout and metadata, not an AttentionImpl."""
-
-    @classmethod
-    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
-        # Cache writes, compressed lengths, C2 state and attention/indexer tiling
-        # consume device boundaries. Host lengths are scheduling upper bounds.
-        return True
 
     @staticmethod
     def get_name():

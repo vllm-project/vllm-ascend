@@ -15,6 +15,7 @@ from tests.e2e.conftest import VllmRunner
 
 def _install_budget_probe(worker, policy):
     import numpy as np
+    from vllm.v1.worker.gpu.spec_decode import adaptive_verification
 
     runner = worker.model_runner
     manager = runner.adaptive_verification
@@ -27,6 +28,15 @@ def _install_budget_probe(worker, policy):
     observations: list[tuple[int, int]] = []
     runner._test_v41_budgets = observations
     runner._test_v41_graph_modes = []
+    runner._test_v41_allocator_calls = 0
+    if not hasattr(runner, "_test_v41_original_allocator"):
+        runner._test_v41_original_allocator = adaptive_verification.assign_draft_token_budget
+
+    def assign_budget(*args, **kwargs):
+        runner._test_v41_allocator_calls += 1
+        return runner._test_v41_original_allocator(*args, **kwargs)
+
+    adaptive_verification.assign_draft_token_budget = assign_budget
     if not hasattr(runner, "_test_v41_original_prepare"):
         runner._test_v41_original_prepare = runner.prepare_inputs
 
@@ -46,7 +56,14 @@ def _install_budget_probe(worker, policy):
             # A decreasing curve makes full verification win even if the
             # trained confidence rounds to zero at every draft position.
             verify_cost = np.linspace(2.0, 1.0, verify_cost.size, dtype=verify_cost.dtype)
-            if policy == "alternating" and len(observations) % 2:
+            phase = len(observations) % 3 if policy == "alternating" else None
+            if policy == "partial" or phase == 1:
+                # Price one interior budget cheaply without replacing the
+                # production budget selection, device ranking or sampler.
+                if scheduled_drafts > 1:
+                    verify_cost.fill(1e12)
+                    verify_cost[base_tokens + scheduled_drafts // 2] = 1.0
+            elif phase == 2:
                 verify_cost.fill(1e12)
                 verify_cost[base_tokens] = 1.0
             manager.cost_tables = np.zeros_like(draft_cost), verify_cost
@@ -59,7 +76,7 @@ def _install_budget_probe(worker, policy):
 
 def _read_budget_probe(worker):
     runner = worker.model_runner
-    return runner._test_v41_budgets, runner._test_v41_graph_modes
+    return runner._test_v41_budgets, runner._test_v41_graph_modes, runner._test_v41_allocator_calls
 
 
 def _assert_output_parity(name, reference, outputs):
@@ -127,19 +144,25 @@ def test_deepseek_v41_dspark_adaptive_output_and_graph_replay():
     _assert_output_parity("fixed", reference, fixed)
     spec["enable_adaptive_verification"] = True
     with VllmRunner(model, speculative_config=spec, **deepcopy(kwargs)) as runner:
-        for policy in ("natural", "full", "alternating"):
+        for policy in ("natural", "full", "partial", "alternating"):
             runner.model.collective_rpc(_install_budget_probe, args=(policy,))
             outputs = runner.model.generate(prompts, sampling)
             _assert_output_parity(policy, reference, outputs)
             probes = runner.model.collective_rpc(_read_budget_probe)
             assert probes and all(probes)
             assert all(probe == probes[0] for probe in probes)
-            raw_budgets, graph_modes = probes[0]
+            raw_budgets, graph_modes, allocator_calls = probes[0]
             assert graph_modes and all(mode == "FULL" for mode in graph_modes), graph_modes
             budgets = [(scheduled, admitted) for scheduled, admitted in raw_budgets if scheduled > 0]
             assert budgets, f"{policy}: did not exercise speculative verification"
             if policy == "full":
                 assert all(admitted == scheduled for scheduled, admitted in budgets)
+            if policy == "partial":
+                assert any(scheduled > 1 for scheduled, _ in budgets)
+                assert all(0 < admitted < scheduled for scheduled, admitted in budgets if scheduled > 1)
+                assert allocator_calls > 0, "partial budgets must execute the upstream device allocator"
             if policy == "alternating":
-                assert any(admitted > 0 for _, admitted in budgets)
+                assert any(admitted == scheduled for scheduled, admitted in budgets)
+                assert any(0 < admitted < scheduled for scheduled, admitted in budgets)
                 assert any(admitted == 0 for _, admitted in budgets)
+                assert allocator_calls > 0

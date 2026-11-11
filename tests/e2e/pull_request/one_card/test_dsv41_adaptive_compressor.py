@@ -5,11 +5,41 @@
 import pytest
 import torch
 import torch_npu  # noqa: F401
+from vllm.v1.worker.gpu.spec_decode.adaptive_verification import assign_draft_token_budget
 
 from vllm_ascend.attention.dsa_v41 import build_replay_swa_visible_lens
 from vllm_ascend.ops.triton.build_window_indices import build_window_indices_triton
 from vllm_ascend.ops.triton.c2_ring_metadata import build_c2_ring_metadata
 from vllm_ascend.ops.triton.compressor.compressor_triton import _cube_core_num, compressor_from_projected
+
+
+@pytest.mark.parametrize("draft_budget", [2, 5, 7])
+@pytest.mark.parametrize("full_graph", [False, True])
+def test_common_partial_budget_allocator_keeps_request_prefixes(draft_budget, full_graph):
+    """Exercise the shared ranking kernel with unequal counts and inactive rows."""
+    device = torch.device("npu:0")
+    confidences = torch.ones(5, 5, device=device)
+    confidences[3].fill_(0.95)
+    confidences[1].fill_(0.2)
+    request_slots = torch.tensor([3, 1, 4, 0], dtype=torch.int32, device=device)
+    scheduled = torch.tensor([5, 5, 0, 0], dtype=torch.int32, device=device)
+    admitted = torch.empty_like(scheduled)
+    survival = torch.empty(scheduled.numel() * confidences.shape[1], dtype=torch.int32, device=device)
+
+    def forward():
+        admitted.copy_(scheduled)
+        assign_draft_token_budget(confidences, request_slots, admitted, draft_budget, survival)
+
+    forward()
+    if full_graph:
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            forward()
+        # Replays must recompute the allocation, including overwriting stale counts.
+        admitted.fill_(-1)
+        graph.replay()
+    torch.npu.synchronize()
+    assert admitted.cpu().tolist() == [min(draft_budget, 5), max(draft_budget - 5, 0), 0, 0]
 
 
 @pytest.mark.parametrize("max_query_len", [6, 9, 32])
