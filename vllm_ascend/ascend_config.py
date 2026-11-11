@@ -450,6 +450,32 @@ class QuantizedAllReduceConfig:
 
 
 @config
+class SharedEngramRdmaConfig:
+    """A2 immutable table owner and per-rank receive capacity."""
+
+    model_config = ConfigDict(extra="forbid")
+    endpoint: str | None = None
+    endpoints: list[str] | None = None
+    capacity: int = 65536
+    library_path: str | None = None
+
+    @model_validator(mode="after")
+    def _validate(self):
+        if bool(self.endpoint) == bool(self.endpoints):
+            raise ValueError("set exactly one of shared Engram endpoint or endpoints")
+        endpoints = self.endpoints if self.endpoints else [self.endpoint or ""]
+        if len(set(endpoints)) != len(endpoints):
+            raise ValueError("shared Engram endpoints must be distinct")
+        for endpoint in endpoints:
+            host, separator, port = endpoint.rpartition(":")
+            if not separator or not host or not port.isdigit() or not 0 < int(port) < 65536:
+                raise ValueError("shared Engram endpoint must be host:port")
+        if not 0 < self.capacity <= 65536:
+            raise ValueError("shared Engram capacity must be in [1, 65536]")
+        return self
+
+
+@config
 class AscendConfig:
     """Configuration Object for additional_config from vllm.configs.
 
@@ -617,6 +643,7 @@ class AscendConfig:
 
     # ---- user-input switches: bool/int/list/str, auto type validation ----
     enable_cpu_binding: bool = True
+    shared_engram_rdma: SharedEngramRdmaConfig | None = None
     multistream_dsv4_dsa_overlap: bool = True
     # Prepare Engram hashes, lookups and DP/TP exchanges on an auxiliary stream;
     # FULL graphs wait on descriptor-specific external events at consumers.
@@ -755,6 +782,10 @@ class AscendConfig:
     # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        if self.shared_engram_rdma is not None:
+            if getattr(vc, "shutdown_timeout", 0) <= 0:
+                raise ValueError("shared_engram_rdma requires --shutdown-timeout > 0 to retire reader leases")
+            os.environ.setdefault("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS", "120")
         engram_config = getattr(vc, "engram_config", None)
         if (
             engram_config is not None

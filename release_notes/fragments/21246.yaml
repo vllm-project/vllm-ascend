@@ -1,0 +1,4 @@
+pr: 21246
+entries:
+  - category: feature
+    text: Support distributing a shared Engram table across multiple HIXL owners.
