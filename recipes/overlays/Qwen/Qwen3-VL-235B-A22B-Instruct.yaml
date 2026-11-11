@@ -2,7 +2,7 @@
 # Extracted with vllm-project/recipes@b08ad73889f9e33319d8ac9c887dec6a0975c55d.
 meta:
   hardware:
-    ascend_910c: supported
+    ascend_910c: verified
     ascend_950dt: supported
 variants:
   ascend_w8a8_quarot_a3:
