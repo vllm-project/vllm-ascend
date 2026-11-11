@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 import torch
 import torch_npu
 
+from vllm_ascend.ascend_config import QuantizedAllReduceConfig
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.distributed.device_communicators import mxfp8_all_reduce as mx
 from vllm_ascend.distributed.device_communicators import npu_communicator as comm_module
@@ -183,9 +184,19 @@ class TestQuantizedBackendSelection(unittest.TestCase):
             comm.unique_name = unique_name
             comm.world_size = 2
 
-        for dtype in ("int8", "mxfp8"):
-            with self.subTest(quant_dtype=dtype):
-                config = SimpleNamespace(enable=True, min_numel=512, quant_dtype=dtype)
+        cases = (
+            (False, {}, "int8"),
+            (True, {}, "mxfp8"),
+            (False, {"quant_dtype": "int8"}, "int8"),
+            (True, {"quant_dtype": "int8"}, "int8"),
+            (True, {"quant_dtype": "mxfp8"}, "mxfp8"),
+        )
+        for is_a5, options, dtype in cases:
+            with (
+                self.subTest(is_a5=is_a5, options=options),
+                patch("vllm_ascend.ascend_config.is_950", return_value=is_a5),
+            ):
+                config = QuantizedAllReduceConfig(enable=True, min_numel=512, **options)
                 wrapper = SimpleNamespace(supported=True, min_numel=512, max_q=63, all_reduce=MagicMock())
                 group = MagicMock()
                 with (

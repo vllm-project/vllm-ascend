@@ -67,7 +67,7 @@ class NPUCommunicator(DeviceCommunicatorBase):
         # FlashInfer PCIe IPC backend on NPU.
         self.fi_pcie_ipc_ar_comm = None
         self.all2all_manager = _NpuAll2AllManager()
-        # Select one opt-in backend; existing configs retain the INT8 path.
+        # Select the configured backend; defaults are MXFP8 on A5, INT8 on A2.
         # Both wrappers use payload/shape gates and the existing process group.
         quantized_cfg = get_ascend_config().quantized_all_reduce_config
         self.quantized_ar: QuantizedAllReduce | Mxfp8AllReduce | None = None

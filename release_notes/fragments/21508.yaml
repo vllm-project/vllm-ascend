@@ -8,7 +8,7 @@ entries:
     hardware: [A5]
   - category: feature
     text: >-
-      Added an optional MXFP8 AllToAll/AllGather backend on Atlas A5,
-      selected with quantized_all_reduce_config.quant_dtype. It uses
-      BF16 dequantization and local SUM output on the existing process group.
+      Added MXFP8 AllToAll/AllGather with BF16 staging as the default
+      quantized all-reduce backend on Atlas A5. Atlas A2 defaults to INT8;
+      quantized_all_reduce_config.quant_dtype can override the hardware default.
     hardware: [A5]

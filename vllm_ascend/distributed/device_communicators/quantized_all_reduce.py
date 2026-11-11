@@ -34,7 +34,7 @@ Configuration
 -------------
 Enable it through ``--additional-config`` (see vllm_ascend.ascend_config):
 
-    --additional-config '{"quantized_all_reduce_config": {"enable": true, "min_numel": 16777216}}'
+    --additional-config '{"quantized_all_reduce_config": {"enable": true, "quant_dtype": "int8"}}'
 
   enable     bool, default false.
   min_numel  Payload threshold in elements: a collective is quantized only when
