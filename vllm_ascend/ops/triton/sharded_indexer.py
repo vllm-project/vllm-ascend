@@ -958,4 +958,3 @@ def normalize_dcp_candidates(indices, scores, query_start_loc):
             indices, scores, query_start_loc, query_start_loc.numel() - 1, topk, 256
         )
     return indices, scores
-
