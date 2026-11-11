@@ -65,11 +65,10 @@ _MOD_TRIED = False
 
 
 def _module():
-    """Load the compiled extension built by setup.py / CMake.
+    """Load the setuptools Extension (``pip install`` / ``build_ext``).
 
-    Prefer the installed package module (setuptools Extension or cmake
-    ``rare_feed_native`` target). Fall back to a sidecar ``rare_feed_native.so``
-    for hand-built / editable copies next to this file.
+    Also accepts an editable sidecar ``rare_feed_native*.so`` next to this file
+    for local ``build_ext --inplace`` without reinstall.
     """
     global _MOD, _MOD_TRIED
     if _MOD_TRIED:
@@ -99,15 +98,6 @@ def _module():
         _MOD = module
         return module
     return None
-
-
-def _log(msg: str) -> None:
-    try:
-        from vllm_ascend.logger import init_logger_ascend
-
-        init_logger_ascend(__name__).info("%s", msg)
-    except Exception:
-        return
 
 
 def _literal_fffd(boff: np.ndarray, bflat: np.ndarray, n: int) -> np.ndarray:
@@ -413,12 +403,9 @@ class NativeFeed:
         return np.frombuffer(raw, dtype=np.int32).copy()
 
 
-def bind(detector) -> NativeFeed | None:
-    """Return a native feed for ``detector``, or None when the extension is absent."""
-    try:
-        native = NativeFeed(detector)
-    except Exception as exc:
-        _log(f"[runtime_guard: rare_chars] native feed unavailable: {exc}")
-        return None
-    _log("[runtime_guard: rare_chars] native feed enabled")
-    return native
+def bind(detector) -> NativeFeed:
+    """Return a native feed for ``detector``.
+
+    Raises if ``rare_feed_native`` is not built or tables cannot be bound.
+    """
+    return NativeFeed(detector)

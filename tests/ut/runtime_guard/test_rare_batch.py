@@ -17,14 +17,23 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from vllm_ascend.observability.runtime_guard.detector.rare import (
     CONFIG_RC4,
     RareDetector,
     RareRowBatch,
     build_from_token_bytes,
+    rare_native,
     register_rare_table,
 )
+
+
+def _require_native() -> None:
+    rare_native._MOD = None
+    rare_native._MOD_TRIED = False
+    if rare_native._module() is None:
+        pytest.skip("rare_feed_native not built")
 
 
 def _table_key() -> str:
@@ -55,6 +64,7 @@ def _batch_snapshot(det: RareDetector, batch: RareRowBatch, row: int) -> tuple:
 
 
 def test_batch_matches_scalar_streams():
+    _require_native()
     key = _table_key()
     token_rows = [
         np.array([1, 1, 2], np.int64),
