@@ -1300,7 +1300,9 @@ class NPUModelRunner(GPUModelRunner):
         load_balance_ctx = override_mrv2_in_profile_run(True) if profile_adaptive_tail else nullcontext()
         with (
             # Disable the CPP drafter before entering contexts that inspect it.
-            self._finegrained_tp_warmup_context(),
+            # Worker.execute_dummy_batch marks runtime idle with skip_ring;
+            # it must retain the same post-dispatch check as active peers.
+            self._finegrained_tp_warmup_context() if not skip_ring else nullcontext(),
             self._cpp_profile_dummy(profile_cpp),
             # Preserve scheduled query tokens before PIECEWISE graph padding.
             self._preserve_dummy_query_tokens(num_tokens, uniform_decode),
