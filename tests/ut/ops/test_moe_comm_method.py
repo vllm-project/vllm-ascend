@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -75,6 +76,44 @@ class TestMoECommMethod(TestBase):
         self._patch_get_ascend_config.stop()
         self._patch_get_ascend_config_module.stop()
         self._patch_get_ascend_config_forward_context.stop()
+
+    def test_low_latency_call_binds_scoring_and_local_expert_contract(self):
+        comm_impl = object.__new__(AllGatherCommImpl)
+        comm_impl.moe_config = SimpleNamespace(
+            ep_rank=2,
+            num_local_experts=4,
+            swiglu_limit=None,
+        )
+        output = torch.empty(3, 1024, dtype=torch.bfloat16)
+        comm_impl.mega_moe_low_latency = MagicMock(return_value=output)
+        weights = MoEWeights(
+            w1=torch.empty(4, 1024, 512),
+            w2=torch.empty(4, 1024, 256),
+            w1_scale=torch.empty(4, 1024, 8, 2),
+            w2_scale=torch.empty(4, 1024, 4, 2),
+        )
+        quant_method = SimpleNamespace(get_mega_moe_low_latency_weights=MagicMock(return_value=weights))
+        layer = SimpleNamespace(quant_type=QuantType.W4A4MXFP)
+        hidden_states = torch.empty(3, 1024, dtype=torch.bfloat16)
+        gate = SimpleNamespace(weight=torch.empty(32, 1024, dtype=torch.bfloat16))
+        score_bias = torch.empty(32, dtype=torch.float32)
+        router = SimpleNamespace(
+            scoring_func="sigmoid",
+            e_score_correction_bias=score_bias,
+            top_k=8,
+            routed_scaling_factor=2.5,
+        )
+        self.mock_ascend_config.mega_moe_low_latency_fused_gather = True
+
+        with patch("vllm_ascend.ops.fused_moe.moe_comm_method.maybe_record_event", side_effect=["start", "end"]):
+            result = comm_impl.fused_experts_low_latency(layer, hidden_states, gate, router, quant_method)
+
+        self.assertIs(result.routed_out, output)
+        call = comm_impl.mega_moe_low_latency.call_args
+        self.assertEqual(call.args[7], 8)
+        self.assertEqual(call.args[8], 1)
+        self.assertEqual(call.args[9:13], (8, 2.5, 296, float("inf")))
+        self.assertEqual(call.kwargs, {"scoring_activation": 1})
 
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_mc2_group")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.logger.warning_once")

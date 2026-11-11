@@ -217,6 +217,60 @@ class AllGatherCommImpl(MoECommMethod):
     This is a workaround and should be removed after the issue is fixed.
     """
 
+    def __init__(self, moe_config):
+        super().__init__(moe_config)
+        self.mega_moe_low_latency = None
+        if getattr(get_ascend_config(), "enable_mega_moe_low_latency", False) is True:
+            self.mega_moe_low_latency = moe_utils.load_cann_mega_moe_low_latency_op()
+
+    def fused_experts_low_latency(self, layer, hidden_states, gate, router, quant_method) -> FusedExpertsResult:
+        """Run fused scoring and this rank's local experts.
+
+        Communication remains owned by PrepareAndFinalizeWithAllGather; the
+        operator returns only this rank's partial sum.
+        """
+        if self.mega_moe_low_latency is None:
+            raise RuntimeError("MegaMoeLowLatency was not initialized.")
+        weights = quant_method.get_mega_moe_low_latency_weights(layer)
+        tensors = (weights.w1, weights.w2, weights.w1_scale, weights.w2_scale)
+        if not all(isinstance(tensor, torch.Tensor) for tensor in tensors):
+            raise RuntimeError("MegaMoeLowLatency requires one stacked tensor for each weight and scale input.")
+
+        quant_out_dtype = (
+            moe_utils.MEGA_MOE_LOW_LATENCY_FLOAT4_E2M1
+            if layer.quant_type == QuantType.W4A4MXFP
+            else moe_utils.MEGA_MOE_LOW_LATENCY_FLOAT8_E4M3FN
+        )
+        scoring_activation = 0 if router.scoring_func == "softmax" else 1
+        activation_clamp = self.moe_config.swiglu_limit
+        if activation_clamp is None or activation_clamp <= 0:
+            activation_clamp = float("inf")
+        before_dispatch_evt = maybe_record_event()
+        routed_out = self.mega_moe_low_latency(
+            hidden_states,
+            gate.weight,
+            router.e_score_correction_bias,
+            weights.w1,
+            weights.w2,
+            weights.w1_scale,
+            weights.w2_scale,
+            self.moe_config.ep_rank * self.moe_config.num_local_experts,
+            int(getattr(get_ascend_config(), "mega_moe_low_latency_fused_gather", True)),
+            router.top_k,
+            router.routed_scaling_factor,
+            quant_out_dtype,
+            activation_clamp,
+            scoring_activation=scoring_activation,
+        )
+        before_combine_evt = maybe_record_event()
+        return FusedExpertsResult(
+            routed_out=routed_out,
+            before_dispatch_evt=before_dispatch_evt,
+            before_gmm2_evt=before_combine_evt,
+            before_combine_evt=before_combine_evt,
+            shared_activation_overlap_start_evt=before_combine_evt,
+        )
+
     def _get_token_dispatcher(self):
         return TokenDispatcherWithAllGather(
             top_k=self.moe_config.experts_per_token,

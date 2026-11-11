@@ -115,6 +115,11 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
 
         self.quant_type = routed_experts.quant_type
         self.routed_experts.router = router
+        # Keep a non-owning reference. Assigning an nn.Module normally would
+        # register the gate a second time below routed_experts and duplicate
+        # checkpoint/state_dict names.
+        object.__setattr__(self.routed_experts, "_mega_moe_low_latency_gate", gate)
+        self.routed_experts.mega_moe_low_latency_has_shared_experts = shared_experts is not None
 
         self.moe_config.tp_group = get_tp_group()
         self.moe_config.dp_group = get_dp_group()
@@ -548,7 +553,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         with self._sequence_parallel_context():
             shared_hidden_states = shared_experts_input if shared_experts_input is not None else hidden_states
             if self.ascend_shared_experts is None:
-                if self.is_internal_router:
+                if self.is_internal_router and not self.routed_experts.can_use_mega_moe_low_latency(hidden_states):
                     router_logits = self._compute_router_logits(hidden_states, router_logits)
                 return self.routed_experts.forward_impl(
                     hidden_states=hidden_states,

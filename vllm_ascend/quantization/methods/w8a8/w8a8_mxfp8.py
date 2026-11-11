@@ -30,7 +30,12 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
-from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
+from vllm_ascend.ops.fused_moe.moe_utils import (
+    cumsum_group_list,
+    interleave_mega_moe_low_latency_w1,
+    maybe_normalize_mxfp_scale_layout,
+    register_mega_moe_low_latency_buffer,
+)
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg, get_dynamic_mx_quant_scale_alg
 from vllm_ascend.utils import (
@@ -476,6 +481,15 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         )
 
     @staticmethod
+    def get_mega_moe_low_latency_weights(layer: torch.nn.Module) -> MoEWeights:
+        return MoEWeights(
+            w1=layer.mega_moe_low_latency_w13_weight,
+            w2=layer.mega_moe_low_latency_w2_weight,
+            w1_scale=layer.mega_moe_low_latency_w13_weight_scale,
+            w2_scale=layer.mega_moe_low_latency_w2_weight_scale,
+        )
+
+    @staticmethod
     def get_eplb_weight_views(layer: torch.nn.Module) -> list:
         if hasattr(layer, "cann_mega_moe_w13_weight_list"):
             return [
@@ -526,6 +540,36 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 "w2_weight": tuple(layer.w2_weight.data.shape),
                 "w2_weight_scale": tuple(layer.w2_weight_scale.data.shape),
             }
+
+        if getattr(get_ascend_config(), "enable_mega_moe_low_latency", False) is True:
+            g_num, n_size, k_size = layer.w13_weight_scale.shape
+            low_latency_s1 = layer.w13_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
+            g_num, n_size, k_size = layer.w2_weight_scale.shape
+            low_latency_s2 = layer.w2_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
+            low_latency_w1, low_latency_s1 = interleave_mega_moe_low_latency_w1(
+                layer.w13_weight.data,
+                low_latency_s1,
+            )
+            register_mega_moe_low_latency_buffer(
+                layer,
+                "mega_moe_low_latency_w13_weight",
+                torch_npu.npu_format_cast(low_latency_w1, ACL_FORMAT_FRACTAL_NZ),
+            )
+            register_mega_moe_low_latency_buffer(
+                layer,
+                "mega_moe_low_latency_w2_weight",
+                torch_npu.npu_format_cast(layer.w2_weight.data.contiguous(), ACL_FORMAT_FRACTAL_NZ),
+            )
+            register_mega_moe_low_latency_buffer(
+                layer,
+                "mega_moe_low_latency_w13_weight_scale",
+                low_latency_s1.view(torch.float8_e8m0fnu),
+            )
+            register_mega_moe_low_latency_buffer(
+                layer,
+                "mega_moe_low_latency_w2_weight_scale",
+                low_latency_s2.contiguous().view(torch.float8_e8m0fnu),
+            )
 
         use_mega_moe = use_cann_megamoe(get_current_vllm_config())
         if not use_mega_moe and not self.use_expert_weight_list:

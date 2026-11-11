@@ -28,7 +28,12 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
-from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
+from vllm_ascend.ops.fused_moe.moe_utils import (
+    cumsum_group_list,
+    interleave_mega_moe_low_latency_w1,
+    maybe_normalize_mxfp_scale_layout,
+    register_mega_moe_low_latency_buffer,
+)
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, COMPRESSED_TENSORS_METHOD, dispose_tensor
 
@@ -305,15 +310,23 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
                 shared_w1_scale=shared.w1_scale if shared else None,
                 shared_w2_scale=shared.w2_scale if shared else None,
             )
-        else:
-            return MoEWeights(
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
-                w1_scale_bias=None,
-                w2_scale_bias=None,
-            )
+        return MoEWeights(
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            w1_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            w1_scale_bias=None,
+            w2_scale_bias=None,
+        )
+
+    @staticmethod
+    def get_mega_moe_low_latency_weights(layer: torch.nn.Module) -> MoEWeights:
+        return MoEWeights(
+            w1=layer.mega_moe_low_latency_w13_weight,
+            w2=layer.mega_moe_low_latency_w2_weight,
+            w1_scale=layer.mega_moe_low_latency_w13_weight_scale,
+            w2_scale=layer.mega_moe_low_latency_w2_weight_scale,
+        )
 
     @staticmethod
     def get_eplb_weight_views(layer: torch.nn.Module) -> list[torch.Tensor]:
@@ -341,6 +354,41 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
             layer.w2_weight_scale.data = F.pad(layer.w2_weight_scale.data, (0, 1), mode="constant", value=0)
             k_size += 1
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
+        if getattr(get_ascend_config(), "enable_mega_moe_low_latency", False) is True:
+            low_latency_w1, low_latency_s1 = interleave_mega_moe_low_latency_w1(
+                layer.w13_weight.data,
+                layer.w13_weight_scale.data,
+            )
+            register_mega_moe_low_latency_buffer(
+                layer,
+                "mega_moe_low_latency_w13_weight",
+                torch_npu.npu_format_cast(
+                    low_latency_w1,
+                    ACL_FORMAT_FRACTAL_NZ,
+                    customize_dtype=torch.float8_e4m3fn,
+                    input_dtype=torch_npu.float4_e2m1fn_x2,
+                ),
+            )
+            register_mega_moe_low_latency_buffer(
+                layer,
+                "mega_moe_low_latency_w2_weight",
+                torch_npu.npu_format_cast(
+                    layer.w2_weight.data.contiguous(),
+                    ACL_FORMAT_FRACTAL_NZ,
+                    customize_dtype=torch.float8_e4m3fn,
+                    input_dtype=torch_npu.float4_e2m1fn_x2,
+                ),
+            )
+            register_mega_moe_low_latency_buffer(
+                layer,
+                "mega_moe_low_latency_w13_weight_scale",
+                low_latency_s1.view(torch.float8_e8m0fnu),
+            )
+            register_mega_moe_low_latency_buffer(
+                layer,
+                "mega_moe_low_latency_w2_weight_scale",
+                layer.w2_weight_scale.data.contiguous().view(torch.float8_e8m0fnu),
+            )
         # MegaMoe (FUSED_MC2 on A5) expects the weights in their original
         # (out, in) layout — weight1=(E, 2*inter, hidden//2), weight2=(E,
         # hidden, inter//2) for packed FP4 — and the reshaped (not transposed)

@@ -34,6 +34,9 @@ from vllm.logger import logger
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import enable_custom_op
 
+MEGA_MOE_LOW_LATENCY_FLOAT8_E4M3FN = 24
+MEGA_MOE_LOW_LATENCY_FLOAT4_E2M1 = 296
+
 COMM_STREAM = None
 
 _CANN_ACL_INT8 = 258
@@ -162,6 +165,69 @@ def load_cann_mega_moe_ops():
     else:
         comm_context.comm_context_op_builder.load()
     return get_symm_buffer_for_mega_moe, mega_moe
+
+
+def load_cann_mega_moe_low_latency_op():
+    """Load the public ops-transformer wrapper for MegaMoeLowLatency.
+
+    Loading is deliberately lazy so importing vLLM-Ascend does not require
+    the optional operator package and so graph capture never triggers a first
+    import or extension build.
+    """
+    ops_module = import_module("cann_ops_transformer.ops")
+    op = getattr(ops_module, "mega_moe_low_latency", None)
+    if op is None:
+        raise RuntimeError(
+            "The installed ops-transformer package does not export "
+            "cann_ops_transformer.ops.mega_moe_low_latency. Install a build "
+            "containing MegaMoeLowLatency quant contract v4 / shared API v6."
+        )
+    return op
+
+
+def interleave_mega_moe_low_latency_w1(
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Interleave canonical [gate, up] rows in 128-row tiles.
+
+    This must run while both tensors are still logical ND tensors, before the
+    weight is converted to FRACTAL_NZ. The same row permutation is applied to
+    its E8M0 scales.
+    """
+    tile_rows = 128
+    if weight.ndim != 3 or scale.ndim != 4 or weight.shape[:2] != scale.shape[:2]:
+        raise ValueError("MegaMoeLowLatency W1/scale must be [E,2F,K] and [E,2F,K/64,2].")
+    experts, twice_intermediate = weight.shape[:2]
+    if twice_intermediate % (2 * tile_rows) != 0:
+        raise ValueError("MegaMoeLowLatency intermediate size must be divisible by 128.")
+    intermediate = twice_intermediate // 2
+    if intermediate not in (512, 1024, 1536, 2048, 3584):
+        raise ValueError(
+            "MegaMoeLowLatency intermediate size must be one of "
+            "512, 1024, 1536, 2048, or 3584."
+        )
+    tiles = intermediate // tile_rows
+
+    def _interleave(tensor: torch.Tensor) -> torch.Tensor:
+        tail = tensor.shape[2:]
+        shaped = tensor.reshape(experts, 2, tiles, tile_rows, *tail)
+        order = (0, 2, 1, 3, *range(4, shaped.ndim))
+        return shaped.permute(order).reshape(experts, twice_intermediate, *tail).contiguous()
+
+    return _interleave(weight), _interleave(scale)
+
+
+def register_mega_moe_low_latency_buffer(layer, name: str, tensor: torch.Tensor) -> None:
+    """Register a derived payload and preserve its address across reloads."""
+    if name in layer._buffers:
+        existing = layer._buffers[name]
+        if existing is not None and existing.shape == tensor.shape and existing.dtype == tensor.dtype:
+            existing.copy_(tensor)
+        else:
+            layer._buffers[name] = tensor
+    else:
+        layer.register_buffer(name, tensor, persistent=False)
 
 
 def select_mega_moe_activation_kwargs(

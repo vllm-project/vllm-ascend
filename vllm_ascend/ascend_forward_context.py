@@ -411,6 +411,11 @@ def select_moe_comm_method(
     if not is_moe_model(vllm_config):
         return None
 
+    # MegaMoeLowLatency owns only scoring and local expert computation. Its
+    # cross-rank contract is explicitly AllGather -> operator -> ReduceScatter.
+    if getattr(get_ascend_config(), "enable_mega_moe_low_latency", False) is True:
+        return MoECommType.ALLGATHER
+
     mc2_tokens_capacity = get_mc2_tokens_capacity()
     moe_comm_policy = get_current_hardware_profile().moe_comm_policy
     lora_config = getattr(vllm_config, "lora_config", None)
