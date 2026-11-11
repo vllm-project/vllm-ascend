@@ -27,12 +27,12 @@ a3:
         config_file_path: Kimi-K3-W4A8-A3-1M-PD.yaml
         config_base_path: tests/SIT/cases/models/configs/Kimi
         size: 8
+  multi_node:
+    test_config:
       - name: Kimi-K3.1-Pro-W4A8-A3-1M-PD
         config_file_path: Kimi-K3.1-Pro-W4A8-A3-1M-PD.yaml
         config_base_path: tests/SIT/cases/models/configs/Kimi
         size: 8
-  multi_node:
-    test_config:
       - name: Qwen3.5-397B-w8a8-PD
         config_file_path: Qwen-3.5-397B-A17B-W8A8-PD.yaml
         config_base_path: tests/SIT/cases/models/configs/Qwen

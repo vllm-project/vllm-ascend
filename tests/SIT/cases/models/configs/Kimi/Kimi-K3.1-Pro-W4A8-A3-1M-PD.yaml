@@ -83,7 +83,7 @@ env_common: &env_common
   OMP_NUM_THREADS: "1"
   OMP_PROC_BIND: "false"
   FLA_STABLE_DEBUG_DESC: "0"
-  TORCH_EXTENSIONS_DIR: "/tmp/kimi_k3_torch_extensions/node-${NODE_INDEX}/dp-${DP_RANK}"
+  TORCH_EXTENSIONS_DIR: "/tmp/kimi_k31_torch_extensions/node-${NODE_INDEX}/dp-${DP_RANK}"
 
 env_prefill: &env_prefill
   <<: *env_common
@@ -139,7 +139,6 @@ templates:
       - "--enable-expert-parallel"
       - "--seed"
       - "1024"
-      - "${MODEL}"
       - "--max-model-len"
       - "1048576"
       - "--max-num-batched-tokens"
@@ -213,7 +212,6 @@ templates:
       - "--enable-expert-parallel"
       - "--seed"
       - "1024"
-      - "${MODEL}"
       - "--max-model-len"
       - "1048576"
       - "--max-num-batched-tokens"
@@ -294,7 +292,6 @@ templates:
       - "--enable-expert-parallel"
       - "--seed"
       - "1024"
-      - "${MODEL}"
       - "--max-model-len"
       - "1048576"
       - "--max-num-batched-tokens"
