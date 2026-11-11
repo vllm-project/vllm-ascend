@@ -34,7 +34,7 @@ def make_method(scale_alg, enable_eplb=False):
 @pytest.mark.parametrize("activation", list(MoEActivation))
 def test_fused_activation_dispatch(scale_alg, activation, enable_eplb):
     method = make_method(scale_alg, enable_eplb=enable_eplb)
-    expected = activation == MoEActivation.SILU or (
+    expected = activation in (MoEActivation.SILU, MoEActivation.SWIGLUSTEP) or (
         scale_alg == DynamicMXQuantScaleAlg.CEIL and activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE
     )
     assert method.supports_fused_activation(activation) == expected
@@ -47,7 +47,7 @@ def test_enabling_one_model_does_not_change_other_instances():
     assert not other_model.supports_fused_activation(MoEActivation.SWIGLUOAI_UNINTERLEAVE)
     assert "fused_activations" not in vars(enabled)
     assert "fused_activations" not in vars(other_model)
-    assert module.AscendW8A8MXFP8DynamicFusedMoEMethod.fused_activations == frozenset({"silu"})
+    assert module.AscendW8A8MXFP8DynamicFusedMoEMethod.fused_activations == frozenset({"silu", "swiglustep"})
 
 
 @pytest.mark.parametrize("scale_alg", [0, 1])
@@ -110,3 +110,43 @@ def test_mlp_dispatch_preserves_fallback_and_gmm2_scales(scale_alg):
         fused.assert_not_called()
         legacy.assert_called_once_with(packed, swiglu_limit=5.0, swiglu_alpha=1.5, swiglu_beta=0.5)
         method.apply_act_quant.assert_called_once_with(inputs, "activated")
+
+
+@pytest.mark.parametrize("scale_alg", [0, 1])
+@pytest.mark.parametrize("group_list_type", [0, 1])
+def test_swiglustep_mlp_dispatch(scale_alg, group_list_type):
+    method = make_method(scale_alg)
+    packed = torch.randn(4, 128, dtype=torch.bfloat16)
+    quantized = torch.zeros(4, 64, dtype=torch.float8_e4m3fn)
+    scales = torch.ones(4, 1, 2, dtype=torch.uint8)
+    method.apply_gmm1 = Mock(return_value=packed)
+    method.apply_act_quant = Mock()
+    method.apply_gmm2 = Mock(return_value="result")
+    inputs = SimpleNamespace(
+        activation=MoEActivation.SWIGLUSTEP,
+        quant=SimpleNamespace(is_quant=True),
+        lora_context=None,
+        group_list=torch.tensor([1, 1, 4] if group_list_type == 0 else [1, 0, 3], dtype=torch.int64),
+        group_list_type=group_list_type,
+    )
+    with (
+        patch.object(module.torch_npu, "npu_swiglu_mx_quant", return_value=(quantized, scales), create=True) as fused,
+        patch("vllm_ascend.ops.fused_moe.moe_mlp.maybe_record_event", return_value=None),
+    ):
+        assert apply_moe_mlp(inputs, method) == ("result", None)
+    fused.assert_called_once()
+    group_index = fused.call_args.kwargs["group_index"]
+    torch.testing.assert_close(group_index, torch.tensor([1, 0, 3], dtype=torch.int64))
+    fused.assert_called_once_with(
+        packed,
+        group_index=group_index,
+        group_mode=0,
+        activate_left=True,
+        swiglu_mode=3,
+        clamp_limit=7.0,
+        dst_type=torch.float8_e4m3fn,
+        scale_alg=scale_alg,
+    )
+    method.apply_gmm1.assert_called_once_with(inputs)
+    method.apply_act_quant.assert_not_called()
+    method.apply_gmm2.assert_called_once_with(inputs, quantized, scales)
