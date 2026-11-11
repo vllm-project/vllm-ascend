@@ -1,0 +1,4 @@
+pr: 21548
+entries:
+  - category: bugfix
+    text: Mooncake PD transfers now choose available handshake ports automatically, avoiding startup failures when the fixed ports are occupied.
