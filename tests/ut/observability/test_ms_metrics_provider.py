@@ -82,6 +82,7 @@ def test_get_metric_provider_returns_packaged_yaml(monkeypatch):
     assert provider.config_paths == tuple(sorted(provider.config_paths))
     packaged_configs = {Path(path).name for path in provider.config_paths}
     assert {
+        "acl_graph_metrics.yaml",
         "base_metrics.yaml",
         "eplb_metrics.yaml",
         "runtime_guard_metrics.yaml",
@@ -163,6 +164,7 @@ def test_provider_yaml_custom_handlers_resolve(monkeypatch):
         "vllm_ascend.observability.ms_metrics",
         "vllm_ascend.observability.ms_metrics.provider",
         "vllm_ascend.observability.ms_metrics.handlers",
+        "vllm_ascend.observability.ms_metrics.handlers.acl_graph",
         "vllm_ascend.observability.ms_metrics.handlers.common",
         "vllm_ascend.observability.ms_metrics.handlers.eplb",
         "vllm_ascend.observability.ms_metrics.handlers.rl_lifecycle",
@@ -305,6 +307,27 @@ def test_symbol_hook_handlers_honor_level_and_labels(monkeypatch):
     assert lifecycle.sleep_handler(lambda worker, level: "slept", object(), 2) == "slept"
     assert metrics.record_metric.call_args.kwargs["labels"] == {"level": "2"}
     assert metrics.record_metric.call_args.args[0] == "lifecycle:sleep:duration_ms"
+
+
+def test_graph_replay_handler_records_duration_ms(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_acl_graph_replay", "acl_graph")
+    sys.modules[_COMMON_MODULE].set_metric_level("detail")
+
+    assert handlers.graph_replay_handler(lambda manager: "replayed", object()) == "replayed"
+    assert metrics.record_metric.call_args.args[0] == "graph:replay:duration_ms"
+    assert metrics.record_metric.call_args.kwargs["labels"] == {}
+
+    metrics.reset_mock()
+    sys.modules[_COMMON_MODULE].set_metric_level("basic")
+    handlers.graph_replay_handler(lambda manager: "replayed", object())
+    metrics.record_metric.assert_not_called()
 
 
 def test_custom_handlers_are_not_factory_created_from_yaml_metrics():
