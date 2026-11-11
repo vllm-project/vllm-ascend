@@ -6,12 +6,12 @@ This section is for developers who want to contribute to vLLM Ascend or understa
 
 - **[Contribution Guide](contribution/index.md)** — How to contribute to vLLM Ascend
 - **[Testing](contribution/testing.md)** — Write and run unit, E2E, and nightly tests
+- **[Contributing Triton operators](contribution/triton_operators.md)** — Deliverables and operator quality requirements
+- **[Triton JIT warmup on Ascend](contribution/triton_jit_warmup.md)** — Kernel registration, startup compilation and validation
 - **[Doc Writing](contribution/doc_writing.md)** — Documentation contribution guide
 - **[Multi-Node Test](contribution/multi_node_test.md)** — Multi-node testing guide
 - **[Nightly CI Test](contribution/nightly_ci_test.md)** — Nightly CI testing
 - **[E2E CI Test](contribution/e2e_ci_test.md)** — E2E CI testing
-
-- **[Contributing Triton operators](contribution/triton_operators.md)** — Deliverables and operator quality requirements
 
 ## Design Documents
 
