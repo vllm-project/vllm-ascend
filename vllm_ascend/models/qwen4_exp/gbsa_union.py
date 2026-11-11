@@ -5,6 +5,8 @@ The private custom-op package is required; decode keeps the stock GBSA path.
 Union construction stays on the device, including the exact per-query mask.
 """
 
+from types import ModuleType
+
 import torch
 
 from vllm_ascend.ops.triton.qwen4_exp.gbsa import prepare_qsa_gbsa_inputs
@@ -54,11 +56,13 @@ def build_qsa_union_inputs(
         padded_visible = torch.zeros(groups * UNION_SIZE, dtype=visible.dtype, device=visible.device)
         padded_visible[:rows] = visible
     query_lane = keys.remainder(UNION_SIZE)
-    row_visible = padded_visible.reshape(groups, UNION_SIZE).gather(1, query_lane.long())
+    visible_rows = padded_visible.reshape(groups, UNION_SIZE)
+    query_lane_long = query_lane.long()
+    row_visible = visible_rows.gather(1, query_lane_long)
     unique = valid & (keys != previous)
     bit_table = torch.tensor([1, 2, 4, 8, 16, 32, 64, 128], dtype=torch.int32, device=sparse_idx.device)
     bit_rows = bit_table.unsqueeze(0).expand(groups, -1).contiguous()
-    bits = bit_rows.gather(1, query_lane.long())
+    bits = bit_rows.gather(1, query_lane_long)
     # Full 4-token blocks share one bitset. Only the at-most-one partial
     # block per query requires per-token handling.
     full = unique & ((block_id + 1) * BLOCK_Y <= row_visible)
@@ -67,15 +71,15 @@ def build_qsa_union_inputs(
     mask = full_mask.unsqueeze(-1).expand(-1, -1, BLOCK_Y).contiguous()
     mask = mask.reshape(groups, (width + 1) * BLOCK_Y)
 
-    visible_rows = padded_visible.reshape(groups, UNION_SIZE)
     tail_block = visible_rows.div(BLOCK_Y, rounding_mode="floor")
     tail_key = tail_block * UNION_SIZE + torch.arange(UNION_SIZE, dtype=torch.int32, device=sparse_idx.device)
     location = torch.searchsorted(keys, tail_key).clamp_max(width - 1)
     found = keys.gather(1, location) == tail_key
     tail_rank = rank.gather(1, location)
-    partial = found & (visible_rows.remainder(BLOCK_Y) > 0)
+    tail_length = visible_rows.remainder(BLOCK_Y)
+    partial = found & (tail_length > 0)
     token = torch.arange(BLOCK_Y, dtype=torch.int32, device=sparse_idx.device)
-    allowed_tail = partial.unsqueeze(-1) & (token < visible_rows.remainder(BLOCK_Y).unsqueeze(-1))
+    allowed_tail = partial.unsqueeze(-1) & (token < tail_length.unsqueeze(-1))
     tail_dest = torch.where(partial, tail_rank, width).long().unsqueeze(-1) * BLOCK_Y + token
     tail_bits = torch.where(allowed_tail, bit_table.reshape(1, UNION_SIZE, 1), 0)
     mask.scatter_add_(
@@ -84,6 +88,65 @@ def build_qsa_union_inputs(
     exact = mask[:, : width * BLOCK_Y].contiguous().unsqueeze(0)
 
     return union_idx, union_count, exact
+
+
+def _run_union_gbsa(
+    union_ops: ModuleType,
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    union_inputs: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    cu_q: torch.Tensor,
+    seq_lens: torch.Tensor,
+    block_table: torch.Tensor,
+    output: torch.Tensor,
+    *,
+    max_query_length: int,
+) -> torch.Tensor:
+    """Use the same native attention contract for single and packed requests."""
+    union_idx, union_count, exact = union_inputs
+    common = dict(
+        cu_seqlens_q=cu_q,
+        seqused_kv=seq_lens,
+        layout_q="TND",
+        layout_kv="PA_BBND",
+        layout_sparse_pattern=4,
+        mask_mode=3,
+        quant_mode=0,
+        softmax_precision=0,
+        win_left=-1,
+        win_right=-1,
+        residual_block_mode=0,
+        is_consistent_topk=False,
+    )
+    shape = [UNION_SIZE, BLOCK_Y]
+    metadata = union_ops.generic_block_sparse_attention_metadata(
+        union_idx,
+        union_count,
+        query.shape[1],
+        1,
+        query.shape[-1],
+        shape,
+        max_seqlen_q=max_query_length,
+        max_seqlen_kv=block_table.shape[1] * GBSA_PAGE_SIZE,
+        **common,
+    )
+    result, _ = union_ops.generic_block_sparse_attention(
+        query.contiguous(),
+        key_cache,
+        value_cache,
+        union_idx,
+        union_count,
+        shape,
+        metadata=metadata,
+        block_table=block_table.contiguous(),
+        attn_mask=exact,
+        softmax_scale=query.shape[-1] ** -0.5,
+        return_softmax_lse=False,
+        **common,
+    )
+    output.copy_(result)
+    return output
 
 
 def qsa_union_gbsa_attention(
@@ -105,56 +168,26 @@ def qsa_union_gbsa_attention(
 
     if key_cache.shape[2] != 1 or query.shape[1] > 16:
         raise ValueError("Union GBSA requires one KV head and at most 16 Q heads per launch")
-    if block_table.shape[1] * 128 > (1 << 23):
+    if block_table.shape[1] * GBSA_PAGE_SIZE > (1 << 23):
         raise ValueError("Union index encoding exceeds exact FP32 sort range")
     sparse_idx, sparse_count, visible, _, _ = prepare_qsa_gbsa_inputs(
         compact_indices, logical_positions, seq_lens, token_to_req, block_table, 1, write_row_metadata=False
     )
-    union_idx, union_count, exact = build_qsa_union_inputs(sparse_idx, sparse_count, visible)
+    union_inputs = build_qsa_union_inputs(sparse_idx, sparse_count, visible)
     rows = query.shape[0]
     cu_q = torch.tensor([0, rows], dtype=torch.int64, device=query.device)
-    common = dict(
-        cu_seqlens_q=cu_q,
-        seqused_kv=seq_lens[request_index : request_index + 1].contiguous(),
-        layout_q="TND",
-        layout_kv="PA_BBND",
-        layout_sparse_pattern=4,
-        mask_mode=3,
-        quant_mode=0,
-        softmax_precision=0,
-        win_left=-1,
-        win_right=-1,
-        residual_block_mode=0,
-        is_consistent_topk=False,
-    )
-    shape = [UNION_SIZE, BLOCK_Y]
-    metadata = union_ops.generic_block_sparse_attention_metadata(
-        union_idx,
-        union_count,
-        query.shape[1],
-        1,
-        query.shape[-1],
-        shape,
-        max_seqlen_q=rows,
-        max_seqlen_kv=block_table.shape[1] * 128,
-        **common,
-    )
-    result, _ = union_ops.generic_block_sparse_attention(
-        query.contiguous(),
+    return _run_union_gbsa(
+        union_ops,
+        query,
         key_cache,
         value_cache,
-        union_idx,
-        union_count,
-        shape,
-        metadata=metadata,
-        block_table=block_table[request_index : request_index + 1].contiguous(),
-        attn_mask=exact,
-        softmax_scale=query.shape[-1] ** -0.5,
-        return_softmax_lse=False,
-        **common,
+        union_inputs,
+        cu_q,
+        seq_lens[request_index : request_index + 1].contiguous(),
+        block_table[request_index : request_index + 1],
+        output,
+        max_query_length=rows,
     )
-    output.copy_(result)
-    return output
 
 
 def build_qsa_union_batch_inputs(
@@ -176,22 +209,21 @@ def build_qsa_union_batch_inputs(
         return build_qsa_union_inputs(sparse_idx, sparse_count, visible)
     # Padding is per request, never across a request boundary. Keep actual Q
     # unpadded; metadata uses its original cu_seqlens_q to locate union groups.
-    padded_starts = [0]
+    padded_rows = 0
     destinations = []
     for length in lengths:
-        start = padded_starts[-1]
+        start = padded_rows
         destinations.extend(range(start, start + length))
-        padded_starts.append(start + (length + UNION_SIZE - 1) // UNION_SIZE * UNION_SIZE)
+        padded_rows += (length + UNION_SIZE - 1) // UNION_SIZE * UNION_SIZE
     destination = torch.tensor(destinations, dtype=torch.int64, device=sparse_idx.device)
-    total = padded_starts[-1]
     padded_idx = torch.full(
-        (1, total, sparse_idx.shape[-1]),
+        (1, padded_rows, sparse_idx.shape[-1]),
         -1,
         dtype=sparse_idx.dtype,
         device=sparse_idx.device,
     )
-    padded_count = torch.zeros((1, total), dtype=sparse_count.dtype, device=sparse_count.device)
-    padded_visible = torch.zeros(total, dtype=visible.dtype, device=visible.device)
+    padded_count = torch.zeros((1, padded_rows), dtype=sparse_count.dtype, device=sparse_count.device)
+    padded_visible = torch.zeros(padded_rows, dtype=visible.dtype, device=visible.device)
     padded_idx[0].index_copy_(0, destination, sparse_idx[0])
     padded_count[0].index_copy_(0, destination, sparse_count[0])
     padded_visible.index_copy_(0, destination, visible)
@@ -230,50 +262,20 @@ def qsa_union_gbsa_attention_batch(
         1,
         write_row_metadata=False,
     )
-    union_idx, union_count, exact = build_qsa_union_batch_inputs(sparse_idx, sparse_count, visible, query_starts)
+    union_inputs = build_qsa_union_batch_inputs(sparse_idx, sparse_count, visible, query_starts)
     cu_q = torch.tensor(query_starts, dtype=torch.int64, device=query.device)
     selected = torch.tensor(request_indices, dtype=torch.int64, device=query.device)
     table = block_table.index_select(0, selected)
     lengths = seq_lens.index_select(0, selected)
-    common = dict(
-        cu_seqlens_q=cu_q,
-        seqused_kv=lengths,
-        layout_q="TND",
-        layout_kv="PA_BBND",
-        layout_sparse_pattern=4,
-        mask_mode=3,
-        quant_mode=0,
-        softmax_precision=0,
-        win_left=-1,
-        win_right=-1,
-        residual_block_mode=0,
-        is_consistent_topk=False,
-    )
-    shape = [UNION_SIZE, 4]
-    metadata = union_ops.generic_block_sparse_attention_metadata(
-        union_idx,
-        union_count,
-        query.shape[1],
-        1,
-        query.shape[-1],
-        shape,
-        max_seqlen_q=max(b - a for a, b in zip(query_starts, query_starts[1:])),
-        max_seqlen_kv=block_table.shape[1] * GBSA_PAGE_SIZE,
-        **common,
-    )
-    result, _ = union_ops.generic_block_sparse_attention(
-        query.contiguous(),
+    return _run_union_gbsa(
+        union_ops,
+        query,
         key_cache,
         value_cache,
-        union_idx,
-        union_count,
-        shape,
-        metadata=metadata,
-        block_table=table,
-        attn_mask=exact,
-        softmax_scale=query.shape[-1] ** -0.5,
-        return_softmax_lse=False,
-        **common,
+        union_inputs,
+        cu_q,
+        lengths,
+        table,
+        output,
+        max_query_length=max(b - a for a, b in zip(query_starts, query_starts[1:])),
     )
-    output.copy_(result)
-    return output
