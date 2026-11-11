@@ -1,0 +1,8 @@
+pr: 20807
+entries:
+  - category: feature
+    text: >-
+      Added an experimental MooncakePushConnector and concurrent P/D proxy for
+      whole-request KV transfer on Ascend with equal tensor parallelism, eager
+      execution, and dense FP16/BF16 attention. The connector supports early
+      destination allocation and fences cancellation before KV pages are reused.
