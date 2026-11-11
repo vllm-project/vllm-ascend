@@ -73,7 +73,12 @@ def test_shared_embedding_preserves_etp_lookup_and_excludes_external_parameter(m
     monkeypatch.setattr(ple_bm_embedding.Qwen4ExpPLEEmbedding, "__init__", init_base)
     events = []
     monkeypatch.setattr(common, "warmup_shared_engram_aicpu", lambda: events.append("warmup"), raising=False)
-    monkeypatch.setattr(ple_bm_embedding, "open_bm_reader", lambda *args: events.append("attach") or Reader())
+
+    def open_reader(*args):
+        events.append("attach")
+        return Reader()
+
+    monkeypatch.setattr(ple_bm_embedding, "open_bm_reader", open_reader)
     monkeypatch.setattr(ple_bm_embedding.AscendSharedPLEEmbedding, "_get_dp_gather_slot", lambda self, n: (n, 0))
     monkeypatch.setattr(ple_bm_embedding.AscendSharedPLEEmbedding, "_gather_dp_ids", lambda self, ids, size: ids)
     monkeypatch.setattr(

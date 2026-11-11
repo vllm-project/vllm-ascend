@@ -53,7 +53,10 @@ def test_failed_attachment_closes_client_and_does_not_expose_names(monkeypatch):
 
 def test_cleanup_failure_preserves_original_error_without_add_note(monkeypatch):
     class AttachError(RuntimeError):
-        add_note = None
+        def __getattribute__(self, name):
+            if name == "add_note":
+                raise AttributeError(name)
+            return super().__getattribute__(name)
 
     def fail_attach(*args):
         raise AttachError("attach failed")

@@ -34,7 +34,12 @@ def test_load_and_attach_padded_table(monkeypatch):
         device_pointer=lambda offset, size: base + offset,
     )
     calls = []
-    owner = SimpleNamespace(add=lambda key, rows, width, dtype: calls.append((key, rows, width, dtype)) or buffer)
+
+    def add(key, rows, width, dtype):
+        calls.append((key, rows, width, dtype))
+        return buffer
+
+    owner = SimpleNamespace(add=add)
     layout = ple_bm_table.load_table(owner, checkpoint, "weights", chunk_rows=2)
     assert calls == [("weights", 8, 3, torch.bfloat16)]
     raw = bytes(memory)

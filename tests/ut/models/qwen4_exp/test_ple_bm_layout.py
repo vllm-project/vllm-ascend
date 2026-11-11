@@ -15,6 +15,11 @@ def test_padded_publication_and_mapping_pointers():
     memory = ctypes.create_string_buffer(layout.allocation_bytes)
     base = ctypes.addressof(memory)
     calls = []
+
+    def device_pointer(offset, size):
+        calls.append((offset, size))
+        return base + offset
+
     buffer = SimpleNamespace(
         owner=True,
         closed=False,
@@ -26,7 +31,7 @@ def test_padded_publication_and_mapping_pointers():
         device="cpu",
         runtime=SimpleNamespace(bm=SimpleNamespace(BmMemType=SimpleNamespace(LOCAL_HOST=0))),
         handle=SimpleNamespace(gva_to_va=lambda address, _: base + address),
-        device_pointer=lambda offset, size: calls.append((offset, size)) or base + offset,
+        device_pointer=device_pointer,
     )
     rows = torch.arange(15, dtype=torch.float32).reshape(5, 3).to(torch.bfloat16)
     publish_rows(buffer, layout, 0, rows)
