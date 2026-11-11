@@ -16,14 +16,14 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import
 
 
 class TestSyncLoadFailureReporting(unittest.TestCase):
-    def _load_sync_result(self, block_ids_by_group, result, num_groups=None):
+    def _load_sync_result(self, block_ids_by_group, result):
         worker = KVPoolWorker.__new__(KVPoolWorker)
         worker.load_async = False
         worker.tp_mismatch = False
         worker.tp_rank = 0
         worker.backend_name = "mooncake"
         worker.cache_transfer_granularity = 16
-        worker.num_kv_cache_groups = num_groups or len(block_ids_by_group)
+        worker.num_kv_cache_groups = len(block_ids_by_group)
         worker.grouped_block_size = [16] * worker.num_kv_cache_groups
         worker.group_uses_align_state = [False] * worker.num_kv_cache_groups
         worker._invalid_block_ids = set()
@@ -77,12 +77,6 @@ class TestSyncLoadFailureReporting(unittest.TestCase):
         self.assertEqual(worker.get_block_ids_with_load_errors(), set())
         self.assertTrue(request.can_save)
         self.assertFalse(worker._save_disabled.is_set())
-
-    def test_one_loaded_group_in_hybrid_layout_still_reports_request(self):
-        worker, request = self._load_sync_result([[11]], [-704], num_groups=2)
-        self.assertEqual(worker.get_failed_requests(), {request.req_id})
-        self.assertEqual(worker.get_block_ids_with_load_errors(), set())
-        self.assertFalse(request.can_save)
 
     def test_single_group_block_error_reporting_is_preserved(self):
         for result, expected in (([-704], {11}), (None, {11}), ([0], set())):

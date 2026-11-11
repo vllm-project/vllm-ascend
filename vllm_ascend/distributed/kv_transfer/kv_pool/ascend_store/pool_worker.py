@@ -1508,9 +1508,8 @@ class KVPoolWorker(BaseKVPoolWorker):
                     block_id_list_c,
                     ret,
                 )
-                if self.num_kv_cache_groups == 1:
-                    with self._invalid_block_ids_lock:
-                        self._invalid_block_ids.update(missing_block_ids)
+                if len(request.block_ids_by_group) == 1:
+                    self._invalid_block_ids.update(missing_block_ids)
                 elif missing_block_ids:
                     self._record_failed_request(request)
             elif ret is None:
@@ -1518,9 +1517,8 @@ class KVPoolWorker(BaseKVPoolWorker):
                     block_id_list_c,
                     [1] * len(block_id_list_c),
                 )
-                if self.num_kv_cache_groups == 1:
-                    with self._invalid_block_ids_lock:
-                        self._invalid_block_ids.update(missing_block_ids)
+                if len(request.block_ids_by_group) == 1:
+                    self._invalid_block_ids.update(missing_block_ids)
                 elif missing_block_ids:
                     self._record_failed_request(request)
             logger.debug(
