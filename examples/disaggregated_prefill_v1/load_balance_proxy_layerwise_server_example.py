@@ -535,7 +535,7 @@ async def _handle_completions(api: str, request: Request):
         async def generate_stream():
             nonlocal released_kv, request_id
             generated_token = ""
-            generated_token_ids = []
+            generated_token_ids: list[int] = []
             released_kv = False
             retry_count = 0
             retry = True
