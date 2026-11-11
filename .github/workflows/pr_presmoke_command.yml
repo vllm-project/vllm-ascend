@@ -93,8 +93,8 @@ jobs:
           ]')
           # The presmoke suffix is appended to the matrix suffix so the runtime
           # image tag becomes nightly-<ref>-<suffix>-presmoke; the layered presmoke
-          # image in schedule_nightly_image_build_with_base_presmoke.yaml resolves
-          # the same tag via base_tag_suffix='-presmoke'.
+          # image in _schedule_nightly_pair_image_build.yaml resolves the same tag
+          # via base_tag_suffix='-presmoke'.
           FILTERED=$(echo "$ALL" | jq -c --argjson chips "$CHIPS" \
             '[.[] | select(.target as $t | $chips | index($t))
                  | .presmoke_suffix = (if .suffix == "" then "presmoke" else "\(.suffix)-presmoke" end)]')
@@ -112,7 +112,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.setup-matrix.outputs.matrix) }}
-    uses: ./.github/workflows/schedule_nightly_image_build_with_base_presmoke.yaml
+    uses: ./.github/workflows/_schedule_nightly_pair_image_build.yaml
     with:
       target: ${{ matrix.target }}
       os: ${{ matrix.os }}
@@ -125,9 +125,12 @@ jobs:
       build_type: 'full'
       should_push: ${{ github.repository == 'vllm-project/vllm-ascend' }}
       skip_base: ${{ inputs.skip_base || false }}
-      # Presmoke images are built for localization only; the smoke tests are
-      # dispatched separately through the nightly test chain.
-      run_presmoke: false
+      # Isolate the presmoke layer into the *_presmoke repositories. The smoke
+      # tests are dispatched separately through the nightly test chain, and the
+      # base image must not be mirrored to quay.io.
+      image_repo_suffix: '_presmoke'
+      base_tag_suffix: '-presmoke'
+      skip_sync: true
       swr_registry: 'swr.cn-north-12.myhuaweicloud.com'
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
