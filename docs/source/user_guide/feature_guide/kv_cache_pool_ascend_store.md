@@ -976,7 +976,8 @@ Expected output: MetaService starts successfully with no errors.
     Use `--enforce-eager` for cross-layer deployments. PIECEWISE and combined
     graph modes containing PIECEWISE are temporarily unsupported and fail
     before GVA initialization. Their DS4.1 model-runtime adaptation is being
-    developed separately. In PD separation, enable layerwise on P only;
+    tracked in [PR #21511](https://github.com/vllm-project/vllm-ascend/pull/21511).
+    In PD separation, enable layerwise on P only;
     D keeps it disabled.
 
     PD separation also supports `MultiConnector` with the existing

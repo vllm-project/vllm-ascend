@@ -148,7 +148,8 @@ fallback switches to bulk keys.
 
 Use `--enforce-eager`. PIECEWISE and combined graph modes containing
 PIECEWISE fail before GVA initialization. DS4.1 PIECEWISE runtime adaptation
-is maintained separately; this change does not modify graph splitting,
+is maintained in [PR #21511](https://github.com/vllm-project/vllm-ascend/pull/21511);
+this change does not modify graph splitting,
 bounded-replay operators, Engram preparation or metadata graph lifetimes.
 
 A fatal load error drains or stops the receiver before lease release. The
