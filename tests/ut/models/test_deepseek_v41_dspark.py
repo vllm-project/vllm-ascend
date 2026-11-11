@@ -298,7 +298,8 @@ def test_context_wkv_weights_load_into_the_matching_merged_shard(monkeypatch):
         "model.context_wkv_proj.weight": merged_param,
     }
     model = SimpleNamespace(
-        model=SimpleNamespace(num_dspark_layers=1, get_expert_mapping=lambda: []),
+        model=SimpleNamespace(num_dspark_layers=1, get_expert_mapping=lambda *, num_redundant_experts: []),
+        num_redundant_experts=0,
         config=SimpleNamespace(num_attention_heads=1),
         rotation_path=None,
         named_parameters=lambda: params.items(),
