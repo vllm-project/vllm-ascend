@@ -562,8 +562,6 @@ vllm serve Qwen/Qwen3-8B \
   }'
 ```
 
-Adaptive verification takes effect only with model runner V2.
-
 #### DeepSeek-V4.1-Flash targets
 
 The Ascend V4.1 cache backend implements DSpark adaptive verification with
@@ -571,7 +569,7 @@ Model Runner V2 and FULL decode graphs. Use a V4.1 checkpoint containing its
 native DSpark draft weights, Markov head, and confidence head:
 
 ```shell
-VLLM_USE_V2_MODEL_RUNNER=1 vllm serve /path/to/DeepSeek-V4.1-Flash \
+vllm serve /path/to/DeepSeek-V4.1-Flash \
   --tensor-parallel-size 4 --enable-expert-parallel \
   --trust-remote-code --no-enable-prefix-caching \
   --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \

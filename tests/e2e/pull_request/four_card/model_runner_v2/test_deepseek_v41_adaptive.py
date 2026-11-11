@@ -81,7 +81,6 @@ def _assert_output_parity(name, reference, outputs):
 @patch.dict(
     os.environ,
     {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         # Test-only RPC callables install cost probes; serving needs no such flag.
         "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",

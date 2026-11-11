@@ -12,7 +12,6 @@ from vllm.v1.worker.gpu.spec_decode import adaptive_verification
 from vllm_ascend.attention import dsa_v41
 from vllm_ascend.attention.dsa_v41 import (
     AscendDSAV41MetadataBuilder,
-    DeepseekV41CacheBackend,
     build_replay_swa_visible_lens,
 )
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
@@ -22,7 +21,7 @@ from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
 
 @pytest.mark.parametrize("num_drafts", [5, 7, 15, STATE_RING_ROWS - 1, STATE_RING_ROWS])
 def test_v41_adaptive_real_initialization_gate(monkeypatch, num_drafts):
-    # The four cache planes all use this backend/builder. Exercise the real
+    # All five role backends inherit the bounded graph capability. Exercise the real
     # upstream checks; only construction of device-side manager buffers is mocked.
     monkeypatch.setattr(AttentionBackend, "supports_device_cpu_query_lens_mismatch", classmethod(lambda cls: False))
     config = SimpleNamespace(
@@ -31,17 +30,16 @@ def test_v41_adaptive_real_initialization_gate(monkeypatch, num_drafts):
         ),
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1),
     )
-    builder = AscendDSAV41MetadataBuilder.__new__(AscendDSAV41MetadataBuilder)
     groups = [
         [
             SimpleNamespace(
-                backend=DeepseekV41CacheBackend,
-                layer_names=[name],
+                backend=getattr(dsa_v41, f"DeepseekV41{role}Backend"),
+                layer_names=[role],
                 kv_cache_spec=object(),
-                get_metadata_builder=lambda index: builder,
+                get_metadata_builder=lambda index, role=role: getattr(dsa_v41, f"AscendDSAV41{role}MetadataBuilder"),
             )
         ]
-        for name in ("swa", "long_kv", "index_k", "compressor_state")
+        for role in ("SWA", "Attention", "Indexer", "State", "FoldedIndex")
     ]
     kwargs = dict(
         enable_adaptive_verification=True,
@@ -118,7 +116,8 @@ def _window_reference(positions, window_size, *, visible_lens=None, indices_outp
     return indices, lengths
 
 
-def test_v41_a5_replay_window_keeps_current_token_and_masks_padding(monkeypatch):
+@pytest.mark.parametrize("specialized", [False, True])
+def test_v41_a5_replay_window_keeps_current_token_and_masks_padding(monkeypatch, specialized):
     """A shorter sparse list must keep the newest KV, including this query's KV."""
     monkeypatch.setattr(dsa_v41.DeviceOperator, "get_dsv41_packed_cache_ops", lambda: None)
     config = SimpleNamespace(
@@ -131,11 +130,16 @@ def test_v41_a5_replay_window_keeps_current_token_and_masks_padding(monkeypatch)
     spec = AscendSlidingWindowMLASpec(
         block_size=64, num_kv_heads=1, head_size=8, dtype=torch.bfloat16, sliding_window=4, model_version="deepseek_v41"
     )
-    builder = AscendDSAV41MetadataBuilder(spec, [], config, torch.device("cpu"))
+    builder_cls = dsa_v41.AscendDSAV41SWAMetadataBuilder if specialized else AscendDSAV41MetadataBuilder
+    builder = builder_cls(spec, [], config, torch.device("cpu"))
+    peer = builder_cls(spec, [], config, torch.device("cpu"))
     # Execute the real metadata builder, replacing only A5's index producer.
     builder._a5_causal_swa_indices = torch.empty(16, 1, 4, dtype=torch.int32)
     builder._a5_causal_swa_lengths = torch.empty(16, 1, dtype=torch.int32)
     builder._device_backend = SimpleNamespace(build_window_indices=_window_reference)
+    peer._a5_causal_swa_indices = torch.empty(16, 1, 4, dtype=torch.int32)
+    peer._a5_causal_swa_lengths = torch.empty(16, 1, dtype=torch.int32)
+    peer._device_backend = builder._device_backend
     common = SimpleNamespace(
         query_start_loc=torch.zeros(5, dtype=torch.int32),
         query_start_loc_cpu=torch.tensor([0, 3, 7, 16, 16]),
@@ -159,7 +163,13 @@ def test_v41_a5_replay_window_keeps_current_token_and_masks_padding(monkeypatch)
         common.query_start_loc.copy_(torch.tensor([0, lengths[0], end, end, end]))
         common.seq_lens[:2] = torch.tensor([121 + lengths[0], 255 + lengths[1]])
         common.positions[:end] = torch.cat([torch.arange(121, 121 + lengths[0]), torch.arange(255, 255 + lengths[1])])
-        metadata = builder.build(0, common, num_actual_reqs=2)
+        shared = {}
+        metadata = builder.build(0, common, num_actual_reqs=2, common_v41_batch_metadata=shared)
+        # A peer shares request coordinates but has a different replay floor.
+        # Its build must not reuse or overwrite this group's sparse window.
+        peer_common = SimpleNamespace(**vars(common))
+        peer_common.replay_start = torch.zeros_like(common.replay_start)
+        peer_metadata = peer.build(0, peer_common, num_actual_reqs=2, common_v41_batch_metadata=shared)
         expected = torch.full((16, 1, 4), -1, dtype=torch.int32)
         for row, position in enumerate(common.positions[:end].tolist()):
             floor = 121 if row < lengths[0] else 255
@@ -168,6 +178,10 @@ def test_v41_a5_replay_window_keeps_current_token_and_masks_padding(monkeypatch)
         torch.testing.assert_close(metadata.ori_sparse_indices, expected)
         torch.testing.assert_close(metadata.ori_topk_length, (expected >= 0).sum(-1, dtype=torch.int32))
         assert metadata.ori_sparse_indices.data_ptr() == builder._a5_causal_swa_indices.data_ptr()
+        assert peer_metadata.ori_sparse_indices.data_ptr() == peer._a5_causal_swa_indices.data_ptr()
+        assert peer_metadata.ori_topk_length[:end].tolist() == [[4]] * end
+        assert peer_metadata.ori_topk_length[end:].tolist() == [[0]] * (16 - end)
+        assert peer_metadata.ori_sparse_indices[0, 0].tolist() == [118, 119, 120, 121]
 
 
 @pytest.mark.parametrize("prebuilt", [False, True])

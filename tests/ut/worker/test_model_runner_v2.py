@@ -1033,6 +1033,7 @@ def test_default_model_state_preserves_varlen_capture_query_bound(monkeypatch, p
     )
     build = Mock(return_value={})
     monkeypatch.setattr(default, "build_attn_metadata", build)
+    monkeypatch.setattr(default, "get_ascend_config", lambda: SimpleNamespace(xlite_graph_config=None))
     state.prepare_attn(batch, CUDAGraphMode.FULL, (), torch.empty(0), [], None, for_capture=True)
     assert build.call_args.kwargs["max_query_len"] == expected
 

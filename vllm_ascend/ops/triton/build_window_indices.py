@@ -87,7 +87,7 @@ def build_window_indices_triton(
         block_size = triton.next_power_of_2(window_size)
         _build_window_indices_kernel[(tokens,)](
             positions.contiguous(),
-            visible_lens,
+            visible_lens if visible_lens is not None else positions,
             indices_output,
             lengths_output,
             tokens,

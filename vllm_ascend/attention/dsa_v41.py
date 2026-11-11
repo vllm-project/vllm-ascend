@@ -1317,7 +1317,8 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         replay_start = getattr(common, "replay_start", None)
         replay_visible_lens = None
         if replay_start is not None and req.cache_kind == "swa":
-            replay_visible_lens = self.common_v41_batch_metadata.get("swa:replay-visible")
+            # Replay floors are group-local even when request coordinates are shared.
+            replay_visible_lens = self.common_v41_smla_metadata.get("swa:replay-visible")
             if replay_visible_lens is None:
                 assert self._replay_visible_lens is not None
                 replay_visible_lens = self._replay_visible_lens[: req.num_input_tokens]
@@ -1330,7 +1331,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                         req.num_input_tokens,
                     )
                 )
-                self.common_v41_batch_metadata["swa:replay-visible"] = replay_visible_lens
+                self.common_v41_smla_metadata["swa:replay-visible"] = replay_visible_lens
             req.ori_topk_length = replay_visible_lens
         if (
             not noncausal
@@ -1339,7 +1340,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             and req.positions is not None
         ):
             cache_key = f"a5-causal-swa:w{window_size}"
-            cached_window = self.common_v41_batch_metadata.get(cache_key)
+            cached_window = self.common_v41_smla_metadata.get(cache_key)
             if cached_window is None:
                 assert self._device_backend is not None
                 cached_window = self._device_backend.build_window_indices(
@@ -1349,7 +1350,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                     indices_output=self._a5_causal_swa_indices[: req.num_input_tokens],
                     lengths_output=self._a5_causal_swa_lengths[: req.num_input_tokens],
                 )
-                self.common_v41_batch_metadata[cache_key] = cached_window
+                self.common_v41_smla_metadata[cache_key] = cached_window
             req.ori_sparse_indices, req.ori_topk_length = cached_window
         req.ori_mask_mode = 0 if noncausal else 4
         req.ori_win_left = max(0, window_size - 1)
