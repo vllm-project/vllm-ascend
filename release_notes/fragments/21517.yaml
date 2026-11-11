@@ -1,0 +1,4 @@
+pr: 21517
+entries:
+  - category: feature
+    text: Added pipeline parallelism support to the Mooncake layerwise KV PUSH connector on the prefill side, so each prefill stage transfers its own physical layers and only the last stage signals request completion. Decode-side pipeline parallelism is rejected at startup.
