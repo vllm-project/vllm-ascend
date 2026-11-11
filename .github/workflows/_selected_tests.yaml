@@ -417,11 +417,13 @@ jobs:
           retention-days: 7
 
       - name: Generate Cobertura XML from coverage data
+        if: ${{ inputs.enable-coverage != true }}
         run: |
           python -m slipcover --merge ./tests/coverage.json \
             --xml --out ./tests/coverage.xml
 
       - name: Generate coverage comment
+        if: ${{ inputs.enable-coverage != true }}
         run: |
           pip install diff-cover
           diff-cover ./tests/coverage.xml --compare-branch=origin/${{ github.base_ref }} \
@@ -429,6 +431,7 @@ jobs:
           cat ./tests/diff_coverage.md >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Check coverage on new code
+        if: ${{ inputs.enable-coverage != true }}
         run: |
           diff-cover ./tests/coverage.xml --compare-branch=origin/${{ github.base_ref }} \
             --fail-under=80

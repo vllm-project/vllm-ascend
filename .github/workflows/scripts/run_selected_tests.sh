@@ -38,11 +38,11 @@ num_npus="$2"
 mode="$3"
 shift 3
 
-record_timing=false
-if [ "$1" = "--timing" ]; then
-  record_timing=true
-  shift
-fi
+record_timing=true
+#if [ "$1" = "--timing" ]; then
+#  record_timing=true
+#  shift
+#fi
 
 targets=("$@")
 
@@ -195,7 +195,8 @@ run_pytest_target() {
     run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${target}"
   else
     set +e
-    run_logged_command "${log_file}" python -m slipcover --source="${project_root}/vllm_ascend" --omit="*/tests/*,*/ops/triton/*" --json --out "${project_root}/tests/coverage.json" -m pytest -n "${pytest_xdist_workers}" -sv --color=yes "${target}"
+    #run_logged_command "${log_file}" python -m slipcover --source="${project_root}/vllm_ascend" --omit="*/tests/*,*/ops/triton/*" --json --out "${project_root}/tests/coverage.json" -m pytest -n "${pytest_xdist_workers}" -sv --color=yes "${target}"
+    run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${target}"
   fi
   local status=$?
   set -e
@@ -209,6 +210,8 @@ run_pytest_target() {
     local elapsed_ns=$(( $(date +%s%N) - start_time ))
     local elapsed=$(( elapsed_ns / 1000000000 )).$(( (elapsed_ns % 1000000000) / 100000000 ))
     timing_entries+=("{\"name\":\"${target}\",\"passed\":$([ ${status} -eq 0 ] && echo true || echo false),\"elapsed\":${elapsed}}")
+    echo -e "\033[1;34m=== UT run time for coverage.py ===\033[0m"
+    echo -e "    time elapsed: ${elapsed}"
   fi
   echo "::endgroup::"
   if [ "${status}" -eq 0 ]; then
@@ -246,7 +249,8 @@ run_pytest_batch() {
     run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${batch_targets[@]}"
   else
     set +e
-    run_logged_command "${log_file}" python -m slipcover --source="${project_root}/vllm_ascend" --omit="*/tests/*,*/ops/triton/*" --json --out "${project_root}/tests/coverage.json" -m pytest -n "${pytest_xdist_workers}" -sv --color=yes "${batch_targets[@]}"
+    #run_logged_command "${log_file}" python -m slipcover --source="${project_root}/vllm_ascend" --omit="*/tests/*,*/ops/triton/*" --json --out "${project_root}/tests/coverage.json" -m pytest -n "${pytest_xdist_workers}" -sv --color=yes "${batch_targets[@]}"
+    run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${batch_targets[@]}"
   fi
   local status=$?
   set -e
@@ -257,6 +261,8 @@ run_pytest_batch() {
     local elapsed_ns=$(( $(date +%s%N) - start_time ))
     local elapsed=$(( elapsed_ns / 1000000000 )).$(( (elapsed_ns % 1000000000) / 100000000 ))
     timing_entries+=("{\"name\":\"${target}\",\"passed\":$([ ${status} -eq 0 ] && echo true || echo false),\"elapsed\":${elapsed}}")
+    echo -e "\033[1;34m=== UT run time for coverage.py ===\033[0m"
+    echo -e "    time elapsed: ${elapsed}"
   fi
   echo "::endgroup::"
   if [ "${status}" -eq 0 ]; then

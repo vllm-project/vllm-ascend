@@ -590,8 +590,14 @@ jobs:
     # which is skipped under ready-all or main2main. Without a status check
     # function, the skipped need propagates transitively and skips this job
     # even when select-tests succeeded.
+    #
+    # TEMP DEBUG: force-fail this job on entry so downstream run-selected-tests*
+    # (which all require prepare-csrc-cache.result == 'success') do not run. The
+    # job reports 'failure' (not 'skip'), since a reusable workflow (uses:) cannot
+    # hold inline steps. REVERT BEFORE MERGE.
     if: >-
       ${{
+        false &&
         !cancelled() &&
         needs.select-tests.result == 'success' &&
         (
