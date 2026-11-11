@@ -72,7 +72,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_pcp_embedding_lmhead_weight_sharding` | bool | `True` | Whether PCP shards embedding and LM Head weights across PCP ranks inside each TP shard. This option is enabled by default, takes effect when PCP size is greater than 1, and is incompatible with batch-sharded sampling (`enable_batch_sharded_sampling`) and fine-grained TP for these modules. |
 | `rejection_sampler_config`          | dict | `{}`    | Configuration options for rejection sampler (block verify and entropy verify). |
 | `dynamic_spec_config`               | dict | `{}`    | Configuration options for Dynamic Speculative Decoding. See [Dynamic Speculative Decoding](../feature_guide/speculative_decoding.md#dynamic-speculative-decoding). |
-| `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable dsa multi-stream overlap for DeepSeek V4.  |
+| `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable DSA multi-stream overlap for DeepSeek V4 outside PCP. PCP batches with global prefill overlap local Q projection and global cache preparation by default on nonempty query shards, independently of this option.  |
 | `rl_config`                        | dict | `{}`    | One-click RL mode configuration. See <a href="#rl_config">rl_config</a> for all fields, the two deployment modes, usage examples, and the migration guide. |
 | `combine_quant_mode`                | int  | `0`     | Fused MC2 configuration. This configuration will be passed as the `comm_quant_mode` argument for the `torch_npu.npu_moe_distribute_combine_v2` operator. Please refer to the operator documentation for the valid value range. |
 

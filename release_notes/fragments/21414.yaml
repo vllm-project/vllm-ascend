@@ -1,7 +1,5 @@
 pr: 21414
 entries:
   - category: performance
-    text: Added an opt-in PCP prefill path that overlaps the local Q projection with global cache preparation.
+    text: PCP prefill now overlaps the local Q projection with global cache preparation by default for nonempty local query shards.
     hardware: [A2]
-  - category: config
-    text: Added the `pcp_q_projection_overlap` option (default off) for DSA PCP prefill.

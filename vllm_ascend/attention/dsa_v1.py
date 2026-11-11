@@ -2388,19 +2388,9 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             output[...] = self.wo_b(o_proj_input)
         return output
 
-    def _prepare_caches_before_attention(
-        self,
-        layer_name: str,
-        hidden_states: torch.Tensor,
-        kv_cache: tuple[torch.Tensor, ...],
-        attn_metadata: DSAMetadataDict,
-    ) -> bool:
-        """Prepare cache updates and report whether local writes can be skipped."""
-        return False
-
     def _prepare_caches_and_query(self, layer_name, hidden_states, kv_cache, attn_metadata, layer_metadata):
         """Prepare caches and optionally return invocation-local Q intermediates."""
-        return self._prepare_caches_before_attention(layer_name, hidden_states, kv_cache, attn_metadata), None
+        return False, None
 
     def _get_o_proj_input_shape(
         self,
