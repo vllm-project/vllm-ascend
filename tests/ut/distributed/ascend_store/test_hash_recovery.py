@@ -20,15 +20,22 @@ except ModuleNotFoundError as exc:
         raise
     from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import KeyMetadata
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hash_connector import (
-    AscendHashStoreWorker,
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import MooncakeStoreWorker
+
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
     AscendStoreConnector,
-    MooncakeStoreWorker,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import get_hash_store_layout_class
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import (
     _align_store_eagle_policy,
     _AlignedStore,
     _engine_transfer_config,
+    get_hash_store_worker_class,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hash_layout import AscendHashStoreLayout
+
+AscendHashStoreWorker = get_hash_store_worker_class()
+AscendHashStoreLayout = get_hash_store_layout_class()
 
 
 def layout(*, state=False, hnd=False, page=16, unit=4):
@@ -44,7 +51,7 @@ def test_engine_policy_not_multiconnector_child_role(source):
         cache.kv_transfer_config = parent.kv_transfer_config
     current = parent if source == "worker_context" else None
     with patch(
-        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hash_connector.get_current_vllm_config_or_none",
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.get_current_vllm_config_or_none",
         return_value=current,
     ):
         resolved = _engine_transfer_config(child, cache)
@@ -374,7 +381,7 @@ def test_worker_binds_all_components_before_upstream_registration():
             database.store_layout.register_kv_caches([attention[0], state[0]], 3)
 
     with (
-        patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hash_connector._AlignedStore"),
+        patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker._AlignedStore"),
         patch.object(MooncakeStoreWorker, "register_kv_caches", side_effect=legacy_registration),
     ):
         worker.register_kv_caches({"attention": attention, "mamba": state})
@@ -398,18 +405,35 @@ def test_worker_binds_all_components_before_upstream_registration():
 )
 def test_hash_mode_rejects_unsupported_configuration(extra):
     config = SimpleNamespace(
-        kv_transfer_config=SimpleNamespace(kv_connector_extra_config={"pool_prefix_mode": "hash", **extra})
+        kv_transfer_config=SimpleNamespace(
+            kv_connector="AscendStoreConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"pool_prefix_mode": "hash", **extra},
+        )
     )
     with pytest.raises(ValueError, match="rank-local Mooncake"):
         AscendStoreConnector(config, None)
 
 
-def test_non_hash_entrypoint_rejected():
+@pytest.mark.parametrize("mode", [None, "block_only", "hash"])
+def test_single_connector_selects_prefix_mode(mode):
     config = SimpleNamespace(
-        kv_transfer_config=SimpleNamespace(kv_connector_extra_config={"pool_prefix_mode": "block_only"})
+        kv_transfer_config=SimpleNamespace(
+            kv_connector="AscendStoreConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={} if mode is None else {"pool_prefix_mode": mode},
+        )
     )
-    with pytest.raises(ValueError, match="original module"):
-        AscendStoreConnector(config, None)
+    with (
+        patch.object(AscendStoreConnector, "_init_hash_store") as hash_init,
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.create_kv_pool_scheduler"
+        ) as legacy,
+    ):
+        connector = AscendStoreConnector(config, KVConnectorRole.SCHEDULER, Mock())
+    assert connector._hash_prefix is (mode == "hash")
+    assert hash_init.call_count == int(mode == "hash")
+    assert legacy.call_count == int(mode != "hash")
 
 
 def test_uncovered_registration_span_rejected():

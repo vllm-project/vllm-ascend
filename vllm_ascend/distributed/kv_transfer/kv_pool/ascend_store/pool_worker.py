@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import hashlib
 import importlib
 import threading
 import time
 from collections.abc import Callable, Sequence
+from contextlib import nullcontext
+from copy import copy
+from dataclasses import replace
+from functools import cache as cache_factory
+from pathlib import Path
 
 import torch
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from filelock import FileLock
+from vllm.config import VllmConfig, get_current_vllm_config_or_none
 from vllm.distributed import (
     get_pcp_group,
     get_pp_group,
@@ -53,8 +60,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
     KeyMetadata,
     ReqMeta,
+    dense_cache_segments,
     get_block_hashes,
     get_group_cache_family,
+    get_hash_store_layout_class,
     infer_group_block_sizes,
     infer_group_cache_families,
     infer_tp_mismatch_info,
@@ -70,6 +79,195 @@ from vllm_ascend.distributed.utils import (
 )
 
 SAVE_BATCH_FAILURE_POLL_INTERVAL_S = 1.0
+
+
+def _engine_transfer_config(vllm_config, kv_cache_config):
+    # MultiConnector replaces only the child's transfer config. The scheduler
+    # planner retains the engine config; worker RPCs run in Core's explicit
+    # current-config context (the dynamic planner attribute may not cross IPC).
+    resolved = getattr(kv_cache_config, "kv_transfer_config", None)
+    if resolved is not None:
+        return resolved
+    current = get_current_vllm_config_or_none()
+    return (current if current is not None else vllm_config).kv_transfer_config
+
+
+def _align_store_eagle_policy(coord, kv_transfer_config):
+    """Use the existing Ascend producer checkpoint policy in Store too.
+
+    Core Store derives its policy from speculative config, whereas Ascend's
+    scheduler/manager suppress the drop on a pure prefill producer. Otherwise
+    Store publishes attention at a different hash boundary from Mamba. Only
+    this connector's coordinator is changed; MTP and engine config are intact.
+    """
+    # Do not import the platform patch package here: that installs unrelated
+    # scheduler patches even for an isolated Core Store adapter import.
+    pure_producer = (
+        kv_transfer_config is not None
+        and getattr(kv_transfer_config, "is_kv_producer", False)
+        and not getattr(kv_transfer_config, "is_kv_consumer", False)
+    )
+    if not pure_producer:
+        return
+    coord.use_eagle = False
+    coord.attention_groups = [group._replace(use_eagle=False) for group in coord.attention_groups]
+    coord.eagle_group_ids = set()
+    coord.eagle_proof_margin_by_group = {}
+
+
+class _AlignedStore:
+    """Translate registration only; logical payload addresses stay untouched."""
+
+    def __init__(self, store, views, alignment=2 * 1024 * 1024):
+        self._store = store
+        self._regions = {}
+        self._registered = set()
+        for view in views:
+            if not view.numel():
+                continue
+            storage = view.untyped_storage()
+            raw, size = storage.data_ptr(), storage.nbytes()
+            aligned = ((raw + alignment - 1) // alignment) * alignment
+            # Register strictly inside this allocation. Check the true strided
+            # extent, not numel() or the first layer's minimum data pointer.
+            span = (1 + sum((n - 1) * s for n, s in zip(view.shape, view.stride()))) * view.element_size()
+            if any(s <= 0 for s in view.stride()) or not aligned <= view.data_ptr() < raw + size:
+                raise ValueError("KV view starts outside the allocation's aligned registration region")
+            if view.data_ptr() + span > raw + size:
+                raise ValueError("KV view exceeds its storage allocation")
+            self._regions[raw] = (size, aligned, raw + size - aligned)
+
+    def register_buffer(self, address, size):
+        expected, aligned, length = self._regions[address]
+        if size != expected:
+            raise ValueError("Unexpected Store registration span")
+        if address in self._registered:
+            return 0
+        result = self._store.register_buffer(aligned, length)
+        if result != 0:
+            # Upstream's rank-local registration logs failures and continues.
+            # On NPU this must fail before any payload can be published.
+            raise RuntimeError(f"NPU Store registration failed: {result}")
+        self._registered.add(address)
+        return result
+
+    def unregister_buffer(self, address):
+        result = self._store.unregister_buffer(self._regions[address][1])
+        if result == 0:
+            self._registered.discard(address)
+        return result
+
+    def __getattr__(self, name):
+        return getattr(self._store, name)
+
+
+@cache_factory
+def get_hash_store_worker_class():
+    # Keep the old bulk/layerwise Store independent of new Core APIs.
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
+        ChunkedTokenDatabase as CoreChunkedTokenDatabase,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import MooncakeStoreWorker
+    from vllm.v1.kv_cache_interface import group_kernel_blocks
+
+    class AscendHashStoreWorker(MooncakeStoreWorker):
+        def __init__(self, vllm_config, kv_cache_config):
+            # Some FabricMem runtimes fail concurrent VA reservations. This opt-in
+            # host-local bootstrap lock does not serialize requests or transfers.
+            extra = vllm_config.kv_transfer_config.kv_connector_extra_config
+            lock_path = extra.get("npu_store_setup_lock")
+            if lock_path is not None and not Path(lock_path).is_absolute():
+                raise ValueError("npu_store_setup_lock must be an absolute host-local path")
+            lock = FileLock(lock_path, timeout=60) if lock_path is not None else nullcontext()
+            with lock:
+                super().__init__(vllm_config, kv_cache_config)
+            _align_store_eagle_policy(self.coord, _engine_transfer_config(vllm_config, kv_cache_config))
+
+        def _select_store_layout(self, extra_config):
+            # Never mix partial attention objects with legacy whole-page keys.
+            schema = tuple(repr(group.kv_cache_spec) for group in self._kv_cache_groups)
+            digest = hashlib.sha256(
+                repr((schema, self.hash_block_size, envs.VLLM_KV_CACHE_LAYOUT)).encode()
+            ).hexdigest()[:16]
+            return None, f"@ascend_hash_v2:tp{self.tp_size}:pp{self.pp_size}:{digest}", None
+
+        def _build_token_databases(self, metadata, plans):
+            databases = []
+            # Match AscendAttentionBackend.get_kv_cache_shape, not Core's logical
+            # [B,H,N,C] descriptor: Ascend exposes the backend-shaped cache views.
+            head_major = envs.VLLM_KV_CACHE_LAYOUT in ("HND", "LBHNC")
+            for group_id, group in enumerate(self._kv_cache_groups):
+                spec = group.kv_cache_spec
+                is_state = isinstance(spec, MambaSpec)
+                group_metadata = replace(
+                    metadata, group_id=group_id, tp_rank=self.tp_rank // self._group_tp_replication_factors[group_id]
+                )
+                layout = get_hash_store_layout_class()(
+                    group_metadata, spec.block_size, self.hash_block_size, is_state=is_state, head_major=head_major
+                )
+                databases.append(
+                    CoreChunkedTokenDatabase(
+                        group_metadata,
+                        spec.block_size,
+                        hash_block_size=self.hash_block_size,
+                        store_layout=layout,
+                    )
+                )
+            return databases
+
+        def register_kv_caches(self, kv_caches):
+            if self._capacity_only:
+                return
+            # MRV2 carries the resolved capacity on KVCacheConfig rather than
+            # filling the legacy cache-config field consumed by Store's worker.
+            # Bridge the Core result on a worker-local copy; never re-plan it.
+            self.cache_config = copy(self.cache_config)
+            resolved_blocks = self._kv_cache_config.num_blocks
+            if self.cache_config.num_gpu_blocks not in (None, resolved_blocks):
+                raise ValueError("Store capacity disagrees with Core-resolved KVCacheConfig")
+            self.cache_config.num_gpu_blocks = resolved_blocks
+            if self._kv_cache_config.hisparse_host_num_blocks is not None:
+                raise ValueError("Ascend hash Store does not support host-resident cache groups")
+            names = {name for group in self._kv_cache_groups for name in group.layer_names}
+            if names - kv_caches.keys():
+                raise ValueError("Missing transferable Ascend Store layers")
+            caches = {
+                name: list(cache) if isinstance(cache, tuple) else cache
+                for name, cache in kv_caches.items()
+                if name in names
+            }
+            views = [view for cache in caches.values() for view in (cache if isinstance(cache, list) else [cache])]
+            self.store = _AlignedStore(self.store, views)
+            # Register every component's allocation, including separately allocated
+            # recurrent state. Upstream may register only a representative tensor;
+            # the wrapper deduplicates those later registration calls.
+            for view in views:
+                if view.numel():
+                    storage = view.untyped_storage()
+                    self.store.register_buffer(storage.data_ptr(), storage.nbytes())
+            for group, database in zip(self._kv_cache_groups, self.token_dbs, strict=True):
+                group_views = []
+                for name in group.layer_names:
+                    value = caches[name]
+                    components = value if isinstance(value, list) else [value]
+                    group_views.extend(group_kernel_blocks(view, resolved_blocks) for view in components)
+                database.store_layout.bind_group_views(group_views)
+            super().register_kv_caches(caches)
+
+        def wait_for_save(self, metadata):
+            if self._capacity_only or not self.can_put:
+                return
+            pending = [request for request in metadata.requests if request.can_save]
+            if not pending:
+                return
+            event = torch.npu.Event()
+            event.record()
+            for request in pending:
+                request.current_event = event
+                assert self.kv_send_thread is not None
+                self.kv_send_thread.add_request(request)
+
+    return AscendHashStoreWorker
 
 
 class KVPoolWorker:
@@ -531,11 +729,9 @@ class KVPoolWorker:
         block_len, block_stride, _, scale = self._get_cache_block_metadata(cache)
         physical_bytes = block_len // scale
         physical_stride = block_stride // scale
-        if scale == 1 or physical_stride == physical_bytes:
-            return [(cache.data_ptr(), block_len, block_stride)]
-        if not cache[0].is_contiguous():
+        if scale > 1 and physical_stride != physical_bytes and not cache[0].is_contiguous():
             raise ValueError("Segmented KV pool transfer requires contiguous data inside each physical block.")
-        return [(cache.data_ptr() + index * physical_stride, physical_bytes, block_stride) for index in range(scale)]
+        return dense_cache_segments(cache.data_ptr(), block_len, block_stride, scale, kernel_stride=physical_stride)
 
     def _get_combined_cache_transfer_segments(
         self, caches: tuple[torch.Tensor, ...], group_id: int

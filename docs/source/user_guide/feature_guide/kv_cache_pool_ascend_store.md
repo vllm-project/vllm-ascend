@@ -1646,12 +1646,11 @@ Values in `kv_connector_extra_config` take precedence over environment variables
 
 Whole-page pool I/O (`pool_prefix_mode="block_only"`) and local APC matches
 have different granularities. To restore an external prefix at a hash boundary
-inside a physical page, explicitly select the hash connector entrypoint:
+inside a physical page, set `pool_prefix_mode="hash"` on the same connector:
 
 ```json
 {
   "kv_connector": "AscendStoreConnector",
-  "kv_connector_module_path": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.hash_connector",
   "kv_role": "kv_both",
   "kv_connector_extra_config": {
     "pool_prefix_mode": "hash",
@@ -1661,11 +1660,11 @@ inside a physical page, explicitly select the hash connector entrypoint:
 }
 ```
 
-This entrypoint requires a vLLM Core version with Mooncake Store
+Hash mode requires a vLLM Core version with Mooncake Store
 `prefix_cacheable_groups` and partial-tail boundary-state handoff APIs. It fails
 explicitly on older versions; it does not patch Core or silently fall back to
-whole-page recovery. The existing connector entrypoint and its defaults are
-unchanged.
+whole-page recovery. Omit the setting or use `block_only` to keep the existing
+whole-page path. No custom module path is needed for either mode.
 
 The scheduler, group recoverability checks, pinned checkpoint lifecycle,
 rank acknowledgements, lookup protocol, and metrics are inherited from Core's
@@ -1683,7 +1682,7 @@ asynchronous loads, NHD/HND attention views, and contiguous recurrent checkpoint
 components, including inter-layer slab padding. It rejects layerwise transfers,
 context parallelism, store TP sharing, custom memory pools, sleep mode, and
 HiSparse host caches. Other AscendStore backends are not supported by this
-entrypoint. Hash objects use a separate schema namespace and cannot be mixed
+mode. Hash objects use a separate schema namespace and cannot be mixed
 with legacy whole-page objects. Use consistent model weights and configuration
 across workers sharing a pool, as with the upstream connector.
 

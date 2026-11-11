@@ -1,4 +1,5 @@
 from collections.abc import Callable, Iterable
+from functools import cache
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
@@ -13,6 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
     KVConnectorTransferResults,
+    KVConnectorWorkerMetadata,
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
@@ -43,9 +45,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_wor
     LayerwiseKVPoolWorker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import LookupKeyServer
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
-    AscendStoreKVConnectorWorkerMetadata,
-)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
     AscendStorePromMetrics,
@@ -54,10 +53,25 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler imp
     BaseKVPoolScheduler,
     KVPoolScheduler,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import (
+    KVPoolWorker,
+    _align_store_eagle_policy,
+    _engine_transfer_config,
+    get_hash_store_worker_class,
+)
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandshakeMetadata
+
+
+@cache
+def _core_store():
+    """Load Core's Store protocol only when the hash path needs it."""
+    try:
+        from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import connector
+    except ImportError as exc:
+        raise ImportError("AscendStore hash recovery requires vLLM Core's Mooncake Store boundary-state APIs") from exc
+    return connector
 
 
 def create_kv_pool_scheduler(
@@ -115,6 +129,8 @@ class AscendStoreKVEvents(KVConnectorKVEvents):
 
 
 class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
+    _hash_prefix = False
+
     @classmethod
     def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
         """
@@ -128,6 +144,10 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.kv_role = vllm_config.kv_transfer_config.kv_role
 
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        prefix_mode = extra_config.get("pool_prefix_mode")
+        if prefix_mode not in (None, "block_only", "hash"):
+            raise ValueError(f"Unsupported AscendStore pool_prefix_mode={prefix_mode!r}")
+        self._hash_prefix = prefix_mode == "hash"
         self.use_layerwise = extra_config.get("use_layerwise", False)
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
         self.backend_name = extra_config.get("backend", "mooncake").lower()
@@ -158,7 +178,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 "as the MoonCakeStoreConnector will be removed in the future."
             )
 
-        self._kv_cache_events: AscendStoreKVEvents | None = None
+        self._kv_cache_events: KVConnectorKVEvents | None = None
 
         self._current_step_has_real_forward = False
         self._mamba_copy_bufs = None
@@ -168,13 +188,17 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self._loaded_layer: int | None = None
         self.requires_mamba_state_copy_after_layer_load = self.use_layerwise
         # Opt in only for synchronous bulk loads, not background retrieval.
-        self.requires_mamba_state_copy_after_load = not self.use_layerwise and not extra_config.get("load_async", False)
+        self.requires_mamba_state_copy_after_load = (
+            not self._hash_prefix and not self.use_layerwise and not extra_config.get("load_async", False)
+        )
 
-        self.connector_scheduler: BaseKVPoolScheduler | None = None
-        self.connector_worker: KVPoolWorker | None = None
+        self.connector_scheduler = None
+        self.connector_worker = None
         self.dspark_prefix_cache_enabled = False
 
-        if role == KVConnectorRole.SCHEDULER:
+        if self._hash_prefix:
+            self._init_hash_store(vllm_config, role, kv_cache_config, extra_config)
+        elif role == KVConnectorRole.SCHEDULER:
             assert kv_cache_config is not None
             self.connector_scheduler = create_kv_pool_scheduler(vllm_config, self.use_layerwise, kv_cache_config)
         else:
@@ -186,6 +210,40 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             assert self.connector_worker is not None
             if not self.use_layerwise and vllm_config.parallel_config.rank == 0:
                 self.lookup_server = LookupKeyServer(self.connector_worker, vllm_config)
+
+    def _init_hash_store(self, vllm_config, role, kv_cache_config, extra) -> None:
+        unsupported = (
+            extra.get("backend", "mooncake").lower() != "mooncake"
+            or extra.get("use_layerwise", False)
+            or not extra.get("load_async", True)
+            or extra.get("consumer_is_to_put", False)
+            or extra.get("custom_mem_pool")
+            or extra.get("store_tp_size") is not None
+            or extra.get("enable_store_tp_lcm", False)
+            or extra.get("store_chunk_size") is not None
+            or vllm_config.parallel_config.prefill_context_parallel_size != 1
+            or vllm_config.parallel_config.decode_context_parallel_size != 1
+            or vllm_config.model_config.enable_sleep_mode
+        )
+        if unsupported:
+            raise ValueError(
+                "Hash recovery requires rank-local Mooncake, async bulk loads, no custom memory pool or CP"
+            )
+        if kv_cache_config is None or not hasattr(kv_cache_config, "prefix_cacheable_groups"):
+            raise ValueError("Hash recovery requires Core prefix-cacheable groups and boundary-state handoff")
+        core = _core_store()
+        if not hasattr(core.MooncakeStoreScheduler, "register_finished_partial_tail"):
+            raise ValueError("Core Store scheduler lacks partial-tail handoff support")
+        if kv_cache_config.hisparse_host_num_blocks is not None:
+            raise ValueError("Hash recovery does not support HiSparse host caches")
+        core.MooncakeStoreConnector._validate_kv_cache_config(vllm_config, kv_cache_config)
+        if role == KVConnectorRole.SCHEDULER:
+            self.connector_scheduler = core.MooncakeStoreScheduler(vllm_config, kv_cache_config)
+            _align_store_eagle_policy(
+                self.connector_scheduler._store_coord, _engine_transfer_config(vllm_config, kv_cache_config)
+            )
+        else:
+            self.connector_worker = get_hash_store_worker_class()(vllm_config, kv_cache_config)
 
     def configure_dspark_prefix_cache(self, vllm_config: VllmConfig) -> bool:
         """Opt the SFA DSpark producer into joint external prefix reuse.
@@ -225,6 +283,10 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
     def shutdown(self):
         """Stop store users before closing the backend's native resources."""
+        if self._hash_prefix:
+            _core_store().MooncakeStoreConnector.shutdown(self)
+            super().shutdown()
+            return
         try:
             if self.connector_scheduler is not None:
                 client = self.connector_scheduler.client
@@ -251,7 +313,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         """Ignore P/D handshake metadata because AscendStore handles PP via pool keys."""
         pass
 
-    def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
+    def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int | None, bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(request, num_computed_tokens)
 
@@ -271,6 +333,8 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
+        if self._hash_prefix:
+            return self.request_finished_all_groups(request, (block_ids,))
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
 
@@ -279,8 +343,22 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
+        if self._hash_prefix:
+            # Core's in-flight store jobs hold their own references.
+            return False, None
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished_all_groups(request, block_ids)
+
+    def register_finished_partial_tail(
+        self,
+        request: Request,
+        block_ids: tuple[list[int], ...],
+        partial_tail_offloads: list[tuple[int, int, int]],
+    ) -> bool:
+        if not self._hash_prefix:
+            return False
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.register_finished_partial_tail(request, block_ids, partial_tail_offloads)
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """
@@ -289,6 +367,8 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         Args:
             connector_output (KVConnectorOutput): the worker-side connectors output.
         """
+        if self._hash_prefix:
+            return _core_store().MooncakeStoreConnector.update_connector_output(self, connector_output)
         if self.connector_scheduler is not None:
             self.connector_scheduler.update_connector_output(connector_output)
 
@@ -311,7 +391,9 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         Yields:
             New KV cache events since the last call.
         """
-        if self._kv_cache_events is not None:
+        if self._hash_prefix:
+            yield from _core_store().MooncakeStoreConnector.take_events(self)
+        elif self._kv_cache_events is not None:
             self._kv_cache_events.aggregate()
             kv_cache_events = self._kv_cache_events.get_all_events()
             yield from kv_cache_events
@@ -331,7 +413,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         class of regression structurally impossible and supersedes the
         connector-side flag entirely.
         """
-        if self.connector_worker is None:
+        if self._hash_prefix or self.connector_worker is None:
             return False
         return self.connector_worker.set_external_slot_release_waiter(waiter)
 
@@ -345,6 +427,8 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         This hook is temporarily reused for deferred KV cache save
         synchronization and will be replaced by a dedicated mechanism.
         """
+        if self._hash_prefix:
+            return
         assert self.connector_worker is not None
         self.connector_worker.wait_for_previous_save()
 
@@ -366,6 +450,9 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if not self.use_layerwise:
             self._mamba_copy_bufs = None
         metadata = self._get_connector_metadata()
+        if self._hash_prefix:
+            self.connector_worker.start_load_kv(metadata)
+            return
         self._current_step_has_real_forward = forward_context is not None
         logger.debug(
             "KV pool connector start_load_kv metadata_requests=%d specs=%s",
@@ -451,7 +538,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         cast(LayerwiseKVPoolWorker, self.connector_worker).save_kv_layer(self._get_connector_metadata())
 
     def wait_for_save(self):
-        if not self.can_put:
+        if not self._hash_prefix and not self.can_put:
             # A load-only consumer has no store thread to wait for.
             return
 
@@ -461,7 +548,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         self.connector_worker.wait_for_save(self._get_connector_metadata())
 
-    def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
+    def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str] | None, set[str] | None]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
         metadata = self._get_connector_metadata()
@@ -474,6 +561,9 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         return done_sending, done_recving
 
     def get_transfer_results(self, finished_req_ids: set[str]) -> KVConnectorTransferResults:
+        if self._hash_prefix:
+            assert self.connector_worker is not None
+            return self.connector_worker.get_transfer_results(finished_req_ids, self._get_connector_metadata())
         done_sending, done_recving = self.get_finished(finished_req_ids)
         assert self.connector_worker is not None
         failed = self.connector_worker.get_failed_requests()
@@ -488,10 +578,12 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         return self.connector_worker.get_block_ids_with_load_errors()
 
-    def get_kv_connector_kv_cache_events(self) -> AscendStoreKVEvents | None:
+    def get_kv_connector_kv_cache_events(self) -> KVConnectorKVEvents | None:
         """
         Get the KV connector kv cache events collected during the last interval.
         """
+        if self._hash_prefix:
+            return _core_store().MooncakeStoreConnector.get_kv_connector_kv_cache_events(self)
         assert self.connector_worker is not None
         events = self.connector_worker.get_kv_events()
         if not events:
@@ -526,17 +618,25 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self._kv_cache_events = None
         return self.connector_scheduler.reset_store()
 
-    def build_connector_worker_meta(self) -> AscendStoreKVConnectorWorkerMetadata | None:
+    def build_connector_worker_meta(self) -> KVConnectorWorkerMetadata | None:
         assert self.connector_worker is not None
         return self.connector_worker.build_connector_worker_meta()
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         if self.connector_worker is None:
             return None
+        if self._hash_prefix:
+            return self.connector_worker.get_kv_connector_stats()
         return self.connector_worker.get_stats()
 
     @classmethod
     def build_kv_connector_stats(cls, data: dict[str, Any] | None = None) -> KVConnectorStats:
+        # Core reconstructs stats from serialized data without passing config.
+        # Its operation records are dictionaries, unlike legacy counters/samples.
+        if data and any(
+            isinstance(records, list) and records and isinstance(records[0], dict) for records in data.values()
+        ):
+            return _core_store().MooncakeStoreConnector.build_kv_connector_stats(data)
         return AscendStoreKVConnectorStats(data=data or {})
 
     @classmethod
@@ -547,6 +647,10 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         labelnames: list[str],
         per_engine_labelvalues: dict[int, list[object]],
     ) -> KVConnectorPromMetrics:
+        if vllm_config.kv_transfer_config.kv_connector_extra_config.get("pool_prefix_mode") == "hash":
+            return _core_store().MooncakeStoreConnector.build_prom_metrics(
+                vllm_config, metric_types, labelnames, per_engine_labelvalues
+            )
         return AscendStorePromMetrics(
             vllm_config,
             metric_types,
