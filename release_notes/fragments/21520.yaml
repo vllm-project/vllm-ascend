@@ -1,0 +1,6 @@
+pr: 21520
+entries:
+  - category: performance
+    text: Reduced decode-iteration synchronization for async speculative Mamba models by deferring accepted-token snapshot waits until CPU preprocessing consumes them.
+    model: qwen3.8-flash-next
+    hardware: [A5]
