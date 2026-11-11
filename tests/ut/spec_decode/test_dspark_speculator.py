@@ -13,6 +13,7 @@ from vllm.model_executor.models import ModelRegistry
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 import vllm_ascend.worker.v2.spec_decode.dspark.speculator as dspark_module
+from vllm_ascend.worker.v2.spec_decode import lmhead_tp_utils
 from vllm_ascend.models import register_model
 from vllm_ascend.models.qwen3_dspark import (
     AscendQwen3DSparkForCausalLM,
@@ -193,6 +194,36 @@ def test_dspark_lmhead_aligns_collective_rows_and_trims_logits(monkeypatch, num_
         assert torch.count_nonzero(inputs_seen[0][num_rows:]) == 0
         if not lmhead_enabled:
             assert model.compute_draft_logits is compute_logits
+
+
+def test_dspark_adaptive_verification_with_lmhead_tp(monkeypatch):
+    spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
+    spec.max_num_reqs, spec.num_speculative_steps = 4, 2
+    spec.use_local_argmax_reduction = False
+    spec.enable_adaptive_verification = True
+    weight = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+    inputs_seen = []
+
+    def compute_logits(hidden):
+        inputs_seen.append(hidden.clone())
+        return hidden @ weight
+
+    model = SimpleNamespace(compute_draft_logits=compute_logits)
+
+    monkeypatch.setattr(lmhead_tp_utils, "lmhead_tp_enable", lambda: True)
+    monkeypatch.setattr(dspark_module, "lmhead_tp_enable", lambda: True)
+
+    spec._lmhead_tp_validate_draft_sampling()
+    spec._lmhead_tp_wrap_draft_logits(model)
+    hidden = torch.arange(6, dtype=torch.float32).reshape(3, 2)
+    logits = model.compute_draft_logits(hidden)
+
+    assert len(inputs_seen) == 1
+    assert inputs_seen[0].shape == (8, 2)
+    torch.testing.assert_close(inputs_seen[0][:3], hidden)
+    assert torch.count_nonzero(inputs_seen[0][3:]) == 0
+    assert logits.shape == (3, 3)
+    torch.testing.assert_close(logits, hidden @ weight)
 
 
 def _context_speculator(monkeypatch, group_ids=(0, 1), layer_map=(1, 0)):

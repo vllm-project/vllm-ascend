@@ -388,14 +388,14 @@ def test_sample_draft_alignment_and_guards(max_num_reqs, num_rows, lmhead_enable
         ("greedy", False, False, False, None),  # default stays supported
         ("greedy", True, False, False, "sample_draft"),  # DFlash2/LiLiCorr opt-out
         ("greedy", False, True, False, "use_local_argmax_reduction"),
-        ("greedy", False, False, True, "enable_adaptive_verification"),
+        ("greedy", False, False, True, None),
     ],
 )
 def test_speculator_init_validates(draft_method, bypass, argmax, adaptive, match):
     """Unsupported combinations must fail at construction, not at the first
-    sampling step in a running engine. Probabilistic sampling is now
-    supported; bypassing paths, local argmax and adaptive verification retain
-    their independent restrictions."""
+    sampling step in a running engine. Probabilistic sampling and adaptive
+    verification are supported; bypassing paths and local argmax retain their
+    independent restrictions."""
     spec = _make_speculator()
     spec.speculative_config = SimpleNamespace(draft_sample_method=draft_method)
     spec._lmhead_tp_sample_draft_supported = not bypass
