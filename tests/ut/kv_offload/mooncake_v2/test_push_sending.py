@@ -165,6 +165,8 @@ def worker(monkeypatch, request):
                 names = ["model.layers.0.attn.0", "model.layers.0.attn.0.indexer", "model.layers.0.attn.1"]
             elif layout == "three_layers":
                 names = [f"model.layers.{i}.attn" for i in range(3)]
+            elif layout in ("mtp", "eagle3", "dspark"):
+                names[-1] = f"{layout}.layer.0.self_attn"
             self.transfer_metadata = replace(
                 self.transfer_metadata,
                 layer_names=names,
@@ -702,6 +704,43 @@ def test_layer_hook_sends_all_caches_across_groups(worker, monkeypatch):
     worker.wait_for_save()
     drive(worker, lambda: worker._send_done.called)
     assert worker.engine.batch_transfer_sync_write.call_count == 3
+
+
+@pytest.mark.parametrize("worker", ["mtp", "eagle3", "dspark"], indirect=True)
+@pytest.mark.parametrize("draft_hook", [False, True])
+def test_draft_namespace_does_not_share_target_readiness(worker, monkeypatch, draft_hook):
+    monkeypatch.setattr(worker, "_get_remote_metadata", lambda message: multi_cache_remote(worker))
+    message = dict(destination_message(), block_ids=[[20, 21], [10, 11]])
+    meta = MooncakeConnectorMetadata()
+    meta.add_new_push_send_req("p-request", ([1, 2], [3, 4]), 8, 0, 8, target_params(message))
+    worker.start_load_kv(meta)
+    state = worker._reqs_send_state["d-request"]
+    destination = state.destinations[(0, 0, 0)]
+    destination.metadata_future.result(timeout=3)
+    attention, indexer, draft = worker.transfer_metadata.layer_names
+
+    worker.save_kv_layer(attention)
+    assert set(state.available_layers) == {attention, indexer}
+    assert state.available_layers[attention][1] is state.available_layers[indexer][1]
+    drive(worker, lambda: len(destination.sent_tokens) == 2)
+    worker.save_kv_layer(indexer)
+    assert draft not in state.available_layers
+    assert destination.completion is None
+
+    if draft_hook:
+        worker.save_kv_layer(draft)
+        drive(worker, lambda: len(destination.sent_tokens) == 3)
+        assert state.available_layers[draft][1] is not state.available_layers[attention][1]
+        # No namespace's numeric last layer can finalize the entire step.
+        assert destination.completion is None
+    worker._send_done.assert_not_called()
+
+    # The deferred runner finalization also covers draft caches without hooks.
+    worker.wait_for_save()
+    assert set(destination.sent_tokens) == {attention, indexer, draft}
+    assert worker.engine.batch_transfer_sync_write.call_count == 3
+    worker._send_done.assert_called_once()
+    assert worker._send_done.call_args.args[1] is None
 
 
 @pytest.mark.parametrize("worker", ["multi_cache"], indirect=True)

@@ -229,13 +229,20 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             self._layer_indices = {name: i for i, name in enumerate(self.transfer_metadata.layer_names)}
             model_type = self.vllm_config.model_config.hf_text_config.model_type
             num_attn_module = 2 if model_type in ("longcat_flash", "longcat_flash_ngram") else 1
-            self._layer_index_by_name = {
-                name: extract_layer_index(name, num_attn_module) for name in self._layer_indices
-            }
-            self._layer_names_by_index: dict[int, list[str]] = {}
+            self._layer_index_by_name: dict[str, tuple[str, int]] = {}
+            for name in self._layer_indices:
+                layer_index = extract_layer_index(name, num_attn_module)
+                parts = name.split(".")
+                namespace = ".".join(parts[: next(i for i, part in enumerate(parts) if part.isdecimal())])
+                # Target and draft layers can reuse layer numbers, but not KV readiness.
+                self._layer_index_by_name[name] = (namespace, layer_index)
+            self._layer_names_by_index: dict[tuple[str, int], list[str]] = {}
             for name, layer_index in self._layer_index_by_name.items():
                 self._layer_names_by_index.setdefault(layer_index, []).append(name)
-            self._last_layer_index = max(self._layer_names_by_index, default=None)
+            # Layer numbers do not establish execution order across models.
+            # Multiple namespaces finalize at wait_for_save after draft execution.
+            namespaces = {namespace for namespace, _ in self._layer_names_by_index}
+            self._last_layer_index = max(self._layer_names_by_index) if len(namespaces) == 1 else None
             # Shared Mamba address calculation uses the same registered descriptors as Pull.
             for name in ("layer_names", "kv_caches_base_addr", "block_shapes", "block_strides", "block_lens"):
                 setattr(self, name, getattr(self.transfer_metadata, name))

@@ -108,6 +108,14 @@ P follows this lifecycle:
    `finished_sending`; only those cancellations are forwarded to core for
    delayed release. P preemption remains unsupported and is a TODO.
 
+Layer cache grouping uses the name prefix before the first numeric component
+and the extracted layer index. For example, `model.layers.0.attn` and
+`mtp.layer.0.self_attn` belong to separate namespaces even though both have index
+zero. Names must still contain the numeric layer index expected by
+`extract_layer_index()`. With multiple namespaces, layer hooks publish only
+their own group's caches; final flushing and DONE submission happen in
+`wait_for_save()` after draft execution rather than at the largest layer index.
+
 The existing metaserver responds after P finishes. Consequently, outstanding
 HTTP requests occupy pool threads for that duration. A multi-prompt request
 must fit within both D's concurrent allocation capacity and the HTTP pool;
