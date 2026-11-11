@@ -129,25 +129,31 @@ class TestTransferTimeout(unittest.TestCase):
             self.assertEqual(get_transfer_timeout_value(), 33064)
 
     def test_hccl_overrides_change_formula(self):
-        with patch.dict(
-            os.environ, {"HCCL_RDMA_TIMEOUT": "21", "HCCL_RDMA_RETRY_CNT": "8"}, clear=True
-        ):
+        with patch.dict(os.environ, {"HCCL_RDMA_TIMEOUT": "21", "HCCL_RDMA_RETRY_CNT": "8"}, clear=True):
             # int((4.096 * (2 ** 21)) * 8 // 1000 + 3000)
             self.assertEqual(get_transfer_timeout_value(), 71719)
 
     def test_invalid_ascend_transfer_timeout_names_variable(self):
-        with patch.dict(os.environ, {"ASCEND_TRANSFER_TIMEOUT": "abc"}, clear=False), \
-             self.assertRaisesRegex(ValueError, "ASCEND_TRANSFER_TIMEOUT"):
+        with (
+            patch.dict(os.environ, {"ASCEND_TRANSFER_TIMEOUT": "abc"}, clear=False),
+            self.assertRaisesRegex(ValueError, "ASCEND_TRANSFER_TIMEOUT"),
+        ):
             get_transfer_timeout_value()
 
     def test_invalid_hccl_rdma_timeout_names_variable(self):
-        with patch.dict(os.environ, {"HCCL_RDMA_TIMEOUT": "abc"}, clear=True), \
-             self.assertRaisesRegex(ValueError, "HCCL_RDMA_TIMEOUT"):
+        with (
+            patch.dict(os.environ, {"HCCL_RDMA_TIMEOUT": "abc"}, clear=True),
+            self.assertRaisesRegex(ValueError, "HCCL_RDMA_TIMEOUT"),
+        ):
             get_transfer_timeout_value()
 
     def test_invalid_hccl_rdma_retry_cnt_names_variable(self):
-        with patch.dict(
-            os.environ, {"HCCL_RDMA_TIMEOUT": "20", "HCCL_RDMA_RETRY_CNT": "x"},
-            clear=True,
-        ), self.assertRaisesRegex(ValueError, "HCCL_RDMA_RETRY_CNT"):
+        with (
+            patch.dict(
+                os.environ,
+                {"HCCL_RDMA_TIMEOUT": "20", "HCCL_RDMA_RETRY_CNT": "x"},
+                clear=True,
+            ),
+            self.assertRaisesRegex(ValueError, "HCCL_RDMA_RETRY_CNT"),
+        ):
             get_transfer_timeout_value()

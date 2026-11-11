@@ -97,9 +97,7 @@ def _parse_int_env(var: str, default: int) -> int:
     try:
         return int(raw)
     except ValueError as exc:
-        raise ValueError(
-            f"Environment variable {var} must be an integer, got {raw!r}."
-        ) from exc
+        raise ValueError(f"Environment variable {var} must be an integer, got {raw!r}.") from exc
 
 
 def get_transfer_timeout_value():
