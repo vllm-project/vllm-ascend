@@ -148,6 +148,9 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if prefix_mode not in (None, "block_only", "hash"):
             raise ValueError(f"Unsupported AscendStore pool_prefix_mode={prefix_mode!r}")
         self._hash_prefix = prefix_mode == "hash"
+        direct_only = extra_config.get("npu_shared_engine_direct_only", False)
+        if type(direct_only) is not bool or direct_only and not self._hash_prefix:
+            raise ValueError("npu_shared_engine_direct_only requires a boolean and hash pool mode")
         self.use_layerwise = extra_config.get("use_layerwise", False)
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
         self.backend_name = extra_config.get("backend", "mooncake").lower()

@@ -1718,6 +1718,34 @@ provider with capacity and configure inference clients with
 if the installed SDK routes same-process pool reads through Fabric self-import.
 This deployment choice does not change Core's hash-boundary lookup or local APC.
 
+### Sharing the Mooncake V2 engine in direct-only mode
+
+Some SDKs cannot register the same NPU allocation with two Fabric engines.
+For a producer using `MultiConnector` with `MooncakeConnectorV2` and a hash-mode
+`AscendStoreConnector`, explicitly set
+`"npu_shared_engine_direct_only": true` in the Store child's extra configuration.
+The default is `false`: existing independent Store initialization, including
+mixed deployments, is unchanged. The option must be a JSON boolean and is
+rejected for whole-page mode or without the V2/Store combination.
+
+This mode requires Mooncake `protocol="ascend"`, an independent external Store
+provider, and client `global_segment_size=0`. Keep a positive `local_buffer_size`
+in the Mooncake configuration: Core still parses and validates that value.
+The Ascend instance adapter explicitly maps it to native `local_buffer_size=0`
+because the hash worker uses direct NPU multi-buffer reads/writes rather than a
+host bounce buffer. Startup logs report both `configured_local_buffer_bytes`
+and `effective_native_local_buffer_bytes=0`; the configured buffer is **not**
+allocated in this opt-in mode. No engine, pool, Fabric, APC, or model feature is
+disabled. Provider capacity is configured separately and is unchanged.
+
+Only reviewed direct multi-buffer and metadata APIs are exposed in this mode.
+Calls requiring staging (including native `get`, `put`, `get_into`, or buffer
+allocation), and unknown future APIs, fail explicitly rather than silently
+using an unavailable buffer. V2 owns native KV registration and its lifecycle;
+Store validates coverage of every real strided view and does not re-register or
+unregister V2's live ranges. Store teardown retains the borrowed engine owner.
+This mode does not cover host-resident cache groups or local Store capacity.
+
 ## FAQ
 
 For common environment, installation, and general parameter issues, see the [Public FAQ](../../faqs.md). This chapter only covers issues specific to this feature.

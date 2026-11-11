@@ -31,11 +31,257 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import
     _align_store_eagle_policy,
     _AlignedStore,
     _engine_transfer_config,
+    _SharedEngineStore,
+    _shares_mooncake_v2_engine,
     get_hash_store_worker_class,
 )
 
 AscendHashStoreWorker = get_hash_store_worker_class()
 AscendHashStoreLayout = get_hash_store_layout_class()
+
+
+@pytest.mark.parametrize(
+    "connector,children,expected",
+    [
+        ("AscendStoreConnector", [], False),
+        ("MultiConnector", [{"kv_connector": "MooncakeConnectorV1"}], False),
+        ("MultiConnector", [{"kv_connector": "MooncakeConnectorV2"}], True),
+    ],
+)
+def test_shared_engine_is_limited_to_v2_pair(connector, children, expected):
+    transfer = SimpleNamespace(kv_connector=connector, kv_connector_extra_config={"connectors": children})
+    assert _shares_mooncake_v2_engine(transfer) is expected
+
+
+def test_shared_store_setup_only_changes_instance_and_reuses_engine():
+    store, engine = Mock(), Mock()
+    engine.get_rpc_port.return_value = 1234
+    store.setup.return_value = 0
+    proxy = _SharedEngineStore(store)
+    with (
+        patch("vllm.utils.network_utils.get_ip", return_value="test-host"),
+        patch("vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine.global_te") as global_te,
+    ):
+        global_te.get_transfer_engine.return_value = engine
+        assert proxy.setup("original-host", "P2PHANDSHAKE", 0, 0, "ascend", "", "master", tenant_id="tenant") == 0
+    store.setup.assert_called_once_with(
+        "test-host:1234", "P2PHANDSHAKE", 0, 0, "ascend", "", "master", engine=engine.get_engine(), tenant_id="tenant"
+    )
+    proxy.close()
+    store.close.assert_called_once()
+    engine.unregister_memory.assert_not_called()
+
+
+def test_bootstrap_property_is_instance_local_and_not_reapplied():
+    worker = object.__new__(AscendHashStoreWorker)
+    other = object.__new__(AscendHashStoreWorker)
+    worker._bootstrap_shared_engine = True
+    first, second = Mock(), Mock()
+    worker.store = first
+    other.store = second
+    assert isinstance(worker.store, _SharedEngineStore) and worker.store._store is first
+    assert other.store is second
+    worker._bootstrap_shared_engine = False
+    wrapper = Mock()
+    worker.store = wrapper
+    assert worker.store is wrapper
+    worker.store = None
+    assert worker.store is None
+
+
+@pytest.mark.parametrize("flag", [None, False, True])
+def test_shared_direct_only_is_explicit_opt_in(flag):
+    extra = {} if flag is None else {"npu_shared_engine_direct_only": flag}
+    config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector="MultiConnector",
+            kv_connector_extra_config=extra,
+        )
+    )
+    parent = SimpleNamespace(
+        kv_connector="MultiConnector",
+        kv_connector_extra_config={
+            "connectors": [{"kv_connector": "MooncakeConnectorV2"}],
+        },
+    )
+
+    def initialize(worker, *args):
+        worker.coord = SimpleNamespace()
+        worker.store = Mock()
+
+    with (
+        patch.object(MooncakeStoreWorker, "__init__", autospec=True, side_effect=initialize),
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker._engine_transfer_config",
+            return_value=parent,
+        ),
+    ):
+        worker = AscendHashStoreWorker(config, None)
+    assert worker._shared_engine is (flag is True)
+    assert isinstance(worker.store, _SharedEngineStore) is (flag is True)
+    assert not worker._bootstrap_shared_engine
+
+
+@pytest.mark.parametrize("flag", [1, 0, "true", None])
+def test_direct_only_rejects_non_boolean(flag):
+    config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector_extra_config={"npu_shared_engine_direct_only": flag},
+        )
+    )
+    with pytest.raises(ValueError, match="boolean"):
+        AscendHashStoreWorker(config, None)
+
+
+def test_direct_only_rejects_independent_mixed():
+    config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector="AscendStoreConnector",
+            kv_connector_extra_config={"npu_shared_engine_direct_only": True},
+        )
+    )
+    with pytest.raises(ValueError, match="MooncakeConnectorV2"):
+        AscendHashStoreWorker(config, None)
+
+
+@pytest.mark.parametrize("mode,flag", [("block_only", True), (None, True), ("hash", 1), ("hash", 0)])
+def test_connector_direct_only_requires_boolean_and_hash_mode(mode, flag):
+    config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "pool_prefix_mode": mode,
+                "npu_shared_engine_direct_only": flag,
+            },
+        )
+    )
+    with (
+        patch.object(AscendStoreConnector.__mro__[1], "__init__", return_value=None),
+        pytest.raises(ValueError, match="boolean and hash"),
+    ):
+        AscendStoreConnector(config, KVConnectorRole.WORKER, None)
+
+
+@pytest.mark.parametrize("segment,buffer,protocol", [(1, 1024, "ascend"), (0, 0, "ascend"), (0, 1024, "tcp")])
+def test_direct_only_rejects_unsupported_native_setup_before_engine(segment, buffer, protocol):
+    store = Mock()
+    proxy = _SharedEngineStore(store, direct_only=True)
+    with pytest.raises(ValueError, match="external provider"):
+        proxy.setup("host", "P2PHANDSHAKE", segment, buffer, protocol, "", "master")
+    store.setup.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", [0, -600, RuntimeError("native setup failed")])
+def test_direct_only_setup_is_observable_and_preserves_failure(failure):
+    store, engine = Mock(), Mock()
+    engine.get_rpc_port.return_value = 1234
+    if isinstance(failure, Exception):
+        store.setup.side_effect = failure
+    else:
+        store.setup.return_value = failure
+    proxy = _SharedEngineStore(store, direct_only=True)
+    with (
+        patch("vllm.utils.network_utils.get_ip", return_value="host"),
+        patch("vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine.global_te") as global_te,
+        patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.logger") as log,
+    ):
+        global_te.get_transfer_engine.return_value = engine
+        if isinstance(failure, Exception):
+            with pytest.raises(RuntimeError, match="native setup failed"):
+                proxy.setup("original", "P2PHANDSHAKE", 0, 1024, "ascend", "", "master", tenant_id="tenant")
+        else:
+            assert (
+                proxy.setup("original", "P2PHANDSHAKE", 0, 1024, "ascend", "", "master", tenant_id="tenant") == failure
+            )
+        assert log.info.call_args.args[1] == 1024
+    store.setup.assert_called_once_with(
+        "host:1234", "P2PHANDSHAKE", 0, 0, "ascend", "", "master", engine=engine.get_engine(), tenant_id="tenant"
+    )
+    assert proxy._engine is engine
+
+
+@pytest.mark.parametrize("name", ["get", "put", "get_into", "get_buffer", "allocate", "unknown_future_api"])
+def test_direct_only_rejects_staging_and_unknown_apis(name):
+    store = Mock()
+    proxy = _SharedEngineStore(store, direct_only=True)
+    with pytest.raises(RuntimeError, match="non-direct API"):
+        getattr(proxy, name)
+    assert not store.mock_calls
+
+
+@pytest.mark.parametrize("name", sorted(_SharedEngineStore._DIRECT_APIS))
+def test_direct_only_allows_reviewed_core_apis(name):
+    store = Mock()
+    proxy = _SharedEngineStore(store, direct_only=True)
+    assert getattr(proxy, name) is getattr(store, name)
+
+
+def test_direct_only_close_failure_does_not_touch_borrowed_engine():
+    store, engine = Mock(), Mock()
+    proxy = _SharedEngineStore(store, direct_only=True)
+    proxy._engine = engine
+    store.close.side_effect = RuntimeError("close failed")
+    with pytest.raises(RuntimeError, match="close failed"):
+        proxy.close()
+    assert proxy._engine is engine
+    assert not engine.mock_calls
+
+
+@pytest.mark.parametrize("covered", [True, False])
+def test_shared_registration_covers_strided_payload_not_unused_storage_tail(covered):
+    view = SimpleNamespace(
+        untyped_storage=lambda: SimpleNamespace(data_ptr=lambda: 1003, nbytes=lambda: 400),
+        numel=lambda: 10,
+        data_ptr=lambda: 1040,
+        shape=(2, 5),
+        stride=lambda: (20, 1),
+        element_size=lambda: 4,
+    )
+    store = Mock()
+    # The true end is 1140; numel*element_size would incorrectly claim 1080.
+    regions = [(1008, 132 if covered else 100)]
+    if not covered:
+        with pytest.raises(ValueError, match="shared Mooncake V2 registration"):
+            _AlignedStore(store, [view], alignment=16, shared_regions=regions)
+        return
+    wrapper = _AlignedStore(store, [view], alignment=16, shared_regions=regions)
+    assert wrapper.register_buffer(1003, 400) == 0
+    assert wrapper.register_buffer(1003, 400) == 0
+    assert wrapper.unregister_buffer(1003) == 0
+    store.register_buffer.assert_not_called()
+    store.unregister_buffer.assert_not_called()
+
+
+@pytest.mark.parametrize("v2_first", [True, False])
+def test_worker_uses_v2_collector_and_does_not_register_padding_twice(v2_first):
+    worker = object.__new__(AscendHashStoreWorker)
+    worker._capacity_only = False
+    worker._shared_engine = True
+    worker.cache_config = SimpleNamespace(num_gpu_blocks=None)
+    worker._kv_cache_config = SimpleNamespace(num_blocks=3, hisparse_host_num_blocks=None)
+    worker._kv_cache_groups = []
+    worker.token_dbs = []
+    worker.store = Mock()
+    regions = SimpleNamespace(ptrs=[16], lengths=[32])
+    module = "vllm_ascend.distributed.kv_transfer."
+    with (
+        patch(module + "kv_p2p.mooncake.utils.collect_configured_register_regions", return_value=regions) as collect,
+        patch(module + "utils.mooncake_transfer_engine.global_te") as global_te,
+        patch(module + "kv_pool.ascend_store.pool_worker._AlignedStore") as aligned,
+        patch.object(MooncakeStoreWorker, "register_kv_caches"),
+    ):
+        global_te.registered_buffers = [(16, 32)] if v2_first else []
+
+        def register(ptrs, sizes):
+            if not global_te.registered_buffers:
+                global_te.registered_buffers = list(zip(ptrs, sizes))
+
+        global_te.register_buffer.side_effect = register
+        original = worker.store
+        worker.register_kv_caches({})
+        collect.assert_called_once_with(worker._kv_cache_config, {})
+        global_te.register_buffer.assert_called_once_with([16], [32])
+        aligned.assert_called_once_with(original, [], shared_regions=((16, 32),))
 
 
 def layout(*, state=False, hnd=False, page=16, unit=4):

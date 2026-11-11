@@ -115,13 +115,74 @@ def _align_store_eagle_policy(coord, kv_transfer_config):
     coord.eagle_proof_margin_by_group = {}
 
 
+def _shares_mooncake_v2_engine(transfer):
+    """Only the V2/Store MultiConnector pair borrows the process-local engine."""
+    if transfer is None or getattr(transfer, "kv_connector", None) != "MultiConnector":
+        return False
+    children = transfer.kv_connector_extra_config.get("connectors", ())
+    return any(child.get("kv_connector") == "MooncakeConnectorV2" for child in children)
+
+
+class _SharedEngineStore:
+    """Instance-local setup adapter; neither Core nor the native module is patched."""
+
+    _DIRECT_APIS = frozenset(
+        {
+            "batch_is_exist",
+            "batch_get_replica_desc",
+            "batch_put_from_multi_buffers",
+            "batch_get_into_multi_buffers",
+            "register_buffer",
+            "unregister_buffer",
+            "remove_all",
+            "close",
+        }
+    )
+
+    def __init__(self, store, direct_only=False):
+        self._store = store
+        self._engine = None
+        self._direct_only = direct_only
+
+    def setup(self, local_hostname, *args, **kwargs):
+        from vllm.utils.network_utils import get_ip
+
+        from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
+
+        if "engine" in kwargs:
+            raise ValueError("Store engine must be supplied by the Ascend V2 adapter")
+        if self._direct_only:
+            # Core has already parsed and validated these positional values.
+            # This explicit adapter mode does not claim to allocate that buffer.
+            if len(args) < 6 or args[1] != 0 or args[3] != "ascend" or args[2] <= 0:
+                raise ValueError("Direct-only Store requires ascend, an external provider, and a positive Core buffer")
+            requested_buffer = args[2]
+            args = (*args[:2], 0, *args[3:])
+            logger.info(
+                "Ascend Store direct-only setup: configured_local_buffer_bytes=%d "
+                "effective_native_local_buffer_bytes=0; "
+                "staging APIs are disabled",
+                requested_buffer,
+            )
+        # Retain the Python owner as well as the shared_ptr borrowed by Store.
+        self._engine = global_te.get_transfer_engine(get_ip(), device_name=None)
+        hostname = f"{get_ip()}:{self._engine.get_rpc_port()}"
+        return self._store.setup(hostname, *args, engine=self._engine.get_engine(), **kwargs)
+
+    def __getattr__(self, name):
+        if self._direct_only and name not in self._DIRECT_APIS:
+            raise RuntimeError(f"Direct-only Ascend Store rejects non-direct API: {name}")
+        return getattr(self._store, name)
+
+
 class _AlignedStore:
     """Translate registration only; logical payload addresses stay untouched."""
 
-    def __init__(self, store, views, alignment=2 * 1024 * 1024):
+    def __init__(self, store, views, alignment=2 * 1024 * 1024, shared_regions=None):
         self._store = store
         self._regions = {}
         self._registered = set()
+        self._shared = shared_regions is not None
         for view in views:
             if not view.numel():
                 continue
@@ -135,6 +196,11 @@ class _AlignedStore:
                 raise ValueError("KV view starts outside the allocation's aligned registration region")
             if view.data_ptr() + span > raw + size:
                 raise ValueError("KV view exceeds its storage allocation")
+            if self._shared and not any(
+                start <= view.data_ptr() and view.data_ptr() + span <= start + length
+                for start, length in shared_regions
+            ):
+                raise ValueError("KV view exceeds the shared Mooncake V2 registration")
             self._regions[raw] = (size, aligned, raw + size - aligned)
 
     def register_buffer(self, address, size):
@@ -142,6 +208,11 @@ class _AlignedStore:
         if size != expected:
             raise ValueError("Unexpected Store registration span")
         if address in self._registered:
+            return 0
+        if self._shared:
+            # V2 owns the registration/sleep lifecycle. Do not re-export the
+            # storage's unused alignment tail or unregister its live engine.
+            self._registered.add(address)
             return 0
         result = self._store.register_buffer(aligned, length)
         if result != 0:
@@ -152,6 +223,9 @@ class _AlignedStore:
         return result
 
     def unregister_buffer(self, address):
+        if self._shared:
+            self._registered.discard(address)
+            return 0
         result = self._store.unregister_buffer(self._regions[address][1])
         if result == 0:
             self._registered.discard(address)
@@ -171,6 +245,16 @@ def get_hash_store_worker_class():
     from vllm.v1.kv_cache_interface import group_kernel_blocks
 
     class AscendHashStoreWorker(MooncakeStoreWorker):
+        @property
+        def store(self):
+            return self._ascend_store
+
+        @store.setter
+        def store(self, value):
+            if value is not None and getattr(self, "_bootstrap_shared_engine", False):
+                value = _SharedEngineStore(value, direct_only=getattr(self, "_shared_direct_only", False))
+            self._ascend_store = value
+
         def __init__(self, vllm_config, kv_cache_config):
             # Some FabricMem runtimes fail concurrent VA reservations. This opt-in
             # host-local bootstrap lock does not serialize requests or transfers.
@@ -179,8 +263,19 @@ def get_hash_store_worker_class():
             if lock_path is not None and not Path(lock_path).is_absolute():
                 raise ValueError("npu_store_setup_lock must be an absolute host-local path")
             lock = FileLock(lock_path, timeout=60) if lock_path is not None else nullcontext()
-            with lock:
-                super().__init__(vllm_config, kv_cache_config)
+            self._shared_direct_only = extra.get("npu_shared_engine_direct_only", False)
+            if type(self._shared_direct_only) is not bool:
+                raise ValueError("npu_shared_engine_direct_only must be a boolean")
+            has_v2 = _shares_mooncake_v2_engine(_engine_transfer_config(vllm_config, kv_cache_config))
+            if self._shared_direct_only and not has_v2:
+                raise ValueError("Direct-only Store requires MooncakeConnectorV2 in MultiConnector")
+            self._shared_engine = self._shared_direct_only and has_v2
+            self._bootstrap_shared_engine = self._shared_engine
+            try:
+                with lock:
+                    super().__init__(vllm_config, kv_cache_config)
+            finally:
+                self._bootstrap_shared_engine = False
             _align_store_eagle_policy(self.coord, _engine_transfer_config(vllm_config, kv_cache_config))
 
         def _select_store_layout(self, extra_config):
@@ -237,7 +332,20 @@ def get_hash_store_worker_class():
                 if name in names
             }
             views = [view for cache in caches.values() for view in (cache if isinstance(cache, list) else [cache])]
-            self.store = _AlignedStore(self.store, views)
+            shared_regions = None
+            if getattr(self, "_shared_engine", False):
+                from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
+                    collect_configured_register_regions,
+                )
+                from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
+
+                # Use V2's exact configured backing, which already validates
+                # real strided views. Either connector may register it first.
+                regions = collect_configured_register_regions(self._kv_cache_config, caches)
+                global_te.register_buffer(regions.ptrs, regions.lengths)
+                shared_regions = tuple(global_te.registered_buffers)
+                logger.info("Ascend Store reuses Mooncake V2 registration: %s", shared_regions)
+            self.store = _AlignedStore(self.store, views, shared_regions=shared_regions)
             # Register every component's allocation, including separately allocated
             # recurrent state. Upstream may register only a representative tensor;
             # the wrapper deduplicates those later registration calls.
