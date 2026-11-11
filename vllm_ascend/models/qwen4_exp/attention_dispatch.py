@@ -7,7 +7,7 @@ import torch
 
 from .fia import prepare_qsa_fia_paged_kv, qsa_fia_attention
 from .gbsa import qsa_gbsa_attention
-from .gbsa_union import qsa_union_gbsa_attention
+from .gbsa_union import qsa_union_gbsa_attention, qsa_union_gbsa_attention_batch
 
 QSA_FIA_MAX_LOGICAL_KV_LENGTH = 24 * 1024
 
@@ -53,12 +53,22 @@ class QSARequest:
 
 
 @dataclass(frozen=True)
+class QSAUnionBatch:
+    query_start: int
+    query_end: int
+    query_starts: tuple[int, ...]
+    request_indices: tuple[int, ...]
+
+
+@dataclass(frozen=True)
 class QSARequestPlan:
     """Precomputed operator routing shared by every QSA layer in one step."""
 
     requests: tuple[QSARequest, ...]
     fia_requests: tuple[QSARequest, ...]
     gbsa_spans: tuple[tuple[int, int], ...]
+    union_batches: tuple[QSAUnionBatch, ...]
+    decode_spans: tuple[tuple[int, int], ...]
 
     def __getitem__(self, index: int) -> QSARequest:
         return self.requests[index]
@@ -95,6 +105,8 @@ def build_qsa_request_plan(
     requests_tuple = tuple(requests)
     fia_requests = tuple(request for request in requests_tuple if request.use_fia)
     gbsa_spans: list[tuple[int, int]] = []
+    union_requests: list[list[QSARequest]] = []
+    decode_spans: list[tuple[int, int]] = []
     for request in requests_tuple:
         start = request.gbsa_query_start
         if start >= request.query_end:
@@ -103,7 +115,25 @@ def build_qsa_request_plan(
             gbsa_spans[-1] = (gbsa_spans[-1][0], request.query_end)
         else:
             gbsa_spans.append((start, request.query_end))
-    return QSARequestPlan(requests_tuple, fia_requests, tuple(gbsa_spans))
+        if request.is_prefill:
+            if union_requests and union_requests[-1][-1].query_end == start:
+                union_requests[-1].append(request)
+            else:
+                union_requests.append([request])
+        elif decode_spans and decode_spans[-1][1] == start:
+            decode_spans[-1] = (decode_spans[-1][0], request.query_end)
+        else:
+            decode_spans.append((start, request.query_end))
+    union_batches = tuple(
+        QSAUnionBatch(
+            batch[0].gbsa_query_start,
+            batch[-1].query_end,
+            (0,) + tuple(request.query_end - batch[0].gbsa_query_start for request in batch),
+            tuple(request.request_index for request in batch),
+        )
+        for batch in union_requests
+    )
+    return QSARequestPlan(requests_tuple, fia_requests, tuple(gbsa_spans), union_batches, tuple(decode_spans))
 
 
 def dispatch_qsa_attention(
@@ -168,13 +198,9 @@ def dispatch_qsa_attention(
     # changing the original request IDs used to address block tables and lengths.
     # Union groups must never cross request boundaries. Keep the decode-only
     # sentinel above unchanged, including graph capture and replay.
-    decode_spans: list[tuple[int, int]] = []
-    for request in request_plan.requests:
-        start, end = request.gbsa_query_start, request.query_end
-        if start >= end:
-            continue
-        if request.is_prefill:
-            rows = slice(start, end)
+    for batch in request_plan.union_batches:
+        rows = slice(batch.query_start, batch.query_end)
+        if len(batch.request_indices) == 1:
             qsa_union_gbsa_attention(
                 query[rows],
                 key_cache,
@@ -185,13 +211,23 @@ def dispatch_qsa_attention(
                 logical_positions[rows],
                 seq_lens,
                 output[rows],
-                request_index=request.request_index,
+                request_index=batch.request_indices[0],
             )
-        elif decode_spans and decode_spans[-1][1] == start:
-            decode_spans[-1] = (decode_spans[-1][0], end)
         else:
-            decode_spans.append((start, end))
-    for start, end in decode_spans:
+            qsa_union_gbsa_attention_batch(
+                query[rows],
+                key_cache,
+                value_cache,
+                compact_indices[rows],
+                block_table,
+                token_to_req[rows],
+                logical_positions[rows],
+                seq_lens,
+                output[rows],
+                query_starts=batch.query_starts,
+                request_indices=batch.request_indices,
+            )
+    for start, end in request_plan.decode_spans:
         rows = slice(start, end)
         qsa_gbsa_attention(
             query[rows],
