@@ -48,6 +48,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/model_runner_v2/test_deepseek_mtp.py: 590
   tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_0_6B_basic.py: 370
   tests/e2e/pull_request/one_card/model_runner_v2/test_uva.py: 80
+  tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_6_mrv2.py: 900
   tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_8B.py: 350
   tests/e2e/pull_request/one_card/pooling/test_classification.py: 280
   tests/e2e/pull_request/one_card/pooling/test_d3.py: 350
@@ -99,6 +100,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_dflash.py: 600
   tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_dspark.py: 600
   tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_mtp.py: 710
+  tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_mrv2_tp2.py: 480
   # Initial estimate: one target-only and three LiLiCorr model runs.
   tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_8_lilicorr.py: 1200
   tests/e2e/pull_request/two_card/model_runner_v2/test_spec_decode_data_parallel.py: 460

@@ -156,6 +156,9 @@ a3-560t:
       - name: singlecard-ops-a3
         os: linux-aarch64-a3-800i-8
         tests: tests/e2e/nightly/single_node/ops/singlecard_ops/
+      - name: Qwen3.6-MRV2-golden-A3
+        os: linux-aarch64-a3-800i-2
+        tests: tests/e2e/nightly/single_node/models/test_qwen3_6_mrv2_nightly.py
       - name: Qwen3.8-27B-w8a8-A3
         os: linux-aarch64-a3-800i-2
         config_file_path: Qwen3.8-27B-w8a8-A3.yaml
