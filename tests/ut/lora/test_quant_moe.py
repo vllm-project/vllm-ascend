@@ -554,9 +554,11 @@ def test_packed_fp4_format_cast_retries_without_internal_format() -> None:
         return input_tensor
 
     recorder = _ConfigRecorder()
-    with patch.object(torch.npu, "config", recorder):
-        with patch.object(torch_npu, "npu_format_cast", side_effect=fake_cast):
-            out = fp4_packed_nz().cast(tensor)
+    with (
+        patch.object(torch.npu, "config", recorder),
+        patch.object(torch_npu, "npu_format_cast", side_effect=fake_cast),
+    ):
+        out = fp4_packed_nz().cast(tensor)
 
     assert out is tensor
     assert seen == [True, False]
@@ -569,6 +571,8 @@ def test_packed_fp4_format_cast_retries_without_internal_format() -> None:
 def test_packed_fp4_format_cast_propagates_unrelated_errors() -> None:
     from vllm_ascend.quantization.nz import fp4_packed_nz
 
-    with patch.object(torch_npu, "npu_format_cast", side_effect=RuntimeError("unrelated failure")):
-        with pytest.raises(RuntimeError, match="unrelated failure"):
-            fp4_packed_nz().cast(torch.zeros(4))
+    with (
+        patch.object(torch_npu, "npu_format_cast", side_effect=RuntimeError("unrelated failure")),
+        pytest.raises(RuntimeError, match="unrelated failure"),
+    ):
+        fp4_packed_nz().cast(torch.zeros(4))
