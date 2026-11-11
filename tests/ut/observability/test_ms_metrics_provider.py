@@ -80,13 +80,14 @@ def test_get_metric_provider_returns_packaged_yaml(monkeypatch):
     assert provider.handler_module_prefixes == ("vllm_ascend.observability.ms_metrics.",)
     assert provider.config_paths == tuple(sorted(provider.config_paths))
     assert [Path(path).name for path in provider.config_paths] == [
+        "async_scheduling_metrics.yaml",
         "base_metrics.yaml",
         "eplb_metrics.yaml",
         "schedule_execute_metrics.yaml",
     ]
     assert all(Path(path).is_file() for path in provider.config_paths)
     config = _load_all_provider_configs(provider.config_paths)
-    assert len(config) == 12
+    assert len(config) == 13
     assert all(item["symbol"].startswith("vllm_ascend.") for item in config)
     assert all("id" not in item for item in config)
     assert all(
@@ -150,6 +151,7 @@ def test_ascend_handler_module_loads_from_yaml_path(monkeypatch):
         "vllm_ascend.observability.ms_metrics.provider",
         "vllm_ascend.observability.ms_metrics.handlers",
         "vllm_ascend.observability.ms_metrics.handlers.common",
+        "vllm_ascend.observability.ms_metrics.handlers.async_scheduling",
         "vllm_ascend.observability.ms_metrics.handlers.eplb",
         "vllm_ascend.observability.ms_metrics.handlers.schedule_execute",
     ):
@@ -165,7 +167,7 @@ def test_ascend_handler_module_loads_from_yaml_path(monkeypatch):
 
 def test_provider_yaml_symbols_exist_in_current_vllm_ascend_source():
     config_paths = sorted((_PACKAGE_ROOT / "config").glob("*.yaml"))
-    assert len(config_paths) == 3
+    assert len(config_paths) == 4
     config = _load_all_provider_configs(config_paths)
 
     for item in config:
@@ -449,6 +451,47 @@ def test_symbol_hook_handlers_honor_level_and_labels(monkeypatch):
     common.set_metric_level("basic")
 
     assert handlers.sample_tokens_handler(lambda runner, grammar: "sampled", object(), None) == "sampled"
+    metrics.record_metric.assert_not_called()
+
+
+def test_async_seq_lens_update_handler_records_duration(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_async_seq_lens_update", "async_scheduling")
+    sys.modules[_COMMON_MODULE].set_metric_level("detail")
+
+    assert handlers.seq_lens_update_handler(lambda runner: "lens", object()) == "lens"
+    assert metrics.record_metric.call_args.args[0] == "async_scheduling:seq_lens_update_ms"
+    assert metrics.record_metric.call_args.kwargs["labels"] == {}
+
+
+def test_record_d2h_sync_ms_honors_level(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_async_d2h_sync", "async_scheduling")
+    sys.modules[_COMMON_MODULE].set_metric_level("detail")
+
+    handlers.record_d2h_sync_ms(3.5)
+
+    metrics.record_metric.assert_called_once_with(
+        "async_scheduling:d2h_sync_ms",
+        value=3.5,
+        labels={},
+    )
+
+    metrics.reset_mock()
+    sys.modules[_COMMON_MODULE].set_metric_level("basic")
+    handlers.record_d2h_sync_ms(1.0)
     metrics.record_metric.assert_not_called()
 
 

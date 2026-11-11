@@ -7,10 +7,12 @@ them. Re-export new feature handlers here so the YAML reference
 ``vllm_ascend.observability.ms_metrics.handlers:function_name`` stays stable.
 """
 
+from vllm_ascend.observability.ms_metrics.handlers.async_scheduling import seq_lens_update_handler
 from vllm_ascend.observability.ms_metrics.handlers.eplb import eplb_do_update_hotness_handler
 from vllm_ascend.observability.ms_metrics.handlers.schedule_execute import sample_tokens_handler
 
 __all__ = [
     "eplb_do_update_hotness_handler",
     "sample_tokens_handler",
+    "seq_lens_update_handler",
 ]
