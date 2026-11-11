@@ -245,33 +245,6 @@ def test_gather_decode_batch_preserves_upstream_graph_gate(uses_flashmla, graph_
     assert uniform == expected_uniform
 
 
-@pytest.mark.parametrize("dcp_size", [1, 2])
-@pytest.mark.parametrize("use_mla", [False, True])
-@pytest.mark.parametrize("has_prefill", [False, True])
-@pytest.mark.parametrize("pd_recompute", [False, True])
-def test_gather_mla_dcp_prefix_hit_graph_dispatch(dcp_size, use_mla, has_prefill, pd_recompute):
-    runner = _make_runner()
-    runner.model_config.use_mla = use_mla
-    runner.vllm_config.parallel_config.decode_context_parallel_size = dcp_size
-    # Three one-token suffixes fit a four-request decode capture, but MLA DCP
-    # still builds prefill metadata for the two prefix-cache hits.
-    batch_state = _make_batch_state([5, 512, 768], [1, 1, 1], [5, 513, 769] if has_prefill else [5, 512, 768])
-    with (
-        patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, 1)),
-        patch(
-            "vllm_ascend.worker.v2.model_runner.is_pd_decode_recompute_scheduler_enabled",
-            return_value=pd_recompute,
-        ),
-    ):
-        gathered, uniform = runner.gather_batch_req_state(SimpleNamespace(), False)
-
-    prefill_path = use_mla and dcp_size > 1 and has_prefill and not pd_recompute
-    assert gathered.decode_graph_eligible is (not prefill_path)
-    assert uniform == (None if prefill_path else 1)
-    np.testing.assert_array_equal(gathered.is_prefilling_np, batch_state.is_prefilling_np)
-    assert batch_state.decode_graph_eligible is True
-
-
 @pytest.mark.parametrize("uses_flashmla", [False, True])
 def test_gather_dummy_batch_bypasses_flashmla(uses_flashmla):
     runner = _make_runner()

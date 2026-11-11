@@ -105,7 +105,6 @@ from vllm_ascend.utils import (
     enable_sfa_dcp_sharded_indexer,
     is_c8_mxfp_kv_quant,
     is_deepseek_v41,
-    is_pd_decode_recompute_scheduler_enabled,
     lmhead_tp_enable,
     lmhead_tp_max_num_logits,
     lmhead_tp_pad_rows,
@@ -773,18 +772,6 @@ class NPUModelRunner(GPUModelRunner):
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
-        if (
-            batch_state is not None
-            and batch_state.has_prefill
-            and self.model_config.use_mla
-            and self.vllm_config.parallel_config.decode_context_parallel_size > 1
-            and not is_pd_decode_recompute_scheduler_enabled(self.vllm_config)
-        ):
-            # MLA DCP uses its prefill path even for one-token prefix-cache
-            # suffixes. Keep graph dispatch consistent with the metadata builder;
-            # a decode capture cannot replay that prefill or its padded rows.
-            batch_state = batch_state._replace(decode_graph_eligible=False)
-            uniform_token_count = None
         if self._uses_flashmla and batch_state is not None:
             # The backend order must precede derived inputs and graph dispatch.
             batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
