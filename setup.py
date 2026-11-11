@@ -358,14 +358,13 @@ class cmake_build_ext(build_ext):
         def target_name(s: str) -> str:
             return s.removeprefix("vllm_ascend.")
 
-        # Build all the CMake extensions (+ rare CPU feed target).
+        # Build Ascend CMake extensions only (rare_feed_native is the plain
+        # Extension above — always packaged by setuptools).
         for ext in cmake_exts:
             self.configure(ext)
             name = target_name(ext.name)
             if name not in targets:
                 targets.append(name)
-        if "rare_feed_native" not in targets:
-            targets.append("rare_feed_native")
 
         num_jobs = self.compute_num_jobs()
 
@@ -394,24 +393,12 @@ class cmake_build_ext(build_ext):
         if isinstance(self.distribution.get_command_obj("develop"), develop):
             import shutil
 
-            rare_dst_dir = os.path.join(
-                self.build_lib,
-                "vllm_ascend",
-                "observability",
-                "runtime_guard",
-                "detector",
-                "rare",
-            )
-            os.makedirs(rare_dst_dir, exist_ok=True)
             for root, _, files in os.walk(self.build_temp):
                 for file in files:
                     if not file.endswith(".so"):
                         continue
                     src_path = os.path.join(root, file)
-                    if file.startswith("rare_feed_native"):
-                        dst_path = os.path.join(rare_dst_dir, "rare_feed_native.so")
-                    else:
-                        dst_path = os.path.join(self.build_lib, "vllm_ascend", file)
+                    dst_path = os.path.join(self.build_lib, "vllm_ascend", file)
                     shutil.copy(src_path, dst_path)
                     print(f"Copy: {src_path} -> {dst_path}")
 
@@ -449,9 +436,11 @@ except LookupError:
     # only checks out the commit. In this case, we set a dummy version.
     VERSION = "0.0.0"
 
-# rare_feed_native: pure CPython C extension (no Ascend). Always build.
-# With COMPILE_CUSTOM_KERNELS=1 it is also a cmake target installed beside
-# the rare package; the plain Extension covers CPU-only / kernel-skipped builds.
+# rare_feed_native: pure CPython C extension (no Ascend / CANN).
+# Always register as a setuptools Extension so bdist_wheel packages it for
+# both COMPILE_CUSTOM_KERNELS=0 (CPU CI / docs) and =1 (Ascend image / wheel).
+# Do not rely on a cmake sidecar alone: that path installs into the source
+# tree and is easy to omit from the wheel (*.so is gitignored).
 _RARE_FEED_NATIVE_SRC = os.path.join(
     "vllm_ascend",
     "observability",
@@ -468,9 +457,7 @@ _RARE_FEED_NATIVE_EXT = Extension(
 
 ext_modules: list[Extension] = [_RARE_FEED_NATIVE_EXT]
 if envs.COMPILE_CUSTOM_KERNELS:
-    # CMake builds vllm_ascend_C and rare_feed_native; drop the plain Extension
-    # to avoid compiling the same .c twice.
-    ext_modules = [CMakeExtension(name="vllm_ascend.vllm_ascend_C")]
+    ext_modules.append(CMakeExtension(name="vllm_ascend.vllm_ascend_C"))
 
 
 def get_path(*filepath) -> str:

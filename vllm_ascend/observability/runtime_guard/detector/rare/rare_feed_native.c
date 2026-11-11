@@ -706,39 +706,6 @@ static int feed_impl(const Ctx *c, State *s, const int64_t *rows, const int64_t 
     return n_hits;
 }
 
-/* Several buffered tokens per row, lengths differ, one GIL-free call.
- * tok/top1/chosen are row-major (buf_rows, width). lengths[s] tokens of rows[s]
- * are applied in order, the same as that many one-token feeds. */
-static int feed_spans_impl(const Ctx *c, State *s, const int64_t *rows, const int32_t *lengths, int nspan, int width,
-                           int buf_rows, const int64_t *tok, const double *top1, const double *chosen, int32_t *hit_row,
-                           int16_t *hit_mon, int16_t *hit_strict, int64_t *hit_fired, int max_hits) {
-    int s_i, n_hits = 0;
-    for (s_i = 0; s_i < nspan; s_i++) {
-        int row = (int)rows[s_i];
-        int len = (int)lengths[s_i];
-        int k;
-        const int64_t *rt;
-        const double *r1;
-        const double *rc;
-        if (row < 0 || row >= s->cap || row >= buf_rows || len <= 0) {
-            continue;
-        }
-        if (len > width) {
-            len = width;
-        }
-        rt = tok + (size_t)row * (size_t)width;
-        r1 = top1 + (size_t)row * (size_t)width;
-        rc = chosen + (size_t)row * (size_t)width;
-        for (k = 0; k < len; k++) {
-            if (s->done[row]) {
-                break;
-            }
-            apply_token(c, s, row, rt[k], r1[k], rc[k], hit_row, hit_mon, hit_strict, hit_fired, &n_hits, max_hits);
-        }
-    }
-    return n_hits;
-}
-
 typedef struct {
     Py_buffer b;
     int held;
@@ -869,124 +836,6 @@ static PyObject *feed(PyObject *self, PyObject *args) {
     Py_END_ALLOW_THREADS
     drop_all(tmp, 32);
     (void)i;
-    return PyLong_FromLong(n_hits);
-}
-
-static PyObject *feed_spans(PyObject *self, PyObject *args) {
-    PyObject *cap_obj;
-    PyObject *o_counts, *o_letters, *o_prev_last, *o_answer, *o_ring, *o_ring_len;
-    PyObject *o_dec_n, *o_dec_b, *o_prev, *o_has, *o_hold, *o_lp1, *o_lpc, *o_t, *o_done, *o_mon;
-    PyObject *o_seen, *o_rlen, *o_rtok, *o_rlp1, *o_rlpc;
-    PyObject *o_rows, *o_lengths, *o_tok, *o_top1, *o_chosen;
-    PyObject *o_hrow, *o_hmon, *o_hstrict, *o_hfired;
-    int cap, width;
-    Ctx *c;
-    Tmp tmp[32];
-    State st;
-    int n_hits = 0;
-    int nspan, buf_rows, max_hits, total;
-    Py_ssize_t nrows;
-    int i;
-
-    if (!PyArg_ParseTuple(
-            args, "OiOOOOOOOOOOOOOOOOOOOOOOOiOOOOOOO",
-            &cap_obj, &cap,
-            &o_counts, &o_letters, &o_prev_last, &o_answer, &o_ring, &o_ring_len,
-            &o_dec_n, &o_dec_b, &o_prev, &o_has, &o_hold, &o_lp1, &o_lpc, &o_t, &o_done, &o_mon,
-            &o_seen, &o_rlen, &o_rtok, &o_rlp1, &o_rlpc,
-            &o_rows, &o_lengths, &width, &o_tok, &o_top1, &o_chosen,
-            &o_hrow, &o_hmon, &o_hstrict, &o_hfired)) {
-        return NULL;
-    }
-    c = (Ctx *)PyCapsule_GetPointer(cap_obj, "rare_feed_ctx");
-    if (c == NULL) {
-        return NULL;
-    }
-    if (cap < 1 || width < 1) {
-        PyErr_SetString(PyExc_ValueError, "rare feed_spans: empty state");
-        return NULL;
-    }
-    memset(tmp, 0, sizeof(tmp));
-#define GRAB(i, obj, nbytes)                                                                 \
-    if (grab(&tmp[i], (obj), (nbytes)) < 0) {                                                \
-        drop_all(tmp, 32);                                                                   \
-        return NULL;                                                                         \
-    }
-    GRAB(0, o_counts, (Py_ssize_t)cap * c->ncls * (Py_ssize_t)sizeof(int64_t));
-    GRAB(1, o_letters, (Py_ssize_t)cap * (Py_ssize_t)sizeof(int64_t));
-    GRAB(2, o_prev_last, (Py_ssize_t)cap * (Py_ssize_t)sizeof(int16_t));
-    GRAB(3, o_answer, (Py_ssize_t)cap);
-    GRAB(4, o_ring, (Py_ssize_t)cap * WIN * (Py_ssize_t)sizeof(int16_t));
-    GRAB(5, o_ring_len, (Py_ssize_t)cap * (Py_ssize_t)sizeof(int16_t));
-    GRAB(6, o_dec_n, (Py_ssize_t)cap);
-    GRAB(7, o_dec_b, (Py_ssize_t)cap * DEC_MAX);
-    GRAB(8, o_prev, (Py_ssize_t)cap * (Py_ssize_t)sizeof(int64_t));
-    GRAB(9, o_has, (Py_ssize_t)cap);
-    GRAB(10, o_hold, (Py_ssize_t)cap * (Py_ssize_t)sizeof(int64_t));
-    GRAB(11, o_lp1, (Py_ssize_t)cap * (Py_ssize_t)sizeof(double));
-    GRAB(12, o_lpc, (Py_ssize_t)cap * (Py_ssize_t)sizeof(double));
-    GRAB(13, o_t, (Py_ssize_t)cap * (Py_ssize_t)sizeof(int64_t));
-    GRAB(14, o_done, (Py_ssize_t)cap);
-    GRAB(15, o_mon, (Py_ssize_t)cap);
-    GRAB(16, o_seen, (Py_ssize_t)cap * (Py_ssize_t)sizeof(int64_t));
-    GRAB(17, o_rlen, (Py_ssize_t)cap * (Py_ssize_t)sizeof(int16_t));
-    GRAB(18, o_rtok, (Py_ssize_t)cap * RECENT_CAP * (Py_ssize_t)sizeof(int64_t));
-    GRAB(19, o_rlp1, (Py_ssize_t)cap * RECENT_CAP * (Py_ssize_t)sizeof(double));
-    GRAB(20, o_rlpc, (Py_ssize_t)cap * RECENT_CAP * (Py_ssize_t)sizeof(double));
-    GRAB(21, o_rows, (Py_ssize_t)sizeof(int64_t));
-    nrows = tmp[21].b.len / (Py_ssize_t)sizeof(int64_t);
-    nspan = (int)nrows;
-    GRAB(22, o_lengths, (Py_ssize_t)nspan * (Py_ssize_t)sizeof(int32_t));
-    GRAB(23, o_tok, (Py_ssize_t)width * (Py_ssize_t)sizeof(int64_t));
-    buf_rows = (int)(tmp[23].b.len / ((Py_ssize_t)width * (Py_ssize_t)sizeof(int64_t)));
-    GRAB(24, o_top1, (Py_ssize_t)buf_rows * width * (Py_ssize_t)sizeof(double));
-    GRAB(25, o_chosen, (Py_ssize_t)buf_rows * width * (Py_ssize_t)sizeof(double));
-    total = 0;
-    for (i = 0; i < nspan; i++) {
-        int len = ((const int32_t *)tmp[22].b.buf)[i];
-        if (len > width) {
-            len = width;
-        }
-        if (len > 0) {
-            total += len;
-        }
-    }
-    max_hits = total > 0 ? total : 1;
-    GRAB(26, o_hrow, (Py_ssize_t)max_hits * (Py_ssize_t)sizeof(int32_t));
-    GRAB(27, o_hmon, (Py_ssize_t)max_hits * (Py_ssize_t)sizeof(int16_t));
-    GRAB(28, o_hstrict, (Py_ssize_t)max_hits * (Py_ssize_t)sizeof(int16_t));
-    GRAB(29, o_hfired, (Py_ssize_t)max_hits * (Py_ssize_t)sizeof(int64_t));
-#undef GRAB
-
-    st.counts = tmp[0].b.buf;
-    st.letters = tmp[1].b.buf;
-    st.prev_last = tmp[2].b.buf;
-    st.answer = tmp[3].b.buf;
-    st.ring = tmp[4].b.buf;
-    st.ring_len = tmp[5].b.buf;
-    st.dec_n = tmp[6].b.buf;
-    st.dec_b = tmp[7].b.buf;
-    st.prev = tmp[8].b.buf;
-    st.has_hold = tmp[9].b.buf;
-    st.hold_id = tmp[10].b.buf;
-    st.hold_lp1 = tmp[11].b.buf;
-    st.hold_lpc = tmp[12].b.buf;
-    st.t = tmp[13].b.buf;
-    st.done = tmp[14].b.buf;
-    st.monitor_set = tmp[15].b.buf;
-    st.tokens_seen = tmp[16].b.buf;
-    st.recent_len = tmp[17].b.buf;
-    st.recent_tok = tmp[18].b.buf;
-    st.recent_lp1 = tmp[19].b.buf;
-    st.recent_lpc = tmp[20].b.buf;
-    st.cap = cap;
-    st.ncls = c->ncls;
-
-    Py_BEGIN_ALLOW_THREADS
-    n_hits = feed_spans_impl(c, &st, tmp[21].b.buf, tmp[22].b.buf, nspan, width, buf_rows, tmp[23].b.buf, tmp[24].b.buf,
-                             tmp[25].b.buf, tmp[26].b.buf, tmp[27].b.buf, tmp[28].b.buf, tmp[29].b.buf, max_hits);
-    Py_END_ALLOW_THREADS
-    drop_all(tmp, 32);
     return PyLong_FromLong(n_hits);
 }
 
@@ -1399,7 +1248,6 @@ static PyMethodDef methods[] = {
     {"feed", feed, METH_VARARGS, "Score one new token on each row. GIL is released."},
     {"bind_state", bind_state, METH_VARARGS, "Pin row-state buffers for later feed_bound calls."},
     {"feed_bound", feed_bound, METH_VARARGS, "Feed using pinned row state. GIL is released."},
-    {"feed_spans", feed_spans, METH_VARARGS, "Score a variable-length token span on each row. GIL is released."},
     {"map_new", map_new, METH_NOARGS, "req_id to row map."},
     {"map_put", map_put, METH_VARARGS, "Insert req_id."},
     {"map_del", map_del, METH_VARARGS, "Remove req_id."},
