@@ -23,8 +23,6 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TABLES = os.path.join(HERE, "tables")
-# Historical '</think>' ids (only used when an explicit corpus path/name is given).
-THINK_END = {"qwen3": 151668, "glm": 154842, "dsv4": None}
 
 
 def _byte_decoder():

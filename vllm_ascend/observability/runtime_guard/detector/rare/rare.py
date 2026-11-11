@@ -55,7 +55,7 @@ import numpy as np
 
 from . import rare_ref
 from .rare_gb import GB
-from .rare_vocab import CI, LETTERS, THINK_END, classify, load as load_rare
+from .rare_vocab import CI, LETTERS, classify, load as load_rare
 from .result import Result
 
 LN10 = math.log(10.0)
@@ -479,18 +479,21 @@ def _repo_path(path):
 
 
 class RareDetector:
-    def __init__(self, corpus, config, think_end='auto'):
+    def __init__(self, corpus, config, think_end=None):
         self.T = load_rare(corpus)
-        if think_end == 'auto':
-            if corpus not in THINK_END:
-                raise ValueError(
-                    "think_end='auto' needs a known corpus name or an explicit "
-                    "'</think>' id / None (chat); Guard warmup resolves this from the tokenizer"
-                )
-            self.think_end = THINK_END[corpus]
+        # Pass an int id or None. Guard resolves '</think>' online via
+        # resolve_think_end_id(tokenizer); no hardcoded per-model map.
+        if think_end == "auto" or isinstance(think_end, str):
+            raise ValueError(
+                "think_end must be an int token id or None; use "
+                "resolve_think_end_id(tokenizer, 'auto') for online resolution"
+            )
+        self.think_end = think_end
+        if isinstance(config, str):
+            with open(config, encoding="utf-8") as f:
+                self.cfg = json.load(f)
         else:
-            self.think_end = think_end
-        self.cfg = json.load(open(config)) if isinstance(config, str) else config
+            self.cfg = config
         self.rules = self.cfg['rules']
         self.need = needs(self.rules)
         self.compiled = [compile_rule(r) for r in self.rules]
@@ -585,7 +588,7 @@ def record_features(det, tok, top1_lp, chosen_lp, ref='auto'):
                     gbm=det.gbm, **ctx)
 
 
-def decide(tok, top1_lp, chosen_lp, corpus, config, think_end='auto', tier='intercept'):
+def decide(tok, top1_lp, chosen_lp, corpus, config, think_end=None, tier='intercept'):
     """whole-record reference: (fired_at, rule description) of the first alert of a tier, (-1, '') if none. The earliest
     deciding position wins, ties go to the earlier rule; with look-ahead an alert at position p is raised at min(p + 2, n)."""
     det = RareDetector(corpus, config, think_end)
