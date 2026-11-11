@@ -28,7 +28,7 @@ qualification results described below.
 
 Build the native extension with CANN headers providing `HcclCreateSubCommConfig`.
 The C++ shim uses the installed `HcclCommConfig` ABI. Use Model Runner V2 on
-current main; the V1 commands in the matched pilot apply to its pinned compatibility runtime.
+current main; the V1 commands in the matched comparison apply to its pinned compatibility runtime.
 
 For Qwen3-30B-A3B-Base on four NPUs, create a placement JSON with 48 entries
 in `layer_list`. Each entry has a `device_list` of four objects whose
@@ -114,7 +114,7 @@ retaining the process and device context.
 Run the targeted NPU tests on four idle devices. Component results and full
 serving qualification must be reported separately for the exact tested source.
 
-### Full-model functional qualification
+### Earlier full-model functional qualification
 
 Qwen3-30B-A3B-Base BF16 was validated on three Ascend 910B3 NPUs across
 two nodes, using Model Runner V2, PIECEWISE graphs, AllToAll, and
@@ -128,7 +128,7 @@ Observed inactive native communication reclamation was 145,805,312,
 307,748,864, and 307,576,832 bytes across shrink transitions. Each rejoin
 verified 6,144 expert tensors after migration. Initial MC2 handle cleanup
 executed, and owned processes and reservations were released afterward.
-These observations establish functionality for that configuration.
+These observations precede the shrink-overhead follow-up and establish functionality for that configuration.
 
 Single-node checks also compared V1 AllGather graph execution against eager
 execution at each matched topology and an independent EP2 control. BF16
@@ -140,54 +140,82 @@ a normalization compatibility shim corresponding to
 Performance of the earlier retained-communicator implementation is separate
 from the reclaimable graph/communication implementation described here.
 
-## Matched eager pilot
+## Matched eager resize comparison (2026-11-11)
 
-One method pair was measured at each offered rate, in fixed Native-then-FastEEP order. Each method completed 52/52 measured HTTP requests (48 load requests and four single-request controls), after real generation and 3→2→3 warmup. Process ownership was recorded on all six logical chips of the three reserved physical cards; no unregistered process was observed there during either method. Task-owned processes and reservations were released and checked independently.
+Three independent method pairs were measured at each offered rate, with process order Native/FastEEP, FastEEP/Native, Native/FastEEP. Each method block starts a fresh server and completes three 3→2→3 warmup cycles before measured arrivals. The six completed measurement blocks passed: 156/156 HTTP requests per method (144 load requests and 12 streaming single-request controls). Ownership checks cover all six logical chips of three reserved physical cards; only registered task processes are cleaned up. The third pair resumed in a fresh controller after an ownership guard stopped its earlier server start before measurement; the first two pairs were retained. Processes and reservations were released and checked after the study.
 
-Qwen3-30B-A3B-Base BF16; three Ascend 910 A3 cards, one model chip per card; TP=1, DP=EP3↔2, V1 eager, AllGather and Ray. Both methods use the same vLLM 0.21 compatibility runtime, full Ascend Native Elastic EP port, normalization shim, checkpoint hashes and four-shot prompts. Both disable continuous EPLB; the Native port performs placement changes during explicit resizes. This comparison measures the current FastEEP core in that common compatibility runtime. The current-stack PIECEWISE/AllToAll multi-node qualification above establishes functionality separately.
+Qwen3-30B-A3B-Base BF16; three Ascend 910 A3 cards, one model chip per card; TP=1, DP=EP3↔2, V1 eager, AllGather and Ray. Both methods use the same pinned vLLM 0.21 compatibility runtime, full Ascend Native Elastic EP port, normalization shim, checkpoint hashes and four-shot prompts. Both disable continuous EPLB. The measured FastEEP modules match commit `834f1dcfad842c2e19eef1e0511b92fb68fb1b07`; the shared legacy allocator/framework adapters remain pinned separately. Current-main V2 functional qualification is a separate configuration.
 
-KV budget is 2 GiB per worker; actual block-rounded backing is 2,139,095,040 bytes (2,040 MiB). Maximum model length 2,048, maximum sequences 16, maximum batched tokens 512, maximum output 64, temperature 0, seed 51027. Actual physical capacity matches at 128 expert slots per layer for EP2 and 192 for EP3, with identical placement digests across all 48 layers. Initial placement per layer is experts0–63,64–127,0–63; heterogeneous-placement functionality is qualified separately above. Every direction uses 20 seconds of scheduled arrivals and a 4-second post-transition arrival phase; resize starts at 8 seconds. The same frontend waits for full responses to drain and queues new arrivals.
+KV budget is 2 GiB per worker; actual block-rounded backing is 2,139,095,040 bytes (2,040 MiB). Maximum model length 2,048, maximum sequences 16, maximum batched tokens 512, maximum output 64, temperature 0, seed 51027. Actual capacity and placement match across methods at every measured transition: 128 expert slots per layer at EP2, 192 at EP3, across 48 layers. Initial per-layer placement is experts 0–63,64–127,0–63. Every direction schedules arrivals for 20 seconds and starts resize at 8 seconds, followed by a four-second post-transition arrival phase. A common frontend drains complete responses and queues new arrivals during resize.
 
-|Rate(req/s)|Scale|Native API(s)|FastEEP API(s)|Fast−Native(s)|Native drain(s)|FastEEP drain(s)|
-|---|---|---:|---:|---:|---:|---:|
-|0.25|3→2|8.159|12.949|+4.790|4.946|5.336|
-|0.25|2→3|54.182|22.422|-31.760|4.515|8.943|
-|0.75|3→2|10.848|20.491|+9.643|7.936|9.428|
-|0.75|2→3|57.398|19.502|-37.896|7.845|8.153|
+### Resize latency
 
-API includes the response drain. The accompanying data separates drain and endpoint time after drain. Each row has one observed call per method; there is no run-to-run confidence interval.
+Values below are medians of three calls per method and condition. API latency includes response drain; endpoint time is the server transaction duration after subtracting that drain. Column medians are computed independently and need not sum. Three pairs do not establish statistical significance.
 
-|Rate(req/s)|Method|Load requests|TTFT p95(s)|TPOT p95(ms)|Response p95(s)|Output(token/s)|
-|---|---|---:|---:|---:|---:|---:|
-|0.25|Native|12|54.266|146.78|63.514|6.580|
-|0.25|FastEEP|12|16.698|138.57|25.306|8.836|
-|0.75|Native|36|57.472|144.19|66.371|17.810|
-|0.75|FastEEP|36|18.741|143.50|27.601|23.358|
+|Rate(req/s)|Scale|Native API(s)|FastEEP API(s)|Fast−Native API(s)|Native endpoint(s)|FastEEP endpoint(s)|Native drain(s)|FastEEP drain(s)|
+|---|---|---|---|---|---|---|---|---|
+|0.25|3→2|11.347|6.081|-5.267|3.313|1.937|7.994|3.929|
+|0.25|2→3|47.070|15.533|-31.538|43.187|7.794|3.883|7.737|
+|0.75|3→2|10.112|8.421|-1.690|3.009|1.552|6.923|6.917|
+|0.75|2→3|49.985|16.897|-33.088|43.010|8.970|7.734|8.177|
 
-At 0.25 requests/s, whole-interval output throughput changes by +2.257 token/s (+34.30%). At 0.75 requests/s, whole-interval output throughput changes by +5.549 token/s (+31.16%).
+Individual measured calls (API / endpoint after drain, seconds); [full-precision resize data](fasteep_resize_measurements.csv) and [per-block serving data](fasteep_serving_measurements.csv) accompany these tables:
 
-Output throughput counts load output tokens over the entire rate interval, including drain, transition, controls and admission waiting; control tokens are excluded from the numerator. This is completed work under the offered load, not peak serving capacity. TTFT and TPOT are measured from nonempty streamed chunks; p95 summarizes requests, not repeated runs.
+|Rate(req/s)|Pair|Native 3→2|FastEEP 3→2|Native 2→3|FastEEP 2→3|
+|---|---|---|---|---|---|
+|0.25|1|11.347 / 3.351|6.110 / 1.918|52.350 / 44.912|11.325 / 7.842|
+|0.25|2|11.412 / 3.313|6.081 / 2.150|47.070 / 43.187|15.533 / 7.794|
+|0.25|3|7.010 / 3.306|5.830 / 1.937|46.248 / 42.724|15.783 / 7.628|
+|0.75|1|10.403 / 2.957|8.629 / 1.710|50.745 / 43.010|17.641 / 8.970|
+|0.75|2|10.112 / 3.228|8.421 / 1.417|49.985 / 42.127|16.541 / 9.613|
+|0.75|3|9.932 / 3.009|8.336 / 1.552|49.598 / 43.131|16.897 / 8.718|
 
-|Condition|Native HBM mean(driverMB)|FastEEP HBM mean(driverMB)|Fast−Native(driverMB)|
-|---|---:|---:|---:|
-|r0.25-c0-post2|87916.2|91907.2|+3991.0|
-|r0.25-c0-post3|123157.7|127218.3|+4060.7|
-|r0.75-c0-post2|88011.5|92035.2|+4023.7|
-|r0.75-c0-post3|123227.0|127180.5|+3953.5|
+### Serving and memory
 
-HBM covers all six chips of the three physical cards after each transition. Driver MB is the driver’s reported unit. Actual sample spacing: median 2.334s, maximum 3.427s; sampled peaks are lower bounds. Torch current allocated/reserved bytes are reported separately from driver HBM. Torch peak counters are per-process lifetime values; retained virtual allocations can remain counted after physical discard.
+Each p95 is calculated over requests within one method block and rate; the table reports the median of those three p95 values. Throughput is the median of three whole-interval measurements.
 
-Output validation: 7/7 fixed single-request control pairs match token IDs and finish reason; load token parity is 39/48. Native: 2/48 explicit final answers correct, 46 missing final answers; FastEEP: 2/48 explicit final answers correct, 46 missing final answers. Load scoring requires the explicit final-answer marker and exact numeric comparison. The 64-token limit and reused questions make these descriptive observations, not full GSM8K accuracy.
+|Rate(req/s)|Method|Load requests(total)|TTFT p95(s)|TPOT p95(ms)|Response p95(s)|Output(token/s)|
+|---|---|---|---|---|---|---|
+|0.25|Native|36|47.265|132.764|55.043|7.042|
+|0.25|FastEEP|36|9.715|124.490|17.350|10.786|
+|0.75|Native|108|49.033|128.649|57.044|19.651|
+|0.75|FastEEP|108|14.273|128.937|22.630|28.017|
 
-The earlier retained-communicator study is preserved separately and is not used for these numbers. Software/model source hashes, absolute values, paired deltas, Torch snapshots, output counts and definitions accompany the measurement record.
+Load completion tokens / elapsed first shrink load-phase start to final expansion post-phase completion, including drain, resize, controls and admission waits; sentinel tokens excluded. This measures completed work under the offered load.
+
+|Rate(req/s)|After|Native HBM(driverMB)|FastEEP HBM(driverMB)|Fast−Native(driverMB)|Samples Native/FastEEP|
+|---|---|---|---|---|---|
+|0.25|EP2|87959.0|91840.5|+3881.5|12 / 12|
+|0.25|EP3|123139.2|127131.0|+3991.8|11 / 12|
+|0.75|EP2|88004.2|91941.7|+3937.5|17 / 17|
+|0.75|EP3|123150.7|127088.5|+3937.8|17 / 18|
+
+HBM is the median of the three block means over post-transition arrival phases, summed over all six chips of three physical cards, in the driver's reported MB. Actual monitor sample spacing within controller segments: median 1.908 s, maximum 3.783 s. Sampled peaks are lower bounds. Torch allocated/reserved counters are separate; virtual allocations may remain counted after physical unmapping. FastEEP's additional HBM remains an observed cost in this configuration.
+
+Output checks: all 144 paired load prompt hashes and all measured active topologies/placement digests match. Fixed controls match token IDs and finish reason in 33/33 pairs (initial generation, six warmup probes and four measured sentinels per pair). Load token/finish parity is 112/144.
+Native: 4/144 explicit final answers correct, 0 incorrect explicit answers, 140 missing final answers.
+FastEEP: 4/144 explicit final answers correct, 1 incorrect explicit answer, 139 missing final answers.
+Explicit #### numeric final answer only; exact Decimal comparison. 64 output-token cap; reused questions; descriptive, not full GSM8K accuracy.
+
+The original CUDA FastEEP paper describes retaining execution metadata and offloading inactive data buffers (2–4 GB, excluding KV) to CPU memory. That CPU figure does not quantify a Native-versus-FastEEP HBM difference. See [FastEEP §6](https://arxiv.org/html/2610.18451v1#S6); the Ascend HBM values above are measured separately.
+
+### Isolated optimization and migration checks
+
+An instrumented no-arrival check in the same compatibility stack compared the previous FastEEP core with this change. Three successive shrink API calls in one fresh process per implementation were 4.855586 / 3.518592 / 3.459938 s before and 3.709730 / 2.626814 / 2.735158 s after. The median fell from 3.518592 to 2.735158 s (22.3%). This diagnostic is distinct from the uninstrumented Native comparison above.
+
+The change skips empty migration work, creates peer communication only when transfers/refill require it, shares routing-table construction across equal layer placements, and overlaps inactive pool reclamation with active communicator setup. Before pool unmapping, migration and old serving communicators are closed; all ranks synchronize before publishing readiness.
+
+A separate full-model heterogeneous-placement check completed two 3→2→3 cycles with migration readback enabled. Its initial shards were 0–63,32–95,64–127. The first shrink checked 3,072 destination tensors; each expansion checked 6,144. All post-transition generation checks passed. Inactive native-communication reclamation was 146,296,832 and 148,332,544 bytes, accounted before weight/KV pool reclamation. Performance measurements above disable readback and profiling hooks.
 
 ### Recorded commands and sources
 
+Set `PAIR` to 0, 1 or 2. Start a fresh server for every method block, perform three 3→2→3 warmup cycles with a post-transition generation check, then execute the corresponding load command. Run Native/FastEEP for pair 0, FastEEP/Native for pair 1, and Native/FastEEP for pair 2.
+
 Set `MODEL` to the locally acquired, SHA-verified checkpoint and `MODEL_CHIPS` to three exclusively reserved chips on three physical cards (the measured two-chip-per-card mapping used logical chips 0,2,4). Monitor/reserve the companion chips as well. The explicit KV byte budget takes precedence over the utilization fraction; it does not cap model weights or native workspaces.
 
-The shared compatibility environment uses vLLM commit ad7125a431e176d4161099480a66f0169609a690 and Ascend base commit 80610e4438dba05011b05f89fc45d91e96992671 with the full legacy Native Elastic EP port and common framework adapters. The measured FastEEP core matches commit 789752924ae45d6f7018945a31d6b8d38afaf7ae.
+The shared compatibility environment uses vLLM commit ad7125a431e176d4161099480a66f0169609a690 and Ascend base commit 80610e4438dba05011b05f89fc45d91e96992671 with the full legacy Native Elastic EP port and common framework adapters. The measured FastEEP core matches commit 834f1dcfad842c2e19eef1e0511b92fb68fb1b07.
 
-Python 3.12.9, PyTorch 2.10.0+cpu, torch-npu 2.10.0, Ray 2.48.0, transformers 5.5.4, CANN 9.2.0 and NNAL 9.0.0. These are the recorded benchmark-harness commands, requiring the shared compatibility port, prepared server wrapper, observer/admission modules and frozen inputs.
+Python 3.12.9, PyTorch 2.10.0+cpu, torch-npu 2.10.0, Ray 2.48.0, transformers 5.5.4, CANN 8.5.1, NNAL 8.5.1 and triton-ascend 3.2.1. These are the recorded benchmark-harness commands, requiring the shared compatibility port, prepared server wrapper, observer/admission modules and frozen inputs.
 
 **Native Elastic EP**
 
@@ -228,7 +256,7 @@ python prepared-serve.py \
 python load_client.py --url http://localhost:8000 \
   --requests frozen-requests.json --prompt-policy prompt_policy.json \
   --output requests.jsonl --action evaluate --mode elastic \
-  --rates 0.25 0.75 --cycles 1 --cycle-offset 0 \
+  --rates 0.25 0.75 --cycles 1 --cycle-offset "$PAIR" \
   --seconds 20 --post-seconds 4 --max-tokens 64
 ```
 
@@ -271,7 +299,7 @@ python prepared-serve.py \
 python load_client.py --url http://localhost:8000 \
   --requests frozen-requests.json --prompt-policy prompt_policy.json \
   --output requests.jsonl --action evaluate --mode reuse \
-  --rates 0.25 0.75 --cycles 1 --cycle-offset 0 \
+  --rates 0.25 0.75 --cycles 1 --cycle-offset "$PAIR" \
   --seconds 20 --post-seconds 4 --max-tokens 64
 ```
 
@@ -279,13 +307,14 @@ Frozen input and harness SHA-256 values:
 
 |File|SHA-256|
 |---|---|
-|run_prepared_comparison.py|c615879f31ca941d4823b401b23d5ed1267215ec6dfdeeaa6b4834abcf11a532|
+|run_prepared_comparison.py|91339c56c744566a1fe177c10442b73b3af721789d34a4460856ecc95de046a3|
+|Third-pair resumed controller (pair offset only)|c3d6b9fe4b0f8f501ab0864922ae52c0a37d07d169bc2a6439491c2b7e910d62|
 |load_client.py|0ee23c339959f0d5c165aa9c2405bc0b4454ffa3af8e26b2f6265aade14f0bef|
 |frozen-requests.json|cd709866888661a97b20684c17e3bf57b926ffba7357821e967745e25f7c2057|
 |frozen-expert-map.json|6cf98cab8c3287ea56715b4c556ffa4c8c71496c061c72f7270018b59c6c15a6|
 |prompt_policy.json|b49c6d464df5f4cf28ef6121d8ac628f3c780c2d945d9553b12799ace79ff3f6|
-|candidate-current-head-core-manifest.json|df9ee804df8552529e0fa3f9fb87dce16acb6513ba0a0b4fb020699ffa17c5b5|
+|candidate-current-head-core-manifest.json|a8682ddcdd488b3cb023d478992c69d422c9c24f8da926982ec97141a6712713|
 |Shared compatibility differences: vllm-legacy-common.patch|5b925ccd87287c7b5e6dd520e0a1d686190ac5e90ba714e4cf2e843c77f40962|
 |Shared compatibility differences: vllm-ascend-legacy-common.patch|90daafeb9bbc036924fcb6a80cc850d97bc43e295cd3637393169155cc54da88|
 
-The generated measurement JSON and CSV preserve full precision, per-rank Torch snapshots, source/model hashes and paired output counts.
+The retained measurement record preserves full precision, per-rank Torch snapshots, source/model hashes and paired output counts. The [checkpoint manifest](fasteep_checkpoint_manifest.json) records all 16 shard SHA-256 values and acquisition revisions. Its canonical sorted-key compact JSON SHA-256 is `f7168f67afd0fbdcb662ac757bf05a8d29c3f40d6aa818938b14487a8e33f69a`.

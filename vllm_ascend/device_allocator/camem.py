@@ -224,15 +224,16 @@ class CaMemAllocator(CuMemAllocator):
         NPUGraph capture enters the pool itself. Nesting use_mem_pool around
         it leaves an allocator capture active during graph-entry empty_cache.
         """
-        if self.graphs_tag not in self.allocator_and_pools:
+        pools = self.allocator_and_pools.setdefault(self.graphs_tag, [])
+        if not pools:
             allocator = get_pluggable_allocator(self.python_malloc_callback, self.python_free_callback)
             pool = torch.npu.memory.MemPool(allocator._allocator)
             # Older torch-npu versions bind the custom allocator on first use.
             # Register it before capture, whose entry clears the default cache.
             with torch.npu.memory.use_mem_pool(pool):
                 pass
-            self.allocator_and_pools[self.graphs_tag] = (pool, allocator)
-        return self.allocator_and_pools[self.graphs_tag][0].id
+            pools.append((pool, allocator))
+        return pools[0][0].id
 
     @contextmanager
     def use_graph_memory(self):
@@ -241,7 +242,7 @@ class CaMemAllocator(CuMemAllocator):
         previous = self.current_tag
         self.current_tag = self.graphs_tag
         try:
-            with torch.npu.memory.use_mem_pool(self.allocator_and_pools[self.graphs_tag][0]):
+            with torch.npu.memory.use_mem_pool(self.allocator_and_pools[self.graphs_tag][0][0]):
                 yield
         finally:
             self.current_tag = previous
@@ -255,7 +256,7 @@ class CaMemAllocator(CuMemAllocator):
         # torch-npu versions with TLS-based pluggable allocation also need
         # the pool context alive during capture, without starting a second
         # allocation scope for the same graph pool.
-        context = torch.npu.memory.MemPoolContext(self.allocator_and_pools[self.graphs_tag][0])
+        context = torch.npu.memory.MemPoolContext(self.allocator_and_pools[self.graphs_tag][0][0])
         try:
             yield pool
         finally:

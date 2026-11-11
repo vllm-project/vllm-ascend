@@ -14,6 +14,8 @@
 #
 
 import gc
+from contextlib import nullcontext
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -122,6 +124,32 @@ class TestCaMem(PytestBase):
 
         # Cleanup is safe to call repeatedly, including during shutdown.
         allocator.release_pools()
+
+    def test_graph_pool_reuses_capture_storage_and_releases_with_regular_pools(self, monkeypatch):
+        allocator = CaMemAllocator.get_instance()
+        monkeypatch.setattr(allocator, "allocator_and_pools", {})
+        monkeypatch.setattr(allocator, "current_tag", "outside")
+        pool = SimpleNamespace(id=(0, 17))
+        wrapper = SimpleNamespace(_allocator=object())
+        with (
+            patch.object(camem_module, "get_pluggable_allocator", return_value=wrapper) as create,
+            patch.object(torch.npu.memory, "MemPool", return_value=pool),
+            patch.object(torch.npu.memory, "use_mem_pool", side_effect=lambda value: nullcontext()) as use,
+            patch.object(torch.npu.memory, "MemPoolContext") as capture,
+        ):
+            assert allocator.get_graph_pool_handle() == pool.id
+            with allocator.use_graph_memory():
+                assert allocator.current_tag == allocator.graphs_tag
+            with allocator.capture_graph_memory() as handle:
+                assert handle == pool.id
+            assert allocator.current_tag == "outside"
+            create.assert_called_once()
+            assert all(call.args == (pool,) for call in use.call_args_list)
+            capture.assert_called_once_with(pool)
+            allocator.allocator_and_pools["weights"] = [(object(), object())]
+            allocator.release_pools()
+            assert allocator.allocator_and_pools == {}
+            allocator.release_pools()
 
     def test_shutdown_singleton_releases_pools(self, monkeypatch):
         allocator = MagicMock()
