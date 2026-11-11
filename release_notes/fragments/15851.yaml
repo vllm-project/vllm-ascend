@@ -8,3 +8,5 @@ entries:
     model: kimi-k3.1
   - category: bugfix
     text: Fixed MooncakeV2 transfers for multi-head NHD attention caches by preserving physical byte strides through the handshake and TP head slicing.
+  - category: bugfix
+    text: Fixed DSpark graph replay with padded request batches by keeping KV lengths and block-table rows aligned with the captured query batch.

@@ -413,6 +413,17 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 continue
             decode_metadata = metadata.decode if self.attn_architecture == "MLA" else metadata
             decode_metadata.actual_seq_lengths_q = query_lens_list
+            # The generic builder may append a synthetic tail request while
+            # upstream still describes zero-width padded requests. FULL draft
+            # graphs already assign a query block to every captured request;
+            # discard that extra row when restoring their uniform Q lengths.
+            seq_lens_list = getattr(decode_metadata, "seq_lens_list", None)
+            if seq_lens_list is not None and len(seq_lens_list) > num_reqs_padded:
+                decode_metadata.seq_lens_list = seq_lens_list[:num_reqs_padded]
+                for name in ("seq_lens", "seq_lens_cpu", "seq_lens_gpu", "block_table", "block_tables"):
+                    value = getattr(decode_metadata, name, None)
+                    if isinstance(value, torch.Tensor) and value.shape[0] > num_reqs_padded:
+                        setattr(decode_metadata, name, value[:num_reqs_padded])
         return attn_metadata
 
     def propose(
