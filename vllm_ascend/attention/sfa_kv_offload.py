@@ -54,6 +54,10 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     split_decodes_and_prefills,
 )
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.selective_lim import (
+    get_selective_lim_launcher,
+    prepare_selective_lim,
+)
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     FSA_SELECTION_MEMBERSHIP_CONTROL_INT16_COUNT,
     FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT,
@@ -71,6 +75,18 @@ LIM_CACHE_BLOCK_SIZE = 128
 # Copy-SFA's two-block circular tail requires stronger alignment than LIM.
 COPY_SFA_TAIL_BLOCKS = 2
 COPY_SFA_TAIL_TOKENS = COPY_SFA_TAIL_BLOCKS * LIM_CACHE_BLOCK_SIZE
+
+
+class SelectiveKVPlan(NamedTuple):
+    source_slots: torch.Tensor
+    destinations: torch.Tensor
+    valid: torch.Tensor
+    current: torch.Tensor
+    current_slots: torch.Tensor | None
+    request: torch.Tensor
+    physical_indices: torch.Tensor
+    source_byte_offsets: tuple[torch.Tensor, torch.Tensor]
+    destination_byte_offsets: tuple[torch.Tensor, torch.Tensor]
 
 
 def _validate_fused_copy_sfa_config(vllm_config: VllmConfig, cfg: SparseKVOffloadConfig) -> None:
@@ -883,9 +899,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
                     rows = cache_tensor.view(-1, cache_tensor.shape[-1])
                     rows.index_copy_(0, device_slots[: value.shape[0]], value.reshape(value.shape[0], -1))
             if attn_metadata.selective_tail_rows is not None:
-                manager.write_selective_tail(
-                    layer_name, slots, attn_metadata.selective_tail_rows, k_nope, k_pe, self._in_graph_runtime()
-                )
+                manager.write_selective_tail(layer_name, slots, attn_metadata.selective_tail_rows, k_nope, k_pe)
                 return k_pe, k_nope
             k_cache_cpu, v_cache_cpu = self._cpu_cache_pair(manager, layer_name)
             manager.offload_new_kv(
@@ -1586,9 +1600,13 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         topk_indices: torch.Tensor,
         metadata: AscendSFAOffloadMetadata,
         seq_lengths: torch.Tensor,
-        plan: tuple[torch.Tensor | None, ...] | None = None,
+        plan: SelectiveKVPlan | None = None,
         lookup: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor | None, ...]:
+    ) -> SelectiveKVPlan | None:
+        lim = get_selective_lim_launcher()
+        if lim is not None:
+            prepare_selective_lim(lim, manager, layer_id, topk_indices, metadata, seq_lengths)
+            return None
         block_size = manager.block_size
         topk = manager.topk
         rows = topk_indices.numel() // topk
@@ -1636,26 +1654,36 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             current_slots = None
             if tail_indices is None:
                 current_slots = torch.where(current, destinations, -1).amax(-1, keepdim=True)
-            plan = source_slots, destinations, valid, current, current_slots, request, tail_indices
+            device_slots = destinations + manager.selective_hot_offsets[:rows]
+            k_bytes, v_bytes = manager.token_size_bytes_k, manager.token_size_bytes_v
+            plan = SelectiveKVPlan(
+                source_slots,
+                destinations,
+                valid,
+                current,
+                current_slots,
+                request,
+                torch.where(valid, destinations, -1 if tail_indices is None else tail_indices).unsqueeze(1),
+                (source_slots * k_bytes, source_slots * v_bytes),
+                (device_slots * k_bytes, device_slots * v_bytes),
+            )
         else:
-            source_slots, destinations, valid, current, current_slots, request, tail_indices = plan
             # A follower can be cold even when the shared placement plan is valid.
-            resident = torch.where(previous_request == request, keys, -1)
-            misses = valid & (resident.gather(-1, destinations) != source_slots)
+            resident = torch.where(previous_request == plan.request, keys, -1)
+            misses = plan.valid & (resident.gather(-1, plan.destinations) != plan.source_slots)
             sentinel = keys.shape[-1] - 1
             updated_keys = resident.scatter(
                 -1,
-                torch.where(valid, destinations, sentinel),
-                torch.where(valid, source_slots, -1),
+                torch.where(plan.valid, plan.destinations, sentinel),
+                torch.where(plan.valid, plan.source_slots, -1),
             )
-        if current_slots is not None:
-            manager.selective_current_slots[layer_id, :rows].copy_(current_slots)
-        misses &= ~current
+        if plan.current_slots is not None:
+            manager.selective_current_slots[layer_id, :rows].copy_(plan.current_slots)
+        copy_mask = (misses & ~plan.current).to(torch.int32)
         entries = rows * topk
         src = manager.selective_copy_src[layer_id, : 2 * entries]
         dst = manager.selective_copy_dst[layer_id, : 2 * entries]
         lengths = manager.selective_copy_lengths[layer_id, : 2 * entries]
-        device_slots = destinations + manager.selective_hot_offsets[:rows]
         for i, (host, hot, row_bytes) in enumerate(
             (
                 (manager.gvas_k_bases[layer_id], manager.topk_buffers_k[layer_id], manager.token_size_bytes_k),
@@ -1663,14 +1691,13 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             )
         ):
             segment = slice(i * entries, (i + 1) * entries)
-            src[segment].copy_((host + source_slots * row_bytes).flatten())
-            dst[segment].copy_((hot.data_ptr() + device_slots * row_bytes).flatten())
-            lengths[segment].copy_((misses.to(torch.int32) * row_bytes).flatten())
-        manager.copy_sfa_kv(src, dst, lengths, manager.selective_copy_counts[rows - 1])
+            torch.add(plan.source_byte_offsets[i].flatten(), host, out=src[segment])
+            torch.add(plan.destination_byte_offsets[i].flatten(), hot.data_ptr(), out=dst[segment])
+            torch.mul(copy_mask.flatten(), row_bytes, out=lengths[segment])
+        manager.prefetch_selective_kv(rows, src, dst, lengths)
         manager.selective_hot_keys[layer_id][:rows].copy_(updated_keys)
-        manager.selective_hot_requests[layer_id][:rows].copy_(request)
-        indices = torch.where(valid, destinations, -1 if tail_indices is None else tail_indices)
-        manager.selective_physical[layer_id, :rows].copy_(indices.unsqueeze(1))
+        manager.selective_hot_requests[layer_id][:rows].copy_(plan.request)
+        manager.selective_physical[layer_id, :rows].copy_(plan.physical_indices)
         return plan
 
     def _prefetch_selective_followers(self, topk_indices, metadata) -> None:
@@ -1786,10 +1813,11 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             attention_mode=2,
             return_softmax_lse=False,
         )
-        # Join before the TP output projection so peers can read the committed KV next step.
-        manager.wait_for_current_kv_writeback(self._in_graph_runtime())
         if metadata.selective_tail_rows is None:
+            manager.wait_for_current_kv_writeback(self._in_graph_runtime())
             manager.current_kv_by_layer.pop(layer_id)
+        else:
+            manager.flush_selective_tail_group(self._offload_layer_name(), self._in_graph_runtime())
         return output[0]
 
     def _execute_sparse_flash_attention_process(

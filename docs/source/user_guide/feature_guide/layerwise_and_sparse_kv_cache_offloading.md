@@ -164,7 +164,7 @@ Note that users might encounter an error like "Sparse KV offload offload.initial
 
 ### Selective offload for full/shared SFA layers
 
-On Ascend A5, enable `sparse_kv_offload_config` on Decode as above. Models
+Enable `sparse_kv_offload_config` on Decode as above. Models
 with full/shared `indexer_types` automatically select this path.
 Shared layers store their main KV in host memory. Full layers and the indexer
 keep their KV on the device. Use `SfaRemoteD2HConnector` for P/D transfer.
@@ -184,6 +184,49 @@ request changes. For example, to capture one- and two-request Decode graphs:
 ```bash
 --max-num-seqs 2 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2]}'
 ```
+
+#### Precomputed TopK LIM and SDMA staging
+
+The experimental native cache manager accepts the full layer's TopK and
+manages each shared layer's hot slots. Build its standalone library with
+CANN installed and its environment loaded. Set `SOC_VERSION` for the device
+used to build and run the kernel. For the validated A3 configuration:
+
+```bash
+cmake -S csrc/attention/fused_lightning_indexer_manage/precomputed_topk \
+    -B build/selective-lim -DCMAKE_BUILD_TYPE=Release -DSOC_VERSION=Ascend910_9391
+cmake --build build/selective-lim -j
+export VLLM_ASCEND_SELECTIVE_LIM_LIBRARY="$PWD/build/selective-lim/lib/libselective_lim.so"
+```
+
+Export the library path in every Decode worker's environment before startup.
+The current kernel supports `TopK <= hot capacity <= 2048` and uses one
+compute core. Select `memfabric_transfer_protocol=sdma` in the P/D connector
+configuration on both nodes.
+
+The complete shared-layer KV pool is allocated by MemFabric. TP0 gathers
+missing rows into a small TP-shared Host buffer. Each rank registers its
+mapping with `aclrtHostRegisterV2` using `ACL_HOST_REG_PINNED`, then reads
+the shared buffer directly through SDMA H2D into its local device staging
+buffer. A device scatter installs the rows in the layer's hot slots.
+Buffer addresses, registration, and callback arguments remain alive for
+graph replay. A callback queued after both K/V H2D copies acknowledges
+completion. TP0 waits for all ranks' acknowledgements before overwriting
+the shared buffer.
+
+New KV stays in the device tail until a block fills. At the shared-group
+boundary, TP0 gathers the completed suffix on the device, copies it to
+pinned Host staging through SDMA D2H, and commits it to the MemFabric pool
+from a Host callback. Decode joins the writeback stream and synchronizes
+TP ranks at the end of the forward pass. Rollback restores historical KV
+through the same shared gather and SDMA H2D path.
+
+The additional fixed device staging and descriptor buffers are deducted
+before automatic KV block planning. Shared Host staging scales with the
+captured batch capacity and TopK. The native library is built separately
+from the default extension. This path has been exercised on A3 with a
+reduced-layer dummy-weight model. Full-model accuracy and performance,
+A5 execution, and standard image integration still need validation.
 
 ## 4. Start the P/D Proxy
 

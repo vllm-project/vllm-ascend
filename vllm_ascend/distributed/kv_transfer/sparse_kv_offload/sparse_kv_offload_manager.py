@@ -19,6 +19,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     get_tp_group,
 )
+from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.math_utils import cdiv
@@ -33,6 +34,11 @@ from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.ascend_config import SparseKVOffloadConfig, get_ascend_config
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import copy_sfa_pool_capacity
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.selective_lim import get_selective_lim_library
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.selective_sdma import (
+    HostGatherCoordinator,
+    SelectiveSDMATransfer,
+)
 from vllm_ascend.utils import AscendDeviceType, enable_custom_op, get_ascend_device_type
 
 # Main BF16 cache:
@@ -191,6 +197,34 @@ def allocate_kv_offload_topk_profile_buffers(
         num_offload_layers,
     )
     return buffers
+
+
+def get_selective_sdma_device_memory_bytes(
+    vllm_config: VllmConfig,
+    sparse_kv_offload_config: SparseKVOffloadConfig,
+) -> int:
+    if not sparse_kv_offload_config.selective_offload or get_selective_lim_library() is None:
+        return 0
+    decode_width = 1
+    if vllm_config.speculative_config is not None:
+        decode_width += vllm_config.speculative_config.num_speculative_tokens
+    rows = min(
+        vllm_config.scheduler_config.max_num_batched_tokens,
+        vllm_config.scheduler_config.max_num_seqs * decode_width,
+    )
+    if sparse_kv_offload_config.use_fused_copy_sfa:
+        rows = 2 * copy_sfa_pool_capacity(vllm_config.scheduler_config.max_num_seqs)
+    model = vllm_config.model_config.hf_text_config
+    k_bytes = model.kv_lora_rank * torch.bfloat16.itemsize
+    v_bytes = model.qk_rope_head_dim * torch.bfloat16.itemsize
+    memory_bytes = SelectiveSDMATransfer.device_memory_bytes(rows * sparse_kv_offload_config.topk, k_bytes, v_bytes)
+    if get_tensor_model_parallel_rank() == 0:
+        block_size = vllm_config.cache_config.block_size
+        memory_bytes += SelectiveSDMATransfer.device_memory_bytes(rows, block_size * k_bytes, block_size * v_bytes)
+        memory_bytes += SelectiveSDMATransfer.device_memory_bytes(
+            vllm_config.scheduler_config.max_num_batched_tokens, k_bytes, v_bytes
+        )
+    return memory_bytes
 
 
 _CPU_CACHE_ALIGNMENT = 2 * 1024 * 1024
@@ -857,6 +891,8 @@ class SparseKVOffloadManager:
                     leader = index
                 else:
                     self.selective_followers.setdefault(leader, []).append(host_layers[index])
+            self.selective_group_tails = {followers[-1] for followers in self.selective_followers.values()}
+            self.selective_writeback_fence = torch.zeros(1, dtype=torch.int32, device=device)
             self.selective_row_stride = self.topk_buffers_k[0].shape[1]
             row_blocks = self.selective_row_stride // self.block_size
             hot_blocks = self.topk_buffer_size // self.block_size
@@ -966,6 +1002,39 @@ class SparseKVOffloadManager:
             )
         if self.use_fused_copy_sfa:
             self._bind_copy_sfa_bases()
+
+        self.selective_sdma_prefetch = None
+        self.selective_sdma_tail = None
+        self.selective_sdma_prefill = None
+        library = get_selective_lim_library() if selective else None
+        if library is not None:
+            rows = self.topk_buffers_k[0].shape[0]
+            self.selective_host_gather = HostGatherCoordinator(
+                self.tp_group,
+                self.tp_rank,
+                self.tp_size,
+                rows * self.topk * (self.token_size_bytes_k + self.token_size_bytes_v),
+            )
+            self.selective_sdma_prefetch = SelectiveSDMATransfer(
+                library,
+                rows * self.topk,
+                self.token_size_bytes_k,
+                self.token_size_bytes_v,
+                device,
+                coordinator=self.selective_host_gather,
+            )
+            if self.tp_rank == 0:
+                self.selective_sdma_tail = SelectiveSDMATransfer(
+                    library,
+                    rows,
+                    self.block_size * self.token_size_bytes_k,
+                    self.block_size * self.token_size_bytes_v,
+                    device,
+                )
+                self.selective_sdma_prefill = SelectiveSDMATransfer(
+                    library, self.max_num_tokens, self.token_size_bytes_k, self.token_size_bytes_v, device
+                )
+            logger.info("Selective KV uses Host gather, SDMA H2D/D2H, and device-local gather/scatter")
 
         if self.use_fused_overlap:
             self._init_fused_overlap_planner()
@@ -1201,7 +1270,10 @@ class SparseKVOffloadManager:
             for host_bases, device_bases in zip(self.copy_sfa_host_bases, self.copy_sfa_device_bases):
                 sources = (src_offsets + host_bases).reshape(-1)
                 destinations = (dst_offsets + device_bases).reshape(-1)
-                self.copy_sfa_kv(sources, destinations, lengths_bytes.reshape(-1), count)
+                if self.selective_sdma_prefetch is not None:
+                    self.selective_sdma_prefetch.restore(self, sources, destinations, lengths_bytes.reshape(-1))
+                else:
+                    self.copy_sfa_kv(sources, destinations, lengths_bytes.reshape(-1), count)
 
     def restore_copy_sfa_tails(self, metadata) -> None:
         """Copy the current tail descriptors for every layer. Used on prefix rollback."""
@@ -1217,7 +1289,19 @@ class SparseKVOffloadManager:
         for host_bases, device_bases in zip(self.copy_sfa_host_bases, self.copy_sfa_device_bases):
             torch.add(src_off.view(2, -1), host_bases, out=self.copy_sfa_copy_src[:n].view(2, -1))
             torch.add(dst_off.view(2, -1), device_bases, out=self.copy_sfa_copy_dst[:n].view(2, -1))
-            self.copy_sfa_kv(self.copy_sfa_copy_src[:n], self.copy_sfa_copy_dst[:n], lengths, count)
+            if self.selective_sdma_prefetch is not None:
+                self.selective_sdma_prefetch.restore(
+                    self, self.copy_sfa_copy_src[:n], self.copy_sfa_copy_dst[:n], lengths
+                )
+            else:
+                self.copy_sfa_kv(self.copy_sfa_copy_src[:n], self.copy_sfa_copy_dst[:n], lengths, count)
+
+    def prefetch_selective_kv(self, rows, sources, destinations, lengths) -> None:
+        count = self.selective_copy_counts[rows - 1]
+        if self.selective_sdma_prefetch is None:
+            self.copy_sfa_kv(sources, destinations, lengths, count)
+        else:
+            self.selective_sdma_prefetch.transfer(self, sources, destinations, lengths, count, to_device=True)
 
     def copy_sfa_kv(self, sources, destinations, lengths, count) -> None:
         """Enqueue bounded descriptor copies on the current compute stream."""
@@ -1232,7 +1316,7 @@ class SparseKVOffloadManager:
             keys.fill_(-1)
             request.fill_(-1)
 
-    def write_selective_tail(self, layer_name, slots, tail_rows, k, v, capturing):
+    def write_selective_tail(self, layer_name, slots, tail_rows, k, v):
         layer_id = self._get_offload_layer_id(layer_name)
         k_cache, v_cache = self.topk_buffers_k[layer_id], self.topk_buffers_v[layer_id]
         rows = slots.numel()
@@ -1277,14 +1361,38 @@ class SparseKVOffloadManager:
                 self.d2h_dst_ptrs_npu[segment].copy_(gva + host_base * row_bytes)
                 self.d2h_lengths_npu[segment].copy_((tokens * row_bytes).to(torch.int32))
             self.d2h_size_npu.fill_(2 * rows)
-            self._submit_current_kv_writeback(k_cache.device)
+            self._submit_current_kv_writeback(k_cache.device, rows, tail=True)
 
+        context = get_forward_context()
+        pending = getattr(context, "_selective_tail_writebacks", None)
+        if pending is None:
+            pending = context._selective_tail_writebacks = []
+        pending.append(submit)
+
+    def flush_selective_tail_group(self, layer_name: str, capturing: bool) -> None:
+        if layer_name not in self.selective_group_tails:
+            return
+        context = get_forward_context()
+        if capturing:
+            context._selective_tail_fence_required = True
+        if self.tp_rank != 0:
+            return
+        pending = context._selective_tail_writebacks
         if capturing:
             self.current_kv_save_stream.wait_stream(torch_npu.npu.current_stream())
             with torch_npu.npu.stream(self.current_kv_save_stream):
-                submit()
+                for submit in pending:
+                    submit()
         else:
-            submit()
+            for submit in pending:
+                submit()
+        pending.clear()
+
+    def finish_selective_tail_writeback(self) -> None:
+        self.wait_for_current_kv_writeback(capturing=True)
+        if get_tensor_model_parallel_world_size() > 1:
+            # Every rank must observe TP0's Host commit before the next replay.
+            get_tp_group().all_reduce(self.selective_writeback_fence)
 
     def offload_new_kv(
         self,
@@ -1415,9 +1523,20 @@ class SparseKVOffloadManager:
         self.d2h_lengths_npu[:token_count].masked_fill_(~valid, 0)
         self.d2h_lengths_npu[token_count : 2 * token_count].masked_fill_(~valid, 0)
         self.d2h_size_npu.fill_(2 * token_count)
-        self._submit_current_kv_writeback(device)
+        self._submit_current_kv_writeback(device, token_count)
 
-    def _submit_current_kv_writeback(self, device: torch.device) -> None:
+    def _submit_current_kv_writeback(self, device: torch.device, entries=None, *, tail=False) -> None:
+        if self.selective_sdma_prefetch is not None:
+            transfer = self.selective_sdma_tail if tail else self.selective_sdma_prefill
+            transfer.transfer(
+                self,
+                self.d2h_src_ptrs_npu[: 2 * entries],
+                self.d2h_dst_ptrs_npu[: 2 * entries],
+                self.d2h_lengths_npu[: 2 * entries],
+                self.d2h_size_npu,
+                to_device=False,
+            )
+            return
         result = offload.sparse_copy(
             self.d2h_src_ptrs_npu,
             self.d2h_dst_ptrs_npu,
@@ -1663,11 +1782,10 @@ def init_sparse_kv_offload_manager(
 ):
     global _SPARSE_KV_OFFLOAD_MANAGER
     if _SPARSE_KV_OFFLOAD_MANAGER is None:
-        device_type = get_ascend_device_type()
-        if getattr(sparse_kv_offload_config, "selective_offload", False):
-            if device_type != AscendDeviceType.A5:
-                raise RuntimeError("Selective KV offload is only validated on A5")
-        elif device_type != AscendDeviceType.A3:
+        if (
+            not getattr(sparse_kv_offload_config, "selective_offload", False)
+            and get_ascend_device_type() != AscendDeviceType.A3
+        ):
             raise RuntimeError("Sparse KV offload is only support on A3")
         _SPARSE_KV_OFFLOAD_MANAGER = SparseKVOffloadManager(
             vllm_config,

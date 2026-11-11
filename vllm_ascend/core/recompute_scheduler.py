@@ -42,6 +42,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.utils import record_function_or_nullcontext
 
+from vllm_ascend.ascend_config import uses_selective_kv_offload
 from vllm_ascend.core.dyntra_lb_scheduler import (
     DyntraLBPolicyMixin,
     print_scheduler_summary,
@@ -101,6 +102,20 @@ class RecomputeScheduler(Scheduler):
     """
 
     prefill_capacity_bound: bool
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._recomputed_reqs: list[RecomputeReqInfo] = []
+
+    def reset_prefix_cache(self, reset_running_requests: bool = False, reset_connector: bool = False) -> bool:
+        if reset_running_requests and uses_selective_kv_offload(self.vllm_config):
+            # The upstream reset requeues requests for local prefill. Selective
+            # D has no device main-KV pages for that prefill.
+            for request in reversed(self.running.copy()):
+                self._finish_recomputed_request(request)
+            self.prev_step_scheduled_req_ids.clear()
+            reset_running_requests = False
+        return super().reset_prefix_cache(reset_running_requests, reset_connector)
 
     def _allocate_encoder_inputs(self, request: Request, input_ids: list[int], duplicate_input_ids: list[int]) -> None:
         allocate = getattr(super(), "_allocate_encoder_inputs", None)
@@ -214,7 +229,6 @@ class RecomputeScheduler(Scheduler):
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
-        self._recomputed_reqs: list[RecomputeReqInfo] = []
 
         self._apply_load_balance_modifications()
 
@@ -999,6 +1013,7 @@ class RecomputeScheduler(Scheduler):
             has_sync_kv_loads=has_sync_kv_loads,
             kv_connector_block_state=kv_connector_block_state,
         )
+        self._recomputed_reqs = []
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store

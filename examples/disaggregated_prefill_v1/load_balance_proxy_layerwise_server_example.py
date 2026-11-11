@@ -523,10 +523,19 @@ async def _handle_completions(api: str, request: Request):
             origin_prompt = ""
         # refer to vLLM sampling_params: max_token default value
         origin_max_tokens = req_data.get("max_tokens", 16)
+        replay_token_ids = (
+            stream_flag
+            and isinstance(origin_prompt, list)
+            and all(isinstance(token, int) for token in origin_prompt)
+            and req_data.get("return_token_ids")
+            and req_data.get("n", 1) == 1
+            and not req_data.get("echo")
+        )
 
         async def generate_stream():
-            nonlocal released_kv
+            nonlocal released_kv, request_id
             generated_token = ""
+            generated_token_ids = []
             released_kv = False
             retry_count = 0
             retry = True
@@ -570,6 +579,8 @@ async def _handle_completions(api: str, request: Request):
                         message = choice.get("message") or {}
                         content = delta.get("content") or message.get("content") or choice.get("text") or ""
                         generated_token += content
+                        if replay_token_ids:
+                            generated_token_ids.extend(choice.get("token_ids") or ())
 
                         stop_reason = choice.get("stop_reason")
                         usage = chunk_json.get("usage", {})
@@ -581,7 +592,9 @@ async def _handle_completions(api: str, request: Request):
                         if stop_reason == "recomputed":
                             retry = True
                             retry_count += 1
-                            if chat_flag:
+                            if replay_token_ids:
+                                req_data["prompt"] = origin_prompt + generated_token_ids
+                            elif chat_flag:
                                 messages[0]["content"] = (
                                     origin_prompt
                                     + ([{"type": "text", "text": generated_token}] if generated_token else [])
@@ -590,7 +603,22 @@ async def _handle_completions(api: str, request: Request):
                                 )
                             else:
                                 req_data["prompt"] = origin_prompt + generated_token
-                            req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
+                            req_data["max_tokens"] = (
+                                origin_max_tokens - len(generated_token_ids)
+                                if replay_token_ids
+                                else origin_max_tokens - completion_tokens + retry_count
+                            )
+                            # The previous rendezvous contains the old prompt and
+                            # transfer addresses. Each retry needs its own P/D hand-off.
+                            await proxy_state.cleanup_request_batch(request_id)
+                            request_id = await proxy_state.next_req_id()
+                            proxy_state.register_request_batch(
+                                request_id,
+                                get_api_request_ids(api, request_id, req_data),
+                                req_data,
+                                request_length,
+                                api,
+                            )
                             break
                         if retry_count > 0 and not stream_flag:
                             if chat_flag:

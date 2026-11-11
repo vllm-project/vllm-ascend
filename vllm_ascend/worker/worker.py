@@ -99,6 +99,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     get_physical_layer_index,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+    get_selective_sdma_device_memory_bytes,
     plan_sparse_kv_offload_memory,
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
@@ -624,6 +625,10 @@ class NPUWorker(WorkerBase):
 
         kv_cache_spec = getattr(self, "kv_cache_spec", None) or self.get_kv_cache_spec()
         dram_limit_bytes = int(sparse_kv_offload_config.dram_size_per_dp_GB * GiB_bytes)
+        # These buffers are allocated after profiling, when the KV caches are registered.
+        available_device_memory_bytes -= get_selective_sdma_device_memory_bytes(
+            self.vllm_config, sparse_kv_offload_config
+        )
         budget = plan_sparse_kv_offload_memory(
             kv_cache_spec=kv_cache_spec,
             vllm_config=self.vllm_config,

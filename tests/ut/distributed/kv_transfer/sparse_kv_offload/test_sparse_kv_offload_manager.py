@@ -65,6 +65,24 @@ def _make_memory_plan_inputs(max_num_seqs=2):
 
 
 class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
+    @patch.object(manager_module, "get_selective_lim_library", return_value=object())
+    def test_selective_sdma_reserves_rank_local_staging(self, _library):
+        config = SimpleNamespace(
+            scheduler_config=SimpleNamespace(max_num_seqs=4, max_num_batched_tokens=256),
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(kv_lora_rank=512, qk_rope_head_dim=64)),
+            cache_config=SimpleNamespace(block_size=128),
+            speculative_config=None,
+        )
+        sparse = SimpleNamespace(selective_offload=True, use_fused_copy_sfa=False, topk=2048)
+        for rank, expected in ((0, 10_592_384), (1, 9_699_328)):
+            with (
+                self.subTest(rank=rank),
+                patch.object(manager_module, "get_tensor_model_parallel_rank", return_value=rank),
+            ):
+                self.assertEqual(manager_module.get_selective_sdma_device_memory_bytes(config, sparse), expected)
+        sparse.selective_offload = False
+        self.assertEqual(manager_module.get_selective_sdma_device_memory_bytes(config, sparse), 0)
+
     @patch.object(planning, "_pool_bytes_per_block", return_value=2048)
     @patch.object(planning, "get_kv_cache_groups")
     def test_selective_layout_counts_all_groups_in_the_shared_block_pool(self, groups, pool_bytes):
