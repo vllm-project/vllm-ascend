@@ -31,6 +31,51 @@ PCP support is experimental. The following table shows the basic backend support
 - 🟠 **Partial compatibility**: The basic path or feature combination is supported with the stated limitations.
 - **Not applicable**: The feature does not apply to the attention backend.
 
+#### Experimental DFlash2 request sharding
+
+On MRV2, `additional_config.dflash_pcp_request_sharding` (default `false`)
+distributes DFlash2 **query forward, LM head and candidate selection** across
+requests in the last PP stage's PCP group. Merge the switch into your existing
+`--additional-config` JSON:
+
+```json
+{"dflash_pcp_request_sharding": true}
+```
+
+The initial supported topology is TP=1, DP=1, DCP=1, PP=2 and PCP>1, with eager
+target and draft execution, fixed speculative length and greedy draft sampling.
+Target sampling may still be probabilistic. Adaptive verification and draft
+watermarking are not supported by this path.
+
+The draft embedding and LM head must contain complete local weights without
+PCP/TP communication. In particular, a shared PCP-sharded target vocabulary
+layer cannot be used with different request subsets. Eligibility is checked
+after loading the draft and agreed across its PCP group; unsupported cases log
+the reason and retain replicated execution. The switch does not change the
+target model's vocabulary layout. Leave it disabled to restore the baseline.
+
+For 32 requests and PCP=8, every rank still updates valid draft context KV for
+all 32 requests, but generates candidates for only four requests. Ownership is
+`batch_row % PCP_size`, and the proposed tokens are gathered back into the
+original global order on every rank. Empty owners participate in the gather
+without running a model forward. Requests can change owners between batches
+because valid context KV remains replicated. Global context handling for mixed
+prefill/decode batches is unchanged.
+
+Weights and context KV remain replicated, and profiling/dummy calls use the
+baseline path. This feature does not reduce KV capacity requirements or imply
+an eightfold end-to-end speedup. The existing final proposal synchronization is
+retained for compatibility with paired vLLM revisions.
+
+This is an experimental optimization described in
+[RFC #21632](https://github.com/vllm-project/vllm-ascend/issues/21632).
+NPU validation must cover mixed batches, prefix-cache hits, rejection, owner
+changes and preemption/resume before enabling broader support. Benchmark against
+replicated execution with identical settings and record query time, gather time,
+acceptance, output throughput, memory use and P95 latency. The target is improved
+concurrent throughput with at most 5% single-request P95 latency regression;
+no hardware speedup measurement is available yet.
+
 ### Decode Context Parallel
 
 DCP supports eager and graph execution, prefix caching, chunked prefill, speculative decoding, P/D disaggregation, and stacking with PCP on the model and hardware combinations documented by vLLM Ascend. The following table shows whether each feature can be combined with DCP across devices and attention backends:
