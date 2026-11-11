@@ -15,17 +15,16 @@
 # This file is a part of the vllm-ascend project.
 #
 
-# This workflow related to the resources atlas 800 A3
-# All test jobs are submitted together; pending LWS jobs are queued in FIFO
-# order by the npu-scheduler instead of being serialized by workflow `needs`.
-name: Nightly-A3
+# This workflow related to the resources atlas 800 A3 560T (non-exclusive / shared machines)
+# Single-node and multi-card tests run directly on dedicated runners labeled in nightly_config.yaml.
+name: Nightly-A3-560T
 
 run-name: >-
   ${{ inputs.request_id != '' &&
       (inputs.request_id == 'daily' &&
-        'Nightly-A3 (Daily)' ||
-        format('Nightly-A3 (PR) {0}', inputs.request_id)) ||
-      'Nightly-A3 (scheduled)' }}
+        'Nightly-A3-560T (Daily)' ||
+        format('Nightly-A3-560T (PR) {0}', inputs.request_id)) ||
+      'Nightly-A3-560T (scheduled)' }}
 
 on:
   workflow_dispatch:
@@ -50,6 +49,11 @@ on:
         required: false
         default: 'false'
         type: string
+      skip_base:
+        description: 'If false, rebuild the runtime base image from the CANN base image before building the nightly layer (used by /presmoke). Default true reuses the existing base image.'
+        required: false
+        default: 'true'
+        type: string
       vllm_ascend_ref:
         description: 'PR commit SHA for PR-triggered tests'
         required: false
@@ -65,6 +69,10 @@ on:
         required: false
         default: false
         type: boolean
+      profile_options_json:
+        description: 'JSON profiling options: enabled, start_after or start_after_requests, duration, with_stack, output, benchmark_names'
+        type: string
+        default: '{}'
       bisect_args_json:
         description: 'JSON object containing optional bisect parameters'
         required: false
@@ -75,10 +83,6 @@ on:
         required: false
         default: ''
         type: string
-      profile_options_json:
-        description: 'JSON profiling options: enabled, start_after or start_after_requests, duration, with_stack, output, benchmark_names'
-        type: string
-        default: '{}'
 permissions:
   contents: read
   pull-requests: read
@@ -92,25 +96,18 @@ defaults:
     shell: bash -el {0}
 
 concurrency:
-  group: ascend-nightly-${{ github.ref }}-a3-${{ inputs.vllm_ascend_branch }}${{ inputs.request_id && format('-{0}', inputs.request_id) || '' }}
+  group: ascend-nightly-${{ github.ref }}-a3-560t${{ inputs.request_id && format('-{0}', inputs.request_id) || '' }}
   cancel-in-progress: true
-
-env:
-  # Single source of truth for all shared variables across jobs.
-  # NOTE: GitHub Actions does not support env context in reusable workflow `with:` inputs,
-  # so these values are exported as job outputs via the `setup-vars` job below.
-  ASCEND_LOG_PREFIX: '/root/.cache/ascend-logs'
 
 jobs:
   parse-trigger:
     name: Parse trigger and determine test scope
     if: >-
       github.event_name == 'workflow_dispatch'
-    runs-on: linux-aarch64-a3-800t-0
+    runs-on: linux-amd64-cpu-2-hk
     outputs:
       run: ${{ steps.parse.outputs.run }}
       filter: ${{ steps.parse.outputs.filter }}
-      ref: ${{ steps.parse.outputs.ref }}
     steps:
       - name: Parse trigger
         id: parse
@@ -119,8 +116,6 @@ jobs:
           script: |
             const eventName = context.eventName;
             const testCases = '${{ inputs.test_cases }}'.trim();
-
-            core.setOutput('ref', context.sha || 'unknown');
 
             if (testCases) {
               core.setOutput('run', 'true');
@@ -140,12 +135,9 @@ jobs:
     needs: parse-trigger
     runs-on: linux-amd64-cpu-8-hk
     outputs:
-      ascend_log_prefix: ${{ steps.export.outputs.ascend_log_prefix }}
       vllm_ascend_branches: ${{ steps.export.outputs.vllm_ascend_branches }}
       profile_options: ${{ steps.profile-options.outputs.value }}
       profile_parse: ${{ steps.profile-options.outputs.parse }}
-      multi_node: ${{ steps.set-matrix.outputs.multi_node }}
-      double_node: ${{ steps.set-matrix.outputs.double_node }}
       single_node: ${{ steps.set-matrix.outputs.single_node }}
       multi_card: ${{ steps.set-matrix.outputs.multi_card }}
     steps:
@@ -198,12 +190,9 @@ jobs:
 
       - id: export
         run: |
-          {
-            echo "ascend_log_prefix=${{ env.ASCEND_LOG_PREFIX }}"
-            input_branch="${{ inputs.vllm_ascend_branch }}"
-            normalized=$(echo "$input_branch" | tr '/' '-')
-            echo "vllm_ascend_branches=[\"${normalized}\"]"
-          } >> $GITHUB_OUTPUT
+          input_branch="${{ inputs.vllm_ascend_branch }}"
+          normalized=$(echo "$input_branch" | tr '/' '-')
+          echo "vllm_ascend_branches=[\"${normalized}\"]" >> $GITHUB_OUTPUT
 
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -239,11 +228,11 @@ jobs:
           python3 -m tools.profiling.capture configure \
             --options-json "$PROFILE_OPTIONS_JSON" --output "$GITHUB_OUTPUT"
 
-      - name: Read A3 test matrix config
+      - name: Read A3 560T test matrix config
         id: set-matrix
         env:
           MATRIX_FILE: ${{ github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_ref != '' && './pr/.github/workflows/configs/nightly_config.yaml' || '.github/workflows/configs/nightly_config.yaml' }}
-          MATRIX_OUTPUTS: '{"multi_node":"a3.multi_node.test_config","double_node":"a3.double_node.test_config","single_node":"a3.single_node.test_config","multi_card":"a3.multi_card.test_config"}'
+          MATRIX_OUTPUTS: '{"single_node":"a3-560t.single_node.test_config","multi_card":"a3-560t.multi_card.test_config"}'
         run: |
           python3 -m pip install pyyaml -q
           python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix
@@ -256,123 +245,26 @@ jobs:
       matrix:
         vllm_ascend_branch: >-
           ${{ fromJSON(format('["{0}"]', inputs.vllm_ascend_branch)) }}
-    uses: ./.github/workflows/_nightly_image_build.yaml
+    uses: ./.github/workflows/_schedule_nightly_pair_image_build.yaml
     with:
       target: a3
-      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
-      should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
+      os: ubuntu
       soc: 'a3'
+      dockerfile: Dockerfile.a3
+      suffix: 'a3'
+      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
+      # The nightly layer always keeps the release shape (ubuntu arm64). The
+      # /presmoke command additionally rebuilds the runtime base image from CANN
+      # by passing skip_base=false.
+      build_type: 'release'
+      should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
+      skip_base: ${{ inputs.skip_base != 'false' }}
+      # presmoke images are for issue localization only and must not be mirrored to quay.io.
+      skip_sync: true
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
-
-  multi-node-tests:
-    name: multi-node
-    needs: [setup-vars, parse-trigger, build-image]
-    if: >-
-      always() &&
-      needs.parse-trigger.outputs.run == 'true' &&
-      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
-    strategy:
-      fail-fast: false
-      matrix:
-        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
-        test_config: ${{ fromJson(needs.setup-vars.outputs.multi_node) }}
-    uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
-    with:
-      soc_version: a3
-      runner: linux-aarch64-a3-800t-0
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
-      ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
-      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
-      replicas: 1
-      size: ${{ matrix.test_config.size }}
-      config_file_path: ${{ matrix.test_config.config_file_path }}
-      config_base_path: ${{ matrix.test_config.config_base_path }}
-      name: ${{ matrix.test_config.name }}
-      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
-      vllm_ref: ${{ inputs.vllm_ref || '' }}
-      aop_multi_enabled: ${{ inputs.aop_enabled }}
-      profile_options_json: ${{ needs.setup-vars.outputs.profile_options }}
-      bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
-      bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
-      bisect_fail_confirm_retries: ${{ fromJSON(inputs.bisect_args_json || '{}').fail_confirm_retries || '' }}
-      bisect_trial_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').trial_timeout || '' }}
-      bisect_barrier_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').barrier_timeout || '' }}
-      bisect_no_verify_good: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_good || false }}
-      bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
-      bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
-      bisect_config_base_path: ''
-      request_id: ${{ inputs.request_id || '' }}
-      download_path: ${{ inputs.download_path }}
-      should_run: >-
-        ${{
-          needs.parse-trigger.outputs.run == 'true' && (
-            needs.parse-trigger.outputs.filter == 'all' ||
-            contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
-          )
-        }}
-    secrets:
-      HW_OBS_PROFILE_AK: ${{ secrets.HW_OBS_PROFILE_AK }}
-      HW_OBS_PROFILE_SK: ${{ secrets.HW_OBS_PROFILE_SK }}
-      KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
-      OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
-      OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
-      OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
-
-  double-node-tests:
-    name: double-node
-    needs: [setup-vars, parse-trigger, build-image]
-    if: >-
-      always() &&
-      needs.parse-trigger.outputs.run == 'true' &&
-      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
-    strategy:
-      fail-fast: false
-      matrix:
-        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
-        test_config: ${{ fromJson(needs.setup-vars.outputs.double_node) }}
-    uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
-    with:
-      soc_version: a3
-      runner: linux-aarch64-a3-800t-0
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
-      ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
-      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
-      replicas: 1
-      size: ${{ matrix.test_config.size }}
-      config_file_path: ${{ matrix.test_config.config_file_path }}
-      config_base_path: ${{ matrix.test_config.config_base_path }}
-      name: ${{ matrix.test_config.name }}
-      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
-      vllm_ref: ${{ inputs.vllm_ref || '' }}
-      aop_multi_enabled: ${{ inputs.aop_enabled }}
-      profile_options_json: ${{ needs.setup-vars.outputs.profile_options }}
-      bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
-      bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
-      bisect_fail_confirm_retries: ${{ fromJSON(inputs.bisect_args_json || '{}').fail_confirm_retries || '' }}
-      bisect_trial_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').trial_timeout || '' }}
-      bisect_barrier_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').barrier_timeout || '' }}
-      bisect_no_verify_good: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_good || false }}
-      bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
-      bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
-      bisect_config_base_path: ''
-      request_id: ${{ inputs.request_id || '' }}
-      download_path: ${{ inputs.download_path }}
-      should_run: >-
-        ${{
-          needs.parse-trigger.outputs.run == 'true' && (
-            needs.parse-trigger.outputs.filter == 'all' ||
-            contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
-          )
-        }}
-    secrets:
-      HW_OBS_PROFILE_AK: ${{ secrets.HW_OBS_PROFILE_AK }}
-      HW_OBS_PROFILE_SK: ${{ secrets.HW_OBS_PROFILE_SK }}
-      KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
-      OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
-      OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
-      OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
+      SYNC_TOOLS_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}
 
   single-node-tests:
     name: single-node
@@ -380,8 +272,6 @@ jobs:
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
-      needs.setup-vars.result == 'success' &&
-      needs.setup-vars.outputs.single_node != '[]' &&
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
@@ -389,11 +279,12 @@ jobs:
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
         test_config: ${{ fromJson(needs.setup-vars.outputs.single_node) }}
-    uses: ./.github/workflows/_e2e_nightly_single_node.yaml
+    uses: ./.github/workflows/_e2e_nightly_single_node_560t.yaml
     with:
       runner: ${{ matrix.test_config.os }}
-      soc_version: a3
+      soc_version: a3-560t
       image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       config_base_path: ${{ matrix.test_config.config_base_path }}
       name: ${{ matrix.test_config.name }}
@@ -433,18 +324,16 @@ jobs:
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
-      needs.setup-vars.result == 'success' &&
-      needs.setup-vars.outputs.multi_card != '[]' &&
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
         test_config: ${{ fromJson(needs.setup-vars.outputs.multi_card) }}
-    uses: ./.github/workflows/_e2e_nightly_single_node.yaml
+    uses: ./.github/workflows/_e2e_nightly_single_node_560t.yaml
     with:
       runner: ${{ matrix.test_config.os }}
-      soc_version: a3
+      soc_version: a3-560t
       image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
       tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
@@ -480,56 +369,6 @@ jobs:
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
       OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
       OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
-
-  parse-multi-node-profiles:
-    name: Parse multi-node profiles
-    needs: [setup-vars, parse-trigger, multi-node-tests]
-    if: >-
-      always() &&
-      needs.setup-vars.result == 'success' &&
-      needs.multi-node-tests.result != 'skipped' &&
-      needs.setup-vars.outputs.profile_parse == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
-        test_config: ${{ fromJSON(needs.setup-vars.outputs.multi_node) }}
-    uses: ./.github/workflows/_e2e_profile_parse.yaml
-    with:
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
-      prefix: nightly-profiling/${{ github.repository }}/${{ github.run_id }}/${{ github.run_attempt }}/multi-node/${{ matrix.vllm_ascend_branch }}-${{ matrix.test_config.name }}
-      ref: ${{ github.sha }}
-      should_run: >-
-        ${{ needs.parse-trigger.outputs.filter == 'all' ||
-            contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name)) }}
-    secrets:
-      HW_OBS_PROFILE_AK: ${{ secrets.HW_OBS_PROFILE_AK }}
-      HW_OBS_PROFILE_SK: ${{ secrets.HW_OBS_PROFILE_SK }}
-
-  parse-double-node-profiles:
-    name: Parse double-node profiles
-    needs: [setup-vars, parse-trigger, double-node-tests]
-    if: >-
-      always() &&
-      needs.setup-vars.result == 'success' &&
-      needs.double-node-tests.result != 'skipped' &&
-      needs.setup-vars.outputs.profile_parse == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
-        test_config: ${{ fromJSON(needs.setup-vars.outputs.double_node) }}
-    uses: ./.github/workflows/_e2e_profile_parse.yaml
-    with:
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
-      prefix: nightly-profiling/${{ github.repository }}/${{ github.run_id }}/${{ github.run_attempt }}/multi-node/${{ matrix.vllm_ascend_branch }}-${{ matrix.test_config.name }}
-      ref: ${{ github.sha }}
-      should_run: >-
-        ${{ needs.parse-trigger.outputs.filter == 'all' ||
-            contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name)) }}
-    secrets:
-      HW_OBS_PROFILE_AK: ${{ secrets.HW_OBS_PROFILE_AK }}
-      HW_OBS_PROFILE_SK: ${{ secrets.HW_OBS_PROFILE_SK }}
 
   parse-single-node-profiles:
     name: Parse single-node profiles
@@ -583,28 +422,9 @@ jobs:
       HW_OBS_PROFILE_AK: ${{ secrets.HW_OBS_PROFILE_AK }}
       HW_OBS_PROFILE_SK: ${{ secrets.HW_OBS_PROFILE_SK }}
 
-  clear-pre-logs:
-    runs-on: linux-aarch64-a3-800t-0
-    needs: [multi-node-tests, double-node-tests]
-    if: (needs.multi-node-tests.result != 'skipped' || needs.double-node-tests.result != 'skipped')
-    steps:
-      - name: Clear pre-logs on pvc
-        env:
-          VLLM_ASCEND_BRANCH: ${{ inputs.vllm_ascend_branch }}
-        run: |
-          # Only clear this branch's directory so a concurrent run of another
-          # branch keeps its in-flight logs on the shared PVC.
-          branch=$(printf '%s' "$VLLM_ASCEND_BRANCH" | tr '/' '-')
-          if [ -z "$branch" ]; then
-            echo "vllm_ascend_branch is empty; skip clearing logs"
-            exit 0
-          fi
-          echo "Clearing ${ASCEND_LOG_PREFIX}/${branch}"
-          rm -rf "${ASCEND_LOG_PREFIX:?}/${branch:?}"/* || true
-
   merge-benchmark-artifacts:
-    name: Merge benchmark artifacts into nightly-a3.zip
-    needs: [parse-trigger, single-node-tests, multi-node-tests, double-node-tests, multi-card-tests]
+    name: Merge benchmark artifacts into nightly-a3-560t.zip
+    needs: [parse-trigger, single-node-tests, multi-card-tests]
     if: >-
       always() &&
       github.event_name == 'workflow_dispatch' &&
@@ -615,8 +435,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact/merge@v7
         with:
-          name: nightly-a3
+          name: nightly-a3-560t
           pattern: nightly-test-benchmark-results-*
           compression-level: 0
           delete-merged: true
-
