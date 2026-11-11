@@ -70,6 +70,16 @@ on:
         type: boolean
         default: false
         description: "If true, login to SWR and push built images. Set to false for PR verification builds."
+      base_tag_suffix:
+        required: false
+        type: string
+        default: ''
+        description: "Suffix appended to the runtime base image tag that Dockerfile.nightly.<target> consumes via FROM (nightly-<branch>-<target><os-mark>${base_tag_suffix}). Must match the tag produced by the base image build. Default '' consumes the standard base tag."
+      image_tag_suffix:
+        required: false
+        type: string
+        default: ''
+        description: "Suffix appended to the published nightly image tag (nightly-ci-<branch>-<target>${image_tag_suffix}). Callers isolating a build (presmoke) must pass the same suffix to their test jobs, otherwise the tests pull the standard nightly image. Default '' keeps the standard tag."
       cann_swr_url:
         required: false
         type: string
@@ -242,9 +252,11 @@ jobs:
             OS_MARK="-openeuler"
           fi
           # Runtime image tags are stable now that dependency versions are pinned
-          # in the Dockerfiles, so no CANN/date suffix is appended.
-          TAG_SUFFIX=""
-          FULL_TAG="nightly-ci-${BRANCH_TAG}-${{ inputs.target }}${OS_MARK}"
+          # in the Dockerfiles, so no CANN/date suffix is appended by default.
+          # base_tag_suffix must match the runtime tag produced by the base build
+          # (e.g. '-presmoke' → nightly-<branch>-<target>-presmoke).
+          TAG_SUFFIX="${{ inputs.base_tag_suffix }}"
+          FULL_TAG="nightly-ci-${BRANCH_TAG}-${{ inputs.target }}${OS_MARK}${{ inputs.image_tag_suffix }}"
           # Same dual-tag rule as the mainline nightly builds: the stable tag is
           # overwritten by each nightly, while a unique tag (CANN version +
           # build date + run number) keeps the history of nightly images.
@@ -321,6 +333,7 @@ jobs:
           OS_FILTER: ${{ inputs.os_filter }}
           TAG_SUFFIX_UBUNTU: ${{ needs.generate-matrix.outputs.tag_suffix_ubuntu }}
           TAG_SUFFIX_OPENEULER: ${{ needs.generate-matrix.outputs.tag_suffix_openeuler }}
+          IMAGE_TAG_SUFFIX: ${{ inputs.image_tag_suffix }}
         run: |
           set -euo pipefail
           BRANCH_TAG="${VLLM_ASCEND_BRANCH//\//-}"
@@ -352,7 +365,7 @@ jobs:
               # atlas_inference mirror, matching the retired daily pipeline.
               DESTS="${SWR_REGISTRY}/base_image/ascend-ci/vllm-ascend ${SWR_REGISTRY}/atlas_inference/vllm-ascend"
             fi
-            TAG="nightly-ci-${BRANCH_TAG}-${TARGET}${OS_MARK}"
+            TAG="nightly-ci-${BRANCH_TAG}-${TARGET}${OS_MARK}${IMAGE_TAG_SUFFIX}"
             # The build step pushed the per-arch images under the unique tag.
             UNIQUE_TAG="${TAG}${TAG_SUFFIX}"
             TEMP="${SWR_REGISTRY}/atlas_ci/vllm-atlas-temp:${UNIQUE_TAG}"
