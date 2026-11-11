@@ -12,3 +12,10 @@ entries:
       INT8, selected with quantized_all_reduce_config.quant_dtype. It uses
       BF16 dequantization and local SUM output on the existing process group.
     hardware: [A5]
+  - category: feature
+    text: >-
+      Added optional two- or four-chunk MXFP8 communication pipelining on Atlas
+      A5, configured with pipeline_chunks and a separate pipeline_min_numel
+      threshold. Eager calls can overlap computation and communication while
+      graph capture retains the existing whole-tensor path.
+    hardware: [A5]

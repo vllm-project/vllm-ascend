@@ -480,3 +480,44 @@ python3 -m torch.distributed.run --standalone --nproc-per-node 2 \
 The benchmark writes its result in place; the runtime wrapper returns a separate result to satisfy the communicator contract, so their memory peaks need not match. Both should be compared against independent FP32 references and ordinary BF16 all-reduce, then validated with the actual mixed workload and MTP acceptance metrics.
 
 For runtime routing diagnostics, add `distributed.device_communicators.mxfp8_all_reduce` to `runtime_config.ascend_log.debug` and inspect `MXFP8-AR-HIT` / `MXFP8-AR-SKIP`. Disable debug logging during performance measurements.
+
+##### Chunked MXFP8 pipeline (A5, Eager)
+
+Set `pipeline_chunks` to `2` or `4` to overlap different row chunks' quantization, communication and local reduction. The default `1` preserves whole-tensor MXFP8. These settings require `quant_dtype="mxfp8"`; INT8 remains available with its existing configuration.
+
+```json
+{
+    "quantized_all_reduce_config": {
+        "enable": true,
+        "quant_dtype": "mxfp8",
+        "min_numel": 16777216,
+        "pipeline_chunks": 2,
+        "pipeline_min_numel": 83886080
+    }
+}
+```
+
+`pipeline_min_numel` is a separate threshold on the **original full BF16 tensor**, before splitting. It must be positive when provided; omitted or `null` uses `min_numel`. The example quantizes eligible tensors at 32 MiB and enables the pipeline at 160 MiB (`83886080 * 2` bytes). It leaves smaller eligible messages on whole-tensor MXFP8. Both thresholds must be met for pipelining.
+
+The wrapper uses these routes, with the existing group, dtype, hidden alignment and row-sharding requirements:
+
+| Condition | Route |
+| --- | --- |
+| Below `min_numel` or ineligible tensor/group | Ordinary all-reduce |
+| Eligible, `pipeline_chunks=1` | Whole-tensor MXFP8 |
+| Eligible, below `pipeline_min_numel` | Whole-tensor MXFP8 |
+| Eligible, insufficient rows to give each chunk at least one row per rank | Whole-tensor MXFP8 |
+| Eligible, during graph capture | Whole-tensor MXFP8 |
+| Eligible, enough rows, both thresholds met, Eager execution | Chunked MXFP8 pipeline |
+
+Decode calls below `min_numel` keep their existing BF16 graph path. Eligible graph-captured calls retain the original synchronous whole-tensor MXFP8 algorithm; asynchronous chunked communication is not captured. Replay executes the recorded path. Prefill and mixed prefill/decode batches in Eager mode can use the pipeline under the same metadata/size gates; no pure-prefill requirement is added.
+
+The pipeline uses a two-chunk lookahead, ordinary asynchronous AllToAll and BF16 AllGather, and `Work.wait()` dependencies on the existing HCCL group. There are no additional groups, manually created streams or device-wide synchronizations. All output shards are joined onto the caller's stream before return. Like the original runtime wrapper, it returns a separate BF16 tensor with the original shape and preserves the input.
+
+Rows are partitioned in group-sized units, preserving each hidden-axis MX block and its scale. Uneven partitions are supported. Send/receive buffers for at most two chunks remain in the queue; AllGather inputs and output views are kept alive through their joins. Temporary payloads are scoped to each call, with no cross-call payload cache. The full output tensor, in-flight payloads, local reductions and external HCCL resources still contribute to peak memory.
+
+On the measured `[tokens,5120]` A5 workloads, TP2 benefited from 2 chunks at 8192/16384/32768 tokens. TP4 favored whole-tensor MXFP8 at 8192 tokens, 2 chunks at 16384, and 4 chunks at 32768 when considering both latency and memory. The example's 160 MiB pipeline threshold is a conservative starting point for TP4; for the measured TP2 case, 80 MiB corresponds to `pipeline_min_numel=41943040`. These measurements do not establish a universal crossover or model TTFT improvement. Tune thresholds and chunk count with the intended TP, topology, HCCL mode and model workload.
+
+For route diagnosis, the existing `MXFP8-AR-HIT` debug record now includes `mode=full|pipeline`, actual `chunks`, `pipeline_min_numel` and `pipeline_reason`. A whole-tensor fallback reports `disabled`, `below_pipeline_threshold`, `insufficient_rows` or `graph_capture`. `MXFP8-AR-SKIP` continues to identify ordinary all-reduce fallbacks. Disable debug logs during performance runs.
+
+Validate the model's accuracy, MTP acceptance, TTFT/throughput and actual decode graph capture on the target A5 stack. The standalone `benchmarks/benchmark_mxfp8_pipeline.py` compares the algorithms in place; runtime output is out of place, so its memory peaks can differ. `benchmarks/profile_mxfp8_pipeline.py` captures the three algorithm families together for overlap analysis.
