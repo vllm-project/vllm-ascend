@@ -366,6 +366,9 @@ class ChunkedTokenDatabase:
         self.partitions = partitions
         self.hash_block_size = self.block_size[0] if hash_block_size is None else hash_block_size
         self._key_prefix_cache: dict[tuple[int, str, str], str] = {}
+        # Immutable descriptors for a whole logical block, independent of its
+        # physical block ID. Shared by the send and receive threads.
+        self._full_block_layouts: dict[int, tuple[tuple[tuple[int, int], ...], tuple[int, ...]]] = {}
         self.cache_coordinator: Any | None = None
 
     def _get_key_prefix(
@@ -473,6 +476,7 @@ class ChunkedTokenDatabase:
             self.group_block_stride = group_block_stride or {}
             self.group_layer_cache_entry_offsets = group_layer_cache_entry_offsets or {}
             self.group_cache_entry_segments = group_cache_entry_segments or {}
+            self._full_block_layouts.clear()
         if group_cache_families is not None:
             self.group_cache_families[cache_role] = group_cache_families.copy()
             self._key_prefix_cache.clear()
@@ -519,6 +523,13 @@ class ChunkedTokenDatabase:
         block_start = start // group_block_size * group_block_size
         start_in_block = start - block_start
         end_in_block = end - block_start
+        full_block = start_in_block == 0 and end_in_block == group_block_size
+        if full_block:
+            layout = self._full_block_layouts.get(kv_cache_group_id)
+            if layout is not None:
+                descriptors, sizes = layout
+                return [base + block_id * stride for base, stride in descriptors], list(sizes), block_id
+        descriptors = []
         for index, base_addr in enumerate(group_addrs):
             segment_index, segment_count = segments[index] if segments else (0, 1)
             segment_tokens = group_block_size // segment_count
@@ -534,6 +545,10 @@ class ChunkedTokenDatabase:
             addr = base_addr + block_id * block_stride + byte_start
             addr_list.append(addr)
             size_list.append(byte_end - byte_start)
+            if full_block:
+                descriptors.append((base_addr + byte_start, block_stride))
+        if full_block:
+            self._full_block_layouts[kv_cache_group_id] = (tuple(descriptors), tuple(size_list))
         return addr_list, size_list, block_id
 
     def prepare_value_layer(self, start: int, end: int, block_ids: list[int], layer_id: int):
