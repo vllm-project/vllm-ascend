@@ -18,7 +18,7 @@ from tests.e2e.common.multi_node.external_dp.external_dp_config import ExternalD
 from tests.e2e.common.multi_node.external_dp.runtime import build_all_server_commands
 
 ROOT = Path(__file__).resolve().parents[3]
-CONFIG_DIR = ROOT / "tests/e2e/cases/models/configs/GLM/full_model"
+CONFIG_DIR = ROOT / "tests/SIT/cases/models/configs/GLM/full_model"
 
 
 class FullModelConfigTests(unittest.TestCase):
