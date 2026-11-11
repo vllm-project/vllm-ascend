@@ -69,7 +69,6 @@ from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
-from vllm_ascend.attention.indexer import AscendSFAIndexerMetadataBuilder
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -110,7 +109,6 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     make_qsa_kernel_page_cache,
     make_slab_view,
 )
-from vllm_ascend.ops.rotary_embedding import MLARopeMetadataCache
 from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.quantization.methods.kv_cache.turboquant.cache import uses_turboquant_groups
 from vllm_ascend.quantization.utils import enable_fa_quant
@@ -565,8 +563,6 @@ def build_attn_metadata(
     if num_actual_reqs is None:
         num_actual_reqs = num_reqs
 
-    shared_mla_rope = None
-
     # positions will not be used directly in graph modes, so it is saft to create it here.
     if positions is None:
         positions = torch.zeros(num_input_tokens, dtype=torch.int64, device=query_start_loc_gpu.device)
@@ -617,9 +613,6 @@ def build_attn_metadata(
         group_causal = causal if isinstance(causal, bool) else causal.get(i, True)
         common_v41_metadata: dict[str, Any] = {}
 
-        if model_specific_attn_metadata is not None:
-            # Custom providers may update positions or persistent RoPE storage.
-            shared_mla_rope = None
         common_attn_metadata_extra_kwargs = (
             model_specific_attn_metadata.get_extra_common_attn_kwargs(i, num_reqs)
             if model_specific_attn_metadata is not None
@@ -663,7 +656,6 @@ def build_attn_metadata(
         )
         if common_metadata_callback is not None:
             common_metadata_callback(i, common_attn_metadata)
-            shared_mla_rope = None
 
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
@@ -689,8 +681,6 @@ def build_attn_metadata(
                     metadata_variants = ([(target_names, common_attn_metadata)] if target_names else []) + [
                         (draft_names, draft_common)
                     ]
-            if not for_cudagraph_capture and model_specific_attn_metadata is not None:
-                shared_mla_rope = None
             attn_metadata_extra_kwargs = (
                 model_specific_attn_metadata.get_extra_attn_kwargs(
                     attn_metadata_builder,
@@ -699,18 +689,6 @@ def build_attn_metadata(
                 if not for_cudagraph_capture and model_specific_attn_metadata is not None
                 else {}
             )
-            # Core's capture entry point does not accept the shared RoPE context.
-            # Keep sharing on the runtime build interface that declares it.
-            if not for_cudagraph_capture and isinstance(
-                attn_metadata_builder, (AscendSFAMetadataBuilder, AscendSFAIndexerMetadataBuilder)
-            ):
-                if shared_mla_rope is None:
-                    shared_mla_rope = MLARopeMetadataCache()
-                attn_metadata_extra_kwargs["shared_mla_rope"] = shared_mla_rope
-            else:
-                # An unrelated builder may update the same persistent RoPE
-                # storage. Share only within runs of known compatible builders.
-                shared_mla_rope = None
             if is_dsa_builder:
                 # DSA cache groups share request-level metadata during replay.
                 attn_metadata_extra_kwargs.update(

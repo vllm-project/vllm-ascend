@@ -19,7 +19,6 @@ from vllm_ascend.hisparse.prefill import (
     build_hisparse_prefill_staging_plan,
     stage_prefill_rows,
 )
-from vllm_ascend.ops.rotary_embedding import MLARopeMetadataCache
 
 # Bound the temporary D2D packing workspace independently of prefill length.
 _ATTENTION_CHUNK_ROWS = 32
@@ -68,10 +67,8 @@ class AscendHiSparseMetadataBuilder(AscendSFAMetadataBuilder):
         common_attn_metadata,
         draft_index=None,
         pcp_context=None,
-        *,
-        shared_mla_rope: MLARopeMetadataCache | None = None,
     ):
-        metadata = super()._build(common_attn_metadata, draft_index, pcp_context, shared_mla_rope=shared_mla_rope)
+        metadata = super()._build(common_attn_metadata, draft_index, pcp_context)
         metadata.num_reqs = common_attn_metadata.num_reqs
         if draft_index not in self._request_row_buffers:
             self._request_row_buffers[draft_index] = torch.empty(
