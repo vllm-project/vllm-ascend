@@ -15,12 +15,16 @@ from vllm_ascend.models.deepseek_v41.model import DeepseekV41Model
 
 @pytest.mark.parametrize(("pcp_size", "prefix_caching"), [(1, True), (2, True), (2, False)])
 @pytest.mark.parametrize("dp_size", [1, 2])
-def test_decoder_replay_enabled_with_or_without_prefix_caching(pcp_size, prefix_caching, dp_size):
+@pytest.mark.parametrize("pp_size", [1, 2])
+@pytest.mark.parametrize("sequence_parallel", [False, True])
+def test_decoder_replay_enabled_with_or_without_prefix_caching(
+    pcp_size, prefix_caching, dp_size, pp_size, sequence_parallel
+):
     model = SimpleNamespace(
         config=SimpleNamespace(kv_source_layer_ids=[0], sliding_window=2, engram_layer_ids=[]),
         end_layer=3,
         decoder_replay_start=3,
-        use_sequence_parallel=False,
+        use_sequence_parallel=sequence_parallel,
         _run_replay_layers=lambda *states: states,
         topk_indices_buffer=torch.zeros(8, 2),
         candidate_indices_buffer=torch.zeros(8, 2),
@@ -30,7 +34,7 @@ def test_decoder_replay_enabled_with_or_without_prefix_caching(pcp_size, prefix_
     config = SimpleNamespace(
         cache_config=SimpleNamespace(swa_bounded_replay=True, enable_prefix_caching=prefix_caching),
         parallel_config=SimpleNamespace(
-            pipeline_parallel_size=1,
+            pipeline_parallel_size=pp_size,
             prefill_context_parallel_size=pcp_size,
             data_parallel_size=dp_size,
             decode_context_parallel_size=1,
@@ -193,6 +197,40 @@ def test_pcp_replay_empty_owner_runs_padded_rows_without_scattering(monkeypatch)
     assert not hidden.count_nonzero()
     assert not mix.count_nonzero()
     assert buffer[:2, 0].tolist() == [0, 0]
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+def test_sp_replay_pads_before_sharding_and_restores_pp_states(monkeypatch, rank):
+    rows = torch.tensor([4, 5, 6])
+    hidden = torch.arange(8).float().reshape(8, 1)
+    mix = hidden + 20
+    compact_hidden = torch.cat((hidden[rows], torch.zeros(1, 1)))
+    compact_mix = torch.cat((mix[rows], torch.zeros(1, 1)))
+    gathered = iter((hidden, mix, compact_hidden + 10, compact_mix + 30))
+    monkeypatch.setattr(replay_mod, "tensor_model_parallel_all_gather", lambda *args, **kwargs: next(gathered))
+    monkeypatch.setattr(replay_mod, "get_tp_group", lambda: SimpleNamespace(world_size=2, rank_in_group=rank))
+    state = torch.arange(8).reshape(8, 1)
+
+    def run_layers(value, coefficients, positions):
+        assert value.shape == coefficients.shape == (2, 1)
+        torch.testing.assert_close(value, compact_hidden.chunk(2)[rank])
+        assert positions.tolist() == [4, 5, 6, 0]
+        state[:3].add_(100)
+        return value + 10, coefficients + 30
+
+    replay = replay_mod.AscendDecoderReplayLayers(2, run_layers, [state])
+    replay.sequence_parallel = True
+    replay.output_row_buffers = [state]
+    replay.rows, replay.num_actual_rows, replay.num_padded_rows = rows, 3, 4
+    replay.context_factory = nullcontext
+    result, coefficients = replay(hidden.chunk(2)[rank], mix.chunk(2)[rank], torch.arange(7))
+    expected = torch.zeros(8, 1)
+    expected[rows] = hidden[rows] + 10
+    torch.testing.assert_close(result, expected.chunk(2)[rank])
+    expected.zero_()
+    expected[rows] = mix[rows] + 30
+    torch.testing.assert_close(coefficients, expected.chunk(2)[rank])
+    assert state[:7, 0].tolist() == [0, 0, 0, 0, 104, 105, 106]
 
 
 def test_replay_without_rows_keeps_inputs():

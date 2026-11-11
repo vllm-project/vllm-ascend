@@ -3,6 +3,7 @@
 
 # ruff: noqa: E402
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -10,17 +11,19 @@ import pytest
 pytest.importorskip("vllm.transformers_utils.configs.deepseek_v41")
 
 import torch
+from vllm.config import CUDAGraphMode
 from vllm.sequence import IntermediateTensors
 from vllm.v1.core.kv_cache_planning import _project_kv_cache_groups_to_worker
 
 from tests.deepseek_v41_utils import allocate_cache_views, make_cache_config
+from vllm_ascend.models.deepseek_v41 import decoder_replay_layers as replay_mod
 from vllm_ascend.models.deepseek_v41 import model as v41_model
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
     group_cache_specs,
     make_cache_groups,
 )
-from vllm_ascend.models.deepseek_v41.model import TOPK, TOPK_LENGTHS, build_layer_plan
+from vllm_ascend.models.deepseek_v41.model import CANDIDATE_LENGTHS, CANDIDATES, TOPK, TOPK_LENGTHS, build_layer_plan
 from vllm_ascend.worker.v2 import pp_transport
 
 
@@ -102,9 +105,11 @@ def runtime(monkeypatch):
     monkeypatch.setattr(v41_model, "get_forward_context", lambda: context)
     monkeypatch.setattr(pp_transport, "get_forward_context", lambda: context)
     monkeypatch.setattr(pp_transport, "is_forward_context_available", lambda: True)
+    monkeypatch.setattr(replay_mod, "get_forward_context", lambda: context)
     library = torch.library.Library("vllm", "IMPL", "CPU")
     library.impl("pp_dependency_export", pp_transport._export_dependencies)
     library.impl("pp_dependency_import", pp_transport._import_dependencies)
+    library.impl("dsv41_decoder_replay_forward", replay_mod.dsv41_decoder_replay_forward)
     yield context
     library._destroy()
     torch._dynamo.reset()
@@ -438,3 +443,125 @@ def test_v41_pp_preserves_hc_pre_mix_and_aux_states(monkeypatch, partition, use_
     assert len(actual_aux) == len(expected_aux) == 2
     for actual_state, expected_state in zip(actual_aux, expected_aux):
         torch.testing.assert_close(actual_state, expected_state, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "lengths", [(3, 3), (2, 4), (2, 1, 1, 2), (3, 1, 1, 1), (1, 1, 1, 1, 1, 1), (4, 2), (5, 1), (1, 5)]
+)
+def test_replay_preserves_pp_states_and_full_source_writes(runtime, monkeypatch, lengths):
+    """Every eligible stage trims; PP keeps the original token correspondence."""
+    config = _config()
+    config.num_hidden_layers, config.hidden_size, config.sliding_window = 6, 4, 2
+    config.compress_ratios = [0, 0, 1, 1, 1, 1]
+    config.kv_source_layer_ids, config.index_source_layer_ids = [2], [2, 4]
+    config.candidate_source_layer_id = 2
+    partitions = _partitions(lengths)
+    plans = build_layer_plan(config).pp_boundaries(partitions)
+    embedding = torch.nn.Embedding(8, 4, dtype=torch.bfloat16)
+    calls, writes = {}, []
+
+    def make_stage(start, end, rank=None):
+        model = _model_stage(start, end, embedding, False)
+        model.aux_hidden_state_layers = (1, 4, 5)
+        model.config = config
+        shared = v41_model.DeepseekV41SharedAttentionState(**vars(_shared()))
+        model.shared_attention_state = shared
+        model.topk_indices_buffer, model.topk_lengths_buffer = shared.topk_indices, shared.topk_lengths
+        model.candidate_indices_buffer = shared.candidates
+        model.candidate_lengths_buffer = shared.candidate_lengths
+        states = {
+            TOPK: shared.topk_indices,
+            TOPK_LENGTHS: shared.topk_lengths,
+            CANDIDATES: shared.candidates,
+            CANDIDATE_LENGTHS: shared.candidate_lengths,
+        }
+        for layer in model.layers[start:end]:
+
+            def forward(positions, hidden, mix, unused, input_ids=None, layer=layer):
+                n, index = len(positions), layer.layer_idx
+                calls[index] = positions.tolist()
+                if index == 2:
+                    shared.candidates[:n].copy_((positions + 10).view(-1, 1, 1))
+                    shared.candidate_lengths[:n].fill_(3)
+                if index in (2, 4):
+                    shared.topk_indices[:n].copy_(shared.candidates[:n, 0, :1] + index + shared.candidate_lengths[:n])
+                    shared.topk_lengths[:n].fill_(5)
+                if index > 2:
+                    value = shared.topk_indices[:n, 0] + shared.topk_lengths[:n, 0]
+                    hidden = hidden + value[:, None, None].to(hidden.dtype)
+                return hidden + index + 1, mix + (index + 1) / 8
+
+            layer.forward = forward
+            layer.write_kv = lambda hidden, mix, positions, ids: writes.append(positions.tolist())
+            layer.self_attn = SimpleNamespace(v41_impl=SimpleNamespace(swa_prefix="source_swa"))
+        if rank is None:
+            return model
+        settings = SimpleNamespace(
+            cache_config=SimpleNamespace(swa_bounded_replay=True),
+            parallel_config=SimpleNamespace(
+                pipeline_parallel_size=len(lengths),
+                prefill_context_parallel_size=1,
+                decode_context_parallel_size=1,
+                use_ubatching=False,
+            ),
+            compilation_config=SimpleNamespace(
+                cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY, static_forward_context=runtime.no_compile_layers
+            ),
+            speculative_config=None,
+            lora_config=None,
+        )
+
+        def boundary_states(plan):
+            names = (TOPK, TOPK_LENGTHS) if plan is not None and plan.topk else ()
+            if plan is not None and plan.candidates:
+                names += (CANDIDATES, CANDIDATE_LENGTHS)
+            return {name: states[name] for name in names}
+
+        model.pp_cache_transport = pp_transport.PPDependencyTransport(
+            settings,
+            f"stage_{rank}",
+            torch.nn.Module(),
+            (),
+            (),
+            boundary_states(plans[rank - 1] if rank else None),
+            boundary_states(plans[rank] if rank < len(plans) else None),
+        )
+        model.decoder_replay_layers = replay_mod.make_decoder_replay(model, settings)
+        model.decoder_replay_layer_name = f"stage_{rank}.replay"
+        runtime.no_compile_layers[model.decoder_replay_layer_name] = model.decoder_replay_layers
+        return model
+
+    baseline = make_stage(0, 6)
+    stages = [make_stage(start, end, rank) for rank, (start, end) in enumerate(partitions)]
+    for positions, rows in (
+        (torch.tensor([0, 1, 2, 3, 4, 5, 30]), torch.tensor([4, 5, 6])),
+        (torch.tensor([6, 31]), None),
+    ):
+        ids = torch.zeros(len(positions), dtype=torch.int64)
+        monkeypatch.setattr(v41_model, "get_pp_group", lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True))
+        expected, expected_aux = baseline(ids, positions, None)
+        calls.clear()
+        writes.clear()
+        payload = None
+        for rank, model in enumerate(stages):
+            monkeypatch.setattr(
+                v41_model,
+                "get_pp_group",
+                lambda rank=rank: SimpleNamespace(is_first_rank=rank == 0, is_last_rank=rank == len(stages) - 1),
+            )
+            replay = model.decoder_replay_layers
+            if replay is not None:
+                replay.rows = rows
+                replay.num_actual_rows = len(rows) if rows is not None else len(positions)
+                replay.context_factory = nullcontext if rows is not None else None
+            payload = model(ids, positions, payload)
+            for index in range(model.start_layer, model.end_layer):
+                kept = rows if replay is not None and rows is not None and index >= model.decoder_replay_start else None
+                assert calls[index] == (positions[kept] if kept is not None else positions).tolist()
+        actual, actual_aux = payload
+        selected = rows if rows is not None else torch.arange(len(positions))
+        torch.testing.assert_close(actual[selected], expected[selected], rtol=0, atol=0)
+        assert len(actual_aux) == len(expected_aux) == 3
+        for actual_value, expected_value in zip(actual_aux, expected_aux):
+            torch.testing.assert_close(actual_value[selected], expected_value[selected], rtol=0, atol=0)
+        assert writes == ([positions.tolist()] if rows is not None else [])

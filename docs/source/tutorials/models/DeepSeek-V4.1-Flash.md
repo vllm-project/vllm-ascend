@@ -374,7 +374,7 @@ vLLM Ascend revision.
     - `--safetensors-load-strategy lazy` avoids eagerly materializing the whole
         checkpoint during loading.
     - `--swa-bounded-replay` enables SWA bounded replay.
-    - `enable_flashcomm1: false` disables FlashComm for compatibility with SWA bounded replay.
+    - `enable_flashcomm1: false` selects the non-sequence-parallel execution path.
     - `enable_fused_mc2` and `enable_shared_expert_dp` enable the A3 MoE and
         communication optimizations
         used by this configuration. `enable_cpu_binding` pins worker processes to
@@ -400,7 +400,7 @@ vllm serve "<YOUR_MODEL_PATH>" \
     --max-model-len 16512 --max-num-batched-tokens 2048 --max-num-seqs 4 \
     --block-size 128 --gpu-memory-utilization 0.85 \
     --limit-mm-per-prompt '{"image":0}' \
-    --async-scheduling --enable-chunked-prefill --no-enable-prefix-caching \
+    --async-scheduling --swa-bounded-replay --enable-chunked-prefill --no-enable-prefix-caching \
     --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[24]}' \
     --additional-config '{"enable_flashcomm1":true,"multistream_engram_overlap":false,"multistream_dsv4_dsa_overlap":false,"multistream_overlap_shared_expert":false}'
@@ -418,9 +418,13 @@ write slots of each replicated PCP cache, while activations and selection
 states retain the rank-local query layout. PCP requires DCP1.
 
 For DSpark, keep native asynchronous scheduling enabled. The target can use
-Decode ACL graphs while the draft runs eagerly. Decoder-layer bounded replay
-is disabled for PP greater than one. Multimodal inputs, A5 hardware and
-performance require separate qualification.
+Decode ACL graphs while the draft runs eagerly. With `--swa-bounded-replay`, decoder-layer replay
+trims eligible Prefill layers on every PP stage after the last shared-KV source.
+The source stage completes full-batch cache writes before trimming its own tail;
+PCP and sequence parallelism preserve the same request/token correspondence.
+Use eager Prefill (`NONE` or `FULL_DECODE_ONLY` graph mode); the existing DCP,
+microbatching, LoRA and incompatible-drafter restrictions still apply.
+Multimodal inputs, A5 hardware and performance require separate qualification.
 
 ### 5.2 1P1D PD Disaggregated Deployment
 
