@@ -74,7 +74,6 @@ env_common: &env_common
   ACL_OP_INIT_MODE: "1"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
   SERVER_PORT: "${PORT}"
-  LD_LIBRARY_PATH: "/usr/local/python3.11.10/lib:/usr/local/lib:${LD_LIBRARY_PATH}"
 
 env_prefill: &env_prefill
   <<: *env_common
