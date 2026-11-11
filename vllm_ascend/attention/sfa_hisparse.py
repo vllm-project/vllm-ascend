@@ -6,7 +6,6 @@ import math
 from dataclasses import dataclass
 
 import torch
-import torch_npu
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
@@ -276,21 +275,9 @@ class AscendHiSparseImpl(AscendSFAImpl):
 
         assert self.kv_a_layernorm is not None
         if self.enable_sparse_sfa_c8:
-            from vllm_ascend.attention.sfa_v1 import custom_kv_rmsnorm_rope
             from vllm_ascend.hisparse.c8 import pack_c8_components
 
-            values = kv_no_split.reshape(-1, self.num_kv_heads, 1, self.kv_lora_rank + self.qk_rope_head_dim)
-            rope, latent, scales = custom_kv_rmsnorm_rope(
-                values,
-                self.kv_a_layernorm.weight,
-                cos,
-                sin,
-                self.kv_lora_rank,
-                self.qk_rope_head_dim,
-                epsilon=self.kv_a_layernorm.variance_epsilon,
-                dst_type=self.c8_cache_dtype,
-                tile_size=self.sfa_qsfa_tile_size,
-            )
+            rope, latent, scales = super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
             rows = latent.numel() // self.kv_lora_rank
             packed = pack_c8_components(latent.contiguous(), rope.contiguous(), scales.contiguous())
             cache = self.hisparse_cache
@@ -312,17 +299,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
             # Match ordinary SFA's fused RMSNorm/RoPE rounding. Separate RMSNorm
             # can differ by a BF16 ULP near a rounding midpoint. Local slots
             # isolate padding from the real resident/hot destination below.
-            torch_npu.npu_kv_rmsnorm_rope_cache(
-                values.view(num_tokens, self.num_kv_heads, 1, self.kv_lora_rank + self.qk_rope_head_dim),
-                self.kv_a_layernorm.weight,
-                cos,
-                sin,
-                local_slots[:num_tokens],
-                rope_cache,
-                latent_cache,
-                epsilon=self.kv_a_layernorm.variance_epsilon,
-                cache_mode="PA",
-            )
+            super().exec_kv(values, cos, sin, (latent_cache, rope_cache), local_slots[:num_tokens], attn_metadata)
             latent = latent_cache.view(-1, self.kv_lora_rank)[:num_tokens]
             rope = rope_cache.view(-1, self.qk_rope_head_dim)[:num_tokens]
         else:

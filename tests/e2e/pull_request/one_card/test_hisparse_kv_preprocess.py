@@ -42,26 +42,24 @@ def test_preprocess_writes_hisparse_mapping_once(cache_dtype, capture):
         torch.empty(1, block, 1, 64, dtype=values.dtype, device="npu"),
         torch.arange(block, dtype=torch.int64, device="npu"),
     )
-    impl = SimpleNamespace(
-        enable_sparse_sfa_c8=c8,
-        c8_cache_dtype=torch.float8_e4m3fn,
-        sfa_qsfa_tile_size=128,
-        kv_lora_rank=512,
-        qk_rope_head_dim=64,
-        num_kv_heads=1,
-        _kv_staging_capacity=block,
-        _kv_workspace=lambda dtype: scratch,
-        kv_a_layernorm=SimpleNamespace(weight=gamma, variance_epsilon=1e-5),
-        hisparse_cache=SimpleNamespace(write_target=lambda count, slot_count: (destination, slots, count)),
-    )
+    impl = AscendHiSparseImpl.__new__(AscendHiSparseImpl)
+    impl.enable_sparse_sfa_c8 = c8
+    impl.enable_sparse_sfa_turboquant = False
+    impl.c8_cache_dtype = torch.float8_e4m3fn
+    impl.sfa_qsfa_tile_size = 128
+    impl.kv_lora_rank, impl.qk_rope_head_dim, impl.num_kv_heads = 512, 64, 1
+    impl._kv_staging_capacity = block
+    impl._kv_workspace = lambda dtype: scratch
+    impl.kv_a_layernorm = SimpleNamespace(weight=gamma, variance_epsilon=1e-5)
+    impl.hisparse_cache = SimpleNamespace(write_target=lambda count, slot_count: (destination, slots, count))
     # The ordinary source cache has no Resident/Hot addressing. It must never
     # receive the parent's second C8 store after exec_kv has used write_target.
     source_cache = (torch.empty(0, device="npu"),)
 
     def forward():
-        rope, latent, *scales = AscendHiSparseImpl.exec_kv(impl, values, cos, sin, source_cache, slots, metadata)
+        rope, latent, *scales = impl.exec_kv(values, cos, sin, source_cache, slots, metadata)
         scales = scales[0] if scales else None
-        AscendHiSparseImpl._store_parallel_kv(impl, rope, latent, scales, source_cache, slots, metadata)
+        impl._store_parallel_kv(rope, latent, scales, source_cache, slots, metadata)
 
     graph = None
     try:
