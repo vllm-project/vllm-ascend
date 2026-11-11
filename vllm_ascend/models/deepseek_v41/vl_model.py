@@ -30,6 +30,7 @@ from vllm.models.deepseek_v41.common.mm_preprocess import (
 )
 from vllm.models.deepseek_v41.common.vl_cudagraph import DeepseekV4VLEncoderCudaGraphMixin
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
 
 from .model import AscendDeepseekV41LLMForCausalLM
 from .vision import DeepseekV41Aligner, DeepseekV41ViT
@@ -63,6 +64,23 @@ class AscendDeepseekV41ForCausalLM(
     requires_raw_input_tokens = True
     packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
     language_model_cls = AscendDeepseekV41LLMForCausalLM
+
+    def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
+        # AscendMMEncoderAttention dispatches to FIA, irrespective of the
+        # upstream backend marker. CUDA's TORCH_SDPA/FLASHINFER rejection
+        # therefore does not describe the operator captured on NPU.
+        def pad_cu_seqlens(dst: torch.Tensor, src: torch.Tensor) -> None:
+            n = min(src.shape[0], dst.shape[0])
+            dst[:n].copy_(src[:n])
+            if n < dst.shape[0]:
+                dst[n:] = src[-1] if n else 0
+
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            buffer_keys=["patches", "vit_cos", "vit_sin", "cu_seqlens", "max_seqlen", "merge_idx", "merge_mask"],
+            out_hidden_size=self.config.hidden_size,
+            padding_logics={"cu_seqlens": pad_cu_seqlens},
+        )
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:

@@ -25,3 +25,22 @@ def test_packed_aligner_matches_per_image(grids):
     expected = torch.cat([aligner(x, h, w) for x, (h, w) in zip(images, grids)])
     actual = aligner.forward_packed(torch.cat(images), **metadata)
     torch.testing.assert_close(actual, expected)
+
+
+def test_ascend_config_accepts_sdpa_marker_and_pads_boundaries():
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    attention = SimpleNamespace(attn_backend=AttentionBackendEnum.TORCH_SDPA)
+    model = SimpleNamespace(
+        config=SimpleNamespace(hidden_size=12),
+        multimodal_config=None,
+        vision=SimpleNamespace(blocks=[SimpleNamespace(attn=SimpleNamespace(attn=attention))]),
+    )
+    config = AscendDeepseekV41ForCausalLM.get_encoder_cudagraph_config(model)
+    assert config.out_hidden_size == 12
+    assert "merge_idx" in config.buffer_keys
+    dst = torch.full((6,), -1, dtype=torch.int32)
+    config.padding_logics["cu_seqlens"](dst, torch.tensor([0, 6, 10], dtype=torch.int32))
+    assert dst.tolist() == [0, 6, 10, 10, 10, 10]
+    config.padding_logics["cu_seqlens"](dst, torch.empty(0, dtype=torch.int32))
+    assert dst.tolist() == [0] * 6
