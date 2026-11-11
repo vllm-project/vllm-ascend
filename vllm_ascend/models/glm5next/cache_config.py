@@ -100,44 +100,43 @@ def _is_glm5_next_tail_spec(spec: KVCacheSpec) -> bool:
 def _align_glm5_next_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]) -> None:
     """Align GLM-Next specs into two physical page-size classes in-place."""
 
-    main_specs = [spec for spec in kv_cache_spec.values() if _is_glm5_next_main_spec(spec)]
-    indexer_specs = [spec for spec in kv_cache_spec.values() if _is_glm5_next_indexer_spec(spec)]
-    tail_specs = [spec for spec in kv_cache_spec.values() if _is_glm5_next_tail_spec(spec)]
-    mamba_specs = [spec for spec in kv_cache_spec.values() if isinstance(spec, MambaSpec)]
+    main_specs = {name: spec for name, spec in kv_cache_spec.items() if _is_glm5_next_main_spec(spec)}
+    indexer_specs = {name: spec for name, spec in kv_cache_spec.items() if _is_glm5_next_indexer_spec(spec)}
+    tail_specs = {name: spec for name, spec in kv_cache_spec.items() if _is_glm5_next_tail_spec(spec)}
+    mamba_specs = {name: spec for name, spec in kv_cache_spec.items() if isinstance(spec, MambaSpec)}
 
     if not main_specs and not indexer_specs and not tail_specs:
         return
     if not main_specs or not indexer_specs or not tail_specs:
         raise ValueError("GLM-Next cache layout requires main MLA, compressed indexer, and compressor-tail specs.")
 
-    main_candidates = (*main_specs, *mamba_specs)
+    main_candidates = {**main_specs, **mamba_specs}
     main_page_size = max(
-        max(spec.page_size_bytes for spec in main_candidates),
-        max(_unpadded_page_size(spec) for spec in main_candidates),
+        max(spec.page_size_bytes for spec in main_candidates.values()),
+        max(_unpadded_page_size(spec) for spec in main_candidates.values()),
     )
-    small_candidates = (*indexer_specs, *tail_specs)
+    small_candidates = {**indexer_specs, **tail_specs}
     small_page_size = max(
-        max(spec.page_size_bytes for spec in small_candidates),
-        max(_unpadded_page_size(spec) for spec in small_candidates),
+        max(spec.page_size_bytes for spec in small_candidates.values()),
+        max(_unpadded_page_size(spec) for spec in small_candidates.values()),
     )
     scale_alignments = tuple(
         get_storage_block_size(spec) * get_dtype_size(spec.scale_dtype)
-        for spec in indexer_specs
+        for spec in indexer_specs.values()
         if isinstance(spec, AscendMLAAttentionSpec) and spec.scale_dim
     )
     if scale_alignments:
         # C8 shares pages with the FP32 tail; keep whole tail rows and aligned
         # scales when a scheduler page is split into indexer kernel blocks.
         small_page_alignment = lcm(
-            *(_unpadded_page_size(spec) // spec.ring_capacity for spec in tail_specs), *scale_alignments
+            *(_unpadded_page_size(spec) // spec.ring_capacity for spec in tail_specs.values()), *scale_alignments
         )
         small_page_size = (small_page_size + small_page_alignment - 1) // small_page_alignment * small_page_alignment
 
-    for name, spec in kv_cache_spec.items():
-        if _is_glm5_next_main_spec(spec) or isinstance(spec, MambaSpec):
-            kv_cache_spec[name] = replace(spec, page_size_padded=main_page_size)
-        elif _is_glm5_next_indexer_spec(spec) or _is_glm5_next_tail_spec(spec):
-            kv_cache_spec[name] = replace(spec, page_size_padded=small_page_size)
+    for name, spec in main_candidates.items():
+        kv_cache_spec[name] = replace(spec, page_size_padded=main_page_size)
+    for name, spec in small_candidates.items():
+        kv_cache_spec[name] = replace(spec, page_size_padded=small_page_size)
 
 
 def _create_glm5_next_attention_groups(
