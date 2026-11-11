@@ -20,6 +20,48 @@ name: Handle /nightly Command
 on:
   repository_dispatch:
     types: [nightly-command, presmoke-command, weekly-command]
+  # TEMPORARY (pre-merge verification only): lets the command handler run on a
+  # feature branch so the whole dispatch chain can be exercised before this file
+  # is merged into the default branch. REMOVE this trigger and the workflow-level
+  # EVENT_* env fallbacks below before merging.
+  workflow_dispatch:
+    inputs:
+      command:
+        description: 'Command to simulate'
+        required: true
+        default: 'presmoke'
+        type: choice
+        options:
+          - presmoke
+          - nightly
+          - weekly
+      args:
+        description: 'Arguments that would follow the slash command, e.g. "all" or "test_custom_op,qwen3-32b"'
+        required: true
+        default: 'all'
+        type: string
+      pr_number:
+        description: 'PR number whose head ref provides the test matrix (also used as request_id)'
+        required: true
+        default: ''
+        type: string
+      target_ref:
+        description: 'Ref the downstream test workflows are dispatched on. Set to the feature branch to exercise unmerged workflow changes.'
+        required: false
+        default: 'main'
+        type: string
+
+# TEMPORARY (pre-merge verification only): fallbacks that resolve the
+# repository_dispatch payload fields when the workflow is started manually.
+# REMOVE together with the workflow_dispatch trigger above.
+env:
+  EVENT_REPO: ${{ github.event_name == 'workflow_dispatch' && github.repository || github.event.client_payload.github.payload.repository.full_name }}
+  EVENT_ACTOR: ${{ github.event_name == 'workflow_dispatch' && github.actor || github.event.client_payload.github.payload.comment.user.login }}
+  EVENT_COMMAND: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.command || github.event.action }}
+  EVENT_ARGS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.args || github.event.client_payload.slash_command.args.all }}
+  EVENT_TARGET_REF: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.target_ref || 'main' }}
+  EVENT_PR_NUMBER: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.pr_number || github.event.client_payload.github.payload.issue.number }}
+  EVENT_PR_URL: ${{ github.event_name == 'workflow_dispatch' && format('https://api.github.com/repos/{0}/pulls/{1}', github.repository, github.event.inputs.pr_number) || github.event.client_payload.github.payload.issue.pull_request.url }}
 
 defaults:
   run:
@@ -80,8 +122,8 @@ jobs:
         id: auth
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-          ACTOR: ${{ github.event.client_payload.github.payload.comment.user.login }}
-          REPO: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          ACTOR: ${{ env.EVENT_ACTOR }}
+          REPO: ${{ env.EVENT_REPO }}
         run: |
           ROLE_NAME=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq '.role_name')
           case "$ROLE_NAME" in
@@ -96,11 +138,11 @@ jobs:
           esac
 
       - name: Post unauthorized comment
-        if: steps.auth.outputs.is_authorized == 'false'
+        if: github.event_name == 'repository_dispatch' && steps.auth.outputs.is_authorized == 'false'
         uses: peter-evans/create-or-update-comment@v5
         with:
           token: ${{ secrets.PAT_TOKEN }}
-          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          repository: ${{ env.EVENT_REPO }}
           comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
           body: |
             [Bot]: nightly command failed: you do not have permission. Only users with triage+ permission can trigger /nightly.
@@ -124,7 +166,7 @@ jobs:
         if: steps.auth.outputs.is_authorized == 'true'
         env:
           BLOCK_WINDOW: ${{ vars.NIGHTLY_COMMAND_BLOCK_WINDOW }}
-          COMMAND: ${{ github.event.action }}
+          COMMAND: ${{ env.EVENT_COMMAND }}
         run: |
           echo "command=${COMMAND%-command}" >> "$GITHUB_OUTPUT"
           BLOCKED="false"
@@ -189,11 +231,11 @@ jobs:
           fi
 
       - name: Post blocked comment
-        if: steps.auth.outputs.is_authorized == 'true' && steps.block_window.outputs.blocked == 'true'
+        if: github.event_name == 'repository_dispatch' && steps.auth.outputs.is_authorized == 'true' && steps.block_window.outputs.blocked == 'true'
         uses: peter-evans/create-or-update-comment@v5
         with:
           token: ${{ secrets.PAT_TOKEN }}
-          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          repository: ${{ env.EVENT_REPO }}
           comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
           body: |
             [Bot]: `/${{ steps.block_window.outputs.command }}` is temporarily disabled during the maintenance window (Beijing time `${{ steps.block_window.outputs.window }}`). Please retry after the window ends.
@@ -208,9 +250,9 @@ jobs:
         if: steps.auth.outputs.is_authorized == 'true' && steps.block_window.outputs.blocked != 'true'
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-          ALL_ARGS: ${{ github.event.client_payload.slash_command.args.all }}
-          PR_URL: ${{ github.event.client_payload.github.payload.issue.pull_request.url }}
-          COMMAND: ${{ github.event.action }}
+          ALL_ARGS: ${{ env.EVENT_ARGS }}
+          PR_URL: ${{ env.EVENT_PR_URL }}
+          COMMAND: ${{ env.EVENT_COMMAND }}
         run: |
           # Derive command type from repository_dispatch action (e.g. nightly-command -> nightly)
           COMMAND="${COMMAND%-command}"
@@ -218,7 +260,7 @@ jobs:
 
           ALL_ARGS=$(echo "$ALL_ARGS" | xargs)
           if [ -z "$ALL_ARGS" ]; then
-            gh api "repos/${{ github.event.client_payload.github.payload.repository.full_name }}/issues/${{ github.event.client_payload.github.payload.issue.number }}/comments" \
+            gh api "repos/${{ env.EVENT_REPO }}/issues/${{ env.EVENT_PR_NUMBER }}/comments" \
               -f body="[Bot]: \`/$COMMAND\` without test names will not dispatch. Please specify test names, e.g. \`/$COMMAND all\` or \`/$COMMAND test_custom_op\`." \
               --silent
             exit 1
@@ -413,7 +455,7 @@ jobs:
           fi
 
           if [ -z "$TEST_CASES" ]; then
-            gh api "repos/${{ github.event.client_payload.github.payload.repository.full_name }}/issues/${{ github.event.client_payload.github.payload.issue.number }}/comments" \
+            gh api "repos/${{ env.EVENT_REPO }}/issues/${{ env.EVENT_PR_NUMBER }}/comments" \
               -f body="[Bot]: \`/$COMMAND\` without test names will not dispatch. Please specify test names, e.g. \`/$COMMAND all\` or \`/$COMMAND test_custom_op\`." \
               --silent
             exit 1
@@ -473,7 +515,7 @@ jobs:
           # which is accessible through the base repo without fork access permission.
           # Nightly and presmoke read nightly_config.yaml; weekly reads
           # weekly_config.yaml. resolve_nightly_tests.py picks the non-empty one.
-          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
+          REPO='${{ env.EVENT_REPO }}'
           case "$COMMAND" in
             nightly|presmoke)
               NIGHTLY_MATRIX=$(gh api "repos/$REPO/contents/.github/workflows/configs/nightly_config.yaml?ref=pull/$PR_NUMBER/head" --jq '.content' 2>/dev/null || echo "")
@@ -517,10 +559,10 @@ jobs:
           PROFILE_OPTIONS_JSON: ${{ needs.authorize.outputs.profile_options_json }}
           VLLM_REF: ${{ needs.authorize.outputs.vllm_ref }}
         run: |
-          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
+          REPO='${{ env.EVENT_REPO }}'
           gh workflow run schedule_nightly_test_a2.yaml \
             --repo "$REPO" \
-            --ref main \
+            --ref '${{ env.EVENT_TARGET_REF }}' \
             -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
@@ -567,10 +609,10 @@ jobs:
           PROFILE_OPTIONS_JSON: ${{ needs.authorize.outputs.profile_options_json }}
           VLLM_REF: ${{ needs.authorize.outputs.vllm_ref }}
         run: |
-          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
+          REPO='${{ env.EVENT_REPO }}'
           gh workflow run schedule_nightly_test_a3.yaml \
             --repo "$REPO" \
-            --ref main \
+            --ref '${{ env.EVENT_TARGET_REF }}' \
             -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
@@ -617,10 +659,10 @@ jobs:
           PROFILE_OPTIONS_JSON: ${{ needs.authorize.outputs.profile_options_json }}
           VLLM_REF: ${{ needs.authorize.outputs.vllm_ref }}
         run: |
-          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
+          REPO='${{ env.EVENT_REPO }}'
           gh workflow run schedule_nightly_test_a3_560t.yaml \
             --repo "$REPO" \
-            --ref main \
+            --ref '${{ env.EVENT_TARGET_REF }}' \
             -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
@@ -667,10 +709,10 @@ jobs:
           PROFILE_OPTIONS_JSON: ${{ needs.authorize.outputs.profile_options_json }}
           VLLM_REF: ${{ needs.authorize.outputs.vllm_ref }}
         run: |
-          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
+          REPO='${{ env.EVENT_REPO }}'
           gh workflow run schedule_nightly_test_a5.yaml \
             --repo "$REPO" \
-            --ref main \
+            --ref '${{ env.EVENT_TARGET_REF }}' \
             -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
@@ -716,10 +758,10 @@ jobs:
           PROFILE_OPTIONS_JSON: ${{ needs.authorize.outputs.profile_options_json }}
           VLLM_REF: ${{ needs.authorize.outputs.vllm_ref }}
         run: |
-          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
+          REPO='${{ env.EVENT_REPO }}'
           gh workflow run schedule_nightly_test_310p.yaml \
             --repo "$REPO" \
-            --ref main \
+            --ref '${{ env.EVENT_TARGET_REF }}' \
             -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
@@ -762,10 +804,10 @@ jobs:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           VLLM_REF: ${{ needs.authorize.outputs.vllm_ref }}
         run: |
-          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
+          REPO='${{ env.EVENT_REPO }}'
           gh workflow run schedule_weekly_test_a2.yaml \
             --repo "$REPO" \
-            --ref main \
+            --ref '${{ env.EVENT_TARGET_REF }}' \
             -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
@@ -805,10 +847,10 @@ jobs:
           BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
           VLLM_REF: ${{ needs.authorize.outputs.vllm_ref }}
         run: |
-          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
+          REPO='${{ env.EVENT_REPO }}'
           gh workflow run schedule_weekly_test_a3.yaml \
             --repo "$REPO" \
-            --ref main \
+            --ref '${{ env.EVENT_TARGET_REF }}' \
             -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
@@ -849,10 +891,10 @@ jobs:
           BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
           VLLM_REF: ${{ needs.authorize.outputs.vllm_ref }}
         run: |
-          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
+          REPO='${{ env.EVENT_REPO }}'
           gh workflow run schedule_weekly_test_a3_560t.yaml \
             --repo "$REPO" \
-            --ref main \
+            --ref '${{ env.EVENT_TARGET_REF }}' \
             -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
@@ -893,10 +935,10 @@ jobs:
           BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
           VLLM_REF: ${{ needs.authorize.outputs.vllm_ref }}
         run: |
-          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
+          REPO='${{ env.EVENT_REPO }}'
           gh workflow run schedule_weekly_test_310p.yaml \
             --repo "$REPO" \
-            --ref main \
+            --ref '${{ env.EVENT_TARGET_REF }}' \
             -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
@@ -964,10 +1006,11 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Post workflow URLs
+        if: github.event_name == 'repository_dispatch'
         uses: peter-evans/create-or-update-comment@v5
         with:
           token: ${{ secrets.PAT_TOKEN }}
-          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          repository: ${{ env.EVENT_REPO }}
           comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
           body: ${{ steps.body.outputs.body }}
           reactions: rocket
