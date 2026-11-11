@@ -32,7 +32,7 @@ class FullModelConfigTests(unittest.TestCase):
                 )
                 ranks = RankResolver(config).resolve()
                 commands = build_all_server_commands(config, ranks)
-                devices_by_node = {index: set() for index in range(config.num_nodes)}
+                devices_by_node: dict[int, set[int]] = {index: set() for index in range(config.num_nodes)}
                 decode_ranks = []
                 transfer_topologies = []
                 for rank, command in zip(ranks, commands, strict=True):
