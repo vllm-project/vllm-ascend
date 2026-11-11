@@ -85,8 +85,9 @@ def _run_adaptor(inputs, return_lse, *, packed=False):
     rope_dim = inputs["rope_head_dim"]
     query = inputs["query"]
     nope, rope = query.split((512, rope_dim), dim=-1)
+    # Native heads and the three-result contract require Kimi's custom QSFA path.
     return get_device_adaptor()._execute_kv_quant_sparse_flash_attention_vllm(
-        SimpleNamespace(scale=inputs["scale_value"], qk_rope_head_dim=rope_dim),
+        SimpleNamespace(scale=inputs["scale_value"], qk_rope_head_dim=rope_dim, is_kimi_k31=True),
         nope,
         rope,
         inputs["key"],
