@@ -144,13 +144,20 @@ writers still require integration validation.
 
 ## Runtime and lifetime boundaries
 
-The initial worker requires Model Runner V2 and supports Memcache TP
+The initial worker requires Model Runner V2 and supports Memcache TP/PCP
 deployments. Explicit V1 configurations are rejected before GVA initialization;
-the V1 runner is unchanged. PP, PCP, DCP and KVPP are also rejected. Eager
+the V1 runner is unchanged. PP, DCP and KVPP are also rejected. Eager
 supports target prefetch; the V2 `DeepseekV41DSparkModel` drafter is supported.
 Other speculative configurations, unsupported graph modes, SP, microbatching,
 missing hooks and unknown layouts retain synchronous GVA restoration. No
 fallback switches to bulk keys.
+
+V4.1 PCP attention gathers cache-write inputs and keeps complete KV replicas
+on each PCP rank. Cross-layer therefore reuses the GVA keys, offsets and TP
+save-leader rule; each rank waits for its own layer-load event before entering
+attention collectives. The inherited GVA checks still reject explicitly
+configured P/D PCP or DCP topology mismatches. With bounded replay, PCP keeps
+the existing full cut-layer forward before trimming the later replay layers.
 
 Use `--enforce-eager`. PIECEWISE and combined graph modes containing
 PIECEWISE fail before GVA initialization. DS4.1 PIECEWISE runtime adaptation
@@ -169,9 +176,12 @@ CPU tests exercise the actual GVA sender/receiver and registered tensor
 addresses: key parity, source/SWA round trips, segmented views, changed source
 positions, early-consumer overlap, replay-cut publication order, missing or
 wrong-sized objects, failed copies, lease cleanup and DSpark final contents.
+PCP tests restore the same GVA objects into every simulated TP/PCP replica,
+check local layer gates and cover saves with bounded replay ON/OFF and
+peer-topology mismatch rejection.
 Existing Memcache GVA and Mooncake block-key regressions are also required.
 
 Before readiness, validate Ascend NPU eager execution and precision, bounded
-replay ON/OFF, DSpark ordering, concurrent writers, worker failure/restart,
-TTFT/throughput/HBM/network measurements. CPU simulations do not establish
-device correctness or performance.
+replay ON/OFF, PCP collectives, DSpark ordering, concurrent writers, worker
+failure/restart, TTFT/throughput/HBM/network measurements. CPU simulations do
+not establish device correctness or performance.

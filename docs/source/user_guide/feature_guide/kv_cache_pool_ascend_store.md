@@ -1011,7 +1011,10 @@ Expected output: MetaService starts successfully with no errors.
     step-end fence after draft preparation. Other
     speculative methods or draft architectures restore synchronously with GVA.
 
-    The initial shared-source worker supports TP; PP/PCP/DCP/KVPP are rejected.
+    The initial shared-source worker supports TP/PCP; PP/DCP/KVPP are rejected.
+    V4.1 PCP keeps complete KV replicas on each rank and uses the existing GVA
+    keys and layer-load events. Explicitly configured P/D PCP or DCP topology
+    mismatches remain subject to the ordinary GVA validation.
     Sequence parallelism, microbatching, unsupported graph modes, partial
     objects or missing hooks use synchronous GVA restoration without changing
     the key protocol.

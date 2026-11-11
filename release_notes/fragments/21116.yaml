@@ -4,7 +4,8 @@ entries:
     text: >-
       The existing use_layerwise option now automatically selects the experimental
       cross_layer strategy for compatible shared-source models such as
-      DeepSeek-V4.1 on Model Runner V2, while DS4 retains the physical-layer path.
+      DeepSeek-V4.1 on Model Runner V2 with TP or PCP, while DS4 retains the
+      physical-layer path.
       Explicit V1 and PIECEWISE configurations are rejected for cross-layer KV;
       use --enforce-eager.
     model: deepseek-v4.1

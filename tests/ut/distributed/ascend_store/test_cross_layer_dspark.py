@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import unittest
+from itertools import product
 from unittest.mock import patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
@@ -83,9 +84,11 @@ class TestDSparkCrossLayerGVA(unittest.TestCase):
         worker.finish_cross_layer_loads()
 
     def test_dspark_target_saves_overlap_and_late_groups_use_final_contents(self):
-        for bounded in (False, True):
-            with self.subTest(bounded=bounded):
-                worker, store, caches = make_cross_worker(self, bounded=bounded, draft=True, method="dspark")
+        for bounded, (pcp_size, pcp_rank) in product((False, True), ((1, 0), (2, 0), (2, 1))):
+            with self.subTest(bounded=bounded, pcp_size=pcp_size, pcp_rank=pcp_rank):
+                worker, store, caches = make_cross_worker(
+                    self, bounded=bounded, draft=True, method="dspark", pcp_size=pcp_size, pcp_rank=pcp_rank
+                )
                 meta = metadata(worker)
                 worker.prepare_cross_layer_step(meta)
                 for layer in range(12):

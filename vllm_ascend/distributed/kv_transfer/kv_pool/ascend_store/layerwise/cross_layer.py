@@ -41,8 +41,9 @@ class CrossLayerKVPoolWorker(LayerwiseKVPoolWorker):
         if "PIECEWISE" in mode_name:
             raise ValueError("cross_layer does not support PIECEWISE yet; use --enforce-eager")
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
-        if self.pp_size != 1 or self.pcp_size != 1 or self.dcp_size != 1 or self.use_kvpp:
-            raise ValueError("cross_layer currently supports Memcache TP deployments without PP/PCP/DCP/KVPP")
+        # V4.1 PCP attention maintains replicated KV; reuse the GVA layout.
+        if self.pp_size != 1 or self.dcp_size != 1 or self.use_kvpp:
+            raise ValueError("cross_layer currently supports Memcache TP/PCP deployments without PP/DCP/KVPP")
         self.load_async = False
         self._load_started = False
         self._pending_layers: set[int] = set()

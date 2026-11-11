@@ -124,6 +124,13 @@ def make_cross_worker(
     architecture="DeepseekV41DSparkModel",
     use_v2=True,
     segmented=False,
+    pcp_size=1,
+    pcp_rank=0,
+    tp_size=1,
+    tp_rank=0,
+    use_mla=False,
+    extra_config=None,
+    store=None,
 ):
     names = [
         name
@@ -175,10 +182,15 @@ def make_cross_worker(
             use_layerwise=True,
             num_layers=num_layers,
             num_hidden_layers=num_layers,
-            extra_config={"backend": "memcache", "layerwise_num_shared_buffers": 1},
+            extra_config={"backend": "memcache", "layerwise_num_shared_buffers": 1, **(extra_config or {})},
             kv_cache_config=cache_config,
+            pcp_size=pcp_size,
+            pcp_rank=pcp_rank,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+            use_mla=use_mla,
         )
-    store = MemoryGVAStore()
+    store = MemoryGVAStore() if store is None else store
     worker.m_store = store
     worker.cache_coordinator = worker.token_database.cache_coordinator = None
     all_names = sum(groups, [])
@@ -228,6 +240,60 @@ def save_prefix(worker):
 
 
 class TestCrossLayerGVA(unittest.TestCase):
+    def test_pcp_replicas_restore_same_gva_objects_with_local_layer_gates(self):
+        writer, store, caches = make_cross_worker(
+            self, pcp_size=2, tp_size=2, use_mla=True, draft=True, method="dspark"
+        )
+        expected = {name: cache[1].clone() for name, cache in caches.items()}
+        save_prefix(writer)
+        objects = dict(store.objects)
+        for pcp_rank in range(2):
+            for tp_rank in range(2):
+                with self.subTest(pcp_rank=pcp_rank, tp_rank=tp_rank):
+                    reader, _, replicas = make_cross_worker(
+                        self,
+                        pcp_size=2,
+                        pcp_rank=pcp_rank,
+                        tp_size=2,
+                        tp_rank=tp_rank,
+                        use_mla=True,
+                        draft=True,
+                        method="dspark",
+                        store=store,
+                    )
+                    self.assertTrue(reader._pipeline_enabled)
+                    self.assertEqual(reader._is_layerwise_save_leader(), tp_rank == 0)
+                    for group in reader.cacheable_group_ids:
+                        self.assertEqual(
+                            reader._make_layerwise_full_key(group, b"h".hex()),
+                            writer._make_layerwise_full_key(group, b"h".hex()),
+                        )
+                    for cache in replicas.values():
+                        cache.zero_()
+                    store.block_address = replicas["model.layers.8.attn.long_kv_cache"][1].data_ptr()
+                    store.blocked.clear()
+                    store.resume.clear()
+                    restore = metadata(reader, load=True, save=False)
+                    reader.prepare_cross_layer_step(restore)
+                    reader.start_load_kv(restore)
+                    self.assertTrue(store.blocked.wait(timeout=2))
+                    reader.wait_for_cross_layer_load(2)
+                    self.assertFalse(reader.layer_load_finished_events[reader._global_to_local_layer[8]].is_set())
+                    torch.testing.assert_close(
+                        replicas["model.layers.2.attn.long_kv_cache"][1], expected["model.layers.2.attn.long_kv_cache"]
+                    )
+                    store.resume.set()
+                    reader.finish_cross_layer_loads()
+                    for name, cache in replicas.items():
+                        torch.testing.assert_close(cache[1], expected[name])
+                        self.assertEqual(int(cache[0].sum()), 0)
+                    self.assertFalse(store.leases)
+                    self.assertEqual(store.objects, objects)
+
+    def test_pcp_peer_mismatch_keeps_existing_gva_validation(self):
+        with self.assertRaisesRegex(ValueError, "Both the producer and consumer must use the same"):
+            make_cross_worker(self, pcp_size=2, extra_config={"decode_pcp_size": 1})
+
     def test_multiple_requests_share_first_consumer_batches(self):
         worker, store, caches = make_cross_worker(self, bounded=True)
         meta = metadata(worker)
