@@ -49,6 +49,8 @@ def test_init_ascend_model_parallel(mock_distributed, parallel_config, otp_size)
     mock_ascend_config.finegrained_tp_config.oproj_tensor_parallel_size = otp_size
     mock_ascend_config.finegrained_tp_config.embedding_tensor_parallel_size = 2
     mock_ascend_config.finegrained_tp_config.mlp_tensor_parallel_size = 2
+    mock_ascend_config.finegrained_tp_config.qkv_iproj_tensor_parallel_size = 1
+    mock_ascend_config.finegrained_tp_config.gproj_tensor_parallel_size = 1
     mock_ascend_config.pd_tp_ratio = 2
     mock_ascend_config.num_head_replica = 0
     mock_ascend_config.pd_head_ratio = 2
@@ -165,6 +167,8 @@ def test_kvpp_group_stays_inside_pipeline_stage(monkeypatch, size, pcp_size):
             lmhead_tensor_parallel_size=0,
             embedding_tensor_parallel_size=0,
             mlp_tensor_parallel_size=0,
+            qkv_iproj_tensor_parallel_size=1,
+            gproj_tensor_parallel_size=1,
         ),
     )
     calls, groups = {}, {}
@@ -218,6 +222,8 @@ def test_engram_dp_pcp_group_reuses_upstream_node_partition(monkeypatch, shared,
             lmhead_tensor_parallel_size=0,
             embedding_tensor_parallel_size=0,
             mlp_tensor_parallel_size=0,
+            qkv_iproj_tensor_parallel_size=1,
+            gproj_tensor_parallel_size=1,
         ),
     )
     upstream = parallel_state.vllm_parallel_state

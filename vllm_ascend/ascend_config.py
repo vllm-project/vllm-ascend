@@ -868,6 +868,8 @@ class AscendConfig:
         finegrained_tp_enabled = (
             self.finegrained_tp_config.oproj_tensor_parallel_size > 1
             or self.finegrained_tp_config.mlp_tensor_parallel_size > 1
+            or self.finegrained_tp_config.qkv_iproj_tensor_parallel_size > 1
+            or self.finegrained_tp_config.gproj_tensor_parallel_size > 1
         )
         if finegrained_tp_enabled and not self.scheduler_config.recompute_scheduler_enable:
             raise AssertionError(
@@ -1400,22 +1402,21 @@ class AscendConfig:
 class FinegrainedTPConfig:
     """Configuration Object for ``additional_config["finegrained_tp_config"]``.
 
-    Migrated to ``@config`` (pydantic dataclass). 4 int fields get lax coercion
+    Migrated to ``@config`` (pydantic dataclass). 6 int fields get lax coercion
     ('2'→2). vllm_config-dependent preconditions (TP/eager/kv_consumer/is_moe/
     data_parallel divisibility) are validated in ``_validate_preconditions()``,
     a plain method invoked explicitly by ``init_ascend_config`` (Plan B:
     business validation stays out of pydantic). ``vllm_config`` is no longer a
     member field.
-
-    Size semantics follow vLLM ``ParallelConfig``: ``1`` (the default) means no
-    sharding and only sizes > 1 enable a knob. ``0`` is tolerated as a disabled
-    alias for older configs but is not part of the documented range.
     """
 
     oproj_tensor_parallel_size: int = 1
     lmhead_tensor_parallel_size: int = 1
     embedding_tensor_parallel_size: int = 1
     mlp_tensor_parallel_size: int = 1
+    # DP-axis projection TP, adapted from upstream PR20574. 0/1 both disable.
+    qkv_iproj_tensor_parallel_size: int = 1
+    gproj_tensor_parallel_size: int = 1
 
     @model_validator(mode="after")
     def _validate_sizes(self):
@@ -1424,6 +1425,8 @@ class FinegrainedTPConfig:
             "lmhead_tensor_parallel_size",
             "embedding_tensor_parallel_size",
             "mlp_tensor_parallel_size",
+            "qkv_iproj_tensor_parallel_size",
+            "gproj_tensor_parallel_size",
         )
         for field_name in size_fields:
             value = getattr(self, field_name)
@@ -1437,7 +1440,39 @@ class FinegrainedTPConfig:
 
         vc = vllm_config
         enabled_configs = []
-        if self.oproj_tensor_parallel_size > 1 or self.mlp_tensor_parallel_size > 1:
+        projection_tp = self.qkv_iproj_tensor_parallel_size > 1 or self.gproj_tensor_parallel_size > 1
+        text_config = getattr(vc.model_config, "hf_text_config", None)
+        is_kimi = getattr(text_config, "model_type", None) == "kimi_linear"
+        if projection_tp:
+            parallel = vc.parallel_config
+            if (
+                parallel.tensor_parallel_size != 1
+                or parallel.prefill_context_parallel_size != 1
+                or parallel.decode_context_parallel_size != 1
+                or parallel.pipeline_parallel_size != 1
+            ):
+                raise ValueError("Kimi projection TP requires TP=PCP=DCP=PP=1.")
+            if not is_kimi:
+                raise ValueError("QKV/G projection TP currently supports Kimi linear attention only.")
+            if vc.kv_transfer_config is None or not vc.kv_transfer_config.is_kv_consumer:
+                raise ValueError("Kimi projection TP requires a PD decode node.")
+            if vc.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
+                raise ValueError("Kimi projection TP requires graph mode.")
+            kda = text_config.linear_attn_config
+            if not kda.get("use_full_rank_gate", False):
+                raise ValueError("Kimi projection TP requires full-rank output gates.")
+            for name, heads in (
+                ("qkv_iproj_tensor_parallel_size", kda["num_heads"]),
+                ("gproj_tensor_parallel_size", kda["num_heads"]),
+                ("gproj_tensor_parallel_size", text_config.num_attention_heads),
+            ):
+                size = getattr(self, name)
+                if size > 1 and heads % size:
+                    raise ValueError(f"{name} must divide the attention head count ({heads}).")
+            for name in ("qkv_iproj_tensor_parallel_size", "gproj_tensor_parallel_size"):
+                if getattr(self, name) > 1:
+                    enabled_configs.append(f"{name}={getattr(self, name)}")
+        if self.oproj_tensor_parallel_size > 1 or self.mlp_tensor_parallel_size > 1 or projection_tp:
             # o_proj's _forward_o_proj reshape misaligns under tp > 1; mlp is untested there.
             if vc.parallel_config.tensor_parallel_size > 1:
                 raise AssertionError(
@@ -1476,6 +1511,8 @@ class FinegrainedTPConfig:
                 capture_bound = max(capture_sizes) if capture_sizes else None
             # A step beyond the capture bound dispatches to eager and desyncs the cross-DP collectives.
             if capture_bound is None or capture_bound < max_step:
+                if is_kimi:
+                    raise ValueError("Kimi fine-grained TP requires graph capture capacity covering every decode step.")
                 logger.warning(
                     "Disabling oproj_tensor_parallel_size=%d and mlp_tensor_parallel_size=%d: "
                     "the largest cudagraph capture size (%s) does not cover the largest "
@@ -1503,6 +1540,8 @@ class FinegrainedTPConfig:
             self.lmhead_tensor_parallel_size,
             self.embedding_tensor_parallel_size,
             self.mlp_tensor_parallel_size,
+            self.qkv_iproj_tensor_parallel_size,
+            self.gproj_tensor_parallel_size,
         ]
         for module_tp_size in module_tp_sizes:
             # If it is a dense model, then expert parallel is not needed,

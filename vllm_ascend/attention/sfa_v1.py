@@ -2014,9 +2014,11 @@ class AscendSFAImpl(MLAAttentionImpl):
             assert self.turboquant is not None
             # Build the transform tensors outside graph capture.
             self.turboquant._initialize(hidden_states.device)
+        gate_tp = getattr(self, "gproj_tp", None)
         if attn_metadata is None:
-            # Profiling run.
-            return output.fill_(0)
+            if gate_tp is not None:
+                gate_tp.project(gate_tp.gather(hidden_states), self.g_proj).wait()
+            return output.zero_()
 
         if self.qk_rope_head_dim == 0:
             num_tokens = min(hidden_states.shape[0], attn_metadata.slot_mapping.shape[0])
@@ -2030,9 +2032,14 @@ class AscendSFAImpl(MLAAttentionImpl):
                 else:
                     num_tokens = min(num_tokens, attn_metadata.num_actual_tokens)
             if num_tokens == 0:
+                if gate_tp is not None:
+                    gate_tp.project(gate_tp.gather(hidden_states), self.g_proj).wait()
                 return output.zero_()
+
             hidden_states = hidden_states[:num_tokens]
         gate_hidden_states = hidden_states if self.g_proj is not None else None
+        # AG reads owner hidden while the prolog runs. Do not wait here.
+        gate_input = gate_tp.gather(hidden_states) if gate_tp is not None else None
 
         composed_kv_cache = self._compose_sfa_kv_cache(kv_cache)
         assert composed_kv_cache is not None
@@ -2161,6 +2168,9 @@ class AscendSFAImpl(MLAAttentionImpl):
                 self._store_packed_kv_cache(k_pe, k_nope, knope_scale, kv_cache, slot_mapping_sfa, attn_metadata)
             self._on_kv_cache_written(kv_cache, attn_metadata)
 
+        # G Cube follows prolog; return communication runs during indexer/SFA.
+        pending_gate = gate_tp.project(gate_input, self.g_proj) if gate_input is not None else None
+
         # A sharded-decode PCP rank can own no request but must still write
         # and gather KV with the other ranks.
         has_local_query = attn_metadata.num_actual_tokens > 0
@@ -2223,7 +2233,10 @@ class AscendSFAImpl(MLAAttentionImpl):
             attn_output = hidden_states.new_zeros((ql_nope.shape[0], self.local_num_heads * self.v_head_dim))
         if gate_hidden_states is not None:
             assert self.g_proj is not None
-            gate = self.g_proj(gate_hidden_states.contiguous())[0]
+            if pending_gate is not None:
+                gate = pending_gate.wait().flatten(1)[: attn_output.shape[0]]
+            else:
+                gate = self.g_proj(gate_hidden_states.contiguous())[0]
             flash_attention_gate(attn_output, gate)
         self._finalize_o_proj(attn_output, output[:num_input_tokens])
 

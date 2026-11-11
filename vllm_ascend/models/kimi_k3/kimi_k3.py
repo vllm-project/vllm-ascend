@@ -16,6 +16,7 @@ from typing import Any, TypeVar, cast
 import torch
 import vllm.envs as envs
 from torch import nn
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_pp_group,
@@ -87,15 +88,18 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.distributed.parallel_state import get_gproj_tp_group, get_mlp_tp_group
+from vllm_ascend.ops.finegrained_tp import ChunkedMLPTP, FullRankGateTP, ProjectionColumnParallelLinear
 from vllm_ascend.ops.kda_parallel import KDARowParallelLinear, get_kda_state_shape
 from vllm_ascend.ops.kimi_kda import (
     AscendKimiK3DeltaAttention as AscendKimiK3DeltaAttentionBase,
 )
-from vllm_ascend.ops.linear_op import KimiOProjMMReduceScatterOp
+from vllm_ascend.ops.linear_op import KimiOProjMMReduceScatterOp, MLPColumnParallelOp
 from vllm_ascend.quantization.configs.modelslim_config import AscendModelSlimConfig
 from vllm_ascend.quantization.methods.base import PreparedLinearInput
 from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import AscendW8A8DynamicLinearMethod
@@ -286,8 +290,23 @@ class AscendKimiMLP(KimiMLP):
             activation_situ_linear_beta=activation_situ_linear_beta,
         )
         self.use_sequence_parallel = use_sequence_parallel
+        self._finegrained_mlp = None
+        if isinstance(getattr(getattr(self, "gate_up_proj", None), "custom_op", None), MLPColumnParallelOp):
+            self._finegrained_mlp = ChunkedMLPTP(get_mlp_tp_group())
+            self._finegrained_prefix = prefix
+            context = get_current_vllm_config().compilation_config.static_forward_context
+            if prefix in context:
+                raise ValueError(f"Duplicate fine-grained MLP layer name: {prefix}")
+            context[prefix] = self
+
+    def _prepare_down_input(self, gate_up: torch.Tensor) -> torch.Tensor:
+        return self.act_fn(gate_up)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if getattr(self, "_finegrained_mlp", None) is not None:
+            output = torch.empty_like(x)
+            torch.ops.vllm.kimi_mlp_finegrained_forward(x, output, self._finegrained_prefix)
+            return output
         if self.use_sequence_parallel:
             # All weight shards must operate on the same tokens. Reducing
             # different sequence shards would mix live and padding rows.
@@ -654,13 +673,25 @@ class AscendKimiDSAAttention(AscendKimiMLAAttention):
             topk_indices_buffer=topk_indices_buffer,
         )
         if config.mla_use_output_gate:
-            self.g_proj = ColumnParallelLinear(
-                config.hidden_size,
-                config.num_attention_heads * config.v_head_dim,
-                bias=False,
-                quant_config=vllm_config.quant_config,
-                prefix=f"{prefix}.g_proj",
-            )
+            gate_size = get_ascend_config().finegrained_tp_config.gproj_tensor_parallel_size
+            if gate_size > 1:
+                group = get_gproj_tp_group()
+                self.g_proj = ProjectionColumnParallelLinear(
+                    config.hidden_size,
+                    config.num_attention_heads * config.v_head_dim,
+                    group=group,
+                    quant_config=None,
+                    prefix=f"{prefix}.g_proj",
+                )
+                self.impl.gproj_tp = FullRankGateTP(group, config.num_attention_heads, config.v_head_dim)
+            else:
+                self.g_proj = ColumnParallelLinear(
+                    config.hidden_size,
+                    config.num_attention_heads * config.v_head_dim,
+                    bias=False,
+                    quant_config=vllm_config.quant_config,
+                    prefix=f"{prefix}.g_proj",
+                )
             self.impl.g_proj = self.g_proj
 
 
@@ -1090,7 +1121,9 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                 # projection. Match registered parameters, including scales
                 # and offsets, and preserve their own TP/quantization loaders.
                 # Missing PP layers and fused MLA/KDA gates stay upstream.
-                if ".g_proj." in name and name in params_dict:
+                if name in params_dict and any(
+                    token in name for token in (".g_proj.", ".b_proj.", ".f_a_proj.", ".f_b_proj.")
+                ):
                     param = params_dict[name]
                     weight_loader = getattr(param, "weight_loader", default_weight_loader)
                     kwargs = args[2] if len(args) > 2 else {}
@@ -1486,3 +1519,21 @@ class AscendKimiK3ForConditionalGeneration(UpstreamKimiK3ForConditionalGeneratio
 
     def set_dspark_aux_capture_materialized(self, enabled: bool) -> None:
         self.language_model.set_dspark_aux_capture_materialized(enabled)
+
+
+@eager_break_during_capture
+def kimi_mlp_finegrained_forward(hidden_states: torch.Tensor, output: torch.Tensor, layer_name: str) -> None:
+    layer = get_forward_context().no_compile_layers[layer_name]
+    output.copy_(layer._finegrained_mlp.forward(layer, hidden_states))
+
+
+def kimi_mlp_finegrained_forward_fake(hidden_states: torch.Tensor, output: torch.Tensor, layer_name: str) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="kimi_mlp_finegrained_forward",
+    op_func=kimi_mlp_finegrained_forward,
+    mutates_args=["output"],
+    fake_impl=kimi_mlp_finegrained_forward_fake,
+)
