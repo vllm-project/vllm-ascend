@@ -133,12 +133,11 @@ if TYPE_CHECKING:
     from vllm.distributed.weight_transfer import WeightTransferEngine
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 
-# Online-quantized LM-head copies and these helpers exist only on paired main.
-if not vllm_version_is("0.32.0"):
-    from vllm.model_executor.layers.quantization.online.lm_head import (
-        restore_quantized_lm_heads,
-        share_source_lm_heads,
-    )
+
+from vllm.model_executor.layers.quantization.online.lm_head import (
+    restore_quantized_lm_heads,
+    share_source_lm_heads,
+)
 
 
 
