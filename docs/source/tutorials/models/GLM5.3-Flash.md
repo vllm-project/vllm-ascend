@@ -605,6 +605,7 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
               --reasoning-parser glm47 \
               --enable-prefix-caching \
               --enable-chunked-prefill \
+              --enable-prompt-tokens-details \
               --limit-mm-per-prompt '{"image": 1, "video": 0}' \
               --gpu-memory-utilization 0.9 \
               --enforce-eager \
@@ -759,6 +760,11 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
       [Context Parallel](../../user_guide/feature_guide/context_parallel.md).
     - Both roles enable prefix caching and allow one image per prompt,
       with video input disabled through `--limit-mm-per-prompt`.
+    - Prefill enables `--enable-prompt-tokens-details` so the PD proxy can
+      report the prefiller's real prefix-cache hit count through
+      `usage.prompt_tokens_details.cached_tokens`. Without the flag the proxy
+      reports `cached_tokens: 0`. See
+      [Using EvalScope](../../developer_guide/evaluation/using_evalscope.md).
     - `MooncakeConnectorV2` uses `kv_producer` on Prefill and `kv_consumer`
       on Decode, with base KV ports `30100` and `30800`, respectively.
       Both roles declare Prefill TP1/PCP8/DP1 and Decode TP1/PCP1/DP8.
@@ -826,6 +832,7 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
       --tensor-parallel-size "$7" \
       --prefill-context-parallel-size "$8" \
       --enable-expert-parallel \
+      --enable-prompt-tokens-details \
       --enable-eplb \
       --eplb-config '{"window_size":3000,"step_interval":3000,"num_redundant_experts":0,"use_async":true,"policy":"stair","communicator":"hixl"}' \
       --seed 1024 \
@@ -1006,6 +1013,11 @@ address, DP RPC port, TP size, and PCP size to each role script as `$1` through
       shared-expert DP and multistream
       overlap. Recompute scheduling is enabled through `scheduler_config`.
     - Both roles explicitly limit image input to one image per prompt.
+    - Prefill enables `--enable-prompt-tokens-details` so the PD proxy can
+      report the prefiller's real prefix-cache hit count through
+      `usage.prompt_tokens_details.cached_tokens`. Without the flag the proxy
+      reports `cached_tokens: 0`. See
+      [Using EvalScope](../../developer_guide/evaluation/using_evalscope.md).
     - `MooncakeConnectorV2` uses `kv_producer` and engine ID `0` on Prefill,
       and `kv_consumer` and engine ID `1` on Decode. These IDs identify the
       roles in this deployment. Base KV ports are `36680` and `36580`.

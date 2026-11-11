@@ -537,10 +537,28 @@ def test_instances_add_remove(proxy_server):
 
 
 def test_usage_cached_tokens(proxy_server):
-    """Proxy reports prefiller cached_tokens in the decode response usage field."""
+    """The prefiller's cached_tokens replace the decoder's PD-inflated value."""
+    _set_script(
+        MOCK_PREFILL_PORT,
+        [
+            {
+                "kind": "json",
+                "status": 200,
+                "body": {
+                    "kv_transfer_params": {"do_remote_decode": True},
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 1,
+                        "total_tokens": 11,
+                        "prompt_tokens_details": {"cached_tokens": 8},
+                    },
+                },
+            }
+        ],
+    )
     usage_chunk = (
         b'data: {"id":"x","choices":[],"usage":{"prompt_tokens":10,'
-        b'"completion_tokens":2,"prompt_tokens_details":{}}}\n\n'
+        b'"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":10}}}\n\n'
     )
     _set_script(
         MOCK_DECODE_PORT,
@@ -548,5 +566,28 @@ def test_usage_cached_tokens(proxy_server):
     )
     st, body = _post(proxy_server, _chat_req(stream=True), stream=True)
     assert st == 200
-    # The proxy should have added cached_tokens to the usage chunk
-    assert b"cached_tokens" in body
+    # The decoder counts transferred KV as cached, so its own 10 is wrong here.
+    assert b'"cached_tokens": 8' in body
+    assert b'"cached_tokens": 10' not in body
+
+
+def test_usage_cached_tokens_without_prefiller_details(proxy_server):
+    """A prefiller that omits prompt-token details yields cached_tokens=0.
+
+    vLLM drops the field both when the prefiller had no hits and when
+    --enable-prompt-tokens-details is not set, so the proxy cannot report the
+    decoder's PD-inflated count in this case.
+    """
+    _set_script(MOCK_PREFILL_PORT, [])
+    usage_chunk = (
+        b'data: {"id":"x","choices":[],"usage":{"prompt_tokens":10,'
+        b'"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":10}}}\n\n'
+    )
+    _set_script(
+        MOCK_DECODE_PORT,
+        [{"kind": "stream", "status": 200, "chunks": [_sse("hi"), usage_chunk, DONE]}],
+    )
+    st, body = _post(proxy_server, _chat_req(stream=True), stream=True)
+    assert st == 200
+    assert b'"cached_tokens": 0' in body
+    assert b'"cached_tokens": 10' not in body
