@@ -1,0 +1,5 @@
+pr: 21621
+entries:
+  - category: bugfix
+    text: Fixed DeepSeek V4.1 DSpark MoE registration and redundant expert weight mapping when EPLB is enabled.
+    model: deepseek-v4.1
