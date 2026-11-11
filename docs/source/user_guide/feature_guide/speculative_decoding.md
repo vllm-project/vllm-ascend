@@ -490,7 +490,7 @@ for a BF16 draft.
 !!! warning
 
     When `enable_adaptive_verification` is enabled, vLLM Ascend does not support fully eager execution or pure `PIECEWISE` graph mode for the target model. The same restriction applies in vLLM.
-    In vLLM Ascend, adaptive verification cannot be combined with PP, PCP, DCP, LM head TP, or LoRA.
+    In vLLM Ascend, adaptive verification cannot be combined with PP, PCP, DCP, or LoRA.
     Commercial use is restricted.
 
 - Offline inference
