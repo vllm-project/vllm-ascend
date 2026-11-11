@@ -149,14 +149,18 @@ class FastEEPRuntime:
         config.parallel_config.data_parallel_size = target
         if not config.use_v2_model_runner:
             self.worker.model_runner.dp_size = target
+        routing_tables = {}
+        routing_rank = self.rank if communication_method(config) == "alltoall" else 0
         for layer, placement in zip(self.layers, placements):
             layer.global_expert_map = torch.tensor(
                 placement, dtype=layer.global_expert_map.dtype, device=layer.global_expert_map.device
             )
             log2phy = layer.log2phy
             assert log2phy is not None
-            routing_rank = self.rank if communication_method(config) == "alltoall" else 0
-            log2phy.copy_(generate_log2phy_map(layer.global_expert_map, routing_rank, tp_size=1).to(log2phy.device))
+            key = tuple(tuple(row) for row in placement)
+            if key not in routing_tables:
+                routing_tables[key] = generate_log2phy_map(layer.global_expert_map, routing_rank, tp_size=1)
+            log2phy.copy_(routing_tables[key].to(log2phy.device))
             moe = layer.moe_config
             local = moe.num_local_experts
             physical = local * target
@@ -190,8 +194,8 @@ class FastEEPRuntime:
                 raise RuntimeError("FastEEP inference replaced or recaptured a graph after initialization.")
             if self.comms is None:
                 self.comms = ReclaimableCommunicators(self.parent_dp)
-            self.comms.begin_transition()
             if target > self.active:
+                self.comms.begin_transition()
                 self._refill(target)
             verify = get_ascend_config().fasteep.verify_migration
             migration = ExpertMigration(self.layers, self.rank, self.comms, verify=verify)

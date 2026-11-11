@@ -14,6 +14,20 @@ from vllm_ascend.distributed.fasteep.hccl import RetainedGroup
 
 
 class TestCommunicationReclamation(PytestBase):
+    def test_constructor_defers_migration_bootstrap(self):
+        parent = MagicMock(rank_in_group=0)
+        with (
+            patch.object(communication.torch.npu, "current_device", return_value=0),
+            patch.object(communication.torch, "device", return_value="npu:0"),
+            patch("vllm_ascend.distributed.fasteep.hccl.HCCLLibrary") as library,
+            patch("vllm_ascend.distributed.fasteep.hccl.PyHcclCommunicator") as create,
+        ):
+            owner = ReclaimableCommunicators(parent)
+        create.assert_not_called()
+        library.assert_called_once_with()
+        assert owner.root is None
+        assert owner.library is library.return_value
+
     def test_v2_cpu_metadata_uses_group_local_collective(self):
         group = object.__new__(RetainedGroup)
         group.world_size = 3

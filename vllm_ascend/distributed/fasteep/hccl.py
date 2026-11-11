@@ -13,6 +13,7 @@ from vllm.distributed.utils import stateless_init_torch_distributed_process_grou
 
 from vllm_ascend.distributed.device_communicators.pyhccl import PyHcclCommunicator
 from vllm_ascend.distributed.device_communicators.pyhccl_wrapper import (
+    HCCLLibrary,
     aclrtStream_t,
     buffer_type,
     hcclComm_t,
@@ -152,15 +153,19 @@ class RetainedGroup:
 
 
 class RetainedCommunicators:
-    def __init__(self, parent):
+    def __init__(self, parent, *, initialize_root=True):
         self.parent = parent
         self.rank = parent.rank_in_group
         self.device = torch.device("npu", torch.npu.current_device())
         self.control = getattr(parent, "tcp_store_group", None)
-        self.root: PyHcclCommunicator | None = PyHcclCommunicator(self.control or parent.cpu_group, self.device)
-        if not self.root.available:
-            raise RuntimeError("A live HCCL parent is required for FastEEP.")
-        self.library = self.root.hccl
+        self.root: PyHcclCommunicator | None = None
+        if initialize_root:
+            self.root = PyHcclCommunicator(self.control or parent.cpu_group, self.device)
+            if not self.root.available:
+                raise RuntimeError("A live HCCL parent is required for FastEEP.")
+            self.library = self.root.hccl
+        else:
+            self.library = HCCLLibrary()
         self.children = {}
         self.sequence = 0
         self.functions = {}

@@ -83,6 +83,12 @@ sessions before resizing.
 The native `/scale_elastic_ep`, sleep/wake, pause/resume and collective-RPC
 control endpoints are disabled in this mode. Worker
 processes and CPU rendezvous groups remain resident until server shutdown.
+
+Layers whose expert slots already match the target placement skip migration
+collectives. The migration communicator is initialized only for peer transfers
+or joining-worker weight refill. Equal layer placements reuse routing-table
+construction within each resize while retaining independent layer metadata.
+Every startup rank still participates in the final topology commit barrier.
 Native migration communicators exist only during transitions. Active serving
 communicators are rebuilt for the new group, and replaced startup device
 communicators are destroyed. This releases their communication buffers while

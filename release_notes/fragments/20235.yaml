@@ -2,3 +2,5 @@ pr: 20235
 entries:
   - category: feature
     text: Added experimental retained-state FastEEP with reclaimable PIECEWISE graph memory and HCCL buffers, expert-level migration, and a serialized resize endpoint.
+  - category: performance
+    text: FastEEP avoids redundant migration setup for unchanged placements and reuses routing-table construction for equal layer layouts during resizing.

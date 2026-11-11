@@ -24,7 +24,7 @@ class ReclaimableCommunicators(RetainedCommunicators):
     """
 
     def __init__(self, parent):
-        super().__init__(parent)
+        super().__init__(parent, initialize_root=False)
         self.active_group = None
         self.active_native = None
         self.cpu_groups = {}

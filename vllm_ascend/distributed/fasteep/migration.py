@@ -33,6 +33,10 @@ class ExpertMigration:
         verified = 0
         for layer, before, after in zip(self.layers, current, target):
             transfers = plan_transfers(before, after)
+            if not transfers:
+                continue
+            if any(move.source_rank != move.target_rank for move in transfers):
+                self.comms.begin_transition()
             checks = []
             # Capture all outgoing values before any target slot is written.
             # A cyclic permutation can otherwise overwrite a later donor.
