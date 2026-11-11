@@ -148,8 +148,6 @@ def enable_batch_invariant_mode():
         torch_npu.npu_fused_infer_attention_score = (
             torch.ops.batch_invariant_ops.npu_fused_infer_attention_score_batch_invariant
         )
-        # patch npu_add_rms_norm to ensure batch invariant.
-        torch_npu.npu_add_rms_norm = add_rms_norm
         # torch.sum can't be replaced by dispatch logic, so we patch it directly.
         torch.sum = reduce_sum
         # Tensor.sum uses the same batch-invariant reduce_sum implementation.
@@ -164,6 +162,10 @@ def enable_batch_invariant_mode():
         # linear call matmul internally, so register linear only when ascendc
         # is not available. it will get better performance with ascendc.
         _batch_invariant_LIB.impl("aten::linear", linear_batch_invariant, "NPU")
+
+    if HAS_TRITON or HAS_ASCENDC_BATCH_INVARIANT:
+        # The add + RMSNorm decomposition only needs torch_npu.
+        torch_npu.npu_add_rms_norm = add_rms_norm
 
 
 def init_batch_invariance():
