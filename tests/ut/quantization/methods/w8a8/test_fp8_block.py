@@ -402,3 +402,66 @@ class TestAscendFp8BlockFusedMoEMethod(TestBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFp8WeightShapeValidation(TestBase):
+    def setUp(self):
+        self.linear = AscendFp8BlockLinearMethod.__new__(AscendFp8BlockLinearMethod)
+        self.linear.block_n = self.linear.block_k = 128
+        self.moe = AscendFp8BlockFusedMoEMethod.__new__(AscendFp8BlockFusedMoEMethod)
+        self.moe.block_n = 64
+        self.moe.block_k = 128
+
+    def test_rejects_misaligned_row_and_column_shards(self):
+        layer = nn.Module()
+        layer.tp_size = 4
+        with patch(f"{MODULE}.get_tensor_model_parallel_world_size") as global_tp:
+            with self.assertRaisesRegex(ValueError, "input_size_per_partition"):
+                self.linear.validate_weight_shapes(layer, 768, 128, 192, [128])
+            with self.assertRaisesRegex(ValueError, "output_partition_size"):
+                self.linear.validate_weight_shapes(layer, 256, 768, 256, [192])
+            self.linear.validate_weight_shapes(layer, 256, 1536, 256, [384])
+            global_tp.assert_not_called()
+
+    def test_packed_mismatch_respects_loader_allowance(self):
+        layer = nn.Module()
+        layer.tp_size = 8
+        layer.output_sizes = [1536, 512]
+        with self.assertRaisesRegex(ValueError, "output_partition_size"):
+            self.linear.validate_weight_shapes(layer, 256, 2048, 256, [192, 64])
+        layer.allow_fp8_block_shape_mismatch = True
+        self.linear.validate_weight_shapes(layer, 256, 2048, 256, [192, 64])
+
+    def test_replicated_final_projection_can_end_in_a_partial_tile(self):
+        layer = nn.Module()
+        layer.tp_size = 4
+        layer.output_sizes = [512, 512, 256]
+        layer.num_kv_head_replicas = 4
+        self.linear.validate_weight_shapes(layer, 256, 1280, 256, [128, 128, 64])
+        layer.num_kv_head_replicas = 1
+        with self.assertRaisesRegex(ValueError, "output_partition_size"):
+            self.linear.validate_weight_shapes(layer, 256, 1280, 256, [128, 128, 64])
+
+    def test_moe_checks_block_k_only_when_tensor_sharded(self):
+        layer = nn.Module()
+        layer.tp_size = 4
+        with self.assertRaisesRegex(ValueError, "block_n"):
+            self.moe.validate_weight_shapes(layer, 160)
+        with self.assertRaisesRegex(ValueError, "block_k"):
+            self.moe.validate_weight_shapes(layer, 192)
+        layer.tp_size = 1
+        self.moe.validate_weight_shapes(layer, 192)
+
+    def test_global_tp_fallback_and_replicated_merged_pair(self):
+        layer = nn.Module()
+        layer.output_sizes = [1536, 512]
+        with patch(f"{MODULE}.get_tensor_model_parallel_world_size", return_value=8) as global_tp:
+            self.linear.validate_weight_shapes(layer, 256, 2048, 256, [1536, 512])
+            global_tp.assert_called_once_with()
+
+    def test_sharded_final_projection_uses_its_own_global_size(self):
+        layer = nn.Module()
+        layer.tp_size = 4
+        layer.output_sizes = [512, 768]
+        with self.assertRaisesRegex(ValueError, "output_partition_size"):
+            self.linear.validate_weight_shapes(layer, 256, 1280, 256, [128, 192])

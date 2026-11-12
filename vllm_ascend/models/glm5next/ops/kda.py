@@ -82,6 +82,7 @@ def chunk_kda(
         a_log,
         dt_bias,
         lower_bound=lower_bound,
+        use_qk_l2norm_in_kernel=False,
     )
     scatter_states(state, final_state.to(state.dtype), state_indices)
     return output

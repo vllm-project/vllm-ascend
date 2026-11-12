@@ -1332,6 +1332,10 @@ class NPUModelRunner310V2(NPUModelRunner):
             sampler_output = self.sampler(logits, input_batch)
             can_sample_np = input_batch.seq_lens_np[: input_batch.num_reqs] >= input_batch.prefill_len_np
             self._sampled_tokens_cpu = None
+            # Penalties and bad words read host history. MTP also uses it
+            # to prepare the next draft, including steps with no drafts.
+            if self.speculator is not None or self.sampler.needs_cpu_token_history(input_batch.idx_mapping_np):
+                self._sampled_tokens_cpu = sampler_output.sampled_token_ids.detach().to("cpu")
             num_reqs = input_batch.num_reqs
             np.copyto(
                 self._num_sampled_staging.np[:num_reqs],
@@ -1371,8 +1375,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         """Run request bookkeeping on CPU; upload only immediate NPU consumers."""
         # Device arguments remain for upstream API compatibility.
         del num_sampled, num_rejected, query_start_loc, draft_tokens
-        if self._sampled_tokens_cpu is not None:
-            assert self.rejection_sampler is not None
+        if self._sampled_tokens_cpu is not None and self.rejection_sampler is not None:
             self.rejection_sampler.synchronize_cpu()
         # Host rejection counts are ready after synchronize_cpu; reuse them in
         # propose() instead of another device→host copy.
@@ -1391,7 +1394,10 @@ class NPUModelRunner310V2(NPUModelRunner):
         # Chunked-prefill rows have no sample and retain prior state.
         valid_batch_np = np.flatnonzero(self._num_sampled_cpu.numpy() > 0)
         if valid_batch_np.size:
-            all_rows_valid = sampled_tokens_cpu is None and valid_batch_np.size == self._postprocess_idx_mapping_np.size
+            # Reuse the device token for non-speculative decoding, even when
+            # penalties or bad words require a separate CPU history.
+            use_device_tokens = sampled_tokens_cpu is None or (self.speculator is None and sampled_tokens.shape[1] == 1)
+            all_rows_valid = use_device_tokens and valid_batch_np.size == self._postprocess_idx_mapping_np.size
             if all_rows_valid:
                 valid_reqs = idx_mapping.to(torch.int64)
                 last_tokens = sampled_tokens[:, 0]
@@ -1403,7 +1409,7 @@ class NPUModelRunner310V2(NPUModelRunner):
                 valid_reqs = self._decode_req_indices.gpu[:num_valid]
                 self._decode_input_indices.copy_to_gpu(num_valid)
                 self._decode_req_indices.copy_to_gpu(num_valid)
-                if sampled_tokens_cpu is None:
+                if use_device_tokens:
                     last_tokens = sampled_tokens.index_select(0, valid_batch)[:, 0]
                 else:
                     last_tokens_cpu = torch.stack(

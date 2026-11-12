@@ -179,8 +179,8 @@ def _score_edges(
     return unary_logits[:, :, None] + torch.einsum("blpr,blcr->blpc", predecessors * hidden[:, :, None], successors)
 
 
-# The V2 speculator supplies a request-shaped ForwardContext for this module.
-# Its compiled operations remain inside DFlash2's outer FULL ACL graph.
+# Context-free calls bypass any internal ACLGraphWrapper's capture/replay.
+# Compiled device operations still participate in an active outer draft capture.
 @support_torch_compile
 class CandidateSelector(nn.Module):
     def __init__(

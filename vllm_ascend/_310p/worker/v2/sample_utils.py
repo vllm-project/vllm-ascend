@@ -2,8 +2,8 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 """310P sampling primitives backed by the shared CPU generator cache.
 
-Lives under the MRv2 worker so that the MRv1-only ``vllm_ascend._310p.sample``
-package can be deleted without affecting the 310P MRv2 sampling path.
+Lives under the MRv2 worker; the MRv1-only ``vllm_ascend._310p.sample`` package
+it was extracted from has been removed.
 """
 
 import torch
@@ -16,7 +16,11 @@ _CPU_GENERATOR_CACHE_310P: dict[int, tuple[torch.Generator, torch.Generator]] = 
 def _prepare_cpu_generators_310p(
     generators: dict[int, torch.Generator],
 ) -> dict[int, torch.Generator]:
-    """Return CPU RNGs while preserving requests across batch reordering."""
+    """Reuse request-owned CPU RNGs; cache mirrors only for non-CPU sources.
+
+    CPU sources must retain their current state across temporary batch absence
+    and baseline/speculative sampling, rather than restarting from initial_seed.
+    """
     cached_by_source = {
         id(source): (source, cpu_generator) for source, cpu_generator in _CPU_GENERATOR_CACHE_310P.values()
     }
@@ -24,6 +28,9 @@ def _prepare_cpu_generators_310p(
     next_cache: dict[int, tuple[torch.Generator, torch.Generator]] = {}
 
     for request_index, source in generators.items():
+        if isinstance(source, torch.Generator) and source.device.type == "cpu":
+            prepared[request_index] = source
+            continue
         cache_entry = cached_by_source.get(id(source))
         if cache_entry is None or cache_entry[0] is not source:
             cpu_generator = torch.Generator(device="cpu")
@@ -67,49 +74,6 @@ def _sample_from_cdf_310p(
     cdf = weights.cumsum(dim=-1, dtype=torch.float32)
     thresholds = uniforms.unsqueeze(-1) * cdf[..., -1:]
     return torch.searchsorted(cdf, thresholds, right=True).squeeze(-1)
-
-
-def fill_exponential_310p(
-    reference: torch.Tensor,
-    generators: dict[int, torch.Generator],
-    active_mask: list[bool] | None = None,
-) -> torch.Tensor:
-    """Generate exponential values on CPU and transfer them to NPU."""
-    batch_size = reference.shape[0]
-    cpu_generators = _prepare_cpu_generators_310p(generators)
-    needs_default_values = active_mask is not None or len(generators) != batch_size
-
-    if needs_default_values:
-        uniforms = torch.rand(
-            reference.shape,
-            dtype=torch.float32,
-            device="cpu",
-            pin_memory=True,
-        )
-    else:
-        uniforms = torch.empty(
-            reference.shape,
-            dtype=torch.float32,
-            device="cpu",
-            pin_memory=True,
-        )
-
-    for request_index, cpu_generator in cpu_generators.items():
-        if active_mask is not None and not active_mask[request_index]:
-            continue
-        uniforms[request_index] = torch.rand(
-            reference.shape[1:],
-            dtype=torch.float32,
-            generator=cpu_generator,
-        )
-
-    uniforms.clamp_min_(torch.finfo(torch.float32).tiny)
-    exponential = -torch.log(uniforms)
-    return exponential.to(
-        device=reference.device,
-        dtype=reference.dtype,
-        non_blocking=True,
-    )
 
 
 def _random_sample_310p(
