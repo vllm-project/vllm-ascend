@@ -8,6 +8,7 @@ from dataclasses import dataclass, fields
 from typing import Any, ClassVar
 
 import torch
+from vllm.config import CUDAGraphMode
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 
@@ -26,6 +27,7 @@ from vllm_ascend.attention.dsa_v41 import (
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, is_pcp_enabled, uses_pcp_sharded_layout
 from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio, get_storage_block_size
+from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.rope_dsv4 import get_full_cos_and_sin_dsa_for_layer
 
 
@@ -517,15 +519,58 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
         gathered = get_pcp_group().all_gather(hidden_states.contiguous(), dim=0)
         return torch.index_select(gathered, 0, metadata.hidden_restore_idx)
 
+    def _can_overlap_hidden_gather(self, metadata, projector):
+        # PCP metadata identifies a step that already requires global hidden.
+        # Ordinary replicated decode/draft steps must not gain a new collective.
+        swa = metadata.swa
+        if not isinstance(swa, AscendDSAV41PCPMetadata) or swa.global_metadata is None:
+            return False
+        global_metadata = swa.global_metadata
+        # Keep a no-request/dummy classification on the original path. Decide
+        # from global counts, never from this rank's possibly empty query rows.
+        if global_metadata.num_prefills == 0 and global_metadata.num_decodes == 0:
+            return False
+        # Prefill, mixed and sharded decode may overlap in eager execution.
+        # Graph capture/replay requires separate stream/buffer qualification.
+        if getattr(get_forward_context(), "cudagraph_runtime_mode", None) != CUDAGraphMode.NONE:
+            return False
+        if self.multistream_dsv4_dsa_overlap:
+            # Only independent local computation may be moved before the wait.
+            if getattr(projector.cv_wq_a, "_has_communication", True):
+                return False
+        return True
+
     def _prepare_inputs_and_caches(self, attn, hidden_states, metadata, metadata_by_prefix):
         if not isinstance(metadata.swa, AscendDSAV41PCPMetadata):
             return super()._prepare_inputs_and_caches(attn, hidden_states, metadata, metadata_by_prefix)
-        # Empty query ranks also join hidden and weight collectives.
-        global_hidden_states = self._gather_and_restore_hidden_states(hidden_states, metadata.swa)
         projector = attn.dsa_attn.dsa_attn.impl
+        if not self._can_overlap_hidden_gather(metadata, projector):
+            # Preserve graph/no-work/communicating-projection fallbacks.
+            global_hidden_states = self._gather_and_restore_hidden_states(hidden_states, metadata.swa)
+            projector._parallel_o_proj.all_gather_weights()
+            global_metadata = self._global_layer_metadata(metadata_by_prefix)
+            return self._preprocess(attn, hidden_states, global_hidden_states, metadata, global_metadata)
+
+        assert hidden_states.shape[0] == metadata.swa.local_num_tokens_after_padding
+        # Keep all padded rows in the collective: restore_idx uses this stride.
+        # 'send' stays strongly referenced until work.wait(), including failures.
+        send = hidden_states.contiguous()
+        gathered, work = all_gather_async(send, get_pcp_group())
+        q_a = None
+        try:
+            query_hidden = hidden_states[: metadata.swa.num_actual_tokens]
+            # Empty ranks still join the gather, but do not launch empty GEMMs.
+            if query_hidden.shape[0]:
+                q_a = self._project_q_a(attn, query_hidden)
+        finally:
+            if work is not None:
+                work.wait()
+
+        global_hidden_states = torch.index_select(gathered, 0, metadata.swa.hidden_restore_idx)
+        # Retain the original hidden-before-output-weight collective order.
         projector._parallel_o_proj.all_gather_weights()
         global_metadata = self._global_layer_metadata(metadata_by_prefix)
-        return self._preprocess(attn, hidden_states, global_hidden_states, metadata, global_metadata)
+        return self._preprocess(attn, hidden_states, global_hidden_states, metadata, global_metadata, q_a=q_a)
 
     def forward(self, attn, positions, hidden_states, output=None):
         # Every layer has SWA metadata carrying the batch's PCP and prefill state.

@@ -429,7 +429,15 @@ class AscendDSAV41Impl:
     def _prepare_inputs_and_caches(self, attn, hidden_states, metadata, metadata_by_prefix):
         return self._preprocess(attn, hidden_states, hidden_states, metadata, metadata)
 
-    def _preprocess(self, attn, query_hidden, cache_hidden, query_metadata, cache_metadata):
+    def _project_q_a(self, attn, query_hidden):
+        """Project local queries without consuming gathered cache inputs."""
+        if self.multistream_dsv4_dsa_overlap:
+            wq_a = attn.dsa_attn.dsa_attn.impl.cv_wq_a
+            q_quant, q_scale = wq_a.quantize(query_hidden)
+            return wq_a.matmul(q_quant, q_scale, bias=attn.wq_a.bias)
+        return attn.wq_a(query_hidden)
+
+    def _preprocess(self, attn, query_hidden, cache_hidden, query_metadata, cache_metadata, *, q_a=None):
         query_hidden = query_hidden[: query_metadata.swa.num_actual_tokens]
         cache_hidden = cache_hidden[: cache_metadata.swa.num_actual_tokens]
         if not query_hidden.shape[0]:
@@ -446,9 +454,10 @@ class AscendDSAV41Impl:
                 kv_sin,
                 cache_metadata.swa,
                 share_inputs=query_metadata is cache_metadata,
+                q_a=q_a,
             )
         else:
-            qr = attn.q_norm(attn.wq_a(query_hidden))
+            qr = attn.q_norm(attn.wq_a(query_hidden) if q_a is None else q_a)
             q = attn.wq_b(qr).unflatten(-1, (-1, attn.head_dim))
             if cache_hidden.shape[0]:
                 kv = self._project_kv(attn, cache_hidden, kv_cos, kv_sin)
@@ -519,7 +528,9 @@ class AscendDSAV41Impl:
         attn.dsa_attn.dsa_attn.impl._forward_o_proj(padded, projected)
         return projected
 
-    def multistream_preprocess(self, attn, query_hidden, cache_hidden, kv_cos, kv_sin, swa_metadata, *, share_inputs):
+    def multistream_preprocess(
+        self, attn, query_hidden, cache_hidden, kv_cos, kv_sin, swa_metadata, *, share_inputs, q_a=None
+    ):
         """Overlap Q Vector work with KV Cube work, then reverse their roles.
 
         Reuse V1's stream and projection wrappers. V4.1 keeps floating-point
@@ -530,23 +541,28 @@ class AscendDSAV41Impl:
         aux_stream = dsv4_dsa_overlap_stream()
         v1_impl = attn.dsa_attn.dsa_attn.impl
         wq_a, wkv, wq_b = v1_impl.cv_wq_a, v1_impl.cv_wkv, v1_impl.cv_wq_b
-        share_quant = (
-            share_inputs
-            and type(wq_a._quant_method) is type(wkv._quant_method)
-            and wq_a._has_communication == wkv._has_communication
-        )
-        # Part 1: Q_a matmul (Cube) overlaps independent KV quantization (Vector).
-        q_quant, q_scale = wq_a.quantize(query_hidden)
         kv_quant_done = None
-        if share_quant:
-            kv_quant, kv_scale = q_quant, q_scale
+        if q_a is None:
+            share_quant = (
+                share_inputs
+                and type(wq_a._quant_method) is type(wkv._quant_method)
+                and wq_a._has_communication == wkv._has_communication
+            )
+            # Part 1: Q_a matmul (Cube) overlaps KV quantization (Vector).
+            q_quant, q_scale = wq_a.quantize(query_hidden)
+            if share_quant:
+                kv_quant, kv_scale = q_quant, q_scale
+            else:
+                q_quant_done = main_stream.record_event()
+                with npu_stream_switch(aux_stream):
+                    aux_stream.wait_event(q_quant_done)
+                    kv_quant, kv_scale = wkv.quantize(cache_hidden)
+                    kv_quant_done = aux_stream.record_event()
+            q_a = wq_a.matmul(q_quant, q_scale, bias=attn.wq_a.bias)
         else:
-            q_quant_done = main_stream.record_event()
-            with npu_stream_switch(aux_stream):
-                aux_stream.wait_event(q_quant_done)
-                kv_quant, kv_scale = wkv.quantize(cache_hidden)
-                kv_quant_done = aux_stream.record_event()
-        q_a = wq_a.matmul(q_quant, q_scale, bias=attn.wq_a.bias)
+            # PCP already projected local Q while gathering global cache inputs.
+            # Quantization cannot be shared across these different token layouts.
+            kv_quant, kv_scale = wkv.quantize(cache_hidden)
 
         # Part 2: Q normalization/quantization (Vector) overlaps KV matmul (Cube).
         part2_start = main_stream.record_event()
