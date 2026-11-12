@@ -142,16 +142,11 @@ MINIMAX_M3_CASE = WeightUpdateModelCase(
             "mlp_layer_types": ["dense", "dense", "dense", "sparse"],
         },
     },
-    # The original layer schedules already make layers 0..2 dense and
-    # layer 3 sparse/MoE; preserve them and the sparse kernel settings.
     meta_config_attribute="text_config",
     checkpoint_model_prefix="language_model.model.",
     checkpoint_name_map=minimax_m3_checkpoint_name,
-    # Disable the checkpoint's auto_map remote config and use Transformers'
-    # native MiniMaxM3VLConfig, whose text_config is MiniMaxM3VLTextConfig.
-    # AutoModelForCausalLM resolves that text config to MiniMaxM3VLForCausalLM
-    # for meta-model construction. The legacy remote config instead yields
-    # a generic text PreTrainedConfig that AutoModel cannot resolve.
+    # The legacy remote config creates a generic text config; the native
+    # Transformers config resolves to the registered text model instead.
     trust_remote_code=False,
     split_fused_mlp=True,
     extra_server_args=("--block-size", "128", "--kv-cache-memory-bytes", str(MINIMAX_M3_KV_CACHE_BYTES)),

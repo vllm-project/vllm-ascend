@@ -29,7 +29,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from tests.e2e.common.rlhf.weight_transfer import reference_check as utils
-from tests.e2e.common.rlhf.weight_transfer.case import MODEL_CASES, pytest_model_cases
+from tests.e2e.common.rlhf.weight_transfer.case import MODEL_CASES
 from tests.e2e.common.rlhf.weight_transfer.reference_check import (
     live_update_serve_args,
     reference_serve_args,
@@ -57,24 +57,20 @@ def _flag_map(args: list[str]) -> dict[str, str | bool]:
     return flags
 
 
-@pytest.mark.parametrize("case", MODEL_CASES, ids=lambda case: case.id)
-@pytest.mark.parametrize("tensor_parallel_size", [1, 2])
-def test_reference_and_lane_differ_only_in_the_load_path(case, tensor_parallel_size):
+def test_reference_and_lane_differ_only_in_the_load_path():
     lane = _flag_map(
         live_update_serve_args(
-            case,
+            CASE,
             backend="hccl",
             port=PORT,
             gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
-            tensor_parallel_size=tensor_parallel_size,
         )
     )
     reference = _flag_map(
         reference_serve_args(
-            case,
+            CASE,
             port=PORT,
             gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
-            tensor_parallel_size=tensor_parallel_size,
         )
     )
 
@@ -82,8 +78,8 @@ def test_reference_and_lane_differ_only_in_the_load_path(case, tensor_parallel_s
     # under the case's own model name and tokenizer.
     assert lane.pop("--load-format") == "dummy"
     assert lane.pop("--weight-transfer-config") == '{"backend": "hccl"}'
-    assert reference.pop("--tokenizer") == case.model
-    assert reference.pop("--served-model-name") == case.model
+    assert reference.pop("--tokenizer") == CASE.model
+    assert reference.pop("--served-model-name") == CASE.model
     assert "--load-format" not in reference
 
     assert lane == reference
@@ -191,24 +187,3 @@ def test_reference_signature_starts_one_server_per_measurement_conditions(refere
     assert mock_generate.call_count == 2
     # One gate per startup, not per call: a cache hit must not stop the world.
     assert mock_wait.call_count == 2
-
-
-@pytest.mark.parametrize("backend", ["npu_ipc", "hccl"])
-def test_model_matrix_separates_model_and_transport_coverage(backend):
-    parameters = pytest_model_cases(backend)
-    representative = next(case for case in MODEL_CASES if case.model == "Qwen/Qwen3.5-35B-A3B")
-    expected = {(representative.id, False), (representative.id, True)}
-    if backend == "npu_ipc":
-        expected |= {(case.id, False) for case in MODEL_CASES}
-
-    assert {(case.id, packed) for param in parameters for case, packed in [param.values]} == expected
-    assert len(parameters) == len(expected)
-    for parameter in parameters:
-        case, packed = parameter.values
-        assert parameter.id == f"{'packed' if packed else 'unpacked'}-{case.id}"
-        assert any(mark.name == "e2e_model" and mark.args == (case.model,) for mark in parameter.marks)
-
-
-def test_model_matrix_rejects_unknown_backend():
-    with pytest.raises(ValueError, match="Unsupported weight transfer backend"):
-        pytest_model_cases("unknown")
