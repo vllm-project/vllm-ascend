@@ -629,6 +629,8 @@ class AscendConfig:
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
+    # Optional A5 MiniMax-M3 FP8 exact-mask attention; requires CANN Union extensions.
+    enable_minimax_m3_union: bool = False
     kv_pool_range_debug: bool = False
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
     sfa_dcp_force_tmajor_restore: bool = False

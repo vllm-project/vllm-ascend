@@ -65,6 +65,11 @@ from vllm_ascend.ops.triton.msa.msa_m3_index_postprocess import FP32_INDEX_SENTI
 from vllm_ascend.utils import AscendDeviceType
 
 
+@pytest.fixture(autouse=True)
+def default_native_sparse_attention(monkeypatch):
+    monkeypatch.setattr(msa_m3_module, "get_ascend_config", lambda: SimpleNamespace(enable_minimax_m3_union=False))
+
+
 @pytest.mark.parametrize(
     ("device_type", "kv_dtype", "expected_precision"),
     [
@@ -605,6 +610,98 @@ def test_sparse_metadata_builder(batch_spec: BatchSpec, mock_gbsa_ops) -> None:
         rebuilt = builder.build(0, common)
         assert rebuilt.prefill is not None
         assert rebuilt.prefill.cu_seqlens_q.data_ptr() == metadata.prefill.cu_seqlens_q.data_ptr()
+
+
+def test_union_builder_counts_groups_per_request_and_skips_native_schedule(monkeypatch, mock_gbsa_ops):
+    monkeypatch.setattr(msa_m3_module, "get_ascend_config", lambda: SimpleNamespace(enable_minimax_m3_union=True))
+    monkeypatch.setattr(
+        msa_m3_module, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A5)
+    )
+    builder = _make_sparse_builder(torch.device("cpu"), torch.float8_e4m3fn)
+    common = _create_common_attn_metadata(BatchSpec(seq_lens=[129, 257], query_lens=[9, 17]), 128, torch.device("cpu"))
+    metadata = builder.build(0, common)
+    assert metadata.prefill.num_union_groups == 5  # ceil(9/8) + ceil(17/8), not ceil(26/8).
+    assert not builder.reuse_decode_gbsa_metadata
+    assert not builder.decode_gbsa_metadata_buffers
+    mock_gbsa_ops[0].assert_not_called()
+
+
+@pytest.mark.parametrize("cache_dtype", ["auto", "bfloat16", "fp8_e5m2"])
+def test_union_initialization_rejects_unsupported_cache_before_extension_load(monkeypatch, cache_dtype):
+    monkeypatch.setattr(msa_m3_module, "get_ascend_config", lambda: SimpleNamespace(enable_minimax_m3_union=True))
+    monkeypatch.setattr(
+        msa_m3_module, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A5)
+    )
+    loader = MagicMock()
+    monkeypatch.setattr(msa_m3_module, "load_union_extensions", loader)
+    with pytest.raises(ValueError, match="A5 FP8 KV"):
+        AscendMiniMaxM3SparseImpl(16, 128, 0.5, 1, cache_dtype, topk_blocks=16, sparse_block_size=128)
+    loader.assert_not_called()
+
+
+def test_union_dispatches_mixed_batch_without_native_attention(monkeypatch):
+    monkeypatch.setattr(msa_m3_module, "get_ascend_config", lambda: SimpleNamespace(enable_minimax_m3_union=True))
+    monkeypatch.setattr(
+        msa_m3_module, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A5)
+    )
+    loader = MagicMock()
+    monkeypatch.setattr(msa_m3_module, "load_union_extensions", loader)
+    impl = AscendMiniMaxM3SparseImpl(16, 128, 0.5, 1, "fp8_e4m3", topk_blocks=16, sparse_block_size=128)
+    loader.assert_called_once()
+    decode = AscendMiniMaxM3SparseDecodeMetadata(
+        seq_lens=torch.tensor([129], dtype=torch.int32),
+        block_table=torch.tensor([[0, 1]], dtype=torch.int32),
+        max_seq_len=129,
+        decode_query_len=1,
+        cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int64),
+    )
+    prefill = AscendMiniMaxM3SparsePrefillMetadata(
+        cu_seqlens_q=torch.tensor([0, 9], dtype=torch.int32),
+        cu_seqlens_k=torch.tensor([0, 257], dtype=torch.int32),
+        seq_lens=torch.tensor([257], dtype=torch.int32),
+        context_lens=torch.tensor([248], dtype=torch.int32),
+        block_table=torch.tensor([[2, 3, 4]], dtype=torch.int32),
+        max_query_len=9,
+        max_seq_len=257,
+        total_kv_blocks=3,
+        max_kv_blocks=3,
+        num_union_groups=2,
+    )
+    md = AscendMiniMaxM3SparseMetadata(
+        seq_lens=torch.tensor([129, 257], dtype=torch.int32),
+        max_seq_len=257,
+        slot_mapping=torch.arange(10),
+        num_actual_tokens=10,
+        num_decodes=1,
+        num_decode_tokens=1,
+        num_prefills=1,
+        num_prefill_tokens=9,
+        prefill=prefill,
+        decode=decode,
+    )
+    monkeypatch.setattr(msa_m3_module, "get_forward_context", lambda: SimpleNamespace(attn_metadata={"attn": md}))
+    union = MagicMock()
+    native = MagicMock(side_effect=AssertionError("native attention must not run"))
+    monkeypatch.setattr(msa_m3_module, "minimax_m3_sparse_attn_union", union)
+    monkeypatch.setattr(msa_m3_module, "minimax_m3_sparse_attn", native)
+    monkeypatch.setattr(msa_m3_module, "minimax_m3_sparse_attn_decode", native)
+    q = torch.zeros((10, 16 * 128), dtype=torch.bfloat16)
+    selections = (
+        torch.zeros((1, 1, 16), dtype=torch.int32),
+        torch.zeros((1, 9, 16), dtype=torch.int32),
+        torch.ones((1, 1), dtype=torch.int32),
+    )
+    output = torch.empty_like(q)
+    assert impl.forward(SimpleNamespace(layer_name="attn"), q, (), selections, output) is output
+    assert union.call_count == 2
+    dec_args, pre_args = (call.args for call in union.call_args_list)
+    assert dec_args[0].shape == (1, 16, 128)
+    assert dec_args[7:11] == (1, 2, 1, 129)
+    assert pre_args[0].shape == (9, 16, 128)
+    assert pre_args[7:11] == (2, 3, 9, 257)
+    assert dec_args[2] is selections[0] and pre_args[2] is selections[1]
+    assert union.call_args_list[0].kwargs["select_num_idx"] is selections[2]
+    assert impl._dequant_scale is None
 
 
 @pytest.mark.parametrize("query_len", [1, 2, 4, 8])
