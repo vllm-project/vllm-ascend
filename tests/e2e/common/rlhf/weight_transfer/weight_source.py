@@ -231,7 +231,7 @@ class FixedRandomWeightSource(WeightSource):
         save_file(state, str(target / "model.safetensors"), metadata={"format": "pt"})
 
 
-def packed_buffer_size_for(source: FixedRandomWeightSource) -> int:
+def packed_buffer_size_for(source: WeightSource) -> int:
     """Size a packed transfer buffer so every single tensor fits.
 
     Both engines default to 1 GiB, which is smaller than the largest tensor of
@@ -244,8 +244,22 @@ def packed_buffer_size_for(source: FixedRandomWeightSource) -> int:
     return max(max_tensor_bytes + 128 * 2**20, 2**30)
 
 
+def make_weight_source(case: WeightUpdateModelCase, device: torch.device) -> WeightSource:
+    """Build the payload source a case declares, or the default random one.
+
+    Cases whose architecture Transformers can enumerate use
+    ``FixedRandomWeightSource``. DeepSeek-V4.1 cannot - ``AutoConfig`` raises
+    ``KeyError: 'deepseek_v41'`` - so it names a source that reads the
+    checkpoint's safetensors headers instead. ``packed_buffer_size_for`` works on
+    either, because both answer ``metadata()`` with the same ``ParamMeta``.
+    """
+    if case.weight_source_factory is not None:
+        return case.weight_source_factory(case, device)
+    return FixedRandomWeightSource(case, device)
+
+
 @contextlib.contextmanager
-def fixed_startup_checkpoint(source: FixedRandomWeightSource) -> Iterator[str]:
+def fixed_startup_checkpoint(source: WeightSource) -> Iterator[str]:
     """Expose the source's payload as a throwaway startup-load checkpoint."""
     with tempfile.TemporaryDirectory(prefix=f"fixed-startup-{source.case_id}-") as directory:
         source.write_checkpoint(directory)
