@@ -31,8 +31,14 @@ CHUNK_ROWS = 1 << 22
 
 def _madvise_hugepage(shm: shared_memory.SharedMemory, size: int) -> None:
     """Ask the kernel to back a shared Engram mapping with shmem THPs."""
+    buf = shm.buf
+    if buf is None:  # pragma: no cover - the mapping exists once attached
+        return
     try:
-        cast(mmap.mmap, shm.buf.obj).madvise(mmap.MADV_HUGEPAGE, 0, size)
+        mapping = cast(mmap.mmap, buf.obj)
+        # ``madvise`` and the THP advice are Linux-only; elsewhere the call
+        # raises AttributeError and the mapping keeps the default policy.
+        mapping.madvise(mmap.MADV_HUGEPAGE, 0, size)  # type: ignore[attr-defined]
     except (AttributeError, OSError) as exc:
         logger.warning("madvise(MADV_HUGEPAGE) failed for shared Engram: %s", exc)
 
@@ -145,7 +151,7 @@ def _host_library() -> ctypes.CDLL:
 class HostUvaBuffer:
     """Host memory the device gathers from directly."""
 
-    def __init__(self, shape, dtype, device):
+    def __init__(self, shape, dtype, device, buffer_name, module):
         self.lib = _host_library()
         rows = int(shape[0])
         row_elements = int(torch.Size(shape[1:]).numel())
@@ -177,6 +183,13 @@ class HostUvaBuffer:
                 dtype=torch.int64,
                 device=device,
             )
+            # Own the address table on the owning module: it is a device tensor
+            # built while the sleep-mode weights mem-pool is active, and
+            # level-2 sleep backs up nothing while restoring only
+            # ``named_buffers()``, so an unregistered table comes back empty and
+            # the gather kernel then dereferences garbage.  Registering here
+            # rather than at the call site keeps every construction covered.
+            module.register_buffer(f"{buffer_name}_ptrs", self.ptrs, persistent=False)
         except Exception:
             # A half-built buffer must not leave the host range registered: the
             # caller only sees the exception, so nothing else can release it.
@@ -272,7 +285,7 @@ class SharedUvaBuffer:
     mapping with CANN. The leader unlinks it after all ranks have attached.
     """
 
-    def __init__(self, shape, dtype, device, group):
+    def __init__(self, shape, dtype, device, group, buffer_name, module):
         self.lib = _host_library()
         self.group = group
         rows = int(shape[0])
@@ -309,7 +322,9 @@ class SharedUvaBuffer:
                 with patch("multiprocessing.resource_tracker.register", lambda *args, **kwargs: None):
                     self.shm = shared_memory.SharedMemory(name=name)
             assert self.shm.size >= size
-            address_of_mapping = ctypes.c_void_p(ctypes.addressof(ctypes.c_char.from_buffer(self.shm.buf)))
+            buffer = self.shm.buf
+            assert buffer is not None
+            address_of_mapping = ctypes.c_void_p(ctypes.addressof(ctypes.c_char.from_buffer(buffer)))
             _madvise_hugepage(self.shm, size)
             rc = self.lib.aclrtHostRegisterV2(address_of_mapping, size, DeviceOperator.host_register_flags())
             if rc:
@@ -329,6 +344,13 @@ class SharedUvaBuffer:
                 dtype=torch.int64,
                 device=device,
             )
+            # Own the address table on the owning module: it is a device tensor
+            # built while the sleep-mode weights mem-pool is active, and
+            # level-2 sleep backs up nothing while restoring only
+            # ``named_buffers()``, so an unregistered table comes back empty and
+            # the gather kernel then dereferences garbage.  Registering here
+            # rather than at the call site keeps every construction covered.
+            module.register_buffer(f"{buffer_name}_ptrs", self.ptrs, persistent=False)
         except Exception as exc:  # noqa: BLE001 - aggregated below
             error = f"{type(exc).__name__}: {exc}"
 
