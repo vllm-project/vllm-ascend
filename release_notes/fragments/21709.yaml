@@ -1,0 +1,4 @@
+pr: 21709
+entries:
+  - category: performance
+    text: Removed the per-layer padding-mask chain and the identity scatter from GLM5.3-Flash decode by writing the recurrent output once per layer; median ITL drops by 1.0-1.65 ms at concurrency up to 16 on a 1P1D deployment with decode DP16/TP2.

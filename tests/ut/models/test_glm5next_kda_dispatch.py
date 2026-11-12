@@ -158,13 +158,24 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
         fla_update,
     )
     calls: list[str] = []
+    writeback_targets: list[torch.Tensor | None] = []
 
     def recurrent(q, k, v, gate, beta, state, starts, indices, *args, **kwargs):
         events.append("state_write")
         calls.append("recurrent")
-        assert kwargs.get("output_buffer") is None
+        # A spec-verify step without non-spec tokens writes the captured buffer
+        # directly; a mixed step returns a temporary that is scattered later.
+        output_buffer = kwargs.get("output_buffer")
+        writeback_targets.append(output_buffer)
+        assert output_buffer is (out if spec_only else None)
         assert q.shape[1] == (2 if speculative else 1)
         torch.testing.assert_close(starts, torch.tensor([0, q.shape[1]]))
+        if output_buffer is not None:
+            # Reference semantics of the recurrent writeback: valid rows are
+            # copied and every remaining capacity row is zeroed.
+            output_buffer.zero_()
+            output_buffer[:, : q.shape[1]].copy_(q * 2)
+            return output_buffer
         return q * 2
 
     def prefill(q, k, v, gate, beta, state, indices, initial, chunk, *args):
@@ -183,8 +194,14 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
     expected = torch.arange(1, tokens + 1, dtype=torch.bfloat16) * 3
     expected[: 2 if speculative else 1] = torch.arange(1, 3 if speculative else 2) * 2
     torch.testing.assert_close(out[0, :tokens, 0, 0], expected)
-    # Rows outside the scheduled token groups are left untouched.
-    assert torch.isnan(out[:, tokens:]).all()
+    if spec_only:
+        # The recurrent writeback clears the graph-capacity rows itself, so no
+        # padding-mask kernel is needed on the spec-verify path.
+        assert torch.count_nonzero(out[:, tokens:]) == 0
+    else:
+        # Rows outside the scheduled token groups are left untouched.
+        assert torch.isnan(out[:, tokens:]).all()
+    assert len(writeback_targets) == 1
     assert calls == (["recurrent"] if spec_only else ["recurrent", "prefill"])
     assert conv_calls == ([1] if spec_only else ([1, 0] if speculative else [0]))
     assert events == [("load", "layer"), "compute", *(["state_write"] * len(calls)), "save"]

@@ -370,6 +370,10 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         num_accepted_tokens = attn_metadata_narrowed.num_accepted_tokens
         num_spec_decodes = attn_metadata_narrowed.num_spec_decodes
         use_spec = spec_sequence_masks is not None and num_spec_decodes > 0
+        # A pure spec-verify step has no non-spec tokens, so the spec recurrent
+        # kernel covers every actual token and can write the layer output
+        # directly into the captured buffer, padding rows included.
+        uniform_spec = use_spec and (non_spec_token_indx is None or non_spec_token_indx.numel() == 0)
         # Safe-gate checkpoints use the bounded sigmoid variant.
         lower_bound = self.kda_lower_bound
         constant_caches = self.kv_cache
@@ -492,6 +496,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         )
         # Prefill copies its output and speculative dispatch scatters both token
         # groups. Recurrent writeback handles decode padding without a pre-clear.
+        # In a pure spec-verify step spec_token_indx is arange(num_actual_tokens),
+        # so the index_copy below is an identity copy and the arange/less/
+        # logical_not/masked_fill chain inside recurrent_kda only exists to zero
+        # graph-capacity padding rows. Let the recurrent writeback fill the
+        # captured buffer in one launch instead: same bytes, padding zeroed.
         if use_spec:
             spec_output = recurrent_kda(
                 rearrange(q_spec),
@@ -506,8 +515,10 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 self.dt_bias,
                 lower_bound,
                 num_accepted_tokens,
+                output_buffer=core_attn_out if uniform_spec else None,
             )
-            core_attn_out[0].index_copy_(0, spec_token_indx, spec_output[0])
+            if not uniform_spec:
+                core_attn_out[0].index_copy_(0, spec_token_indx, spec_output[0])
 
         if q_ns is None:
             maybe_save_kv_layer_to_connector("", [])
