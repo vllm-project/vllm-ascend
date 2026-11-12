@@ -1,0 +1,4 @@
+pr: 21188
+entries:
+  - category: performance
+    text: Reduced Model Runner V2 selected-token logprob computation time on Ascend A2 with online normalization.
