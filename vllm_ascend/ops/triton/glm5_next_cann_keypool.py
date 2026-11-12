@@ -1,16 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Three fused adapters for CANN pooled indexing: inputs, cache writes and indices."""
+"""Fused adapters for CANN pooled indexing: inputs, cache writes and indices."""
 
 from types import SimpleNamespace
 
 from vllm.triton_utils import tl, triton
+
+FP8_E4M3_MAX = tl.constexpr(448.0)
 
 
 @triton.jit(do_not_specialize=["tail_rows", "tail_blocks", "cache_blocks", "INPUT_STRIDE", "INPUT_WIDTH"])
 def _write_keypool_caches_kernel(
     tail,
     cache,
+    scale_cache,
     key,
     gate,
     pooled,
@@ -26,10 +29,12 @@ def _write_keypool_caches_kernel(
     cache_blocks,
     BLOCK_SIZE: tl.constexpr,
     CACHE_STRIDE: tl.constexpr,
+    SCALE_STRIDE: tl.constexpr,
     POOLED_STRIDE: tl.constexpr,
     INPUT_STRIDE,
     INPUT_WIDTH,
     SPECULATIVE: tl.constexpr,
+    QUANTIZED: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     row = tl.program_id(0)
@@ -53,11 +58,17 @@ def _write_keypool_caches_kernel(
         slot = tl.load(slots + pool_row).to(tl.int64)
         valid = (slot >= 0) & (slot < cache_blocks * BLOCK_SIZE)
         pool_value = tl.load(pooled + pool_row * POOLED_STRIDE + cols, valid & (cols < HEAD_DIM), other=0)
+        if QUANTIZED:
+            pool_value = pool_value.to(tl.float32)
+            maximum = tl.max(tl.abs(pool_value), 0)
+            scale = tl.where(maximum > 0, maximum / FP8_E4M3_MAX, 1.0)
+            pool_value = pool_value / scale
+            tl.store(scale_cache + slot // BLOCK_SIZE * SCALE_STRIDE + slot % BLOCK_SIZE, scale, valid)
         address = cache + slot // BLOCK_SIZE * CACHE_STRIDE + slot % BLOCK_SIZE * HEAD_DIM + cols
         tl.store(address, pool_value, valid & (cols < HEAD_DIM))
 
 
-def write_keypool_caches(tail, cache, key, gate, pooled, metadata, tail_metadata, state):
+def write_keypool_caches(tail, cache, key, gate, pooled, metadata, tail_metadata, state, scale_cache=None):
     inputs = tail_metadata.cann_inputs
     writes = inputs.write_indices
     tail_rows = writes.numel()
@@ -66,6 +77,7 @@ def write_keypool_caches(tail, cache, key, gate, pooled, metadata, tail_metadata
     _write_keypool_caches_kernel[(tail_rows + pooled_rows,)](
         tail,
         cache,
+        scale_cache,
         key,
         gate,
         pooled,
@@ -81,10 +93,12 @@ def write_keypool_caches(tail, cache, key, gate, pooled, metadata, tail_metadata
         cache.shape[0],
         cache.shape[1],
         cache.stride(0),
+        scale_cache.stride(0) if scale_cache is not None else 0,
         pooled.stride(0),
         writes.stride(0),
         writes.shape[1],
         key is not None,
+        scale_cache is not None,
         triton.next_power_of_2(2 * cache.shape[-1]),
     )
 
@@ -149,7 +163,7 @@ METADATA_PROGRAMS = 32
 METADATA_REQUEST_BLOCK = 128
 
 
-@triton.jit(do_not_specialize=["n", "tokens", "source", "actual", "pooled_rows", "cp_start", "cp_end", "WIDTH"])
+@triton.jit(do_not_specialize=["n", "tokens", "source", "actual", "pooled_rows", "WIDTH"])
 def _build_keypool_metadata_kernel(
     raw_query,
     raw_lengths,
@@ -190,12 +204,6 @@ def _build_keypool_metadata_kernel(
     BLOCK: tl.constexpr,
     REQUESTS: tl.constexpr,
     COLUMNS: tl.constexpr,
-    cp_ends,
-    cp_seq,
-    cp_tails,
-    cp_start,
-    cp_end,
-    CP_MODE: tl.constexpr,
 ):
     row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     q0 = tl.load(raw_query + row * QUERY_STRIDE, row <= n, other=0)
@@ -255,13 +263,6 @@ def _build_keypool_metadata_kernel(
         tl.store(starts + row, start, row < n)
         tl.store(tails + row, raw_len % POOL, row < n)
         tl.store(offsets + row, start % POOL, row < n)
-        if CP_MODE:
-            local_end = tl.minimum(q1, cp_end)
-            has_query = local_end > tl.maximum(q0, cp_start)
-            local_length = tl.where(has_query, tl.maximum(raw_len - tl.maximum(q1 - cp_end, 0), 0), 0)
-            tl.store(cp_ends + row, tl.maximum(local_end - cp_start, 0), row < n)
-            tl.store(cp_seq + row, local_length // POOL, row < n)
-            tl.store(cp_tails + row, local_length % POOL, row < n)
         # Invert request pool counts to locate each compact output's boundary
         # token directly; evicted slots still occupy their CANN output row.
         prefix = tl.full((), 0, tl.int32)
@@ -292,7 +293,7 @@ def _build_keypool_metadata_kernel(
             tl.store(compact, -1)
 
 
-def build_keypool_metadata(common, buffers, tokens, source, logical, ratio, *, query_metadata=None, local_start=0):
+def build_keypool_metadata(common, buffers, tokens, source, logical, ratio):
     n = common.num_reqs
     pooled = min(tokens, tokens // ratio + n)
     # Fully padded buckets can have empty source tensors. Keep masked input
@@ -343,12 +344,6 @@ def build_keypool_metadata(common, buffers, tokens, source, logical, ratio, *, q
         block,
         METADATA_REQUEST_BLOCK,
         1,
-        query_metadata.cum_query_lens if query_metadata is not None else None,
-        query_metadata.seq_lens if query_metadata is not None else None,
-        query_metadata.pool_tail if query_metadata is not None else None,
-        local_start,
-        local_start + query_metadata.positions.numel() if query_metadata is not None else 0,
-        query_metadata is not None,
     )
     return (
         buffers.positions[:tokens],
@@ -409,12 +404,6 @@ def build_tail_inputs(common, pool, capacity, page_rows, retained_width, buffers
         METADATA_MIN_BLOCK,
         1,
         triton.next_power_of_2(max(pool, capacity)),
-        None,
-        None,
-        None,
-        0,
-        0,
-        False,
     )
     return SimpleNamespace(
         history_indices=history,

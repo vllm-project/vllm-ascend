@@ -220,6 +220,7 @@ The `pr-accuracy-group-*` entries only run on `/nightly` (PR-triggered) runs;
 | `MiniMax-M3-BF16-A3` | MiniMax-M3 BF16 |
 | `Kimi-K2.6-W4A8-PCP-DCP` | Kimi-K2.6 W4A8 + PCP + DCP |
 | `glm-5.2-W4A8C8-DSpark-PCP` | GLM-5.2 W4A8C8 + DSpark + PCP |
+| `DeepSeek-V4.1-Flash-W8A8-DSpark-PCP` | DeepSeek-V4.1-Flash W8A8 + DSpark + PCP |
 | `Qwen3.5-397B-A17B-w8a8-mtp` | Qwen3.5-397B-A17B W8A8 + MTP |
 | `Qwen3-235B-A22B-W8A8_piecewise_fullgraph_A3` | Qwen3-235B-A22B W8A8, PIECEWISE and full graph |
 | `acceptace_rate_deepseekv4-flash-w8a8-mtp` | DeepSeek-V4-Flash W8A8 + MTP acceptance rate |
@@ -344,7 +345,7 @@ can be earlier or later than the 60-second default:
 ```
 
 The test name and `perf` key in this example come from the nightly matrix and its
-[model YAML](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/cases/models/configs/DeepSeek/DeepSeek-V4-Flash-W8A8-A3.yaml).
+[model YAML](https://github.com/vllm-project/vllm-ascend/blob/main/tests/SIT/cases/models/configs/DeepSeek/DeepSeek-V4-Flash-W8A8-A3.yaml).
 Choose the corresponding names from your PR when testing another configuration.
 
 Wait for the capture job and its `Plan`, `Parse / node-N`, and `Finalize` jobs.

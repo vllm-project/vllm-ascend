@@ -9,6 +9,7 @@ from vllm.triton_utils import triton
 
 from vllm_ascend.ops.triton.msa import minimax_qknorm_rope_cache as fused_module
 from vllm_ascend.ops.triton.msa.minimax_qknorm_rope_cache import minimax_qknorm_rope_cache
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
 
 def reference(packed, cos_sin, positions, weights, q_heads, kv_heads, index_heads, eps):
@@ -26,6 +27,18 @@ def reference(packed, cos_sin, positions, weights, q_heads, kv_heads, index_head
         x[..., half : 2 * half] = b * cs[..., :half] + a * cs[..., half:]
         parts[part] = x.reshape(packed.shape[0], -1)
     return parts
+
+
+def core_boundary_tokens(num_vector_cores):
+    return sorted(
+        {
+            max(1, num_vector_cores - 1),
+            num_vector_cores,
+            num_vector_cores + 1,
+            2 * num_vector_cores - 1,
+            2 * num_vector_cores + 1,
+        }
+    )
 
 
 @pytest.mark.parametrize("tokens", [1, 4, 8, 16, 32, 64, 128, 192, 256, 513])
@@ -98,6 +111,14 @@ def test_minimax_qknorm_rope_cache(tokens, heads, rotary_dim):
 @torch.inference_mode()
 def test_minimax_qknorm_rope_cache_prefill(tokens):
     test_minimax_qknorm_rope_cache(tokens, (8, 1, 1), 64)
+
+
+@pytest.mark.parametrize("heads", [(8, 1, 1), (16, 1, 1)])
+@torch.inference_mode()
+def test_minimax_qknorm_rope_cache_core_boundaries(heads):
+    init_device_properties_triton()
+    for tokens in core_boundary_tokens(get_vectorcore_num()):
+        test_minimax_qknorm_rope_cache(tokens, heads, 64)
 
 
 @torch.inference_mode()
@@ -331,7 +352,11 @@ def test_request_sizes_reuse_one_compiled_variant(isolated_fused_kernel):
     assert jit_variant_count(kernel) == compile_spy.call_count == 1
     # These are three independent sweeps, not a parametrized test with a fresh
     # runtime cache per case. Include 0/1 and aligned/unaligned scalar values.
-    cases = [(n, n, 64) for n in (1, 4, 8, 16, 32, 64, 128, 192, 256, 512)]
+    init_device_properties_triton()
+    token_counts = sorted(
+        set((1, 4, 8, 16, 32, 64, 128, 192, 256, 512)) | set(core_boundary_tokens(get_vectorcore_num()))
+    )
+    cases = [(n, n, 64) for n in token_counts]
     cases += [(192, n, 64) for n in (0, 1, 4, 15, 16, 17, 31, 32, 127, 191, 192)]
     cases += [(192, 192, n) for n in (3, 64, 5392, 8192)]
     for tokens, actual, blocks in cases:

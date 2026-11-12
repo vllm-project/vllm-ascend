@@ -8,6 +8,7 @@ import torch
 
 import vllm_ascend.ops.fused_moe.routed_experts as routed_experts_module
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts, EplbExpertTensorList
+from vllm_ascend.quantization.nz import NzCastSpec
 
 
 class _FakeNpuTensor:
@@ -72,6 +73,67 @@ def test_get_expert_weights_preserves_independent_expert_tensors():
     assert isinstance(buffer, EplbExpertTensorList)
     assert buffer.shape == views[0].shape
     assert all(tensor.storage_offset() == 0 for tensor in buffer)
+
+
+def test_eplb_expert_tensor_list_supports_upstream_uint8_contract():
+    # vLLM main registers expert weights via
+    # `w.view(torch.uint8) if w.element_size() == 1 else w` (interfaces.py,
+    # #61786); the per-expert container must satisfy that contract.
+    expert_tensors = [
+        torch.ones(3, 4, dtype=torch.int8),
+        torch.ones(3, 4, dtype=torch.int8),
+    ]
+    weights = EplbExpertTensorList(expert_tensors)
+
+    assert weights.element_size() == 1
+
+    viewed = weights.view(torch.uint8)
+    assert isinstance(viewed, EplbExpertTensorList)
+    assert all(tensor.dtype == torch.uint8 for tensor in viewed)
+    assert all(
+        actual.untyped_storage().data_ptr() == expected.untyped_storage().data_ptr()
+        for actual, expected in zip(viewed, expert_tensors)
+    )
+
+    registered = [w.view(torch.uint8) if w.element_size() == 1 else w for w in [weights, torch.randn(2, 5)]]
+    assert isinstance(registered[0], EplbExpertTensorList)
+    assert all(tensor.dtype == torch.uint8 for tensor in registered[0])
+    assert registered[1].dtype == torch.float32
+
+    buffer = torch.empty_like(registered[0])
+    assert isinstance(buffer, EplbExpertTensorList)
+    assert all(tensor.dtype == torch.uint8 for tensor in buffer)
+
+
+def test_expert_weight_views_keep_the_cast_they_were_built_with():
+    """FRACTAL_NZ is not one layout, so a view carries the cast behind it.
+
+    Whatever rebuilds these weights elsewhere has to repeat that cast, and the
+    Gloo receive buffers inherit it from here.
+    """
+    spec = NzCastSpec(customize_dtype=torch.float8_e4m3fn)
+    expert_tensors = [torch.ones(3, 4, dtype=torch.int8), torch.ones(3, 4, dtype=torch.int8)]
+    declared = EplbExpertTensorList(expert_tensors, spec)
+
+    views = list(_routed_experts([declared, torch.randn(2, 5)]).get_expert_weights())
+
+    assert views[0].nz_cast_spec is spec
+    # The uint8 reinterpretation upstream registers weights through, and the
+    # buffer allocation, both have to keep it.
+    assert views[0].view(torch.uint8).nz_cast_spec is spec
+    assert torch.empty_like(views[0]).nz_cast_spec is spec
+    # A stacked view declares no cast.
+    assert not hasattr(views[1], "nz_cast_spec")
+
+
+def test_undeclared_expert_tensor_lists_still_become_eplb_containers():
+    """Most quant methods cast without parameters and declare nothing."""
+    expert_tensors = [torch.ones(3, 4, dtype=torch.int8), torch.ones(3, 4, dtype=torch.int8)]
+
+    views = list(_routed_experts([expert_tensors]).get_expert_weights())
+
+    assert isinstance(views[0], EplbExpertTensorList)
+    assert views[0].nz_cast_spec is None
 
 
 @pytest.mark.parametrize(

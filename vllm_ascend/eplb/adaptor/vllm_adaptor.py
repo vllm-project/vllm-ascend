@@ -24,6 +24,7 @@ import torch.distributed as dist
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.quantization.nz import fp4_nz_for_dtype
 from vllm_ascend.quantization.quant_type import QuantType
 
 EPLB_EXPERT_WEIGHT_NAMES = {
@@ -59,11 +60,31 @@ EPLB_EXPERT_WEIGHT_NAMES = {
         "w13_scale_bias_list",
         "w2_scale_bias_list",
     ),
+    (QuantType.W4A8MXFP, False): (
+        "w13_weight_list",
+        "w2_weight_list",
+        "w13_weight_scale_list",
+        "w2_weight_scale_list",
+    ),
+    (QuantType.W4A8MXFP, True): (
+        "w13_weight_list",
+        "w2_weight_list",
+        "w13_weight_scale_list",
+        "w2_weight_scale_list",
+    ),
     (QuantType.W4A4MXFP, False): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
     (QuantType.W4A4MXFP, True): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
     (QuantType.W8A8MXFP, False): ("w13_weight_list", "w2_weight_list", "w13_weight_scale_list", "w2_weight_scale_list"),
     (QuantType.W8A8MXFP, True): ("w13_weight_list", "w2_weight_list", "w13_weight_scale_list", "w2_weight_scale_list"),
 }
+
+_W4A8MXFP_NZ_WEIGHT_NAMES = {"w13_weight_list", "w2_weight_list"}
+
+
+def _new_w4a8_mxfp_nz_buffer(expert_tensor: torch.Tensor) -> torch.Tensor:
+    """Create an offset-0 NZ receive buffer matching an MXFP expert."""
+    buffer_tensor = torch.empty(expert_tensor.shape, dtype=expert_tensor.dtype, device=expert_tensor.device)
+    return fp4_nz_for_dtype(expert_tensor.dtype).cast_(buffer_tensor)
 
 
 class VllmEplbAdaptor:
@@ -82,7 +103,7 @@ class VllmEplbAdaptor:
         super().__init__(**args)
         if hasattr(model, "language_model"):
             self.model = model.language_model
-            self.config = model.config.text_config
+            self.config = model.config.get_text_config()
         else:
             self.model = model
             self.config = model.config
@@ -128,8 +149,11 @@ class VllmEplbAdaptor:
             buffer_tensor_shapes[expert_weight_key] = expert_tensor_shapes
             self.buffer_tensor_list[expert_weight_key] = [[] for _ in range(num_buffer_tensor)]
             for buffer_id in range(num_buffer_tensor):
-                for expert_tensor in expert_tensors:
-                    buffer_tensor = torch.empty_like(expert_tensor)
+                for name, expert_tensor in zip(expert_weight_names, expert_tensors):
+                    if expert_weight_key[0] == QuantType.W4A8MXFP and name in _W4A8MXFP_NZ_WEIGHT_NAMES:
+                        buffer_tensor = _new_w4a8_mxfp_nz_buffer(expert_tensor)
+                    else:
+                        buffer_tensor = torch.empty_like(expert_tensor)
                     self.buffer_tensor_list[expert_weight_key][buffer_id].append(buffer_tensor)
 
     def init_expert_param_per_layer(self):
@@ -138,8 +162,6 @@ class VllmEplbAdaptor:
         for local_idx, layer in enumerate(self.moe_layers):
             quant_type = QuantType.NONE if self.model.quant_config is None else layer.quant_type
             expert_weight_key = (quant_type, get_ascend_config().enable_fused_mc2 == 1)
-            if expert_weight_key[0] == QuantType.W4A8MXFP:
-                raise RuntimeError(f"EPLB not support {quant_type}")
             if expert_weight_key not in EPLB_EXPERT_WEIGHT_NAMES:
                 raise ValueError(f"EPLB not support {quant_type} with fused MC2 {expert_weight_key[1]}")
             expert_weight_names = EPLB_EXPERT_WEIGHT_NAMES[expert_weight_key]

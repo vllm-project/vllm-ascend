@@ -66,7 +66,7 @@ from vllm_ascend.distributed.kv_transfer.utils.utils import (
     get_transfer_timeout_value,
     validate_register_region_count,
 )
-from vllm_ascend.spec_decode.dspark_utils import get_dspark_aux_layer_ids
+from vllm_ascend.worker.dspark_utils import get_dspark_aux_layer_ids
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backend import AttentionMetadata
@@ -860,6 +860,7 @@ class SFAPDRD2HProducerWorker:
         self.kv_send_layer_thread = MembPullSendingThread(
             ready_event=ready_event,
             state=send_state,
+            device_id=torch.npu.current_device(),
         )
         self.kv_send_layer_thread.start()
         if not ready_event.wait(timeout=CONNECTOR_THREAD_STARTUP_TIMEOUT_SECONDS):

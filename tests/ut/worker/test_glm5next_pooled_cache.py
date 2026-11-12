@@ -3,21 +3,22 @@
 """CPU tests for GLM-Next model-runner pooled cache views."""
 
 from dataclasses import replace
-from itertools import permutations
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 import torch
 from vllm.v1.core.single_type_kv_cache_manager import (
     register_all_kvcache_specs,
 )
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
 
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     requires_padded_page_layout,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    apply_layerwise_kv_cache_plan,
 )
 from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_kv_cache_config,
@@ -26,7 +27,6 @@ from vllm_ascend.models.glm5next.cache_config import (
 )
 from vllm_ascend.models.glm5next.cache_views import view_kpool_tail_cache
 from vllm_ascend.utils import get_kv_cache_tensor_layers
-from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2 import attn_utils
 
 MAIN = "model.layers.1.attn"
@@ -107,6 +107,7 @@ def _make_specs(main_head_size=4):
         ),
         STATE: AscendIndexerKPoolTailSpec(
             block_size=2,
+            ring_capacity=2,
             sliding_window=2,
             compress_ratio=2,
             num_kv_heads=1,
@@ -121,65 +122,6 @@ def _make_specs(main_head_size=4):
             dtypes=(torch.bfloat16, torch.float32),
         ),
     }
-
-
-def _make_runner(config, main_cache_dims=(4, 0)):
-    runner = NPUModelRunner.__new__(NPUModelRunner)
-    runner.device = torch.device("cpu")
-    runner.vllm_config = config
-    runner.dcp_size = config.parallel_config.decode_context_parallel_size
-    runner.ascend_config = SimpleNamespace(
-        kvpp_config=SimpleNamespace(size=1),
-        xlite_graph_config=SimpleNamespace(enabled=False),
-    )
-    runner.compilation_config = config.compilation_config
-    runner.runner_only_attn_layers = set()
-    runner.shared_kv_cache_layers = {}
-    runner.kv_caches = []
-    runner.use_sparse = False
-    # GLM-Next exposes its layout through KV specs and does not define the
-    # legacy ``compress_ratios`` config used to derive this runner flag.
-    runner.use_compress = False
-    runner.use_hybrid_blocks = True
-    runner.sparse_kv_offload_enabled = False
-    runner.sparse_kv_offload_config = SimpleNamespace(enabled=False)
-    runner.tp_rank = 0
-    runner.attn_backend = _AttentionBackend
-    runner.kernel_block_sizes = [[8], [2], [0]]
-    # The runner gates GLM-Next reshape views on the spec-carried
-    # model_version marker, not on model_config.
-    runner.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="glm5_next"))
-
-    specs = _make_specs()
-    attn_groups = [
-        SimpleNamespace(
-            backend=_AttentionBackend,
-            kv_cache_spec=specs[MAIN],
-            layer_names=[MAIN],
-            kv_cache_group_id=0,
-        ),
-        SimpleNamespace(
-            backend=_AttentionBackend,
-            kv_cache_spec=specs[INDEXER],
-            layer_names=[INDEXER],
-            kv_cache_group_id=0,
-        ),
-        SimpleNamespace(
-            backend=_StateBackend,
-            kv_cache_spec=specs[STATE],
-            layer_names=[STATE],
-            kv_cache_group_id=1,
-        ),
-        SimpleNamespace(
-            backend=None,
-            kv_cache_spec=specs[MAMBA],
-            layer_names=[MAMBA],
-            kv_cache_group_id=2,
-        ),
-    ]
-    runner._kv_cache_spec_attn_group_iterator = lambda: iter(attn_groups)
-    runner._get_attention_kv_cache_dims = lambda _name, _spec: main_cache_dims
-    return runner
 
 
 def _make_plan(num_blocks=3, main_head_size=4):
@@ -197,144 +139,178 @@ def _make_plan(num_blocks=3, main_head_size=4):
     return config, groups, plan
 
 
-def test_glm5_next_runner_allocates_contiguous_slot_backings():
+@pytest.fixture(params=[True, False], ids=["glm-marker", "layout-capability"])
+def v2_glm_cache_plan(request, monkeypatch):
     config, _, plan = _make_plan()
-    runner = _make_runner(config)
+    if not request.param:
+        for group in plan.kv_cache_groups:
+            spec = group.kv_cache_spec
+            if isinstance(spec, UniformTypeKVCacheSpecs):
+                group.kv_cache_spec = replace(
+                    spec,
+                    kv_cache_specs={
+                        name: replace(layer_spec, model_version=None)
+                        for name, layer_spec in spec.kv_cache_specs.items()
+                    },
+                )
+    config.model_config.get_num_layers = lambda _: 2
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(attn_utils.KVPPConfig, "from_vllm_config", lambda _: SimpleNamespace(size=1))
+    monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _: False)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: False)
+    return config, plan
 
-    raw_caches = runner._allocate_kv_cache_tensors(plan)
+
+@pytest.mark.parametrize(
+    ("use_layerwise", "independent_layers"),
+    [(None, None), (False, None), (True, None), (True, "all")],
+    ids=["no-transfer", "non-layerwise", "layerwise", "independent"],
+)
+def test_v2_glm_shared_slots_preserve_backings(monkeypatch, v2_glm_cache_plan, use_layerwise, independent_layers):
+    config, plan = v2_glm_cache_plan
+    if use_layerwise is not None:
+        extra_config = {"backend": "memcache", "use_layerwise": use_layerwise}
+        if independent_layers is not None:
+            extra_config["layerwise_independent_layers"] = independent_layers
+        config.kv_transfer_config = SimpleNamespace(
+            kv_connector="AscendStoreConnector", kv_connector_extra_config=extra_config
+        )
+    apply_layerwise_kv_cache_plan(plan, config)
+    allocated_sizes = []
+    allocate = attn_utils._allocate_int8_cache_tensor
+
+    def allocate_slot(size, alignment, device):
+        allocated_sizes.append(size)
+        return allocate(size, alignment, device)
+
+    monkeypatch.setattr(attn_utils, "_allocate_int8_cache_tensor", allocate_slot)
+
+    raw_caches = attn_utils._allocate_kv_cache(plan, {}, torch.device("cpu"))
+
+    assert set(raw_caches) == {MAIN, INDEXER, STATE, MAMBA}
     assert raw_caches[MAIN] is raw_caches[MAMBA]
     assert raw_caches[INDEXER] is raw_caches[STATE]
     assert raw_caches[MAIN] is not raw_caches[INDEXER]
-
-    caches = runner._reshape_kv_cache_tensors(plan, raw_caches)
-    descriptors = {
-        name: descriptor for descriptor in plan.kv_cache_tensors for name in get_kv_cache_tensor_layers(descriptor)
-    }
-    main_cache, main_rope_cache = caches[MAIN]
-    (indexer_cache,) = caches[INDEXER]
-    (tail_cache,) = caches[STATE]
-    assert main_cache.shape == (3, 8, 1, 4)
-    assert main_rope_cache.shape == (3, 8, 1, 0)
-    assert main_cache.is_contiguous()
-    assert indexer_cache.shape == (3, 4, 1, 4)
-    assert tail_cache.shape == (3, 2, 2)
-    assert [cache.shape for cache in caches[MAMBA]] == [
-        (3, 2, 2),
-        (3, 1, 2, 2),
-    ]
-
-    assert indexer_cache.is_contiguous()
-    assert indexer_cache.data_ptr() == raw_caches[INDEXER].data_ptr()
-    assert tail_cache.data_ptr() == raw_caches[STATE].data_ptr()
-    slot = raw_caches[STATE]
-    page_bytes = descriptors[STATE].size // plan.num_blocks
-    slot_fp32 = slot.view(torch.float32)
-    page_els_fp32 = page_bytes // slot_fp32.element_size()
-    tail_block_els = tail_cache[0].numel()
-    for block_index in range(plan.num_blocks):
-        assert tail_cache[block_index].data_ptr() == slot.data_ptr() + block_index * page_bytes
-    tail_cache[2].fill_(7)
-    assert torch.all(slot_fp32[2 * page_els_fp32 : 2 * page_els_fp32 + tail_block_els] == 7)
-    assert torch.count_nonzero(slot_fp32[2 * page_els_fp32 + tail_block_els : 3 * page_els_fp32]) == 0
-    assert torch.count_nonzero(slot_fp32[: 2 * page_els_fp32]) == 0
-    for cache in caches[MAMBA]:
-        assert cache.stride(0) * cache.element_size() == descriptors[MAMBA].size // plan.num_blocks
-
-    mamba_second_offset = caches[MAMBA][0][0].numel() * caches[MAMBA][0].element_size()
-    assert caches[MAMBA][1].data_ptr() - raw_caches[MAMBA].data_ptr() == mamba_second_offset
-    mamba_payload_size = sum(cache.numel() * cache.element_size() for cache in caches[MAMBA])
-    assert mamba_payload_size < descriptors[MAMBA].size
+    assert allocated_sizes == [descriptor.size for descriptor in plan.kv_cache_tensors]
+    for descriptor in plan.kv_cache_tensors:
+        backing = raw_caches[descriptor.layers[0]]
+        assert backing.numel() == descriptor.size
+        if use_layerwise is not None:
+            assert backing.data_ptr() % (2 * 1024 * 1024) == 0
 
 
-def test_glm5_next_runner_splits_main_mla_components_within_each_page():
-    config, _, plan = _make_plan(main_head_size=6)
-    runner = _make_runner(config, main_cache_dims=(4, 2))
+@pytest.mark.parametrize(
+    "descriptor_changes",
+    [
+        {"offset": 1},
+        {"layer_stride": 1},
+        {"block_stride": 0},
+        {"size": 1},
+        {"layers": []},
+        {"block_stride": 1, "size": 3},
+    ],
+)
+def test_v2_glm_shared_slots_reject_invalid_geometry(v2_glm_cache_plan, descriptor_changes):
+    _, plan = v2_glm_cache_plan
+    plan.kv_cache_tensors[0] = replace(plan.kv_cache_tensors[0], **descriptor_changes)
 
-    raw_caches = runner._allocate_kv_cache_tensors(plan)
-    caches = runner._reshape_kv_cache_tensors(plan, raw_caches)
-
-    kv_c_cache, k_pe_cache = caches[MAIN]
-    assert kv_c_cache.shape == (3, 8, 1, 4)
-    assert k_pe_cache.shape == (3, 8, 1, 2)
-    page_size = next(
-        descriptor.size // plan.num_blocks
-        for descriptor in plan.kv_cache_tensors
-        if MAIN in get_kv_cache_tensor_layers(descriptor)
-    )
-    assert kv_c_cache.stride(0) * kv_c_cache.element_size() == page_size
-    assert k_pe_cache.stride(0) * k_pe_cache.element_size() == page_size
-    assert k_pe_cache.data_ptr() - raw_caches[MAIN].data_ptr() == kv_c_cache[0].numel() * kv_c_cache.element_size()
+    with pytest.raises(ValueError, match="Invalid padded shared-slot KV cache descriptor geometry"):
+        attn_utils._allocate_kv_cache(plan, {}, torch.device("cpu"))
 
 
-def test_standalone_mtp_uses_existing_compressed_cache_allocator():
+def test_v2_glm_shared_slots_reject_missing_layers(v2_glm_cache_plan):
+    _, plan = v2_glm_cache_plan
+    plan.kv_cache_tensors.pop()
+
+    with pytest.raises(ValueError, match="Padded shared-slot KV cache descriptors must cover every cache spec"):
+        attn_utils._allocate_kv_cache(plan, {}, torch.device("cpu"))
+
+
+@pytest.mark.parametrize("kernel_size", [4, 8])
+def test_glm_fp8_indexer_keys_and_scales_share_padded_pages_without_overlapping(monkeypatch, kernel_size):
     config = _make_config()
-    specs = {name: spec for name, spec in _make_specs().items() if not isinstance(spec, MambaSpec)}
-    groups = get_glm5_next_kv_cache_groups(config, specs)
-    bytes_per_block = get_glm5_next_pool_bytes_per_block(groups)
-    plan = get_glm5_next_kv_cache_config(config, groups, 3 * bytes_per_block)
-
-    raw_caches = _make_runner(config)._allocate_kv_cache_tensors(plan)
-
-    assert set(raw_caches) == {MAIN, INDEXER, STATE}
-    assert raw_caches[INDEXER] is raw_caches[STATE]
-
-
-def test_glm5_next_initialize_passes_all_pooled_views_to_cache_binding():
-    config, _, plan = _make_plan()
-    runner = _make_runner(config)
-    runner.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="glm5_next"))
-
-    with patch("vllm.v1.worker.utils.bind_kv_cache") as bind_kv_cache:
-        caches = runner.initialize_kv_cache_tensors(plan)
-
-    assert set(caches) == {MAIN, INDEXER, STATE, MAMBA}
-    bind_kv_cache.assert_called_once_with(
-        caches,
-        runner.compilation_config.static_forward_context,
-        runner.kv_caches,
-        1,
+    specs = _make_specs()
+    specs[INDEXER] = replace(
+        specs[INDEXER],
+        head_size=128,
+        dtype=torch.float8_e4m3fn,
+        scale_dim=1,
+        scale_dtype=torch.float32,
+        page_size_padded=640,
     )
+    register_all_kvcache_specs(None)
+    groups = get_glm5_next_kv_cache_groups(config, specs)
+    plan = get_glm5_next_kv_cache_config(config, groups, 3 * get_glm5_next_pool_bytes_per_block(groups))
+    config.model_config.get_num_layers = lambda _: 2
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(attn_utils.KVPPConfig, "from_vllm_config", lambda _: SimpleNamespace(size=1))
+    monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _: False)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: False)
+    raw = attn_utils._allocate_kv_cache(plan, {}, torch.device("cpu"))
+    group = SimpleNamespace(
+        kv_cache_group_id=0, kv_cache_spec=specs[INDEXER], layer_names=[INDEXER], backend=_AttentionBackend
+    )
+    key, scale = attn_utils._reshape_kv_cache_v2([group], raw, "fp8", [kernel_size], {}, plan)[INDEXER]
+    page_bytes = next(
+        d.size // plan.num_blocks for d in plan.kv_cache_tensors if INDEXER in get_kv_cache_tensor_layers(d)
+    )
+    rows = kernel_size // 2
+    assert key.shape == (3 * 8 // kernel_size, rows, 1, 128)
+    assert scale.shape == (3 * 8 // kernel_size, rows, 1, 1)
+    assert key.dtype == torch.float8_e4m3fn and scale.dtype == torch.float32
+    assert key.stride(0) == scale.stride(0) * scale.element_size() == page_bytes // (8 // kernel_size)
+    assert scale.data_ptr() - key.data_ptr() == rows * 128
+    key[1].view(torch.uint8).fill_(23)
+    scale[2].fill_(7)
+    assert torch.count_nonzero(key[2].view(torch.uint8)) == 0
+    assert torch.count_nonzero(scale[:2]) == 0
+    assert torch.all(key[1].view(torch.uint8) == 23)
 
 
-@pytest.mark.parametrize("offset", [0, 64])
-def test_glm_shared_mla_mamba_pages_preserve_other_block_ids(offset):
-    config, _, plan = _make_plan(num_blocks=4)
-    runner = _make_runner(config)
-    raw_tensors = runner._allocate_kv_cache_tensors(plan)
-    assert raw_tensors[MAIN] is raw_tensors[MAMBA]
-    page_bytes = raw_tensors[MAIN].numel() // plan.num_blocks
-    backing = torch.zeros(offset + raw_tensors[MAIN].numel() + 64, dtype=torch.int8)
-    raw = backing[offset : offset + plan.num_blocks * page_bytes]
-    raw_tensors[MAIN] = raw_tensors[MAMBA] = raw
-    caches = runner._reshape_kv_cache_tensors(plan, raw_tensors)
-    latent, _ = caches[MAIN]
-    conv, ssm = caches[MAMBA]
-    for state in (conv, ssm):
-        assert state.untyped_storage().data_ptr() == raw.untyped_storage().data_ptr()
-        assert state.stride(0) * state.element_size() == page_bytes
-    assert ssm.data_ptr() - conv.data_ptr() == conv[0].numel() * conv.element_size()
-    state_bytes = sum(state[0].numel() * state.element_size() for state in (conv, ssm))
-    for mla_id, state_id in permutations(range(plan.num_blocks), 2):
-        raw.zero_()
-        latent[mla_id].fill_(7)
-        conv[state_id].fill_(11)
-        ssm[state_id].fill_(13)
-        torch.testing.assert_close(latent[mla_id], torch.full_like(latent[mla_id], 7))
-        latent[mla_id].fill_(17)
-        torch.testing.assert_close(conv[state_id], torch.full_like(conv[state_id], 11))
-        torch.testing.assert_close(ssm[state_id], torch.full_like(ssm[state_id], 13))
-        assert torch.count_nonzero(raw.view(plan.num_blocks, page_bytes)[state_id, state_bytes:]) == 0
-    assert torch.count_nonzero(backing[:offset]) == 0
-    assert torch.count_nonzero(backing[offset + raw.numel() :]) == 0
-
-
-def test_padded_page_layout_detected_for_shared_state_pages():
-    # The pooled layout pads the state caches to the page size of the
-    # block-stride addressed MLA/indexer caches they share physical pages with.
-    # Probe the specs the runner itself derives from the KV cache config.
+def test_cann_tail_views_keep_interleaved_rows_and_shared_page_stride(monkeypatch):
     config, _, plan = _make_plan()
-    layer_specs = _make_runner(config)._get_layer_kv_cache_specs(plan)
-    assert requires_padded_page_layout(layer_specs.values())
+    config.model_config.get_num_layers = lambda _: 2
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(attn_utils.KVPPConfig, "from_vllm_config", lambda _: SimpleNamespace(size=1))
+    monkeypatch.setattr(attn_utils, "_is_dsv4_model", lambda _: False)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _: False)
+    raw_caches = attn_utils._allocate_kv_cache(plan, {}, torch.device("cpu"))
+    spec = replace(_make_specs()[STATE], head_size=2)
+    plan.kv_cache_groups = [KVCacheGroupSpec(layer_names=[STATE], kv_cache_spec=spec)]
+    raw = raw_caches[STATE]
+    expected = view_kpool_tail_cache(STATE, spec, raw, plan.num_blocks)[0]
+    group = SimpleNamespace(kv_cache_group_id=0, kv_cache_spec=spec, layer_names=[STATE], backend=_StateBackend)
+    actual = attn_utils._reshape_kv_cache_v2([group], {STATE: raw}, "auto", [2], {}, plan)[STATE][0]
+    assert actual.shape == expected.shape == (plan.num_blocks, 2, 4)
+    assert actual.data_ptr() == expected.data_ptr() == raw.data_ptr()
+    page_bytes = raw.numel() // plan.num_blocks
+    assert actual.stride(0) * actual.element_size() == page_bytes
+    expected[1, :, :2] = 5
+    expected[1, :, 2:] = 7
+    torch.testing.assert_close(actual[1], torch.tensor([[5, 5, 7, 7], [5, 5, 7, 7]], dtype=torch.float32))
+    torch.testing.assert_close(actual[0], torch.zeros_like(actual[0]))
+    torch.testing.assert_close(actual[2], torch.zeros_like(actual[2]))
+
+
+def test_speculative_tail_view_preserves_all_nine_physical_rows():
+    spec = AscendIndexerKPoolTailSpec(
+        block_size=4,
+        ring_capacity=9,
+        sliding_window=4,
+        compress_ratio=4,
+        num_kv_heads=1,
+        head_size=2,
+        dtype=torch.float32,
+        page_size_padded=256,
+    )
+    raw = torch.zeros(3 * spec.page_size_bytes, dtype=torch.int8)
+    view = view_kpool_tail_cache(STATE, spec, raw, 3)[0]
+    assert view.shape == (3, 9, 4)
+    assert view.stride() == (64, 4, 1)
+    view[1, 8].fill_(7)
+    torch.testing.assert_close(raw.view(torch.float32)[96:100], torch.full((4,), 7.0))
+    assert not torch.count_nonzero(view[0])
+    assert not torch.count_nonzero(view[2])
 
 
 def test_padded_page_layout_rejected_without_tail_caches():
@@ -363,26 +339,3 @@ def test_padded_page_layout_rejected_for_packed_hybrid_pool():
         ),
     ]
     assert not requires_padded_page_layout(specs)
-
-
-def test_cann_tail_views_keep_interleaved_rows_and_shared_page_stride(monkeypatch):
-    config, _, plan = _make_plan()
-    runner = _make_runner(config)
-    raw_caches = runner._allocate_kv_cache_tensors(plan)
-    spec = replace(_make_specs()[STATE], head_size=2)
-    plan.kv_cache_groups = [KVCacheGroupSpec(layer_names=[STATE], kv_cache_spec=spec)]
-    raw = raw_caches[STATE]
-    expected = view_kpool_tail_cache(STATE, spec, raw, plan.num_blocks)[0]
-    group = SimpleNamespace(kv_cache_group_id=0, kv_cache_spec=spec, layer_names=[STATE], backend=_StateBackend)
-    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
-    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _config: False)
-    actual = attn_utils._reshape_kv_cache_v2([group], {STATE: raw}, "auto", [2], {}, plan)[STATE][0]
-    assert actual.shape == expected.shape == (plan.num_blocks, 2, 4)
-    assert actual.data_ptr() == expected.data_ptr() == raw.data_ptr()
-    page_bytes = raw.numel() // plan.num_blocks
-    assert actual.stride(0) * actual.element_size() == page_bytes
-    expected[1, :, :2] = 5
-    expected[1, :, 2:] = 7
-    torch.testing.assert_close(actual[1], torch.tensor([[5, 5, 7, 7], [5, 5, 7, 7]], dtype=torch.float32))
-    torch.testing.assert_close(actual[0], torch.zeros_like(actual[0]))
-    torch.testing.assert_close(actual[2], torch.zeros_like(actual[2]))

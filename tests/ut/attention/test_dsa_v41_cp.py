@@ -9,6 +9,7 @@ tests check persistent addresses and state controls, not NPU graph replay.
 """
 
 import importlib
+from dataclasses import fields, replace
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
@@ -16,6 +17,7 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 import torch
+import vllm.distributed as vllm_distributed
 from vllm.config import CUDAGraphMode
 from vllm.v1.kv_cache_interface import CircularBufferSpec
 
@@ -23,15 +25,35 @@ from vllm_ascend.attention import dsa_v41
 from vllm_ascend.attention.context_parallel import dsa_cp, dsa_v41_cp
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec
+from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
 from vllm_ascend.models.deepseek_v41.compressor import DeepseekV41Compressor
 from vllm_ascend.models.deepseek_v41.indexer import DeepseekV41Indexer
 from vllm_ascend.ops import rope_dsv4
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
+from vllm_ascend.quantization.method_adapters import AscendLinearMethod
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
+from vllm_ascend.quantization.methods.w4a8.w4a8 import AscendW4A8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DSDynamicLinearMethod
-from vllm_ascend.weight_switch import WeightSwitchConfig
+from vllm_ascend.weight_switch import ParallelOProjection, WeightSwitchConfig
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
+
+
+@pytest.mark.parametrize("pcp", [False, True])
+def test_backend_selection_follows_current_target_or_draft_config(monkeypatch, pcp):
+    config = {"pcp": pcp}
+    monkeypatch.setattr(dsa_v41_cp, "is_pcp_enabled", lambda: config["pcp"])
+    expected = (
+        (dsa_v41_cp.AscendDSAV41PCPMetadataBuilder, dsa_v41_cp.AscendDSAV41PCPImpl)
+        if pcp
+        else (dsa_v41.AscendDSAV41MetadataBuilder, dsa_v41.AscendDSAV41Impl)
+    )
+    assert dsa_v41_cp.get_v41_cp_classes() == expected
+    assert dsa_v41.DeepseekV41CacheBackend.get_builder_cls() is expected[0]
+    assert dsa_v41.DeepseekV41CacheBackend.supports_pcp()
+    config["pcp"] = False
+    assert dsa_v41_cp.get_v41_cp_classes() == (dsa_v41.AscendDSAV41MetadataBuilder, dsa_v41.AscendDSAV41Impl)
+
 
 LAYER = "model.layers.0.attn"
 PREFIXES = {
@@ -40,6 +62,102 @@ PREFIXES = {
     "index_k": "model.layers.0.indexer.k_cache",
     "compressor_state": "model.layers.0.compressor.state_cache",
 }
+
+
+@pytest.mark.parametrize("world", [2, 4, 8, 16])
+@pytest.mark.parametrize(
+    "lengths,positions,drop_tail",
+    [
+        ([1, 2, 3, 33, 67], [0, 1, 5, 30, 63], 0),
+        ([1, 2, 3, 33, 67], [0, 1, 5, 30, 63], 29),
+        ([1], [0], 0),
+    ],
+    ids=["multiple-requests", "truncated-tail", "empty-peers"],
+)
+def test_local_compressor_boundaries_preserve_request_tails_and_predecessors(world, lengths, positions, drop_tail):
+    """Exchange only owned rows, keep request isolation, and cover empty local chunks."""
+    lengths = np.asarray(lengths, dtype=np.int32)
+    starts = np.concatenate(([0], lengths.cumsum())).astype(np.int32)
+    positions = np.asarray(positions, dtype=np.int32)
+    actual_tokens = int(starts[-1]) - drop_tail
+    batch = SimpleNamespace(
+        num_reqs=len(lengths),
+        num_tokens=actual_tokens,
+        num_scheduled_tokens=lengths,
+        query_start_loc_np=starts,
+        num_computed_tokens_np=positions,
+        is_prefilling_np=np.ones(len(lengths), dtype=np.bool_),
+    )
+    rank_c2_metadata, rank_rows, gathered = [], [], []
+    for rank in range(world):
+        rows: list[int] = []
+        segment_starts: list[tuple[int, int]] = []
+        for req, length in enumerate(lengths):
+            chunk = (int(length) + 2 * world - 1) // (2 * world)
+            for part in (rank, 2 * world - 1 - rank):
+                offset = part * chunk
+                if offset < length:
+                    segment_starts.append((req, int(starts[req]) + offset))
+                    rows.extend(range(int(starts[req]) + offset, int(starts[req]) + min(offset + chunk, length)))
+        c2_metadata = dsa_v41_cp.build_v41_pcp_c2_metadata(
+            batch,
+            world,
+            rank,
+            torch.device("cpu"),
+            decode_sharded=False,
+            min_send_rows=0,
+            num_local_reqs=len(segment_starts),
+            num_ring_rows=0,
+            buffers=None,
+            buffer_capacity=0,
+        )
+        optimistic = dsa_v41_cp.build_v41_pcp_c2_metadata(
+            SimpleNamespace(**(vars(batch) | {"num_computed_tokens_np": positions + 1})),
+            world,
+            rank,
+            torch.device("cpu"),
+            decode_sharded=False,
+            min_send_rows=0,
+            num_local_reqs=len(segment_starts),
+            num_ring_rows=0,
+            buffers=None,
+            buffer_capacity=0,
+        )
+        for field in fields(c2_metadata):
+            torch.testing.assert_close(getattr(c2_metadata, field.name), getattr(optimistic, field.name))
+        send_rows = torch.full_like(c2_metadata.send_token_indices, -1)
+        if rows:
+            send_rows[c2_metadata.send_valid_mask] = torch.tensor(rows)[
+                c2_metadata.send_token_indices[c2_metadata.send_valid_mask]
+            ]
+        assert c2_metadata.prev_token_row_indices.numel() == len(segment_starts)
+        if not rows:
+            assert not c2_metadata.send_valid_mask.any()
+        rank_c2_metadata.append(c2_metadata)
+        rank_rows.append(segment_starts)
+        gathered.append(send_rows)
+    assert len({metadata.send_token_indices.numel() for metadata in rank_c2_metadata}) == 1
+    assert rank_c2_metadata[0].send_token_indices.numel() >= 1
+    gathered = torch.cat(gathered)
+    ends = np.minimum(starts[1:], actual_tokens)
+    used = np.maximum(ends - starts[:-1], 0)
+    expected_tail = [row for req, end in enumerate(ends) for row in range(max(starts[req], end - 32), end)]
+    for c2_metadata, segments in zip(rank_c2_metadata, rank_rows):
+        assert gathered[c2_metadata.ring_source_row_indices].tolist() == expected_tail
+        expected_requests = [req for req, length in enumerate(used) for _ in range(min(int(length), 32))]
+        assert c2_metadata.ring_request_indices.tolist() == expected_requests
+        expected_offsets = [row - int(starts[req]) for row, req in zip(expected_tail, expected_requests)]
+        assert c2_metadata.ring_token_offsets.tolist() == expected_offsets
+        keys = list(zip(c2_metadata.ring_request_indices.tolist(), c2_metadata.ring_token_offsets.tolist()))
+        assert len(keys) == len(set(keys))
+        for index, (req, row) in enumerate(segments):
+            predecessor = int(c2_metadata.prev_token_row_indices[index])
+            if starts[req] < row < actual_tokens:
+                assert int(gathered[predecessor]) == row - 1
+            else:
+                assert predecessor == -1
+
+
 # Scheduler token IDs owned by each rank, in DualChunkSwap order. Repeated
 # decode rows are added separately; the oracle does not call PCP helpers.
 PREFILL_ROWS = {
@@ -96,18 +214,29 @@ def _projector(
     projector.head_dim = width
     projector.support_fp8_attention = False
     projector.enable_pcp_o_proj_weight_sharding = sharding
-    projector._pcp_decode_sharded = decode_sharded
-    projector._pcp_o_proj_weight_switches = None
     projector.wo_a_pcp_weight_method = projector.wo_a.quant_method
     projector.wo_b_pcp_weight_method = projector.wo_b.quant_method
     group = SimpleNamespace(world_size=world, rank_in_group=rank, device_group=object())
-    projector.pcp_o_proj_weight_switch_config = WeightSwitchConfig.from_group(group)
     projector.vllm_config = SimpleNamespace(
         num_speculative_tokens=speculative_tokens,
         scheduler_config=SimpleNamespace(max_num_seqs=4),
         compilation_config=compilation_config,
         model_config=SimpleNamespace(dtype=torch.float32),
     )
+    projector._parallel_o_proj = ParallelOProjection(
+        world * width,
+        projector.wo_b,
+        config=WeightSwitchConfig.from_group(group),
+        tp_group=SimpleNamespace(world_size=1, rank_in_group=0),
+        pool={},
+        pool_key="dsa_pcp_o_proj",
+        project_full=dsa_cp.dsa_v1.AscendDSAImpl._forward_o_proj.__get__(projector),
+        decode_sharded=decode_sharded,
+        input_layer=projector.wo_a,
+        input_projection=projector._wo_a_bmm,
+        num_input_groups=world,
+    )
+    projector._parallel_o_proj.enabled = sharding
     monkeypatch.setattr(dsa_cp.AscendDSAPCPImpl, "o_proj_full_pools", {})
 
     def matmul(value, weight, **kwargs):
@@ -132,33 +261,33 @@ def _projector(
 
     def exchange(destination, source, *, group):
         events.append("exchange")
-        assert group is projector.pcp_o_proj_weight_switch_config.group.device_group
-        assert source.data_ptr() == projector._pcp_o_proj_ag_in_buf.data_ptr()
-        assert destination.data_ptr() == projector._pcp_o_proj_ag_out_buf.data_ptr()
+        assert group is projector._parallel_o_proj.config.group.device_group
+        assert source.data_ptr() == projector._parallel_o_proj.all_gather_input.data_ptr()
+        assert destination.data_ptr() == projector._parallel_o_proj.all_gather_output.data_ptr()
         peers = projector.peer_inputs
         torch.testing.assert_close(source, peers[rank])
         destination.copy_(torch.cat(peers))
 
     def scatter(destination, source, *, group):
         events.append("scatter")
-        assert group is projector.pcp_o_proj_weight_switch_config.group.device_group
-        assert source.data_ptr() == projector._pcp_o_proj_rs_in_buf.data_ptr()
-        assert destination.data_ptr() == projector._pcp_o_proj_rs_out_buf.data_ptr()
+        assert group is projector._parallel_o_proj.config.group.device_group
+        assert source.data_ptr() == projector._parallel_o_proj.reduce_scatter_input.data_ptr()
+        assert destination.data_ptr() == projector._parallel_o_proj.reduce_scatter_output.data_ptr()
         destination.copy_(reduce(source).chunk(world)[rank])
 
     group.all_reduce = reduce
 
-    monkeypatch.setattr(dsa_cp.torch_npu, "npu_transpose_batchmatmul", matmul, raising=False)
+    monkeypatch.setattr(dsa_cp.dsa_v1.torch_npu, "npu_transpose_batchmatmul", matmul, raising=False)
     # Match the runtime import even when another UT replaces sys.modules.
     monkeypatch.setattr(importlib.import_module("vllm_ascend.distributed.utils"), "all_gather_async", gather_weight)
     monkeypatch.setattr(dsa_cp, "get_pcp_group", lambda: group)
     monkeypatch.setattr(dsa_cp, "get_tp_group", lambda: SimpleNamespace(world_size=1, rank_in_group=0))
-    monkeypatch.setattr(dsa_cp.dist, "all_gather_into_tensor", exchange)
-    monkeypatch.setattr(dsa_cp.dist, "reduce_scatter_tensor", scatter)
+    monkeypatch.setattr(torch.distributed, "all_gather_into_tensor", exchange)
+    monkeypatch.setattr(torch.distributed, "reduce_scatter_tensor", scatter)
     monkeypatch.setattr(dsa_cp.dsa_v1, "oproj_tp_enable", lambda: False)
     monkeypatch.setattr(torch.ops.vllm, "unquantized_gemm", torch.nn.functional.linear, raising=False)
     if sharding and decode_sharded:
-        projector._initialize_pcp_o_proj_exchange_buffers()
+        projector._parallel_o_proj._prepare_exchange_buffers(projector.vllm_config)
     return projector
 
 
@@ -186,12 +315,12 @@ def builders(monkeypatch):
     for module in (dsa_v41, dsa_v41_cp):
         monkeypatch.setattr(module, "get_full_cos_and_sin_dsa_for_layer", lambda name: (full_cos, full_sin))
 
-    def make(world=2, rank=0, *, max_seqs=2, graph_sizes=(12, 24), dcp=1, legacy=False, decode_sharded=False):
+    def make(world=2, rank=0, *, max_seqs=2, graph_sizes=(12, 24), dcp=1, decode_sharded=False):
         monkeypatch.setattr(dsa_v41_cp, "is_pcp_decode_sharding_enabled", lambda config: decode_sharded)
         config = SimpleNamespace(
             parallel_config=SimpleNamespace(
-                tensor_parallel_size=world if legacy else 1,
-                prefill_context_parallel_size=1 if legacy else world,
+                tensor_parallel_size=1,
+                prefill_context_parallel_size=world,
                 decode_context_parallel_size=dcp,
             ),
             scheduler_config=SimpleNamespace(max_num_seqs=max_seqs, max_num_batched_tokens=64),
@@ -204,7 +333,7 @@ def builders(monkeypatch):
             model_config=SimpleNamespace(
                 hf_text_config=SimpleNamespace(
                     sliding_window=4,
-                    num_attention_heads=8 if legacy else 2,
+                    num_attention_heads=2,
                     head_dim=2,
                     qk_rope_head_dim=2,
                     index_topk=3,
@@ -220,9 +349,7 @@ def builders(monkeypatch):
         }
         monkeypatch.setattr(dsa_v41_cp, "get_pcp_group", lambda: SimpleNamespace(rank_in_group=rank))
         monkeypatch.setattr(dsa_cp, "get_tp_group", lambda: SimpleNamespace(world_size=world, rank_in_group=rank))
-        builder_class = (
-            dsa_v41_cp.AscendDSAV41CPMetadataBuilder if legacy else dsa_v41_cp.AscendDSAV41PCPMetadataBuilder
-        )
+        builder_class = dsa_v41_cp.AscendDSAV41PCPMetadataBuilder
         result = {
             kind: builder_class(spec, [PREFIXES[kind]], config, torch.device("cpu")) for kind, spec in specs.items()
         }
@@ -230,7 +357,28 @@ def builders(monkeypatch):
             builder.prepare_source_rope()
         return result
 
-    return make
+    def make_specialized(*args, specialized=False, ratio=2, **kwargs):
+        result = make(*args, **kwargs)
+        if not specialized and ratio == 2:
+            return result
+        role_classes: dict[str, type[dsa_v41_cp.AscendDSAV41PCPMetadataBuilder]] = {
+            "swa": dsa_v41_cp.AscendDSAV41PCPSWAMetadataBuilder,
+            "long_kv": dsa_v41_cp.AscendDSAV41PCPAttentionMetadataBuilder,
+            "index_k": dsa_v41_cp.AscendDSAV41PCPIndexerMetadataBuilder,
+            "compressor_state": dsa_v41_cp.AscendDSAV41PCPStateMetadataBuilder,
+        }
+        for kind, builder in result.items():
+            spec = builder.kv_cache_spec
+            if kind in {"long_kv", "index_k"}:
+                spec = replace(spec, tokens_per_state=ratio)
+            builder_cls = role_classes[kind] if specialized else type(builder)
+            result[kind] = builder_cls(spec, builder.layer_names, builder.vllm_config, torch.device("cpu"))
+            result[kind].prepare_source_rope()
+        if specialized:
+            dsa_v41_cp.AscendDSAV41PCPMetadataBuilder.prepare_shared_buffers(result.values())
+        return result
+
+    return make_specialized
 
 
 def _batch(world, rank, scenario, *, decode_sharded=False):
@@ -242,11 +390,11 @@ def _batch(world, rank, scenario, *, decode_sharded=False):
     elif scenario == "mixed":
         decode_length = 1 if decode_sharded else 6
         rows = [
-            row[: len(row) // 2] + (list(range(8, 8 + decode_length)) if not decode_sharded or peer == 0 else [])
+            (list(range(8, 8 + decode_length)) if not decode_sharded or peer == 0 else []) + row[: len(row) // 2]
             for peer, row in enumerate(PREFILL_ROWS[world])
         ]
         lengths, computed, flags = [8, decode_length], [4, 8], [True, False]
-        local_lengths = [8 // (2 * world)] * 2 + ([decode_length] if not decode_sharded or rank == 0 else [])
+        local_lengths = ([decode_length] if not decode_sharded or rank == 0 else []) + [8 // (2 * world)] * 2
     elif scenario == "empty":
         rows = [[0]] + [[] for _ in range(world - 1)]
         lengths, computed, flags = [1], [3], [True]
@@ -335,7 +483,8 @@ def _batch(world, rank, scenario, *, decode_sharded=False):
         if decode_sharded:
             local_tables = tables[local_ids] if local_ids else torch.zeros_like(tables[:1])
     elif scenario == "mixed":
-        local_flags = [True, True] + ([False] if len(local_lengths) == 3 else [])
+        local_flags = ([False] if len(local_lengths) == 3 else []) + [True, True]
+        local_tables = tables[([1] if len(local_lengths) == 3 else []) + [0, 0]]
     else:
         local_flags = [True] * len(local_lengths)
     local = AscendCommonAttentionMetadata(
@@ -355,6 +504,10 @@ def _batch(world, rank, scenario, *, decode_sharded=False):
         is_prefilling=torch.tensor(local_flags),
         attn_state=scenario,
     )
+    # Populate the new common-metadata interface while retaining keyword
+    # arguments at call sites for compatibility with the branch's runner.
+    local.pcp_context = context
+    local.pcp_cache_group_idx = 0
     return SimpleNamespace(
         local=local,
         context=context,
@@ -380,9 +533,7 @@ def _build_planes(builders, batch):
             slots = torch.where(slots >= 0, slots + 128, -1)
         result[PREFIXES[kind]] = builder.build(
             0,
-            batch.local.replace(slot_mapping=slots),
-            pcp_context=batch.context,
-            pcp_cache_group_idx=group,
+            batch.local.replace(slot_mapping=slots, pcp_context=batch.context, pcp_cache_group_idx=group),
             num_actual_reqs=1 if batch.graph else batch.local.num_reqs,
             full_graph_mode=batch.graph,
             common_v41_metadata={},
@@ -393,94 +544,55 @@ def _build_planes(builders, batch):
     return result
 
 
-class TestLegacyMetadata:
-    @pytest.mark.parametrize("world", [2, 4])
-    @pytest.mark.parametrize("last_rank", [False, True])
-    @pytest.mark.parametrize("causal", [False, True])
-    def test_query_intersection_uses_device_lengths_and_global_rope(
-        self, builders, monkeypatch, world, last_rank, causal
-    ):
-        rank = world - 1 if last_rank else 0
-        batch = _batch(world, rank, "prefill")
-        global_batch = batch.context.global_batch
-        # Only pinned staging is device-specific. The legacy metadata builder
-        # and its request-intersection calculation execute unmocked.
-        monkeypatch.setattr(torch.Tensor, "pin_memory", lambda self: self)
-        common = AscendCommonAttentionMetadata(
-            query_start_loc=global_batch.query_start_loc,
-            query_start_loc_cpu=global_batch.query_start_loc.clone(),
-            seq_lens=global_batch.seq_lens,
-            seq_lens_cpu=global_batch.seq_lens + 1000,
-            num_reqs=2,
-            num_actual_tokens=16,
-            num_input_tokens=18,
-            max_query_len=8,
-            max_seq_len=16,
-            block_table_tensor=batch.context.global_block_tables[0],
-            slot_mapping=batch.context.global_slot_mappings[0],
-            positions=global_batch.positions,
-            is_prefilling=torch.tensor([True, True]),
-            causal=causal,
-        )
-        local = builders(world, rank, legacy=True)["swa"].build(
-            0, common, common_v41_metadata={}, common_v41_batch_metadata={}
-        )
-        # Independent examples include partial requests and rank-tail padding.
-        expected = {
-            (2, 0): ([0, 8, 9], [12, 9], 0, 9),
-            (2, 1): ([0, 0, 7], [0, 16], 9, 16),
-            (4, 0): ([0, 5, 5], [9, 0], 0, 5),
-            (4, 3): ([0, 0, 1], [0, 16], 15, 16),
-        }
-        offsets, lengths, start, end = expected[world, rank]
-        if not causal:
-            lengths = [
-                length if right > left else 0 for length, left, right in zip([12, 16], offsets[:-1], offsets[1:])
-            ]
-        torch.testing.assert_close(local.query_start_loc, torch.tensor(offsets, dtype=torch.int32))
-        torch.testing.assert_close(local.seq_lens, torch.tensor(lengths, dtype=torch.int32))
-        assert local.num_actual_tokens == end - start
-        assert local.seq_lens.data_ptr() != local.global_metadata.seq_lens.data_ptr()
-        torch.testing.assert_close(local.global_metadata.seq_lens, torch.tensor([12, 16], dtype=torch.int32))
-        torch.testing.assert_close(local.positions, batch.positions[start:end])
-        torch.testing.assert_close(local.cos[LAYER], local.global_metadata.cos[LAYER][start:end])
-        torch.testing.assert_close(local.global_metadata.cos[LAYER][:16, 0, 0, 0], batch.positions.float())
-
-
 class TestPCPMetadata:
+    def test_sharded_decode_graph_reuses_c2_buffers_and_masks_padding(self, builders):
+        owners = builders(2, 1, specialized=True, decode_sharded=True)
+        addresses = None
+        for scenario in ("decode", "dummy", "decode"):
+            batch = _batch(2, 1, scenario, decode_sharded=True)
+            batch.graph = True
+            metadata = _build_planes(owners, batch)
+            c2_metadata = metadata[PREFIXES["swa"]].c2_metadata
+            current = tuple(getattr(c2_metadata, name).data_ptr() for name in c2_metadata.__dataclass_fields__)
+            if addresses is None:
+                addresses = current
+            assert current == addresses
+            assert c2_metadata.send_token_indices.numel() == batch.local.num_input_tokens
+            assert torch.all(c2_metadata.ring_request_indices[len(batch.positions) :] == -1)
+
     @pytest.mark.parametrize("graph_width", [1, 8])
     @pytest.mark.parametrize("packed_cache", [False, True])
     def test_empty_rank_disables_captured_query_tasks(self, builders, graph_width, packed_cache):
         owners = builders(world=4, rank=3, decode_sharded=True)
         _build_planes(owners, _batch(4, 3, "prefill", decode_sharded=True))
-        builder = owners["swa"]
-        if packed_cache:
-            builder._a5_smla_metadata = torch.ones(dsa_v41.V41_METADATA_BUFFER_SIZE, dtype=torch.int32)
-        captured = [builder._smla_metadata, builder._qli_metadata]
-        if packed_cache:
-            captured.append(builder._a5_smla_metadata)
-        for buffer in captured:
-            buffer.fill_(1)
-        addresses = [buffer.data_ptr() for buffer in captured]
-        global_metadata = builder._global_builder._seq_lens
-        assert global_metadata.numel() > 0
-        global_metadata.fill_(7)
-        batch = _batch(4, 3, "decode", decode_sharded=True)
-        common = batch.local.replace(
-            num_reqs=graph_width,
-            num_input_tokens=graph_width,
-            query_start_loc=torch.arange(graph_width + 1, dtype=torch.int32),
-        )
+        for builder in (owners["swa"], owners["compressor_state"]):
+            if packed_cache:
+                builder._a5_smla_metadata = torch.ones(dsa_v41.V41_METADATA_BUFFER_SIZE, dtype=torch.int32)
+            captured = [builder._smla_metadata, builder._qli_metadata, builder._c2_ring_metadata]
+            if packed_cache:
+                captured.append(builder._a5_smla_metadata)
+            for buffer in captured:
+                buffer.fill_(1)
+            addresses = [buffer.data_ptr() for buffer in captured]
+            global_buffers = [builder._global_builder._seq_lens, builder._global_builder._c2_ring_metadata]
+            for buffer in global_buffers:
+                buffer.fill_(7)
+            batch = _batch(4, 3, "decode", decode_sharded=True)
+            common = batch.local.replace(
+                num_reqs=graph_width,
+                num_input_tokens=graph_width,
+                query_start_loc=torch.arange(graph_width + 1, dtype=torch.int32),
+            )
 
-        result = builder._build_empty_local_metadata(common)
+            result = builder._build_empty_local_metadata(common)
 
-        assert result.num_actual_tokens == 0
-        assert result.num_input_tokens == graph_width
-        assert torch.count_nonzero(result.seq_lens) == 0
-        assert torch.all(result.slot_mapping == -1)
-        assert [buffer.data_ptr() for buffer in captured] == addresses
-        assert all(torch.count_nonzero(buffer) == 0 for buffer in captured)
-        assert torch.all(global_metadata == 7)
+            assert result.num_actual_tokens == 0
+            assert result.num_input_tokens == graph_width
+            assert torch.count_nonzero(result.seq_lens) == 0
+            assert torch.all(result.slot_mapping == -1)
+            assert [buffer.data_ptr() for buffer in captured] == addresses
+            assert all(torch.count_nonzero(buffer) == 0 for buffer in captured)
+            assert all(torch.all(buffer == 7) for buffer in global_buffers)
 
     @pytest.mark.parametrize(
         "world,rank,scenario,decode_sharded",
@@ -496,13 +608,15 @@ class TestPCPMetadata:
             (4, 3, "empty", False),
             (2, 0, "decode", True),
             (2, 1, "decode", True),
+            (2, 0, "dummy", True),
             (4, 3, "dummy", True),
             (4, 1, "mixed", True),
         ],
     )
-    def test_local_queries_and_global_cache_planes(self, builders, world, rank, scenario, decode_sharded):
+    @pytest.mark.parametrize("specialized", [False, True])
+    def test_local_queries_and_global_cache_planes(self, builders, world, rank, scenario, decode_sharded, specialized):
         batch = _batch(world, rank, scenario, decode_sharded=decode_sharded)
-        owners = builders(world, rank, decode_sharded=decode_sharded)
+        owners = builders(world, rank, specialized=specialized, decode_sharded=decode_sharded)
         assert all(builder._is_decode_sharded == decode_sharded for builder in owners.values())
         metadata = _build_planes(owners, batch)
         for kind, prefix in PREFIXES.items():
@@ -529,7 +643,17 @@ class TestPCPMetadata:
                 assert torch.count_nonzero(global_meta.seq_lens[1:]) == 0
             if kind == "compressor_state":
                 if needs_global_metadata:
-                    assert local.c2_ring_metadata is None
+                    assert local.c2_metadata is metadata[PREFIXES["swa"]].c2_metadata
+                    assert (local.c2_ring_metadata is not None) == bool(batch.local_ids)
+                    if batch.local_ids:
+                        used_local = batch.local.query_start_loc.diff()
+                        if scenario == "dummy":
+                            used_local = torch.zeros_like(used_local)
+                        torch.testing.assert_close(local.c2_ring_metadata[1], used_local)
+                        expected_complete = batch.positions[batch.local_ids].remainder(2) == 1
+                        if scenario == "dummy":
+                            expected_complete.zero_()
+                        torch.testing.assert_close(local.c2_complete_mask[: len(batch.local_ids)], expected_complete)
                 used = torch.zeros_like(global_meta.c2_ring_metadata[1])
                 if scenario != "dummy":
                     used[: len(batch.lengths)] = torch.tensor(batch.lengths, dtype=used.dtype)
@@ -551,9 +675,12 @@ class TestPCPMetadata:
             expected_slots[expected < 0] = -1
             torch.testing.assert_close(global_meta.slot_mapping[: len(expected)], expected_slots.to(torch.int32))
             assert torch.all(global_meta.slot_mapping[len(expected) :] == -1)
-            torch.testing.assert_close(
-                local.slot_mapping[: len(batch.local_ids)], expected_slots[batch.local_ids].to(torch.int32)
-            )
+            if specialized and needs_global_metadata:
+                assert torch.all(local.slot_mapping == -1)
+            else:
+                torch.testing.assert_close(
+                    local.slot_mapping[: len(batch.local_ids)], expected_slots[batch.local_ids].to(torch.int32)
+                )
             assert torch.all(local.slot_mapping[len(batch.local_ids) :] == -1)
             if kind == "swa" and batch.local_ids and needs_global_metadata:
                 assert local.cos[LAYER].data_ptr() != global_meta.cos[LAYER].data_ptr()
@@ -581,7 +708,14 @@ class TestPCPMetadata:
                 for owner in (builder, builder._global_builder):
                     buffers.extend(
                         getattr(owner, name).data_ptr()
-                        for name in ("_seq_lens", "_c2_ring_metadata", "_c2_complete_mask", "_c2_source_positions")
+                        for name in (
+                            "_seq_lens",
+                            "_c2_ring_metadata",
+                            "_c2_complete_mask",
+                            "_c2_source_positions",
+                            "_slot_mapping_2d",
+                            "_flat_slot_mapping",
+                        )
                     )
                 buffers.append(builder._hidden_restore_idx_buffer.data_ptr())
                 for rope in builder._pcp_rope_buffers.values():
@@ -665,9 +799,16 @@ class TestPCPMetadata:
     def test_rejects_unsupported_context(self, builders):
         with pytest.raises(NotImplementedError, match="DCP=1"):
             builders(dcp=2)
-        builder = builders()["swa"]
-        with pytest.raises(AssertionError, match="global batch context"):
-            builder.build(0, _batch(2, 0, "prefill").local)
+
+    def test_builds_ordinary_metadata_without_pcp_context(self, builders):
+        # A replicated draft decode builds through PCP builders without a
+        # PCP context and must get the ordinary, PCP=1-shaped metadata.
+        common = _batch(2, 0, "decode").local
+        # Replicated drafts keep rank-local slots, unlike target PCP batches.
+        common = common.replace(slot_mapping=common.slot_mapping[: common.num_input_tokens])
+        for builder in builders().values():
+            metadata = builder.build(0, common)
+            assert not isinstance(metadata, dsa_v41_cp.AscendDSAV41PCPMetadata)
 
 
 @pytest.fixture
@@ -736,8 +877,16 @@ def runtime(builders, monkeypatch):
                 peers.append(peer)
 
             def gather(value, dim):
-                events.append("hidden")
-                return torch.cat(peers, dim=dim)
+                events.append("cache_gather")
+                if value.shape[-1] == attn.head_dim:
+                    return torch.cat([peer[:, : attn.head_dim] for peer in peers], dim=dim).to(value.dtype)
+                # Each request fits in the ring, so C2 sends every owned row.
+                rank_send_rows = []
+                for peer, ids in zip(peers, batch.rows):
+                    send_rows = torch.zeros_like(value)
+                    send_rows[: len(ids)] = peer[: len(ids), : attn.head_dim].repeat(1, 2)
+                    rank_send_rows.append(send_rows)
+                return torch.cat(rank_send_rows, dim=dim)
 
             monkeypatch.setattr(dsa_v41_cp, "get_pcp_group", lambda: SimpleNamespace(all_gather=gather))
             projector.reference_input = torch.zeros_like(peers[rank])
@@ -759,6 +908,98 @@ def runtime(builders, monkeypatch):
 
 
 class TestPCPBatchLifecycle:
+    @pytest.mark.parametrize("wrapped", [False, True])
+    @pytest.mark.parametrize(
+        "q_scheme,kv_scheme,quantizations",
+        [
+            (AscendW8A8DynamicLinearMethod, AscendW8A8DynamicLinearMethod, 1),
+            (AscendW8A8DynamicLinearMethod, AscendW4A8DynamicLinearMethod, 2),
+            (AscendW4A8DynamicLinearMethod, AscendW8A8DynamicLinearMethod, 2),
+            (AscendW4A8DynamicLinearMethod, AscendW4A8DynamicLinearMethod, 2),
+        ],
+    )
+    def test_qkv_quantization_respects_wrapped_schemes(
+        self, runtime, monkeypatch, wrapped, q_scheme, kv_scheme, quantizations
+    ):
+        state = runtime(overlap=True)
+        for layer, scheme_cls in ((state.attn.wq_a, q_scheme), (state.attn.wkv, kv_scheme)):
+            # Bypass checkpoint setup; execute the real scheme and adapter apply paths.
+            scheme = scheme_cls.__new__(scheme_cls)
+            layer.quant_method = AscendLinearMethod(scheme) if wrapped else scheme
+            layer.weight_scale = torch.ones(layer.out_features)
+            layer.scale_bias = torch.zeros(layer.out_features)
+        state.projector.cv_wq_a = CVLinearWrapper(state.attn.wq_a)
+        state.projector.cv_wkv = CVLinearWrapper(state.attn.wkv)
+        inputs = []
+
+        def dynamic_quant(value, **kwargs):
+            assert value.dtype == torch.float32, "Quantization must consume the original floating-point input"
+            inputs.append(value.clone())
+            # The fixture uses small integral values, so a unit scale is exact.
+            return value.to(torch.int8), torch.ones(value.shape[0])
+
+        def quant_matmul(value, weight, scale, *, pertoken_scale, output_dtype, **kwargs):
+            assert value.dtype == torch.int8
+            assert pertoken_scale is not None
+            return torch.nn.functional.linear(value.float() * pertoken_scale[:, None], weight).to(output_dtype)
+
+        def grouped_matmul(*, x, weight, per_token_scale, output_dtype, **kwargs):
+            assert output_dtype == torch.float32
+            return [quant_matmul(x[0], weight[0], None, pertoken_scale=per_token_scale[0], output_dtype=output_dtype)]
+
+        monkeypatch.setattr("torch_npu.npu_dynamic_quant", dynamic_quant, raising=False)
+        monkeypatch.setattr("torch_npu.npu_quant_matmul", quant_matmul, raising=False)
+        monkeypatch.setattr("torch_npu.npu_grouped_matmul", grouped_matmul, raising=False)
+        batch, _ = state.run("prefill")
+        assert len(inputs) == quantizations
+        for value in inputs:
+            torch.testing.assert_close(value, state.projector.reference_input[: len(batch.local_ids)])
+
+    @pytest.mark.parametrize("ratio", [1, 2])
+    @pytest.mark.parametrize("full_graph", [False, True])
+    def test_compressed_cache_rope_follows_restored_rows(self, monkeypatch, ratio, full_graph):
+        cos = torch.arange(16).reshape(4, 1, 1, 4).float()
+        sin = -cos
+        local_swa = dsa_v41_cp.AscendDSAV41PCPMetadata.__new__(dsa_v41_cp.AscendDSAV41PCPMetadata)
+        local_swa.local_num_tokens_after_padding = 2
+        local_swa.hidden_restore_idx = torch.tensor([0, 2, 3, 0] if full_graph else [0, 2, 3])
+        local_metadata = SimpleNamespace(swa=local_swa)
+        cache = SimpleNamespace(slot_mapping=torch.tensor([[1, 0], [1, 1], [1, 2], [-1, -1]]))
+        global_metadata = SimpleNamespace(
+            swa=SimpleNamespace(num_actual_tokens=3, num_input_tokens=4),
+            rope=lambda name, count: (cos[:count], sin[:count]),
+            compressor=SimpleNamespace(cache=cache, state=SimpleNamespace(c2_source_cos=cos, c2_source_sin=sin)),
+            indexer=SimpleNamespace(cache=cache),
+        )
+        num_rows = local_swa.hidden_restore_idx.numel()
+        hidden_states = torch.arange(8).reshape(1, 8).float()
+        gathered = torch.arange(32).reshape(4, 8).float()
+        group = SimpleNamespace(all_gather=Mock(return_value=gathered))
+        monkeypatch.setattr(dsa_v41_cp, "get_pcp_group", lambda: group)
+        seen = []
+
+        def check_rope(value, actual_cos, actual_sin):
+            seen.append(value.shape[0])
+            assert value.shape[0] == actual_cos.shape[0] == actual_sin.shape[0] == num_rows
+            torch.testing.assert_close(actual_cos, cos[:num_rows])
+            torch.testing.assert_close(actual_sin, sin[:num_rows])
+
+        attn = SimpleNamespace(
+            compressor=torch.nn.Identity(),
+            rotary_emb=SimpleNamespace(layername=LAYER),
+            indexer=SimpleNamespace(update_keys=lambda value, slots, cos, sin: check_rope(value, cos, sin)),
+            long_kv_cache=SimpleNamespace(kv_cache=[object()]),
+            head_dim=8,
+        )
+        monkeypatch.setattr(dsa_v41.AscendDSAV41Impl, "_apply_rotary", lambda attn, *args: check_rope(*args))
+        monkeypatch.setattr(dsa_v41, "scatter_cache_sk", lambda *args: None)
+        impl = dsa_v41_cp.AscendDSAV41PCPImpl.__new__(dsa_v41_cp.AscendDSAV41PCPImpl)
+        impl.role = SimpleNamespace(compress_ratio=ratio)
+        impl._quantize_indexer_query = lambda *args: None
+        impl._compress_local_c2 = lambda *args: hidden_states
+        impl._compress_and_write_caches(attn, hidden_states, None, None, local_metadata, global_metadata)
+        assert seen == [num_rows, num_rows]
+
     @pytest.mark.parametrize("sharding,overlap", [(False, False), (False, True), (True, False), (True, True)])
     @pytest.mark.parametrize("decode_sharded", [False, True])
     def test_profile_prefill_decode_and_verification_share_one_weight_lifecycle(
@@ -771,7 +1012,7 @@ class TestPCPBatchLifecycle:
         state.impl.forward(state.attn, None, torch.zeros_like(profile_output), profile_output)
         assert torch.count_nonzero(profile_output) == 0
         assert state.events == (["project", "reduce"] if sharding else [])
-        switches = state.projector._pcp_o_proj_weight_switches or ()
+        switches = state.projector._parallel_o_proj._weight_switch_states or ()
         addresses = [
             (layer.weight.data_ptr(), part.gather_output.data_ptr())
             for layer, _, weight in switches
@@ -779,9 +1020,9 @@ class TestPCPBatchLifecycle:
         ]
         for scenario in ("prefill", "decode", "dummy", "mixed", "decode", "empty", "prefill"):
             state.events.clear()
-            state.run(scenario)
+            batch, _ = state.run(scenario)
             needs_global_metadata = scenario not in {"decode", "dummy"} or decode_sharded
-            assert state.events.count("hidden") == int(needs_global_metadata)
+            assert state.events.count("cache_gather") == int(needs_global_metadata)
             has_prefill = scenario not in {"decode", "dummy"}
             exchanges = sharding and decode_sharded and not has_prefill
             assert state.events.count("weights") == 2 * int(sharding and has_prefill)
@@ -789,7 +1030,9 @@ class TestPCPBatchLifecycle:
             assert state.events.count("exchange") == state.events.count("scatter") == int(exchanges)
             assert state.events.count("cache") == 1
             if sharding and has_prefill:
-                assert state.events.index("hidden") < state.events.index("weights") < state.events.index("cache")
+                assert state.events.index("cache_gather") < state.events.index("cache") < state.events.index("weights")
+                if batch.local_ids:
+                    assert state.events.index("weights") < state.events.index("attention")
             if exchanges:
                 assert state.events.index("cache") < state.events.index("exchange") < state.events.index("scatter")
             assert addresses == [
@@ -805,8 +1048,9 @@ class TestPCPBatchLifecycle:
     def test_failed_prefill_drains_both_weight_gathers_and_restores_decode(self, runtime, monkeypatch, stage):
         state = runtime()
         projector = state.projector
-        with projector._o_proj_batch(needs_global_metadata=False, has_prefill=False):
-            switches = projector._get_pcp_o_proj_weight_switches()
+        with projector._parallel_o_proj.batch(needs_global_metadata=False, has_prefill=False):
+            switches = projector._parallel_o_proj._weight_switch_states
+        assert switches is not None and len(switches) == 2
         addresses = [layer.weight.data_ptr() for layer, _, _ in switches]
 
         def fail(*args, **kwargs):
@@ -825,7 +1069,7 @@ class TestPCPBatchLifecycle:
             elif stage == "attention":
                 failure.setattr(torch.ops._C_ascend, "npu_sparse_flash_mla", fail)
             elif stage == "projection":
-                failure.setattr(dsa_cp.torch_npu, "npu_transpose_batchmatmul", fail)
+                failure.setattr(dsa_cp.dsa_v1.torch_npu, "npu_transpose_batchmatmul", fail)
             elif stage == "weight_gather":
                 failure.setattr(switches[1][1], "all_gather_weight", fail)
             elif stage == "weight_wait":
@@ -869,14 +1113,17 @@ class TestPCPBatchLifecycle:
         torch.nn.Module.__init__(indexer)
         indexer.owns_k, indexer.width, indexer.rope_width = True, 2, 2
         indexer.packed_cache_ops = None
-        indexer.wk, indexer.k_norm = _linear(2, 2), torch.nn.Identity()
+        indexer.wk, indexer.k_norm = _linear(2, 2).to(torch.bfloat16), torch.nn.Identity()
         indexer.k_cache = SimpleNamespace(kv_cache=[(k_cache, scale_cache)])
         attn.indexer = indexer
         compressor = DeepseekV41Compressor.__new__(DeepseekV41Compressor)
         torch.nn.Module.__init__(compressor)
+        compressor.width = 2
         compressor.wkv, compressor.wgate, compressor.norm = _linear(4, 2), _linear(4, 2), torch.nn.Identity()
-        compressor.state_cache = SimpleNamespace(kv_cache=[torch.zeros(256, 2)])
-        compressor._ring_pooled, compressor._ring_num_cores = torch.empty(64, 2), 1
+        monkeypatch.setattr(
+            compressor, "state_cache", SimpleNamespace(kv_cache=[torch.zeros(256, 32, 1, 4)]), raising=False
+        )
+        compressor._ring_pooled, compressor._ring_num_cores = torch.empty(64, 2, dtype=torch.bfloat16), 1
         attn.compressor = compressor
         state.context.no_compile_layers = {PREFIXES["long_kv"]: attn.long_kv_cache}
         ring_steps, stores = [], []
@@ -885,6 +1132,16 @@ class TestPCPBatchLifecycle:
             ring_steps.append(int(metadata[1].sum()))
             output.copy_(kv)
             return output
+
+        def write_ring_rows(
+            gathered_kv_scores, ring_state, ring_metadata, source_row_indices, request_indices, token_offsets
+        ):
+            for source_row_idx, req_idx, offset in zip(
+                source_row_indices.tolist(), request_indices.tolist(), token_offsets.tolist()
+            ):
+                if req_idx >= 0 and ring_metadata[1, req_idx] > 0:
+                    ring_slot = (ring_metadata[0, req_idx] + offset) % STATE_RING_ROWS
+                    ring_state[ring_metadata[4, req_idx], ring_slot].copy_(gathered_kv_scores[source_row_idx])
 
         def scatter(cache, slots, values):
             block_size = 8 if cache.data_ptr() == attn.dsa_attn.swa_cache_layer.kv_cache[0].data_ptr() else 4
@@ -917,16 +1174,25 @@ class TestPCPBatchLifecycle:
             attn.window_size = 4
 
         monkeypatch.setattr("vllm_ascend.ops.triton.compressor.compressor_triton.compressor_from_projected", pool)
+        monkeypatch.setattr("vllm_ascend.ops.triton.compressor.compressor_triton.write_pcp_ring_rows", write_ring_rows)
         monkeypatch.setattr(torch.ops._C_ascend, "npu_scatter_nd_update_sk", scatter)
         monkeypatch.setattr(
-            dsa_cp.torch_npu, "npu_dynamic_quant", lambda x, **kwargs: (x, torch.ones(x.shape[0])), raising=False
+            dsa_cp.dsa_v1.torch_npu,
+            "npu_dynamic_quant",
+            lambda x, **kwargs: (x, torch.ones(x.shape[0])),
+            raising=False,
         )
         for scenario in ("prefill", "decode", "dummy", "mixed", "empty", "decode"):
             stores.clear()
-            batch, _ = state.run(scenario)
+            ring_steps.clear()
+            batch, metadata = state.run(scenario)
             expected_live = 0 if scenario == "dummy" else len(batch.positions)
             expected_completed = 0 if scenario == "dummy" else int((batch.positions % 2 == 1).sum())
-            assert ring_steps[-1] == expected_live
+            local = metadata[PREFIXES["swa"]]
+            expected_local = (
+                len(batch.local_ids) if isinstance(local, dsa_v41_cp.AscendDSAV41PCPMetadata) else expected_live
+            )
+            assert ring_steps == ([expected_local] if batch.local_ids else [])
             assert stores == [expected_live, expected_completed, expected_completed, expected_completed]
             assert compressor._ring_pooled.shape == (64, 2)
 
@@ -942,6 +1208,8 @@ class TestPCPProjectionPartition:
         tp_group = SimpleNamespace(world_size=tp_size, rank_in_group=tp_rank)
         monkeypatch.setattr(dsa_cp, "get_pcp_group", lambda: group)
         monkeypatch.setattr(dsa_cp, "get_tp_group", lambda: tp_group)
+        monkeypatch.setattr(vllm_distributed, "get_pcp_group", lambda: group)
+        monkeypatch.setattr(vllm_distributed, "get_tp_group", lambda: tp_group)
         impl = dsa_cp.AscendDSAPCPImpl.__new__(dsa_cp.AscendDSAPCPImpl)
         impl.n_local_groups = pcp_size
         impl.wo_a, impl.wo_b = torch.nn.Module(), torch.nn.Module()
@@ -976,7 +1244,20 @@ class TestPCPProjectionPartition:
                     parameter.weight_loader = lambda parameter, value: parameter.data.copy_(value)
                     layer.register_parameter(attr, parameter)
                     checkpoints.append((layer, parameter, full, 0))
-        impl._prepare_pcp_o_proj_weight_shards()
+        impl._parallel_o_proj = ParallelOProjection(
+            pcp_size * 4,
+            impl.wo_b,
+            config=WeightSwitchConfig.from_group(group),
+            tp_group=tp_group,
+            pool={},
+            pool_key="dsa_pcp_o_proj",
+            project_full=dsa_cp.dsa_v1.AscendDSAImpl._forward_o_proj.__get__(impl),
+            decode_sharded=False,
+            input_layer=impl.wo_a,
+            input_projection=impl._wo_a_bmm,
+            num_input_groups=pcp_size,
+        )
+        impl._parallel_o_proj.prepare_weight_load(SimpleNamespace())
         composed_rank = tp_rank * pcp_size + pcp_rank
         for layer, parameter, full, axis in checkpoints:
             parameter.weight_loader(parameter, full)
@@ -986,10 +1267,10 @@ class TestPCPProjectionPartition:
             assert layer.tp_group is tp_group
         assert impl.n_local_groups == pcp_size
         assert impl.wo_a.n_local_groups == 1
-        assert impl.pcp_o_proj_weight_switch_config.group is group
+        assert impl._parallel_o_proj.config.group is group
         impl.wo_a.quant_method.supports_weight_switch = False
         with pytest.raises(RuntimeError, match="weight-switch capable"):
-            impl._get_pcp_weight_switch_method(impl.wo_a)
+            impl._parallel_o_proj._resolve_o_proj_weight_switch_method(impl.wo_a)
 
     @pytest.mark.parametrize("world,rank", [(2, 0), (2, 1), (4, 3)])
     @pytest.mark.parametrize("decode_sharded", [False, True])
@@ -1048,7 +1329,7 @@ class TestPCPProjectionPartition:
             projector.reference_input = peers[rank]
             expected = torch.nn.functional.linear(peers[rank], dense_weight)
             output = torch.full_like(expected, -777)
-            with projector._o_proj_batch(needs_global_metadata=decode_sharded, has_prefill=False):
+            with projector._parallel_o_proj.batch(needs_global_metadata=decode_sharded, has_prefill=False):
                 assert projector._forward_o_proj(peers[rank].view(rows, world, width), output) is output
             torch.testing.assert_close(output, expected)
             assert events.count("exchange") == events.count("scatter") == int(decode_sharded)
@@ -1076,9 +1357,10 @@ class TestPCPProjectionPartition:
             hidden = torch.tensor([values])
             output = torch.empty_like(hidden)
             impl = dsa_v41_cp.AscendDSAV41PCPImpl.__new__(dsa_v41_cp.AscendDSAV41PCPImpl)
-            with projector._o_proj_batch(needs_global_metadata=True, has_prefill=True):
-                projector._maybe_all_gather_pcp_o_proj_weights()
-                impl._project_output(attn, hidden.view(1, 2, 2), hidden, None, projected=output)
+            with projector._parallel_o_proj.batch(needs_global_metadata=True, has_prefill=True):
+                if projector._parallel_o_proj.uses_full_weight:
+                    projector._parallel_o_proj.all_gather_weights()
+                impl._project_output(attn, hidden.view(1, 2, 2), hidden, projected=output)
             outputs.append(output[0, 0].item())
         assert outputs == [3.0, 30.0]
 
@@ -1093,8 +1375,8 @@ class TestPCPProjectionPartition:
         full_weight = torch.eye(2).repeat(2, 1, 1)
         full_scale = torch.cat((projector.wo_a.weight_scale, projector.wo_a.weight_scale + 1))
         expected_parts = {}
-        with projector._o_proj_batch(needs_global_metadata=False, has_prefill=False):
-            switches = projector._get_pcp_o_proj_weight_switches()
+        with projector._parallel_o_proj.batch(needs_global_metadata=False, has_prefill=False):
+            switches = projector._parallel_o_proj._weight_switch_states or ()
             for layer, _, weight in switches:
                 for name, part in weight.gather_parts.items():
                     full = (
@@ -1112,21 +1394,22 @@ class TestPCPProjectionPartition:
 
         monkeypatch.setattr(importlib.import_module("vllm_ascend.distributed.utils"), "all_gather_async", gather)
         monkeypatch.setattr(
-            dsa_cp.torch_npu,
+            dsa_cp.dsa_v1.torch_npu,
             "npu_dynamic_mx_quant",
             lambda value, **kwargs: (value, torch.ones(value.shape[:-1], dtype=torch.uint8)),
             raising=False,
         )
         monkeypatch.setattr(
-            dsa_cp.torch_npu,
+            dsa_cp.dsa_v1.torch_npu,
             "npu_transpose_quant_batchmatmul",
             lambda value, weight, **kwargs: torch.bmm(value.transpose(0, 1), weight).transpose(0, 1),
             raising=False,
         )
         addresses = [getattr(layer, name).data_ptr() for layer, _, weight in switches for name in weight.gather_parts]
         for has_prefill in (True, False, True):
-            with projector._o_proj_batch(needs_global_metadata=has_prefill, has_prefill=has_prefill):
-                projector._maybe_all_gather_pcp_o_proj_weights()
+            with projector._parallel_o_proj.batch(needs_global_metadata=has_prefill, has_prefill=has_prefill):
+                if projector._parallel_o_proj.uses_full_weight:
+                    projector._parallel_o_proj.all_gather_weights()
                 output = torch.empty_like(projector.reference_input)
                 projector._forward_o_proj(projector.reference_input.view(2, 2, 2), output)
                 torch.testing.assert_close(output, projector.reference_input)
@@ -1242,114 +1525,6 @@ class TestSparseLayerReuse:
             assert addresses == (topk.data_ptr(), candidates.data_ptr())
             impl.role = role
 
-    def test_legacy_cp_compressor_uses_global_rope_and_query_slice(self, monkeypatch):
-        """Prepare local Query before compression can overwrite global RoPE scratch."""
-        impl = dsa_v41_cp.AscendDSAV41CPImpl.__new__(dsa_v41_cp.AscendDSAV41CPImpl)
-        impl.role = SimpleNamespace(
-            is_kv_source=True,
-            has_long_context=True,
-            is_index_source=True,
-            is_candidate_source=False,
-            uses_candidate_filter=False,
-        )
-        impl.topology = SimpleNamespace(candidate_topk_blocks=2, candidate_block_size=8)
-        impl.index_k_source_prefix = PREFIXES["index_k"]
-        hidden = torch.arange(24, dtype=torch.float32).view(6, 4)
-        local = SimpleNamespace(
-            swa=SimpleNamespace(cp_token_range=(2, 4, 2, 0), num_actual_tokens=2),
-            indexer=SimpleNamespace(cache=SimpleNamespace(max_cache_seq_len=1)),
-        )
-        cos, sin = torch.ones(4, 2), torch.zeros(4, 2)
-        global_metadata = SimpleNamespace(
-            swa=SimpleNamespace(num_actual_tokens=4, slot_mapping=torch.zeros(4, 2, dtype=torch.int32)),
-            positions=torch.arange(4),
-            indexer=SimpleNamespace(cache=SimpleNamespace(max_cache_seq_len=1)),
-            rope=lambda name, count: (cos[:count], sin[:count]),
-        )
-        impl.multistream_dsv4_dsa_overlap = True
-        local.rope = lambda name, count: (cos[2 : 2 + count], sin[2 : 2 + count])
-        calls, writes, selections = [], [], []
-        kv = torch.nn.Linear(4, 2, bias=False)
-        with torch.no_grad():
-            kv.weight.copy_(torch.eye(4)[:2])
-
-        def wrapper(projection):
-            return SimpleNamespace(
-                _quant_method=object(),
-                _has_communication=False,
-                quantize=lambda values: (values, None),
-                matmul=lambda values, scale, **kwargs: projection(values),
-            )
-
-        def select(query, values, positions, cache, metadata, **kwargs):
-            selections.append(values)
-            torch.testing.assert_close(values, hidden[2:4])
-            torch.testing.assert_close(query, hidden[2:4])
-            return kwargs["indices_output"], None
-
-        attn = SimpleNamespace(
-            rotary_emb=SimpleNamespace(layername=LAYER),
-            n_heads=2,
-            head_dim=2,
-            nope_head_dim=0,
-            wq_a=SimpleNamespace(bias=None),
-            wkv=SimpleNamespace(bias=None),
-            wq_b=SimpleNamespace(bias=None),
-            q_norm=torch.nn.Identity(),
-            kv_norm=torch.nn.Identity(),
-            indexer=_query_indexer(select),
-            shared_state=SimpleNamespace(
-                topk_indices=torch.zeros(6, 3),
-                candidates=torch.zeros(6, 1, 2),
-                candidate_lengths=None,
-                topk_lengths=None,
-            ),
-            dsa_attn=SimpleNamespace(
-                swa_cache_layer=SimpleNamespace(kv_cache=[torch.zeros(256, 2)]),
-                dsa_attn=SimpleNamespace(
-                    impl=SimpleNamespace(
-                        cv_wq_a=wrapper(torch.nn.Identity()), cv_wkv=wrapper(kv), cv_wq_b=wrapper(torch.nn.Identity())
-                    )
-                ),
-            ),
-        )
-        monkeypatch.setattr(impl, "_global_layer_metadata", lambda metadata: global_metadata)
-        monkeypatch.setattr(dsa_v41_cp, "get_forward_context", lambda: SimpleNamespace(attn_metadata=object()))
-
-        def compress(*args, **kwargs):
-            calls.append(args)
-            cos.fill_(9999)
-
-        def rotate(value, rope_cos, rope_sin, **kwargs):
-            if value.shape[2] == 2:
-                torch.testing.assert_close(rope_cos, torch.ones(2, 2))
-                assert not calls
-
-        monkeypatch.setattr(impl, "_write_compressed_source", compress)
-        monkeypatch.setattr(
-            torch.ops._C_ascend,
-            "npu_scatter_nd_update_sk",
-            lambda cache, slots, values: writes.append(values),
-            raising=False,
-        )
-        monkeypatch.setattr(torch.ops._C_ascend, "inplace_partial_rotary_mul", rotate, raising=False)
-        monkeypatch.setattr(
-            dsa_v41,
-            "get_forward_context",
-            lambda: SimpleNamespace(no_compile_layers={PREFIXES["index_k"]: SimpleNamespace(kv_cache=[object()])}),
-        )
-        q, qr, prepared = impl._prepare_inputs_and_caches(attn, hidden, local, {})
-        torch.testing.assert_close(q.flatten(1), hidden[2:4])
-        assert len(writes) == 1
-        torch.testing.assert_close(writes[0], hidden[:4, :2])
-        impl._select_sparse_indices(attn, hidden, qr, torch.arange(2, 4), cos[2:4], sin[2:4], local, prepared)
-        assert len(selections) == 1
-        assert len(calls) == 1
-        torch.testing.assert_close(calls[0][1], hidden[:4])
-        assert calls[0][3].data_ptr() == cos.data_ptr()
-        assert calls[0][4].data_ptr() == sin.data_ptr()
-        assert calls[0][5] is global_metadata
-
 
 class TestProjectionLayout:
     @pytest.mark.parametrize("live,padded", [(4, 4), (3, 8), (0, 8)])
@@ -1364,31 +1539,7 @@ class TestProjectionLayout:
             )
         )
         impl = dsa_v41.AscendDSAV41Impl.__new__(dsa_v41.AscendDSAV41Impl)
-        assert impl._project_output(attn, values, torch.empty(padded, 4), None, projected=output) is output
+        assert impl._project_output(attn, values, torch.empty(padded, 4), projected=output) is output
         expected = torch.zeros_like(output)
         expected[:live] = values.flatten(1)
         torch.testing.assert_close(output, expected)
-
-
-@pytest.mark.parametrize("legacy,pcp", [(False, False), (True, False), (False, True), (True, True)])
-def test_backend_selection_follows_current_target_or_draft_config(monkeypatch, legacy, pcp):
-    config = {"legacy": legacy, "pcp": pcp}
-    monkeypatch.setattr(dsa_v41_cp, "enable_dsa_cp", lambda: config["legacy"])
-    monkeypatch.setattr(dsa_v41_cp, "enable_pcp", lambda: config["pcp"])
-    if legacy and pcp:
-        with pytest.raises(ValueError, match="cannot be enabled"):
-            dsa_v41_cp.get_v41_cp_classes()
-        return
-    expected = (
-        (dsa_v41_cp.AscendDSAV41CPMetadataBuilder, dsa_v41_cp.AscendDSAV41CPImpl)
-        if legacy
-        else (dsa_v41_cp.AscendDSAV41PCPMetadataBuilder, dsa_v41_cp.AscendDSAV41PCPImpl)
-        if pcp
-        else (dsa_v41.AscendDSAV41MetadataBuilder, dsa_v41.AscendDSAV41Impl)
-    )
-    assert dsa_v41_cp.get_v41_cp_classes() == expected
-    assert dsa_v41.DeepseekV41CacheBackend.get_builder_cls() is expected[0]
-    assert dsa_v41.DeepseekV41CacheBackend.supports_pcp()
-    # DSpark constructs its replicated draft under PCP1 in the same process.
-    config.update(legacy=False, pcp=False)
-    assert dsa_v41_cp.get_v41_cp_classes() == (dsa_v41.AscendDSAV41MetadataBuilder, dsa_v41.AscendDSAV41Impl)

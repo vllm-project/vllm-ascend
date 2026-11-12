@@ -12,18 +12,6 @@ Starting from [PR #9064](https://github.com/vllm-project/vllm-ascend/pull/9064),
 - **Recommendation**: Use `--additional-config` for new deployments and migrate existing configurations
 - **Future Plan**: Environment variables will be **removed** in a future release; only `--additional-config` will be supported
 
-### Quick Reference
-
-| Environment Variable | Config Key | Type Conversion |
-|---------------------|------------|-----------------|
-| `VLLM_ASCEND_BALANCE_SCHEDULING` | `scheduler_config.enable_balance_scheduling` | `"1"` → `true`, `"0"` → `false` |
-| `MSMONITOR_USE_DAEMON` | `msmonitor_use_daemon` | `"1"` → `true`, `"0"` → `false` |
-| `VLLM_ASCEND_ENABLE_MLAPO` | `enable_mlapo` | `"1"` → `true`, `"0"` → `false` |
-| `VLLM_ASCEND_ENABLE_NZ` | `weight_nz_mode` | Integer (unchanged, field name changed) |
-| `VLLM_ASCEND_ENABLE_FUSED_MC2` | `enable_fused_mc2` | Integer (unchanged) |
-| `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` | `enable_transpose_kv_cache_by_block` | `"1"` → `true`, `"0"` → `false` |
-| `VLLM_ASCEND_KVPOOL_RANGE_DEBUG` | `kv_pool_range_debug` | `"1"` → `true`, `"0"` → `false` |
-
 ## How to use
 
 With either online mode or offline mode, users can use additional configuration. Take Qwen3 as an example:
@@ -79,12 +67,10 @@ The following table lists additional configuration options available in vLLM Asc
 | `weight_nz_mode`                    | int  | `1`     | Weight NZ mode. `0` disables NZ, `1` enables NZ only for quantized weights, and `2` also enables NZ for BF16/FP16 weights when supported. The legacy `VLLM_ASCEND_ENABLE_NZ` environment variable is no longer supported. |
 | `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. `0` disables the fused path, `1` selects dispatch-FFN-combine, and `2` selects CANN MegaMoe when the model and parallel configuration support it. On A5, SiTU models require a CANN MegaMoe wrapper exposing `activation` and `activation_params`; both SiTU parameters are bound from the MoE configuration during initialization. The legacy `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable is no longer supported. |
 | `enable_transpose_kv_cache_by_block`| bool | `True`  | Whether to enable transpose KV cache by block. The legacy `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable is no longer supported. |
-| `enable_dsa_cp`                     | bool | `False` | Whether to enable DSA-CP for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. Supported only with Model Runner V1 and requires sequence parallelism. Enabling it automatically enables FlashComm. Setting this option to `true` with Model Runner V2 raises a configuration error; use [PCP](../feature_guide/context_parallel.md#prefill-context-parallel) instead. |
 | `enable_flashcomm1`                 | bool | `False` | Whether to enable SP MoE. See [Sequence Parallelism](../feature_guide/sequence_parallelism.md). |
 | `enable_pcp_o_proj_weight_sharding` | bool | `True` | Whether PCP shards O-projection weights across the PCP group. This option controls SFA-PCP `o_proj` and DSA-PCP two-stage O-projection (`wo_a`/`wo_b`). If the weight method or PCP partition does not support sharding, the option is disabled with a warning. Set it to `false` at server startup to disable sharding. Other attention backends do not use this option. |
 | `enable_pcp_embedding_lmhead_weight_sharding` | bool | `True` | Whether PCP shards embedding and LM Head weights across PCP ranks inside each TP shard. This option is enabled by default, takes effect when PCP size is greater than 1, and is incompatible with batch-sharded sampling (`enable_batch_sharded_sampling`) and fine-grained TP for these modules. |
 | `rejection_sampler_config`          | dict | `{}`    | Configuration options for rejection sampler (block verify and entropy verify). |
-| `dynamic_spec_config`               | dict | `{}`    | Configuration options for Dynamic Speculative Decoding. See [Dynamic Speculative Decoding](../feature_guide/speculative_decoding.md#dynamic-speculative-decoding). |
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable dsa multi-stream overlap for DeepSeek V4.  |
 | `rl_config`                        | dict | `{}`    | One-click RL mode configuration. See <a href="#rl_config">rl_config</a> for all fields, the two deployment modes, usage examples, and the migration guide. |
 | `combine_quant_mode`                | int  | `0`     | Fused MC2 configuration. This configuration will be passed as the `comm_quant_mode` argument for the `torch_npu.npu_moe_distribute_combine_v2` operator. Please refer to the operator documentation for the valid value range. |
@@ -131,10 +117,10 @@ Design / ops (analysis branch): `docs/source/developer_guide/Design_Documents/ru
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `oproj_tensor_parallel_size`     | int  | `0` | The custom tensor parallel size of `o_proj`. Values `0` and `1` disable O-projection TP; values greater than `1` enable sharding.     |
-| `mlp_tensor_parallel_size`       | int  | `0` | The custom tensor parallel size of `mlp`.       |
-| `lmhead_tensor_parallel_size`    | int  | `0` | The custom tensor parallel size of `lm_head`.    |
-| `embedding_tensor_parallel_size` | int  | `0` | The custom tensor parallel size of `embedding`. |
+| `oproj_tensor_parallel_size`     | int  | `1` | The custom tensor parallel size of `o_proj`.     |
+| `mlp_tensor_parallel_size`       | int  | `1` | The custom tensor parallel size of `mlp`.       |
+| `lmhead_tensor_parallel_size`    | int  | `1` | The custom tensor parallel size of `lm_head`.    |
+| `embedding_tensor_parallel_size` | int  | `1` | The custom tensor parallel size of `embedding`. |
 
 **ascend_compilation_config**
 
@@ -158,33 +144,25 @@ Both warmups run on a background thread during weight loading. The worker waits 
 
 **eplb_config**
 
-The accepted fields depend on the model runner:
+Accepts `load_collection_phase` and `stair_config`. Configure upstream EPLB
+through `--enable-eplb` and `--eplb-config`. Ascend uses the STAIR policy by
+default and moves expert weights asynchronously over HIXL when it is available
+on every EPLB rank, falling back to Gloo CPU staging otherwise. Select
+`default` or `stair` only through the upstream `--eplb-config.policy` option.
+See the
+[EPLB user guide](../feature_guide/expert_parallelism_load_balancer.md#tuning-suggestions)
+for the advanced STAIR fields and their defaults.
 
-- **Model Runner V2** accepts `load_collection_phase` and `stair_config` here.
-  Configure upstream EPLB through `--enable-eplb` and `--eplb-config`. Ascend
-  uses the STAIR policy by default and asynchronous Gloo movement. Select
-  `default` or `stair` only through the upstream `--eplb-config.policy`
-  option. See the
-  [EPLB user guide](../feature_guide/expert_parallelism_load_balancer.md#advanced-stair-tuning)
-  for the advanced STAIR fields and their defaults.
-- **Model Runner V1** accepts the legacy fields below except
-  `load_collection_phase`.
-  MRv1 does not accept upstream `--enable-eplb` on Ascend.
-
-Mixing the two schemas fails during startup instead of silently ignoring
-configuration.
+The legacy `dynamic_eplb`, `expert_map_path`, `expert_heat_collection_interval`,
+`algorithm_execution_interval`, `expert_map_record_path`,
+`num_redundant_experts`, `eplb_policy_type`, and `eplb_heat_collection_stage`
+fields configured the Model Runner V1 EPLB implementation, which has been
+removed. They no longer take effect.
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `dynamic_eplb`                   | bool| `False`| MRv1 only. Whether to enable legacy dynamic EPLB. |
-| `expert_map_path`                | str | `None` | MRv1 only. Load a recorded static expert map. |
-| `expert_heat_collection_interval`| int | `600`  | MRv1 only. Number of forward iterations used to collect expert heat. |
-| `algorithm_execution_interval`   | int | `50`   | MRv1 only. Interval allowed for the EPLB worker to finish its CPU task. |
-| `expert_map_record_path`         | str | `None` | MRv1 only. Save the calculated expert map to the specified JSON path. |
-| `num_redundant_experts`          | int | `0`    | MRv1 only in this table. Configure the MRv2 value through upstream `--eplb-config`. |
-| `eplb_policy_type`               | int | `2`    | MRv1 only. EPLB policy: `0`=Random, `1`=DefaultEplb, `2`=SwiftBalanceEplb, `3`=FlashLB. |
-| `eplb_heat_collection_stage`     | str | `"all"`| MRv1 only. Select `"all"`, `"prefill"`, or `"decode"` heat collection. |
-| `load_collection_phase`          | str | `"all"`| MRv2 only. Select `"all"`, `"prefill"`, or `"decode"` load submission. Any batch containing a prefill request is classified entirely as prefill. |
+| `load_collection_phase` | str | `"all"` | Select `"all"`, `"prefill"`, or `"decode"` load submission. Only effective with the STAIR policy; a value other than `"all"` requires `--enable-eplb`. Any batch containing a prefill request is classified entirely as prefill. |
+| `stair_config` | dict | `{}` | Advanced STAIR policy tuning. See the [tuning suggestions table](../feature_guide/expert_parallelism_load_balancer.md#tuning-suggestions) for all fields, defaults, and ranges. |
 
 **scheduler_config**
 
@@ -204,7 +182,7 @@ The legacy top-level `enable_balance_scheduling`, `recompute_scheduler_enable`, 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `enabled`       | bool  | `False` | Whether to enable dynamic chunked pipeline parallel. Requires `pipeline-parallel-size > 1`. |
-| `smooth_factor` | float | `1.0`   | Smoothing factor (0 < x ≤ 1.0). Higher values trust the dynamic prediction more; `0.0` disables dynamic adjustment. |
+| `smooth_factor` | float | `1.0`   | Smoothing factor (0 < x ≤ 1.0). Higher values trust the dynamic prediction more. To disable CPP and return to normal fixed chunking, set `enabled` to `false`. |
 | `min_chunk`     | int   | `4096`  | Minimum chunk size for dynamic calculation. Should be smaller than `max-num-batched-tokens`. |
 | `need_timing` | bool | True | Enable/disable Online Calibration |
 | `max_fit_chunk` | int | 30 | Number of chunk-time data for Online Calibration |
@@ -229,38 +207,21 @@ settings; enabling both selects the combined DyntraLB recompute scheduler.
 
 **rejection_sampler_config**
 
-> **Note**: Both block verify and entropy verify improve speculative decoding performance (higher acceptance rate, lower latency) at the cost of reduced sampling precision. A larger `posterior_alpha` makes the adjustment more aggressive — it further lowers the acceptance threshold for high-entropy tokens, improving throughput but degrading output quality. Users should tune these parameters based on their specific model weights and application scenario to find the right trade-off between performance and precision.
+Enable Entropy Verify with `enable_entropy_verify=true` and `speculative_config.rejection_sample_method="standard"`. Entropy Verify and upstream `"block"` verification are mutually exclusive. See [Block Verify and Entropy Verify](../feature_guide/speculative_decoding.md#entropy-verify) for usage and sampling semantics.
+
+> **Note**: Entropy verify improves speculative decoding performance (higher acceptance rate, lower latency) at the cost of reduced sampling precision. A larger `posterior_alpha` makes the adjustment more aggressive — it further lowers the acceptance threshold for high-entropy tokens, improving throughput but degrading output quality. Users should tune these parameters based on their specific model weights and application scenario to find the right trade-off between performance and precision.
+
+`enable_block_verify` is no longer accepted: passing `true` fails at startup. Use `enable_entropy_verify` instead.
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `enable_block_verify`   | bool  | `False` | Whether to enable block verify mode. Block verify evaluates all draft tokens as a block using cumulative probability products, which can improve acceptance rate. |
 | `enable_entropy_verify` | bool  | `False` | Whether to enable entropy verify mode. Entropy verify adjusts the acceptance threshold based on the entropy of the target distribution — higher entropy (uncertain) tokens get a lower threshold (easier to accept), while lower entropy (confident) tokens get a stricter threshold. |
 | `posterior_threshold`   | float | `0.95`  | Upper bound for the entropy-adjusted acceptance threshold. Must be in (0, 1]. The effective threshold is `min(exp(-entropy * posterior_alpha), posterior_threshold)`. |
 | `posterior_alpha`       | float | `0.4`   | Scaling factor for entropy in the threshold computation. Must be >= 0. Higher values make the threshold more sensitive to entropy — high-entropy tokens become much easier to accept, improving performance but reducing precision. |
 
-**dynamic_spec_config**
-
-> **Note**: This is an exploratory feature for model runner v1. Supported methods are `"dspark"` (DSpark confidence head) and `"dflash"` (head-free; uses max-softmax over draft logits as a confidence proxy). You still need a matching `speculative_config` (`method: "dspark"` or `"dflash"`); `dynamic_spec_config` only controls how many drafted tokens are verified per request. See [Dynamic Speculative Decoding](../feature_guide/speculative_decoding.md#dynamic-speculative-decoding) for usage and limitations.
-
-| Name | Type | Default | Description |
-| ---- | ---- | ------- | ----------- |
-| `method` | str | `None` | Dynamic method name. Supported values: `"dspark"`, `"dflash"`. Omit or set to `None` to disable. |
-| `method_params` | dict | `{}` | Method-specific hyperparameters. When empty, each method falls back to its built-in defaults. |
-
-**dynamic_spec_config.method_params** (when `method` is `"dspark"` or `"dflash"`)
-
-`dspark` and `dflash` share the same scheduling hyperparameters. The difference is only how per-token acceptance confidence is estimated: DSpark uses its confidence head (`sigmoid`), while DFlash (head-free) uses `max(softmax(logits))` of the drafted token.
-
-| Name | Type | Default | Description |
-| ---- | ---- | ------- | ----------- |
-| `initial_verify_budget_per_req` | int | `5` | Initial per-request verify budget before the first recompute. |
-| `budget_update_interval` | int | `16` | Recompute the shared verify budget every N decode steps. |
-| `budget_threshold` | float | `0.3` | Cumulative survival-probability threshold used when estimating the mean verify budget. |
-| `min_verify_tokens` | int | `1` | Minimum number of draft tokens verified per request. |
-
 **scheduler_config.short_request_first_config**
 
-ShortRequestFirst is a waiting-queue policy for FCFS synchronous or asynchronous scheduling on prefill and PD-mixed paths. It does not support batch-job-aware, profiling-chunk, or PD-disaggregated D-node scheduling. See [ShortRequestFirst Prefill Scheduling](../feature_guide/short_request_first.md) for usage, behavior, and tuning guidance.
+ShortRequestFirst is a waiting-queue policy for FCFS synchronous or asynchronous scheduling on prefill and PD-mixed paths. It can be combined with profiling-chunk scheduling, but it does not support batch-job-aware or PD-disaggregated D-node scheduling. See [ShortRequestFirst Prefill Scheduling](../feature_guide/short_request_first.md) for usage, behavior, and tuning guidance.
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
@@ -359,18 +320,9 @@ An example of additional configuration is as follows:
     "enable_kv_nz": False,
     "multistream_overlap_shared_expert": True,
     "rejection_sampler_config": {
-        "enable_block_verify": True,
         "enable_entropy_verify": True,
         "posterior_threshold": 0.95,
         "posterior_alpha": 0.4,
-    },
-    "dynamic_spec_config": {
-        "method": "dspark",
-        "method_params": {
-            "initial_verify_budget_per_req": 5,
-            "budget_update_interval": 50,
-            "budget_threshold": 0.7,
-        },
     },
     "refresh": False
 }
@@ -378,13 +330,41 @@ An example of additional configuration is as follows:
 
 ### KV pipeline parallelism (KVPP)
 
-Set `enable_kvpp: true` in `--additional-config` to distribute persistent MLA
-KV-cache layers across TP and (with Model Runner V2) PCP ranks within the same
-DP replica and PP stage. Group size is TP x PCP: TP4 + PCP2 uses eight ranks;
-TP1 + PCP2 also enables KVPP. DP replicas and PP stages use separate groups.
+Set `enable_kvpp: true` in `--additional-config` to distribute persistent KV-cache layers across TP and PCP ranks within the same DP replica and PP stage. The group size is TP × PCP: TP4 + PCP2 uses eight ranks, and TP1 + PCP2 also enables KVPP. DP replicas and PP stages use separate groups.
 
-PCP requires `VLLM_USE_V2_MODEL_RUNNER=1`. KVPP still requires eager execution and
-non-hybrid MLA, and does not support DCP or KV transfer connectors. PCP gathers
-prefill KV before cache writes; layer broadcasts restore prior-forward cache
-contents before attention. The broadcast decision uses the global scheduled
-batch, not PCP-local segment offsets.
+KVPP supports non-hybrid MLA/SFA models with eager execution or `PIECEWISE` graphs. Full graph modes and DCP are not supported. For `PIECEWISE`, set `--compilation-config '{"cudagraph_mode":"PIECEWISE"}'`; for eager execution, use `--enforce-eager` instead.
+
+KVPP can be combined with `MooncakeConnectorV2` for P/D disaggregation and `AscendStoreConnector` for KV pooling under the connector-specific restrictions in the [KVPP guide](../feature_guide/kvpp.md#kv-transfer-configuration). Enable KVPP only on the prefill node for P/D disaggregation. `MultiConnector` can combine these connectors; each child must satisfy its own type and role requirements.
+
+PCP gathers prefill KV before cache writes. KVPP layer broadcasts restore prior-forward cache contents before attention; the broadcast decision uses the global scheduled batch rather than PCP-local segment offsets.
+
+## GDN internal prefill checkpoints
+
+Enable with `--additional-config '{"gdn_internal_prefill_checkpoints": true}'`.
+The option remains disabled by default pending numerical and performance
+qualification of the alternate prefill recurrence on supported NPUs.
+Requires prefix caching in align mode and vLLM with #60050. The optimization is
+experimental. Eligible GDN layers require BF16,
+K=V=128, PCP=1 and no ubatching. The upstream all-layer capability check preserves split
+prefill when another recurrent layer cannot export checkpoints.
+KV transfer configurations and legacy EAGLE/MTP block dropping without
+lookahead hashes fall back to existing prefill scheduling: the scheduler and
+worker cannot safely assume the same internal checkpoint boundary in these modes.
+
+Checkpoint-bearing prefill uses the existing Triton recurrence instead of the
+AscendC FwdH implementation to export only selected FP32 chunk-start states.
+Convolution history and recurrent state are written through the shared upstream
+checkpoint exporter. Enabled layers use the same Triton recurrence for cold
+prefills and cache-hit tails, including tails without a new checkpoint. At an
+exported boundary, the cold FP32 accumulator is rounded to the configured SSM
+cache dtype before continuing, matching the state restored by a cache hit.
+Decode is unchanged. This backend change needs numerical
+and performance qualification; skipping a model forward does not guarantee a
+net speedup. A persistent FP32 scratch buffer is allocated during profiling, of size
+`max_num_seqs * local_value_heads * 128 * 128 * 4` bytes. Eligible layers
+with the same VllmConfig, device and state shape share it; ubatching is excluded.
+Checkpoint export retains a view of the pre-convolution input; the pinned FLA
+convolution allocates its output separately.
+Small prefix match units can increase checkpoint traffic.
+
+Validate correctness, quality and performance on the deployment hardware before deploying in production.

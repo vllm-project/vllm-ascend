@@ -287,7 +287,10 @@ class StairEplbPolicy(AbstractEplbPolicy):
         """Compress local temporal samples into weighted STAIR bins."""
         boundaries, samples_per_bin = self._load_bin_boundaries(load_samples.shape[0], self.config.load_window_bins)
         load_sums_per_bin = torch.stack(
-            [load_samples[start:end].sum(dim=0) for start, end in zip(boundaries[:-1], boundaries[1:])]
+            [
+                load_samples[start:end].sum(dim=0, dtype=load_samples.dtype)
+                for start, end in zip(boundaries[:-1], boundaries[1:])
+            ]
         )
         return PreparedLoadStats(load_sums_per_bin, samples_per_bin)
 

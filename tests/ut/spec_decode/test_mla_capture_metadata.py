@@ -17,7 +17,7 @@ from vllm_ascend.attention.mla_v1 import AscendMLAMetadataBuilder
 def test_mla_capture_defaults_preserve_common_metadata(dcp, state, has_flags):
     builder = AscendMLAMetadataBuilder.__new__(AscendMLAMetadataBuilder)
     builder.flashmla_state = None
-    builder.dcp_enabled = dcp
+    builder.use_dcp = dcp
     builder.reorder_batch_threshold = 3
     builder.build = MagicMock(side_effect=lambda prefix, metadata: metadata)
     flags = torch.tensor([True, False]) if has_flags else None
@@ -50,7 +50,7 @@ def test_mla_capture_defaults_preserve_common_metadata(dcp, state, has_flags):
 def test_mla_capture_keeps_upstream_decode_validation():
     builder = AscendMLAMetadataBuilder.__new__(AscendMLAMetadataBuilder)
     builder.flashmla_state = None
-    builder.dcp_enabled = True
+    builder.use_dcp = True
     builder.reorder_batch_threshold = 3
     builder.build = MagicMock()
     common = SimpleNamespace(num_reqs=2, num_actual_tokens=8, max_query_len=4, attn_state=None, is_prefilling=None)

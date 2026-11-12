@@ -4,8 +4,60 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from vllm.v1.worker import cp_utils
 
+from vllm_ascend.attention import mla_v1
 from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
+from vllm_ascend.attention.mla_v1 import AscendMLAImpl
+
+
+@pytest.mark.parametrize("is_draft", [False, True])
+@pytest.mark.parametrize("pcp,dcp", [(1, 1), (2, 1), (1, 2), (2, 2)])
+def test_mla_target_and_draft_accept_target_interleave(monkeypatch, is_draft, pcp, dcp):
+    draft = SimpleNamespace(
+        model_config=SimpleNamespace(runner_type="draft" if is_draft else "generate", dtype=torch.bfloat16),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp, decode_context_parallel_size=dcp),
+        cache_config=SimpleNamespace(cache_dtype="bfloat16"),
+        speculative_config=None,
+    )
+    monkeypatch.setattr(mla_v1, "get_current_vllm_config", lambda: draft)
+    monkeypatch.setattr(mla_v1, "get_ascend_config", lambda: SimpleNamespace(enable_kv_nz=False))
+    monkeypatch.setattr(mla_v1, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: False))
+    monkeypatch.setattr(mla_v1, "enable_fa_quant", lambda *_: False)
+    monkeypatch.setattr(mla_v1, "enabling_mlapo", lambda *_: False)
+    monkeypatch.setattr(AscendMLAImpl, "_can_use_flashmla", lambda _: False)
+    impl = AscendMLAImpl(
+        num_heads=1,
+        head_size=16,
+        scale=1.0,
+        num_kv_heads=1,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="auto",
+        logits_soft_cap=None,
+        attn_type=None,
+        kv_sharing_target_layer_name=None,
+        q_lora_rank=None,
+        kv_lora_rank=8,
+        qk_nope_head_dim=8,
+        qk_rope_head_dim=2,
+        qk_head_dim=10,
+        v_head_dim=8,
+        rotary_emb=None,
+        q_proj=Mock(),
+        kv_b_proj=Mock(),
+        o_proj=Mock(),
+    )
+    target = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=2, decode_context_parallel_size=1, cp_kv_cache_interleave_size=768
+        ),
+        speculative_config=object(),
+    )
+    monkeypatch.setattr(cp_utils, "get_layers_from_vllm_config", lambda *_: {"draft": SimpleNamespace(impl=impl)})
+    cp_utils.check_attention_cp_compatibility(target, target_layer_names=set())
+    assert impl.use_pcp == (pcp > 1)
+    assert impl.use_dcp == (dcp > 1)
 
 
 @pytest.mark.parametrize("tp_size,pcp_size", [(1, 2), (4, 2), (2, 4)])
@@ -13,7 +65,7 @@ from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
 def test_query_gather_restores_only_distinct_tp_heads(tp_size, pcp_size, logical_pcp):
     impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
     impl.dcp_size = tp_size * pcp_size
-    impl.pcp_enabled = logical_pcp
+    impl.use_pcp = logical_pcp
     impl.pcp_group = SimpleNamespace(world_size=pcp_size)
     impl.tp_group = SimpleNamespace(
         all_gather=Mock(side_effect=lambda q, dim: torch.cat([q + 100 * rank for rank in range(tp_size)], dim=dim))
@@ -102,38 +154,30 @@ def test_merge_preserves_input_dtype(dtype, defer):
     assert merge.call_args.kwargs == {"defer_combine": defer}
 
 
-@pytest.mark.parametrize("dcp_enabled", [False, True])
-@pytest.mark.parametrize("with_pcp_context", [False, True])
-def test_capture_forwards_pcp_context_and_preserves_dcp_dummy_metadata(dcp_enabled, with_pcp_context):
+@pytest.mark.parametrize("use_dcp", [False, True])
+def test_capture_preserves_dcp_dummy_metadata(use_dcp):
     from vllm_ascend.attention.attention_v1 import AscendAttentionState
     from vllm_ascend.attention.mla_v1 import AscendMLAMetadataBuilder
 
     builder = AscendMLAMetadataBuilder.__new__(AscendMLAMetadataBuilder)
     builder.flashmla_state = None
-    builder.dcp_enabled = dcp_enabled
+    builder.use_dcp = use_dcp
     builder.reorder_batch_threshold = 3
     expected = object()
     builder.build = Mock(return_value=expected)
     common = SimpleNamespace(attn_state=None, is_prefilling=None, num_reqs=3, num_actual_tokens=9, max_query_len=3)
-    context = object()
-    kwargs = {"pcp_context": context, "pcp_cache_group_idx": 2} if with_pcp_context else {}
-    assert builder.build_for_cudagraph_capture(common, **kwargs) is expected
+    assert builder.build_for_cudagraph_capture(common) is expected
     args = builder.build.call_args.args
-    call = builder.build.call_args.kwargs
     assert args[0] == 0
     captured = args[1]
     assert captured is not common
     assert captured.attn_state == AscendAttentionState.ChunkedPrefill
     assert common.attn_state is None and common.is_prefilling is None
-    if dcp_enabled:
+    if use_dcp:
         assert captured.is_prefilling.shape == (3,)
         assert not captured.is_prefilling.any()
     else:
         assert captured.is_prefilling is None
-    if with_pcp_context:
-        assert call["pcp_context"] is context and call["pcp_cache_group_idx"] == 2
-    else:
-        assert "pcp_context" not in call
 
 
 @pytest.mark.parametrize("interleave", [1, 2, 4])
@@ -168,7 +212,7 @@ def test_chunk_reorg_maps_local_fragments_and_restores_logical_senders(interleav
         padded_local_chunk_seq_lens=[pad],
         local_context_lens_allranks=local_lengths.tolist(),
         cu_seq_lens_lst=[[0] + local.cumsum(0).tolist()],
-        chunk_size=16,
+        local_chunk_starts=[[0, 0]],
         pcp_global_req_indices=table,
         padded_local_cu_seq_lens_lst=[offsets],
         kv_rank_offsets=[[rank * sum(pad) for rank in collective_rank_order]],
@@ -184,7 +228,7 @@ def test_chunk_reorg_maps_local_fragments_and_restores_logical_senders(interleav
             rows.append(torch.cat((latent, latent + 1000), dim=-1))
         senders.append(torch.cat(rows))
     recv = torch.cat(senders)
-    impl._dcp_all_gather = lambda packed, dim: recv
+    impl._dcp_all_gather = lambda packed, dim, recv=recv: recv
     latent, rope = impl._reorg_kvcache(
         torch.empty(sum(pad), 1, 1), torch.empty(sum(pad), 1, 1), chunked_context=meta, chunk_idx=0, toks=sum(pad)
     )
@@ -215,14 +259,15 @@ def test_mla_dcp_inherits_standard_build_and_does_not_materialize_whole_cache():
     assert "_gather_prefill_cache_blocks" not in AscendMlaDCPImpl.__dict__
 
 
-@pytest.mark.parametrize("pcp_enabled", [False, True])
-def test_chunked_metadata_preserves_explicit_plan_and_workspace(pcp_enabled):
+@pytest.mark.parametrize("use_pcp", [False, True])
+def test_chunked_metadata_preserves_explicit_plan_and_workspace(use_pcp):
     from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPMetadataBuilder
     from vllm_ascend.attention.mla_v1 import AscendMLAMetadataBuilder
 
     builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
-    builder.pcp_enabled = pcp_enabled
-    builder.dcp_enabled = True
+    builder.use_pcp = use_pcp
+    builder.block_size = builder.cp_virtual_block_size = 4
+    builder.use_dcp = True
     builder.num_decodes = 0
     builder.seq_lens = torch.tensor([6, 12], dtype=torch.int32)
     builder.query_lens = torch.tensor([3, 3], dtype=torch.int32)
@@ -235,7 +280,7 @@ def test_chunked_metadata_preserves_explicit_plan_and_workspace(pcp_enabled):
     assert result is None
     assert base.call_args.kwargs["chunk_plan_lens_cpu"] is plan
     assert base.call_args.kwargs["chunk_workspace_size"] == 48
-    if pcp_enabled:
+    if use_pcp:
         builder._get_pcp_prefill_kv_inputs.assert_called_once()
     else:
         builder._get_pcp_prefill_kv_inputs.assert_not_called()
@@ -250,13 +295,15 @@ def test_chunked_metadata_preserves_explicit_plan_and_workspace(pcp_enabled):
         (2, 2, 32, 128, 65536),
         (2, 16, 2, 128, 65536),
         (2, 16, 16, 128, 65536),
-        (2, 16, 17, 128, 69632),
-        (2, 16, 32, 128, 131072),
-        (2, 16, 64, 128, 262144),
-        (2, 16, 32, 256, 262144),
+        (2, 16, 17, 128, 65536),
+        (2, 16, 32, 128, 65536),
+        (2, 16, 64, 128, 65536),
+        (2, 16, 32, 256, 65536),
+        (1, 1, 2048, 128, 65536),
+        (2, 16, 2048, 128, 65536),
     ],
 )
-def test_pcp_dcp_workspace_fits_an_aligned_chunk_per_fragment(pcp_size, dcp_size, max_num_seqs, interleave, expected):
+def test_pcp_dcp_workspace_is_independent_of_request_count(pcp_size, dcp_size, max_num_seqs, interleave, expected):
     from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPMetadataBuilder
 
     config = SimpleNamespace(
@@ -273,11 +320,11 @@ def test_pcp_dcp_workspace_fits_an_aligned_chunk_per_fragment(pcp_size, dcp_size
 
 
 @pytest.mark.parametrize("workspace_size", [65536, 131072])
-def test_pcp_dcp_chunk_plan_rejects_insufficient_budget_and_fits_exact_boundary(workspace_size):
+def test_pcp_dcp_chunk_plan_packs_requests_within_budget(workspace_size):
     from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPMetadataBuilder
 
     builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
-    builder.pcp_enabled = builder.dcp_enabled = builder.chunked_prefill_enabled = True
+    builder.use_pcp = builder.use_dcp = builder.chunked_prefill_enabled = True
     builder.chunked_prefill_workspace_size = workspace_size
     builder.chunked_prefill_workspace = torch.empty(0)
     builder.block_size = builder.cp_virtual_block_size = 2048
@@ -292,14 +339,6 @@ def test_pcp_dcp_chunk_plan_rejects_insufficient_budget_and_fits_exact_boundary(
     builder._get_pcp_prefill_kv_inputs = Mock(
         return_value=(torch.full((32,), 4128, dtype=torch.int32), [row for row in range(32) for _ in range(2)], None)
     )
-    if workspace_size == 65536:
-        with pytest.raises(
-            ValueError,
-            match=r"workspace_size=32768, num_prefills_with_context=32, block_size=2048, minimum_workspace_size=65536",
-        ):
-            builder.build_chunked_metadata(0, SimpleNamespace(num_reqs=64))
-        return
-
     cpu_zeros = torch.zeros
 
     def zeros_without_pinning(*args, **kwargs):
@@ -312,11 +351,11 @@ def test_pcp_dcp_chunk_plan_rejects_insufficient_budget_and_fits_exact_boundary(
         patch("torch.zeros", side_effect=zeros_without_pinning),
     ):
         metadata = builder.build_chunked_metadata(0, SimpleNamespace(num_reqs=64))
-    assert builder.max_context_chunk == 2048
-    assert builder.num_chunks == 3
-    assert metadata.chunk_seq_lens.shape == (3, 64)
-    assert metadata.seq_tot == [4096, 4096, 4096]
-    assert metadata.chunk_seq_lens.sum(1).tolist() == [131072, 131072, 768]
+    assert metadata.chunk_seq_lens.shape[1] == 64
+    torch.testing.assert_close(metadata.chunk_seq_lens.sum(0), builder.seq_lens - builder.query_lens, check_dtype=False)
+    assert all(t * builder.dcp_size <= workspace_size // 2 for t in metadata.seq_tot)
+    assert all(t <= workspace_size for t in metadata.chunk_seq_lens.sum(1).tolist())
+    assert builder.num_chunks > 1
 
 
 def test_pcp_global_plan_keeps_local_fragment_mapping():
@@ -326,8 +365,8 @@ def test_pcp_global_plan_keeps_local_fragment_mapping():
     from vllm_ascend.attention.mla_v1 import AscendMLAMetadataBuilder, ChunkedContextMetadata
 
     builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
-    builder.pcp_enabled = True
-    builder.dcp_enabled = True
+    builder.use_pcp = True
+    builder.use_dcp = True
     builder.chunked_prefill_workspace_size = 64
     builder.dcp_collective_rank_order = [0, 2, 1, 3]
     builder.pcp_size = 2
@@ -353,7 +392,9 @@ def test_pcp_global_plan_keeps_local_fragment_mapping():
     lens = torch.tensor([3, 9, 20], dtype=torch.int32)
     chunk_lengths = torch.tensor([[3, 9, 16], [0, 0, 4]], dtype=torch.int32)
     builder.context_lens_cpu = lens
-    builder.max_context_chunk = 16
+    builder.block_size = 4
+    builder.context_plan_starts = torch.tensor([[0, 0], [0, 16]], dtype=torch.int32)
+    builder.context_plan_lens = torch.tensor([[12, 16], [0, 8]], dtype=torch.int32)
     builder.num_chunks = 2
     builder.chunk_seq_lens = chunk_lengths
     builder.cu_seq_lens_cpu = torch.cat((torch.zeros(2, 1, dtype=torch.int32), chunk_lengths.cumsum(1)), dim=1)
@@ -392,3 +433,108 @@ def test_pcp_global_plan_keeps_local_fragment_mapping():
     assert result.padded_local_cu_seq_lens_lst == [[0, 3, 7], [0, 0, 2]]
     assert result.kv_rank_offsets == [[0, 14, 7, 21], [0, 4, 2, 6]]
     assert builder.num_prefills == 3 and builder.num_decodes == 0
+
+
+@pytest.mark.parametrize("contexts", [[128] * 513, [0, 513, 0, 129, 128, 7], [1] * 513])
+def test_context_chunks_cover_each_request_without_exceeding_workspace(contexts):
+    from vllm_ascend.attention.mla_v1 import AscendMLAMetadataBuilder
+
+    builder = AscendMLAMetadataBuilder.__new__(AscendMLAMetadataBuilder)
+    builder.chunked_prefill_enabled = True
+    builder.chunked_prefill_workspace_size = 256
+    builder.chunked_prefill_workspace = torch.empty(0)
+    builder.block_size = 128
+    builder.device = torch.device("cpu")
+    builder.num_decodes = 0
+    builder.num_prefills = len(contexts)
+    builder.query_lens = torch.ones(len(contexts), dtype=torch.int32)
+    builder.seq_lens = torch.tensor(contexts, dtype=torch.int32) + builder.query_lens
+    cpu_zeros = torch.zeros
+
+    def zeros_without_pinning(*args, **kwargs):
+        kwargs.pop("pin_memory", None)
+        return cpu_zeros(*args, **kwargs)
+
+    with (
+        patch.object(torch.Tensor, "pin_memory", lambda x: x),
+        patch.object(torch.Tensor, "npu", lambda x: x, create=True),
+        patch("torch.zeros", side_effect=zeros_without_pinning),
+    ):
+        meta = builder.build_chunked_metadata(0, SimpleNamespace(num_reqs=len(contexts)))
+    assert all(0 < size <= 256 for size in meta.seq_tot)
+    for request, context in enumerate(contexts):
+        offset = 0
+        for starts, lengths in zip(meta.starts.tolist(), meta.chunk_seq_lens.tolist()):
+            if lengths[request]:
+                assert starts[request] == offset
+                assert starts[request] % 128 == 0
+                offset += lengths[request]
+        assert offset == context
+
+
+@pytest.mark.parametrize("dcp_size,interleave", [(2, 1), (4, 4), (4, 128)])
+@pytest.mark.parametrize("use_pcp", [False, True])
+def test_packed_chunks_reorg_covers_each_history_once(dcp_size, interleave, use_pcp):
+    from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPMetadataBuilder
+
+    global_lens = [1300, 0, 39, 900, 17]
+    mapping = [row for row in range(len(global_lens)) for _ in range(2)] if use_pcp else list(range(len(global_lens)))
+    histories = [max(0, global_lens[row] - (index % 2) * 7) for index, row in enumerate(mapping)]
+    if not use_pcp:
+        global_lens = histories
+    builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
+    builder.use_pcp = use_pcp
+    builder.use_dcp = builder.chunked_prefill_enabled = True
+    builder.chunked_prefill_workspace_size = 1024
+    builder.chunked_prefill_workspace = torch.empty(0)
+    builder.block_size = 128
+    builder.cp_virtual_block_size = dcp_size * interleave
+    builder.cp_local_block_size = interleave
+    builder.dcp_size = dcp_size
+    builder.dcp_collective_rank_order = list(reversed(range(dcp_size)))
+    builder.device = torch.device("cpu")
+    builder.num_decodes = 0
+    builder.num_prefills = len(histories)
+    builder.query_lens = torch.ones(len(histories), dtype=torch.int32)
+    builder.seq_lens = torch.tensor(histories, dtype=torch.int32) + builder.query_lens
+    builder._get_pcp_prefill_kv_inputs = Mock(return_value=(torch.tensor(global_lens), mapping, None))
+    cpu_zeros = torch.zeros
+
+    def zeros_without_pinning(*args, **kwargs):
+        kwargs.pop("pin_memory", None)
+        return cpu_zeros(*args, **kwargs)
+
+    with (
+        patch.object(torch.Tensor, "pin_memory", lambda x: x),
+        patch.object(torch.Tensor, "npu", lambda x: x, create=True),
+        patch("torch.zeros", side_effect=zeros_without_pinning),
+    ):
+        meta = builder.build_chunked_metadata(0, SimpleNamespace(num_reqs=len(histories)))
+    impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
+    impl.kv_lora_rank = impl.qk_rope_head_dim = 1
+    seen: list[list[float]] = [[] for _ in histories]
+    for chunk, counts in enumerate(meta.padded_local_chunk_seq_lens):
+        senders = []
+        for physical_rank in range(dcp_size):
+            rank = builder.dcp_collective_rank_order.index(physical_rank)
+            rows = []
+            for request, count in enumerate(counts):
+                positions = torch.arange(count) + meta.local_chunk_starts[chunk][request]
+                values = positions // interleave * (dcp_size * interleave) + rank * interleave + positions % interleave
+                latent = (request * 10000 + values).float().view(count, 1, 1)
+                rows.append(torch.cat((latent, latent + 100000), dim=-1))
+            senders.append(torch.cat(rows))
+        recv = torch.cat(senders)
+        impl._dcp_all_gather = lambda packed, dim, recv=recv: recv
+        toks = meta.seq_tot[chunk]
+        latent, rope = impl._reorg_kvcache(
+            torch.empty(toks, 1, 1), torch.empty(toks, 1, 1), chunked_context=meta, chunk_idx=chunk, toks=toks
+        )
+        torch.testing.assert_close(rope, latent + 100000)
+        offset = 0
+        for row, count in enumerate(meta.chunk_seq_lens[chunk].tolist()):
+            seen[row].extend(latent[offset : offset + count].flatten().tolist())
+            offset += count
+        assert toks * dcp_size <= 1024 // (2 if use_pcp else 1)
+    for row, history in enumerate(histories):
+        assert sorted(seen[row]) == [mapping[row] * 10000 + token for token in range(history)]

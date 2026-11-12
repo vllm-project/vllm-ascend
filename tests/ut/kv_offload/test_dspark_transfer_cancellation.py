@@ -137,10 +137,11 @@ def _fixture(names=("cancel",), *, admit=True):
         scheduler._metaserver_futures[internal] = Mock()
         scheduler._metaserver_retry_timers[internal] = Mock()
     connector = SfaRemoteD2HConnector.__new__(SfaRemoteD2HConnector)
-    connector.connector_scheduler = scheduler
+    connector.connector_scheduler = scheduler  # type: ignore[assignment]
     connector.is_consumer = True
     connector.is_producer = False
     upstream = Scheduler.__new__(Scheduler)
+    upstream._pending_encoder_input_ids = {}
     upstream.requests = {request.request_id: request for request in requests.values()}
     upstream.running = []
     upstream.waiting = Mock()
@@ -158,6 +159,8 @@ def _fixture(names=("cancel",), *, admit=True):
     upstream.encoder_cache_manager = Mock()
     upstream.connector = connector
     upstream.defer_block_free = False
+    # Upstream main records deferred async connector loads here.
+    upstream.deferred_loads = {}
     upstream.vllm_config = SimpleNamespace(kv_transfer_config=None)
     upstream.kv_cache_config = SimpleNamespace(kv_cache_groups=[None, None, None])
     upstream.kv_cache_manager = Mock()

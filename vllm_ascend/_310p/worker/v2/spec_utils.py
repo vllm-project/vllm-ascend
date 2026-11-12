@@ -222,7 +222,7 @@ def probabilistic_rejection_sample_cpu(
 
     ``target_logits`` must already include temperature / top-k / top-p processing.
     """
-    from vllm_ascend._310p.sample.sampler import _prepare_cpu_generators_310p
+    from vllm_ascend._310p.worker.v2.sample_utils import _prepare_cpu_generators_310p
 
     cu_np = cu_num_logits_np
     num_reqs = cu_np.shape[0] - 1
@@ -371,7 +371,7 @@ def prepare_prefill_inputs_cpu(
         kept_end = query_start + query_len
         if query_len > 1:
             # 310P: NPU slice-assign can corrupt the destination tail element
-            # (see llm_base_proposer_310.set_inputs_first_pass). Save/restore
+            # on the persistent drafter input_ids buffer. Save/restore
             # draft_input_ids[kept_end-1] around the shift copy.
             tail_idx = kept_end - 1
             tail_save = draft_input_ids[tail_idx].clone()

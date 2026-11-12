@@ -41,7 +41,9 @@ def _grouped_conv(
         position = position & (block_size - 1)
     else:
         position = position % block_size
-    for tap in range(1, taps):
+    # Taps outside the current query block cannot contribute. Skipping them
+    # also keeps single-request short drafts from padding beyond the input.
+    for tap in range(1, min(taps, block_size)):
         shifted = F.pad(blocks[:-tap], (0, 0, 0, 0, tap, 0))
         output += coefficients[:, tap] * shifted * (position >= tap).view(-1, 1, 1)
     return output.flatten(-2)
@@ -56,6 +58,7 @@ class DFlashGroupedConv(nn.Module):
         block_size: int,
         params_dtype: torch.dtype,
         prefix: str,
+        quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
         if hidden_size % group_size:
@@ -73,7 +76,7 @@ class DFlashGroupedConv(nn.Module):
             2 * taps * self.num_groups,
             bias=False,
             params_dtype=params_dtype,
-            quant_config=None,
+            quant_config=quant_config,
             prefix=maybe_prefix(prefix, "kernel_projection"),
             return_bias=False,
         )
@@ -127,6 +130,7 @@ class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
             group_size=int(draft_config["conv_group_size"]),
             block_size=1 + speculative_config.num_speculative_tokens,
             params_dtype=vllm_config.model_config.dtype,
+            quant_config=quant_config,
         )
         self.attention_conv = DFlashGroupedConv(**conv_args, prefix=maybe_prefix(prefix, "attention_conv"))
         self.mlp_conv = DFlashGroupedConv(**conv_args, prefix=maybe_prefix(prefix, "mlp_conv"))
@@ -175,6 +179,8 @@ def _score_edges(
     return unary_logits[:, :, None] + torch.einsum("blpr,blcr->blpc", predecessors * hidden[:, :, None], successors)
 
 
+# Context-free calls bypass any internal ACLGraphWrapper's capture/replay.
+# Compiled device operations still participate in an active outer draft capture.
 @support_torch_compile
 class CandidateSelector(nn.Module):
     def __init__(
@@ -247,9 +253,8 @@ class DFlash2Qwen3Model(DFlashQwen3Model):
 
         draft_config = self.config.dflash_config
         self.input_embedding_scale = float(draft_config.get("input_embedding_scale", 1.0))
-        # Draft load uses set_model_tag("eagle_head"); without a distinct tag the
-        # selector's @support_torch_compile backend shares that npugraph cache and
-        # unpacks the draft graph (67 values) with the selector's 9 inputs.
+        # The selector has different inputs from the draft backbone, so it
+        # must use a separate compilation cache namespace.
         with set_model_tag("dflash2_candidate_selector"):
             self.candidate_selector = CandidateSelector(
                 hidden_size=self.config.hidden_size,

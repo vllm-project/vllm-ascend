@@ -3,30 +3,46 @@ from vllm import ModelRegistry
 
 def register_model():
     ModelRegistry.register_model(
+        "Qwen4ExpForCausalLM",
+        "vllm_ascend.models.qwen4_exp:AscendQwen4ExpForCausalLM",
+    )
+    ModelRegistry.register_model(
+        "Qwen4ExpForConditionalGeneration",
+        "vllm_ascend.models.qwen4_exp:AscendQwen4ExpForConditionalGeneration",
+    )
+    ModelRegistry.register_model(
+        "Qwen4ExpMTP",
+        "vllm_ascend.models.qwen4_exp:AscendQwen4ExpMTP",
+    )
+    ModelRegistry.register_model(
         "Gemma4ForConditionalGeneration",
         "vllm_ascend.models.gemma4_mm:AscendGemma4ForConditionalGeneration",
     )
     ModelRegistry.register_model(
         "KimiLinearForCausalLM",
-        "vllm_ascend.models.kimi_k3:AscendKimiLinearForCausalLM",
+        "vllm_ascend.models.kimi_k3.kimi_k3:AscendKimiLinearForCausalLM",
     )
     # Keep the release-branch text architecture as a compatibility alias for
     # checkpoints whose config predates vLLM's KimiLinear rename.
     ModelRegistry.register_model(
         "KimiK3ForCausalLM",
-        "vllm_ascend.models.kimi_k3:AscendKimiLinearForCausalLM",
+        "vllm_ascend.models.kimi_k3.kimi_k3:AscendKimiLinearForCausalLM",
     )
     ModelRegistry.register_model(
         "KimiK3ForConditionalGeneration",
-        "vllm_ascend.models.kimi_k3:AscendKimiK3ForConditionalGeneration",
+        "vllm_ascend.models.kimi_k3.kimi_k3:AscendKimiK3ForConditionalGeneration",
+    )
+    ModelRegistry.register_model(
+        "KimiK31ForConditionalGeneration",
+        "vllm_ascend.models.kimi_k3.kimi_k3:AscendKimiK3ForConditionalGeneration",
     )
     ModelRegistry.register_model(
         "KimiK3MTPModel",
-        "vllm_ascend.models.kimi_k3_mtp:AscendKimiK3MTP",
+        "vllm_ascend.models.kimi_k3.kimi_k3_mtp:AscendKimiK3MTP",
     )
     ModelRegistry.register_model(
         "K3DSparkModel",
-        "vllm_ascend.models.kimi_k3_dspark:AscendK3DSparkForCausalLM",
+        "vllm_ascend.models.kimi_k3.kimi_k3_dspark:AscendK3DSparkForCausalLM",
     )
     ModelRegistry.register_model(
         "DeepseekV4ForCausalLM", "vllm_ascend.models.deepseek_v4.model:AscendDeepseekV4ForCausalLM"
@@ -82,6 +98,14 @@ def register_model():
     ModelRegistry.register_model(
         "Qwen3_5MoeForConditionalGeneration",
         "vllm_ascend.models.qwen3_5_vl:AscendQwen3_5MoeForConditionalGeneration",
+    )
+    ModelRegistry.register_model(
+        "D3ForSequenceClassification",
+        "vllm_ascend.models.d3:AscendD3ForSequenceClassification",
+    )
+    ModelRegistry.register_model(
+        "ClefFlashForJointSchema",
+        "vllm_ascend.models.clef_flash:AscendClefFlashForJointSchema",
     )
     ModelRegistry.register_model(
         "Eagle3LlamaForCausalLM", "vllm_ascend.models.llama_eagle3:AscendEagle3LlamaForCausalLM"

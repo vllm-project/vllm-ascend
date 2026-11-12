@@ -34,10 +34,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-  UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
+  UV_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly https://download.pytorch.org/whl/cpu/"
   UV_INDEX_STRATEGY: unsafe-best-match
-  UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
   UV_HTTP_TIMEOUT: 120
   UV_NO_CACHE: 1
   UV_SYSTEM_PYTHON: 1
@@ -75,8 +73,8 @@ jobs:
         strategy:
           fail-fast: false
           matrix:
-            part: [0, 1, 2, 3]
-            image_tag: [9.1.0-910b-ubuntu22.04-py3.12]
+            part: [0, 1, 2, 3, 4, 5]
+            image_tag: [9.2.1-910b-ubuntu22.04-py3.12]
             num_npus: [1]
         container:
           image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
@@ -93,11 +91,8 @@ jobs:
               npu-smi info
               cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
 
-          - name: Config mirrors
+          - name: Install packages
             run: |
-              sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
-              pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-              pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
               apt-get update -y
               apt install git zstd -y
               git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -176,9 +171,7 @@ jobs:
               CSRC_CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit }}
             run: |
               export MAX_JOBS=$(( ${{ matrix.num_npus }} * 23 ))
-              pip install uc-manager
               uv pip install -r requirements-dev.txt
-              uv pip install --force-reinstall --no-deps triton-ascend==3.2.2
               # Preserve CI availability during the transition by compiling on
               # the NPU only when the CPU-produced cache is unavailable.
               if [ "$CSRC_CACHE_HIT" = "true" ]; then
@@ -188,11 +181,26 @@ jobs:
                 echo "csrc cache miss: compile kernels on the NPU runner"
                 uv pip install -e . --no-build-isolation
               fi
-              uv pip install tblib 
+              uv pip install tblib
               uv pip install cohere_melody peft "vllm[helion]"  "vllm[grpc]" "vllm[audio]"
               uv pip install pqdm timm imagehash num2words schemathesis==3.39.15
               uv pip install "mteb[bm25s]" "lm-eval[api]" "runai-model-streamer[s3,gcs]"
               uv pip install open_clip_torch terratorch==1.2.2 torchgeo==0.9.0
+              uv pip install pytest-asyncio 
+              uv pip install cohere 
+              uv pip install pytest-timeout multiprocess 
+              uv pip install "accelerate>=1.1.0" 
+              uv pip install datasets 
+              uv pip install vllm_bnb_plugin
+              uv pip install msguard openpyxl
+              uv pip install --no-deps tilelang==0.1.15
+              uv pip install --no-deps mhc==0.5.5
+
+          - name: Install FLA NPU for A2 upstream tests
+            run: |
+              set -euo pipefail
+              uv pip install --no-deps flash-linear-attention-npu-a2===26.9.1
+              python3 -c "import fla_npu.ops.ascendc"
 
           - name: Run vllm-project/vllm test
             working-directory: ./vllm-empty
@@ -205,7 +213,7 @@ jobs:
               python3 ../.github/workflows/scripts/run_suite.py \
                 --suite e2e-upstream_singlecard \
                 --auto-partition-id "${{ matrix.part }}" \
-                --auto-partition-size 4 \
+                --auto-partition-size 6 \
                 --continue-on-error
 
     e2e-upstream_multicard:
@@ -215,7 +223,7 @@ jobs:
           fail-fast: false
           matrix:
             part: [0]
-            image_tag: [9.1.0-910b-ubuntu22.04-py3.12]
+            image_tag: [9.2.1-910b-ubuntu22.04-py3.12]
             num_npus: [2, 4]
         container:
           image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
@@ -232,11 +240,8 @@ jobs:
               npu-smi info
               cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
 
-          - name: Config mirrors
+          - name: Install packages
             run: |
-              sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
-              pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-              pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
               apt-get update -y
               apt install git zstd -y
               git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -312,9 +317,7 @@ jobs:
               CSRC_CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit }}
             run: |
               export MAX_JOBS=$(( ${{ matrix.num_npus }} * 23 ))
-              pip install uc-manager
               uv pip install -r requirements-dev.txt
-              uv pip install --force-reinstall --no-deps triton-ascend==3.2.2
               # Preserve CI availability during the transition by compiling on
               # the NPU only when the CPU-produced cache is unavailable.
               if [ "$CSRC_CACHE_HIT" = "true" ]; then
@@ -324,14 +327,23 @@ jobs:
                 echo "csrc cache miss: compile kernels on the NPU runner"
                 uv pip install -e . --no-build-isolation
               fi
-              uv pip install tblib 
+              uv pip install tblib
+              uv pip install "mteb[bm25s]"
+
+          - name: Install FLA NPU for A2 upstream tests
+            run: |
+              set -euo pipefail
+              uv pip install --no-deps flash-linear-attention-npu-a2===26.9.1
+              python3 -c "import fla_npu.ops.ascendc"
 
           - name: Run vllm-project/vllm test
             working-directory: ./vllm-empty
             env:
               PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
               VLLM_WORKER_MULTIPROC_METHOD: spawn
+              PYTEST_ADDOPTS: -p upstream_test_plugin
             run: |
+              export PYTHONPATH="${GITHUB_WORKSPACE}/tests${PYTHONPATH:+:$PYTHONPATH}"
               python3 ../.github/workflows/scripts/run_suite.py \
                 --suite e2e-upstream_a2_${{ matrix.num_npus }} \
                 --auto-partition-id "${{ matrix.part }}" \
@@ -345,7 +357,7 @@ jobs:
           fail-fast: false
           matrix:
             part: [0]
-            image_tag: [9.1.0-910b-ubuntu22.04-py3.12]
+            image_tag: [9.2.1-910b-ubuntu22.04-py3.12]
             num_npus: [1]
         container:
           image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
@@ -362,11 +374,8 @@ jobs:
               npu-smi info
               cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
 
-          - name: Config mirrors
+          - name: Install packages
             run: |
-              sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
-              pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-              pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
               apt-get update -y
               apt install git zstd -y
               git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -442,9 +451,7 @@ jobs:
               CSRC_CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit }}
             run: |
               export MAX_JOBS=$(( ${{ matrix.num_npus }} * 23 ))
-              pip install uc-manager
               uv pip install -r requirements-dev.txt
-              uv pip install --force-reinstall --no-deps triton-ascend==3.2.2
               # Preserve CI availability during the transition by compiling on
               # the NPU only when the CPU-produced cache is unavailable.
               if [ "$CSRC_CACHE_HIT" = "true" ]; then
@@ -456,6 +463,12 @@ jobs:
               fi
               uv pip install tblib 
               uv pip install "runai-model-streamer[s3,gcs]"
+
+          - name: Install FLA NPU for A2 upstream tests
+            run: |
+              set -euo pipefail
+              uv pip install --no-deps flash-linear-attention-npu-a2===26.9.1
+              python3 -c "import fla_npu.ops.ascendc"
 
           - name: Run vllm-project/vllm test
             working-directory: ./vllm-empty

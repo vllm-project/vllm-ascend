@@ -117,12 +117,16 @@ with the sleep-mode memory pool. The former top-level
 
 ### Weight transfer
 
-vLLM-Ascend exposes two Ascend-specific weight-transfer backends:
+vLLM-Ascend exposes the following Ascend-specific weight-transfer backends:
 
 | Backend | Use case | Transport |
 | --- | --- | --- |
 | `ipc` | Trainer and rollout engine use the same physical NPU | NPU IPC handles |
 | `hccl` | Trainer and rollout engine use separate NPUs | HCCL collectives |
+| `sparse_hccl` | Replace selected checkpoint weight values on separate NPUs | HCCL collectives |
+
+The table describes transport choices. Sparse transfer requires the trainer and
+rollout engine to start from the same checkpoint.
 
 Start an HCCL-enabled server with:
 
@@ -151,18 +155,42 @@ The control flow is:
 2. pause generation;
 3. start the weight update;
 4. transfer one or more groups of weights;
-5. finish the weight update; and
+5. finish the weight update;
 6. resume generation.
 
-The repository contains runnable examples for both backends:
+The repository contains runnable examples for weight transfer:
 
 - [`rlhf_http_hccl.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rl/rlhf_http_hccl.py)
 - [`rlhf_http_npu_ipc.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rl/rlhf_http_npu_ipc.py)
 - [`rlhf_async_new_apis.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rl/rlhf_async_new_apis.py)
+- [`rlhf_sparse_hccl.py`](https://github.com/vllm-project/vllm-ascend/blob/182ea0448550a970e4f0ae3624fe35e38b37bc80/examples/rl/rlhf_sparse_hccl.py)
 
 FRACTAL_NZ must be disabled for weight updates. RL mode forces
 `weight_nz_mode=0`; the weight-transfer start path validates the effective
 Ascend configuration.
+
+#### Sparse HCCL
+
+For sparse checkpoint updates, follow the upstream [Sparse NCCL
+guide](https://docs.vllm.ai/en/latest/training/weight_transfer/nccl/#sparse-nccl)
+for patch semantics and the update lifecycle. On Ascend, select `sparse_hccl`
+and enable RL mode:
+
+```bash
+vllm serve /path/to/checkpoint \
+    --weight-transfer-config '{"backend": "sparse_hccl"}' \
+    --additional-config '{"rl_config": {"enabled": true}}'
+```
+
+Run `rlhf_sparse_hccl.py` to initialize the trainer and send sparse checkpoint
+updates. Its TP2 launch commands explicitly enable expert parallelism. Reserve
+a separate NPU for the trainer; the transfer group size is `1 + TP * DP`, with
+no additional EP factor. Pipeline parallelism is currently unsupported.
+
+Sparse HCCL requires unquantized ND weights and static expert placement with
+EPLB disabled. FRACTAL_NZ, fused MC2 expert weight lists, draft models, and packed
+sparse updates are unsupported. Updates apply in place: after a failed update,
+keep generation paused until the baseline is restored or the engine restarts.
 
 ### Pause and resume generation
 
@@ -195,6 +223,263 @@ must not span weight versions.
 
 See the upstream [Async RL guide](https://docs.vllm.ai/en/latest/training/async_rl/)
 for the API lifecycle.
+
+### Weight checker
+
+The Weight Checker helps validate the weight-transfer path during development.
+It computes SHA-256 digests for model parameters on each rank, resets the
+parameters, and checks whether transferring the original weights back restores
+the same digests. See the upstream
+[Weight Checker guide](https://docs.vllm.ai/en/latest/training/weight_checker/)
+for the full API.
+
+All three operations use `POST /weight_checker`:
+
+| Action | Purpose | Request body | Response |
+| --- | --- | --- | --- |
+| `checksum` | Compute the current digest of each checked parameter without changing it. Save the result as the baseline before resetting weights. | `{"action":"checksum"}` | `{"checksums": {key: sha256_hex}}` |
+| `reset` | Zero the checked parameters to test the transfer path. The model cannot serve valid requests until its weights are restored. | `{"action":"reset"}` | `{"status":"reset"}` |
+| `compare` | Compute current digests and compare them with the baseline supplied by the caller. | `{"action":"compare","baseline":{key: sha256_hex}}` | `{"match":bool,"mismatches":[key]}` |
+
+A checksum key has the form `dp{dp}:pp{pp}:pcp{pcp}:tp{tp}:{tensor_name}`,
+so each shard is checked separately. Expert-parallel ranks are identified by
+their DP/PCP/TP coordinates; there is no separate `ep` field. The server does
+not retain the baseline between requests: save the `checksum` response and
+pass its `checksums` object to `compare`.
+
+The standard check transfers the *same original weights* after `reset` and
+expects `compare` to report a full match. An old baseline should not match
+weights changed by a real training step. This procedure validates the
+weight-transfer path, not the correctness of newly trained weights.
+
+#### Example
+
+Use an installed vLLM-Ascend environment with compatible vLLM, CANN and
+TorchNPU, including the compiled Ascend custom operators. The paired vLLM
+must provide the Weight Checker API and the weight-transfer trainer API used
+below. Use the dependency versions selected by your vLLM-Ascend checkout;
+changing only `PYTHONPATH` does not install its custom operators.
+
+This example needs two available NPUs, `curl`, `jq`, and the full
+`Qwen/Qwen3-0.6B` checkpoint. The server and trainer must resolve the same
+checkpoint revision. Device IDs 0 and 1 below are examples; replace them
+consistently with two available physical devices. Do not use dummy weights
+or change the model's layer count for this checkpoint round trip.
+
+In terminal 1, start the server on physical NPU 0 and wait until
+`curl -fsS http://127.0.0.1:8000/health` succeeds:
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0 VLLM_SERVER_DEV_MODE=1 \
+vllm serve Qwen/Qwen3-0.6B \
+    --weight-transfer-config '{"backend": "hccl"}' \
+    --additional-config '{"rl_config": {"enabled": true}}'
+```
+
+In terminal 2, save the following as `weight_checker_trainer.py`. It uses the
+same trainer API as
+[`rlhf_http_hccl.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rl/rlhf_http_hccl.py),
+but waits for the reset and leaves generation paused after the transfer.
+Do not run that standalone example in the middle of this procedure: it
+requests generation before the transfer and resumes before checksum comparison.
+
+```python
+import torch
+import torch_npu  # noqa: F401
+from transformers import AutoModelForCausalLM
+from vllm.distributed.weight_transfer.base import ModuleSource
+from vllm.distributed.weight_transfer.clients import HTTPVLLMWeightSyncClient
+from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
+from vllm.utils.network_utils import get_ip, get_open_port
+
+from vllm_ascend.distributed.weight_transfer import register_engine
+from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLTrainerInitInfo
+
+
+def main():
+    # Both devices are visible here: logical NPU 1 is the trainer's device.
+    torch.accelerator.set_device_index("npu:1")
+    model = AutoModelForCausalLM.from_pretrained(
+        "Qwen/Qwen3-0.6B", dtype=torch.bfloat16
+    ).to("npu:1")
+    max_tensor_bytes = max(p.numel() * p.element_size() for p in model.parameters())
+    register_engine()
+    engine = WeightTransferTrainerFactory.trainer_init(
+        HCCLTrainerInitInfo(
+            rank=0,
+            master_address=get_ip(),
+            master_port=get_open_port(),
+            world_size=2,  # One trainer and one inference worker.
+            packed=True,
+            packed_buffer_size_bytes=max(max_tensor_bytes + 128 * 2**20, 2**30),
+        ),
+        client=HTTPVLLMWeightSyncClient(base_url="http://127.0.0.1:8000"),
+        source=ModuleSource(model),
+    )
+    try:
+        input(
+            "Trainer ready. Complete pause/checksum/reset in terminal 3, "
+            "then press Enter here to restore the original weights: "
+        )
+        # Owns START -> transfer -> FINISH, including worker RPCs.
+        engine.send_weights()
+        print("Transfer complete. Keep generation paused and compare in terminal 3.")
+    finally:
+        engine.shutdown()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+Run it with both devices visible, and wait for the `Trainer ready` prompt
+before resetting the server. Leave this terminal waiting at the prompt:
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0,1 python weight_checker_trainer.py
+```
+
+In terminal 3, pause generation and save the original checksums:
+
+```bash
+URL=http://127.0.0.1:8000
+
+curl -fsS -X POST "$URL/pause?mode=abort"
+curl -fsS -X POST "$URL/weight_checker" \
+    -H 'Content-Type: application/json' \
+    -d '{"action":"checksum"}' > baseline.json
+
+jq -e '.checksums | length > 0' baseline.json
+```
+
+The final command should print `true`. `baseline.json` contains the actual
+parameter names and SHA-256 digests. Its response has this shape (the values
+below are placeholders):
+
+```json
+{
+  "checksums": {
+    "dp0:pp0:pcp0:tp0:<parameter_name>": "<SHA-256 hex digest>"
+  }
+}
+```
+
+Reset the weights while generation remains paused:
+
+```bash
+curl -fsS -X POST "$URL/weight_checker" \
+    -H 'Content-Type: application/json' \
+    -d '{"action":"reset"}'
+```
+
+Expected response:
+
+```json
+{"status":"reset"}
+```
+
+Before restoring the weights, verify that comparison detects the reset.
+Save a reusable comparison request so that the same baseline is used for
+both checks:
+
+```bash
+jq '{action: "compare", baseline: .checksums}' baseline.json > compare-request.json
+curl -fsS -X POST "$URL/weight_checker" \
+    -H 'Content-Type: application/json' \
+    --data-binary @compare-request.json > after-reset.json
+jq -e '.match == false and (.mismatches | length > 0)' after-reset.json
+```
+
+The final command should print `true`. Now press Enter in terminal 2 to
+transfer the *original checkpoint weights*, and wait for `Transfer complete`
+and a successful trainer exit. This step must not perform a training update
+or resume generation.
+
+Back in terminal 3, compare the restored weights with the saved baseline:
+
+```bash
+curl -fsS -X POST "$URL/weight_checker" \
+    -H 'Content-Type: application/json' \
+    --data-binary @compare-request.json > after-restore.json
+cat after-restore.json
+```
+
+Expected response after a successful restore:
+
+```json
+{"match":true,"mismatches":[]}
+```
+
+If `match` is `false`, inspect `mismatches` and restore the weights before
+serving requests. Resume generation only after a full match:
+
+```bash
+jq -e '.match == true and (.mismatches | length == 0)' after-restore.json && \
+    curl -fsS -X POST "$URL/resume"
+```
+
+Finally, verify that generation works again:
+
+```bash
+curl -fsS "$URL/v1/completions" \
+    -H 'Content-Type: application/json' \
+    -d '{"model":"Qwen/Qwen3-0.6B","prompt":"The capital of France is","max_tokens":16,"temperature":0}'
+```
+
+#### Automated checks
+
+Run these commands from the repository root in the installed environment:
+
+```bash
+bash format.sh ci
+python -m pytest -q \
+    tests/ut/worker/test_worker_weight_checker.py \
+    tests/ut/distributed/weight_transfer/test_hccl_engine.py
+ASCEND_RT_VISIBLE_DEVICES=0,1 VLLM_RL_TEST_DEVICE_INDEX=0 \
+python -m pytest -sv -ra \
+    tests/e2e/pull_request/two_card/rlhf/state_transitions/test_weight_checker.py
+```
+
+The unit tests cover worker integration and mocked HCCL behavior. The E2E
+suite needs two NPUs and the full `Qwen/Qwen3-0.6B` checkpoint. It covers
+checksum/reset/reload, packed and unpacked IPC/HCCL transfers, and TP=2/DP=2
+rank coverage. Its shared helpers live under `tests/e2e/common/rlhf/`.
+`VLLM_RL_TEST_DEVICE_INDEX` is a logical index into the visible device list;
+the trainer uses the next device. Check the pytest summary for skipped cases
+before claiming the full suite passed.
+
+Basic and TP/DP checksum cases use eager mode. Transfer cases use the shared
+RLHF helper's `FULL_DECODE_ONLY` configuration with capture size 1. Other
+graph configurations require separate validation.
+
+#### Operational constraints
+
+- Stay paused from `checksum` through `compare`. Weights are invalid between
+  `reset` and the transfer, and EPLB may move experts while serving. The
+  worker methods do not enforce the pause; the caller must do so.
+- Before `reset`, confirm that a recovery path is available: a working
+  weight-transfer configuration or a checkpoint that `reload_weights` can
+  restore. In RL mode, `rl_config.enabled=true` disables FRACTAL_NZ by setting
+  `weight_nz_mode=0`. In a non-RL deployment where `weight_nz_mode` remains
+  enabled, the weight-update transaction cannot start; checkpoint reload may
+  be needed to recover after `reset`.
+- If the transfer or comparison fails, keep generation paused and restore the
+  weights before resuming. The engine must be awake: sleep levels 1 and 2
+  release weight memory.
+- `reset` is a destructive development operation. Keep development endpoints
+  within a trusted access boundary and do not expose them to the public
+  internet.
+
+#### Limitations
+
+In addition to the
+[upstream limitations](https://docs.vllm.ai/en/latest/training/weight_checker/#limitations):
+
+- Weights held as buffers rather than parameters, such as some quantization
+  repacking paths, are invisible to the checker.
+- MoE weights padded beyond the checkpoint shape may report false mismatches;
+  validate the behavior with the target model before relying on `compare`.
+- Ascend 310P has not yet been verified with the Weight Checker.
 
 ## Training data returned by the engine
 
@@ -239,6 +524,101 @@ expert choices. See the upstream
 [routed experts example](https://docs.vllm.ai/en/latest/examples/rl/routed_experts_e2e/)
 for decoding and replay logic.
 
+### Sampling Mask (Distribution Replay)
+
+During RL rollout inference, top-k/top-p/min-p sampling truncates the model's
+distribution. Sampling Mask returns the retained token IDs for each generated
+position, so training can normalize policy probabilities over the same support
+used during rollout. See the upstream
+[Sampling Mask (Distribution Replay) guide](https://docs.vllm.ai/en/latest/training/sampling_mask/)
+for training-side usage.
+
+`--return-sampling-mask` enables the feature and is disabled by default.
+`--logprobs-mode processed_logprobs` is required.
+The following example also uses `--tokens-only` to expose the token-in/token-out
+API and skip tokenizer initialization. Use `--enable-scale-out` instead to expose the
+same endpoint while retaining the normal serving setup and tokenizer.
+See [Tokens in, tokens out](#tokens-in-tokens-out) for serving details.
+
+```bash
+vllm serve Qwen/Qwen3-0.6B \
+    --tokens-only \
+    --return-sampling-mask \
+    --logprobs-mode processed_logprobs
+```
+
+With sampling-mask capture enabled, requests must use
+`temperature > 0` and `top_k > 0`. Send pre-tokenized input to
+`/inference/v1/generate`:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8000/inference/v1/generate \
+    -H 'Content-Type: application/json' \
+    -d '{
+        "token_ids": [785, 6722, 315, 9625, 374],
+        "sampling_params": {
+            "temperature": 1.0,
+            "top_k": 20,
+            "top_p": 0.95,
+            "max_tokens": 2,
+            "logprobs": 1
+        },
+        "output_mode": "tokens",
+        "stream": false
+    }'
+```
+
+Each choice returns one support set per generated token. The following tested
+Qwen3-0.6B response excerpt omits metadata, ranks, and `top_logprobs`:
+
+```json
+{
+  "finish_reason": "length",
+  "token_ids": [12095, 11],
+  "sampling_mask": [
+    [220, 264, 279, 304, 320, 510, 1112, 1181, 1304, 2130,
+     2598, 7407, 7436, 9625, 12095, 21718, 24209, 30743, 32671, 55201],
+    [11, 13, 323, 382]
+  ],
+  "logprobs": {
+    "content": [
+      {"token_id": 12095, "logprob": -0.2592906951904297},
+      {"token_id": 11, "logprob": -0.7923774719238281}
+    ]
+  }
+}
+```
+
+Basic distribution replay needs the complete mask and the sampled token's old
+logprob. During training, apply the saved mask to the current policy's logits
+to compute that token's new logprob. Old logprobs for every candidate token are
+not required.
+
+The sampled token belongs to its corresponding support. Mask size is independent
+of `logprobs`, and top-k ties can retain more than `top_k` tokens. With
+`stream=true`, concatenate token and mask chunks by choice index and token
+position.
+
+For an MTP-capable model, speculative decoding is supported with fixed
+verification boundaries. Add the following configuration to the server command:
+
+```bash
+--speculative-config '{"method":"mtp","num_speculative_tokens":2,"enable_adaptive_verification":false}'
+```
+
+Each committed token receives the processed target-model support at its
+position. The mask does not record draft or acceptance probabilities.
+
+On Ascend, supports are packed on the NPU and decoded on the CPU using the
+exact bitmask fallback. This preserves the complete support but adds transfer,
+CPU decoding, and response-size overhead. The adapter requires the upstream
+request-major sampling-mask interface.
+
+Diffusion models, custom logits processors, adaptive verification, and the
+batch-sharded LM-head gather path are not supported for this feature.
+Sampling masks contain neither probability values nor RNG state; they do not
+force a token sequence as [Trace Replay](#trace-replay) does.
+
 ## Deterministic rollouts
 
 Batch invariance reduces output differences caused by changes in batch shape
@@ -260,15 +640,25 @@ limitations.
 
 ## Tokens in, tokens out
 
-The experimental tokens-only endpoint accepts pre-tokenized prompts and
-returns generated token IDs. Start the normal `serve` command with
-`--tokens-only`:
+The experimental token-in/token-out (TITO) endpoint accepts pre-tokenized
+prompts and, by default (`output_mode="tokens"`), returns generated token IDs.
+Apply tokenization and any chat template on the client before sending
+`token_ids`. Choose one of two serving modes:
 
 ```bash
+# Dedicated token-only serving: skips tokenizer initialization.
 vllm serve Qwen/Qwen3-0.6B --tokens-only
+
+# Enable TITO while retaining the normal serving setup and tokenizer.
+vllm serve Qwen/Qwen3-0.6B --enable-scale-out
 ```
 
-Send requests to `/inference/v1/generate`:
+`--tokens-only` uses token output and does not support stop strings; use
+`sampling_params.stop_token_ids` instead. A normal server started without
+either flag returns HTTP 403 for TITO requests, with a message to enable
+`--enable-scale-out`.
+
+Send a non-streaming request to `/inference/v1/generate`:
 
 ```bash
 curl http://127.0.0.1:8000/inference/v1/generate \
@@ -276,38 +666,80 @@ curl http://127.0.0.1:8000/inference/v1/generate \
     -d '{
         "request_id": "rollout-001",
         "token_ids": [151644, 8948, 198],
+        "output_mode": "tokens",
         "sampling_params": {
             "temperature": 1.0,
-            "max_tokens": 32,
+            "max_tokens": 2,
             "logprobs": 1
         }
     }'
 ```
 
-A non-streaming response has the following shape:
+The following non-streaming response excerpt illustrates the structure for a
+request that reaches the two-token limit. Token IDs and logprob values are
+illustrative, not captured model output; other response fields are omitted:
 
 ```json
 {
-  "request_id": "rollout-001",
+  "request_id": "generate-tokens-rollout-001",
   "model": "Qwen/Qwen3-0.6B",
+  "output_mode": "tokens",
   "choices": [
     {
       "index": 0,
-      "logprobs": null,
-      "finish_reason": "stop",
+      "logprobs": {
+        "content": [
+          {
+            "token_id": 123,
+            "logprob": -0.5,
+            "rank": 1,
+            "top_logprobs": [
+              {"token_id": 123, "logprob": -0.5, "rank": 1}
+            ]
+          },
+          {
+            "token_id": 456,
+            "logprob": -0.7,
+            "rank": 1,
+            "top_logprobs": [
+              {"token_id": 456, "logprob": -0.7, "rank": 1}
+            ]
+          }
+        ]
+      },
+      "finish_reason": "length",
+      "stop_reason": null,
       "token_ids": [123, 456],
       "routed_experts": null
     }
   ],
   "prompt_logprobs": null,
-  "usage": null
+  "usage": {
+    "prompt_tokens": 3,
+    "completion_tokens": 2,
+    "total_tokens": 5
+  }
 }
 ```
 
-The exact logprob and usage values depend on the sampling parameters and
-server configuration. The API is intended for disaggregated serving and may
-change; track the upstream [Tokens API RFC](https://github.com/vllm-project/vllm/issues/22817)
-for its status.
+In token output mode, `choices[].logprobs.content` contains an integer
+`token_id`, its `logprob` and `rank`, and `top_logprobs` for each generated
+position. Non-streaming responses include `usage` without requiring
+`stream_options.include_usage`. Here, three prompt tokens and two completion
+tokens give five total tokens; `stop_reason` is `null` because generation
+reached `max_tokens`.
+
+Set `stream=true` to receive server-sent events (SSE), ending with
+`data: [DONE]`. To cancel an in-flight request, send a POST to
+`/inference/v1/abort_requests` with a JSON body containing `request_ids`, a
+list of IDs returned by the server (including the `generate-tokens-` prefix),
+rather than the original client-supplied IDs.
+
+For the full protocol and the `text` output mode, which requires a tokenizer,
+see the upstream
+[TITO guide](https://docs.vllm.ai/en/latest/serving/online_serving/token_in_token_out/).
+The [Tokens API RFC](https://github.com/vllm-project/vllm/issues/22817)
+provides design background.
 
 ## Tool calling for agentic RL
 
@@ -352,21 +784,19 @@ for the supported load-balancing modes.
 
 Trace replay forces the engine to emit a predetermined token sequence during
 decoding while computing real logprobs from the model's unmodified logit
-distribution. It is only supported by model runner V2. When using the normal
-`vllm serve` command with the token-in/token-out endpoint, explicitly enable
-model runner V2 and the scale-out endpoints:
+distribution. When using the normal
+`vllm serve` command with the token-in/token-out endpoint, enable the scale-out
+endpoints:
 
 ```bash
-VLLM_USE_V2_MODEL_RUNNER=1 \
-VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1 \
 vllm serve Qwen/Qwen3-8B \
+    --enable-scale-out \
     --enable-trace-replay
 ```
 
-`VLLM_USE_V2_MODEL_RUNNER=1` prevents the server from falling back to model
-runner V1, which is incompatible with trace replay.
-`VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1` registers the
+`--enable-scale-out` registers the
 `/inference/v1/generate` endpoint for a normal serving process.
+`--enable-trace-replay` opts the server into accepting trace replay requests.
 
 Send requests to `/inference/v1/generate`:
 
@@ -398,8 +828,8 @@ The output tokens will always be `[15, 284, 1026, 374]`. The logprobs reflect th
 | `--weight-transfer-config '{"backend": "hccl"}'` | Cross-NPU weight transfer | Register the Ascend HCCL transfer engine |
 | `--weight-transfer-config '{"backend": "ipc"}'` | Same-NPU weight transfer | Select the Ascend NPU IPC transfer engine |
 | `--enable-return-routed-experts` | MoE router replay | Return encoded expert routing decisions |
-| `VLLM_USE_V2_MODEL_RUNNER=1` | Trace replay | Select the required model runner V2 implementation |
-| `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1` | Token-in/token-out requests on a normal server | Register `/inference/v1/generate` |
+| `--return-sampling-mask` | Sampling Mask (Distribution Replay) | Return the support set for each generated token; disabled by default |
+| `--enable-scale-out` | Token-in/token-out requests on a normal server | Register `/inference/v1/generate`; `--tokens-only` also registers this endpoint |
 | `--enable-trace-replay` | trace replay | Forces decoding to follow a predetermined token sequence |
 
 For the Ascend-specific option definitions, see

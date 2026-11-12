@@ -8,6 +8,8 @@ import numpy as np
 import pytest
 import torch
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
@@ -251,6 +253,10 @@ def generate_test_case(
 # ---------------------------------------------------------------------------
 # Parametrized tests
 # ---------------------------------------------------------------------------
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+    reason="CopyAndExpandEagleInputs is configured for Ascend A2/A3",
+)
 @pytest.mark.parametrize("num_reqs", [1, 2, 4, 8, 16])
 @pytest.mark.parametrize("num_padding_slots", [1, 2, 3, 5])
 @pytest.mark.parametrize("shift_input_ids", [False, True])
@@ -307,6 +313,10 @@ def test_copy_and_expand_eagle_inputs(num_reqs, num_padding_slots, shift_input_i
         torch.testing.assert_close(n_hsm, g_hsm_t, atol=0, rtol=0, msg="out_hidden_state_mapping mismatch")
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+    reason="CopyAndExpandEagleInputs is configured for Ascend A2/A3",
+)
 @pytest.mark.parametrize("num_reqs", [1])
 @pytest.mark.parametrize("num_padding_slots", [1])
 @pytest.mark.parametrize("shift_input_ids", [False, True])
@@ -355,6 +365,10 @@ def test_minimal_case(num_reqs, num_padding_slots, shift_input_ids):
     torch.testing.assert_close(n_nti, torch.from_numpy(g_nti), atol=0, rtol=0)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+    reason="CopyAndExpandEagleInputs is configured for Ascend A2/A3",
+)
 @pytest.mark.parametrize("num_reqs", [3, 7, 13])
 def test_large_tokens_per_request(num_reqs):
     """Test with larger token counts per request."""
@@ -401,6 +415,10 @@ def test_large_tokens_per_request(num_reqs):
     torch.testing.assert_close(n_nti, torch.from_numpy(g_nti), atol=0, rtol=0)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+    reason="CopyAndExpandEagleInputs is configured for Ascend A2/A3",
+)
 @pytest.mark.parametrize("num_reqs", [3, 7, 13])
 def test_large_tokens_shift_true(num_reqs):
     """Test with larger token counts and shift_input_ids=True."""
@@ -448,6 +466,10 @@ def test_large_tokens_shift_true(num_reqs):
     torch.testing.assert_close(n_hsm, torch.from_numpy(g_hsm), atol=0, rtol=0)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+    reason="CopyAndExpandEagleInputs is configured for Ascend A2/A3",
+)
 @pytest.mark.parametrize("num_reqs", [1, 4, 8])
 def test_no_rejected_tokens(num_reqs):
     """Test cases with zero rejected tokens."""

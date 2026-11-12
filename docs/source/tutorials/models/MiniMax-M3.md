@@ -8,11 +8,11 @@
 
     **For the production environment on the customer side, [MindIE Motor](https://www.hiascend.com/document/detail/en/mindie/latest/quickstart/docs/en/user_guide/quick_start.md) + vLLM-Ascend is recommended.**
 
-MiniMax-M3 is a multimodal large language model that supports text, image, and video inputs. On Ascend, it supports BF16 and W8A8 on A2/A3, Prefill-Decode disaggregation on Atlas 800I A3 (BF16) and 950DT products (MXFP8), thinking mode, reasoning parsing, tool-call parsing, and multimodal inputs.
+MiniMax-M3 is a multimodal large language model that supports text, image, and video inputs. On Ascend, it supports BF16 and W8A8 on A2/A3, Prefill-Decode disaggregation on Atlas 800I A3 (W8A8) and 950DT products (MXFP8), thinking mode, reasoning parsing, tool-call parsing, and multimodal inputs.
 
-This document covers supported features, environment and model preparation, single-node deployment, multi-node deployment, PD separation, thinking and parser configuration, functional verification, accuracy evaluation, and troubleshooting.
+This document covers supported features, environment and model preparation, single-node deployment, multi-node deployment, PD separation, thinking and parser configuration, functional verification, accuracy evaluation, performance evaluation, tuning, and troubleshooting. After following it, you can deploy the model and validate both accuracy and performance.
 
-This document is written based on the vLLM-Ascend main branch. This model is supported on this branch.
+This document is written based on the vLLM Ascend main branch. This model is supported on this branch.
 
 ## 2 Supported Features
 
@@ -26,12 +26,16 @@ Refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for featur
 
 | Weight Version | Hardware Requirements | Download Links | Notes |
 | --- | --- | --- | --- |
-| `MiniMax-M3` (BF16) | 2 Atlas 800I A3 nodes (64GB × 16 per node) | [ModelScope](https://www.modelscope.cn/collections/MiniMax/MiniMax-M3) | / |
+| `MiniMax-M3` (BF16) | 2 Atlas 800I A3 nodes (64GB × 16 per node) | [Hugging Face](https://huggingface.co/MiniMaxAI/MiniMax-M3) \| [ModelScope](https://www.modelscope.cn/collections/MiniMax/MiniMax-M3) | / |
 | `MiniMax-M3-w8a8` (W8A8) | 1 Atlas 800I A3 node (64GB × 16) or 1 Atlas 800 A2 node (64GB × 8) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/MiniMax-M3-w8a8-0626) | / |
 | `MiniMax-M3-MXFP8` (MXFP8) | 1 950DT node (96GB × 8) | [ModelScope](https://www.modelscope.cn/models/MiniMax/MiniMax-M3-MXFP8) | Supports a W8A8C8 configuration: C8 is dynamic KV-cache quantization. Set `--kv-cache-dtype fp8` in the serving command to enable FP8 KV cache. |
 | `MiniMax-M3-EAGLE3-GQA` | / | [ModelScope](https://www.modelscope.cn/models/Inferact/MiniMax-M3-EAGLE3-GQA) | Draft model for EAGLE3 speculative decoding; uses Grouped Query Attention (GQA). |
 
+> The W8A8, MXFP8, and EAGLE3 weights above are Ascend-adapted releases published on ModelScope only; no Hugging Face mirror is provided for them.
+
 It is recommended to place the model weight in a shared cache directory.
+
+Record the downloaded model directories for use in the deployment commands. Set `WEIGHT_PATH` (or `MODEL_PATH` in the PD templates) to the target-weight directory, for example `/models/MiniMax-M3-w8a8`, and `EAGLE3_WEIGHT_PATH` to the downloaded EAGLE3 draft directory when speculative decoding is enabled. Replace the weight-path placeholders below with these actual paths and ensure they are accessible inside the container. `LOG_PATH` is a writable log-file path; the single-node examples use files in the current directory.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
@@ -133,7 +137,13 @@ Select the `docker run` command for your hardware platform:
 
 Adjust data volume mounts (for example, model weights and datasets) according to your environment. On 950DT products, do not add Atlas A3 mounts such as `/dev/devmm_svm` that do not exist on the host.
 
-Expected result: The container is listed with status `Up`. You can also verify the vllm-ascend version inside the container:
+In another terminal on the same host, check the container status (replace `minimax-m3-dev` if you changed `NAME`):
+
+```bash
+docker ps --filter name=minimax-m3-dev
+```
+
+Expected result: The container is listed with status `Up`. In the original container terminal, verify the vLLM Ascend version:
 
 ```bash
 pip show vllm-ascend
@@ -141,17 +151,48 @@ pip show vllm-ascend
 
 Expected result: The version information is displayed, matching the pulled image version.
 
-## 5 Online Service Deployment
+### 4.2 Source Code Installation
 
-Start the online serving service with the following command:
+If you prefer not to use the Docker image, build both packages from source. MiniMax-M3 support is available on the vLLM Ascend main branch (see [Section 1](#1-introduction)), so install that branch rather than an older release.
 
-Select a platform or weight format using the tabs in each section to switch between deployment examples.
+1. Clone and install vLLM:
+
+    ```bash
+    git clone https://github.com/vllm-project/vllm.git
+    cd vllm
+    pip install -v -e .
+    ```
+
+2. Clone and install vLLM Ascend (main branch):
+
+    ```bash
+    git clone https://github.com/vllm-project/vllm-ascend.git
+    cd vllm-ascend
+    git checkout main
+    pip install -v -e .
+    ```
+
+3. Verify the installation:
+
+    ```bash
+    pip show vllm vllm-ascend
+    ```
+
+    Expected result: The version information for both packages is displayed, confirming a successful installation.
+
+!!! note
+
+    For a multi-node deployment, repeat the setup on every node and make sure both packages are built at the same commit.
+
+## 5 Online Service Deployment {: #5-online-service-deployment }
+
+Start the online serving service with the deployment commands in the following sections. Select the tab for your hardware platform and weight format.
 
 For descriptions of the standard `vllm serve` arguments used in the deployment examples, refer to the [vLLM Serving Arguments documentation](https://docs.vllm.ai/en/latest/cli/serve/#arguments). For Ascend-specific options passed through `--additional-config`, refer to [Additional Configuration](../../user_guide/configuration/additional_config.md). For Ascend-specific environment variables, refer to [Environment Variables](../../user_guide/configuration/env_vars.md).
 
 The `--speculative-config` examples use single-quoted JSON. The `'"${EAGLE3_WEIGHT_PATH}"'` segment expands the draft-weight path within that JSON.
 
-### 5.1 Single-Node Deployment
+### 5.1 Single-Node Online Deployment
 
 Single-node deployment completes both Prefill and Decode within the same node. The MiniMax-M3 (BF16) model can be deployed on 1 Atlas 800I A3 (64GB × 16), but dual-node deployment is recommended for BF16 on A3 series; single-node is not recommended. The MiniMax-M3-w8a8 (W8A8) quantized model is recommended for single-node deployment on 1 Atlas 800I A3 (64GB × 16) or 1 Atlas 800 A2 (64GB × 8). The MiniMax-M3-MXFP8 (MXFP8) quantized model can be deployed on 1 950DT products (96GB × 8).
 
@@ -168,11 +209,14 @@ Single-node deployment completes both Prefill and Decode within the same node. T
 === "A3 series (BF16)"
 
     ```bash
+    WEIGHT_PATH="<MINIMAX_M3_BF16_PATH>"
+    LOG_PATH="./minimax-m3-bf16.log"
+
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_OP_EXPANSION_MODE="AIV"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-    vllm serve ${WEIGHT_PATH} \
+    vllm serve "${WEIGHT_PATH}" \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
       --host 0.0.0.0 \
       --port 11223 \
@@ -197,17 +241,21 @@ Single-node deployment completes both Prefill and Decode within the same node. T
           },
           "multistream_overlap_shared_expert": true,
           "weight_nz_mode": 2
-      }' > ${LOG_PATH} 2>&1 &
+      }' > "${LOG_PATH}" 2>&1 &
     ```
 
 === "A3 series (W8A8)"
 
     ```bash
+    WEIGHT_PATH="<MINIMAX_M3_W8A8_PATH>"
+    EAGLE3_WEIGHT_PATH="<MINIMAX_M3_EAGLE3_GQA_PATH>"
+    LOG_PATH="./minimax-m3-w8a8.log"
+
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_OP_EXPANSION_MODE="AIV"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-    vllm serve ${WEIGHT_PATH} \
+    vllm serve "${WEIGHT_PATH}" \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
       --host 0.0.0.0 \
       --port 11223 \
@@ -238,18 +286,22 @@ Single-node deployment completes both Prefill and Decode within the same node. T
           "multistream_overlap_shared_expert": true,
           "enable_shared_expert_dp": true,
           "weight_nz_mode": 2
-      }' > ${LOG_PATH} 2>&1 &
+      }' > "${LOG_PATH}" 2>&1 &
     ```
 
 === "950DT products"
 
     ```bash
+    WEIGHT_PATH="<MINIMAX_M3_MXFP8_PATH>"
+    EAGLE3_WEIGHT_PATH="<MINIMAX_M3_EAGLE3_GQA_PATH>"
+    LOG_PATH="./minimax-m3-mxfp8.log"
+
     export VLLM_USE_V2_MODEL_RUNNER=1
     export HCCL_BUFFSIZE=512
     export HCCL_OP_EXPANSION_MODE="AIV"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-    vllm serve ${WEIGHT_PATH} \
+    vllm serve "${WEIGHT_PATH}" \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
       --host 0.0.0.0 \
       --port 11223 \
@@ -273,16 +325,16 @@ Single-node deployment completes both Prefill and Decode within the same node. T
       --gpu-memory-utilization 0.92 \
       --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
       --speculative-config '{"model":"'"${EAGLE3_WEIGHT_PATH}"'", "method":"eagle3", "num_speculative_tokens":3, "kv_cache_dtype":"bfloat16"}' \
-      --safetensors-load-strategy prefetch > ${LOG_PATH} 2>&1 &
+      --safetensors-load-strategy prefetch > "${LOG_PATH}" 2>&1 &
     ```
 
-**Note**: In the script above, `max-num-seqs` represents the maximum number of sequences the scheduler can process in a single iteration. Adjust the `max-num-seqs` parameter dynamically based on actual business.
+**Note**: In the scripts above, `max-num-seqs` limits the number of sequences scheduled in one iteration. Tune this limit using the expected input/output lengths and request concurrency, and measure throughput and latency after each change. Increase it only when additional sequences fit in the available KV cache; a higher limit does not guarantee higher throughput and can increase latency or KV-cache preemption.
 
-For text-only deployment, `--limit-mm-per-prompt` can be omitted. For multimodal deployment, configure this parameter according to the actual request shape. For example, use `--limit-mm-per-prompt '{"image":2,"video":0}'` for two-image requests, and use `--limit-mm-per-prompt '{"image":0,"video":1}'` for one-video requests.
+Text requests do not require `--limit-mm-per-prompt`, but omitting this flag does not disable multimodal support or its memory planning. For a text-only service that disables multimodal inputs, use `--language-model-only`, as described in [Section 5.5](#55-multimodal-and-vit-dp-optional). For multimodal deployment, configure the limits according to the actual request shape. For example, use `--limit-mm-per-prompt '{"image":2,"video":0}'` for two-image requests, and use `--limit-mm-per-prompt '{"image":0,"video":1}'` for one-video requests.
 
 ### 5.2 Multi-Node Deployment
 
-Deploying the float model on Ascend A2 servers requires at least two nodes. Multi-node deployment on A3 servers without prefill–decode disaggregation is not recommended. Update `WEIGHT_PATH`, `EAGLE3_WEIGHT_PATH`, `LOG_PATH`, `local_ip`, `node0_ip`, and `NETWORK_INTERFACE` based on the actual environment. Set `NETWORK_INTERFACE` to the local communication NIC name (for example, `eth0`); HCCL and Gloo use this value directly.
+Deploying the BF16 model on Ascend A2 servers requires at least two nodes. Multi-node deployment on A3 servers without prefill–decode disaggregation is not recommended. Update `WEIGHT_PATH`, `EAGLE3_WEIGHT_PATH`, `LOG_PATH`, `local_ip`, `node0_ip`, and `NETWORK_INTERFACE` based on the actual environment. Set `NETWORK_INTERFACE` to the local communication NIC name (for example, `eth0`); HCCL and Gloo use this value directly.
 
 === "A3 series (BF16)"
 
@@ -439,6 +491,17 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
       --enable-prefix-caching \
       --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "enable_shared_expert_dp":true,"multistream_overlap_shared_expert": true, "weight_nz_mode": 2,"enable_flashcomm1":true}' > ${LOG_PATH} 2>&1 &
     ```
+
+Start both nodes before waiting for initialization to complete, and inspect the log file configured by `LOG_PATH` on each node for errors. Node 1 uses `--headless` and does not expose an HTTP API. After node 0 logs `Application startup complete`, run the following checks inside the node 0 container:
+
+```bash
+curl --noproxy '*' -fsS -i http://127.0.0.1:11223/health
+curl --noproxy '*' -fsS http://127.0.0.1:11223/v1/models
+```
+
+Expected result: `/health` returns HTTP 200, and `/v1/models` lists `minimax-m3`. If startup fails or either check fails, inspect both nodes' logs before sending inference requests.
+
+**Common Issues Tip:** If the two nodes cannot form a DP group, check that `node0_ip`, `--data-parallel-address`, and `--data-parallel-rpc-port` match on both nodes, that `--data-parallel-start-rank` values do not overlap, and that `HCCL_SOCKET_IFNAME` names an interface reachable between the hosts. For other environment, installation, and parameter issues, refer to the [Public FAQs](../../faqs.md) and [Chapter 10 FAQ](#10-faq).
 
 ### 5.3 Sub-1M-Token Context Deployment
 
@@ -716,7 +779,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
     export VISIBLE_DEVICES="${VISIBLE_DEVICES:-0,1,2,3}"
 
     export VLLM_USE_V2_MODEL_RUNNER=1
-    export HCCL_BUFFSIZE=1024
+    export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP=$LOCAL_IP
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=$NIC_NAME
@@ -857,7 +920,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
 
     python load_balance_proxy_server_example.py \
     --port 8009 \
-    --host $PREFILL_IP \
+    --host 0.0.0.0 \
     --prefiller-hosts \
         $PREFILL_IP \
     --prefiller-ports \
@@ -869,9 +932,9 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
         31260 31261 31262 31263 31260 31261 31262 31263
     ```
 
-    The service is then accessible at `<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in Section 7.
+    The service is then accessible at `<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in [Section 6](#6-functional-verification).
 
-    To use MindIE PyMotor instead of the example proxy, follow [Deploy vLLM-Ascend with MindIE-Motor](../../user_guide/deployment_guide/using_mindie_motor.md) and register the same one Prefill and eight Decode endpoints. Send benchmark requests to the Motor inference endpoint. Changing the request router does not require changing the P/D parallel sizes or scheduler limits above.
+    To use MindIE PyMotor instead of the example proxy, follow [Deploy vLLM Ascend with MindIE-Motor](../../user_guide/deployment_guide/using_mindie_motor.md) and register the same one Prefill and eight Decode endpoints. Send benchmark requests to the Motor inference endpoint. Changing the request router does not require changing the P/D parallel sizes or scheduler limits above.
 
 === "950DT products"
 
@@ -931,6 +994,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
         --data-parallel-rpc-port "$DP_RPC_PORT" \
         --tensor-parallel-size "$TP_SIZE" \
         --pipeline-parallel-size "$PP_SIZE" \
+        --seed 1024 \
         --served-model-name minimax-m3 \
         --trust-remote-code \
         --dtype bfloat16 \
@@ -1104,7 +1168,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
 
     python load_balance_proxy_server_example.py \
     --port 8009 \
-    --host $PREFILL_IP \
+    --host 0.0.0.0 \
     --prefiller-hosts \
         $PREFILL_IP $PREFILL_IP \
     --prefiller-ports \
@@ -1115,7 +1179,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
         31060 31061
     ```
 
-    The service is then accessible at `<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in Section 7.
+    The service is then accessible at `<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in [Section 6](#6-functional-verification).
 
     **Scaling to three nodes (still 1P1D)**
 
@@ -1173,7 +1237,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
 
     python load_balance_proxy_server_example.py \
     --port 8009 \
-    --host $PREFILL_IP \
+    --host 0.0.0.0 \
     --prefiller-hosts \
         $PREFILL_IP $PREFILL_IP \
     --prefiller-ports \
@@ -1208,7 +1272,7 @@ Key Parameter Descriptions:
 - `--max-num-batched-tokens` (A3 Prefill: `8192`): For better prefill performance, use `8192` when the input length is at least 8192 tokens; for shorter inputs, set it to the input token length. This recommendation also applies to A3 Prefill with KV Cache Pool in Section 5.3.2.
 - `--enforce-eager`: Prefill nodes retain eager execution without graph capture.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`: The ordinary-context Decode examples and the single-node examples in Section 5.4.1 use full graph capture for decode-only batches. Section 5.4.2 uses eager execution for its 1M-context PD layout.
-- `--speculative-config '{"method":"eagle3", ...}'`: Enables the `MiniMax-M3-EAGLE3-GQA` draft model. Do not replace this with GLM MTP options.
+- `--speculative-config '{"method":"eagle3", ...}'`: Enables the `MiniMax-M3-EAGLE3-GQA` draft model.
 
 **Decode node-specific configurations:**
 
@@ -1243,7 +1307,7 @@ This section builds on [Section 5.3.1](#531-prefill-decode-disaggregation). The 
 
 The examples below enable three-tier KV storage: the active NPU KV cache, the Mooncake memory pool, and SSD offload.
 
-For backend selection, `mooncake.json`, Mooncake Master, eviction, and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md). For the hardware/communication environment variables required by pooling, refer to [Environment Variables Description](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md). For MiniMax-specific issues, refer to [Chapter 10 FAQ](#10-faq).
+For backend selection, `mooncake.json`, Mooncake Master, eviction, tenant options, and hardware-specific pooling exports, refer to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md). For MiniMax-specific issues, refer to [Chapter 10 FAQ](#10-faq).
 
 **Compared with normal PD in Section 5.3.1, pay attention to these pooling-only requirements:**
 
@@ -1356,7 +1420,7 @@ The 950DT examples use `64GB` per worker rank on both P and D. Adjust the size t
 
 ##### 5.3.2.2 Environment Variables
 
-Start from the Section 5.3.1 environment block (`HCCL_IF_IP`, `HCCL`/`GLOO` socket IFNAME, `HCCL_BUFFSIZE`, `PYTORCH_NPU_ALLOC_CONF`, `ASCEND_RT_VISIBLE_DEVICES`, and A3 Prefill `VLLM_PP_LAYER_PARTITION="16,15,15,14"`). Then add the pooling-required variables below. Choose the hardware/communication exports from [Environment Variables Description](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md) according to your machine and link type.
+Start from the Section 5.3.1 environment block (`HCCL_IF_IP`, `HCCL`/`GLOO` socket IFNAME, `HCCL_BUFFSIZE`, `PYTORCH_NPU_ALLOC_CONF`, `ASCEND_RT_VISIBLE_DEVICES`, and A3 Prefill `VLLM_PP_LAYER_PARTITION="16,15,15,14"`). Then add the pooling-required variables below. Choose the hardware/communication exports from the [Mooncake backend startup examples](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-4-start-vllm-inference-service) according to your machine and link type.
 
 Common pooling exports on Prefill node and DP ranks:
 
@@ -1372,6 +1436,7 @@ export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824
 # SSD disk budget per NPU worker rank: 10 GiB.
 export MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES=$((10 * 1024 * 1024 * 1024))
 export MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE=$((10 * 1024 * 1024 * 1024))
+export MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY=lru
 ```
 
 The SSD I/O buffer is allocated separately from `global_segment_size`. The `1GB` value above is an aligned starting point; size it for the KV read/write batches and include it in the per-rank memory budget.
@@ -1380,6 +1445,7 @@ For this three-tier (NPU, host memory, and SSD) example, the recommended startin
 
 - `MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES` sets the per-worker SSD capacity reported to Mooncake Master. Its default is `2199023255552` bytes (2 TiB) per worker; this is advertised capacity, not an immediate disk allocation.
 - `MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE` sets the local bucket size limit. Its default is `0`, meaning 90% of the physical disk capacity. Set it explicitly alongside the reported capacity.
+- `MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY=lru` enables least-recently-used eviction, removing old SSD cache entries to make room for new writes within the configured bucket limit.
 
 Adjust both values to the workload and usable SSD space, allowing for all workers sharing that disk and leaving room for other data. Count TP and PP worker ranks, not just DP ranks or physical cards: an A3 node with 16 logical NPU workers has a combined budget of 160 GiB at 10 GiB per worker. These limits control SSD usage; they do not change the host-memory pool or SSD I/O buffer size. For details, see [Mooncake SSD Offload Parameter Tuning](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#mooncake-ssd-offload-parameter-tuning).
 
@@ -1441,6 +1507,7 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
     # SSD disk budget per NPU worker rank: 10 GiB.
     export MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES=$((10 * 1024 * 1024 * 1024))
     export MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE=$((10 * 1024 * 1024 * 1024))
+    export MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY=lru
 
     # Explicit DP ranks enable external load balancing, which requires DP > 1.
     DP_RANK_ARGS=()
@@ -1548,6 +1615,7 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
     # SSD disk budget per NPU worker rank: 10 GiB.
     export MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES=$((10 * 1024 * 1024 * 1024))
     export MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE=$((10 * 1024 * 1024 * 1024))
+    export MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY=lru
 
     # Explicit DP ranks enable external load balancing, which requires DP > 1.
     DP_RANK_ARGS=()
@@ -1656,6 +1724,7 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
     # SSD disk budget per NPU worker rank: 10 GiB.
     export MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES=$((10 * 1024 * 1024 * 1024))
     export MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE=$((10 * 1024 * 1024 * 1024))
+    export MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY=lru
     export ASCEND_LOCAL_COMM_RES_PATH=/etc/hixlep/
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
     unset ASCEND_GLOBAL_RESOURCE_CONFIG
@@ -1763,6 +1832,7 @@ Reuse Section 5.3.1 `launch_online_dp.py`. Replace each role's `run_dp_template.
     # SSD disk budget per NPU worker rank: 10 GiB.
     export MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES=$((10 * 1024 * 1024 * 1024))
     export MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE=$((10 * 1024 * 1024 * 1024))
+    export MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY=lru
     export ASCEND_LOCAL_COMM_RES_PATH=/etc/hixlep/
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
     unset ASCEND_GLOBAL_RESOURCE_CONFIG
@@ -1858,6 +1928,8 @@ Proxy (:8009)
     --client_ttl=120
     ```
 
+    These are example Master settings: `default_kv_lease_ttl=11000` is in milliseconds, while `client_ttl=120` is in seconds. The eviction ratios are dimensionless; see the [Mooncake Master parameter table](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#step-2-configure-mooncakejson-and-start-mooncake_master) for their meanings and supported ranges. Keep `enable_offload=true` for this SSD-offload deployment.
+
 2. Start the first A3 Decode node (global DP ranks 0–3). Use the pooled Decode template, not the normal-PD template:
 
     ```bash
@@ -1939,7 +2011,7 @@ Proxy (:8009)
 
     python load_balance_proxy_server_example.py \
     --port 8009 \
-    --host $PREFILL_IP \
+    --host 0.0.0.0 \
     --prefiller-hosts \
         $PREFILL_IP \
     --prefiller-ports \
@@ -1951,7 +2023,7 @@ Proxy (:8009)
         31260 31261 31262 31263 31260 31261 31262 31263
     ```
 
-    On 950DT, use the Section 5.3.1 two-node proxy command (two P and two D endpoints). The service is accessible at `<proxy_ip>:8009`; use this endpoint in Section 7.
+    On 950DT, use the Section 5.3.1 two-node proxy command (two P and two D endpoints). The service is accessible at `<proxy_ip>:8009`; use this endpoint in [Section 6](#6-functional-verification).
 
 ##### 5.3.2.5 Verification
 
@@ -2036,7 +2108,7 @@ Prepare the container and weights as described in Sections 3 and 4. Replace `<MO
         }' > ./minimax-m3-1m-a3.log 2>&1 &
     ```
 
-    `--long-prefill-token-threshold 8192` sets the long-prefill threshold used with chunked prefill. The scheduler uses this threshold to limit the prefill tokens scheduled for a long request in one iteration, while `--max-num-batched-tokens 8192` bounds the total token budget for the iteration. In this single-request example both values are 8192, so the 1M prompt is processed in chunks within that budget. This parameter does not reduce the total context limit configured by `--max-model-len`. See the [vLLM scheduler arguments](https://docs.vllm.ai/en/latest/configuration/engine_args/#--long-prefill-token-threshold) for details.
+    `--long-prefill-token-threshold 8192` sets the long-prefill threshold used with chunked prefill. The scheduler uses this threshold to limit the prefill tokens scheduled for a long request in one iteration, while `--max-num-batched-tokens 8192` bounds the total token budget for the iteration. In this single-request example both values are 8192, so the 1M prompt is processed in chunks within that budget. This parameter does not reduce the total context limit configured by `--max-model-len`. See the [vLLM scheduler arguments](https://docs.vllm.ai/en/latest/configuration/engine_args/#-long-prefill-token-threshold) for details.
 
 === "950DT Products (MXFP8)"
 
@@ -2490,7 +2562,7 @@ Send client requests to `http://<PROXY_HOST_IP>:18919/v1/chat/completions`. The 
 3. Prepare a prompt containing exactly 1,048,576 tokens using the deployed model's tokenizer. Keep input plus requested output within `1049600`; the configuration reserves up to 1024 output tokens for a full 1M-token input.
 4. Verify the API's input-token count and the requested retrieval answers. Check the Prefill prompt-token counter and the receiving Decode rank's external-prefix-cache hit counter to confirm the long prefix was transferred. Decode should not recompute the complete 1M prefill.
 
-The recorded A3 run used vLLM `0.30.0+empty` and vLLM-Ascend `0.30.0rc2.dev166+g7672a5b50`. All five engines were healthy, and one real request with 1,048,576 input tokens and 33 output tokens correctly retrieved three random values placed across the context. P processed 1,048,576 prompt tokens; the receiving D rank reported the same transferred-prefix hit increment and 33 iteration tokens, with no preemption. This validates one 1M-context PD request. It does not establish four simultaneous 1M requests or an AISBench performance result. The templates retain that run's serving parameters and KV topology, with environment exports normalized to this guide. These normalized snippets have not been rerun on NPUs, and the existing validation container was not fully audited for pre-existing changes. Recheck compatibility when reproducing on a different build.
+The recorded A3 run used vLLM `0.30.0+empty` and vLLM Ascend `0.30.0rc2.dev166+g7672a5b50`. All five engines were healthy, and one real request with 1,048,576 input tokens and 33 output tokens correctly retrieved three random values placed across the context. P processed 1,048,576 prompt tokens; the receiving D rank reported the same transferred-prefix hit increment and 33 iteration tokens, with no preemption. This validates one 1M-context PD request. It does not establish four simultaneous 1M requests or an AISBench performance result. The templates retain that run's serving parameters and KV topology, with environment exports normalized to this guide. These normalized snippets have not been rerun on NPUs, and the existing validation container was not fully audited for pre-existing changes. Recheck compatibility when reproducing on a different build.
 
 ### 5.5 Multimodal and ViT DP (Optional)
 
@@ -2534,9 +2606,9 @@ FLASHCOMM1 and `--language-model-only` can be enabled together for text-only ser
 --language-model-only
 ```
 
-## 6 Thinking and Parser Configuration
+### 5.6 Thinking and Parser Configuration
 
-### 6.1 Thinking Mode
+#### 5.6.1 Thinking Mode
 
 MiniMax-M3 supports three thinking modes, controlled via `thinking_mode` in `chat_template_kwargs`:
 
@@ -2546,7 +2618,7 @@ MiniMax-M3 supports three thinking modes, controlled via `thinking_mode` in `cha
 | `disabled` | No thinking; the model answers directly | Latency-sensitive turns |
 | `adaptive` | The model decides whether to think based on the task (default when unset) | General use |
 
-#### 6.1.1 Request Examples
+##### 5.6.1.1 Request Examples
 
 **With thinking disabled (curl):**
 
@@ -2569,10 +2641,12 @@ Change `"thinking_mode"` to `"enabled"` or `"adaptive"` as needed. The deprecate
 
 **With thinking enabled (Python SDK):**
 
+Set `base_url` to the deployed API address, including `/v1`. The example below uses the Section 5.1 service port; for PD disaggregation, use the proxy address and port instead.
+
 ```python
 from openai import OpenAI
 
-client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+client = OpenAI(api_key="EMPTY", base_url="http://localhost:11223/v1")
 
 response = client.chat.completions.create(
     model="minimax-m3",
@@ -2584,11 +2658,11 @@ print(getattr(msg, "reasoning", None))  # the <mm:think> block
 print(msg.content)                       # the final answer
 ```
 
-### 6.2 Reasoning Parser
+#### 5.6.2 Reasoning Parser
 
 The MiniMax-M3 reasoning parser (`--reasoning-parser minimax_m3`) extracts the thinking block `<mm:think>...</mm:think>` from model output and exposes it as the `reasoning` field. The remaining text is returned as `content`.
 
-#### 6.2.1 Server Configuration
+##### 5.6.2.1 Server Configuration
 
 The `--reasoning-parser minimax_m3` flag enables the MiniMax-M3 reasoning parser, which splits model output into reasoning and content using `<mm:think>...</mm:think>` delimiters:
 
@@ -2601,7 +2675,7 @@ vllm serve ${WEIGHT_PATH} \
   ...
 ```
 
-#### 6.2.2 Output Format
+##### 5.6.2.2 Output Format
 
 MiniMax-M3 uses explicit thinking delimiters:
 
@@ -2609,18 +2683,18 @@ MiniMax-M3 uses explicit thinking delimiters:
 <mm:think>reasoning process...</mm:think>final answer
 ```
 
-#### 6.2.3 Parser Behavior
+##### 5.6.2.3 Parser Behavior
 
 - **`thinking_mode="enabled"`**: The chat template pre-fills `<mm:think>` in the prompt. Generated text starts inside the reasoning block and transitions to content after `</mm:think>`.
 - **`thinking_mode="disabled"` or default**: Model output is treated as plain content. If `<mm:think>` appears, the parser splits on the delimiters.
 - **Streaming**: Reasoning and content are streamed incrementally via `DeltaMessage.reasoning` and `DeltaMessage.content` token-by-token.
 - **Token counting**: Reasoning tokens inside `<mm:think>` blocks are correctly counted.
 
-### 6.3 Tool Call Parser
+#### 5.6.3 Tool Call Parser
 
-MiniMax-M3 uses a namespace-delimited XML format for tool calls. Enable it with `--tool-parser minimax_m3`.
+MiniMax-M3 uses a namespace-delimited XML format for tool calls. Enable it with `--tool-call-parser minimax_m3`.
 
-#### 6.3.1 Server Configuration
+##### 5.6.3.1 Server Configuration
 
 When both `--reasoning-parser minimax_m3` and `--tool-call-parser minimax_m3` are specified, the parsers work together automatically to handle responses that contain both reasoning blocks and tool calls:
 
@@ -2635,7 +2709,7 @@ vllm serve ${WEIGHT_PATH} \
   ...
 ```
 
-#### 6.3.2 Tool Call Format
+##### 5.6.3.2 Tool Call Format
 
 Each structural tag is preceded by the `]<]minimax[>[` namespace marker:
 
@@ -2651,21 +2725,21 @@ Each structural tag is preceded by the `]<]minimax[>[` namespace marker:
 ]<]minimax[>[</tool_call>
 ```
 
-#### 6.3.3 Key Features
+##### 5.6.3.3 Key Features
 
 - **Recursive parameter parsing**: Supports nested objects and arrays (e.g., `shipping` containing `city`/`zip`).
 - **Schema-aware type coercion**: String parameter values are automatically converted to the correct types (integer, boolean, object, array) based on the function's JSON Schema definition.
 - **Multiple invocations**: A single `<tool_call>` block can contain multiple `<invoke>` blocks.
 - **Streaming**: Tool name and argument fragments are streamed incrementally as the `<invoke>` block is received.
 
-#### 6.3.4 Request Example (curl)
+##### 5.6.3.4 Request Example (curl)
 
 ```bash
 curl http://{ip}:{port}/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "minimax-m3",
-    "messages": [{"role": "user", "content": "What's the weather like in Shanghai?"}],
+    "messages": [{"role": "user", "content": "What is the weather like in Shanghai?"}],
     "max_tokens": 300,
     "stream": false,
     "tool_choice": "auto",
@@ -2693,9 +2767,9 @@ curl http://{ip}:{port}/v1/chat/completions \
   }'
 ```
 
-## 7 Functional Verification
+## 6 Functional Verification
 
-### 7.1 Text
+### 6.1 Text
 
   ```bash
   curl http://{ip}:{port}/v1/chat/completions \
@@ -2717,7 +2791,7 @@ curl http://{ip}:{port}/v1/chat/completions \
 
   Expected result: the answer is C.
 
-### 7.2 Single Image
+### 6.2 Single Image
 
   Start the service with image input enabled, for example `--limit-mm-per-prompt '{"image":1,"video":0}'`. Replace `${IMAGE_PATH}` with a local image path on the client side.
 
@@ -2747,7 +2821,7 @@ curl http://{ip}:{port}/v1/chat/completions \
 
   Expected result: HTTP 200 response with a JSON body containing non-empty `choices` and generated text describing the image.
 
-### 7.3 Single Video
+### 6.3 Single Video
 
   Start the service with video input enabled, for example `--limit-mm-per-prompt '{"image":0,"video":1}'`. If the request uses `file://` local video paths, also add `--allowed-local-media-path /` or a narrower allowed directory. If `media_io_kwargs.video.num_frames` is not specified, vLLM samples 32 frames by default.
 
@@ -2780,7 +2854,7 @@ curl http://{ip}:{port}/v1/chat/completions \
 
   Expected result: HTTP 200 response with a JSON body containing non-empty `choices` and generated text describing the video content.
 
-### 7.4 Mixed Image and Video Request
+### 6.4 Mixed Image and Video Request
 
   Start the service with both image and video input enabled. For the following request, use `--limit-mm-per-prompt '{"image":1,"video":1}'`. If the request uses `file://` local video paths, also add `--allowed-local-media-path /` or a narrower allowed directory.
 
@@ -2810,32 +2884,34 @@ curl http://{ip}:{port}/v1/chat/completions \
 
   Expected result: HTTP 200 response with a JSON body containing non-empty `choices` and generated text that describes the image and video separately and explains whether they are related.
 
-## 8 Accuracy Evaluation
+## 7 Accuracy Evaluation
 
-The context-limit entries below use the unified serving setting `max-model-len=133000`. Accuracy scores are retained from the existing evaluations and have not been remeasured with this documentation update.
+The context-limit entries below use the unified serving setting `max-model-len=133000`, except the GPQA-Diamond row for 8 Atlas 800I A3, which was measured with `263000`. Accuracy scores are retained from the existing evaluations and have not been remeasured with this documentation update.
 
-### 8.1 Using AISBench
+### 7.1 Using AISBench
 
 For detailed instructions, refer to [Using AISBench for accuracy evaluation](../../developer_guide/evaluation/using_ais_bench.md).
 
-### 8.2 Text Evaluation
+### 7.2 Text Evaluation
 
 | Dataset | Hardware | Score | max-model-len | max-num-seqs | max_out_len | batch_size | generation_kwargs |
 |---------|----------|-------|---------------|--------------|-------------|------------|-------------------|
-| GSM8K   | 8 H20 (96G × 8)     | 96.72 | 133000 | 16           | 49152       | 16         | temperature=1.0, top_p=0.95 |
+| GSM8K   | 8 H20 (96GB × 8)     | 96.72 | 133000 | 16           | 49152       | 16         | temperature=1.0, top_p=0.95 |
 | GSM8K   | 8 Atlas 800I A3 (64GB × 16)      | 96.36 | 133000 | 16           | 9500        | 20         | temperature=1.0, top_p=0.95 |
-| AIME2025 | 8 H20 (96G × 8)     | 95@repeat4 | -        | -            | -           | -          | -                 |
+| AIME2025 | 8 H20 (96GB × 8)     | 95@repeat4 | -        | -            | -           | -          | -                 |
 | AIME2025 | 8 Atlas 800I A3 (64GB × 16)      | 93.3@repeat2    | 133000 | 32         | 65536           | 8         | temperature=1.0, top_p=0.95 |
-| GPQA-Diamond | 8 H20 (96G × 8)     | 92.42    | 133000 | 64        | 75776       | 8       | temperature=0.6, top_p=0.95 |
-| GPQA-Diamond | 8 Atlas 800I A3 (64GB × 16)      | 92.42    | 133000 | 32        | 65536       | 8       | temperature=0.6, top_p=0.95 |
-| GPQA-Diamond | 8 950DT products (96GB × 8)      | 92.9    | 133000 | 128       | 131072       | 128       | temperature=0.6, top_p=0.95 |
-| MMMU-pro | 8 950DT products (96GB × 8)      | 78.9    | 133000 | 128       | 131072       | 50       | temperature=0.6, top_p=0.95 |
+| GPQA-Diamond | 8 H20 (96GB × 8)     | 92.42    | 133000 | 64        | 75776       | 8       | temperature=0.6, top_p=0.95 |
+| GPQA-Diamond | 8 Atlas 800I A3 (64GB × 16)      | 92.42    | 263000 | 32        | 131072       | 64       | temperature=1.0, top_p=0.95 |
+| GPQA-Diamond | 8 950DT products (96GB × 8)      | 92.9    | 133000 | 128       | 131072       | 128       | temperature=1.0, top_p=0.95 |
+| MMMU-pro | 8 950DT products (96GB × 8)      | 78.9    | 133000 | 128       | 131072       | 50       | temperature=1.0, top_p=0.95 |
 
-### 8.3 Multimodal Evaluation
+### 7.3 Multimodal Evaluation
 
 MiniMax-M3 multimodal accuracy is evaluated with AISBench. The ViT DP path is optional and can be enabled by adding `--mm-encoder-tp-mode data` to the serving command, but it is not required for all multimodal accuracy runs. For video evaluation, if no frame count is specified in the request or evaluation config, vLLM samples 32 frames by default.
 
 The Video-MME results below are measured on chunk1 and chunk2, not the full dataset.
+
+Obtain the video files and question/answer annotations from the [Video-MME dataset](https://huggingface.co/datasets/lmms-eval/Video-MME), linked by the [official Video-MME repository](https://github.com/MME-Benchmarks/Video-MME#-dataset). Prepare the chunk1/chunk2 videos locally and set the dataset config's `path` and `video_path` to the corresponding metadata and extracted video directories, as described below.
 
 For Video-MME evaluation, run the vLLM OpenAI-compatible service with video input enabled and use AISBench to send the Video-MME requests. The official AISBench guide may not list Video-MME as a built-in example, so the recommended MiniMax-M3 settings are:
 
@@ -2864,13 +2940,38 @@ ais_bench \
 | Video-MME chunk1+chunk2 | Video | AISBench | GPU | - | 133000 | 8192 | `--limit-mm-per-prompt '{"image":0,"video":1}'`, default 32 frames | temperature=1.0, top_p=0.95 | 73.41 |
 | Video-MME chunk1+chunk2 | Video | AISBench | NPU | - | 133000 | 8192 | `--limit-mm-per-prompt '{"image":0,"video":1}'`, default 32 frames | temperature=1.0, top_p=0.95 | 74.21 |
 
+## 8 Performance Evaluation
+
+### 8.1 Using AISBench
+
+For setup details, including installation, dataset download, and configuration, refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation).
+
+Reuse the accuracy evaluation configuration from [Section 7](#7-accuracy-evaluation), but set `stream=True`, `ignore_eos=True`, and a `max_out_len` that matches your target output length, so that TPOT is measured consistently. Point `host_ip`/`host_port` at the endpoint you deployed: `127.0.0.1:11223` for the single-node service, or `<proxy_ip>:8009` for PD and KV-pool topologies.
+
+**Run the performance evaluation using the GSM8K dataset as an example:**
+
+```bash
+ais_bench --models vllm_api_stream_chat --datasets gsm8k_gen_0_shot_cot_str_perf --debug --summarizer default_perf --mode perf
+```
+
+**Expected result:**
+
+AISBench prints one line per finished request and then a summary table. Check the following fields; the exact values depend on hardware, concurrency, and input/output lengths:
+
+- `Request throughput (req/s)`: completed requests per second.
+- `Output token throughput (tok/s)`: generated tokens per second.
+- `Mean TTFT (ms)` / `P99 TTFT (ms)`: time to first token, average and 99th percentile.
+- `Mean TPOT (ms)` / `P99 TPOT (ms)`: time per output token, average and 99th percentile.
+
+Detailed results are written under `outputs/` (or the directory given by `--work-dir`), including the per-request CSV and the summary JSON.
+
 ## 9 Performance Tuning
 
 > **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
 
 ### 9.1 Recommended Configurations
 
-The recommended configurations are the same as those specified in Chapter 5, "Online Service Deployment."
+The recommended configurations are the same as those specified in Chapter 5 [Online Service Deployment](#5-online-service-deployment).
 
 ### 9.2 Tuning Guidelines
 
@@ -2890,6 +2991,8 @@ Use the following adjustments as starting points for the target workload. Rechec
 | Short-input workloads, such as 4K input tokens | `--max-num-batched-tokens` | Reduce from `32768` to `8192`. | Use a smaller per-iteration token budget to reduce memory pressure and tune short-sequence performance. |
 
 ## 10 FAQ
+
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md). This chapter only covers issues specific to MiniMax-M3.
 
 - **Q: How can I reinstall vLLM Ascend?**
 

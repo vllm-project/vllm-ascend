@@ -54,7 +54,7 @@ from vllm_ascend._310p.worker.v2.spec_utils import (
 from vllm_ascend._310p.worker.v2.states import Ascend310PRequestState
 from vllm_ascend.core.kv_cache_interface import get_storage_block_size
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, get_kv_cache_tensor_layers, vllm_version_is
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, get_kv_cache_tensor_layers, shared_experts_calculation_stream
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
@@ -152,6 +152,14 @@ class NPUModelRunner310V2(NPUModelRunner):
         # ``_allocate_kv_cache_tensors`` without going through that path.
         self._attn_kv_copy_params: list[tuple[torch.Tensor, torch.Tensor, int]] = []
         self._attn_kv_storage_ptrs: set[int] = set()
+
+    def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
+        super().load_model(load_dummy_weights, *args, **kwargs)
+        if self.ascend_config.multistream_overlap_shared_expert:
+            # MRv2 profiles and captures after load_model. Allocate the shared
+            # stream here so its resources are accounted for before profiling
+            # and no lazy stream creation is needed inside ACL graph capture.
+            shared_experts_calculation_stream()
 
     def _make_metadata_buffer(
         self,
@@ -820,9 +828,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             use_v2_model_runner=True,
             kv_cache_config=kv_cache_config,
             max_num_reqs=self.max_num_reqs,
-            **(
-                {"tensor_parallel_size": self.parallel_config.tensor_parallel_size} if vllm_version_is("0.31.0") else {}
-            ),
+            **{},
         )
         self.cudagraph_manager = ModelAclGraphManager310(
             self.vllm_config,
@@ -1292,6 +1298,24 @@ class NPUModelRunner310V2(NPUModelRunner):
         )
         return block_tables, slot_mappings
 
+    def _dummy_sampler_run(self, hidden_states: torch.Tensor) -> None:
+        super()._dummy_sampler_run(hidden_states)
+        if not self.ascend_config.multistream_overlap_shared_expert or self.parallel_config.tensor_parallel_size <= 1:
+            return
+        if not self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+            return
+
+        # The maximum-batch sampler profile above does not initialize the
+        # small-message HCCL transport used by decode logits AllGather. Do so
+        # before FULL graphs consume the limited 310P Event resources. Include
+        # batch 1 even if graph sizes start at 2: logits are not graph-padded.
+        # The enclosing profile_run already synchronizes before graph capture.
+        profile_rows = hidden_states.shape[0]
+        warmup_sizes = {1, *(self.compilation_config.cudagraph_capture_sizes or [])}
+        for num_rows in sorted(warmup_sizes):
+            if 0 < num_rows < profile_rows:
+                self.model.compute_logits(hidden_states[:num_rows])
+
     def sample(
         self,
         hidden_states: torch.Tensor,
@@ -1308,6 +1332,10 @@ class NPUModelRunner310V2(NPUModelRunner):
             sampler_output = self.sampler(logits, input_batch)
             can_sample_np = input_batch.seq_lens_np[: input_batch.num_reqs] >= input_batch.prefill_len_np
             self._sampled_tokens_cpu = None
+            # Penalties and bad words read host history. MTP also uses it
+            # to prepare the next draft, including steps with no drafts.
+            if self.speculator is not None or self.sampler.needs_cpu_token_history(input_batch.idx_mapping_np):
+                self._sampled_tokens_cpu = sampler_output.sampled_token_ids.detach().to("cpu")
             num_reqs = input_batch.num_reqs
             np.copyto(
                 self._num_sampled_staging.np[:num_reqs],
@@ -1342,12 +1370,12 @@ class NPUModelRunner310V2(NPUModelRunner):
         num_sampled: torch.Tensor,
         num_rejected: torch.Tensor,
         query_start_loc: torch.Tensor | None = None,
+        draft_tokens: torch.Tensor | None = None,
     ) -> None:
         """Run request bookkeeping on CPU; upload only immediate NPU consumers."""
         # Device arguments remain for upstream API compatibility.
-        del num_sampled, num_rejected, query_start_loc
-        if self._sampled_tokens_cpu is not None:
-            assert self.rejection_sampler is not None
+        del num_sampled, num_rejected, query_start_loc, draft_tokens
+        if self._sampled_tokens_cpu is not None and self.rejection_sampler is not None:
             self.rejection_sampler.synchronize_cpu()
         # Host rejection counts are ready after synchronize_cpu; reuse them in
         # propose() instead of another device→host copy.
@@ -1366,7 +1394,10 @@ class NPUModelRunner310V2(NPUModelRunner):
         # Chunked-prefill rows have no sample and retain prior state.
         valid_batch_np = np.flatnonzero(self._num_sampled_cpu.numpy() > 0)
         if valid_batch_np.size:
-            all_rows_valid = sampled_tokens_cpu is None and valid_batch_np.size == self._postprocess_idx_mapping_np.size
+            # Reuse the device token for non-speculative decoding, even when
+            # penalties or bad words require a separate CPU history.
+            use_device_tokens = sampled_tokens_cpu is None or (self.speculator is None and sampled_tokens.shape[1] == 1)
+            all_rows_valid = use_device_tokens and valid_batch_np.size == self._postprocess_idx_mapping_np.size
             if all_rows_valid:
                 valid_reqs = idx_mapping.to(torch.int64)
                 last_tokens = sampled_tokens[:, 0]
@@ -1378,7 +1409,7 @@ class NPUModelRunner310V2(NPUModelRunner):
                 valid_reqs = self._decode_req_indices.gpu[:num_valid]
                 self._decode_input_indices.copy_to_gpu(num_valid)
                 self._decode_req_indices.copy_to_gpu(num_valid)
-                if sampled_tokens_cpu is None:
+                if use_device_tokens:
                     last_tokens = sampled_tokens.index_select(0, valid_batch)[:, 0]
                 else:
                     last_tokens_cpu = torch.stack(

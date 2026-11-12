@@ -42,7 +42,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots i
     copy_sfa_pool_capacity,
     copy_sfa_prefill_dest_geometry,
 )
-from vllm_ascend.spec_decode.dspark_utils import get_dspark_aux_layer_ids
+from vllm_ascend.worker.dspark_utils import get_dspark_aux_layer_ids
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks

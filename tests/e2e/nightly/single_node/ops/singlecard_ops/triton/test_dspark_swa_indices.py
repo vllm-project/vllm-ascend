@@ -19,6 +19,8 @@ graph-mode specifics that the integration review called out:
 import pytest
 import torch
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.dspark_swa_indices import (
     build_dspark_swa_slot_indices_triton,
     dspark_swa_indices_supported,
@@ -86,6 +88,10 @@ def _make_inputs(
     return query_start_loc, seq_lens, block_table
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize(
     (
         "num_reqs",
@@ -156,6 +162,10 @@ def test_triton_matches_eager(
     torch.testing.assert_close(out_lens, ref_lens)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 def test_capacity_grid_padding():
     """max_num_reqs > num_reqs: pad rows are reset to (-1, 0), not stale."""
 
@@ -230,6 +240,10 @@ def test_capacity_grid_padding():
     )
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 def test_num_decode_tokens_is_authoritative():
     """num_decode_tokens drives T_active without any D2H sync."""
 
@@ -269,6 +283,10 @@ def test_num_decode_tokens_is_authoritative():
     torch.testing.assert_close(out_lens, ref_lens)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 def test_capacity_grid_exact_sized_inputs():
     """Capacity grid over exact-sized (non-padded) input tensors is safe.
 
@@ -330,6 +348,10 @@ def test_capacity_grid_exact_sized_inputs():
     assert torch.equal(lens_buf[T_active:], torch.zeros_like(lens_buf[T_active:]))
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 def test_active_sized_buffer_warns_and_disables_cleanup():
     """A buffer sliced to the active rows under graph intent must warn.
 
@@ -395,6 +417,10 @@ def test_active_sized_buffer_warns_and_disables_cleanup():
         )
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 def test_anchor_sampling_num_query_per_req():
     """num_query_per_req=spec (anchor sampling) sizes the grid correctly.
 
@@ -461,6 +487,10 @@ def test_anchor_sampling_num_query_per_req():
     assert torch.equal(lens_buf[T_active:], torch.zeros_like(lens_buf[T_active:]))
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 def test_capacity_grid_exact_allocation_boundary():
     """num_reqs == R_alloc: every grid program owns an active request.
 
@@ -526,6 +556,10 @@ def test_capacity_grid_exact_allocation_boundary():
     assert torch.equal(out_slots.view(T_active, index_width), slots_buf.view(T_active, index_width))
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 def test_non_contiguous_block_table():
     """A column-sliced block table must resolve rows via stride(0), not B.
 
@@ -574,6 +608,10 @@ def test_non_contiguous_block_table():
     torch.testing.assert_close(out_lens, ref_lens)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 def test_int32_metadata_inputs():
     """int32 query_start_loc / seq_lens / block_table must work end-to-end.
 
@@ -617,6 +655,10 @@ def test_int32_metadata_inputs():
     torch.testing.assert_close(out_lens, ref_lens.to(torch.int64))
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize("bad_block_size", [100, 96, 0])
 def test_gate_rejects_non_pow2_block_size(bad_block_size):
     """The host-side gate must reject non-power-of-two block sizes."""
@@ -624,5 +666,9 @@ def test_gate_rejects_non_pow2_block_size(bad_block_size):
     assert not dspark_swa_indices_supported(bad_block_size, 16)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 def test_gate_accepts_valid_config():
     assert dspark_swa_indices_supported(128, 64)

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -14,11 +15,12 @@ import vllm_ascend.ops.kda as kda_ops
     "accepted,qkv_padding,direct_output",
     [(None, 0, False), (None, 64, False), ([1, 2, 1], 0, False), ([1, 2, 1], 64, False), (None, 64, True)],
 )
-def test_recurrent_raw_gates_rollback_slots_and_padding(monkeypatch, accepted, qkv_padding, direct_output):
+@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
+def test_recurrent_raw_gates_rollback_slots_and_padding(monkeypatch, accepted, qkv_padding, direct_output, state_dtype):
     q, k, v = (torch.ones(1, 4, 1, 128 + qkv_padding * i, dtype=torch.bfloat16)[..., :128] for i in (1, 2, 3))
     gate = q * 2
     beta = torch.zeros(1, 4, 1, dtype=torch.bfloat16)
-    state = torch.zeros(8, 1, 128, 128)
+    state = torch.zeros(8, 1, 128, 128, dtype=state_dtype)
     starts = torch.tensor([0, 1, 3], dtype=torch.int32)
     slots = torch.tensor([[2, 3], [5, 6], [0, 0]], dtype=torch.int32)
     accepted_tensor = None if accepted is None else torch.tensor(accepted, dtype=torch.int32)
@@ -44,7 +46,8 @@ def test_recurrent_raw_gates_rollback_slots_and_padding(monkeypatch, accepted, q
     monkeypatch.setattr(kda_ops, "recurrent_kda", recurrent)
     destination = torch.full((1, 8, 1, 128), float("nan"), dtype=q.dtype) if direct_output else None
 
-    def writeback(source, target, ends):
+    def writeback(source: torch.Tensor, target: torch.Tensor, ends: torch.Tensor) -> None:
+        assert destination is not None
         assert target is destination and ends is starts
         assert torch.isnan(source[:, 3:]).all()
         target.zero_()
@@ -69,7 +72,14 @@ def test_recurrent_raw_gates_rollback_slots_and_padding(monkeypatch, accepted, q
     if direct_output:
         assert out is destination
     torch.testing.assert_close(out[:, :3], q[:, :3])
-    assert torch.count_nonzero(out[:, 3:]) == 0
+    if direct_output:
+        # write_recurrent_output zeroes the captured buffer before copying.
+        assert torch.count_nonzero(out[:, 3:]) == 0
+    else:
+        # The recurrent kernel writes valid rows only; padding rows are owned
+        # by the caller (index_copy_ / write_recurrent_output), so the sentinel
+        # NaNs written by the kernel must survive unchanged.
+        assert torch.isnan(out[:, 3:]).all()
 
 
 @pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
@@ -93,6 +103,8 @@ def test_chunk_uses_host_descriptors_and_preserves_vk_cache(monkeypatch, state_d
         assert kwargs["cu_seqlens"] is metadata.cu_seqlens_host
         assert kwargs["chunk_indices"] is metadata.chunk_indices_chunk64_host
         assert kwargs["initial_state"].dtype == torch.float32
+        assert kwargs["use_qk_l2norm_in_kernel"] is False
+        assert l2norm.call_count == 2
         torch.testing.assert_close(kwargs["initial_state"][0], saved[3].float())
         if not compact:
             assert torch.count_nonzero(kwargs["initial_state"][1]) == 0
@@ -100,10 +112,14 @@ def test_chunk_uses_host_descriptors_and_preserves_vk_cache(monkeypatch, state_d
         return v, torch.full_like(kwargs["initial_state"], 17)
 
     monkeypatch.setattr(kda_ops, "chunk_kda_fwd", chunk)
-    monkeypatch.setattr("vllm.third_party.flash_linear_attention.ops.l2norm.l2norm_fwd", lambda x: x)
+    l2norm = MagicMock(side_effect=lambda x: x)
+    monkeypatch.setattr("vllm.third_party.flash_linear_attention.ops.l2norm.l2norm_fwd", l2norm)
     out = kda.chunk_kda(
         q, q, q, q, torch.zeros(1, 3, 1), state, indices, has_initial, metadata, torch.zeros(1), torch.zeros(128), -4
     )
+    for call in l2norm.call_args_list:
+        assert call.args[0].is_contiguous()
+        torch.testing.assert_close(call.args[0], q)
     torch.testing.assert_close(out, q)
     assert (state[3] == 17).all()
     torch.testing.assert_close(state[0], saved[0])

@@ -26,6 +26,7 @@ from vllm_ascend._310p.worker.v2.input_batch import Ascend310PInputBatch
 from vllm_ascend._310p.worker.v2.rope import Ascend310PRopeState, get_310p_rope_state
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
+from vllm_ascend.worker.v2.model_states.encoder_only import AscendEncoderOnlyModelState
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
 
 from .rejection_sampler import RejectionSampler310V2
@@ -138,7 +139,12 @@ class _Ascend310PModelStateMixin:
             model_config = getattr(self, "model_config", None)
             if model_config is not None and hasattr(model_config, "get_vocab_size"):
                 vocab_size = model_config.get_vocab_size()
-        base_sampler = Ascend310PSampler(max_num_reqs, device, vocab_size=vocab_size)
+        base_sampler = Ascend310PSampler(
+            max_num_reqs,
+            device,
+            vocab_size=vocab_size,
+            req_states=getattr(sampler, "req_states", None),
+        )
         vllm_config = getattr(self, "vllm_config", None)
         spec_config = None if vllm_config is None else vllm_config.speculative_config
         if spec_config is None:
@@ -164,6 +170,33 @@ class Ascend310PModelState(_Ascend310PModelStateMixin, AscendModelState):
         # then swap RoPE to the Triton-free 310P implementation.
         # follow-imports=skip hides DefaultModelState.__init__; ignore call-arg.
         AscendModelState.__init__(  # type: ignore[call-arg]
+            self, vllm_config, model, encoder_cache, device
+        )
+        # ACLGraph replays the tensor addresses bound during capture. Keep every
+        # captured seq_lens buffer so its contents can be refreshed before replay.
+        self._capture_seq_lens_by_ptr = {}
+        self._replace_310p_rope_state(encoder_cache)
+
+
+class Ascend310PEncoderOnlyModelState(_Ascend310PModelStateMixin, AscendEncoderOnlyModelState):
+    """310P state for encoder-only (BERT/BGE) models.
+
+    Encoder-only layers are non-causal and keep no KV cache, so they never
+    enter ``kv_cache_config.kv_cache_groups`` and the KV-backed
+    ``Ascend310PModelState`` builds no metadata for them. Take the encoder
+    metadata construction from the shared Ascend encoder state and keep the
+    310P Triton-free RoPE / sampler from the mixin.
+    """
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        model: nn.Module,
+        encoder_cache: EncoderCache | None,
+        device: torch.device,
+    ) -> None:
+        # follow-imports=skip hides EncoderOnlyModelState.__init__; ignore call-arg.
+        AscendEncoderOnlyModelState.__init__(  # type: ignore[call-arg]
             self, vllm_config, model, encoder_cache, device
         )
         # ACLGraph replays the tensor addresses bound during capture. Keep every

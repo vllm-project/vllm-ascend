@@ -6,7 +6,9 @@ from dataclasses import replace
 
 import torch
 from vllm.config import VllmConfig
-from vllm.v1.core.kv_cache_utils import may_override_num_blocks
+
+# Both supported versions expose planning helpers in kv_cache_planning.
+from vllm.v1.core.kv_cache_planning import may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     KVCacheConfig,
@@ -24,7 +26,6 @@ from vllm_ascend.device.hardware_profile import (
     HardwareCapability,
     get_current_hardware_profile,
 )
-from vllm_ascend.utils import vllm_version_is
 
 STATE_RING_ROWS = 32
 
@@ -80,8 +81,8 @@ def make_mla_cache_spec(*, block_size, head_size, compress_ratio):
         dtype=dtype,
         tokens_per_state=compress_ratio,
         model_version="deepseek_v41",
-        # vLLM main (#57169) dropped MLA `storage_block_size`; v0.31.0 declares it.
-        **({"storage_block_size": block_size // compress_ratio} if vllm_version_is("0.31.0") else {}),
+        # Both supported vLLM lanes (#57169) omit MLA `storage_block_size`.
+        **{},
         scale_dtype=scale_dtype,
     )
 
@@ -105,8 +106,8 @@ def make_index_cache_spec(*, block_size, head_size, compress_ratio):
         dtype=dtype,
         tokens_per_state=compress_ratio,
         model_version="deepseek_v41",
-        # vLLM main (#57169) dropped MLA `storage_block_size`; v0.31.0 declares it.
-        **({"storage_block_size": block_size // compress_ratio} if vllm_version_is("0.31.0") else {}),
+        # Both supported vLLM lanes (#57169) omit MLA `storage_block_size`.
+        **{},
         scale_dim=scale_dim,
         scale_dtype=scale_dtype,
     )
@@ -123,8 +124,8 @@ def make_folded_index_cache_spec(*, block_size):
         dtype=torch.uint8,
         tokens_per_state=INDEX_FOLD_ROWS,
         model_version="deepseek_v41",
-        # vLLM main (#57169) dropped MLA `storage_block_size`; v0.31.0 declares it.
-        **({"storage_block_size": block_size // INDEX_FOLD_ROWS} if vllm_version_is("0.31.0") else {}),
+        # Both supported vLLM lanes (#57169) omit MLA `storage_block_size`.
+        **{},
     )
 
 

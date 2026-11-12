@@ -3,8 +3,8 @@
 import unittest
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import LoadSpec, ReqMeta, RequestTracker
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
 
 class TestReuseSnapshotIdentity(unittest.TestCase):
@@ -14,7 +14,7 @@ class TestReuseSnapshotIdentity(unittest.TestCase):
         self.assertTrue(meta.can_save)
         self.assertEqual(tracker.last_layerwise_snapshot_end_token, 7)
         self.assertEqual(tracker.last_layerwise_snapshot_block_index, 0)
-        worker = KVPoolWorker.__new__(KVPoolWorker)
+        worker = LayerwiseKVPoolWorker.__new__(LayerwiseKVPoolWorker)
         worker.layerwise_offload = True
         worker.num_kv_cache_groups = 1
         worker.group_uses_align_state = [False]

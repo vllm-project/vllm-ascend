@@ -1,5 +1,18 @@
 # KvQuantSparseFlashAttentionVllm
 
+## A3/A5 原生 headnum 接入
+
+A3/A5 量化 SFA 复用现有 `_C_ascend.npu_kv_quant_sparse_flash_attention_vllm`，
+依赖 [PR #54](https://github.com/hust17yixuan/vllm-ascend-kimi/pull/54) 的
+query group 1..128 支持。12/24/96 heads 直接传入，不再补齐或裁剪输出及 max/sum。
+A3/A5 的量化 DCP 统一保留完整 packed query，由 adaptor 处理连续化，均不做 head padding。
+非量化 SFA 的独立 padding 保持原样，无需外部 QSFA V2 包或新增 Torch 绑定。
+
+更新并编译包含 #54 的自定义算子后，运行 `test_qsfa_native_heads.py`，
+覆盖原生 heads、RoPE0/64、DCP max/sum 和变输入图重放。
+现有内核仅在返回 LSE 时裁剪尾部 `-1`，因此统一接入始终请求 max/sum；
+调用方不需要 LSE 时仍只返回 attention 输出。
+
 ## 产品支持情况
 
 |产品      | 是否支持 |
@@ -48,7 +61,7 @@
       <tr>
           <td>query</td>
           <td>输入</td>
-          <td>attention结构的Q输入，不支持非连续。query由相同数据类型的q_nope和q_rope按D维度拼接得到。layout_query为"BSND"时shape为[B, Q_S, Q_N, Q_D]。layout_query为"TND"时shape为[Q_T, Q_N, Q_D]。其中Q_D = 512 + rope_head_dim。A2/A3支持Q_D为512（rope_head_dim=0）或576（rope_head_dim=64）；A5 INT8和FLOAT8_E4M3FN场景同样支持这两种Q_D，HiFloat8场景仍仅支持576。rope_head_dim=0时query仅包含q_nope；Q_N值支持1/2/4/8/16/32/48/64/128。</td>
+          <td>attention结构的Q输入，不支持非连续。query由相同数据类型的q_nope和q_rope按D维度拼接得到。layout_query为"BSND"时shape为[B, Q_S, Q_N, Q_D]。layout_query为"TND"时shape为[Q_T, Q_N, Q_D]。其中Q_D = 512 + rope_head_dim。A2/A3支持Q_D为512（rope_head_dim=0）或576（rope_head_dim=64）；A5 INT8和FLOAT8_E4M3FN场景同样支持这两种Q_D，HiFloat8场景仍仅支持576。rope_head_dim=0时query仅包含q_nope；Q_N值支持[1,128]。</td>
           <td>FLOAT16、BFLOAT16</td>
           <td>ND</td>
       </tr>
@@ -226,7 +239,6 @@
 ## 约束说明
 
 - 该接口支持图模式。
-- 参数query shape中：<term>Atlas A3 系列产品</term>、<term>Atlas A2 系列产品</term>：Q_N不支持48。
 - 参数key、value数据类型要求：
     - <term>Ascend 950PR&950DT 系列产品</term>：仅支持float8_e4m3、int8、hifloat8数据类型。
     - <term>Atlas A3 系列产品</term>、<term>Atlas A2 系列产品</term>：仅支持int8数据类型。
@@ -253,19 +265,20 @@ rope_head_dim=0表示输入中没有RoPE分支，不需要调用方补齐64维Ro
 
 ### 测试入口
 
-在仓库根目录、已编译并安装自定义算子的A2/A3环境中运行：
+在仓库根目录、已编译并安装自定义算子的环境中运行统一测试文件：
 
 ```bash
 python -m pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_kv_quant_sparse_flash_attention_vllm.py
-python -m pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_kv_quant_sparse_flash_attention_vllm_rope0.py
 ```
 
-原测试继续使用原有随机golden和精度阈值。新增[rope0测试](../../../tests/e2e/nightly/single_node/ops/singlecard_ops/test_kv_quant_sparse_flash_attention_vllm_rope0.py)
-共53项，仅在A2/A3硬件配置上运行，覆盖FP16/BF16、rope0/64、PA与TND、batch与尾块、
-LSE开关、图捕获/修改KV后的重放，以及非法RoPE维度和输入shape。
+[统一测试文件](../../../tests/e2e/nightly/single_node/ops/singlecard_ops/test_kv_quant_sparse_flash_attention_vllm.py)
+保留原有随机golden和精度阈值，并包含已合入同一文件的rope0/64回归用例。
+各测试函数保留各自的设备判断，A5专属用例与A2/A3的rope0/64用例分别执行。
+后者覆盖FP16/BF16、PA与TND、batch与尾块、LSE开关、图捕获/修改KV后的重放，
+以及非法RoPE维度和输入shape。
 随机紧凑输入与显式补零输入做逐位对照；均匀attention用例以独立计算的选中V均值验证精度，
 并校验有效query行的softmax_max、softmax_sum及LSE。
-两项Python接入测试调用真实RMSNorm/INT8量化、cache写入和attention路径，
+Python接入用例调用真实RMSNorm/INT8量化、cache写入和attention路径，
 验证空RoPE、FLOAT32 scale字节、slot=-1不写cache以及独立均值精度。
 
 ### Python SFA接入
@@ -293,7 +306,7 @@ A5复用现有C8接口和NoPE512布局，key/value数据类型支持INT8和FLOAT
 使用 `attention_mode=2`、`key_quant_mode=2`、`value_quant_mode=2`、
 `quant_scale_repo_mode=1`、`tile_size=128` 和 `sparse_block_size=1`。
 RoPE0场景下调用方无需提供补零的RoPE数据，`scale_value`保持模型原值。
-A5当前只写attention输出，应使用 `return_softmax_lse=False`。
+A5 的 max/sum 输出供 DCP LSE 合并使用。
 HiFloat8继续仅支持原有RoPE64路径。
 
 内核按实际输入维度读取GM数据和scale，保留原有672字节UB行跨距，

@@ -274,6 +274,19 @@ def test_non_bf16_prefill_falls_back_to_triton_pipeline_with_strided_ssm_cache()
         assert kwargs["initial_state"].shape == (1, 1, 2, 2)
         return kwargs["v"].clone(), kwargs["initial_state"] + 1
 
+    # The padded-cache branch gathers and scatters through Triton kernels.
+    # CPU CI disables Triton, so swap in the equivalent torch reference.
+    def gather_state(state, indices, has_initial_state, **kwargs):
+        assert state is model.ssm_state
+        assert kwargs == {}
+        out = state.index_select(0, indices).contiguous()
+        out[~has_initial_state] = 0
+        return out
+
+    def scatter_state(state, indices, values):
+        assert state is model.ssm_state
+        state.index_copy_(0, indices, values)
+
     with (
         override_forward_context(forward_context),
         patch("vllm_ascend.ops.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
@@ -285,6 +298,8 @@ def test_non_bf16_prefill_falls_back_to_triton_pipeline_with_strided_ssm_cache()
         patch("vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating", return_value=gating),
         patch("vllm_ascend.ops.gdn.DeviceOperator.fla_gdn_prefill", side_effect=fla_prefill),
         patch("vllm_ascend.ops.gdn.chunk_gated_delta_rule", side_effect=triton_prefill) as triton_fallback,
+        patch("vllm_ascend.ops.gdn.gather_ssm_states", side_effect=gather_state) as gather_mock,
+        patch("vllm_ascend.ops.gdn.scatter_ssm_states_", side_effect=scatter_state) as scatter_mock,
         patch("vllm_ascend.ops.gdn.clear_ssm_states") as clear_mock,
         patch("vllm_ascend.ops.gdn.causal_conv1d_fn", side_effect=lambda x, *a, **k: x.clone()),
         patch("vllm_ascend.ops.gdn.wait_for_kv_layer_from_connector"),
@@ -299,7 +314,9 @@ def test_non_bf16_prefill_falls_back_to_triton_pipeline_with_strided_ssm_cache()
             core_attn_out,
         )
 
-    clear_mock.assert_called_once()
+    gather_mock.assert_called_once()
+    scatter_mock.assert_called_once()
+    clear_mock.assert_not_called()
     triton_fallback.assert_called_once()
     torch.testing.assert_close(model.ssm_state[0], torch.zeros_like(model.ssm_state[0]))
     torch.testing.assert_close(model.ssm_state[1], torch.full_like(model.ssm_state[1], 3))

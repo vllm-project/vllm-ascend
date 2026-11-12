@@ -1,0 +1,4 @@
+pr: 19997
+entries:
+  - category: feature
+    text: Enabled FlashMLA for GLM DSpark MLA drafts on supported hardware, avoiding sequence-length transfers to the CPU during non-DCP drafting.

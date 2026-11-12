@@ -16,7 +16,6 @@
 #
 
 import threading
-import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -25,27 +24,31 @@ import numpy as np
 # isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm.distributed.kv_events import BlockStored
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
+    LayerBatchReqMeta,
+    LayerBlockRange,
+    LayerLoadTask,
+    LayerPoolKey,
+    LayerTransferTask,
+    SharedBlockData,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
     KeyMetadata,
-    LayerBlockRange,
-    LayerLoadTask,
-    LayerBatchReqMeta,
-    LayerPoolKey,
-    LayerTransferTask,
     LoadSpec,
     ReqMeta,
-    SharedBlockData,
 )
 
 # isort: on
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
-    KVCacheStoreKeyLayerSendingThread,
-    KVCacheStoreLayerRecvingThread,
-    KVCacheStoreLayerSendingThread,
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
     KVTransferThread,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
+    KVCacheStoreKeyLayerSendingThread,
+    KVCacheStoreLayerRecvingThread,
+    KVCacheStoreLayerSendingThread,
     LayerBatchBuilder,
 )
 
@@ -552,6 +555,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         kv_role="kv_producer",
         enable_kv_event=False,
         block_size=16,
+        sharded_mamba_group_ids=None,
     ):
         store = FakeStore(exists_result or [0, 0, 0, 0])
         db = FakeTokenDatabase(block_size=block_size)
@@ -566,6 +570,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             ready_event=threading.Event(),
             group_uses_align_state=[False],
             enable_kv_event=enable_kv_event,
+            sharded_mamba_group_ids=sharded_mamba_group_ids,
         )
         return t, store
 
@@ -594,6 +599,19 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             [[key.rsplit("@", 1)[1] for key in call[0]] for call in store.put_calls],
             [["h1"], ["h0", "h2"]],
         )
+
+    def test_pcp_head_shards_save_every_checkpoint(self):
+        hashes = [f"h{i}" for i in range(4)]
+        for pcp_rank in range(2):
+            thread, store = self._make_thread(sharded_mamba_group_ids={0})
+            thread.pcp_rank, thread.pcp_size = pcp_rank, 2
+            thread.group_uses_align_state = [True]
+            req = ReqMeta(req_id="r1", token_len_chunk=64, block_ids=[1, 2, 3, 4], block_hashes=hashes)
+            thread.add_stored_request(req)
+            thread.request_queue.put(req)
+            thread._handle_request(req)
+            keys = [key for call in store.put_calls for key in call[0]]
+            self.assertEqual([key.rsplit("@", 1)[1] for key in keys], hashes)
 
     def test_write_shards_cover_filtered_blocks_once(self):
         hashes = [f"h{i}" for i in range(8)]
@@ -729,97 +747,6 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t.delete_finished_stored_request("nonexistent")
         t.delete_finished_stored_request("r1")
         self.assertNotIn("r1", t.stored_requests)
-
-    def test_wait_for_requests_saved_returns_immediately_without_released_ids(self):
-        t, _ = self._make_thread()
-        t.wait_for_requests_saved(None)
-        t.wait_for_requests_saved(set())
-
-    def test_wait_for_requests_saved_blocks_until_released_requests_drain(self):
-        t, _ = self._make_thread()
-        first = ReqMeta("r1", store_job_id=1)
-        second = ReqMeta("r2", store_job_id=2)
-        t.add_stored_request(first)
-        t.add_stored_request(second)
-        entered = threading.Event()
-
-        def wait_released():
-            entered.set()
-            # An unknown id was already drained before this fence started.
-            t.wait_for_requests_saved({"r1", "r2", "ghost"})
-
-        waiter = threading.Thread(target=wait_released)
-        waiter.start()
-        self.assertTrue(entered.wait(timeout=5))
-        time.sleep(0.05)
-        self.assertTrue(waiter.is_alive(), "fence must keep waiting while r1/r2 still have queued saves")
-
-        t.finish_store_job(first)
-        time.sleep(0.05)
-        self.assertTrue(waiter.is_alive(), "fence must keep waiting until every released request drained")
-
-        t.finish_store_job(second)
-        waiter.join(timeout=5)
-        self.assertFalse(waiter.is_alive(), "fence must return once all released requests drained")
-
-    def test_released_fence_drains_all_jobs_without_waiting_for_active_request(self):
-        t, _ = self._make_thread()
-        first = ReqMeta("released", store_job_id=1)
-        second = ReqMeta("released", store_job_id=2)
-        active = ReqMeta("active", store_job_id=3)
-        for job in (first, second, active):
-            t.add_stored_request(job)
-        polled = threading.Event()
-        original_sleep = time.sleep
-
-        def poll(interval):
-            polled.set()
-            original_sleep(interval)
-
-        waiter = threading.Thread(target=t.wait_for_requests_saved, args=({"released"},), daemon=True)
-        try:
-            with patch(
-                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer.time.sleep",
-                side_effect=poll,
-            ):
-                waiter.start()
-                self.assertTrue(polled.wait(timeout=5))
-                t.finish_store_job(first)
-                polled.clear()
-                self.assertTrue(polled.wait(timeout=5))
-                self.assertTrue(waiter.is_alive(), "the second job still owns released blocks")
-                t.finish_store_job(second)
-                waiter.join(timeout=5)
-                self.assertFalse(waiter.is_alive(), "an active request must not hold up the released fence")
-                self.assertTrue(t.is_live_store_job(active))
-        finally:
-            for job in (first, second, active):
-                t.finish_store_job(job)
-            waiter.join(timeout=5)
-
-    def test_released_fence_observes_failure_while_waiting(self):
-        t, _ = self._make_thread()
-        t.add_stored_request(ReqMeta("released", store_job_id=1))
-
-        def fail_transfer(_interval):
-            t._fatal_error = RuntimeError("dispatch failed")
-            t._handle_request_exception(None)
-
-        with (
-            patch(
-                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer.time.sleep",
-                side_effect=fail_transfer,
-            ),
-            self.assertRaises(RuntimeError),
-        ):
-            t.wait_for_requests_saved({"released"})
-
-    def test_wait_for_requests_saved_raises_when_transfer_failed(self):
-        t, _ = self._make_thread()
-        t.add_stored_request(ReqMeta("r1", store_job_id=1))
-        t._fatal_error = RuntimeError("boom")
-        with self.assertRaises(RuntimeError):
-            t.wait_for_requests_saved({"r1"})
 
     def test_failed_store_retries_suffix_and_events(self):
         t, store = self._make_thread([0, 0], enable_kv_event=True)

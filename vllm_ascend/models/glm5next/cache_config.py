@@ -9,10 +9,14 @@ classes: main MLA/KDA pages and compressed-indexer/tail pages.
 """
 
 from dataclasses import dataclass
+from math import lcm
 
 from vllm.config import VllmConfig
 from vllm.model_executor.models.utils import extract_layer_index
-from vllm.v1.core.kv_cache_utils import (
+from vllm.utils.torch_utils import get_dtype_size
+
+# Both supported versions expose planning helpers in kv_cache_planning.
+from vllm.v1.core.kv_cache_planning import (
     create_kv_cache_group_specs,
     may_override_num_blocks,
 )
@@ -26,7 +30,12 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
-from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec, get_kv_cache_compression_ratio
+from vllm_ascend.core.kv_cache_interface import (
+    AscendIndexerKPoolTailSpec,
+    AscendMLAAttentionSpec,
+    get_kv_cache_compression_ratio,
+    get_storage_block_size,
+)
 
 
 @dataclass(frozen=True)
@@ -34,6 +43,7 @@ class _Glm5NextCacheLayout:
     full_group: KVCacheGroupSpec
     tail_group: KVCacheGroupSpec
     mamba_groups: tuple[KVCacheGroupSpec, ...]
+    draft_groups: tuple[KVCacheGroupSpec, ...]
     mla_names: tuple[str, ...]
     indexer_names: tuple[str, ...]
     tail_names: tuple[str, ...]
@@ -110,6 +120,18 @@ def _align_glm5_next_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]) -> None:
         max(spec.page_size_bytes for spec in small_candidates),
         max(_unpadded_page_size(spec) for spec in small_candidates),
     )
+    scale_alignments = tuple(
+        get_storage_block_size(spec) * get_dtype_size(spec.scale_dtype)
+        for spec in indexer_specs
+        if isinstance(spec, AscendMLAAttentionSpec) and spec.scale_dim
+    )
+    if scale_alignments:
+        # C8 shares pages with the FP32 tail; keep whole tail rows and aligned
+        # scales when a scheduler page is split into indexer kernel blocks.
+        small_page_alignment = lcm(
+            *(_unpadded_page_size(spec) // spec.ring_capacity for spec in tail_specs), *scale_alignments
+        )
+        small_page_size = (small_page_size + small_page_alignment - 1) // small_page_alignment * small_page_alignment
 
     for spec in main_candidates:
         object.__setattr__(spec, "page_size_padded", main_page_size)
@@ -129,8 +151,7 @@ def _create_glm5_next_attention_groups(
     tail_names = _sorted_layer_names([name for name, spec in kv_cache_spec.items() if _is_glm5_next_tail_spec(spec)])
 
     classified_names = {*main_names, *indexer_names, *tail_names}
-    if classified_names != set(kv_cache_spec):
-        raise ValueError("GLM-Next KV cache specs contain an unsupported cache role.")
+    draft_names = _sorted_layer_names([name for name in set(kv_cache_spec) - classified_names])
     if not (len(main_names) == len(indexer_names) == len(tail_names) > 0):
         raise ValueError(
             "Every GLM-Next MLA layer requires one main MLA, compressed indexer, and compressor-tail cache."
@@ -161,7 +182,7 @@ def _create_glm5_next_attention_groups(
                 f"compression ratio: block_size={main_spec.block_size}, "
                 f"compress_ratio={compress_ratio}."
             )
-        if tail_spec.compress_ratio != compress_ratio or tail_spec.block_size < compress_ratio:
+        if tail_spec.compress_ratio != compress_ratio or tail_spec.ring_capacity < compress_ratio:
             raise ValueError(
                 f"GLM-Next tail must use compression ratio {compress_ratio} and have at least that ring capacity."
             )
@@ -184,9 +205,11 @@ def _create_glm5_next_attention_groups(
     if tail_uniform_spec is None:
         raise ValueError("GLM-Next compressor-tail caches must have uniform fixed-block circular semantics.")
 
+    draft_groups = [KVCacheGroupSpec([name], kv_cache_spec[name]) for name in draft_names]
     return [
         KVCacheGroupSpec(full_names, full_uniform_spec),
         KVCacheGroupSpec(list(tail_names), tail_uniform_spec),
+        *draft_groups,
     ]
 
 
@@ -201,12 +224,15 @@ def _get_glm5_next_cache_layout(
     full_groups: list[KVCacheGroupSpec] = []
     tail_groups: list[KVCacheGroupSpec] = []
     mamba_groups: list[KVCacheGroupSpec] = []
+    draft_groups: list[KVCacheGroupSpec] = []
     for group in kv_cache_groups:
         group_spec = group.kv_cache_spec
         if isinstance(group_spec, MambaSpec):
             mamba_groups.append(group)
             continue
         if not isinstance(group_spec, UniformTypeKVCacheSpecs):
+            if not _is_glm5_next_spec(group_spec):
+                draft_groups.append(group)
             continue
 
         values = list(group_spec.kv_cache_specs.values())
@@ -219,6 +245,8 @@ def _get_glm5_next_cache_layout(
             full_groups.append(group)
         elif values and all(_is_glm5_next_tail_spec(spec) for spec in values):
             tail_groups.append(group)
+        elif values and all(not _is_glm5_next_spec(spec) for spec in values):
+            draft_groups.append(group)
 
     has_glm5_next_group = bool(full_groups or tail_groups)
     if not has_glm5_next_group:
@@ -227,7 +255,7 @@ def _get_glm5_next_cache_layout(
         raise ValueError(
             "GLM-Next requires exactly one combined main/indexer group and one compressor-tail KV cache group."
         )
-    if len(full_groups) + len(tail_groups) + len(mamba_groups) != len(kv_cache_groups):
+    if len(full_groups) + len(tail_groups) + len(mamba_groups) + len(draft_groups) != len(kv_cache_groups):
         raise ValueError("GLM-Next KV cache groups contain an unsupported cache spec.")
 
     full_group = full_groups[0]
@@ -273,6 +301,7 @@ def _get_glm5_next_cache_layout(
         full_group=full_group,
         tail_group=tail_group,
         mamba_groups=tuple(mamba_groups),
+        draft_groups=tuple(draft_groups),
         mla_names=mla_names,
         indexer_names=indexer_names,
         tail_names=tail_names,
@@ -372,7 +401,10 @@ def get_glm5_next_pool_bytes_per_block(groups: list[KVCacheGroupSpec]) -> int:
     layout = _get_glm5_next_cache_layout(groups)
     if layout is None:
         raise ValueError("Expected GLM-Next cache groups.")
-    return layout.main_slot_count * layout.main_page_size + layout.small_slot_count * layout.small_page_size
+    draft_bytes = sum(group.kv_cache_spec.page_size_bytes * len(group.layer_names) for group in layout.draft_groups)
+    return (
+        layout.main_slot_count * layout.main_page_size + layout.small_slot_count * layout.small_page_size + draft_bytes
+    )
 
 
 def get_glm5_next_kv_cache_config(
@@ -417,6 +449,17 @@ def get_glm5_next_kv_cache_config(
                 layout.main_page_size,
             )
         )
+
+    for group in layout.draft_groups:
+        page_size = group.kv_cache_spec.page_size_bytes
+        for layer_name in group.layer_names:
+            tensors.append(
+                make_tensor(
+                    page_size * num_blocks,
+                    [layer_name],
+                    page_size,
+                )
+            )
 
     for indexer_name, tail_name in zip(layout.indexer_names, layout.tail_names):
         tensors.append(

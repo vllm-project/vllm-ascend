@@ -39,14 +39,16 @@ from tools.bisect import git_ops
 from tools.bisect.build_manager import DEPLOY_ERRORS, BuildManager
 from tools.bisect.config import (
     MULTI_NODE_RUN_SH,
+    SCENE_SINGLE,
     SINGLE_NODE_TEST_PATH,
     BisectInput,
     BisectOptions,
     Candidate,
 )
 from tools.bisect.coordinator import Coordinator
+from tools.bisect.process_output import run_streaming
 from tools.bisect.verdict import RunOutcome
-from tools.bisect.version_compat import VersionAdaptationError, VersionAdapter, VersionPolicy
+from tools.bisect.version_compat import VersionAdaptationError
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +56,7 @@ logger = logging.getLogger(__name__)
 # commits created before the framework moved under tests/e2e/common or before
 # the common multi-node dispatcher existed.
 _LEGACY_SINGLE_NODE_TEST = "tests/e2e/nightly/single_node/models/scripts/test_single_node.py"
+_LEGACY_SINGLE_NODE_CONFIG_DIR = "tests/e2e/nightly/single_node/models/configs"
 _MULTI_NODE_TEST = "tests/e2e/common/multi_node/test_multi_node.py"
 _LEGACY_MULTI_NODE_TEST = "tests/e2e/nightly/multi_node/scripts/test_multi_node.py"
 _INTERNAL_DP_TEST = "tests/e2e/nightly/multi_node/internal_dp/scripts/test_multi_node.py"
@@ -131,22 +134,21 @@ class BaseRunner:
         self.opt = opt
         self.builder = builder
         self.repo = opt.repo_dir
-        self.version_adapter = VersionAdapter(opt)
-        self.version_policy = VersionPolicy()
-
-    def configure_version_policy(self, policy: VersionPolicy) -> None:
-        self.version_policy = policy
-
-    def _ensure_versions(self, commit: str, log_path: Path) -> None:
-        if not self.version_policy.enabled:
-            return
-        self.version_adapter.ensure_at_commit(self.repo, commit, self.version_policy, log_path)
 
     def _base_env(self) -> dict[str, str]:
-        env = dict(os.environ)
+        env = dict(self.builder.test_environment or os.environ)
         env["CONFIG_YAML_PATH"] = self.inp.config_yaml
-        if self.inp.config_base_path:
-            env["CONFIG_BASE_PATH"] = self.inp.config_base_path
+        config_base_path = self.inp.config_base_path
+        if self.inp.scene == SCENE_SINGLE and config_base_path:
+            requested = self.repo / config_base_path / self.inp.config_yaml
+            legacy_base = self.repo / _LEGACY_SINGLE_NODE_CONFIG_DIR
+            legacy_config = legacy_base / Path(self.inp.config_yaml).name
+            if not requested.is_file() and legacy_config.is_file():
+                config_base_path = str(legacy_base)
+                env["CONFIG_YAML_PATH"] = legacy_config.name
+                logger.info("[single] config moved in candidate; using %s", legacy_config)
+        if config_base_path:
+            env["CONFIG_BASE_PATH"] = config_base_path
         return env
 
     @staticmethod
@@ -161,6 +163,8 @@ class BaseRunner:
         raise NotImplementedError
 
     def teardown(self) -> None:
+        if self.opt.mock_tests:
+            return
         kill_stray_servers()
 
     def finish(self) -> None:  # multi-node overrides to release workers
@@ -170,8 +174,19 @@ class BaseRunner:
 class SingleNodeRunner(BaseRunner):
     def validate(self, candidate: Candidate, round_idx: int, log_dir: Path) -> RunOutcome:
         log_path = log_dir / f"round{round_idx}_{candidate.short}.log"
-        decision = self.builder.prepare(candidate.commit, log_path)  # may raise BuildError
-        self._ensure_versions(candidate.commit, log_path)
+        self.builder.decide(candidate.commit)  # fail before changing dependencies when the image cannot match
+        try:
+            decision = self.builder.prepare(candidate.commit, log_path)  # may raise BuildError
+        except DEPLOY_ERRORS:
+            self.builder.invalidate_baseline()
+            raise
+
+        if self.opt.mock_tests:
+            with open(log_path, "a", encoding="utf-8") as out:
+                out.write("\n[mock-tests] Environment prepared; pytest and model serving were not run.\n")
+            outcome = RunOutcome(exit_code=0)
+            outcome.rebuilt = decision.rebuild  # type: ignore[attr-defined]
+            return outcome
 
         # Run the WHOLE yaml (all test_cases): nightly cannot select a single
         # case, so we don't pass -k. Each case writes its own benchmark JSON
@@ -179,7 +194,7 @@ class SingleNodeRunner(BaseRunner):
         # this trial's files.
         results_dir = self._reset_dir(self.repo / "benchmark_results")
         env = self._base_env()
-        cmd = ["python", "-m", "pytest", "-sv", "--show-capture=no", _single_node_test_path(self.repo)]
+        cmd = ["python", "-u", "-m", "pytest", "-sv", "--show-capture=no", _single_node_test_path(self.repo)]
 
         rc = self._run_pytest(cmd, env, log_path)
         outcome = RunOutcome(exit_code=rc, results_dir=results_dir if results_dir.exists() else None)
@@ -192,12 +207,11 @@ class SingleNodeRunner(BaseRunner):
             out.write(f"\n$ {' '.join(cmd)}\n")
             out.flush()
             try:
-                proc = subprocess.run(
+                proc = run_streaming(
                     cmd,
                     cwd=str(self.repo),
                     env=env,
-                    stdout=out,
-                    stderr=subprocess.STDOUT,
+                    output=out,
                     timeout=self.opt.trial_timeout_s,
                 )
                 return proc.returncode
@@ -225,7 +239,6 @@ class MultiNodeRunner(BaseRunner):
         # a SKIP command so both sides stay in lockstep instead.
         try:
             decision = self.builder.decide(candidate.commit)
-            version_targets = self.version_adapter.targets_at(self.repo, candidate.commit, self.version_policy)
         except DEPLOY_ERRORS:
             self.coord.publish_command(round_idx, candidate.commit, rebuild=False, action="SKIP")
             self._abort_round(round_idx)
@@ -235,17 +248,11 @@ class MultiNodeRunner(BaseRunner):
             candidate.commit,
             decision.rebuild,
             action="RUN",
-            version_targets=version_targets,
-            version_checks=self.version_policy.checked_packages,
         )
         try:
-            self.builder.prepare(candidate.commit, log_path)
-            self.version_adapter.ensure_targets(
-                version_targets,
-                self.version_policy.checked_packages,
-                log_path,
-            )
+            decision = self.builder.prepare(candidate.commit, log_path)
         except DEPLOY_ERRORS:
+            self.builder.invalidate_baseline()
             self._abort_round(round_idx)
             raise
 
@@ -255,6 +262,11 @@ class MultiNodeRunner(BaseRunner):
             self.coord.wait_all_ready(round_idx, candidate.commit, self.opt.barrier_timeout_s)
         except (TimeoutError, RuntimeError) as exc:
             self._abort_round(round_idx)
+            if "worker-deploy-failed" in str(exc):
+                raise BisectFatalError(
+                    f"Worker environment transition failed on round {round_idx}; "
+                    f"inspect worker_logs for the failed node: {exc}"
+                ) from exc
             # No worker EVER signalled ready (any round): they are gone or never
             # joined. SKIP-scanning the remaining range would burn the full
             # barrier timeout per round for nothing -> abort the whole search.
@@ -277,6 +289,13 @@ class MultiNodeRunner(BaseRunner):
         job = _safe_name(self.inp.config_yaml)
         results_dir = self._reset_dir(Path("/root/.cache/benchmark_results") / job)
         rc = self._run_multi_pytest(log_path, job)
+        kill_stray_servers()
+        self.coord.signal_finished(round_idx)
+        try:
+            self.coord.wait_all_finished(round_idx, max(self.opt.barrier_timeout_s, self.opt.trial_timeout_s))
+        except TimeoutError as exc:
+            self._abort_round(round_idx)
+            raise VersionAdaptationError(f"Round finish barrier failed: {exc}") from exc
         outcome = RunOutcome(exit_code=rc, results_dir=results_dir if results_dir.exists() else None)
         outcome.rebuilt = decision.rebuild  # type: ignore[attr-defined]
         return outcome
@@ -295,19 +314,18 @@ class MultiNodeRunner(BaseRunner):
         # Source the Ascend toolkit env then exec pytest (mirrors run.sh, but
         # without its broad python3 kill which would take down this driver).
         sources = " ; ".join(f"source {f} 2>/dev/null || true" for f in _ENV_SOURCE_FILES)
-        pytest_cmd = f"python -m pytest -sv --show-capture=no {self._test_path()}"
+        pytest_cmd = f"python -u -m pytest -sv --show-capture=no {self._test_path()}"
         bash_cmd = f"set -e ; {sources} ; exec {pytest_cmd}"
         logger.info("[multi] running: %s", pytest_cmd)
         with open(log_path, "a", encoding="utf-8") as out:
             out.write(f"\n$ {bash_cmd}\n")
             out.flush()
             try:
-                proc = subprocess.run(
+                proc = run_streaming(
                     ["bash", "-c", bash_cmd],
                     cwd=str(self.repo),
                     env=env,
-                    stdout=out,
-                    stderr=subprocess.STDOUT,
+                    output=out,
                     timeout=self.opt.trial_timeout_s,
                 )
                 return proc.returncode

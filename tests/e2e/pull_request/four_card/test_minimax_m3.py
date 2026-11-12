@@ -135,6 +135,14 @@ def test_minimax_m3_tp4_dummy_logprobs() -> None:
     ) as vllm_model:
         tokenizer = vllm_model.model.get_tokenizer()
         prompt = _apply_minimax_chat_template(tokenizer)
+        # The first generate on main runs right after a cold static-kernel
+        # JIT. That one-time execution can shift the near-uniform dummy
+        # logits (top logprob ~= -ln(vocab) ~= -12) by ~3e-3, enough to flip
+        # a greedy token. Absorb it with a throwaway run so baseline and
+        # replay measure the warmed steady state. It also fills the prompt's
+        # prefix cache, so both compared runs resume from the same cached
+        # prefix and prefill the same shape.
+        vllm_model.generate_greedy_logprobs([prompt], max_tokens=MAX_TOKENS, num_logprobs=NUM_LOGPROBS)
 
         baseline = vllm_model.generate_greedy_logprobs([prompt], max_tokens=MAX_TOKENS, num_logprobs=NUM_LOGPROBS)[0]
         replay = vllm_model.generate_greedy_logprobs([prompt], max_tokens=MAX_TOKENS, num_logprobs=NUM_LOGPROBS)[0]

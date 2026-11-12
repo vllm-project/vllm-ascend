@@ -19,12 +19,16 @@ def causal_conv1d(
     run_mode: int,
     initial_state_mode: torch.Tensor | None = None,
     num_accepted_tokens: torch.Tensor | None = None,
+    output_buffer: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Consume GDN metadata and update the caller's [cache, state_len, dim] state."""
-    # Padded requests can be skipped by the kernel; their output must stay zero.
-    output = torch.zeros_like(x)
+    output = None
+    if output_buffer is not None:
+        output = output_buffer[: x.shape[0]]
+        if output.shape != x.shape:
+            raise ValueError("Convolution output buffer must cover the input rows and match its feature shape")
     if cache_indices.shape[0] == 0:
-        return output
+        return torch.zeros_like(x) if output is None else output
     kernel_state = conv_state
     # GLM metadata shares a contiguous vector across this group's layers.
     # Standalone callers can still pass a matrix, using its first column.
@@ -58,6 +62,10 @@ def causal_conv1d(
             null_block_id=null_block_id,
         )
     else:
+        # Metadata resets the shared destination once per step. Standalone
+        # callers retain the original zero-initialized padding behavior.
+        if output is None:
+            output = torch.zeros_like(x)
         result = causal_conv1d_update(
             x,
             kernel_state,
