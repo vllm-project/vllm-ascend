@@ -1,0 +1,6 @@
+pr: 19528
+entries:
+  - category: feature
+    text: Added opt-in MemFabric BM-backed shared host INT8 Engram tables for independent DeepSeek V4.1 instances on supported A3 supernodes, with a separate owner and leased consumers. Existing table placement remains the default.
+    model: deepseek-v4.1
+    hardware: [A3]
