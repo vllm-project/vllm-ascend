@@ -72,7 +72,7 @@ def test_runner_binds_materialized_kv_cache() -> None:
     names = ["model.layers.2.self_attn", "model.layers.0.self_attn"]
     caches = {name: (torch.zeros(2, 4), torch.zeros(2, 4)) for name in names}
     layers = {name: SimpleNamespace(kv_cache=None) for name in names}
-    runner_caches = []
+    runner_caches: list[tuple[torch.Tensor, torch.Tensor]] = []
 
     assert model_runner_module.bind_kv_cache is worker_utils.bind_kv_cache
     assert model_runner_module.bind_kv_cache is patch_attn_utils.bind_kv_cache
