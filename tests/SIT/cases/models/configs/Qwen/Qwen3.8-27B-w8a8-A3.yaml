@@ -5,41 +5,44 @@ _envs: &envs
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   OMP_NUM_THREADS: "1"
   TASK_QUEUE_ENABLE: "1"
-  HCCL_OP_EXPANSION_MODE: "AIV"
-  HCCL_BUFFSIZE: "1024"
-  VLLM_USE_MODELSCOPE: "true"
+  VLLM_USE_V2_MODEL_RUNNER: "1"
   SERVER_PORT: "DEFAULT_PORT"
 test_cases:
-  - name: "Qwen3.8-27B-w8a8-in128k-TPOT50-prefix90-24-6"
+  - name: "Qwen3.8-27B-w8a8-in128k"
     model: "Eco-Tech/Qwen3.8-27B-w8a8"
     envs:
       <<: *envs
     server_cmd:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "$SERVER_PORT"
       - "--data-parallel-size"
       - "1"
       - "--tensor-parallel-size"
       - "2"
-      - "--port"
-      - "$SERVER_PORT"
       - "--max-model-len"
-      - "133120"
-      - "--enable-prefix-caching"
+      - "131072"
       - "--max-num-batched-tokens"
       - "16384"
       - "--max-num-seqs"
-      - "32"
+      - "500"
       - "--gpu-memory-utilization"
-      - "0.9"
-      - "--compilation-config"
-      - '{"cudagraph_capture_sizes":[1,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "0.85"
       - "--speculative_config"
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}'
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[1,4,8,10,12,16,24,28,32,48,56,64,66,80,84,88,96,112,128,144,160,172,196,200,212,232,256], "cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--trust-remote-code"
+      - "--quantization"
+      - "ascend"
       - "--async-scheduling"
       - "--allowed-local-media-path"
       - "/"
-      - "--quantization"
-      - "ascend"
+      - "--dtype"
+      - "bfloat16"
+      - "--reasoning-parser"
+      - "qwen3"
       - "--mm-processor-cache-gb"
       - "0"
       - "--mm-encoder-tp-mode"
@@ -48,19 +51,29 @@ test_cases:
       - "shm"
       - "--additional-config"
       - '{"enable_cpu_binding":true}'
-      - "--api-server-count"
-      - "4"
+
     benchmarks:
+      perf_warmup:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_qwen
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 3
+        max_out_len: 1024
+        batch_size: 3
+        request_rate: 0
+        baseline: 0
+        threshold: 0.97
       perf:
         case_type: performance
         dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_qwen
         request_conf: vllm_api_stream_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-        num_prompts: 24
+        num_prompts: 12
         max_out_len: 1024
-        batch_size: 6
+        batch_size: 3
         request_rate: 0
-        baseline: 95.42
+        baseline: 107.93
         threshold: 0.97
       acc_GPQA:
         case_type: accuracy
