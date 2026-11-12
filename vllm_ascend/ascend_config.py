@@ -586,6 +586,8 @@ class AscendConfig:
 
     # ---- user-input switches: bool/int/list/str, auto type validation ----
     enable_cpu_binding: bool = True
+    # Experimental node-local shared Engram VMM backing; enabled by default.
+    engram_local_vmm: bool = True
     shared_engram_rdma: SharedEngramRdmaConfig | None = None
     # Optional private shared-filesystem generation published by shared_engram.
     # Default None retains the existing HBM/host-UVA placement paths.
@@ -714,6 +716,18 @@ class AscendConfig:
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
         engram_config = getattr(vc, "engram_config", None)
+        additional = getattr(vc, "additional_config", None) or {}
+        explicit_local_vmm = "engram_local_vmm" in additional
+        external_engram = self.engram_shared_host_dir is not None or self.shared_engram_rdma is not None
+        if self.engram_local_vmm and external_engram:
+            if explicit_local_vmm:
+                raise ValueError("engram_local_vmm cannot be combined with an external Engram backend")
+            # The release already supports external owners; its existing
+            # configurations must not acquire a new local table by default.
+            self.engram_local_vmm = False
+        elif not explicit_local_vmm and (engram_config is None or not getattr(engram_config, "cpu_offload", False)):
+            # Preserve existing behavior for models without host Engram.
+            self.engram_local_vmm = False
         if self.engram_shared_host_dir is not None:
             if not engram_config or not engram_config.cpu_offload:
                 raise ValueError("engram_shared_host_dir requires Engram cpu_offload")
@@ -732,6 +746,14 @@ class AscendConfig:
             # DP-dummy ranks have no hash work in MRV2. Share host tables
             # across DP and PCP peers to avoid per-step lookup collectives.
             engram_config.dp_shared_memory = True
+        if (
+            not explicit_local_vmm
+            and self.engram_local_vmm
+            and engram_config is not None
+            and not engram_config.dp_shared_memory
+        ):
+            # Preserve private host tables when sharing is not enabled.
+            self.engram_local_vmm = False
         if self.enable_force_eplb:
             logger.warning(
                 "enable_force_eplb is enabled: it forces a deterministic round-robin "

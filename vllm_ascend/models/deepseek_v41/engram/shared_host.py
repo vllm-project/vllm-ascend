@@ -48,6 +48,14 @@ def _library(path: Path):
     return lib
 
 
+def retry_pending_rollbacks(library_path=None):
+    """Retry native allocation rollbacks using the target release's ABI."""
+    library_path = library_path or Path(__file__).resolve().parents[3] / "libengram_host_vmm.so"
+    lib = _library(Path(library_path))
+    if lib.host_vmm_retry_rollbacks():
+        raise RuntimeError(f"Engram VMM rollback: {lib.host_shared_last_error().decode()}")
+
+
 class MappedHostBuffer:
     """One physical range or its import; no CPU aliases escape this object.
 
