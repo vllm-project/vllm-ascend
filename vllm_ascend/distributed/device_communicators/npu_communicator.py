@@ -72,10 +72,18 @@ class NPUCommunicator(DeviceCommunicatorBase):
         quantized_cfg = get_ascend_config().quantized_all_reduce_config
         self.quantized_ar: QuantizedAllReduce | Mxfp8AllReduce | None = None
         if quantized_cfg.enable:
-            backend = QuantizedAllReduce if quantized_cfg.quant_dtype == "int8" else Mxfp8AllReduce
-            self.quantized_ar = backend(
-                self.device_group, min_numel=quantized_cfg.min_numel, group_name=self.unique_name
-            )
+            if quantized_cfg.quant_dtype == "int8":
+                self.quantized_ar = QuantizedAllReduce(
+                    self.device_group, min_numel=quantized_cfg.min_numel, group_name=self.unique_name
+                )
+            else:
+                self.quantized_ar = Mxfp8AllReduce(
+                    self.device_group,
+                    min_numel=quantized_cfg.min_numel,
+                    group_name=self.unique_name,
+                    pipeline_chunks=quantized_cfg.pipeline_chunks,
+                    pipeline_min_numel=quantized_cfg.pipeline_min_numel,
+                )
             if self.quantized_ar.supported:
                 if quantized_cfg.quant_dtype == "int8":
                     logger.info_once(
@@ -87,9 +95,12 @@ class NPUCommunicator(DeviceCommunicatorBase):
                 else:
                     logger.info_once(
                         "MXFP8 AllToAll quantized all-reduce enabled "
-                        "(group=%s, min_numel=%d, dequant_dtype=bf16, sum_output_dtype=bf16).",
+                        "(group=%s, min_numel=%d, pipeline_chunks=%d, pipeline_min_numel=%d, "
+                        "dequant_dtype=bf16, sum_output_dtype=bf16; pipeline is Eager-only).",
                         self.unique_name,
                         self.quantized_ar.min_numel,
+                        self.quantized_ar.pipeline_chunks,
+                        self.quantized_ar.pipeline_min_numel,
                     )
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
