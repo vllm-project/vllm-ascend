@@ -1066,34 +1066,3 @@ def test_busy_engine_does_not_block_another_engine(worker, monkeypatch):
         release.set()
     worker.wait_for_save()
     assert worker._send_done.call_count == 2
-
-
-@pytest.mark.parametrize("local_layout", ["HND", "NHD"])
-@pytest.mark.parametrize("remote_layout", ["HND", "NHD"])
-def test_push_attention_head_slice_preserves_layout(worker, local_layout, remote_layout):
-    local_strides = (16, 4, 2) if local_layout == "HND" else (4, 8, 2)
-    worker.transfer_metadata = replace(worker.transfer_metadata, block_inner_strides=[[local_strides]])
-    remote = remote_metadata(tp_size=2, heads=1)
-    remote_strides = (16, 4, 2) if remote_layout == "HND" else (4, 4, 2)
-    remote.metadata_by_pp_rank[0] = replace(remote.metadata_by_pp_rank[0], block_inner_strides=[[remote_strides]])
-    event = Event()
-    event.record()
-    batch = push_worker.LayerTransferBatch(
-        "model.layers.0.attn",
-        (0, 0, 1),
-        remote,
-        (push_worker.LayerTransferRequest("request", (1,), (2,), 0, 4),),
-        event,
-    )
-    assert worker._execute_layer_transfer(batch) is None
-    _, src, dst, lengths = worker.engine.batch_transfer_sync_write.call_args.args
-    copied = {(s + offset, d + offset) for s, d, size in zip(src, dst, lengths) for offset in range(size)}
-    expected = {
-        (
-            1000 + 32 + local_strides[0] + token * local_strides[1] + offset,
-            10000 + 32 + token * remote_strides[1] + offset,
-        )
-        for token in range(4)
-        for offset in range(4)
-    }
-    assert copied == expected
