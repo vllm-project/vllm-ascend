@@ -87,9 +87,11 @@ def _ipc_trainer_peer(local_rank: int, case: WeightUpdateModelCase, packed: bool
                 engine.send_weights()
                 # This rank materialised its own half of the payload, and the NPU
                 # caching allocator keeps those blocks. The caller wakes the KV
-                # cache on this chip right after the next barrier, so hand the
-                # memory back here as well, not only on rank 0.
+                # cache on this chip after the barrier below, so hand the memory
+                # back here as well, not only on rank 0, and wait there until rank 0
+                # has released its own blocks.
                 torch.npu.empty_cache()
+                dist.barrier()
         finally:
             engine.shutdown()
     finally:
