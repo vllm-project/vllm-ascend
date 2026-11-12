@@ -175,12 +175,14 @@ class TestShouldReshapeWoATo3d(unittest.TestCase):
         the plain 2D matmul on an NZ weight, so the 3D reshape must not run
         and the NZ conversion must be allowed."""
         self.assertFalse(
-            self._reshape_decision("model.layers.0.self_attn.wo_a", torch.bfloat16, mx_quant_fusion=True,
-                                   n_local_groups=1)
+            self._reshape_decision(
+                "model.layers.0.self_attn.wo_a", torch.bfloat16, mx_quant_fusion=True, n_local_groups=1
+            )
         )
         self.assertFalse(
-            self._reshape_decision("model.layers.0.self_attn.wo_a", torch.bfloat16, mx_quant_fusion=False,
-                                   n_local_groups=1)
+            self._reshape_decision(
+                "model.layers.0.self_attn.wo_a", torch.bfloat16, mx_quant_fusion=False, n_local_groups=1
+            )
         )
 
     def test_quantized_wo_a_single_group_still_reshaped(self):
