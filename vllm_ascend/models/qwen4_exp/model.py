@@ -46,7 +46,7 @@ from vllm_ascend.ops.triton.qwen4_exp.hc import (
     hc_silu,
 )
 
-from .ple import patch_upstream_ple_short_conv
+from .ple import AscendQwen4ExpPLEBackend, patch_upstream_ple_short_conv
 
 # Keep the upstream model and weight loader authoritative. HyperConnection's
 # CUDA glue functions are module globals, so replace them before importing the
@@ -81,6 +81,9 @@ class AscendQwen4ExpPLELayer(upstream_model.Qwen4ExpPLELayer):
     ) -> None:
         super().__init__(*args, **kwargs)
         self.use_sequence_parallel = use_sequence_parallel
+
+    def get_attn_backend(self) -> type[AscendQwen4ExpPLEBackend]:
+        return AscendQwen4ExpPLEBackend
 
     def _sequence_parallel_embeddings(
         self,

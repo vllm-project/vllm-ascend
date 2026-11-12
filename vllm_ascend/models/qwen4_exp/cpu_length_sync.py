@@ -27,6 +27,10 @@ def can_skip_qwen_cpu_length_sync(runner: Any) -> bool:
 
         from vllm_ascend.models.qwen4_exp import qsa as ascend_qsa
         from vllm_ascend.models.qwen4_exp.model_state import AscendQwen4ExpModelState
+        from vllm_ascend.models.qwen4_exp.ple import (
+            AscendQwen4ExpPLEBackend,
+            AscendQwen4ExpPLEMetadataBuilder,
+        )
         from vllm_ascend.models.qwen4_exp.qsa import (
             AscendQSABackend,
             AscendQSAImpl,
@@ -81,6 +85,7 @@ def can_skip_qwen_cpu_length_sync(runner: Any) -> bool:
             AscendGDNHostMetadataBackend: (AscendGDNHostMetadataBuilder,),
             AscendGDNFusedAttentionBackend: (AscendGDNAttentionMetadataBuilder, AscendGDNHostMetadataBuilder),
             PleShortConvAttentionBackend: (PleShortConvAttentionMetadataBuilder,),
+            AscendQwen4ExpPLEBackend: (AscendQwen4ExpPLEMetadataBuilder,),
         }
         target_pairs = tuple(
             (group.backend, type(group.get_metadata_builder(0)))
