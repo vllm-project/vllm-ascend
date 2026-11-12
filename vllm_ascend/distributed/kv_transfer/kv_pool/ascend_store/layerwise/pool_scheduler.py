@@ -307,8 +307,8 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         backend's protocol module.
 
         Single-group uses PR #11585 format; multi-group includes group_id.
-        The protocol helper covers every PP stage, head, PCP rank for sharded
-        Mamba groups, and every DCP rank.
+        The protocol helper covers every PP stage and head, and every PCP
+        rank for sharded Mamba groups. PCP replicas share one object.
         """
         assert self.layerwise_keys is not None
         draft_keys = self.dspark_prefix_keys

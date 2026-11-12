@@ -162,46 +162,23 @@ to the corresponding model deployment guide.
 ### Decode Context Parallelism (DCP)
 
 Mooncake block-key layerwise pooling supports standalone DCP
-(`prefill_context_parallel_size=1`, `decode_context_parallel_size>1`). Launch
-the Prefill and Decode instances with the same DCP size:
+(`prefill_context_parallel_size=1`, `decode_context_parallel_size>1`) with the
+same TP/PP/DCP topology and PP layer partition on both sides. See the
+[Context Parallel Guide](context_parallel.md#decode-context-parallel) for the
+topology constraints. Keys append `@dcp_size:N@dcp_rank:R`; DCP=1 keys are
+unchanged. A block is a hit only after every PP stage and DCP rank committed it.
 
-```bash
-vllm serve <model> \
-    --tensor-parallel-size <tp-size> \
-    --prefill-context-parallel-size 1 \
-    --decode-context-parallel-size <dcp-size> \
-    --cp-kv-cache-interleave-size <block-size> \
-    --kv-transfer-config '{... "use_layerwise": true ...}'
-```
+PCP and DCP cannot be combined. Every cache group must be DCP-sharded;
+sliding-window, recurrent/align-state, circular-buffer and other non-DCP-scaled
+groups must keep DCP disabled. The smallest cacheable block size must divide
+the others; `--prefix-match-unit` must be unset or equal to that block size.
+GQA/MQA also requires `tensor_parallel_size // num_key_value_heads >=
+decode_context_parallel_size`.
 
-DCP reuses TP ranks, so follow the standalone topology constraints in the
-[Context Parallel Guide](context_parallel.md#decode-context-parallel). Each DCP
-rank stores and reads only its own context shard. Keys append
-`@dcp_size:<size>@dcp_rank:<rank>` to the existing single-group or hybrid key,
-and `DCP=1` keys remain unchanged. A prefix block is reported as a cache hit
-only after every PP stage and DCP rank has committed it.
-
-PCP and DCP cannot be enabled together for layerwise pooling. DCP requires
-cache groups that vLLM shards across DCP, such as full-attention caches. Groups
-whose block sizes are not scaled by DCP, including sliding-window,
-recurrent/align-state and circular-buffer caches (for example DeepSeek-V4
-SWA/compressor caches), must keep DCP disabled: the pool derives block hashes
-and transfer offsets from the DCP-scaled block size, so those groups would be
-addressed at the wrong granularity. The smallest cache-group block size must
-divide every other group block size, and `--prefix-match-unit` must be unset or
-set to the no-op value equal to the smallest prefix-cacheable block size.
-
-For GQA/MQA models, the number of TP ranks sharing one KV head
-(`tensor_parallel_size // num_key_value_heads`) must be at least the DCP size;
-otherwise some DCP shards have no saving rank and every block misses.
-
-In P/D disaggregation both sides must use the same DCP size. The layerwise
-worker can only verify this when the peer size is provided through
-`prefill_dcp_size` / `decode_dcp_size` in `kv_connector_extra_config`, so set
-the peer value on both sides. Without it a mismatch is not detected at startup
-and the consumer simply misses the pool (fail-closed; it never reads another
-shard's data).
-See the [hybrid attention guide](mooncake_hybrid_attention.md#decode-context-parallelism-dcp).
+In P/D disaggregation both sides must use the same DCP size; set
+`prefill_dcp_size` / `decode_dcp_size` in `kv_connector_extra_config` so the
+worker can verify it. See the
+[hybrid guide](mooncake_hybrid_attention.md#decode-context-parallelism-dcp).
 
 ### Use Cached Prefixes
 

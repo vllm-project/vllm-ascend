@@ -127,59 +127,10 @@ def validate_pp_groups(kv_cache_config: Any, parallel_config: Any) -> None:
         )
 
 
-def layerwise_put_step(vllm_config: Any, kv_cache_config: Any, tp_size: int) -> tuple[int, int]:
-    """Resolve the saving-head dedup step of the layerwise save leader.
-
-    Mirrors ``BaseKVPoolWorker._init_key_head_config``: MLA keeps one logical KV
-    head, otherwise the model's total KV head count decides how many ranks
-    replicate one head. Returns ``(put_step, num_kv_heads)``.
-    """
-    model_config = getattr(vllm_config, "model_config", None)
-    num_kv_heads: int | None = None
-    if getattr(model_config, "use_mla", False):
-        num_kv_heads = 1
-    else:
-        getter = getattr(model_config, "get_total_num_kv_heads", None)
-        if callable(getter):
-            try:
-                num_kv_heads = int(getter())
-            except (TypeError, ValueError):
-                num_kv_heads = None
-    if num_kv_heads is None and kv_cache_config is not None:
-        for group in kv_cache_config.kv_cache_groups:
-            spec = group.kv_cache_spec
-            specs = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,)
-            for sub_spec in specs:
-                heads = getattr(sub_spec, "num_kv_heads", None)
-                if isinstance(heads, int) and heads > 0:
-                    num_kv_heads = heads
-                    break
-            if num_kv_heads is not None:
-                break
-    if num_kv_heads is None or num_kv_heads <= 0:
-        num_kv_heads = 1
-    put_step = tp_size // num_kv_heads if num_kv_heads < tp_size else 1
-    return max(1, put_step), num_kv_heads
-
-
 def validate_dcp_groups(kv_cache_config: Any) -> int | None:
-    """Fail closed when a cache group cannot be sharded across DCP ranks.
+    """Reject cache groups that cannot be sharded across DCP ranks.
 
-    Returns the smallest prefix-cacheable block size, which the caller uses to
-    accept a ``prefix_match_unit`` value that is a no-op.
-
-    Layerwise block-key DCP gives every DCP rank its own object. Sliding-window
-    caches are not DCP-sharded by upstream vLLM at all. Groups without
-    ``dcp_sharded`` (recurrent/align-state, circular-buffer, ...) keep a full
-    per-rank state and, importantly, their block sizes are not scaled by DCP:
-    the pool derives block hashes and offsets from the DCP-scaled cache-group
-    block size, so such groups would be addressed at the wrong granularity.
-
-    The pool derives block-hash granularity from the smallest cache-group
-    block size times DCP. That matches upstream's GCD-based granularity only
-    when the smallest block size divides every other block size, so mixed
-    layouts that would otherwise hash blocks at a different granularity than
-    the scheduler are rejected as well.
+    Returns the smallest prefix-cacheable block size for the prefix_match_unit check.
     """
     if kv_cache_config is None:
         return None
@@ -192,21 +143,13 @@ def validate_dcp_groups(kv_cache_config: Any) -> int | None:
         specs = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,)
         for sub_spec in specs:
             if isinstance(sub_spec, SlidingWindowSpec):
-                raise ValueError(
-                    "Mooncake layerwise DCP does not support sliding-window cache groups "
-                    "(including DeepSeek-V4 SWA/compressor caches); disable DCP or use a "
-                    "full-attention cache layout."
-                )
+                raise ValueError("Mooncake layerwise DCP does not support sliding-window cache groups.")
             if isinstance(sub_spec, MambaSpec) and getattr(sub_spec, "mamba_cache_mode", None) == "align":
-                raise ValueError(
-                    "Mooncake layerwise DCP does not support recurrent/align-state cache groups; "
-                    "disable DCP or use a cache layout without recurrent state."
-                )
+                raise ValueError("Mooncake layerwise DCP does not support recurrent/align-state cache groups.")
             if not getattr(sub_spec, "dcp_sharded", False):
                 raise ValueError(
                     "Mooncake layerwise DCP requires every cache group to be DCP-sharded; "
-                    f"found {type(sub_spec).__name__}, whose block size is not scaled by DCP. "
-                    "Disable DCP or use a full-attention cache layout."
+                    f"found {type(sub_spec).__name__}."
                 )
         if not is_prefix_cacheable(spec):
             continue
@@ -220,12 +163,10 @@ def validate_dcp_groups(kv_cache_config: Any) -> int | None:
     if not group_block_sizes:
         return None
     smallest_block_size = min(group_block_sizes)
-    unsupported_block_sizes = sorted({size for size in group_block_sizes if size % smallest_block_size})
-    if unsupported_block_sizes:
+    if any(size % smallest_block_size for size in group_block_sizes):
         raise ValueError(
-            "Mooncake layerwise DCP requires every prefix-cacheable cache-group block size to be a multiple "
-            f"of the smallest block size ({smallest_block_size}); got {sorted(set(group_block_sizes))}. "
-            "Disable DCP or use cache groups with compatible block sizes."
+            "Mooncake layerwise DCP requires every cacheable block size to be a multiple "
+            f"of the smallest block size ({smallest_block_size}); got {sorted(set(group_block_sizes))}."
         )
     return smallest_block_size
 

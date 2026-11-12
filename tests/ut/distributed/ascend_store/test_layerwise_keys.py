@@ -16,10 +16,6 @@ import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, SlidingWindowSpec
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_layerwise
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import (
-    is_layerwise_dcp_save_leader,
-    layerwise_dcp_rank,
-)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MemcacheBackend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
 
@@ -202,19 +198,9 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
                 grouped_block_size=[16],
             )
 
-    def test_dcp_rank_mapping_matches_group_layout(self):
-        self.assertEqual(layerwise_dcp_rank(0, 0, 1, 4), 0)
-        self.assertEqual(layerwise_dcp_rank(3, 0, 1, 4), 3)
-        self.assertEqual(layerwise_dcp_rank(4, 0, 1, 4), 0)
-        # Generalized (TP, PCP) plane; standalone layerwise DCP restricts PCP=1.
-        self.assertEqual(layerwise_dcp_rank(0, 1, 2, 4), 1)
-        self.assertEqual(layerwise_dcp_rank(1, 1, 2, 4), 3)
-
     def test_dcp_accepts_noop_prefix_match_unit(self):
         config = self.make_config()
         config.parallel_config.decode_context_parallel_size = 2
-        # Equal to the smallest cacheable block size: the pool computes the same
-        # hash granularity as without the override, so this is a no-op.
         config.cache_config.prefix_match_unit = 16
         builder = MooncakeBackend.bind_layerwise_keys(
             vllm_config=config,
@@ -282,7 +268,6 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
         config = self.make_config()
         config.parallel_config.tensor_parallel_size = 4
         config.parallel_config.decode_context_parallel_size = 2
-        # GQA: TP=4, 2 KV heads -> put_step=2, exactly covering DCP=2.
         config.model_config.get_total_num_kv_heads = lambda: 2
         builder = MooncakeBackend.bind_layerwise_keys(
             vllm_config=config,
@@ -294,18 +279,6 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
         keys = builder.make_hit_check_keys(0, "hash", 2)
         self.assertEqual(len(keys), 4)
         self.assertEqual(len(set(keys)), 4)
-
-    def test_dcp_save_leader_covers_every_content_class(self):
-        # GQA TP=8, 2 KV heads -> put_step=4; DCP=2. Each (head, shard)
-        # content class must have exactly one leader.
-        leaders: dict[tuple[int, int], list[int]] = {}
-        for tp_rank in range(8):
-            dcp_rank = tp_rank % 2
-            if is_layerwise_dcp_save_leader(tp_rank, 4, 2, dcp_rank):
-                leaders.setdefault((tp_rank // 4, dcp_rank), []).append(tp_rank)
-        self.assertEqual(leaders, {(0, 0): [0], (0, 1): [1], (1, 0): [4], (1, 1): [5]})
-        # put_step == dcp_size: every TP rank owns a distinct content class.
-        self.assertTrue(all(is_layerwise_dcp_save_leader(rank, 2, 2, rank % 2) for rank in range(4)))
 
     def test_dcp_rejects_mixed_block_size_granularity(self):
         config = self.make_config()

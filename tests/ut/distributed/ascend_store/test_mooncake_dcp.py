@@ -19,8 +19,6 @@ class TestMooncakeDCP(unittest.TestCase):
     def test_single_group_dcp_roundtrip_and_incomplete_rank_miss(self):
         store = hybrid_tests.MemoryRangeStore()
         workers = []
-        # Keep the real two-stage PP layout used by the shared fixture; DCP
-        # ranks are the TP ranks within each stage.
         for stage in range(2):
             for dcp_rank in range(2):
                 worker, arrays = pipeline_tests.TestMooncakePipeline.make_stage(
@@ -34,8 +32,7 @@ class TestMooncakeDCP(unittest.TestCase):
                     dcp_size=2,
                     dcp_rank=dcp_rank,
                 )
-                # Each DCP rank owns a different context shard of the same
-                # logical block, so the payloads must not be interchangeable.
+                # Each DCP rank owns a distinct shard.
                 for array in arrays.values():
                     array ^= np.uint8(41 * dcp_rank)
                 workers.append((worker, arrays, {name: array.copy() for name, array in arrays.items()}))
@@ -60,8 +57,7 @@ class TestMooncakeDCP(unittest.TestCase):
             # Every PP stage and DCP shard is required for a complete block.
             self.assertEqual(scheduler._query_layerwise_block_hits([keys]), [index == len(workers) - 1])
 
-        # Clear every destination and use different block IDs, proving each
-        # rank restores its own remote shard rather than another rank's data.
+        # Different block IDs prove each rank restores its own shard.
         for worker, arrays, saved in workers:
             for array in arrays.values():
                 array.fill(0)
@@ -83,9 +79,7 @@ class TestMooncakeDCP(unittest.TestCase):
         store = hybrid_tests.MemoryRangeStore()
         tp_size, dcp_size = 4, 2
         workers = []
-        # GQA layout: TP=4, 2 KV heads -> put_step=2, exactly covering DCP=2.
-        # Each (head, DCP shard) content class has one writer, so this exercises
-        # the put_step > 1 branch of the save leader that MLA cannot reach.
+        # GQA TP=4 / 2 KV heads: put_step=2, covering DCP=2 with one writer per class.
         for stage in range(2):
             for tp_rank in range(tp_size):
                 dcp_rank = tp_rank % dcp_size

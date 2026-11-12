@@ -177,24 +177,16 @@ not require one stored copy per PCP rank. Keep `enable_kvpp` disabled.
 
 ### Decode Context Parallelism (DCP)
 
-Hybrid cache groups that vLLM shards across DCP, such as full-attention and
-compressed/indexer groups, support standalone DCP with the same
-matching-topology rules as the
+Hybrid cache groups that vLLM shards across DCP support standalone DCP under
+the same topology rules as the
 [layerwise pooling guide](mooncake_layerwise_adaptation_and_optimization.md#decode-context-parallelism-dcp).
-Each DCP rank stores its own context shard, and a prefix is reusable only after
-every PP stage and DCP rank has committed it.
+Each DCP rank owns its shard; a prefix is reusable only after every PP stage and
+DCP rank committed it.
 
-Sliding-window groups (including DeepSeek-V4 SWA and compressor caches),
-recurrent/align-state groups, circular-buffer groups and any other cache group
-whose block size is not scaled by DCP do not support DCP. The pool derives block
-hashes and transfer offsets from the DCP-scaled block size, so such groups would
-be addressed at the wrong granularity. Disable DCP for those models. The
-smallest cache-group block size must divide every other group block size, and
-`--prefix-match-unit` must be unset or set to the no-op value equal to the
-smallest prefix-cacheable block size. PCP and DCP cannot be enabled together.
-
-Hybrid DCP support is experimental: key construction and the startup rejection
-paths are unit-tested, but no hybrid end-to-end run has been validated yet.
+Sliding-window, recurrent/align-state, circular-buffer and other groups whose
+block size is not scaled by DCP are unsupported. PCP and DCP cannot be combined.
+Hybrid DCP is experimental: the startup/key paths are unit-tested, but no hybrid
+E2E run has been validated.
 
 ## Configuration Parameters
 
