@@ -131,13 +131,7 @@ def _e4m3_rows_to_float32(rows_e4m3: torch.Tensor) -> torch.Tensor:
 
     if get_current_hardware_profile().supports(HardwareCapability.ENGRAM_MXFP8):
         return rows_e4m3.to(torch.float32)
-    return (
-        rows_e4m3.view(torch.uint8)
-        .cpu()
-        .view(rows_e4m3.dtype)
-        .to(torch.float32)
-        .to(rows_e4m3.device)
-    )
+    return rows_e4m3.view(torch.uint8).cpu().view(rows_e4m3.dtype).to(torch.float32).to(rows_e4m3.device)
 
 
 def _iter_ptpc_row_chunks(
@@ -206,9 +200,7 @@ def _requantize_ptpc_to_int8(
         amax = chunk.abs().amax(dim=1, keepdim=True)
         row_scale = (amax / _INT8_MAX).clamp_min(_MIN_CHANNEL_SCALE).to(out_dtype)
         q[row_start:row_end] = (
-            torch.round(chunk / row_scale.to(torch.float32))
-            .clamp_(_INT8_MIN, _INT8_MAX)
-            .to(torch.int8)
+            torch.round(chunk / row_scale.to(torch.float32)).clamp_(_INT8_MIN, _INT8_MAX).to(torch.int8)
         )
         scale[row_start:row_end] = row_scale
     return q, scale
@@ -245,17 +237,13 @@ def _patch_ptpc_per_channel_quant_for_ascend() -> None:
         # vLLM builds without the PTPC online method never call it.
         return
 
-    def _ascend_fp8_quant_per_channel(
-        weight: torch.Tensor, scale: torch.Tensor
-    ) -> torch.Tensor:
+    def _ascend_fp8_quant_per_channel(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
         from vllm_ascend.device.hardware_profile import (
             HardwareCapability,
             get_current_hardware_profile,
         )
 
-        if get_current_hardware_profile().supports(
-            HardwareCapability.ENGRAM_MXFP8
-        ):
+        if get_current_hardware_profile().supports(HardwareCapability.ENGRAM_MXFP8):
             return upstream_quant(weight, scale)
         fp8_min, fp8_max = get_fp8_min_max()
         out = torch.empty_like(weight, dtype=current_platform.fp8_dtype())
@@ -267,9 +255,7 @@ def _patch_ptpc_per_channel_quant_for_ascend() -> None:
         for start in range(0, weight.shape[0], chunk_rows):
             rows = slice(start, start + chunk_rows)
             chunk = (weight[rows] / scale[rows]).clamp_(fp8_min, fp8_max)
-            out_bytes[rows] = (
-                chunk.cpu().to(out.dtype).view(torch.uint8).to(out.device)
-            )
+            out_bytes[rows] = chunk.cpu().to(out.dtype).view(torch.uint8).to(out.device)
         return out
 
     _online_fp8._fp8_quant_per_channel = _ascend_fp8_quant_per_channel
@@ -289,9 +275,7 @@ class AscendFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     """
 
     @classmethod
-    def is_supported(
-        cls, compute_capability: int | None = None
-    ) -> tuple[bool, str | None]:
+    def is_supported(cls, compute_capability: int | None = None) -> tuple[bool, str | None]:
         if not current_platform.is_out_of_tree():
             return False, "requires an out-of-tree (Ascend NPU) platform."
         # Resolving the profile reads the device configuration, which is only
@@ -302,13 +286,8 @@ class AscendFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             get_current_hardware_profile,
         )
 
-        if not get_current_hardware_profile().supports(
-            HardwareCapability.ENGRAM_MXFP8
-        ):
-            return False, (
-                "requires an Ascend device with native MXFP8 support "
-                "(A5 / 950 or later)."
-            )
+        if not get_current_hardware_profile().supports(HardwareCapability.ENGRAM_MXFP8):
+            return False, ("requires an Ascend device with native MXFP8 support (A5 / 950 or later).")
         return True, None
 
     @classmethod
@@ -342,9 +321,7 @@ class AscendFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         weight = getattr(layer, self.layer_param_names[0])
         weight_scale = getattr(layer, self.layer_param_names[1])
         # weight: [K, N] fp8 * weight_scale: [N, 1] -> dense [N, K] model dtype.
-        resolved = _resolve_ptpc_scales(
-            weight, weight_scale, self.config.input_dtype
-        )
+        resolved = _resolve_ptpc_scales(weight, weight_scale, self.config.input_dtype)
 
         quantized, mx_scale = torch_npu.npu_dynamic_mx_quant(
             resolved,
@@ -378,9 +355,7 @@ class AscendFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
-        raise NotImplementedError(
-            "AscendFP8ScaledMMLinearKernel overrides apply_weights directly."
-        )
+        raise NotImplementedError("AscendFP8ScaledMMLinearKernel overrides apply_weights directly.")
 
 
 class AscendFP8ScaledMMInt8LinearKernel(FP8ScaledMMLinearKernel):
@@ -401,9 +376,7 @@ class AscendFP8ScaledMMInt8LinearKernel(FP8ScaledMMLinearKernel):
     """
 
     @classmethod
-    def is_supported(
-        cls, compute_capability: int | None = None
-    ) -> tuple[bool, str | None]:
+    def is_supported(cls, compute_capability: int | None = None) -> tuple[bool, str | None]:
         if not current_platform.is_out_of_tree():
             return False, "requires an out-of-tree (Ascend NPU) platform."
         # Resolving the profile reads the device configuration, which is only
@@ -418,8 +391,7 @@ class AscendFP8ScaledMMInt8LinearKernel(FP8ScaledMMLinearKernel):
         profile = get_current_hardware_profile()
         if profile.supports(HardwareCapability.ENGRAM_MXFP8):
             return False, (
-                "not used on devices with native MXFP8 support; the MXFP8 "
-                "execution kernel is selected instead."
+                "not used on devices with native MXFP8 support; the MXFP8 execution kernel is selected instead."
             )
         if profile.quantization_backend_family is not QuantizationBackendFamily.STANDARD:
             return False, "requires the standard quantization backend family."
@@ -451,9 +423,7 @@ class AscendFP8ScaledMMInt8LinearKernel(FP8ScaledMMLinearKernel):
         """
         weight = getattr(layer, self.layer_param_names[0])
         weight_scale = getattr(layer, self.layer_param_names[1])
-        q, scale = _requantize_ptpc_to_int8(
-            weight, weight_scale, self.config.input_dtype
-        )
+        q, scale = _requantize_ptpc_to_int8(weight, weight_scale, self.config.input_dtype)
         replace_parameter(layer, "weight", torch.nn.Parameter(q, requires_grad=False))
         replace_parameter(layer, "weight_scale", torch.nn.Parameter(scale, requires_grad=False))
         # The W8A8 dynamic transform reads weight_offset; PTPC only creates
@@ -484,9 +454,7 @@ class AscendFP8ScaledMMInt8LinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
-        raise NotImplementedError(
-            "AscendFP8ScaledMMInt8LinearKernel overrides apply_weights directly."
-        )
+        raise NotImplementedError("AscendFP8ScaledMMInt8LinearKernel overrides apply_weights directly.")
 
 
 def register_ascend_fp8_lm_head_kernel() -> bool:
@@ -532,8 +500,7 @@ def register_ascend_fp8_lm_head_kernel() -> bool:
         # support for linear kernel, #37989); it is present in both v0.31.0
         # and main.
         logger.debug(
-            "vLLM build has no OOT linear-kernel registration API; "
-            "draft_lm_head_quantization stays unsupported."
+            "vLLM build has no OOT linear-kernel registration API; draft_lm_head_quantization stays unsupported."
         )
         return False
 

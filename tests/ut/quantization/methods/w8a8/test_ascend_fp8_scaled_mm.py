@@ -22,7 +22,6 @@ import pytest
 import torch
 import torch.nn as nn
 from vllm.model_executor.kernels.linear.scaled_mm import (
-    FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -74,9 +73,7 @@ class TestAscendFP8ScaledMMKernel(TestBase):
     @patch(_PROFILE_PATH)
     def test_is_supported_only_on_out_of_tree_platform(self, mock_profile):
         mock_profile.return_value.supports.return_value = True
-        with patch(
-            "vllm_ascend.quantization.methods.w8a8.ascend_fp8_scaled_mm.current_platform"
-        ) as mock_platform:
+        with patch("vllm_ascend.quantization.methods.w8a8.ascend_fp8_scaled_mm.current_platform") as mock_platform:
             mock_platform.is_out_of_tree.return_value = True
             ok, _ = AscendFP8ScaledMMLinearKernel.is_supported()
             self.assertTrue(ok)
@@ -89,9 +86,7 @@ class TestAscendFP8ScaledMMKernel(TestBase):
     @patch(_PROFILE_PATH)
     def test_is_supported_requires_engram_mxfp8_hardware(self, mock_profile):
         mock_profile.return_value.supports.return_value = False
-        with patch(
-            "vllm_ascend.quantization.methods.w8a8.ascend_fp8_scaled_mm.current_platform"
-        ) as mock_platform:
+        with patch("vllm_ascend.quantization.methods.w8a8.ascend_fp8_scaled_mm.current_platform") as mock_platform:
             mock_platform.is_out_of_tree.return_value = True
             ok, reason = AscendFP8ScaledMMLinearKernel.is_supported()
         self.assertFalse(ok)
@@ -132,22 +127,16 @@ class TestAscendFP8ScaledMMKernel(TestBase):
         self.assertFalse(ok)
         self.assertIn("reduction dim", reason)
 
-    @patch(
-        "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config"
-    )
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config")
     @patch(
         "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_dynamic_mx_quant_scale_alg",
         return_value=0,
     )
     @patch(_PROFILE_PATH)
-    def test_constructs_mxfp8_delegate(
-        self, mock_profile, mock_scale_alg, mock_vllm
-    ):
+    def test_constructs_mxfp8_delegate(self, mock_profile, mock_scale_alg, mock_vllm):
         mock_profile.return_value.supports.return_value = True
         config = make_config()
-        mock_vllm.return_value = SimpleNamespace(
-            quant_config=SimpleNamespace(quant_description={"group_size": 32})
-        )
+        mock_vllm.return_value = SimpleNamespace(quant_config=SimpleNamespace(quant_description={"group_size": 32}))
         with patch(
             "vllm_ascend.quantization.methods.w8a8.ascend_fp8_scaled_mm.current_platform.is_out_of_tree",
             return_value=True,
@@ -169,9 +158,7 @@ class TestAscendFP8ScaledMMKernel(TestBase):
             )
 
     @patch("torch_npu.npu_quant_matmul")
-    @patch(
-        "vllm_ascend.quantization.methods.w8a8.ascend_fp8_scaled_mm.AscendW8A8MXFP8DynamicLinearMethod"
-    )
+    @patch("vllm_ascend.quantization.methods.w8a8.ascend_fp8_scaled_mm.AscendW8A8MXFP8DynamicLinearMethod")
     def test_apply_weights_delegates_to_mxfp8_method(self, mock_method_cls, mock_matmul):
         mock_method = Mock()
         mock_method.apply.return_value = torch.empty(2, N)
@@ -190,9 +177,7 @@ class TestAscendFP8ScaledMMKernel(TestBase):
     @patch("torch_npu.npu_dynamic_mx_quant")
     @patch("torch_npu.npu_format_cast", side_effect=lambda w, fmt, **kwargs: w.clone())
     @patch("vllm_ascend.utils._should_trans_nz", return_value=False)
-    def test_process_weights_requantizes_ptpc_to_mxfp8(
-        self, mock_should_trans_nz, mock_format_cast, mock_mx_quant
-    ):
+    def test_process_weights_requantizes_ptpc_to_mxfp8(self, mock_should_trans_nz, mock_format_cast, mock_mx_quant):
         """PTPC [K,N] fp8 + [N,1] fp32 scale must become MXFP8 weights."""
         weight = torch.randn(K, N, dtype=torch.bfloat16)
         scale = torch.randn(N, 1, dtype=torch.bfloat16).abs() + 0.1
@@ -235,9 +220,7 @@ class TestAscendFP8ScaledMMInt8Kernel(TestBase):
     @patch(_PROFILE_PATH)
     def test_is_supported_only_on_out_of_tree_platform(self, mock_profile):
         mock_profile.return_value = make_profile(mxfp8=False, backend=QuantizationBackendFamily.STANDARD)
-        with patch(
-            "vllm_ascend.quantization.methods.w8a8.ascend_fp8_scaled_mm.current_platform"
-        ) as mock_platform:
+        with patch("vllm_ascend.quantization.methods.w8a8.ascend_fp8_scaled_mm.current_platform") as mock_platform:
             mock_platform.is_out_of_tree.return_value = True
             ok, _ = AscendFP8ScaledMMInt8LinearKernel.is_supported()
             self.assertTrue(ok)
@@ -251,9 +234,7 @@ class TestAscendFP8ScaledMMInt8Kernel(TestBase):
     def test_is_supported_not_on_mxfp8_hardware(self, mock_profile):
         """The MXFP8 kernel takes precedence where the capability exists."""
         mock_profile.return_value = make_profile(mxfp8=True, backend=QuantizationBackendFamily.STANDARD)
-        with patch(
-            "vllm_ascend.quantization.methods.w8a8.ascend_fp8_scaled_mm.current_platform"
-        ) as mock_platform:
+        with patch("vllm_ascend.quantization.methods.w8a8.ascend_fp8_scaled_mm.current_platform") as mock_platform:
             mock_platform.is_out_of_tree.return_value = True
             ok, reason = AscendFP8ScaledMMInt8LinearKernel.is_supported()
         self.assertFalse(ok)
@@ -261,12 +242,8 @@ class TestAscendFP8ScaledMMInt8Kernel(TestBase):
 
     @patch(_PROFILE_PATH)
     def test_is_supported_rejects_compatibility_backend(self, mock_profile):
-        mock_profile.return_value = make_profile(
-            mxfp8=False, backend=QuantizationBackendFamily.COMPATIBILITY
-        )
-        with patch(
-            "vllm_ascend.quantization.methods.w8a8.ascend_fp8_scaled_mm.current_platform"
-        ) as mock_platform:
+        mock_profile.return_value = make_profile(mxfp8=False, backend=QuantizationBackendFamily.COMPATIBILITY)
+        with patch("vllm_ascend.quantization.methods.w8a8.ascend_fp8_scaled_mm.current_platform") as mock_platform:
             mock_platform.is_out_of_tree.return_value = True
             ok, reason = AscendFP8ScaledMMInt8LinearKernel.is_supported()
         self.assertFalse(ok)
@@ -276,9 +253,10 @@ class TestAscendFP8ScaledMMInt8Kernel(TestBase):
         """Whatever the hardware, exactly one of the two kernels is supported."""
         for mxfp8 in (False, True):
             profile = make_profile(mxfp8=mxfp8, backend=QuantizationBackendFamily.STANDARD)
-            with patch(_PROFILE_PATH, return_value=profile), patch(
-                "vllm_ascend.quantization.methods.w8a8.ascend_fp8_scaled_mm.current_platform"
-            ) as mock_platform:
+            with (
+                patch(_PROFILE_PATH, return_value=profile),
+                patch("vllm_ascend.quantization.methods.w8a8.ascend_fp8_scaled_mm.current_platform") as mock_platform,
+            ):
                 mock_platform.is_out_of_tree.return_value = True
                 mxfp8_ok, _ = AscendFP8ScaledMMLinearKernel.is_supported()
                 int8_ok, _ = AscendFP8ScaledMMInt8LinearKernel.is_supported()
@@ -291,9 +269,7 @@ class TestAscendFP8ScaledMMInt8Kernel(TestBase):
 
     def test_can_implement_allows_k_not_multiple_of_mxfp8_group_size(self):
         """INT8 per-channel quantization has no MX group-size constraint."""
-        ok, _ = AscendFP8ScaledMMInt8LinearKernel.can_implement(
-            make_config(weight_shape=(N, 100))
-        )
+        ok, _ = AscendFP8ScaledMMInt8LinearKernel.can_implement(make_config(weight_shape=(N, 100)))
         self.assertTrue(ok)
 
     def test_can_implement_rejects_other_weight_keys(self):
@@ -334,9 +310,7 @@ class TestAscendFP8ScaledMMInt8Kernel(TestBase):
             )
 
     @patch("torch_npu.npu_quant_matmul")
-    @patch(
-        "vllm_ascend.quantization.methods.w8a8.ascend_fp8_scaled_mm.AscendW8A8DynamicLinearMethod"
-    )
+    @patch("vllm_ascend.quantization.methods.w8a8.ascend_fp8_scaled_mm.AscendW8A8DynamicLinearMethod")
     def test_apply_weights_delegates_to_int8_method(self, mock_method_cls, mock_matmul):
         mock_method = Mock()
         mock_method.apply.return_value = torch.empty(2, N)
@@ -376,20 +350,14 @@ class TestAscendFP8ScaledMMInt8Kernel(TestBase):
         dense = weight.t().float() * scale.float()
         amax = dense.abs().amax(dim=1, keepdim=True)
         exp_scale = (amax / _INT8_MAX).clamp_min(_MIN_CHANNEL_SCALE).to(torch.bfloat16)
-        exp_q = (
-            torch.round(dense / exp_scale.float())
-            .clamp_(_INT8_MIN, _INT8_MAX)
-            .to(torch.int8)
-        )
+        exp_q = torch.round(dense / exp_scale.float()).clamp_(_INT8_MIN, _INT8_MAX).to(torch.int8)
         # The W8A8 transform transposes the weight to [K, N] and flattens the
         # scales/offset to [N]; it also derives the fp32 scale copy.
         self.assertEqual(layer.weight.data.shape, (4, 2))
         self.assertEqual(layer.weight.data.dtype, torch.int8)
         self.assertTrue(torch.equal(layer.weight.data, exp_q.t().contiguous()))
         self.assertTrue(torch.equal(layer.weight_scale.data, exp_scale.flatten()))
-        self.assertTrue(
-            torch.equal(layer.weight_offset.data, torch.zeros(2, dtype=torch.bfloat16))
-        )
+        self.assertTrue(torch.equal(layer.weight_offset.data, torch.zeros(2, dtype=torch.bfloat16)))
         self.assertEqual(layer.weight_scale_fp32.dtype, torch.float32)
 
 
@@ -401,9 +369,7 @@ class TestFP8LmHeadKernelRegistration(TestBase):
     """
 
     def test_register_calls_upstream_oot_api(self):
-        with patch(
-            "vllm.model_executor.kernels.linear.register_linear_kernel"
-        ) as mock_register:
+        with patch("vllm.model_executor.kernels.linear.register_linear_kernel") as mock_register:
             ok = register_ascend_fp8_lm_head_kernel()
         self.assertTrue(ok)
         self.assertEqual(

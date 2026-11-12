@@ -444,20 +444,13 @@ class NPUWorker(WorkerBase):
 
         draft_model = self.get_draft_model()
         if draft_model is None:
-            raise RuntimeError(
-                "Draft model weight update requested, but no draft model is configured."
-            )
+            raise RuntimeError("Draft model weight update requested, but no draft model is configured.")
 
         speculative_config = self.speculative_config
         if speculative_config is None or speculative_config.draft_model_config is None:
-            raise RuntimeError(
-                "Draft model weight update requested, but no draft model "
-                "config is configured."
-            )
+            raise RuntimeError("Draft model weight update requested, but no draft model config is configured.")
 
-        self.weight_transfer_engine.set_weight_update_target(
-            draft_model, speculative_config.draft_model_config
-        )
+        self.weight_transfer_engine.set_weight_update_target(draft_model, speculative_config.draft_model_config)
 
     def start_weight_update(self) -> None:
         """Begin a new weight update; prepares the model for layerwise reload."""
@@ -477,14 +470,12 @@ class NPUWorker(WorkerBase):
 
         if is_draft and not self.weight_transfer_engine.supports_draft_weight_update:
             raise RuntimeError(
-                f"{type(self.weight_transfer_engine).__name__} does not support "
-                "draft model weight updates."
+                f"{type(self.weight_transfer_engine).__name__} does not support draft model weight updates."
             )
 
         if self._weight_update_active:
             raise RuntimeError(
-                "start_weight_update called while a weight update is already "
-                "active. Call finish_weight_update first."
+                "start_weight_update called while a weight update is already active. Call finish_weight_update first."
             )
 
         self._check_nz_disabled()
@@ -526,18 +517,14 @@ class NPUWorker(WorkerBase):
         assert self.weight_transfer_engine is not None
 
         if not self._weight_update_active:
-            raise RuntimeError(
-                "start_weight_update must be called before update_weights."
-            )
+            raise RuntimeError("start_weight_update must be called before update_weights.")
 
         with set_current_vllm_config(self.vllm_config):
             try:
                 if isinstance(update_info, list):
                     parallel_config = self.vllm_config.parallel_config
                     local_update_info = update_info[
-                        parallel_config.data_parallel_index
-                        * parallel_config.world_size
-                        + self.rank
+                        parallel_config.data_parallel_index * parallel_config.world_size + self.rank
                     ]
                 else:
                     local_update_info = update_info
@@ -551,9 +538,7 @@ class NPUWorker(WorkerBase):
         self._check_weight_transfer_engine()
 
         if not self._weight_update_active:
-            raise RuntimeError(
-                "start_weight_update must be called before finish_weight_update."
-            )
+            raise RuntimeError("start_weight_update must be called before finish_weight_update.")
 
         assert self.weight_transfer_engine is not None
         with set_current_vllm_config(self.vllm_config):
@@ -584,8 +569,7 @@ class NPUWorker(WorkerBase):
         self._weight_update_active = False
         self.weight_transfer_engine.reset_weight_update_target()
         if self._weight_update_is_draft and (
-            (draft_model := self.get_draft_model()) is not None
-            and restore_quantized_lm_heads is not None
+            (draft_model := self.get_draft_model()) is not None and restore_quantized_lm_heads is not None
         ):
             restore_quantized_lm_heads(draft_model, refresh=refresh)
 
