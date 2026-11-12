@@ -284,7 +284,6 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             transposed_weight = padded_weight.transpose(0, 1).contiguous()
             target_scale = reshaped_scale.transpose(0, 1)
 
-        transposed_weight = padded_weight.transpose(0, 1).contiguous()
         layer._mxfp8_gmm_nz_layout = (
             getattr(layer, "_single_group_gmm_nz", False)
             and not getattr(layer, "_fused_preprocess_managed", False)
