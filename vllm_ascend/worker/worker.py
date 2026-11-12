@@ -434,6 +434,14 @@ class NPUWorker(WorkerBase):
         self._weight_update_active = False
 
     def shutdown(self) -> None:
+        model = getattr(getattr(self, "model_runner", None), "model", None)
+        close_engram = getattr(model, "close_shared_engram", None)
+        engram_error = None
+        if callable(close_engram):
+            try:
+                close_engram()
+            except Exception as exc:
+                engram_error = exc
         state = getattr(getattr(self, "model_runner", None), "eplb_state", None)
         if isinstance(state, AscendEplbState):
             state.close()
@@ -452,6 +460,8 @@ class NPUWorker(WorkerBase):
             shutdown_fn = getattr(model_runner, "shutdown", None)
             if callable(shutdown_fn):
                 shutdown_fn()
+        if engram_error is not None:
+            raise engram_error
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
