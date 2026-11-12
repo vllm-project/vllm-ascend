@@ -1,6 +1,0 @@
-pr: 21721
-entries:
-  - category: feature
-    text: Use FP8 Union sparse attention by default for supported MiniMax-M3 configurations on Ascend 950, requiring matching UnionSparseGen and GBSA exactMask CANN extensions.
-    model: MiniMax-M3
-    hardware: [A5]
