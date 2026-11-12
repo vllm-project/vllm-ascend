@@ -149,13 +149,28 @@ def test_pd_requires_none_without_prefix_caching(connector, role, cache_mode, pr
         helpers["validate_qwen_gdn_recoverssm"](config)
 
 
-@pytest.mark.parametrize("model_type", ["qwen3_next", "qwen3_5_text", "qwen3_5_moe_text"])
+@pytest.mark.parametrize("model_type", ["qwen3_next", "qwen3_5_text", "qwen3_5_moe_text", "qwen4_exp_text"])
 def test_target_selector_enables_qwen_gdn_architectures(model_type):
     config = make_config()
     config.model_config.hf_text_config.model_type = model_type
     assert helpers["_uses_gdn_recoverssm"](config)
     config.cache_config.use_replayssm = False
     assert not helpers["_uses_gdn_recoverssm"](config)
+
+
+def test_qwen4_exp_release_config_is_registered_without_widening_selector():
+    config = make_config()
+    config.model_config.hf_text_config.model_type = "qwen4_exp_text"
+    config.model_config.hf_config = NS(architectures=["Qwen4ExpForConditionalGeneration"])
+
+    assert helpers["is_gdn_model"](config)
+    assert helpers["_uses_gdn_recoverssm"](config)
+
+    config.model_config.hf_config.architectures = ["CustomQwen4ExpForConditionalGeneration"]
+    assert not helpers["is_gdn_model"](config)
+    config.model_config.hf_config.architectures = ["Qwen4ExpForConditionalGeneration"]
+    config.model_config.hf_text_config.model_type = "custom_qwen4_exp_text"
+    assert not helpers["is_gdn_model"](config)
 
 
 @pytest.mark.parametrize("model_type", ["glm5_next_text", "kimi_k3", "qwen3"])

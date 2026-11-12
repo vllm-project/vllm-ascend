@@ -19,6 +19,7 @@ _GDN_MODEL_TYPES = frozenset(
         "qwen3_5_moe_text",
         "qwen3_5_text",
         "qwen3_next",
+        "qwen4_exp_text",
     }
 )
 
@@ -30,6 +31,7 @@ _GDN_ARCHITECTURES = frozenset(
         "Qwen3NextForCausalLM",
         "Qwen3_5ForConditionalGeneration",
         "Qwen3_5MoeForConditionalGeneration",
+        "Qwen4ExpForConditionalGeneration",
     }
 )
 
