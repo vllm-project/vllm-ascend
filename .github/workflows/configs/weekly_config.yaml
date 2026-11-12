@@ -238,6 +238,15 @@ a3:
         config_file_path: DeepSeek-V4-Flash-no-Memcache-PD.yaml
         config_base_path: tests/SIT/cases/features/kv_pool
         size: 2
+      ####
+      - name: DeepSeek-V4-Flash-0731-w8a8-no-Memcache
+        config_file_path: DeepSeek-V4-Flash-0731-w8a8-no-Memcache.yaml
+        config_base_path: tests/SIT/cases/features/kv_pool
+        size: 2
+      - name: DeepSeek-V4-Flash-0731-w8a8-Memcache
+        config_file_path: DeepSeek-V4-Flash-0731-w8a8-Memcache.yaml
+        config_base_path: tests/SIT/cases/features/kv_pool
+        size: 2
   single_node:
     test_config:
       # pytest-driven tests
