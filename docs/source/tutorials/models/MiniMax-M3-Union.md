@@ -1,10 +1,10 @@
 # MiniMax-M3 FP8 Union attention on Ascend 950
 
-MiniMax-M3 can optionally run its sparse attention through UnionSparseGen and
+MiniMax-M3 runs its supported FP8 sparse attention through UnionSparseGen and
 GenericBlockSparseAttention (GBSA) exactMask. Eight adjacent queries share the
 union of their selected KV blocks. An exact per-query mask preserves the original
 selection and causal boundary. The indexer and TopK selection are unchanged.
-This option applies to both prefill and decode; it does not introduce a policy
+This default applies to both prefill and decode; it does not introduce a policy
 or switch between attention implementations at runtime.
 
 ## Requirements
@@ -27,19 +27,15 @@ The Python packages must expose `cann_ops_nn_custom` and
 vLLM Ascend does not change operator search paths or install these packages.
 The standard non-Union CANN packages remain required by the model's indexer.
 
-## Enable Union
+## Deployment
 
 Follow the [MiniMax-M3.1-Flash deployment guide](MiniMax-M3.1-Flash.md), use
-`--kv-cache-dtype fp8_e4m3`, and add the following key to the existing
-`--additional-config` JSON:
-
-```json
-{"enable_minimax_m3_union": true}
-```
-
-The default is `false`, which retains the native attention path and does not
-load either optional custom extension. Unsupported cache types or attention
-geometry fail during model initialization when Union is enabled.
+`--kv-cache-dtype fp8_e4m3`, and install the matching CANN packages above.
+Union is selected automatically for the supported hardware, cache type and
+attention geometry; no additional configuration flag is needed. Other hardware,
+cache types and attention geometries retain the native attention path without
+loading the Union extensions. Missing or incompatible Union packages fail during
+model initialization for configurations that select Union.
 
 The extensions load before graph capture. Output capacities come from host
 attention metadata, including per-request groups and incomplete groups of fewer

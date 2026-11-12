@@ -65,11 +65,6 @@ from vllm_ascend.ops.triton.msa.msa_m3_index_postprocess import FP32_INDEX_SENTI
 from vllm_ascend.utils import AscendDeviceType
 
 
-@pytest.fixture(autouse=True)
-def default_native_sparse_attention(monkeypatch):
-    monkeypatch.setattr(msa_m3_module, "get_ascend_config", lambda: SimpleNamespace(enable_minimax_m3_union=False))
-
-
 @pytest.mark.parametrize(
     ("device_type", "kv_dtype", "expected_precision"),
     [
@@ -220,13 +215,13 @@ def _make_vllm_config(
 
 
 def _make_sparse_builder(
-    device: torch.device, kv_cache_dtype: torch.dtype = torch.bfloat16
+    device: torch.device, kv_cache_dtype: torch.dtype = torch.bfloat16, *, num_kv_heads: int = 2
 ) -> AscendMiniMaxM3SparseMetadataBuilder:
     vllm_config = _make_vllm_config()
     vllm_config.speculative_config = SimpleNamespace(num_speculative_tokens=7, parallel_drafting=False)
     spec = FullAttentionSpec(
         block_size=128,
-        num_kv_heads=2,
+        num_kv_heads=num_kv_heads,
         head_size=128,
         head_size_v=128,
         dtype=kv_cache_dtype,
@@ -613,11 +608,11 @@ def test_sparse_metadata_builder(batch_spec: BatchSpec, mock_gbsa_ops) -> None:
 
 
 def test_union_builder_counts_groups_per_request_and_skips_native_schedule(monkeypatch, mock_gbsa_ops):
-    monkeypatch.setattr(msa_m3_module, "get_ascend_config", lambda: SimpleNamespace(enable_minimax_m3_union=True))
     monkeypatch.setattr(
         msa_m3_module, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A5)
     )
-    builder = _make_sparse_builder(torch.device("cpu"), torch.float8_e4m3fn)
+    builder = _make_sparse_builder(torch.device("cpu"), torch.float8_e4m3fn, num_kv_heads=1)
+    assert builder.use_union
     common = _create_common_attn_metadata(BatchSpec(seq_lens=[129, 257], query_lens=[9, 17]), 128, torch.device("cpu"))
     metadata = builder.build(0, common)
     assert metadata.prefill.num_union_groups == 5  # ceil(9/8) + ceil(17/8), not ceil(26/8).
@@ -627,20 +622,56 @@ def test_union_builder_counts_groups_per_request_and_skips_native_schedule(monke
 
 
 @pytest.mark.parametrize("cache_dtype", ["auto", "bfloat16", "fp8_e5m2"])
-def test_union_initialization_rejects_unsupported_cache_before_extension_load(monkeypatch, cache_dtype):
-    monkeypatch.setattr(msa_m3_module, "get_ascend_config", lambda: SimpleNamespace(enable_minimax_m3_union=True))
+def test_union_default_keeps_native_for_other_cache_types(monkeypatch, cache_dtype):
     monkeypatch.setattr(
         msa_m3_module, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A5)
     )
     loader = MagicMock()
     monkeypatch.setattr(msa_m3_module, "load_union_extensions", loader)
-    with pytest.raises(ValueError, match="A5 FP8 KV"):
+    impl = AscendMiniMaxM3SparseImpl(16, 128, 0.5, 1, cache_dtype, topk_blocks=16, sparse_block_size=128)
+    assert not impl.use_union
+    loader.assert_not_called()
+
+
+@pytest.mark.parametrize("cache_dtype", ["fp8", "fp8_e4m3"])
+def test_union_is_default_for_supported_fp8_and_requires_extensions(monkeypatch, cache_dtype):
+    monkeypatch.setattr(
+        msa_m3_module, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A5)
+    )
+    loader = MagicMock()
+    monkeypatch.setattr(msa_m3_module, "load_union_extensions", loader)
+    impl = AscendMiniMaxM3SparseImpl(16, 128, 0.5, 1, cache_dtype, topk_blocks=16, sparse_block_size=128)
+    assert impl.use_union
+    loader.assert_called_once()
+    loader.side_effect = ImportError("Union extensions missing")
+    with pytest.raises(ImportError, match="Union extensions missing"):
         AscendMiniMaxM3SparseImpl(16, 128, 0.5, 1, cache_dtype, topk_blocks=16, sparse_block_size=128)
+
+
+@pytest.mark.parametrize(
+    ("device_type", "num_heads", "num_kv_heads", "head_size", "block_size"),
+    [
+        (AscendDeviceType.A3, 16, 1, 128, 128),
+        (AscendDeviceType.A5, 32, 1, 128, 128),
+        (AscendDeviceType.A5, 16, 2, 128, 128),
+        (AscendDeviceType.A5, 16, 1, 64, 128),
+        (AscendDeviceType.A5, 16, 1, 128, 64),
+    ],
+)
+def test_union_default_keeps_native_for_other_hardware_or_geometry(
+    monkeypatch, device_type, num_heads, num_kv_heads, head_size, block_size
+):
+    monkeypatch.setattr(msa_m3_module, "get_current_hardware_profile", lambda: get_hardware_profile(device_type))
+    loader = MagicMock()
+    monkeypatch.setattr(msa_m3_module, "load_union_extensions", loader)
+    impl = AscendMiniMaxM3SparseImpl(
+        num_heads, head_size, 0.5, num_kv_heads, "fp8_e4m3", topk_blocks=16, sparse_block_size=block_size
+    )
+    assert not impl.use_union
     loader.assert_not_called()
 
 
 def test_union_dispatches_mixed_batch_without_native_attention(monkeypatch):
-    monkeypatch.setattr(msa_m3_module, "get_ascend_config", lambda: SimpleNamespace(enable_minimax_m3_union=True))
     monkeypatch.setattr(
         msa_m3_module, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A5)
     )

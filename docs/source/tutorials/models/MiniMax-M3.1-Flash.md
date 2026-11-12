@@ -2911,7 +2911,7 @@ Expected result: the run prints a performance summary that includes request thro
 
 ## 9 Performance Tuning
 
-For optional FP8 Union sparse attention on Ascend 950, see the
+For the default FP8 Union sparse attention path on Ascend 950 and its required CANN packages, see the
 [MiniMax-M3 Union guide](MiniMax-M3-Union.md).
 
 ### 9.1 Recommended Configurations

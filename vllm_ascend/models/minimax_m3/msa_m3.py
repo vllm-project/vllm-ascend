@@ -41,7 +41,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
 )
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
@@ -122,6 +121,24 @@ else:
 
 # CANN GenericBlockSparseAttentionMetadata returns exactly 1024 int32 values.
 _GBSA_METADATA_SIZE = 1024
+
+
+def _use_union_attention(
+    kv_cache_dtype: str | torch.dtype,
+    num_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+    block_size: int,
+) -> bool:
+    """Select the default Union path only for its supported FP8 geometry."""
+    return (
+        get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
+        and kv_cache_dtype in ("fp8", "fp8_e4m3", torch.float8_e4m3fn)
+        and num_kv_heads == 1
+        and 1 <= num_heads <= 16
+        and head_size == _MSA_INDEX_BLOCK_SIZE
+        and block_size == _MSA_INDEX_BLOCK_SIZE
+    )
 
 
 def _active_decode_num_reqs(
@@ -842,7 +859,17 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
             for query_len in self.decode_gbsa_query_lengths
         }
         hardware_profile = get_current_hardware_profile()
-        self.use_union = get_ascend_config().enable_minimax_m3_union
+        context = vllm_config.compilation_config.static_forward_context
+        self.use_union = any(
+            _use_union_attention(
+                kv_cache_spec.dtype,
+                context[name].num_heads,
+                kv_cache_spec.num_kv_heads,
+                kv_cache_spec.head_size,
+                self.block_size,
+            )
+            for name in layer_names
+        )
         self.reuse_decode_gbsa_metadata = not self.use_union and hardware_profile.supports(
             HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE
         )
@@ -1058,20 +1085,10 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
         self.topk_blocks = topk_blocks
         self.block_size = sparse_block_size
         self._dequant_scale: torch.Tensor | None = None
-        self.use_union = get_ascend_config().enable_minimax_m3_union
+        self.use_union = _use_union_attention(
+            kv_cache_dtype, num_heads, self.num_kv_heads, head_size, sparse_block_size
+        )
         if self.use_union:
-            if (
-                not get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
-                or kv_cache_dtype not in ("fp8", "fp8_e4m3")
-                or self.num_kv_heads != 1
-                or not 1 <= num_heads <= 16
-                or head_size != 128
-                or sparse_block_size != 128
-            ):
-                raise ValueError(
-                    "MiniMax-M3 Union requires A5 FP8 KV, 128-token pages, "
-                    "head size 128, one local KV head and at most 16 Q heads"
-                )
             load_union_extensions()
             logger.info_once("MiniMax-M3 FP8 Union enabled: UnionSparseGen + GBSA exactMask, union_size=8")
 
