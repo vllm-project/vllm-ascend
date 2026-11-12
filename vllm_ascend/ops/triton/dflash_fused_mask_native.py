@@ -227,8 +227,7 @@ def _validate_workspace(workspace, expected, logits, name):
             raise ValueError(f"{name} workspace entry {index} must be a tensor")
         if tensor.shape != shape or tensor.dtype != dtype or tensor.device != logits.device:
             raise ValueError(
-                f"{name} workspace entry {index} must have shape={shape}, "
-                f"dtype={dtype}, device={logits.device}"
+                f"{name} workspace entry {index} must have shape={shape}, dtype={dtype}, device={logits.device}"
             )
         if not tensor.is_contiguous():
             raise ValueError(f"{name} workspace entry {index} must be contiguous")
@@ -249,7 +248,7 @@ def topm_route(
     _validate_fused_route_roles(logits, roles)
     # the fused kernel does not consume non-unit strides correctly
     # (validated on A3). Production router logits are always contiguous;
-    # guard here so strided inputs are copied once instead of mis-read.
+    # guard here so strided inputs are copied once instead of misread.
     if not logits.is_contiguous():
         logits = logits.contiguous()
     n, num_experts = logits.shape
@@ -327,7 +326,7 @@ def dspark_route(
     _validate_fused_route_roles(logits, roles)
     # the fused kernel does not consume non-unit strides correctly
     # (validated on A3). Production router logits are always contiguous;
-    # guard here so strided inputs are copied once instead of mis-read.
+    # guard here so strided inputs are copied once instead of misread.
     if not logits.is_contiguous():
         logits = logits.contiguous()
     n, num_experts = logits.shape

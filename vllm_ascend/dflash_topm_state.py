@@ -10,7 +10,6 @@ import torch.nn.functional as F
 from vllm.distributed import get_tp_group
 from vllm.logger import logger
 
-
 _activation_batch: ContextVar[tuple | None] = ContextVar("activation_batch", default=None)
 _active_forward: ContextVar[object | None] = ContextVar("active_forward", default=None)
 
@@ -531,10 +530,7 @@ def build_verify_segments(scheduler_output, input_batch, num_scheduled_tokens_np
     for req_id, draft_token_ids in scheduler_output.scheduled_spec_decode_tokens.items():
         req_idx = input_batch.req_id_to_index[req_id]
         draft_count = len(draft_token_ids)
-        is_decode = (
-            input_batch.num_computed_tokens_cpu[req_idx]
-            >= input_batch.num_prompt_tokens[req_idx]
-        )
+        is_decode = input_batch.num_computed_tokens_cpu[req_idx] >= input_batch.num_prompt_tokens[req_idx]
         if not (draft_count and is_decode):
             continue
         segment_start = int(cumulative_tokens[req_idx]) - draft_count - 1
@@ -584,9 +580,8 @@ def validate_activation_routing(
     use_async_scheduling,
 ):
     """Fail fast when the runtime config violates the activation-routing contract."""
-    uses_supported_drafter = (
-        speculative_config is not None
-        and (speculative_config.method == "dflash" or speculative_config.use_dspark())
+    uses_supported_drafter = speculative_config is not None and (
+        speculative_config.method == "dflash" or speculative_config.use_dspark()
     )
     if not uses_supported_drafter:
         raise ValueError("Activation routing requires DFlash or DSpark speculative decoding")
@@ -603,20 +598,17 @@ def validate_activation_routing(
     )
     if model_num_experts != state.num_experts:
         raise ValueError(
-            "Activation-routing num_experts must match the model: "
-            f"{state.num_experts} != {model_num_experts}"
+            f"Activation-routing num_experts must match the model: {state.num_experts} != {model_num_experts}"
         )
     model_route_top_k = getattr(text_config, "num_experts_per_tok", None)
     if model_route_top_k != state.route_top_k:
         raise ValueError(
-            "Activation-routing route_top_k must match the model: "
-            f"{state.route_top_k} != {model_route_top_k}"
+            f"Activation-routing route_top_k must match the model: {state.route_top_k} != {model_route_top_k}"
         )
     model_scoring_func = getattr(text_config, "scoring_func", "softmax")
     if model_scoring_func != state.scoring_func:
         raise ValueError(
-            "Activation-routing scoring_func must match the model: "
-            f"{state.scoring_func} != {model_scoring_func}"
+            f"Activation-routing scoring_func must match the model: {state.scoring_func} != {model_scoring_func}"
         )
     if use_async_scheduling:
         raise ValueError("Activation routing currently requires --no-async-scheduling")
@@ -696,10 +688,7 @@ def _inject_dspark_defaults(
         # equal uniform_decode_query_len, so mirroring the engine truth is
         # the zero-risk default.
         routing_config["verify_block_size"] = uniform_decode_query_len
-        derived.append(
-            f"verify_block_size={uniform_decode_query_len} "
-            "(derived from uniform_decode_query_len)"
-        )
+        derived.append(f"verify_block_size={uniform_decode_query_len} (derived from uniform_decode_query_len)")
     if "fused_rows" not in user_keys and query_len_usable:
         block_size = routing_config["verify_block_size"]
         routing_config["fused_rows"] = [block_size, DSPARK_PREFILL_FUSED_ROWS]
@@ -711,14 +700,9 @@ def _inject_dspark_defaults(
         expected = _derive_expected_router_layers(text_config)
         if expected is not None:
             routing_config["expected_router_layers"] = expected
-            derived.append(
-                f"expected_router_layers={expected} "
-                "(derived from num_hidden_layers - num_hash_layers)"
-            )
+            derived.append(f"expected_router_layers={expected} (derived from num_hidden_layers - num_hash_layers)")
     if derived:
-        logger.info(
-            "[ACTIVATION-ROUTING] DSpark family defaults applied: %s", "; ".join(derived)
-        )
+        logger.info("[ACTIVATION-ROUTING] DSpark family defaults applied: %s", "; ".join(derived))
 
 
 def resolve_activation_routing_config(

@@ -476,8 +476,10 @@ class ActivationRoutingConfig:
             raise ValueError(f"Unknown activation_routing keys: {sorted(unknown)}")
         self.config = {**self._defaults, **user_config}
         self.user_keys = frozenset(user_config)
+
         def is_int(value):
             return isinstance(value, int) and not isinstance(value, bool)
+
         if not isinstance(self.enabled, bool):
             raise TypeError("activation_routing.enabled must be a boolean")
         if self.backend not in {"baseline", "anchor_union_reference", "anchor_union_topm", "anchor_union_fused_native"}:

@@ -138,7 +138,7 @@ def apply_anchor_reference(logits, roles, mask, top_k=8, suffix_pool_top_k=2):
 
     # the fused kernel does not consume non-unit strides correctly
     # (validated on A3). Production router logits are always contiguous;
-    # guard here so strided inputs are copied once instead of mis-read.
+    # guard here so strided inputs are copied once instead of misread.
     if not logits.is_contiguous():
         logits = logits.contiguous()
     ids = torch.topk(logits, top_k, dim=-1).indices

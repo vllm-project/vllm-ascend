@@ -55,13 +55,6 @@ from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.dflash_topm_state import (
-    build_verify_segments_v2,
-    finish_activation_routing,
-    resolve_activation_routing_config,
-    set_activation_routing_batch,
-    validate_activation_routing,
-)
 from vllm_ascend.ascend_forward_context import (
     MoECommType,
     get_mc2_tokens_capacity,
@@ -82,6 +75,13 @@ from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
     _start_profiling_chunk_timing,
+)
+from vllm_ascend.dflash_topm_state import (
+    build_verify_segments_v2,
+    finish_activation_routing,
+    resolve_activation_routing_config,
+    set_activation_routing_batch,
+    validate_activation_routing,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     bind_dspark_context_receiver,
@@ -1126,11 +1126,7 @@ class NPUModelRunner(GPUModelRunner):
 
         if self.dflash_topm_state is not None:
             verify_rows, segments = (), []
-            if (
-                self.pcp_manager is None
-                and not adaptive_verification_active
-                and batch_req_state is not None
-            ):
+            if self.pcp_manager is None and not adaptive_verification_active and batch_req_state is not None:
                 verify_rows, segments = build_verify_segments_v2(
                     scheduler_output,
                     req_ids,
