@@ -15,13 +15,22 @@ buffers follow the model's prime layout and deterministic multiplier rules.
 
 The conditional-generation architecture preserves MRoPE. Image/video limits
 are zero, so the unused vision tower is skipped; no image inputs are tested.
-MTP is disabled. This lane does not modify model runtime implementations and
-does not establish correctness for the original 256-wide attention path or
-full-size PLE tables.
+MTP is disabled. This lane does not establish correctness for the original
+256-wide attention path or full-size PLE tables.
 
 PLE tables stay on the NPU through `--engram-config '{"cpu_offload":false}'`.
 The default CPU-offload path requires an accelerator view of pinned host memory,
 which is unsupported on the validated NPU stack.
+The lane uses an explicit 4 GiB KV-cache budget per worker. Forward profiling
+and full-decode graph capture still run; the fixed budget avoids depending on
+the automatic free-memory estimate during co-located process startup. Temporary
+NPU generator allocations are synchronized and released before reference startup.
+The Ascend Qwen4Exp model state registers its immutable PLE ngram offsets as a
+nonpersistent model buffer. MRV2 creates this state inside the weights pool;
+registration lets the existing level-2 sleep backup restore the offsets in
+place. Without it, discarded offsets become zero and fresh prompts use their
+first token instead of EOS as the preceding PLE context. No attention kernels
+or cache layout implementations are changed.
 
 Only local configuration, tokenizer/processor assets and safetensors headers
 are read. Pretrained tensor values are never loaded. Floating parameters use

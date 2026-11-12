@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+KV_CACHE_BYTES = 4 * 2**30
+
 
 def test_qwen38_ipc_unpacked(request):
     if not request.config.getoption("--qwen38-enable-npu"):
@@ -16,8 +18,8 @@ def test_qwen38_ipc_unpacked(request):
     model_dir = Path(model_dir).resolve()
 
     # Keep hardware-aware imports behind the explicit execution gate.
+    from tests.e2e.common.rlhf.weight_transfer import npu_ipc
     from tests.e2e.common.rlhf.weight_transfer.case import WeightUpdateModelCase
-    from tests.e2e.common.rlhf.weight_transfer.npu_ipc import run_npu_ipc_weight_transfer_transaction
     from tests.e2e.common.rlhf.weight_transfer.qwen38_manifest import validate_ci_config
     from tests.e2e.common.rlhf.weight_transfer.qwen38_weight_source import Qwen38RandomWeightSource
 
@@ -34,6 +36,8 @@ def test_qwen38_ipc_unpacked(request):
             '{"image":0,"video":0}',
             "--engram-config",
             '{"cpu_offload":false}',
+            "--kv-cache-memory-bytes",
+            str(KV_CACHE_BYTES),
         ),
     )
-    run_npu_ipc_weight_transfer_transaction(case, packed=False, source_factory=Qwen38RandomWeightSource)
+    npu_ipc.run_npu_ipc_weight_transfer_transaction(case, packed=False, source_factory=Qwen38RandomWeightSource)

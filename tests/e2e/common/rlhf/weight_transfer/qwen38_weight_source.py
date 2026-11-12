@@ -89,6 +89,13 @@ class Qwen38RandomWeightSource(FixedRandomWeightSource):
             shard_bytes += size_bytes
             total_bytes += size_bytes
         flush()
+        # Release temporary generator storage before the co-located reference
+        # server takes its initial HBM snapshot.
+        del tensor
+        if self._device.type == "npu":
+            with torch.npu.device(self._device):
+                torch.npu.synchronize()
+                torch.npu.empty_cache()
         (target / "model.safetensors.index.json").write_text(
             json.dumps({"metadata": {"total_size": total_bytes}, "weight_map": weight_map}, indent=2) + "\n"
         )

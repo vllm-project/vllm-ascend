@@ -1,0 +1,5 @@
+pr: 21697
+entries:
+  - category: bugfix
+    text: Preserved Qwen3.8 PLE n-gram context offsets across level-2 sleep and wake, preventing incorrect generation after live weight updates.
+    model: qwen3.8-flash-next
