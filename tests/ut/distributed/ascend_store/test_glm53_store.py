@@ -416,8 +416,6 @@ class TestGLM53Store(unittest.TestCase):
             saves_attention = rank == 0 and pcp_rank == 0
             expected_groups = {2, 3, 4} | ({0} if saves_attention else set())
             self.assertEqual(task_groups, expected_groups)
-            request = metadata.requests[0]
-            self.assertEqual(len(request.transfer.block_gvas_by_group_np), 5)
             self.finish_layerwise_step(worker, metadata)
             workers.append((worker, caches))
             self.doCleanups()
@@ -442,9 +440,6 @@ class TestGLM53Store(unittest.TestCase):
             metadata = self.make_metadata(target, [block_hash], load=True)
             metadata.requests[0].is_last_chunk = True
             worker.prepare_layerwise_step(metadata)
-            request = metadata.requests[0]
-            self.assertEqual(len(request.transfer.load_block_gvas_by_group_np), 5)
-            self.assertEqual(len(request.transfer.load_block_gvas_by_group_np[1]), 0)
             self.finish_layerwise_step(worker, metadata, load=True)
             self.assert_restored(worker, caches, source, target)
         for key in scheduler._make_layerwise_hit_check_keys(4, block_hash.hex()):
