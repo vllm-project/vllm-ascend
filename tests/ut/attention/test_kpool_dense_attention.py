@@ -299,6 +299,8 @@ def test_projected_mha_dispatch_preserves_cache_and_indexer_work(impl_cls, graph
     impl: Any = object.__new__(impl_cls)
     impl.qk_rope_head_dim = 0
     impl.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
+    impl.pcp_enabled = False
+    impl._parallel_o_proj = None
     impl.enable_sparse_sfa_c8 = impl.enable_sparse_sfa_turboquant = False
     impl.q_lora_rank = impl.kv_lora_rank = impl.v_head_dim = 2
     impl.local_num_heads = 1
@@ -312,25 +314,25 @@ def test_projected_mha_dispatch_preserves_cache_and_indexer_work(impl_cls, graph
     impl.W_UK_T = impl.W_UV = torch.ones(1, 2, 2)
     hidden = torch.ones(3, 2)
     metadata = SimpleNamespace(
-        cos=None, sin=None, num_actual_tokens=3, num_input_tokens=3, slot_mapping=torch.arange(3), prefill_mha=object()
+        cos=None,
+        sin=None,
+        num_actual_tokens=3,
+        num_input_tokens=3,
+        slot_mapping=torch.arange(3),
+        cum_query_lens=torch.tensor([3]),
+        seq_lens=torch.tensor([3]),
+        prefill_mha=object(),
     )
     impl._compose_sfa_kv_cache = MagicMock(return_value=(torch.empty(1),))
     impl._get_sfa_kv_slot_mapping = MagicMock(return_value=metadata.slot_mapping)
     impl._get_indexer_attn_metadata = MagicMock(return_value=object())
-    impl._get_parallel_forward_context = MagicMock(
-        return_value=SimpleNamespace(
-            actual_seq_lengths_query=torch.tensor([3]),
-            actual_seq_lengths_key=torch.tensor([3]),
-            kv_slot_mapping=metadata.slot_mapping,
-            topk_num_tokens=3,
-        )
-    )
     impl.fused_qkv_a_proj = MagicMock(return_value=(torch.zeros(3, 4),))
     impl.q_a_layernorm = lambda value: value
     impl.exec_kv = MagicMock(return_value=(None, torch.zeros(3, 2)))
-    impl._store_parallel_kv = MagicMock(return_value=(None, None))
+    impl._on_kv_cache_written = MagicMock()
+    impl._start_o_proj_weight_gather = MagicMock()
     impl._q_proj_and_k_up_proj = MagicMock(return_value=(torch.zeros(3, 1, 2), None))
-    impl._record_query_gather_context = MagicMock()
+    impl._on_query_ready = MagicMock()
     impl._prepare_indexer_metadata = MagicMock()
     impl.indexer = MagicMock(return_value=torch.zeros(3, 1, 1, dtype=torch.int32))
     impl._execute_sparse_flash_attention_process = MagicMock(return_value=torch.ones(3, 2))
@@ -354,11 +356,13 @@ def test_projected_mha_dispatch_preserves_cache_and_indexer_work(impl_cls, graph
         assert forward(impl, "layer", hidden, (), metadata, output) is output
     routed = impl_cls is AscendSFAImpl and not graph
     impl.exec_kv.assert_called_once()
-    impl._store_parallel_kv.assert_called_once()
+    impl._on_kv_cache_written.assert_called_once()
+    impl._on_query_ready.assert_called_once()
     impl.indexer.assert_called_once()
     assert impl.indexer.call_args.kwargs["compute_topk"]
     assert mha.call_count == int(routed)
     assert impl._execute_sparse_flash_attention_process.call_count == int(not routed)
     assert impl._v_up_proj.call_count == int(not routed)
+    impl._q_proj_and_k_up_proj.assert_called_once()
     assert impl._q_proj_and_k_up_proj.call_args.kwargs == ({"absorb": False} if routed else {})
     torch.testing.assert_close(output, torch.full_like(output, 5.0 if routed else 9.0))
