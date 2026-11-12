@@ -237,7 +237,15 @@ class EngramModelState(AscendModelState):
         if self.decoder_replay_state is not None:
             self.decoder_replay_state.prepare(
                 DecoderReplayInputs(
-                    input_batch, block_tables, slot_mappings, attn_groups, replay_start, self.pcp_context
+                    input_batch,
+                    block_tables,
+                    slot_mappings,
+                    attn_groups,
+                    replay_start,
+                    self.pcp_context,
+                    metadata_producer_stream=(
+                        self.device_metadata.executor.stream if self.device_metadata is not None else None
+                    ),
                 ),
                 cudagraph_mode,
                 for_capture=for_capture,
