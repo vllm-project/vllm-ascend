@@ -53,7 +53,7 @@ def test_dspark_sample_logits_dispatch(monkeypatch, probabilistic):
     speculator.temperature = torch.tensor([0.5, 1.5])
     speculator.seeds = torch.tensor([3, 7])
     speculator._step_cols = torch.arange(2, dtype=torch.int32)
-    if vllm_version_is("0.32.0"):
+    if vllm_version_is("0.33.0"):
         # vLLM main (#63554) forwards the draft-logits cache shard to the sampler.
         speculator.draft_logits = (  # type: ignore[assignment]
             torch.empty(2, 2, 3) if probabilistic else None
@@ -99,7 +99,7 @@ def test_dspark_sample_logits_dispatch(monkeypatch, probabilistic):
         torch.testing.assert_close(args[4], sample_pos - 1)
         assert kwargs["apply_temperature"] is True
         assert kwargs["is_drafting"] is True
-        if vllm_version_is("0.32.0"):
+        if vllm_version_is("0.33.0"):
             assert kwargs["logits_cache"] is speculator.draft_logits
         else:
             assert kwargs["logits_cache"] is speculator.draft_logits.values  # type: ignore[attr-defined]

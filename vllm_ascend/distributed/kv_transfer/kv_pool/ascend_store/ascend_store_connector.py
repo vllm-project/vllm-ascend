@@ -31,7 +31,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
-from vllm.v1.worker import mamba_utils
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_backend_class,
@@ -44,6 +43,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_wor
     LayerwiseKVPoolWorker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import LookupKeyServer
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    get_sharded_mamba_group_ids,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
     AscendStorePromMetrics,
@@ -52,9 +54,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler imp
     BaseKVPoolScheduler,
     KVPoolScheduler,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import (
-    KVPoolWorker,
-)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import BaseKVPoolWorker, KVPoolWorker
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandshakeMetadata
@@ -71,7 +71,7 @@ def create_kv_pool_worker(
     vllm_config: VllmConfig,
     use_layerwise: bool,
     kv_cache_config: KVCacheConfig | None = None,
-) -> KVPoolWorker:
+) -> BaseKVPoolWorker:
     worker_class = LayerwiseKVPoolWorker if use_layerwise else KVPoolWorker
     return worker_class(
         vllm_config,
@@ -126,6 +126,13 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None):
         super().__init__(vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config)
         self.kv_role = vllm_config.kv_transfer_config.kv_role
+        parallel_config = vllm_config.parallel_config
+        if (
+            get_sharded_mamba_group_ids(kv_cache_config)
+            and parallel_config.tensor_parallel_size > 1
+            and parallel_config.prefill_context_parallel_size > 1
+        ):
+            raise ValueError("AscendStore sharded Mamba state transfer currently requires PCP=1 or TP=1")
 
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         removed = {"pool_prefix_mode", "npu_shared_engine_direct_only", "npu_store_setup_lock"} & extra_config.keys()
@@ -164,7 +171,6 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self._kv_cache_events: KVConnectorKVEvents | None = None
 
         self._current_step_has_real_forward = False
-        self._mamba_copy_bufs = None
         # Handle to the (V2) mamba hybrid model state while its per-layer
         # align pre-copy is deferred behind this connector's layerwise loads.
         self._mamba_state: Any = None
@@ -173,8 +179,8 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         # Opt in only for synchronous bulk loads, not background retrieval.
         self.requires_mamba_state_copy_after_load = not self.use_layerwise and not extra_config.get("load_async", False)
 
-        self.connector_scheduler = None
-        self.connector_worker = None
+        self.connector_scheduler: BaseKVPoolScheduler | None = None
+        self.connector_worker: BaseKVPoolWorker | None = None
         self.dspark_prefix_cache_enabled = False
 
         if role == KVConnectorRole.SCHEDULER:
@@ -214,7 +220,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
     def restore_dspark_prefix(self, metadata: Any, request_id: str, offset: int, block_ids: Any) -> int:
         assert self.connector_worker is not None
-        cache = self.connector_worker.dspark_prefix_cache
+        cache = getattr(self.connector_worker, "dspark_prefix_cache", None)
         request = next((request for request in metadata.requests if request.req_id == request_id), None)
         if cache is None or request is None:
             raise RuntimeError("DSpark prefix hit has no registered draft cache or load metadata")
@@ -222,7 +228,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
     def save_dspark_prefix(self, metadata: Any, request_id: str, through_tokens: int, block_ids: Any) -> None:
         assert self.connector_worker is not None
-        cache = self.connector_worker.dspark_prefix_cache
+        cache = getattr(self.connector_worker, "dspark_prefix_cache", None)
         request = next((request for request in metadata.requests if request.req_id == request_id), None)
         if cache is not None and request is not None:
             cache.save(request, through_tokens, block_ids)
@@ -232,9 +238,10 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         try:
             if self.connector_scheduler is not None:
                 client = self.connector_scheduler.client
-                if client is not None:
-                    client.close()
-                if self.use_layerwise:
+                try:
+                    if client is not None:
+                        client.close()
+                finally:
                     self.connector_scheduler.store_scheduler.close()
         finally:
             if hasattr(self, "lookup_server"):
@@ -371,14 +378,11 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             # steps), V1 calls start_load_kv after target forward, before MTP.
             # Target hooks have advanced current_layer by then, so preparing
             # the step there would reset the current layer before MTP.
-            self._mamba_copy_bufs = None
             self._loaded_layer = None
             cast(LayerwiseKVPoolWorker, self.connector_worker).prepare_layerwise_step(connector_metadata)
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
-        if not self.use_layerwise:
-            self._mamba_copy_bufs = None
         metadata = self._get_connector_metadata()
         self._current_step_has_real_forward = forward_context is not None
         logger.debug(
@@ -413,11 +417,6 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if self._loaded_layer != layer:
             cast(LayerwiseKVPoolWorker, self.connector_worker).wait_for_layer_load()
             self._loaded_layer = layer
-        if self._mamba_copy_bufs is not None:
-            mamba_utils.do_mamba_copy_block_for_layer(
-                self._mamba_copy_bufs,
-                layer_name,
-            )
         # Mamba state copy must run AFTER this layer's load finishes,
         # otherwise the copy would race with the in-flight layerwise load and
         # read half-loaded state. The model state no-ops for non-mamba layers
@@ -428,28 +427,20 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def prepare_mamba_state_copy(self, mamba_state_or_copy_bufs) -> bool:
         """Take over the mamba align pre-copy for this step.
 
-        The V1 model runner passes its mamba copy buffers; each layer's copy
-        is then executed from :meth:`wait_for_layer_load` via
-        ``mamba_utils.do_mamba_copy_block_for_layer``. The V2 model runner
-        passes its mamba hybrid model state from ``preprocess_state``; each
-        layer's copy is executed from :meth:`wait_for_layer_load` right after
-        that layer's KV load (conv/ssm state included) completes.
+        Each layer's copy is executed from :meth:`wait_for_layer_load` right
+        after that layer's KV load (conv/ssm state included) completes.
         """
         if not self.requires_mamba_state_copy_after_layer_load:
             return False
-        if hasattr(mamba_state_or_copy_bufs, "do_mamba_copy_for_layer"):
-            self._mamba_state = mamba_state_or_copy_bufs
-        else:
-            mamba_utils.prepare_mamba_copy_by_layer(mamba_state_or_copy_bufs)
-            self._mamba_copy_bufs = mamba_state_or_copy_bufs
+        if not hasattr(mamba_state_or_copy_bufs, "do_mamba_copy_for_layer"):
+            raise TypeError(
+                "prepare_mamba_state_copy expects a mamba hybrid model state with "
+                f"do_mamba_copy_for_layer, got {type(mamba_state_or_copy_bufs).__name__}"
+            )
+        self._mamba_state = mamba_state_or_copy_bufs
         return True
 
     def finish_mamba_state_copy(self) -> None:
-        if self._mamba_copy_bufs is not None:
-            try:
-                mamba_utils.finish_mamba_copy_by_layer(self._mamba_copy_bufs)
-            finally:
-                self._mamba_copy_bufs = None
         self._mamba_state = None
 
     def save_kv_layer(
@@ -473,7 +464,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             return
 
         assert self.connector_worker is not None
-        self.connector_worker.wait_for_save(self._get_connector_metadata())
+        cast(KVPoolWorker, self.connector_worker).wait_for_save(self._get_connector_metadata())
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str] | None, set[str] | None]:
         """Get the finished recving and sending requests."""

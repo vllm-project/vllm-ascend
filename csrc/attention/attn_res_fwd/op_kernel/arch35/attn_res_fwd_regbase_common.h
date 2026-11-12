@@ -21,6 +21,9 @@
 namespace AttnResFwd {
 namespace RegBase {
 
+// Both BF16 half-row bases must remain aligned to a 32-byte UB block.
+constexpr uint32_t kDualB16AlignedHidden = 32U;
+
 using namespace AscendC;
 using namespace AscendC::MicroAPI;
 
@@ -76,9 +79,10 @@ __aicore__ inline void AddB16(const LocalTensor<T> &dst, const LocalTensor<T> &r
 
 /*!
  * outFp32 += Cast(srcB16) * broadcast(brcOneBlock[0])
- * even H：半分双发；odd H：单路。
+ * INITIALIZE starts from +0 in registers; keep the separate Mul/Add rounding.
+ * 对齐的半行：双路；其他 H：线性单路。
  */
-template <typename D_IN>
+template <typename D_IN, bool INITIALIZE = false>
 __aicore__ inline void WeightedMulAddFromB16(const LocalTensor<float> &outFp32, const LocalTensor<D_IN> &srcB16,
                                              const LocalTensor<float> &brcOneBlock, uint32_t hiddenSize)
 {
@@ -86,7 +90,7 @@ __aicore__ inline void WeightedMulAddFromB16(const LocalTensor<float> &outFp32, 
     __local_mem__ float *dstAddr = (__local_mem__ float *)outFp32.GetPhyAddr();
     __local_mem__ float *brcAddr = (__local_mem__ float *)brcOneBlock.GetPhyAddr();
 
-    if ((hiddenSize & 1U) == 0U) {
+    if ((hiddenSize & (kDualB16AlignedHidden - 1U)) == 0U) {
         const uint32_t halfCount = hiddenSize >> 1;
         uint32_t sreg = halfCount;
         const uint16_t repeatTimes = static_cast<uint16_t>((halfCount + kVlFp32 - 1U) / kVlFp32);
@@ -103,8 +107,13 @@ __aicore__ inline void WeightedMulAddFromB16(const LocalTensor<float> &outFp32, 
                     mask = UpdateMask<float>(sreg);
                     DataCopy<float, LoadDist::DIST_NORM>(x0, srcAddr + i * kVlFp32);
                     DataCopy<float, LoadDist::DIST_NORM>(x1, srcAddr2 + i * kVlFp32);
-                    DataCopy<float, LoadDist::DIST_NORM>(acc0, dstAddr + i * kVlFp32);
-                    DataCopy<float, LoadDist::DIST_NORM>(acc1, dstAddr2 + i * kVlFp32);
+                    if constexpr (INITIALIZE) {
+                        Duplicate(acc0, 0.0f, mask);
+                        Duplicate(acc1, 0.0f, mask);
+                    } else {
+                        DataCopy<float, LoadDist::DIST_NORM>(acc0, dstAddr + i * kVlFp32);
+                        DataCopy<float, LoadDist::DIST_NORM>(acc1, dstAddr2 + i * kVlFp32);
+                    }
                     Mul(x0, x0, wReg, mask);
                     Add(acc0, acc0, x0, mask);
                     Mul(x1, x1, wReg, mask);
@@ -120,8 +129,13 @@ __aicore__ inline void WeightedMulAddFromB16(const LocalTensor<float> &outFp32, 
                     DataCopy<D_IN, LoadDist::DIST_UNPACK_B16>(xIn1, srcAddr2 + i * kVlFp32);
                     Cast<float, D_IN, kCastB16ToB32>(x0, xIn0, mask);
                     Cast<float, D_IN, kCastB16ToB32>(x1, xIn1, mask);
-                    DataCopy<float, LoadDist::DIST_NORM>(acc0, dstAddr + i * kVlFp32);
-                    DataCopy<float, LoadDist::DIST_NORM>(acc1, dstAddr2 + i * kVlFp32);
+                    if constexpr (INITIALIZE) {
+                        Duplicate(acc0, 0.0f, mask);
+                        Duplicate(acc1, 0.0f, mask);
+                    } else {
+                        DataCopy<float, LoadDist::DIST_NORM>(acc0, dstAddr + i * kVlFp32);
+                        DataCopy<float, LoadDist::DIST_NORM>(acc1, dstAddr2 + i * kVlFp32);
+                    }
                     Mul(x0, x0, wReg, mask);
                     Add(acc0, acc0, x0, mask);
                     Mul(x1, x1, wReg, mask);
@@ -143,7 +157,11 @@ __aicore__ inline void WeightedMulAddFromB16(const LocalTensor<float> &outFp32, 
                 for (uint16_t i = 0; i < repeatTimes; ++i) {
                     mask = UpdateMask<float>(sreg);
                     DataCopy<float, LoadDist::DIST_NORM>(x0, srcAddr + i * kVlFp32);
-                    DataCopy<float, LoadDist::DIST_NORM>(acc0, dstAddr + i * kVlFp32);
+                    if constexpr (INITIALIZE) {
+                        Duplicate(acc0, 0.0f, mask);
+                    } else {
+                        DataCopy<float, LoadDist::DIST_NORM>(acc0, dstAddr + i * kVlFp32);
+                    }
                     Mul(x0, x0, wReg, mask);
                     Add(acc0, acc0, x0, mask);
                     DataCopy(dstAddr + i * kVlFp32, acc0, mask);
@@ -154,7 +172,11 @@ __aicore__ inline void WeightedMulAddFromB16(const LocalTensor<float> &outFp32, 
                     mask = UpdateMask<float>(sreg);
                     DataCopy<D_IN, LoadDist::DIST_UNPACK_B16>(xIn0, srcAddr + i * kVlFp32);
                     Cast<float, D_IN, kCastB16ToB32>(x0, xIn0, mask);
-                    DataCopy<float, LoadDist::DIST_NORM>(acc0, dstAddr + i * kVlFp32);
+                    if constexpr (INITIALIZE) {
+                        Duplicate(acc0, 0.0f, mask);
+                    } else {
+                        DataCopy<float, LoadDist::DIST_NORM>(acc0, dstAddr + i * kVlFp32);
+                    }
                     Mul(x0, x0, wReg, mask);
                     Add(acc0, acc0, x0, mask);
                     DataCopy(dstAddr + i * kVlFp32, acc0, mask);
@@ -177,7 +199,7 @@ __aicore__ inline void CastB16ToFp32Dual(const LocalTensor<float> &dstFp32, cons
         return;
     }
 
-    if ((hiddenSize & 1U) == 0U) {
+    if ((hiddenSize & (kDualB16AlignedHidden - 1U)) == 0U) {
         const uint32_t halfCount = hiddenSize >> 1;
         uint32_t sreg = halfCount;
         const uint16_t repeatTimes = static_cast<uint16_t>((halfCount + kVlFp32 - 1U) / kVlFp32);
@@ -229,7 +251,7 @@ __aicore__ inline void CastFp32ToB16Dual(const LocalTensor<D_OUT> &dstB16, const
         return;
     }
 
-    if ((hiddenSize & 1U) == 0U) {
+    if ((hiddenSize & (kDualB16AlignedHidden - 1U)) == 0U) {
         const uint32_t halfCount = hiddenSize >> 1;
         uint32_t sreg = halfCount;
         const uint16_t repeatTimes = static_cast<uint16_t>((halfCount + kVlFp32 - 1U) / kVlFp32);
@@ -268,48 +290,6 @@ __aicore__ inline void CastFp32ToB16Dual(const LocalTensor<D_OUT> &dstB16, const
     }
 }
 
-/*! dst = src * src（半分双发） */
-__aicore__ inline void MulSquareDual(const LocalTensor<float> &dst, const LocalTensor<float> &src, uint32_t hiddenSize)
-{
-    __local_mem__ float *srcAddr = (__local_mem__ float *)src.GetPhyAddr();
-    __local_mem__ float *dstAddr = (__local_mem__ float *)dst.GetPhyAddr();
-    if ((hiddenSize & 1U) == 0U) {
-        const uint32_t halfCount = hiddenSize >> 1;
-        uint32_t sreg = halfCount;
-        const uint16_t repeatTimes = static_cast<uint16_t>((halfCount + kVlFp32 - 1U) / kVlFp32);
-        __local_mem__ float *srcAddr2 = srcAddr + halfCount;
-        __local_mem__ float *dstAddr2 = dstAddr + halfCount;
-        __VEC_SCOPE__
-        {
-            RegTensor<float> x0, x1, y0, y1;
-            MaskReg mask;
-            for (uint16_t i = 0; i < repeatTimes; ++i) {
-                mask = UpdateMask<float>(sreg);
-                DataCopy<float, LoadDist::DIST_NORM>(x0, srcAddr + i * kVlFp32);
-                DataCopy<float, LoadDist::DIST_NORM>(x1, srcAddr2 + i * kVlFp32);
-                Mul(y0, x0, x0, mask);
-                Mul(y1, x1, x1, mask);
-                DataCopy(dstAddr + i * kVlFp32, y0, mask);
-                DataCopy(dstAddr2 + i * kVlFp32, y1, mask);
-            }
-        }
-    } else {
-        uint32_t sreg = hiddenSize;
-        const uint16_t repeatTimes = static_cast<uint16_t>((hiddenSize + kVlFp32 - 1U) / kVlFp32);
-        __VEC_SCOPE__
-        {
-            RegTensor<float> x0, y0;
-            MaskReg mask;
-            for (uint16_t i = 0; i < repeatTimes; ++i) {
-                mask = UpdateMask<float>(sreg);
-                DataCopy<float, LoadDist::DIST_NORM>(x0, srcAddr + i * kVlFp32);
-                Mul(y0, x0, x0, mask);
-                DataCopy(dstAddr + i * kVlFp32, y0, mask);
-            }
-        }
-    }
-}
-
 /*! dst = src0 * src1（半分双发） */
 __aicore__ inline void MulDual(const LocalTensor<float> &dst, const LocalTensor<float> &src0,
                                const LocalTensor<float> &src1, uint32_t hiddenSize)
@@ -317,7 +297,7 @@ __aicore__ inline void MulDual(const LocalTensor<float> &dst, const LocalTensor<
     __local_mem__ float *aAddr = (__local_mem__ float *)src0.GetPhyAddr();
     __local_mem__ float *bAddr = (__local_mem__ float *)src1.GetPhyAddr();
     __local_mem__ float *dstAddr = (__local_mem__ float *)dst.GetPhyAddr();
-    if ((hiddenSize & 1U) == 0U) {
+    if ((hiddenSize & (kDualB16AlignedHidden - 1U)) == 0U) {
         const uint32_t halfCount = hiddenSize >> 1;
         uint32_t sreg = halfCount;
         const uint16_t repeatTimes = static_cast<uint16_t>((halfCount + kVlFp32 - 1U) / kVlFp32);
@@ -365,7 +345,7 @@ __aicore__ inline void MulByBrcBlockDual(const LocalTensor<float> &dst, const Lo
     __local_mem__ float *srcAddr = (__local_mem__ float *)src.GetPhyAddr();
     __local_mem__ float *dstAddr = (__local_mem__ float *)dst.GetPhyAddr();
     __local_mem__ float *brcAddr = (__local_mem__ float *)brcOneBlock.GetPhyAddr();
-    if ((hiddenSize & 1U) == 0U) {
+    if ((hiddenSize & (kDualB16AlignedHidden - 1U)) == 0U) {
         const uint32_t halfCount = hiddenSize >> 1;
         uint32_t sreg = halfCount;
         const uint16_t repeatTimes = static_cast<uint16_t>((halfCount + kVlFp32 - 1U) / kVlFp32);
@@ -599,37 +579,6 @@ __aicore__ inline void ReduceSquareSum(const LocalTensor<float> &dstScalar, cons
             mask = UpdateMask<float>(sreg);
             DataCopy<float, LoadDist::DIST_NORM>(x, srcAddr + i * kVlFp32);
             Mul(prod, x, x, mask);
-            ReduceSum(part, prod, mask);
-            Add(acc, acc, part, maskAll);
-        }
-        DataCopy<float, StoreDist::DIST_FIRST_ELEMENT_B32>(dstAddr, acc, maskAll);
-    }
-}
-
-/*! dst[0] = sum(src0 * src1)，src 不被破坏 */
-__aicore__ inline void ReduceMulSum(const LocalTensor<float> &dstScalar, const LocalTensor<float> &src0,
-                                    const LocalTensor<float> &src1, uint32_t hiddenSize)
-{
-    if ((hiddenSize % 512U) == 0U && hiddenSize <= 8192U) {
-        GroupedReduce<false>(dstScalar, src0, src1, dstScalar, hiddenSize, 0.0f, dstScalar);
-        return;
-    }
-    __local_mem__ float *aAddr = (__local_mem__ float *)src0.GetPhyAddr();
-    __local_mem__ float *bAddr = (__local_mem__ float *)src1.GetPhyAddr();
-    __local_mem__ float *dstAddr = (__local_mem__ float *)dstScalar.GetPhyAddr();
-    uint32_t sreg = hiddenSize;
-    const uint16_t repeatTimes = static_cast<uint16_t>((hiddenSize + kVlFp32 - 1U) / kVlFp32);
-    __VEC_SCOPE__
-    {
-        RegTensor<float> a, b, prod, part, acc;
-        MaskReg mask;
-        MaskReg maskAll = CreateMask<float, MaskPattern::ALL>();
-        Duplicate(acc, 0.0f, maskAll);
-        for (uint16_t i = 0; i < repeatTimes; ++i) {
-            mask = UpdateMask<float>(sreg);
-            DataCopy<float, LoadDist::DIST_NORM>(a, aAddr + i * kVlFp32);
-            DataCopy<float, LoadDist::DIST_NORM>(b, bAddr + i * kVlFp32);
-            Mul(prod, a, b, mask);
             ReduceSum(part, prod, mask);
             Add(acc, acc, part, maskAll);
         }

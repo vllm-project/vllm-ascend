@@ -23,17 +23,16 @@ class TestMooncakePCP(unittest.TestCase):
         store = hybrid_tests.MemoryRangeStore()
         workers = []
         for stage in range(2):
-            for pcp_rank in range(2):
+            for pcp_rank in (1, 0):
                 worker, arrays = pipeline_tests.TestMooncakePipeline.make_stage(
                     self, stage, store, hybrid=False, draft=True, mla=True, pcp_size=2, pcp_rank=pcp_rank
                 )
-                for array in arrays.values():
-                    array ^= np.uint8(41 * pcp_rank)
                 workers.append((worker, arrays, {name: array.copy() for name, array in arrays.items()}))
         scheduler = pipeline_tests.TestMooncakePipeline.make_scheduler(self, workers[0][0], store)
         keys = scheduler._make_layerwise_hit_check_keys(0, b"h0".hex())
-        self.assertEqual(len(set(keys)), 4)
+        self.assertEqual(len(set(keys)), 2)
         for index, (worker, _, _) in enumerate(workers):
+            before = set(store.objects)
             request = ReqMeta(
                 "save",
                 token_len_chunk=32,
@@ -44,7 +43,10 @@ class TestMooncakePCP(unittest.TestCase):
             )
             pipeline_tests.TestMooncakePipeline.run_step(worker, request)
             worker._drain_deferred_last_save()
+            if worker.pcp_rank != 0:
+                self.assertEqual(set(store.objects), before)
             self.assertEqual(scheduler._query_layerwise_block_hits([keys]), [index == 3])
+        self.assertEqual(len(store.complete), 4)
         for worker, arrays, saved in workers:
             for array in arrays.values():
                 array.fill(0)
@@ -68,20 +70,18 @@ class TestMooncakePCP(unittest.TestCase):
             self.assertFalse(job.is_alive(), "PCP transfer did not finish")
         self.assertFalse(errors)
 
-    def test_four_rank_hybrid_roundtrip_and_incomplete_rank_miss(self):
-        # TP=1 matches DSV4 Flash; TP=2 also exercises MLA writer dedup and
-        # per-TP recurrent snapshots. Private tail rings must remain private.
-        for tp_size in (1, 2):
-            with self.subTest(tp_size=tp_size):
+    def test_hybrid_roundtrip_requires_all_pcp_or_tp_head_shards(self):
+        for tp_size, pcp_size in ((1, 4), (2, 1)):
+            with self.subTest(tp_size=tp_size, pcp_size=pcp_size):
                 store = hybrid_tests.MemoryRangeStore()
                 workers = []
-                for pcp_rank in range(4):
+                for pcp_rank in reversed(range(pcp_size)):
                     for tp_rank in range(tp_size):
                         worker, _, arrays, jobs, errors = hybrid_tests.TestMooncakeHybrid.make_hybrid(
                             self,
                             extra_entry=True,
                             private_tail=True,
-                            pcp_size=4,
+                            pcp_size=pcp_size,
                             pcp_rank=pcp_rank,
                             tp_size=tp_size,
                             tp_rank=tp_rank,
@@ -90,9 +90,8 @@ class TestMooncakePCP(unittest.TestCase):
                         self.addCleanup(self.finish_jobs, jobs, errors)
                         worker.m_store = worker.kv_send_thread.m_store = worker.kv_recv_thread.m_store = store
                         for name, array in arrays.items():
-                            # Identical MLA replicas within TP, distinct PCP
-                            # payloads, and distinct recurrent state on each TP.
-                            array += pcp_rank * 31 + (tp_rank * 7 if "state" in name else 0)
+                            if "state" in name:
+                                array += pcp_rank * 31 + tp_rank * 7
                         saved = {name: array.copy() for name, array in arrays.items()}
                         workers.append((worker, arrays, saved))
                 first = workers[0][0]
@@ -112,9 +111,15 @@ class TestMooncakePCP(unittest.TestCase):
                 self.assertEqual(scheduler.hash_block_size, first.hash_block_size)
                 keys = scheduler._make_layerwise_hit_check_keys(0, b"h0".hex())
                 state_keys = scheduler._make_layerwise_hit_check_keys(2, b"h3".hex())
-                self.assertEqual(len(keys), 4)
-                self.assertEqual(len(state_keys), 4 * tp_size)
+                self.assertEqual(len(keys), 1)
+                self.assertEqual(len(state_keys), pcp_size * tp_size)
                 for index, (worker, _, _) in enumerate(workers):
+                    self.assertEqual(worker.metadata[2].head_or_tp_rank, worker.tp_rank)
+                    state_key = worker.layerwise_keys.make_base_key(2, b"h3".hex(), worker.tp_rank, worker.pp_rank)
+                    if pcp_size > 1:
+                        state_key += f"@pcp_size:{pcp_size}@pcp_rank:{worker.pcp_rank}"
+                    self.assertEqual(worker._make_layerwise_full_key(2, b"h3".hex()), state_key)
+                    self.assertIn(state_key, state_keys)
                     for group in worker.cacheable_group_ids:
                         self.assertIn(
                             worker._make_layerwise_full_key(group, b"h0".hex()),
@@ -123,7 +128,7 @@ class TestMooncakePCP(unittest.TestCase):
                     hybrid_tests.TestMooncakeHybrid.save_prefix(self, worker)
                     # Missing the last PCP/TP state keeps the snapshot a miss.
                     self.assertEqual(scheduler._query_layerwise_block_hits([state_keys]), [index == len(workers) - 1])
-                self.assertEqual(len(store.complete), 4 * (4 + 2 + tp_size))
+                self.assertEqual(len(store.complete), 4 + 2 + pcp_size * tp_size)
                 store.complete.remove(keys[-1])
                 self.assertEqual(scheduler._query_layerwise_block_hits([keys]), [False])
                 store.complete.add(keys[-1])

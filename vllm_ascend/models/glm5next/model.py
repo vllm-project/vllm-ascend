@@ -56,8 +56,10 @@ from vllm.model_executor.models.glm4_1v import (
     Glm4vForConditionalGeneration,
 )
 from vllm.model_executor.models.interfaces import (
+    EagleModelMixin,
     HasInnerState,
     IsHybrid,
+    SupportsEagle3,
     SupportsPP,
 )
 from vllm.model_executor.models.utils import (
@@ -80,7 +82,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import get_kv_cache_torch_dtype
 
-from vllm_ascend.utils import pad_sequence_parallel_tokens, vllm_version_is
+from vllm_ascend.utils import pad_sequence_parallel_tokens
 
 from .attention import Glm5NextMLAAttention
 from .kda import Glm5NextLinearAttention, get_kda_parallel_size
@@ -383,9 +385,7 @@ class Glm5NextDecoderLayer(nn.Module):
         self._mlp_is_moe = isinstance(self.mlp, Glm5NextMoE)
         # In SP, the attention output projection leaves a partial sum; the
         # decoder-layer reduce_scatter after attention completes it (DSv4 pattern).
-        # MTP layers use the non-mHC path which has no sp_reduce_scatter, so
-        # their o_proj must still reduce normally.
-        if self.is_sequence_parallel and not is_mtp_layer:
+        if self.is_sequence_parallel:
             self.self_attn.o_proj.reduce_results = False
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -428,16 +428,34 @@ class Glm5NextDecoderLayer(nn.Module):
     ]:
         # 70B or MTP layers: KDA + MoE without HC.
         if not self.mhc or self.is_mtp_layer:
+            mtp_sequence_parallel = self.is_mtp_layer and self.is_sequence_parallel
+            if mtp_sequence_parallel:
+                hidden_states = sp_shard(pad_sequence_parallel_tokens(hidden_states))
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
+
+            if mtp_sequence_parallel:
+                hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
 
             attn_output = self.self_attn(
                 hidden_states=hidden_states,
                 positions=positions,
             )
+            if mtp_sequence_parallel:
+                attn_output = sp_reduce_scatter(pad_sequence_parallel_tokens(attn_output))
             hidden_states, residual = self.post_attention_layernorm(attn_output, residual=residual)
-            hidden_states = self.mlp(hidden_states)
+            if self._mlp_is_moe:
+                hidden_states = self.mlp(hidden_states, already_sequence_parallel=mtp_sequence_parallel)
+            else:
+                hidden_states = self.mlp(hidden_states)
             if self.is_mtp_layer:
+                if mtp_sequence_parallel:
+                    # Restore MTP's full-token output contract, gathering both
+                    # inputs to shared_head's fused add + RMSNorm together.
+                    combined_states = torch.cat([hidden_states, residual], dim=-1)
+                    combined_states = sp_all_gather(combined_states)[: positions.shape[0]]
+                    hidden_states, residual = combined_states.split(self.hidden_size, dim=-1)
+                    residual = residual.contiguous()
                 # Return the unsummed pair: the MTP caller feeds it straight
                 # into shared_head's fused_add_rms_norm (one kernel instead of
                 # a separate residual-add + norm). The sum itself is unchanged
@@ -579,7 +597,7 @@ class Glm5NextDecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class Glm5NextModel(nn.Module):
+class Glm5NextModel(nn.Module, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -660,6 +678,31 @@ class Glm5NextModel(nn.Module):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
+    def _aux_hidden_state(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+        post: torch.Tensor | None,
+        comb: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Completed residual stream entering a layer, as one hidden vector.
+
+        mHC layers defer their final ``hc_post`` into the next layer's fused
+        pre-op, so ``hidden_states`` holds the raw layer output while the
+        widened stream is completed here and contracted back to
+        ``hidden_size``. Non-mHC layers already return the summed stream.
+        """
+        if post is None:
+            return hidden_states
+        assert residual is not None and comb is not None
+        completed = torch.ops._C_ascend.npu_hc_post(
+            hidden_states.unsqueeze(0),
+            residual.unsqueeze(0),
+            post.squeeze(-1).unsqueeze(0),
+            comb.unsqueeze(0),
+        ).squeeze(0)
+        return hc_contract(completed, self.config.hc_mult)
+
     def make_empty_intermediate_tensors(
         self,
         batch_size: int,
@@ -699,7 +742,7 @@ class Glm5NextModel(nn.Module):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -721,7 +764,15 @@ class Glm5NextModel(nn.Module):
         if self.is_sequence_parallel:
             hidden_states = sp_shard(pad_sequence_parallel_tokens(hidden_states))
 
-        for layer in self._active_layers:
+        aux_hidden_states: list[torch.Tensor] = []
+        # DFlash2 targets are validated as PP=1, so auxiliary layer IDs are
+        # local to this model instance and must not depend on a PP stage offset.
+        for layer_idx, layer in enumerate(self._active_layers):
+            if layer_idx in self.aux_hidden_state_layers:
+                aux_hidden_state = self._aux_hidden_state(hidden_states, residual, post, comb)
+                if self.is_sequence_parallel:
+                    aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
+                aux_hidden_states.append(aux_hidden_state)
             hidden_states, residual, post, comb = layer(positions, hidden_states, residual, post, comb)
 
         if not get_pp_group().is_last_rank:
@@ -733,10 +784,21 @@ class Glm5NextModel(nn.Module):
                 tensors["comb"] = comb
             return IntermediateTensors(tensors)
 
+        # The mHC inputs are still sequence-parallel shards here. Materialize
+        # the final aux state before gathering the model output so residual,
+        # post, and comb all keep the same rank-local token layout.
+        if self.end_layer in self.aux_hidden_state_layers:
+            final_aux = self._aux_hidden_state(hidden_states, residual, post, comb)
+            if self.is_sequence_parallel:
+                final_aux = sp_all_gather(final_aux)[:full_num_tokens]
+            aux_hidden_states.append(final_aux)
+
         if self.is_sequence_parallel:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
 
         hidden_states = self.norm(hidden_states)
+        if aux_hidden_states:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
     # Entries are (name, weight) or (name, weight, kwargs); the optional third
@@ -775,13 +837,10 @@ class Glm5NextModel(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
-        if vllm_version_is("0.32.0"):
-            _pending_wk_fp8: dict = {}
-        else:
-            # Reordering loaders can split an FP8 indexer wk weight/scale pair
-            # across load_weights() calls; keep the pending buffer on the model.
-            _pending_wk_fp8 = getattr(self, "_pending_indexer_wk_fp8", {})
-            self._pending_indexer_wk_fp8 = _pending_wk_fp8
+        # Reordering loaders can split an FP8 indexer wk weight/scale pair
+        # across load_weights() calls; keep the pending buffer on the model.
+        _pending_wk_fp8 = getattr(self, "_pending_indexer_wk_fp8", {})
+        self._pending_indexer_wk_fp8 = _pending_wk_fp8
 
         for args in weights:
             name, loaded_weight = args[:2]
@@ -874,7 +933,7 @@ class Glm5NextModel(nn.Module):
         return loaded_params
 
 
-class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, DeepseekV2MixtureOfExperts, IsHybrid):
+class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, DeepseekV2MixtureOfExperts, IsHybrid, SupportsEagle3):
     supports_replayssm: ClassVar[Literal[True]] = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -938,8 +997,6 @@ class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, DeepseekV2Mixtur
             vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
         if use_glm_recoverssm(vllm_config):
-            if vllm_version_is("0.32.0"):
-                return MambaStateDtypeCalculator.append_kda_recoverssm_record(dtypes, vllm_config.model_config.dtype)
             # vLLM main moved KDA RecoverSSM records out of the KV cache and
             # removed the calculator helper, but Ascend still packs them in.
             return (*dtypes, torch.float32, get_kv_cache_torch_dtype("auto", vllm_config.model_config.dtype))
@@ -961,10 +1018,6 @@ class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, DeepseekV2Mixtur
             num_spec=num_spec,
         )
         if use_glm_recoverssm(vllm_config):
-            if vllm_version_is("0.32.0"):
-                return MambaStateShapeCalculator.append_kda_recoverssm_record(
-                    shapes, hf_config.linear_num_heads, hf_config.linear_head_dim, tp_size, num_spec + 1
-                )
             local_num_heads = divide(hf_config.linear_num_heads, tp_size)
             spec_query_len = num_spec + 1
             return (
@@ -997,7 +1050,7 @@ class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, DeepseekV2Mixtur
     info=Glm5NextProcessingInfo,
     dummy_inputs=Glm4vDummyInputsBuilder,
 )
-class Glm5NextForConditionalGeneration(Glm4vForConditionalGeneration, HasInnerState, IsHybrid):
+class Glm5NextForConditionalGeneration(Glm4vForConditionalGeneration, HasInnerState, IsHybrid, SupportsEagle3):
     supports_replayssm: ClassVar[Literal[True]] = True
     # The text model (KDA + dense-MLA + MoE) is a hybrid mamba model. The
     # multimodal wrapper must declare the same interfaces so vLLM treats it as
