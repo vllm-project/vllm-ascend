@@ -709,6 +709,10 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         if not is_kv_save_role(self.kv_role, self.save_decode_cache):
             return False
 
+        # KVPP owners persist disjoint layer shards; every owner saves.
+        if getattr(self, "use_kvpp", False):
+            return True
+
         # Each rank must save its own Mamba state shard.
         if group_id in self.sharded_mamba_group_ids:
             return True
