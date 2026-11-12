@@ -15,6 +15,8 @@ from vllm import envs
 
 from tests.e2e.common.rlhf.weight_transfer.checkpoint_adapters import (
     deepseek_v4_checkpoint_name,
+    expand_fused_expert_params,
+    expand_minimax_m3_params,
     minimax_m3_checkpoint_name,
 )
 
@@ -38,6 +40,9 @@ class WeightUpdateModelCase:
     meta_config_attribute: str | None = None
     checkpoint_model_prefix: str | None = None
     checkpoint_name_map: Callable[[str], str] | None = None
+    checkpoint_param_expander: Callable[[str, tuple[int, ...]], list[tuple[str, tuple[int, ...]]]] = (
+        expand_fused_expert_params
+    )
     expert_intermediate_size: int | None = None
     trust_remote_code: bool = True
     extra_server_args: tuple[str, ...] = ()
@@ -232,6 +237,7 @@ MINIMAX_M3_CASE = WeightUpdateModelCase(
     meta_config_attribute="text_config",
     checkpoint_model_prefix="language_model.model.",
     checkpoint_name_map=minimax_m3_checkpoint_name,
+    checkpoint_param_expander=expand_minimax_m3_params,
     # The legacy remote config creates a generic text config; the native
     # Transformers config resolves to the registered text model instead.
     trust_remote_code=False,

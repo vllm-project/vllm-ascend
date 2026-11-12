@@ -10,7 +10,7 @@ import torch
 from transformers import AutoConfig
 
 from tests.e2e.common.rlhf.weight_transfer import weight_source as utils
-from tests.e2e.common.rlhf.weight_transfer.case import MINIMAX_M3_CASE
+from tests.e2e.common.rlhf.weight_transfer.case import MINIMAX_M3_CASE, WeightUpdateModelCase
 
 
 def test_minimax_native_checkpoint_metadata():
@@ -46,4 +46,17 @@ def test_minimax_native_checkpoint_metadata():
 
 def test_fused_projection_rejects_odd_dimension():
     with pytest.raises(AssertionError, match="odd fused gate/up dimension"):
-        utils.expand_fused_mlp_params("model.layers.0.mlp.gate_up_proj.weight", (7, 16))
+        MINIMAX_M3_CASE.checkpoint_param_expander("model.layers.0.mlp.gate_up_proj.weight", (7, 16))
+
+
+def test_dense_fusion_expansion_is_model_specific():
+    case = WeightUpdateModelCase("fused-checkpoint", "unused", {})
+    name, shape = "model.layers.0.mlp.gate_up_proj.weight", (8, 16)
+    assert case.checkpoint_param_expander(name, shape) == [(name, shape)]
+    assert MINIMAX_M3_CASE.checkpoint_param_expander(name, shape) == [
+        ("model.layers.0.mlp.gate_proj.weight", (4, 16)),
+        ("model.layers.0.mlp.up_proj.weight", (4, 16)),
+    ]
+    # Even MiniMax must leave an unrelated attention tensor with the same tail alone.
+    name = "model.layers.0.self_attn.gate_up_proj.weight"
+    assert MINIMAX_M3_CASE.checkpoint_param_expander(name, shape) == [(name, shape)]
