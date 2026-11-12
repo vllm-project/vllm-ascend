@@ -1,10 +1,16 @@
 # HiSparse on Ascend
 
-HiSparse keeps active sparse-attention KV rows in NPU Resident/Hot storage and
-refills selected missing rows from Host memory. Core owns HMA allocation,
-Coordinator admission/eviction, request lifetimes, prefetch and mirror completion.
-The Ascend backend supplies residency resolution, transfers and the existing SFA
-Attention interface. Attention core arithmetic is unchanged.
+## How HiSparse works
+
+Sparse attention selects a subset of KV rows for each query. HiSparse keeps
+recent KV rows in the NPU Resident cache and uses the NPU Hot cache for rows
+refilled from Host memory.
+
+The resolver checks the selected rows against both NPU caches. Resident and Hot
+hits can be read directly. For misses, HiSparse refills only the missing rows
+from the Host KV mirror into Hot before attention runs. With speculative decoding,
+the resolver considers the selected rows for all query tokens of a request
+together before evicting Hot rows.
 
 ## Supported configurations
 
@@ -50,41 +56,9 @@ For native A5 C8, replace the two dtype options with:
 | `device_buffer_size` | Per-request Hot capacity from Core's HiSparse configuration. It must cover the selected verification-row union. |
 | `kv_cache_dtype` / `indexer_kv_dtype` | Select main and Indexer KV formats independently from model-weight quantization. |
 
-## Capacity and correctness notes
+## Cache sizing
 
-The resolver preserves the complete MTP query-row union before choosing LRU
-victims, and produces the refill plan on device. Hot capacity must fit both the
-int16 LRU representation (at most 32768 rows) and the compiled target's UB budget.
-These checks do not change the configured TopK or discard selected tokens.
-
-Native C8 uses the existing Ascend E4M3FN values, BF16 RoPE and FP32 scales.
-Weight quantization and KV-cache quantization remain separate choices. HiSparse
-preserves the shared-slab strides and uses the existing quantizer and Attention
-operations. No upstream vLLM source change or unmerged Core PR is required.
-
-Zero misses remove cold-row refills; eager Host mirroring and residency
-bookkeeping still run. Size Host memory per rank and compare matched workloads
-when assessing performance. Prefill, mixed batches and Decode retain current
-request mappings, padding and completion-before-reuse rules.
-
-## Validation and performance
-
-Ascend 950 eager and Graph tests covered native C8 Prolog writes to the bound KV
-cache at revision `a11b1b9d1`. In a separate TP8/MTP3 model comparison, two
-rounds per arm with fixed inputs and 8K outputs measured these mean SSE TPOT
-increases:
-
-| Input / concurrency | Reported residency | ON versus OFF |
-| --- | --- | --- |
-| 16K / C8 | Zero misses | +1.03% |
-| 32K / C8 | Misses present | +10.01% |
-
-These measurements used merged Core `39dbf518` (including #63801), Ascend
-`5a02c50`, Python 3.12 and CANN 9.2.1 on the same machine. Inputs, outputs and
-MTP counters matched. N2 does not establish statistical significance or dataset
-accuracy. See [PR #20926](https://github.com/vllm-project/vllm-ascend/pull/20926)
-for exact configuration, commands and separate capacity qualifications.
-
-Formal performance runs exclude profiling. Reported miss and H2D counters are
-asynchronous software observations, not physical DMA measurements. Qualification
-on one workload does not establish dataset accuracy or support for other devices.
+Size `host_pool_gib` for the context lengths and concurrency you plan to serve.
+It applies per tensor-parallel rank. Set `device_buffer_size` large enough to
+hold the combined set of rows selected during speculative verification. The
+supported Hot capacity depends on the device's on-chip memory limit.
