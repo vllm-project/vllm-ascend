@@ -287,16 +287,15 @@ If the last rank is constrained by memory or latency, reduce its target hidden
 layers with a custom partition. `draft_tensor_parallel_size` controls only the
 draft model's TP size; it does not define a draft-model PP partition.
 
-The following matrix lists the features that can be stacked with PP on
-Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`). Support describes each individual
-feature combination with PP and remains subject to the model and hardware
-requirements in the relevant feature guide.
+The following matrix lists the features that can be stacked with PP. Support
+describes each individual feature combination with PP and remains subject to
+the model and hardware requirements in the relevant feature guide.
 
 | Feature stacked with PP | Support |
 | --- | --- |
 | Graph mode (ACL graph) | Supported with `FULL_DECODE_ONLY` and `PIECEWISE`; `FULL_DECODE_ONLY` is validated with MTP stacks. |
 | MTP | Supported. |
-| EAGLE3 | Supported only for MiniMax-M3 sparse models; the upstream Model Runner V2 restriction is lifted for these architectures. |
+| EAGLE3 | Supported only for MiniMax-M3 sparse models; the upstream restriction is lifted for these architectures. |
 | DFlash | Not supported. |
 | DSpark | Supported only for DeepSeek-V4 and GLM-5.2 MoE-DSA models. The drafter taps intermediate target layers, and the tapped hidden states are relayed across PP stages. |
 | PCP (Prefill Context Parallel) | Supported. |
@@ -317,7 +316,7 @@ requirements in the relevant feature guide.
 | Async scheduling | Supported. |
 | Sequence parallelism | Supported. |
 
-Notes for speculative decoding with PP on Model Runner V2:
+Notes for speculative decoding with PP:
 
 - DSpark drafts from taps on intermediate target layers
   (`dspark_target_layer_ids`). Taps that fall on an earlier PP stage are

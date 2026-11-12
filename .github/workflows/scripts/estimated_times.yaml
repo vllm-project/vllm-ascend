@@ -50,18 +50,14 @@ estimated_times:
   tests/e2e/pull_request/one_card/model_runner_v2/test_uva.py: 80
   tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_8B.py: 350
   tests/e2e/pull_request/one_card/pooling/test_classification.py: 280
+  tests/e2e/pull_request/one_card/pooling/test_d3.py: 350
   tests/e2e/pull_request/one_card/pooling/test_embedding.py: 600
   tests/e2e/pull_request/one_card/pooling/test_scoring.py: 520
   tests/e2e/pull_request/one_card/spec_decode/test_dflash.py: 235
-  tests/e2e/pull_request/one_card/spec_decode/test_dspark.py: 255
-  tests/e2e/pull_request/one_card/spec_decode/test_dynamic.py: 500
-  tests/e2e/pull_request/one_card/spec_decode/test_draft_parallel.py: 270
   tests/e2e/pull_request/one_card/spec_decode/test_eagle.py: 410
   tests/e2e/pull_request/one_card/spec_decode/test_extract_hidden_states.py: 340
   tests/e2e/pull_request/one_card/spec_decode/test_mtp_eagle_correctness.py: 340
-  tests/e2e/pull_request/one_card/spec_decode/test_ngram.py: 160
-  tests/e2e/pull_request/one_card/spec_decode/test_ngram_npu.py: 250
-  tests/e2e/pull_request/one_card/spec_decode/test_suffix.py: 220
+  tests/e2e/pull_request/one_card/spec_decode/test_ngram_npu.py: 700
   tests/e2e/pull_request/one_card/rlhf/consistency/test_attention_fa3.py: 30
   tests/e2e/pull_request/one_card/rlhf/consistency/test_fa3_mixed_batches.py: 60
   tests/e2e/pull_request/one_card/rlhf/test_trace_replay.py: 30
@@ -72,6 +68,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_decoder_replay.py: 60
   tests/e2e/pull_request/one_card/test_fla_lazy_imports.py: 60
   tests/e2e/pull_request/one_card/test_gdn_block_packed_states.py: 60
+  tests/e2e/pull_request/one_card/test_gdn_checkpoint_states.py: 600
   tests/e2e/pull_request/one_card/test_gdn_stable_argsort.py: 60
   tests/e2e/pull_request/one_card/test_guided_decoding.py: 280
   tests/e2e/pull_request/one_card/test_minicpm.py: 180
@@ -84,6 +81,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py: 320
   tests/e2e/pull_request/one_card/rlhf/state_transitions/test_pause_resume.py: 260
   tests/e2e/pull_request/two_card/rlhf/state_transitions/test_pause_device_idle.py: 300
+  tests/e2e/pull_request/two_card/rlhf/state_transitions/test_weight_checker.py: 1200
   tests/e2e/pull_request/one_card/rlhf/state_transitions/test_sleep_wake.py: 300
   tests/e2e/pull_request/one_card/test_sampler.py: 190
   tests/e2e/pull_request/one_card/test_simple_cpu_offload.py: 170

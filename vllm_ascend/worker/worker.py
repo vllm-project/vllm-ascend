@@ -50,6 +50,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandsha
 from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.model_loader.weight_checksum import compute_tensor_digests, zero_weights
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
@@ -140,18 +141,6 @@ torch._dynamo.trace_rules.torch_name_rule_map.append(torch_non_c_binding_in_grap
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
-
-
-class _V1ModelRunnerFactory:
-    """Import the V1 model runner only when one is actually constructed."""
-
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        from vllm_ascend.worker.v1.model_runner import NPUModelRunner
-
-        return NPUModelRunner(*args, **kwargs)
-
-
-NPUModelRunner = _V1ModelRunnerFactory()
 
 
 class NPUWorker(WorkerBase):
@@ -589,20 +578,16 @@ class NPUWorker(WorkerBase):
         num_ubatches = 1
         init_workspace_manager(self.device, num_ubatches)
         # Init ModelRunner here, so that we have access to self.device.
-        if self.use_v2_model_runner:
-            logger.warning("npu model runner v2 is in developing, some features doesn't work for now.")
-            if self.vllm_config.is_mm_encoder_only:
-                from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
+        if self.vllm_config.is_mm_encoder_only:
+            from vllm.v1.worker.mm_encoder_model_runner import MMEncoderModelRunner
 
-                from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
+            from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
-                with torch_cuda_wrapper():
-                    self.model_runner = MMEncoderModelRunner(self.vllm_config, self.device)
-            else:
-                from vllm_ascend.worker.v2.model_runner import NPUModelRunner as NPUModelRunnerV2
-
-                self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
+            with torch_cuda_wrapper():
+                self.model_runner = MMEncoderModelRunner(self.vllm_config, self.device)
         else:
+            from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+
             self.model_runner = NPUModelRunner(self.vllm_config, self.device)
 
         if self.rank == 0:
@@ -1105,6 +1090,38 @@ class NPUWorker(WorkerBase):
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
 
+    def _weight_checksum_model(self) -> nn.Module:
+        # The v1 model runner exposes get_model(); the v2 runner (still under
+        # development) only exposes the model attribute.
+        get_model = getattr(self.model_runner, "get_model", None)
+        if callable(get_model):
+            return get_model()
+        return self.model_runner.model
+
+    def _weight_checksum_prefix(self) -> str:
+        # Aligned with upstream gpu_worker: data_parallel_rank is reset to 0
+        # in dense workers; only data_parallel_index keeps DP keys unique.
+        # (locals renamed from upstream's dp/pp/pcp/tp: dp is this module's
+        # dynamic_profile alias)
+        dp_rank = self.parallel_config.data_parallel_index
+        pp_rank = get_pp_group().rank_in_group
+        pcp_rank = get_pcp_group().rank_in_group
+        tp_rank = get_tp_group().rank_in_group
+        return f"dp{dp_rank}:pp{pp_rank}:pcp{pcp_rank}:tp{tp_rank}:"
+
+    def compute_weight_checksums(self) -> dict[str, str]:
+        prefix = self._weight_checksum_prefix()
+        digests = compute_tensor_digests(self._weight_checksum_model())
+        return {prefix + name: digest for name, digest in digests.items()}
+
+    def reset_weights(self) -> None:
+        if get_ascend_config().weight_nz_mode:
+            logger.warning(
+                "weight_nz_mode is enabled: weight transfer update is unavailable, "
+                "reset weights can only be restored via checkpoint reload (reload_weights)."
+            )
+        zero_weights(self._weight_checksum_model())
+
     @torch.inference_mode()
     def profile_prefill_latency(self, num_tokens: int) -> float:
         """
@@ -1332,20 +1349,8 @@ class NPUWorker(WorkerBase):
         )
 
         # MRV2's scheduler emits new_block_ids_to_zero whenever this flag is
-        # set, so its worker-side consumer must use the same condition. Keep the
-        # narrower Mamba + Eagle3 condition for MRV1, where zeroing was
-        # introduced only to prevent a recycled Mamba block from exposing stale
-        # values when reused by full attention during multi-step speculation.
-        speculative_config = self.vllm_config.speculative_config
-        needs_mrv1_mamba_eagle_zeroing = (
-            kv_cache_config.has_mamba_layers
-            and speculative_config is not None
-            and speculative_config.method == "eagle3"
-            and speculative_config.num_speculative_tokens > 1
-        )
-        should_init_kv_zeroer = kv_cache_config.needs_kv_cache_zeroing and (
-            self.use_v2_model_runner or needs_mrv1_mamba_eagle_zeroing
-        )
+        # set, so its worker-side consumer must use the same condition.
+        should_init_kv_zeroer = kv_cache_config.needs_kv_cache_zeroing
         # Keep bookkeeping buffers outside the sleep-mode KV-cache pool so they
         # survive sleep/wake cycles.
         if should_init_kv_zeroer and hasattr(self.model_runner, "_init_kv_zero_meta"):
