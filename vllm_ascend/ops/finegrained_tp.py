@@ -16,6 +16,7 @@ from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.forward_context import is_forward_context_available
 from vllm.model_executor.layers.linear import ColumnParallelLinear, MergedColumnParallelLinear
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.utils import npu_stream_switch
 
@@ -24,6 +25,19 @@ def projection_capacity(hidden: torch.Tensor) -> int:
     """Runner DP synchronization has already aligned graph buckets across peers."""
     synced = _EXTRA_CTX.max_tokens_across_dp if is_forward_context_available() else None
     return max(hidden.shape[0], synced or 0)
+
+
+def uses_aiv_communication(group: GroupCoordinator | None) -> bool:
+    """Resolve the configured communication mode once, without a device probe."""
+    if group is None:
+        return False
+    backend = group.device_group._get_backend(torch.device("npu"))
+    mode = backend.options.hccl_config.get("hccl_op_expansion_mode", 0)
+    if mode:
+        # HcclCommConfig: 3=AIV, 4=AIV_ONLY. All other explicit modes use
+        # separate communication engines; a PG setting overrides the env.
+        return mode in (3, 4)
+    return envs.HCCL_OP_EXPANSION_MODE in ("AIV", "AIV_ONLY")
 
 
 class ProjectionColumnParallelLinear(ColumnParallelLinear):
@@ -85,8 +99,15 @@ class TPCommunication:
         output = hidden.new_empty(shape)
         return self._launch(hidden.contiguous(), output, group, dist.all_gather_into_tensor)
 
-    def exchange(self, source, group):
-        return self._launch(source.contiguous(), torch.empty_like(source), group, dist.all_to_all_single)
+    def exchange(self, source, group, *, overlap=True):
+        source = source.contiguous()
+        output = torch.empty_like(source)
+        if overlap:
+            return self._launch(source, output, group, dist.all_to_all_single)
+        # Submit on the caller's stream. The KDA caller joins immediately,
+        # before it can enqueue Vector state recovery or output preparation.
+        work = dist.all_to_all_single(output, source, group=group.device_group, async_op=True)
+        return PendingTensor(output, work, source)
 
     def scatter(self, source, group):
         shape = (source.shape[0] // group.world_size, *source.shape[1:])
@@ -107,7 +128,39 @@ class PendingGate:
             assert self.owner_gate is not None
             return self.owner_gate.view(self.capacity, self.heads, self.head_dim)
         received = self.pending.wait().view(self.size, self.capacity, self.heads // self.size, self.head_dim)
-        return received.permute(1, 0, 2, 3).reshape(self.capacity, self.heads, self.head_dim)
+        self.owner_gate = received.permute(1, 0, 2, 3).reshape(self.capacity, self.heads, self.head_dim)
+        self.pending = None
+        return self.owner_gate
+
+
+@dataclass
+class PendingKDAProjection:
+    qkv: torch.Tensor
+    beta: torch.Tensor
+    forget: torch.Tensor
+    gate: PendingGate
+    pending_qkv: PendingTensor | None
+    size: int
+    capacity: int
+    heads: int
+    head_dim: int
+
+    def wait(self):
+        if self.pending_qkv is not None:
+            local_heads = self.heads // self.size
+            width = local_heads * self.head_dim
+            received = self.pending_qkv.wait().view(self.size, self.capacity, -1)
+            qkv, beta = received.split((3 * width, local_heads), dim=-1)
+            qkv = qkv.reshape(self.size, self.capacity, 3, local_heads, self.head_dim)
+            self.qkv = qkv.permute(1, 2, 0, 3, 4).reshape(self.capacity, -1)
+            self.beta = beta.permute(1, 0, 2).reshape(self.capacity, self.heads)
+            self.pending_qkv = None
+        return (
+            self.qkv,
+            self.forget.view(1, self.capacity, self.heads, self.head_dim),
+            self.beta.unsqueeze(0),
+            self.gate,
+        )
 
 
 class FullRankGateTP:
@@ -139,6 +192,8 @@ class KDAProjectionTP:
         self.qkv_group, self.gate_group = qkv_group, gate_group
         self.heads, self.head_dim = heads, head_dim
         self.communication = TPCommunication()
+        self.qkv_uses_aiv = uses_aiv_communication(qkv_group)
+        self.gate_uses_aiv = uses_aiv_communication(gate_group)
 
     def project(self, layer, hidden, *, aux_stream: torch.npu.Stream):
         capacity = projection_capacity(hidden)
@@ -158,7 +213,10 @@ class KDAProjectionTP:
         with npu_stream_switch(aux_stream):
             aux_stream.wait_event(owner_ready)
             forget = layer.f_b_proj(layer.f_a_proj(owner)[0])[0]
-        q_hidden = q_input.wait() if q_input is not None else owner
+        # G Cube precedes both beta Cube and DynamicQuant Vector.
+        g_hidden = g_input.wait() if g_input is not None else owner
+        gate = layer.g_proj(g_hidden)[0]
+        q_hidden = g_hidden if q_input is g_input else q_input.wait() if q_input is not None else owner
         input_ready = main.record_event()
         q_hidden.record_stream(aux_stream)
         # C2: raw BF16 beta Cube and MX input quant Vector have the same input.
@@ -166,33 +224,41 @@ class KDAProjectionTP:
             aux_stream.wait_event(input_ready)
             beta = layer.b_proj(q_hidden)[0]
             beta_ready = aux_stream.record_event()
-        quantized = layer._quantize_fused_qkv(q_hidden)
+        quantized = layer._quantize_fused_qkv(q_hidden, for_finegrained_tp=True)
+        # This launch records a main-stream event after DynamicQuant, so G
+        # communication cannot contend with that quantization on AIVs.
+        pending_gate = self.exchange_gate(gate)
         main.wait_event(beta_ready)
         beta.record_stream(main)
         forget.record_stream(main)
         qkv = layer._matmul_fused_qkv(quantized)
+        if self.gate_uses_aiv:
+            # Hide AIV communication only behind QKV Cube, then join before
+            # cat/reorder/zeros/cast/sigmoid/conv/recurrent Vector work.
+            pending_gate.wait()
         q_pending = None
         if self.qkv_group is not None:
             if qkv.dtype != beta.dtype:
                 raise RuntimeError("Kimi QKV/beta exchange requires equal raw projection dtypes.")
-            q_pending = self.communication.exchange(torch.cat((qkv, beta), dim=-1), self.qkv_group)
-
-        # C3: enqueue G Cube before waiting for the QKV/beta return.
-        g_hidden = g_input.wait() if g_input is not None else owner
-        gate = layer.g_proj(g_hidden)[0]
-        if q_pending is not None:
-            size = self.qkv_group.world_size
-            local_heads = self.heads // size
-            width = local_heads * self.head_dim
-            received = q_pending.wait().view(size, capacity, -1)
-            qkv, beta = received.split((3 * width, local_heads), dim=-1)
-            # Source-major flatten would interleave Q/K/V incorrectly.
-            qkv = qkv.reshape(size, capacity, 3, local_heads, self.head_dim)
-            qkv = qkv.permute(1, 2, 0, 3, 4).reshape(capacity, -1)
-            beta = beta.permute(1, 0, 2).reshape(capacity, self.heads)
-        # Keep G local until recurrent inputs are ready. Starting its A2A
-        # here would contend with reorder/beta/conv Vector work for AIVs.
-        return qkv, forget.view(1, capacity, self.heads, self.head_dim), beta.unsqueeze(0), gate
+            q_pending = self.communication.exchange(
+                torch.cat((qkv, beta), dim=-1), self.qkv_group, overlap=not self.qkv_uses_aiv
+            )
+        result = PendingKDAProjection(
+            qkv,
+            beta,
+            forget,
+            pending_gate,
+            q_pending,
+            self.qkv_group.world_size if self.qkv_group is not None else 1,
+            capacity,
+            self.heads,
+            self.head_dim,
+        )
+        if self.qkv_uses_aiv:
+            result.wait()
+        # Non-AIV QKV communication can overlap independent output-buffer
+        # initialization. Its consumers still wait before reading QKV/beta.
+        return result
 
     def exchange_gate(self, gate: torch.Tensor) -> PendingGate:
         size = self.gate_group.world_size if self.gate_group is not None else 1
