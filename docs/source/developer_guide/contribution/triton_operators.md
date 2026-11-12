@@ -80,20 +80,22 @@ Reduce unnecessary specialization before warming up required variants. See the u
 
 Compare each output element `actual_i` with its reference `golden_i`:
 
-`abs(actual_i - golden_i) <= atol + rtol * abs(golden_i)`
+$$
+\left|\mathrm{actual}_i-\mathrm{golden}_i\right| \leq \mathrm{atol}+\mathrm{rtol}\cdot\left|\mathrm{golden}_i\right|
+$$
 
 | Output dtype | rtol | atol | Maximum absolute error |
 | --- | --- | --- | --- |
-| FP16 | 2^-9 | 2^-9 | 0.1 |
-| BF16 | 2^-6 | 2^-6 | 1 |
-| FP32 | 2^-10 | 2^-16 | 0.01 |
+| FP16 | $2^{-9}$ | $2^{-9}$ | 0.1 |
+| BF16 | $2^{-6}$ | $2^{-6}$ | 1 |
+| FP32 | $2^{-10}$ | $2^{-16}$ | 0.01 |
 
 Both conditions must hold:
 
 1. At least 99% of elements satisfy the combined tolerance.
 2. The maximum absolute error across all elements does not exceed the corresponding limit.
 
-The maximum-error rule is `max(fixed_limit, 32 * ULP_1.0)`, where `ULP_1.0` is the unit in the last place at 1.0 for the output dtype; use the explicit limits in the table.
+The maximum-error rule is $\max\left(\mathrm{fixed\_limit},\;32\cdot\mathrm{ULP}_{1.0}\right)$, where $\mathrm{ULP}_{1.0}$ is the unit in the last place at 1.0 for the output dtype; use the explicit limits in the table.
 
 ### Triton operator coding guidelines
 
