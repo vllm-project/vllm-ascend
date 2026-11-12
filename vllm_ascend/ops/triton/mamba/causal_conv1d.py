@@ -55,6 +55,8 @@ def causal_conv1d_update_varlen(
         conv_state_indices,
         num_accepted_tokens,
         query_start_loc,
+        None,  # block_idx_last_scheduled_token (APC disabled)
+        None,  # initial_state_idx (APC disabled)
         out,
         batch,
         dim,
@@ -78,6 +80,7 @@ def causal_conv1d_update_varlen(
         KERNEL_WIDTH=width,
         SILU_ACTIVATION=activation in ("silu", "swish"),
         IS_VARLEN=True,
+        IS_APC_ENABLED=False,
         IS_SPEC_DECODING=True,
         NP2_STATELEN=triton.next_power_of_2(state_len),
         HAS_NULL_BLOCK=True,
