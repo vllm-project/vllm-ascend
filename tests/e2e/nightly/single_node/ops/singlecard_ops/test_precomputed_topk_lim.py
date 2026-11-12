@@ -131,6 +131,11 @@ def test_precomputed_topk_parallel_layers_and_rows_graph_replay(layer_count, row
         )
         assert result is None
 
+    def poison_outputs():
+        for state in layers:
+            state["physical"].fill_(-12345)
+            state["sizes"].fill_(-1)
+
     def update(step):
         for layer, state in enumerate(layers):
             lengths = (2305 + torch.arange(rows) * 17 + layer * 31 + (step // 5) * BLOCK_SIZE).int()
@@ -152,6 +157,9 @@ def test_precomputed_topk_parallel_layers_and_rows_graph_replay(layer_count, row
             state["tails"].copy_(tails)
             if layer == 1 and step == 2:
                 state["keys"].fill_(-1)
+            if step == 7:
+                # Row zero keeps its nonzero owner from step six; normalize its dirty sentinel.
+                state["keys"][0, hot].fill_(17)
         lengths = layers[0]["lengths"].cpu()
         ids = (torch.arange(width).expand(rows, -1) + (step // 2) * 257) % (lengths[:, None] - 1)
         for layer, state in enumerate(layers):
@@ -159,7 +167,11 @@ def test_precomputed_topk_parallel_layers_and_rows_graph_replay(layer_count, row
         if step:
             ids[:, 1] = ids[:, 0]
             ids[:, 2] = -1
+        if step == 1:
+            # Preserve the warmed source subset while changing physical-output order.
+            ids = ids.flip(-1)
         topk.copy_(ids)
+        poison_outputs()
 
     def expected():
         return [
@@ -200,6 +212,7 @@ def test_precomputed_topk_parallel_layers_and_rows_graph_replay(layer_count, row
         check(reference)
     reference = expected()
     for _ in range(50):
+        poison_outputs()
         graph.replay()
     torch.npu.synchronize()
     check(reference)

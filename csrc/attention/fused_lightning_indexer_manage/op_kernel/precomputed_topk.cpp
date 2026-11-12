@@ -111,6 +111,7 @@ extern "C" __global__ __aicore__ void selective_lim_group_topk(
                 slots.SetValue(h, i);
             }
         }
+        bool pendingSource = false;
         for (int col = 0; col < width; ++col) {
             const int64_t id = logical[base + col];
             int source = -1;
@@ -135,45 +136,57 @@ extern "C" __global__ __aicore__ void selective_lim_group_topk(
             }
             selectedLocal.SetValue(col, selected);
             sources.SetValue(col, source);
+            pendingSource = pendingSource || (source >= 0 && selected < 0);
         }
-        int available = 0;
-        for (int i = 0; i < hot; ++i) {
-            if (resident.GetValue(i) < 0) {
-                free.SetValue(available++, i);
-            }
-        }
-        for (int i = 0; i < hot; ++i) {
-            if (resident.GetValue(i) >= 0 && used.GetValue(i) == 0) {
-                free.SetValue(available++, i);
-            }
-        }
-        int next = 0;
-        for (int col = 0; col < width; ++col) {
-            const int source = sources.GetValue(col);
-            int selected = selectedLocal.GetValue(col);
-            bool miss = false;
-            if (source >= 0 && selected < 0) {
-                const int h = Lookup(tokens, source);
-                if (tokens.GetValue(h) == source) {
-                    selected = slots.GetValue(h);
-                } else {
-                    selected = free.GetValue(next++);
-                    resident.SetValue(selected, source);
-                    tokens.SetValue(h, source);
-                    slots.SetValue(h, selected);
-                    miss = true;
+        // Preserve the slow path's sentinel normalization before skipping cache writeback.
+        const bool allHits = keep && !pendingSource && cache[cacheBase + hot] == -1;
+        if (allHits) {
+            // The lookup pass used slot-indexed flags; outputs need fresh column-indexed miss flags.
+            SyncPipes<HardEvent::S_V>();
+            Duplicate(used, 0, hot);
+            SyncPipes<HardEvent::V_S>();
+        } else {
+            int available = 0;
+            for (int i = 0; i < hot; ++i) {
+                if (resident.GetValue(i) < 0) {
+                    free.SetValue(available++, i);
                 }
-                selectedLocal.SetValue(col, selected);
             }
-            used.SetValue(col, miss ? 1 : 0);
+            for (int i = 0; i < hot; ++i) {
+                if (resident.GetValue(i) >= 0 && used.GetValue(i) == 0) {
+                    free.SetValue(available++, i);
+                }
+            }
+            int next = 0;
+            for (int col = 0; col < width; ++col) {
+                const int source = sources.GetValue(col);
+                int selected = selectedLocal.GetValue(col);
+                bool miss = false;
+                if (source >= 0 && selected < 0) {
+                    const int h = Lookup(tokens, source);
+                    if (tokens.GetValue(h) == source) {
+                        selected = slots.GetValue(h);
+                    } else {
+                        selected = free.GetValue(next++);
+                        resident.SetValue(selected, source);
+                        tokens.SetValue(h, source);
+                        slots.SetValue(h, selected);
+                        miss = true;
+                    }
+                    selectedLocal.SetValue(col, selected);
+                }
+                used.SetValue(col, miss ? 1 : 0);
+            }
+            for (int i = 0; i < hot; ++i) {
+                cacheLocal.SetValue(i, resident.GetValue(i));
+            }
+            cacheLocal.SetValue(hot, -1);
         }
-        for (int i = 0; i < hot; ++i) {
-            cacheLocal.SetValue(i, resident.GetValue(i));
-        }
-        cacheLocal.SetValue(hot, -1);
         SyncPipes<HardEvent::S_MTE3>();
         DataCopyPad(physicalGm[base], selectedLocal, {1, static_cast<uint32_t>(width * sizeof(int32_t)), 0, 0, 0});
-        DataCopyPad(cacheGm[cacheBase], cacheLocal, {1, static_cast<uint32_t>((hot + 1) * sizeof(int64_t)), 0, 0, 0});
+        if (!allHits) {
+            DataCopyPad(cacheGm[cacheBase], cacheLocal, {1, static_cast<uint32_t>((hot + 1) * sizeof(int64_t)), 0, 0, 0});
+        }
         SyncPipes<HardEvent::MTE3_S>();
 
         // Lookup is finished, so reuse its hash storage for the four address vectors.
@@ -199,10 +212,12 @@ extern "C" __global__ __aicore__ void selective_lim_group_topk(
         DataCopyPad(sizeGm[base], sizesLocal, sizeCopy);
         DataCopyPad(sizeGm[rows * width + base], sizesLocal[alignedWidth], sizeCopy);
         SyncPipes<HardEvent::MTE3_S>();
-        addresses.SetValue(0, request);
-        SyncPipes<HardEvent::S_MTE3>();
-        DataCopyPad(previousGm[row], addresses, {1, sizeof(int64_t), 0, 0, 0});
-        SyncPipes<HardEvent::MTE3_S>();
+        if (!allHits) {
+            addresses.SetValue(0, request);
+            SyncPipes<HardEvent::S_MTE3>();
+            DataCopyPad(previousGm[row], addresses, {1, sizeof(int64_t), 0, 0, 0});
+            SyncPipes<HardEvent::MTE3_S>();
+        }
     }
 }
 
