@@ -40,6 +40,7 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 from vllm_ascend.attention.gdn_attn_builder import (
     AscendGDNFusedAttentionBackend,
+    AscendGDNPCPBackend,
     GDNSpecCausalConv1dMetadata,
 )
 from vllm_ascend.attention.gdn_recoverssm_metadata import AscendGDNRecoverSSMAttentionBackend
@@ -140,6 +141,61 @@ def initialize_packed_conv_weight(layer: nn.Module) -> None:
 def _get_packed_conv_weights(layer: nn.Module) -> torch.Tensor:
     """Return the registered, kernel-layout convolution parameter."""
     return _get_base_conv1d(layer).get_parameter(_PACKED_CONV_WEIGHT_NAME)
+
+
+def shard_gdn_heads_over_pcp(layer: nn.Module, parallel_config) -> None:
+    """Configure the Qwen4Exp GDN layer before checkpoint weights are loaded."""
+    from vllm.model_executor.layers.mamba.mamba_mixer2 import mamba_v2_sharded_weight_loader
+
+    from vllm_ascend.ops.kda_parallel import (
+        KDAColumnParallelLinear,
+        KDAMergedColumnParallelLinear,
+        KDARowParallelLinear,
+        get_kda_parallel_rank,
+        get_kda_parallel_size,
+    )
+
+    layer.tp_size = get_kda_parallel_size(parallel_config)
+    layer.tp_rank = get_kda_parallel_rank()
+    prefix = layer.prefix
+    qkv_sizes = [layer.key_dim, layer.key_dim, layer.value_dim]
+    layer.conv1d = KDAColumnParallelLinear(
+        layer.conv_kernel_size, sum(qkv_sizes), bias=False, prefix=f"{prefix}.conv1d"
+    )
+    layer.conv1d.weight.data = layer.conv1d.weight.data.unsqueeze(1)
+    layer.conv1d.weight.weight_loader = mamba_v2_sharded_weight_loader(
+        [(size, 0, False) for size in qkv_sizes], layer.tp_size, layer.tp_rank
+    )
+    initialize_packed_conv_weight(layer)
+    layer.in_proj_qkvz = KDAMergedColumnParallelLinear(
+        layer.hidden_size,
+        [*qkv_sizes, layer.value_dim],
+        bias=False,
+        quant_config=layer.quant_config,
+        prefix=f"{prefix}.in_proj_qkvz",
+    )
+    layer.in_proj_ba = KDAMergedColumnParallelLinear(
+        layer.hidden_size,
+        [layer.num_v_heads] * 2,
+        bias=False,
+        quant_config=layer.quant_config,
+        prefix=f"{prefix}.in_proj_ba",
+    )
+    loader = mamba_v2_sharded_weight_loader([(layer.num_v_heads, 0, False)], layer.tp_size, layer.tp_rank)
+    local_heads = layer.num_v_heads // layer.tp_size
+    for name in ("dt_bias", "A_log"):
+        param = nn.Parameter(getattr(layer, name).new_empty(local_heads))
+        param.weight_loader = loader
+        setattr(layer, name, param)
+    layer.out_proj = KDARowParallelLinear(
+        layer.value_dim,
+        layer.hidden_size,
+        bias=False,
+        input_is_parallel=True,
+        reduce_results=layer.out_proj.reduce_results,
+        quant_config=layer.quant_config,
+        prefix=f"{prefix}.out_proj",
+    )
 
 
 def _normalize_causal_cache_indices(cache_indices: torch.Tensor) -> torch.Tensor:
@@ -417,6 +473,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
     def get_attn_backend(self) -> type[AttentionBackend]:
         if getattr(self, "use_gdn_recoverssm", False):
             return AscendGDNRecoverSSMAttentionBackend
+        if hasattr(getattr(self, "out_proj", None), "pcp_group"):
+            return AscendGDNPCPBackend
         return AscendGDNFusedAttentionBackend
 
     def forward(
@@ -430,6 +488,18 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         2. Core attention (custom op)
         3. Output projection
         """
+        local_num_tokens = hidden_states.size(0)
+        pcp_context = None
+        if hasattr(self.out_proj, "pcp_group"):
+            metadata = get_forward_context().attn_metadata
+            if metadata is None:
+                # Profiling runs before the PCP manager has built token maps.
+                # Size the projections for the gathered token extent.
+                hidden_states = self.out_proj.pcp_group.all_gather(hidden_states.contiguous(), dim=0)
+            elif self.prefix in metadata:
+                pcp_context = metadata[self.prefix].pcp_context
+                if pcp_context is not None:
+                    hidden_states = pcp_context.gather_tokens(hidden_states)
         num_tokens = hidden_states.size(0)
         if hasattr(self, "in_proj_qkv"):
             mixed_qkv, _ = self.in_proj_qkv(hidden_states)
@@ -497,8 +567,12 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
         out, _ = self.out_proj(core_attn_out)
+        if pcp_context is not None:
+            out = pcp_context.scatter_tokens(out)
+        elif num_tokens != local_num_tokens:
+            out = out[:local_num_tokens]
         if output is not None:
-            output[:num_tokens] = out
+            output[: out.shape[0]] = out
         return out
 
     def _forward_core(
@@ -519,6 +593,10 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         if attn_metadata is None:
             # V1 profile run
+            return
+        head_sharded_pcp = hasattr(getattr(self, "out_proj", None), "pcp_group")
+        if head_sharded_pcp and self.prefix not in attn_metadata:
+            # MRV2 profiling may omit the recurrent layers from the metadata.
             return
 
         # Layerwise KV pool hooks must stay inside the custom op body: the
@@ -596,13 +674,13 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
             mixed_qkv_spec = output_spec
 
-        # Ordinary mixed batches keep decode token-major while prefill can
-        # use head-first convolution output. PCP retains its collective path.
+        # A head-sharded layer already sees every request in causal order.
+        exchange_conv_state = get_pcp_group().world_size > 1 and not head_sharded_pcp
         split_conv = (
             not has_spec_decode
             and attn_metadata.num_prefills > 0
             and attn_metadata.num_decodes > 0
-            and get_pcp_group().world_size == 1
+            and not exchange_conv_state
         )
         decode_conv_qkv = None
 
@@ -613,7 +691,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 query_start_loc_opt = non_spec_causal_conv1d_meta.query_start_loc
                 cache_indices_opt = non_spec_causal_conv1d_meta.cache_indices
                 initial_state_mode_opt = non_spec_causal_conv1d_meta.initial_state_mode
-                if get_pcp_group().world_size > 1:
+                if exchange_conv_state:
                     non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
                     assert non_spec_query_start_loc is not None
                     non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor
@@ -909,11 +987,13 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             use_checkpoint_prefill = (
                 getattr(self, "_ascend_internal_checkpoint_enabled", False) and self._exports_checkpoints
             )
-            supports_fused_dtype = query_non_spec.dtype == torch.bfloat16 and not use_checkpoint_prefill
-            use_fla_gdn_prefill = (
-                supports_fused_dtype
-                and get_pcp_group().world_size == 1
-                and get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL)
+            supports_fused_prefill = (
+                query_non_spec.dtype == torch.bfloat16
+                and not use_checkpoint_prefill
+                and (head_sharded_pcp or get_pcp_group().world_size == 1)
+            )
+            use_fla_gdn_prefill = supports_fused_prefill and get_current_hardware_profile().supports(
+                HardwareCapability.FLA_GDN_PREFILL
             )
             fla_gdn_prefill_op = _get_fla_gdn_prefill_op() if use_fla_gdn_prefill else None
             # The built-in fused operator is NPU-only. Keep CPU/unit-test
@@ -921,10 +1001,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             # probe was cached globally.
             use_fused_chunk = (
                 fla_gdn_prefill_op is None
-                and supports_fused_dtype
+                and supports_fused_prefill
                 and query_non_spec.device.type != "cpu"
                 and AscendGatedDeltaNetAttention._probe_fused_chunk()
-                and get_pcp_group().world_size == 1
             )
             # Keep the same numerical recurrence on cold requests and
             # cache-hit tails, even when the tail creates no new checkpoint.
