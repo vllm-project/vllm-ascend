@@ -168,6 +168,11 @@ class GDNSpecDecodeMetadata:
     spec_causal_conv1d: GDNSpecCausalConv1dMetadata
     # 310P derives lengths in its recurrent wrapper and only consumes conv metadata.
     actual_seq_lengths: torch.Tensor | None
+    # Keep the dispatch contract explicit even when the fixed-length release
+    # path uses the native kernels. Adaptive/full-graph paths may opt into the
+    # upstream fallbacks without changing every metadata constructor.
+    use_upstream_recurrent: bool = False
+    use_upstream_conv: bool = False
 
 
 def _build_actual_seq_lengths(
