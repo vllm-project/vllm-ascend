@@ -1,7 +1,7 @@
 # Qwen3.8-Flash-Next (Experimental)
 
-For the experimental 910B TP8/EP8 BF16 pure-prefill backend, see
-[A2 MegaMoE prefill](../../user_guide/feature_guide/qwen38_a2_megamoe.md).
+For the experimental 910B TP8/EP8 BF16/W8A8 all-stage backend and ACL graph
+integration, see [A2 MegaMoE](../../user_guide/feature_guide/qwen38_a2_megamoe.md).
 
 ## 1 Introduction
 

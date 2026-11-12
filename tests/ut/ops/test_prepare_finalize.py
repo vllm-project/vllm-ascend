@@ -15,6 +15,10 @@ from vllm_ascend.ops.fused_moe.prepare_finalize import (
 
 class TestPrepareAndFinalize(unittest.TestCase):
     def setUp(self):
+        self.mock_base_context = patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_forward_context")
+        base_context = self.mock_base_context.start()
+        base_context.return_value.is_padding = None
+        self.addCleanup(self.mock_base_context.stop)
         # These fixtures expose V1 forward-context attributes directly.
         self.mock_use_v2 = patch(
             "vllm_ascend.mrv2_utils.envs_vllm.VLLM_USE_V2_MODEL_RUNNER",

@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""A2 prefill policy and BF16/INT8 execution weights; no vLLM/NPU imports."""
+"""A2 MegaMoE policy and BF16/INT8 execution weights; no vLLM/NPU imports."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import ConfigDict, Field
 from pydantic.dataclasses import dataclass
@@ -18,13 +18,18 @@ _A2_INTERMEDIATE_SIZE_ALIGNMENT = 128
 
 @dataclass(config=ConfigDict(extra="forbid", frozen=True))
 class A2MegaMoEPrefillConfig:
-    """Opt-in EP8 BF16/W8A8 prefill experiment, configured in additional_config."""
+    """Opt-in EP8 BF16/W8A8 backend; keep the original config name for compatibility."""
 
     enabled: bool = Field(default=False, strict=True)
+    scope: Literal["all", "prefill"] = "all"
 
-    def selects(self, metadata: Any, *, in_profile_run: bool = False) -> bool:
-        # Profiling exercises fused allocation even without live phase metadata.
-        return self.enabled and (in_profile_run or is_pure_prefill(metadata))
+    def selects(self, metadata: Any, *, in_profile_run: bool = False, graph_enabled: bool = False) -> bool:
+        # An all-stage policy must also select fusion during metadata-free graph
+        # warmup/capture, so replay cannot retain a different communication backend.
+        # The original prefill-only experiment remains eager-only.
+        return self.enabled and (
+            self.scope == "all" or (not graph_enabled and (in_profile_run or is_pure_prefill(metadata)))
+        )
 
 
 def is_pure_prefill(metadata: Any) -> bool:

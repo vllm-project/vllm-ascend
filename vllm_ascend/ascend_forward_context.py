@@ -273,7 +273,17 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     # Cap for fused MC2 / MegaMoe: regular MC2 (gated by enable_prefill_mc2) uses
     # HCCL comm buffer (HCCL_BUFFSIZE); MegaMoe (use_mega_moe, non-decode-only)
     # uses the symm buffer (separate torch alloc, not HCCL_BUFFSIZE).
-    if ascend_config.enable_prefill_mc2 or (use_mega_moe and not _is_decode_only_node(vllm_config)):
+    a2_mega_moe = (
+        use_mega_moe and get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY
+    )
+    if a2_mega_moe:
+        # Include profiling and padded graph buckets even on D-only workers.
+        # Capacity is rank-invariant and independent of the current batch phase.
+        max_num_tokens = max(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            vllm_config.compilation_config.max_cudagraph_capture_size or 0,
+        )
+    elif ascend_config.enable_prefill_mc2 or (use_mega_moe and not _is_decode_only_node(vllm_config)):
         max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
     elif vllm_config.compilation_config.cudagraph_capture_sizes:
         max_num_tokens = vllm_config.compilation_config.max_cudagraph_capture_size
@@ -306,9 +316,13 @@ def set_mc2_mask(vllm_config, device):
     if _reserved_mc2_mask is not None:
         return
     if is_moe_model(vllm_config):
-        _reserved_mc2_mask = torch.zeros(
-            vllm_config.scheduler_config.max_num_batched_tokens, dtype=torch.bool, device=device
-        )
+        max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        if (
+            use_cann_megamoe(vllm_config)
+            and get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY
+        ):
+            max_num_tokens = max(max_num_tokens, get_mc2_tokens_capacity())
+        _reserved_mc2_mask = torch.zeros(max_num_tokens, dtype=torch.bool, device=device)
     else:
         _reserved_mc2_mask = None
 
@@ -336,10 +350,19 @@ def _select_capacity_and_expert_density_moe_comm_method(
         and not is_draft_model
         and getattr(vllm_config, "speculative_config", None) is None
         and vllm_config.parallel_config.data_parallel_size == 1
-        and cudagraph_runtime_mode in (None, CUDAGraphMode.NONE)
-        and settings.selects(attn_metadata, in_profile_run=in_profile_run)
+        and settings.selects(
+            attn_metadata,
+            in_profile_run=in_profile_run,
+            graph_enabled=cudagraph_runtime_mode not in (None, CUDAGraphMode.NONE),
+        )
     ):
-        logger.debug("A2 MegaMoE prefill selected: tokens=%s profile=%s", num_tokens, in_profile_run)
+        logger.debug(
+            "A2 MegaMoE selected: scope=%s tokens=%s profile=%s graph=%s",
+            settings.scope,
+            num_tokens,
+            in_profile_run,
+            cudagraph_runtime_mode,
+        )
         return MoECommType.FUSED_MC2
     num_experts = vllm_config.model_config.get_num_experts()
     ep_world_size = (

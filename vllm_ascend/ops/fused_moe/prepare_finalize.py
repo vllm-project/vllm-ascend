@@ -26,6 +26,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 
@@ -271,6 +272,15 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
         """
         self.replace_allreduce = replace_allreduce
         mc2_mask = _EXTRA_CTX.mc2_mask
+        is_padding = getattr(get_forward_context(), "is_padding", None)
+        if isinstance(is_padding, torch.Tensor):
+            # MRv2 FULL replay bypasses Python forward-context setup. Derive the
+            # active mask inside the graph from the persistent input buffer that
+            # the runner updates every step, including all-padding capture rows.
+            mc2_mask = torch.logical_not(is_padding)
+            mask_padding = _EXTRA_CTX.padded_num_tokens - mc2_mask.shape[0]
+            if mask_padding > 0:
+                mc2_mask = nn.functional.pad(mc2_mask, (0, mask_padding), value=False)
         if self.replace_allreduce:
             # SP shards use the local token count, not the largest DP batch.
             # Select valid bits before adding padding for uniform MC2 batches.

@@ -2,6 +2,6 @@
 pr: 0
 entries:
   - category: feature
-    text: Added opt-in BF16 and symmetric dynamic INT8 W8A8 Qwen3.8-Flash-Next MegaMoE pure-prefill execution on 910B TP8/EP8 through additional_config.a2_mega_moe_prefill. Mixed and decode batches retain the ordinary backend; native 640-wide expert weights are shared with fallback execution without padding weights, scales or offsets to 768. Requires a CANN MegaMoE build with A2 128-aligned intermediate-size support. Ordinary W8A8 decode retains its FP32 scale copy.
+    text: Added opt-in BF16 and symmetric dynamic INT8 W8A8 Qwen3.8-Flash-Next MegaMoE execution on 910B TP8/EP8 for model runners V1 and V2. additional_config.a2_mega_moe_prefill now defaults to scope=all when enabled, covering prefill, mixed batches, decode and ACL graph capture without forcing a compilation mode; scope=prefill restores the original eager-only policy. Native 640-wide expert weights are shared with fallback execution. Communication capacity covers scheduler and graph budgets, and V2 graph replay refreshes padding masks from persistent inputs. Requires a CANN MegaMoE build with A2 128-aligned intermediate-size support; target-hardware precision and throughput validation remain required.
     model: qwen3.8-flash-next
     hardware: [A2]

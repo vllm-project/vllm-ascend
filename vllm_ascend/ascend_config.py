@@ -605,9 +605,9 @@ class AscendConfig:
     # count exceeds it, tokens may be truncated, causing precision
     # degradation. Do not set it too large because workspace memory scales
     # linearly with this value. Default 65536.
-    # A2 pure-prefill instead derives an absolute safe receive bound from the scheduler budget.
+    # A2 MegaMoE instead derives an absolute safe receive bound from the scheduler/graph budget.
     mega_moe_max_tokens: int = 65536
-    # Opt-in BF16/W8A8 TP8/EP8 pure-prefill backend; no token-count selection thresholds.
+    # Opt-in BF16/W8A8 TP8/EP8 backend; scope=all includes ACL graphs, scope=prefill is eager-only.
     a2_mega_moe_prefill: A2MegaMoEPrefillConfig = dataclasses.field(default_factory=A2MegaMoEPrefillConfig)
     ascend_log_path: str = dataclasses.field(
         default_factory=lambda: os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")

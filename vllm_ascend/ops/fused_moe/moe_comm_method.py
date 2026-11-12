@@ -513,6 +513,10 @@ class FusedMC2CommImpl(MoECommMethod):
         )
 
         if self.mega_moe_symm_buffer is None:
+            if get_ascend_config().a2_mega_moe_prefill.enabled is True and torch.npu.is_current_stream_capturing():
+                raise RuntimeError(
+                    "A2 MegaMoE requires an eager warmup to allocate its symmetric buffer before capture"
+                )
             self.mega_moe_symm_buffer = self._init_mega_moe_symm_buffer(
                 dispatch_quant_mode,
                 dispatch_quant_out_dtype,

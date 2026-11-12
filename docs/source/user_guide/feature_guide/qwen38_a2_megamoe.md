@@ -1,8 +1,10 @@
-# Qwen3.8-Flash-Next A2 MegaMoE prefill
+# Qwen3.8-Flash-Next A2 MegaMoE
 
-This experimental integration uses CANN MegaMoE for pure prefill on a single
-910B eight-device worker. It is disabled by default. There is no minimum or
-maximum token threshold for selecting the backend.
+This experimental integration uses CANN MegaMoE for prefill, mixed batches and
+decode on a single 910B eight-device worker, with model runners V1 and V2.
+It is disabled by default. Once enabled, `scope="all"` is the default: eager,
+graph warmup and ACL graph capture select the same backend, including when
+phase metadata is absent. There is no token-count selection threshold.
 
 ## Enable
 
@@ -22,13 +24,20 @@ vllm serve /path/to/Qwen3.8-Flash-Next \
   --dtype bfloat16 \
   --tensor-parallel-size 8 \
   --enable-expert-parallel \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-  --additional-config '{"enable_fused_mc2":2,"a2_mega_moe_prefill":{"enabled":true}}'
+  --additional-config '{"enable_fused_mc2":2,"a2_mega_moe_prefill":{"enabled":true,"scope":"all"}}'
 ```
 
 `enable_fused_mc2=2` explicitly selects the CANN package rather than the legacy
-`dispatch_ffn_combine` operator. Both options above are required. The A2 setting
-has only an `enabled` field; token-range options are not supported.
+`dispatch_ffn_combine` operator. Both options above are required. The historical
+`a2_mega_moe_prefill` key is retained for compatibility; its name does not limit
+the default scope. Valid scope values are `all` and `prefill`. Existing enabled
+configurations without a scope now use all-stage execution. Token-range options
+are not supported.
+
+No compilation mode is forced by this feature. Keep or tune the model's graph
+configuration separately; `FULL_DECODE_ONLY` is one candidate, not a requirement.
+`scope="prefill"` restores the original pure-prefill, eager-only policy for
+comparison with the all-stage policy.
 
 This implementation requires BF16 activations, TP8/EP8, DP1, PP1 and PCP1, static contiguous
 experts, and no LoRA, speculative decoding, EPLB or mixed placement. Invalid
@@ -52,27 +61,38 @@ Gate/up INT8 weights and their scales/offsets retain the native 640-wide
 intermediate dimension before NZ conversion. W1 has 1280 output channels and
 W2 has 640 input rows; W2 output-channel scales and offsets remain H-wide.
 Existing packed int64 scale encoding and per-expert NZ views feed MegaMoE.
-Ordinary mixed/decode execution keeps the same native-width stacked NZ weights
-and FP32 first-layer scale copy. No per-forward repacking is introduced.
+Ordinary fallback execution keeps the same native-width stacked NZ weights and
+FP32 first-layer scale copy. No per-forward repacking is introduced.
 
 ## Selection
 
-| Forward | Routed MoE backend |
-| --- | --- |
-| Confirmed pure prefill, eager | CANN MegaMoE |
-| Mixed prefill/decode | Original A2 selection (ALLGATHER for this EP8 model) |
-| Pure decode | Original A2 selection |
-| Missing or ambiguous phase metadata | Original A2 selection |
-| Captured graph execution | Original A2 selection |
-| Explicit memory-profile dummy run | MegaMoE can run without live phase metadata |
+| Forward | `scope="all"` (default when enabled) | `scope="prefill"` |
+| --- | --- | --- |
+| Confirmed pure prefill, eager | CANN MegaMoE | CANN MegaMoE |
+| Mixed prefill/decode, eager | CANN MegaMoE | ALLGATHER |
+| Pure decode, eager | CANN MegaMoE | ALLGATHER |
+| Missing or ambiguous phase metadata, eager | CANN MegaMoE | ALLGATHER |
+| FULL / PIECEWISE warmup and capture | CANN MegaMoE | ALLGATHER |
+| Graph replay | Replays captured MegaMoE | Replays captured ALLGATHER |
+| Explicit eager memory-profile dummy run | CANN MegaMoE | CANN MegaMoE |
 
-The phase check uses explicit prefill/decode counters or Qwen's complete QSA
-request plan. Query length is not used to guess the phase. Unknown GDN metadata
-can coexist with a complete QSA plan. A mixed/decode plan vetoes fusion.
+Only `scope="prefill"` checks the phase, using explicit prefill/decode counters
+or Qwen's complete QSA request plan. Query length is not used to guess the
+phase. Unknown GDN metadata can coexist with a complete QSA plan. A mixed/decode
+plan vetoes fusion in that scope, including the prefill rows of a mixed batch.
 
-The full-decode-only graph setting keeps prefill eager while decode retains its
-ordinary graph path. Full and piecewise captured executions do not dynamically
-switch their captured communication backend.
+Graph support here means ACL Graph / NPUGraph capture of the existing ACLNN
+execution path; it does not use or validate the CANN TorchAir/GE converter.
+The surrounding model and installed torch_npu/CANN stack must also support the
+selected graph mode. Full and piecewise captures retain their communication
+backend on replay; changing scope requires a worker restart and fresh capture.
+Symmetric buffers must be allocated in eager warmup before capture, or execution
+raises an error rather than attempting a collective allocation inside capture.
+
+V1 refreshes its persistent active mask before replay. V2 FULL replay bypasses
+Python model execution, so MC2 preparation derives its active mask inside the
+graph from the runner's persistent `is_padding` input. Updating that input changes
+the active rows on each replay, including all-padding dummy inputs.
 
 Memory profiling may call MegaMoE even when no actual request has used it. With
 debug logging, inspect the selector and actual MegaMoE call separately; an
@@ -100,11 +120,13 @@ Benchmark the complete model against the original configuration before rollout.
 
 ## Communication capacity
 
-The sender capacity comes from the scheduler's `max_num_batched_tokens`, rounded
-up to a TP multiple; A2 does not apply a token-count policy cutoff. All EP ranks
-allocate identical resources. For this model the absolute receive-route bound is
+The sender capacity covers the larger of the scheduler's `max_num_batched_tokens`
+and `max_cudagraph_capture_size`, rounded up to a TP multiple, including on
+decode-only workers. The reserved active mask covers that padded capacity too.
+A2 does not apply a token-count policy cutoff. All EP ranks allocate identical
+resources. For this model the absolute receive-route bound is
 `Bmax * 8 * 10`, where Bmax is the configured per-rank sender capacity.
-The A2 prefill path uses that bound rather than the general
+The A2 path uses that bound rather than the general
 `mega_moe_max_tokens` reference hint, so skewed routing is not silently truncated.
 
 Increasing the scheduler budget can substantially increase communication windows
@@ -112,21 +134,52 @@ and workspace. It is a memory budget, not a backend-selection threshold.
 Forward inputs exceeding the allocated sender capacity raise an error. The
 active mask excludes padding; each rank must still participate in collectives.
 
+## Throughput tuning
+
+Compare the disabled backend (`enable_fused_mc2=0`, `enabled=false`), the original
+`scope="prefill"` policy and `scope="all"` under identical workload conditions.
+For all-stage execution compare `--enforce-eager` with the model/runtime-supported
+`cudagraph_mode` settings: `FULL_DECODE_ONLY`, `FULL`, `PIECEWISE` and
+`FULL_AND_PIECEWISE`. Check the actual selected modes in runtime logs; model or
+attention-backend constraints may restrict capture coverage.
+
+Tune `max_num_batched_tokens`, concurrency, chunked prefill and graph capture
+sizes together. Larger MegaMoE windows and graph pools can reduce KV capacity
+and therefore concurrency. Measure end-to-end throughput, TTFT, TPOT and peak
+memory under the same prompt/output lengths and arrival pattern. Select the
+highest throughput configuration satisfying any latency limits; all-stage fusion
+or wider graph coverage alone does not establish a performance improvement.
+
 ## Validation and rollback
 
-CPU policy, real-selector, buffer-sizing, BF16/W8A8 weight-producer and scale tests can run
-without a vLLM or NPU installation:
+CPU policy, V2 platform-entry, selector, buffer-sizing, replay-mask, BF16/W8A8
+weight-producer and scale tests can run without a vLLM or NPU installation:
 
 ```shell
 python -m pytest --noconftest -q tests/ut/ops/test_a2_mega_moe.py
 ```
 
-These checks do not validate CANN registration, multi-device synchronization,
-BF16 kernel precision, graph replay or performance. On the target machine compare
+An eight-card A2 standalone regression exercises native I640 BF16/W8A8 eager
+execution and ACL graph replay with changed inputs, routes and padding. Run
+each shape/precision in a fresh process, for example:
+
+```shell
+torchrun --nproc-per-node=8 tests/e2e/nightly/single_node/ops/test_a2_mega_moe_graph.py --tokens 32 --precision bf16
+torchrun --nproc-per-node=8 tests/e2e/nightly/single_node/ops/test_a2_mega_moe_graph.py --tokens 32 --precision w8a8
+```
+
+Repeat with per-rank token counts such as 1, 8 and 512. The regression checks
+changed routing and active rows against eager outputs and independently checks
+per-expert counts, including skewed routing and all-padding replay. It reports
+eager and graph latency but does not assert a speedup or validate complete model
+precision. CPU checks do not validate CANN registration, multi-device
+synchronization, NPU precision, graph replay or performance. This integration
+still needs target-hardware validation. On the target machine compare
 original and enabled deployments with identical inputs and scheduler settings:
 pure prefill (including one-token prefix-cache tails), mixed batches, decode,
 chunk boundaries, skewed experts, padding and repeated graph replay. Check every
-rank's outputs and counts, TTFT, TPOT, throughput and peak memory.
+rank's outputs and counts, TTFT, TPOT, throughput and peak memory. Cover both
+model runners and all supported graph modes, restarting between policies.
 
 Set `enable_fused_mc2=0` and `a2_mega_moe_prefill.enabled=false`, then restart the
 workers, to restore the original weight-loading and communication paths. Merely

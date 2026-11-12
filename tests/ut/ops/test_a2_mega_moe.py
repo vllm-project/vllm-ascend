@@ -8,11 +8,12 @@ these numerical tests can also run with --noconftest on a development laptop.
 
 import ast
 import importlib.util
+import math
 import sys
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import Mock
 
 import pytest
@@ -46,6 +47,8 @@ def make_config():
         speculative_config=None,
         lora_config=None,
         quant_config=None,
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=4096),
+        compilation_config=SimpleNamespace(cudagraph_capture_sizes=[1, 8, 256], max_cudagraph_capture_size=256),
     )
 
 
@@ -56,7 +59,7 @@ def qsa_metadata(*phases):
 
 
 def test_explicit_prefill_enable():
-    cfg = TypeAdapter(Settings).validate_python({"enabled": True})
+    cfg = TypeAdapter(Settings).validate_python({"enabled": True, "scope": "prefill"})
     metadata = {"gdn": SimpleNamespace(), "qsa": qsa_metadata(True, True)}
     assert cfg.selects(metadata)
     assert not Settings().selects(metadata)
@@ -77,17 +80,20 @@ def test_explicit_prefill_enable():
     ],
 )
 def test_decode_mixed_and_unknown_never_selected(metadata):
-    assert not Settings(enabled=True).selects(metadata)
+    assert not Settings(enabled=True, scope="prefill").selects(metadata)
 
 
 def test_standard_metadata_and_profile():
-    cfg = Settings(enabled=True)
+    cfg = Settings(enabled=True, scope="prefill")
     assert cfg.selects(SimpleNamespace(num_prefills=1, num_decode_tokens=0))
     assert cfg.selects(None, in_profile_run=True)
     assert not Settings().selects(qsa_metadata(True), in_profile_run=True)
 
 
-@pytest.mark.parametrize("kwargs", [{"min_tokens": 1024}, {"max_tokens": 4096}, {"enabled": "true"}, {"unknown": 1}])
+@pytest.mark.parametrize(
+    "kwargs",
+    [{"min_tokens": 1024}, {"max_tokens": 4096}, {"enabled": "true"}, {"unknown": 1}, {"scope": "decode"}],
+)
 def test_invalid_settings_rejected(kwargs):
     with pytest.raises((ValueError, ValidationError)):
         Settings(**kwargs)
@@ -171,6 +177,7 @@ def load_forward_policy(settings):
         "_select_capacity_and_world_size_moe_comm_method",
         "select_moe_comm_method",
         "set_mc2_tokens_capacity",
+        "set_mc2_mask",
     }
     nodes = [n for n in source.body if isinstance(n, ast.FunctionDef) and n.name in names]
     code = ast.Module(body=nodes, type_ignores=[])
@@ -197,6 +204,8 @@ def load_forward_policy(settings):
         logger=Mock(),
         _is_decode_only_node=lambda _: False,
         _mc2_tokens_capacity=None,
+        _reserved_mc2_mask=None,
+        torch=torch,
         _MEGA_MOE_TOKENS_PER_RANK_LIMIT=16384,
         _MC2_TOKENS_PER_RANK_LIMIT=512,
         _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT=512,
@@ -224,7 +233,7 @@ def load_forward_policy(settings):
     ],
 )
 def test_real_selector_dispatch(tokens, phase, graph, expected):
-    policy, _ = load_forward_policy(Settings(enabled=True))
+    policy, _ = load_forward_policy(Settings(enabled=True, scope="prefill"))
     result = policy.select_moe_comm_method(
         tokens,
         make_config(),
@@ -258,7 +267,187 @@ def test_real_capacity_uses_scheduler_without_a_token_policy_limit():
     policy.set_mc2_tokens_capacity(cfg, max_num_reqs=256, uniform_decode_query_len=1)
     assert namespace["_mc2_tokens_capacity"] == 32768
     assert policy.select_moe_comm_method(4096, cfg, in_profile_run=True).name == "FUSED_MC2"
-    assert policy.select_moe_comm_method(4096, cfg).name == "ALLGATHER"
+    assert policy.select_moe_comm_method(4096, cfg).name == "FUSED_MC2"
+
+
+@pytest.mark.parametrize("phase", [None, {}, qsa_metadata(True), qsa_metadata(False), qsa_metadata(True, False)])
+@pytest.mark.parametrize("graph", [None, "NONE", "FULL", "PIECEWISE"])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_all_scope_keeps_backend_identical_across_warmup_capture_and_live_phases(phase, graph, enabled):
+    settings = TypeAdapter(Settings).validate_python({"enabled": enabled})
+    assert settings.scope == "all"
+    policy, _ = load_forward_policy(settings)
+    graph_mode = getattr(policy.CUDAGraphMode, graph) if graph else None
+    for profiling in (False, True):
+        result = policy.select_moe_comm_method(
+            8, make_config(), attn_metadata=phase, cudagraph_runtime_mode=graph_mode, in_profile_run=profiling
+        )
+        assert result.name == ("FUSED_MC2" if enabled else "ALLGATHER")
+
+
+def test_prefill_scope_never_captures_fusion_even_during_profiling():
+    settings = Settings(enabled=True, scope="prefill")
+    assert not settings.selects(qsa_metadata(True), in_profile_run=True, graph_enabled=True)
+
+
+@pytest.mark.parametrize("scope", ["all", "prefill"])
+@pytest.mark.parametrize("graph", ["NONE", "FULL", "PIECEWISE"])
+@pytest.mark.parametrize("phase", [None, qsa_metadata(True), qsa_metadata(True, False)])
+def test_mrv2_platform_entry_uses_real_a2_selector(monkeypatch, scope, graph, phase):
+    policy, _ = load_forward_policy(Settings(enabled=True, scope=scope))
+    mask = torch.zeros(16, dtype=torch.bool)
+    context_module = SimpleNamespace(
+        _is_decode_only_node=lambda _: False,
+        get_mc2_mask=lambda: mask,
+        get_mrv2_in_profile_run=lambda: False,
+        select_moe_comm_method=policy.select_moe_comm_method,
+        sync_v2_extra_kwargs=Mock(),
+        use_cann_megamoe=policy.use_cann_megamoe,
+    )
+    comm = object()
+    modules = {
+        "vllm_ascend.ascend_forward_context": context_module,
+        "vllm_ascend.ops.fused_moe.moe_comm_method": SimpleNamespace(get_moe_comm_method=lambda _: comm),
+        "vllm_ascend.quantization.utils": SimpleNamespace(get_dynamic_mx_quant_scale_alg=lambda _: 0),
+        "vllm.distributed": SimpleNamespace(
+            get_dp_group=lambda: SimpleNamespace(world_size=1), get_tensor_model_parallel_world_size=lambda: 8
+        ),
+        "vllm.config": SimpleNamespace(CUDAGraphMode=policy.CUDAGraphMode),
+    }
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    source = ast.parse((ROOT / "vllm_ascend/platform.py").read_text())
+    owner = next(n for n in source.body if isinstance(n, ast.ClassDef) and n.name == "NPUPlatform")
+    method = next(
+        n for n in owner.body if isinstance(n, ast.FunctionDef) and n.name == "set_additional_forward_context"
+    )
+    method.decorator_list = []
+    namespace = dict(torch=torch, Any=Any, VllmConfig=Any, math=math, is_moe_model=lambda _: True)
+    exec(compile(ast.Module(body=[method], type_ignores=[]), "platform.py", "exec"), namespace)
+    cfg = make_config()
+    cfg.use_v2_model_runner = True
+    extras = namespace[method.name](
+        None, phase, cfg, None, num_tokens=9, cudagraph_runtime_mode=getattr(policy.CUDAGraphMode, graph)
+    )
+    fused = scope == "all" or (graph == "NONE" and MODULE.is_pure_prefill(phase))
+    assert extras["moe_comm_type"].name == ("FUSED_MC2" if fused else "ALLGATHER")
+    assert extras["use_mega_moe"] is True
+    assert extras["moe_comm_method"] is comm
+    assert extras["padded_num_tokens"] == 16
+    torch.testing.assert_close(extras["mc2_mask"], torch.arange(16) < 9)
+    context_module.sync_v2_extra_kwargs.assert_called_once_with(cfg)
+
+
+@pytest.mark.parametrize("decode_only", [False, True])
+@pytest.mark.parametrize("scheduler,graph,expected", [(32768, 256, 32768), (1001, 1024, 1024), (1001, 0, 1008)])
+def test_a2_capacity_covers_scheduler_profiling_graph_buckets_and_tp_padding(decode_only, scheduler, graph, expected):
+    policy, namespace = load_forward_policy(Settings(enabled=True))
+    cfg = make_config()
+    cfg.scheduler_config.max_num_batched_tokens = scheduler
+    cfg.compilation_config.max_cudagraph_capture_size = graph
+    namespace["_is_decode_only_node"] = lambda _: decode_only
+    namespace["get_mc2_tokens_capacity"] = lambda: namespace["_mc2_tokens_capacity"]
+    policy.set_mc2_tokens_capacity(cfg, max_num_reqs=32, uniform_decode_query_len=1)
+    assert namespace["_mc2_tokens_capacity"] == expected
+    policy.set_mc2_mask(cfg, "cpu")
+    assert namespace["_reserved_mc2_mask"].shape == (expected,)
+
+
+@pytest.mark.parametrize("replace_allreduce", [False, True])
+@pytest.mark.parametrize("runner_mask", [False, True])
+def test_real_mc2_prepare_tracks_replay_padding_for_every_tp_rank(replace_allreduce, runner_mask):
+    source = ast.parse((ROOT / "vllm_ascend/ops/fused_moe/prepare_finalize.py").read_text())
+    owner = next(n for n in source.body if isinstance(n, ast.ClassDef) and n.name == "PrepareAndFinalizeWithMC2")
+    method = next(n for n in owner.body if isinstance(n, ast.FunctionDef) and n.name == "prepare")
+    padding = torch.ones(9, dtype=torch.bool)
+    # V1 refreshes a reserved active mask outside the graph; V2 refreshes a
+    # persistent is_padding input consumed inside the captured prepare function.
+    context = SimpleNamespace(mc2_mask=torch.zeros(16, dtype=torch.bool), padded_num_tokens=16)
+    namespace = dict(
+        torch=torch,
+        nn=torch.nn,
+        QuantType=SimpleNamespace(NONE=0),
+        MoEPrepareOutput=SimpleNamespace,
+        _EXTRA_CTX=context,
+        get_forward_context=lambda: SimpleNamespace(is_padding=padding if runner_mask else None),
+        _pad_tokens_with_cat=lambda x, target: torch.nn.functional.pad(x, (0, 0, 0, target - x.shape[0])),
+    )
+    exec(compile(ast.Module(body=[method], type_ignores=[]), "prepare_finalize.py", "exec"), namespace)
+    hidden, logits = torch.randn(16, 4), torch.randn(16, 8)
+    pointer = padding.data_ptr()
+    for actual in (0, 1, 7, 9, 3):
+        padding.fill_(True)
+        padding[:actual] = False
+        context.mc2_mask[:] = torch.arange(16) < actual
+        expected_mask = torch.arange(16) < actual
+        for rank in range(8):
+            instance = SimpleNamespace(tp_size=8, tp_rank=rank)
+            local_hidden = hidden[rank * 2 : rank * 2 + 2] if replace_allreduce else hidden[:9]
+            local_logits = logits[rank * 2 : rank * 2 + 2] if replace_allreduce else logits[:9]
+            result = namespace[method.name](instance, local_hidden, local_logits, replace_allreduce)
+            torch.testing.assert_close(result.mc2_mask, expected_mask[rank * 2 : rank * 2 + 2])
+            assert result.hidden_states.shape == (2, 4)
+    assert padding.data_ptr() == pointer
+
+
+def test_real_mega_moe_warmup_allocates_once_and_capture_reuses_buffer(monkeypatch):
+    source = ast.parse((ROOT / "vllm_ascend/ops/fused_moe/moe_comm_method.py").read_text())
+    owner = next(n for n in source.body if isinstance(n, ast.ClassDef) and n.name == "FusedMC2CommImpl")
+    method = next(n for n in owner.body if isinstance(n, ast.FunctionDef) and n.name == "_apply_cann_mega_moe")
+
+    class Dispatcher:
+        global_bs = 0
+        max_num_tokens_per_rank = 16
+
+    capturing = Mock(return_value=False)
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(is_current_stream_capturing=capturing), raising=False)
+    namespace = dict(
+        torch=torch,
+        cast=cast,
+        TokenDispatcherWithMC2=Dispatcher,
+        MoEFusedExpertsInput=Any,
+        get_ascend_config=lambda: SimpleNamespace(a2_mega_moe_prefill=Settings(enabled=True)),
+        get_current_hardware_profile=lambda: SimpleNamespace(supports=lambda _: False),
+        HardwareCapability=SimpleNamespace(CANN_MEGAMOE_MXFP=0),
+        moe_utils=SimpleNamespace(_get_cann_mega_moe_quant_settings=lambda _: (0, None, None)),
+        logger=Mock(),
+        _EXTRA_CTX=SimpleNamespace(in_profile_run=False),
+    )
+    exec(compile(ast.Module(body=[method], type_ignores=[]), "moe_comm_method.py", "exec"), namespace)
+    buffer = SimpleNamespace()
+    instance = SimpleNamespace(
+        token_dispatcher=Dispatcher(),
+        mega_moe_symm_buffer=None,
+        _init_mega_moe_symm_buffer=Mock(return_value=buffer),
+        mega_moe=Mock(return_value=(torch.zeros(2, 4), torch.zeros(64))),
+    )
+    inputs = SimpleNamespace(
+        hidden_states=torch.zeros(2, 4),
+        topk_ids=torch.zeros(2, 10, dtype=torch.int32),
+        topk_weights=torch.ones(2, 10),
+        quant=SimpleNamespace(quant_type=None),
+        routing=SimpleNamespace(mc2_mask=torch.tensor([True, False])),
+        layer=SimpleNamespace(a2_mega_moe_intermediate_size=640),
+    )
+    weights = SimpleNamespace(w1=[], w2=[], w1_scale=None, w2_scale=None, w1_scale_bias=None, w2_scale_bias=None)
+    apply = namespace[method.name]
+    capturing.return_value = True
+    with pytest.raises(RuntimeError, match="eager warmup"):
+        apply(instance, inputs, weights, False)
+    instance._init_mega_moe_symm_buffer.assert_not_called()
+    capturing.return_value = False
+    apply(instance, inputs, weights, False)
+    capturing.return_value = True
+    apply(instance, inputs, weights, False)
+    instance._init_mega_moe_symm_buffer.assert_called_once()
+    assert instance._init_mega_moe_symm_buffer.call_args.kwargs["physical_intermediate_size"] == 640
+    assert instance.mega_moe.call_args.args[5] is buffer
+    torch.testing.assert_close(
+        instance.mega_moe.call_args.kwargs["x_active_mask"], torch.tensor([1, 0], dtype=torch.int8)
+    )
+    inputs.hidden_states = torch.zeros(17, 4)
+    with pytest.raises(ValueError, match="at most 16"):
+        apply(instance, inputs, weights, False)
 
 
 def test_real_weight_producer_shares_native_views_for_both_backends(monkeypatch):
