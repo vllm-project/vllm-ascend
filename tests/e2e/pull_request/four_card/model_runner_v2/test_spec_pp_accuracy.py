@@ -43,9 +43,9 @@ from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMooncakeManag
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from tests.e2e.pull_request.kv_pool_watch import run_pool_ab, run_pool_hit_sequence
 
-# A3 mooncake ascend store uses the fabric-mem direct-transfer path. Keep an
-# explicit escape hatch for environments that need to probe the legacy path.
-os.environ.setdefault("ASCEND_ENABLE_USE_FABRIC_MEM", "1")
+# RoCE 对照实验：显式关闭 fabric-mem 并打开 ROCE，确保 store 走 RoCE 路径。
+os.environ["ASCEND_ENABLE_USE_FABRIC_MEM"] = "0"
+os.environ["HCCL_INTRA_ROCE_ENABLE"] = "1"
 
 DEEPSEEK_V4_MODEL = os.environ.get(
     "DEEPSEEK_V4_DSPARK_MODEL_PATH",

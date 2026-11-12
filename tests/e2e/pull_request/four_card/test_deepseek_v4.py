@@ -30,10 +30,9 @@ from tests.e2e.pull_request.kv_pool_watch import run_pool_ab, run_pool_hit_seque
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-# A3: without fabric mem every cross-rank put fails (halDeviceDisableP2P
-# drvRetCode=17 -> aclrtIpcMemImportByKey 107000) and R2 sees 0 hits.
-# setdefault keeps it overridable on other platforms.
-os.environ.setdefault("ASCEND_ENABLE_USE_FABRIC_MEM", "1")
+# RoCE 对照实验：显式关闭 fabric-mem 并打开 ROCE，确保 store 走 RoCE 路径。
+os.environ["ASCEND_ENABLE_USE_FABRIC_MEM"] = "0"
+os.environ["HCCL_INTRA_ROCE_ENABLE"] = "1"
 
 # Local verification uses a mounted checkpoint; CI uses the HF id.
 POOL_MODEL = os.environ.get("DEEPSEEK_V4_MTP_MODEL_PATH", "gdydems/DeepSeek-V4-Flash-w4a8-mtp")
