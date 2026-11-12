@@ -51,6 +51,7 @@ jobs:
       profile_options_json: ${{ steps.resolve.outputs.profile_options_json }}
       bisect_args_json: ${{ steps.resolve.outputs.bisect_args_json }}
       command: ${{ steps.resolve.outputs.command }}
+      presmoke_image: ${{ steps.resolve.outputs.presmoke_image }}
       pr_number: ${{ steps.resolve.outputs.pr_number }}
       download_path: ${{ steps.resolve.outputs.download_path }}
       blocked: ${{ steps.block_window.outputs.blocked }}
@@ -230,6 +231,7 @@ jobs:
           AOP_ENABLED="false"
           PROFILE_OPTIONS_JSON='{}'
           IS_A3_560T="false"
+          IS_PRESMOKE_IMAGE="false"
           NEXT_IS_BRANCH=0
           NEXT_IS_DOWNLOAD=0
           DOWNLOAD_PATH=""
@@ -327,6 +329,8 @@ jobs:
               AOP_ENABLED="true"
             elif [ "$WORD" = "--a3-560t" ]; then
               IS_A3_560T="true"
+            elif [ "$WORD" = "--presmoke" ]; then
+              IS_PRESMOKE_IMAGE="true"
             elif [ "$WORD" = "--profile" ]; then
               PROFILE_OPTIONS_JSON=$(jq -c '.enabled = true' <<< "$PROFILE_OPTIONS_JSON")
             elif [ "$WORD" = "--profile-with-stack" ]; then
@@ -379,6 +383,10 @@ jobs:
           fi
           if jq -e '.enabled == true' <<< "$PROFILE_OPTIONS_JSON" >/dev/null && [ "$COMMAND" != "nightly" ]; then
             echo "ERROR: profiling is supported only by Nightly workflows"
+            exit 1
+          fi
+          if [ "$IS_PRESMOKE_IMAGE" = "true" ] && [ "$COMMAND" != "nightly" ]; then
+            echo "ERROR: --presmoke is supported only by the /nightly command (use /presmoke to build the image)"
             exit 1
           fi
 
@@ -436,6 +444,7 @@ jobs:
             echo "download_path=$DOWNLOAD_PATH"
             echo "aop_enabled=$AOP_ENABLED"
             echo "profile_options_json=$PROFILE_OPTIONS_JSON"
+            echo "presmoke_image=$IS_PRESMOKE_IMAGE"
             echo "vllm_ref=$VLLM_REF"
             echo "bisect_good_commit=$BISECT_GOOD_COMMIT"
             echo "bisect_bad_commit=$BISECT_BAD_COMMIT"
@@ -526,8 +535,10 @@ jobs:
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
             -f skip_build_image='${{ needs.authorize.outputs.command != 'presmoke' }}' \
             -f skip_base='${{ needs.authorize.outputs.command != 'presmoke' }}' \
-            -f image_tag_suffix='${{ needs.authorize.outputs.command == 'presmoke' && '-presmoke' || '' }}' \
-            -f os_matrix='${{ needs.authorize.outputs.command == 'presmoke' && '["ubuntu","openeuler"]' || '["ubuntu"]' }}' \
+            -f skip_test='${{ needs.authorize.outputs.command == 'presmoke' }}' \
+            -f image_tag_suffix='${{ (needs.authorize.outputs.command == 'presmoke' || needs.authorize.outputs.presmoke_image == 'true') && '-presmoke' || '' }}' \
+            -f image_repo_suffix='${{ (needs.authorize.outputs.command == 'presmoke' || needs.authorize.outputs.presmoke_image == 'true') && '-presmoke' || '' }}' \
+            -f os_matrix='${{ (needs.authorize.outputs.command == 'presmoke' || needs.authorize.outputs.presmoke_image == 'true') && '["ubuntu","openeuler"]' || '["ubuntu"]' }}' \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
             -f download_path="$DOWNLOAD_PATH" \
@@ -577,8 +588,10 @@ jobs:
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
             -f skip_build_image='${{ needs.authorize.outputs.command != 'presmoke' }}' \
             -f skip_base='${{ needs.authorize.outputs.command != 'presmoke' }}' \
-            -f image_tag_suffix='${{ needs.authorize.outputs.command == 'presmoke' && '-presmoke' || '' }}' \
-            -f os_matrix='${{ needs.authorize.outputs.command == 'presmoke' && '["ubuntu","openeuler"]' || '["ubuntu"]' }}' \
+            -f skip_test='${{ needs.authorize.outputs.command == 'presmoke' }}' \
+            -f image_tag_suffix='${{ (needs.authorize.outputs.command == 'presmoke' || needs.authorize.outputs.presmoke_image == 'true') && '-presmoke' || '' }}' \
+            -f image_repo_suffix='${{ (needs.authorize.outputs.command == 'presmoke' || needs.authorize.outputs.presmoke_image == 'true') && '-presmoke' || '' }}' \
+            -f os_matrix='${{ (needs.authorize.outputs.command == 'presmoke' || needs.authorize.outputs.presmoke_image == 'true') && '["ubuntu","openeuler"]' || '["ubuntu"]' }}' \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
             -f download_path="$DOWNLOAD_PATH" \
@@ -628,8 +641,10 @@ jobs:
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
             -f skip_build_image='${{ needs.authorize.outputs.command != 'presmoke' }}' \
             -f skip_base='${{ needs.authorize.outputs.command != 'presmoke' }}' \
-            -f image_tag_suffix='${{ needs.authorize.outputs.command == 'presmoke' && '-presmoke' || '' }}' \
-            -f os_matrix='${{ needs.authorize.outputs.command == 'presmoke' && '["ubuntu","openeuler"]' || '["ubuntu"]' }}' \
+            -f skip_test='${{ needs.authorize.outputs.command == 'presmoke' }}' \
+            -f image_tag_suffix='${{ (needs.authorize.outputs.command == 'presmoke' || needs.authorize.outputs.presmoke_image == 'true') && '-presmoke' || '' }}' \
+            -f image_repo_suffix='${{ (needs.authorize.outputs.command == 'presmoke' || needs.authorize.outputs.presmoke_image == 'true') && '-presmoke' || '' }}' \
+            -f os_matrix='${{ (needs.authorize.outputs.command == 'presmoke' || needs.authorize.outputs.presmoke_image == 'true') && '["ubuntu","openeuler"]' || '["ubuntu"]' }}' \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
             -f download_path="$DOWNLOAD_PATH" \
@@ -679,8 +694,10 @@ jobs:
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
             -f skip_build_image='${{ needs.authorize.outputs.command != 'presmoke' }}' \
             -f skip_base='${{ needs.authorize.outputs.command != 'presmoke' }}' \
-            -f image_tag_suffix='${{ needs.authorize.outputs.command == 'presmoke' && '-presmoke' || '' }}' \
-            -f os_matrix='${{ needs.authorize.outputs.command == 'presmoke' && '["ubuntu","openeuler"]' || '["ubuntu"]' }}' \
+            -f skip_test='${{ needs.authorize.outputs.command == 'presmoke' }}' \
+            -f image_tag_suffix='${{ (needs.authorize.outputs.command == 'presmoke' || needs.authorize.outputs.presmoke_image == 'true') && '-presmoke' || '' }}' \
+            -f image_repo_suffix='${{ (needs.authorize.outputs.command == 'presmoke' || needs.authorize.outputs.presmoke_image == 'true') && '-presmoke' || '' }}' \
+            -f os_matrix='${{ (needs.authorize.outputs.command == 'presmoke' || needs.authorize.outputs.presmoke_image == 'true') && '["ubuntu","openeuler"]' || '["ubuntu"]' }}' \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
             -f download_path="$DOWNLOAD_PATH" \
@@ -730,8 +747,10 @@ jobs:
             -f download_path="$DOWNLOAD_PATH" \
             -f skip_build_image='${{ needs.authorize.outputs.command != 'presmoke' }}' \
             -f skip_base='${{ needs.authorize.outputs.command != 'presmoke' }}' \
-            -f image_tag_suffix='${{ needs.authorize.outputs.command == 'presmoke' && '-presmoke' || '' }}' \
-            -f os_matrix='${{ needs.authorize.outputs.command == 'presmoke' && '["ubuntu","openeuler"]' || '["ubuntu"]' }}' \
+            -f skip_test='${{ needs.authorize.outputs.command == 'presmoke' }}' \
+            -f image_tag_suffix='${{ (needs.authorize.outputs.command == 'presmoke' || needs.authorize.outputs.presmoke_image == 'true') && '-presmoke' || '' }}' \
+            -f image_repo_suffix='${{ (needs.authorize.outputs.command == 'presmoke' || needs.authorize.outputs.presmoke_image == 'true') && '-presmoke' || '' }}' \
+            -f os_matrix='${{ (needs.authorize.outputs.command == 'presmoke' || needs.authorize.outputs.presmoke_image == 'true') && '["ubuntu","openeuler"]' || '["ubuntu"]' }}' \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
             -f profile_options_json="$PROFILE_OPTIONS_JSON" \
