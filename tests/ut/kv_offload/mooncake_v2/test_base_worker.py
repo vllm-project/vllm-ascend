@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -31,7 +30,7 @@ def test_kvpp_publishes_owned_layers_and_mtp(monkeypatch, pcp_rank, tp_rank, tar
 
     names = [layer_name(i) for i in (9, 10, 11, 12, 17)]
     spec = make_full_spec()
-    caches = {name: torch.zeros((2, 1, 16, 8), dtype=torch.float16) for name in names}
+    caches = {name: torch.zeros((2, 16, 1, 8), dtype=torch.float16) for name in names}
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
     worker.vllm_config = make_kvpp_config(tp=2, pcp=2)
     worker.vllm_config.parallel_config.cp_kv_cache_interleave_size = 16
@@ -85,11 +84,11 @@ def test_build_spec_mappings_expands_uniform_group_by_layer_spec() -> None:
     assert worker.layer_name_to_spec_index == {"layer.0": 0, "layer.1": 1}
 
 
-@pytest.mark.parametrize("heads", [1, 2, 4])
+@pytest.mark.parametrize("layout", ["HND", "NHD"])
 @pytest.mark.parametrize("spec_factory", [make_full_spec, make_sliding_spec])
-def test_register_kv_caches_uses_config_order_and_publishes_tensor_metadata(monkeypatch, spec_factory, heads) -> None:
-    spec = replace(spec_factory(), num_kv_heads=heads)
-    shape = (4, heads, 16, 8)
+def test_register_kv_caches_uses_config_order_and_publishes_tensor_metadata(monkeypatch, layout, spec_factory) -> None:
+    spec = spec_factory()
+    shape = (4, 1, 16, 8) if layout == "HND" else (4, 16, 1, 8)
     k_cache = torch.empty(shape, dtype=torch.float16)
     v_cache = torch.empty(shape, dtype=torch.float16)
     config = KVCacheConfig(
@@ -133,12 +132,26 @@ def test_register_kv_caches_uses_config_order_and_publishes_tensor_metadata(monk
     assert metadata.layer_names == ["layer.0"]
     assert metadata.layer_block_sizes == [spec.block_size]
     assert metadata.kv_caches_base_addr == [[k_cache.data_ptr(), v_cache.data_ptr()]]
-    assert metadata.block_shapes == [[(heads, 16, 8), (heads, 16, 8)]]
+    assert metadata.block_shapes == [[(1, 16, 8), (1, 16, 8)]]
     assert metadata.block_size_scales == [[2, 2]]
     assert metadata.block_strides == [[k_cache.stride(0) * 2, v_cache.stride(0) * 2]]
-    assert metadata.block_lens == [[256 * heads, 256 * heads]]
+    assert metadata.block_lens == [[256, 256]]
     assert tuple(k_cache.shape) == shape
     transfer_engine.register_buffer.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("heads", "shape", "step", "error"),
+    [
+        (2, (2, 16, 2, 8), 1, "exactly one KV head"),
+        (16, (2, 16, 16, 8), 1, "cannot distinguish HND from NHD"),
+        (1, (2, 16, 1, 16), 2, "contiguous bytes"),
+    ],
+)
+def test_transfer_block_shape_rejects_unsupported_cache(heads, shape, step, error) -> None:
+    cache = torch.empty(shape, dtype=torch.float16)[..., ::step]
+    with pytest.raises(ValueError, match=error):
+        MooncakeBaseConnectorWorker._get_transfer_block_shape(make_full_spec(num_kv_heads=heads), cache)
 
 
 @pytest.mark.parametrize("spare", [0, 64, 256])
