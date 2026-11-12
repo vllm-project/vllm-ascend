@@ -11,7 +11,10 @@ from vllm_ascend.core import kv_cache_config_builder
 
 def test_packed_groups_leave_eagle_annotation_to_upstream():
     """Ascend grouping never tags draft groups; get_kv_cache_configs does."""
-    config = SimpleNamespace(scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False))
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen3")),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+    )
     specs = {"layer": object()}
     groups = [KVCacheGroupSpec(layer_names=["layer"], kv_cache_spec=specs["layer"])]
     with (

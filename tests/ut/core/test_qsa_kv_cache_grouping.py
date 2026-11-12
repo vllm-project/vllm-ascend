@@ -25,6 +25,7 @@ def _ordinary_specs() -> dict[str, KVCacheSpec]:
 
 def _ordinary_config() -> SimpleNamespace:
     return SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen3")),
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         speculative_config=None,
         kv_transfer_config=None,

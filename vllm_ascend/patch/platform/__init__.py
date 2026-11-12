@@ -80,27 +80,21 @@ import vllm_ascend.patch.platform.patch_example_connector  # noqa
 #
 # ** File: platform/patch_kv_cache_utils.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes`
-#      `vllm.v1.engine.core.resolve_kv_cache_block_sizes`
-#   2. `vllm.v1.core.kv_cache_planning._max_memory_usage_bytes_from_groups`
+#   1. `vllm.v1.core.kv_cache_planning._max_memory_usage_bytes_from_groups`
 #      `..._annotate_eagle_groups`, `vllm.v1.kv_cache_interface.KVCacheConfig.has_mamba_layers`
 #    Why:
-#       vLLM PR #40860 restricts hybrid KV cache groups with multiple block
-#       sizes under decode context parallelism, which Ascend implements per
-#       MLA/SWA-MLA layer. The Ascend cache layouts also keep their own
-#       admission accounting, EAGLE draft group marking, and nested-Mamba
-#       detection, none of which has a builder or platform hook upstream.
+#       The Ascend cache layouts keep their own admission accounting, EAGLE
+#       draft group marking, and nested-Mamba detection, none of which has a
+#       builder or platform hook upstream.
 #    How:
 #       Monkey-patch only the module-level helpers the builder cannot express.
 #       Grouping, pool accounting, and materialization live in
 #       AscendKVCacheConfigBuilder, which the platform selects through
 #       NPUPlatform.get_kv_cache_config_builder_cls.
 #    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/40860
 #       https://github.com/vllm-project/vllm/pull/53558
 #    Future Plan:
-#       Remove this patch once upstream supports hybrid KV cache + CP for
-#       non-CUDA backends and exposes hooks for the remaining helpers.
+#       Remove this patch once upstream exposes hooks for the remaining helpers.
 #
 # ** File: platform/patch_mamba_config.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
