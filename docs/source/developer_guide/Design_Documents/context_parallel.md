@@ -1,5 +1,7 @@
 # Context Parallel
 
+## Overview
+
 The context parallel features include Prefill Context Parallel (PCP) and Decode Context Parallel (DCP).
 
 Prefill Context Parallel splits prefill tokens across additional ranks to reduce time to first token. See the [Context Parallel Guide](../../user_guide/feature_guide/context_parallel.md#prefill-context-parallel) for PCP configuration, supported feature combinations, and constraints.
@@ -7,6 +9,10 @@ Prefill Context Parallel splits prefill tokens across additional ranks to reduce
 Decode Context Parallel shards the KV cache along the sequence dimension across ranks in a DCP group, which may reuse TP ranks, PCP ranks, or both. It eliminates redundant KV-cache storage without adding devices to the process world.
 
 This document describes PCP execution and DCP cache sharding. See the [PCP/DCP RFC](https://github.com/vllm-project/vllm-ascend/issues/12622) for the design rationale.
+
+!!! warning "Sunset Notice for GQA DCP"
+
+    Decode Context Parallelism (DCP) for GQA models is **deprecated** as of v0.32.0 and will be removed in a future release. GQA draft models maintain native TP sharding under target DCP. DCP for MLA and SFA models remains fully supported. See [RFC #21305](https://github.com/vllm-project/vllm-ascend/issues/21305).
 
 ## KV-cache layout
 
@@ -183,7 +189,7 @@ Extensions need consistent topology checks, query/cache mappings, and output lay
 ## Related Files
 
 - Slot mapping: `vllm_ascend/worker/block_table.py`
-- Input and attention metadata: `vllm_ascend/worker/v1/model_runner.py`
+- Input and attention metadata: `vllm_ascend/worker/v2/model_runner.py`
 - Shared DCP backend capabilities: `vllm_ascend/attention/context_parallel/common_cp.py`
 - GQA DCP backend: `vllm_ascend/attention/context_parallel/attention_cp.py`
 - MLA DCP backend: `vllm_ascend/attention/context_parallel/mla_cp.py`

@@ -9,7 +9,6 @@ import torch
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.block_table import BlockTables
 
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.block_table import AscendBlockTables
 
 _TRITON_BLOCK_SIZE = 1024
@@ -82,11 +81,10 @@ def test_init_keeps_explicit_kernel_block_sizes():
         kernel_block_sizes=[4],
     )
     assert tables.kernel_block_sizes == [4]
-    if not vllm_version_is("0.31.0"):
-        # vLLM #57169 dropped the expansion from BlockTables on main; a manager
-        # block still covers `blocks_per_kv_block` kernel entries (block 7 ->
-        # [14, 15]) because Ascend kernels address kernel blocks.
-        assert tables.blocks_per_kv_block == [2]
+    # vLLM #57169 dropped the expansion from BlockTables on main; a manager
+    # block still covers `blocks_per_kv_block` kernel entries (block 7 ->
+    # [14, 15]) because Ascend kernels address kernel blocks.
+    assert tables.blocks_per_kv_block == [2]
 
 
 def test_init_forwards_slot_mapping_enabled_on_newer_vllm():
@@ -205,15 +203,13 @@ def test_init_block_table_layout_tensors_builds_distinct_sizes():
     tables.block_tables = [SimpleNamespace(gpu=torch.zeros(2, 8)) for _ in range(2)]
     tables.input_block_tables = [torch.zeros(2, 8) for _ in range(2)]
     tables._slot_mapping_enabled = [True, False]
+    # vLLM main's ``init_block_table_layout_tensors`` reads this; ``__init__``
+    # normally sets it, but this stub bypasses ``__init__``.
+    tables._sliding_window_reach = [0, 0]
     tables.init_block_table_layout_tensors()
-
-    if vllm_version_is("0.31.0"):
-        # The release lane's layout tensors also cover the kernel block sizes.
-        assert torch.equal(tables.kernel_block_sizes_tensor, torch.tensor([8, 8], dtype=torch.int32))
-    else:
-        # vLLM main dropped `kernel_block_sizes`; AscendBlockTables builds the
-        # kernel-block tensor in __init__ instead.
-        assert not hasattr(tables, "kernel_block_sizes_tensor")
+    # vLLM main dropped `kernel_block_sizes`; AscendBlockTables builds the
+    # kernel-block tensor in __init__ instead.
+    assert not hasattr(tables, "kernel_block_sizes_tensor")
     assert torch.equal(tables.block_sizes_tensor, torch.tensor([16, 32], dtype=torch.int32))
     assert tables.block_sizes_tensor.device.type == "cpu"
 

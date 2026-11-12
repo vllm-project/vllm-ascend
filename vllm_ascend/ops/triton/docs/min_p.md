@@ -4,7 +4,7 @@ Source: `vllm_ascend/worker/v2/sample/min_p.py` (host wrapper: `apply_min_p`).
 
 ## Description
 
-- **Function**: Applies min-p sampling filtering to the sampler logits **in place**. For every token row, tokens whose logit is below `max_logit + log(min_p)` (equivalently, whose probability is below `min_p * max_prob`) are masked out with `-inf`; rows whose request has `min_p == 0.0` are left untouched. It replaces `vllm.v1.worker.gpu.sample.states.apply_min_p` through `vllm_ascend/patch/worker/patch_v2/patch_triton.py`.
+- **Function**: Applies min-p sampling filtering to the sampler logits **in place**. For every token row, tokens whose logit is below `max_logit + log(min_p)` (equivalently, whose probability is below `min_p * max_prob`) are masked out with `-inf`; rows whose request has `min_p == 0.0` are left untouched. It replaces `vllm.v1.worker.gpu.sample.states.apply_min_p` through `vllm_ascend/patch/worker/patch_triton.py`.
 - **Formula**: For token row `t` with request index `r = expanded_idx_mapping[t]` and `p = min_p[r]`:
 
     ```text
@@ -23,7 +23,7 @@ Source: `vllm_ascend/worker/v2/sample/min_p.py` (host wrapper: `apply_min_p`).
   3. Kernel side, per row: load `req_state_idx = expanded_idx_mapping[token_idx]`, then `min_p = min_p[req_state_idx]` cast to fp32. If `min_p == 0.0`, the row is skipped entirely (no load, no store), which keeps mixed batches cheap.
   4. Kernel side, pass 1 (reduction): scan the vocabulary in `BLOCK_SIZE` tiles, masking the tail with `other=-inf`, and reduce to the row maximum `max_val`; cast it to fp32. Tiling means the whole vocabulary row never has to fit into UB.
   5. Kernel side, pass 2 (masking): compute `threshold = max_val + log(min_p)`, re-scan the vocabulary in `BLOCK_SIZE` tiles, apply `tl.where(logits < threshold, -inf, logits)` and store the tile back to the output row with the same tail mask.
-- **Supported modes**: Atlas A2, Atlas A3, and 950PR&950DT Products. Used by the V2 worker sampler (`vllm_ascend/patch/worker/patch_v2/patch_triton.py`) in both the normal decode path and the speculative-decoding sampling path.
+- **Supported modes**: Atlas A2, Atlas A3, and 950PR&950DT Products. Used by the V2 worker sampler (`vllm_ascend/patch/worker/patch_triton.py`) in both the normal decode path and the speculative-decoding sampling path.
 
 ## Parameters
 

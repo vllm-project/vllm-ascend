@@ -152,8 +152,8 @@ def _rope_fp8_pytorch_native(
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
-    reason="Requires Ascend A2/A3",
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
 @pytest.mark.parametrize("num_tokens,num_q_heads,num_k_heads,head_size,rotary_dim", ORDINARY_ROPE_CASES)
@@ -193,8 +193,8 @@ def test_rotary_embedding_triton_kernel(
 
 
 @pytest.mark.skipif(
-    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
-    reason="Requires Ascend A2/A3",
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("max_position_embeddings", MAX_POSITION_EMBEDDINGS)
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)

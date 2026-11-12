@@ -3,7 +3,7 @@
 
 import torch
 
-from vllm_ascend.patch.worker.patch_v2.patch_uva import _int64_storage, _zeros_on_npu
+from vllm_ascend.patch.worker.patch_uva import _int64_storage, _zeros_on_npu
 
 
 def test_uint64_npu_zeros_view_int64_storage(monkeypatch):

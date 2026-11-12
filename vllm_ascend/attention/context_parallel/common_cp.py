@@ -4,18 +4,47 @@ from typing import Any
 import torch
 import torch.distributed as dist
 import torch_npu
+from vllm import envs
 from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
+from vllm.logger import logger
 
 import vllm_ascend.ops.triton.dcp.dcp_a2a  # noqa: F401
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
+from vllm_ascend.utils import enable_sfa, model_uses_kpool_indexer
+
+
+def use_dcp_q_replicate(vllm_config) -> bool:
+    """Resolve dense MLA Q replication before creating Q projections."""
+    parallel = vllm_config.parallel_config
+    requested = (
+        envs.VLLM_DCP_Q_REPLICATE
+        if envs.is_set("VLLM_DCP_Q_REPLICATE")
+        else bool(getattr(parallel, "dcp_q_replicate", False))
+    )
+    if not requested or parallel.decode_context_parallel_size <= 1 or parallel.prefill_context_parallel_size > 1:
+        return False
+    if enable_sfa(vllm_config):
+        logger.warning_once("Ascend dcp_q_replicate is not supported for SFA; disabling Q replication.")
+        return False
+    # LoRA wrappers do not implement the replicated-Q projection layout.
+    if vllm_config.lora_config is not None:
+        logger.warning_once("Ascend dcp_q_replicate is not supported for LoRA adapters; disabling Q replication.")
+        return False
+    return True
 
 
 def is_pcp_decode_sharding_enabled(vllm_config) -> bool:
     """Shard PCP decode requests, including speculative target verification.
 
     The decision uses declared vLLM fields so cloning a draft
-    ``ParallelConfig`` with ``replace()`` remains supported.
+    ``ParallelConfig`` with ``replace()`` remains supported. KPool models
+    keep replicated decodes so every PCP rank advances its head-sharded
+    Mamba state in the same request order.
     """
+    if model_uses_kpool_indexer(getattr(vllm_config, "model_config", None)):
+        # TODO: Adapt PCP decode request sharding for GLM-5.3-Flash, including
+        # recurrent-state ownership and request ordering across PCP ranks.
+        return False
     parallel_config = vllm_config.parallel_config
     return parallel_config.prefill_context_parallel_size > 1 and parallel_config.decode_context_parallel_size == 1
 
@@ -54,29 +83,6 @@ def use_history_current_split_decode(
     assert decode is not None and decode.actual_seq_lengths_q is not None
     query_ends = decode.actual_seq_lengths_q
     return any(end - start > 1 for start, end in zip([0] + query_ends[:-1], query_ends))
-
-
-def get_cp_local_query_key_lens(
-    query_start_loc: torch.Tensor,
-    cum_query_lens: torch.Tensor,
-    seq_lens: torch.Tensor,
-    local_start: int,
-    local_end: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return cumulative query lengths and causal KV lengths for a token shard.
-
-    ``local_end`` includes CP padding. Requests with no local queries must
-    have zero KV length, including graph-padding requests with zero seq_lens.
-    Callers copy the results into their own graph-stable metadata buffers.
-    """
-    global_start = query_start_loc[: cum_query_lens.shape[0]]
-    req_local_start = global_start.clamp(min=local_start)
-    req_local_end = cum_query_lens.clamp(max=local_end)
-    num_local_tokens = req_local_end - req_local_start
-    local_query_lens = torch.cumsum(num_local_tokens.clamp(min=0), dim=0)
-    offset = cum_query_lens - req_local_end
-    local_key_lens = torch.where(num_local_tokens > 0, torch.clamp_min(seq_lens - offset, 0), 0)
-    return local_query_lens, local_key_lens
 
 
 def build_pcp_ordered_slot_mapping(

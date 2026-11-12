@@ -10,14 +10,20 @@ import msgspec
 import pytest
 import torch
 import zmq
+from cachetools import TTLCache
 from vllm.sampling_params import SamplingParams
 from vllm.v1.request import Request, RequestStatus
 
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import heartbeat as heartbeat_module
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import pull_scheduler
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
     MooncakeBaseConnectorScheduler,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import MooncakePullConnector
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.heartbeat import (
+    HEARTBEAT_MSG,
+    MooncakeHeartbeatThread,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeTransferMetadataGroups,
 )
@@ -59,12 +65,14 @@ def make_sending_thread(
         dcp_size=dcp_size,
         use_kv_pp=use_kv_pp,
         ready_event=threading.Event(),
+        kv_lease_duration=30,  # Explicit short lease for boundary tests.
     )
 
 
 def make_pull_scheduler() -> MooncakePullConnectorScheduler:
     scheduler = MooncakePullConnectorScheduler.__new__(MooncakePullConnectorScheduler)
     scheduler.need_truncate = False
+    scheduler._logged_mamba_allocation = False
     scheduler.num_speculative_tokens = 0
     scheduler.pcp_size = 1
     scheduler.dcp_size = 1
@@ -78,8 +86,15 @@ def make_pull_scheduler() -> MooncakePullConnectorScheduler:
     scheduler._reqs_need_send = {}
     scheduler._reqs_in_batch = set()
     scheduler._reqs_recv_info = {}
+    scheduler._validated_producer_leases = TTLCache(
+        maxsize=pull_scheduler.PRODUCER_LEASE_CACHE_MAX_SIZE,
+        ttl=pull_scheduler.PRODUCER_LEASE_CACHE_TTL_SECONDS,
+        timer=time.monotonic,
+    )
     scheduler._sending_thread = None
     scheduler._recving_thread = None
+    scheduler._heartbeat_thread = None
+    scheduler._kv_lease_duration = 30
     return scheduler
 
 
@@ -261,7 +276,7 @@ def test_sending_thread_rejects_incomplete_or_inconsistent_workers() -> None:
 def test_sending_thread_handles_completion_once() -> None:
     thread = make_sending_thread()
 
-    thread.add_delayed_request("normal", time.time())
+    thread.add_delayed_request("normal")
     thread._handle_finished_request("normal")
     thread._handle_finished_request("normal")
     assert thread.get_and_clear_finished_requests() == {"normal"}
@@ -276,7 +291,7 @@ def test_sending_thread_ignores_unknown_completion() -> None:
 
     thread._handle_finished_request("unknown")
     assert thread.get_and_clear_finished_requests() == set()
-    thread.add_delayed_request("unknown", time.time())
+    thread.add_delayed_request("unknown")
     assert thread.get_and_clear_finished_requests() == set()
     thread._handle_finished_request("unknown")
     assert thread.get_and_clear_finished_requests() == {"unknown"}
@@ -284,7 +299,7 @@ def test_sending_thread_ignores_unknown_completion() -> None:
 
 def test_sending_thread_acks_duplicate_and_unknown_completion() -> None:
     thread = make_sending_thread()
-    thread.add_delayed_request("normal", time.time())
+    thread.add_delayed_request("normal")
     sock = MagicMock()
     sock.recv_multipart.side_effect = [
         [b"consumer", b"", msgspec.msgpack.encode((DONE_RECVING_MSG, request_id))]
@@ -303,7 +318,7 @@ def test_sending_thread_does_not_retain_completed_request_ids() -> None:
 
     for index in range(100):
         request_id = f"request-{index}"
-        thread.add_delayed_request(request_id, time.time())
+        thread.add_delayed_request(request_id)
         thread._handle_finished_request(request_id)
         assert thread.get_and_clear_finished_requests() == {request_id}
         thread._handle_finished_request(request_id)
@@ -317,17 +332,14 @@ def test_sending_thread_does_not_retain_completed_request_ids() -> None:
 
 def test_sending_thread_force_frees_expired_request(monkeypatch: pytest.MonkeyPatch) -> None:
     thread = make_sending_thread()
-    thread.add_delayed_request("expired", 10.0)
-    monkeypatch.setattr(
-        pull_scheduler.envs,
-        "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT",
-        5,
-    )
+    clock = MagicMock(return_value=10.0)
     monkeypatch.setattr(
         pull_scheduler.time,
-        "time",
-        MagicMock(return_value=20.0),
+        "monotonic",
+        clock,
     )
+    thread.add_delayed_request("expired")
+    clock.return_value = 40.0
 
     assert thread.get_and_clear_finished_requests() == {"expired"}
     assert not thread.delayed_free_requests
@@ -412,7 +424,7 @@ def test_base_scheduler_clips_attention_and_keeps_mamba_state_blocks() -> None:
     scheduler.dcp_size = 1
     scheduler.num_speculative_tokens = 2
     scheduler.group_block_size = [16, 16]
-    scheduler.group_unique_specs = [[make_full_spec()], [make_mamba_spec()]]
+    scheduler.group_unique_specs = [[make_full_spec()], [replace(make_mamba_spec(), num_speculative_blocks=2)]]
 
     result = scheduler._get_transfer_block_ids(
         ([10, 11, 12, 13], [20, 21, 22, 23]),
@@ -478,6 +490,52 @@ def test_zero_external_tokens_acknowledges_without_worker_transfer() -> None:
     scheduler._recving_thread.add_request.assert_called_once_with("10.0.0.1", 6000, "request-p")
 
 
+def test_request_finished_acks_unallocated_remote_prefill() -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._recving_thread = MagicMock()
+    request = make_request(
+        request_id="request-d",
+        status=RequestStatus.FINISHED_ABORTED,
+        kv_transfer_params={
+            "do_remote_prefill": True,
+            "remote_host": "10.0.0.1",
+            "remote_port": 6000,
+            "remote_request_id": "request-p",
+            "remote_block_ids": ([20, 21],),
+        },
+    )
+
+    delay_free, params = scheduler.request_finished(request, ([],))
+
+    assert delay_free is False
+    assert params is None
+    assert request.kv_transfer_params["do_remote_prefill"] is False
+    scheduler._recving_thread.add_request.assert_called_once_with("10.0.0.1", 6000, "request-p")
+    assert "request-d" not in scheduler._reqs_need_recv
+
+
+def test_request_finished_does_not_ack_prefill_already_queued_for_workers() -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._recving_thread = MagicMock()
+    request = make_request(
+        request_id="request-d",
+        status=RequestStatus.FINISHED_ABORTED,
+        kv_transfer_params={
+            "do_remote_prefill": False,
+            "remote_host": "10.0.0.1",
+            "remote_port": 6000,
+            "remote_request_id": "request-p",
+        },
+    )
+    scheduler._reqs_need_recv["request-d"] = (request, ([10],), ([10],), 16)
+
+    delay_free, params = scheduler.request_finished(request, ([],))
+
+    assert (delay_free, params) == (False, None)
+    scheduler._recving_thread.add_request.assert_not_called()
+    assert scheduler._reqs_need_recv["request-d"][3] == 16
+
+
 def test_request_finished_delays_blocks_and_builds_remote_params() -> None:
     scheduler = make_pull_scheduler()
     scheduler._sending_thread = MagicMock()
@@ -494,8 +552,132 @@ def test_request_finished_delays_blocks_and_builds_remote_params() -> None:
     assert params is not None
     assert params["remote_block_ids"] == ([10, 11],)
     assert params["remote_request_id"] == "request-p"
+    assert params["remote_kv_lease_duration"] == scheduler._kv_lease_duration
     assert params["last_token_id"] == 123
     scheduler._sending_thread.add_delayed_request.assert_called_once()
+
+
+@pytest.mark.parametrize("status", [RequestStatus.FINISHED_ABORTED, RequestStatus.FINISHED_ERROR])
+def test_request_finished_before_allocation_releases_remote_blocks_once(status: RequestStatus) -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._recving_thread = MagicMock()
+    request = make_request(
+        request_id="rejected-d",
+        prompt_token_ids=[0],
+        status=status,
+        kv_transfer_params={
+            "do_remote_prefill": True,
+            "remote_block_ids": ([20], [30, 31]),
+            "remote_engine_id": "engine-p",
+            "remote_host": "10.0.0.1",
+            "remote_port": 6000,
+            "remote_request_id": "request-p",
+        },
+    )
+
+    # Includes the pre-aborted request submitted by AsyncLLM after an API 400.
+    assert scheduler.request_finished(request, ([], [])) == (False, None)
+    assert scheduler.request_finished(request, ([], [])) == (False, None)
+
+    scheduler._recving_thread.add_request.assert_called_once_with("10.0.0.1", 6000, "request-p")
+    assert request.kv_transfer_params["do_remote_prefill"] is False
+    assert not scheduler._reqs_need_recv
+    assert not scheduler._reqs_recv_info
+
+
+def test_rejected_consumer_completes_producer_delayed_free_without_timeout() -> None:
+    producer = make_pull_scheduler()
+    producer._sending_thread = make_sending_thread()
+    request_p = make_request(
+        request_id="request-p",
+        status=RequestStatus.FINISHED_LENGTH_CAPPED,
+        kv_transfer_params={"do_remote_decode": True},
+    )
+    delay_free, params = producer.request_finished(request_p, ([10, 11],))
+    assert delay_free
+    assert "request-p" in producer._sending_thread.delayed_free_requests
+
+    consumer = make_pull_scheduler()
+    consumer._recving_thread = MagicMock()
+    consumer._recving_thread.add_request.side_effect = lambda host, port, req_id: (
+        producer._sending_thread._handle_finished_request(req_id)
+    )
+    request_d = make_request(status=RequestStatus.FINISHED_ABORTED, kv_transfer_params=params)
+    assert consumer.request_finished(request_d, ([],)) == (False, None)
+
+    # The actual producer completion path returns the held request to vLLM.
+    output = SimpleNamespace(finished_recving=set(), finished_sending=None)
+    producer.update_connector_output(output)
+    assert output.finished_sending == {"request-p"}
+    assert not producer._reqs_need_send
+    assert not producer._sending_thread.delayed_free_requests
+
+
+def test_cancel_after_allocation_waits_for_worker_completion() -> None:
+    scheduler = make_pull_scheduler()
+    scheduler.kv_transfer_config = SimpleNamespace(kv_load_failure_policy="fail")
+    scheduler._recving_thread = MagicMock()
+    request = make_request(
+        request_id="request-d",
+        kv_transfer_params={
+            "do_remote_prefill": True,
+            "remote_block_ids": ([20],),
+            "remote_engine_id": "engine-p",
+            "remote_host": "10.0.0.1",
+            "remote_port": 6000,
+            "remote_request_id": "request-p",
+        },
+    )
+    scheduler.update_state_after_alloc(request, make_blocks(), num_external_tokens=16)
+    request.status = RequestStatus.FINISHED_ABORTED
+
+    assert scheduler.request_finished(request, ([],)) == (False, None)
+    scheduler._recving_thread.add_request.assert_not_called()
+    assert "request-d" in scheduler._reqs_need_recv
+    assert "request-d" in scheduler._reqs_recv_info
+
+    output = SimpleNamespace(finished_recving={"request-d"}, finished_sending=None, failed_recving=set())
+    scheduler.update_connector_output(output)
+    scheduler.update_connector_output(output)
+    scheduler._recving_thread.add_request.assert_called_once_with("10.0.0.1", 6000, "request-p")
+    assert not scheduler._reqs_recv_info
+
+
+def test_request_finished_after_zero_external_tokens_does_not_repeat_ack() -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._recving_thread = MagicMock()
+    request = make_request(
+        kv_transfer_params={
+            "do_remote_prefill": True,
+            "remote_block_ids": ([20],),
+            "remote_engine_id": "engine-p",
+            "remote_host": "10.0.0.1",
+            "remote_port": 6000,
+            "remote_request_id": "request-p",
+        },
+    )
+    scheduler.update_state_after_alloc(request, make_blocks(), num_external_tokens=0)
+    request.status = RequestStatus.FINISHED_ABORTED
+    assert scheduler.request_finished(request, ([],)) == (False, None)
+    scheduler._recving_thread.add_request.assert_called_once_with("10.0.0.1", 6000, "request-p")
+
+
+@pytest.mark.parametrize("missing", ["remote_host", "remote_port", "remote_request_id"])
+def test_rejected_consumer_without_remote_address_does_not_send_done(missing: str) -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._recving_thread = MagicMock()
+    params = {
+        "do_remote_prefill": True,
+        "remote_block_ids": ([20],),
+        "remote_host": "10.0.0.1",
+        "remote_port": 6000,
+        "remote_request_id": "request-p",
+    }
+    del params[missing]
+    request = make_request(status=RequestStatus.FINISHED_ABORTED, kv_transfer_params=params)
+
+    assert scheduler.request_finished(request, ([],)) == (False, None)
+    scheduler._recving_thread.add_request.assert_not_called()
 
 
 @pytest.mark.parametrize("failed", [False, True])
@@ -552,6 +734,7 @@ def test_truncate_request_for_prefill_is_idempotent_for_token_ids() -> None:
         max_tokens=8,
     )
 
+    request.block_hashes = ["full-prompt-hash"]
     scheduler._truncate_request_for_prefill(request)
     scheduler._truncate_request_for_prefill(request)
 
@@ -560,6 +743,7 @@ def test_truncate_request_for_prefill_is_idempotent_for_token_ids() -> None:
     assert request.num_prompt_tokens == 2
     assert request.max_tokens == 1
     assert request.kv_transfer_params["_p_side_truncated"] is True
+    assert request.block_hashes == [(1, 2)]
 
 
 def test_truncate_request_for_prefill_supports_prompt_embeddings() -> None:
@@ -671,6 +855,7 @@ def prefix_connector():
     result = MooncakePullConnector.__new__(MooncakePullConnector)
     result.connector_scheduler = MooncakePullConnectorScheduler.__new__(MooncakePullConnectorScheduler)
     result.connector_scheduler.need_truncate = True
+    result.connector_scheduler._heartbeat_thread = None
     return result
 
 
@@ -818,7 +1003,7 @@ def test_sending_thread_shutdown_exits_receive_loop(monkeypatch: pytest.MonkeyPa
         raise zmq.Again()  # type: ignore[attr-defined]
 
     socket.recv_multipart.side_effect = recv
-    thread.add_delayed_request("pending", time.time())
+    thread.add_delayed_request("pending")
     thread.start()
     assert thread.ready_event.wait(timeout=5)
     thread.shutdown()
@@ -832,6 +1017,7 @@ def test_sending_thread_shutdown_exits_receive_loop(monkeypatch: pytest.MonkeyPa
 
 def test_scheduler_shutdown_stops_threads_and_clears_request_state() -> None:
     scheduler = make_pull_scheduler()
+    scheduler._heartbeat_thread = MagicMock()
     scheduler._sending_thread = MagicMock()
     scheduler._recving_thread = MagicMock()
     scheduler._reqs_need_recv["recv"] = MagicMock()
@@ -843,9 +1029,740 @@ def test_scheduler_shutdown_stops_threads_and_clears_request_state() -> None:
 
     connector.shutdown()
 
+    scheduler._heartbeat_thread.shutdown.assert_called_once()
     scheduler._sending_thread.shutdown.assert_called_once()
     scheduler._recving_thread.shutdown.assert_called_once()
     assert not scheduler._reqs_need_recv
     assert not scheduler._reqs_need_send
     assert not scheduler._reqs_in_batch
     assert not scheduler._reqs_recv_info
+
+
+@pytest.mark.parametrize("sizes", [[0, 1, 8], [0, 0, 0]])
+def test_sending_thread_aligns_indexer_replication_sizes_by_layer(sizes) -> None:
+    first = replace(
+        make_transfer_metadata(layer_names=["layer.0", "layer.1", "layer.2"]),
+        indexer_replication_sizes=sizes,
+    )
+    second = replace(
+        make_transfer_metadata(layer_names=["layer.2", "layer.1", "layer.0"]),
+        indexer_replication_sizes=list(reversed(sizes)),
+    )
+    thread = make_sending_thread({0: first, 1: second}, tp_size=2)
+    decoded = msgspec.msgpack.decode(thread.encoded_metadata, type=MooncakeTransferMetadataGroups)
+    assert decoded.metadata_by_pp_rank[0].indexer_replication_sizes == sizes
+
+
+@pytest.mark.parametrize("other_sizes", [[1], [8]])
+def test_sending_thread_rejects_inconsistent_indexer_replication_sizes(other_sizes) -> None:
+    first = replace(make_transfer_metadata(), indexer_replication_sizes=[0])
+    second = replace(make_transfer_metadata(), indexer_replication_sizes=other_sizes)
+    with pytest.raises(ValueError, match="indexer_replication_sizes"):
+        make_sending_thread({0: first, 1: second}, tp_size=2)
+
+
+def test_sending_thread_merges_replication_for_split_layers() -> None:
+    workers: dict[int | tuple[int, ...], object] = {
+        rank: replace(
+            make_transfer_metadata(layer_names=[layer]),
+            indexer_replication_sizes=[0 if rank == 0 else 8],
+        )
+        for rank, layer in enumerate(["layer.0", "layer.1"])
+    }
+    thread = make_sending_thread(workers, tp_size=2, use_kv_pp=True)
+    decoded = msgspec.msgpack.decode(thread.encoded_metadata, type=MooncakeTransferMetadataGroups)
+    assert decoded.metadata_by_pp_rank[0].indexer_replication_sizes == [0, 8]
+
+
+def test_sending_thread_publishes_cp_interleave() -> None:
+    metadata = replace(make_transfer_metadata(), cp_kv_cache_interleave_size=128)
+    thread = make_sending_thread({0: metadata})
+    decoded = msgspec.msgpack.decode(thread.encoded_metadata, type=MooncakeTransferMetadataGroups)
+    assert decoded.metadata_by_pp_rank[0].cp_kv_cache_interleave_size == 128
+
+
+def test_sending_thread_rejects_inconsistent_cp_interleave() -> None:
+    first = replace(make_transfer_metadata(), cp_kv_cache_interleave_size=128)
+    second = replace(make_transfer_metadata(), cp_kv_cache_interleave_size=256)
+    with pytest.raises(ValueError, match="cp_kv_cache_interleave_size"):
+        make_sending_thread({0: first, 1: second}, tp_size=2)
+
+
+def heartbeat_request(request_id: str = "request-d", **overrides):
+    params = dict(
+        do_remote_prefill=True,
+        remote_engine_id="engine-p",
+        remote_host="127.0.0.1",
+        remote_port=6000,
+        remote_request_id="request-p",
+        remote_num_prompt_tokens=32,
+        remote_kv_lease_duration=30,
+        remote_block_ids=([20, 21],),
+    )
+    params.update(overrides)
+    return make_request(request_id=request_id, kv_transfer_params=params)
+
+
+@pytest.mark.parametrize("duration", [6, 7, 120, 600])
+def test_producer_lease_configuration_is_validated_at_consumer_admission(duration: int) -> None:
+    producer = make_pull_scheduler()
+    producer._kv_lease_duration = duration
+    producer._sending_thread = MagicMock()
+    request_p = make_request(
+        request_id="request-p",
+        status=RequestStatus.FINISHED_LENGTH_CAPPED,
+        kv_transfer_params={"do_remote_decode": True},
+        output_token_ids=[123],
+    )
+    delay_free, params = producer.request_finished(request_p, ([10, 11],))
+    assert delay_free and params is not None
+    assert params["remote_kv_lease_duration"] == duration
+
+    consumer = make_pull_scheduler()
+    consumer._kv_lease_duration = duration
+    consumer._heartbeat_thread = MooncakeHeartbeatThread(duration // 6)
+    request_d = make_request(request_id="request-d", kv_transfer_params=params)
+    consumer.on_new_request(request_d)
+
+    assert consumer._heartbeat_thread.requests == {"request-d": ("10.0.0.10", 6000, "request-p")}
+    assert not consumer._reqs_need_recv  # Validation precedes allocation and READ scheduling.
+
+
+@pytest.mark.parametrize("producer_duration, consumer_duration", [(120, 600), (600, 120), (60, 120), (120, 60)])
+def test_lease_mismatch_is_rejected_before_heartbeat_registration(producer_duration, consumer_duration) -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._kv_lease_duration = consumer_duration
+    scheduler._heartbeat_thread = MooncakeHeartbeatThread(consumer_duration // 6)
+    request = heartbeat_request(remote_kv_lease_duration=producer_duration)
+
+    with pytest.raises(ValueError, match="kv_lease_duration mismatch") as exc:
+        scheduler.on_new_request(request)
+
+    assert f"P (127.0.0.1:6000)={producer_duration}s" in str(exc.value)
+    assert f"D={consumer_duration}s" in str(exc.value)
+    assert not scheduler._heartbeat_thread.requests
+    assert not scheduler._reqs_need_recv and not scheduler._reqs_recv_info
+
+
+@pytest.mark.parametrize("remote_duration", [None, True, False, 0, -1, 5, 30.0, "30"])
+def test_invalid_producer_lease_configuration_is_rejected(remote_duration) -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._heartbeat_thread = MooncakeHeartbeatThread(5)
+    request = heartbeat_request(remote_kv_lease_duration=remote_duration)
+
+    with pytest.raises(ValueError, match="producer must provide remote_kv_lease_duration"):
+        scheduler.on_new_request(request)
+
+    assert not scheduler._heartbeat_thread.requests
+    assert not scheduler._reqs_need_recv
+
+
+def test_missing_producer_lease_configuration_does_not_assume_a_default() -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._heartbeat_thread = MooncakeHeartbeatThread(5)
+    request = heartbeat_request()
+    del request.kv_transfer_params["remote_kv_lease_duration"]
+
+    with pytest.raises(ValueError, match="Upgrade P before D"):
+        scheduler.on_new_request(request)
+
+    assert not scheduler._heartbeat_thread.requests
+
+
+def test_lease_configuration_is_validated_once_for_unchanged_producer(monkeypatch) -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._heartbeat_thread = MooncakeHeartbeatThread(5)
+    validate = MagicMock(wraps=scheduler._validate_remote_lease_duration)
+    monkeypatch.setattr(scheduler, "_validate_remote_lease_duration", validate)
+
+    scheduler.on_new_request(heartbeat_request())
+    scheduler.on_new_request(heartbeat_request(request_id="second-request-d"))
+
+    validate.assert_called_once_with(30, "127.0.0.1", 6000)
+    assert set(scheduler._heartbeat_thread.requests) == {"request-d", "second-request-d"}
+
+
+def test_producer_validation_expires_without_extending_ttl_on_cache_hits(monkeypatch) -> None:
+    clock = MagicMock(return_value=0.0)
+    monkeypatch.setattr(pull_scheduler.time, "monotonic", clock)
+    scheduler = make_pull_scheduler()
+    scheduler._heartbeat_thread = MagicMock()
+    validate = MagicMock(wraps=scheduler._validate_remote_lease_duration)
+    monkeypatch.setattr(scheduler, "_validate_remote_lease_duration", validate)
+
+    scheduler.on_new_request(heartbeat_request())
+    clock.return_value = 599.0
+    scheduler.on_new_request(heartbeat_request(request_id="before-expiry"))
+    assert validate.call_count == 1
+
+    clock.return_value = 600.0
+    scheduler.on_new_request(heartbeat_request(request_id="at-expiry"))
+    assert validate.call_count == 2
+    clock.return_value = 1199.0
+    scheduler.on_new_request(heartbeat_request(request_id="renewed-validation"))
+    assert validate.call_count == 2
+
+
+def test_new_producer_validation_removes_expired_endpoints(monkeypatch) -> None:
+    clock = MagicMock(return_value=0.0)
+    monkeypatch.setattr(pull_scheduler.time, "monotonic", clock)
+    scheduler = make_pull_scheduler()
+    scheduler._heartbeat_thread = MagicMock()
+    scheduler.on_new_request(heartbeat_request())
+
+    clock.return_value = 600.0
+    scheduler.on_new_request(heartbeat_request(request_id="new-producer", remote_host="127.0.0.2"))
+
+    assert dict(scheduler._validated_producer_leases) == {("127.0.0.2", 6000): ("engine-p", 30)}
+
+
+def test_producer_validation_cache_evicts_lru_and_revalidates(monkeypatch) -> None:
+    monkeypatch.setattr(pull_scheduler, "PRODUCER_LEASE_CACHE_MAX_SIZE", 2)
+    scheduler = make_pull_scheduler()
+    scheduler._heartbeat_thread = MagicMock()
+    validate = MagicMock(wraps=scheduler._validate_remote_lease_duration)
+    monkeypatch.setattr(scheduler, "_validate_remote_lease_duration", validate)
+    scheduler.on_new_request(heartbeat_request())
+    scheduler.on_new_request(heartbeat_request(request_id="second", remote_port=6001))
+    scheduler.on_new_request(heartbeat_request(request_id="touch-first"))
+    scheduler.on_new_request(heartbeat_request(request_id="third", remote_port=6002))
+
+    assert len(scheduler._validated_producer_leases) == 2
+    assert ("127.0.0.1", 6000) in scheduler._validated_producer_leases
+    assert ("127.0.0.1", 6001) not in scheduler._validated_producer_leases
+    assert validate.call_count == 3
+
+    scheduler.on_new_request(heartbeat_request(request_id="second-again", remote_port=6001))
+    assert validate.call_count == 4
+    assert len(scheduler._validated_producer_leases) == 2
+
+
+@pytest.mark.parametrize(
+    "overrides", [{"remote_engine_id": "restarted-p"}, {"remote_host": "127.0.0.2"}, {"remote_port": 6001}]
+)
+def test_new_producer_instance_or_endpoint_is_validated(monkeypatch, overrides) -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._heartbeat_thread = MooncakeHeartbeatThread(5)
+    validate = MagicMock(wraps=scheduler._validate_remote_lease_duration)
+    monkeypatch.setattr(scheduler, "_validate_remote_lease_duration", validate)
+
+    scheduler.on_new_request(heartbeat_request())
+    scheduler.on_new_request(heartbeat_request(request_id="second-request-d", **overrides))
+
+    assert validate.call_count == 2
+    assert "second-request-d" in scheduler._heartbeat_thread.requests
+
+
+@pytest.mark.parametrize("remote_duration", [6, 120, None, 30.0, "30", [30]])
+def test_changed_or_invalid_duration_cannot_reuse_cached_validation(remote_duration) -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._heartbeat_thread = MooncakeHeartbeatThread(5)
+    scheduler.on_new_request(heartbeat_request())
+    changed = heartbeat_request(request_id="second-request-d", remote_kv_lease_duration=remote_duration)
+
+    with pytest.raises(ValueError, match="kv_lease_duration"):
+        scheduler.on_new_request(changed)
+
+    assert "second-request-d" not in scheduler._heartbeat_thread.requests
+    assert scheduler._validated_producer_leases == {("127.0.0.1", 6000): ("engine-p", 30)}
+
+
+def test_failed_lease_validation_is_not_cached(monkeypatch) -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._heartbeat_thread = MooncakeHeartbeatThread(5)
+    validate = MagicMock(wraps=scheduler._validate_remote_lease_duration)
+    monkeypatch.setattr(scheduler, "_validate_remote_lease_duration", validate)
+    request = heartbeat_request(remote_kv_lease_duration=6)
+
+    for _ in range(2):
+        with pytest.raises(ValueError, match="kv_lease_duration mismatch"):
+            scheduler.on_new_request(request)
+
+    assert validate.call_count == 2
+    assert not scheduler._validated_producer_leases
+    assert not scheduler._heartbeat_thread.requests
+
+
+def test_shutdown_clears_validated_producer_leases() -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._heartbeat_thread = MooncakeHeartbeatThread(5)
+    scheduler.on_new_request(heartbeat_request())
+
+    scheduler.shutdown()
+
+    assert not scheduler._validated_producer_leases
+
+
+def test_lease_configuration_is_checked_for_each_producer() -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._heartbeat_thread = MooncakeHeartbeatThread(5)
+    scheduler.on_new_request(heartbeat_request())
+    other_request = heartbeat_request(
+        request_id="other-request-d",
+        remote_engine_id="other-engine-p",
+        remote_host="127.0.0.2",
+        remote_kv_lease_duration=6,
+    )
+
+    with pytest.raises(ValueError, match="kv_lease_duration mismatch"):
+        scheduler.on_new_request(other_request)
+
+    assert scheduler._heartbeat_thread.requests == {"request-d": ("127.0.0.1", 6000, "request-p")}
+
+
+@pytest.mark.parametrize(
+    "params", [{"do_remote_prefill": False}, {"remote_block_ids": ()}, {"remote_block_ids": ([],)}]
+)
+def test_requests_without_remote_kv_do_not_require_producer_lease_configuration(params) -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._heartbeat_thread = MooncakeHeartbeatThread(5)
+    request = heartbeat_request(**params)
+    del request.kv_transfer_params["remote_kv_lease_duration"]
+
+    scheduler.on_new_request(request)
+
+    assert not scheduler._heartbeat_thread.requests
+
+
+def test_heartbeat_tracks_waiting_request_until_aggregated_receive() -> None:
+    scheduler = make_pull_scheduler()
+    heartbeat = MooncakeHeartbeatThread(5)
+    scheduler._heartbeat_thread = heartbeat
+    scheduler._recving_thread = MagicMock()
+    request = heartbeat_request()
+    scheduler.on_new_request(request)
+    assert heartbeat.requests == {"request-d": ("127.0.0.1", 6000, "request-p")}
+    assert not scheduler._reqs_need_recv  # No allocation is needed to register.
+    scheduler.update_state_after_alloc(request, make_blocks(), 16)
+    scheduler.build_connector_meta(MagicMock())
+    assert "request-d" in heartbeat.requests
+    scheduler.update_connector_output(SimpleNamespace(finished_recving={"request-d"}, failed_recving=set()))
+    assert not heartbeat.requests
+    scheduler._recving_thread.add_request.assert_called_once_with("127.0.0.1", 6000, "request-p")
+
+
+@pytest.mark.parametrize("params", [{"do_remote_prefill": False}, {"remote_block_ids": ()}, {"remote_port": None}])
+def test_heartbeat_ignores_requests_without_remote_kv(params) -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._heartbeat_thread = MooncakeHeartbeatThread(5)
+    request = heartbeat_request(**params)
+    if params.get("remote_port", 1) is None:
+        del request.kv_transfer_params["remote_port"]
+    scheduler.on_new_request(request)
+    assert not scheduler._heartbeat_thread.requests
+
+
+def test_local_prefix_hit_stops_heartbeat() -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._heartbeat_thread = MooncakeHeartbeatThread(5)
+    scheduler._recving_thread = MagicMock()
+    request = heartbeat_request()
+    scheduler.on_new_request(request)
+    scheduler.update_state_after_alloc(request, make_blocks(), 0)
+    assert not scheduler._heartbeat_thread.requests
+    scheduler._recving_thread.add_request.assert_called_once()
+
+
+def test_heartbeat_registration_starts_at_scheduler_admission_and_is_idempotent() -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._heartbeat_thread = MooncakeHeartbeatThread(5)
+    request = heartbeat_request()
+    assert not scheduler._heartbeat_thread.requests
+    scheduler.on_new_request(request)
+    assert scheduler._heartbeat_thread.requests == {"request-d": ("127.0.0.1", 6000, "request-p")}
+    assert not scheduler._reqs_recv_info and not scheduler._reqs_need_recv
+    snapshot = dict(scheduler._heartbeat_thread.requests)
+    scheduler.on_new_request(request)
+    assert scheduler._heartbeat_thread.requests == snapshot
+
+
+@pytest.mark.parametrize("in_flight", [False, True])
+def test_abort_only_releases_remote_kv_after_read_is_safe(in_flight: bool) -> None:
+    scheduler = make_pull_scheduler()
+    scheduler._heartbeat_thread = MooncakeHeartbeatThread(5)
+    scheduler._recving_thread = MagicMock()
+    request = heartbeat_request()
+    scheduler.on_new_request(request)
+    if in_flight:
+        scheduler.update_state_after_alloc(request, make_blocks(), 16)
+    request.status = RequestStatus.FINISHED_ABORTED
+    scheduler.request_finished(request, ())
+    scheduler.request_finished(request, ())  # Repeated completion must not send another DONE.
+    assert request.kv_transfer_params["do_remote_prefill"] is False
+    assert bool(scheduler._heartbeat_thread.requests) == in_flight
+    if in_flight:
+        scheduler._recving_thread.add_request.assert_not_called()
+    else:
+        scheduler._recving_thread.add_request.assert_called_once()
+
+
+def test_lease_renewal_preserves_initial_deadline_and_reaps_both_queues(monkeypatch) -> None:
+    clock = MagicMock(return_value=0.0)
+    monkeypatch.setattr(pull_scheduler.time, "monotonic", clock)
+    thread = make_sending_thread()
+    thread.add_delayed_request("older")  # initial expiry 30
+    clock.return_value = 5.0
+    thread.add_delayed_request("newer")  # initial expiry 35
+    thread._handle_heartbeat(("older", "unknown"))
+    assert thread.delayed_free_requests["older"] == 30.0
+    clock.return_value = 15.0
+    thread._handle_heartbeat(("older",))  # renewed expiry 35
+    assert thread.renewed_requests["older"] == 35.0
+    clock.return_value = 25.0
+    thread._handle_heartbeat(("older",))  # renewed expiry 45
+    clock.return_value = 35.0
+    assert thread.get_and_clear_finished_requests() == {"newer"}
+    assert thread.renewed_requests == {"older": 45.0}
+    clock.return_value = 45.0
+    thread._handle_heartbeat(("older",))  # expired even if not yet reaped
+    assert thread.get_and_clear_finished_requests() == {"older"}
+    thread._handle_heartbeat(("older",))
+    assert not thread.renewed_requests and not thread.delayed_free_requests
+
+
+def test_shorter_renewed_lease_is_not_blocked_by_new_initial_lease(monkeypatch) -> None:
+    clock = MagicMock(return_value=0.0)
+    monkeypatch.setattr(pull_scheduler.time, "monotonic", clock)
+    thread = make_sending_thread()
+    thread.add_delayed_request("renewed")
+    clock.return_value = 15.0
+    thread.add_delayed_request("initial")  # expiry 45
+    thread._handle_heartbeat(("renewed",))  # expiry 35
+    clock.return_value = 35.0
+    assert thread.get_and_clear_finished_requests() == {"renewed"}
+    assert "initial" in thread.delayed_free_requests
+
+
+def test_done_and_late_heartbeat_complete_only_once(monkeypatch) -> None:
+    clock = MagicMock(return_value=0.0)
+    monkeypatch.setattr(pull_scheduler.time, "monotonic", clock)
+    thread = make_sending_thread()
+    thread.add_delayed_request("request")
+    clock.return_value = 15.0
+    thread._handle_heartbeat(("request",))
+    thread._handle_finished_request("request")
+    thread._handle_heartbeat(("request", "missing"))
+    thread._handle_finished_request("request")
+    assert thread.get_and_clear_finished_requests() == {"request"}
+    assert thread.get_and_clear_finished_requests() == set()
+    assert not thread.renewed_requests
+
+
+def test_control_loop_accepts_heartbeat_without_completing_transfer(monkeypatch) -> None:
+    clock = MagicMock(return_value=0.0)
+    monkeypatch.setattr(pull_scheduler.time, "monotonic", clock)
+    thread = make_sending_thread()
+    thread.add_delayed_request("request")
+    clock.return_value = 15.0
+    sock = MagicMock()
+    sock.recv_multipart.side_effect = [
+        [b"decoder", b"", msgspec.msgpack.encode((HEARTBEAT_MSG, ("request",)))],
+        KeyboardInterrupt(),
+    ]
+    with pytest.raises(KeyboardInterrupt):
+        thread._run_busy_loop(sock)
+    sock.send_multipart.assert_called_once_with((b"decoder", b"", ACK_MSG))
+    assert thread.get_and_clear_finished_requests() == set()
+    assert thread.renewed_requests["request"] == 35.0
+
+
+def test_heartbeat_thread_renews_without_scheduler_steps_and_isolates_dead_peer() -> None:
+    # Real control messages, without ever scheduling or running a model.
+    stop = threading.Event()
+    received = threading.Event()
+    second = threading.Event()
+    with zmq.Context() as context:  # type: ignore[attr-defined]
+        router = context.socket(zmq.ROUTER)  # type: ignore[attr-defined]
+        port = router.bind_to_random_port("tcp://127.0.0.1")
+        router.setsockopt(zmq.RCVTIMEO, 100)  # type: ignore[attr-defined]
+        seen = []
+
+        def serve():
+            try:
+                while not stop.is_set():
+                    try:
+                        frames = router.recv_multipart()
+                    except zmq.Again:  # type: ignore[attr-defined]
+                        continue
+                    message = msgspec.msgpack.decode(frames[-1])
+                    seen.append(message)
+                    router.send_multipart((frames[0], b"", ACK_MSG))
+                    (received if len(seen) == 1 else second).set()
+            finally:
+                router.close(linger=0)
+
+        server = threading.Thread(target=serve)
+        server.start()
+        heartbeat = MooncakeHeartbeatThread(0.1)
+        heartbeat.add_request("dead", "127.0.0.1", 1, "dead-request")
+        heartbeat.add_request("local", "127.0.0.1", port, "remote")
+        heartbeat.start()
+        try:
+            assert received.wait(3)
+            assert second.wait(3)
+            assert all(message == [HEARTBEAT_MSG, ["remote"]] for message in seen)
+            assert heartbeat.remove_request("local") == ("127.0.0.1", port, "remote")
+        finally:
+            heartbeat.shutdown()
+            stop.set()
+            server.join(3)
+        assert not heartbeat.is_alive()
+        assert not heartbeat.requests
+
+
+@pytest.mark.parametrize("duration", [0, 5, -1, 6.0, True, "30"])
+def test_invalid_lease_configuration_fails_before_starting_threads(monkeypatch, duration) -> None:
+    config = SimpleNamespace(get_from_extra_config=lambda key, default: duration)
+    monkeypatch.setattr(
+        MooncakeBaseConnectorScheduler, "__init__", lambda self, *args: setattr(self, "kv_transfer_config", config)
+    )
+    with pytest.raises(ValueError, match="kv_lease_duration"):
+        MooncakePullConnectorScheduler(MagicMock(), "engine", MagicMock())
+
+
+def test_heartbeat_batches_large_groups_and_reconnects_after_bad_ack(monkeypatch) -> None:
+    monkeypatch.setattr(heartbeat_module, "HEARTBEAT_ACK_TIMEOUT", 0.05)
+    stop = threading.Event()
+    received_all = threading.Event()
+    with zmq.Context() as context:  # type: ignore[attr-defined]
+        router = context.socket(zmq.ROUTER)  # type: ignore[attr-defined]
+        port = router.bind_to_random_port("tcp://127.0.0.1")
+        router.setsockopt(zmq.RCVTIMEO, 100)  # type: ignore[attr-defined]
+        seen = set()
+        batch_sizes = []
+        identities = set()
+
+        def serve():
+            first = True
+            try:
+                while not stop.is_set():
+                    try:
+                        frames = router.recv_multipart()
+                    except zmq.Again:  # type: ignore[attr-defined]
+                        continue
+                    identities.add(frames[0])
+                    _, ids = msgspec.msgpack.decode(frames[-1])
+                    if not first:
+                        seen.update(ids)
+                        batch_sizes.append(len(ids))
+                    router.send_multipart((frames[0], b"", b"bad-ACK" if first else ACK_MSG))
+                    first = False
+                    if len(seen) == 1025:
+                        received_all.set()
+            finally:
+                router.close(linger=0)
+
+        server = threading.Thread(target=serve)
+        server.start()
+        heartbeat = MooncakeHeartbeatThread(0.1)
+        for index in range(1025):
+            heartbeat.add_request(str(index), "127.0.0.1", port, "remote-" + str(index))
+        heartbeat.start()
+        try:
+            assert received_all.wait(5)
+            assert max(batch_sizes) <= 512
+            assert len(identities) >= 2
+        finally:
+            heartbeat.shutdown()
+            stop.set()
+            server.join(3)
+
+
+def test_slow_heartbeat_acks_do_not_starve_tail_or_retain_removed_requests() -> None:
+    stop = threading.Event()
+    received_all = threading.Event()
+    received_new = threading.Event()
+    with zmq.Context() as context:  # type: ignore[attr-defined]
+        router = context.socket(zmq.ROUTER)  # type: ignore[attr-defined]
+        port = router.bind_to_random_port("tcp://127.0.0.1")
+        router.setsockopt(zmq.RCVTIMEO, 100)  # type: ignore[attr-defined]
+        seen = set()
+        batch_sizes = []
+        new_snapshot_batches = []
+
+        def serve():
+            refreshed = False
+            try:
+                while not stop.is_set():
+                    try:
+                        frames = router.recv_multipart()
+                    except zmq.Again:  # type: ignore[attr-defined]
+                        continue
+                    _, ids = msgspec.msgpack.decode(frames[-1])
+                    seen.update(ids)
+                    batch_sizes.append(len(ids))
+                    if len(seen) >= 1025:
+                        received_all.set()
+                    if "new-remote" in ids:
+                        refreshed = True
+                        received_new.set()
+                    if refreshed:
+                        new_snapshot_batches.append(ids)
+                    # Cross a refresh interval while each ACK is outstanding.
+                    stop.wait(0.08)
+                    router.send_multipart((frames[0], b"", ACK_MSG))
+            finally:
+                router.close(linger=0)
+
+        server = threading.Thread(target=serve)
+        server.start()
+        heartbeat = MooncakeHeartbeatThread(0.05)
+        for index in range(1025):
+            heartbeat.add_request(str(index), "127.0.0.1", port, "remote-" + str(index))
+        heartbeat.start()
+        try:
+            assert received_all.wait(3), "unsent tail must survive heartbeat refreshes"
+            heartbeat.remove_request("0")
+            heartbeat.add_request("new", "127.0.0.1", port, "new-remote")
+            assert received_new.wait(3), "new requests must enter the next snapshot"
+            assert max(batch_sizes) <= 512
+            assert all("remote-0" not in ids for ids in new_snapshot_batches)
+            assert heartbeat.is_alive()
+        finally:
+            heartbeat.shutdown()
+            stop.set()
+            server.join(3)
+        assert not server.is_alive()
+
+
+@pytest.mark.parametrize("failure_stage", ["create", "configure"])
+def test_heartbeat_connection_failure_is_isolated_and_closes_partial_socket(monkeypatch, failure_stage) -> None:
+    stop = threading.Event()
+    received_twice = threading.Event()
+    original_make_socket = heartbeat_module.make_zmq_socket
+    failed_socket = MagicMock()
+    failed_socket.setsockopt.side_effect = RuntimeError("socket configuration failed")
+
+    def make_socket(context, path, *args, **kwargs):
+        if path.endswith(":1"):
+            if failure_stage == "create":
+                raise ValueError("invalid heartbeat endpoint")
+            return failed_socket
+        return original_make_socket(context, path, *args, **kwargs)
+
+    monkeypatch.setattr(heartbeat_module, "make_zmq_socket", make_socket)
+    with zmq.Context() as context:  # type: ignore[attr-defined]
+        router = context.socket(zmq.ROUTER)  # type: ignore[attr-defined]
+        port = router.bind_to_random_port("tcp://127.0.0.1")
+        router.setsockopt(zmq.RCVTIMEO, 100)  # type: ignore[attr-defined]
+        seen = []
+
+        def serve():
+            try:
+                while not stop.is_set():
+                    try:
+                        frames = router.recv_multipart()
+                    except zmq.Again:  # type: ignore[attr-defined]
+                        continue
+                    seen.append(msgspec.msgpack.decode(frames[-1]))
+                    router.send_multipart((frames[0], b"", ACK_MSG))
+                    if len(seen) >= 2:
+                        received_twice.set()
+            finally:
+                router.close(linger=0)
+
+        server = threading.Thread(target=serve)
+        server.start()
+        heartbeat = MooncakeHeartbeatThread(0.05)
+        heartbeat.add_request("bad", "127.0.0.1", 1, "bad-remote")
+        heartbeat.add_request("good", "127.0.0.1", port, "good-remote")
+        heartbeat.start()
+        try:
+            assert received_twice.wait(3), "a failed connection must not stop other producers"
+            assert heartbeat.is_alive()
+            assert all(message == [HEARTBEAT_MSG, ["good-remote"]] for message in seen)
+            if failure_stage == "configure":
+                failed_socket.close.assert_any_call(linger=0)
+            else:
+                failed_socket.close.assert_not_called()
+        finally:
+            heartbeat.shutdown()
+            stop.set()
+            server.join(3)
+        assert not server.is_alive()
+
+
+def test_request_finished_registers_monotonic_lease(monkeypatch) -> None:
+    monkeypatch.setattr(pull_scheduler.time, "time", lambda: 1000.0)
+    monkeypatch.setattr(pull_scheduler.time, "monotonic", lambda: 10.0)
+    scheduler = make_pull_scheduler()
+    scheduler._sending_thread = make_sending_thread()
+    request = make_request(
+        request_id="request-p",
+        status=RequestStatus.FINISHED_LENGTH_CAPPED,
+        kv_transfer_params={"do_remote_decode": True},
+        output_token_ids=[123],
+    )
+    delay_free, params = scheduler.request_finished(request, ([10, 11, 12],))
+    assert delay_free and params is not None
+    assert scheduler._reqs_need_send["request-p"] == 10.0
+    assert scheduler._sending_thread.delayed_free_requests["request-p"] == 40.0
+
+
+def test_producer_passes_lease_duration_to_control_thread(monkeypatch) -> None:
+    scheduler = make_pull_scheduler()
+    scheduler.kv_transfer_config = SimpleNamespace(is_kv_producer=True)
+    scheduler.tp_size = scheduler.pp_size = 1
+    factory = MagicMock()
+    factory.return_value.start.side_effect = lambda: factory.call_args.args[9].set()
+    monkeypatch.setattr(pull_scheduler, "MooncakeSchedulerSendingThread", factory)
+    scheduler.set_xfer_handshake_metadata_from_workers({0: make_transfer_metadata()})
+    assert factory.call_args.kwargs["kv_lease_duration"] == 30
+
+
+@pytest.mark.parametrize("extra, duration, interval", [({}, 120, 20), ({"kv_lease_duration": 60}, 60, 10)])
+def test_consumer_always_starts_heartbeat_with_configured_interval(monkeypatch, extra, duration, interval) -> None:
+    config = SimpleNamespace(
+        is_kv_consumer=True,
+        get_from_extra_config=extra.get,
+    )
+    monkeypatch.setattr(
+        MooncakeBaseConnectorScheduler, "__init__", lambda self, *args: setattr(self, "kv_transfer_config", config)
+    )
+    receiver = MagicMock()
+
+    def create_receiver(ready):
+        ready.set()
+        return receiver
+
+    monkeypatch.setattr(pull_scheduler, "MooncakeSchedulerRecvingThread", create_receiver)
+    heartbeat = MagicMock()
+    monkeypatch.setattr(pull_scheduler, "MooncakeHeartbeatThread", heartbeat)
+    scheduler = MooncakePullConnectorScheduler(MagicMock(), "engine", MagicMock())
+    assert scheduler._kv_lease_duration == duration
+    assert isinstance(scheduler._validated_producer_leases, TTLCache)
+    assert scheduler._validated_producer_leases.ttl == 600
+    assert scheduler._validated_producer_leases.maxsize == 1024
+    heartbeat.assert_called_once_with(interval)
+    heartbeat.return_value.start.assert_called_once()
+    scheduler.shutdown()
+    heartbeat.return_value.shutdown.assert_called_once()
+
+
+def test_default_producer_lease_lasts_120_seconds_and_renews_for_80(monkeypatch) -> None:
+    clock = MagicMock(return_value=0.0)
+    monkeypatch.setattr(pull_scheduler.time, "monotonic", clock)
+    thread = MooncakeSchedulerSendingThread(
+        host="127.0.0.1",
+        port=6000,
+        engine_id="engine-p",
+        metadata={0: make_transfer_metadata()},
+        tp_size=1,
+        pp_size=1,
+        pcp_size=1,
+        dcp_size=1,
+        use_kv_pp=False,
+        ready_event=threading.Event(),
+    )
+    thread.add_delayed_request("initial")
+    thread.add_delayed_request("renewed")
+    clock.return_value = 60.0
+    thread._handle_heartbeat(("renewed",))
+    clock.return_value = 119.0
+    assert thread.get_and_clear_finished_requests() == set()
+    clock.return_value = 120.0
+    assert thread.get_and_clear_finished_requests() == {"initial"}
+    clock.return_value = 139.0
+    assert thread.get_and_clear_finished_requests() == set()
+    clock.return_value = 140.0
+    assert thread.get_and_clear_finished_requests() == {"renewed"}

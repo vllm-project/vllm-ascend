@@ -216,14 +216,6 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         torch.Tensor.pin_memory = lambda x: x  # noqa
         self.builder = AscendAttentionMetadataBuilder(None, None, self.mock_vllm_config, self.mock_device)
 
-    def test_reorder_batch(self):
-        mock_input_batch = MagicMock()
-        mock_scheduler_output = MagicMock()
-
-        result = self.builder.reorder_batch(mock_input_batch, mock_scheduler_output)
-
-        self.assertFalse(result)
-
     def test_pcp_mode_is_initialized_from_config(self):
         self.assertFalse(self.builder.use_pcp)
         self.assertIs(self.builder.metadata_cls, AscendMetadata)
@@ -300,6 +292,7 @@ def test_pcp_metadata_keeps_expanded_slot_mapping() -> None:
 
     builder._finalize_pcp_metadata(metadata, expanded_slot_mapping)
 
+    assert metadata.uses_pcp_sharded_layout
     assert metadata.slot_mapping is expanded_slot_mapping
     assert metadata.pcp_local_num_input_tokens == 4
     assert metadata.attn_state == AscendAttentionState.ChunkedPrefill
@@ -391,6 +384,25 @@ def test_pcp_builder_keeps_short_extend_in_prefill() -> None:
     assert builder._split_decodes_and_prefills(common_metadata) == (0, 2, 0, 5)
 
 
+def test_pcp_replicated_draft_decode_writes_cache_locally() -> None:
+    impl = AscendAttentionBackendImpl.__new__(AscendAttentionBackendImpl)
+    impl.use_pcp = True
+    impl.key_cache = object()
+    # A draft decode built without a PCP context has no PCP-local layout.
+    query, key, value, output = (torch.zeros(2, 1, 1) for _ in range(4))
+    metadata = AscendMetadata(model_runner_type="generate", slot_mapping=torch.tensor([3, 4]))
+    layer = SimpleNamespace(layer_name="layer", _k_scale_float=1.0, _v_scale_float=1.0)
+    written = (query, key, value, output)
+    with (
+        patch.object(impl, "_reshape_and_cache_pcp", return_value=written) as pcp_write,
+        patch.object(impl, "reshape_and_cache", return_value=written) as write,
+        patch.object(impl, "forward_impl", return_value=output),
+    ):
+        impl.forward(layer, query, key, value, (), metadata, output)
+    pcp_write.assert_not_called()
+    write.assert_called_once()
+
+
 class TestAscendAttentionBackendImpl(TestBase):
     def setUp(self):
         self.mock_event = MagicMock()
@@ -412,6 +424,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.attention_type.DECODER = "decoder"
         self.attention_type.ENCODER = "encoder"
         self.attn_metadata = MagicMock()
+        self.attn_metadata.uses_pcp_sharded_layout = False
         self.attn_metadata.return_value = "1"
         self.layer_no_quant = MagicMock(spec=["layer_name", "_k_scale_float", "_v_scale_float"])
         self.layer_no_quant.layer_name = "test_layer"
@@ -829,6 +842,22 @@ class TestAscendAttentionBackendImpl(TestBase):
         output = self.impl.forward(layer, query, key, value, kv_cache, None, output)
 
         assert output.shape == (10, 8 * 64)
+
+    def test_forward_pooling_encoder_only_is_bidirectional_despite_causal_metadata(self):
+        self.impl.attn_type = attn_module.AttentionType.ENCODER_ONLY
+        query = torch.zeros(2, self.impl.num_heads, self.impl.head_size)
+        output = torch.zeros_like(query)
+        encoder_output = torch.ones_like(query)
+        metadata = AscendMetadata(model_runner_type="pooling", causal=True, actual_seq_lengths_q=[query.shape[0]])
+
+        with (
+            patch("torch_npu.npu_fusion_attention", return_value=(encoder_output,)) as encoder_attention,
+            patch.object(self.impl, "forward_impl", return_value=output),
+        ):
+            result = self.impl.forward(self.layer_no_quant, query, query, query, (), metadata, output)
+
+        encoder_attention.assert_called_once()
+        torch.testing.assert_close(result, encoder_output)
 
     @patch("torch_npu.npu_scatter_pa_kv_cache")
     @patch("torch_npu.npu_fused_infer_attention_score")

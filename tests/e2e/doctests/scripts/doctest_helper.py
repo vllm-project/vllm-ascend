@@ -384,13 +384,16 @@ def select_doctests(base: str, head: str) -> dict[str, list[str]]:
     base_text = read_repo_text(MKDOCS_PATH, comparison_base)
     head_text = read_repo_text(MKDOCS_PATH, head)
     assert base_text is not None and head_text is not None
-    # Shared tooling or release changes add both devices and pip, retaining other selections.
+    # Release updates exercise source installation before wheels are published.
+    if release_config_changed(base_text, head_text):
+        run_a2 = run_310p = run_source = True
+    # Shared tooling changes add both devices and pip, retaining other selections.
     shared_doctest_changed = any(
         path == shared_path or path.startswith(f"{shared_path}/")
         for path in changed_paths
         for shared_path in SHARED_DOCTEST_PATHS
     )
-    if release_config_changed(base_text, head_text) or shared_doctest_changed:
+    if shared_doctest_changed:
         run_a2 = run_310p = run_pip = True
 
     quickstart_devices = []

@@ -172,7 +172,6 @@ jobs:
       HF_HUB_OFFLINE: 1
       TEST_FREQUENCY: ${{ inputs.test_frequency }}
       VLLM_USE_MODELSCOPE: True
-      UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
       UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi"
       UV_INDEX_STRATEGY: unsafe-best-match
       UV_NO_CACHE: 1
@@ -186,9 +185,6 @@ jobs:
         run: |
           npu-smi info
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
-          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
-          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           pip install uv
 
       - name: Install vllm from ref
@@ -241,10 +237,17 @@ jobs:
           fetch-depth: 1
           submodules: recursive
 
+      # Stage manifests where both the job container and runner can read them.
+      - name: Check layout and stage actions
+        if: ${{ inputs.request_id != '' }}
+        shell: bash
+        working-directory: ./temp-vllm-ascend
+        run: bash .github/workflows/scripts/stage_ci_actions.sh .
+
       - name: Restore incremental cache for source checkout
         id: source-l1
         if: ${{ inputs.request_id != '' }}
-        uses: $/.github/actions/csrc-l1-restore
+        uses: ./../../_temp/ci-workflow/.github/actions/csrc-l1-restore
         with:
           cache-dir: csrc/build_cache
           architecture: ${{ runner.arch }}
@@ -288,7 +291,7 @@ jobs:
           cp -r /tmp/aisbench-backup /vllm-workspace/vllm-ascend/benchmark
           cd /vllm-workspace/vllm-ascend/benchmark
           pip install pytest asyncio pytest-asyncio
-          pip install -e . -r requirements/api.txt -r requirements/extra.txt
+          pip install -e . -r requirements/api.txt -r requirements/extra.txt -r requirements/response_anomaly.txt
           python3 -m pip cache purge
 
       - name: Show vLLM and vLLM-Ascend version
@@ -365,6 +368,13 @@ jobs:
         working-directory: /vllm-workspace/vllm-ascend
         run: python3 -m tools.profiling.capture initialize --root "$ASCEND_PROFILE_ROOT"
 
+      - name: Clear Ascend logs before tests
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          rm -rf /root/ascend/log
+          mkdir -p /root/ascend/log
+
       - name: Run Pytest (py-driven)
         id: pytest-driven
         if: ${{ inputs.tests != '' }}
@@ -382,7 +392,7 @@ jobs:
 
       - name: Run Pytest (YAML-driven)
         id: yaml-test
-        if: ${{ always() && inputs.config_file_path != '' }}
+        if: ${{ !cancelled() && inputs.config_file_path != '' }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
@@ -399,6 +409,28 @@ jobs:
           set -o pipefail
           pytest -sv tests/e2e/common/single_node/test_single_node.py \
             2>&1 | tee /tmp/test-logs/yaml-test.log
+
+      - name: Collect Ascend logs
+        id: collect_ascend_logs
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          ARTIFACT_LABEL: ${{ inputs.soc_version }}-${{ inputs.vllm_ascend_branch }}-${{ inputs.name || inputs.config_file_path || inputs.tests }}
+        run: |
+          safe_label=$(printf '%s' "$ARTIFACT_LABEL" | tr -c 'A-Za-z0-9_.-' '-')
+          echo "name=single-node-${safe_label}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-ascend-logs" >> "$GITHUB_OUTPUT"
+          tar -czf /tmp/single-node-ascend-logs.tar.gz -C / root/ascend/log tmp/test-logs
+
+      - name: Upload Ascend logs (GitHub Artifacts)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.collect_ascend_logs.outputs.name }}
+          path: /tmp/single-node-ascend-logs.tar.gz
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0
 
       - name: Update good_table.csv on success
         if: >-
@@ -505,6 +537,11 @@ jobs:
           BISECT_FORCE_INITIAL_BUILD: ${{ inputs.bisect_force_initial_build }}
           BISECT_CONFIG_BASE_PATH: ${{ inputs.bisect_config_base_path }}
         run: |
+          BISECT_WORK_DIR=$(mktemp -d /tmp/aop-bisect.XXXXXX)
+          export BISECT_WORK_DIR
+          mkdir -p /tmp/test-logs
+          set +e
+          set -o pipefail
           bash tests/e2e/nightly/scripts/aop_process.sh \
             "${{ steps.classify.outputs.failure_type }}" \
             "${{ steps.commit-age.outputs.commit_age_days }}" \
@@ -526,7 +563,33 @@ jobs:
             "$BISECT_NO_VERIFY_GOOD" \
             "$BISECT_NO_VERIFY_BAD" \
             "$BISECT_FORCE_INITIAL_BUILD" \
-            "$BISECT_CONFIG_BASE_PATH"
+            "$BISECT_CONFIG_BASE_PATH" 2>&1 | tee /tmp/test-logs/aop-process.log
+          process_rc=${PIPESTATUS[0]}
+          mkdir -p /tmp/aop-bisect-diagnostics
+          cp -a "$BISECT_WORK_DIR" /tmp/aop-bisect-diagnostics/bisect_runs || \
+            echo "Warning: could not collect bisect logs from $BISECT_WORK_DIR"
+          exit "$process_rc"
+
+      - name: Collect AOP bisect diagnostics
+        if: ${{ always() && inputs.aop_single_enabled }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          DEST=/tmp/aop-bisect-diagnostics
+          mkdir -p "$DEST"
+          if [ -d /tmp/test-logs ]; then
+            cp -a /tmp/test-logs "$DEST/initial_tests"
+          fi
+
+      - name: Upload AOP bisect diagnostics (GitHub Artifacts)
+        if: ${{ always() && inputs.aop_single_enabled }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: aop-bisect-${{ inputs.vllm_ascend_branch }}-${{ inputs.name || github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/aop-bisect-diagnostics/
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: On success
         if: ${{ always() && inputs.aop_single_enabled && steps.test-result.outputs.result == 'success' }}
@@ -590,8 +653,8 @@ jobs:
         with:
           access_key: ${{ secrets.OBS_ACCESS_KEY_ID }}
           secret_key: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
-          name: nightly-test-benchmark-results-${{ inputs.name }}-${{ steps.bench_ts.outputs.artifact_ts }}
-          path: /vllm-workspace/vllm-ascend/benchmark_results/${{ inputs.name }}.json
+          name: nightly-test-benchmark-results-${{ steps.bench_ts.outputs.effective_name }}-${{ steps.bench_ts.outputs.artifact_ts }}
+          path: /vllm-workspace/vllm-ascend/benchmark_results/${{ steps.bench_ts.outputs.effective_name }}.json
           if-no-files-found: warn
           retention-days: 90
 
@@ -608,6 +671,7 @@ jobs:
 
       - name: Upload AISBench outputs
         if: ${{ always() && inputs.config_file_path != '' }}
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: aisbench-outputs-single-node-${{ steps.bench_ts.outputs.effective_name }}-${{ github.run_id }}-${{ github.run_attempt }}

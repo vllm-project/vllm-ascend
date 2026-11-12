@@ -30,14 +30,14 @@ The Ascend integration adapts the boundaries between these planes; it does not
 implement a second controller or placement lifecycle.
 
 ```mermaid
-flowchart LR
+flowchart TD
     A["Upstream EPLB controller"] -->|"committed placement"| B["Ascend EPLB state"]
     B -->|"refresh in place"| C["Device lookup table"]
     D["Router logical expert IDs"] --> C
     C -->|"physical expert IDs"| E["Quantized fused MoE"]
     E -->|"executed expert counts"| F["Load recorder"]
     F --> A
-    A -->|"default-policy placement"| G["Quantization-owned weight views"]
+    A -->|"policy placement"| G["Quantization-owned weight views"]
     G <-->|"HIXL direct transfer (Gloo fallback)"| H["Peer EP ranks"]
     G -->|"main-thread commit"| B
 ```
@@ -64,15 +64,18 @@ alternative implementation of EPLB.
 
 At runner initialization, platform validation checks the Model Runner version,
 EPLB mode, quantization layout, and execution features. Unsupported
-combinations fail before serving. Model Runner V1 keeps its legacy EPLB path;
-Model Runner V2 uses the upstream control plane. V1-only controls and V2 EPLB
-configuration cannot be mixed.
+combinations fail before serving. Ascend uses the upstream EPLB control plane;
+the legacy Model Runner V1 EPLB controls have been removed.
 
 At the start of a Model Runner V2 batch, the runner tells
 `AscendEPLBController` whether the batch belongs to the configured load
 collection phase. The phase may collect all batches, prefill batches, or decode
-batches. A mixed batch containing prefill work is classified as prefill. This
-decision is made once per batch rather than once per token or MoE layer.
+batches. A mixed batch containing prefill work is classified as prefill, and
+on disaggregated decode nodes prompt-tail recomputation is classified as
+decode. This decision is made once per batch rather than once per token or
+MoE layer. Phase filtering only applies to policies that consume custom load
+statistics (STAIR); with the upstream `default` policy the field is accepted
+but has no effect.
 
 Each MoE layer then follows one routing path:
 
@@ -96,12 +99,18 @@ in the layer hot path.
 
 ## Rearrangement and weight views
 
-When an upstream load window closes, vLLM's default policy calculates a new
-placement and the upstream asynchronous worker moves the changed layers'
-expert weights through the selected transport. The model-runner thread
-installs each published layer, commits its placement, and refreshes the
-device lookup before acknowledging the receive workspace. Routing never
-observes a lookup for an uncommitted placement.
+When an upstream load window closes, the configured policy calculates a new
+placement — STAIR by default on Ascend, with the upstream `default` policy
+available for comparison experiments — and the upstream asynchronous worker
+moves the changed layers' expert weights through the selected transport. The
+model-runner thread installs each published layer, commits its placement,
+and refreshes the device lookup before acknowledging the receive workspace.
+Routing never observes a lookup for an uncommitted placement.
+
+The initial placement also differs from upstream when redundant experts are
+configured: Ascend spreads the redundant physical experts round-robin across
+EP ranks instead of appending them to the last ranks, so the very first
+rearrangement starts from a balanced replica distribution.
 
 Expert storage is quantization-specific. Some kernels consume independent
 per-expert tensors, while others consume packed tensors or associated scale and
@@ -171,7 +180,7 @@ Changes to this integration must preserve these invariants:
 6. The worker does not reuse transfer workspace before the main thread
    commits the layer and refreshes routing.
 7. Unsupported modes fail during initialization instead of silently degrading.
-8. EPLB-disabled execution and the Model Runner V1 EPLB path remain isolated.
+8. EPLB-disabled execution stays isolated from the EPLB path.
 9. The routing hot path avoids host loops, device-to-host synchronization, and
    mutable Python mapping work.
 
@@ -189,6 +198,13 @@ missing or shifted load statistics, verify that the fused routing operation
 records physical IDs and excludes padding. Startup rejections should be checked against
 the user-guide support matrix and
 [additional configuration reference](../../user_guide/configuration/additional_config.md).
+
+Useful log anchors: `Ascend EPLB selected ...` lines record the communicator
+consensus decision; `Ascend async EPLB cycle committed` lines summarize each
+committed movement cycle (predicted imbalance — mean and p95 max-to-average
+rank-load ratios, lower is better — before and after, changed layers,
+transfer counts); with `--eplb-config.log_balancedness true`, upstream
+`EPLB step: ... balancedness=...` lines record per-step load balance.
 
 Repository test placement and registration rules are documented in the
 [testing guide](../contribution/testing.md).

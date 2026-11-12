@@ -50,7 +50,6 @@ ALLOWED_VALUES: dict[str, set[str]] = {
         "sfa_dsa",
         "sfa_pcp",
         "dsa_pcp",
-        "dsa_cp",
         "prefix_caching",
         "chunked_prefill",
         "cpu_offloading",

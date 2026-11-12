@@ -16,9 +16,9 @@
 #
 """Scheduler subclass with profiling-based dynamic chunk sizing.
 
-The ``schedule()`` override below follows the ``Scheduler.schedule()``
-contract of vLLM v0.31.0. When the upstream
-``schedule()`` method is refactored, this override must be updated accordingly.
+The ``schedule()`` override originated from the ``Scheduler.schedule()``
+contract of vLLM v0.31.0 and carries subsequent compatibility updates. When
+the upstream method is refactored, this override must be updated accordingly.
 """
 
 import inspect
@@ -46,7 +46,6 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.core.profiling_chunk_predictor import ProfilingChunkManager
-from vllm_ascend.utils import vllm_version_is
 
 
 class ProfilingChunkScheduler(Scheduler):
@@ -89,6 +88,13 @@ class ProfilingChunkScheduler(Scheduler):
 
         profiling_cfg = scheduler_extension_config.profiling_chunk_config
         self.profiling_chunk_config = profiling_cfg
+        if self.profiling_chunk_config.enabled:
+            logger.warning_once(
+                "Dynamic chunk size Chunked Pipeline Parallelism (CPP) is deprecated "
+                "as of v0.32.0 and has entered the sunset process. It will be removed "
+                "in a future release. See RFC #21304 (https://github.com/vllm-project/vllm-ascend/issues/21304) "
+                "for details and migration guidance."
+            )
 
         short_request_first_config = scheduler_extension_config.short_request_first_config
         self._short_request_first_enabled = short_request_first_config.enabled
@@ -527,6 +533,12 @@ class ProfilingChunkScheduler(Scheduler):
                         break
 
             if new_blocks is None:
+                if self.policy == SchedulingPolicy.PRIORITY and request.status == RequestStatus.PREEMPTED:
+                    # The request was the lowest-priority running request and
+                    # preempted itself. The requests after it have higher
+                    # priority and may still fit; it was removed from
+                    # `self.running`, so `req_index` already points at the next.
+                    continue
                 # Cannot schedule this request.
                 break
 
@@ -812,7 +824,7 @@ class ProfilingChunkScheduler(Scheduler):
                     if (
                         not self.scheduler_config.enable_chunked_prefill
                         and num_new_tokens > request_token_budget
-                        and (vllm_version_is("0.31.0") or not self.is_mm_encoder_only)
+                        and not self.is_mm_encoder_only
                     ):
                         # If chunked_prefill is disabled,
                         # we can stop the scheduling here.
@@ -891,6 +903,11 @@ class ProfilingChunkScheduler(Scheduler):
                     num_lookahead_tokens=effective_lookahead_tokens,
                     num_external_computed_tokens=num_external_computed_tokens,
                     delay_cache_blocks=load_kv_async,
+                    skip_zeroing_group_ids=(
+                        self.connector.get_loaded_kv_cache_group_ids(request)
+                        if load_kv_async and self.connector is not None
+                        else ()
+                    ),
                     num_encoder_tokens=num_encoder_tokens,
                     full_sequence_must_fit=self.scheduler_reserve_full_isl,
                     reserved_blocks=reserved_blocks,
@@ -946,16 +963,6 @@ class ProfilingChunkScheduler(Scheduler):
                     # only the successfully loaded tokens.
                     request.num_computed_tokens = num_computed_tokens
                     self._inflight_prefills.add(request)
-                    if self.needs_kv_cache_zeroing:
-                        # Skip zeroing of the blocks the async load will
-                        # overwrite; the zeroing could race the write.
-                        self._skip_zero_block_ids.update(
-                            self.kv_cache_manager.get_zeroing_block_ids_in_range(
-                                request.request_id,
-                                num_new_local_computed_tokens,
-                                num_computed_tokens,
-                            )
-                        )
                     skip_request(request_queue)
                     continue
 
@@ -1038,27 +1045,17 @@ class ProfilingChunkScheduler(Scheduler):
                 num_common_prefix_blocks = self.kv_cache_manager.get_num_common_prefix_blocks(any_request_id)
 
         # Construct the scheduler output.
-        if self.use_v2_model_runner:
-            scheduled_new_reqs.extend(scheduled_resumed_reqs)
-            scheduled_resumed_reqs.clear()
-            new_reqs_data = [
-                NewRequestData.from_request(
-                    req,
-                    req_to_new_blocks[req.request_id].get_block_ids(),
-                    req._all_token_ids,
-                    uses_mrope=self.model_uses_mrope,
-                )
-                for req in scheduled_new_reqs
-            ]
-        else:
-            new_reqs_data = [
-                NewRequestData.from_request(
-                    req,
-                    req_to_new_blocks[req.request_id].get_block_ids(),
-                    uses_mrope=self.model_uses_mrope,
-                )
-                for req in scheduled_new_reqs
-            ]
+        scheduled_new_reqs.extend(scheduled_resumed_reqs)
+        scheduled_resumed_reqs.clear()
+        new_reqs_data = [
+            NewRequestData.from_request(
+                req,
+                req_to_new_blocks[req.request_id].get_block_ids(),
+                req._all_token_ids,
+                uses_mrope=self.model_uses_mrope,
+            )
+            for req in scheduled_new_reqs
+        ]
 
         with record_function_or_nullcontext("schedule: make_cached_request_data"):
             cached_reqs_data = self._make_cached_request_data(
@@ -1068,11 +1065,6 @@ class ProfilingChunkScheduler(Scheduler):
                 scheduled_spec_decode_tokens,
                 req_to_new_blocks,
             )
-
-        # Record the request ids that were scheduled in this step (MRV1-only).
-        if not self.use_v2_model_runner:
-            self.prev_step_scheduled_req_ids.clear()
-            self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
         # Mamba "align" boundary states must be handed off with exact block ids;
         # they cannot be reconstructed from a connector's append-only block

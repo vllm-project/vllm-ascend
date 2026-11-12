@@ -1,0 +1,9 @@
+pr: 20276
+entries:
+  - category: feature
+    text: >-
+      Added Engram Tensor Parallel (ETP) support for the Qwen4Exp PLE embedding
+      table, so the table can be sharded across cards and TP can be reduced to
+      fit DP+TP deployment shapes.
+    model: qwen4-exp
+    hardware: [A2, A3]

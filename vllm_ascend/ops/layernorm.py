@@ -110,12 +110,7 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
         import torch_npu
 
         if residual is not None:
-            if enable_custom_op():
-                x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
-                    x, residual, 1.0 + self.weight, None, self.variance_epsilon
-                )
-            else:
-                x, _, residual = torch_npu.npu_add_rms_norm(x, residual, 1.0 + self.weight, self.variance_epsilon)
+            x, _, residual = torch_npu.npu_add_rms_norm(x, residual, 1.0 + self.weight, self.variance_epsilon)
             return x, residual
 
         x = DeviceOperator.npu_gemma_rms_norm(x, self.weight, self.variance_epsilon)
@@ -161,6 +156,7 @@ class LayerNormFn(torch.autograd.Function):
             group_size=group_size,
             norm_before_gate=norm_before_gate,
             is_rms_norm=is_rms_norm,
+            activation=activation,
         )
         ctx.save_for_backward(x, weight, bias, mean, rstd, z)
         ctx.x_shape_og = x_shape_og
@@ -210,7 +206,17 @@ class AscendRMSNormGated(RMSNormGated):
 
     def forward_oot(self, x, z=None):
         """If z is not None, we do norm(x) * silu(z) if norm_before_gate, else norm(x * silu(z))"""
-        return LayerNormFn.apply(x, self.weight, self.bias, z, self.eps, self.group_size, self.norm_before_gate, True)
+        return LayerNormFn.apply(
+            x,
+            self.weight,
+            self.bias,
+            z,
+            self.eps,
+            self.group_size,
+            self.norm_before_gate,
+            True,
+            self.activation,
+        )
 
 
 def __getattr__(name: str):

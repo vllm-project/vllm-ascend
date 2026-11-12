@@ -9,8 +9,8 @@ import torch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 from tests.ut.distributed.ascend_store.test_segmented_cache_transfer import make_database, make_worker
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import LayerBatchBuilder
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import SharedBlockData
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import LayerBatchBuilder
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import SharedBlockData
 
 
 def components(scale, padding, dtype, tokens=2, nope=8, rope=1):

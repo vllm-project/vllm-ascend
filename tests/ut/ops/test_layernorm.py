@@ -3,12 +3,16 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.config import set_current_vllm_config
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops import layernorm as ascend_layernorm
-from vllm_ascend.ops.layernorm import AscendFusedRMSNormGated
+from vllm_ascend.ops.layernorm import (
+    AscendFusedRMSNormGated,
+    AscendRMSNormGated,
+    LayerNormFn,
+)
 from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
@@ -86,6 +90,34 @@ def test_RMSNorm_creates_bias_from_quant_description(default_vllm_config):
     assert not layer.bias.requires_grad
 
 
+@patch("vllm_ascend.ops.layernorm.enable_custom_op", return_value=True)
+@patch("torch.ops._C_ascend.npu_add_rms_norm_bias", create=True, side_effect=mock_add_rms_norm_bias)
+@patch("torch_npu.npu_add_rms_norm", create=True, side_effect=mock_add_rms_norm)
+def test_GemmaRMSNorm_residual_uses_native_op(
+    mock_native, mock_bias_op, _custom_op_enabled, dummy_tensor, default_vllm_config
+):
+    """GemmaRMSNorm has no beta, so AddRmsNormBias has nothing to fuse.
+
+    The operator is only reachable where the custom OPP is installed, while the
+    native operator computes the same result everywhere.
+
+    ``enable_custom_op`` is pinned to True even though the method no longer
+    consults it: that is what the removed branch keyed on, so the pin makes this
+    test fail against the previous implementation on a CPU runner too, where the
+    ambient value is False and both implementations would otherwise agree.
+    """
+    layer = GemmaRMSNorm(hidden_size=8, eps=1e-05)
+    assert not hasattr(layer, "bias")
+
+    residual = torch.randn(4, 8, dtype=torch.float16)
+    out_x, out_residual = layer.forward_oot(dummy_tensor, residual)
+
+    mock_native.assert_called_once()
+    mock_bias_op.assert_not_called()
+    assert torch.allclose(out_x, 2 * dummy_tensor)
+    assert torch.allclose(out_residual, 2 * residual)
+
+
 def test_FusedRMSNormGated_dispatches_to_ascend_kernel(default_vllm_config):
     layer = FusedRMSNormGated(hidden_size=8, eps=1e-6, activation="sigmoid")
     x = torch.randn(1, 4, 2, 8)
@@ -110,6 +142,52 @@ def test_FusedRMSNormGated_dispatches_to_ascend_kernel(default_vllm_config):
         residual_in_fp32=True,
         out=None,
     )
+
+
+@pytest.mark.parametrize("activation", ["sigmoid", "swish"])
+def test_RMSNormGated_forwards_activation(default_vllm_config, activation):
+    layer = AscendRMSNormGated(
+        hidden_size=8,
+        eps=1e-6,
+        norm_before_gate=True,
+        activation=activation,
+    )
+    x = torch.randn(2, 8)
+    z = torch.randn_like(x)
+    expected = torch.empty_like(x)
+
+    with patch.object(LayerNormFn, "apply", return_value=expected) as apply:
+        assert layer.forward_oot(x, z) is expected
+
+    assert apply.call_args.args[-1] == activation
+
+
+def test_LayerNormFn_forwards_sigmoid_to_npu_kernel(default_vllm_config):
+    x = torch.randn(2, 8)
+    z = torch.randn_like(x)
+    weight = torch.ones(8)
+    bias = torch.zeros(8)
+    expected = torch.empty_like(x)
+    rstd = torch.ones(2)
+
+    with patch(
+        "vllm_ascend.ops.layernorm.layer_norm_fwd_npu",
+        return_value=(expected, None, rstd),
+    ) as npu_kernel:
+        actual = LayerNormFn.apply(
+            x,
+            weight,
+            bias,
+            z,
+            1e-6,
+            None,
+            True,
+            True,
+            "sigmoid",
+        )
+
+    assert actual.data_ptr() == expected.data_ptr()
+    assert npu_kernel.call_args.kwargs["activation"] == "sigmoid"
 
 
 @pytest.mark.skipif(

@@ -1,0 +1,4 @@
+pr: 20723
+entries:
+  - category: feature
+    text: Enabled GLM RecoverSSM on TP1 PCP Mooncake prefill producers and fixed PCP metadata propagation and step registration. Decode consumers retain PCP1.

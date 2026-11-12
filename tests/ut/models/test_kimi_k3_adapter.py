@@ -8,20 +8,139 @@ import pytest
 import torch
 from safetensors.torch import save_file
 from torch import nn
+from vllm.config import CUDAGraphMode
 
 import vllm_ascend.attention.mla_v1 as mla_v1
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
-from vllm_ascend.models import kimi_k3, kimi_k3_dspark
-from vllm_ascend.models.kimi_k3 import (
+from vllm_ascend.models.kimi_k3 import kimi_k3, kimi_k3_dspark
+from vllm_ascend.models.kimi_k3.kimi_k3 import (
     AscendKimiK3MultiModalProjector,
     AscendKimiLinearModel,
 )
-from vllm_ascend.models.kimi_k3_dspark import (
+from vllm_ascend.models.kimi_k3.kimi_k3_dspark import (
     AscendK3DSparkForCausalLM,
     AscendK3DSparkModel,
 )
+from vllm_ascend.quantization.methods.base import PreparedLinearInput
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
+
+
+@pytest.mark.parametrize("uses_mixed_projection", [False, True])
+def test_kimi_kda_marks_only_mixed_qkv_for_gmm_layout(uses_mixed_projection):
+    def fake_backend_init(attention, _config, _vllm_config, _prefix):
+        nn.Module.__init__(attention)
+        attention.uses_mixed_projection = uses_mixed_projection
+        attention.in_proj_qkvgfab = nn.Module()
+
+    with patch.object(kimi_k3.AscendKimiK3DeltaAttentionBase, "__init__", new=fake_backend_init):
+        attention = kimi_k3.AscendKimiK3DeltaAttention(None, None)
+
+    assert getattr(attention.in_proj_qkvgfab, "_single_group_gmm_nz", False) is uses_mixed_projection
+
+
+@pytest.mark.parametrize("runtime_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE])
+@pytest.mark.parametrize("capturing", [False, True])
+@pytest.mark.parametrize("nz_layout", [False, True])
+def test_kimi_qkv_matmul_uses_model_dispatch(runtime_mode, capturing, nz_layout):
+    attention = kimi_k3.AscendKimiK3DeltaAttention.__new__(kimi_k3.AscendKimiK3DeltaAttention)
+    nn.Module.__init__(attention)
+    inner_method = AscendW8A8MXFP8DynamicLinearMethod.__new__(AscendW8A8MXFP8DynamicLinearMethod)
+    quantized = torch.empty(4, 128, dtype=torch.float8_e4m3fn)
+    x_scale = torch.empty(4, 2, 2, dtype=torch.uint8)
+    output = torch.randn(4, 192, dtype=torch.bfloat16)
+    fallback_output = output.unsqueeze(0) if nz_layout else output
+    quant_method = SimpleNamespace(quant_method=inner_method, apply=MagicMock(return_value=fallback_output))
+    layer = SimpleNamespace(
+        quant_method=quant_method,
+        weight=torch.empty((1, 128, 192) if nz_layout else (128, 192), dtype=torch.float8_e4m3fn),
+        weight_scale=torch.empty((1, 2, 192, 2) if nz_layout else (2, 192, 2), dtype=torch.uint8),
+        _mxfp8_gmm_nz_layout=nz_layout,
+    )
+    attention.in_proj_qkvgfab = layer
+    qkv_input = (quantized, x_scale)
+
+    with (
+        patch(
+            "vllm_ascend.models.kimi_k3.kimi_k3.get_forward_context",
+            return_value=SimpleNamespace(cudagraph_runtime_mode=runtime_mode),
+        ),
+        patch("vllm_ascend.models.kimi_k3.kimi_k3.is_forward_context_available", return_value=True),
+        patch("vllm_ascend.models.kimi_k3.kimi_k3.torch.npu.is_current_stream_capturing", return_value=capturing),
+        patch(
+            "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.torch_npu.npu_grouped_matmul", return_value=[output]
+        ) as grouped,
+        patch.object(inner_method, "apply_single_group_gmm", wraps=inner_method.apply_single_group_gmm) as single_group,
+    ):
+        actual = attention._matmul_fused_qkv(qkv_input)
+
+    torch.testing.assert_close(actual, output)
+    if runtime_mode == CUDAGraphMode.NONE and not capturing:
+        single_group.assert_called_once_with(layer, qkv_input)
+        quant_method.apply.assert_not_called()
+        kwargs = grouped.call_args.kwargs
+        assert kwargs["group_list"].tolist() == [4]
+        assert kwargs["group_list"].device == quantized.device
+        assert kwargs["split_item"] == 2
+        assert kwargs["group_type"] == 0
+    else:
+        grouped.assert_not_called()
+        single_group.assert_not_called()
+        quant_method.apply.assert_called_once_with(layer, qkv_input, bias=None)
+
+
+@pytest.mark.parametrize("runtime_mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE])
+@pytest.mark.parametrize("capturing", [False, True])
+@pytest.mark.parametrize("nz_layout", [False, True])
+@pytest.mark.parametrize("prepared", [False, True])
+def test_kimi_routed_linear_uses_gmm_only_in_eager(runtime_mode, capturing, nz_layout, prepared):
+    layer = kimi_k3.AscendKimiK3RoutedLinear.__new__(kimi_k3.AscendKimiK3RoutedLinear)
+    nn.Module.__init__(layer)
+    method = AscendW8A8MXFP8DynamicLinearMethod.__new__(AscendW8A8MXFP8DynamicLinearMethod)
+    x = torch.randn(4, 128, dtype=torch.bfloat16)
+    if prepared:
+        x = PreparedLinearInput(x.to(torch.float8_e4m3fn), torch.ones(4, 2, 2, dtype=torch.uint8), x.dtype)
+    output = torch.randn(4, 192, dtype=torch.bfloat16)
+    fallback_output = output.unsqueeze(0) if nz_layout else output
+    quant_method = SimpleNamespace(quant_method=method, apply=MagicMock(return_value=fallback_output))
+    layer.quant_method = quant_method
+    layer.weight = nn.Parameter(torch.empty((1, 128, 192) if nz_layout else (128, 192)), requires_grad=False)
+    layer._mxfp8_gmm_nz_layout = nz_layout
+    layer.bias = None
+    layer.skip_bias_add = False
+    layer.return_bias = True
+
+    with (
+        patch(
+            "vllm_ascend.models.kimi_k3.kimi_k3.get_forward_context",
+            return_value=SimpleNamespace(cudagraph_runtime_mode=runtime_mode),
+        ),
+        patch("vllm_ascend.models.kimi_k3.kimi_k3.is_forward_context_available", return_value=True),
+        patch("vllm_ascend.models.kimi_k3.kimi_k3.torch.npu.is_current_stream_capturing", return_value=capturing),
+        patch.object(AscendW8A8MXFP8DynamicLinearMethod, "apply_single_group_gmm", return_value=output) as grouped,
+    ):
+        actual = layer.forward(x)
+
+    torch.testing.assert_close(actual[0], output)
+    assert actual[1] is None
+    if runtime_mode == CUDAGraphMode.NONE and not capturing:
+        grouped.assert_called_once_with(layer, x)
+        quant_method.apply.assert_not_called()
+    else:
+        grouped.assert_not_called()
+        quant_method.apply.assert_called_once_with(layer, x, bias=None)
+
+
+def test_kimi_routed_nz_fallback_preserves_batched_input_shape():
+    method = AscendW8A8MXFP8DynamicLinearMethod.__new__(AscendW8A8MXFP8DynamicLinearMethod)
+    output = torch.randn(1, 4, 192)
+    layer = SimpleNamespace(
+        _mxfp8_gmm_nz_layout=True,
+        quant_method=SimpleNamespace(quant_method=method, apply=MagicMock(return_value=output)),
+    )
+    with patch("vllm_ascend.models.kimi_k3.kimi_k3.is_forward_context_available", return_value=False):
+        actual = kimi_k3.AscendKimiK3RoutedLinear.apply_projection(layer, torch.randn(1, 4, 128))
+    assert actual is output
 
 
 def test_kimi_disabling_mlapo_refreshes_projection_nz_management():
@@ -128,7 +247,7 @@ def test_k3_dspark_context_writer_splits_fused_mla_cache(monkeypatch):
     )
     model.layers = [SimpleNamespace(self_attn=attn)]
     monkeypatch.setattr(
-        "vllm_ascend.models.kimi_k3_dspark.get_cos_and_sin_mla",
+        "vllm_ascend.models.kimi_k3.kimi_k3_dspark.get_cos_and_sin_mla",
         lambda positions: (torch.ones(3, 2), torch.zeros(3, 2)),
     )
 
@@ -181,7 +300,7 @@ def test_k3_dspark_context_writer_routes_strided_caches_to_prolog_v3(monkeypatch
     model.layers = [SimpleNamespace(self_attn=attn)]
     context_states = torch.randn(4, 8)
     monkeypatch.setattr(
-        "vllm_ascend.models.kimi_k3_dspark.get_cos_and_sin_mla",
+        "vllm_ascend.models.kimi_k3.kimi_k3_dspark.get_cos_and_sin_mla",
         lambda positions: (torch.ones(4, 1, 1, 1), torch.zeros(4, 1, 1, 1)),
     )
 
@@ -403,18 +522,21 @@ def test_kimi_dense_mlp_gathers_and_scatters_sequence_shards(monkeypatch):
     torch.testing.assert_close(output, torch.tensor([[2.0], [3.0]]))
 
 
-def test_kimi_attention_residual_stays_sequence_sharded(monkeypatch):
+@pytest.mark.parametrize("fused_o_proj", [False, True])
+@pytest.mark.parametrize("block_boundary", [False, True])
+def test_kimi_attention_residual_stays_sequence_sharded(monkeypatch, fused_o_proj, block_boundary):
     class IdentityAttention(nn.Module):
         def forward(self, *, hidden_states, positions):
             del positions
-            return hidden_states
+            return hidden_states.chunk(2, dim=0)[0] if fused_o_proj else hidden_states
 
     layer = kimi_k3.AscendKimiDecoderLayer.__new__(kimi_k3.AscendKimiDecoderLayer)
     nn.Module.__init__(layer)
     layer.use_sequence_parallel = True
-    layer.fuse_o_proj_mm_reduce_scatter = False
+    layer.fuse_o_proj_mm_reduce_scatter = fused_o_proj
     layer.prev_valid_blocks = 0
-    layer.is_block_write_layer = False
+    layer.is_block_write_layer = block_boundary
+    layer.block_write_idx = 0
     # The main-contract fused path reads the norm/proj weights directly, so use
     # weight-bearing stand-ins rather than opaque sentinels.
     layer.input_layernorm = SimpleNamespace(weight=torch.ones(2), variance_epsilon=1e-5)
@@ -440,7 +562,9 @@ def test_kimi_attention_residual_stays_sequence_sharded(monkeypatch):
     monkeypatch.setattr(kimi_k3, "sp_reduce_scatter", fake_reduce_scatter)
     layer.prepare_attn_residual = MethodType(lambda self, prefix, bank, **kwargs: (prefix, prefix, prefix), layer)
 
-    def fake_fused(prefix, addend, *_args, **_kwargs):
+    def fake_fused(prefix, addend, bank, *_args, **_kwargs):
+        assert prefix.shape == (bank.shape[0], bank.shape[2])
+        assert addend is None or addend.shape == prefix.shape
         raw = prefix if addend is None else prefix + addend
         return raw, raw, raw
 
@@ -455,11 +579,12 @@ def test_kimi_attention_residual_stays_sequence_sharded(monkeypatch):
         prefix_delta=None,
     )
     assert output.shape == torch.Size([2, 2])
+    torch.testing.assert_close(output, hidden_states if block_boundary else hidden_states * 2)
 
-    assert collective_shapes == [
-        ("gather", torch.Size([2, 2])),
-        ("reduce_scatter", torch.Size([3, 2])),
-    ]
+    expected_collectives = [("gather", torch.Size([2, 2]))]
+    if not fused_o_proj:
+        expected_collectives.append(("reduce_scatter", torch.Size([3, 2])))
+    assert collective_shapes == expected_collectives
     assert returned_residual.shape == torch.Size([2, 1, 2])
 
 
@@ -735,3 +860,85 @@ def test_k3_dspark_pp_mapper_keeps_frozen_embed_but_drops_heads(monkeypatch):
         "context_proj.weight",
     ):
         assert pp_mapper._map_name(name) == upstream_mapper._map_name(name)
+
+
+def test_kimi_lm_initializes_specialized_decode(monkeypatch):
+    from vllm.models.kimi_k3.amd.specialized_decode import runtime
+
+    sentinel = object()
+    seen = {}
+
+    def fake_specialized_decode_config(vllm_config):
+        seen["vllm_config"] = vllm_config
+        return sentinel
+
+    class DummyKimiLinearModel:
+        layers: list = []
+
+        def __init__(self, **kwargs):
+            pass
+
+    monkeypatch.setattr(runtime, "specialized_decode_config", fake_specialized_decode_config)
+    monkeypatch.setattr(kimi_k3, "AscendKimiLinearModel", DummyKimiLinearModel)
+    monkeypatch.setattr(kimi_k3, "get_pp_group", lambda: SimpleNamespace(is_last_rank=False))
+    monkeypatch.setattr(kimi_k3, "LogitsProcessor", lambda *args, **kwargs: SimpleNamespace())
+    monkeypatch.setattr(
+        kimi_k3.AscendKimiLinearForCausalLM,
+        "set_moe_parameters",
+        lambda self: None,
+    )
+
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(vocab_size=16, hidden_size=8, logit_scale=1.0)),
+        quant_config=None,
+    )
+    model = kimi_k3.AscendKimiLinearForCausalLM(vllm_config=vllm_config)
+
+    # The inherited forward/compute_logits read these hooks, so they must exist.
+    assert seen["vllm_config"] is vllm_config
+    assert model.specialized_decode_config is sentinel
+    assert model.specialized_decode is None
+
+
+def test_kimi_lm_uses_ascend_hybrid_model_state():
+    from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
+
+    model = kimi_k3.AscendKimiLinearForCausalLM.__new__(kimi_k3.AscendKimiLinearForCausalLM)
+
+    # Upstream points at the ROCm state, whose attention metadata is invalid on NPU.
+    assert model.get_model_state_cls() is AscendMambaHybridModelState
+
+
+def test_kimi_model_forwards_specialized_decode_step(monkeypatch):
+    seen = {}
+    step = object()
+
+    def fake_forward(self, input_ids, positions, intermediate_tensors, inputs_embeds=None, step=None, **kwargs):
+        seen["step"] = step
+        return inputs_embeds
+
+    monkeypatch.setattr(kimi_k3.UpstreamKimiLinearModel, "forward", fake_forward)
+
+    model = AscendKimiLinearModel.__new__(AscendKimiLinearModel)
+    nn.Module.__init__(model)
+    model.config = SimpleNamespace(attn_res_block_size=None)
+
+    inputs_embeds = torch.zeros(1, 2)
+    # Upstream passes step as the fifth positional argument.
+    output = model(None, torch.tensor([0]), None, inputs_embeds, step)
+
+    assert seen["step"] is step
+    assert output is inputs_embeds
+
+
+def test_kimi_mla_attention_kv_cache_is_assignable():
+    attn = kimi_k3.AscendKimiMLAAttention.__new__(kimi_k3.AscendKimiMLAAttention)
+    nn.Module.__init__(attn)
+    inner = SimpleNamespace(kv_cache=torch.zeros(3))
+    attn.mla_attn = SimpleNamespace(mla_attn=inner)
+
+    replacement = torch.tensor([])
+    # Upstream clear_layer_kv_caches() detaches the cache by assignment.
+    attn.kv_cache = replacement
+
+    assert inner.kv_cache is replacement

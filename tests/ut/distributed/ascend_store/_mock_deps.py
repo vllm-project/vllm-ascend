@@ -145,6 +145,7 @@ _base_mod.KVConnectorBase_V1 = type(  # type: ignore[attr-defined]
     (),
     {
         "__init__": lambda self, **kw: None,
+        "role": property(lambda self: self._role),
         "bind_connector_metadata": lambda self, metadata: setattr(self, "_connector_metadata", metadata),
         "_get_connector_metadata": lambda self: self._connector_metadata,
     },
@@ -499,12 +500,15 @@ else:
     # tests in the same CPU-UT process.
     _kv_transfer_init = importlib.import_module("vllm_ascend.distributed.kv_transfer")
 
-_kv_utils_pkg = _make_pkg(
-    "vllm_ascend.distributed.kv_transfer.utils",
-    os.path.join(_kv_transfer_real_path, "utils"),
-)
-sys.modules["vllm_ascend.distributed.kv_transfer.utils"] = _kv_utils_pkg
-sys.modules["vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine"] = MagicMock()
+if _MOCK_VLLM_DEPS:
+    # Ascend-store tests import the Mooncake backend, which imports this module.
+    # Without vLLM there is no real engine to load, so keep the import stubbed.
+    _kv_utils_pkg = _make_pkg(
+        "vllm_ascend.distributed.kv_transfer.utils",
+        os.path.join(_kv_transfer_real_path, "utils"),
+    )
+    sys.modules["vllm_ascend.distributed.kv_transfer.utils"] = _kv_utils_pkg
+    sys.modules["vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine"] = MagicMock()
 
 _kv_pool_pkg = _make_pkg(
     "vllm_ascend.distributed.kv_transfer.kv_pool",
@@ -543,11 +547,9 @@ sys.modules["vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend"] 
 # with ImportError under the stub. (Submodules such as
 # backend.memcache_backend resolve through the stub package's __path__ and
 # need no special casing.)
-# The scheduler/worker resolve the backend class dynamically via
-# ``importlib.import_module(path)``; tests that exercise those paths patch
-# ``<module>.importlib`` locally (see test_pool_scheduler.py /
-# test_pool_worker.py) so the backend resolves to a MagicMock. Do NOT
-# register the backends in sys.modules or globally wrap import_module here:
+# Scheduler tests mock create_scheduler_client on real backend classes;
+# worker tests patch pool_worker.importlib locally. Do NOT install fake
+# backend modules in sys.modules or globally wrap import_module here:
 # test_backend.py imports the real backend classes and also relies on
 # ``mock.patch`` (which itself calls importlib.import_module) resolving
 # those real modules.

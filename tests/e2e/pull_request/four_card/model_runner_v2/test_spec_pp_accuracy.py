@@ -128,7 +128,6 @@ def test_deepseek_v4_dspark_pp_accuracy() -> None:
             "enforce_eager": True,
         },
         additional_config={
-            "enable_dsa_cp": False,
             "enable_fused_mc2": 0,
         },
     ) as runner:

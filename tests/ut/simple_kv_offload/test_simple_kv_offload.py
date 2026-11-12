@@ -232,3 +232,60 @@ def test_get_finished_records_store_barrier_on_npu(
     store_event = store_call["wait_event"]
     assert isinstance(store_event, FakeEvent)
     assert store_event.recorded_stream is current_stream
+
+
+def test_npu_worker_reports_aligned_cpu_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm.distributed.kv_transfer.kv_connector.v1 import (
+        simple_cpu_offload_connector as upstream_connector_module,
+    )
+
+    from vllm_ascend.worker import worker as worker_module
+    from vllm_ascend.worker.worker import NPUWorker
+
+    connector = SimpleNamespace(get_aligned_num_cpu_blocks=lambda: 8)
+    monkeypatch.setattr(worker_module, "has_kv_transfer_group", lambda: True)
+    monkeypatch.setattr(worker_module, "get_kv_transfer_group", lambda: object())
+    monkeypatch.setattr(
+        upstream_connector_module,
+        "_find_simple_cpu_offload_connector",
+        lambda _group: connector,
+    )
+
+    worker = NPUWorker.__new__(NPUWorker)
+    assert worker.get_simple_cpu_offload_num_cpu_blocks() == 8
+
+
+def test_npu_worker_reports_no_cpu_blocks_without_transfer_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm_ascend.worker import worker as worker_module
+    from vllm_ascend.worker.worker import NPUWorker
+
+    monkeypatch.setattr(worker_module, "has_kv_transfer_group", lambda: False)
+
+    worker = NPUWorker.__new__(NPUWorker)
+    assert worker.get_simple_cpu_offload_num_cpu_blocks() is None
+
+
+def test_npu_worker_reports_no_cpu_blocks_without_connector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm.distributed.kv_transfer.kv_connector.v1 import (
+        simple_cpu_offload_connector as upstream_connector_module,
+    )
+
+    from vllm_ascend.worker import worker as worker_module
+    from vllm_ascend.worker.worker import NPUWorker
+
+    monkeypatch.setattr(worker_module, "has_kv_transfer_group", lambda: True)
+    monkeypatch.setattr(worker_module, "get_kv_transfer_group", lambda: object())
+    monkeypatch.setattr(
+        upstream_connector_module,
+        "_find_simple_cpu_offload_connector",
+        lambda _group: None,
+    )
+
+    worker = NPUWorker.__new__(NPUWorker)
+    assert worker.get_simple_cpu_offload_num_cpu_blocks() is None

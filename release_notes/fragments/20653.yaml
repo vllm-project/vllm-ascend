@@ -1,0 +1,4 @@
+pr: 20653
+entries:
+  - category: bugfix
+    text: Reject unsupported block FP8 tensor parallel shard shapes during weight creation to prevent incorrect scale assignment.

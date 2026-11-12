@@ -1,0 +1,4 @@
+pr: 20694
+entries:
+  - category: bugfix
+    text: Fixed Ascend worker initialization with FP8 KV caches when the vLLM dtype registration API is available but the FP8 mapping still uses raw-byte storage.

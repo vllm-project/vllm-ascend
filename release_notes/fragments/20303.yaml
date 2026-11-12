@@ -1,0 +1,6 @@
+pr: 20303
+entries:
+  - category: performance
+    text: Reduced QLI sorting and merge work with an adaptive Top-K accumulator width, and batched candidate vector operations with AscendC Level-0 repeats on Ascend A3.
+    model: DeepSeek-V4.1
+    hardware: [A3]

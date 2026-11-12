@@ -147,6 +147,21 @@ jobs:
         CSRC_HASH=$(printf '%s\n' "$CSRC_MANIFEST" | sha256sum | awk '{print $1}')
         echo "CSRC_HASH=$CSRC_HASH" >> "$GITHUB_OUTPUT"
 
+    - name: Record source commit
+      if: ${{ inputs.should_push }}
+      run: |
+        mkdir -p /tmp/source-commit
+        git rev-parse HEAD > /tmp/source-commit/commit.txt
+
+    - name: Upload source commit
+      if: ${{ inputs.should_push }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: build-info-source-base-${{ github.run_attempt }}-${{ inputs.suffix || 'a2' }}-${{ matrix.runner_info.tag }}
+        path: /tmp/source-commit/commit.txt
+        if-no-files-found: error
+        retention-days: 30
+
     - name: Get architecture
       id: get_arch
       run: |
@@ -338,6 +353,8 @@ jobs:
           echo "Current tags:"
           echo "$TAGS"
 
+          PUBLISHED_DIR="${RUNNER_TEMP}/published-base"
+          mkdir -p "$PUBLISHED_DIR"
           for tag in $TAGS; do
             echo "Creating tag $tag"
 
@@ -352,9 +369,15 @@ jobs:
             done
 
             # shellcheck disable=SC2086
+            metadata_file="$PUBLISHED_DIR/$(printf '%s' "$tag" | sha256sum | cut -c1-16).json"
             docker buildx imagetools create \
               -t "$tag" \
+              --metadata-file "$metadata_file" \
               $DIGESTS
+            digest=$(jq -er '."containerimage.descriptor".digest' "$metadata_file")
+            jq -n --arg image_ref "$tag" --arg digest "$digest" \
+              '{image_ref: $image_ref, digest: $digest}' > "$metadata_file.tmp"
+            mv "$metadata_file.tmp" "$metadata_file"
           done
 
       - name: Dispatch quay.io sync
@@ -369,3 +392,97 @@ jobs:
               workflow_id: 'sync-vllm-ascend.yml',
               ref: 'main',
             });
+
+      - name: Download source commits for build information
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          path: ${{ runner.temp }}/source-commits
+          pattern: build-info-source-base-*-${{ inputs.suffix || 'a2' }}-*
+
+      - name: Restore source commits from previous complete attempt
+        if: ${{ github.run_attempt > 1 }}
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          path: ${{ runner.temp }}/previous-build-info-bundles
+          pattern: build-info-run-*
+
+      - name: Merge restored source commits
+        if: ${{ github.run_attempt > 1 }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ runner.temp }}/source-commits"
+          for bundle in "${{ runner.temp }}"/previous-build-info-bundles/build-info-run-*/sources; do
+            [ -d "$bundle" ] || continue
+            cp -R "$bundle/." "${{ runner.temp }}/source-commits/"
+          done
+
+      - name: Collect published image information
+        env:
+          SOC: ${{ inputs.soc }}
+          SUFFIX: ${{ inputs.suffix }}
+          BUILD_TYPE: ${{ github.event_name == 'push' && 'tag' || 'base' }}
+        run: |
+          set -euo pipefail
+          case "$SOC" in
+            910b) HARDWARE=a2 ;;
+            a3|310p) HARDWARE="$SOC" ;;
+            950) HARDWARE=a5 ;;
+            *) echo "::error::Unsupported SoC: $SOC"; exit 1 ;;
+          esac
+          OS=ubuntu
+          if [[ "$SUFFIX" == *openeuler* ]]; then
+            OS=openeuler
+          fi
+          for arch in arm64 amd64; do
+            latest_attempt=0
+            commit_file=""
+            for dir in "$RUNNER_TEMP"/source-commits/build-info-source-base-*-"${SUFFIX:-a2}"-"$arch"; do
+              [ -d "$dir" ] || continue
+              attempt="$(basename "$dir")"
+              attempt="${attempt#build-info-source-base-}"
+              attempt="${attempt%%-*}"
+              if (( attempt > latest_attempt && attempt <= GITHUB_RUN_ATTEMPT )); then
+                latest_attempt="$attempt"
+                commit_file="$dir/commit.txt"
+              fi
+            done
+            if [ -z "$commit_file" ] || [ ! -f "$commit_file" ]; then
+              echo "::error::Missing source commit for $arch"
+              exit 1
+            fi
+            if [ "$arch" = arm64 ]; then ARM_COMMIT=$(cat "$commit_file"); else AMD_COMMIT=$(cat "$commit_file"); fi
+          done
+          REPORT_DIR="${RUNNER_TEMP}/build-info-image"
+          mkdir -p "$REPORT_DIR"
+          published_files=("$RUNNER_TEMP"/published-base/*.json)
+          if [ "${#published_files[@]}" -ne 1 ] || [ ! -f "${published_files[0]}" ]; then
+            echo "::error::Expected exactly one published base image"
+            exit 1
+          fi
+          image_ref=$(jq -er '.image_ref' "${published_files[0]}")
+          repository="${image_ref%:*}"
+          tag="${image_ref##*:}"
+          digest=$(jq -er '.digest' "${published_files[0]}")
+          jq -n \
+            --arg type "$BUILD_TYPE" \
+            --arg hardware "$HARDWARE" \
+            --arg os "$OS" \
+            --arg arm_commit "$ARM_COMMIT" \
+            --arg amd_commit "$AMD_COMMIT" \
+            --arg tag "$tag" \
+            --arg digest "$digest" \
+            --arg repository "$repository" \
+            '{type: $type, hardware: $hardware, os: $os,
+              commits: {arm64: $arm_commit, amd64: $amd_commit}, tag: $tag, digest: $digest,
+              repositories: [$repository]}' \
+            > "$REPORT_DIR/image.json"
+
+      - name: Upload published image information
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-info-image-${{ github.run_attempt }}-${{ github.event_name == 'push' && 'tag' || 'base' }}-${{ inputs.suffix || 'a2' }}
+          path: ${{ runner.temp }}/build-info-image/*.json
+          if-no-files-found: error
+          retention-days: 30

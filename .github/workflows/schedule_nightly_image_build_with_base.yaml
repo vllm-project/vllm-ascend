@@ -24,8 +24,8 @@
 # nightly test image (via _nightly_image_build.yaml) on top of it.
 #
 # All dependency versions (CANN, torch-npu, triton-ascend, memcache, memfabric,
-# vLLM) are pinned in the root Dockerfiles, so this workflow only selects the
-# source branch and, optionally, the chips to build.
+# vLLM, mooncake) are pinned in requirements.txt and the root Dockerfiles, so
+# this workflow only selects the source branch and, optionally, the chips to build.
 name: Nightly Image Build (with base)
 
 on:
@@ -38,6 +38,7 @@ on:
         type: choice
         options:
           - main
+          - releases/v0.32.0rc
           - releases/v0.30.0
           - releases/v0.29.0rc
           - releases/v0.28.0rc
@@ -62,6 +63,7 @@ on:
         type: boolean
 
 permissions:
+  actions: read
   packages: write
   contents: read
 
@@ -121,3 +123,24 @@ jobs:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
       SYNC_TOOLS_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}
+
+  collect-build-info:
+    needs: [setup-matrix, build-image]
+    permissions:
+      actions: write
+      contents: read
+    # An intentionally skipped base is excluded from expected_types_json;
+    # missing nightly reports still make the collector fail.
+    if: ${{ always() && needs.setup-matrix.result == 'success' && needs.setup-matrix.outputs.has_matrix == 'true' && github.repository == 'vllm-project/vllm-ascend' }}
+    uses: ./.github/workflows/_collect_build_info.yaml
+    with:
+      branch: ${{ inputs.vllm_ascend_branch }}
+      targets_json: ${{ needs.setup-matrix.outputs.matrix }}
+      expected_types_json: ${{ inputs.skip_base && '["nightly"]' || '["base","nightly"]' }}
+      obs_bucket: vllm-ascend
+      obs_endpoint: https://obs.cn-north-4.myhuaweicloud.com
+      obs_region: cn-north-4
+      obs_prefix: ci/build-info
+    secrets:
+      BUILD_INFO_OBS_AK: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
+      BUILD_INFO_OBS_SK: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}

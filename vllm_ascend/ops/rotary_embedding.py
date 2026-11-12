@@ -92,13 +92,17 @@ def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype, devi
         _sin = torch.zeros(1, max_num_batched_tokens, 1, rope_dim, dtype=dtype, device=device)
 
 
-def get_cos_and_sin_mla(positions, use_cache=False):
+def get_cos_and_sin_mla(positions, use_cache=False, *, use_rope=True):
     global _cos_cache
     global _sin_cache
     global _cos_mla
     global _sin_mla
     global _cos_sin_flat
     num_tokens = positions.size(0)
+    # Kimi's NoPE MLA retains a nonzero shared K projection; its dimensions
+    # describe checkpoint storage, rather than an instruction to rotate it.
+    if not use_rope:
+        return _cos_mla[:num_tokens], _sin_mla[:num_tokens]
     # MLA-NoPE skip rope cache (e.g. GLM-5.3-Flash qk_rope_head_dim=0).
     # Do not copy indexer RoPE (last dim 32) into a 0-width MLA buffer.
     if _cos_mla is not None and _cos_mla.shape[-1] == 0:
@@ -282,7 +286,7 @@ def rope_forward_oot(
         # npu_mrope handles both full and partial rotary internally:
         # it splits query into queryRot[..., :rotary_dim] and queryPass[..., rotary_dim:],
         # where rotary_dim is inferred from cos_sin_cache.shape[-1].
-        rotary_mode = "half" if is_neox_style else "interleaved"
+        rotary_mode = "half" if is_neox_style else "interleave"
         query, key = torch_npu.npu_mrope(
             positions,
             query.contiguous().view(query.shape[0], -1),
@@ -681,6 +685,7 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
             self.head_size,
             self.rotary_dim,
             self.mrope_interleaved,
+            self.is_neox_style,
         )
 
         return q.reshape(query_shape), k.reshape(key_shape)
@@ -689,40 +694,63 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: torch.Tensor,
+        key: torch.Tensor | None = None,
     ):
+        if positions.ndim == 1 and key is None:
+            # DFlash rotates fused context keys through the query argument.
+            # For text positions M-RoPE equals RoPE; avoid a dummy key tensor.
+            q_in = query
+            query, unused_key = RotaryEmbedding.forward_static(
+                positions,
+                query,
+                None,
+                self.head_size,
+                self.rotary_dim,
+                self._match_cos_sin_cache_dtype(query),
+                self.is_neox_style,
+            )
+            q_in.copy_(query.view(q_in.shape))
+            return q_in, unused_key
+
+        assert key is not None
+        q_in, k_in = query, key
         if HAS_TRITON and positions.ndim == 2 and self.mrope_interleaved:
             # todo: need cann update in 8.5.0
-            return self.forward_triton(positions, query, key)
+            query, key = self.forward_triton(positions, query, key)
+        elif self.mrope_section != [16, 24, 24]:
+            query, key = super().forward_oot(positions, query, key)
+        else:
+            import torch_npu
 
-        if self.mrope_section != [16, 24, 24]:
-            return super().forward_oot(positions, query, key)
+            mrope_section = [0, 0, 0] if positions.ndim == 1 else self.mrope_section
 
-        import torch_npu
+            if self.cos_sin_cache.device != query.device:  # type: ignore
+                self.cos_sin_cache = self.cos_sin_cache.to(  # type: ignore
+                    query.device
+                )  # type: ignore
 
-        mrope_section = [0, 0, 0] if positions.ndim == 1 else self.mrope_section
+            if self.cos_sin_cache.dtype != query.dtype:  # type: ignore
+                self.cos_sin_cache = self.cos_sin_cache.to(  # type: ignore
+                    query.dtype
+                )  # type: ignore
 
-        if self.cos_sin_cache.device != query.device:  # type: ignore
-            self.cos_sin_cache = self.cos_sin_cache.to(  # type: ignore
-                query.device
-            )  # type: ignore
+            rotary_mode = "half" if self.is_neox_style else "interleave"
 
-        if self.cos_sin_cache.dtype != query.dtype:  # type: ignore
-            self.cos_sin_cache = self.cos_sin_cache.to(  # type: ignore
-                query.dtype
-            )  # type: ignore
+            query, key = torch_npu.npu_mrope(
+                positions.to(dtype=torch.int64).contiguous(),
+                query.contiguous(),
+                key.contiguous(),
+                self.cos_sin_cache.contiguous(),
+                self.head_size,
+                mrope_section=mrope_section,
+                rotary_mode=rotary_mode,
+            )
 
-        query, key = torch_npu.npu_mrope(
-            positions.contiguous(),
-            query.contiguous(),
-            key.contiguous(),
-            self.cos_sin_cache.contiguous(),
-            self.head_size,
-            mrope_section=mrope_section,
-            rotary_mode="half",
-        )
-
-        return query, key
+        # Upstream DFlash/DSpark assumes RoPE is in-place and discards the
+        # return value; copy the rotated values back so that assumption holds.
+        q_in.copy_(query.view(q_in.shape))
+        k_in.copy_(key.view(k_in.shape))
+        return q_in, k_in
 
 
 class AscendApplyRotaryEmb(ApplyRotaryEmb):

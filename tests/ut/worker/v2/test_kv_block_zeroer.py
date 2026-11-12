@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
-"""Regression coverage for empty MRV2 cache components."""
+"""Regression coverage for MRV2 cache component filtering."""
 
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -70,6 +70,53 @@ def test_nonempty_components_and_exclusions_are_preserved(zeroer_factory):
         groups = call.kwargs["attn_groups_iter"]
         assert groups[0].layer_names == ["live"]
         assert call.kwargs["static_forward_context"]["live"].kv_cache is tensor
+
+
+@pytest.mark.parametrize("container", [tuple, list])
+@pytest.mark.parametrize("keep_device_kv", [False, True])
+def test_topk_exclusion_preserves_paged_components(monkeypatch, container, keep_device_kv):
+    class PagedZeroer:
+        def __init__(self, device, *, static_forward_context, num_blocks, **kwargs):
+            self.caches = [binding.kv_cache for binding in static_forward_context.values()]
+            assert all(cache.shape[0] % num_blocks == 0 for cache in self.caches)
+
+        def zero_block_ids(self, block_ids):
+            for cache in self.caches:
+                cache[block_ids] = 0
+
+        def warmup(self, num_kv_blocks):
+            pass
+
+    monkeypatch.setattr(v2_utils, "KVBlockZeroer", PagedZeroer)
+    num_blocks = 5856
+    key, value = (torch.ones(num_blocks, 1, 1, 2) for _ in range(2))
+    topk_key, topk_value = (torch.full((32, 4, 1, 2), 7.0) for _ in range(2))
+    indexer = torch.ones(num_blocks, 1, 1, 2, dtype=torch.int8)
+    # Empty host/device views do not need a zeroer. TopK components do not use
+    # logical block IDs, even when device-resident paged K/V are also present.
+    binding = container(
+        (key if keep_device_kv else None, value if keep_device_kv else None, None, None, topk_key, topk_value)
+    )
+    context = {"main": SimpleNamespace(kv_cache=binding), "indexer": SimpleNamespace(kv_cache=(indexer,))}
+    zeroer = v2_utils.AscendV2KVBlockZeroer(
+        torch.device("cpu"),
+        [_group(["main", "indexer"])],
+        [1],
+        context,
+        num_blocks,
+        excluded_cache_components={("main", 4), ("main", 5)},
+    )
+    zeroer.warmup(num_blocks)
+    zeroer.zero_block_ids([0, num_blocks - 1])
+
+    assert torch.all(indexer[[0, -1]] == 0)
+    assert torch.all(indexer[1:-1] == 1)
+    for cache in (key, value):
+        assert torch.all(cache[[0, -1]] == (0 if keep_device_kv else 1))
+        assert torch.all(cache[1:-1] == 1)
+    assert torch.all(topk_key == 7)
+    assert torch.all(topk_value == 7)
+    assert len(zeroer._zeroers) == (2 if keep_device_kv else 1)
 
 
 def _group(names):

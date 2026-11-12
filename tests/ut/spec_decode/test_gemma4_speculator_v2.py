@@ -20,27 +20,17 @@ from unittest.mock import MagicMock, patch
 
 import torch
 from vllm.v1.worker.gpu.spec_decode.gemma4.speculator import Gemma4Speculator
-
-from vllm_ascend.utils import vllm_version_is
-
-# vLLM #60335 renamed the AR speculator class/module on main; the release
-# lane (v0.31.0) still ships `autoregressive.speculator.AutoRegressiveSpeculator`.
-if vllm_version_is("0.31.0"):
-    from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (  # type: ignore[import-not-found]
-        AutoRegressiveSpeculator,
-    )
-else:
-    from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
-        TargetDependentARSpeculator as AutoRegressiveSpeculator,
-    )
+from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
+    TargetDependentARSpeculator,
+)
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.worker.v2 import spec_decode as v2_spec_decode
-from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
-    AscendAutoRegressiveSpeculator,
-)
 from vllm_ascend.worker.v2.spec_decode.gemma4.speculator import (
     AscendGemma4Speculator,
+)
+from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
+    AscendTargetDependentARSpeculator,
 )
 
 
@@ -88,9 +78,9 @@ def test_gemma4_speculator_mro():
     mro = AscendGemma4Speculator.__mro__
     order = (
         AscendGemma4Speculator,
-        AscendAutoRegressiveSpeculator,
+        AscendTargetDependentARSpeculator,
         Gemma4Speculator,
-        AutoRegressiveSpeculator,
+        TargetDependentARSpeculator,
     )
     indices = [mro.index(cls) for cls in order]
     assert indices == sorted(indices), f"MRO order broken: {mro}"
@@ -142,7 +132,7 @@ def test_prefill_rebinds_prefill_nocache_state():
         "shared": SimpleNamespace(attn_state=AscendAttentionState.PrefillNoCache),
         "other": SimpleNamespace(attn_state=AscendAttentionState.DecodeOnly),
     }
-    with patch.object(AscendAutoRegressiveSpeculator, "_prefill") as parent_prefill:
+    with patch.object(AscendTargetDependentARSpeculator, "_prefill") as parent_prefill:
         speculator._prefill(2, 8, original, None)
 
     passed = parent_prefill.call_args[0][2]
@@ -155,7 +145,7 @@ def test_prefill_rebinds_prefill_nocache_state():
 def test_prefill_keeps_cache_reading_states():
     speculator = AscendGemma4Speculator.__new__(AscendGemma4Speculator)
     original = {"shared": SimpleNamespace(attn_state=AscendAttentionState.DecodeOnly)}
-    with patch.object(AscendAutoRegressiveSpeculator, "_prefill") as parent_prefill:
+    with patch.object(AscendTargetDependentARSpeculator, "_prefill") as parent_prefill:
         speculator._prefill(2, 8, original, None)
 
     assert parent_prefill.call_args[0][2] is original

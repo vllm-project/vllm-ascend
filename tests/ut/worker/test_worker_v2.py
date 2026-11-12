@@ -1,14 +1,98 @@
 from contextlib import contextmanager
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
-from vllm.config import CUDAGraphMode
+import pytest
+import torch
+from vllm.config import CUDAGraphMode, KVTransferConfig
 from vllm.sequence import IntermediateTensors
+from vllm.v1.kv_cache_interface import (
+    KVCacheGroupSpec,
+    MambaSpec,
+    MLAAttentionSpec,
+)
+from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from tests.ut.base import TestBase
 
 
+@pytest.mark.parametrize("enforce_eager", [False, True])
+@pytest.mark.parametrize("use_v2", [False, True])
+def test_triton_warmup_follows_dummy_runs_before_capture(enforce_eager, use_v2):
+    from vllm_ascend.worker.worker import NPUWorker
+
+    events: list[tuple[str] | tuple[str, int]] = []
+    compilation_config = SimpleNamespace(
+        compile_sizes=[2, 4],
+        cudagraph_mode=CUDAGraphMode.NONE,
+        get_compile_ranges=lambda: [],
+        compilation_time=0.0,
+    )
+    worker = SimpleNamespace(
+        use_v2_model_runner=use_v2,
+        vllm_config=SimpleNamespace(compilation_config=compilation_config),
+        model_config=SimpleNamespace(enforce_eager=enforce_eager, seed=0),
+        cache_config=SimpleNamespace(kv_cache_memory_bytes=1),
+        model_runner=SimpleNamespace(
+            _dummy_run=lambda size: events.append(("dummy", size)),
+            capture_model=lambda: events.append(("capture",)),
+        ),
+    )
+    with (
+        patch(
+            "vllm_ascend.model_executor.warmup.kernel_warmup.kernel_warmup",
+            side_effect=lambda worker: events.append(("kernels",)),
+        ),
+        patch("vllm_ascend.worker.worker.get_current_hardware_profile") as profile,
+        patch("vllm_ascend.worker.worker.get_ascend_config", return_value=SimpleNamespace(enable_cpu_binding=False)),
+        patch("vllm_ascend.worker.worker.set_random_seed"),
+    ):
+        profile.return_value.supports.return_value = False
+        NPUWorker.compile_or_warm_up_model(worker)
+    expected = [("dummy", 4), ("dummy", 2), ("kernels",)]
+    if not enforce_eager:
+        expected.append(("capture",))
+    assert events == expected
+
+
+@pytest.mark.parametrize("use_v2", [False, True])
+def test_triton_warmup_failure_prevents_capture(use_v2):
+    from vllm_ascend.worker.worker import NPUWorker
+
+    worker = SimpleNamespace(
+        use_v2_model_runner=use_v2,
+        vllm_config=SimpleNamespace(
+            compilation_config=SimpleNamespace(
+                compile_sizes=[2, 4],
+                cudagraph_mode=CUDAGraphMode.NONE,
+                get_compile_ranges=lambda: [],
+            ),
+        ),
+        model_config=SimpleNamespace(enforce_eager=False),
+        model_runner=MagicMock(),
+    )
+    with (
+        patch(
+            "vllm_ascend.model_executor.warmup.kernel_warmup.kernel_warmup",
+            side_effect=RuntimeError("KDA compilation failed"),
+        ),
+        pytest.raises(RuntimeError, match="KDA compilation failed"),
+    ):
+        NPUWorker.compile_or_warm_up_model(worker)
+    assert worker.model_runner._dummy_run.call_args_list == [call(4), call(2)]
+    worker.model_runner.capture_model.assert_not_called()
+
+
 class TestNPUWorkerV2(TestBase):
+    def test_worker_imports_planning_helpers_from_supported_lane(self):
+        from vllm.v1.core import kv_cache_planning as planning
+        from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
+
+        from vllm_ascend.worker import worker
+
+        self.assertIs(worker.get_kv_cache_config_builder, get_kv_cache_config_builder)
+        self.assertIs(worker.unify_hybrid_kv_cache_specs, planning.unify_hybrid_kv_cache_specs)
+
     def test_get_encoder_cudagraph_stats_is_serializable(self):
         from vllm_ascend.worker.worker import NPUWorker
 
@@ -319,3 +403,59 @@ class TestNPUWorkerV2(TestBase):
             self.assertEqual(model_runner_output.execution_time_ms, 125.0)
             self.assertIsNone(model_runner._cpp_execution_time_ms)
             model_runner.sample_tokens.assert_called_once_with(grammar_output)
+
+
+@pytest.mark.parametrize("with_kv_transfer", [False, True])
+@pytest.mark.parametrize("use_compress", [False, True])
+def test_mrv2_block_outermost_hybrid_budget_respects_shared_backing(with_kv_transfer, use_compress):
+    from vllm_ascend.worker.worker import NPUWorker
+
+    compressed_spec = MLAAttentionSpec(
+        block_size=8,
+        num_kv_heads=1,
+        head_size=4,
+        dtype=torch.float16,
+        tokens_per_state=4,
+    )
+    mamba_spec = MambaSpec(
+        block_size=8,
+        shapes=((2, 4),),
+        dtypes=(torch.float32,),
+    )
+    groups = [
+        KVCacheGroupSpec(
+            layer_names=["compressed_attn"],
+            kv_cache_spec=compressed_spec,
+        ),
+        KVCacheGroupSpec(
+            layer_names=["linear_attn"],
+            kv_cache_spec=mamba_spec,
+        ),
+    ]
+    worker = NPUWorker.__new__(NPUWorker)
+    worker.use_v2_model_runner = True
+    worker.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen4_exp"))
+    worker.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC),
+        kv_transfer_config=(
+            KVTransferConfig(kv_connector="MooncakeConnector", kv_role="kv_both") if with_kv_transfer else None
+        ),
+    )
+    worker.get_kv_cache_spec = MagicMock(
+        return_value={
+            "compressed_attn": compressed_spec,
+            "linear_attn": mamba_spec,
+        }
+    )
+    for use_sparse in (False, True):
+        worker.model_runner = SimpleNamespace(
+            supports_standardized_shared_kv_backing=True,
+            use_sparse=use_sparse,
+            use_compress=use_compress,
+        )
+        with patch(
+            "vllm_ascend.worker.worker.get_kv_cache_groups",
+            return_value=groups,
+        ):
+            expected = 8230 if use_sparse or use_compress else 12345
+            assert worker._scale_kv_cache_memory_for_multi_group(12345) == expected

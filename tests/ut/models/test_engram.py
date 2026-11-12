@@ -3,6 +3,7 @@
 # ruff: noqa: E402
 """Focused tests for the Ascend Engram configuration and storage path."""
 
+import ctypes
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -10,7 +11,6 @@ from multiprocessing.shared_memory import SharedMemory
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-import numpy as np
 import pytest
 import torch
 from safetensors.torch import save_file
@@ -20,21 +20,126 @@ pytest.importorskip(
     reason="DeepSeek V4.1 is unavailable on this vLLM release",
 )
 
-from vllm_ascend.utils import vllm_version_is
-
-# Upstream #59327 (4c2d277643) moved the Engram module from `nvidia.engram` to
-# `common.engram` on main; the release lane (v0.31.0) still ships it under
-# `nvidia.engram`.
-if vllm_version_is("0.31.0"):
-    from vllm.models.deepseek_v41.nvidia import engram as upstream_engram  # type: ignore[import-not-found]
-else:
-    from vllm.models.deepseek_v41.common import engram as upstream_engram
+from vllm.models.deepseek_v41.common import engram as upstream_engram
 
 from vllm_ascend.models.deepseek_v41.engram import embedding as embedding_mod
 from vllm_ascend.models.deepseek_v41.engram import npu
-from vllm_ascend.models.deepseek_v41.engram.common import engram_gate
+from vllm_ascend.models.deepseek_v41.engram.common import engram_gate, load_engram_rotation_block
 from vllm_ascend.models.deepseek_v41.engram.hash_state import DEAD_ID, AscendNgramHashState
 from vllm_ascend.models.deepseek_v41.engram.parallel import resolve_dp_shared_memory
+
+
+@pytest.mark.parametrize("tp", [1, 2, 4])
+@pytest.mark.parametrize("dp", [1, 2])
+@pytest.mark.parametrize("tokens", [0, 3])
+@pytest.mark.parametrize("quantized", [False, True])
+def test_lookup_overwrites_dirty_output_before_exchange(monkeypatch, tp, dp, tokens, quantized):
+    table = object.__new__(embedding_mod.AscendParallelEngramEmbedding)
+    torch.nn.Module.__init__(table)
+    table.dim, table.block_size = 64, 32
+    table.n_hash_cols, table.part_n_hash_cols = 24, 24 // tp
+    table.head_start = 24 - table.part_n_hash_cols
+    table.vocab_start_idx, table.vocab_end_idx = 5, 8
+    table.tp_size, table.dp_size = tp, dp
+    table._codes_uva = None
+    codes = torch.arange(3 * 64).reshape(3, 64).remainder(31).sub(15)
+    table.weight = torch.nn.Parameter(codes.to(torch.int8 if quantized else torch.bfloat16), requires_grad=False)
+    table.weight_scale_inv = torch.nn.Parameter(torch.full((3, 2), 0.125), requires_grad=False) if quantized else None
+    # Match the non-contiguous layer slice passed by prepare_engram.
+    ids = torch.tensor([-1, 5, 6, 8]).repeat(tokens * dp * 12).reshape(tokens * dp, 2, 24)[:, 1]
+    columns = ids[:, table.head_start :]
+    owned = (columns >= 5) & (columns < 8)
+    local = torch.where(owned, columns - 5, 0)
+    expected = (codes[local].float() * (0.125 if quantized else 1)).bfloat16()
+    expected = torch.where(owned.unsqueeze(-1), expected, 0)
+    original_empty = torch.empty
+
+    def dirty_empty(*args, **kwargs):
+        return original_empty(*args, **kwargs).fill_(float("nan"))
+
+    def exchange(out, count):
+        torch.testing.assert_close(out, expected, rtol=0, atol=0)
+        return out[-count:] if count else out[:0]
+
+    def gather(out, dim):
+        torch.testing.assert_close(out, expected[:tokens], rtol=0, atol=0)
+        return torch.cat([out] * tp, dim=dim)
+
+    monkeypatch.setattr(embedding_mod.torch, "empty", dirty_empty)
+    monkeypatch.setattr(embedding_mod, "exchange_engram_rows", exchange)
+    monkeypatch.setattr(embedding_mod, "tensor_model_parallel_all_gather", gather)
+    result = table.embed_gathered(ids, tokens)
+    torch.testing.assert_close(result, torch.cat([expected[:tokens]] * tp, dim=1), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("failure", [None, "malloc", "null", "register", "device_pointer"])
+@pytest.mark.parametrize("dtype", [torch.uint8, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("offset", [0, 4096, 65535])
+def test_host_uva_aligns_registration_and_frees_original_allocation(monkeypatch, failure, dtype, offset):
+    alignment, size = 65536, 4096
+
+    class Library:
+        def __init__(self):
+            self.storage = ctypes.create_string_buffer(size + 4 * alignment)
+            base = ctypes.addressof(self.storage)
+            self.original = (base + alignment - 1) // alignment * alignment + offset
+            self.registered = self.unregistered = self.freed = None
+            self.free_count = self.unregister_count = 0
+
+        def aclrtMallocHost(self, output, count, flags):
+            assert count == size + alignment - 1
+            if failure == "malloc":
+                return 1
+            ctypes.cast(output, ctypes.POINTER(ctypes.c_void_p)).contents.value = (
+                None if failure == "null" else self.original
+            )
+            return 0
+
+        def aclrtHostRegisterV2(self, pointer, count, flags):
+            assert count == size and pointer.value % alignment == 0
+            self.registered = pointer.value
+            return 1 if failure == "register" else 0
+
+        def aclrtHostGetDevicePointer(self, pointer, output, flags):
+            assert pointer.value == self.registered
+            ctypes.cast(output, ctypes.POINTER(ctypes.c_void_p)).contents.value = 0x100000000
+            return 1 if failure == "device_pointer" else 0
+
+        def aclrtHostUnregister(self, pointer):
+            self.unregistered = pointer.value
+            self.unregister_count += 1
+            return 0
+
+        def aclrtFreeHost(self, pointer):
+            self.freed = pointer.value
+            self.free_count += 1
+            return 0
+
+    lib = Library()
+    monkeypatch.setattr(npu, "_host_library", lambda: lib)
+    shape = (size // torch.empty((), dtype=dtype).element_size(),)
+    if failure:
+        message = "NULL pointer" if failure == "null" else "failed: rc=1"
+        with pytest.raises(RuntimeError, match=message):
+            npu.HostUvaBuffer(shape, dtype, "cpu")
+    else:
+        buffer = npu.HostUvaBuffer(shape, dtype, "cpu")
+        assert buffer.tensor.data_ptr() == lib.registered
+        assert lib.original <= lib.registered and lib.registered + size <= lib.original + size + alignment - 1
+        buffer.tensor.fill_(17)
+        value = torch.frombuffer(
+            lib.storage, dtype=dtype, count=1, offset=lib.registered - ctypes.addressof(lib.storage)
+        )
+        assert value.item() == 17
+        buffer.close()
+        buffer.close()
+    if failure in ("malloc", "null"):
+        assert lib.registered is lib.unregistered is lib.freed is None
+        assert lib.free_count == lib.unregister_count == 0
+    else:
+        assert lib.unregistered == lib.registered
+        assert lib.freed == lib.original
+        assert lib.free_count == lib.unregister_count == 1
 
 
 def test_shared_memory_needs_a_local_dp_peer(monkeypatch):
@@ -122,9 +227,6 @@ def test_loader_preserves_checkpoint_shards_across_dp_pcp_tp(tmp_path, monkeypat
     assert len(barriers) == (8 if shared else 0)
 
 
-from vllm_ascend.worker.v1.model_runner import NPUModelRunner
-
-
 @pytest.mark.parametrize(
     "enabled,shared,tp,mode,expected",
     [
@@ -159,6 +261,63 @@ def test_bf16_gate_without_rotation():
     # Normalized dot is sqrt(64) = 8; the gate applies signed sqrt, then sigmoid.
     expected = (1 + 0.25 * torch.sigmoid(torch.tensor(8.0).sqrt())).bfloat16()
     assert torch.all(result[0] == expected)
+    assert torch.equal(result[1], hidden[1])
+
+
+def test_loader_accepts_distinct_block_diagonal_rotation(tmp_path):
+    first = torch.eye(32)
+    second = torch.flip(torch.eye(32), dims=(0,))
+    rotation = torch.block_diag(first, second)
+    rotation_path = tmp_path / "quarot.safetensors"
+    save_file({"global_rotation": rotation}, rotation_path)
+
+    blocks = load_engram_rotation_block(str(tmp_path), 64, rotation_path)
+
+    assert blocks.shape == (2, 32, 32)
+    torch.testing.assert_close(blocks[0], first)
+    torch.testing.assert_close(blocks[1], second)
+
+
+def test_loader_rejects_invalid_rotation_layouts(tmp_path):
+    wrong_shape_path = tmp_path / "wrong_shape.safetensors"
+    save_file({"global_rotation": torch.eye(32)}, wrong_shape_path)
+    with pytest.raises(ValueError, match="Expected global_rotation shape"):
+        load_engram_rotation_block(str(tmp_path), 64, wrong_shape_path)
+
+    dense_path = tmp_path / "dense.safetensors"
+    rotation = torch.eye(64)
+    rotation[:32, 32:] = 1
+    save_file({"global_rotation": rotation}, dense_path)
+    with pytest.raises(ValueError, match="requires block-diagonal global rotation"):
+        load_engram_rotation_block(str(tmp_path), 64, dense_path)
+
+
+def test_loader_requires_declared_rotation_file(tmp_path):
+    declared_path = tmp_path / "optional" / "quarot.safetensors"
+    with pytest.raises(FileNotFoundError, match="QuaRot global rotation"):
+        load_engram_rotation_block(str(tmp_path), 64, declared_path)
+
+
+def test_loader_uses_identity_when_rotation_is_not_declared(tmp_path):
+    blocks = load_engram_rotation_block(str(tmp_path), 64)
+    torch.testing.assert_close(blocks, torch.eye(32))
+
+
+def test_gate_accepts_distinct_rotation_blocks():
+    first = torch.eye(32)
+    second = torch.flip(torch.eye(32), dims=(0,))
+    blocks = torch.stack((first, second))
+    hidden = torch.arange(2 * 3 * 64, dtype=torch.float32).reshape(2, 3, 64).bfloat16()
+    key = torch.linspace(-1.0, 1.0, 2 * 3 * 64).reshape(2, 3, 64).bfloat16()
+    value = torch.full((2, 64), 0.25, dtype=torch.bfloat16)
+    channel_weight = torch.linspace(0.5, 1.5, 3 * 64).reshape(3, 64)
+    mask = torch.tensor([True, False])
+
+    result = engram_gate(hidden, key, value, channel_weight, blocks, mask, 1e-6)
+
+    assert result.shape == hidden.shape
+    assert result.dtype == hidden.dtype
+    assert not torch.equal(result[0], hidden[0])
     assert torch.equal(result[1], hidden[1])
 
 
@@ -273,45 +432,6 @@ def test_idle_hashes_have_no_valid_rows(num_tokens):
     assert not keep.any()
 
 
-def _runner(rows, computed, prompt):
-    token_ids = np.full((len(rows), 16), -7, dtype=np.int32)
-    for index, row in enumerate(rows):
-        token_ids[index, : len(row)] = row
-    runner = object.__new__(NPUModelRunner)
-    runner.input_batch = SimpleNamespace(
-        num_reqs=len(rows),
-        token_ids_cpu=token_ids,
-        num_computed_tokens_cpu=np.asarray(computed, dtype=np.int32),
-        num_prompt_tokens=np.asarray(prompt, dtype=np.int32),
-    )
-    lookback = np.empty((len(rows), 3), dtype=np.int32)
-    runner.lookback_token_ids = SimpleNamespace(
-        np=lookback,
-        copy_to_gpu=lambda: torch.from_numpy(lookback.copy()),
-    )
-    runner.is_pooling_model = False
-    return runner
-
-
-@pytest.mark.parametrize(
-    "computed,num_reqs,expected",
-    [
-        (4, None, [13, 12, 11]),
-        (6, None, [-1, -1, 13]),
-        (0, None, [-1, -1, -1]),
-        (4, 0, [-1, -1, -1]),
-        (4, 1, [13, 12, 11]),
-    ],
-)
-def test_v1_lookback_uses_prompt_tokens_once(computed, num_reqs, expected):
-    runner = _runner([[10, 11, 12, 13, -7, -7]], [computed], [4])
-    copy = Mock(wraps=runner.lookback_token_ids.copy_to_gpu)
-    runner.lookback_token_ids.copy_to_gpu = copy
-    kwargs = runner._init_model_kwargs(num_reqs=num_reqs)
-    assert kwargs["lookback_token_ids"][0].tolist() == expected
-    copy.assert_called_once_with()
-
-
 @pytest.mark.parametrize("shared", [False, True])
 @pytest.mark.parametrize("remote_group", ["tp", "edp"])
 def test_engram_rejects_nonlocal_groups_before_allocation(monkeypatch, shared, remote_group):
@@ -391,3 +511,53 @@ def test_native_mxfp8_requires_e8m0_scales_before_allocation(tmp_path):
     )
     with pytest.raises(ValueError, match="requires E8M0 scales"):
         embedding_mod.preflight_engram_checkpoint(tmp_path, [1])
+
+
+@pytest.mark.parametrize("quantized", [False, True])
+def test_embed_gathered_walks_strided_hashes_without_a_copy(monkeypatch, quantized):
+    """Strided per-layer hash slices must reach the lookup uncopied.
+
+    The lookup kernels walk ids with an explicit token stride and only need a
+    unit inner stride, which the per-layer slice of the
+    ``[tokens, layers, columns]`` hash buffer already has -- forcing it through
+    ``contiguous()`` is a dead copy on the preparation hot path.
+    """
+    source = torch.linspace(-12, 12, 36 * 64).reshape(36, 64).bfloat16()
+    codes, scales = npu.quantize_engram_rows(source)
+    table = object.__new__(embedding_mod.AscendParallelEngramEmbedding)
+    torch.nn.Module.__init__(table)
+    table._shared_group = None
+    table._codes_uva = None
+    table._scales_uva = None
+    table.vocab_start_idx, table.vocab_end_idx = 5, 17
+    table.block_size, table.dim = 32, 64
+    table.head_start, table.part_n_hash_cols = 1, 2
+    table.n_hash_cols, table.dp_size, table.tp_size = 2, 1, 1
+    table.weight = torch.nn.Parameter((codes if quantized else source)[5:17], requires_grad=False)
+    table.weight_scale_inv = torch.nn.Parameter(scales[5:17], requires_grad=False) if quantized else None
+
+    hashes = torch.zeros(4, 3, 3, dtype=torch.int64)
+    hashes[:, :, 1:] = torch.randint(5, 17, (4, 3, 2))
+    hashes[1, :, 1:] = DEAD_ID
+    gathered = hashes[:, 1]  # the per-layer slice keeps the outer layer stride
+    assert not gathered.is_contiguous()
+
+    def refuse(unit, *args, **kwargs):
+        raise AssertionError("strided hash slices must reach lookup without a contiguity copy")
+
+    monkeypatch.setattr(torch.Tensor, "contiguous", refuse)
+    out = table.embed_gathered(gathered, 4)
+    monkeypatch.undo()
+
+    if quantized:
+        reference = (codes.float().unflatten(-1, (-1, 32)) * scales.float().unsqueeze(-1)).flatten(-2).bfloat16()
+    else:
+        reference = source
+    columns = gathered[:, table.head_start : table.head_start + table.part_n_hash_cols].long()
+    owned = (columns >= table.vocab_start_idx) & (columns < table.vocab_end_idx)
+    # The lookup gathers rows of the *shard* by local index; mirror that on the
+    # matching slice of the reference table (global id = start + local index).
+    shard = reference[table.vocab_start_idx : table.vocab_end_idx]
+    rows = shard[torch.where(owned, columns - table.vocab_start_idx, 0)]
+    expected = torch.where(owned.unsqueeze(-1), rows, torch.zeros(1, dtype=reference.dtype))
+    torch.testing.assert_close(out, expected, rtol=0, atol=0)
