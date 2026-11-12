@@ -1,0 +1,7 @@
+pr: 11066
+entries:
+  - category: feature
+    text: >-
+      Added GLM-5.3-Flash DSpark speculative decoding support by exposing
+      target auxiliary hidden states and isolating draft sliding-window KV
+      cache groups.

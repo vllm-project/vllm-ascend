@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -11,9 +12,22 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 from vllm_ascend.models import qwen3_dflash2, qwen3_dspark
 from vllm_ascend.models.kimi_k3.kimi_k3_dspark import AscendK3DSparkForCausalLM
+from vllm_ascend.models.llama_eagle3 import _find_safetensors_weight
 from vllm_ascend.models.qwen3_dflash2 import DFlash2Qwen3ForCausalLM
 from vllm_ascend.models.qwen3_dspark import AscendQwen3DSparkForCausalLM
 from vllm_ascend.worker.v2.spec_decode.dspark import speculator as shared
+
+
+def test_find_glm53_target_embedding_weight(tmp_path):
+    weight_name = "model.language_model.embed_tokens.weight"
+    shard_name = "quant_model_weights-00001-of-00001.safetensors"
+    index = {"weight_map": {weight_name: shard_name}}
+    (tmp_path / "quant_model_weights.safetensors.index.json").write_text(json.dumps(index), encoding="utf-8")
+
+    shard_path, found_name = _find_safetensors_weight(tmp_path, qwen3_dspark.TARGET_EMBED_WEIGHT_NAMES)
+
+    assert shard_path == tmp_path / shard_name
+    assert found_name == weight_name
 
 
 @pytest.mark.parametrize("fail", [False, True])
