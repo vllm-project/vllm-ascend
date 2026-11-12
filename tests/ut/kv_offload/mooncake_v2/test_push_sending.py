@@ -206,6 +206,40 @@ def worker(monkeypatch, request):
     assert obj._zmq_context is None
 
 
+def test_shared_slot_waits_for_write_and_does_not_publish_prefix_early(worker):
+    worker._slot_predecessors = {1: 0}
+    worker._slot_index_by_name = {"model.layers.0.attn": 0}
+    worker._slot_sources = {0}
+    worker._scratch_layers = {0, 1}
+    write_started = threading.Event()
+    release_write = threading.Event()
+
+    def blocked_write(*args):
+        write_started.set()
+        assert release_write.wait(timeout=3)
+        return 0
+
+    worker.engine.batch_transfer_sync_write.side_effect = blocked_write
+    worker.start_load_kv(source_meta(computed=4))
+    assert not worker._reqs_send_state["d-request"].available_layers
+    with pytest.raises(RuntimeError, match="missing the shared-slot save hook"):
+        worker.wait_for_layer_reuse(1)
+    try:
+        worker.save_kv_layer("model.layers.0.attn")
+        assert write_started.wait(timeout=3)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            try:
+                gate = executor.submit(worker.wait_for_layer_reuse, 1)
+                assert not gate.done()
+            finally:
+                release_write.set()
+            gate.result(timeout=3)
+    finally:
+        release_write.set()
+    worker.wait_for_save()
+    worker.engine.batch_transfer_sync_write.assert_called_once()
+
+
 def test_proxy_destinations_and_two_chunks(worker):
     worker.start_load_kv(source_meta())
     # Deferred finalization may collect results before all cache hooks run.
@@ -714,7 +748,15 @@ def test_layer_hook_sends_all_caches_across_groups(worker, monkeypatch):
 
 @pytest.mark.parametrize("worker", ["mtp", "eagle3", "dspark"], indirect=True)
 @pytest.mark.parametrize("draft_hook", [False, True])
-def test_draft_namespace_does_not_share_target_readiness(worker, monkeypatch, draft_hook):
+@pytest.mark.parametrize("shared_buffers", [False, True])
+def test_draft_namespace_does_not_share_target_readiness(worker, monkeypatch, draft_hook, shared_buffers):
+    if shared_buffers:
+        attention, indexer, draft = worker.transfer_metadata.layer_names
+        worker._slot_predecessors = {2: 0}
+        worker._slot_sources = {0}
+        worker._scratch_layers = {0, 2}
+        worker._slot_index_by_name = {attention: 0, indexer: 0, draft: 16}
+
     monkeypatch.setattr(worker, "_get_remote_metadata", lambda message: multi_cache_remote(worker))
     message = dict(destination_message(), block_ids=[[20, 21], [10, 11]])
     meta = MooncakeConnectorMetadata()

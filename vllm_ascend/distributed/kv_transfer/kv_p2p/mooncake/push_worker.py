@@ -41,6 +41,9 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     ensure_zmq_send,
     zmq_ctx,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    get_physical_layer_index,
+)
 
 # Rank tuples are (PP, PCP, TP), matching scheduler handshake keys.
 WorkerRank = tuple[int, int, int]
@@ -217,6 +220,21 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         self._sending_futures: dict[str, list[Future]] = {}
         self._remote_metadata: SizedDict = SizedDict(max_size=128)
         self._sender_executor: ThreadPoolExecutor | None = None
+        layout = getattr(kv_cache_config, "layerwise_reuse_layout", None)
+        self._slot_predecessors: dict[int, int] = (
+            layout.prefetch_layer_map
+            if layout is not None and getattr(kv_cache_config, "layerwise_kv_cache_reuse", False)
+            else {}
+        )
+        if self._slot_predecessors and (
+            vllm_config.parallel_config.pipeline_parallel_size != 1
+            or vllm_config.parallel_config.prefill_context_parallel_size != 1
+        ):
+            raise ValueError("Mooncake Push with shared buffers requires P PP=PCP=1")
+        self._slot_sources = set(self._slot_predecessors.values())
+        self._scratch_layers = self._slot_sources | self._slot_predecessors.keys()
+        self._slot_writes: dict[int, tuple[Future, ...]] = {}
+        self._slot_index_by_name: dict[str, int] = {}
         self._zmq_context: Context | None = None
 
     def register_kv_caches(self, kv_caches: dict[str, "torch.Tensor | list[torch.Tensor]"]) -> None:
@@ -239,6 +257,11 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             self._layer_names_by_index: dict[tuple[str, int], list[str]] = {}
             for name, layer_index in self._layer_index_by_name.items():
                 self._layer_names_by_index.setdefault(layer_index, []).append(name)
+            if self._slot_predecessors:
+                base_layers = self.vllm_config.model_config.get_num_layers(self.vllm_config.parallel_config)
+                self._slot_index_by_name = {
+                    name: get_physical_layer_index(name, base_layers) for name in self._layer_indices
+                }
             # Layer numbers do not establish execution order across models.
             # Multiple namespaces finalize at wait_for_save after draft execution.
             namespaces = {namespace for namespace, _ in self._layer_names_by_index}
@@ -264,13 +287,18 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
     def start_load_kv(self, metadata: MooncakeConnectorMetadata) -> None:
         if self.kv_transfer_config.is_kv_producer:
             # The previous step's wait_for_save has joined its WRITE tasks.
+            self._slot_writes.clear()
+            if self._slot_predecessors:
+                # Scratch is not resident until the Store restores each layer.
+                for state in self._reqs_send_state.values():
+                    state.available_layers.clear()
             for local_request_id, request in metadata.push_send_requests.items():
                 state = self._reqs_send_state.setdefault(request.request_id, SendReqInfo(local_request_id))
                 state.metadata = request
                 if not state.destinations:
                     self._prepare_destinations(state, request)
-                # A prefix hit is already resident before this forward.
-                if not state.available_layers and request.num_computed_tokens:
+                # Prefix data is immediately readable only with resident KV.
+                if not self._slot_predecessors and not state.available_layers and request.num_computed_tokens:
                     event = torch.npu.Event()
                     event.record()
                     state.available_layers = {
@@ -751,6 +779,33 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                         self._send_done_after_transfers, destination.transfer_params, state.error, transfers
                     )
 
+    def _submit_slot_writes(self, layer_idx: int, layer_names: list[str]) -> None:
+        """Publish the predecessor's immutable WRITE dependencies to Store."""
+        wait_futures(
+            {
+                dest.metadata_future
+                for request_id in self._prefilling_request_ids
+                if (state := self._reqs_send_state[request_id]).error is None
+                for dest in state.destinations.values()
+                if dest.completion is None and dest.metadata_future is not None
+            }
+        )
+        self._process_sending_requests(layer_hook=True, force=True)
+        self._slot_writes[layer_idx] = tuple(
+            future for batch, future in self._pending_sends if batch.layer_name in layer_names
+        )
+
+    def wait_for_layer_reuse(self, layer_idx: int) -> None:
+        source = self._slot_predecessors.get(layer_idx)
+        if source is None or not self._prefilling_request_ids:
+            return
+        # Called from the Store receive thread after the predecessor's Store
+        # save. The MultiConnector publishes the Push gate before that save.
+        writes = self._slot_writes.get(source)
+        if writes is None:
+            raise RuntimeError(f"Mooncake Push is missing the shared-slot save hook for layer {source}")
+        wait_futures(writes)
+
     def save_kv_layer(self, layer_name: str) -> None:
         if not self.kv_transfer_config.is_kv_producer or not self._prefilling_request_ids:
             return
@@ -774,7 +829,11 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                         event.record()
                     state.available_layers[cache_name] = end, event
         last_layer = layer_index == self._last_layer_index
-        if event is not None or last_layer:
+        slot_index = self._slot_index_by_name.get(layer_name)
+        if slot_index in self._slot_sources and slot_index not in self._slot_writes:
+            assert slot_index is not None
+            self._submit_slot_writes(slot_index, layer_names)
+        elif event is not None or last_layer:
             self._process_sending_requests(layer_hook=True, force=last_layer)
         if last_layer:
             self._send_completions()
@@ -798,6 +857,9 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             end = state.metadata.num_computed_tokens + state.metadata.num_scheduled_tokens
             for layer_name in self._layer_indices:
                 if state.available_layers.get(layer_name, (-1, None))[0] < end:
+                    if self._slot_index_by_name.get(layer_name) in self._scratch_layers:
+                        state.error = f"Missing Mooncake Push save hook for shared cache {layer_name}"
+                        break
                     if event is None:
                         event = torch.npu.Event()
                         event.record()

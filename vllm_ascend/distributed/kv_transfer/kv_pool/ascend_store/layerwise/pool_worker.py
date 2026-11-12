@@ -752,7 +752,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             return False
 
         # Each rank must save its own Mamba state shard.
-        if group_id in self.sharded_mamba_group_ids or group_id in self.layerwise_head_sharded_groups:
+        if group_id in self.sharded_mamba_group_ids or group_id in getattr(self, "layerwise_head_sharded_groups", ()):
             return True
 
         # Deduplicate PCP replicas only when DCP does not shard their KV.

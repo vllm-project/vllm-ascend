@@ -40,9 +40,25 @@ Add the following to the **producer's** `AscendStoreConnector` configuration:
 }
 ```
 
-Use the Store connector on its own. P/D transport integration is separate: a
-transport that reads these buffers must release each slot before it is reused.
-Omitting `layerwise_num_shared_buffers` retains ordinary Mooncake layerwise pooling.
+The Store connector can run alone or with the mainline `MooncakePushConnector`
+in a `MultiConnector`. Both P and D must select Push and use the D-first
+layerwise proxy. Bulk `MooncakeConnectorV2` / Pull cannot release source slots
+during forward and is rejected with shared buffers. Omitting
+`layerwise_num_shared_buffers` retains ordinary Mooncake layerwise pooling.
+
+The offload bridge registers Push as a slot-release provider. A reused layer's
+Store load waits for the predecessor's Store save and all corresponding Push
+WRITEs. Push waits for destination metadata before publishing these WRITE
+dependencies, so late discovery cannot submit a source read after slot release.
+Target/draft readiness keeps mainline's namespace-aware layer identity;
+offload maps cache names separately to the physical slot indices. Store
+prefix hits become Push-readable only after their layer load and write hook.
+
+P/D examples are in
+`examples/disaggregated_prefill_v1/glm53_mooncake_offload/`.
+Start with P PP=PCP=DCP=1; Push with shared buffers currently rejects PP/PCP
+greater than one. The mainline Push restriction on P preemption still applies.
+This bridge does not reimplement P/D routing or the Push protocol.
 
 For the initial GLM-5.3-Flash validation, keep the model's quantization and
 hardware-specific options and use `--tensor-parallel-size 8

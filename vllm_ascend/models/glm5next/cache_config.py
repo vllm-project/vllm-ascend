@@ -36,6 +36,14 @@ from vllm_ascend.core.kv_cache_interface import (
     get_kv_cache_compression_ratio,
     get_storage_block_size,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    LayerwiseCacheTopology,
+    apply_layerwise_kv_cache_plan,
+    get_layerwise_reuse_config,
+    get_physical_layer_index,
+)
+
+# Fixed over-allocation used by the transfer-aligned KV backing allocator.
 GLM5_NEXT_CACHE_ALIGNMENT = 2 * 1024 * 1024
 
 
