@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -21,6 +22,114 @@ from vllm_ascend.ops.gdn_attn_builder import (
     GDNSpecCausalConv1dMetadata,
     GDNSpecDecodeMetadata,
 )
+
+
+@pytest.mark.parametrize("batch_kind", ["prefill", "mixed", "spec"])
+@pytest.mark.parametrize("backend", ["a5", "missing_fla", "other_device", "fp16"])
+def test_chunk32_raw_beta_routing(batch_kind, backend):
+    """Only A5 chunk32 prefill consumes raw b; dt_bias belongs to g."""
+    layer = _make_layer()
+    layer.dt_bias.fill_(1.75)
+    layer.A_log.fill_(0.5)
+    metadata = _make_mixed_metadata()
+    total = 5 if batch_kind == "spec" else 3
+    prefill_tokens = torch.tensor([1, 2] if batch_kind == "mixed" else list(range(total)))
+    decode_tokens = torch.tensor([0]) if batch_kind == "mixed" else None
+    if batch_kind != "mixed":
+        metadata.num_decodes = metadata.num_decode_tokens = 0
+        if batch_kind == "spec":
+            decode_tokens = torch.tensor([0, 2])
+            prefill_tokens = torch.tensor([1, 3, 4])
+            metadata.spec_sequence_masks = torch.tensor([True, False])
+            metadata.spec_token_indx = decode_tokens
+            metadata.non_spec_token_indx = prefill_tokens
+            metadata.spec_state_indices_tensor = torch.tensor([0, 0], dtype=torch.int32)
+            metadata.num_spec_decodes = 1
+            metadata.num_spec_decode_tokens = 2
+            metadata.spec_decode_metadata = GDNSpecDecodeMetadata(
+                spec_causal_conv1d=GDNSpecCausalConv1dMetadata(
+                    query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+                    cache_indices=torch.tensor([0], dtype=torch.int32),
+                    num_accepted_tokens=torch.tensor([1], dtype=torch.int32),
+                ),
+                actual_seq_lengths=torch.tensor([0, 2], dtype=torch.int32),
+            )
+        metadata.prefill_query_start_loc = torch.tensor([0, 3], dtype=torch.int32)
+        conv_meta = metadata.non_spec_prefill_metadata.causal_conv1d
+        conv_meta.query_start_loc = metadata.prefill_query_start_loc
+        conv_meta.cache_indices = torch.tensor([1], dtype=torch.int32)
+        conv_meta.initial_state_mode = torch.tensor([1], dtype=torch.int32)
+    metadata.num_actual_tokens = total
+    metadata.num_prefill_tokens = len(prefill_tokens)
+    dtype = torch.float16 if backend == "fp16" else torch.bfloat16
+    # Include a padding row and distinct logits to expose wrong slices,
+    # double sigmoid and the review's proposed (incorrect) b + dt_bias.
+    packed = torch.arange((total + 1) * 6, dtype=dtype).reshape(total + 1, 6)
+    b = torch.linspace(-2, 2, total + 1, dtype=dtype).unsqueeze(1)
+    a = torch.linspace(0.25, 1.5, total + 1, dtype=dtype).unsqueeze(1)
+    output = torch.full((total + 1, 1, 2), -99, dtype=dtype)
+    expected_g = -layer.A_log.exp() * torch.nn.functional.softplus(a[:total].float() + layer.dt_bias)
+    expected_beta = b[:total].float().sigmoid().to(dtype)
+
+    def gating(A_log, gate_a, gate_b, dt_bias):
+        torch.testing.assert_close(gate_a, a[:total])
+        torch.testing.assert_close(gate_b, b[:total])
+        assert dt_bias is layer.dt_bias
+        return expected_g.unsqueeze(0), expected_beta.unsqueeze(0)
+
+    def prefill(**kwargs):
+        return kwargs["v"].clone(), kwargs["initial_state"].clone()
+
+    context = ForwardContext(
+        no_compile_layers={layer.prefix: layer},
+        attn_metadata={layer.prefix: metadata},
+        slot_mapping={},
+    )
+    with ExitStack() as stack:
+        stack.enter_context(override_forward_context(context))
+        mocks = {}
+        replacements = {
+            "get_pcp_group": {"return_value": SimpleNamespace(world_size=1)},
+            "get_current_hardware_profile": {
+                "return_value": SimpleNamespace(supports=lambda _: backend != "other_device")
+            },
+            "_get_fla_gdn_prefill_op": {"return_value": None if backend == "missing_fla" else Mock()},
+            "DeviceOperator.fused_gdn_gating": {"side_effect": gating},
+            "DeviceOperator.fla_gdn_prefill": {"side_effect": prefill},
+            "chunk_gated_delta_rule": {"side_effect": prefill},
+            "recurrent_gated_delta_rule": {"side_effect": lambda q, k, v, state, **kw: v.clone()},
+            "causal_conv1d_fn": {"side_effect": lambda x, *args, **kw: x.clone()},
+            "causal_conv1d_update": {"side_effect": lambda x, *args, **kw: x.clone()},
+            "l2norm_fwd": {"side_effect": lambda x: x},
+            "gather_ssm_states": {"side_effect": lambda state, indices, *args: state[indices].clone()},
+            "scatter_ssm_states_": {},
+            "clear_ssm_states": {},
+            "wait_for_kv_layer_from_connector": {},
+            "record_attention_compute_start": {},
+            "maybe_save_kv_layer_to_connector": {},
+        }
+        for name, kwargs in replacements.items():
+            mocks[name] = stack.enter_context(patch(f"vllm_ascend.ops.gdn.{name}", **kwargs))
+        AscendGatedDeltaNetAttention._forward_core(layer, packed, b, a, output)
+
+    use_fla = backend == "a5"
+    selected = "DeviceOperator.fla_gdn_prefill" if use_fla else "chunk_gated_delta_rule"
+    unused = "chunk_gated_delta_rule" if use_fla else "DeviceOperator.fla_gdn_prefill"
+    mocks[selected].assert_called_once()
+    mocks[unused].assert_not_called()
+    call = mocks[selected].call_args.kwargs
+    beta = b[:total] if use_fla else expected_beta
+    torch.testing.assert_close(call["beta"], beta[prefill_tokens].unsqueeze(0))
+    torch.testing.assert_close(call["g"], expected_g[prefill_tokens].unsqueeze(0))
+    if decode_tokens is None:
+        mocks["recurrent_gated_delta_rule"].assert_not_called()
+    else:
+        mocks["recurrent_gated_delta_rule"].assert_called_once()
+        decode = mocks["recurrent_gated_delta_rule"].call_args.kwargs
+        torch.testing.assert_close(decode["beta"], expected_beta[decode_tokens])
+        torch.testing.assert_close(decode["g"], expected_g[decode_tokens])
+    torch.testing.assert_close(output[:total], packed[:total, 4:].reshape(total, 1, 2))
+    torch.testing.assert_close(output[total], torch.full((1, 2), -99, dtype=dtype))
 
 
 def _make_mixed_metadata() -> GDNAttentionMetadata:
