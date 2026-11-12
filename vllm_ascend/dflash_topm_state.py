@@ -103,6 +103,16 @@ class DFlashTopMState:
             raise ValueError("protected_rows must be in [1, verify_block_size]")
         if not 1 <= self.suffix_pool_top_k <= self.route_top_k:
             raise ValueError("suffix_pool_top_k must be in [1, route_top_k]")
+        if (
+            self.backend == "anchor_union_fused_native"
+            and self.scoring_func == "sqrtsoftplus"
+            and self.suffix_pool_top_k != 2
+        ):
+            raise ValueError(
+                "anchor_union_fused_native requires suffix_pool_top_k=2 for "
+                "the DSpark contract; use anchor_union_reference to "
+                "experiment with other pool sizes."
+            )
         if any(value <= 0 for value in self.fused_rows):
             raise ValueError("fused_rows must contain positive token counts")
         self.trace_dir = self.config.get("trace_dir")
@@ -242,24 +252,17 @@ class DFlashTopMState:
             and top_k == self.route_top_k
             and scoring_func == self.scoring_func
         )
-        qwen_contract = (
-            logits.dtype == torch.bfloat16
-            and self.num_experts in (128, 256)
-            and self.route_top_k == 8
-            and self.scoring_func == "softmax"
-            and routed_scaling_factor == 1.0
-            and e_score_correction_bias is None
-        )
         dspark_contract = (
             logits.dtype == torch.float32
             and self.num_experts == 256
             and self.route_top_k == 6
+            and self.suffix_pool_top_k == 2
             and self.scoring_func == "sqrtsoftplus"
             and routed_scaling_factor == 1.5
             and e_score_correction_bias is not None
             and e_score_correction_bias.shape == (256,)
         )
-        return common and (qwen_contract or dspark_contract)
+        return common and dspark_contract
 
     def route(
         self,
@@ -293,19 +296,10 @@ class DFlashTopMState:
                 routed_scaling_factor=routed_scaling_factor,
             )
 
-        from vllm_ascend.ops.triton.dflash_fused_mask_native import (
-            allocate_workspace,
-            topm_route,
-        )
-
-        key = ("qwen", logits.shape[0], logits.device, logits.dtype)
-        if key not in self.workspaces:
-            self.workspaces[key] = allocate_workspace(logits)
-        return topm_route(
-            logits,
-            roles,
-            workspace=self.workspaces[key],
-            suffix_pool_top_k=self.suffix_pool_top_k,
+        raise ValueError(
+            "The fused route supports the DeepSeek DSpark contract "
+            "(sqrtsoftplus scoring) only; the reference implementation "
+            "covers the remaining contracts."
         )
 
     def begin(self, context):

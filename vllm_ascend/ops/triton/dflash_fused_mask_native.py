@@ -3,6 +3,11 @@
 The implementation keeps the original two-kernel contract: one kernel builds
 per-row candidate flags, a second kernel reduces the flags into a batch union
 and masks suffix rows. This is not a Top-M implementation.
+
+Only the DSpark path (`dspark_route`) is wired into activation routing. The
+Top-8 BF16 path (`topm_route`) is an unwired prototype reserved for a
+follow-up PR: it targets a `DeviceOperator.moe_gating_top_k` adaptor API that
+is not yet available in this tree.
 """
 
 import torch

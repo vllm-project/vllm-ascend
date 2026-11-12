@@ -35,9 +35,7 @@
 The tests compare the fused route with `route_reference` using the following criteria:
 
 - Expert IDs are compared exactly (`rtol=0`, `atol=0`).
-- Qwen fused BF16 weights use `rtol=2**-6`, `atol=2**-6`.
 - D-Spark FP32 weights use `rtol=2**-16`, `atol=2**-10`, with a `0.01` maximum absolute error limit.
-- Qwen BF16 weights use a `1.0` maximum absolute error limit.
 - Each case prints `max_abs_error`, `max_rel_error`, and the percentage of elements satisfying `atol + rtol * abs(reference)`.
 
 Run with `-s` to keep the precision metrics in the test log:

@@ -69,50 +69,6 @@ def _report_exact(name, actual, expected):
     reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("rows", [8, 16])
-@pytest.mark.parametrize("num_experts", [128, 256])
-def test_qwen_fused_matches_reference(rows, num_experts):
-    torch.manual_seed(0)
-    state = _make_state(num_experts, 8, "softmax", rows)
-    logits = torch.randn(rows, num_experts, dtype=torch.bfloat16, device=DEVICE)
-    roles = _make_roles(rows, DEVICE)
-    state.prepare(rows, [(0, rows)], DEVICE)
-
-    reference = state.route_reference(
-        logits.clone(),
-        roles,
-        top_k=8,
-        renormalize=True,
-        routed_scaling_factor=1.0,
-        e_score_correction_bias=None,
-    )
-    fused = state.route(
-        logits.clone(),
-        roles,
-        top_k=8,
-        renormalize=True,
-        scoring_func="softmax",
-        routed_scaling_factor=1.0,
-        e_score_correction_bias=None,
-    )
-
-    _report_exact("qwen_expert_ids", fused[1], reference[1])
-    _report_precision(
-        "qwen_weights",
-        fused[0],
-        reference[0],
-        rtol=2**-6,
-        atol=2**-6,
-        max_abs_limit=1.0,
-    )
-    torch.testing.assert_close(fused[1], reference[1], rtol=0, atol=0)
-    torch.testing.assert_close(fused[0], reference[0], rtol=2**-6, atol=2**-6)
-
-
-@pytest.mark.skipif(
-    get_ascend_device_type() not in SUPPORTED_DEVICES,
-    reason="Requires Ascend A2/A3/A5",
-)
-@pytest.mark.parametrize("rows", [8, 16])
 def test_dspark_fused_matches_reference_and_handles_strides(rows):
     torch.manual_seed(1)
     state = _make_state(256, 6, "sqrtsoftplus", rows)

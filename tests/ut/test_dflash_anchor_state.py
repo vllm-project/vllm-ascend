@@ -162,7 +162,7 @@ def test_dspark_512_contract_and_padding_roles(cpu_role_state):
     )
 
 
-def test_original_qwen_fused_contract_remains_available(tmp_path):
+def test_softmax_contract_falls_back_to_reference(tmp_path):
     state = make_state(
         tmp_path,
         backend="anchor_union_fused_native",
@@ -173,13 +173,24 @@ def test_original_qwen_fused_contract_remains_available(tmp_path):
         fused_rows=[16],
     )
     logits = torch.zeros(16, 128, dtype=torch.bfloat16)
-    assert state.supports_fused_route(
+    assert not state.supports_fused_route(
         logits,
         top_k=8,
         scoring_func="softmax",
         routed_scaling_factor=1.0,
         e_score_correction_bias=None,
     )
+    state.prepare(16, [(0, 16)], "cpu")
+    weights, ids = state.route_reference(
+        logits,
+        state.current_roles,
+        top_k=8,
+        renormalize=True,
+        routed_scaling_factor=1.0,
+        e_score_correction_bias=None,
+    )
+    assert ids.shape == (16, 8)
+    assert weights.shape == (16, 8)
 
 
 def test_dspark_reference_uses_bias_for_selection_and_raw_scores_for_weights(
