@@ -1,0 +1,4 @@
+pr: 21679
+entries:
+  - category: performance
+    text: Sequence-parallel quantized shared experts pad eligible inputs before the down projection to reduce padding width.
