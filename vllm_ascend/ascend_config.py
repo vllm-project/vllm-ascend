@@ -618,6 +618,10 @@ class AscendConfig:
     # ---- user-input switches: bool/int/list/str, auto type validation ----
     enable_cpu_binding: bool = True
     multistream_dsv4_dsa_overlap: bool = True
+    # Experimental replicated-input projection before SP all-gather, including
+    # DSpark and multistream DSA. Disabled pending distributed NPU validation.
+    dsv41_projected_sp: bool = False
+    dsv41_projected_sp_min_tokens: int = 256
     # Prepare Engram hashes, lookups and DP/TP exchanges on an auxiliary stream;
     # FULL graphs wait on descriptor-specific external events at consumers.
     # Default to overlap on A5 only; explicit settings override this policy.
@@ -720,6 +724,8 @@ class AscendConfig:
 
     @model_validator(mode="after")
     def _validate_user_input_ranges(self):
+        if self.dsv41_projected_sp_min_tokens < 1:
+            raise ValueError("dsv41_projected_sp_min_tokens must be positive")
         if self.weight_nz_mode not in (0, 1, 2):
             raise ValueError(f"weight_nz_mode must be one of 0, 1, or 2; got {self.weight_nz_mode}")
         # TODO(zzzzwwjj): remove it after deprecating `enable_mc2_hierarchy_comm`.
