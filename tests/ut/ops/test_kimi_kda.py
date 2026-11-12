@@ -695,7 +695,7 @@ def test_projection_communication_mode_honors_pg_override(monkeypatch, env_mode,
 def test_kda_g_precedes_quant_and_aiv_exchanges_join_before_vector(monkeypatch, aiv):
     trace = []
     main = _RecordingStream("main", ["owner_ready", "input_ready"], trace)
-    aux = _RecordingStream("aux", ["beta_ready"], trace)
+    aux = _RecordingStream("aux", ["forget_ready", "beta_ready"], trace)
     group = SimpleNamespace(world_size=2)
     monkeypatch.setattr(projection_module, "uses_aiv_communication", lambda group: aiv)
     monkeypatch.setattr(projection_module, "projection_capacity", lambda hidden: hidden.shape[0])
@@ -713,7 +713,11 @@ def test_kda_g_precedes_quant_and_aiv_exchanges_join_before_vector(monkeypatch, 
 
     class Communication:
         def gather(self, hidden, group):
-            return SimpleNamespace(wait=lambda: cat([hidden, hidden]))
+            def wait():
+                trace.append("wait-input-AG")
+                return cat([hidden, hidden])
+
+            return SimpleNamespace(wait=wait)
 
         def exchange(self, source, group, *, overlap=True):
             name = "G" if source.shape[-1] == 2 else "QKV"
@@ -749,6 +753,10 @@ def test_kda_g_precedes_quant_and_aiv_exchanges_join_before_vector(monkeypatch, 
     qkv, forget, beta, gate = pending.wait()
     trace.append("core-vector")
     gate.wait()
+    assert trace.index("F_b") < trace.index("aux.record:forget_ready") < trace.index("main.wait:forget_ready")
+    assert trace.index("wait-input-AG") < trace.index("main.wait:forget_ready") < trace.index("G-cube")
+    assert trace.index("G-cube") < trace.index("main.record:input_ready") < trace.index("aux.wait:input_ready")
+    assert trace.index("aux.wait:input_ready") < trace.index("beta-cube") < trace.index("aux.record:beta_ready")
     assert trace.index("G-cube") < trace.index("beta-cube")
     assert trace.index("G-cube") < trace.index("quant-vector")
     assert trace.index("quant-vector") < trace.index("exchange-G:True") < trace.index("QKV-cube")

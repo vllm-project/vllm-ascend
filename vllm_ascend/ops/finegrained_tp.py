@@ -213,8 +213,10 @@ class KDAProjectionTP:
         with npu_stream_switch(aux_stream):
             aux_stream.wait_event(owner_ready)
             forget = layer.f_b_proj(layer.f_a_proj(owner)[0])[0]
-        # G Cube precedes both beta Cube and DynamicQuant Vector.
+            forget_ready = aux_stream.record_event()
+        # G waits for input AG and owner F_b, avoiding concurrent Cube work.
         g_hidden = g_input.wait() if g_input is not None else owner
+        main.wait_event(forget_ready)
         gate = layer.g_proj(g_hidden)[0]
         q_hidden = g_hidden if q_input is g_input else q_input.wait() if q_input is not None else owner
         input_ready = main.record_event()
