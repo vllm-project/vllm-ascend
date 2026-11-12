@@ -43,7 +43,6 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     get_sparse_kv_offload_manager,
     update_sparse_kv_offload_metadata,
 )
-from vllm_ascend.models.glm5next.adaptive import glm_mtp_adaptive_query_len
 from vllm_ascend.utils import should_skip_allreduce_across_dp_group
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, ring_state_update_skipped
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
@@ -513,13 +512,6 @@ class AscendModelState(DefaultModelState):
                 )
         is_prefilling = torch.from_numpy(input_batch.is_prefilling_np)
         max_query_len = input_batch.num_scheduled_tokens.max().item()
-        if for_capture:
-            # Varlen graph dummies can have one row per request while replay
-            # verifies K+1 rows. Preserve the descriptor's bound for KPool
-            # state-table and rollback-window allocation (vLLM #60229).
-            capture_query_len = getattr(input_batch, "max_query_len", None)
-            if capture_query_len is not None:
-                max_query_len = min(capture_query_len, num_input_tokens)
         pcp_context = (
             self.pcp_manager.build_attention_context(input_batch, block_tables, slot_mappings)
             if self.pcp_manager is not None and self.pcp_manager.is_target_attn_groups(attn_groups)
@@ -562,10 +554,6 @@ class AscendModelState(DefaultModelState):
             for_cudagraph_capture=for_capture,
             # Same wiring as model_runner_v1
             full_graph_mode=cudagraph_mode == CUDAGraphMode.FULL,
-            has_adaptive_draft_tokens=(
-                input_batch.num_draft_tokens_per_req is not None
-                and glm_mtp_adaptive_query_len(self.vllm_config) is not None
-            ),
             model_specific_attn_metadata=model_specific_attn_metadata,
             req_ids_tensor=offload_req_ids.gpu[:num_reqs] if offload_req_ids is not None else None,
             token_to_req=offload_token_to_req.gpu[:num_input_tokens] if offload_token_to_req is not None else None,

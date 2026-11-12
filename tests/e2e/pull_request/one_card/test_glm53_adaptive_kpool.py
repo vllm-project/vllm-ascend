@@ -47,7 +47,7 @@ def test_device_partition_masks_stale_padding_and_retains_tail(graph_mode):
         graph = torch.npu.NPUGraph()
         with torch.npu.graph(graph):
             run()
-    for lengths in ([1, 6, 0, 0], [6, 1, 0, 0], [0, 0, 0, 0]):
+    for lengths in ([1, 6, 0, 0], [6, 1, 0, 0], [0, 0, 0, 0], [2, 6, 0, 0]):
         starts = [0, *torch.tensor(lengths).cumsum(0).tolist()]
         histories = [7, 15, 0, 0]
         positions = [pos for history, length in zip(histories, lengths) for pos in range(history, history + length)]
@@ -59,7 +59,9 @@ def test_device_partition_masks_stale_padding_and_retains_tail(graph_mode):
         # Poison the graph tail with valid-looking pool-boundary slots.
         positions += [3] * (8 - len(positions))
         slots += [999] * (8 - len(slots))
-        common.query_start_loc.copy_(torch.tensor(starts, dtype=torch.int32))
+        # A negative padding sentinel denotes the end of the logical batch.
+        raw_starts = starts if sum(lengths) < 8 else [*starts[:3], -1, -1]
+        common.query_start_loc.copy_(torch.tensor(raw_starts, dtype=torch.int32))
         common.seq_lens.copy_(torch.tensor([h + n if n else 0 for h, n in zip(histories, lengths)], dtype=torch.int32))
         common.positions.copy_(torch.tensor(positions))
         common.slot_mapping.copy_(torch.tensor(slots))

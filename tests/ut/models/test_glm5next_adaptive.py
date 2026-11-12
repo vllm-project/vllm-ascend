@@ -28,8 +28,12 @@ def _config(method="mtp", adaptive=True, model_type="glm5_next_text"):
     return SimpleNamespace(
         model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type=model_type)),
         speculative_config=SimpleNamespace(
-            method=method, enable_adaptive_verification=adaptive, num_speculative_tokens=5
+            method=method,
+            enable_adaptive_verification=adaptive,
+            num_speculative_tokens=5,
+            parallel_drafting=method in ("dspark", "dflash"),
         ),
+        use_v2_model_runner=True,
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1),
         cache_config=SimpleNamespace(use_replayssm=False),
     )
@@ -72,11 +76,11 @@ def test_adaptive_manager_accepts_all_glm_target_cache_planes(monkeypatch):
 @pytest.mark.parametrize("model_type", ["glm5_next", "glm5_next_text", "qwen3_next"])
 @pytest.mark.parametrize("method", ["mtp", "deepseek_mtp", "dspark", "dflash"])
 @pytest.mark.parametrize("enabled", [False, True])
-def test_varlen_capabilities_are_limited_to_glm_mtp(model_type, method, enabled):
+def test_kpool_varlen_capabilities_are_limited_to_glm_mtp(model_type, method, enabled):
     config = _config(method, enabled, model_type)
     expected = 6 if model_type.startswith("glm5_next") and method in ("mtp", "deepseek_mtp") and enabled else None
     assert glm_mtp_adaptive_query_len(config) == expected
-    for builder in (AscendIndexerKPoolMetadataBuilder, AscendIndexerKPoolTailMetadataBuilder, AscendSFAMetadataBuilder):
+    for builder in (AscendIndexerKPoolMetadataBuilder, AscendIndexerKPoolTailMetadataBuilder):
         assert builder.get_varlen_cudagraph_max_query_len(config, None) == expected
 
 
