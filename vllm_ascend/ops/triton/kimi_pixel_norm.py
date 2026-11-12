@@ -24,22 +24,15 @@ def _kimi_pixel_norm_kernel(
     count,
     BLOCK: tl.constexpr,
 ):
-    if BLOCK == 1024:
-        table = tl.load(lut + tl.arange(0, 256))
-    else:
-        table_offsets = tl.arange(0, 512)
-        table = tl.load(lut + table_offsets % 256)
+    table_offsets = tl.arange(0, 256)
+    table = tl.load(lut + table_offsets)
     lanes = tl.arange(0, BLOCK)
     for tile in range(tl.program_id(0), tl.cdiv(count, BLOCK), tl.num_programs(0)):
         offsets = tile * BLOCK + lanes
         valid = offsets < count
-        values = tl.load(pixels + offsets, mask=valid, other=0)
-        if BLOCK == 1024:
-            # Avoid expanding the table for small inputs.
-            values = values.to(tl.float16).to(tl.int32)
-        else:
-            # Bias into the repeated table to prevent 8-bit Gather indices on A5.
-            values = values.to(tl.int32) + 256
+        # Preserve a supported vector Gather index path on the A5 backend.
+        # All uint8 values are represented exactly by FP16 before widening.
+        values = tl.load(pixels + offsets, mask=valid, other=0).to(tl.float16).to(tl.int32)
         result = tl.gather(table, values, axis=0)
         tl.store(output + offsets, result, mask=valid)
 

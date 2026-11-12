@@ -16,19 +16,14 @@
      inputs. Dispatch boundaries are 196608 and 2408448 elements, corresponding
      to 334 and 4096 complete patches.
   2. Start at most the actual number of Vector cores and assign tiles by a
-     grid-stride loop. Small tiles use the 256-entry table directly; medium and
-     large tiles expand it into a repeated 512-entry table on chip.
-  3. Small tiles convert uint8 pixels through FP16 to int32 indices, avoiding
-     table expansion overhead. Medium and large tiles widen pixels to integers
-     and add 256 before Gather. Indices 256 through 511 avoid the tested A5
-     compiler's 8-bit Gather layout failure without floating-point index
-     conversions. Both paths preserve the table values and their rounding.
+     grid-stride loop. Every tile uses the same 256-entry table.
+  3. Convert uint8 pixels through FP16 to int32 indices, then gather the
+     corresponding table entries. Every uint8 value is represented exactly by
+     FP16, so the conversion preserves the index and the rounded table value.
   4. Mask the last tile; empty input returns an empty output without a launch.
 - **Supported modes**: A3 and 950PR&950DT Products, eager execution, dynamic Torch
-  compile and ACL graph capture/replay. The integer-index update was validated on
-  Ascend950DT_9582 and Ascend910_9382. A3 quick checks covered both output dtypes,
-  precision, cold-cache warmup and changed-input graph replay. A3 preprocessing
-  throughput below still uses the previous kernel. A2 has not been validated.
+  compile and ACL graph capture/replay. Hardware validation used Ascend950DT_9582
+  and Ascend910_9382. A2 has not been validated.
 
 ## Parameters
 
@@ -103,39 +98,22 @@ or actual cold-cache compilation behavior.
 pytest -q tests/ut/model_executor/warmup/test_jit_warmup_kimi_pixel_norm.py
 ```
 
-A5 real-image validation was refreshed after the integer-index update using
-1730 MMMU_Pro requests and 2015 images; all 2,735,879,328 BF16 projection-input
-elements matched the CPU processor. Manual checks covered both output dtypes,
-all pixel values, empty inputs, tails and dispatch boundaries. Cold-cache shared
-registry warmup compiled three keys per dtype; a compiler-denying guard passed
-for new shapes and graph replay with changed inputs. The nightly file was not
-rerun for this update.
+Recorded A3 and A5 hardware runs of the FP16-index kernel passed all 10 nightly
+cases on each device. Real-image validation used 1730 MMMU_Pro requests and 2015
+images; all 2,735,879,328 BF16 projection-input elements matched the actual CPU
+processor on each device. These are existing hardware results; the latest
+checkout has not been rerun on NPU.
 
-The C=1 comparison included decoded RGB preprocessing, pinning, H2D and
-synchronization, with one consumer, four Numba threads and three alternating
-CPU/device pairs. A3 measurements are retained as historical evidence for the
-previous kernel.
+The C=1 preprocessing comparison includes decoded RGB resize/pad/patchify,
+pinning, H2D and synchronization to BF16 readiness, with one consumer, four Numba
+threads and three alternating CPU/device pairs over the same request order.
 
-| Hardware / kernel | CPU requests/s | NPU requests/s | Throughput gain |
+| Hardware | CPU requests/s | NPU requests/s | Throughput gain |
 | --- | ---: | ---: | ---: |
-| A3 / previous FP16-index kernel | 148.93 | 171.62 | 15.24% |
-| A5 / current kernel | 120.28 | 146.02 | 21.41% |
+| A3 | 148.93 | 171.62 | 15.24% |
+| A5 | 126.83 | 159.65 | 25.87% |
 
-A5 pure-kernel comparisons reused preallocated buffers in graph replay and
-bracketed each current-kernel measurement with the previous FP16-index kernel.
-Both used the same shape, dtype, BLOCK and program count. Compilation, allocation
-and H2D were excluded. The BF16 results below use nine paired rounds, with 200
-launches per event sample and three samples per section.
-
-| Patches | BLOCK | Current kernel (us) | Median paired latency reduction |
-| ---: | ---: | ---: | ---: |
-| 1064 | 4096 | 2.15 | 1.29% |
-| 1152 | 4096 | 2.17 | 2.17% |
-| 20000 | 8192 | 8.95 | 2.76% |
-
-These are preprocessing observations, not a full-model serving result or a
-hardware-only speed ratio. A5 used a shared card, and pure-kernel measurements
-reused cached buffers. The refreshed run is a new CPU/device comparison; changes
-from historical throughput cannot be attributed solely to index optimization.
-Per-shape and paired-round variation must be considered separately; aggregate
-throughput improvement does not establish every latency gate.
+Environment: CANN 9.2.1, torch 2.10.0, torch-npu 2.10.0.post7 and triton-ascend
+3.6.0.post2. These measurements cover image preprocessing, not full-model answer
+accuracy, TTFT or generation throughput. A5 used a shared card, and aggregate
+throughput gains do not establish a latency improvement for every input shape.
