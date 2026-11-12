@@ -1260,9 +1260,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             # contents never advance with decoding.
             num_spec_tokens = self.vllm_config.speculative_config.num_speculative_tokens
             index_width = _aligned_dspark_index_width(window_size, num_spec_tokens)
-            use_triton = (
-                build_dspark_swa_indices_triton is not None and common.query_start_loc.device.type == "npu"
-            )
+            use_triton = build_dspark_swa_indices_triton is not None and common.query_start_loc.device.type == "npu"
             if self._dspark_swa_indices is None:
                 self._dspark_swa_indices = torch.empty(
                     (self._max_tokens, 1, index_width), dtype=torch.int32, device=req.seq_lens.device
