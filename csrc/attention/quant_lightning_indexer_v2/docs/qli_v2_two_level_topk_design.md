@@ -5,6 +5,7 @@
 > **Provenance**: 本方案基于 `ops-transformer` 仓库 `ds41` 分支 commit `32d64c27f`（提交MegaMoeWave模板）的代码调研。
 > 参考语义来源: 用户提供的 `select_candidate_blocks` PyTorch 参考实现（口头描述，2026-09-06）。
 > 适用范围: `attention/quant_lightning_indexer_v2`（主算子）+ `attention/quant_lightning_indexer_v2_metadata`（配套算子），**仅 910b (arch22) 路径**，arch35 (950) 不在本次范围。
+> 本文的 `tests/` 路径记录的是设计阶段的测试组织方式；当前单算子精度用例位于仓库的 `tests/e2e/nightly/single_node/ops/singlecard_ops/test_quant_lightning_indexer_v2.py`。
 
 ---
 

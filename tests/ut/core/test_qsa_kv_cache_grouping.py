@@ -24,7 +24,7 @@ def _ordinary_specs() -> dict[str, KVCacheSpec]:
 
 def test_non_qsa_grouping_delegates_to_upstream_vllm(monkeypatch) -> None:
     specs = _ordinary_specs()
-    vllm_config = SimpleNamespace()
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen3")))
     expected = [Mock(spec=KVCacheGroupSpec)]
     upstream_grouping = Mock(return_value=expected)
     monkeypatch.setattr(
@@ -67,7 +67,10 @@ def test_non_qsa_config_uses_upstream_vllm_planner(monkeypatch) -> None:
         "_get_glm5_next_cache_layout",
         lambda _: None,
     )
-    vllm_config = SimpleNamespace(kv_transfer_config=None)
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen3")),
+        kv_transfer_config=None,
+    )
 
     actual = patch_kv_cache_utils._ascend_get_kv_cache_config_from_groups(
         vllm_config,

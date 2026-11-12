@@ -344,7 +344,10 @@ def _get_checkpoint_weight_names(model: Module, model_config: ModelConfig, load_
         index_path = os.path.join(folder, index_file)
         if os.path.isfile(index_path):
             with open(index_path, encoding="utf-8") as index_stream:
-                weight_map = json.load(index_stream)["weight_map"]
+                index = json.load(index_stream)
+            weight_map = index.get("weight_map") if isinstance(index, dict) else None
+            if not isinstance(weight_map, dict):
+                raise ValueError(f"RFork could not read checkpoint metadata from {index_path}")
             weight_names.update(source.prefix + name for name in weight_map)
             continue
         for path in files:
@@ -360,8 +363,38 @@ def _get_checkpoint_weight_names(model: Module, model_config: ModelConfig, load_
     return weight_names
 
 
+_DEEPSEEK_DSPARK_CLASSES = (
+    ("vllm_ascend.models.deepseek_v4.dspark", "DSparkDeepseekV4ForCausalLM"),
+    ("vllm_ascend.models.deepseek_v41.dspark", "DSparkDeepseekV41ForCausalLM"),
+)
+
+
+def _is_deepseek_dspark(model: Module) -> bool:
+    # The model's module is already imported; importing here would load unrelated model families.
+    return any(
+        isinstance(model, model_cls)
+        for module_name, class_name in _DEEPSEEK_DSPARK_CLASSES
+        if (model_cls := getattr(sys.modules.get(module_name), class_name, None)) is not None
+    )
+
+
 def _prepare_rfork_model_state(model: Module, model_config: ModelConfig, load_config: LoadConfig) -> None:
     from vllm_ascend.models.deepseek_mtp import AscendDeepSeekMTP
+
+    if _is_deepseek_dspark(model):
+        from vllm.model_executor.models.utils import process_eagle_weight
+
+        for name in _get_checkpoint_weight_names(model, model_config, load_config):
+            # Keep in sync with load_weights in models/deepseek_v4/dspark.py and models/deepseek_v41/dspark.py.
+            if name == "embed.weight" and not model.rotation_path:
+                mapped_name = "model.embed_tokens.weight"
+            elif name == "head.weight" and not model.rotation_path:
+                mapped_name = "lm_head.weight"
+            else:
+                mapped_name = model._remap_dspark_name(name)
+            if mapped_name is not None:
+                process_eagle_weight(model, mapped_name)
+        return
 
     if not isinstance(model, AscendDeepSeekMTP):
         return
