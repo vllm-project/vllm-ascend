@@ -4,9 +4,7 @@
 """L routing for DeepSeek: form the batch pool, then emit logical IDs and weights."""
 
 import torch
-import triton
-import triton.language as tl
-from triton.language.extra.cann import extension as ascend
+from vllm.triton_utils import tl, triton
 
 from vllm_ascend.worker.v2.dspark_expert_pool import CONTRIBUTOR, RESTRICTED, TOP_K
 
@@ -27,7 +25,7 @@ def _build_pool(
     RESTRICTED_ROLE: tl.constexpr,
     K: tl.constexpr,
 ):
-    with ascend.scope(core_mode="vector"):
+    with tl.extra.cann.extension.scope(core_mode="vector"):
         row = tl.program_id(0)
         expert = tl.arange(0, BLOCK)
         valid = expert < EXPERTS
@@ -64,7 +62,7 @@ def _finish_route(
     K: tl.constexpr,
     SCALING: tl.constexpr,
 ):
-    with ascend.scope(core_mode="vector"):
+    with tl.extra.cann.extension.scope(core_mode="vector"):
         row = tl.program_id(0)
         expert = tl.arange(0, BLOCK)
         valid = expert < EXPERTS
