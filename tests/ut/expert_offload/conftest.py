@@ -23,6 +23,19 @@ from vllm_ascend.quantization.quant_type import QuantType
 ROOT = Path(__file__).resolve().parents[3]
 
 
+class _NzCastDouble:
+    """Identity stand-in for the named NZ cast specs; CPU doubles only track layouts."""
+
+    def cast(self, tensor):
+        return tensor
+
+    def cast_(self, tensor):
+        return tensor
+
+    def cast_kwargs(self):
+        return {}
+
+
 @pytest.fixture
 def load_hook_class():
     def load(path, class_name, methods, parent, namespace, *, helpers=()):
@@ -69,7 +82,9 @@ def expert_factory(load_hook_class):
             {
                 "torch": torch,
                 "torch_npu": SimpleNamespace(
-                    npu_format_cast=lambda tensor, *a, **k: tensor, float4_e2m1fn_x2=torch.uint8
+                    npu_format_cast=lambda tensor, *a, **k: tensor,
+                    get_npu_format=lambda tensor: 2,
+                    float4_e2m1fn_x2=torch.uint8,
                 ),
                 "MoEActivation": SimpleNamespace(SITU="situ"),
                 "get_current_vllm_config": lambda: None,
@@ -79,8 +94,12 @@ def expert_factory(load_hook_class):
                     weight.transpose(1, 2).contiguous(),
                     scale.transpose(1, 2).contiguous(),
                 ),
+                "dispose_tensor": lambda tensor: None,
+                "fp4_packed_nz": _NzCastDouble,
+                "fp4_semantic_nz": _NzCastDouble,
+                "mxfp8_nz": _NzCastDouble,
             },
-            helpers={"_process_batched_weights"},
+            helpers={"_process_batched_weights", "_is_situ", "_w13_cast_spec"},
         )()
         scheme.group_size = 32
         scheme.quant_type = QuantType.W8A8MXFP if is_fp8 else QuantType.W4A8MXFP
