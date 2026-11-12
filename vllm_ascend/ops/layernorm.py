@@ -19,6 +19,7 @@ import torch
 from torch import nn
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm, RMSNormGated
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
@@ -106,6 +107,74 @@ class AscendRMSNorm(RMSNorm):
 
 
 class AscendGemmaRMSNorm(GemmaRMSNorm):
+    _effective_weight: torch.Tensor
+
+    def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
+        super().__init__(hidden_size, eps)
+        # Allocate on every rank so parameter/buffer transfer manifests agree
+        # even when a receiver bypasses the checkpoint loader. Such receivers
+        # keep the runtime addition until a supported loader prepares the cache.
+        self.register_buffer("_effective_weight", torch.ones_like(self.weight), persistent=False)
+        self._effective_weight_ready = False
+        self.weight.weight_loader = self._weight_loader
+
+    def register_buffer(self, name: str, tensor: torch.Tensor | None, persistent: bool = True) -> None:
+        super().register_buffer(name, tensor, persistent=persistent)
+        # Native layerwise reload restores parameters before re-registering the
+        # original buffers, but skips copying derived nonpersistent buffers.
+        # Refresh the restored cache in place; meta staging is not usable yet.
+        if (
+            name == "_effective_weight"
+            and getattr(self, "_effective_weight_ready", False)
+            and tensor is not None
+            and not tensor.is_meta
+            and not self.weight.is_meta
+        ):
+            self._refresh_effective_weight()
+
+    @torch.inference_mode()
+    def _refresh_effective_weight(self) -> None:
+        # Add in the parameter dtype, preserving the original BF16/FP16
+        # rounding. Refresh in place so captured graphs retain the same address.
+        value = 1.0 + self.weight
+        cached = self._effective_weight
+        if (
+            cached is not None
+            and cached.device == value.device
+            and cached.dtype == value.dtype
+            and cached.shape == value.shape
+        ):
+            cached.copy_(value)
+        else:
+            self._effective_weight = value
+        self._effective_weight_ready = True
+
+    def _weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor) -> None:
+        default_weight_loader(param, loaded_weight)
+        self._refresh_effective_weight()
+
+    def _load_from_state_dict(self, *args, **kwargs):
+        super()._load_from_state_dict(*args, **kwargs)
+        # assign=True can replace the parameter, including its loader attribute.
+        self.weight.weight_loader = self._weight_loader
+        self._refresh_effective_weight()
+
+    def _apply(self, fn, recurse=True):
+        prepared = self._effective_weight_ready
+        result = super()._apply(fn, recurse=recurse)
+        self.weight.weight_loader = self._weight_loader
+        if prepared:
+            # Casting a previously rounded (1 + weight) differs from adding
+            # after casting weight. Recompute after device/dtype conversion.
+            self._refresh_effective_weight()
+        return result
+
+    @property
+    def effective_weight(self) -> torch.Tensor:
+        if self._effective_weight_ready and not torch.is_grad_enabled():
+            return self._effective_weight
+        return 1.0 + self.weight
+
     def forward_oot(
         self,
         x: torch.Tensor,
@@ -114,12 +183,26 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
         import torch_npu
 
         if residual is not None:
-            x, _, residual = torch_npu.npu_add_rms_norm(x, residual, 1.0 + self.weight, self.variance_epsilon)
+            x, _, residual = torch_npu.npu_add_rms_norm(x, residual, self.effective_weight, self.variance_epsilon)
             return x, residual
 
-        x = DeviceOperator.npu_gemma_rms_norm(x, self.weight, self.variance_epsilon)
+        x = DeviceOperator.npu_gemma_rms_norm(
+            x,
+            self.weight,
+            self.variance_epsilon,
+            effective_weight=(
+                self._effective_weight if self._effective_weight_ready and not torch.is_grad_enabled() else None
+            ),
+        )
 
         return x
+
+
+def get_gemma_rms_norm_weight(norm: GemmaRMSNorm) -> torch.Tensor:
+    """Share loaded effective weights with fused Q/K normalization consumers."""
+    if isinstance(norm, AscendGemmaRMSNorm):
+        return norm.effective_weight
+    return 1.0 + norm.weight
 
 
 class LayerNormFn(torch.autograd.Function):

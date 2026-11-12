@@ -1115,6 +1115,18 @@
 #       patch Qwen3_5GatedDeltaNet._forward_core to use triton ops like `fused_recurrent_gated_delta_rule`.
 #    Future Plan:
 #       Remove this patch when all ops in _forward_core support both Qwen3_5 and Qwen3Next.
+#   2. `Qwen3NextAttention.forward` (Qwen3.5 multimodal RoPE path)
+#    Why:
+#       Fused Q/K normalization bypasses the Norm forward and otherwise repeats
+#       the constant unit-offset weight addition on every invocation.
+#    How:
+#       Read the effective weight maintained by AscendGemmaRMSNorm's loaders.
+#       Unregistered Norm implementations retain the original addition.
+#    Related PR (if no, explain why):
+#       No upstream PR yet; this consumer belongs to the Ascend fused kernel.
+#    Future Plan:
+#       Remove the accessor integration when upstream exposes a shared effective
+#       weight interface or the fused kernel accepts raw unit-offset weights.
 #
 # ** 15. File: worker/patch_qwen3_dflash.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
