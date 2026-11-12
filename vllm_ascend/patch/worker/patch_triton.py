@@ -118,7 +118,7 @@ from vllm_ascend.ops.triton.sample.thinking_budget import (  # noqa: E402
 from vllm_ascend.worker.v2.sample.apply_top_k_top_p import apply_top_k_top_p  # noqa: E402
 from vllm_ascend.worker.v2.sample.bad_words import apply_bad_words  # noqa: E402
 from vllm_ascend.worker.v2.sample.gumbel import apply_temperature  # noqa: E402
-from vllm_ascend.worker.v2.sample.logprob import compute_token_logprobs, compute_topk_logprobs  # noqa: E402
+from vllm_ascend.worker.v2.sample.logprob import compute_token_logprobs, compute_topk_scores  # noqa: E402
 from vllm_ascend.worker.v2.sample.min_p import apply_min_p  # noqa: E402
 from vllm_ascend.worker.v2.sample.penalties import apply_penalties, bincount  # noqa: E402
 from vllm_ascend.worker.v2.sample.trace_replay import apply_trace_tokens  # noqa: E402
@@ -130,10 +130,10 @@ from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import (  # noqa:
 penalties.apply_penalties = apply_penalties
 # These modules import compute_topk_scores before this patch runs.
 # Replace their local references as well as the defining module.
-logprob.compute_topk_scores = compute_topk_logprobs
-prompt_logprob.compute_topk_scores = compute_topk_logprobs
-sampler.compute_topk_scores = compute_topk_logprobs
-rejection_sampler.compute_topk_scores = compute_topk_logprobs
+logprob.compute_topk_scores = compute_topk_scores
+prompt_logprob.compute_topk_scores = compute_topk_scores
+sampler.compute_topk_scores = compute_topk_scores
+rejection_sampler.compute_topk_scores = compute_topk_scores
 states.apply_min_p = apply_min_p
 penalties.bincount = bincount
 bad_words.apply_bad_words = apply_bad_words

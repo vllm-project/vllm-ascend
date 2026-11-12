@@ -118,7 +118,7 @@ def _ranks_kernel(
             tl.store(output_ptr + req_idx, n)
 
 
-def compute_topk_logprobs(
+def compute_topk_scores(
     logits: torch.Tensor,
     num_logprobs: int,
     sampled_token_ids: torch.Tensor,
@@ -130,17 +130,6 @@ def compute_topk_logprobs(
 ) -> LogprobsTensors:
     assert num_logprobs >= 0
     batch_size, vocab_size = logits.shape
-
-    if batch_size == 0:
-        num_cols = 1 + max(num_logprobs, max_per_req_token_ids)
-        is_tensor = isinstance(cu_num_logits, torch.Tensor)
-        return LogprobsTensors(
-            logprob_token_ids=sampled_token_ids.new_empty((0, num_cols)),
-            logprobs=logits.new_empty((0, num_cols), dtype=torch.float32),
-            selected_token_ranks=sampled_token_ids.new_empty((0,), dtype=torch.int64),
-            cu_num_generated_tokens=None if is_tensor else cu_num_logits,
-            cu_num_generated_tokens_tensor=cu_num_logits if is_tensor else None,
-        )
 
     if max_per_req_token_ids == 0:
         logprob_token_ids = sampled_token_ids.unsqueeze(-1)

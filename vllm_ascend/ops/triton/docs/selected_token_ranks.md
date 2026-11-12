@@ -1,6 +1,6 @@
 # selected_token_ranks
 
-> Source: `vllm_ascend/worker/v2/sample/logprob.py` (`_ranks_kernel`, called by `compute_topk_logprobs`).
+> Source: `vllm_ascend/worker/v2/sample/logprob.py` (`_ranks_kernel`, called by `compute_topk_scores`).
 
 ## Description
 
@@ -19,7 +19,7 @@
   5. Reduce the counting vector to a scalar and store the rank as int64.
 - **Supported modes**: The operator is intended for Atlas A2, Atlas A3, and 950PR&950DT Products in the V2 score implementation. Single-operator tests run eagerly. End-to-end model ACL Graph and MTP coverage is not established by these tests.
 
-  On the paired vLLM `24420b7a` source, standard MRV2 callers invoke `compute_topk_scores`. The Ascend patch binds that entry in the defining module and its sampler, prompt-logprob and rejection-sampler callers to `compute_topk_logprobs`. The rank comparison was aligned separately in [#20109](https://github.com/vllm-project/vllm-ascend/pull/20109); this score-binding change reuses that implementation.
+  On the paired vLLM `24420b7a` source, standard MRV2 callers invoke `compute_topk_scores`. The Ascend patch binds that entry in the defining module and its sampler, prompt-logprob and rejection-sampler callers to `compute_topk_scores`. The rank comparison was aligned separately in [#20109](https://github.com/vllm-project/vllm-ascend/pull/20109); this score-binding change reuses that implementation.
 
 ## Parameters
 
@@ -59,7 +59,7 @@ All eight kernel arguments are required. Grid size and `multibuffer` below are f
 
 ## Test Cases
 
-The committed regression file is `tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_compute_topk_logprobs.py`:
+The unified regression file is `tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_compute_topk_scores.py`. Its five rank cases cover:
 
 - Four wrapper cases use `(batch_size, vocab_size, num_logprobs)` of `(48, 1024, 5)`, `(96, 1024, 0)`, `(24, 1519, 1)`, and `(1, 320, 10)`. They compare token IDs, logprobs, and ranks against PyTorch. The batch of 96 also exercises the multi-row assignment on the validated A3's 48 Vector Cores.
 - The one-based/tie case uses three rows and a vocabulary of 128, asserting ranks 1, 2, and 2 directly.
@@ -68,8 +68,8 @@ These small vocabularies are targeted contract regressions, not a claim of full-
 
 Ranks are integer counts: require exact equality (`rtol=0, atol=0`) against `(logits >= selected_logits).sum(-1)` on the same input values, independent of the input floating-point dtype. The committed wrapper tests use fp32 logits; their separate logprob comparison uses `rtol=1e-4, atol=1e-4`. This does not claim cross-dtype rank equality after logits have been rounded differently.
 
-The file-level hardware guard skips unsupported products, including 310P. The current file contains five cases. Earlier A3 results included a padding-correction implementation that has since been removed; they are not a fresh validation of this revision.
+The file-level hardware guard skips unsupported products, including 310P. The unified file contains 38 cases: five rank cases and 33 custom-score, metadata and binding cases.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_compute_topk_logprobs.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_compute_topk_scores.py
 ```
