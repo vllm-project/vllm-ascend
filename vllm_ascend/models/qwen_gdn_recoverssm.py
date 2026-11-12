@@ -78,13 +78,15 @@ def validate_qwen_gdn_recoverssm(config: "VllmConfig") -> None:
     if cache.mamba_cache_dtype not in ("auto", "bfloat16"):
         raise ValueError("Qwen GDN RecoverSSM requires BF16 convolution state")
     parallel = config.parallel_config
-    if (
-        parallel.pipeline_parallel_size,
-        parallel.prefill_context_parallel_size,
-        parallel.decode_context_parallel_size,
-    ) != (1, 1, 1):
-        raise ValueError("Qwen GDN RecoverSSM requires PP=PCP=DCP=1")
     transfer = config.kv_transfer_config
+    if (parallel.prefill_context_parallel_size, parallel.decode_context_parallel_size) != (1, 1):
+        raise ValueError("Qwen GDN RecoverSSM requires PCP=DCP=1")
+    if parallel.pipeline_parallel_size > 1 and (
+        transfer is None
+        or transfer.kv_connector not in ("MooncakeConnectorV2", "MooncakePullConnector")
+        or getattr(transfer, "kv_role", None) != "kv_producer"
+    ):
+        raise ValueError("Qwen GDN RecoverSSM pipeline parallelism is supported only for a Mooncake KV producer")
     if transfer is not None:
         if transfer.kv_connector not in ("MooncakeConnectorV2", "MooncakePullConnector"):
             raise ValueError("Qwen GDN RecoverSSM KV transfer requires MooncakeConnectorV2 or MooncakePullConnector")
