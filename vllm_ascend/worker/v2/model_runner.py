@@ -566,6 +566,12 @@ class NPUModelRunner(GPUModelRunner):
                 fill_mxfp_v_scale_cache(layer.v_cache_scale, value_scale_cache)
 
     def shutdown(self) -> None:
+        model = getattr(self, "model", None)
+        shared_embeddings = getattr(self, "_shared_engram_shutdown_pending", None) or (
+            [module for module in model.modules() if getattr(module, "_shared_pool_client", None) is not None]
+            if model is not None
+            else []
+        )
         # Drop C8 packet views before the parent collects tensors and
         # empties the allocator cache.
         entries = getattr(self, "_c8_mxfp_v_scale_caches", None)
@@ -575,7 +581,20 @@ class NPUModelRunner(GPUModelRunner):
         if isinstance(zeroer, C8KVBlockZeroer):
             zeroer.entries.clear()
             self.kv_block_zeroer = zeroer.delegate
-        super().shutdown()
+        self._shared_engram_shutdown_pending = shared_embeddings
+        if not getattr(self, "_shared_engram_parent_stopped", False):
+            super().shutdown()
+            self._shared_engram_parent_stopped = True
+        first_error = None
+        for embedding in shared_embeddings:
+            try:
+                embedding.close_host_offload()
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
+        self._shared_engram_shutdown_pending = []
 
     def _register_sparse_kv_caches(self, kv_caches: dict[str, Any]) -> None:
         """Bind host pools before the V2 KV connector registers its destinations."""
