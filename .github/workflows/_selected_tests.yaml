@@ -245,6 +245,7 @@ jobs:
         if: ${{ matrix.group.npu_type != 'cpu' }}
         env:
           CSRC_CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit }}
+          INSTALL_BATCH_INVARIANT_OPS: ${{ contains(matrix.group.tests, 'test_batch_invariant') }}
         run: |
           export MAX_JOBS=$(( ${{ matrix.group.num_npus }} * 23 ))
           pip install uc-manager
@@ -252,32 +253,20 @@ jobs:
           uv pip install 'mooncake-transfer-engine-npu===0.3.14rc3'
           # Reinstall triton-ascend last so its files win over upstream triton in the shared triton/ dir.
           uv pip install --force-reinstall --no-deps 'triton-ascend===3.6.0.post2'
-          # Preserve CI availability during the transition by compiling on the
-          # NPU only when the new CPU-produced cache is unavailable.
-          if [ "$CSRC_CACHE_HIT" = "true" ]; then
+          # Batch-invariance tests need a source build; other groups can use
+          # the csrc cache and compile only on a cache miss.
+          if [ "$INSTALL_BATCH_INVARIANT_OPS" = "true" ]; then
+            # Batch-invariant packages are installed by the source build and
+            # are not included in the vllm-ascend csrc cache.
+            VLLM_BATCH_INVARIANT=1 COMPILE_CUSTOM_KERNELS=1 \
+              uv pip install -e . --no-build-isolation
+          elif [ "$CSRC_CACHE_HIT" = "true" ]; then
             echo "csrc cache hit: skip kernel compilation"
             COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
           else
             echo "csrc cache miss: compile kernels on the NPU runner"
             uv pip install -e . --no-build-isolation
           fi
-
-      - name: Install AscendC batch-invariant operators for E2E tests
-        if: ${{ matrix.group.npu_type != 'cpu' && contains(matrix.group.tests, 'test_batch_invariant') }}
-        env:
-          NPU_TYPE: ${{ matrix.group.npu_type }}
-        run: |
-          set -euo pipefail
-          . /usr/local/Ascend/ascend-toolkit/set_env.sh
-          case "$NPU_TYPE" in
-            a2) soc=ascend910b ;;
-            a3) soc=ascend910_93 ;;
-            a5) soc=ascend950 ;;
-            *) echo "Unsupported batch-invariant device: $NPU_TYPE" >&2; exit 1 ;;
-          esac
-          # This package is not part of the vllm-ascend csrc cache.
-          bash csrc/build_batch_invariant_ops.sh "$soc"
-          python -c "import batch_invariant_ops"
 
       - name: Install FLA NPU for selected tests
         if: ${{ matrix.group.npu_type == 'a2' || matrix.group.npu_type == 'a3' || matrix.group.npu_type == 'a5' }}

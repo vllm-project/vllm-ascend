@@ -52,26 +52,52 @@ case "${ARCH_INFO}" in
         ;;
 esac
 
-# Use a private working directory so failed installs leave no stale downloads.
-INSTALL_DIR=$(mktemp -d)
-trap 'rm -rf -- "${INSTALL_DIR}"' EXIT
-cd "${INSTALL_DIR}"
-
-# Install the device package before building its matching PyTorch extension.
+# download and install run package
+BATCH_INVARIANT_RUN_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/cann-ops-batch_invariant-${BATCH_INVARIANT_DEVICE}-2.0.0-linux.${ARCH_SUFFIX}.run"
 BATCH_INVARIANT_RUN_FILE="cann-ops-batch_invariant-${BATCH_INVARIANT_DEVICE}-2.0.0-linux.${ARCH_SUFFIX}.run"
-BATCH_INVARIANT_RUN_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BATCH_INVARIANT_RUN_FILE}"
-log "Downloading batch_invariant run package: ${BATCH_INVARIANT_RUN_URL}"
-unset ASCEND_CUSTOM_OPP_PATH
-curl --fail --location --retry 3 --max-time 120 -sS -o "${BATCH_INVARIANT_RUN_FILE}" "${BATCH_INVARIANT_RUN_URL}"
-chmod +x "${BATCH_INVARIANT_RUN_FILE}"
-"./${BATCH_INVARIANT_RUN_FILE}"
-log "batch_invariant run package installed successfully"
 
+log "Downloading batch_invariant run package..."
+unset ASCEND_CUSTOM_OPP_PATH
+if curl --max-time 120 -sS -k -O "${BATCH_INVARIANT_RUN_URL}" && [[ -f "${BATCH_INVARIANT_RUN_FILE}" ]]; then
+    chmod +x "${BATCH_INVARIANT_RUN_FILE}"
+    log "Running installer: ${BATCH_INVARIANT_RUN_FILE}"
+    if "./${BATCH_INVARIANT_RUN_FILE}"; then
+        log "batch_invariant run package installed successfully"
+    else
+        log "Failed to install batch_invariant run package"
+    fi
+else
+    log "Failed to download batch_invariant run package: ${BATCH_INVARIANT_RUN_URL}"
+fi
+# clean up downloaded run file (always clean, regardless of success/failure)
+rm -f "${BATCH_INVARIANT_RUN_FILE}"
+
+# download and install whl package
+BATCH_INVARIANT_WHL_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/batch_invariant-torch_ops_extension-2.0.0.zip"
 BATCH_INVARIANT_WHL_FILE="batch_invariant-torch_ops_extension-2.0.0.zip"
-BATCH_INVARIANT_WHL_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${BATCH_INVARIANT_WHL_FILE}"
-log "Downloading batch_invariant extension: ${BATCH_INVARIANT_WHL_URL}"
-curl --fail --location --retry 3 --max-time 120 -sS -o "${BATCH_INVARIANT_WHL_FILE}" "${BATCH_INVARIANT_WHL_URL}"
-python -m zipfile -e "${BATCH_INVARIANT_WHL_FILE}" .
-cd torch_ops_extension/batch_invariant_ops
-bash build_and_install.sh
-log "batch_invariant_ops installation completed"
+
+log "Downloading batch_invariant whl package..."
+if curl --max-time 5 -sS -k -O "${BATCH_INVARIANT_WHL_URL}" >/dev/null 2>&1 && [[ -f "${BATCH_INVARIANT_WHL_FILE}" ]]; then
+    if python -m zipfile -e "${BATCH_INVARIANT_WHL_FILE}" . >/dev/null 2>&1; then
+        if [[ -d "torch_ops_extension/batch_invariant_ops" ]]; then
+            cd torch_ops_extension/batch_invariant_ops
+            log "Building and installing batch_invariant whl package..."
+            if bash build_and_install.sh; then
+                log "batch_invariant whl package installed successfully"
+            else
+                log "Failed to build and install batch_invariant whl package"
+            fi
+            cd -
+        else
+            log "batch_invariant_ops directory not found in zip"
+        fi
+    else
+        log "Failed to unzip batch_invariant whl package"
+    fi
+else
+    log "Failed to download batch_invariant whl package: ${BATCH_INVARIANT_WHL_URL}"
+fi
+# clean up downloaded files (always clean, regardless of success/failure)
+rm -rf "${BATCH_INVARIANT_WHL_FILE}" torch_ops_extension
+
+log "batch_invariant_ops build completed"
