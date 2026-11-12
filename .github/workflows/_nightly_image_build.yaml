@@ -59,7 +59,7 @@ on:
         required: false
         type: string
         default: 'release'
-        description: "Matrix shape only (dependency versions always come from the Dockerfiles): 'full' builds both OS variants on amd64+arm64; 'release' builds ubuntu on arm64 only."
+        description: "Matrix shape only (dependency versions always come from the Dockerfiles): 'full' builds both OS variants on amd64+arm64; 'release' builds arm64 only and covers the ubuntu variant by default, or the openEuler variant when os_filter='openeuler'."
       swr_registry:
         required: false
         type: string
@@ -80,6 +80,11 @@ on:
         type: string
         default: ''
         description: "Suffix appended to the published nightly image tag (nightly-ci-<branch>-<target>${image_tag_suffix}). Callers isolating a build (presmoke) must pass the same suffix to their test jobs, otherwise the tests pull the standard nightly image. Default '' keeps the standard tag."
+      image_repo_suffix:
+        required: false
+        type: string
+        default: ''
+        description: "Suffix appended to the SWR repository name of both the runtime base image it consumes (ascend/vllm-ascend<suffix>) and the published nightly image (base_image/ascend-ci/vllm-ascend<suffix>). Used by presmoke to publish to its own isolated repositories. Empty keeps the standard repositories."
       cann_swr_url:
         required: false
         type: string
@@ -128,6 +133,12 @@ jobs:
         run: |
           if [ "${{ inputs.build_type }}" = "full" ]; then
             ALL='{"include":[{"arch_name":"amd64","arch_runner":"linux-amd64-cpu-4","arch_platform":"linux/amd64","os":"ubuntu"},{"arch_name":"amd64","arch_runner":"linux-amd64-cpu-4","arch_platform":"linux/amd64","os":"openeuler"},{"arch_name":"arm64","arch_runner":"linux-aarch64-cpu-4","arch_platform":"linux/arm64","os":"ubuntu"},{"arch_name":"arm64","arch_runner":"linux-aarch64-cpu-4","arch_platform":"linux/arm64","os":"openeuler"}]}'
+          elif [ "${{ inputs.os_filter }}" = "openeuler" ]; then
+            # The non-'full' shape builds arm64 only and used to be ubuntu-only. An
+            # explicit os_filter=openeuler narrows it to the openEuler variant, so
+            # callers such as /presmoke can cover openEuler without switching to the
+            # multi-arch 'full' matrix (which would also build amd64).
+            ALL='{"include":[{"arch_name":"arm64","arch_runner":"linux-aarch64-cpu-4","arch_platform":"linux/arm64","os":"openeuler"}]}'
           else
             ALL='{"include":[{"arch_name":"arm64","arch_runner":"linux-aarch64-cpu-4","arch_platform":"linux/arm64","os":"ubuntu"}]}'
           fi
@@ -137,8 +148,7 @@ jobs:
           else
             MATRIX=$(echo "$ALL" | jq -c --arg os "$OS" '{include:[.include[]|select(.os==$os)]}')
           fi
-          # Guard against an empty matrix (e.g. os_filter='openeuler' with build_type
-          # 'release', where release only builds ubuntu, or an unsupported os_filter).
+          # Guard against an empty matrix (e.g. an unsupported os_filter).
           # An empty `include` yields a matrix with no jobs, so fail loudly instead.
           COUNT=$(echo "$MATRIX" | jq '.include | length')
           if [ "$COUNT" = "0" ]; then
@@ -246,7 +256,7 @@ jobs:
 
           # Runtime images are published by the runtime build workflow as
           # nightly-<branch>[-<target>][-openeuler] from the root Dockerfiles.
-          BASE_IMAGE="${{ inputs.swr_registry }}/ascend/vllm-ascend"
+          BASE_IMAGE="${{ inputs.swr_registry }}/ascend/vllm-ascend${{ inputs.image_repo_suffix }}"
           OS_MARK=""
           if [ "${{ matrix.os }}" = "openeuler" ]; then
             OS_MARK="-openeuler"
@@ -275,11 +285,11 @@ jobs:
             if [ -n "$OS_MARK" ]; then
               FINAL_IMAGE="${{ inputs.swr_registry }}/atlas_inference/vllm-ascend:${FULL_TAG}"
             else
-              FINAL_IMAGE="${{ inputs.swr_registry }}/base_image/ascend-ci/vllm-ascend:${FULL_TAG}, ${{ inputs.swr_registry }}/atlas_inference/vllm-ascend:${FULL_TAG}"
+              FINAL_IMAGE="${{ inputs.swr_registry }}/base_image/ascend-ci/vllm-ascend${{ inputs.image_repo_suffix }}:${FULL_TAG}, ${{ inputs.swr_registry }}/atlas_inference/vllm-ascend:${FULL_TAG}"
             fi
             PUSH_IMAGE="${{ inputs.swr_registry }}/atlas_ci/vllm-atlas-temp:${UNIQUE_TAG}-${{ matrix.arch_name }}"
           else
-            FINAL_IMAGE="${{ inputs.swr_registry }}/base_image/ascend-ci/vllm-ascend:${FULL_TAG}"
+            FINAL_IMAGE="${{ inputs.swr_registry }}/base_image/ascend-ci/vllm-ascend${{ inputs.image_repo_suffix }}:${FULL_TAG}"
             PUSH_IMAGE="${FINAL_IMAGE}"
           fi
 
@@ -363,7 +373,7 @@ jobs:
               # ubuntu nightly images serve the CI contract (test workflows
               # pull from ascend-ci) and the north-4 consumers through the
               # atlas_inference mirror, matching the retired daily pipeline.
-              DESTS="${SWR_REGISTRY}/base_image/ascend-ci/vllm-ascend ${SWR_REGISTRY}/atlas_inference/vllm-ascend"
+              DESTS="${SWR_REGISTRY}/base_image/ascend-ci/vllm-ascend${{ inputs.image_repo_suffix }} ${SWR_REGISTRY}/atlas_inference/vllm-ascend"
             fi
             TAG="nightly-ci-${BRANCH_TAG}-${TARGET}${OS_MARK}${IMAGE_TAG_SUFFIX}"
             # The build step pushed the per-arch images under the unique tag.
