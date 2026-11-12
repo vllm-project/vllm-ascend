@@ -1089,6 +1089,16 @@
 #    Future Plan:
 #       Remove this patch once the torch mHC kernels honour norm_weight/norm_eps.
 #
+# ** File: worker/patch_short_conv.py **
+#   Target: `vllm.model_executor.layers.mamba.short_conv` convolution imports.
+#   Why: ShortConv can retain CUDA function references if imported before the
+#   Ascend causal-convolution bindings are installed.
+#   How: Rebind only ShortConv's references after the worker selects its kernels.
+#   Related upstream PR: none; upstream does not yet expose convolution dispatch.
+#   Future: remove this rebind when the upstream layer dispatches by backend.
+#   Performance: the fallback synchronizes per request and is intended for
+#   eager validation; graph capture and throughput require NPU measurement.
+#
 # ** 14. File: worker/patch_qwen3_5.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3_5.Qwen3_5GatedDeltaNet._forward_core`

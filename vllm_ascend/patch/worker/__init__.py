@@ -26,6 +26,7 @@ from vllm_ascend.utils import vllm_version_is
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_ascend_ops  # noqa
     import vllm_ascend.patch.worker.patch_triton  # noqa
+    import vllm_ascend.patch.worker.patch_short_conv  # noqa
 
 
 # Flip STR_DTYPE_TO_TORCH_DTYPE["fp8"] -> torch.float8_e4m3fn on vllm builds
