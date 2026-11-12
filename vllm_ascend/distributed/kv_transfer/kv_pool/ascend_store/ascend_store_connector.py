@@ -135,9 +135,6 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             raise ValueError("AscendStore sharded Mamba state transfer currently requires PCP=1 or TP=1")
 
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
-        removed = {"pool_prefix_mode", "npu_shared_engine_direct_only", "npu_store_setup_lock"} & extra_config.keys()
-        if removed:
-            raise ValueError(f"Removed AscendStore settings {sorted(removed)}; use --prefix-match-unit only")
         self.use_layerwise = extra_config.get("use_layerwise", False)
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
         self.backend_name = extra_config.get("backend", "mooncake").lower()
