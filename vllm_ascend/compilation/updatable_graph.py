@@ -66,7 +66,7 @@ class GraphUpdateTask:
     event: Any
 
     def bind(self, params: Params) -> "GraphUpdateTask":
-        runtime_kwargs = {**self.kwargs, **params}
+        runtime_kwargs = { key: params[key] if key in params else value for key, value in self.kwargs.items()}
         return replace(self, kwargs=runtime_kwargs)
 
     def apply(self, update_stream) -> None:
