@@ -262,6 +262,23 @@ jobs:
             uv pip install -e . --no-build-isolation
           fi
 
+      - name: Install AscendC batch-invariant operators for E2E tests
+        if: ${{ matrix.group.npu_type != 'cpu' && contains(matrix.group.tests, 'test_batch_invariant') }}
+        env:
+          NPU_TYPE: ${{ matrix.group.npu_type }}
+        run: |
+          set -euo pipefail
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh
+          case "$NPU_TYPE" in
+            a2) soc=ascend910b ;;
+            a3) soc=ascend910_93 ;;
+            a5) soc=ascend950 ;;
+            *) echo "Unsupported batch-invariant device: $NPU_TYPE" >&2; exit 1 ;;
+          esac
+          # This package is not part of the vllm-ascend csrc cache.
+          bash csrc/build_batch_invariant_ops.sh "$soc"
+          python -c "import batch_invariant_ops"
+
       - name: Install FLA NPU for selected tests
         if: ${{ matrix.group.npu_type == 'a2' || matrix.group.npu_type == 'a3' || matrix.group.npu_type == 'a5' }}
         env:

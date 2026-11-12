@@ -99,6 +99,20 @@ assert 'npu_matmul_batch_invariant' in str(op)
 "
 ```
 
+## PR CI coverage
+
+When a selected NPU test group includes `test_batch_invariant`, PR CI runs
+`csrc/build_batch_invariant_ops.sh` after installing vllm-ascend, even when the
+vllm-ascend custom-kernel cache hits. The script installs the device operator
+package and builds its matching PyTorch extension; download, installation, or
+extension build failures stop the job.
+
+The TP4 batch-invariance E2E suite requires `batch_invariant_ops` and its AscendC
+interfaces. It directly executes the matrix multiplication and reduction
+operators across batch sizes before relying on the existing model consistency
+tests. A missing AscendC package fails the suite instead of allowing Triton
+fallback to pass it.
+
 ## Enabling Batch Invariance
 
 Batch invariance can be enabled by setting the `VLLM_BATCH_INVARIANT` environment variable to `1`:

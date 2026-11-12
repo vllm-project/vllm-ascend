@@ -19,11 +19,13 @@
 import os
 import random
 
+import batch_invariant_ops  # noqa: F401
 import pytest
 import torch
 from vllm import SamplingParams
 
 from tests.e2e.conftest import ModelName
+from vllm_ascend import batch_invariant
 
 os.environ["VLLM_BATCH_INVARIANT"] = "1"
 
@@ -41,6 +43,39 @@ SMALL_QWEN3_OVERRIDES = {
 def enable_batch_invariant_mode(monkeypatch: pytest.MonkeyPatch):
     """Automatically enable batch invariant kernel overrides for all tests."""
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    assert batch_invariant.HAS_ASCENDC_BATCH_INVARIANT, "AscendC batch-invariant operators are required"
+    for name in (
+        "npu_mm_batch_invariant",
+        "npu_matmul_batch_invariant",
+        "npu_reduce_sum_batch_invariant",
+        "npu_fused_infer_attention_score_batch_invariant",
+    ):
+        assert hasattr(torch.ops.batch_invariant_ops, name), f"Missing AscendC operator: {name}"
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("op_name", ["npu_mm_batch_invariant", "npu_matmul_batch_invariant"])
+def test_ascendc_matmul_batch_invariance(dtype, op_name):
+    """Execute the external kernels rather than only checking registration."""
+    x = torch.randn(32, 128, dtype=dtype, device="npu")
+    weight = torch.randn(128, 64, dtype=dtype, device="npu")
+    op = getattr(torch.ops.batch_invariant_ops, op_name)
+    batched = op(x, weight)
+    individual = torch.cat([op(row.unsqueeze(0), weight) for row in x])
+    torch.npu.synchronize()
+    assert torch.equal(batched, individual)
+    torch.testing.assert_close(batched.cpu(), x.cpu().float().mm(weight.cpu().float()).to(dtype), rtol=0.02, atol=0.02)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_ascendc_reduce_sum_batch_invariance(dtype):
+    x = torch.randn(32, 128, dtype=dtype, device="npu")
+    op = torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant
+    batched = op(x, -1, False)
+    individual = torch.cat([op(row.unsqueeze(0), -1, False) for row in x])
+    torch.npu.synchronize()
+    assert torch.equal(batched, individual)
+    torch.testing.assert_close(batched.cpu(), x.cpu().float().sum(dim=-1).to(dtype), rtol=0.02, atol=0.02)
 
 
 def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
