@@ -24,7 +24,6 @@ the upstream method is refactored, this override must be updated accordingly.
 import inspect
 import time
 from collections import deque
-from typing import Any
 
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
@@ -47,7 +46,6 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.core.profiling_chunk_predictor import ProfilingChunkManager
-from vllm_ascend.utils import vllm_version_is
 
 
 class ProfilingChunkScheduler(Scheduler):
@@ -1038,17 +1036,6 @@ class ProfilingChunkScheduler(Scheduler):
         # len(self.running).
         assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs) <= len(self.running)
 
-        # vLLM #64076 removed the deprecated cascade-attention contract.
-        # Remove this compatibility branch when v0.33.0 support is dropped.
-        common_prefix_kwargs: dict[str, Any] = {}
-        if vllm_version_is("0.33.0"):
-            num_common_prefix_blocks = [0] * len(self.kv_cache_config.kv_cache_groups)
-            with record_function_or_nullcontext("schedule: get_num_common_prefix_blocks"):
-                if self.running:
-                    any_request_id = self.running[0].request_id
-                    num_common_prefix_blocks = self.kv_cache_manager.get_num_common_prefix_blocks(any_request_id)
-            common_prefix_kwargs["num_common_prefix_blocks"] = num_common_prefix_blocks
-
         # Construct the scheduler output.
         scheduled_new_reqs.extend(scheduled_resumed_reqs)
         scheduled_resumed_reqs.clear()
@@ -1115,7 +1102,6 @@ class ProfilingChunkScheduler(Scheduler):
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
             scheduled_encoder_input_stats=scheduled_encoder_input_stats,
-            **common_prefix_kwargs,
             preempted_req_ids=self.reset_preempted_req_ids,
             # finished_req_ids is an existing state in the scheduler,
             # instead of being newly scheduled in this step.

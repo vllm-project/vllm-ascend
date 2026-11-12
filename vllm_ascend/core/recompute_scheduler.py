@@ -20,7 +20,6 @@ from __future__ import annotations
 import time
 from collections import deque
 from dataclasses import dataclass, fields
-from typing import Any
 
 from vllm.config import SchedulerConfig, VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
@@ -47,7 +46,7 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
     DyntraLBPolicyMixin,
     print_scheduler_summary,
 )
-from vllm_ascend.utils import get_ascend_config, vllm_version_is
+from vllm_ascend.utils import get_ascend_config
 
 
 def _normalize_encoder_schedule_result(
@@ -902,17 +901,6 @@ class RecomputeScheduler(Scheduler):
         # len(self.running).
         assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs) <= len(self.running)
 
-        # vLLM #64076 removed the deprecated cascade-attention contract.
-        # Remove this compatibility branch when v0.33.0 support is dropped.
-        common_prefix_kwargs: dict[str, Any] = {}
-        if vllm_version_is("0.33.0"):
-            num_common_prefix_blocks = [0] * len(self.kv_cache_config.kv_cache_groups)
-            with record_function_or_nullcontext("schedule: get_num_common_prefix_blocks"):
-                if self.running:
-                    any_request_id = self.running[0].request_id
-                    num_common_prefix_blocks = self.kv_cache_manager.get_num_common_prefix_blocks(any_request_id)
-            common_prefix_kwargs["num_common_prefix_blocks"] = num_common_prefix_blocks
-
         # Construct the scheduler output.
         new_request_kwargs = {
             "uses_mrope": self.model_uses_mrope,
@@ -993,7 +981,6 @@ class RecomputeScheduler(Scheduler):
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
             scheduled_encoder_input_stats=scheduled_encoder_input_stats,
-            **common_prefix_kwargs,
             preempted_req_ids=self.reset_preempted_req_ids,
             # finished_req_ids is an existing state in the scheduler,
             # instead of being newly scheduled in this step.
