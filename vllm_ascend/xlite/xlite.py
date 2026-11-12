@@ -609,6 +609,8 @@ class DeepseekV32XliteModel(DeepseekV3XliteModel):
         index_types: list[str] = getattr(hf_config, "indexer_types", []) or []
         xlite_config.index_full_mask = list(map(lambda x: str(x).lower().startswith("full"), index_types))
         xlite_config.enable_dsa_cp = get_ascend_config().enable_dsa_cp
+        if xlite_config.enable_dsa_cp:
+            xlite_config.num_spec_tokens = getattr(self.vllm_config.speculative_config, "num_speculative_tokens", 0)
 
     def _build_model(self) -> None:
         super()._build_model()
