@@ -743,7 +743,7 @@ class TestAscendSFAKPathFusion(TestBase):
             cache_scatter_indices=torch.stack(
                 (torch.zeros(num_tokens, dtype=torch.int64), torch.arange(num_tokens)), dim=-1
             ),
-            actual_seq_lengths_query=torch.tensor([num_tokens], dtype=torch.int32),
+            cum_query_lens=torch.tensor([num_tokens], dtype=torch.int32),
             actual_seq_lengths_key=torch.tensor([num_tokens], dtype=torch.int32),
         )
 

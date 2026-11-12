@@ -131,7 +131,6 @@ def test_sfa_indexer_metadata_builder_builds_kernel_metadata(mock_cos_sin, mock_
     assert torch.equal(metadata.cum_query_lens, common.query_start_loc[1:3])
     assert torch.equal(metadata.block_table, common.block_table_tensor[:2])
     assert metadata.block_size == _KERNEL_BLOCK_SIZE
-    assert torch.equal(metadata.actual_seq_lengths_query, common.query_start_loc[1:3])
     assert torch.equal(metadata.query_start_loc, common.query_start_loc[:3])
     assert metadata.query_start_loc.data_ptr() == common.query_start_loc.data_ptr()
     assert torch.equal(metadata.actual_seq_lengths_key, common.seq_lens[:2])

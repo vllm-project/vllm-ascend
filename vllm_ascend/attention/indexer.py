@@ -105,7 +105,6 @@ class AscendSFAIndexerMetadata:
     cache_scatter_indices: torch.Tensor | None = None
     # Parallel-layout sequence lengths consumed by the top-k kernel. Base/PCP
     # modes use the unsharded values.
-    actual_seq_lengths_query: torch.Tensor | None = None
     actual_seq_lengths_key: torch.Tensor | None = None
     # The PCP cache-write gather splits the local prefill region on this
     # independently computed decode-token count.
@@ -815,7 +814,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
 
         assert self.wk_weights_proj is not None
         assert self.wq_b is not None
-        assert indexer_metadata.actual_seq_lengths_query is not None
+        assert indexer_metadata.cum_query_lens is not None
         assert indexer_metadata.actual_seq_lengths_key is not None
 
         if hidden_states is k_hidden_states:
@@ -903,7 +902,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             INDEXER_K_CACHE_SLOT,
             INDEXER_SCALE_CACHE_SLOT,
             indexer_metadata,
-            indexer_metadata.actual_seq_lengths_query,
+            indexer_metadata.cum_query_lens,
             indexer_metadata.actual_seq_lengths_key,
             self.enable_sparse_li_c8,
             self.enable_sparse_li_c4,
@@ -1426,7 +1425,6 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         sin = sin[:num_input_tokens]
         cum_query_lens = common_attn_metadata.query_start_loc[1 : num_reqs + 1]
         seq_lens = common_attn_metadata.seq_lens[:num_reqs]
-        actual_seq_lengths_query = cum_query_lens
         actual_seq_lengths_key = seq_lens
         query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
         local_visible = None
@@ -1511,7 +1509,6 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                 is_pcp_sharded,
                 buffer_key,
             ),
-            actual_seq_lengths_query=actual_seq_lengths_query,
             actual_seq_lengths_key=actual_seq_lengths_key,
             num_decode_tokens=num_decode_tokens,
             uses_pcp_sharded_layout=is_pcp_sharded,
