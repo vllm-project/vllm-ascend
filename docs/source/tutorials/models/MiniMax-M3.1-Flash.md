@@ -3380,6 +3380,8 @@ Use the commands in [Section 5](#5-online-service-deployment) as starting config
 
 #### 9.2.1 DSpark and KV Cache Configuration
 
+On compatible A5 configurations, native MiniMax M3.1 DSpark drafts retain CANN FlashAttn in both eager and graph modes. This requires FP16/BF16 queries, unquantized draft KV cache, decoder attention, PP/PCP/DCP sizes of one, and disabled adaptive verification; unsupported configurations keep their existing backend. Compare graph and eager performance with the same attention backend.
+
 The single-node examples in Section 5.1 and Decode examples in Section 5.3 enable DSpark draft graph execution on A3 and 950DT products:
 
 | Setting | A3 | 950DT products |

@@ -76,10 +76,12 @@ def selector_runtime(monkeypatch):
 
 @pytest.mark.parametrize("architecture", ["MiniMaxM31FlashA3DSparkModel", "DSparkMiniMaxDraftModel"])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_flash_draft_selection(selector_runtime, architecture, dtype):
+@pytest.mark.parametrize("eager", [False, True])
+def test_flash_draft_selection(selector_runtime, architecture, dtype, eager):
     r = selector_runtime
     r.config.speculative_config.draft_model_config.architectures = [architecture]
     r.selector.dtype = dtype
+    r.config.speculative_config.enforce_eager = eager
     assert r.select((False, False, False), r.selector)
 
 
@@ -94,7 +96,6 @@ def test_flash_draft_selection(selector_runtime, architecture, dtype):
         "target",
         "method",
         "architecture",
-        "graph",
         "adaptive",
         "pipeline_parallel_size",
         "prefill_context_parallel_size",
@@ -112,9 +113,11 @@ def test_flash_draft_selection(selector_runtime, architecture, dtype):
         "sparse_backend",
     ],
 )
-def test_flash_draft_unsupported_paths_fall_back(selector_runtime, fault):
+@pytest.mark.parametrize("eager", [False, True])
+def test_flash_draft_unsupported_paths_fall_back(selector_runtime, fault, eager):
     r = selector_runtime
     spec = r.config.speculative_config
+    spec.enforce_eager = eager
     key = (False, False, False)
     if fault == "no_config":
         r.config = None
@@ -132,8 +135,6 @@ def test_flash_draft_unsupported_paths_fall_back(selector_runtime, fault):
         spec.method = "eagle3"
     elif fault == "architecture":
         spec.draft_model_config.architectures = ["OtherDraft"]
-    elif fault == "graph":
-        spec.enforce_eager = False
     elif fault == "adaptive":
         spec.enable_adaptive_verification = True
     elif fault.endswith("parallel_size"):
