@@ -10,6 +10,8 @@ import torch
 
 @pytest.fixture
 def worker(monkeypatch):
+    from vllm_ascend.device_allocator import sleep_runtime
+    from vllm_ascend.device_allocator.sleep_mode_backend import AscendLegacySleepModeBackend
     from vllm_ascend.worker import worker as worker_module
 
     worker = worker_module.NPUWorker.__new__(worker_module.NPUWorker)
@@ -35,6 +37,9 @@ def worker(monkeypatch):
             rl_config=SimpleNamespace(enabled=False, sleep_mode_extra_cleanup=False),
         ),
     )
+    monkeypatch.setattr(sleep_runtime, "get_ascend_config", worker_module.get_ascend_config)
+    worker.sleep_mode_backend = AscendLegacySleepModeBackend()
+    worker.sleep_mode_backend.bind_runtime(sleep_runtime.AscendSleepRuntime(worker))
     return worker
 
 
@@ -177,3 +182,54 @@ def test_repeated_sleep_uses_latest_parameter_values(worker, monkeypatch):
 
         assert torch.equal(model.weight, torch.full_like(model.weight, value))
         assert worker._sleep_saved_parameters == {}
+
+
+def test_worker_shutdown_keeps_resource_cleanup_repeatable(worker, monkeypatch):
+    from vllm_ascend.device_allocator.sleep_mode_backend import AscendSleepModeBackend
+    from vllm_ascend.worker import worker as worker_module
+
+    backend = AscendSleepModeBackend()
+    backend.bind_runtime(worker.sleep_mode_backend.runtime)
+    worker.sleep_mode_backend = backend
+    worker.profiler = None
+    worker.weight_transfer_engine = None
+    shutdown = MagicMock()
+    worker.model_runner.shutdown = shutdown
+    monkeypatch.setattr(worker_module, "ensure_kv_transfer_shutdown", MagicMock())
+    monkeypatch.setattr(worker_module, "ensure_ec_transfer_shutdown", MagicMock())
+    worker.shutdown()
+    worker.shutdown()
+    assert backend.state() == "SUSPENDED"
+    with pytest.raises(RuntimeError, match="closed"):
+        backend.resume()
+    assert shutdown.call_count == 2
+
+
+@pytest.mark.parametrize(
+    "has_backend, failing_stage",
+    [(False, stage) for stage in ("profiler", "transfer", "runner")]
+    + [(True, stage) for stage in ("backend", "profiler", "transfer", "runner")],
+)
+def test_worker_shutdown_can_retry_failed_cleanup(worker, monkeypatch, has_backend, failing_stage):
+    from vllm_ascend.worker import worker as worker_module
+
+    backend = MagicMock()
+    worker.sleep_mode_backend = backend if has_backend else None
+    worker.profiler = SimpleNamespace(shutdown=MagicMock())
+    worker.weight_transfer_engine = SimpleNamespace(shutdown=MagicMock())
+    worker.model_runner.shutdown = MagicMock()
+    operations = {
+        "backend": backend.close,
+        "profiler": worker.profiler.shutdown,
+        "transfer": worker.weight_transfer_engine.shutdown,
+        "runner": worker.model_runner.shutdown,
+    }
+    operations[failing_stage].side_effect = [RuntimeError("injected shutdown failure"), None]
+    monkeypatch.setattr(worker_module, "ensure_kv_transfer_shutdown", MagicMock())
+    monkeypatch.setattr(worker_module, "ensure_ec_transfer_shutdown", MagicMock())
+    with pytest.raises(RuntimeError, match="injected shutdown failure"):
+        worker.shutdown()
+    worker.shutdown()
+    assert operations[failing_stage].call_count == 2
+    assert worker.weight_transfer_engine.shutdown.called
+    assert worker.model_runner.shutdown.called
