@@ -26,7 +26,7 @@ from contextvars import ContextVar
 from statistics import NormalDist
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import ConfigDict, TypeAdapter, field_validator, model_validator
+from pydantic import ConfigDict, StrictBool, StrictInt, TypeAdapter, field_validator, model_validator
 from pydantic_core import ArgsKwargs
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
@@ -450,6 +450,39 @@ class QuantizedAllReduceConfig:
             )
 
 
+@config(config=ConfigDict(frozen=True))
+class DSparkExpertPoolConfig:
+    """Opt-in L routing for the single-device DSpark expert-offload path."""
+
+    enabled: StrictBool = False
+    protected_positions: StrictInt | None = None
+    suffix_experts: StrictInt | None = None
+
+    def validate(self, vllm_config: VllmConfig, offload: ExpertOffloadConfig) -> None:
+        if not self.enabled:
+            return
+
+        from vllm_ascend.worker.v2.dspark_expert_pool import (
+            DEVICE_EXPERT_SLOTS,
+            MAX_VERIFY_REQUESTS,
+            NUM_DRAFT_TOKENS,
+            TOP_K,
+            VERIFY_WIDTH,
+        )
+
+        if not offload.enabled or offload.num_device_experts != DEVICE_EXPERT_SLOTS:
+            raise ValueError(f"dspark_expert_pool requires enabled expert offload with {DEVICE_EXPERT_SLOTS} slots")
+        spec = vllm_config.speculative_config
+        if spec is None or spec.method != "dspark" or spec.num_speculative_tokens != NUM_DRAFT_TOKENS:
+            raise ValueError(f"dspark_expert_pool requires DSpark with {NUM_DRAFT_TOKENS} speculative tokens")
+        if not 1 <= vllm_config.scheduler_config.max_num_seqs <= MAX_VERIFY_REQUESTS:
+            raise ValueError(f"dspark_expert_pool requires max_num_seqs in [1, {MAX_VERIFY_REQUESTS}]")
+        if self.protected_positions is None or not 1 <= self.protected_positions <= VERIFY_WIDTH:
+            raise ValueError(f"dspark_expert_pool.protected_positions must be in [1, {VERIFY_WIDTH}]")
+        if self.suffix_experts is None or not 0 <= self.suffix_experts <= TOP_K:
+            raise ValueError(f"dspark_expert_pool.suffix_experts must be in [0, {TOP_K}]")
+
+
 @config
 class AscendConfig:
     """Configuration Object for additional_config from vllm.configs.
@@ -698,6 +731,7 @@ class AscendConfig:
     sparse_kv_offload_config: Any = dataclasses.field(kw_only=True)
     kvpp_config: KVPPConfig = dataclasses.field(default_factory=KVPPConfig, kw_only=True)
     expert_offload_config: ExpertOffloadConfig = dataclasses.field(default_factory=ExpertOffloadConfig)
+    dspark_expert_pool: DSparkExpertPoolConfig = dataclasses.field(default_factory=DSparkExpertPoolConfig)
 
     # ---- derived fields: sentinel default, after-validator overwrites ----
     enable_shared_expert_dp: bool = False
@@ -758,6 +792,7 @@ class AscendConfig:
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
         self.expert_offload_config.validate(vc, self)
+        self.dspark_expert_pool.validate(vc, self.expert_offload_config)
         engram_config = getattr(vc, "engram_config", None)
         if (
             engram_config is not None
