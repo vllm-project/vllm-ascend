@@ -1,14 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
-"""Ascend KV cache planning hooks for vLLM's pluggable config builder.
+"""Ascend KV cache planning rules for vLLM's pluggable config builder.
 
 vLLM plans the KV cache in ``vllm.v1.core.kv_cache_planning`` and resolves the
 planner through ``Platform.get_kv_cache_config_builder_cls`` (see
-``NPUPlatform.get_kv_cache_config_builder_cls``). Ascend-specific grouping and
-pool accounting live here; materialization stays in the patched planning
-functions (see ``patch_kv_cache_utils.py``), which
-``DefaultKVCacheConfigBuilder.get_kv_cache_config_from_groups`` calls with the
-Core-resolved ``num_blocks``.
+``NPUPlatform.get_kv_cache_config_builder_cls``). Ascend-specific grouping,
+pool accounting, and materialization live here, so the planning module itself
+no longer needs a monkey patch for these decisions.
 """
 
 from collections import defaultdict
@@ -18,17 +16,24 @@ from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.core.kv_cache_planning import (
     DefaultKVCacheConfigBuilder,
     _approximate_gcd,
+    may_override_num_blocks,
     unify_hybrid_kv_cache_specs,
 )
+from vllm.v1.core.kv_cache_planning import (
+    get_kv_cache_config_from_groups as _upstream_get_kv_cache_config_from_groups,
+)
 from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
+    KVCacheTensor,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
 )
 
 from vllm_ascend.models.deepseek_v41.cache_config import (
+    get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
     group_cache_specs,
     is_deepseek_v41_cache,
@@ -36,17 +41,25 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
 )
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
+    get_glm5_next_kv_cache_config,
     get_glm5_next_kv_cache_groups,
     get_glm5_next_pool_bytes_per_block,
 )
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
 from vllm_ascend.models.kimi_k3.cache_config import _get_kimi_k3_dspark_mixed_kv_cache_groups
-from vllm_ascend.models.kimi_k3.paired_sfa_cache import paired_sfa_cache_groups, paired_sfa_pool_bytes
+from vllm_ascend.models.kimi_k3.paired_sfa_cache import (
+    paired_sfa_cache_config,
+    paired_sfa_cache_groups,
+    paired_sfa_pool_bytes,
+)
 from vllm_ascend.models.qwen4_exp.cache_config import (
+    get_qwen4_exp_kv_cache_config,
+    get_qwen4_exp_kv_cache_groups,
     get_qwen4_exp_pool_bytes_per_block,
 )
 from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.quantization.methods.kv_cache.turboquant import cache as tq_cache
+from vllm_ascend.utils import vllm_version_is
 
 
 class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
@@ -59,8 +72,9 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
     ) -> list[KVCacheGroupSpec]:
         """Group layers, preferring the Ascend layout when one applies.
 
-        Precedence: Kimi-K3.1, GLM-Next, then DSV4.1 / mixed-page-size shared slots, then
-        the Kimi-K3 DSpark mixed grouping, then vLLM's generic grouping.
+        Precedence: Kimi-K3.1, GLM-Next, Qwen4-Exp MTP, then DSV4.1 /
+        mixed-page-size shared slots, then the Kimi-K3 DSpark mixed grouping,
+        then vLLM's generic grouping.
         """
         if vllm_config.model_config.hf_config.model_type == "kimi_k31":
             return paired_sfa_cache_groups(vllm_config, kv_cache_spec)
@@ -71,6 +85,10 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
 
         if any(is_glm5_next_cache_spec(spec) for spec in kv_cache_spec.values()):
             return get_glm5_next_kv_cache_groups(vllm_config, kv_cache_spec)
+
+        qwen4_exp_groups = get_qwen4_exp_kv_cache_groups(vllm_config, kv_cache_spec, super().get_kv_cache_groups)
+        if qwen4_exp_groups is not None:
+            return qwen4_exp_groups
 
         if is_deepseek_v41_cache(kv_cache_spec):
             return make_cache_groups(group_cache_specs(kv_cache_spec))
@@ -86,6 +104,29 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
             return kimi_k3_groups
 
         return super().get_kv_cache_groups(vllm_config, kv_cache_spec)
+
+    def get_kv_cache_config_from_groups(
+        self,
+        vllm_config: VllmConfig,
+        kv_cache_groups: list[KVCacheGroupSpec],
+        num_blocks: int,
+    ) -> KVCacheConfig:
+        """Materialize the Ascend layouts for exactly ``num_blocks`` blocks.
+
+        The default implementation derives the pool size from a one-block
+        placement, which the shared-slot layouts here violate. Converting the
+        block count with ``_get_pool_bytes_per_block`` reproduces the memory
+        budget the model planners consume exactly, so the cell split, offsets,
+        and page strides stay identical to the block-count-based sizing.
+        """
+        bytes_per_block = self._get_pool_bytes_per_block(vllm_config, kv_cache_groups)
+        if bytes_per_block is None:
+            return super().get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks)
+        return get_ascend_kv_cache_config_from_groups(
+            vllm_config,
+            kv_cache_groups,
+            num_blocks * bytes_per_block,
+        )
 
     def _get_pool_bytes_per_block(
         self,
@@ -318,3 +359,128 @@ def _deepseek_v4_pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -
     """
     page_sizes, _, _, _, num_layer_tuples = _get_deepseek_v4_cache_layout(kv_cache_groups)
     return sum(page_sizes) * num_layer_tuples
+
+
+def _get_kv_cache_config_deepseek_v4_main(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    available_memory: int,
+) -> tuple[int, list[KVCacheTensor]]:
+    if tq_cache.uses_turboquant_groups(kv_cache_groups):
+        return tq_cache.cache_config(vllm_config, kv_cache_groups, available_memory)
+    (
+        page_sizes,
+        bucketed,
+        mtp_layer_names,
+        mtp_page_size,
+        num_tuple_slots,
+    ) = _get_deepseek_v4_cache_layout(kv_cache_groups)
+
+    bytes_per_tuple = sum(page_sizes)
+    num_blocks = available_memory // (bytes_per_tuple * num_tuple_slots)
+    num_blocks = may_override_num_blocks(vllm_config, num_blocks)
+
+    tuple_stride = bytes_per_tuple * num_blocks
+    backing_size = tuple_stride * num_tuple_slots
+
+    # Within every tuple slot, page-size buckets are placed consecutively.
+    page_offsets: dict[int, int] = {}
+    page_prefix = 0
+    for page_size in page_sizes:
+        page_offsets[page_size] = page_prefix * num_blocks
+        page_prefix += page_size
+
+    tensors: list[KVCacheTensor] = []
+
+    # Keep each descriptor inside one cache group. Descriptors from different
+    # groups alias corresponding tuple slots by using identical geometry.
+    for group_buckets in bucketed:
+        for page_size in page_sizes:
+            layer_names = group_buckets.get(page_size)
+            if not layer_names:
+                continue
+
+            tensors.append(
+                KVCacheTensor(
+                    size=backing_size,
+                    layers=list(layer_names),
+                    offset=page_offsets[page_size],
+                    layer_stride=tuple_stride,
+                    block_stride=page_size,
+                )
+            )
+
+    # MTP layers receive trailing tuple slots. Unused page buckets remain
+    # padding so num_blocks and memory accounting retain the existing contract.
+    normal_tuple_slots = num_tuple_slots - len(mtp_layer_names)
+    for index, layer_name in enumerate(mtp_layer_names):
+        slot = normal_tuple_slots + index
+        tensors.append(
+            KVCacheTensor(
+                size=backing_size,
+                layers=[layer_name],
+                offset=slot * tuple_stride + page_offsets[mtp_page_size],
+                layer_stride=0,
+                block_stride=mtp_page_size,
+            )
+        )
+
+    return num_blocks, tensors
+
+
+def get_ascend_kv_cache_config_from_groups(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    available_memory: int,
+) -> KVCacheConfig:
+    """Materialize an Ascend layout from the memory budget Core resolved.
+
+    Attach ``kv_transfer_config`` onto the built config: ``KVCacheConfig`` has
+    no native field, and the PD prefill-producer role read back by the kv-cache
+    coordinator (see ``patch_kv_cache_coordinator.py``) must ride on the config
+    object - the coordinator factory receives ``KVCacheConfig`` but not
+    ``VllmConfig``. The attribute survives the scheduler-side ``copy.deepcopy``
+    in ``generate_scheduler_kv_cache_config`` and is dropped by worker pickle
+    IPC, which never reads it.
+    """
+    qwen_config = (
+        None
+        if vllm_version_is("0.28.0")
+        else get_qwen4_exp_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
+    )
+    if vllm_config.model_config.hf_config.model_type == "kimi_k31":
+        kv_cache_config = paired_sfa_cache_config(vllm_config, kv_cache_groups, available_memory)
+    elif qwen_config is not None:
+        kv_cache_config = qwen_config
+    elif is_deepseek_v41_cache(kv_cache_groups):
+        kv_cache_config = get_deepseek_v41_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
+    elif _get_glm5_next_cache_layout(kv_cache_groups) is not None:
+        kv_cache_config = get_glm5_next_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
+    elif not _is_deepseek_v4_groups(kv_cache_groups):
+        kv_cache_config = _upstream_get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, available_memory)
+    else:
+        num_blocks, kv_cache_tensors = _get_kv_cache_config_deepseek_v4_main(
+            vllm_config,
+            kv_cache_groups,
+            available_memory,
+        )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=kv_cache_tensors,
+            kv_cache_groups=kv_cache_groups,
+            prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
+        )
+    kv_cache_config.kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    if speculative_config is not None and speculative_config.method == "dspark":
+        from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import resident_mla_context_group_ids
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_layout import draft_only_group_ids
+
+        # Upstream scheduler conversion keeps only the first spec in a uniform
+        # group, losing both residency and per-layer draft ownership. Keep the
+        # PD context and external prefix-store classifications separate: a
+        # mixed group needs draft block IDs AND ordinary target hit keys.
+        # Remove these snapshots once upstream preserves per-layer ownership.
+        kv_cache_config.dspark_context_group_ids = resident_mla_context_group_ids(kv_cache_config.kv_cache_groups)
+        kv_cache_config.dspark_draft_only_group_ids = draft_only_group_ids(kv_cache_config.kv_cache_groups)
+    return kv_cache_config

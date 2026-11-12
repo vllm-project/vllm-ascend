@@ -32,6 +32,14 @@ from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 import vllm_ascend.patch.platform.patch_kv_cache_utils as kv_cache_utils_patch
+from vllm_ascend.core import kv_cache_config_builder
+from vllm_ascend.core.kv_cache_config_builder import (
+    AscendKVCacheConfigBuilder,
+    _get_kimi_k3_dspark_mixed_kv_cache_groups,
+    _get_kv_cache_config_deepseek_v4_main,
+    get_ascend_kv_cache_config_from_groups,
+    group_and_unify_kv_cache_specs,
+)
 from vllm_ascend.core.kv_cache_interface import (
     AscendCircularBufferSpec,
     AscendIndexerKPoolTailSpec,
@@ -46,9 +54,6 @@ from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
 )
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _ascend_annotate_eagle_groups,
-    _get_kimi_k3_dspark_mixed_kv_cache_groups,
-    _get_kv_cache_config_deepseek_v4_main,
-    group_and_unify_kv_cache_specs,
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
 
@@ -877,7 +882,7 @@ def test_kimi_k3_gqa_mixed_groups_use_expected_physical_layout(monkeypatch) -> N
     expected_num_blocks = 100
     available_memory = page_size * 29 * expected_num_blocks
     monkeypatch.setattr(
-        "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks",
+        "vllm_ascend.core.kv_cache_config_builder.may_override_num_blocks",
         lambda _config, num_blocks: num_blocks,
     )
 
@@ -985,9 +990,9 @@ def test_deepseek_v4_main_restores_ascend_shared_tuple_planner(monkeypatch) -> N
     )
 
     planner = MagicMock(return_value=(7, [planned_tensor]))
-    monkeypatch.setattr(kv_cache_utils_patch, "_get_kv_cache_config_deepseek_v4_main", planner)
+    monkeypatch.setattr(kv_cache_config_builder, "_get_kv_cache_config_deepseek_v4_main", planner)
 
-    result = kv_cache_utils_patch._ascend_get_kv_cache_config_from_groups(
+    result = get_ascend_kv_cache_config_from_groups(
         vllm_config,
         kv_cache_config.kv_cache_groups,
         available_memory=1 << 30,
@@ -1032,7 +1037,7 @@ def test_deepseek_v4_main_planner_uses_shared_backing_geometry(monkeypatch) -> N
     expected_num_blocks = 7
     available_memory = page_size * expected_num_blocks
     monkeypatch.setattr(
-        "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks",
+        "vllm_ascend.core.kv_cache_config_builder.may_override_num_blocks",
         lambda _config, num_blocks: num_blocks,
     )
 
@@ -1091,15 +1096,20 @@ def test_deepseek_v4_main_rank_replan_preserves_num_blocks() -> None:
             # computing the pool bytes per block.
             get_resolved_kv_cache_layout=lambda: KVCacheLayout.LBHNC,
         ),
+        attention_config=SimpleNamespace(hisparse_config=None),
     )
-    ascend_bytes_per_block = kv_cache_utils_patch._ascend_pool_bytes_per_block(vllm_config, kv_cache_groups)
-    upstream_bytes_per_block = kv_cache_utils_patch._orig_pool_bytes_per_block(vllm_config, kv_cache_groups)
+    builder = AscendKVCacheConfigBuilder()
+    ascend_bytes_per_block = builder._get_pool_bytes_per_block(vllm_config, kv_cache_groups)
+    planning = kv_cache_utils_patch._kv_cache_planning
+    upstream_bytes_per_block = planning._pool_bytes_per_block(vllm_config, kv_cache_groups)
     assert ascend_bytes_per_block != upstream_bytes_per_block
-    live_module = kv_cache_utils_patch._kv_cache_planning
-    assert live_module._pool_bytes_per_block is kv_cache_utils_patch._ascend_pool_bytes_per_block
+    # The builder declares the accounting, so Core reads it instead of probing
+    # a one-block placement, which this shared-slot layout cannot express.
+    probed_bytes_per_block = planning._pool_bytes_per_block_from_builder(builder, vllm_config, kv_cache_groups)
+    assert probed_bytes_per_block == ascend_bytes_per_block
 
     expected_num_blocks = 7
-    replanned_config = kv_cache_utils_patch._ascend_get_kv_cache_config_from_groups(
+    replanned_config = get_ascend_kv_cache_config_from_groups(
         vllm_config,
         kv_cache_groups,
         expected_num_blocks * ascend_bytes_per_block,

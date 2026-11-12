@@ -9,13 +9,14 @@ import pytest
 import torch
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec
 
+from vllm_ascend.core import kv_cache_config_builder
+from vllm_ascend.core.kv_cache_config_builder import AscendKVCacheConfigBuilder
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.models.kimi_k3.paired_sfa_cache import (
     paired_sfa_cache_config,
     paired_sfa_cache_groups,
     paired_sfa_pool_bytes,
 )
-from vllm_ascend.patch.platform import patch_kv_cache_utils
 
 
 def make_specs():
@@ -170,11 +171,13 @@ def test_paired_planner_selection_uses_outer_model_type(monkeypatch, model_type)
     config.model_config.hf_config.model_type = model_type
     paired = Mock(return_value=[])
     upstream = Mock(return_value=[])
-    monkeypatch.setattr(patch_kv_cache_utils, "paired_sfa_cache_groups", paired)
-    monkeypatch.setattr(patch_kv_cache_utils, "_orig_get_kv_cache_groups", upstream)
-    monkeypatch.setattr(patch_kv_cache_utils, "get_qwen4_exp_kv_cache_groups", lambda *_: None)
+    monkeypatch.setattr(kv_cache_config_builder, "paired_sfa_cache_groups", paired)
+    monkeypatch.setattr(kv_cache_config_builder, "get_qwen4_exp_kv_cache_groups", lambda *_: None)
+    monkeypatch.setattr(kv_cache_config_builder, "group_and_unify_kv_cache_specs", lambda *_: None)
+    monkeypatch.setattr(kv_cache_config_builder, "_get_kimi_k3_dspark_mixed_kv_cache_groups", lambda *_: None)
+    monkeypatch.setattr(kv_cache_config_builder.DefaultKVCacheConfigBuilder, "get_kv_cache_groups", upstream)
 
-    actual = patch_kv_cache_utils._get_ascend_kv_cache_groups(config, specs)
+    actual = AscendKVCacheConfigBuilder().get_kv_cache_groups(config, specs)
 
     # The same hybrid cache geometry must not opt unrelated models into K3.1.
     # K3.1's nested text config still reports kimi_linear.

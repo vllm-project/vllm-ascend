@@ -242,7 +242,7 @@ def test_mamba_checkpoint_drop_follows_lookup_policy(
     ],
 )
 def test_kv_cache_config_builder_mounts_kv_transfer_config(monkeypatch, kv_transfer_config):
-    from vllm_ascend.patch.platform import patch_kv_cache_utils as kcu_patch
+    from vllm_ascend.core import kv_cache_config_builder as builder_module
 
     sentinel_config = SimpleNamespace()
     vllm_config = SimpleNamespace(
@@ -250,15 +250,13 @@ def test_kv_cache_config_builder_mounts_kv_transfer_config(monkeypatch, kv_trans
         kv_transfer_config=kv_transfer_config,
     )
     monkeypatch.setattr(
-        kcu_patch,
-        "_orig_get_kv_cache_config_from_groups",
+        builder_module,
+        "_upstream_get_kv_cache_config_from_groups",
         lambda *args, **kwargs: sentinel_config,
     )
-    result = kcu_patch._ascend_get_kv_cache_config_from_groups(vllm_config, [], 0)
-    # The builder replaces the upstream entry point, so the coordinator-side
+    result = builder_module.get_ascend_kv_cache_config_from_groups(vllm_config, [], 0)
+    # The builder owns every config it materializes, so the coordinator-side
     # getattr in __init__ sees the attached role on every real engine path.
-    live_module = kcu_patch._kv_cache_planning
-    assert live_module.get_kv_cache_config_from_groups is kcu_patch._ascend_get_kv_cache_config_from_groups
     assert result is sentinel_config
     assert result.kv_transfer_config is kv_transfer_config
 

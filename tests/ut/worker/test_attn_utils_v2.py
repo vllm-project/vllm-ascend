@@ -44,6 +44,9 @@ from vllm_ascend.attention.dsa_v1 import (
 )
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAImpl, AscendSFAMetadataBuilder
+from vllm_ascend.core.kv_cache_config_builder import (
+    _get_kv_cache_config_deepseek_v4_main,
+)
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
@@ -54,9 +57,6 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware
 from vllm_ascend.models.deepseek_v4 import compressor as deepseek_v4_compressor
 from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
-from vllm_ascend.patch.platform.patch_kv_cache_utils import (
-    _get_kv_cache_config_deepseek_v4_main,
-)
 from vllm_ascend.worker.utils import prepare_ascend_kernel_block_sizes
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2 import model_runner as v2_model_runner
@@ -1006,7 +1006,7 @@ def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
     tuple_stride = (small_spec.page_size_bytes + large_spec.page_size_bytes) * num_blocks
     backing_size = tuple_stride * 2
     monkeypatch.setattr(
-        "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks",
+        "vllm_ascend.core.kv_cache_config_builder.may_override_num_blocks",
         lambda _config, value: value,
     )
     planned_num_blocks, descriptors = _get_kv_cache_config_deepseek_v4_main(

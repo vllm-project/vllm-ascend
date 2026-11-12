@@ -284,17 +284,21 @@
 #
 # ** 10. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.core.kv_cache_planning.get_kv_cache_config_from_groups`,
-#      `..._max_memory_usage_bytes_from_groups`, `..._pool_bytes_per_block`
+#   1. `vllm.v1.core.kv_cache_planning._max_memory_usage_bytes_from_groups`
+#      `..._annotate_eagle_groups`, `vllm.v1.kv_cache_interface.KVCacheConfig.has_mamba_layers`
 #    Why:
-#       Ascend cache layouts need platform-specific materialization and memory
-#       accounting.
+#       Ascend cache layouts keep their own admission accounting, EAGLE draft
+#       group marking, and nested-Mamba detection, none of which has a builder
+#       or platform hook upstream.
 #    How:
-#       Both supported versions select AscendKVCacheConfigBuilder through
-#       NPUPlatform. Its default materialization delegates to the patched
-#       planning functions.
+#       Monkey-patch only the module-level helpers the builder cannot express.
+#       Grouping, pool accounting, and materialization live in
+#       `AscendKVCacheConfigBuilder`, selected through NPUPlatform.
 #    Related PR:
 #       https://github.com/vllm-project/vllm/pull/53558
+#    Future Plan:
+#       Fold the remaining helpers into the builder once upstream exposes hooks
+#       for them.
 #
 # ** 11. File: platform/patch_mamba_block_aligned_split.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

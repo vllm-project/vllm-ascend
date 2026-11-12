@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 # ruff: noqa: E402
-"""Dispatch contract of ``AscendKVCacheConfigBuilder`` (main-only).
+"""Dispatch contract of ``AscendKVCacheConfigBuilder``.
 
-Locks the grouping precedence (GLM-Next, Ascend shared-tuple layouts, Kimi-K3
-DSpark, then vLLM's generic grouping) and the TurboQuant pool accounting: the
-surface most likely to drift between the pluggable builder on main and the
-release-lane monkey patches.
+Locks the grouping precedence (GLM-Next, Qwen4-Exp MTP, Ascend shared-tuple
+layouts, Kimi-K3 DSpark, then vLLM's generic grouping) and the TurboQuant pool
+accounting, all of which now live in the builder rather than in a monkey patch.
 """
 
 from types import SimpleNamespace
@@ -16,7 +15,7 @@ import pytest
 
 pytest.importorskip(
     "vllm.v1.core.kv_cache_config_builder",
-    reason="the pluggable KV cache builder is main-only",
+    reason="the pluggable KV cache builder requires the v0.33.0 lane or newer",
 )
 
 import torch
