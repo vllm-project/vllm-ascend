@@ -55,6 +55,8 @@ PUNCT_CHECKER = "00.正确性/标点符号/scripts/punctuation-checker.py"
 SECURITY_CHECKER = "00.正确性/安全合规/scripts/prescan.py"
 SECURITY_RULES_DIR = "00.正确性/安全合规"
 LINK_CHECKER_DIR = "00.正确性/链接与导航/scripts"
+# 链接检查入口：v5.0 起为纯 Python 实现（上游 2026-11 重构，取代旧 link-checker.js）
+LINK_RUNNER = "run_link_checks.py"
 
 # 打分与报告工具（相对 SKILL_TOOLS_DIR）
 MERGE_SCRIPT = "merge_and_score.py"
@@ -142,10 +144,9 @@ def launch_scripts(doc_path, temp_dir, std_dir, skip_link):
 
     if skip_link:
         print("[run_eval] 已配置跳过链接检查")
-    elif not os.path.isdir(os.path.join(link_dir, "node_modules")):
+    elif not os.path.isfile(os.path.join(link_dir, LINK_RUNNER)):
         print(
-            "[run_eval][warn] link-checker 依赖未安装（node_modules 缺失），"
-            "跳过链接检查；可在 workflow 中执行 npm ci 启用",
+            f"[run_eval][warn] 链接检查脚本缺失（{LINK_RUNNER}），跳过链接检查",
             file=sys.stderr,
         )
     else:
@@ -153,12 +154,14 @@ def launch_scripts(doc_path, temp_dir, std_dir, skip_link):
             procs["link"] = (
                 subprocess.Popen(
                     [
-                        "node",
-                        "link-checker.js",
+                        sys.executable,
+                        os.path.join(link_dir, LINK_RUNNER),
+                        "--document-md",
                         doc_path,
-                        "--all-links",
-                        "--out",
+                        "--dq-out",
                         os.path.join(temp_dir, SCRIPT_JSONS["link"]),
+                        "--profile",
+                        "dq",
                     ],
                     cwd=link_dir,
                     stdout=subprocess.DEVNULL,

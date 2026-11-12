@@ -146,16 +146,20 @@ jobs:
         with:
           python-version: '3.12'
 
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '20'
-
       - name: Install eval deps
         run: |
           python -m pip install --disable-pip-version-check --quiet openpyxl regex
-          LINK_SCRIPTS="$RUNNER_TEMP/skill/skills/01.评估标准/00.正确性/链接与导航/scripts"
-          npm ci --prefix "$LINK_SCRIPTS" \
-            || echo "DOC_EVAL_SKIP_LINK=1" >> "$GITHUB_ENV"
+          # 链接检查器 v5.0 起为纯 Python 实现（run_link_checks.py），依赖 httpx/PyYAML，
+          # 不再需要 node/npm。依赖缺失时降级为跳过链接脚本（LLM 层仍会做链接检查）。
+          LINK_DIR="$RUNNER_TEMP/skill/skills/01.评估标准/00.正确性/链接与导航"
+          if [ -f "$LINK_DIR/requirements.txt" ]; then
+            python -m pip install --disable-pip-version-check --quiet \
+              -r "$LINK_DIR/requirements.txt" \
+              || echo "DOC_EVAL_SKIP_LINK=1" >> "$GITHUB_ENV"
+          else
+            python -m pip install --disable-pip-version-check --quiet httpx PyYAML \
+              || echo "DOC_EVAL_SKIP_LINK=1" >> "$GITHUB_ENV"
+          fi
 
       - name: Run doc evaluation
         id: eval
