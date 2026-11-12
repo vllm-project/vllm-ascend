@@ -1781,6 +1781,36 @@
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
 #
+# ** 36. File: worker/patch_draft_lm_head_quantization.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.spec_decode.eagle.utils.load_eagle_model`, plus
+#      every speculator namespace that binds it by name (upstream eagle/mtp/
+#      multi_module_mtp speculators, vllm-ascend's V2 multi_module_mtp
+#      speculator, and the 310P MTP speculator).
+#    Why:
+#       additional_config draft_lm_head_quantization="w8a8_dynamic" must drive
+#       the upstream quantized-copy mechanism (quantized_lm_head_copy) for the
+#       drafter's shared target lm_head, but the upstream
+#       SpeculativeConfig.draft_lm_head_quantization field is validated at
+#       construction and only accepts the platform formats ("fp8"/"nvfp4"),
+#       so an Ascend format cannot be selected through the CLI field.
+#    How:
+#       Resolve the format from the hardware family (MXFP8 on A5, INT8 on
+#       A2/A3), register the Ascend lm_head schemes under internal "mxfp8"/
+#       "int8" keys in the upstream _LM_HEAD_METHODS table (wrapped in
+#       AscendEmbeddingMethod, the adapter _quantize_copy instantiates
+#       through), and assign the resolved format to the field around the
+#       load_eagle_model call only. Requires Model Runner V2; mutually
+#       exclusive with lm_head_quantization; upstream rejects drafters that
+#       do not share the target lm_head. RL weight updates re-derive the
+#       copy through the upstream _SOURCES registry.
+#    Related PR (if no, explain why):
+#       No upstream PR yet; there is no extension point for platform-specific
+#       draft lm_head quantization formats.
+#    Future Plan:
+#       Remove this patch once the upstream field accepts platform-provided
+#       formats (or equivalent pluggable draft lm_head quant dispatch).
+#
 
 # worker/patch_qwen3_5.py: GDN internal prefill checkpoints.
 # Why: Ascend replaces the upstream GDN forward/backend.
