@@ -20,6 +20,8 @@ def _check_native_dispatch(fake):
     import torch_npu  # noqa: F401
     from torch._subclasses.fake_tensor import FakeTensor, FakeTensorMode
 
+    from vllm_ascend.device.device_config import is_950
+
     # Load the actual library's static registrations without importing the
     # plugin's unrelated Python platform initialization path.
     package = importlib.util.find_spec("vllm_ascend")
@@ -90,7 +92,7 @@ def _check_native_dispatch(fake):
                     indices, scores = outputs[:2]
                     assert indices.shape == (3, 1, 512) and indices.dtype == torch.int32
                     assert scores.shape == ((3, 1, 512) if return_value else (0,))
-                    assert scores.dtype == torch.bfloat16
+                    assert scores.dtype == (torch.bfloat16 if is_950() or not return_value else torch.float32)
                     assert all(output.device.type == device for output in outputs)
                     if fake:
                         assert all(isinstance(output, FakeTensor) for output in outputs)
