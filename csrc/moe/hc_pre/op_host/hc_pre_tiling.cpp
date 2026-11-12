@@ -62,7 +62,6 @@ constexpr int64_t SINKHORN_SETUP_ITER_EQUIVALENT = 4;
 constexpr int64_t SMALL_BS_THRESHOLD = 32;
 constexpr uint64_t MPMD_TILING_KEY = 0;
 constexpr uint64_t ORIGINAL_TILING_KEY = 1;
-constexpr uint64_t PREMIX_TILING_KEY = 2;
 }
 
 ge::graphStatus HcPreTiling::GetPlatformInfo()
@@ -206,10 +205,6 @@ void HcPreTiling::CalcVectorCoreNum()
 
 ge::graphStatus HcPreTiling::CalcMKSplitCoreMembasePart2Tiling()
 {
-    // preMix 场景使用独立的 tilingKey=2 和按行分配策略。
-    if (tilingData_.get_hasPreMix() != 0) {
-        return CalcPremixPart2Tiling();
-    }
     bool useOriginal = bs_ <= SMALL_BS_THRESHOLD;
     if (useOriginal) {
         tilingKey_ = ORIGINAL_TILING_KEY;
@@ -263,7 +258,11 @@ ge::graphStatus HcPreTiling::CalcMKSplitCoreMembasePart2Tiling()
         int64_t mix2Size = rowFactor * hcMult_ * hcMultAlign_ * sizeof(float);
         return mix2OriginSize + combFragSize + base2Size + reduceBufSize + mix2Size;
     };
-    int64_t originalExtraSize = calcOriginalExtraSize(rowOnceLoop);
+    auto calcPreMixSize = [&](int64_t rowFactor) {
+        return tilingData_.get_hasPreMix() != 0 ?
+            rowFactor * hcMultAlign_ * static_cast<int64_t>(sizeof(float)) : 0;
+    };
+    int64_t originalExtraSize = calcOriginalExtraSize(rowOnceLoop) + calcPreMixSize(rowOnceLoop);
 
     int64_t totalSize = mix0OriginSize + mix1OriginSize + mix0Size + mix1Size +
                      squareSumSize + squareReduceSize + rsqrtSize + xSize + ySize + postSize + base0Size + base1Size +
@@ -320,7 +319,7 @@ ge::graphStatus HcPreTiling::CalcMKSplitCoreMembasePart2Tiling()
             rowBrcb0Size = RoundUp(rowFactor_, 8) * BLOCK_SIZE;
             hcBrcb1Size = RoundUp(rowFactor_ * hcMultAlign_, 8) * BLOCK_SIZE;
             maskPatternSize = (rowFactor_ + MASK_PATTERN_DIM_SIZE - 1) * BLOCK_SIZE;
-            originalExtraSize = calcOriginalExtraSize(rowFactor_);
+            originalExtraSize = calcOriginalExtraSize(rowFactor_) + calcPreMixSize(rowFactor_);
             totalSize = mix0OriginSize + mix1OriginSize + mix0Size + mix1Size +
             squareSumSize + squareReduceSize + rsqrtSize +
             xSize + ySize + postSize + base0Size + base1Size + xCastSize + yCastSize +
@@ -345,7 +344,7 @@ ge::graphStatus HcPreTiling::CalcMKSplitCoreMembasePart2Tiling()
             int64_t squareSize = kBlockNum * RoundUp(candidateRow * 16, 16) * sizeof(float) * DOUBLE_BUFFER;
             int64_t squareReduce = candidateRow * SQUARE_SUM_SIZE * sizeof(float);
             int64_t rsqrt = RoundUp(candidateRow, BLOCK_SIZE / sizeof(float)) * sizeof(float);
-            int64_t post = rowFactor_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
+            int64_t post = candidateRow * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
             int64_t rowBrcb = RoundUp(candidateRow, BLOCK_SIZE / sizeof(float)) * BLOCK_SIZE;
             int64_t hcBrcb = RoundUp(candidateRow * hcMultAlign_, BLOCK_SIZE / sizeof(float)) * BLOCK_SIZE;
             int64_t mask = (candidateRow + MASK_PATTERN_DIM_SIZE - 1) * BLOCK_SIZE;
@@ -354,7 +353,8 @@ ge::graphStatus HcPreTiling::CalcMKSplitCoreMembasePart2Tiling()
             int64_t yXCast = rowFactor_ * hcMult_ * RoundUp(dFactor_, 8) * sizeof(float);
             int64_t yYCast = rowFactor_ * RoundUp(dFactor_, 8) * sizeof(float);
             return originSize * 2 + reduceSize * 2 + squareSize + squareReduce + rsqrt +
-                post + base0Size + base1Size + yX + yY + yXCast + yYCast + rowBrcb + hcBrcb + mask;
+                post + base0Size + base1Size + yX + yY + yXCast + yYCast + rowBrcb + hcBrcb + mask +
+                calcPreMixSize(candidateRow);
         };
         prePostRowFactor = 1;
         for (int64_t candidateRow = 1; candidateRow <= rowOfFormerBlock_; candidateRow++) {
@@ -411,140 +411,6 @@ ge::graphStatus HcPreTiling::CalcMKSplitCoreMembasePart2Tiling()
         return ge::GRAPH_SUCCESS;
     }
     return CalcSinkhornTiling();
-}
-
-// preMix 场景的 Part2 tiling：按行分配，UB 预算包含 mix2、combFrag、base2 和 reduceBuf。
-ge::graphStatus HcPreTiling::CalcPremixPart2Tiling()
-{
-    rowOfFormerBlock_ = CeilDiv(bs_, static_cast<int64_t>(aivCoreNum_));
-    usedAivCoreNums_ = std::min(CeilDiv(bs_, rowOfFormerBlock_), static_cast<int64_t>(aivCoreNum_));
-    rowOfTailBlock_ = bs_ - (usedAivCoreNums_ - 1) * rowOfFormerBlock_;
-
-    int64_t minRowPerCore = 1;
-    int64_t rowOnceLoop = std::min(rowOfFormerBlock_, minRowPerCore);
-    int64_t kBlockNum = tilingData_.get_cubeBlockDimK();
-
-    hcMultAlign_ = RoundUp(hcMult_, BLOCK_SIZE / sizeof(float));
-    int64_t mix0OriginSize = kBlockNum * rowOnceLoop * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
-    int64_t mix1OriginSize = kBlockNum * rowOnceLoop * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
-    int64_t mix2OriginSize = kBlockNum * rowOnceLoop * hcMult_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
-    int64_t mix0Size = rowOnceLoop * hcMultAlign_ * sizeof(float);
-    int64_t mix1Size = rowOnceLoop * hcMultAlign_ * sizeof(float);
-    int64_t mix2Size = rowOnceLoop * hcMult_ * hcMultAlign_ * sizeof(float);
-    int64_t squareSumSize = kBlockNum * RoundUp(rowOnceLoop * 16, 16) * sizeof(float) * DOUBLE_BUFFER;
-    int64_t rsqrtSize = RoundUp(rowOnceLoop, BLOCK_SIZE / sizeof(float)) * sizeof(float) * DOUBLE_BUFFER;
-    int64_t xSize = rowOnceLoop * hcMult_ * RoundUp(d_, 16) * 2 * DOUBLE_BUFFER; // x是bfloat16_t 类型
-    int64_t ySize = rowOnceLoop * RoundUp(d_, 16) * 2 * DOUBLE_BUFFER;
-    int64_t postSize = rowOnceLoop * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
-    int64_t combFragSize = rowOnceLoop * hcMult_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
-    int64_t base0Size = hcMultAlign_ * sizeof(float);
-    int64_t base1Size = hcMultAlign_ * sizeof(float);
-    int64_t base2Size = hcMult_ * hcMultAlign_ * sizeof(float);
-    int64_t xCastSize = rowOnceLoop * hcMult_ * RoundUp(d_, 8) * sizeof(float);
-    int64_t yCastSize = rowOnceLoop * RoundUp(d_, 8) * sizeof(float);
-    int64_t rowBrcb0Size = RoundUp(rowOnceLoop, 8) * BLOCK_SIZE;
-    int64_t hcBrcb1Size = RoundUp(rowOnceLoop * hcMultAlign_, 8) * BLOCK_SIZE;
-    int64_t reduceBufSize = rowOnceLoop * hcMultAlign_ * sizeof(float);
-    int64_t maskPatternSize = BLOCK_SIZE * 16;
-
-    int64_t totalSize = mix0OriginSize + mix1OriginSize + mix2OriginSize +
-                     mix0Size + mix1Size + mix2Size + squareSumSize + rsqrtSize +
-                     xSize + ySize + postSize + combFragSize + base0Size + base1Size +
-                     base2Size + xCastSize + yCastSize +
-                     rowBrcb0Size + hcBrcb1Size + reduceBufSize + maskPatternSize;
-    rowFactor_ = rowOnceLoop;
-    if (totalSize <= ubSize_) {
-        // row和d均可以在ub内全载
-        dLoop_ = 1;
-        dFactor_ = d_;
-        tailDFactor_ = dFactor_;
-    } else {
-        int64_t usedUbSize = mix0OriginSize + mix1OriginSize + mix2OriginSize +
-                     mix0Size + mix1Size + mix2Size + squareSumSize + rsqrtSize +
-                     postSize + combFragSize + base0Size + base1Size + base2Size +
-                     rowBrcb0Size + hcBrcb1Size + reduceBufSize + maskPatternSize;
-        int64_t ubRemain = ubSize_ - usedUbSize;
-        dFactor_ = d_;
-        int64_t base = 2;
-        while (1) {
-            dFactor_ = CeilDiv(d_, base);
-            xSize = rowOnceLoop * hcMult_ * RoundUp(dFactor_, 16) * 2 * DOUBLE_BUFFER; // x是bfloat16_t 类型
-            ySize = rowOnceLoop * RoundUp(dFactor_, 16) * 2 * DOUBLE_BUFFER;
-            xCastSize = rowOnceLoop * hcMult_ * RoundUp(dFactor_, 8) * sizeof(float);
-            yCastSize = rowOnceLoop * RoundUp(dFactor_, 8) * sizeof(float);
-            int64_t targetSize = xSize + ySize + xCastSize + yCastSize;
-            if (targetSize <= ubRemain) {
-                break;
-            }
-            base++;
-        }
-        if (dFactor_ > 32) {
-            dFactor_ = DownAlign(dFactor_, 32);
-        }
-        dLoop_ = CeilDiv(d_, dFactor_);
-        tailDFactor_ = d_ % dFactor_ == 0 ? dFactor_ : d_ % dFactor_;
-    }
-
-    // d全载,尝试搬入更多的bs
-    if (dFactor_ == d_) {
-        while (rowFactor_ <= rowOfFormerBlock_) {
-            mix0OriginSize = kBlockNum * rowFactor_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
-            mix1OriginSize = kBlockNum * rowFactor_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
-            mix2OriginSize = kBlockNum * rowFactor_ * hcMult_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
-            mix0Size = rowFactor_ * hcMultAlign_ * sizeof(float);
-            mix1Size = rowFactor_ * hcMultAlign_ * sizeof(float);
-            mix2Size = rowFactor_ * hcMult_ * hcMultAlign_ * sizeof(float);
-            squareSumSize = kBlockNum * RoundUp(rowFactor_ * 16, 16) * sizeof(float) * DOUBLE_BUFFER;
-            rsqrtSize = RoundUp(rowFactor_, BLOCK_SIZE / sizeof(float)) * sizeof(float) * DOUBLE_BUFFER;
-            xSize = rowFactor_ * hcMult_ * RoundUp(d_, 16) * 2 * DOUBLE_BUFFER; // x是bfloat16_t 类型
-            ySize = rowFactor_ * RoundUp(d_, 16) * 2 * DOUBLE_BUFFER;
-            postSize = rowFactor_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
-            combFragSize = rowFactor_ * hcMult_ * hcMultAlign_ * sizeof(float) * DOUBLE_BUFFER;
-            xCastSize = rowFactor_ * hcMult_ * RoundUp(d_, 8) * sizeof(float);
-            yCastSize = rowFactor_ * RoundUp(d_, 8) * sizeof(float);
-            rowBrcb0Size = RoundUp(rowFactor_, 8) * BLOCK_SIZE;
-            hcBrcb1Size = RoundUp(rowFactor_ * hcMultAlign_, 8) * BLOCK_SIZE;
-            reduceBufSize = rowFactor_ * hcMultAlign_ * sizeof(float);
-            maskPatternSize = BLOCK_SIZE;
-            totalSize = mix0OriginSize + mix1OriginSize + mix2OriginSize +
-            mix0Size + mix1Size + mix2Size + squareSumSize + rsqrtSize +
-            xSize + ySize + postSize + combFragSize + base0Size + base1Size +
-            base2Size + xCastSize + yCastSize +
-            rowBrcb0Size + hcBrcb1Size + reduceBufSize + maskPatternSize;
-            if (totalSize > ubSize_) {
-                rowFactor_ = rowFactor_ - 1;
-                break;
-            }
-            rowFactor_ = rowFactor_ + 1;
-        }
-        rowFactor_ = rowFactor_ > rowOfFormerBlock_ ? rowFactor_ - 1 : rowFactor_;
-    }
-    rowLoopOfFormerBlock_ = CeilDiv(rowOfFormerBlock_, rowFactor_);
-    rowLoopOfTailBlock_ = CeilDiv(rowOfTailBlock_, rowFactor_);
-    tailRowFactorOfFormerBlock_ = rowOfFormerBlock_ % rowFactor_ == 0 ? rowFactor_ : rowOfFormerBlock_ % rowFactor_;
-    tailRowFactorOfTailBlock_ = rowOfTailBlock_ % rowFactor_ == 0 ? rowFactor_ : rowOfTailBlock_ % rowFactor_;
-
-    tilingKey_ = PREMIX_TILING_KEY;
-    tilingData_.set_bs(bs_);
-    tilingData_.set_hcMix(hcMix_);
-    tilingData_.set_hcMult(hcMult_);
-    tilingData_.set_d(d_);
-    tilingData_.set_hcMultAlign(hcMultAlign_);
-    tilingData_.set_rowOfFormerBlock(rowOfFormerBlock_);
-    tilingData_.set_rowOfTailBlock(rowOfTailBlock_);
-    tilingData_.set_rowLoopOfFormerBlock(rowLoopOfFormerBlock_);
-    tilingData_.set_rowLoopOfTailBlock(rowLoopOfTailBlock_);
-    tilingData_.set_stage2RowFactor(rowFactor_);
-    tilingData_.set_secondUsedCoreNum(usedAivCoreNums_);
-    tilingData_.set_tailRowFactorOfFormerBlock(tailRowFactorOfFormerBlock_);
-    tilingData_.set_tailRowFactorOfTailBlock(tailRowFactorOfTailBlock_);
-    tilingData_.set_dLoop(dLoop_);
-    tilingData_.set_dFactor(dFactor_);
-    tilingData_.set_tailDFactor(tailDFactor_);
-    tilingData_.set_iterTimes(iterTimes_);
-    tilingData_.set_hcEps(hcEps_);
-    tilingData_.set_normEps(normEps_);
-    return ge::GRAPH_SUCCESS;
 }
 
 ge::graphStatus HcPreTiling::CalcSinkhornTiling()
@@ -693,8 +559,7 @@ ge::graphStatus HcPreTiling::GetWorkspaceSize()
 
     uint64_t requiredSize = workspaceSize1 + workspaceSize2 + squareSumSize + 16 * 1024 * 1024; // 16MB 预留缓冲
 
-    uint64_t defaultSize = 16 * 1024 * 1024 + 192 * 1024 * 1024; // 208MB
-    workspaceSize_ = requiredSize > defaultSize ? requiredSize : defaultSize;
+    workspaceSize_ = requiredSize;
 
     return ge::GRAPH_SUCCESS;
 }

@@ -21,6 +21,7 @@ enable_custom_op()
 HC_MULT = 4
 DSV4_FLASH_HIDDEN_SIZE = 4096
 HIDDEN_SIZE = DSV4_FLASH_HIDDEN_SIZE
+SECOND_HIDDEN_SIZE = 5120
 EXTENDED_HIDDEN_SIZE = 7168
 MIX_HC = 24
 HC_SINKHORN_ITERS = 20
@@ -193,26 +194,38 @@ def test_npu_hc_pre_v2_bf16_extended_hidden_size():
 
 
 @torch.inference_mode()
-def test_npu_hc_pre_v3_uses_external_pre_mix():
-    shape = (2, HC_MULT, HIDDEN_SIZE)
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (2, HC_MULT, HIDDEN_SIZE),
+        (32, HC_MULT, HIDDEN_SIZE),
+        (33, HC_MULT, SECOND_HIDDEN_SIZE),
+        (80, HC_MULT, SECOND_HIDDEN_SIZE),
+        (96, HC_MULT, SECOND_HIDDEN_SIZE),
+        (129, HC_MULT, EXTENDED_HIDDEN_SIZE),
+        (1, 33, HC_MULT, HIDDEN_SIZE),
+    ],
+)
+@pytest.mark.parametrize("use_pre_mix", [False, True])
+def test_npu_hc_pre_v3_matches_reference(shape: tuple[int, ...], use_pre_mix: bool):
     x, hc_fn, hc_scale, hc_base = _make_hc_pre_inputs(shape)
-    pre_mix = torch.rand(shape[:-1], dtype=torch.float32)
+    pre_mix = torch.rand(shape[:-1], dtype=torch.float32) if use_pre_mix else None
     expected_y, expected_post, expected_comb_frag, expected_pre = _hc_pre_cpu(x, hc_fn, hc_scale, hc_base, pre_mix)
     y, post, comb_frag, pre = torch.ops._C_ascend.npu_hc_pre_v3(
         x.npu(),
         hc_fn.npu(),
         hc_scale.npu(),
         hc_base.npu(),
-        pre_mix.npu(),
+        pre_mix.npu() if pre_mix is not None else None,
         hc_mult=HC_MULT,
         hc_sinkhorn_iters=HC_SINKHORN_ITERS,
         norm_eps=NORM_EPS,
         hc_eps=HC_EPS,
     )
-    assert y.shape == (shape[0], shape[-1])
-    assert post.shape == (shape[0], HC_MULT)
-    assert comb_frag.shape == (shape[0], HC_MULT, HC_MULT)
-    assert pre.shape == (shape[0], HC_MULT)
+    assert y.shape == (*shape[:-2], shape[-1])
+    assert post.shape == shape[:-1]
+    assert comb_frag.shape == (*shape[:-1], HC_MULT)
+    assert pre.shape == shape[:-1]
     assert y.dtype == torch.bfloat16
     assert post.dtype == torch.float32
     assert comb_frag.dtype == torch.float32
@@ -254,7 +267,6 @@ def test_npu_hc_pre_v3_uses_external_pre_mix():
 # identical, and assert bitwise (torch.equal) equality of every output row
 # with row 0.
 
-SECOND_HIDDEN_SIZE = 5120
 # Crosses SMALL_BS_THRESHOLD (bs <= 32 hits the ProcessOriginal copy) and tile edges.
 TOKEN_COUNT_SWEEP = (1, 3, 8, 16, 32, 33, 65, 128, 129)
 SINKHORN_ITERS_SWEEP = (1, 2, 4, 20)
