@@ -130,9 +130,11 @@ def enable_batch_invariant_mode():
         HAS_ASCENDC_BATCH_INVARIANT,
     )
 
+    # patch npu_add_rms_norm to ensure batch invariance.
+    torch_npu.npu_add_rms_norm = add_rms_norm
+
     # Register operators only implemented in triton.
     if HAS_TRITON:
-        logger.info("Triton is available, enabling batch-invariant ops.")
         _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, "NPU")
         _batch_invariant_LIB.impl("aten::bmm", bmm_batch_invariant, "NPU")
         _batch_invariant_LIB.impl("aten::softmax", softmax_batch_invariant, "NPU")
@@ -140,7 +142,6 @@ def enable_batch_invariant_mode():
 
     # Register operators implemented in Ascend batch-invariant ops in priority.
     if HAS_ASCENDC_BATCH_INVARIANT:
-        logger.info("AscendC batch-invariant ops is available, enabling batch-invariant ops.")
         _batch_invariant_LIB.impl("aten::mm", torch.ops.batch_invariant_ops.npu_mm_batch_invariant, "NPU")
         _batch_invariant_LIB.impl("aten::matmul", torch.ops.batch_invariant_ops.npu_matmul_batch_invariant, "NPU")
         # torch_npu.npu_fused_infer_attention_score is a function of torch_npu, not a torch.ops.Operator,
@@ -155,17 +156,12 @@ def enable_batch_invariant_mode():
 
     # register triton implementations if ascendc is not available.
     elif HAS_TRITON:
-        logger.info("AscendC batch-invariant ops is not available, enabling triton batch-invariant ops.")
         _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, "NPU")
         _batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant, "NPU")
 
         # linear call matmul internally, so register linear only when ascendc
         # is not available. it will get better performance with ascendc.
         _batch_invariant_LIB.impl("aten::linear", linear_batch_invariant, "NPU")
-
-    if HAS_TRITON or HAS_ASCENDC_BATCH_INVARIANT:
-        # The add + RMSNorm decomposition only needs torch_npu.
-        torch_npu.npu_add_rms_norm = add_rms_norm
 
 
 def init_batch_invariance():

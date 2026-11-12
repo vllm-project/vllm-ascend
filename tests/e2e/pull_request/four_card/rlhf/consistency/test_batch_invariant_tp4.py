@@ -41,7 +41,6 @@ SMALL_QWEN3_OVERRIDES = {
 def enable_batch_invariant_mode(monkeypatch: pytest.MonkeyPatch):
     """Automatically enable batch invariant kernel overrides for all tests."""
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
-    monkeypatch.setenv("VLLM_LOGGING_LEVEL", "INFO")
 
 
 def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
