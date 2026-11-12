@@ -53,6 +53,7 @@ jobs:
       command: ${{ steps.resolve.outputs.command }}
       presmoke_image: ${{ steps.resolve.outputs.presmoke_image }}
       pr_number: ${{ steps.resolve.outputs.pr_number }}
+      dockerfile_ref: ${{ steps.resolve.outputs.dockerfile_ref }}
       download_path: ${{ steps.resolve.outputs.download_path }}
       blocked: ${{ steps.block_window.outputs.blocked }}
       vllm_ref: ${{ steps.resolve.outputs.vllm_ref }}
@@ -226,6 +227,7 @@ jobs:
           fi
 
           BRANCH="main"
+          BRANCH_EXPLICIT="false"
           VLLM_REF=""
           TEST_CASES=""
           AOP_ENABLED="false"
@@ -271,6 +273,7 @@ jobs:
 
             if [ "$NEXT_IS_BRANCH" = "1" ]; then
               BRANCH="$WORD"
+              BRANCH_EXPLICIT="true"
               NEXT_IS_BRANCH=0
             elif [ "$NEXT_IS_DOWNLOAD" = "1" ]; then
               DOWNLOAD_PATH="$WORD"
@@ -462,6 +465,18 @@ jobs:
           echo "vllm_ascend_ref=$PR_SHA" >> "$GITHUB_OUTPUT"
           echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
 
+          # /presmoke without an explicit --branch builds the isolated image from the
+          # Dockerfile submitted in the PR, so the CANN and dependency versions under
+          # test are the ones being reviewed. The Dockerfile is taken from the PR head
+          # ref ('pre-merge') and overlaid on the branch that is built, which keeps the
+          # branch and therefore the published tag (nightly-main-presmoke[-<chip>])
+          # unchanged. An explicit --branch wins and uses that branch's Dockerfile.
+          DOCKERFILE_REF=""
+          if [ "$COMMAND" = "presmoke" ] && [ "$BRANCH_EXPLICIT" != "true" ]; then
+            DOCKERFILE_REF="refs/pull/$PR_NUMBER/head"
+          fi
+          echo "dockerfile_ref=$DOCKERFILE_REF" >> "$GITHUB_OUTPUT"
+
           if [ "$TEST_CASES" = "all" ]; then
             if [ "$IS_A3_560T" = "true" ]; then
               {
@@ -528,7 +543,9 @@ jobs:
           # image, so both flags map to the a3 chip. build_type=release keeps the
           # images in the CI repositories (never atlas_inference) and skip_sync keeps
           # them out of quay.io; the -presmoke repo/tag suffix isolates them from the
-          # standard nightly images.
+          # standard nightly images. dockerfile_ref carries the Dockerfile of the
+          # triggering PR (empty when an explicit --branch was given) so the isolated
+          # image is built with the versions under review.
           CHIPS='[]'
           for CHIP in a2 a3 310p a5; do
             case "$CHIP" in
@@ -541,10 +558,18 @@ jobs:
               CHIPS=$(jq -c --arg chip "$CHIP" '. + [$chip]' <<< "$CHIPS")
             fi
           done
+          # Only forward dockerfile_ref when set: gh would turn an empty -f value
+          # into 'true', which is not a valid ref.
+          DOCKERFILE_REF='${{ needs.authorize.outputs.dockerfile_ref }}'
+          DOCKERFILE_REF_ARGS=()
+          if [ -n "$DOCKERFILE_REF" ]; then
+            DOCKERFILE_REF_ARGS=(-f "dockerfile_ref=$DOCKERFILE_REF")
+          fi
           gh workflow run schedule_nightly_image_build_with_base.yaml \
             --repo "$REPO" \
             --ref main \
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
+            "${DOCKERFILE_REF_ARGS[@]}" \
             -f chips="$CHIPS" \
             -f build_type='release' \
             -f image_repo_suffix='-presmoke' \
@@ -554,7 +579,7 @@ jobs:
           PRESMOKE_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_image_build_with_base.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
           echo "presmoke_run_id=$PRESMOKE_RUN_ID" >> "$GITHUB_OUTPUT"
-          echo "Dispatched presmoke image build for chips=$CHIPS, branch='${{ needs.authorize.outputs.branch }}'"
+          echo "Dispatched presmoke image build for chips=$CHIPS, branch='${{ needs.authorize.outputs.branch }}', dockerfile_ref='${{ needs.authorize.outputs.dockerfile_ref }}'"
 
   dispatch-a2:
     name: Trigger Nightly-A2
