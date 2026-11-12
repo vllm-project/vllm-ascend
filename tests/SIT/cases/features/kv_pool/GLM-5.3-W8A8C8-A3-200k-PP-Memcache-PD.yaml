@@ -11,18 +11,17 @@ routing:
     decoder: [2, 3]
 
 kv_pool:
-  type: "memcache"
-  meta_service_port: 5002
-  config_store_port: 6002
+  type: memcache
+  meta_service_port: 5000
+  config_store_port: 6000
   config:
     meta:
-      ock.mmc.meta_service.metrics_url: "http://${MASTER_IP}:8002"
-      ock.mmc.log_level: "info"
+      ock.mmc.log_level: info
     local:
-      ock.mmc.log_level: "info"
+      ock.mmc.log_level: info
       ock.mmc.local_service.world_size: 256
-      ock.mmc.local_service.protocol: "device_sdma"
-      ock.mmc.local_service.dram.size: "5GB"
+      ock.mmc.local_service.protocol: device_sdma
+      ock.mmc.local_service.dram.size: 10GB
 
 config:
   - node_index: 0
