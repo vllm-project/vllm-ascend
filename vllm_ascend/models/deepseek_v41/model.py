@@ -1747,7 +1747,7 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         engram_query_start_loc=None,
         engram_valid_token_count=None,
     ):
-        model_forward = self.model
+        model_forward: Callable[..., Any] = self.model
         replay = self.model.decoder_replay_layers
         if replay is not None and replay.context_factory is not None:
             # prepare() activates this context only for an eager replay batch,
