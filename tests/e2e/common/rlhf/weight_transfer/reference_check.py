@@ -8,6 +8,8 @@ import json
 import struct
 import zlib
 from contextlib import contextmanager
+from io import BytesIO
+from PIL import Image
 
 from vllm.utils.network_utils import get_open_port
 
@@ -186,29 +188,19 @@ IMAGE_PROMPT = "Describe the colors of this image in one short sentence."
 
 
 def _quadrant_png_data_url(size: int = 384) -> str:
-    """A deterministic four-colour PNG, built without an image library.
-
-    ``size`` is the model's ``vision_min_pixels`` side (384 x 384), so the
-    processor does not have to resize the input; a hard-coded blob would be
-    opaque to review, while this is four bytes of code per pixel and compresses
-    to a few KB.
+    """``size`` is the model's ``vision_min_pixels`` side (384 x 384), so the
+    processor does not have to resize the input
     """
-    rows = bytearray()
     half = size // 2
-    for y in range(size):
-        rows.append(0)  # PNG filter type 0 (None) for this scanline
-        top = y < half
-        for x in range(size):
-            rows += bytes((0 if x < half else 255, 0 if top else 255, 128))
+    image = Image.new("RGB", (size, size), (0, 0, 128))
+    image.paste((255, 0, 128), (half, 0, size, half))
+    image.paste((0, 255, 128), (0, half, half, size))
+    image.paste((255, 255, 128), (half, half, size, size))
 
-    def chunk(tag: bytes, payload: bytes) -> bytes:
-        return struct.pack(">I", len(payload)) + tag + payload + struct.pack(">I", zlib.crc32(tag + payload))
-
-    header = struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0)
-    png = (
-        b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(bytes(rows))) + chunk(b"IEND", b"")
-    )
-    return "data:image/png;base64," + base64.b64encode(png).decode()
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
 
 
 IMAGE_DATA_URL = _quadrant_png_data_url()
