@@ -137,14 +137,13 @@ class FixedRandomWeightSource(WeightSource):
                 else [(expert_name, expert_shape)]
             )
         ]
-        # Include persistent checkpoint buffers (e.g. FP32 router correction
-        # bias), plus integer tables even when HF marks them non-persistent.
-        # Runtime-only floating/complex buffers such as RoPE tables stay out.
+        # Include persistent checkpoint state in BF16, while integer tables
+        # retain their dtype even when HF marks them non-persistent.
         parameters += [
             (
                 self._apply_name_map(self._checkpoint_name(name, case), case),
                 tuple(buffer.shape),
-                buffer.dtype,
+                torch.bfloat16 if buffer.dtype.is_floating_point else buffer.dtype,
             )
             for name, buffer in meta_model.named_buffers()
             if name in persistent_state_names or (not buffer.dtype.is_floating_point and not buffer.dtype.is_complex)

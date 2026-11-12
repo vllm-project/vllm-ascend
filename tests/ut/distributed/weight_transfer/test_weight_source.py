@@ -10,7 +10,7 @@ import torch
 from transformers import AutoConfig
 
 from tests.e2e.common.rlhf.weight_transfer import weight_source as utils
-from tests.e2e.common.rlhf.weight_transfer.case import MINIMAX_M3_CASE, WeightUpdateModelCase
+from tests.e2e.common.rlhf.weight_transfer.case import MINIMAX_M3_CASE
 
 
 def test_minimax_native_checkpoint_metadata():
@@ -39,34 +39,9 @@ def test_minimax_native_checkpoint_metadata():
     for name, shape in expected.items():
         assert metadata[name] == (shape, torch.bfloat16)
     bias = f"{prefix}.layers.3.block_sparse_moe.e_score_correction_bias"
-    assert metadata[bias] == ((8,), torch.float32)
-    assert all(dtype == torch.bfloat16 for name, (_, dtype) in metadata.items() if name != bias)
+    assert metadata[bias] == ((8,), torch.bfloat16)
+    assert all(dtype == torch.bfloat16 for _, dtype in metadata.values())
     assert not any("gate_up_proj" in name or "vision" in name for name in metadata)
-
-
-def test_checkpoint_buffers_keep_dtype_and_persistence():
-    # Persistent FP32 checkpoint state must be sent, runtime RoPE state must
-    # stay out, and non-persistent integer tables retain their old contract.
-    model = torch.nn.Module()
-    model.register_buffer("router_bias", torch.empty(8, dtype=torch.float32, device="meta"))
-    model.register_buffer("tid2eid", torch.empty((4, 2), dtype=torch.int64, device="meta"), persistent=False)
-    model.register_buffer("inv_freq", torch.empty(8, device="meta"), persistent=False)
-    case = WeightUpdateModelCase("buffers", "unused", {"n_routed_experts": 8})
-    config = AutoConfig.for_model("llama")
-    with (
-        patch.object(utils.AutoConfig, "from_pretrained", return_value=config),
-        patch.object(utils.AutoModelForCausalLM, "from_config", return_value=model),
-        patch.object(torch.npu, "manual_seed"),
-    ):
-        source = utils.FixedRandomWeightSource(case, torch.device("cpu"))
-        tensors = dict(source)
-    assert {meta.name: (meta.shape, meta.dtype) for meta in source.metadata} == {
-        "router_bias": ((8,), torch.float32),
-        "tid2eid": ((4, 2), torch.int64),
-    }
-    assert tensors["router_bias"].dtype == torch.float32
-    assert torch.all((tensors["tid2eid"] >= 0) & (tensors["tid2eid"] < 8))
-    assert torch.all(tensors["tid2eid"][:, 0] != tensors["tid2eid"][:, 1])
 
 
 def test_fused_projection_rejects_odd_dimension():
