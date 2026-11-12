@@ -5,12 +5,10 @@
 
 import base64
 import json
-import struct
-import zlib
 from contextlib import contextmanager
 from io import BytesIO
-from PIL import Image
 
+from PIL import Image
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.common.rlhf.common import rlhf_server, wait_for_free_device_memory
