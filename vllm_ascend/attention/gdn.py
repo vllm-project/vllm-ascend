@@ -38,6 +38,10 @@ from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # typ
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
+from vllm_ascend.attention.gdn_attn_builder import (
+    AscendGDNFusedAttentionBackend,
+    GDNSpecCausalConv1dMetadata,
+)
 from vllm_ascend.attention.gdn_recoverssm_metadata import AscendGDNRecoverSSMAttentionBackend
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
@@ -46,15 +50,11 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
-from vllm_ascend.attention.gdn_attn_builder import (
-    AscendGDNFusedAttentionBackend,
-    GDNSpecCausalConv1dMetadata,
-)
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.gdn.recoverssm_gdn import gdn_recoverssm_verify
-from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_update_varlen, extract_last_width
+from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 from vllm_ascend.ops.triton.mamba.state_index import gather_ssm_states, scatter_ssm_states_
 from vllm_ascend.utils import vllm_version_is
 

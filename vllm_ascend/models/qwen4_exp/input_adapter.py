@@ -39,14 +39,10 @@ class Qwen4ExpPreparedInputAdapter:
 
     def __init__(self, model: torch.nn.Module) -> None:
         self._layers = tuple(
-            module
-            for module in model.modules()
-            if module.__class__.__name__ == "AscendQwen4ExpQSAAttention"
+            module for module in model.modules() if module.__class__.__name__ == "AscendQwen4ExpQSAAttention"
         )
         self._rope_buffers: dict[tuple[int, tuple[int, ...], torch.dtype, torch.device], torch.Tensor] = {}
-        self._metadata_buffers: dict[
-            tuple[object, ...], torch.Tensor
-        ] = {}
+        self._metadata_buffers: dict[tuple[object, ...], torch.Tensor] = {}
         self._prepare_gbsa_enabled = os.getenv("VLLM_ASCEND_QWEN4_PREPARE_GBSA", "1") != "0"
         self._prepare_lightning_enabled = os.getenv("VLLM_ASCEND_QWEN4_PREPARE_LIGHTNING", "1") != "0"
         self._prepare_rope_enabled = os.getenv("VLLM_ASCEND_QWEN4_PREPARE_ROPE", "1") != "0"

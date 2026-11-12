@@ -2290,10 +2290,7 @@ class MooncakeConnectorWorker:
         """Keep only the matching P stage for a pipeline-parallel D worker."""
         if self.kv_role != "kv_consumer" or self._decode_pp_size <= 1:
             return ranks_by_decode_tp
-        return [
-            [rank for rank in ranks if rank // prefill_tp_size == self.pp_rank]
-            for ranks in ranks_by_decode_tp
-        ]
+        return [[rank for rank in ranks if rank // prefill_tp_size == self.pp_rank] for ranks in ranks_by_decode_tp]
 
     @staticmethod
     def _serialize_kv_group_spec(
