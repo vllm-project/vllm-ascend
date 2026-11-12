@@ -109,6 +109,33 @@ def _run_gdn_forward(
     return model(hidden_states)
 
 
+def test_head_sharded_gdn_projects_global_tokens_and_returns_local_rows():
+    model = _GDNForwardWrapper()
+    model.out_proj.pcp_group = object()
+    global_hidden = torch.arange(8, dtype=torch.float32).view(4, 2)
+    local_hidden = global_hidden[[0, 3]]
+    context = SimpleNamespace(
+        gather_tokens=Mock(return_value=global_hidden),
+        scatter_tokens=lambda output: output[[0, 3]],
+    )
+    metadata = {model.prefix: SimpleNamespace(pcp_context=context)}
+    output = torch.empty_like(local_hidden)
+
+    def core(qkv, b, a, out, prefix, use_aiter):
+        torch.testing.assert_close(qkv, global_hidden)
+        out.copy_(qkv.view_as(out) + 1)
+
+    with (
+        patch("vllm_ascend.ops.gdn.get_forward_context", return_value=SimpleNamespace(attn_metadata=metadata)),
+        patch.object(torch.ops.vllm, "qwen_gdn_attention_core", side_effect=core),
+    ):
+        result = model(local_hidden, output)
+
+    context.gather_tokens.assert_called_once_with(local_hidden)
+    torch.testing.assert_close(result, local_hidden + 1)
+    torch.testing.assert_close(output, result)
+
+
 def _make_prefill_metadata(device: torch.device | str = "cpu") -> GDNAttentionMetadata:
     metadata = GDNAttentionMetadata(
         num_prefills=1,

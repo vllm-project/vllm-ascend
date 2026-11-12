@@ -24,6 +24,11 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 from vllm.logger import logger
+from vllm.models.qwen4_exp.amd.ple_layer import Qwen4ExpPLELayer
+from vllm.v1.attention.backends.short_conv_attn import (
+    PleShortConvAttentionBackend,
+    PleShortConvAttentionMetadataBuilder,
+)
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 from vllm_ascend.attention.utils import wait_for_kv_layer_from_connector
@@ -292,19 +297,52 @@ def _wrap_ple_short_conv(original: Callable[..., Any]) -> Callable[..., Any]:
                         f"expect at least {state_capacity}."
                     )
                 conv_state = conv_state[:, -state_capacity:, :]
+            pcp_context = getattr(layer_attn_metadata, "pcp_context", None)
+            conv_inputs = inputs
+            conv_residual = residual
+            if pcp_context is not None:
+                conv_inputs = pcp_context.gather_tokens(inputs)
+                conv_residual = torch.zeros_like(conv_inputs)
             self._short_conv_dilated_dispatch(
-                inputs=inputs,
-                residual=residual,
-                outer_residual=outer_residual,
+                inputs=conv_inputs,
+                residual=conv_residual,
+                outer_residual=outer_residual if pcp_context is None else None,
                 metadata=layer_attn_metadata,
                 conv_state=conv_state,
                 conv_weights=conv_weights.to(dtype=inputs.dtype),
             )
+            if pcp_context is not None:
+                residual.add_(pcp_context.scatter_tokens(conv_residual))
+                if outer_residual is not None:
+                    residual.add_(outer_residual)
             return None
         finally:
             _set_allow_internal_format(previous)
 
     return wrapped
+
+
+class AscendPCPPLEMetadataBuilder(PleShortConvAttentionMetadataBuilder):
+    def build(self, common_prefix_len, common_attn_metadata, **kwargs):
+        metadata = super().build(common_prefix_len, common_attn_metadata, **kwargs)
+        context = common_attn_metadata.pcp_context
+        metadata.pcp_context = context if context is not None and context.local_token_indices is not None else None
+        return metadata
+
+
+class AscendPCPPLEBackend(PleShortConvAttentionBackend):
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        return True
+
+    @staticmethod
+    def get_builder_cls() -> type[AscendPCPPLEMetadataBuilder]:
+        return AscendPCPPLEMetadataBuilder
+
+
+class AscendPCPPLELayer(Qwen4ExpPLELayer):
+    def get_attn_backend(self) -> type[AscendPCPPLEBackend]:
+        return AscendPCPPLEBackend
 
 
 def _patch_legacy_prefill(ple_layer_cls: type[Any]) -> None:
