@@ -471,14 +471,14 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         del common_prefix_len, fast_build
         metadata = self._build_metadata(common_attn_metadata, graph_capture)
         metadata.indexer_row_shard = self._build_indexer_row_shard(common_attn_metadata, graph_capture)
-        # Query compaction uses global rows; TP row sharding owns its local scoring layout.
         prefilling = getattr(common_attn_metadata, "is_prefilling", None)
+        # Query compaction uses global rows; TP row sharding owns its local scoring layout.
         # MTP decode capture can call the ordinary builder with runtime mode NONE.
         if (
             plan_queries
+            and metadata.indexer_row_shard is None
             and self.plan_prefill_queries
             and self.pcp_size == 1
-            and metadata.indexer_row_shard is None
             and not graph_capture
             and getattr(common_attn_metadata, "graph_pad_size", -1) == -1
             and common_attn_metadata.num_reqs > 0
@@ -1198,12 +1198,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             mask_mode=3,
         )
         output = self._pack_keypool_indices(
-            indices,
-            scoring,
-            self.topk_tokens,
-            self.index_kpool,
-            output_buffer,
-            query_plan=query_plan,
+            indices, scoring, self.topk_tokens, self.index_kpool, output_buffer, query_plan=query_plan
         )
         if row_shard is not None and self.topk_indices_buffer is not None:
             _exchange_row_shard_topk(self.topk_indices_buffer, row_shard, output_width)
