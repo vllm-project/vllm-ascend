@@ -68,6 +68,23 @@ class AscendPCPAttentionContext:
     # Padded tensor width consumed by each rank's model forward.
     local_num_tokens: int | None = None
 
+    def gather_tokens(self, tokens: torch.Tensor) -> torch.Tensor:
+        """Restore the current step's real tokens in global request order."""
+        if tokens.shape[0] != self.local_num_tokens:
+            raise ValueError("PCP gather input must include the rank-local padding")
+        gathered = get_pcp_group().all_gather(tokens.contiguous(), dim=0)
+        return gathered.index_select(0, self.hidden_restore_idx[: self.global_batch.num_tokens])
+
+    def scatter_tokens(self, tokens: torch.Tensor) -> torch.Tensor:
+        """Return global results in padded rank-local model order."""
+        assert self.local_token_indices is not None and self.local_num_tokens is not None
+        local = tokens.index_select(0, self.local_token_indices)
+        if local.shape[0] == self.local_num_tokens:
+            return local
+        padded = tokens.new_zeros((self.local_num_tokens, *tokens.shape[1:]))
+        padded[: local.shape[0]].copy_(local)
+        return padded
+
 
 class AscendPCPManager(PCPManager):
     """PCP manager that refreshes Ascend-only local-batch metadata."""
