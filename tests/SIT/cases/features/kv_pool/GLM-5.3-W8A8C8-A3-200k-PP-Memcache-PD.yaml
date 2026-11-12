@@ -74,6 +74,7 @@ env_common: &env_common
   ACL_OP_INIT_MODE: "1"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
   SERVER_PORT: "${PORT}"
+  VLLM_USE_MODELSCOPE: "true"
 
 env_prefill: &env_prefill
   <<: *env_common
