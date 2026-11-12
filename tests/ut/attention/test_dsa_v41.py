@@ -269,12 +269,12 @@ def test_a3_deferred_metadata_uses_persistent_inputs_after_scope(monkeypatch, in
     tasks[0].run()
     if in_graph or num_actual_tokens:
         assert len(calls) == 1
-        assert calls[0]["max_seqlen_q"] == (-1 if in_graph else 2)
+        assert calls[0]["max_seqlen_q"] == (0 if in_graph else 2)
         if kind == "index_k":
-            assert calls[0]["max_seqlen_k"] == (-1 if in_graph else 4)
+            assert calls[0]["max_seqlen_k"] == (0 if in_graph else 4)
         else:
-            assert calls[0]["max_seqlen_ori_kv"] == (-1 if in_graph else 8)
-            assert calls[0]["max_seqlen_cmp_kv"] == (0 if kind == "swa" else -1 if in_graph else 4)
+            assert calls[0]["max_seqlen_ori_kv"] == (0 if in_graph else 8)
+            assert calls[0]["max_seqlen_cmp_kv"] == (0 if kind == "swa" or in_graph else 4)
         torch.testing.assert_close(buffer, torch.full_like(buffer, 8 if kind == "index_k" else 16))
     else:
         assert not calls

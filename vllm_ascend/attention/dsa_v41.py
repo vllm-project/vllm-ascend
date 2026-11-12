@@ -964,11 +964,10 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         return self.build(0, common_attn_metadata)
 
     def prepare_source_rope(self) -> None:
-        """Validate and cache V4.1 source RoPE tables without async tasks.
+        """Validate and cache source RoPE without changing producer ownership.
 
-        MRV2 keeps metadata tasks synchronous (``_publish_task`` runs them
-        inline), so this must NOT flip ``_device_metadata_enabled`` — only
-        ``enable_device_metadata`` may turn the async task switch on.
+        Only ``enable_device_metadata`` enables deferred target tasks. Preparing
+        RoPE alone must leave the independent draft builders synchronous.
         """
         if self._build_compressor_metadata and self._cache_kind == "compressor_state":
             source_rope = get_full_cos_and_sin_dsa_for_layer(self._c2_rope_layer_names[0])
@@ -1556,6 +1555,8 @@ class AscendDSAV41AttentionMetadataBuilder(AscendDSAV41MetadataBuilder):
                 if req.num_actual_tokens == 0 and not metadata_in_graph:
                     self._smla_metadata.zero_()
                     return
+                # A3 requires nonnegative maxima. TND/PA reads the actual
+                # lengths from device tensors, including after graph replay.
                 value = torch.ops._C_ascend.npu_sparse_flash_mla_metadata(
                     n_local_heads,
                     1,
@@ -1565,9 +1566,9 @@ class AscendDSAV41AttentionMetadataBuilder(AscendDSAV41MetadataBuilder):
                     seqused_cmp_kv=cmp_seq_lens,
                     cmp_residual_kv=cmp_residual,
                     batch_size=req.num_reqs,
-                    max_seqlen_q=-1 if metadata_in_graph else int(getattr(common, "max_query_len", 0)),
-                    max_seqlen_ori_kv=-1 if metadata_in_graph else max_ori_seq_len,
-                    max_seqlen_cmp_kv=(-1 if metadata_in_graph else req.max_cache_seq_len) if has_compressed else 0,
+                    max_seqlen_q=0 if metadata_in_graph else int(getattr(common, "max_query_len", 0)),
+                    max_seqlen_ori_kv=0 if metadata_in_graph else max_ori_seq_len,
+                    max_seqlen_cmp_kv=(0 if metadata_in_graph else req.max_cache_seq_len) if has_compressed else 0,
                     ori_topk=req.ori_sparse_indices.shape[-1] if req.ori_sparse_indices is not None else 0,
                     ori_topk_length=req.ori_topk_length,
                     cmp_topk=index_topk if has_compressed else 0,
@@ -1692,8 +1693,8 @@ class AscendDSAV41IndexerMetadataBuilder(AscendDSAV41AttentionMetadataBuilder):
                         seqused_k=req.cache_seq_lens,
                         cmp_residual_k=residual,
                         batch_size=req.num_reqs,
-                        max_seqlen_q=-1 if metadata_in_graph else int(getattr(common, "max_query_len", 0)),
-                        max_seqlen_k=-1 if metadata_in_graph else req.max_cache_seq_len,
+                        max_seqlen_q=0 if metadata_in_graph else int(getattr(common, "max_query_len", 0)),
+                        max_seqlen_k=0 if metadata_in_graph else req.max_cache_seq_len,
                         layout_q="TND",
                         layout_k="PA_BBND",
                         mask_mode=3,

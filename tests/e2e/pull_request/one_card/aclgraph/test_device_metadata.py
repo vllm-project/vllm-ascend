@@ -7,6 +7,7 @@ import torch_npu  # noqa: F401
 from vllm.forward_context import BatchDescriptor
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.utils import enable_custom_op
 from vllm_ascend.worker.device_metadata import DeviceMetadataExecutor, DeviceMetadataStage, DeviceMetadataTask
 
 
@@ -84,6 +85,7 @@ def test_a3_captured_smla_and_qli_metadata(full_graph, query_len):
     """Replay real A3 producers after an empty capture and changing KV lengths."""
     if not get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE):
         pytest.skip("Requires native INT8 sparse metadata operators")
+    assert enable_custom_op(), "A3 metadata tests require the Ascend custom-op library"
     torch.npu.set_device(0)
     executor = DeviceMetadataExecutor(capture_producers=True)
     stream = torch.npu.Stream()
@@ -104,9 +106,9 @@ def test_a3_captured_smla_and_qli_metadata(full_graph, query_len):
             seqused_cmp_kv=cache_lens,
             cmp_residual_kv=residual,
             batch_size=2,
-            max_seqlen_q=-1,
-            max_seqlen_ori_kv=-1,
-            max_seqlen_cmp_kv=-1,
+            max_seqlen_q=0,
+            max_seqlen_ori_kv=0,
+            max_seqlen_cmp_kv=0,
             ori_topk=0,
             cmp_topk=512,
             cmp_ratio=2,
@@ -131,8 +133,8 @@ def test_a3_captured_smla_and_qli_metadata(full_graph, query_len):
             seqused_k=cache_lens,
             cmp_residual_k=residual,
             batch_size=2,
-            max_seqlen_q=-1,
-            max_seqlen_k=-1,
+            max_seqlen_q=0,
+            max_seqlen_k=0,
             layout_q="TND",
             layout_k="PA_BBND",
             mask_mode=3,
