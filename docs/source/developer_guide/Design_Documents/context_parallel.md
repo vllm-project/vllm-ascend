@@ -10,9 +10,9 @@ Decode Context Parallel shards the KV cache along the sequence dimension across 
 
 This document describes PCP execution and DCP cache sharding. See the [PCP/DCP RFC](https://github.com/vllm-project/vllm-ascend/issues/12622) for the design rationale.
 
-!!! warning "Sunset Notice for GQA DCP"
+!!! note "GQA DCP support"
 
-    Decode Context Parallelism (DCP) for GQA models is **deprecated** as of v0.32.0 and will be removed in a future release. GQA draft models maintain native TP sharding under target DCP. DCP for MLA and SFA models remains fully supported. See [RFC #21305](https://github.com/vllm-project/vllm-ascend/issues/21305).
+    Decode Context Parallelism (DCP) is not supported for GQA/MQA models. GQA PCP remains supported. GQA draft models keep native TP head sharding and a complete sequence cache on each DCP rank when the target uses DCP. MLA and SFA models retain DCP support. See [RFC #21305](https://github.com/vllm-project/vllm-ascend/issues/21305).
 
 ## KV-cache layout
 
@@ -58,7 +58,7 @@ TP groups follow the table's rows: `[0, 1]` and `[2, 3]`. PCP groups follow its 
 
 The lists follow logical DCP rank order: the PCP coordinate varies first, then the TP coordinate.
 
-MLA and SFA implement both stacked layouts; GQA/MQA stacking requires `DCP=PCP`. DSA and DSA V4.1 PCP use replicated caches, with DCP stacking outside their documented PCP configuration. With PCP=1, DCP groups lie within TP: MLA requires `TP % DCP == 0`, sparse SFA requires `DCP == TP` when DCP is enabled, and GQA has additional KV-head constraints. Deployment constraints are listed in the [Context Parallel user guide](../../user_guide/feature_guide/context_parallel.md).
+MLA and SFA implement both stacked layouts. GQA/MQA supports PCP only and must use `DCP=1`. DSA and DSA V4.1 PCP use replicated caches, with DCP stacking outside their documented PCP configuration. With PCP=1, DCP groups lie within TP: MLA requires `TP % DCP == 0`, sparse SFA requires `DCP == TP` when DCP is enabled. Deployment constraints are listed in the [Context Parallel user guide](../../user_guide/feature_guide/context_parallel.md).
 
 ### Batch lifecycle
 
@@ -103,12 +103,12 @@ Attention metadata distinguishes global request order, local query order, and ga
 
 ### Backend structure
 
-DCP is implemented as a specialization of the corresponding v1 attention backend rather than as a parallel copy of it:
+DCP specializes the corresponding MLA or SFA attention backend:
 
-- `DCPMetadataBuilderMixin` owns DCP group/rank discovery and access to the per-rank context-length matrix.
+- `DCPMetadataBuilderMixin` owns DCP group/rank discovery.
 - `DCPImplMixin` owns DCP collectives and the common partial-output/LSE merge.
-- GQA, MLA, and SFA DCP builders inherit their v1 metadata builders. They only add DCP metadata fields or temporarily expose the DCP-specific cache view.
-- GQA, MLA, and SFA DCP implementations inherit their v1 implementations and override only the kernel stages whose communication or cache layout differs.
+- MLA and SFA DCP builders inherit their base metadata builders. They only add DCP metadata fields or temporarily expose the DCP-specific cache view.
+- MLA and SFA DCP implementations inherit their base implementations and override only the kernel stages whose communication or cache layout differs.
 
 The normal v1 builders remain the source of truth for request classification, padding, masks, graph metadata, and common KV-cache metadata. DCP-specific metadata is kept out of the normal v1 metadata schemas.
 
@@ -119,11 +119,10 @@ For PCP, `AscendPCPAttentionContext` supplies the global request view and restor
 During chunked or cached prefill, the local query must attend to KV-cache shards distributed across the DCP group.
 
 - MLA gathers the context KV cache, restores request-contiguous order, and computes attention for the current query chunk.
-- GQA gathers query heads across the DCP group, computes attention against each local KV shard, and combines partial outputs and LSE values.
 
 ![DCP prefill](../../assets/cp/dcp-prefill.png)
 
-PCP-only GQA and MLA gather current K/V or latent KV for cache insertion while computing local queries. With PCP+DCP, GQA maps merged history results back to local query fragments and combines them with attention over current-token causal prefixes. MLA gathers history KV in bounded chunks; senders derive a shared plan from the global batch so differing local fragment lengths produce matching collective sizes.
+PCP-only GQA and MLA gather current K/V or latent KV for cache insertion while computing local queries. With PCP+DCP, MLA gathers history KV in bounded chunks; senders derive a shared plan from the global batch so differing local fragment lengths produce matching collective sizes.
 
 ### Decode
 
@@ -179,7 +178,7 @@ DSA PCP gathers hidden states and restores global order for cache updates, compr
 
 - **Weight sharding:** Embedding and LM-head weights can be partitioned across TP×PCP. Supported SFA/DSA O-projections also use PCP weight shards: prefill can gather weights temporarily, while sharded decode exchanges activations and returns projected results to their owners. See the [PCP weight-sharding configuration](../../user_guide/feature_guide/context_parallel.md#usage) for the embedding, LM-head, and O-projection options.
 - **Graph execution:** Local execution sizes and global batch metadata coexist. Input, slot, and restore buffers keep stable addresses across replay, and capture metadata must describe the runtime layouts. See [ACL Graph](ACL_Graph.md) for replay mechanisms and the CP user guide for supported modes.
-- **Speculative decoding:** The target uses its PCP topology; supported draft paths run with logical PCP=1 on each peer. Target outputs are restored for draft processing and sampling. Draft DCP support remains model-specific.
+- **Speculative decoding:** The target uses its PCP topology; supported draft paths run with logical PCP=1 on each peer. Target outputs are restored for draft processing and sampling. MLA/SFA drafts retain their supported DCP topology; GQA drafts use DCP=1, with TP-local heads and a complete sequence cache on every DCP rank.
 - **KV transfer:** In the documented PCP P/D setup, the producer uses PCP and the consumer uses PCP=1. For standalone DCP and PCP+DCP, KV transfer requires `cp_kv_cache_interleave_size` to be set explicitly to the cache block size.
 
 Configuration and connector compatibility are listed in the [Context Parallel user guide](../../user_guide/feature_guide/context_parallel.md).
@@ -191,7 +190,6 @@ Extensions need consistent topology checks, query/cache mappings, and output lay
 - Slot mapping: `vllm_ascend/worker/block_table.py`
 - Input and attention metadata: `vllm_ascend/worker/v2/model_runner.py`
 - Shared DCP backend capabilities: `vllm_ascend/attention/context_parallel/common_cp.py`
-- GQA DCP backend: `vllm_ascend/attention/context_parallel/attention_cp.py`
 - MLA DCP backend: `vllm_ascend/attention/context_parallel/mla_cp.py`
 - SFA DCP backend: `vllm_ascend/attention/context_parallel/sfa_cp.py`
 - DSA PCP backend: `vllm_ascend/attention/context_parallel/dsa_cp.py`

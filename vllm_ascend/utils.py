@@ -133,12 +133,13 @@ def get_pcp_profile_num_tokens(vllm_config: VllmConfig, max_num_tokens: int, max
     return profile_tokens
 
 
-def is_gqa_pcp_dcp_config(model_config: Any, parallel_config: Any) -> bool:
-    """Whether a GQA/MQA model enables both PCP and DCP."""
+def model_supports_dcp(model_config: Any) -> bool:
+    """Whether the model uses an attention architecture supported by Ascend DCP."""
     return (
-        parallel_config.decode_context_parallel_size > 1
-        and parallel_config.prefill_context_parallel_size > 1
-        and not model_config.use_mla
+        getattr(model_config, "use_mla", False)
+        or getattr(model_config, "is_deepseek_mla", False)
+        or model_uses_sfa_sparse(model_config)
+        or model_uses_kpool_indexer(model_config)
     )
 
 

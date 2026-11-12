@@ -39,7 +39,7 @@ remainder lowering that is slow on Ascend.
 
 ## Context parallelism
 
-With `CP_SIZE > 1`, a virtual block has size
+For a group with `dcp_sharded=True` and `CP_SIZE > 1`, a virtual block has size
 `kv_block_size * CP_SIZE`. The kernel first finds the virtual block and its
 in-block offset. Interleaved chunks are assigned to ranks using
 `CP_INTERLEAVE`; a position not owned by `cp_rank` receives `PAD_ID`. The
@@ -50,6 +50,10 @@ split into multiple kernel blocks.
 For a local position, the interleaved offset is compacted into a rank-local
 offset before forming the final slot ID. This follows the V0.28.0 upstream
 `_compute_slot_mappings_kernel` mapping rule.
+
+Replicated groups (`dcp_sharded=False`), including GQA draft caches, keep
+every token at its global position on every rank. Their block-table capacity
+and scheduler block sizes also use the complete sequence length.
 
 ## Bounded window gather
 
@@ -87,6 +91,7 @@ address.
 | `block_table_strides` | Row stride of each group block table, in entries. |
 | `block_sizes` | KV-cache allocation block sizes from upstream `block_sizes_tensor`. |
 | `kernel_block_sizes` | Kernel block sizes from upstream `kernel_block_sizes_tensor`. |
+| `dcp_sharded` | Per-group flag selecting sharded or replicated sequence storage. |
 | `CP_SIZE`, `CP_INTERLEAVE`, `cp_rank` | Context-parallel ownership configuration. |
 | `TRITON_BLOCK_SIZE` | Token tile size; production launch uses 1024. |
 | `BLOCK_TABLE_WINDOW_SIZE` | Power-of-two upper bound for the staged tile window. |

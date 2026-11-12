@@ -1,0 +1,9 @@
+pr: 21311
+entries:
+  - category: breaking
+    text: >-
+      Removed Decode Context Parallelism (DCP) support for GQA/MQA models
+      while preserving GQA Prefill Context Parallelism (PCP) and MLA/SFA DCP.
+      When an MLA/SFA target uses DCP, GQA draft models use native Tensor
+      Parallelism (TP) with DCP disabled and a complete sequence KV cache
+      on each DCP rank.

@@ -523,11 +523,6 @@ msgid ""
 msgstr "| `attention_v1` | `ALWAYS` | 支持混合预填充/解码批次的图执行 |"
 
 msgid ""
-"| `context_parallel/attention_cp` | `ALWAYS` | Supports graph execution for "
-"mixed prefill/decode batches |"
-msgstr "| `context_parallel/attention_cp` | `ALWAYS` | 支持混合预填充/解码批次的图执行 |"
-
-msgid ""
 "| `mla_v1` | `UNIFORM_BATCH` | Graph execution is limited to uniform "
 "batches; full graph is more restricted |"
 msgstr "| `mla_v1` | `UNIFORM_BATCH` | 图执行仅限于均匀批次；完整图限制更多 |"
