@@ -60,7 +60,6 @@ test_cases:
       - '{"multistream_overlap_shared_expert":true,"enable_fused_mc2":0}'
     test_content: []
     benchmarks:
-      # Same checkpoint and accuracy settings as GLM-5.2-W4A8C8-SFA-DCP.yaml.
       acc_gsm8k:
         case_type: accuracy
         dataset_path: vllm-ascend/gsm8k-lite
