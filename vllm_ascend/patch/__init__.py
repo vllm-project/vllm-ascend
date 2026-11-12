@@ -36,6 +36,15 @@
 #   Related PR: No backend Host-allocation hook exists in the supported Core.
 #   Future plan: Replace this adapter with that upstream hook when available.
 # --------------------------------
+# * vllm_ascend/hisparse/backend.py (HiSparse backend initialization):
+#   Target: HiSparseConnectorWorker._init_dma and invalidate_blocks in vLLM Core.
+#   Why: Ascend uses int32 slot staging and can invalidate recycled slots in one
+#        grouped device operation.
+#   How: Bind the staging buffer and invalidator after Core initializes DMA.
+#        Other backends and unsupported invalidation inputs use Core's methods.
+#   Future plan: Remove the wrappers when Core exposes backend extension points
+#                for slot staging and recycled-block invalidation.
+# --------------------------------
 # * worker/patch_kda_recoverssm.py:
 #   Target: Kimi KDA's KDARecoverSSMCommitContext module binding.
 #   Why: The upstream metadata builder imports its CUDA context directly.

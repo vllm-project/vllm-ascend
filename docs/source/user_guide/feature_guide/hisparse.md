@@ -1,36 +1,49 @@
 # HiSparse on Ascend
 
-## Overview
+## Feature Introduction
 
-Sparse attention selects a subset of KV rows for each query. HiSparse keeps
-recent KV rows in the NPU Resident cache and uses the NPU Hot cache for rows
-refilled from Host memory.
+HiSparse keeps a Host mirror of sparse MLA KV rows and refills only the missing
+rows selected by attention. This reduces the NPU cache capacity needed for long
+contexts. The experimental Ascend backend requires a SIMT-capable CANN 9.2
+toolchain on Ascend 950.
 
-The resolver checks the selected rows against both NPU caches. Resident and Hot
+### Working Principle
+
+HiSparse keeps recent KV rows in the NPU Resident cache and uses the NPU Hot
+cache for rows refilled from Host memory. The resolver checks the selected rows
+against both NPU caches. Resident and Hot
 hits can be read directly. For misses, HiSparse refills only the missing rows
 from the Host KV mirror into Hot before attention runs. With speculative decoding,
 the resolver considers the selected rows for all query tokens of a request
 together before evicting Hot rows.
 
-## Supported Scenarios
+### Usage Scenarios
 
-- Experimental sparse RoPE MLA/SFA with Model Runner V2.
-- BF16 KV and native Ascend 950 C8: E4M3FN main/Indexer values with FP32 scales.
-  Main and Indexer cache dtypes are independently selectable.
-- Private Host pools per tensor-parallel rank and Core eager Host mirroring.
-- Ascend 950 with a SIMT-capable CANN 9.2 toolchain. A2/A3 are not newly qualified.
-- TopK must satisfy the existing SFA requirement of divisibility by 128.
+Use HiSparse with Model Runner V2 for sparse RoPE MLA/SFA models serving long
+contexts. BF16 KV and native Ascend 950 C8 (E4M3FN values with FP32 scales) are
+supported, with independent Main and Indexer KV dtype selection.
 
-C4, TurboQuant, INT8-format C8, context parallelism and external P/D transport
-are outside this backend's current support.
+### Constraints and Limitations
 
-## Usage
+| Category | Constraint |
+| --- | --- |
+| Hardware and software | Ascend 950 with a SIMT-capable CANN 9.2 toolchain. |
+| Cache formats | C4, TurboQuant and INT8-format C8 are outside the current support scope. |
+| Parallelism and transport | Context parallelism and external P/D transport are outside the current support scope. |
+| Host storage | Use private Host pools per tensor-parallel rank and Core eager Host mirroring. |
+| TopK | The existing SFA requirement of divisibility by 128 applies. |
+| Feature mutual exclusion | HiSparse and `additional_config.sparse_kv_offload_config.enabled` cannot be enabled together. |
 
-Set `VLLM_USE_V2_MODEL_RUNNER=1` and add these options to the compatible model's
-normal serving command:
+## Feature Usage
+
+### Usage Example
+
+Set `MODEL_PATH` to a compatible sparse MLA model and start the server with
+Model Runner V2:
 
 ```bash
---block-size 128 \
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve "$MODEL_PATH" \
+  --block-size 128 \
 --kv-cache-dtype bfloat16 \
 --attention-config '{"indexer_kv_dtype":"bf16","hisparse_config":{"eager_host_mirror":true}}' \
 --kv-transfer-config '{"kv_connector":"HiSparseConnector","kv_role":"kv_both","kv_connector_extra_config":{"host_pool_gib":4}}'
@@ -42,6 +55,17 @@ For native A5 C8, replace the two dtype options with:
 --kv-cache-dtype fp8 \
 --attention-config '{"indexer_kv_dtype":"fp8","hisparse_config":{"eager_host_mirror":true}}'
 ```
+
+### Verifying the Feature
+
+Send a request and check the server's metrics endpoint for the HiSparse miss
+counter. The counter can stay at zero when selected rows are already on the NPU.
+
+```bash
+curl -fsS http://127.0.0.1:8000/metrics | grep '^vllm:hisparse_cache_misses_total'
+```
+
+## Configuration Parameters
 
 | Parameter | Meaning |
 | --- | --- |

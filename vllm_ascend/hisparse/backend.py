@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 
 def _install_worker_dma_hooks() -> None:
-    """Bind Ascend staging dtype and grouped invalidation to the Core worker."""
+    """Adapt Core until it exposes backend hooks for staging and invalidation."""
     from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import HiSparseConnectorWorker
 
     from vllm_ascend.hisparse.recycled_invalidate import RecycledGroupInvalidator
