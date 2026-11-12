@@ -464,7 +464,6 @@ def test_draft_builder_owns_history_and_padding(rank):
         attn_state=None,
         causal=True,
         is_prefilling=torch.zeros(16, dtype=torch.bool),
-        context_parallel_metadata=None,
     )
     with patch.object(torch.Tensor, "pin_memory", lambda tensor: tensor):
         metadata = builder.build(0, common)

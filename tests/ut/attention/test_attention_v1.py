@@ -373,7 +373,6 @@ def test_pcp_builder_keeps_short_extend_in_prefill() -> None:
     builder.decode_threshold = 1
     builder.use_pcp = True
     common_metadata = SimpleNamespace(
-        context_parallel_metadata=None,
         max_query_len=4,
         num_reqs=2,
         num_actual_tokens=5,
