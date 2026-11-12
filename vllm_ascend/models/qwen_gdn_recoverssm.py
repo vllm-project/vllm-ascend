@@ -84,9 +84,9 @@ def validate_qwen_gdn_recoverssm(config: "VllmConfig") -> None:
     if parallel.pipeline_parallel_size > 1 and (
         transfer is None
         or transfer.kv_connector not in ("MooncakeConnectorV2", "MooncakePullConnector")
-        or getattr(transfer, "kv_role", None) != "kv_producer"
+        or getattr(transfer, "kv_role", None) not in ("kv_producer", "kv_consumer")
     ):
-        raise ValueError("Qwen GDN RecoverSSM pipeline parallelism is supported only for a Mooncake KV producer")
+        raise ValueError("Qwen GDN RecoverSSM pipeline parallelism requires a Mooncake PD role")
     if transfer is not None:
         if transfer.kv_connector not in ("MooncakeConnectorV2", "MooncakePullConnector"):
             raise ValueError("Qwen GDN RecoverSSM KV transfer requires MooncakeConnectorV2 or MooncakePullConnector")
