@@ -7,8 +7,9 @@ import torch_npu  # noqa: F401
 from fla_npu.ops.ascendc import causal_conv1d_fn, causal_conv1d_update
 from fla_npu.ops.ascendc import recurrent_gated_delta_rule as native_recurrent_gated_delta_rule
 
+from vllm_ascend.attention.gdn_attn_builder import _build_actual_seq_lengths
 from vllm_ascend.models.qwen4_exp.cache_config import make_slab_view
-from vllm_ascend.ops.gdn_attn_builder import _build_actual_seq_lengths
+from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_update_varlen
 from vllm_ascend.ops.triton.mamba.state_index import gather_ssm_states, scatter_ssm_states_
 
 
