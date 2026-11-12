@@ -17,6 +17,7 @@
 
 from types import SimpleNamespace
 from unittest import TestCase, main
+from unittest.mock import Mock
 
 import torch
 import vllm  # noqa: F401 - Initialize vLLM before Ascend adaptors.
@@ -120,6 +121,63 @@ class TestChunk32Prebuilt(TestCase):
         )
         self.assertEqual(m.chunk_indices_chunk32_host, (0, 0, 0, 1, 1, 0, 1, 1))
         self.assertEqual(m.chunk_indices_chunk64.tolist(), [[0, 0], [1, 0]])
+
+    def test_missing_chunk32_metadata_rejects_before_kernel(self):
+        from vllm_ascend.device.device_op import A5DeviceAdaptor
+
+        metadata = self.build([0, 32])
+        metadata.chunk_indices_chunk32_host = None
+        fused = Mock()
+        qkv = torch.zeros(1, 32, 1, 4)
+        gate = torch.zeros(1, 32, 1)
+        with self.assertRaisesRegex(ValueError, "requires prebuilt chunk32 metadata"):
+            A5DeviceAdaptor.fla_gdn_prefill(qkv, qkv, qkv, gate, gate, torch.zeros(1, 1, 4, 4), 0.5, metadata, fused)
+        fused.assert_not_called()
+
+    def test_compacted_state_scatter_and_layout(self):
+        from vllm_ascend.device.device_op import A5DeviceAdaptor
+
+        for head_first in (False, True):
+            with self.subTest(head_first=head_first):
+                metadata = self.build([0, 0, 33, 33, 98, 98])
+                state = torch.arange(5 * 2 * 4 * 4).reshape(5, 2, 4, 4).float()
+                original_state = state.clone()
+                qkv = torch.arange(98 * 2 * 4).reshape(1, 98, 2, 4).to(torch.bfloat16)
+                if head_first:
+                    qkv = qkv.transpose(1, 2).contiguous().transpose(1, 2)
+                gate = torch.zeros(1, 98, 2)
+                raw_beta = torch.linspace(-2, 2, 196).reshape(1, 98, 2).to(torch.bfloat16)
+
+                def fused(
+                    q,
+                    k,
+                    v,
+                    g,
+                    beta,
+                    head_first=head_first,
+                    qkv=qkv,
+                    raw_beta=raw_beta,
+                    original_state=original_state,
+                    **kwargs,
+                ):
+                    self.assertEqual(kwargs["layout"], "BNSD" if head_first else "BSND")
+                    expected_qkv = qkv.transpose(1, 2) if head_first else qkv
+                    for actual in (q, k, v):
+                        torch.testing.assert_close(actual, expected_qkv)
+                        self.assertTrue(actual.is_contiguous())
+                    torch.testing.assert_close(beta, raw_beta)
+                    torch.testing.assert_close(kwargs["initial_state"], original_state[[1, 3]])
+                    self.assertEqual(kwargs["cu_seqlens"], (0, 33, 98))
+                    return qkv.clone(), kwargs["initial_state"] + 1000
+
+                output, final = A5DeviceAdaptor.fla_gdn_prefill(
+                    qkv, qkv, qkv, gate, raw_beta, state, 0.5, metadata, fused
+                )
+                expected_state = original_state.clone()
+                expected_state[[1, 3]] += 1000
+                torch.testing.assert_close(output, qkv)
+                torch.testing.assert_close(final, expected_state)
+                torch.testing.assert_close(state, original_state)
 
 
 if __name__ == "__main__":

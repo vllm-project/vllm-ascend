@@ -814,6 +814,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 )
                 # The A5 chunk32 kernel applies sigmoid internally: pass raw b,
                 # while decode and other prefill routes keep the processed beta.
+                # beta = sigmoid(b); dt_bias belongs only to the decay gate
+                # g = -exp(A_log) * softplus(a + dt_bias), computed above.
                 beta_fla = b.unsqueeze(0)
                 if spec_sequence_masks is not None:
                     beta_fla = beta_fla.index_select(1, non_spec_token_indx)
