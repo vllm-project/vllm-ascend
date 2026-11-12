@@ -5,7 +5,7 @@
 - **Function**: Fused native candidate-pool construction and suffix masking for Qwen DFlash and DeepSeek DSpark router paths.
 - **Formula**: Qwen uses BF16 Top-8 candidates; DSpark computes sqrt(softplus(logits)) + bias, builds a Top-6/Top-2 candidate union, masks suffix scores outside the union, and renormalizes the selected raw scores.
 - **Algorithm flow**: Kernel 1 computes per-row candidate flags and, for DSpark, raw scores. Kernel 2 reduces the flags across the padded graph batch and applies the suffix mask. The wrapper then performs the final model-specific top-k and weight normalization.
-- **Supported modes**: Atlas A2, Atlas A3, and Atlas A5 for the validated Qwen/DSpark contracts. Unsupported shapes use the reference or baseline route.
+- **Supported modes**: Atlas A2, Atlas A3, and Atlas A5. End-to-end validation covers the DSpark contract on DeepSeek-V4-Flash; the Qwen Top-8 contract is covered at the operator level by the nightly comparison test. Unsupported shapes use the reference or baseline route.
 
 ## Parameters
 
