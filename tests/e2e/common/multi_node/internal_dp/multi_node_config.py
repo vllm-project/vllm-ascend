@@ -18,7 +18,7 @@ from tests.e2e.common.multi_node.utils import (
 setup_logger()
 logger = logging.getLogger(__name__)
 
-DEFAULT_CONFIG_BASE_PATH = "tests/e2e/cases/models/configs/DeepSeek/"
+DEFAULT_CONFIG_BASE_PATH = "tests/SIT/cases/models/configs/DeepSeek/"
 DEFAULT_SERVER_PORT = 8080
 
 

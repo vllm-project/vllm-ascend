@@ -8,11 +8,13 @@ import math
 import torch
 from vllm.triton_utils import tl, triton
 
+from vllm_ascend.ops.triton.dcp.dcp_jit import _launch_kernel
 from vllm_ascend.ops.triton.triton_utils import get_element, get_vectorcore_num, init_device_properties_triton
 
 
 @triton.jit(
     do_not_specialize=[
+        "lse_stride_rank",
         "lse_stride_axis1",
         "head_count",
         "total_tiles",
@@ -26,7 +28,7 @@ def _fused_merge_kernel(
     out_stride_rank,
     out_stride_axis1,
     out_stride_axis2,
-    LSE_RANK_STRIDE: tl.constexpr,
+    lse_stride_rank,
     lse_stride_axis1,
     head_count,
     head_dim,
@@ -45,9 +47,9 @@ def _fused_merge_kernel(
         token = row // head_count
         head = row % head_count
         if NATIVE_LAYOUT:
-            lse_offsets = rank_ids * LSE_RANK_STRIDE + head * lse_stride_axis1 + token
+            lse_offsets = rank_ids * lse_stride_rank + head * lse_stride_axis1 + token
         else:
-            lse_offsets = rank_ids * LSE_RANK_STRIDE + token * lse_stride_axis1 + head
+            lse_offsets = rank_ids * lse_stride_rank + token * lse_stride_axis1 + head
         raw_lse = tl.load(lse_ptr + lse_offsets).to(tl.float32)
         finite = (raw_lse == raw_lse) & (raw_lse > float("-inf")) & (raw_lse < float("inf"))
         safe_lse = tl.where(finite, raw_lse, float("-inf"))
@@ -77,20 +79,28 @@ def _fused_merge_kernel(
 
 def fused_merge(out_recv: torch.Tensor, lse_recv: torch.Tensor, token_dim: int) -> torch.Tensor:
     """Merge the validated rank/token/head payload produced by exchange."""
-    ranks = out_recv.shape[0]
     if token_dim == 2:
         _, heads, tokens, head_dim = out_recv.shape
-        native_layout = True
     else:
         _, tokens, heads, head_dim = out_recv.shape
-        native_layout = False
     result = torch.empty((tokens, heads, head_dim), dtype=torch.float32, device=out_recv.device)
+    init_device_properties_triton()
+    _launch_fused_merge(out_recv, lse_recv, result, token_dim, get_vectorcore_num(), _launch_kernel)
+    return result
+
+
+def _launch_fused_merge(out_recv, lse_recv, result, token_dim, vector_cores, launch):
+    """Reuse the exact received-view strides during startup compilation."""
+    ranks = out_recv.shape[0]
+    tokens, heads, head_dim = result.shape
+    native_layout = token_dim == 2
     # Bound each program to one feature accumulator and a rank-weight vector.
     block_d = min(triton.next_power_of_2(head_dim), 512)
     tiles = tokens * heads * math.ceil(head_dim / block_d)
-    init_device_properties_triton()
-    programs = min(tiles, get_vectorcore_num())
-    _fused_merge_kernel[(programs,)](
+    programs = min(tiles, vector_cores)
+    launch(
+        _fused_merge_kernel,
+        (programs,),
         out_recv,
         lse_recv,
         result,
@@ -109,4 +119,3 @@ def fused_merge(out_recv: torch.Tensor, lse_recv: torch.Tensor, token_dim: int) 
         NATIVE_LAYOUT=native_layout,
         BLOCK_D=block_d,
     )
-    return result

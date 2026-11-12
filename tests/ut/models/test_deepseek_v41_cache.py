@@ -128,7 +128,9 @@ def config():
 @pytest.fixture
 def runtime(config):
     return SimpleNamespace(
-        model_config=SimpleNamespace(hf_text_config=config, enforce_eager=True),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="deepseek_v41"), hf_text_config=config, enforce_eager=True
+        ),
         cache_config=SimpleNamespace(
             block_size=64,
             enable_prefix_caching=False,

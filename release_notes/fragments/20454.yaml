@@ -1,0 +1,14 @@
+pr: 20454
+entries:
+  - category: performance
+    text: >-
+      Eligible GLM-5.3-Flash PCP prefill automatically overlaps KPool and main KV
+      communication. KDA output uses ReduceScatter only for pure-prefill batches.
+      Main KV overlap follows the active PCP/DCP layout and original cache
+      preprocessing without fixed topology or BF16-only restrictions. Main KV
+      and KPool use one asynchronous gather path, including graph capture, with
+      waits at their consumers and no synchronous fallback. Native preprocessing submits main KV and KPool
+      gathers before O-projection weight communication to reduce exposed waits.
+      End-to-end text equivalence remains under validation.
+    model: glm-5.3-flash
+    hardware: [A5]

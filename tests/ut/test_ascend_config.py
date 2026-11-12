@@ -41,6 +41,7 @@ from vllm_ascend.ascend_config import (
     FinegrainedTPConfig,
     KVPPConfig,
     ProfilingChunkConfig,
+    QuantizedAllReduceConfig,
     RejectionSamplerConfig,
     RlConfig,
     SchedulerConfig,
@@ -111,6 +112,27 @@ class TestRlConfig(TestBase):
         self.assertFalse(config.sleep_mode_extra_cleanup)
         with self.assertRaises(ValueError):
             RlConfig(refresh=False)  # type: ignore[call-arg]
+
+
+class TestQuantizedAllReduceConfig(TestBase):
+    def test_defaults(self):
+        config = QuantizedAllReduceConfig()
+        self.assertFalse(config.enable)
+        self.assertEqual(config.min_numel, 16777216)
+
+    def test_explicit_values_and_lax_bool(self):
+        config = QuantizedAllReduceConfig(enable="true", min_numel="2097152")  # type: ignore[arg-type]
+        self.assertTrue(config.enable)
+        self.assertEqual(config.min_numel, 2097152)
+
+    def test_rejects_unknown_key(self):
+        with self.assertRaises(ValueError):
+            QuantizedAllReduceConfig(enable=True, min_numels=1)  # type: ignore[call-arg]
+
+    def test_rejects_non_positive_min_numel(self):
+        for value in (0, -1):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                QuantizedAllReduceConfig(min_numel=value)
 
 
 class TestAscendConfig(TestBase):
@@ -363,6 +385,61 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_quantized_all_reduce(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"quantized_all_reduce_config": {"enable": True, "min_numel": 2097152}}
+        ascend_config = init_ascend_config(test_vllm_config)
+        self.assertTrue(ascend_config.quantized_all_reduce_config.enable)
+        self.assertEqual(ascend_config.quantized_all_reduce_config.min_numel, 2097152)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_rejects_bad_quantized_all_reduce(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"quantized_all_reduce_config": {"min_numel": 0}}
+        with self.assertRaises(ValueError):
+            init_ascend_config(test_vllm_config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_quantized_all_reduce_rejects_unsupported_tp_at_config_time(self, mock_fix_incompatible_config):
+        # The TP degree is validated here, not when a parallel group is built:
+        # an EP/MC2 group of DP x PCP x TP ranks must never gate the feature.
+        test_vllm_config = VllmConfig()
+        test_vllm_config.parallel_config.tensor_parallel_size = 16
+        test_vllm_config.additional_config = {"quantized_all_reduce_config": {"enable": True}}
+        with self.assertRaisesRegex(ValueError, "tensor_parallel_size <= 8"):
+            init_ascend_config(test_vllm_config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_quantized_all_reduce_unsupported_tp_ok_when_disabled(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.parallel_config.tensor_parallel_size = 16
+        test_vllm_config.additional_config = {"quantized_all_reduce_config": {"enable": False}}
+        ascend_config = init_ascend_config(test_vllm_config)
+        self.assertFalse(ascend_config.quantized_all_reduce_config.enable)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_quantized_all_reduce_disabled_with_flashcomm1_sp(self, mock_fix_incompatible_config):
+        # SP replaces TP all-reduce with all-gather/reduce-scatter, so the int8
+        # all-reduce wrapper would never be invoked. Warn and disable it.
+        test_vllm_config = VllmConfig()
+        test_vllm_config.parallel_config.tensor_parallel_size = 4
+        test_vllm_config.parallel_config.data_parallel_size = 2
+        test_vllm_config.parallel_config.enable_expert_parallel = True
+        test_vllm_config.additional_config = {
+            "enable_flashcomm1": True,
+            "quantized_all_reduce_config": {"enable": True},
+        }
+        with patch("vllm_ascend.ascend_config.logger.warning_once") as mock_warning:
+            ascend_config = init_ascend_config(test_vllm_config)
+        self.assertFalse(ascend_config.quantized_all_reduce_config.enable)
+        self.assertTrue(any("FlashComm1/SP" in str(call) for call in mock_warning.call_args_list))
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_without_additional_config(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         # No additional config given, check the default value here.
@@ -370,7 +447,8 @@ class TestAscendConfig(TestBase):
         self.assertFalse(ascend_config.multistream_overlap_shared_expert)
         self.assertFalse(ascend_config.enable_kv_nz)
         self.assertEqual(ascend_config.weight_nz_mode, 1)
-        self.assertEqual(ascend_config.mega_moe_max_tokens, 65536)
+        # 0 = let the MegaMoe operator auto-compute the receive capacity.
+        self.assertEqual(ascend_config.mega_moe_max_tokens, 0)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
         self.assertTrue(ascend_compilation_config.fuse_norm_quant)
@@ -516,9 +594,10 @@ class TestAscendConfig(TestBase):
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_validates_mega_moe_max_tokens(self, mock_fix_incompatible_config):
-        # NOTE: pydantic coerces numeric strings (e.g. "65536") to int, so only
-        # out-of-range values are invalid on main.
-        invalid_values = [0, -1]
+        # NOTE: pydantic coerces numeric strings (e.g. "65536") to int, and 0 is
+        # now a valid value (let the MegaMoe operator auto-compute), so only
+        # negative values are invalid.
+        invalid_values = [-1]
 
         for invalid_value in invalid_values:
             clear_ascend_config()
@@ -1848,6 +1927,82 @@ class TestTopLevelSwitchTypeValidation(TestBase):
             config.derive_and_validate(vc)
 
     @_clean_up
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
+    def test_fused_mc2_mode_3_rejects_a3(self, _mock_profile):
+        config = AscendConfig(
+            sparse_kv_offload_config=SimpleNamespace(enabled=False),
+            enable_fused_mc2=3,
+        )
+        self.assertTrue(config.megamoe_shared_expert_fusion)
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(hidden_size=4096)),
+        )
+        with self.assertRaisesRegex(NotImplementedError, "only supported on A5"):
+            config._validate_megamoe_shared_expert_fusion(vllm_config)
+
+    @_clean_up
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
+    def test_fused_mc2_mode_3_rejects_latent_moe(self, _mock_profile):
+        config = AscendConfig(
+            sparse_kv_offload_config=SimpleNamespace(enabled=False),
+            enable_fused_mc2=3,
+        )
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(
+                hf_text_config=SimpleNamespace(hidden_size=7168, routed_expert_hidden_size=3584),
+            ),
+        )
+        with self.assertRaisesRegex(NotImplementedError, "does not support latent-MoE"):
+            config._validate_megamoe_shared_expert_fusion(vllm_config)
+
+    @_clean_up
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
+    def test_fused_mc2_mode_3_allows_a5_non_latent(self, _mock_profile):
+        config = AscendConfig(
+            sparse_kv_offload_config=SimpleNamespace(enabled=False),
+            enable_fused_mc2=3,
+        )
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(hidden_size=4096)),
+        )
+        # A5 with a non-latent (shared residual width) model must not raise.
+        config._validate_megamoe_shared_expert_fusion(vllm_config)
+
+    @_clean_up
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
+    def test_fused_mc2_mode_2_still_allowed_on_a3(self, _mock_profile):
+        config = AscendConfig(
+            sparse_kv_offload_config=SimpleNamespace(enabled=False),
+            enable_fused_mc2=2,
+        )
+        self.assertFalse(config.megamoe_shared_expert_fusion)
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(hidden_size=4096)),
+        )
+        # Plain MegaMoe (=2) is not the shared-expert fusion and stays allowed on A3.
+        config._validate_megamoe_shared_expert_fusion(vllm_config)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_derive_and_validate_invokes_shared_expert_fusion_check(self, mock_fix):
+        vc = VllmConfig()
+        with patch.object(AscendConfig, "_validate_megamoe_shared_expert_fusion") as mock_check:
+            init_ascend_config(vc)
+        mock_check.assert_called_once()
+
+    @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_converged_bypass_fields_are_validated(self, mock_fix):
         vc = VllmConfig()
@@ -2250,13 +2405,43 @@ class TestEngramSharedMemoryDefaults(TestBase):
                         config = VllmConfig(device_config=DeviceConfig(device="cpu"))
                         config.parallel_config.data_parallel_size = dp
                         config.parallel_config.prefill_context_parallel_size = pcp
-                        config.engram_config = SimpleNamespace(dp_shared_memory=shared)
+                        config.engram_config = SimpleNamespace(cpu_offload=True, dp_shared_memory=shared)
                         ascend_config = AscendConfig(sparse_kv_offload_config=SparseKVOffloadConfig())
                         with patch.object(
                             _VllmConfig, "use_v2_model_runner", new_callable=PropertyMock, return_value=use_v2
                         ):
                             ascend_config.derive_and_validate(config)
                         self.assertEqual(config.engram_config.dp_shared_memory, shared or (use_v2 and auto_shared))
+
+    def test_dp_shared_memory_not_set_when_cpu_offload_false(self):
+        """dp_shared_memory requires cpu_offload=True (upstream constraint).
+
+        When cpu_offload=False (e.g. ETP path with embedding_across_dp=True),
+        derive_and_validate must NOT auto-enable dp_shared_memory, otherwise
+        the upstream _validate_shared_memory raises ValueError.
+        """
+        topologies = (
+            (1, 1, False),
+            (2, 1, True),
+            (1, 2, True),
+            (2, 4, True),
+        )
+        for use_v2 in (False, True):
+            for dp, pcp, _auto_shared in topologies:
+                for shared in (False, True):
+                    with self.subTest(use_v2=use_v2, dp=dp, pcp=pcp, shared=shared):
+                        config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+                        config.parallel_config.data_parallel_size = dp
+                        config.parallel_config.prefill_context_parallel_size = pcp
+                        config.engram_config = SimpleNamespace(cpu_offload=False, dp_shared_memory=shared)
+                        ascend_config = AscendConfig(sparse_kv_offload_config=SparseKVOffloadConfig())
+                        with patch.object(
+                            _VllmConfig, "use_v2_model_runner", new_callable=PropertyMock, return_value=use_v2
+                        ):
+                            ascend_config.derive_and_validate(config)
+                        # dp_shared_memory must remain unchanged — never auto-enabled
+                        # when cpu_offload=False, regardless of DP/PCP/V2 topology.
+                        self.assertEqual(config.engram_config.dp_shared_memory, shared)
 
     def test_no_engram_config_is_preserved(self):
         config = VllmConfig(device_config=DeviceConfig(device="cpu"))
