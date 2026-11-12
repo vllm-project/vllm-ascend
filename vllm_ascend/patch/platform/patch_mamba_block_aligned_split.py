@@ -100,16 +100,19 @@ def _mamba_block_aligned_split(
     the split off would only erase cacheable hit length.
     """
     kv_transfer_config = self.vllm_config.kv_transfer_config
-    # Rows beyond the available request tokens need an unsplit window, e.g.
-    # a consumer verifier or asynchronous output placeholders. A prefix from
-    # an earlier prefill chunk or cache hit must still stop at checkpoints.
+    # MTP consumers retain their legacy window: splitting before the later
+    # prefill-lookahead reservation can repeatedly reduce a tail chunk to zero.
+    # Extra verifier or asynchronous output rows also need an unsplit window.
+    # Ordinary non-MTP prefills must still stop at reusable checkpoints.
+    speculative_config = self.vllm_config.speculative_config
+    is_mtp = speculative_config is not None and speculative_config.method == "mtp"
     num_computed_tokens = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens
     remaining_tokens = max(request.num_tokens - num_computed_tokens, 0)
     if (
         kv_transfer_config is not None
         and kv_transfer_config.is_kv_consumer
         and num_computed_tokens > 0
-        and num_new_tokens > remaining_tokens
+        and (is_mtp or num_new_tokens > remaining_tokens)
     ):
         return num_new_tokens
 
