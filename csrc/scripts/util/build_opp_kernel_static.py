@@ -217,10 +217,10 @@ def compile_static_library(args):
     if cpu_aarch not in [Const.x86, Const.arm]:
         raise Exception(f"Input cpu_aarch<{cpu_aarch}> Error, Please input parase.")
 
-    ops_compile_files = GenOpResourceIni(args.soc_version, args.build_dir, args.jit).analyze_ops_files()
+    ops_compile_files = GenOpResourceIni(args.soc_series, args.build_dir, args.jit).analyze_ops_files()
 
     csl = CompileOpStaticLib(
-        ops_compile_files, os.path.join(args.build_dir, f"bin_tmp/{args.soc_version}"), index_num, cpu_aarch
+        ops_compile_files, os.path.join(args.build_dir, f"bin_tmp/{args.soc_series}"), index_num, cpu_aarch
     )
     ret = csl.exec_compile()
     return ret
@@ -233,11 +233,11 @@ def parser_compile_static_library(subparsers):
     )
     compile_lib_parser.add_argument(
         "-s",
-        "--soc_version",
+        "--soc_series",
         type=str,
         required=True,
-        dest="soc_version",
-        help="Operator Name, eg: ascend910b, ascend310p",
+        dest="soc_series",
+        help="Target SoC series (e.g., ascend910b, ascend310p, ascend950)",
     )
     compile_lib_parser.add_argument(
         "-b", "--build_dir", type=str, required=True, dest="build_dir", help="Input build dir for this project"
@@ -726,10 +726,10 @@ const OP_BINARY_RES& {op_type}KernelResource() {{
 
 
 def generate_op_resource_h_file(args):
-    soc_version: str = args.soc_version
+    soc_series: str = args.soc_series
     build_dir = args.build_dir
 
-    gen_ini = GenOpResourceIni(soc_version, build_dir, args.jit)
+    gen_ini = GenOpResourceIni(soc_series, build_dir, args.jit)
     gen_ini.gen_ops_ini_files()
     return
 
@@ -740,11 +740,11 @@ def parser_generate_op_resource_h_file(subparsers):
     )
     gen_resource_ini_parser.add_argument(
         "-s",
-        "--soc_version",
+        "--soc_series",
         type=str,
         required=True,
-        dest="soc_version",
-        help="Operator Name, eg: ascend910b, ascend310p",
+        dest="soc_series",
+        help="Target SoC series (e.g., ascend910b, ascend310p, ascend950)",
     )
     gen_resource_ini_parser.add_argument(
         "-b", "--build_dir", type=str, required=True, dest="build_dir", help="Input build dir for this project"
