@@ -41,7 +41,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context impor
     DSparkContextChunk,
     initialize_draft_context_chunk,
 )
-from vllm_ascend.utils import lmhead_tp_enable, lmhead_tp_max_num_logits, vllm_version_is
+from vllm_ascend.utils import embedding_tp_enable, lmhead_tp_enable, lmhead_tp_max_num_logits, vllm_version_is
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
@@ -448,6 +448,13 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             # TODO: Remove this guard once main2main includes upstream vLLM
             # #54856 (facd9a74a1), which resets the profiling DP counts.
             sync_state = None
+        if sync_state is not None and not is_profile and (lmhead_tp_enable() or embedding_tp_enable()):
+            # Fine-grained vocabulary collectives need the same query pass on
+            # active and idle DP peers. The runner discards local K=0 drafts.
+            if getattr(sync_state, "skip_drafts", False):
+                num_speculative_tokens = 0
+            elif num_speculative_tokens == 0:
+                num_speculative_tokens = None
         # Upstream trims DP dummy draft requests before selecting its graph,
         # while input_batch still describes the padded target batch. Replay
         # metadata must use the same count without mutating the target batch.
