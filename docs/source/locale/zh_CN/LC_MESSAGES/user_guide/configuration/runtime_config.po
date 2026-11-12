@@ -18,8 +18,8 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: detect_po_changes.py\n"
 
-msgid "# runtime_config"
-msgstr "# runtime_config"
+msgid "# Runtime Configuration"
+msgstr "# 运行时配置"
 
 msgid ""
 "JSON schema for Runtime Guard. Default path: "

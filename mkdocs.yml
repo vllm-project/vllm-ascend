@@ -294,6 +294,7 @@ nav:
         - user_guide/support_matrix/feature_matrix.md
     - Configuration:
         - user_guide/configuration/index.md
+        - user_guide/configuration/device_selection.md
         - user_guide/configuration/env_vars.md
         - user_guide/configuration/additional_config.md
         - user_guide/configuration/runtime_config.md
