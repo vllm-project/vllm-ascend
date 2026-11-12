@@ -16,7 +16,7 @@
      - Load Q/K/V/Z from the interleaved `mixed_qkvz` head block.
      - Load B/A from the interleaved `mixed_ba` head block.
      - Store Q/K/V into the type-contiguous `mixed_qkv` layout, Z into `z`, and B/A into `b`/`a`, each using its own row stride; out-of-range rows are masked.
-- **Supported modes**: Atlas A2, Atlas A3, and 950PR&950DT Products (Triton kernel), used by the GDN linear attention `gqa_interleaved_layout=True` path (e.g. Qwen3-Next) in `vllm_ascend/attention/gdn.py`; works in both eager and graph-capture modes.
+- **Supported modes**: Atlas A2, Atlas A3, and 950PR&950DT Products (Triton kernel), used by the GDN linear attention `gqa_interleaved_layout=True` path (e.g. Qwen3-Next) in `vllm_ascend/ops/gdn.py`; works in both eager and graph-capture modes.
 
 ## Parameters
 
@@ -44,7 +44,7 @@
 
 ## Origin and Differences
 
-- **Origin**: Based on the fused split/reshape logic of the flash-linear-attention project (MIT license, see header of the source file), rewritten as an Ascend NPU Triton kernel. It replaces the torch `split` + `reshape`/`cat` chain in the GDN attention `gqa_interleaved_layout=True` path of `vllm_ascend/attention/gdn.py`.
+- **Origin**: Based on the fused split/reshape logic of the flash-linear-attention project (MIT license, see header of the source file), rewritten as an Ascend NPU Triton kernel. It replaces the torch `split` + `reshape`/`cat` chain in the GDN attention `gqa_interleaved_layout=True` path of `vllm_ascend/ops/gdn.py`.
 - **Differences**:
     - NPU adaptation for performance: fuses the split + reshape/cat into a single Triton kernel to avoid multiple device-side memory copies; parallelized over vector cores with UB-aware row tiling (`rows_per_iter`) to improve AICore utilization;
     - Modified for a specific vllm-ascend logic or different input parameters: consumes the interleaved GQA layout `[seq, num_heads_qk, (Q, K, V, Z)]` / `[seq, num_heads_qk, (B, A)]` produced by the `gqa_interleaved_layout` linear projections, and outputs the type-contiguous `mixed_qkv` expected by the `qwen_gdn_attention_core` custom op.

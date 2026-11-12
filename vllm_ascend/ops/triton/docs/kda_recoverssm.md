@@ -25,10 +25,10 @@
   reconstructs `next_state` through the accepted prefix from those records and
   the original checkpoint. Softplus uses its linear branch above 20.
 - **Algorithm flow** (independent requests and heads, with value-dimension tiles):
-  1. `kda.recoverssm._kda_recoverssm_verify_kernel` loads a request's checkpoint,
-     advances a register-held recurrence, writes outputs and compact records, and leaves the persistent
-     checkpoint unchanged. Null-page rows produce zero output and do not write
-     records.
+  1. `_kda_recoverssm_verify_kernel` loads a request's checkpoint, advances a
+     register-held recurrence, writes outputs and compact records, and leaves the
+     persistent checkpoint unchanged. Null-page rows produce zero output and do
+     not write records.
   2. `_prepare_commit_plan_kernel` maps speculative rows to sampler rows, clamps
      accepted lengths to the query length and window capacity, and prepares final
      and optional boundary destinations. Null pages and zero accepted lengths
@@ -50,14 +50,6 @@
   Operator validation is separate from model/worker integration. Serving
   configuration and restrictions are documented in the GLM RecoverSSM feature
   guide; low-level align arguments alone do not establish model support.
-
-KDA and GDN keep their verify, state-commit kernels, record helpers, commit
-contexts and launch strategies in [`kda/recoverssm.py`](../kda/recoverssm.py)
-and [`gdn/recoverssm_gdn.py`](../gdn/recoverssm_gdn.py), respectively.
-Only `prepare_commit_plan_kernel`, `compact_conv_state_kernel` and the
-model-independent `_copy_conv_state_tile` helper are shared through
-[`mamba/recoverssm.py`](../mamba/recoverssm.py). The contexts import the shared
-kernels under private aliases.
 
 ## Parameters
 

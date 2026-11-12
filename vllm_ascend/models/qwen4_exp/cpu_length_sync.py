@@ -32,7 +32,7 @@ def can_skip_qwen_cpu_length_sync(runner: Any) -> bool:
             AscendQSAImpl,
             AscendQSAMetadataBuilder,
         )
-        from vllm_ascend.attention.gdn_attn_builder import (
+        from vllm_ascend.ops.gdn_attn_builder import (
             AscendGDNAttentionBackend,
             AscendGDNAttentionMetadataBuilder,
             AscendGDNFusedAttentionBackend,

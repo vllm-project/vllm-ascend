@@ -1,7 +1,0 @@
-# Replace 0 with the assigned PR number before submitting this change.
-pr: 0
-entries:
-  - category: feature
-    text: Added experimental prefill/decode separation for Qwen GDN RecoverSSM with MooncakeConnectorV2 and MooncakePullConnector. Both peers must use matching TP sizes, speculative configurations, and RecoverSSM settings, with Mamba cache mode none and prefix caching disabled.
-  - category: breaking
-    text: Aligned Qwen GDN RecoverSSM with the upstream in-page packed replay layout (conv, checkpoint, FP32 replay). Checkpoint dtype now follows the configured base GDN dtype instead of being forced to FP32; auto uses BF16 with BF16 convolution state. Prefill and decode peers must both use the new matching layout and dtypes.

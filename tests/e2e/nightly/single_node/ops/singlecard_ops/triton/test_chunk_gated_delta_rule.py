@@ -6,9 +6,9 @@ import torch
 
 from tests.ut.base import PytestBase
 from vllm_ascend._310p.ops.fla.chunk_gated_delta_rule import chunk_gated_delta_rule_pytorch
-from vllm_ascend.attention.gdn_attn_builder import _build_non_spec_chunked_prefill_metadata
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.ops.gdn_attn_builder import _build_non_spec_chunked_prefill_metadata
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 
 
