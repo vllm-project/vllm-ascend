@@ -984,7 +984,7 @@ def test_a5_indexer_forward_keeps_triton_decode_branch() -> None:
 
 
 def test_triton_indexer_forward_accepts_single_return_value() -> None:
-    """v0.32.0 keeps the upstream single-tensor decode contract."""
+    """Accept the single-tensor indexer decode result."""
     impl = object.__new__(AscendMiniMaxM3IndexerImpl)
     torch.nn.Module.__init__(impl)
     impl.num_index_heads = 1

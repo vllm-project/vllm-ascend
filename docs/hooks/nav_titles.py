@@ -47,10 +47,6 @@ TITLES = {
         "zh": "动态分块流水线并行",
     },
     "developer_guide/Design_Documents/kvpp.md": {"en": "KVPP Design", "zh": "KVPP 设计方案"},
-    "developer_guide/Design_Documents/model_runner_v1_eplb.md": {
-        "en": "Model Runner V1 EPLB Architecture",
-        "zh": "Model Runner V1 EPLB 架构",
-    },
     "developer_guide/Design_Documents/model_runner_v2_eplb.md": {
         "en": "Model Runner V2 EPLB Architecture",
         "zh": "Model Runner V2 EPLB 架构",
@@ -63,6 +59,10 @@ TITLES = {
     "developer_guide/contribution/multi_node_test.md": {"en": "Multi-Node Test", "zh": "多节点测试"},
     "developer_guide/contribution/nightly_ci_test.md": {"en": "Nightly CI Test", "zh": "夜间 CI 测试"},
     "developer_guide/contribution/testing.md": {"en": "Testing", "zh": "测试"},
+    "developer_guide/contribution/dependency_version_management.md": {
+        "en": "Dependency Version Management",
+        "zh": "依赖版本管理",
+    },
     "developer_guide/evaluation/using_ais_bench.md": {"en": "Using AISBench", "zh": "使用 AISBench"},
     "developer_guide/evaluation/using_evalscope.md": {"en": "Using EvalScope", "zh": "使用 EvalScope"},
     "developer_guide/evaluation/using_lm_eval.md": {"en": "Using lm_eval", "zh": "使用 lm_eval"},
@@ -99,10 +99,6 @@ TITLES = {
         "zh": "PD 分离（Mooncake，单节点）",
     },
     "tutorials/features/ray.md": {"en": "Ray", "zh": "Ray"},
-    "tutorials/features/suffix_speculative_decoding.md": {
-        "en": "Suffix Speculative Decoding",
-        "zh": "后缀推测解码",
-    },
     "tutorials/models/Cohere-Transcribe.md": {"en": "Cohere Transcribe", "zh": "Cohere Transcribe"},
     "tutorials/models/DeepSeek-R1.md": {"en": "DeepSeek-R1", "zh": "DeepSeek-R1"},
     "tutorials/models/DeepSeek-V3.1.md": {"en": "DeepSeek-V3 & 3.1", "zh": "DeepSeek-V3 & 3.1"},
@@ -156,8 +152,8 @@ TITLES = {
     },
     "tutorials/models/Qwen3-Next.md": {"en": "Qwen3-Next", "zh": "Qwen3-Next"},
     "tutorials/models/Qwen3.8-Flash-Next.md": {
-        "en": "Qwen3.8-Flash-Next (Experimental)",
-        "zh": "Qwen3.8-Flash-Next（实验性支持）",
+        "en": "Qwen3.8-Flash-Next",
+        "zh": "Qwen3.8-Flash-Next",
     },
     "tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md": {
         "en": "Qwen3-Omni-30B-A3B-Thinking",

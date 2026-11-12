@@ -112,7 +112,7 @@ then remove the override to compare capacity at equal HBM budgets.
 With baseline and candidate endpoints serving the same model name:
 
 ```bash
-python tests/e2e/cases/features/kv_pool/verify_mooncake_offload.py \
+python tests/SIT/cases/features/kv_pool/verify_mooncake_offload.py \
   --baseline-url http://BASELINE:8000/v1 \
   --candidate-url http://CANDIDATE:8000/v1 \
   --model glm-5.3-flash --concurrency 4 --repeat 3 --max-tokens 1

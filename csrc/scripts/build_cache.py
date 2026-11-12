@@ -487,6 +487,7 @@ def _git_tracked_files(source_dir: Path, repo_root: Path) -> list[Path] | None:
 def _hash_operator_text(
     source_dir: Path,
     repo_root: Path | None,
+    excludes: Sequence[str] = (),
 ) -> tuple[str, list[dict]]:
     source_dir = source_dir.resolve()
     candidates = _git_tracked_files(source_dir, repo_root) if repo_root is not None else None
@@ -509,6 +510,9 @@ def _hash_operator_text(
                 relative = path.relative_to(source_dir).as_posix()
             except ValueError:
                 continue
+
+        if _is_excluded(relative, excludes):
+            continue
 
         if path.is_symlink():
             target = os.readlink(path)
@@ -699,7 +703,6 @@ def _candidate_cann_metadata_files() -> list[Path]:
                 root.parent / "version.info",
             ]
         )
-    candidates.append(Path("/etc/ascend_install.info"))
 
     unique: list[Path] = []
     seen: set[str] = set()
@@ -1480,7 +1483,9 @@ def run(args: argparse.Namespace) -> int:
     operator_text_manifest: list[dict] = []
     if args.domain == "custom_operator":
         repo_root = Path(args.repo_root) if args.repo_root else None
-        operator_text_hash, operator_text_manifest = _hash_operator_text(Path(args.operator_source), repo_root)
+        operator_text_hash, operator_text_manifest = _hash_operator_text(
+            Path(args.operator_source), repo_root, excludes
+        )
 
     recipe_hash, recipe_manifest = _hash_recipe(recipe_files, args.recipe_value, command, normalize_paths, args.set_env)
     environment_hash, environment_manifest = _hash_compiler_environment(

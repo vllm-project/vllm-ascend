@@ -12,7 +12,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadat
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList
-from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, MambaSpec, UniformTypeKVCacheSpecs
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 
@@ -275,6 +275,24 @@ def infer_group_block_sizes(
             spec = next(iter(spec.kv_cache_specs.values()))
         block_sizes.append(spec.block_size)
     return block_sizes
+
+
+def get_sharded_mamba_group_ids(kv_cache_config: KVCacheConfig | None) -> set[int]:
+    """Return IDs of Mamba cache groups whose states are not TP-replicated."""
+    if kv_cache_config is None:
+        return set()
+    group_ids: set[int] = set()
+    for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+        for name in group.layer_names:
+            spec = group.kv_cache_spec
+            if isinstance(spec, UniformTypeKVCacheSpecs):
+                spec = spec.kv_cache_specs[name]
+            if not isinstance(spec, MambaSpec):
+                continue
+            tp_replicated = getattr(spec, "tp_replicated", False)
+            if not tp_replicated:
+                group_ids.add(group_id)
+    return group_ids
 
 
 def infer_cacheable_group_ids(kv_cache_groups: Sequence[Any] | None) -> list[int]:
