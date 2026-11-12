@@ -56,7 +56,10 @@ DEEPSEEK_V4_MODEL = os.environ.get(
 # zero reusable tokens; the 4-token tail keeps exactly 16,384 hit tokens.
 POOL_LCM_BLOCK_SIZE = 16384
 POOL_PROMPT_TOKENS = POOL_LCM_BLOCK_SIZE + 4
-POOL_BATCHED_TOKENS = POOL_LCM_BLOCK_SIZE  # H3 precondition: budget = reusable whole blocks
+# 16K 在 PP2xTP2 + gpu_memory_utilization=0.9 下放不下：
+# CI 实测 16,516 序列需要 4.76 GiB KV，可用仅 2.85 GiB。
+# 4096 = 32 x 128 block 的 chunked prefill，命中序列仍精确 16,384。
+POOL_BATCHED_TOKENS = 4096
 POOL_MAX_MODEL_LEN = POOL_PROMPT_TOKENS + 128
 
 POOL_KV_TRANSFER_CONFIG = {
