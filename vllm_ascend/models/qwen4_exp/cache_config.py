@@ -124,10 +124,10 @@ def _classify_spec(layer_name: str, spec: KVCacheSpec) -> str | None:
     if layer_name.endswith(".attn") and isinstance(spec, FullAttentionSpec):
         return QSA_MAIN
     if isinstance(spec, MambaSpec):
-        if len(spec.shapes) == 2:
-            return GDN
-        if len(spec.shapes) == 1:
-            return PLE
+        # PLE is replicated across TP ranks and owns a private dense bank.
+        # GDN is TP-sharded and may expose either the baseline two states or
+        # an additional RecoverSSM replay record.
+        return PLE if spec.tp_replicated else GDN
     return None
 
 
@@ -238,12 +238,24 @@ def build_qwen4_kv_cache_layout(
     }
     alignment = math.lcm(16, *dtype_sizes)
     gdn_specs = [spec for _, spec in role_members[GDN] if isinstance(spec, MambaSpec)]
-    max_ssm_bytes = max(_state_bytes(spec, 1) for spec in gdn_specs)
-    conv_bytes = max(_state_bytes(spec, 0) for spec in gdn_specs)
+    state_counts = {len(spec.shapes) for spec in gdn_specs}
+    if state_counts not in ({2}, {3}) or any(
+        len(spec.dtypes) != len(spec.shapes) for spec in gdn_specs
+    ):
+        raise ValueError(
+            "Qwen4 GDN owners must expose one uniform two- or three-state "
+            f"layout, got state counts {state_counts}"
+        )
+    num_gdn_states = next(iter(state_counts))
+    state_component_bytes = tuple(
+        max(_state_bytes(spec, state_index) for spec in gdn_specs)
+        for state_index in range(num_gdn_states)
+    )
+    gdn_page_bytes = sum(state_component_bytes)
     for layer_name, spec in role_members[QSA_MAIN]:
         assert isinstance(spec, FullAttentionSpec)
         kv_token_bytes = spec.num_kv_heads * (spec.head_size + spec.head_size_v) * get_dtype_size(spec.dtype)
-        minimum_block_size = round_up((max_ssm_bytes + kv_token_bytes - 1) // kv_token_bytes, 128)
+        minimum_block_size = round_up(cdiv(gdn_page_bytes, kv_token_bytes), 128)
         if spec.block_size < minimum_block_size or spec.block_size % 128:
             raise ValueError(
                 f"{layer_name} block_size={spec.block_size} violates packed K/V-SSM alignment: "
@@ -276,7 +288,7 @@ def build_qwen4_kv_cache_layout(
         _qsa_main_page_bytes(spec) for _, spec in role_members[QSA_MAIN] if isinstance(spec, FullAttentionSpec)
     ]
     # Independent scheduler groups own disjoint block IDs. QSA uses the
-    # whole page; GDN interprets the same bytes as adjacent conv and SSM.
+    # whole page; GDN interprets the same bytes as adjacent state records.
     subpage_alignment = math.lcm(
         *(
             2 * 128 * spec.num_kv_heads * size * get_dtype_size(spec.dtype)
@@ -284,12 +296,20 @@ def build_qwen4_kv_cache_layout(
             for size in (spec.head_size, spec.head_size_v)
         )
     )
-    state_stride = round_up(max(conv_bytes + max_ssm_bytes, *(k + v for k, v in main_pages)), subpage_alignment)
-    regions = [
-        SlabRegion("r0", 0, state_stride, num_blocks),
-        SlabRegion("r1", 0, conv_bytes, num_blocks, state_stride),
-        SlabRegion("r2", conv_bytes, max_ssm_bytes, num_blocks, state_stride),
-    ]
+    state_stride = round_up(max(gdn_page_bytes, *(k + v for k, v in main_pages)), subpage_alignment)
+    regions = [SlabRegion("r0", 0, state_stride, num_blocks)]
+    state_offset = 0
+    for state_index, state_bytes in enumerate(state_component_bytes, start=1):
+        regions.append(
+            SlabRegion(
+                f"r{state_index}",
+                state_offset,
+                state_bytes,
+                num_blocks,
+                state_stride,
+            )
+        )
+        state_offset += state_bytes
     cursor = state_stride * num_blocks
     for name, page_size in {
         "r4": max(_real_page_size_bytes(spec) for _, spec in role_members[QSA_RAW]),
@@ -336,8 +356,9 @@ def build_qwen4_kv_cache_layout(
         num_blocks=num_blocks,
     )
 
-    assert layout.region("r1").offset + conv_bytes <= layout.region("r2").offset
-    assert layout.region("r2").offset + max_ssm_bytes <= state_stride
+    for state_index in range(1, num_gdn_states + 1):
+        state_region = layout.region(f"r{state_index}")
+        assert state_region.offset + state_region.page_size_bytes <= state_stride
     assert layout.region("r4").offset >= state_stride * num_blocks
     assert layout.region("r5").offset >= layout.region("r4").end
     for region in layout.regions:
@@ -464,7 +485,7 @@ def _prepare_qsa_composite_groups(
         )
     main = {source: all_main[source] for source in raw}
     compressed = {source: all_compressed[source] for source in raw}
-    if not any(isinstance(spec, MambaSpec) and len(spec.shapes) == 2 for spec in kv_cache_spec.values()):
+    if not any(isinstance(spec, MambaSpec) and not spec.tp_replicated for spec in kv_cache_spec.values()):
         raise ValueError("Qwen4 QSA cache layout requires GDN state specs")
 
     main_names: set[str] = set()
