@@ -71,6 +71,9 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector imp
     string_to_int64_hash,
     zmq_ctx,
 )
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.layerwise.step import (  # noqa: E402
+    LayerwiseTransferPlan,
+)
 
 # Restore the mocked modules so other test files still work correctly.
 # For keys that our real import loaded, overwrite with the saved mock.
@@ -234,7 +237,7 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
         side_effect=lambda x, _align: x,
     )
     @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.torch.npu.synchronize")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.group_concurrent_contiguous")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.group_contiguous_ids")
     def test_transfer_pd_gt1_uses_buffers_and_calls_engine(
         self, mock_group, _mock_sync, _mock_align, _mock_dataptr, mock_stream_switch
     ):
@@ -340,7 +343,7 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
         self.engine.batch_transfer_sync_write.assert_not_called()
 
     @patch(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.group_concurrent_contiguous",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.group_contiguous_ids",
         side_effect=group_concurrent_contiguous,
     )
     def test_transfer_merges_main_and_indexer_components(self, _mock_group):
@@ -396,7 +399,7 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
         )
 
     @patch(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.group_concurrent_contiguous",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.group_contiguous_ids",
         side_effect=group_concurrent_contiguous,
     )
     def test_sparse_sfa_c8_transfers_packed_main_indexer_and_scale_bytes(self, _mock_group):
@@ -530,7 +533,7 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
         self.assertIn("req2", self.thread.failed_reqs)
 
     @patch(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.group_concurrent_contiguous",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.group_contiguous_ids",
         side_effect=group_concurrent_contiguous,
     )
     @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.torch.npu.synchronize")
@@ -1091,7 +1094,7 @@ class TestMooncakeLayerwiseConnectorScheduler_More(unittest.TestCase):
         meta = self.scheduler.build_connector_meta(out)
         self.assertEqual(len(meta.requests), 0)
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.group_concurrent_contiguous")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.group_contiguous_ids")
     def test_build_connector_meta_emits_when_tokens_reach_total(self, mock_group_concurrent_contiguous):
         send_req_info = MagicMock(spec=SendReqInfo)
         send_req_info.local_block_ids = [[1, 2, 3]]
@@ -1164,21 +1167,21 @@ class TestHelperFunctions(unittest.TestCase):
         with self.assertRaises(ValueError), zmq_ctx("INVALID", "tcp://127.0.0.1:5555"):
             pass
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.transport.make_zmq_socket")
     def test_zmq_ctx_ok(self, mock_make_socket):
         mock_socket = MagicMock()
         mock_make_socket.return_value = mock_socket
         with zmq_ctx(zmq.REQ, "tcp://localhost:1234") as s:  # type: ignore
             self.assertEqual(s, mock_socket)
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.logger")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.transport.logger")
     def test_ensure_zmq_send_success(self, _):
         mock_socket = MagicMock()
         path = "127.0.0.1:12345"
         ensure_zmq_send(mock_socket, b"hello", path)
         mock_socket.send.assert_called_once_with(b"hello")
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.logger")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.transport.logger")
     def test_ensure_zmq_send_retry_and_fail(self, _):
         mock_socket = MagicMock()
         path = "127.0.0.1:12345"
@@ -1295,6 +1298,35 @@ class TestMooncakeLayerwiseConnector(unittest.TestCase):
         connector.on_kv_cache_written("layer0")
 
         connector.connector_worker.on_kv_cache_written.assert_called_once_with("layer0")
+
+    def test_cache_written_hook_noops_without_bound_plan(self):
+        connector = MooncakeLayerwiseConnector.__new__(MooncakeLayerwiseConnector)
+        connector._is_kv_producer = True
+        connector._connector_metadata = MooncakeLayerwiseConnectorMetadata()
+        connector.connector_worker = MooncakeLayerwiseConnectorWorker.__new__(MooncakeLayerwiseConnectorWorker)
+        connector.connector_worker.on_kv_cache_written = MagicMock()
+
+        # Empty metadata keeps the legacy early return.
+        connector.on_kv_cache_written("layer0")
+        # Non-empty metadata still has no plan before bind/prepare.
+        connector._connector_metadata.requests["req"] = MagicMock()
+        connector.on_kv_cache_written("layer0")
+
+        connector.connector_worker.on_kv_cache_written.assert_not_called()
+
+    def test_cache_written_hook_noops_with_empty_plan(self):
+        worker = MooncakeLayerwiseConnectorWorker.__new__(MooncakeLayerwiseConnectorWorker)
+        worker._layerwise_step_plan = LayerwiseTransferPlan(producer=True, requests={}, aligned_remote_block_ids=[])
+        worker.on_kv_cache_written = MagicMock()
+        connector = MooncakeLayerwiseConnector.__new__(MooncakeLayerwiseConnector)
+        connector._is_kv_producer = True
+        connector._connector_metadata = MooncakeLayerwiseConnectorMetadata()
+        connector._connector_metadata.requests["req"] = MagicMock()
+        connector.connector_worker = worker
+
+        connector.on_kv_cache_written("layer0")
+
+        worker.on_kv_cache_written.assert_not_called()
 
 
 def test_layerwise_reuse_state_tracks_shared_physical_slots():
@@ -1417,6 +1449,18 @@ def test_sparse_sfa_c8_save_skips_legacy_quantization_and_preserves_reuse_gate()
     assert worker.current_layer == 1
 
 
+def test_compat_layerwise_plan_copies_scheduler_requests():
+    worker = MooncakeLayerwiseConnectorWorker.__new__(MooncakeLayerwiseConnectorWorker)
+    metadata = MooncakeLayerwiseConnectorMetadata()
+    metadata.requests["req"] = SimpleNamespace(local_block_ids=[[1]])
+
+    plan = worker._compat_layerwise_plan(metadata)
+
+    assert plan.requests is not metadata.requests
+    plan.requests["req"].local_block_ids.append([99])
+    assert metadata.requests["req"].local_block_ids == [[1]]
+
+
 class TestMooncakeLayerwiseStepLifecycle(unittest.TestCase):
     def setUp(self):
         self.worker, _ = _make_worker_for_cache_write_event_test()
@@ -1473,8 +1517,14 @@ class TestMooncakeLayerwiseStepLifecycle(unittest.TestCase):
                 runner.pre_forward(scheduler_output)
                 self.assertEqual(self.worker.current_layer, 0)
                 self.assertEqual(self.worker._cache_write_events, [None, None])
-                self.assertEqual(metadata.requests["req"].local_block_ids, [[6, 7]])
-                self.assertEqual(metadata.requests["req"].remote_block_ids, [[10, 11]])
+                # The step controller produces a plan; the scheduler-produced
+                # metadata is a read-only input and must not be mutated.
+                plan = self.worker._layerwise_step_plan
+                self.assertIsNotNone(plan)
+                self.assertEqual(plan.requests["req"].local_block_ids, [[6, 7]])
+                self.assertEqual(plan.requests["req"].remote_block_ids, [[10, 11]])
+                self.assertEqual(metadata.requests["req"].local_block_ids, [[3]])
+                self.assertEqual(metadata.requests["req"].remote_block_ids, [[5]])
                 self.connector.on_kv_cache_written("layer0")
                 event = self.worker._cache_write_events[0]
                 self.connector.save_kv_layer("layer0", [], MagicMock())
@@ -1486,7 +1536,8 @@ class TestMooncakeLayerwiseStepLifecycle(unittest.TestCase):
                 # time.
                 runner.post_forward(set(), defer_finalize=True)
                 self.assertEqual(self.worker.current_layer, 1)
-                self.assertEqual(metadata.requests["req"].local_block_ids, [[6, 7]])
+                self.assertEqual(self.worker._layerwise_step_plan.requests["req"].local_block_ids, [[6, 7]])
+                self.assertEqual(metadata.requests["req"].local_block_ids, [[3]])
                 self.connector.on_kv_cache_written("mtp.layer1")
                 self.connector.save_kv_layer("mtp.layer1", [], MagicMock())
                 task = self.worker.kv_send_layer_thread.send_queue.put.call_args.args[0]

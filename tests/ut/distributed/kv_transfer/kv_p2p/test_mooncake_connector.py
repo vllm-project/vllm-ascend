@@ -71,7 +71,10 @@ MOONCAKE_STORAGE_REGISTRATION_FIX = pytest.mark.skip(
 @pytest.fixture(autouse=True)
 def _parallel_groups(monkeypatch):
     """Scope fake distributed topology to each case; never patch at collection."""
-    module = sys.modules[KVCacheTaskTracker.__module__]
+    # KVCacheTaskTracker moved to mooncake_v1/common/tracker.py, which has no
+    # parallel-group symbols; patch the module that still implements the
+    # pull connector instead.
+    module = sys.modules[MooncakeConnectorWorker.__module__]
     # Worker construction writes this environment variable. Track its original
     # state even in legacy constructor tests, not only in the wire fixture.
     monkeypatch.setenv("ASCEND_TRANSFER_TIMEOUT", os.environ.get("ASCEND_TRANSFER_TIMEOUT", "30"))
@@ -1067,10 +1070,10 @@ class TestSocketManagement(unittest.TestCase):
             kv_caches=self.kv_caches,
             prefill_pp_layer_partition=None,
         )
-        self.thread.remote_sockets = defaultdict(deque)
+        self.thread.remote_socket_pool.sockets = defaultdict(deque)
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.zmq.Context")
-    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.transport.zmq.Context")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.transport.make_zmq_socket")
     def test_get_remote_socket(self, mock_make_socket, mock_context):
         mock_sock = MagicMock()
         mock_make_socket.return_value = mock_sock
@@ -1085,8 +1088,8 @@ class TestSocketManagement(unittest.TestCase):
         self.assertEqual(kwargs.get("path"), "tcp://test_host:12345")
         self.assertEqual(kwargs.get("socket_type"), zmq.REQ)  # type: ignore
         self.assertFalse(kwargs.get("bind", True))
-        mock_sock.setsockopt.assert_any_call(zmq.SNDTIMEO, int(self.thread.timeout * 1000))  # type: ignore
-        mock_sock.setsockopt.assert_any_call(zmq.RCVTIMEO, int(self.thread.timeout * 1000))  # type: ignore
+        mock_sock.setsockopt.assert_any_call(zmq.SNDTIMEO, int(self.thread.remote_socket_pool.timeout * 1000))  # type: ignore
+        mock_sock.setsockopt.assert_any_call(zmq.RCVTIMEO, int(self.thread.remote_socket_pool.timeout * 1000))  # type: ignore
 
     def test_return_socket_to_pool(self):
         mock_sock = MagicMock()
@@ -1096,8 +1099,8 @@ class TestSocketManagement(unittest.TestCase):
 
         self.thread._return_remote_socket(mock_sock, test_host, test_port)
 
-        self.assertEqual(len(self.thread.remote_sockets[test_path]), 1)
-        self.assertEqual(self.thread.remote_sockets[test_path][0], mock_sock)
+        self.assertEqual(len(self.thread.remote_socket_pool.sockets[test_path]), 1)
+        self.assertEqual(self.thread.remote_socket_pool.sockets[test_path][0], mock_sock)
 
 
 class TestCoreFunctionality(unittest.TestCase):
@@ -1965,7 +1968,7 @@ def wire_transfer_contract(monkeypatch, request):
     socket = MagicMock()
     # Seed only the external socket pool: real acquisition, codec and ACK path
     # are retained without opening a port or starting the receiver/executor.
-    receiver.remote_sockets[make_zmq_path("tcp", "127.0.0.1", 6000)].append(socket)
+    receiver.remote_socket_pool.sockets[make_zmq_path("tcp", "127.0.0.1", 6000)].append(socket)
     try:
         yield worker, receiver, engine, socket, peer
     finally:
@@ -2165,7 +2168,7 @@ def test_wire_transfer_failure_does_not_poison_next_request(wire_transfer_contra
     module = sys.modules[MooncakeConnectorWorker.__module__]
     socket = MagicMock(spec=Socket)
     socket.recv.side_effect = [msgspec.msgpack.encode(peer), done_ack, b"ACK"]
-    socket_pool = receiver.remote_sockets[make_zmq_path("tcp", "127.0.0.1", 6000)]
+    socket_pool = receiver.remote_socket_pool.sockets[make_zmq_path("tcp", "127.0.0.1", 6000)]
     socket_pool.clear()
     socket_pool.append(socket)
     used_sockets = [socket]
@@ -3231,45 +3234,45 @@ class TestUtils(unittest.TestCase):
         with self.assertRaises(ValueError), zmq_ctx("INVALID", "tcp://127.0.0.1:5555"):
             pass
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.transport.make_zmq_socket")
     def test_zmq_ctx_ok(self, mock_make_socket):
         mock_socket = MagicMock()
         mock_make_socket.return_value = mock_socket
         with zmq_ctx(zmq.REQ, "tcp://localhost:1234") as s:  # type: ignore
             self.assertEqual(s, mock_socket)
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.logger")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.transport.logger")
     def test_ensure_zmq_send_success(self, mock_logger):
         mock_socket = MagicMock()
         ensure_zmq_send(mock_socket, b"hello", "tcp://localhost:1234")
         mock_socket.send.assert_called_once_with(b"hello")
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.logger")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.transport.logger")
     def test_ensure_zmq_send_retry_and_fail(self, mock_logger):
         mock_socket = MagicMock()
         mock_socket.send.side_effect = zmq.ZMQError(  # type: ignore
             "send failed"
         )
         with (
-            patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.time.sleep"),
+            patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.transport.time.sleep"),
             self.assertRaisesRegex(RuntimeError, "Failed to send data.*after 2 retries"),
         ):
             ensure_zmq_send(mock_socket, b"hello", "tcp://localhost:1234", max_retries=2)
         self.assertEqual(mock_socket.send.call_count, 2)
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.logger")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.transport.logger")
     def test_ensure_zmq_recv_success(self, mock_logger):
         mock_socket = MagicMock()
         mock_socket.recv.return_value = b"response"
         data = ensure_zmq_recv(mock_socket, "tcp://localhost:1234")
         self.assertEqual(data, b"response")
 
-    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.logger")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.transport.logger")
     def test_ensure_zmq_recv_timeout_and_fail(self, mock_logger):
         mock_socket = MagicMock()
         mock_socket.recv.side_effect = zmq.ZMQError("Receive timeout")  # type: ignore
         with (
-            patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.time.sleep"),
+            patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.transport.time.sleep"),
             self.assertRaisesRegex(RuntimeError, "Failed to receive data after 2 retries"),
         ):
             ensure_zmq_recv(mock_socket, "tcp://localhost:1234", max_retries=2)

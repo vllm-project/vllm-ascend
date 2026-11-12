@@ -1,29 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
-import contextlib
 import copy
-import hashlib
 import logging
 import math
 import os
 import queue
 import random
-import struct
 import threading
 import time
 from collections import OrderedDict, defaultdict, deque
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 import numpy as np
-import numpy.typing as npt
 import torch
-import torch_npu
+import torch_npu  # noqa: F401  (entry patch surface used by existing tests)
 import zmq
 from mooncake.engine import TransferEngine  # type: ignore
-from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_pcp_group
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
@@ -43,22 +37,106 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.distributed.utils import get_pp_indices
 from vllm.logger import logger
-from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
-from vllm.utils.math_utils import cdiv
-from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
+
+# Kept as the module attribute patched by the existing mamba-transfer tests; the
+# reformat mixin resolves this helper through this module at call time.
+from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first  # noqa: F401
+from vllm.utils.network_utils import get_ip, make_zmq_path
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     MambaSpec,
     MLAAttentionSpec,
-    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, AscendSlidingWindowMLASpec
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.block_selection import (
+    GroupTransferInfo,
+    build_group_transfer_info,
+    group_unique_specs,
+    state_prefill_token_count,
+    swa_transfer_block_ids,
+    transfer_block_ids,
+    truncate_request_for_prefill,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.endpoints import (
+    pull_base_port,
+    pull_handshake_port,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.protocol import (
+    DONE_RECVING_MSG,
+    GET_META_MSG,
+    PullAgentMetadata,
+    RemotePortInfo,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.tracker import KVCacheTaskTracker
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.common.transport import (
+    RemoteSocketPool,
+    SizedDict,
+    ensure_zmq_recv,
+    ensure_zmq_send,
+    group_concurrent_contiguous,
+    split_if_not_byte_contiguous,
+    string_to_int64_hash,
+    zmq_ctx,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull import reformat as _pull_reformat
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.metadata import (
+    GroupPull,
+    MooncakeConnectorMetadata,
+    ReqMeta,
+    TransferRequest,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.reformat import KvCacheReformatMixin
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
+    context_parallel_parameters_check as pull_context_parallel_parameters_check,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
+    cp_group_meta as pull_cp_group_meta,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
+    dcp_shard_pulls as pull_dcp_shard_pulls,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
+    group_kernel_params as pull_group_kernel_params,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
+    group_pulls_metadata as pull_group_pulls_metadata,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
+    hybrid_remote_rank_group_pulls as pull_hybrid_remote_rank_group_pulls,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
+    kernel_block_scale as pull_kernel_block_scale,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
+    kv_head_groups as pull_kv_head_groups,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
+    local_remote_block_port_mappings as pull_local_remote_block_port_mappings,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
+    local_remote_cp_params as pull_local_remote_cp_params,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
+    remote_host_info_by_port as pull_remote_host_info_by_port,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
+    remote_port_send_num as pull_remote_port_send_num,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
+    remote_ranks_for_req as pull_remote_ranks_for_req,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
+    set_hma_shared_port as pull_set_hma_shared_port,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_v1.pull.transfer_plan import (
+    sfa_replicate_k_block_ids as pull_sfa_replicate_k_block_ids,
+)
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     PD_QOS_DEFAULT,
@@ -74,7 +152,6 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_world_size,
 )
 from vllm_ascend.utils import (
-    enable_custom_op,
     enable_sfa_dcp_replicated_indexer,
     get_kv_cache_tensor_layers,
     model_uses_sfa_sparse,
@@ -88,8 +165,13 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 # isort: on
 
-GET_META_MSG = b"get_meta_msg"
-DONE_RECVING_MSG = b"done_recving_msg"
+# Back-compat re-exports: the shared wire protocol and task tracker definitions
+# moved to mooncake_v1/common. The imports above keep GET_META_MSG,
+# DONE_RECVING_MSG, RemotePortInfo and KVCacheTaskTracker importable from this
+# module; MooncakeAgentMetadata keeps its historical name and is bound here (not
+# at the end of the module) because the annotations below reference it while the
+# classes are being defined.
+MooncakeAgentMetadata = PullAgentMetadata
 
 
 # A busy peer can otherwise keep a global executor worker forever when the
@@ -97,166 +179,14 @@ DONE_RECVING_MSG = b"done_recving_msg"
 # other peers already waiting in the global executor queue can make progress.
 MAX_REQUESTS_PER_PEER_HANDLER = 5
 KV_CACHE_BUFFER_ALIGNMENT = 2 * 1024 * 1024
-
-
-class RemotePortInfo(TypedDict):
-    num: int
-    host: str
-
-
-class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
-    engine_id: str
-    te_rpc_port: int
-    kv_group2layeridx: dict[int, tuple[dict[str, Any], list[int]]]
-    block_size: int
-    kv_caches_base_addr: list[list[int]]
-    block_size_scale: list[list[int]]
-    num_blocks: int
-    block_lens: list[list[int]]
-    block_strides: list[list[int]]
-    local_ip: str = ""
-    handshake_port: int = 0
-
-
-@dataclass
-class ReqMeta:
-    local_block_ids: BlockIds
-    num_external_tokens: int
-    num_computed_tokens: int
-    remote_block_ids: BlockIds
-
-    remote_host: str
-    remote_port: int
-    remote_engine_id: str
-    remote_request_id: str
-    remote_pcp_size: int
-    remote_dcp_size: int
-    remote_ptp_size: int | None
-    remote_multi_nodes_meta_mapping: dict[str, dict[str, Any]]
-    num_prompt_blocks: int
-    remote_block_size: int
-    local_full_block_ids: BlockIds = tuple()
-    do_virtual: bool = False
-
-
-@dataclass(frozen=True)
-class GroupPull:
-    group_id: int
-    remote_tp_offset: int
-    num_group_pulls: int
-    prefill_pp_rank: int = 0
-    is_group_transfer_end: bool = False
-
-
-@dataclass(frozen=True)
-class GroupTransferInfo:
-    tokens_per_block: int
-    blocks_per_window: int
-    is_state_group: bool
-
-
-@dataclass
-class SizedDict(OrderedDict):
-    def __init__(self, max_size=16000, *args, **kwargs):
-        self.max_size = max_size
-        super().__init__(*args, **kwargs)
-
-    def __setitem__(self, key, value):
-        super().__setitem__(key, value)
-        if len(self) > self.max_size:
-            self.popitem(last=False)
-
-    def __getitem__(self, key):
-        try:
-            return super().__getitem__(key)
-        except KeyError:
-            value: dict[int, list[int]] = {}
-            self[key] = value
-            return value
-
-
-class KVCacheTaskTracker:
-    def __init__(self):
-        super().__init__()
-
-        self.done_task_lock = threading.Lock()
-        self.finished_requests: set[str] = set()
-        # Only used in prefill node. Tracks requests whose kv blocks freeing is
-        # intentionally delayed. Each entry is a tuple of (request_id,
-        # timestamp). If a request remains in this queue for too long, it will
-        # be force-freed.
-        self.delayed_free_requests: OrderedDict[str, float] = OrderedDict()
-        self.reqs_to_process: set[str] = set()
-
-    def add_req_to_process(self, request_id: str):
-        self.reqs_to_process.add(request_id)
-
-    def add_not_transfer_request(self, request_id: str):
-        with self.done_task_lock:
-            self.finished_requests.add(request_id)
-            self.reqs_to_process.discard(request_id)
-
-    def update_done_task_count(self, request_id: str, *, report_completion: bool = True):
-        with self.done_task_lock:
-            if not report_completion:
-                # A notification-only request never entered WAITING_FOR_REMOTE_KVS.
-                self.reqs_to_process.discard(request_id)
-                self.delayed_free_requests.pop(request_id, None)
-                return
-            if request_id in self.reqs_to_process:
-                self.finished_requests.add(request_id)
-                self.reqs_to_process.discard(request_id)
-                self.delayed_free_requests.pop(request_id, None)
-            else:
-                logger.warning(
-                    "MooncakeConnector finish req not in reqs to process. "
-                    "request_id=%s. "
-                    "Possible cause: Request was already completed or not properly tracked. "
-                    "Check: Verify request lifecycle and tracking logic.",
-                    request_id,
-                )
-
-    def get_and_clear_finished_requests(self) -> set[str]:
-        """
-        Get and clear the requests that have been completed.
-        Returns:
-            A set of request IDs that have been completed.
-        """
-        with self.done_task_lock:
-            finished_requests = self.finished_requests.copy()
-            expired_requests = self._retrieve_expired_requests()
-            finished_requests.update(expired_requests)
-            self.finished_requests.clear()
-        return finished_requests
-
-    def add_delayed_request(self, request_id: str, delay_start_time: float):
-        """Add a delayed free request."""
-        with self.done_task_lock:
-            if request_id in self.reqs_to_process:
-                self.delayed_free_requests[request_id] = delay_start_time
-
-    def _retrieve_expired_requests(self):
-        """Retrieve all expired delayed requests."""
-        expired_requests: set[str] = set()
-        # Free delayed requests if they exceed the timeout
-        current_time = time.time()
-        while self.delayed_free_requests:
-            request_id = next(iter(self.delayed_free_requests))
-            delay_start_time = self.delayed_free_requests[request_id]
-            if current_time - delay_start_time > envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT:
-                self.delayed_free_requests.popitem(last=False)
-                self.reqs_to_process.discard(request_id)
-                expired_requests.add(request_id)
-                logger.error(
-                    "Force freed expired request: %s. "
-                    "Reason: Request exceeded timeout threshold (%s seconds). "
-                    "Action: Resources have been forcibly released to prevent memory leak.",
-                    request_id,
-                    envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
-                )
-            else:
-                break
-        return expired_requests
+# Poll/timeout used by the background threads so a stop request can interrupt a
+# blocking wait. The threads observe the stop event and exit on their own; the
+# ZMQ socket is never closed from another thread.
+THREAD_STOP_POLL_SECONDS = 0.2
+# Best-effort upper bound for joining a background thread during shutdown.
+SHUTDOWN_JOIN_TIMEOUT_SECONDS = 5.0
+# Startup wait bound for the transfer threads; on timeout the worker rolls back.
+KV_CACHE_THREAD_STARTUP_TIMEOUT_SECONDS = 5 * 60
 
 
 class KVCacheSendingThread(threading.Thread):
@@ -290,6 +220,10 @@ class KVCacheSendingThread(threading.Thread):
         self.port_send_num: dict[str, int] = {}
 
         self.task_tracker = KVCacheTaskTracker()
+        # Set by stop() to let the busy loop exit; see run_busy_loop().
+        self._stop_event = threading.Event()
+        # First fatal (unrecoverable) error raised by run(); read by the worker.
+        self.fatal_error: BaseException | None = None
 
     def get_and_clear_finished_requests(self) -> set[str]:
         """
@@ -305,6 +239,10 @@ class KVCacheSendingThread(threading.Thread):
     def add_delayed_request(self, request_id: str, delay_start_time: float):
         return self.task_tracker.add_delayed_request(request_id, delay_start_time)
 
+    def stop(self) -> None:
+        """Signal the busy loop to exit; idempotent."""
+        self._stop_event.set()
+
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
         try:
@@ -312,8 +250,14 @@ class KVCacheSendingThread(threading.Thread):
             # to have a unique port. This hack to keeps us moving. We will
             # switch when moving to etcd or where we have a single ZMQ socket in
             # the scheduler.
-            device_index = (self.pp_rank * self.pcp_size + self.pcp_rank) * self.tp_size + self.tp_rank
-            handshake_port = self.side_channel_port + device_index
+            handshake_port = pull_handshake_port(
+                base_port=self.side_channel_port,
+                pp_rank=self.pp_rank,
+                pcp_size=self.pcp_size,
+                pcp_rank=self.pcp_rank,
+                tp_size=self.tp_size,
+                tp_rank=self.tp_rank,
+            )
             path = make_zmq_path("tcp", self.side_channel_host, handshake_port)
             logger.info(
                 "KVCacheSendingThread started listening on path: %s. Thread: tp_rank=%d, pp_rank=%d, pcp_rank=%d",
@@ -326,6 +270,7 @@ class KVCacheSendingThread(threading.Thread):
                 self.ready_event.set()
                 self.run_busy_loop(sock)
         except Exception as e:
+            self.fatal_error = e
             logger.exception(
                 "Mooncake KVCacheSendingThread encountered exception. "
                 "Thread: tp_rank=%d, pp_rank=%d, listening_path=%s. "
@@ -344,8 +289,10 @@ class KVCacheSendingThread(threading.Thread):
             logger.debug("Size of encoded MooncakeAgentMetadata: %s bytes", str(size_in_bytes))
 
         decoder = msgspec.msgpack.Decoder(type=tuple)
-        while True:
+        while not self._stop_event.is_set():
             try:
+                if sock.poll(int(THREAD_STOP_POLL_SECONDS * 1000)) == 0:
+                    continue
                 frames = sock.recv_multipart()
                 if len(frames) < 2:
                     logger.error(
@@ -384,8 +331,14 @@ class KVCacheSendingThread(threading.Thread):
                         if request_id not in self.port_send_num:
                             self.port_send_num[request_id] = 0
                         self.port_send_num[request_id] += 1
-                        device_index = (self.pp_rank * self.pcp_size + self.pcp_rank) * self.tp_size + self.tp_rank
-                        handshake_port = self.side_channel_port + device_index
+                        handshake_port = pull_handshake_port(
+                            base_port=self.side_channel_port,
+                            pp_rank=self.pp_rank,
+                            pcp_size=self.pcp_size,
+                            pcp_rank=self.pcp_rank,
+                            tp_size=self.tp_size,
+                            tp_rank=self.tp_rank,
+                        )
                         if self.port_send_num[request_id] >= remote_port_send_num[handshake_port]["num"]:
                             self.task_tracker.update_done_task_count(request_id)
                             del self.port_send_num[request_id]
@@ -423,7 +376,7 @@ class KVCacheSendingThread(threading.Thread):
                 )
 
 
-class KVCacheRecvingThread(threading.Thread):
+class KVCacheRecvingThread(KvCacheReformatMixin, threading.Thread):
     def __init__(
         self,
         tp_rank: int,
@@ -511,13 +464,7 @@ class KVCacheRecvingThread(threading.Thread):
 
         self.encoder = msgspec.msgpack.Encoder()
         self.decoder = msgspec.msgpack.Decoder(MooncakeAgentMetadata)
-        self.remote_sockets_lock = threading.Lock()
-        self.remote_sockets: dict[  # type: ignore
-            str, deque[zmq.Socket]
-        ] = defaultdict(  # type: ignore
-            deque
-        )
-        self.timeout = 1.0  # seconds
+        self.remote_socket_pool = RemoteSocketPool(timeout=1.0)
 
         assert vllm_config is not None
         self.vllm_config: VllmConfig = vllm_config
@@ -572,6 +519,8 @@ class KVCacheRecvingThread(threading.Thread):
                 self.num_draft_layers = (
                     self.vllm_config.speculative_config.draft_model_config.hf_config.num_hidden_layers
                 )
+        # Set by stop() to let the request loop drain and exit; see run().
+        self._stop_event = threading.Event()
 
     def add_request(
         self,
@@ -593,26 +542,25 @@ class KVCacheRecvingThread(threading.Thread):
         awaiting_kvs: bool = True,
     ):
         """Add a new request to the queue for processing."""
-        if remote_port_send_num is None:
-            remote_port_send_num = {}
-        trans_info = {
-            "request_id": request_id,
-            "local_block_ids": local_block_ids,
-            "remote_block_ids": remote_block_ids,
-            "local_block_ids_replicate_k": local_block_ids_replicate_k or tuple(),
-            "remote_block_ids_replicate_k": remote_block_ids_replicate_k or tuple(),
-            "group_pulls": group_pulls,
-            "remote_engine_id": remote_engine_id,
-            "remote_request_id": remote_request_id,
-            "remote_host": remote_host,
-            "remote_handshake_port": remote_handshake_port,
-            "num_computed_tokens": num_computed_tokens,
-            "remote_port_send_num": remote_port_send_num,
-            "all_task_done": all_task_done,
-            "shard_idx": shard_idx,
-            "remote_block_size": remote_block_size,
-            "awaiting_kvs": awaiting_kvs,
-        }
+        transfer_request = TransferRequest.from_legacy_kwargs(
+            request_id=request_id,
+            remote_request_id=remote_request_id,
+            local_block_ids=local_block_ids,
+            remote_block_ids=remote_block_ids,
+            group_pulls=group_pulls,
+            remote_engine_id=remote_engine_id,
+            remote_host=remote_host,
+            remote_handshake_port=remote_handshake_port,
+            remote_block_size=remote_block_size,
+            remote_port_send_num=remote_port_send_num,
+            num_computed_tokens=num_computed_tokens,
+            all_task_done=all_task_done,
+            shard_idx=shard_idx,
+            local_block_ids_replicate_k=local_block_ids_replicate_k,
+            remote_block_ids_replicate_k=remote_block_ids_replicate_k,
+            awaiting_kvs=awaiting_kvs,
+        )
+        trans_info = transfer_request.as_legacy_dict()
         logger.debug("Adding request %s to the queue.Trans info:%s", request_id, trans_info)
         self.request_queue.put(trans_info)
 
@@ -648,12 +596,19 @@ class KVCacheRecvingThread(threading.Thread):
             if not self.use_request_level_recv_errors:
                 self.invalid_block_ids.update(local_block_ids[0])
 
+    def stop(self) -> None:
+        """Signal the request loop to exit; idempotent."""
+        self._stop_event.set()
+
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
         self.ready_event.set()
-        while True:
+        while not self._stop_event.is_set():
             try:
-                request_data = self.request_queue.get()
+                request_data = self.request_queue.get(timeout=THREAD_STOP_POLL_SECONDS)
+            except queue.Empty:
+                continue
+            try:
                 if request_data is None:
                     logger.warning("Received a None request. ")
                     self.request_queue.task_done()
@@ -1088,398 +1043,6 @@ class KVCacheRecvingThread(threading.Thread):
                 ready_attention_group_reformat_block_ids,
             )
 
-    def _stash_pending_reformat(
-        self,
-        request_id: str,
-        shard_idx: int,
-        ready_attention_group_reformat_block_ids: list[tuple[int, list[list[int]], int, list[int]]],
-    ) -> None:
-        with self.pending_reformat_lock:
-            self.pending_reformat[request_id][shard_idx] = ready_attention_group_reformat_block_ids
-
-    def _reformat_pending_kv_caches(self, request_id: str) -> None:
-        with self.pending_reformat_lock:
-            shard_reformats = self.pending_reformat.pop(request_id, {})
-        for shard_idx in sorted(shard_reformats):
-            logger.debug(
-                "Reformatting KV cache after all pulls completed. request_id=%s shard_idx=%s",
-                request_id,
-                shard_idx,
-            )
-            self._apply_kv_cache_reformat(shard_reformats[shard_idx])
-
-    def _apply_kv_cache_reformat(
-        self,
-        ready_attention_group_reformat_block_ids: list[tuple[int, list[list[int]], int, list[int]]],
-    ) -> None:
-        if not ready_attention_group_reformat_block_ids:
-            return
-
-        gqa_reformat_groups = [
-            (group_idx, grouped_local_block_ids, num_group_pulls, layer_indices)
-            for (
-                group_idx,
-                grouped_local_block_ids,
-                num_group_pulls,
-                layer_indices,
-            ) in ready_attention_group_reformat_block_ids
-            if num_group_pulls > 1
-            and not MooncakeConnectorWorker._group_skip_kv_reformat(self.kv_group2layeridx[group_idx][0])
-        ]
-
-        if self.is_hma_required:
-            for group_idx, grouped_local_block_ids, num_group_pulls, layer_indices in gqa_reformat_groups:
-                num_reformat_blocks = sum(len(block_ids) for block_ids in grouped_local_block_ids)
-                logger.debug(
-                    "Reformat hybrid linear KV cache for GQA attention group. "
-                    "group_idx=%s, num_group_pulls=%s, num_block_groups=%s, num_reformat_blocks=%s, "
-                    "layer_indices=%s",
-                    group_idx,
-                    num_group_pulls,
-                    len(grouped_local_block_ids),
-                    num_reformat_blocks,
-                    layer_indices,
-                )
-                group_kv_caches = self._get_group_kv_caches(group_idx, layer_indices)
-                if not group_kv_caches:
-                    continue
-                self.reformat_kv_cache_hybrid_linear_torch(grouped_local_block_ids, num_group_pulls, group_kv_caches)
-            return
-
-        uniform_num_pulls = {num_group_pulls for _, _, num_group_pulls, _ in ready_attention_group_reformat_block_ids}
-        if len(uniform_num_pulls) != 1:
-            raise RuntimeError(
-                f"Non-hybrid Mooncake KV reformat expects uniform group pulls, but got {uniform_num_pulls}."
-            )
-
-        num_group_pulls = next(iter(uniform_num_pulls))
-        need_cat_cache = num_group_pulls > 1
-        need_nz_cache = get_ascend_config().enable_kv_nz
-        if not (need_cat_cache or need_nz_cache):
-            return
-
-        use_fused_op = get_ascend_config().enable_transpose_kv_cache_by_block
-        for group_idx, reformat_block_ids, _, layer_indices in ready_attention_group_reformat_block_ids:
-            group_spec = self.kv_group2layeridx[group_idx][0]
-            if MooncakeConnectorWorker._group_skip_kv_reformat(group_spec):
-                continue
-            group_kv_caches = self._get_group_kv_caches(group_idx, layer_indices)
-            if not group_kv_caches:
-                continue
-            if use_fused_op and enable_custom_op():
-                if need_cat_cache:
-                    self.reformat_kv_cache_with_fused_op(reformat_block_ids, num_group_pulls, group_kv_caches)
-                if need_nz_cache:
-                    self.reformat_kv_cache(reformat_block_ids, num_group_pulls, False, need_nz_cache, group_kv_caches)
-            else:
-                self.reformat_kv_cache(
-                    reformat_block_ids,
-                    num_group_pulls,
-                    need_cat_cache,
-                    need_nz_cache,
-                    group_kv_caches,
-                )
-
-    @torch.no_grad()
-    def reformat_kv_cache_hybrid_linear_torch(
-        self, block_ids: list[list[int]], tp_num_need_pulls: int, group_kv_caches
-    ):
-        flat_block_ids = [item for sublist in block_ids for item in sublist]
-        if not flat_block_ids or tp_num_need_pulls == 1:
-            return
-        device = list(self.kv_caches.values())[0][0].device
-        block_ids_tensor = torch.tensor(flat_block_ids, dtype=torch.long, device=device)
-        num_blocks = block_ids_tensor.numel()
-
-        def _transpose_cache_by_block(cache: torch.Tensor):
-            # The transferred cache is laid out as
-            # [block, split, token, head_per_split, dim]. Restore it to
-            # [block, token, split, head_per_split, dim] in the selected blocks.
-            selected = cache.index_select(0, block_ids_tensor)
-            block_size = cache.shape[1]
-            transposed = (
-                selected.reshape(num_blocks, tp_num_need_pulls, block_size, -1)
-                .transpose(1, 2)
-                .contiguous()
-                .reshape_as(selected)
-            )
-            cache.index_copy_(0, block_ids_tensor, transposed)
-
-        for _, (k_cache_layer, v_cache_layer) in group_kv_caches.items():
-            _transpose_cache_by_block(k_cache_layer)
-            _transpose_cache_by_block(v_cache_layer)
-
-    def _append_mamba_transfer_meta(
-        self,
-        src_list: list[int],
-        dst_list: list[int],
-        length_list: list[int],
-        group_spec: dict[str, Any],
-        src_layer_base_addr: list[int],
-        dst_layer_base_addr: list[int],
-        block_len: list[int],
-        block_stride: list[int],
-        remote_block_stride: list[int],
-        remote_block_id: int,
-        local_block_id: int,
-        tp_num_need_pulls: int,
-        remote_tp_offset: int,
-    ) -> None:
-        remote_tp_size = self.tp_size * tp_num_need_pulls
-        assert remote_tp_size >= self.tp_size, "Mamba prefill TP size must be >= decode TP size."
-        assert remote_tp_size % self.tp_size == 0, "Mamba prefill TP size must be divisible by decode TP size."
-
-        remote_conv_addr, remote_ssm_addr = dst_layer_base_addr[:2]
-        local_conv_addr, local_ssm_addr = src_layer_base_addr[:2]
-        local_conv_len, local_ssm_len = block_len[:2]
-        local_conv_stride, local_ssm_stride = block_stride[:2]
-        remote_conv_stride, remote_ssm_stride = remote_block_stride[:2]
-
-        tp_ratio = tp_num_need_pulls
-        remote_conv_len = local_conv_len // tp_ratio
-        remote_ssm_len = local_ssm_len // tp_ratio
-
-        if tp_ratio == 1:
-            src_list.extend(
-                [
-                    local_conv_addr + local_block_id * local_conv_stride,
-                    local_ssm_addr + local_block_id * local_ssm_stride,
-                ]
-            )
-            dst_list.extend(
-                [
-                    remote_conv_addr + remote_block_id * remote_conv_stride,
-                    remote_ssm_addr + remote_block_id * remote_ssm_stride,
-                ]
-            )
-            length_list.extend([remote_conv_len, remote_ssm_len])
-            return
-
-        conv_shape = group_spec["shapes"][0]
-        conv_dtype_size = group_spec["dtype_sizes"][0]
-
-        hf_text_config = self.vllm_config.model_config.hf_text_config
-        linear_attn_config = getattr(hf_text_config, "linear_attn_config", None)
-        if linear_attn_config is not None:
-            projection_width = linear_attn_config["num_heads"] * linear_attn_config["head_dim"]
-            remote_conv_sizes = [projection_width // remote_tp_size] * 3
-        else:
-            remote_num_key_heads = hf_text_config.linear_num_key_heads // remote_tp_size
-            remote_num_value_heads = hf_text_config.linear_num_value_heads // remote_tp_size
-            remote_conv_sizes = [
-                remote_num_key_heads * hf_text_config.linear_key_head_dim,
-                remote_num_key_heads * hf_text_config.linear_key_head_dim,
-                remote_num_value_heads * hf_text_config.linear_value_head_dim,
-            ]
-
-        remote_conv_width = sum(remote_conv_sizes)
-        remote_conv_offsets = [0, remote_conv_sizes[0], sum(remote_conv_sizes[:2])]
-        if is_conv_state_dim_first():
-            state_len = conv_shape[1]
-            for remote_conv_offset, remote_conv_size in zip(remote_conv_offsets, remote_conv_sizes):
-                local_addr_offset = (
-                    (remote_conv_offset * tp_ratio + remote_tp_offset * remote_conv_size) * state_len * conv_dtype_size
-                )
-                remote_addr_offset = remote_conv_offset * state_len * conv_dtype_size
-                src_list.append(local_conv_addr + local_block_id * local_conv_stride + local_addr_offset)
-                dst_list.append(remote_conv_addr + remote_block_id * remote_conv_stride + remote_addr_offset)
-                length_list.append(remote_conv_size * state_len * conv_dtype_size)
-        else:
-            state_len = conv_shape[0]
-            for state_idx in range(state_len):
-                for remote_conv_offset, remote_conv_size in zip(remote_conv_offsets, remote_conv_sizes):
-                    remote_addr_offset = (state_idx * remote_conv_width + remote_conv_offset) * conv_dtype_size
-                    local_addr_offset = (
-                        (state_idx * remote_conv_width + remote_conv_offset) * tp_ratio
-                        + remote_tp_offset * remote_conv_size
-                    ) * conv_dtype_size
-                    src_list.append(local_conv_addr + local_block_id * local_conv_stride + local_addr_offset)
-                    dst_list.append(remote_conv_addr + remote_block_id * remote_conv_stride + remote_addr_offset)
-                    length_list.append(remote_conv_size * conv_dtype_size)
-
-        src_list.append(
-            local_ssm_addr + local_block_id * local_ssm_stride + remote_tp_offset * local_ssm_len // tp_num_need_pulls
-        )
-        dst_list.append(remote_ssm_addr + remote_block_id * remote_ssm_stride)
-        length_list.append(remote_ssm_len)
-
-    def _get_group_kv_caches(self, group_idx: int, layer_indices: list[int] | None = None) -> dict[str, Any]:
-        if layer_indices is None:
-            _, layer_indices = self.kv_group2layeridx[group_idx]
-        layer_index_set = set(layer_indices)
-        model_type = self.vllm_config.model_config.hf_text_config.model_type
-        num_attn_module = 2 if model_type in ("longcat_flash", "longcat_flash_ngram") else 1
-        from vllm.v1.worker.utils import extract_layer_index
-
-        def layer_in_group(layer_name: str) -> bool:
-            if "mtp" in layer_name:
-                return any(layer_idx >= self.num_layers for layer_idx in layer_index_set)
-            return extract_layer_index(layer_name, num_attn_module) in layer_index_set
-
-        return {
-            layer_name: layer_cache for layer_name, layer_cache in self.kv_caches.items() if layer_in_group(layer_name)
-        }
-
-    @staticmethod
-    def _get_kv_cache_dims_from_tensors(kv_caches: dict[str, Any]) -> tuple[int, int, int]:
-        """Return (num_kv_heads, k_head_dim, v_head_dim) from registered KV cache tensors."""
-        k_cache, v_cache = next(iter(kv_caches.values()))
-        return int(k_cache.shape[-2]), int(k_cache.shape[-1]), int(v_cache.shape[-1])
-
-    def reformat_kv_cache_with_fused_op(
-        self,
-        block_ids: list[list[int]],
-        tp_num_need_pulls: int,
-        kv_caches: dict[str, Any] | None = None,
-    ):
-        if kv_caches is None:
-            kv_caches = self.kv_caches
-        k_cache = list(kv_caches.values())[0][0]
-        device = k_cache.device
-        num_kv_head, head_dim, _ = self._get_kv_cache_dims_from_tensors(kv_caches)
-        block_size = self.vllm_config.cache_config.block_size
-        layers = len(kv_caches)
-        flat_block_ids = [item for sublist in block_ids for item in sublist]
-        block_ids_tensor = torch.tensor(flat_block_ids, dtype=torch.int64, device=device)
-
-        k_caches = []
-        v_caches = []
-        for _, (k_cache_layer, v_cache_layer) in kv_caches.items():
-            k_caches.append(k_cache_layer)
-            v_caches.append(v_cache_layer)
-
-        torch.ops._C_ascend.transpose_kv_cache_by_block(
-            k_caches, v_caches, block_ids_tensor, block_size, num_kv_head, head_dim, tp_num_need_pulls, layers
-        )
-
-    def reformat_kv_cache(
-        self,
-        block_ids: list[list[int]],
-        tp_num_need_pulls: int,
-        need_cat_cache: bool = False,
-        need_nz_cache: bool = False,
-        kv_caches: dict[str, Any] | None = None,
-    ):
-        if kv_caches is None:
-            kv_caches = self.kv_caches
-        k_cache = list(kv_caches.values())[0][0]
-        dtype = k_cache.dtype
-        device = k_cache.device
-        num_kv_heads, k_head_dim, v_head_dim = self._get_kv_cache_dims_from_tensors(kv_caches)
-
-        flat_block_ids = [item for sublist in block_ids for item in sublist]
-        block_ids_tensor = torch.tensor(flat_block_ids, dtype=torch.int32, device=device)
-        num_blocks = len(flat_block_ids)
-        num_tokens = num_blocks * self.block_size
-
-        # Create device tensors for copy operations
-        block_table = block_ids_tensor.view(1, -1)
-        block_len_tensor = torch.tensor([num_tokens], dtype=torch.int32, device=device)
-        seq_start_tensor = torch.tensor([0], dtype=torch.int32, device=device)
-
-        k_buffer = torch.empty((num_tokens, num_kv_heads, k_head_dim), dtype=dtype, device=device)
-        v_buffer = torch.empty((num_tokens, num_kv_heads, v_head_dim), dtype=dtype, device=device)
-
-        # Create slot mapping for reshape operations
-        block_offsets = torch.arange(0, self.block_size, dtype=torch.int32, device=device)
-        slot_mapping = (
-            block_offsets.reshape((1, self.block_size)) + block_ids_tensor.reshape((num_blocks, 1)) * self.block_size
-        ).flatten()
-
-        # FIXME: Right now, if we skip synchronization at this point, the system
-        # will crash in GQA scenarios. However, we still haven't identified the
-        # root cause.
-        torch.npu.synchronize()
-
-        # Process each layer in the KV cache
-        for _, (k_cache_layer, v_cache_layer) in kv_caches.items():
-            # Load cache data into buffers
-            torch_npu.npu_gather_pa_kv_cache(
-                k_cache_layer,
-                v_cache_layer,
-                block_table,
-                block_len_tensor,
-                seq_offset=seq_start_tensor,
-                key=k_buffer,
-                value=v_buffer,
-            )
-            if need_cat_cache:
-                self._cat_kv_cache(
-                    k_cache_layer,
-                    v_cache_layer,
-                    k_buffer,
-                    v_buffer,
-                    tp_num_need_pulls,
-                    num_blocks,
-                    num_tokens,
-                    slot_mapping,
-                    num_kv_heads,
-                )
-            if need_nz_cache:
-                self._nz_kv_cache(
-                    k_cache_layer,
-                    v_cache_layer,
-                    k_buffer,
-                    v_buffer,
-                    slot_mapping,
-                    num_kv_heads,
-                    k_head_dim,
-                    v_head_dim,
-                )
-        # Clean up buffers
-        del k_buffer, v_buffer
-
-    def _cat_kv_cache(
-        self,
-        k_cache_layer,
-        v_cache_layer,
-        k_buffer,
-        v_buffer,
-        tp_num_need_pulls,
-        num_blocks,
-        num_tokens,
-        slot_mapping,
-        num_kv_heads: int,
-    ):
-        def _transpose_kv_cache_between_head(buffer: torch.Tensor) -> torch.Tensor:
-            buffer = buffer.view(num_blocks, tp_num_need_pulls, self.block_size, -1)
-            buffer.transpose_(1, 2)
-            return buffer.contiguous().view(num_tokens, num_kv_heads, -1)
-
-        # Transpose KV cache
-        k_buffer = _transpose_kv_cache_between_head(k_buffer)
-        v_buffer = _transpose_kv_cache_between_head(v_buffer)
-
-        # Reshape and cache the processed buffers
-        torch_npu.npu_scatter_pa_kv_cache(
-            key=k_buffer,
-            value=v_buffer,
-            key_cache=k_cache_layer,
-            value_cache=v_cache_layer,
-            slot_mapping=slot_mapping,
-            cache_mode="Norm",
-        )
-
-    def _nz_kv_cache(
-        self,
-        k_cache_layer,
-        v_cache_layer,
-        k_buffer,
-        v_buffer,
-        slot_mapping,
-        num_kv_heads: int,
-        k_head_dim: int,
-        v_head_dim: int,
-    ):
-        nz_fmt_last_dim = 16
-        k_cache_layer = k_cache_layer.view(
-            -1, k_head_dim * num_kv_heads // nz_fmt_last_dim, self.block_size, nz_fmt_last_dim
-        )
-        v_cache_layer = v_cache_layer.view(
-            -1, v_head_dim * num_kv_heads // nz_fmt_last_dim, self.block_size, nz_fmt_last_dim
-        )
-        torch_npu.npu_scatter_pa_kv_cache(k_buffer, v_buffer, k_cache_layer, v_cache_layer, slot_mapping)
-
     def _get_remote_metadata(self, remote_host: str, remote_handshake_port: int) -> None:
         """Get the metadata from the remote host."""
         sock: zmq.Socket | None = None  # type: ignore
@@ -1554,27 +1117,7 @@ class KVCacheRecvingThread(threading.Thread):
 
     def _get_remote_socket(self, remote_host: str, remote_handshake_port: int) -> zmq.Socket:  # type: ignore
         """Get a socket to the remote host."""
-        remote_path = make_zmq_path("tcp", remote_host, remote_handshake_port)
-        with self.remote_sockets_lock:
-            if self.remote_sockets[remote_path]:
-                return self.remote_sockets[remote_path].popleft()
-
-            ctx = zmq.Context()  # type: ignore
-            sock = make_zmq_socket(
-                ctx=ctx,
-                path=remote_path,
-                socket_type=zmq.REQ,  # type: ignore
-                bind=False,
-            )
-            sock.setsockopt(
-                zmq.SNDTIMEO,  # type: ignore
-                int(self.timeout * 1000),
-            )
-            sock.setsockopt(
-                zmq.RCVTIMEO,  # type: ignore
-                int(self.timeout * 1000),
-            )
-            return sock
+        return self.remote_socket_pool.get(remote_host, remote_handshake_port)
 
     def _return_remote_socket(
         self,
@@ -1583,46 +1126,12 @@ class KVCacheRecvingThread(threading.Thread):
         remote_handshake_port: int,
     ) -> None:
         """Return the remote socket to the pool."""
-        remote_path = make_zmq_path("tcp", remote_host, remote_handshake_port)
-        with self.remote_sockets_lock:
-            self.remote_sockets[remote_path].append(sock)
-
-
-class MooncakeConnectorMetadata(KVConnectorMetadata):
-    def __init__(self):
-        self.requests: dict[str, ReqMeta] = {}
-        self.requests_to_send: dict[str, float] = {}
-        self.reqs_in_batch: set[str] = set()
-
-    def add_new_req(
-        self,
-        request_id: str,
-        local_block_ids: BlockIds,
-        num_external_tokens: int,
-        kv_transfer_params: dict[str, Any],
-        local_full_block_ids: BlockIds | None = None,
-    ):
-        self.requests[request_id] = ReqMeta(
-            local_block_ids=local_block_ids,
-            num_external_tokens=num_external_tokens,
-            num_computed_tokens=kv_transfer_params.get("num_computed_tokens", 0),
-            remote_block_ids=kv_transfer_params["remote_block_ids"],
-            remote_engine_id=kv_transfer_params["remote_engine_id"],
-            remote_request_id=kv_transfer_params["remote_request_id"],
-            remote_host=kv_transfer_params["remote_host"],
-            remote_port=kv_transfer_params["remote_port"],
-            remote_pcp_size=kv_transfer_params.get("remote_pcp_size", 1),
-            remote_dcp_size=kv_transfer_params.get("remote_dcp_size", 1),
-            remote_ptp_size=kv_transfer_params.get("remote_ptp_size"),
-            remote_multi_nodes_meta_mapping=kv_transfer_params.get("remote_multi_nodes_meta_mapping", {}),
-            num_prompt_blocks=kv_transfer_params.get("num_prompt_blocks", 0),
-            remote_block_size=kv_transfer_params.get("remote_block_size", 0),
-            local_full_block_ids=local_full_block_ids or tuple(),
-            do_virtual=kv_transfer_params.get("do_virtual", False),
-        )
+        self.remote_socket_pool.return_socket(sock, remote_host, remote_handshake_port)
 
 
 class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
+    _shutdown_complete: bool = False
+
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
         return True
@@ -1643,6 +1152,17 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
             self.connector_worker = MooncakeConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
+        # Scheduler side holds no owned resources; the worker side owns threads,
+        # the executor and the remote socket pool.
+        self._shutdown_complete = False
+
+    def shutdown(self) -> None:
+        """Idempotent connector shutdown; delegates to the worker side."""
+        if self._shutdown_complete:
+            return
+        self._shutdown_complete = True
+        if self.connector_worker is not None:
+            self.connector_worker.shutdown()
 
     def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
         # vLLM main's scheduler uses this for skip_zeroing_group_ids.
@@ -1782,12 +1302,12 @@ class MooncakeConnectorScheduler:
 
         # Use the serving index, which survives dense-engine DP rank reset.
         # Keep scheduler metadata and worker handshake ports consistent.
-        self.side_channel_port = (
-            vllm_config.kv_transfer_config.kv_port
-            + vllm_config.parallel_config.data_parallel_index
-            * vllm_config.parallel_config.tensor_parallel_size
-            * vllm_config.parallel_config.pipeline_parallel_size
-            * self.pcp_size
+        self.side_channel_port = pull_base_port(
+            kv_port=vllm_config.kv_transfer_config.kv_port,
+            dp_index=vllm_config.parallel_config.data_parallel_index,
+            tp_size=vllm_config.parallel_config.tensor_parallel_size,
+            pp_size=vllm_config.parallel_config.pipeline_parallel_size,
+            pcp_size=self.pcp_size,
         )
         # Requests that need to start recv.
         # New requests are added by update_state_after_alloc in
@@ -1809,34 +1329,10 @@ class MooncakeConnectorScheduler:
         return isinstance(compress_ratios, (list, tuple, dict))
 
     def _get_group_transfer_info(self, group: Any) -> GroupTransferInfo:
-        specs = self._get_group_unique_specs(group)
-        first_spec = specs[0] if specs else group.kv_cache_spec
-        block_size = getattr(group.kv_cache_spec, "block_size", getattr(first_spec, "block_size", self.block_size))
-        is_state_group = any(isinstance(spec, MambaSpec) for spec in specs)
-        sliding_window = 0
-        compress_ratio = 1
-        for spec in specs:
-            if isinstance(spec, SlidingWindowSpec):
-                sliding_window = spec.sliding_window
-            elif hasattr(spec, "compress_ratio"):
-                compress_ratio = spec.compress_ratio
-
-        return GroupTransferInfo(
-            tokens_per_block=block_size * max(1, int(compress_ratio)),
-            blocks_per_window=cdiv(sliding_window, block_size) + 1 if sliding_window else 0,
-            is_state_group=is_state_group,
-        )
+        return build_group_transfer_info(group, default_block_size=self.block_size)
 
     def _get_group_unique_specs(self, group: Any) -> list[Any]:
-        if not isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
-            return [group.kv_cache_spec]
-
-        specs = []
-        for layer_name in group.layer_names:
-            layer_spec = group.kv_cache_spec.kv_cache_specs[layer_name]
-            if layer_spec not in specs:
-                specs.append(layer_spec)
-        return specs
+        return group_unique_specs(group)
 
     def _get_transfer_block_ids(self, block_ids: BlockIds, prompt_len: int) -> BlockIds:
         """Return blocks that contain prompt KV, dropping MTP extra blocks.
@@ -1847,59 +1343,22 @@ class MooncakeConnectorScheduler:
         state groups keep their existing behavior. SWA tail clipping is handled
         as a separate step after this.
         """
-        if len(block_ids) == 0:
-            return block_ids
-
-        assert len(block_ids) == len(self.group_transfer_info), "Number of KV cache groups must match"
-
-        transfer_block_ids = []
-        for blocks, group_info in zip(block_ids, self.group_transfer_info):
-            is_aligned_state_group = group_info.is_state_group and (
-                getattr(self.vllm_config.cache_config, "mamba_cache_mode", None) == "align"
-            )
-            if group_info.is_state_group and not is_aligned_state_group:
-                transfer_block_ids.append(blocks)
-            elif is_aligned_state_group:
-                # Mamba state is not DCP-sharded like attention KV. Its aligned
-                # block index is derived from the actual (already truncated)
-                # prompt length, without multiplying by the DCP size.
-                num_prompt_state_blocks = cdiv(prompt_len, group_info.tokens_per_block)
-                if num_prompt_state_blocks <= 0 or num_prompt_state_blocks > len(blocks):
-                    raise RuntimeError(
-                        "Invalid aligned Mamba state block metadata: "
-                        f"prompt_len={prompt_len}, tokens_per_block={group_info.tokens_per_block}, "
-                        f"required_block_count={num_prompt_state_blocks}, available_block_count={len(blocks)}."
-                    )
-                transfer_block_ids.append(blocks[num_prompt_state_blocks - 1 : num_prompt_state_blocks])
-            else:
-                # Each scheduler-visible block id is a DCP-grouped virtual
-                # block shared by all DCP ranks.
-                num_prompt_blocks = cdiv(prompt_len, group_info.tokens_per_block * self.dcp_size)
-                transfer_block_ids.append(blocks[:num_prompt_blocks])
-        return tuple(transfer_block_ids)
+        return transfer_block_ids(
+            block_ids,
+            prompt_len,
+            group_transfer_info=self.group_transfer_info,
+            mamba_cache_mode=getattr(self.vllm_config.cache_config, "mamba_cache_mode", None),
+            dcp_size=self.dcp_size,
+        )
 
     def _get_swa_transfer_block_ids(self, block_ids: BlockIds) -> BlockIds:
         """Clip SWA groups to their window tail and drop placeholder block 0."""
-        if len(block_ids) == 0:
-            return block_ids
-
-        assert len(block_ids) == len(self.group_transfer_info), "Number of KV cache groups must match"
-
-        transfer_block_ids = []
-        for blocks, group_info in zip(block_ids, self.group_transfer_info):
-            if group_info.is_state_group or group_info.blocks_per_window == 0:
-                transfer_block_ids.append(blocks)
-            else:
-                window_blocks = blocks[-group_info.blocks_per_window :]
-                transfer_block_ids.append([block_id for block_id in window_blocks if block_id != 0])
-        return tuple(transfer_block_ids)
+        return swa_transfer_block_ids(block_ids, group_transfer_info=self.group_transfer_info)
 
     def _state_prefill_token_count(self, num_prompt_tokens: int) -> int:
         """D-side only. Returns N-1 for Mamba models since the decoder
         always recomputes the last token and must start from h(N-1)."""
-        if self.need_truncate and num_prompt_tokens > 1:
-            return num_prompt_tokens - 1
-        return num_prompt_tokens
+        return state_prefill_token_count(num_prompt_tokens, need_truncate=self.need_truncate)
 
     def _truncate_request_for_prefill(self, request: "Request") -> None:
         """P-side only: drop the last prompt token so the prefiller computes
@@ -1908,27 +1367,7 @@ class MooncakeConnectorScheduler:
 
         Guarded by ``_p_side_truncated`` to avoid repeated truncation if the
         request is preempted and rescheduled."""
-        params = request.kv_transfer_params
-        if (
-            params is not None
-            # Guard against repeated truncation after preemption/reschedule.
-            and not params.get("_p_side_truncated")
-            and request.num_prompt_tokens > 1
-        ):
-            if request.prompt_token_ids is not None:
-                request.prompt_token_ids.pop()
-            elif request.prompt_embeds is not None:
-                request.prompt_embeds = request.prompt_embeds[:-1]
-            else:
-                return
-
-            request._all_token_ids.pop()
-            request.num_prompt_tokens -= 1
-            request.max_tokens = 1
-            # Request already hashed the full prompt. Rebuild for the shortened one.
-            request.block_hashes.clear()
-            request.update_block_hashes()
-            params["_p_side_truncated"] = True
+        truncate_request_for_prefill(request)
 
     def on_new_request(self, request: "Request") -> None:
         # Truncate before local prefix-cache lookup so its hit count stays
@@ -2212,15 +1651,21 @@ class MooncakeConnectorWorker:
 
         # Use the serving index, which survives dense-engine DP rank reset.
         # Keep scheduler metadata and worker handshake ports consistent.
-        self.side_channel_port = (
-            vllm_config.kv_transfer_config.kv_port
-            + vllm_config.parallel_config.data_parallel_index
-            * vllm_config.parallel_config.tensor_parallel_size
-            * vllm_config.parallel_config.pipeline_parallel_size
-            * self.pcp_size
+        self.side_channel_port = pull_base_port(
+            kv_port=vllm_config.kv_transfer_config.kv_port,
+            dp_index=vllm_config.parallel_config.data_parallel_index,
+            tp_size=vllm_config.parallel_config.tensor_parallel_size,
+            pp_size=vllm_config.parallel_config.pipeline_parallel_size,
+            pcp_size=self.pcp_size,
         )
-        device_index = (self.pp_rank * self.pcp_size + self.pcp_rank) * self.tp_size + self.tp_rank
-        self.handshake_port = self.side_channel_port + device_index
+        self.handshake_port = pull_handshake_port(
+            base_port=self.side_channel_port,
+            pp_rank=self.pp_rank,
+            pcp_size=self.pcp_size,
+            pcp_rank=self.pcp_rank,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
+        )
         self.sockets: dict = {}
         device_name = str(torch.npu.current_device()) if self.pp_size > 1 else None
         inject_qos(vllm_config.kv_transfer_config.get_from_extra_config("qos_priority", PD_QOS_DEFAULT))
@@ -2233,6 +1678,9 @@ class MooncakeConnectorWorker:
         # Background thread for sending or receiving KV caches.
         self.kv_send_thread: KVCacheSendingThread | None = None
         self.kv_recv_thread: KVCacheRecvingThread | None = None
+        # Idempotent shutdown state; see shutdown().
+        self._shutdown_complete = False
+        self._shutdown_lock = threading.Lock()
 
         # Handshake metadata of this worker
         self.xfer_handshake_metadata: MooncakeAgentMetadata | None = None
@@ -2248,6 +1696,67 @@ class MooncakeConnectorWorker:
             self.tp_num_need_pulls = num_d_block_heads // num_p_block_heads
         self.local_remote_block_port_mapping: dict[str, list[list[int]] | None] = {}
         self.remote_port_send_num: dict[str, dict[int, RemotePortInfo]] = {}
+
+    def shutdown(self) -> None:
+        """Idempotent best-effort shutdown of worker-owned threads and resources."""
+        with self._shutdown_lock:
+            if self._shutdown_complete:
+                return
+            self._shutdown_complete = True
+        threads = [t for t in (self.kv_recv_thread, self.kv_send_thread) if t is not None]
+        for thread in threads:
+            try:
+                thread.stop()
+            except Exception as error:
+                logger.warning("Failed to signal mooncake thread stop. thread=%s. error=%s. ", thread.name, error)
+        for thread in threads:
+            try:
+                thread.join(timeout=SHUTDOWN_JOIN_TIMEOUT_SECONDS)
+                if thread.is_alive():
+                    logger.warning(
+                        "Mooncake thread did not stop within %.1f s. thread=%s. ",
+                        SHUTDOWN_JOIN_TIMEOUT_SECONDS,
+                        thread.name,
+                    )
+            except Exception as error:
+                logger.warning("Failed to join mooncake thread. thread=%s. error=%s. ", thread.name, error)
+        fatal_error = self.get_thread_fatal_error()
+        if fatal_error is not None:
+            logger.error(
+                "Mooncake transfer thread reported a fatal error. engine_id=%s. error=%s. ",
+                self.engine_id,
+                fatal_error,
+            )
+        if self.kv_recv_thread is not None:
+            try:
+                self.kv_recv_thread.executor.shutdown(wait=True)
+            except Exception as error:
+                logger.warning("Failed to shutdown mooncake recv executor. error=%s. ", error)
+            try:
+                self.kv_recv_thread.remote_socket_pool.close()
+            except Exception as error:
+                logger.warning("Failed to close mooncake remote socket pool. error=%s. ", error)
+        logger.info("MooncakeConnectorWorker shutdown complete. engine_id=%s", self.engine_id)
+
+    def _wait_until_ready(self, thread, ready_event) -> None:
+        """Wait for the transfer thread to become ready; roll back on failure."""
+        start_wait_time = time.time()
+        while not ready_event.is_set():
+            if not thread.is_alive():
+                self.shutdown()
+                raise RuntimeError("KV Cache sending/receiving thread failed to start.")
+            if time.time() - start_wait_time > KV_CACHE_THREAD_STARTUP_TIMEOUT_SECONDS:
+                self.shutdown()
+                raise RuntimeError("Timeout waiting for KV Cache thread to be ready.")
+            time.sleep(3)
+
+    def get_thread_fatal_error(self) -> BaseException | None:
+        """Return the first fatal error reported by a transfer thread, if any."""
+        for thread in (self.kv_recv_thread, self.kv_send_thread):
+            error = getattr(thread, "fatal_error", None) if thread is not None else None
+            if error is not None:
+                return error
+        return None
 
     def _get_prefill_decode_size(self, vllm_config: VllmConfig):
         # get prefill tp and dp size from extra config
@@ -2737,52 +2246,50 @@ class MooncakeConnectorWorker:
         )
         self.xfer_handshake_metadata = metadata
 
-        ready_event = threading.Event()
-        if self.kv_role == "kv_producer":
-            self.kv_send_thread = KVCacheSendingThread(
-                self.vllm_config,
-                self.tp_rank,
-                self._prefill_tp_size,
-                self.engine_id,
-                self.side_channel_host,
-                self.side_channel_port,
-                metadata,
-                ready_event,
-                self.kv_caches,
-                self.pcp_rank,
-            )
-            self.kv_send_thread.start()
-        else:
-            self.kv_recv_thread = KVCacheRecvingThread(
-                self.tp_rank,
-                self.tp_size,
-                self._prefill_pp_size,
-                self.engine,
-                self.engine_id,
-                self.handshake_port,
-                self.side_channel_port,
-                self.kv_caches_base_addr,
-                self.block_len_per_addr,
-                self.block_stride_per_addr,
-                self._is_hma_required,
-                ready_event,
-                self.vllm_config,
-                self.kv_caches,
-                self._prefill_pp_layer_partition,
-                self.kv_group2layeridx,
-                self.block_size_scale,
-                use_request_level_recv_errors=self._use_request_level_recv_errors,
-            )
-            self.kv_recv_thread.start()
-        start_wait_time = time.time()
-        thread = self.kv_send_thread if self.kv_role == "kv_producer" else self.kv_recv_thread
-        assert thread is not None
-        while not ready_event.is_set():
-            if not thread.is_alive():
-                raise RuntimeError("KV Cache sending/receiving thread failed to start.")
-            if time.time() - start_wait_time > 5 * 60:
-                raise RuntimeError("Timeout waiting for KV Cache thread to be ready.")
-            time.sleep(3)
+        try:
+            ready_event = threading.Event()
+            if self.kv_role == "kv_producer":
+                self.kv_send_thread = KVCacheSendingThread(
+                    self.vllm_config,
+                    self.tp_rank,
+                    self._prefill_tp_size,
+                    self.engine_id,
+                    self.side_channel_host,
+                    self.side_channel_port,
+                    metadata,
+                    ready_event,
+                    self.kv_caches,
+                    self.pcp_rank,
+                )
+                self.kv_send_thread.start()
+            else:
+                self.kv_recv_thread = KVCacheRecvingThread(
+                    self.tp_rank,
+                    self.tp_size,
+                    self._prefill_pp_size,
+                    self.engine,
+                    self.engine_id,
+                    self.handshake_port,
+                    self.side_channel_port,
+                    self.kv_caches_base_addr,
+                    self.block_len_per_addr,
+                    self.block_stride_per_addr,
+                    self._is_hma_required,
+                    ready_event,
+                    self.vllm_config,
+                    self.kv_caches,
+                    self._prefill_pp_layer_partition,
+                    self.kv_group2layeridx,
+                    self.block_size_scale,
+                    use_request_level_recv_errors=self._use_request_level_recv_errors,
+                )
+                self.kv_recv_thread.start()
+            thread = self.kv_send_thread if self.kv_role == "kv_producer" else self.kv_recv_thread
+            assert thread is not None
+            self._wait_until_ready(thread, ready_event)
+        except Exception:
+            self.shutdown()
+            raise
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         results = self.get_transfer_results()
@@ -2920,10 +2427,8 @@ class MooncakeConnectorWorker:
         return any(".index_cache" in layer_name for layer_name in group_spec.get("layer_names", []))
 
     def _get_kernel_block_scale(self, layer_indices: list[int]) -> int:
-        """Kernel block scale for logical-to-tensor block expansion."""
-        if layer_indices and layer_indices[0] < len(self.block_size_scale) and self.block_size_scale[layer_indices[0]]:
-            return self.block_size_scale[layer_indices[0]][0]
-        return 1
+        """Delegate kernel block scale computation to ``transfer_plan.kernel_block_scale``."""
+        return pull_kernel_block_scale(layer_indices=layer_indices, block_size_scale=self.block_size_scale)
 
     def _get_kernel_block_ids(self, layer_indices, meta, group_idx, group_spec):
         """No-CP per-group block ids at kernel granularity: (local, remote).
@@ -2959,49 +2464,23 @@ class MooncakeConnectorWorker:
         return kernel_local[:num_kernel_blocks], kernel_remote[:num_kernel_blocks]
 
     def _get_group_kernel_params(self, remote_block_size):
-        # Per attention group kernel-expansion params: (local_scale, remote_scale, kernel_size).
-        # The kernel size is shared by both sides, so remote_scale is derived locally from it
-        # (no remote handshake scale needed). Mamba groups are not block-sharded and skipped.
-        group_kernel_params: dict[int, tuple[int, int, int]] = {}
-        for group_idx, (group_spec, layer_indices) in self.kv_group2layeridx.items():
-            if group_spec["kv_cache_spec_type"] == "MambaSpec":
-                continue
-            local_scale = self._get_kernel_block_scale(layer_indices)
-            kernel_size = self.block_size // local_scale
-            assert remote_block_size % kernel_size == 0, (
-                f"remote_block_size({remote_block_size}) not divisible by kernel_size({kernel_size})"
-            )
-            remote_scale = remote_block_size // kernel_size
-            group_kernel_params[group_idx] = (local_scale, remote_scale, kernel_size)
-        return group_kernel_params
+        """Delegate kernel-expansion params computation to ``transfer_plan.group_kernel_params``."""
+        return pull_group_kernel_params(
+            kv_group2layeridx=self.kv_group2layeridx,
+            block_size=self.block_size,
+            block_size_scale=self.block_size_scale,
+            remote_block_size=remote_block_size,
+        )
 
     def _get_local_remote_cp_params(self, meta: ReqMeta):
-        """Resolve CP geometry: (remote_block_size, local_cp_rank, local_cp_size,
-        remote_cp_size, r_blk), where r_blk = Bd/Bp (>=1) is the D/P block-size ratio.
-        Also validates that P/D block sizes are compatible under D-side CP.
-        """
-        remote_block_size = meta.remote_block_size or self.block_size
-        # MRV2's DCP group already spans PCP; PCP is not another KV shard axis.
-        local_cp_rank = self.dcp_rank
-        local_cp_size = self.dcp_size
-        remote_cp_size = meta.remote_dcp_size
-
-        if remote_block_size != self.block_size:
-            assert self.block_size % remote_block_size == 0 or remote_block_size % self.block_size == 0, (
-                f"Block sizes of P ({remote_block_size}) and D ({self.block_size}) must be divisible by each other."
-            )
-            if local_cp_size > 1:
-                assert self.block_size % remote_block_size == 0, (
-                    f"D node DCP not support P node block_size({remote_block_size}) > D block_size({self.block_size})"
-                )
-                # Ensure that the blocks of each P cp rank belong to the same D rank.
-                assert (remote_cp_size // local_cp_size) % (self.block_size // remote_block_size) == 0, (
-                    f"remote_cp_size({remote_cp_size}) must be an integer multiple of"
-                    f"r({self.block_size // remote_block_size}) * local_cp_size({local_cp_size})"
-                )
-
-        r_blk = self.block_size // remote_block_size if self.block_size > remote_block_size else 1
-        return remote_block_size, local_cp_rank, local_cp_size, remote_cp_size, r_blk
+        """Delegate CP geometry resolution to ``transfer_plan.local_remote_cp_params``."""
+        return pull_local_remote_cp_params(
+            remote_block_size=meta.remote_block_size,
+            block_size=self.block_size,
+            dcp_rank=self.dcp_rank,
+            dcp_size=self.dcp_size,
+            remote_dcp_size=meta.remote_dcp_size,
+        )
 
     def _get_decode_only_dcp_metadata(
         self,
@@ -3158,175 +2637,95 @@ class MooncakeConnectorWorker:
             )
 
         def context_parallel_parameters_check():
-            assert remote_cp_size % local_cp_size == 0 or local_cp_size % remote_cp_size == 0, (
-                f"P/D CP sizes must be divisible in either direction, got P={remote_cp_size}, D={local_cp_size}."
+            pull_context_parallel_parameters_check(
+                remote_cp_size=remote_cp_size,
+                local_cp_size=local_cp_size,
+                use_mla=self.use_mla,
+                use_sparse=self.use_sparse,
+                num_key_value_heads=self.num_key_value_heads,
+                prefill_tp_size=prefill_tp_size,
+                decode_tp_size=self.tp_size,
             )
-            if not (self.use_mla or self.use_sparse):
-                p_node_heads_per_rank = math.ceil(self.num_key_value_heads / prefill_tp_size)
-                d_node_heads_per_rank = math.ceil(self.num_key_value_heads / self.tp_size)
-                assert d_node_heads_per_rank % p_node_heads_per_rank == 0
 
         def get_kv_head_groups(tp_size):
-            if self.use_mla or self.use_sparse:
-                kv_head_groups = []
-                kv_head_ids = [0]
-                kv_head_groups.append(tuple(kv_head_ids))
-                return kv_head_groups
-            if self.num_key_value_heads // tp_size >= 1:
-                kv_head_groups = []
-                for tp_rank in range(tp_size):
-                    kv_head_ids = [
-                        head_idx + tp_rank * (self.num_key_value_heads // tp_size)
-                        for head_idx in range(self.num_key_value_heads // tp_size)
-                    ]
-                    kv_head_groups.append(tuple(kv_head_ids))
-                return kv_head_groups
-            if tp_size // self.num_key_value_heads > 1:
-                kv_head_groups = []
-                for kv_head_ids_ in range(self.num_key_value_heads):
-                    kv_head_groups.append(tuple([kv_head_ids_]))
-                return kv_head_groups
+            return pull_kv_head_groups(
+                num_key_value_heads=self.num_key_value_heads,
+                use_mla=self.use_mla,
+                use_sparse=self.use_sparse,
+                tp_size=tp_size,
+            )
 
         def get_cp_group_meta(tp_size, pcp_size, dcp_size, port_base):
-            # key is kv_head_group, value is cp_groups and which cp_groups to select
-            cp_group_meta: dict = {}
-            kv_head_groups = get_kv_head_groups(tp_size)
-            dcp_repeat_num = tp_size * pcp_size // len(kv_head_groups) // dcp_size
-
-            for kv_head_group_idx, kv_head_group in enumerate(kv_head_groups):
-                if kv_head_group not in cp_group_meta:
-                    cp_group_meta[kv_head_group] = {}
-                    cp_group_meta[kv_head_group]["cp_groups"] = []
-                    cp_group_meta[kv_head_group]["select_cp_groups_id"] = 0
-                kv_head_group_offset = tp_size // len(kv_head_groups) * kv_head_group_idx
-                for dcp_repeat_idx in range(dcp_repeat_num):
-                    # MRV2 orders DCP ranks along PCP first, then TP.
-                    cp_group = []
-                    dcp_repeat_offset = dcp_size * dcp_repeat_idx
-                    for dcp_rank in range(dcp_size):
-                        flat_rank = dcp_repeat_offset + dcp_rank
-                        pcp_rank = flat_rank % pcp_size
-                        tp_rank = flat_rank // pcp_size + kv_head_group_offset
-                        cp_group.append(port_base + pcp_rank * tp_size + tp_rank)
-                    cp_group_meta[kv_head_group]["cp_groups"].append(cp_group)
-
-            return cp_group_meta
+            return pull_cp_group_meta(
+                num_key_value_heads=self.num_key_value_heads,
+                use_mla=self.use_mla,
+                use_sparse=self.use_sparse,
+                tp_size=tp_size,
+                pcp_size=pcp_size,
+                dcp_size=dcp_size,
+                port_base=port_base,
+            )
 
         def get_local_remote_block_port_mappings():
-            context_parallel_parameters_check()
-            p_node_cp_group_meta = get_cp_group_meta(
-                prefill_tp_size, meta.remote_pcp_size, meta.remote_dcp_size, meta.remote_port
+            p_node_cp_group_meta, d_node_cp_group_meta, mappings = pull_local_remote_block_port_mappings(
+                num_key_value_heads=self.num_key_value_heads,
+                use_mla=self.use_mla,
+                use_sparse=self.use_sparse,
+                prefill_tp_size=prefill_tp_size,
+                remote_cp_size=remote_cp_size,
+                local_cp_size=local_cp_size,
+                remote_pcp_size=meta.remote_pcp_size,
+                remote_dcp_size=meta.remote_dcp_size,
+                remote_port=meta.remote_port,
+                decode_tp_size=self.tp_size,
+                decode_pcp_size=self.pcp_size,
+                decode_dcp_size=self.dcp_size,
+                decode_side_channel_port=self.side_channel_port,
+                r_blk=r_blk,
             )
-            d_node_cp_group_meta = get_cp_group_meta(self.tp_size, self.pcp_size, self.dcp_size, self.side_channel_port)
-            local_remote_block_port_mappings: dict[int, list[list[int]]] = {}
-            for d_node_head_key in d_node_cp_group_meta:
-                for p_node_head_key in p_node_cp_group_meta:
-                    if not set(p_node_head_key).issubset(set(d_node_head_key)):
-                        continue
-                    d_node_head_group = d_node_cp_group_meta[d_node_head_key]
-                    p_node_head_group = p_node_cp_group_meta[p_node_head_key]
-                    for d_cp_group in d_node_head_group["cp_groups"]:
-                        select_cp_groups_id = p_node_head_group["select_cp_groups_id"]
-                        p_cp_groups = p_node_head_group["cp_groups"]
-                        p_cp_group = p_cp_groups[select_cp_groups_id]
-                        p_node_head_group["select_cp_groups_id"] = (
-                            select_cp_groups_id + 1 if select_cp_groups_id + 1 < len(p_cp_groups) else 0
-                        )
-                        for d_idx, d_port in enumerate(d_cp_group):
-                            if d_port not in local_remote_block_port_mappings:
-                                local_remote_block_port_mappings[d_port] = []
-                            p_port_remote_list = []
-                            for p_idx, p_port in enumerate(p_cp_group):
-                                # When Bd == Bp, r_blk = 1, which degenerates to the original `p_idx % Lcp` rule.
-                                # When Bd = r * Bp, all blocks of P CP rank q are mapped to D rank `(q // r) % Lcp`.
-                                if (p_idx // r_blk - d_idx) % min(len(d_cp_group), len(p_cp_group)) == 0:
-                                    p_port_remote_list.append(p_port)
-                            local_remote_block_port_mappings[d_port].append(p_port_remote_list)
-
             logger.info(
                 "p_node_cp_group_meta is:: %s. d_node_cp_group_meta is:: %s. "
                 "local_remote_block_port_mappings is:: %s. ",
                 p_node_cp_group_meta,
                 d_node_cp_group_meta,
-                local_remote_block_port_mappings,
+                mappings,
             )
 
-            return local_remote_block_port_mappings
+            return mappings
 
         def get_remote_port_send_num(
             local_remote_block_port_mappings: dict[int, list[list[int]]],
         ) -> dict[int, RemotePortInfo]:
-            remote_port_send_num: dict[int, RemotePortInfo] = {}
-            remote_ports: set[int] = set(
-                range(meta.remote_port, meta.remote_port + prefill_tp_size * meta.remote_pcp_size)
+            return pull_remote_port_send_num(
+                remote_port=meta.remote_port,
+                remote_pcp_size=meta.remote_pcp_size,
+                prefill_tp_size=prefill_tp_size,
+                kv_port=self.vllm_config.kv_transfer_config.kv_port,
+                remote_multi_nodes_meta_mapping=meta.remote_multi_nodes_meta_mapping,
+                remote_host=meta.remote_host,
+                remote_engine_id=meta.remote_engine_id,
+                local_remote_block_port_mappings=local_remote_block_port_mappings,
             )
-            kv_port = self.vllm_config.kv_transfer_config.kv_port
-            for key, remote_host_info in meta.remote_multi_nodes_meta_mapping.items():
-                remote_ports.add(int(remote_host_info.get("handshake_port", kv_port + int(key))))
-            for remote_port_head_list in local_remote_block_port_mappings.values():
-                for remote_port_list in remote_port_head_list:
-                    for remote_port in remote_port_list:
-                        remote_ports.add(remote_port)
-
-            for remote_port in remote_ports:
-                remote_host, _ = self._get_remote_host_info_by_port(
-                    meta.remote_port,
-                    remote_port,
-                    meta.remote_host,
-                    meta.remote_engine_id,
-                    meta.remote_multi_nodes_meta_mapping,
-                )
-                remote_port_send_num[remote_port] = {"num": 0, "host": remote_host}
-
-            for remote_port_head_list in local_remote_block_port_mappings.values():
-                for remote_port_list in remote_port_head_list:
-                    for remote_port in remote_port_list:
-                        remote_port_send_num[remote_port]["num"] += 1
-            return remote_port_send_num
 
         def _set_hma_shared_port(prefill_tp_size, meta, remote_handshake_port_list, req_id):
-            """Rewrite remote attention ports for HMA load balancing and append Mamba ports.
-
-            Only applies to HMA (hybrid) non-MLA/non-sparse models. It does two things:
-
-            1. Attention replica balancing. A remote attention port offset decomposes as
-               ``kv_head_group_offset + dcp_repeat_offset + dcp_rank``. Within the same head
-               group, only the TP replicas that share the same ``dcp_rank`` but differ in
-               ``dcp_repeat`` hold the exact same attention KV shard. So substitution is
-               restricted to the dcp_repeat (replica) dimension - the head group and dcp_rank
-               parts are preserved - otherwise different DCP shards would fetch duplicated KV.
-               The replica is picked from the request's random rank choice to spread load.
-            2. Mamba port append. The Mamba state lives on a different set of P ranks than the
-               attention shards, so the matching Mamba ports are appended to the final shard
-               (which carries the Mamba transfer); duplicates are skipped.
-            """
+            """Delegate HMA attention replica balancing / Mamba port append to transfer_plan."""
             if self._is_hma_required and not (self.use_mla or self.use_sparse):
-                remote_dcp = max(meta.remote_dcp_size, 1)
-                group_span = prefill_tp_size // len(get_kv_head_groups(prefill_tp_size))
-                n_replica = max(group_span // remote_dcp, 1)
                 chosen_tp_list = self._get_remote_rank(req_id, prefill_tp_size)
-                if n_replica > 1:
-                    for shard_ports in remote_handshake_port_list:
-                        for i in range(len(shard_ports)):
-                            # Decompose the port offset into pcp segment + head-group offset +
-                            # dcp part, keeping all of them and only swapping the replica.
-                            tp_off = (shard_ports[i] - meta.remote_port) % prefill_tp_size
-                            pcp_seg = (shard_ports[i] - meta.remote_port) - tp_off
-                            group_off = tp_off // group_span * group_span
-                            dcp_part = (tp_off - group_off) % remote_dcp
-                            # Determine replica ID using random choice of current request to maintain load balancing.
-                            replica = (chosen_tp_list[i % len(chosen_tp_list)] // remote_dcp) % n_replica
-                            shard_ports[i] = meta.remote_port + pcp_seg + group_off + replica * remote_dcp + dcp_part
-                # Append this D rank's matching Mamba ports to the final shard (the one that
-                # carries the Mamba state); k = prefill_tp / decode_tp ports per D rank.
-                k = prefill_tp_size // self.tp_size
-                final_ports = remote_handshake_port_list[-1]
-                pcp_seg = (final_ports[0] - meta.remote_port) // prefill_tp_size * prefill_tp_size
-                for j in range(k):
-                    p = meta.remote_port + pcp_seg + self.tp_rank * k + j
-                    if p not in final_ports:
-                        final_ports.append(p)
-            return remote_handshake_port_list
+            else:
+                chosen_tp_list = []
+            return pull_set_hma_shared_port(
+                is_hma_required=self._is_hma_required,
+                use_mla=self.use_mla,
+                use_sparse=self.use_sparse,
+                num_key_value_heads=self.num_key_value_heads,
+                prefill_tp_size=prefill_tp_size,
+                remote_port=meta.remote_port,
+                remote_dcp_size=meta.remote_dcp_size,
+                decode_tp_size=self.tp_size,
+                decode_tp_rank=self.tp_rank,
+                chosen_tp_list=chosen_tp_list,
+                remote_handshake_port_list=remote_handshake_port_list,
+            )
 
         remote_block_size, local_cp_rank, local_cp_size, remote_cp_size, r_blk = self._get_local_remote_cp_params(meta)
 
@@ -3520,53 +2919,17 @@ class MooncakeConnectorWorker:
         return remote_handshake_port_list, local_block_ids_list, remote_block_ids_list
 
     def _get_dcp_shard_pulls(self, remote_handshake_port_list, prefill_tp_size, remote_base_port, remote_pcp_size):
-        """Build group pulls from the selected ports of each DCP shard."""
-        mamba_num = prefill_tp_size // self.tp_size
-        attn_num = self._get_tp_num_need_pulls(prefill_tp_size)
-        attn_gids = [
-            g for g, (spec, li) in self.kv_group2layeridx.items() if li and spec["kv_cache_spec_type"] != "MambaSpec"
-        ]
-        mamba_gids = [
-            g for g, (spec, li) in self.kv_group2layeridx.items() if li and spec["kv_cache_spec_type"] == "MambaSpec"
-        ]
-        num_shards = len(remote_handshake_port_list)
-        result = []
-        for shard_idx, ports in enumerate(remote_handshake_port_list):
-            is_final = shard_idx == num_shards - 1
-            shard_pulls = []
-            for port_idx, port in enumerate(ports):
-                pulls = []
-                port_tp = (port - remote_base_port) % prefill_tp_size
-                pp_rank = (port - remote_base_port) // (prefill_tp_size * remote_pcp_size)
-                # Attention uses the leading ports selected for each DCP shard.
-                if port_idx < attn_num:
-                    pulls += [
-                        GroupPull(
-                            group_id=g,
-                            remote_tp_offset=port_idx,
-                            num_group_pulls=attn_num,
-                            prefill_pp_rank=pp_rank,
-                            is_group_transfer_end=port_idx == attn_num - 1,
-                        )
-                        for g in attn_gids
-                    ]
-                # Transfer Mamba state only on the final DCP shard, using the port's TP rank to derive its offset.
-                if is_final:
-                    m_off = port_tp - self.tp_rank * mamba_num
-                    if 0 <= m_off < mamba_num:
-                        pulls += [
-                            GroupPull(
-                                group_id=g,
-                                remote_tp_offset=m_off,
-                                num_group_pulls=mamba_num,
-                                prefill_pp_rank=pp_rank,
-                                is_group_transfer_end=m_off == mamba_num - 1,
-                            )
-                            for g in mamba_gids
-                        ]
-                shard_pulls.append(pulls)
-            result.append(shard_pulls)
-        return result
+        """Thin delegate for transfer_plan.dcp_shard_pulls."""
+        return pull_dcp_shard_pulls(
+            remote_handshake_port_list=remote_handshake_port_list,
+            prefill_tp_size=prefill_tp_size,
+            remote_base_port=remote_base_port,
+            remote_pcp_size=remote_pcp_size,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
+            kv_group2layeridx=self.kv_group2layeridx,
+            get_tp_num_need_pulls=self._get_tp_num_need_pulls,
+        )
 
     def _get_group_pulls_metadata(
         self,
@@ -3577,85 +2940,22 @@ class MooncakeConnectorWorker:
         remote_pcp_size: int = 1,
         remote_dcp_size: int = 1,
     ) -> list[list[list[GroupPull]]]:
-        """Build per-port KV cache group pull descriptors.
-
-        Args:
-            req_id: Remote request id used to reproduce hybrid-attention rank
-                selection for the same request.
-            remote_handshake_port_list: Output from ``_get_kv_split_metadata``.
-                Each outer item is one transfer shard; each inner item is a
-                remote P worker handshake port.
-            prefill_tp_size: Effective remote prefill TP size. This may come
-                from ``meta.remote_ptp_size`` when P and D use different TP
-                sizes.
-            remote_base_port: Remote P-side handshake base port. A remote
-                worker rank is ``remote_handshake_port - remote_base_port``.
-
-        Returns:
-            A three-level list aligned with ``remote_handshake_port_list``:
-            ``result[shard_idx][remote_port_idx]`` is the list of ``GroupPull``
-            entries for that remote port. Each ``GroupPull`` identifies the KV
-            cache group, the remote TP offset to read, the number of pulls
-            needed to assemble that group, the prefill PP rank, and whether
-            this pull is the final pull for the group. The final-pull flag is
-            used by the receiver to decide when group reformatting can run.
-        """
-        if self._is_hma_required:
-            if remote_dcp_size == 1:
-                # The table uses TP/PP ranks without PCP replica offsets.
-                # Undo the offset added by _get_kv_split_metadata, keeping the PP stage.
-                # E.g. TP2/PP1, PCP rank 1: port base + 3 maps back to rank 3 - 2 = 1.
-                _, rank_group_pulls = self._get_hybrid_remote_rank_group_pulls(req_id, prefill_tp_size)
-                pcp_offset = self._get_selected_pcp_rank(req_id, remote_pcp_size) * prefill_tp_size
-                return [
-                    [rank_group_pulls[p - remote_base_port - pcp_offset] for p in ports]
-                    for ports in remote_handshake_port_list
-                ]
-
-            # The DCP path has already selected the source ports for each shard.
-            return self._get_dcp_shard_pulls(
-                remote_handshake_port_list, prefill_tp_size, remote_base_port, remote_pcp_size
-            )
-
-        tp_num_need_pulls = self._get_tp_num_need_pulls(prefill_tp_size)
-        group_ids = [group_id for group_id, (_, layer_indices) in self.kv_group2layeridx.items() if layer_indices]
-
-        def make_group_pulls(remote_tp_offset: int, prefill_pp_rank: int) -> list[GroupPull]:
-            return [
-                GroupPull(
-                    group_id=group_id,
-                    remote_tp_offset=remote_tp_offset,
-                    num_group_pulls=tp_num_need_pulls,
-                    prefill_pp_rank=prefill_pp_rank,
-                    is_group_transfer_end=remote_tp_offset == tp_num_need_pulls - 1,
-                )
-                for group_id in group_ids
-            ]
-
-        group_pulls_list = []
-        for shard_idx, remote_ports in enumerate(remote_handshake_port_list):
-            if len(remote_ports) == 1:
-                remote_tp_offsets = [shard_idx % tp_num_need_pulls]
-                prefill_pp_ranks = [
-                    ((remote_ports[0] - remote_base_port) % (prefill_tp_size * self._prefill_pp_size))
-                    // prefill_tp_size
-                ]
-            else:
-                assert len(remote_ports) % tp_num_need_pulls == 0, (
-                    f"tp_num_need_pulls: {tp_num_need_pulls}, remote_ports: {remote_ports}"
-                )
-                remote_tp_offsets = [rank_idx % tp_num_need_pulls for rank_idx in range(len(remote_ports))]
-                prefill_pp_ranks = [
-                    ((remote_port - remote_base_port) % (prefill_tp_size * self._prefill_pp_size)) // prefill_tp_size
-                    for remote_port in remote_ports
-                ]
-            group_pulls_list.append(
-                [
-                    make_group_pulls(remote_tp_offset, prefill_pp_rank)
-                    for remote_tp_offset, prefill_pp_rank in zip(remote_tp_offsets, prefill_pp_ranks)
-                ]
-            )
-        return group_pulls_list
+        """Thin delegate for transfer_plan.group_pulls_metadata."""
+        return pull_group_pulls_metadata(
+            req_id=req_id,
+            remote_handshake_port_list=remote_handshake_port_list,
+            prefill_tp_size=prefill_tp_size,
+            remote_base_port=remote_base_port,
+            remote_pcp_size=remote_pcp_size,
+            remote_dcp_size=remote_dcp_size,
+            is_hma_required=self._is_hma_required,
+            prefill_pp_size=self._prefill_pp_size,
+            kv_group2layeridx=self.kv_group2layeridx,
+            get_tp_num_need_pulls=self._get_tp_num_need_pulls,
+            get_selected_pcp_rank=self._get_selected_pcp_rank,
+            get_hybrid_remote_rank_group_pulls=self._get_hybrid_remote_rank_group_pulls,
+            get_dcp_shard_pulls=self._get_dcp_shard_pulls,
+        )
 
     def _get_hybrid_remote_rank_group_pulls(
         self,
@@ -3663,85 +2963,19 @@ class MooncakeConnectorWorker:
         prefill_tp_size: int,
         tp_rank: int | None = None,
     ) -> tuple[list[int], dict[int, list[GroupPull]]]:
-        if tp_rank is None:
-            tp_rank = self.tp_rank
-
-        rank_group_pulls: OrderedDict[int, list[GroupPull]] = OrderedDict()
-        has_mamba_group = any(
-            layer_indices and group_spec["kv_cache_spec_type"] == "MambaSpec"
-            for group_spec, layer_indices in self.kv_group2layeridx.values()
+        """Thin delegate for transfer_plan.hybrid_remote_rank_group_pulls."""
+        return pull_hybrid_remote_rank_group_pulls(
+            req_id=req_id,
+            prefill_tp_size=prefill_tp_size,
+            tp_rank=tp_rank,
+            default_tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
+            prefill_pp_size=self._prefill_pp_size,
+            kv_group2layeridx=self.kv_group2layeridx,
+            get_attention_group_num_need_pulls=self._get_attention_group_num_need_pulls,
+            get_attention_group_num_key_value_heads=self._get_attention_group_num_key_value_heads,
+            get_attention_group_remote_rank=self._get_attention_group_remote_rank,
         )
-        mamba_num_group_pulls = 0
-        if has_mamba_group:
-            if prefill_tp_size % self.tp_size != 0:
-                raise ValueError(
-                    f"Hybrid Mamba prefill tp size({prefill_tp_size}) must be divisible by "
-                    f"decode tp size({self.tp_size})."
-                )
-            mamba_num_group_pulls = prefill_tp_size // self.tp_size
-
-        def add_group_pull(remote_rank: int, group_pull: GroupPull) -> None:
-            rank_group_pulls.setdefault(remote_rank, []).append(group_pull)
-
-        for group_id, (group_spec, layer_indices) in self.kv_group2layeridx.items():
-            if not layer_indices:
-                continue
-
-            if group_spec["kv_cache_spec_type"] == "MambaSpec":
-                num_group_pulls = mamba_num_group_pulls
-                for pp_rank in range(self._prefill_pp_size):
-                    pp_rank_offset = pp_rank * prefill_tp_size
-                    local_tp_offset = tp_rank * num_group_pulls
-                    for remote_tp_offset in range(num_group_pulls):
-                        remote_rank = pp_rank_offset + local_tp_offset + remote_tp_offset
-                        add_group_pull(
-                            remote_rank,
-                            GroupPull(
-                                group_id=group_id,
-                                remote_tp_offset=remote_tp_offset,
-                                num_group_pulls=num_group_pulls,
-                                prefill_pp_rank=pp_rank,
-                                is_group_transfer_end=remote_tp_offset == num_group_pulls - 1,
-                            ),
-                        )
-                continue
-
-            num_group_pulls = self._get_attention_group_num_need_pulls(group_spec, prefill_tp_size)
-            num_key_value_heads = self._get_attention_group_num_key_value_heads(group_spec)
-            if has_mamba_group and num_key_value_heads == 1 and num_group_pulls == 1:
-                # Keep a replicated single-head attention cache inside this
-                # D rank's Mamba owner group so only its owner can signal that
-                # all request state has finished transferring.
-                replica_offset = random.Random(string_to_int64_hash(req_id)).randrange(mamba_num_group_pulls)
-                chosen_rank_list = [
-                    pp_rank * prefill_tp_size + tp_rank * mamba_num_group_pulls + replica_offset
-                    for pp_rank in range(self._prefill_pp_size)
-                ]
-            else:
-                chosen_rank_list = self._get_attention_group_remote_rank(
-                    req_id,
-                    group_spec,
-                    prefill_tp_size,
-                    tp_rank,
-                )
-            assert len(chosen_rank_list) == num_group_pulls * self._prefill_pp_size, (
-                f"chosen_rank_list({chosen_rank_list}) does not match num_group_pulls({num_group_pulls}) "
-                f"and prefill pp size({self._prefill_pp_size})."
-            )
-            for rank_idx, remote_rank in enumerate(chosen_rank_list):
-                prefill_pp_rank = rank_idx // num_group_pulls
-                add_group_pull(
-                    remote_rank,
-                    GroupPull(
-                        group_id=group_id,
-                        remote_tp_offset=rank_idx % num_group_pulls,
-                        num_group_pulls=num_group_pulls,
-                        prefill_pp_rank=prefill_pp_rank,
-                        is_group_transfer_end=rank_idx % num_group_pulls == num_group_pulls - 1,
-                    ),
-                )
-
-        return list(rank_group_pulls), dict(rank_group_pulls)
 
     def _get_hybrid_remote_port_send_num(
         self,
@@ -3850,82 +3084,15 @@ class MooncakeConnectorWorker:
             use_mla=self._group_use_mla_rank_routing(group_spec),
         )[tp_rank]
 
-    def _get_sfa_replicate_k_block_ids(
-        self,
-        meta: ReqMeta,
-    ) -> tuple[BlockIds, BlockIds]:
-        remote_uses_replicated_indexer = self.use_sfa_sparse and meta.remote_dcp_size > 1
-        if not (self.enable_sfa_dcp_replicated_indexer or remote_uses_replicated_indexer):
-            return tuple(), tuple()
-        if meta.num_external_tokens <= 0 or not meta.remote_block_ids or not meta.local_block_ids:
-            return tuple(), tuple()
-
-        if len(meta.remote_block_ids) != 1 or len(meta.local_block_ids) != 1:
-            raise AssertionError(
-                "SFA replicate-K currently expects exactly one KV cache group. "
-                f"Got remote groups={len(meta.remote_block_ids)}, local groups={len(meta.local_block_ids)}."
-            )
-
-        remote_cp_size = meta.remote_dcp_size
-        local_cp_size = self.dcp_size
-        if (
-            local_cp_size <= 0
-            or remote_cp_size <= 0
-            or (remote_cp_size % local_cp_size != 0 and local_cp_size % remote_cp_size != 0)
-        ):
-            raise AssertionError(
-                f"SFA replicate-K requires positive P/D CP sizes with one divisible by the other, "
-                f"got P CP={remote_cp_size}, D CP={local_cp_size}."
-            )
-        num_prefix_cached_blocks = min(meta.num_computed_tokens // self.block_size, meta.num_prompt_blocks)
-        num_external_blocks = meta.num_prompt_blocks - num_prefix_cached_blocks
-        num_external_blocks_from_tokens = math.ceil(meta.num_external_tokens / self.block_size)
-        if num_external_blocks < num_external_blocks_from_tokens:
-            raise AssertionError(
-                f"num_external_blocks({num_external_blocks}) derived from num_computed_tokens "
-                f"must cover num_external_blocks_from_tokens({num_external_blocks_from_tokens})."
-            )
-
-        if num_prefix_cached_blocks > 0 and not meta.local_full_block_ids:
-            raise AssertionError("SFA replicate-K requires full local block ids when prefix cache is used.")
-
-        remote_blocks = list(meta.remote_block_ids[0])
-        local_full_blocks = list((meta.local_full_block_ids or meta.local_block_ids)[0])
-        if not local_full_blocks:
-            return tuple(), tuple()
-
-        local_block_ids: list[int] = []
-        remote_block_ids: list[int] = []
-        for global_block_idx in range(num_prefix_cached_blocks, meta.num_prompt_blocks):
-            remote_local_idx = global_block_idx // remote_cp_size
-            local_local_idx = global_block_idx // local_cp_size
-            if remote_local_idx >= len(remote_blocks) or local_local_idx >= len(local_full_blocks):
-                break
-            remote_block_ids.append(
-                int(remote_blocks[remote_local_idx]) * remote_cp_size + global_block_idx % remote_cp_size
-            )
-            local_block_ids.append(
-                int(local_full_blocks[local_local_idx]) * local_cp_size + global_block_idx % local_cp_size
-            )
-
-        local_block_ids = local_block_ids[:num_external_blocks]
-        remote_block_ids = remote_block_ids[: len(local_block_ids)]
-        local_block_ids = local_block_ids[: len(remote_block_ids)]
-
-        logger.debug(
-            "Mooncake SFA replicate-K block ids prepared from aligned full blocks. "
-            "remote_cp_size=%s local_cp_size=%s num_prompt_blocks=%s num_computed_tokens=%s "
-            "num_external_blocks=%s local_len=%s remote_len=%s",
-            remote_cp_size,
-            local_cp_size,
-            meta.num_prompt_blocks,
-            meta.num_computed_tokens,
-            num_external_blocks,
-            len(local_block_ids),
-            len(remote_block_ids),
+    def _get_sfa_replicate_k_block_ids(self, meta: ReqMeta) -> tuple[BlockIds, BlockIds]:
+        """Thin delegate for transfer_plan.sfa_replicate_k_block_ids."""
+        return pull_sfa_replicate_k_block_ids(
+            meta=meta,
+            use_sfa_sparse=self.use_sfa_sparse,
+            enable_sfa_dcp_replicated_indexer=self.enable_sfa_dcp_replicated_indexer,
+            dcp_size=self.dcp_size,
+            block_size=self.block_size,
         )
-
-        return (local_block_ids,), (remote_block_ids,)
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         """Start loading KV blocks from remote engine."""
@@ -4083,18 +3250,14 @@ class MooncakeConnectorWorker:
         remote_engine_id: str,
         remote_multi_nodes_meta_mapping: dict,
     ):
-        if remote_multi_nodes_meta_mapping is None:
-            return remote_host, remote_engine_id
-
-        kv_port = self.vllm_config.kv_transfer_config.kv_port
-        rank = str(remote_handshake_port - kv_port)
-        info = remote_multi_nodes_meta_mapping.get(rank)
-        if info is None:
-            rank = str(remote_handshake_port - base_port)
-            info = remote_multi_nodes_meta_mapping.get(rank)
-        if info is None:
-            return remote_host, remote_engine_id
-        return info.get("host", remote_host), info.get("engine_id", remote_engine_id)
+        return pull_remote_host_info_by_port(
+            base_port=base_port,
+            remote_handshake_port=remote_handshake_port,
+            remote_host=remote_host,
+            remote_engine_id=remote_engine_id,
+            remote_multi_nodes_meta_mapping=remote_multi_nodes_meta_mapping,
+            kv_port=self.vllm_config.kv_transfer_config.kv_port,
+        )
 
     def _prefill_get_remote_rank(self, req_id: str) -> list[int]:
         if self._is_hma_required:
@@ -4166,171 +3329,22 @@ class MooncakeConnectorWorker:
         tp_num_need_pulls: int | None = None,
         use_mla: bool | None = None,
     ) -> list[list[int]]:
-        if prefill_tp_size is None:
-            prefill_tp_size = self._prefill_tp_size
-        if num_key_value_heads is None:
-            if self.vllm_config.model_config.is_deepseek_mla or self.use_sparse:
-                num_key_value_heads = 1
-            else:
-                num_key_value_heads = self.num_key_value_heads
-        if tp_num_need_pulls is None:
-            tp_num_need_pulls = self._get_tp_num_need_pulls(prefill_tp_size)
-        if use_mla is None:
-            use_mla = self.vllm_config.model_config.is_deepseek_mla
-
-        # Divide the ports according to the TP within the PP
-        sampled_nums = []
-        if prefill_tp_size == self._decode_tp_size:
-            sampled_nums = list(
-                map(
-                    lambda tp: [tp + pp * prefill_tp_size for pp in range(self._prefill_pp_size)],
-                    range(prefill_tp_size),
-                )
-            )
-            return sampled_nums
-        num_kv_head = num_key_value_heads
-        ori_data = np.arange(prefill_tp_size * self._prefill_pp_size)
-        seed = string_to_int64_hash(req_id)
-        rand = random.Random(seed)
-        # random split prefill tp list
-        ori_data_2d = ori_data.reshape(self._prefill_pp_size, -1)
-        num_groups = max(
-            1, len(ori_data_2d[0]) // num_kv_head
-        )  # The number of redundant copies for each KV head within the PP stage
-        rand_group_index = rand.sample(
-            range(num_groups), (max(self._decode_tp_size // num_kv_head, 1))
-        )  # random choose a group
-        all_results = [
-            self._get_remote_tp_ranks(
-                ori_data_2d[pp_index],
-                rand_group_index,
-                num_groups,
-                prefill_tp_size,
-                num_key_value_heads,
-                tp_num_need_pulls,
-                use_mla,
-            )
-            for pp_index in range(self._prefill_pp_size)
-        ]
-        for group_index in range(len(all_results[0])):
-            group = []
-            for pp_index in range(self._prefill_pp_size):
-                group.extend(all_results[pp_index][group_index])
-            sampled_nums.append(group)
-        return sampled_nums
-
-
-@contextlib.contextmanager
-def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:  # type: ignore
-    """Context manager for a ZMQ socket"""
-
-    if socket_type not in (zmq.ROUTER, zmq.REQ, zmq.DEALER):  # type: ignore
-        raise ValueError(f"Unexpected socket type: {socket_type}")
-
-    ctx: zmq.Context | None = None  # type: ignore
-    try:
-        ctx = zmq.Context()  # type: ignore
-        yield make_zmq_socket(ctx=ctx, path=addr, socket_type=socket_type, bind=socket_type == zmq.ROUTER)  # type: ignore
-    finally:
-        if ctx is not None:
-            ctx.destroy(linger=0)
-
-
-def group_concurrent_contiguous(
-    src: list[int],
-    dst: list[int],
-    src_block_stride: int = 1,
-    dst_block_stride: int = 1,
-    block_len: int = 1,
-) -> tuple[list[list[int]], list[list[int]]]:
-    """Group block ids that are contiguous in both id space and memory."""
-    src_indices: npt.NDArray[np.int64] = np.array(src, dtype=np.int64)
-    dst_indices: npt.NDArray[np.int64] = np.array(dst, dtype=np.int64)
-
-    if src_indices.size == 0:
-        return [], []
-
-    src_byte_contiguous = np.diff(src_indices) * src_block_stride == block_len
-    dst_byte_contiguous = np.diff(dst_indices) * dst_block_stride == block_len
-    brk = np.where(~(src_byte_contiguous & dst_byte_contiguous))[0] + 1
-    src_groups = np.split(src_indices, brk)
-    dst_groups = np.split(dst_indices, brk)
-
-    src_groups = [g.tolist() for g in src_groups]
-    dst_groups = [g.tolist() for g in dst_groups]
-
-    return src_groups, dst_groups
-
-
-def split_if_not_byte_contiguous(
-    src_groups: list[list[int]],
-    dst_groups: list[list[int]],
-    src_block_stride: int,
-    dst_block_stride: int,
-    block_len: int,
-) -> tuple[list[list[int]], list[list[int]]]:
-    if src_block_stride == block_len and dst_block_stride == block_len:
-        return src_groups, dst_groups
-
-    src = [bid for group in src_groups for bid in group]
-    dst = [bid for group in dst_groups for bid in group]
-    return group_concurrent_contiguous(
-        src,
-        dst,
-        src_block_stride=src_block_stride,
-        dst_block_stride=dst_block_stride,
-        block_len=block_len,
-    )
-
-
-def string_to_int64_hash(input_str):
-    """
-    Hash the string using SHA-256 and convert it into an int64 integer.
-    """
-    hashed_bytes = hashlib.sha256(input_str.encode("utf-8")).digest()
-    trunked_bytes = hashed_bytes[:8]
-    uint64_value = struct.unpack("<Q", trunked_bytes)[0]
-    return uint64_value
-
-
-def ensure_zmq_send(
-    socket: zmq.Socket,  # type: ignore
-    data: bytes,
-    path: str,
-    max_retries: int = 3,
-):
-    retries_left = max_retries
-    while True:
-        try:
-            socket.send(data)
-            return
-        except zmq.ZMQError as e:  # type: ignore
-            retries_left -= 1
-            if retries_left > 0:
-                logger.warning("Send failed. error=%s, attempts_left=%d. ", e, retries_left)
-                time.sleep(0.1)
-            else:
-                logger.error("Send failed after all retries. error=%s. ", e)
-                raise RuntimeError(f"Failed to send data to {path} after {max_retries} retries: {e}")
-
-
-def ensure_zmq_recv(
-    socket: zmq.Socket,  # type: ignore
-    path: str,
-    max_retries: int = 3,
-) -> bytes:
-    retries_left = max_retries
-    while True:
-        try:
-            return socket.recv()
-        except zmq.ZMQError as e:  # type: ignore
-            retries_left -= 1
-            if retries_left > 0:
-                logger.warning("Receive failed. error=%s, attempts_left=%d. ", e, retries_left)
-                time.sleep(0.1)
-            else:
-                logger.error("Receive failed after all retries. source=%s, error=%s. ", path, e)
-                raise RuntimeError(f"Failed to receive data after {max_retries} retries: {e}")
+        """Thin delegate for transfer_plan.remote_ranks_for_req."""
+        return pull_remote_ranks_for_req(
+            req_id=req_id,
+            prefill_tp_size=prefill_tp_size,
+            num_key_value_heads=num_key_value_heads,
+            tp_num_need_pulls=tp_num_need_pulls,
+            use_mla=use_mla,
+            default_prefill_tp_size=self._prefill_tp_size,
+            decode_tp_size=self._decode_tp_size,
+            prefill_pp_size=self._prefill_pp_size,
+            default_num_key_value_heads=self.num_key_value_heads,
+            use_sparse=self.use_sparse,
+            model_is_deepseek_mla=self.vllm_config.model_config.is_deepseek_mla,
+            get_tp_num_need_pulls=self._get_tp_num_need_pulls,
+            get_remote_tp_ranks=self._get_remote_tp_ranks,
+        )
 
 
 def transfer_groups_need_independent_block_ids(
@@ -4407,3 +3421,8 @@ def get_prefill_pp_indices(
         start_layer = sum(partitions[:pp_rank])
         end_layer = start_layer + partitions[pp_rank]
         return (start_layer, end_layer)
+
+
+# Bind the class used verbatim by the extracted reformat mixin. This avoids a
+# circular import between the entry module and mooncake_v1/pull/reformat.py.
+_pull_reformat.MooncakeConnectorWorker = MooncakeConnectorWorker
