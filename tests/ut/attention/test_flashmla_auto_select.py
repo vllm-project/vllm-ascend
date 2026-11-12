@@ -157,7 +157,8 @@ def test_flashmla_dspark_target_model_gate(monkeypatch, dcp_size, model_type, ex
 
 @pytest.mark.parametrize("prefilling", [[True, False, True], [False, False, False]])
 @pytest.mark.parametrize("graph_eligible", [None, True, False])
-def test_request_order_preserves_fields_and_real_prefill_graph_gate(prefilling, graph_eligible):
+@pytest.mark.parametrize("override", [False, True])
+def test_request_order_preserves_fields_and_real_prefill_graph_gate(prefilling, graph_eligible, override):
     fields = [
         "req_ids",
         "num_scheduled_tokens",
@@ -180,10 +181,16 @@ def test_request_order_preserves_fields_and_real_prefill_graph_gate(prefilling, 
     ]
     if graph_eligible is not None:
         fields += ["num_draft_tokens_np", "prefill_runs_as_decode_np", "max_seq_len_np", "decode_graph_eligible"]
-        values += [np.array([0, 1, 0]), np.array(prefilling), np.array([100, 200, 300]), graph_eligible]
+        values += [
+            np.array([0, 1, 0]),
+            np.array(prefilling) & override,
+            np.array([100, 200, 300]),
+            graph_eligible,
+        ]
     state = cast(Any, namedtuple("BatchReqState", fields))(*values)
     result, uniform = prepare_flashmla_batch_req_state(state, 1)
-    order = [1, 0, 2] if state.has_prefill else [0, 1, 2]
+    has_prefill = state.has_prefill and not (override and graph_eligible is not None)
+    order = [1, 0, 2] if has_prefill else [0, 1, 2]
     assert result.req_ids == [state.req_ids[index] for index in order]
     for field in state._fields:
         expected = getattr(state, field)
@@ -191,18 +198,19 @@ def test_request_order_preserves_fields_and_real_prefill_graph_gate(prefilling, 
         if isinstance(expected, np.ndarray):
             np.testing.assert_array_equal(actual, expected[order])
         elif field == "decode_graph_eligible":
-            assert actual is (expected and not state.has_prefill)
+            assert actual is (expected and not has_prefill)
         elif field != "req_ids":
             assert actual == expected
-    assert uniform == (None if state.has_prefill or graph_eligible is False else 1)
+    assert uniform == (None if has_prefill or graph_eligible is False else 1)
     common = SimpleNamespace(
-        is_prefilling=torch.from_numpy(result.is_prefilling_np),
+        is_prefilling=torch.from_numpy(flashmla.get_effective_prefill_flags(result)),
         query_start_loc_cpu=torch.tensor([0, 1, 2, 3, 3], dtype=torch.int32),
         num_reqs=4,
         num_actual_tokens=3,
     )
-    # A one-token prompt stays FIA prefill; trailing empty graph rows are ignored.
-    assert split_flashmla_requests(common) == ((1, 2, 1, 2) if state.has_prefill else (3, 0, 3, 0))
+    # Fresh prompts stay FIA prefill; explicit overrides use decode. Trailing
+    # empty graph rows are ignored in either case.
+    assert split_flashmla_requests(common) == ((1, 2, 1, 2) if has_prefill else (3, 0, 3, 0))
 
 
 def test_request_split_rejects_decode_after_real_prefill():

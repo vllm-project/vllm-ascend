@@ -179,14 +179,6 @@ class AscendPCPManager(PCPManager):
         """
         self._draft_layer_names = frozenset(speculator.draft_attn_layer_names)
         self._is_draft_prefill_sharded = speculator.vllm_config.parallel_config.prefill_context_parallel_size > 1
-        # Whether the runner already restored the target hidden states to the
-        # global PCP layout for the current sampling step (replicated PCP
-        # draft). A second all-gather in restore_for_sampling would reorder
-        # them, so the sampling path consumes this flag instead of inferring
-        # the layout from the tensor length, which is ambiguous under
-        # piecewise/FULL graphs where each rank pads its local batch to the
-        # same global padded length.
-        self._sampling_hidden_restored = False
         self._dispatch_prefill_runs_as_decode_np = None
 
     def bind_config(self, vllm_config: VllmConfig) -> None:
@@ -221,6 +213,14 @@ class AscendPCPManager(PCPManager):
     # Keep the old name for out-of-tree callers while the behavior is shared
     # by every PCP attention backend.
     prepare_mla_batch_req_state = prepare_pcp_batch_req_state
+
+    def set_dispatch_batch_req_state(self, batch_state) -> None:
+        """Keep dispatch classification in the runner's final request order.
+
+        FlashMLA can reorder requests after PCP classification. Dispatch must
+        use the reordered mask, just like the subsequent batch partition.
+        """
+        self._dispatch_prefill_runs_as_decode_np = getattr(batch_state, "prefill_runs_as_decode_np", None)
 
     @staticmethod
     def _effective_is_prefilling(input_batch: InputBatch) -> np.ndarray:
@@ -308,28 +308,6 @@ class AscendPCPManager(PCPManager):
                 )
             is_prefilling = np.asarray(is_prefilling, dtype=np.bool_) & ~prefill_runs_as_decode
         return super().get_num_tokens_for_dispatch(num_scheduled_tokens, is_prefilling)
-
-    @staticmethod
-    def broadcast_replicated_hidden_states(
-        last_hidden_states: torch.Tensor,
-        hidden_states: torch.Tensor,
-        num_tokens: int,
-        replicated_pcp: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Broadcast actual draft hidden states only when target PCP is replicated."""
-        if not replicated_pcp:
-            return last_hidden_states, hidden_states
-
-        # Draft tokens are replicated: broadcast PCP rank 0 directly,
-        # matching target decode's gather-then-select behavior.
-        pcp_group = get_pcp_group()
-        shared_hidden_states = hidden_states is last_hidden_states
-        last_hidden_states = pcp_group.broadcast(last_hidden_states[:num_tokens].contiguous(), src=0)
-        if shared_hidden_states:
-            hidden_states = last_hidden_states
-        else:
-            hidden_states = pcp_group.broadcast(hidden_states[:num_tokens].contiguous(), src=0)
-        return last_hidden_states, hidden_states
 
     @property
     def global_batch(self) -> AscendInputBatch:

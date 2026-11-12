@@ -1427,6 +1427,44 @@ def test_mla_short_prefill_uses_decode_request_ownership(num_prefill_tokens):
     assert manager.get_num_tokens_for_dispatch(counts, prefilling) == max(4, num_prefill_tokens)
 
 
+@pytest.mark.parametrize("next_step", ["dummy", "decode", "dcp", "kpool"])
+def test_pcp_short_prefill_dispatch_mask_does_not_leak_between_steps(next_step):
+    manager = AscendPCPManager(2, 0, torch.device("cpu"), shard_decode_requests=True)
+    manager.vllm_config = _make_pcp_config(CUDAGraphMode.NONE)
+    batch_state = vllm_model_runner.BatchReqState(
+        req_ids=["tail", "decode"],
+        num_scheduled_tokens=np.array([1, 1], dtype=np.int32),
+        num_tokens=2,
+        num_draft_tokens_np=None,
+        idx_mapping_np=np.arange(2, dtype=np.intp),
+        prefill_len_np=np.array([128, 128], dtype=np.int32),
+        num_computed_prefill_tokens_np=np.array([127, 128], dtype=np.int32),
+        is_prefilling_np=np.array([True, False]),
+        has_prefill=True,
+        max_seq_len_np=None,
+        prefill_runs_as_decode_np=None,
+        decode_graph_eligible=False,
+    )
+    classified = manager.prepare_pcp_batch_req_state(batch_state)
+    np.testing.assert_array_equal(classified.prefill_runs_as_decode_np, [True, False])
+
+    if next_step == "dummy":
+        batch_state = None
+    elif next_step == "decode":
+        batch_state = batch_state._replace(is_prefilling_np=np.array([False, False]), has_prefill=False)
+    elif next_step == "dcp":
+        manager.vllm_config.parallel_config.decode_context_parallel_size = 2
+    else:
+        manager.vllm_config.model_config.hf_text_config.index_kpool = 4
+
+    result = manager.prepare_pcp_batch_req_state(batch_state)
+    assert result is batch_state
+    assert manager._dispatch_prefill_runs_as_decode_np is None
+    if result is not None:
+        assert result.prefill_runs_as_decode_np is None
+        assert result.decode_graph_eligible is False
+
+
 def _hook_manager() -> AscendPCPManager:
     manager = AscendPCPManager.__new__(AscendPCPManager)
     manager.vllm_config = SimpleNamespace(

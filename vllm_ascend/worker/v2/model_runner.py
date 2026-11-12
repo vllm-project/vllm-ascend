@@ -161,7 +161,6 @@ class NPUModelRunner(GPUModelRunner):
         # boundary and sequence length padding during FULL graph execution.
         self.use_fia = False
         self._uses_flashmla = False
-        self._uses_mla_backend = False
         # FusedMoE can be constructed by the parent initializer and reads this
         # capacity while setting up MC2 communication.
         set_potential_max_tokens(vllm_config)
@@ -453,9 +452,6 @@ class NPUModelRunner(GPUModelRunner):
                 getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None
                 for groups in self.attn_groups
                 for group in groups
-            )
-            self._uses_mla_backend = any(
-                group.backend is AscendMLABackend for groups in self.attn_groups for group in groups
             )
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
@@ -792,6 +788,8 @@ class NPUModelRunner(GPUModelRunner):
         if self._uses_flashmla and batch_state is not None:
             # The backend order must precede derived inputs and graph dispatch.
             batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
+        if pcp_manager is not None:
+            pcp_manager.set_dispatch_batch_req_state(batch_state)
         return batch_state, uniform_token_count
 
     def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:

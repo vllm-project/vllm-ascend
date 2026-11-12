@@ -64,6 +64,7 @@ def has_effective_prefill(batch: Any) -> bool:
     """Whether a batch still contains requests computed by the prefill path."""
     return bool(get_effective_prefill_flags(batch).any())
 
+
 # Native npu_attention_update accepts at most 16 output/LSE pairs.
 ATTENTION_UPDATE_MAX_INPUTS = 16
 SFA_QSFA_TILE_SIZE = 128
