@@ -806,8 +806,25 @@ class AscendDSAV41Impl:
                 attn, positions, metadata, prepared_indexer=prepared_indexer
             )
             attention_output = self._forward_attention(attn, q, metadata, compressed_indices)
+            if attn.fused_attn_epilogue is not None:
+                # The fused kernel applies inverse RoPE and both projections.
+                # It writes the live rows and clears the graph bucket tail.
+                attn.fused_attn_epilogue(
+                    attention_output,
+                    attn.wo_a.weight.data,
+                    attn.wo_b.weight.data,
+                    attn.wo_a.weight_scale.view(torch.float8_e8m0fnu),
+                    attn.wo_b.weight_scale.view(torch.float8_e8m0fnu),
+                    sin.view(num_tokens, attn.rope_head_dim),
+                    cos.view(num_tokens, attn.rope_head_dim),
+                    output,
+                )
+                return output
             AscendDSAV41Impl._apply_rotary(attn, attention_output, cos, sin, inverse=True)
         else:
+            if attn.fused_attn_epilogue is not None:
+                output.zero_()
+                return output
             heads = attn.n_local_heads
             attention_output = hidden_states.new_empty((0, heads, attn.head_dim))
         self._project_output(attn, attention_output, hidden_states, projected=output)
