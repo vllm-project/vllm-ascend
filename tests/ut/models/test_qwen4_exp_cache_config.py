@@ -477,6 +477,49 @@ def test_runner_materializes_packed_kv_and_contiguous_ssm_views(monkeypatch, run
     assert compressed.is_contiguous()
 
 
+def test_qsa_raw_view_honors_padded_hybrid_page_stride(monkeypatch) -> None:
+    groups = _groups()
+    raw_group = groups.pop(1)
+    layer_name = raw_group.layer_names[0]
+    groups.insert(
+        1,
+        KVCacheGroupSpec([layer_name], raw_group.kv_cache_spec),
+    )
+    groups.insert(
+        2,
+        KVCacheGroupSpec(
+            raw_group.layer_names[1:],
+            replace(raw_group.kv_cache_spec, block_size=12),
+        ),
+    )
+    config = get_qwen4_exp_kv_cache_config(
+        SimpleNamespace(
+            cache_config=SimpleNamespace(
+                num_gpu_blocks_override=3,
+                prefix_cache_retention_interval=None,
+            )
+        ),
+        groups,
+        10**9,
+    )
+    assert config is not None
+    raw, caches, layout = _allocate_mrv2_kv_cache(config, monkeypatch)
+    assert layout is not None
+
+    raw_qsa = caches[layer_name]
+    region = layout.region("r4")
+    assert region.page_size_bytes == 12 * 1 * 32 * 2
+    assert raw_qsa.shape == (3, 8, 1, 32)
+    assert raw_qsa.stride(0) * raw_qsa.element_size() == region.block_stride
+    assert not raw_qsa.is_contiguous()
+    assert raw_qsa.untyped_storage().data_ptr() == raw[layer_name].untyped_storage().data_ptr()
+
+    raw_qsa[1].fill_(7)
+    assert torch.count_nonzero(raw_qsa[0]) == 0
+    assert torch.count_nonzero(raw_qsa[1]) == raw_qsa[1].numel()
+    assert torch.count_nonzero(raw_qsa[2]) == 0
+
+
 def test_qsa_source_sets_must_match() -> None:
     groups = _groups()
     groups[1].layer_names[-1] = "model.layers.46.self_attn.indexer.raw_key_cache"

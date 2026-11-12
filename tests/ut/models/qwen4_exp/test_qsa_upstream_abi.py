@@ -33,6 +33,64 @@ def test_main_uses_ascend_projection_and_draft_uses_upstream(monkeypatch) -> Non
     upstream_projection.assert_called_once_with(qkv, positions)
 
 
+def test_main_falls_back_when_fused_projection_abi_is_not_satisfied(monkeypatch) -> None:
+    upstream_projection = Mock(return_value=("q", "k", "v", "gate"))
+    monkeypatch.setattr(
+        qsa.upstream_qsa.Qwen4ExpQSAAttention,
+        "_project_qkv_gate",
+        upstream_projection,
+    )
+    layer = qsa.AscendQwen4ExpQSAAttention.__new__(qsa.AscendQwen4ExpQSAAttention)
+    torch.nn.Module.__init__(layer)
+    layer.layer_name = "model.layers.0.self_attn.attn"
+    layer._main_fused_norm_rope_eligible = Mock(return_value=False)
+    qkv = torch.empty((2, 8))
+    positions = torch.arange(2)
+
+    assert layer._project_qkv_gate(qkv, positions) == ("q", "k", "v", "gate")
+    upstream_projection.assert_called_once_with(qkv, positions)
+
+
+def test_indexer_query_falls_back_when_fused_abi_is_not_satisfied(monkeypatch) -> None:
+    upstream_projection = Mock(return_value=("query", "key"))
+    monkeypatch.setattr(
+        qsa.upstream_indexer.QSAIndexer,
+        "project_qk",
+        upstream_projection,
+    )
+    layer = qsa.AscendQSAIndexer.__new__(qsa.AscendQSAIndexer)
+    torch.nn.Module.__init__(layer)
+    layer.index_n_heads = 2
+    layer.index_head_dim = 4
+    layer.index_kv_heads = 1
+    layer.index_qk_proj = Mock(return_value=(torch.empty((2, 12)), None))
+    layer._fused_norm_rope_eligible = Mock(return_value=False)
+    hidden_states = torch.empty((2, 8))
+    positions = torch.arange(2)
+
+    assert layer.project_qk(hidden_states, positions) == ("query", "key")
+    upstream_projection.assert_called_once_with(hidden_states, positions)
+
+
+def test_indexer_compressed_key_falls_back_when_fused_abi_is_not_satisfied(monkeypatch) -> None:
+    upstream_projection = Mock(return_value="keys")
+    monkeypatch.setattr(
+        qsa.upstream_indexer.QSAIndexer,
+        "normalize_compressed_keys",
+        upstream_projection,
+    )
+    layer = qsa.AscendQSAIndexer.__new__(qsa.AscendQSAIndexer)
+    torch.nn.Module.__init__(layer)
+    layer.index_head_dim = 4
+    layer.rotary_emb = SimpleNamespace(mrope_section=[1, 1, 0])
+    layer._fused_norm_rope_eligible = Mock(return_value=False)
+    pooled = torch.empty((2, 4))
+    first_positions = torch.arange(6).reshape(2, 3)
+
+    assert layer.normalize_compressed_keys(pooled, first_positions) == "keys"
+    upstream_projection.assert_called_once_with(pooled, first_positions)
+
+
 def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch) -> None:
     layer = qsa.AscendQwen4ExpQSAAttention.__new__(qsa.AscendQwen4ExpQSAAttention)
     torch.nn.Module.__init__(layer)
