@@ -19,6 +19,14 @@ from vllm.v1.request import Request
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     resolve_backend,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.cache_config import (
+    infer_cache_transfer_granularity,
+    infer_cacheable_group_ids,
+    infer_group_block_sizes,
+    infer_group_cache_families,
+    infer_tp_mismatch_info,
+    uses_hybrid_kv_cache,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.in_flight_save_blocks import InFlightSaveBlockTracker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import LookupKeyClient
@@ -27,14 +35,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendStoreKVConnectorWorkerMetadata,
     LoadSpec,
     ReqMeta,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.request_state import (
     RequestTracker,
-    infer_cache_transfer_granularity,
-    infer_cacheable_group_ids,
-    infer_group_block_sizes,
-    infer_group_cache_families,
-    infer_tp_mismatch_info,
     normalize_block_ids_by_group,
-    uses_hybrid_kv_cache,
 )
 
 
@@ -416,7 +420,6 @@ class BaseKVPoolScheduler(ABC):
             is_last_chunk=request_tracker.token_len >= last_chunk_tokens_num,
             discard_partial_chunks=self._discard_partial_chunks,
             original_block_size=self.original_block_size,
-            kv_cache_group_families=self.kv_cache_group_families,
             save_partial_block=self.layerwise_offload,
             hash_block_size=self.hash_block_size,
         )
@@ -592,7 +595,6 @@ class BaseKVPoolScheduler(ABC):
             block_hashes=request.block_hashes,
             discard_partial_chunks=self._discard_partial_chunks,
             original_block_size=self.original_block_size,
-            kv_cache_group_families=self.kv_cache_group_families,
             hash_block_size=self.hash_block_size,
         )
 

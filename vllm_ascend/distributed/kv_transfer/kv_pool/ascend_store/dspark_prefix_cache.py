@@ -13,6 +13,8 @@ import numpy as np
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ReqMeta,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_keys import (
     block_hash_to_str,
     get_block_hashes,
 )

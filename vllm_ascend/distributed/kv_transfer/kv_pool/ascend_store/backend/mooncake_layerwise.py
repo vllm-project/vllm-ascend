@@ -16,6 +16,8 @@ from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ReqMeta,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_keys import (
     block_hash_to_str,
     get_block_hashes,
 )
@@ -226,16 +228,16 @@ def _prepare_group_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMet
             view = copy(request)
             # Keep the complete group block table: LayerBatchBuilder indexes it
             # using task.group_id. Only key/session metadata is group-local.
-            view.save_block_keys = []
-            view.load_block_keys = []
-            view.load_keys = []
-            view.save_last_block_key = view.load_last_block_key = None
+            view.transfer.save_block_keys = []
+            view.transfer.load_block_keys = []
+            view.transfer.load_keys = []
+            view.transfer.save_last_block_key = view.transfer.load_last_block_key = None
             view.partial_block_index = None
             result[group].append(view)
             ids = request.block_ids_by_group[group]
             hashes = get_block_hashes(request.block_hashes, block_size, worker.hash_block_size)
             load_mask = load_masks[group] if load_masks is not None else None
-            store_mask = request.store_masks[group] if request.store_masks is not None else None
+            store_mask = request.transfer.store_masks[group] if request.transfer.store_masks is not None else None
 
             def key(index, group=group, hashes=hashes):
                 return worker._make_layerwise_full_key(group, block_hash_to_str(hashes[index]))
@@ -256,10 +258,10 @@ def _prepare_group_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMet
                 for name, index in entries
                 if start <= index < min(len(ids), cached_tokens // block_size) and selected(load_mask, index)
             ]
-            view.load_key_block_offset = 0
-            view.load_block_keys = [None] * (max((index for _, index in entries), default=-1) + 1)
+            view.transfer.load_key_block_offset = 0
+            view.transfer.load_block_keys = [None] * (max((index for _, index in entries), default=-1) + 1)
             for name, index in entries:
-                view.load_block_keys[index] = name
+                view.transfer.load_block_keys[index] = name
                 get_slots.append((view, name, ids[index], index))
 
             start = request.save_start_token // block_size
@@ -270,8 +272,8 @@ def _prepare_group_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMet
                     pool_hit = request.load_spec.kvpool_cached_tokens
                 start = max(start, pool_hit // block_size)
             view.save_end_token = end * block_size
-            view.save_key_block_offset = start
-            view.save_block_keys = [None] * max(0, end - start)
+            view.transfer.save_key_block_offset = start
+            view.transfer.save_block_keys = [None] * max(0, end - start)
             if not request.can_save or not worker._is_layerwise_save_owner(group):
                 continue
             key_indices = [(key(index), index) for index in range(start, end) if selected(store_mask, index)]
@@ -328,7 +330,7 @@ def _prepare_group_sessions(worker: LayerwiseKVPoolWorker, requests: list[ReqMet
                         worker._put_started_keys.update(started_now)
             for name, index in key_indices:
                 if name in started:
-                    view.save_block_keys[index - start] = name
+                    view.transfer.save_block_keys[index - start] = name
             tracker.register_put_keys(
                 request.req_id, ((name, index) for name, index in key_indices if name in started), group_id=group
             )

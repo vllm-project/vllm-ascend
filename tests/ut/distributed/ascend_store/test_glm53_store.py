@@ -416,6 +416,8 @@ class TestGLM53Store(unittest.TestCase):
             saves_attention = rank == 0 and pcp_rank == 0
             expected_groups = {2, 3, 4} | ({0} if saves_attention else set())
             self.assertEqual(task_groups, expected_groups)
+            request = metadata.requests[0]
+            self.assertEqual(len(request.transfer.block_gvas_by_group_np), 5)
             self.finish_layerwise_step(worker, metadata)
             workers.append((worker, caches))
             self.doCleanups()
@@ -440,6 +442,9 @@ class TestGLM53Store(unittest.TestCase):
             metadata = self.make_metadata(target, [block_hash], load=True)
             metadata.requests[0].is_last_chunk = True
             worker.prepare_layerwise_step(metadata)
+            request = metadata.requests[0]
+            self.assertEqual(len(request.transfer.load_block_gvas_by_group_np), 5)
+            self.assertEqual(len(request.transfer.load_block_gvas_by_group_np[1]), 0)
             self.finish_layerwise_step(worker, metadata, load=True)
             self.assert_restored(worker, caches, source, target)
         for key in scheduler._make_layerwise_hit_check_keys(4, block_hash.hex()):
@@ -553,10 +558,10 @@ class TestGLM53Store(unittest.TestCase):
         worker.prepare_layerwise_step(metadata)
         expected = {2: [False, True, False], 3: [True, False, False], 4: [False, False, True]}
         for group_id, mask in expected.items():
-            self.assertEqual(request.store_masks[group_id], mask)
+            self.assertEqual(request.transfer.store_masks[group_id], mask)
             for index, valid in enumerate(mask):
                 key = worker._make_layerwise_full_key(group_id, hashes[index].hex())
-                self.assertEqual(key in request.save_keys, valid)
+                self.assertEqual(key in request.transfer.save_keys, valid)
         for tasks in worker.layer_save_tasks:
             for task in tasks:
                 if task.group_id in expected:
