@@ -4,18 +4,86 @@
 
 import math
 from dataclasses import replace
+from functools import wraps
 from typing import Any
 
 import torch
+from vllm.config import get_current_vllm_config_or_none
 from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     HiSparseResidentSpec,
     KVCacheConfig,
+    KVCacheLayout,
     KVCacheSpec,
     UniformTypeKVCacheSpecs,
+    create_kv_cache_views,
 )
 
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+
+_POOL_BUFFER_ALIGNMENT = 2 * 1024 * 1024
+
+
+def _allocate_aligned_slab(size: int, device: torch.device) -> torch.Tensor:
+    owner = torch.zeros(size + _POOL_BUFFER_ALIGNMENT - 1, dtype=torch.int8, device=device)
+    offset = -owner.data_ptr() % _POOL_BUFFER_ALIGNMENT
+    # A storage slice retains the allocation and gives the aligned range its
+    # own base pointer. Core's Resident/Hot binder uses absolute storage offsets.
+    start = owner.storage_offset() + offset
+    storage = owner.untyped_storage()[start : start + size]
+    return torch.empty(0, dtype=torch.int8, device=device).set_(storage, 0, (size,), (1,))
+
+
+def _allocate_aligned_kv_caches(
+    config: KVCacheConfig,
+    device: torch.device,
+    layout: KVCacheLayout,
+    kernel_block_sizes: list[int],
+) -> dict[str, torch.Tensor]:
+    (size,) = {tensor.size for tensor in config.kv_cache_tensors}
+    slab = _allocate_aligned_slab(size, device)
+    group_ids = {name: i for i, group in enumerate(config.kv_cache_groups) for name in group.layer_names}
+    caches = {}
+    for tensor in config.kv_cache_tensors:
+        name = tensor.layers[0]
+        group_id = group_ids[name]
+        spec = config.kv_cache_groups[group_id].kv_cache_spec
+        if isinstance(spec, UniformTypeKVCacheSpecs):
+            spec = spec.kv_cache_specs[name]
+        if not spec.has_layer_views:
+            caches.update((layer_name, slab) for layer_name in tensor.layers)
+            continue
+        views = create_kv_cache_views(
+            slab, spec, config.num_blocks_of(tensor), layout, tensor, kernel_block_sizes[group_id]
+        )
+        caches.update(zip(tensor.layers, views))
+    return caches
+
+
+def install_aligned_device_allocation() -> None:
+    """Adapt the HiSparse device allocation until Core accepts a slab allocator."""
+    from vllm.v1.hisparse import binding
+
+    original = binding.allocate_kv_cache
+    if getattr(original, "_ascend_aligned_slab", False):
+        return
+
+    @wraps(original)
+    def allocate(config, device, layout, kernel_block_sizes):
+        vllm_config = get_current_vllm_config_or_none()
+        transfer = vllm_config.kv_transfer_config if vllm_config is not None else None
+        if device.type == "npu" and transfer is not None and config.kv_cache_tensors:
+            children = transfer.kv_connector_extra_config.get("connectors", ())
+            uses_store = transfer.kv_connector == "AscendStoreConnector" or (
+                transfer.kv_connector == "MultiConnector"
+                and any(child.get("kv_connector") == "AscendStoreConnector" for child in children)
+            )
+            if uses_store:
+                return _allocate_aligned_kv_caches(config, device, layout, kernel_block_sizes)
+        return original(config, device, layout, kernel_block_sizes)
+
+    allocate.__dict__["_ascend_aligned_slab"] = True
+    binding.allocate_kv_cache = allocate
 
 
 def align_hisparse_indexer_specs(

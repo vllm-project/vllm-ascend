@@ -16,6 +16,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     BatchResultShapeError,
     get_scheduler_device_id,
     parse_qos_from_extra_config,
+    require_aligned_batch_results,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import get_sharded_mamba_group_ids
@@ -164,6 +165,7 @@ class MemcacheBackend(Backend):
         self._store_initialized = False
         self._store_init_lock = threading.Lock()
         self._pending_buffers: tuple[list[int], list[int]] | None = None
+        self._hisparse_host_ranges: tuple[tuple[int, int], ...] = ()
 
         if not self._lazy_init:
             self.store = self._setup_store()
@@ -239,6 +241,62 @@ class MemcacheBackend(Backend):
     def register_buffer(self, ptrs: list[int], sizes: list[int]):
         self._pending_buffers = (list(ptrs), list(sizes))
         self._register_buffers_if_needed()
+
+    def set_hisparse_host_ranges(self, ranges: list[tuple[int, int]]) -> None:
+        self._hisparse_host_ranges = tuple(ranges)
+
+    def _transfer_hisparse(
+        self,
+        keys: list[str],
+        addrs: list[list[int]],
+        sizes: list[list[int]],
+        *,
+        put: bool,
+    ) -> list[int]:
+        assert self.store is not None
+        if len(keys) != len(addrs) or len(keys) != len(sizes):
+            raise ValueError("KV pool transfer requires matching key, address and size counts")
+        directions = []
+        for addresses, lengths in zip(addrs, sizes, strict=True):
+            is_host = []
+            for address, length in zip(addresses, lengths, strict=True):
+                address_end = address + length
+                host = False
+                for start, end in self._hisparse_host_ranges:
+                    if address < end and start < address_end:
+                        if address < start or address_end > end:
+                            raise ValueError("KV pool transfer exceeds its registered host range")
+                        host = True
+                        break
+                is_host.append(host)
+            if is_host and any(is_host) != all(is_host):
+                raise ValueError("One KV pool key cannot combine host and device buffers")
+            directions.append(bool(is_host and is_host[0]))
+        results = [-1] * len(keys)
+        transfer = self.store.batch_put_from_layers if put else self.store.batch_get_into_layers
+        for host in (False, True):
+            indices = [index for index, is_host in enumerate(directions) if is_host == host]
+            if not indices:
+                continue
+            direction = (
+                (MmcDirect.COPY_H2G if put else MmcDirect.COPY_G2H)
+                if host
+                else (MmcDirect.COPY_L2G if put else MmcDirect.COPY_G2L)
+            )
+            selected_keys = [keys[index] for index in indices]
+            batch_results = require_aligned_batch_results(
+                "HiSparse Memcache transfer",
+                selected_keys,
+                transfer(
+                    selected_keys,
+                    [addrs[index] for index in indices],
+                    [sizes[index] for index in indices],
+                    direction.value,
+                ),
+            )
+            for index, result in zip(indices, batch_results, strict=True):
+                results[index] = result
+        return results
 
     def unregister_buffer(self, ptrs: list[int], sizes: list[int]):
         if len(ptrs) != len(sizes):
@@ -420,7 +478,11 @@ class MemcacheBackend(Backend):
             return
         assert self.store is not None
         try:
-            res = self.store.batch_get_into_layers(key, addr, size, MmcDirect.COPY_G2L.value)
+            res = (
+                self._transfer_hisparse(key, addr, size, put=False)
+                if getattr(self, "_hisparse_host_ranges", ())
+                else self.store.batch_get_into_layers(key, addr, size, MmcDirect.COPY_G2L.value)
+            )
             failed_codes = [int(value) for value in res if value != 0]
             failed_count = len(failed_codes)
             if failed_count:
@@ -453,7 +515,11 @@ class MemcacheBackend(Backend):
         self.ensure_initialized()
         assert self.store is not None
         try:
-            res = self.store.batch_put_from_layers(key, addr, size, MmcDirect.COPY_L2G.value)
+            res = (
+                self._transfer_hisparse(key, addr, size, put=True)
+                if getattr(self, "_hisparse_host_ranges", ())
+                else self.store.batch_put_from_layers(key, addr, size, MmcDirect.COPY_L2G.value)
+            )
             failed_codes = [int(value) for value in res if value != 0]
             failed_count = len(failed_codes)
             if failed_count:

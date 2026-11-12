@@ -148,6 +148,12 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.use_layerwise = extra_config.get("use_layerwise", False)
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
         self.backend_name = extra_config.get("backend", "mooncake").lower()
+        has_hisparse = any(
+            getattr(group, "role", None) == "hisparse_source"
+            for group in getattr(kv_cache_config, "kv_cache_groups", ())
+        )
+        if has_hisparse and (self.use_layerwise or self.backend_name != "memcache" or self.kv_role != "kv_both"):
+            raise ValueError("HiSparse with AscendStore requires bulk MemCache transfers with kv_role=kv_both.")
         self.backend_class = get_backend_class(self.backend_name) if self.use_layerwise else None
         self.layerwise_data_plane = self.backend_class.layerwise_data_plane if self.backend_class is not None else None
         self.use_block_key_layerwise = self.use_layerwise and self.layerwise_data_plane == "block_key"
