@@ -75,6 +75,11 @@ on:
         required: false
         type: string
         default: ''
+      dockerfile_ref:
+        description: "Optional git ref the Dockerfile is taken from (e.g. refs/pull/<n>/head). When set, the Dockerfile of the build is overwritten with the version from that ref ('pre-merge' Dockerfile of a PR) while branch_ref still provides the rest of the source tree and therefore the image tag. Default '' uses the Dockerfile of the checked-out ref."
+        required: false
+        type: string
+        default: ''
     secrets:
       SWR_USERNAME:
         description: 'SWR username for pushing images'
@@ -127,6 +132,30 @@ jobs:
         persist-credentials: false
         # Empty on tag pushes and PR events, so the default event ref is used.
         ref: ${{ inputs.branch_ref }}
+
+    - name: Checkout Dockerfile from ref
+      if: ${{ inputs.dockerfile_ref != '' }}
+      uses: actions/checkout@v7
+      with:
+        # An isolated build (e.g. /presmoke over a PR) takes the Dockerfile from
+        # dockerfile_ref and overlays it on the branch checked out above, so the
+        # built image uses the versions under review while the branch, and therefore
+        # the published tag, stay unchanged.
+        ref: ${{ inputs.dockerfile_ref }}
+        path: .pr-dockerfile
+        sparse-checkout: ${{ inputs.dockerfile || 'Dockerfile' }}
+        sparse-checkout-cone-mode: false
+        fetch-depth: 1
+
+    - name: Overlay Dockerfile from ref
+      if: ${{ inputs.dockerfile_ref != '' }}
+      run: |
+        set -euo pipefail
+        DOCKERFILE="${{ inputs.dockerfile || 'Dockerfile' }}"
+        cp ".pr-dockerfile/$DOCKERFILE" "$DOCKERFILE"
+        rm -rf .pr-dockerfile
+        # Record the effective base image so the log shows which version is built.
+        grep -m1 '^FROM' "$DOCKERFILE"
 
     - name: Compute cache tag
       id: cache-tag
