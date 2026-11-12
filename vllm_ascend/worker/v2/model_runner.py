@@ -75,6 +75,13 @@ from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
     _start_profiling_chunk_timing,
 )
+from vllm_ascend.dflash_topm_state import (
+    build_verify_segments_v2,
+    finish_activation_routing,
+    resolve_activation_routing_config,
+    set_activation_routing_batch,
+    validate_activation_routing,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     bind_dspark_context_receiver,
     configure_dspark_kv_transfer,
@@ -94,6 +101,8 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     allocate_kv_offload_topk_profile_buffers,
     init_sparse_kv_offload_manager,
 )
+from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager
+from vllm_ascend.expert_offload.utils import initialize_expert_offload
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
 from vllm_ascend.observability.runtime_guard.hooks import (
     runtime_guard_sample_tokens,
@@ -150,10 +159,14 @@ class NPUModelRunner(GPUModelRunner):
     kv_connector: KVConnector
     max_num_reqs: int
     max_num_tokens: int
+    expert_offload_manager: ExpertOffloadManager | None = None
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
+        expert_offload_config = getattr(self.ascend_config, "expert_offload_config", None)
+        if expert_offload_config is not None and expert_offload_config.enabled:
+            self.expert_offload_manager = ExpertOffloadManager()
         self.sparse_kv_offload_manager = None
         self.kvpp = KVPPRuntime()
         # Adaptive verification uses this flag to apply FIA-specific query
@@ -263,6 +276,20 @@ class NPUModelRunner(GPUModelRunner):
         # NOTE: In GPUModelRunner, decode_query_len is initialized in load_model(),
         # +1 is hardcoded here but not in vllm.
         self.decode_query_len = self.num_speculative_steps + 1
+        self.dflash_topm_state = resolve_activation_routing_config(
+            self.ascend_config.activation_routing_config,
+            text_config=self.model_config.hf_text_config,
+            speculative_method=self.speculative_config.method if self.speculative_config else None,
+            uniform_decode_query_len=self.decode_query_len,
+        )
+        if self.dflash_topm_state is not None:
+            validate_activation_routing(
+                self.dflash_topm_state,
+                self.model_config,
+                self.speculative_config,
+                self.decode_query_len,
+                getattr(self, "use_async_scheduling", False),
+            )
         # Set _mc2_tokens_capacity and _reserved_mc2_mask for MoE communication optimization.
         # TODO: remove set_cos_and_sin (together with update_cos_sin) when mla can properly handle cos/sin internally
         set_cos_and_sin(vllm_config, self.max_num_reqs, self.decode_query_len, self.dtype, self.device)
@@ -296,6 +323,11 @@ class NPUModelRunner(GPUModelRunner):
         return AscendPCPManager
 
     def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
+        expert_offload_manager = self.expert_offload_manager
+        if expert_offload_manager is not None and load_dummy_weights:
+            raise ValueError(
+                "expert offload requires checkpoint shard tracking; dummy checkpoint loading is unsupported"
+            )
         from vllm_ascend.model_executor.warmup.nz_warmup import (
             join_nz_warm_thread,
             start_nz_warm_thread,
@@ -313,6 +345,9 @@ class NPUModelRunner(GPUModelRunner):
             # device and must not outlive this call. Joining here is also before
             # memory profiling.
             join_nz_warm_thread()
+
+        if expert_offload_manager is not None:
+            initialize_expert_offload(self)
 
         # In cudagraph modes the dumper must be started before graph capture so
         # that aclgraph capture/replay is instrumented (v1 parity: v1 starts
@@ -549,6 +584,10 @@ class NPUModelRunner(GPUModelRunner):
                 fill_mxfp_v_scale_cache(layer.v_cache_scale, value_scale_cache)
 
     def shutdown(self) -> None:
+        if self.expert_offload_manager is not None:
+            self.expert_offload_manager.unsubscribe_graph_streams()
+            self.expert_offload_manager = None
+
         # Drop C8 packet views before the parent collects tensors and
         # empties the allocator cache.
         entries = getattr(self, "_c8_mxfp_v_scale_caches", None)
@@ -625,6 +664,7 @@ class NPUModelRunner(GPUModelRunner):
         randomize_inputs: bool = False,
     ):
         self._cpp_execution_time_ms = None
+        set_activation_routing_batch(None, (), ())
         profiling_config = self.ascend_config.scheduler_config.profiling_chunk_config
         execution_start_time = _start_profiling_chunk_timing(
             profiling_config,
@@ -657,6 +697,11 @@ class NPUModelRunner(GPUModelRunner):
         dp_coordination_context = skip_dp_coordination() if skip_dp_metadata_sync else nullcontext()
         profile_kwargs = {"randomize_inputs": randomize_inputs}
         forward_failed = True
+        expert_offload_manager = self.expert_offload_manager
+        if expert_offload_manager is not None:
+            # Dummy runs have no batch state and keep the full-pool default.
+            # Real batch metadata below selects prefill or decode.
+            expert_offload_manager.has_prefill = True
         with dp_coordination_context:
             try:
                 output = super().execute_model(
@@ -674,6 +719,7 @@ class NPUModelRunner(GPUModelRunner):
                 finish_execution = getattr(self.model_state, "finish_execution", None)
                 if finish_execution is not None:
                     finish_execution(failed=forward_failed)
+                finish_activation_routing()
         if not dummy_run and not is_profile:
             self._maybe_send_draft_kv(scheduler_output)
         self.model_state.kvpp_is_dummy_run = False
@@ -775,6 +821,8 @@ class NPUModelRunner(GPUModelRunner):
         if self._uses_flashmla and batch_state is not None:
             # The backend order must precede derived inputs and graph dispatch.
             batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
+        if self.expert_offload_manager is not None and batch_state is not None:
+            self.expert_offload_manager.has_prefill = batch_state.has_prefill
         return batch_state, uniform_token_count
 
     def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:
@@ -1059,6 +1107,29 @@ class NPUModelRunner(GPUModelRunner):
         # helper; PCPManager.partition_batch now takes the batch descriptor.
         if self.pcp_manager is not None:
             input_batch = self.pcp_manager.partition_batch(input_batch, batch_desc)
+
+        if self.dflash_topm_state is not None:
+            verify_rows, segments = (), []
+            if self.pcp_manager is None and not adaptive_verification_active and batch_req_state is not None:
+                verify_rows, segments = build_verify_segments_v2(
+                    scheduler_output,
+                    req_ids,
+                    num_scheduled_tokens_upper_bound,
+                    num_computed_tokens_np,
+                    batch_req_state.prefill_len_np,
+                    scheduler_output.total_num_scheduled_tokens,
+                )
+                if (
+                    not segments
+                    and not batch_req_state.has_prefill
+                    and batch_desc.uniform_token_count == self.dflash_topm_state.verify_block_size
+                ):
+                    block = self.dflash_topm_state.verify_block_size
+                    segments = [(offset, block) for offset in range(0, num_tokens_after_padding, block)]
+            self.dflash_topm_state.prepare(num_tokens_after_padding, segments, self.device)
+            set_activation_routing_batch(self.dflash_topm_state, verify_rows, segments)
+        else:
+            set_activation_routing_batch(None, (), ())
 
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(input_batch.positions)

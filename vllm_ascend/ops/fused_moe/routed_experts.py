@@ -618,11 +618,41 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.router is None:
             raise RuntimeError("AscendRoutedExperts requires a router for expert selection.")
-        topk_weights, topk_ids = self.router._select_experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            input_ids=input_ids,
+        from vllm_ascend.dflash_topm_state import try_activation_route
+
+        router = self.router
+        try:
+            context = get_forward_context()
+        except AssertionError:
+            context = None
+        topm_pair = (
+            try_activation_route(
+                context,
+                router_logits,
+                hidden_states,
+                getattr(router, "top_k", self.moe_config.experts_per_token),
+                getattr(router, "renormalize", True),
+                getattr(router, "scoring_func", "softmax"),
+                getattr(router, "e_score_correction_bias", None),
+                getattr(router, "routed_scaling_factor", 1.0),
+                getattr(router, "custom_routing_function", None),
+                getattr(router, "tid2eid", None),
+                self.mix_placement,
+                getattr(router, "topk_group", None),
+                getattr(router, "num_expert_group", None),
+            )
+            if context is not None
+            else None
         )
+        if topm_pair is None:
+            topk_weights, topk_ids = router._select_experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                input_ids=input_ids,
+            )
+        else:
+            topk_weights, topk_ids = topm_pair
+            context.dflash_topm_state.record_selection(context, topk_weights, topk_ids)
         if self.log2phy is not None:
             topk_ids = self.log2phy[topk_ids]
 

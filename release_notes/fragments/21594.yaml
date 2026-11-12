@@ -1,0 +1,4 @@
+pr: 21594
+entries:
+  - category: feature
+    text: Added opt-in anchor-union activation routing for DeepSeek MoE speculative decoding (DSpark and DFlash), with graph-safe fallback and native fused paths.
