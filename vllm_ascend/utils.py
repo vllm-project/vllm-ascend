@@ -1482,6 +1482,7 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
             "mlp_tensor_parallel_size",
             "qkv_iproj_tensor_parallel_size",
             "gproj_tensor_parallel_size",
+            "shared_expert_tensor_parallel_size",
         )
     ):
         return False
