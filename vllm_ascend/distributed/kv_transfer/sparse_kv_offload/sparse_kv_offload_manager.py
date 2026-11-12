@@ -47,6 +47,28 @@ OFFLOAD_TOPK_BUFFER_K_INDEX = 4
 OFFLOAD_TOPK_BUFFER_V_INDEX = 5
 OFFLOAD_STORE_PORT_BASE = 8500
 
+
+@dataclass(frozen=True)
+class CopySfaLayerCacheViews:
+    """Registered main KV aliases for one layer; callers must not resize them."""
+
+    layer_name: str
+    host_kv: tuple[torch.Tensor, torch.Tensor]
+    hot_kv: tuple[torch.Tensor, torch.Tensor]
+
+
+@dataclass(frozen=True)
+class CopySfaCacheViews:
+    """Immutable layout metadata referencing manager-owned, writable KV storage."""
+
+    main_group_id: int
+    block_size: int
+    hot_tokens: int
+    tp_rank: int
+    tp_size: int
+    layers: tuple[CopySfaLayerCacheViews, ...]
+
+
 FSA_EXTERNAL_PLAN_READY_MARKER = 0x5A45
 FSA_PAIRED_SELECTION_COPY_MARKER = 0x5A56
 FSA_SELECTION_MEMBERSHIP_MAP_INT16_COUNT = 16376
@@ -711,6 +733,49 @@ class SparseKVOffloadManager:
             for component_id in (OFFLOAD_TOPK_BUFFER_K_INDEX, OFFLOAD_TOPK_BUFFER_V_INDEX)
         }
 
+    def get_copy_sfa_cache_views(self) -> CopySfaCacheViews:
+        """Export existing views once, after cache registration, without copying.
+
+        Host aliases include the restored shared views on non-owner TP ranks.
+        Hot views include the two circular tail blocks. The snapshot borrows
+        this manager's worker-lifetime allocations; it neither registers memory
+        with a transport nor transfers ownership to the caller.
+        """
+        if not self.use_fused_copy_sfa:
+            raise ValueError("Copy-SFA cache views require LIM + Copy-SFA")
+        names = getattr(self, "offload_layer_names", ())
+        components = [
+            getattr(self, name, ()) for name in ("k_caches_cpu", "v_caches_cpu", "topk_buffers_k", "topk_buffers_v")
+        ]
+        if not names or any(len(values) != len(names) for values in components):
+            raise RuntimeError("Copy-SFA cache views require registered Host and hot KV")
+        main_groups = {
+            group_id
+            for group_id, group in enumerate(self.kv_cache_config.kv_cache_groups)
+            if set(group.layer_names) & set(names)
+        }
+        if len(main_groups) != 1:
+            raise ValueError("Copy-SFA cache views require one main KV cache group")
+        main_group_id = main_groups.pop()
+        layers = []
+        for name in names:
+            layer_id = self._get_offload_layer_id(name)
+            layers.append(
+                CopySfaLayerCacheViews(
+                    layer_name=name,
+                    host_kv=(self.k_caches_cpu[layer_id], self.v_caches_cpu[layer_id]),
+                    hot_kv=(self.topk_buffers_k[layer_id], self.topk_buffers_v[layer_id]),
+                )
+            )
+        return CopySfaCacheViews(
+            main_group_id=main_group_id,
+            block_size=self.kv_cache_config.kv_cache_groups[main_group_id].kv_cache_spec.block_size,
+            hot_tokens=self.topk_buffer_size,
+            tp_rank=self.tp_rank,
+            tp_size=self.tp_group.world_size,
+            layers=tuple(layers),
+        )
+
     def register_kv_caches(
         self,
         kv_caches: dict[str, torch.Tensor],
@@ -1061,7 +1126,9 @@ class SparseKVOffloadManager:
             )
             dst_block_tokens = torch.arange(nblocks, dtype=torch.int64, device=topk_k.device) * block_size
             dst_offsets = (slot * stride_tokens + dst_block_tokens.view(1, -1).expand(2, -1)) * token_bytes
-            lengths_bytes = lengths.view(1, -1).expand(2, -1) * token_bytes
+            # Byte offsets need int64, but sparse_copy reads int32 lengths.
+            # Passing int64 silently turns every second length into zero.
+            lengths_bytes = (lengths.view(1, -1).expand(2, -1) * token_bytes).to(torch.int32)
             count = torch.full((1,), 2 * nblocks, dtype=torch.int32, device=topk_k.device)
             for host_bases, device_bases in zip(self.copy_sfa_host_bases, self.copy_sfa_device_bases):
                 sources = (src_offsets + host_bases).reshape(-1)
