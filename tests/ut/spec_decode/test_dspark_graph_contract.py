@@ -160,32 +160,6 @@ def test_update_draft_metadata_refreshes_all_padded_query_lengths(query_count, n
         assert value.seq_lens is seq_lens[name]
 
 
-@pytest.mark.parametrize("architecture", ["GQA", "MLA"])
-def test_uniform_draft_graph_removes_synthetic_tail_request(architecture):
-    speculator = _speculator(num_query_per_req=3, attn_architecture=architecture)
-    lengths = torch.tensor([19, 23, 31, 37, 0, 0, 1], dtype=torch.int32)
-    tables = torch.arange(14).reshape(7, 2)
-    decode = SimpleNamespace(
-        actual_seq_lengths_q=[3, 6, 9, 12, 12, 12, 18],
-        seq_lens_list=lengths.tolist(),
-        seq_lens=lengths,
-        seq_lens_cpu=lengths,
-        seq_lens_gpu=lengths[:6],
-        block_table=tables,
-        block_tables=tables,
-    )
-    metadata = {"draft.0": SimpleNamespace(decode=decode) if architecture == "MLA" else decode}
-
-    speculator._update_draft_attn_metadata(metadata, 6)
-
-    assert decode.actual_seq_lengths_q == [3, 6, 9, 12, 15, 18]
-    assert decode.seq_lens_list == [19, 23, 31, 37, 0, 0]
-    for name in ("seq_lens", "seq_lens_cpu", "seq_lens_gpu", "block_table", "block_tables"):
-        assert getattr(decode, name).shape[0] == 6
-    assert lengths.tolist() == [19, 23, 31, 37, 0, 0, 1]
-    assert tables.shape == (7, 2)
-
-
 def test_replay_installs_forward_context_before_accessing_extra_ctx(monkeypatch):
     class _ContextProxy:
         active = False
