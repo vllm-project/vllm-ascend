@@ -213,6 +213,14 @@ upstream_mtp.Qwen4ExpMultiTokenPredictor = AscendQwen4ExpMultiTokenPredictor
 class AscendQwen4ExpMTP(upstream_mtp.Qwen4ExpMTP):
     """Qwen4Exp MTP model bound to the Ascend-patched decoder."""
 
+    def process_weights_after_loading(self) -> None:
+        from .hc_fused import prepare_model_textgr_weights
+
+        parent_hook = getattr(super(), "process_weights_after_loading", None)
+        if parent_hook is not None:
+            parent_hook()
+        prepare_model_textgr_weights(self)
+
     def embed_input_ids(
         self,
         input_ids: torch.Tensor,
