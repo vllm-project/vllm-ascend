@@ -64,14 +64,22 @@ def test_head_first_l2norm_fallback_accepts_multiple_heads(backend, sliced):
 
         def fused(q, k, v, *args, **kwargs):
             assert kwargs["layout"] == "BNSD"
+            assert all(x.is_contiguous() for x in (q, k, v))
+            if not sliced:
+                assert v.data_ptr() == qkv[2].data_ptr()
             for got, original in zip((q, k), qkv[:2]):
                 expected = torch.nn.functional.normalize(original, dim=-1).transpose(1, 2)
                 torch.testing.assert_close(got, expected)
             torch.testing.assert_close(v, qkv[2].transpose(1, 2))
             return output, state.transpose(-1, -2).contiguous()
 
-        with patch("vllm.third_party.flash_linear_attention.ops.l2norm.l2norm_fwd", side_effect=norm):
+        with patch("vllm.third_party.flash_linear_attention.ops.l2norm.l2norm_fwd", side_effect=norm) as normalize:
             actual, _ = BaseDeviceAdaptor.fla_gdn_prefill(*qkv, gate, gate, state, dim**-0.5, meta, fused)
+        if not sliced:
+            for call, original in zip(normalize.call_args_list, qkv[:2], strict=True):
+                norm_input = call.args[0]
+                assert norm_input.shape == original.transpose(1, 2).shape
+                assert norm_input.data_ptr() == original.data_ptr()
     else:
 
         def fused(q, k, v, *args, **kwargs):
