@@ -48,6 +48,17 @@ def expand_fused_expert_params(name: str, shape: tuple[int, ...]) -> list[tuple[
     return [(name, shape)]
 
 
+def split_fused_mlp_params(name: str, shape: tuple[int, ...]) -> list[tuple[str, tuple[int, ...]]]:
+    """Split a fused dense/shared-expert gate-up projection."""
+    if name.endswith(".gate_up_proj.weight"):
+        fused_intermediate, hidden = shape
+        assert fused_intermediate % 2 == 0, f"{name}: odd fused gate/up dimension"
+        shard_shape = (fused_intermediate // 2, hidden)
+        prefix = name.removesuffix(".gate_up_proj.weight")
+        return [(f"{prefix}.{projection}.weight", shard_shape) for projection in ("gate_proj", "up_proj")]
+    return [(name, shape)]
+
+
 def resize_expert_shape(name: str, shape: tuple[int, ...], intermediate_size: int | None) -> tuple[int, ...]:
     """Force expert MLP tensors to the checkpoint's intermediate dimension.
 
@@ -96,12 +107,14 @@ class FixedRandomWeightSource(WeightSource):
     """
 
     def __init__(self, case: WeightUpdateModelCase, device: torch.device) -> None:
-        config = AutoConfig.from_pretrained(case.model, trust_remote_code=True)
+        config = AutoConfig.from_pretrained(case.model, trust_remote_code=case.trust_remote_code)
         _apply_hf_overrides(config, case.hf_overrides)
         self._case = case
         meta_config = getattr(config, case.meta_config_attribute) if case.meta_config_attribute else config
         with torch.device("meta"):
-            meta_model = AutoModelForCausalLM.from_config(meta_config, trust_remote_code=True)
+            meta_model = AutoModelForCausalLM.from_config(meta_config, trust_remote_code=case.trust_remote_code)
+
+        persistent_state_names = set(meta_model.state_dict())
 
         # Two distinct steps: ``_checkpoint_name`` applies the namespace prefix
         # to the raw meta-model name (once), then the checkpoint rename map runs
@@ -115,17 +128,18 @@ class FixedRandomWeightSource(WeightSource):
                 torch.bfloat16,
             )
             for name, parameter in meta_model.named_parameters()
-            for expanded_name, expanded_shape in expand_fused_expert_params(
+            for expert_name, expert_shape in expand_fused_expert_params(
                 self._checkpoint_name(name, case), tuple(parameter.shape)
             )
+            for expanded_name, expanded_shape in (
+                split_fused_mlp_params(expert_name, expert_shape)
+                if case.split_fused_mlp
+                else [(expert_name, expert_shape)]
+            )
         ]
-        # Learned integer tables must travel with the payload too. Some
-        # architectures expose them as HF *buffers* while the served model keeps
-        # them as parameters: DeepSeek-V4's hash router keeps ``tid2eid`` as a
-        # (vocab, topk) token -> expert table, and the real checkpoint ships it
-        # (``model.layers.{0,1,2}.mlp.gate.tid2eid`` in the safetensors index).
-        # Omitting it leaves the table to be re-materialised with ``torch.empty``
-        # during a live update, and the router then indexes experts out of range.
+        # Include persistent checkpoint buffers (e.g. FP32 router correction
+        # bias), plus integer tables even when HF marks them non-persistent.
+        # Runtime-only floating/complex buffers such as RoPE tables stay out.
         parameters += [
             (
                 self._apply_name_map(self._checkpoint_name(name, case), case),
@@ -133,9 +147,14 @@ class FixedRandomWeightSource(WeightSource):
                 buffer.dtype,
             )
             for name, buffer in meta_model.named_buffers()
-            if not buffer.dtype.is_floating_point and not buffer.dtype.is_complex
+            if name in persistent_state_names or (not buffer.dtype.is_floating_point and not buffer.dtype.is_complex)
         ]
-        self._num_experts = int(getattr(meta_config, "n_routed_experts", 0) or 0)
+        self._num_experts = int(
+            getattr(meta_config, "n_routed_experts", 0)
+            or getattr(meta_config, "num_local_experts", 0)
+            or getattr(meta_config, "num_experts", 0)
+            or 0
+        )
         del meta_model
 
         assert parameters, f"{case.id}: reduced meta model contains no parameters"
