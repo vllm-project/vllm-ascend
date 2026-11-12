@@ -93,6 +93,11 @@ on:
         type: string
         default: ''
         description: "Suffix appended to the SWR repository name of both image layers (ascend/vllm-ascend<suffix> and base_image/ascend-ci/vllm-ascend<suffix>). Used by presmoke to publish to its own isolated repositories; callers that set it must pass the same value to their test jobs. Default '' keeps the standard repositories."
+      dockerfile_ref:
+        required: false
+        type: string
+        default: ''
+        description: "Optional git ref the built Dockerfile is taken from (e.g. refs/pull/<n>/head). /presmoke passes the triggering PR so the base image is built with the Dockerfile submitted in that PR, while vllm_ascend_branch still decides the branch and the published tag. Default '' uses the Dockerfile of vllm_ascend_branch."
     secrets:
       SWR_USERNAME:
         required: false
@@ -114,6 +119,7 @@ jobs:
       should_push: ${{ inputs.should_push }}
       schedule_tag_pattern: 'main'
       branch_ref: ${{ inputs.vllm_ascend_branch || 'main' }}
+      dockerfile_ref: ${{ inputs.dockerfile_ref }}
       swr_registry: ${{ inputs.swr_registry }}
       swr_repo: ${{ inputs.swr_registry }}/ascend/vllm-ascend${{ inputs.image_repo_suffix }}
       skip_sync: ${{ inputs.skip_sync }}
