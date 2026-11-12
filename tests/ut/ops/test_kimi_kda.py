@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -8,6 +9,7 @@ import pytest
 import torch
 from torch import nn
 
+import vllm_ascend.ops.finegrained_tp as projection_module
 from vllm_ascend.ops.kimi_kda import (
     _PACKED_CONV_WEIGHT_NAME,
     AscendKimiK3DeltaAttention,
@@ -17,6 +19,7 @@ from vllm_ascend.ops.kimi_kda import (
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDynamicLinearMethod,
 )
+from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
     AscendW8A8MXFP8DynamicLinearMethod,
 )
@@ -663,3 +666,165 @@ def test_kda_prefill_direct_norm_and_idle_output(mode):
         torch.testing.assert_close(output[:, :tokens], before * gate[:tokens].sigmoid())
         torch.testing.assert_close(output[:, tokens:], torch.zeros_like(output[:, tokens:]))
         torch.testing.assert_close(core, before)
+
+
+@pytest.mark.parametrize(
+    "env_mode,pg_mode,expected",
+    [
+        ("AIV", 0, True),
+        ("AIV_ONLY", 0, True),
+        ("CCU_SCHED", 0, False),
+        ("AI_CPU", 0, False),
+        ("", 0, False),
+        ("CCU_SCHED", 3, True),
+        ("CCU_SCHED", 4, True),
+        ("AIV", 6, False),
+        ("AIV", 2, False),
+    ],
+)
+def test_projection_communication_mode_honors_pg_override(monkeypatch, env_mode, pg_mode, expected):
+    monkeypatch.setattr(projection_module.envs, "HCCL_OP_EXPANSION_MODE", env_mode)
+    options = SimpleNamespace(hccl_config={"hccl_op_expansion_mode": pg_mode})
+    backend = SimpleNamespace(options=options)
+    group = SimpleNamespace(device_group=SimpleNamespace(_get_backend=lambda device: backend))
+    assert projection_module.uses_aiv_communication(group) is expected
+    assert not projection_module.uses_aiv_communication(None)
+
+
+@pytest.mark.parametrize("aiv", [True, False])
+def test_kda_g_precedes_quant_and_aiv_exchanges_join_before_vector(monkeypatch, aiv):
+    trace = []
+    main = _RecordingStream("main", ["owner_ready", "input_ready"], trace)
+    aux = _RecordingStream("aux", ["beta_ready"], trace)
+    group = SimpleNamespace(world_size=2)
+    monkeypatch.setattr(projection_module, "uses_aiv_communication", lambda group: aiv)
+    monkeypatch.setattr(projection_module, "projection_capacity", lambda hidden: hidden.shape[0])
+    monkeypatch.setattr(projection_module.torch.npu, "current_stream", lambda: main)
+    monkeypatch.setattr(projection_module, "npu_stream_switch", lambda stream: nullcontext())
+    monkeypatch.setattr(torch.Tensor, "record_stream", lambda tensor, stream: None)
+    cat = torch.cat
+
+    def pack(tensors, dim=0):
+        if [x.shape[-1] for x in tensors] == [6, 1]:
+            trace.append("pack-vector")
+        return cat(tensors, dim=dim)
+
+    monkeypatch.setattr(torch, "cat", pack)
+
+    class Communication:
+        def gather(self, hidden, group):
+            return SimpleNamespace(wait=lambda: cat([hidden, hidden]))
+
+        def exchange(self, source, group, *, overlap=True):
+            name = "G" if source.shape[-1] == 2 else "QKV"
+            trace.append(f"exchange-{name}:{overlap}")
+            work = MagicMock()
+            work.wait.side_effect = lambda: trace.append(f"wait-{name}")
+            return projection_module.PendingTensor(source.clone(), work, source)
+
+    def linear(name, width):
+        def apply(hidden):
+            trace.append(name)
+            return hidden.new_zeros((hidden.shape[0], width)), None
+
+        return apply
+
+    def quantize(hidden, **kwargs):
+        assert kwargs == {"for_finegrained_tp": True}
+        trace.append("quant-vector")
+        return hidden
+
+    layer = SimpleNamespace(
+        f_a_proj=linear("F_a", 2),
+        f_b_proj=linear("F_b", 4),
+        g_proj=linear("G-cube", 2),
+        b_proj=linear("beta-cube", 1),
+        _quantize_fused_qkv=quantize,
+        _matmul_fused_qkv=lambda hidden: linear("QKV-cube", 6)(hidden)[0],
+    )
+    executor = projection_module.KDAProjectionTP(group, group, 2, 2)
+    executor.communication = Communication()
+    pending = executor.project(layer, torch.ones(2, 3), aux_stream=aux)
+    trace.append("zeros-vector")
+    qkv, forget, beta, gate = pending.wait()
+    trace.append("core-vector")
+    gate.wait()
+    assert trace.index("G-cube") < trace.index("beta-cube")
+    assert trace.index("G-cube") < trace.index("quant-vector")
+    assert trace.index("quant-vector") < trace.index("exchange-G:True") < trace.index("QKV-cube")
+    if aiv:
+        assert trace.index("wait-G") < trace.index("pack-vector")
+        assert trace.index("exchange-QKV:False") < trace.index("wait-QKV") < trace.index("zeros-vector")
+    else:
+        assert trace.index("exchange-QKV:True") < trace.index("zeros-vector") < trace.index("wait-QKV")
+        assert trace.index("core-vector") < trace.index("wait-G")
+    assert trace.count("wait-G") == trace.count("wait-QKV") == 1
+    assert qkv.shape == (2, 12) and beta.shape == (1, 2, 2) and forget.shape == (1, 2, 2, 2)
+
+
+def test_pending_kda_projection_restores_owner_heads_once():
+    receive = torch.tensor(
+        [
+            [[10, 11, 20, 21, 30, 31, 40], [110, 111, 120, 121, 130, 131, 140]],
+            [[12, 13, 22, 23, 32, 33, 41], [112, 113, 122, 123, 132, 133, 141]],
+        ]
+    )
+    work = MagicMock()
+    gate = projection_module.PendingGate(None, torch.zeros(2, 4), 1, 2, 2, 2)
+    pending = projection_module.PendingKDAProjection(
+        torch.empty(0),
+        torch.empty(0),
+        torch.zeros(2, 4),
+        gate,
+        projection_module.PendingTensor(receive, work, receive),
+        2,
+        2,
+        2,
+        2,
+    )
+    qkv, _, beta, _ = pending.wait()
+    torch.testing.assert_close(
+        qkv,
+        torch.tensor(
+            [
+                [10, 11, 12, 13, 20, 21, 22, 23, 30, 31, 32, 33],
+                [110, 111, 112, 113, 120, 121, 122, 123, 130, 131, 132, 133],
+            ]
+        ),
+    )
+    torch.testing.assert_close(beta, torch.tensor([[[40, 41], [140, 141]]]))
+    assert pending.wait()[0].data_ptr() == qkv.data_ptr()
+    work.wait.assert_called_once()
+
+
+def test_finegrained_w8a8_quantization_precedes_gate_without_hardware_capability():
+    attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
+    nn.Module.__init__(attention)
+    attention.in_proj_qkvgfab = SimpleNamespace(
+        quant_method=AscendW8A8DynamicLinearMethod(),
+        weight=torch.ones(6, 18, dtype=torch.int8),
+        weight_scale=torch.ones(18),
+    )
+    hidden = torch.ones(4, 6, dtype=torch.bfloat16)
+    trace = []
+
+    def dynamic_quant(x, **kwargs):
+        trace.append("quant-vector")
+        return torch.ones_like(x, dtype=torch.int8), torch.ones(x.shape[0])
+
+    def matmul(*args, **kwargs):
+        trace.append("QKV-cube")
+        return torch.ones(4, 18, dtype=torch.bfloat16)
+
+    with (
+        patch(
+            "vllm_ascend.ops.kimi_kda.get_current_hardware_profile",
+            return_value=SimpleNamespace(supports=lambda cap: False),
+        ),
+        patch("vllm_ascend.ops.kimi_kda.torch_npu.npu_dynamic_quant", side_effect=dynamic_quant),
+        patch("vllm_ascend.ops.kimi_kda.torch_npu.npu_quant_matmul", side_effect=matmul),
+    ):
+        prepared = attention._quantize_fused_qkv(hidden, for_finegrained_tp=True)
+        trace.append("G-A2A")
+        attention._matmul_fused_qkv(prepared)
+    assert trace == ["quant-vector", "G-A2A", "QKV-cube"]

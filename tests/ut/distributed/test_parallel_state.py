@@ -42,13 +42,17 @@ def mock_distributed():
 
 
 @pytest.mark.parametrize("otp_size", [0, 1, 2])
-def test_init_ascend_model_parallel(mock_distributed, parallel_config, otp_size):
+@pytest.mark.parametrize("shared_size", [0, 1, 2])
+def test_init_ascend_model_parallel(mock_distributed, parallel_config, otp_size, shared_size):
     mock_ascend_config = MagicMock()
     mock_ascend_config.kvpp_config.size = 1
     mock_ascend_config.finegrained_tp_config.lmhead_tensor_parallel_size = 2
     mock_ascend_config.finegrained_tp_config.oproj_tensor_parallel_size = otp_size
     mock_ascend_config.finegrained_tp_config.embedding_tensor_parallel_size = 2
     mock_ascend_config.finegrained_tp_config.mlp_tensor_parallel_size = 2
+    mock_ascend_config.finegrained_tp_config.qkv_iproj_tensor_parallel_size = 1
+    mock_ascend_config.finegrained_tp_config.gproj_tensor_parallel_size = 1
+    mock_ascend_config.finegrained_tp_config.shared_expert_tensor_parallel_size = shared_size
     mock_ascend_config.pd_tp_ratio = 2
     mock_ascend_config.num_head_replica = 0
     mock_ascend_config.pd_head_ratio = 2
@@ -64,6 +68,13 @@ def test_init_ascend_model_parallel(mock_distributed, parallel_config, otp_size)
     ):
         init_ascend_model_parallel(parallel_config)
 
+        from vllm_ascend.distributed.parallel_state import get_mlp_tp_group, get_shared_expert_tp_group
+
+        if shared_size > 1:
+            assert get_shared_expert_tp_group() is get_mlp_tp_group()
+        else:
+            with pytest.raises(AssertionError, match="shared-expert TP group is not initialized"):
+                get_shared_expert_tp_group()
         mc2_group = get_mc2_group()
         lmheadtp_group = get_lmhead_tp_group()
         if otp_size > 1:
@@ -165,6 +176,9 @@ def test_kvpp_group_stays_inside_pipeline_stage(monkeypatch, size, pcp_size):
             lmhead_tensor_parallel_size=0,
             embedding_tensor_parallel_size=0,
             mlp_tensor_parallel_size=0,
+            qkv_iproj_tensor_parallel_size=1,
+            gproj_tensor_parallel_size=1,
+            shared_expert_tensor_parallel_size=1,
         ),
     )
     calls, groups = {}, {}
@@ -218,6 +232,9 @@ def test_engram_dp_pcp_group_reuses_upstream_node_partition(monkeypatch, shared,
             lmhead_tensor_parallel_size=0,
             embedding_tensor_parallel_size=0,
             mlp_tensor_parallel_size=0,
+            qkv_iproj_tensor_parallel_size=1,
+            gproj_tensor_parallel_size=1,
+            shared_expert_tensor_parallel_size=1,
         ),
     )
     upstream = parallel_state.vllm_parallel_state

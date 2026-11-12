@@ -429,3 +429,81 @@ def test_production_speculators_carry_lmhead_sampling_mixin():
         assert issubclass(cls, LmheadTPDraftSamplingMixin)
     assert AscendDSparkSpeculator._lmhead_tp_sample_draft_supported is True
     assert AscendDFlash2Speculator._lmhead_tp_sample_draft_supported is False
+
+
+@pytest.mark.parametrize("dummy", [False, True])
+@pytest.mark.parametrize("profile,warmup", [(False, False), (True, False), (False, True)])
+def test_dp_agreed_eager_guard_covers_active_and_idle_before_forward(monkeypatch, dummy, profile, warmup):
+    from vllm_ascend.patch.worker import patch_model_runner as dispatch_patch
+
+    runner = _make_runner()
+    runner._finegrained_tp_requires_graph = True
+    runner._finegrained_tp_warmup = warmup
+    runner.cudagraph_manager = SimpleNamespace(vllm_config=None)
+    descriptor = SimpleNamespace(num_tokens=4, cg_mode=CUDAGraphMode.NONE)
+    monkeypatch.setattr(dispatch_patch, "_dispatch_cg_and_sync_dp", lambda *args, **kwargs: (descriptor, None))
+    reached_forward = []
+
+    def parent_execute(scheduler_output, **kwargs):
+        dispatch_patch.dispatch_cg_and_sync_dp(runner.cudagraph_manager, int(not dummy), int(not dummy), 1)
+        reached_forward.append(True)
+        runner.execute_model_state = None
+        return "output"
+
+    with (
+        patch("vllm_ascend.worker.v2.model_runner._start_profiling_chunk_timing", return_value=None),
+        patch("vllm_ascend.worker.v2.model_runner._finish_profiling_chunk_timing", return_value=None),
+        patch("vllm_ascend.worker.v2.model_runner.should_skip_allreduce_across_dp_group", return_value=False),
+        patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_enable", return_value=False),
+        patch.object(GPUModelRunner, "execute_model", side_effect=parent_execute),
+    ):
+        if not profile and not warmup:
+            with pytest.raises(RuntimeError, match="captured graph"):
+                runner.execute_model(
+                    MagicMock(total_num_scheduled_tokens=int(not dummy)), dummy_run=dummy, is_profile=profile
+                )
+        else:
+            runner.execute_model(
+                MagicMock(total_num_scheduled_tokens=int(not dummy)), dummy_run=dummy, is_profile=profile
+            )
+    assert bool(reached_forward) is (profile or warmup)
+    assert runner.cudagraph_manager._ascend_finegrained_tp_check is None
+
+
+@pytest.mark.parametrize("runtime_idle", [False, True])
+def test_real_dummy_wrapper_only_exempts_startup_warmup(monkeypatch, runtime_idle):
+    from vllm_ascend.patch.worker import patch_model_runner as dispatch_patch
+
+    runner = _make_runner()
+    runner._finegrained_tp_requires_graph = True
+    runner.cudagraph_manager = SimpleNamespace(vllm_config=None)
+    runner.eplb = MagicMock()
+    descriptor = SimpleNamespace(num_tokens=4, cg_mode=CUDAGraphMode.NONE)
+    monkeypatch.setattr(dispatch_patch, "_dispatch_cg_and_sync_dp", lambda *args, **kwargs: (descriptor, None))
+    reached_forward = []
+
+    def parent_execute(scheduler_output, **kwargs):
+        dispatch_patch.dispatch_cg_and_sync_dp(runner.cudagraph_manager, 0, 0, 1)
+        reached_forward.append(True)
+        return "output"
+
+    def parent_dummy(self, num_tokens, *args, **kwargs):
+        return self.execute_model(MagicMock(), dummy_run=True, is_profile=kwargs["is_profile"])
+
+    with (
+        patch("vllm_ascend.worker.v2.model_runner._start_profiling_chunk_timing", return_value=None),
+        patch("vllm_ascend.worker.v2.model_runner._finish_profiling_chunk_timing", return_value=None),
+        patch("vllm_ascend.worker.v2.model_runner.should_skip_allreduce_across_dp_group", return_value=False),
+        patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_enable", return_value=False),
+        patch.object(GPUModelRunner, "execute_model", side_effect=parent_execute),
+        patch.object(GPUModelRunner, "_dummy_run", parent_dummy),
+    ):
+        if runtime_idle:
+            # Exactly the flag used by Worker.execute_dummy_batch.
+            with pytest.raises(RuntimeError, match="captured graph"):
+                runner._dummy_run(1, uniform_decode=True, skip_gdn_state_update=True)
+        else:
+            runner._dummy_run(1, uniform_decode=True)
+    assert bool(reached_forward) is (not runtime_idle)
+    assert not getattr(runner, "_finegrained_tp_warmup", False)
+    assert runner.cudagraph_manager._ascend_finegrained_tp_check is None

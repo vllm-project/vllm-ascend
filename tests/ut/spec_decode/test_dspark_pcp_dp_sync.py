@@ -16,6 +16,61 @@ import vllm_ascend.worker.v2.spec_decode.dspark.speculator as module
 from vllm_ascend.utils import vllm_version_is
 
 
+@pytest.mark.parametrize("embedding_tp,lmhead_tp", [(False, False), (True, False), (False, True), (True, True)])
+@pytest.mark.parametrize("skip_drafts", [False, True, None])
+@pytest.mark.parametrize("is_profile,sync_present", [(False, True), (True, True), (False, False)])
+def test_dspark_vocab_tp_agrees_on_query_pass(
+    monkeypatch, embedding_tp, lmhead_tp, skip_drafts, is_profile, sync_present
+):
+    spec = object.__new__(module.AscendDSparkSpeculator)
+    spec.pcp_manager = None
+    spec.use_dcp = False
+    spec.draft_logits = None
+    spec.input_buffers = SimpleNamespace(positions=torch.zeros(4, dtype=torch.int64))
+    spec.max_num_tokens = 4
+    spec.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace())
+    batch = SimpleNamespace(num_reqs=1, is_prefilling_np=np.zeros(1, dtype=np.bool_))
+    # A missing field is the supported release lane's pre-skip_drafts state.
+    sync = SimpleNamespace(num_reqs=1)
+    if skip_drafts is not None:
+        sync.skip_drafts = skip_drafts
+    monkeypatch.setattr(module, "embedding_tp_enable", lambda: embedding_tp)
+    monkeypatch.setattr(module, "lmhead_tp_enable", lambda: lmhead_tp)
+    monkeypatch.setattr(module, "build_attn_metadata_wrapper", nullcontext)
+    monkeypatch.setattr(module, "build_attn_metadata_factory", lambda *a, **k: nullcontext())
+    monkeypatch.setattr(module.AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
+    query_passes = []
+    forwarded_k = []
+
+    def parent(self, *args, **kwargs):
+        # Upstream only skips the query branch for exactly K=0.
+        forwarded_k.append(kwargs["num_speculative_tokens"])
+        query_passes.append(kwargs["num_speculative_tokens"] != 0)
+        return torch.zeros(1, 3, dtype=torch.int64)
+
+    monkeypatch.setattr(DSparkSpeculator, "propose", parent)
+    applies = (embedding_tp or lmhead_tp) and sync_present and not is_profile
+    # Exercise active K0, active K3, and idle arguments against the shared
+    # decision, including when it overrides a caller's local default.
+    peers = [(0, False), (3, False), (None, True)]
+    for local_k, dummy in peers:
+        spec.propose(
+            batch,
+            {},
+            {},
+            torch.empty(0),
+            None,
+            *[torch.empty(0) for _ in range(6)],
+            dp_sync_state=sync if sync_present else None,
+            dummy_run=dummy,
+            is_profile=is_profile,
+            num_speculative_tokens=local_k,
+        )
+    expected_k: list[int | None] = ([0, 0, 0] if skip_drafts is True else [None, 3, None]) if applies else [0, 3, None]
+    assert forwarded_k == expected_k
+    assert query_passes == [k != 0 for k in expected_k]
+
+
 @pytest.mark.parametrize("pcp_enabled", [False, True])
 @pytest.mark.parametrize("is_profile", [False, True])
 def test_dspark_global_requests_do_not_reuse_local_pcp_dp_capacity(monkeypatch, pcp_enabled, is_profile):

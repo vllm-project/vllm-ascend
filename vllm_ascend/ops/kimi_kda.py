@@ -23,6 +23,7 @@ from vllm.models.kimi_k3.nvidia.kda import (
     KimiK3DeltaAttention,
     _make_decode_conv1d_weight_loader,
 )
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -34,6 +35,13 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
     record_attention_compute_start,
+)
+from vllm_ascend.distributed.parallel_state import get_gproj_tp_group, get_qkv_iproj_tp_group
+from vllm_ascend.ops.finegrained_tp import (
+    KDAProjectionTP,
+    ProjectionColumnParallelLinear,
+    ProjectionMergedColumnParallelLinear,
+    projection_capacity,
 )
 from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
 from vllm_ascend.ops.kda_parallel import (
@@ -61,6 +69,7 @@ _KDA_BFG_STREAM: torch.npu.Stream | None = None
 
 
 def _kda_bfg_stream() -> torch.npu.Stream:
+    """Share one persistent F/beta/BFG compute stream across KDA layers."""
     global _KDA_BFG_STREAM
     if _KDA_BFG_STREAM is None:
         _KDA_BFG_STREAM = torch_npu.npu.Stream()
@@ -229,7 +238,53 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             merged_linear = KDAMergedColumnParallelLinear
         self.uses_mixed_projection = uses_mixed_projection
         self._ascend_kda_state_copy = None
-        if uses_mixed_projection:
+        self.projection_tp = None
+        fine_tp = getattr(vllm_config, "additional_config", {}).get("finegrained_tp_config", {})
+        qkv_size = int(fine_tp.get("qkv_iproj_tensor_parallel_size", 1))
+        gate_size = int(fine_tp.get("gproj_tensor_parallel_size", 1))
+        if qkv_size > 1 or gate_size > 1:
+            if not uses_mixed_projection:
+                raise ValueError("Kimi projection TP requires the mixed QKV/BF16 gate checkpoint format.")
+            qkv_group = get_qkv_iproj_tp_group() if qkv_size > 1 else None
+            gate_group = get_gproj_tp_group() if gate_size > 1 else None
+            self.in_proj_qkvgfab = ProjectionMergedColumnParallelLinear(
+                self.hidden_size,
+                [self.projection_size] * 3,
+                group=qkv_group,
+                quant_config=quant_config,
+                prefix=f"{prefix}.in_proj_qkv",
+            )
+            self.in_proj_padding = 0
+            self.b_proj = ProjectionColumnParallelLinear(
+                self.hidden_size,
+                self.num_heads,
+                group=qkv_group,
+                quant_config=None,
+                prefix=f"{prefix}.b_proj",
+            )
+            self.f_a_proj = ProjectionColumnParallelLinear(
+                self.hidden_size,
+                self.head_dim,
+                group=None,
+                quant_config=None,
+                prefix=f"{prefix}.f_a_proj",
+            )
+            self.f_b_proj = ProjectionColumnParallelLinear(
+                self.head_dim,
+                self.projection_size,
+                group=None,
+                quant_config=None,
+                prefix=f"{prefix}.f_b_proj",
+            )
+            self.g_proj = ProjectionColumnParallelLinear(
+                self.hidden_size,
+                self.projection_size,
+                group=gate_group,
+                quant_config=None,
+                prefix=f"{prefix}.g_proj",
+            )
+            self.projection_tp = KDAProjectionTP(qkv_group, gate_group, self.num_heads, self.head_dim)
+        elif uses_mixed_projection:
             # vLLM 0.27 packs all KDA input projections into one linear.  A
             # QuaRot checkpoint instead stores q/k/v as W8A8 and keeps B/F/G
             # in floating point. Split those precision groups so DynamicQuant
@@ -358,6 +413,10 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
+        if getattr(self, "projection_tp", None) is not None:
+            output = torch.empty_like(hidden_states)
+            torch.ops.vllm.kimi_kda_finegrained_forward(hidden_states, output, self.prefix)
+            return output
         if self.pcp_size > 1:
             hidden_states = torch.ops.vllm.kda_pcp_gather(hidden_states, self.pcp_size, self.prefix)
         output = self._forward_projections(hidden_states, positions)
@@ -449,6 +508,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
     def _quantize_fused_qkv(
         self,
         hidden_states: torch.Tensor,
+        *,
+        for_finegrained_tp: bool = False,
     ) -> torch.Tensor | PreparedLinearInput | tuple[torch.Tensor, torch.Tensor]:
         quant_method = self.in_proj_qkvgfab.quant_method
         inner_quant_method = getattr(quant_method, "quant_method", quant_method)
@@ -456,7 +517,9 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             type(inner_quant_method) is AscendW8A8DynamicLinearMethod
             and hidden_states.dtype in (torch.float16, torch.bfloat16)
             and hidden_states.ndim == 2
-            and get_current_hardware_profile().supports(HardwareCapability.KDA_INT8_QUANT_OVERLAP)
+            and (
+                for_finegrained_tp or get_current_hardware_profile().supports(HardwareCapability.KDA_INT8_QUANT_OVERLAP)
+            )
         ):
             # Prepare on main before the BFG completion wait. apply() consumes
             # the INT8 tensor and per-token scales without quantizing again.
@@ -651,6 +714,20 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         beta_is_preprocessed: bool = False,
     ) -> None:
         """Dispatch speculative, prefill, and decode tokens through KDA kernels."""
+        norm_input = AscendKimiK3DeltaAttention._forward_core(
+            self,
+            mixed_qkv,
+            g1,
+            beta,
+            core_attn_out,
+            beta_is_preprocessed=beta_is_preprocessed,
+        )
+        if norm_input is not None:
+            self.o_norm.forward_oot(norm_input, g2[: norm_input.shape[1]], out=core_attn_out)
+            maybe_save_kv_layer_to_connector("", [])
+
+    def _forward_core(self, mixed_qkv, g1, beta, core_attn_out, *, beta_is_preprocessed=False):
+        """Original conv/spec/recurrent dispatch, with no dependency on output G."""
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
         if attn_metadata_raw is None:
@@ -672,7 +749,6 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         num_actual_tokens = attn_metadata.num_actual_tokens
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         g1 = g1[:, :num_actual_tokens]
-        g2 = g2[:num_actual_tokens]
         beta = _prepare_beta(
             beta,
             num_actual_tokens,
@@ -866,6 +942,39 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 norm_out.copy_(core_non_spec)
             norm_input = norm_out
 
-        # The norm writes valid rows and zeroes graph padding in one launch.
-        self.o_norm.forward_oot(norm_input, g2, out=core_attn_out)
+        return norm_input
+
+
+@eager_break_during_capture
+def kimi_kda_finegrained_forward(hidden_states: torch.Tensor, output: torch.Tensor, layer_name: str) -> None:
+    layer = get_forward_context().no_compile_layers[layer_name]
+    if projection_capacity(hidden_states) == 0:
+        output.zero_()
+        return
+    # Reuse the same worker-local stream as the original fused BFG path;
+    # do not allocate a separate F/beta compute stream for every layer.
+    pending = layer.projection_tp.project(layer, hidden_states, aux_stream=_kda_bfg_stream())
+    capacity = pending.capacity
+    # Non-AIV exchanges may overlap this independent Vector initialization.
+    # In AIV mode project() has already joined both communication operations.
+    core_out = hidden_states.new_zeros((1, capacity, layer.local_num_heads, layer.head_dim))
+    qkv, forget, beta, gate = pending.wait()
+    norm_input = layer._forward_core(qkv, forget, beta, core_out)
+    owner_gate = gate.wait()
+    if norm_input is not None:
+        layer.o_norm.forward_oot(norm_input, owner_gate[: norm_input.shape[1]], out=core_out)
         maybe_save_kv_layer_to_connector("", [])
+    projected = layer.o_proj(core_out.reshape(capacity, -1))[0]
+    output.copy_(projected[: hidden_states.shape[0]])
+
+
+def kimi_kda_finegrained_forward_fake(hidden_states: torch.Tensor, output: torch.Tensor, layer_name: str) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="kimi_kda_finegrained_forward",
+    op_func=kimi_kda_finegrained_forward,
+    mutates_args=["output"],
+    fake_impl=kimi_kda_finegrained_forward_fake,
+)

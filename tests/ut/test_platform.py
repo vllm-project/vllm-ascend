@@ -413,6 +413,7 @@ def test_setup_compile_backend_scopes_kda_splitting_to_piecewise(mode):
     assert "vllm::glm5next_kda_forward" not in compilation_config.splitting_ops
     expected_count = int(mode in (CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL_AND_PIECEWISE))
     assert compilation_config.splitting_ops.count("vllm::glm5next_kda_forward_with_output") == expected_count
+    assert compilation_config.splitting_ops.count("vllm::kimi_kda_finegrained_forward") == expected_count
     if mode in (CUDAGraphMode.FULL, CUDAGraphMode.FULL_DECODE_ONLY):
         assert compilation_config.splitting_ops == []
 
@@ -471,6 +472,7 @@ class TestNPUPlatform(TestBase):
         mock_ascend_config.scheduler_config.recompute_scheduler_enable = False
         mock_ascend_config.finegrained_tp_config.oproj_tensor_parallel_size = 0
         mock_ascend_config.finegrained_tp_config.mlp_tensor_parallel_size = 0
+        mock_ascend_config.finegrained_tp_config.shared_expert_tensor_parallel_size = 1
         mock_ascend_config.scheduler_config.enable_balance_scheduling = False
         mock_ascend_config.scheduler_config.batch_job_sched_config.enabled = False
         mock_ascend_config.mc2_comm_alg = ""
@@ -974,20 +976,26 @@ class TestNPUPlatform(TestBase):
 
                 self.assertEqual(pass_config.sp_min_token_num, 512)
 
-    def test_check_ascend_config_oproj_tp_requires_offload_connector(self):
+    def test_check_ascend_config_finegrained_tp_requires_offload_connector(self):
         from vllm_ascend.platform import _check_ascend_config
 
-        vllm_config = TestNPUPlatform.mock_vllm_config()
-        ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
-        ascend_config.finegrained_tp_config.oproj_tensor_parallel_size = 2
+        for field in (
+            "oproj_tensor_parallel_size",
+            "mlp_tensor_parallel_size",
+            "shared_expert_tensor_parallel_size",
+        ):
+            with self.subTest(field=field):
+                vllm_config = TestNPUPlatform.mock_vllm_config()
+                ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+                setattr(ascend_config.finegrained_tp_config, field, 2)
 
-        # The base mock carries no kv_transfer_config: a real split must fail closed.
-        with pytest.raises(AssertionError, match="PreemptOffloadConnector"):
-            _check_ascend_config(vllm_config, ascend_config)
+                # No connector: every real DP-axis split must fail closed.
+                with pytest.raises(AssertionError, match="PreemptOffloadConnector"):
+                    _check_ascend_config(vllm_config, ascend_config)
 
-        # Size 1 exchanges nothing across ranks and stays exempt.
-        ascend_config.finegrained_tp_config.oproj_tensor_parallel_size = 1
-        _check_ascend_config(vllm_config, ascend_config)
+                # Size 1 exchanges nothing across ranks and stays exempt.
+                setattr(ascend_config.finegrained_tp_config, field, 1)
+                _check_ascend_config(vllm_config, ascend_config)
 
     def test_apply_config_platform_defaults_skips_when_scheduler_max_num_seqs_is_missing(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()

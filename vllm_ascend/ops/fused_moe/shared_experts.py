@@ -36,6 +36,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoEMethodB
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.distributed.parallel_state import get_shared_expert_tp_group
 from vllm_ascend.lora.fused_moe import has_lora
 from vllm_ascend.ops.activation import AscendSiluAndMul
 from vllm_ascend.ops.fused_moe import moe_utils
@@ -45,6 +46,7 @@ from vllm_ascend.ops.fused_moe.dataclass.shared_experts import (
     RoutedMoEMilestones,
 )
 from vllm_ascend.ops.fused_moe.moe_utils import _pad_tokens_with_cat
+from vllm_ascend.ops.linear_op import SharedExpertColumnParallelOp, SharedExpertRowParallelOp
 from vllm_ascend.quantization.prepared_linear_input import PreparedLinearInput
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, npu_stream_switch, shared_experts_calculation_stream
@@ -64,6 +66,7 @@ class SharedExpertParallelMode(Enum):
     SHARED_EXPERT_DATA_PARALLEL_ONLY = auto()  # Full activations, replicated weights (DP only).
     SEQUENCE_PARALLEL_ONLY = auto()  # Sharded activations, TP-sharded weights (SP only).
     SEQUENCE_PARALLEL_SEDP = auto()  # Sharded activations, replicated weights (SP + DP).
+    FINE_GRAINED_TENSOR_PARALLEL = auto()  # DP-local tokens, DP-axis weight shards.
 
 
 class SharedExpertMLPPath(Enum):
@@ -142,6 +145,17 @@ class AscendSharedExperts:
         ascend_config = get_ascend_config()
         self.multistream_overlap = ascend_config.multistream_overlap_shared_expert
         self.weights_replicated = ascend_config.enable_shared_expert_dp
+        self.finegrained_tp_group = None
+        if ascend_config.finegrained_tp_config.shared_expert_tensor_parallel_size > 1:
+            if not isinstance(
+                getattr(layer.gate_up_proj, "custom_op", None), SharedExpertColumnParallelOp
+            ) or not isinstance(getattr(layer.down_proj, "custom_op", None), SharedExpertRowParallelOp):
+                raise ValueError("Shared-expert fine-grained TP requires sharded gate_up_proj and down_proj linears.")
+            if layer.gate_up_proj.gather_output or not layer.down_proj.input_is_parallel:
+                raise ValueError(
+                    "Shared-expert fine-grained TP requires local gate/up output and partitioned down input."
+                )
+            self.finegrained_tp_group = get_shared_expert_tp_group()
 
         # Shared-expert fusion into the A5 MegaMoe operator: disabled until the
         # setup below proves the configuration is supported, then armed once
@@ -183,6 +197,9 @@ class AscendSharedExperts:
         dispatches to MegaMoe. Any unsupported configuration keeps the
         standalone shared-expert execution unchanged.
         """
+        # MegaMoe's fused shared ABI does not own the DP-axis AG/RS.
+        if getattr(self, "finegrained_tp_group", None) is not None:
+            return
         if not use_cann_megamoe(get_current_vllm_config()):
             return
         # Only enable_fused_mc2=3 opts into fusing the shared expert into the
@@ -615,6 +632,8 @@ class AscendSharedExperts:
 
     def parallel_mode(self) -> SharedExpertParallelMode:
         """Resolve the effective activation/weight layout for this forward."""
+        if getattr(self, "finegrained_tp_group", None) is not None:
+            return SharedExpertParallelMode.FINE_GRAINED_TENSOR_PARALLEL
         # EP rewrites FusedMoEParallelConfig.tp_size to 1 because each routed
         # expert is local. Shared-expert linears still span the physical TP
         # group, so their layout must be derived from that group instead.
@@ -672,6 +691,10 @@ class AscendSharedExperts:
         TP-sharded shared-expert weights need the full activations, so
         all-gather the shards back to [T_padded, H] and drop the padding rows.
         """
+        finegrained_tp_group = getattr(self, "finegrained_tp_group", None)
+        if finegrained_tp_group is not None:
+            # These are different DP requests, not SP slices of num_tokens.
+            return finegrained_tp_group.all_gather(hidden_states, dim=0)
         gathered = tensor_model_parallel_all_gather(hidden_states, dim=0)
         return gathered[: _EXTRA_CTX.num_tokens]
 
@@ -684,6 +707,9 @@ class AscendSharedExperts:
         (down_proj is built with reduce_results=False), replacing the usual
         TP all-reduce.
         """
+        finegrained_tp_group = getattr(self, "finegrained_tp_group", None)
+        if finegrained_tp_group is not None:
+            return finegrained_tp_group.reduce_scatter(shared_out, dim=0)
         tp_size = self.moe_config.tp_group.world_size
         original_num_tokens = shared_out.shape[0]
         pad_size = (tp_size - original_num_tokens % tp_size) % tp_size
@@ -701,7 +727,11 @@ class AscendSharedExperts:
         collectives.  This method is intended to overlap the gather only with
         a routed input transform such as Kimi-K3's latent projection.
         """
-        if not (self.multistream_overlap and self.parallel_mode() is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY):
+        if not (
+            self.multistream_overlap
+            and self.parallel_mode()
+            in (SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY, SharedExpertParallelMode.FINE_GRAINED_TENSOR_PARALLEL)
+        ):
             return PreparedSharedExpertInput(hidden_states=hidden_states)
 
         input_ready = torch.npu.current_stream().record_event()
@@ -709,7 +739,10 @@ class AscendSharedExperts:
             torch.npu.current_stream().wait_event(input_ready)
             # Keep TP padding across the custom-op boundary; the shared MLP
             # trims it before computation.
-            hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
+            if self.parallel_mode() is SharedExpertParallelMode.FINE_GRAINED_TENSOR_PARALLEL:
+                hidden_states = self._gather_sp_input(hidden_states)
+            else:
+                hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
             all_gather_done = torch.npu.current_stream().record_event()
         return PreparedSharedExpertInput(
             hidden_states=hidden_states,
@@ -728,13 +761,21 @@ class AscendSharedExperts:
         on the default stream can deadlock HCCL when ranks make different
         progress across the two process groups.
         """
-        if not (self.multistream_overlap and self.parallel_mode() is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY):
+        if not (
+            self.multistream_overlap
+            and self.parallel_mode()
+            in (SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY, SharedExpertParallelMode.FINE_GRAINED_TENSOR_PARALLEL)
+        ):
             return PreparedSharedExpertInput(hidden_states=hidden_states)
 
         # Keep TP padding across the custom-op boundary; the shared MLP trims
         # it before computation. The caller records shared_input_ready after
         # this returns, handing the gathered tensor to the auxiliary stream.
-        hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
+        hidden_states = (
+            self._gather_sp_input(hidden_states)
+            if self.parallel_mode() is SharedExpertParallelMode.FINE_GRAINED_TENSOR_PARALLEL
+            else tensor_model_parallel_all_gather(hidden_states, dim=0)
+        )
         return PreparedSharedExpertInput(
             hidden_states=hidden_states,
             is_gathered=True,
@@ -784,7 +825,11 @@ class AscendSharedExperts:
             # Full activations + replicated weights: shard tokens locally,
             # run the MLP, then gather its complete output.
             hidden_states, local_dp_metadata = self._prepare_local_dp_input(hidden_states)
-        elif mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY and not prepared_input.is_gathered:
+        elif (
+            mode
+            in (SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY, SharedExpertParallelMode.FINE_GRAINED_TENSOR_PARALLEL)
+            and not prepared_input.is_gathered
+        ):
             # TP-sharded weights require full activations. Multistream starts
             # this gather before the routed path; the serial path does it here.
             hidden_states = self._gather_sp_input(hidden_states)
@@ -1157,7 +1202,10 @@ class AscendSharedExperts:
         local_dp_metadata = submitted_gate_up.local_dp_metadata
         with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap):
             shared_out = self._finish_shared_mlp(submitted_gate_up, milestones)
-            if self.multistream_overlap and mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY:
+            if self.multistream_overlap and mode in (
+                SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY,
+                SharedExpertParallelMode.FINE_GRAINED_TENSOR_PARALLEL,
+            ):
                 self._wait_for_milestone(
                     milestones.routed_finalize_done,
                     "routed_finalize_done",
@@ -1165,13 +1213,22 @@ class AscendSharedExperts:
                 shared_out = self._pad_and_reduce_scatter(shared_out)
 
         if self.multistream_overlap and (
-            mode is not SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY or not defer_output_wait
+            mode
+            not in (
+                SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY,
+                SharedExpertParallelMode.FINE_GRAINED_TENSOR_PARALLEL,
+            )
+            or not defer_output_wait
         ):
             self.wait_for_output()
 
         if mode is SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY:
             assert local_dp_metadata is not None
             shared_out = self._finalize_local_dp_output(shared_out, local_dp_metadata)
-        elif mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY and not self.multistream_overlap:
+        elif (
+            mode
+            in (SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY, SharedExpertParallelMode.FINE_GRAINED_TENSOR_PARALLEL)
+            and not self.multistream_overlap
+        ):
             shared_out = self._pad_and_reduce_scatter(shared_out)
         return shared_out

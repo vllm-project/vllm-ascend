@@ -47,6 +47,7 @@ from vllm_ascend.distributed.parallel_state import (
     get_embed_tp_group,
     get_lmhead_tp_group,
 )
+from vllm_ascend.ops.finegrained_tp import ChunkedLMHeadTP
 from vllm_ascend.utils import (
     embedding_tp_enable,
     enable_pcp_embedding_lmhead_weight_sharding,
@@ -445,6 +446,11 @@ class AscendParallelLMHead(ParallelLMHead):
             prefix,
             disable_tp=disable_tp,
         )
+        self._kimi_lmhead_pipeline = None
+        if self.parallel_mode is VocabParallelMode.FINE_GRAINED:
+            text_config = getattr(get_current_vllm_config().model_config, "hf_text_config", None)
+            if getattr(text_config, "model_type", None) == "kimi_linear":
+                self._kimi_lmhead_pipeline = ChunkedLMHeadTP(get_lmhead_tp_group())
         self.quant_config = quant_config
         if bias:
             self.bias = Parameter(torch.empty(self.num_embeddings_per_partition, dtype=params_dtype))
@@ -560,6 +566,9 @@ class AscendLogitsProcessor(LogitsProcessor):
         lm_head: AscendParallelLMHead,
         embedding_bias: torch.Tensor | None,
     ) -> torch.Tensor | None:
+        pipeline = getattr(lm_head, "_kimi_lmhead_pipeline", None)
+        if isinstance(pipeline, ChunkedLMHeadTP):
+            return pipeline.forward(self, hidden_states, lm_head, embedding_bias)
         # Gather hidden states from all devices in tensor parallel group
         gathered_hidden_states = get_lmhead_tp_group().all_gather(hidden_states, dim=0)
         logits = self._apply_head(lm_head, gathered_hidden_states, embedding_bias)

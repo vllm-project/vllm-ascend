@@ -1043,6 +1043,10 @@ def oproj_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.oproj_tensor_parallel_size > 1
 
 
+def shared_expert_tp_enable() -> bool:
+    return get_ascend_config().finegrained_tp_config.shared_expert_tensor_parallel_size > 1
+
+
 def mlp_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size > 1
 
@@ -1400,6 +1404,19 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     is_context_moe_model = is_drafter_moe_model(vllm_config) if is_draft_model else is_moe_model(vllm_config)
     if not is_context_moe_model:
         return True
+    # Projection collectives belong to the target's execution plan. A dense
+    # drafter does not run them and must retain its rank-local K=0 fast path.
+    if not is_draft_model and any(
+        getattr(ascend_config.finegrained_tp_config, name, 1) > 1
+        for name in (
+            "oproj_tensor_parallel_size",
+            "mlp_tensor_parallel_size",
+            "qkv_iproj_tensor_parallel_size",
+            "gproj_tensor_parallel_size",
+            "shared_expert_tensor_parallel_size",
+        )
+    ):
+        return False
 
     # Only applicable to MoE models on KV consumer ranks.
     is_kv_consumer = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer

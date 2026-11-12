@@ -49,6 +49,10 @@ def _bool_env(name: str, default: bool) -> bool:
 
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # Existing HCCL setting: KDA uses the requested expansion mode to avoid
+    # overlapping AIV communication with Vector work. A non-default per-PG
+    # hccl_op_expansion_mode overrides this process-wide value.
+    "HCCL_OP_EXPANSION_MODE": lambda: os.getenv("HCCL_OP_EXPANSION_MODE", ""),
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.

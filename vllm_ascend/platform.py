@@ -1302,7 +1302,11 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
     offload_missing = kv_transfer_config is None or not kv_transfer_config.has_connector("PreemptOffloadConnector")
     # Only a real split (size > 1) needs the offload guarantee, mirroring the runner gate.
     ftpc = ascend_config.finegrained_tp_config
-    if offload_missing and (ftpc.oproj_tensor_parallel_size > 1 or ftpc.mlp_tensor_parallel_size > 1):
+    if offload_missing and (
+        ftpc.oproj_tensor_parallel_size > 1
+        or ftpc.mlp_tensor_parallel_size > 1
+        or ftpc.shared_expert_tensor_parallel_size > 1
+    ):
         raise AssertionError(
             "oproj_tensor_parallel_size / mlp_tensor_parallel_size require PreemptOffloadConnector "
             "(via MultiConnector): a preempted request must not return to the prefill node, "
@@ -1492,6 +1496,7 @@ def _setup_compile_backend(
                 "vllm::dsa_forward",
                 "vllm::minimax_m3_fused_sparse_forward",
                 "vllm::glm5next_kda_forward_with_output",
+                "vllm::kimi_kda_finegrained_forward",
             ]
         )
         additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
