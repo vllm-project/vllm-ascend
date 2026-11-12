@@ -3,12 +3,19 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 """Model descriptions, reduced configurations and weight-transfer test matrix."""
 
+from __future__ import annotations
+
 import json
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from tests.e2e.common.rlhf.weight_transfer.checkpoint_adapters import deepseek_v4_checkpoint_name
+
+if TYPE_CHECKING:
+    import torch
+    from vllm.distributed.weight_transfer.base import WeightSource
 
 
 @dataclass(frozen=True)
@@ -18,6 +25,11 @@ class WeightUpdateModelCase:
     id: str
     model: str
     hf_overrides: dict[str, Any]
+    # Build this case's payload source instead of ``FixedRandomWeightSource``.
+    # DeepSeek-V4.1 overrides it: Transformers has no ``deepseek_v41``, so its
+    # layout comes from the published checkpoint's safetensors headers
+    # (see ``deepseek_v41_weight_source``).
+    weight_source_factory: Callable[[Any, torch.device], WeightSource] | None = None
     meta_config_attribute: str | None = None
     checkpoint_model_prefix: str | None = None
     checkpoint_name_map: Callable[[str], str] | None = None
@@ -103,6 +115,71 @@ DEEPSEEK_V4_CASE = WeightUpdateModelCase(
 DEEPSEEK_CASES = (DEEPSEEK_V4_CASE,)
 
 
+def _dsv41_engram_args() -> tuple[str, ...]:
+    """``--engram-config`` for the V4.1 lane, or nothing when engram is off.
+
+    Gated because ``EngramConfig.verify_model_config()`` rejects an engram config
+    for a model with no n-gram embeddings, so a lane served from a config with
+    ``engram_layer_ids == []`` must not pass it at all. ``cpu_offload`` stays
+    switchable to tell the host/UVA-backed table apart from a device one.
+    """
+    if os.environ.get("DSV41_ENGRAM", "1") != "1":
+        return ()
+    offload = "true" if os.environ.get("DSV41_ENGRAM_CPU_OFFLOAD", "1") == "1" else "false"
+    return ("--engram-config", f'{{"cpu_offload": {offload}}}')
+
+
+def _deepseek_v41_weight_source(case: WeightUpdateModelCase, device: torch.device) -> WeightSource:
+    """Payload source for DeepSeek-V4.1, which has no Transformers meta model."""
+    # Imported lazily: the header reader pulls in ``requests`` and the vLLM
+    # Engram layout, neither of which the rest of the matrix needs.
+    from tests.e2e.common.rlhf.weight_transfer.deepseek_v41_weight_source import (
+        DeepseekV41WeightSource,
+    )
+
+    return DeepseekV41WeightSource(case, device)
+
+
+# Engram host-offload coverage. The published V4.1 checkpoint ships two Engram
+# tables of 384M x 256 BF16 rows (`text_config.engram_num_embeddings`), i.e.
+# ~183 GiB each; reloading one must update the registered host range instead of
+# materializing the table on the device, which is the OOM this lane guards.
+#
+# `full_transfer_matrix=False` keeps the case on the unpacked NPU IPC path only:
+# `pytest_model_cases` selects a non-matrix case for `npu_ipc` with
+# `packed=False` and drops it from every other lane, so the packed buffer
+# lifecycle cannot mask a reload regression here.
+DEEPSEEK_V41_ENGRAM_CASE = WeightUpdateModelCase(
+    id="deepseek-v4.1-flash-engram-cpu-offload",
+    # V4.1 cannot be enumerated through Transformers, so the lane is served from
+    # a local copy of the released config (plus its tokenizer) rather than a repo
+    # id. All 40 layers and the released shape parameters are kept so the
+    # published headers stay authoritative; only the expert count, the engram
+    # vocabulary and the MTP stages are reduced, and that reduction lives in the
+    # model directory's own config.json rather than in ``--hf-overrides``.
+    model=os.environ.get("DSV41_MODEL_DIR", ""),
+    # The reduction is already in that config.json: vLLM flattens the released
+    # ``text_config``, so a nested override would replace the sub-config and drop
+    # every field it does not restate (``num_attention_heads`` among them).
+    hf_overrides={},
+    extra_server_args=(
+        "--tokenizer-mode",
+        "deepseek_v41",
+        # Engram stays part of the model, but its tables live in pinned host
+        # memory: vLLM only offloads when an ``EngramConfig`` is present at all,
+        # so the flag - not the default of ``cpu_offload`` - is what turns it on.
+        *_dsv41_engram_args(),
+    ),
+    weight_source_factory=_deepseek_v41_weight_source,
+    skip_reason=(
+        None if os.environ.get("DSV41_MODEL_DIR") else "set DSV41_MODEL_DIR to a DeepSeek-V4.1 checkpoint directory"
+    ),
+)
+
+
+DEEPSEEK_V41_CASES = (DEEPSEEK_V41_ENGRAM_CASE,)
+
+
 GLM51_CASE = WeightUpdateModelCase(
     id="glm-5.1-sfa-derived-kv",
     model="zai-org/GLM-5.1",
@@ -128,7 +205,7 @@ PACKED_LANE_SKIP_REASON = (
 )
 
 
-MODEL_CASES = (*QWEN_CASES, *DEEPSEEK_CASES, *GLM_CASES)
+MODEL_CASES = (*QWEN_CASES, *DEEPSEEK_CASES, *DEEPSEEK_V41_CASES, *GLM_CASES)
 
 
 def pytest_model_cases(backend: str, *, model_cases: tuple[WeightUpdateModelCase, ...] = MODEL_CASES) -> list[Any]:
