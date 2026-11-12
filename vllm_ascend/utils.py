@@ -1393,6 +1393,11 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     if not is_context_moe_model:
         return True
 
+    # Shared weights exchange DP-owner rows and require a common graph capacity.
+    # A dense drafter does not execute this target shared-expert branch.
+    if not is_draft_model and shared_expert_tp_enable():
+        return False
+
     # Only applicable to MoE models on KV consumer ranks.
     is_kv_consumer = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer
     if not is_kv_consumer:
