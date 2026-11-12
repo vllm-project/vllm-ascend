@@ -187,9 +187,9 @@ def _flatten_recurrent_state_indices(
     return state_indices[seq_ids, slot_ids].contiguous()
 
 
-# The fla_npu AscendC recurrent GDN kernel silently returns without writing
-# output when a sequence exceeds this many tokens. Wider speculative windows
-# must use the uncapped FLA Triton recurrent kernel instead.
+# Retain the existing speculative dispatch policy for legacy kernels.
+# Wider windows stay on upstream Triton until the new native implementation
+# has been validated under those workloads.
 _MAX_RECURRENT_GDN_TOKENS = 8
 
 
@@ -219,6 +219,7 @@ def _run_recurrent_gdn(
     key: torch.Tensor,
     value: torch.Tensor,
     state: torch.Tensor,
+    *,
     a: torch.Tensor,
     b: torch.Tensor,
     A_log: torch.Tensor,
@@ -272,6 +273,41 @@ def _run_recurrent_gdn(
             num_accepted_tokens=(num_accepted_tokens.to(torch.int32) if num_accepted_tokens is not None else None),
         ).unsqueeze(0)
 
+    return _call_fused_recurrent_gdn(
+        query,
+        key,
+        value,
+        state,
+        a=a,
+        b=b,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        actual_seq_lengths=actual_seq_lengths,
+        state_indices=state_indices,
+        num_accepted_tokens=num_accepted_tokens,
+    )
+
+
+def _call_fused_recurrent_gdn(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    state: torch.Tensor,
+    *,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    actual_seq_lengths: torch.Tensor | None,
+    state_indices: torch.Tensor,
+    num_accepted_tokens: torch.Tensor | None,
+) -> torch.Tensor:
+    """Adapt model tensors to the fused native ABI, preserving checkpoint rows.
+
+    The scheduler owns slot allocation and accepted counts. This adapter only
+    selects the metadata rows and converts ABI dtypes; it never reads values
+    back to the CPU or changes which checkpoint is accepted.
+    """
     assert actual_seq_lengths is not None
     num_sequences = actual_seq_lengths.shape[0] - 1
     if state_indices.ndim == 1:
@@ -842,12 +878,12 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 key_spec,
                 value_spec,
                 ssm_state,
-                a_spec,
-                b_spec,
-                self.A_log,
-                self.dt_bias,
-                attn_metadata.spec_decode_metadata.actual_seq_lengths,
-                spec_state_indices_tensor,
+                a=a_spec,
+                b=b_spec,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                actual_seq_lengths=attn_metadata.spec_decode_metadata.actual_seq_lengths,
+                state_indices=spec_state_indices_tensor,
                 num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens,
                 query_start_loc=spec_causal_conv1d_meta.query_start_loc,
                 use_upstream_recurrent=use_upstream_recurrent,
@@ -872,12 +908,12 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 key_decode,
                 value_decode,
                 ssm_state,
-                a_non_spec[:num_decode_tokens],
-                b_non_spec[:num_decode_tokens],
-                self.A_log,
-                self.dt_bias,
-                actual_seq_lengths,
-                non_spec_state_indices_tensor,
+                a=a_non_spec[:num_decode_tokens],
+                b=b_non_spec[:num_decode_tokens],
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                actual_seq_lengths=actual_seq_lengths,
+                state_indices=non_spec_state_indices_tensor,
             )
         else:
             core_attn_out_decode = None
@@ -1039,12 +1075,12 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 key_non_spec,
                 value_non_spec,
                 ssm_state,
-                a_non_spec,
-                b_non_spec,
-                self.A_log,
-                self.dt_bias,
-                actual_seq_lengths,
-                non_spec_state_indices_tensor,
+                a=a_non_spec,
+                b=b_non_spec,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                actual_seq_lengths=actual_seq_lengths,
+                state_indices=non_spec_state_indices_tensor,
             )
         else:
             core_attn_out_non_spec, last_recurrent_state = None, None
