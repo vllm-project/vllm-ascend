@@ -51,6 +51,7 @@ from vllm_ascend.models.deepseek_v41.model import (
     DeepseekV41DecoderLayer,
     DeepseekV41LayerRole,
     DeepseekV41SWAAttention,
+    prepare_moe_routing_inputs,
 )
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.utils import normalize_deepseek_v41_config
@@ -291,6 +292,7 @@ class DeepseekV41DSparkModel(torch.nn.Module):
         pre_mix = hidden_states.new_zeros(hidden_states.shape[0], self.hc_mult, dtype=torch.float32)
         pre_mix[:, 0] = 1.0
         last_layer = None
+        routing_input_ids, image_mask = prepare_moe_routing_inputs(input_ids, self.config)
         for layer in self.layers.values():
             last_layer = layer
             hidden_states, pre_mix = layer(
@@ -298,7 +300,8 @@ class DeepseekV41DSparkModel(torch.nn.Module):
                 hidden_states,
                 pre_mix,
                 llama_4_scaling=None,
-                input_ids=input_ids,
+                input_ids=routing_input_ids,
+                image_mask=image_mask,
             )
         assert last_layer is not None, "Hyper-connection collapse requires at least one decoder layer"
         hidden_states = last_layer.hc_collapse(hidden_states, pre_mix)

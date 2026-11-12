@@ -37,7 +37,7 @@ namespace MoeGatingTopKHashRegbaseNS
     {
     public:
         __aicore__ inline MoeGatingTopKHashRegbase(){};
-        __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR inputIds, GM_ADDR tid2eid, GM_ADDR biasVl, GM_ADDR y, GM_ADDR expertIdx, GM_ADDR out, GM_ADDR workspace,
+        __aicore__ inline void Init(GM_ADDR x, GM_ADDR bias, GM_ADDR inputIds, GM_ADDR tid2eid, GM_ADDR biasVl, GM_ADDR imageMask, GM_ADDR y, GM_ADDR expertIdx, GM_ADDR out, GM_ADDR workspace,
                                     const MoeGatingTopKHashRegbaseTilingData *tilingData, TPipe *tPipe);
         __aicore__ inline void Process();
 
@@ -105,6 +105,8 @@ namespace MoeGatingTopKHashRegbaseNS
         GlobalTensor<int32_t> expertIdxGm_;
         GlobalTensor<float> outGm_;
         GlobalTensor<U1> inputIdsGm_;
+        GlobalTensor<bool> imageMaskGm_;
+        bool hasPreparedRouting_ = false;
         GlobalTensor<U2> tid2eidGm_;
 
         LocalTensor<uint32_t> indexTensor;
@@ -567,7 +569,9 @@ namespace MoeGatingTopKHashRegbaseNS
     __aicore__ inline void MoeGatingTopKHashRegbase<T, U1, U2>::ComputeX(int64_t row)
     {
         visionRow_ = false;
-        if (hasBiasVl_) {
+        if (hasPreparedRouting_) {
+            visionRow_ = hasBiasVl_ && imageMaskGm_.GetValue(row);
+        } else if (hasBiasVl_) {
             int64_t tokenId = static_cast<int64_t>(inputIdsGm_.GetValue(row));
             // Match token zero before classifying draft/padding IDs as vision.
             tokenId = tokenId == -1 ? 0 : tokenId;
@@ -801,7 +805,9 @@ namespace MoeGatingTopKHashRegbaseNS
         LocalTensor<int32_t> hashExpertIdInt32 = hashExpertId.template ReinterpretCast<int32_t>();
 
         U1 key = inputIdsGm_.GetValue(row);
-        key = key == static_cast<U1>(-1) ? static_cast<U1>(0) : key;
+        if (!hasPreparedRouting_) {
+            key = key == static_cast<U1>(-1) ? static_cast<U1>(0) : key;
+        }
         SetWaitFlag<HardEvent::MTE3_MTE2>(HardEvent::MTE3_MTE2);
         DataCopyExtParams dataCopyParams{1, static_cast<uint32_t>(k_ * sizeof(U2)), 0, 0, 0};
         DataCopyPadExtParams dataCopyPadParams{false, 0, 0, static_cast<U2>(0)};
@@ -1492,7 +1498,7 @@ namespace MoeGatingTopKHashRegbaseNS
     }
 
     template <typename T, typename  U1, typename U2>
-    __aicore__ inline void MoeGatingTopKHashRegbase<T, U1, U2>::Init(GM_ADDR x, GM_ADDR bias, GM_ADDR inputIds, GM_ADDR tid2eid, GM_ADDR biasVl, GM_ADDR y, GM_ADDR expertIdx, GM_ADDR out,
+    __aicore__ inline void MoeGatingTopKHashRegbase<T, U1, U2>::Init(GM_ADDR x, GM_ADDR bias, GM_ADDR inputIds, GM_ADDR tid2eid, GM_ADDR biasVl, GM_ADDR imageMask, GM_ADDR y, GM_ADDR expertIdx, GM_ADDR out,
                                                          GM_ADDR workspace,
                                                          const MoeGatingTopKHashRegbaseTilingData *tilingData, TPipe *tPipe)
     {
@@ -1534,6 +1540,10 @@ namespace MoeGatingTopKHashRegbaseNS
         expertIdxGm_.SetGlobalBuffer((__gm__ int32_t *)expertIdx + tilingData_->perCoreRowCount * k_ * blockIdx_, k_);
         outGm_.SetGlobalBuffer((__gm__ float *)out + tilingData_->perCoreRowCount * expertCount_ * blockIdx_, expertCount_);
 
+        hasPreparedRouting_ = imageMask != nullptr;
+        if (hasPreparedRouting_) {
+            imageMaskGm_.SetGlobalBuffer((__gm__ bool *)imageMask);
+        }
         inputIdsGm_.SetGlobalBuffer((__gm__ U1 *)inputIds);
         tid2eidGm_.SetGlobalBuffer((__gm__ U2 *)tid2eid);
 

@@ -36,7 +36,7 @@
 using namespace AscendC;
 using namespace MoeGatingTopKHash;
 extern "C" __global__ __aicore__ void moe_gating_top_k_hash(GM_ADDR x, GM_ADDR bias, GM_ADDR inputIds,
-                                                            GM_ADDR tid2eid, GM_ADDR biasVl, GM_ADDR y,
+                                                            GM_ADDR tid2eid, GM_ADDR biasVl, GM_ADDR imageMask, GM_ADDR y,
                                                             GM_ADDR expertIdx, GM_ADDR out, GM_ADDR workspace,
                                                             GM_ADDR tiling)
 {
@@ -103,31 +103,31 @@ extern "C" __global__ __aicore__ void moe_gating_top_k_hash(GM_ADDR x, GM_ADDR b
           GET_TILING_DATA_WITH_STRUCT(MoeGatingTopKHashRegbaseTilingData, tiling_data_in, tiling);
           const MoeGatingTopKHashRegbaseTilingData *__restrict tilingData = &tiling_data_in;
           MoeGatingTopKHashRegbase<DTYPE_X, int32_t, int32_t> op;
-          op.Init(x, bias, inputIds, tid2eid, biasVl, y, expertIdx, out, userWS, tilingData, &tPipe);
+          op.Init(x, bias, inputIds, tid2eid, biasVl, imageMask, y, expertIdx, out, userWS, tilingData, &tPipe);
           op.Process();
       } else if (TILING_KEY_IS(TILING_KEY_REGBASE_1)) {
           GET_TILING_DATA_WITH_STRUCT(MoeGatingTopKHashRegbaseTilingData, tiling_data_in, tiling);
           const MoeGatingTopKHashRegbaseTilingData *__restrict tilingData = &tiling_data_in;
           MoeGatingTopKHashRegbase<DTYPE_X, int32_t, int64_t>  op;
-          op.Init(x, bias, inputIds, tid2eid, biasVl, y, expertIdx, out, userWS, tilingData, &tPipe);
+          op.Init(x, bias, inputIds, tid2eid, biasVl, imageMask, y, expertIdx, out, userWS, tilingData, &tPipe);
           op.Process();
       } else if (TILING_KEY_IS(TILING_KEY_REGBASE_2)) {
           GET_TILING_DATA_WITH_STRUCT(MoeGatingTopKHashRegbaseTilingData, tiling_data_in, tiling);
           const MoeGatingTopKHashRegbaseTilingData *__restrict tilingData = &tiling_data_in;
           MoeGatingTopKHashRegbase<DTYPE_X, int32_t, int32_t>  op;
-          op.Init(x, bias, inputIds, tid2eid, biasVl, y, expertIdx, out, userWS, tilingData, &tPipe);
+          op.Init(x, bias, inputIds, tid2eid, biasVl, imageMask, y, expertIdx, out, userWS, tilingData, &tPipe);
           op.Process();
       } else if (TILING_KEY_IS(TILING_KEY_REGBASE_3)) {
           GET_TILING_DATA_WITH_STRUCT(MoeGatingTopKHashRegbaseTilingData, tiling_data_in, tiling);
           const MoeGatingTopKHashRegbaseTilingData *__restrict tilingData = &tiling_data_in;
           MoeGatingTopKHashRegbase<DTYPE_X, int64_t, int64_t>  op;
-          op.Init(x, bias, inputIds, tid2eid, biasVl, y, expertIdx, out, userWS, tilingData, &tPipe);
+          op.Init(x, bias, inputIds, tid2eid, biasVl, imageMask, y, expertIdx, out, userWS, tilingData, &tPipe);
           op.Process();
       } else if (TILING_KEY_IS(TILING_KEY_REGBASE_4)) {
           GET_TILING_DATA_WITH_STRUCT(MoeGatingTopKHashRegbaseTilingData, tiling_data_in, tiling);
           const MoeGatingTopKHashRegbaseTilingData *__restrict tilingData = &tiling_data_in;
           MoeGatingTopKHashRegbase<DTYPE_X, int64_t, int32_t>  op;
-          op.Init(x, bias, inputIds, tid2eid, biasVl, y, expertIdx, out, userWS, tilingData, &tPipe);
+          op.Init(x, bias, inputIds, tid2eid, biasVl, imageMask, y, expertIdx, out, userWS, tilingData, &tPipe);
           op.Process();
       }
     #endif
