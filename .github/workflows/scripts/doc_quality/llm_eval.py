@@ -51,6 +51,10 @@ SCRIPT_LINKED = {
     "链接错误或失效": ("link", "link_quickcheck_problems.json"),
 }
 
+# skill 仓公共资源（相对 standard_dir，结构变动时只改这里）
+REGISTRY_PATH = "common/h2_registry.json"
+SCORING_RULES_PATH = "common/_文档评分规则.md"
+
 SEV_RE = re.compile(r"^\s*(致命|严重|一般|提示)\s*([FSNH])?\s*[-－]\s*(\d+(?:\.\d+)?)")
 THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
@@ -246,14 +250,14 @@ def normalize_problem(p, dim, h2):
 
 
 def load_registry(standard_dir):
-    path = os.path.join(standard_dir, "common", "h2_registry.json")
+    path = os.path.join(standard_dir, REGISTRY_PATH)
     with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
 def load_scoring_rules(standard_dir):
     """评分规则第一~三节（定级用），第四节起为脚本用，截去。"""
-    path = os.path.join(standard_dir, "common", "_文档评分规则.md")
+    path = os.path.join(standard_dir, SCORING_RULES_PATH)
     with open(path, encoding="utf-8") as f:
         text = f.read()
     idx = text.find("## 四、")

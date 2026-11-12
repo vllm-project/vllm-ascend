@@ -46,13 +46,30 @@ SCRIPT_JSONS = {
     "link": "link_quickcheck_problems.json",
 }
 
+# --- skill 仓路径常量（上游结构变动时只改这里）---
+SKILL_STANDARD_DIR = "skills/01.评估标准"
+SKILL_TOOLS_DIR = "doc-evaluator/scripts"
+
+# 三个前置脚本（相对 SKILL_STANDARD_DIR）及安全规则目录
+PUNCT_CHECKER = "00.正确性/标点符号/scripts/punctuation-checker.py"
+SECURITY_CHECKER = "00.正确性/安全合规/scripts/prescan.py"
+SECURITY_RULES_DIR = "00.正确性/安全合规"
+LINK_CHECKER_DIR = "00.正确性/链接与导航/scripts"
+
+# 打分与报告工具（相对 SKILL_TOOLS_DIR）
+MERGE_SCRIPT = "merge_and_score.py"
+GEN_REPORT_SCRIPT = "gen_report.py"
+
+# 公共资源（相对 SKILL_STANDARD_DIR，启动校验用）
+REGISTRY_REL = "common/h2_registry.json"
+
 
 def standard_dir(skill_root):
-    return os.path.join(skill_root, "skills", "01.评估标准")
+    return os.path.join(skill_root, SKILL_STANDARD_DIR)
 
 
 def doc_evaluator_scripts(skill_root):
-    return os.path.join(skill_root, "doc-evaluator", "scripts")
+    return os.path.join(skill_root, SKILL_TOOLS_DIR)
 
 
 def safe_name(rel):
@@ -85,10 +102,10 @@ def read_changed(changed_file, repo_root, path_prefix):
 def launch_scripts(doc_path, temp_dir, std_dir, skip_link):
     """并行启动三个确定性前置脚本，返回 {name: (Popen, out_json)}。"""
     procs = {}
-    punct_py = os.path.join(std_dir, "00.正确性", "标点符号", "scripts", "punctuation-checker.py")
-    prescan_py = os.path.join(std_dir, "00.正确性", "安全合规", "scripts", "prescan.py")
-    security_dir = os.path.join(std_dir, "00.正确性", "安全合规")
-    link_dir = os.path.join(std_dir, "00.正确性", "链接与导航", "scripts")
+    punct_py = os.path.join(std_dir, PUNCT_CHECKER)
+    prescan_py = os.path.join(std_dir, SECURITY_CHECKER)
+    security_dir = os.path.join(std_dir, SECURITY_RULES_DIR)
+    link_dir = os.path.join(std_dir, LINK_CHECKER_DIR)
 
     try:
         procs["punctuation"] = (
@@ -221,8 +238,8 @@ def eval_one(rel, cfg):
     skill_root = cfg["skill_root"]
     repo_root = cfg["repo_root"]
     std_dir = standard_dir(skill_root)
-    merge_py = os.path.join(doc_evaluator_scripts(skill_root), "merge_and_score.py")
-    gen_report_py = os.path.join(doc_evaluator_scripts(skill_root), "gen_report.py")
+    merge_py = os.path.join(doc_evaluator_scripts(skill_root), MERGE_SCRIPT)
+    gen_report_py = os.path.join(doc_evaluator_scripts(skill_root), GEN_REPORT_SCRIPT)
 
     doc_path = os.path.join(repo_root, rel)
     stem = safe_name(os.path.splitext(os.path.basename(rel))[0])
@@ -343,6 +360,17 @@ def main():
     if not (cfg["base_url"] and cfg["api_key"] and cfg["model"]):
         print("[run_eval] 缺少 DOC_EVAL_BASE_URL / DOC_EVAL_API_KEY / DOC_EVAL_MODEL", file=sys.stderr)
         return 2
+
+    # 校验 skill 仓关键路径，结构变动时第一时间定位缺失项
+    required = [
+        os.path.join(args.skill_root, SKILL_STANDARD_DIR, REGISTRY_REL),
+        os.path.join(args.skill_root, SKILL_TOOLS_DIR, MERGE_SCRIPT),
+    ]
+    missing = [p for p in required if not os.path.exists(p)]
+    if missing:
+        print(f"[run_eval] skill 仓结构变动，缺失关键路径: {missing}", file=sys.stderr)
+        return 1
+
     os.makedirs(cfg["out_dir"], exist_ok=True)
 
     keep, deleted = read_changed(args.changed_file, cfg["repo_root"], args.path_prefix)
