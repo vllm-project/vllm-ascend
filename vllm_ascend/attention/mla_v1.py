@@ -1052,11 +1052,17 @@ class AscendMLAImpl(MLAAttentionImpl):
 
     def _can_use_quant_flashmla(self) -> bool:
         config = self.vllm_config
-        if config.model_config.hf_config.model_type not in ("kimi_k3", "kimi_linear"):
+        speculative_config = config.speculative_config
+        is_dspark_draft = (
+            (self.is_draft_model or backends.model_tag == "dspark_head")
+            and speculative_config is not None
+            and speculative_config.method == "dspark"
+        )
+        if config.model_config.hf_config.model_type not in ("kimi_k3", "kimi_linear") and not is_dspark_draft:
             return False
         if not getattr(config, "use_v2_model_runner", False):
             return False
-        if config.speculative_config is not None and config.speculative_config.method != "dspark":
+        if speculative_config is not None and speculative_config.method != "dspark":
             return False
         hardware = get_current_hardware_profile()
         if not hardware.supports(HardwareCapability.MLA_FLASH) or not self.support_fp8_attention:
@@ -1083,7 +1089,9 @@ class AscendMLAImpl(MLAAttentionImpl):
 
     def _can_use_flashmla(self) -> bool:
         config = self.vllm_config
-        # Remove this restriction once the K3.1 draft model supports FlashMLA.
+        # K3.1 DSpark draft supports only the calibrated C8 path above. Keep
+        # the floating cache path blocked until its operator contract is
+        # validated independently.
         if config.model_config.hf_config.model_type == "kimi_k31":
             return False
         if not getattr(config, "use_v2_model_runner", False):

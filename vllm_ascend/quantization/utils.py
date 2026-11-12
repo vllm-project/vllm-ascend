@@ -257,9 +257,24 @@ def maybe_auto_detect_quantization(vllm_config) -> None:
 
 def enable_fa_quant(vllm_config, layer_name=None) -> bool:
     model_config = getattr(vllm_config, "model_config", None)
+    quant_config = getattr(vllm_config, "quant_config", None)
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    is_dspark_draft = False
+    if speculative_config is not None and speculative_config.method == "dspark":
+        # V2 keeps the target VllmConfig while constructing a DSpark model.
+        # Resolve the live loader tag before applying target-only SFA gates,
+        # and use the draft checkpoint's own FA scales/quant recipe.
+        from vllm.compilation import backends
+
+        is_dspark_draft = backends.model_tag == "dspark_head"
+        if is_dspark_draft:
+            from vllm.model_executor.models.utils import get_draft_quant_config
+
+            model_config = speculative_config.draft_model_config
+            quant_config = get_draft_quant_config(vllm_config)
     if model_config is None or not model_config.use_mla:
         return False
-    if enable_sfa(vllm_config):
+    if not is_dspark_draft and enable_sfa(vllm_config):
         return False
     cache_config = getattr(vllm_config, "cache_config", None)
     if cache_config is None or cache_config.cache_dtype not in ["fp8", "int8"]:
@@ -267,10 +282,10 @@ def enable_fa_quant(vllm_config, layer_name=None) -> bool:
     is_kv_consumer = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer
     if not is_kv_consumer and not get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
         return False
-    if vllm_config.quant_config is not None and getattr(vllm_config.quant_config, "enable_fa_quant", False):
+    if quant_config is not None and getattr(quant_config, "enable_fa_quant", False):
         if layer_name is not None:
             # Determine whether quantization is enabled at each layer.
-            return vllm_config.quant_config.enabling_fa_quant(vllm_config, layer_name)
+            return quant_config.enabling_fa_quant(vllm_config, layer_name)
         else:
             return True
     raise ValueError(

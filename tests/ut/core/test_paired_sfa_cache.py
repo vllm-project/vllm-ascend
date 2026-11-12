@@ -148,6 +148,41 @@ def test_dspark_preserves_target_recurrent_budget_and_order():
     assert paired_sfa_pool_bytes(projected) == draft_bytes
 
 
+def test_dspark_c8_draft_uses_dense_fp8_regions_without_changing_target_groups():
+    config = make_config()
+    config.model_config.max_model_len = 8192
+    config.parallel_config = SimpleNamespace(decode_context_parallel_size=1)
+    target_groups = paired_sfa_cache_groups(config, make_specs())
+    draft = {
+        f"model.layers.{layer}.attn": AscendMLAAttentionSpec(
+            block_size=1536,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.float8_e4m3fn,
+            is_draft=True,
+            non_causal_multi_token_decode=True,
+        )
+        for layer in range(93, 98)
+    }
+    groups = paired_sfa_cache_groups(config, {**make_specs(), **draft})
+
+    assert [len(group.layer_names) for group in groups] == [53, 23, 23, 23]
+    assert groups[1:] == target_groups[1:]
+    assert all(not spec.uses_packed_sfa_main_cache for spec in draft.values())
+    draft_page_bytes = 1536 * 576
+    assert {spec.page_size_bytes for spec in draft.values()} == {draft_page_bytes}
+    assert paired_sfa_pool_bytes(groups) == 29048832 + 5 * draft_page_bytes == 33472512
+
+    plan = paired_sfa_cache_config(config, groups, 2 * paired_sfa_pool_bytes(groups))
+    assert plan.num_blocks == 2
+    assert len(plan.kv_cache_tensors) == 10
+    draft_tensors = plan.kv_cache_tensors[-5:]
+    assert [tensor.layers for tensor in draft_tensors] == [[name] for name in draft]
+    assert all(tensor.block_stride == draft_page_bytes for tensor in draft_tensors)
+    assert [tensor.offset for tensor in draft_tensors] == sorted(tensor.offset for tensor in draft_tensors)
+    assert draft_tensors[-1].offset + draft_tensors[-1].layer_stride == plan.kv_cache_tensors[0].size
+
+
 def test_target_only_without_recurrent_layers_keeps_one_full_history_group():
     specs = {name: spec for name, spec in make_specs().items() if not isinstance(spec, MambaSpec)}
     groups = paired_sfa_cache_groups(make_config(), specs)

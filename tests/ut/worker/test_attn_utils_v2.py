@@ -1258,6 +1258,64 @@ def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(
     assert spec.non_causal_multi_token_decode is non_causal
 
 
+def test_k31_dspark_c8_mla_cache_spec_uses_dense_fp8_geometry(monkeypatch):
+    source_spec = MLAAttentionSpec(
+        block_size=1536,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=torch.bfloat16,
+        non_causal_multi_token_decode=True,
+    )
+    layer = MLAAttention.__new__(MLAAttention)
+    layer.impl = SimpleNamespace(
+        fa_quant_layer=True,
+        enable_sparse_sfa_c8=False,
+        enable_sparse_sfa_turboquant=False,
+        dtype=torch.float8_e4m3fn,
+    )
+    layer.num_heads = 96
+    layer.head_size = 512
+    layer.qk_rope_head_dim = 64
+    layer.model_version = None
+    layer.indexes_kv_by_block_stride = False
+    layer.is_draft_layer = True
+    layer.kv_sharing_target_layer_name = None
+    layer.get_kv_cache_spec = lambda _config: source_spec
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
+            hf_text_config=SimpleNamespace(model_type="kimi_linear"),
+        ),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1,
+            prefill_context_parallel_size=1,
+        ),
+        attention_config=SimpleNamespace(indexer_kv_dtype="auto"),
+        cache_config=SimpleNamespace(block_size=1536, cache_dtype="fp8"),
+    )
+    monkeypatch.setattr(
+        attn_utils,
+        "get_layers_from_vllm_config",
+        lambda *_args, **_kwargs: {"model.layers.93.self_attn.attn": layer},
+    )
+    # The surrounding VllmConfig still belongs to the K3.1 SFA target. The
+    # layer-local FA quant flag must take precedence for this DSpark draft.
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda _config: True)
+    monkeypatch.setattr(attn_utils, "enable_sfa_dcp_replicated_indexer", lambda _config: False)
+
+    spec = attn_utils.get_kv_cache_spec(vllm_config)["model.layers.93.self_attn.attn"]
+
+    assert isinstance(spec, AscendMLAAttentionSpec)
+    assert spec.is_draft
+    assert spec.num_heads == 1
+    assert spec.head_size == 576
+    assert spec.dtype == torch.float8_e4m3fn
+    assert not spec.cache_sparse_sfa_c8
+    assert not spec.store_on_host
+    assert spec.page_size_bytes == 1536 * 576
+    assert spec.non_causal_multi_token_decode
+
+
 @pytest.mark.parametrize(
     ("replicated_indexer", "expected_size"),
     [(False, 1), (True, 4)],
