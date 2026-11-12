@@ -870,6 +870,7 @@ class AscendConfig:
             or self.finegrained_tp_config.mlp_tensor_parallel_size > 1
             or self.finegrained_tp_config.qkv_iproj_tensor_parallel_size > 1
             or self.finegrained_tp_config.gproj_tensor_parallel_size > 1
+            or self.finegrained_tp_config.shared_expert_tensor_parallel_size > 1
         )
         if finegrained_tp_enabled and not self.scheduler_config.recompute_scheduler_enable:
             raise AssertionError(
@@ -1414,6 +1415,7 @@ class FinegrainedTPConfig:
     lmhead_tensor_parallel_size: int = 1
     embedding_tensor_parallel_size: int = 1
     mlp_tensor_parallel_size: int = 1
+    shared_expert_tensor_parallel_size: int = 1
     # DP-axis projection TP, adapted from upstream PR20574. 0/1 both disable.
     qkv_iproj_tensor_parallel_size: int = 1
     gproj_tensor_parallel_size: int = 1
@@ -1425,6 +1427,7 @@ class FinegrainedTPConfig:
             "lmhead_tensor_parallel_size",
             "embedding_tensor_parallel_size",
             "mlp_tensor_parallel_size",
+            "shared_expert_tensor_parallel_size",
             "qkv_iproj_tensor_parallel_size",
             "gproj_tensor_parallel_size",
         )
@@ -1440,6 +1443,40 @@ class FinegrainedTPConfig:
 
         vc = vllm_config
         enabled_configs = []
+        if self.shared_expert_tensor_parallel_size > 1:
+            parallel = vc.parallel_config
+            if (
+                parallel.tensor_parallel_size != 1
+                or parallel.prefill_context_parallel_size != 1
+                or parallel.decode_context_parallel_size != 1
+                or parallel.pipeline_parallel_size != 1
+            ):
+                raise ValueError("Shared-expert fine-grained TP requires TP=PCP=DCP=PP=1.")
+            if not vc.use_v2_model_runner:
+                raise ValueError("Shared-expert fine-grained TP requires the V2 model runner.")
+            if vc.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
+                raise ValueError("Shared-expert fine-grained TP requires graph mode.")
+            if vc.kv_transfer_config is None or not vc.kv_transfer_config.is_kv_consumer:
+                raise ValueError("Shared-expert fine-grained TP requires a PD decode node.")
+            if (vc.additional_config or {}).get("enable_shared_expert_dp", False):
+                raise ValueError(
+                    "Shared-expert fine-grained TP cannot replicate shared weights with enable_shared_expert_dp."
+                )
+            if vc.lora_config is not None:
+                raise ValueError("Shared-expert fine-grained TP does not support LoRA.")
+            decode_query_len = 1 + (vc.speculative_config.num_speculative_tokens or 0) if vc.speculative_config else 1
+            max_step = min(
+                vc.scheduler_config.max_num_batched_tokens, vc.scheduler_config.max_num_seqs * decode_query_len
+            )
+            capture_bound = vc.compilation_config.max_cudagraph_capture_size
+            if capture_bound is None:
+                sizes = vc.compilation_config.cudagraph_capture_sizes
+                capture_bound = max(sizes) if sizes else None
+            if capture_bound is None or capture_bound < max_step:
+                raise ValueError(
+                    "Shared-expert fine-grained TP requires graph capture capacity covering every decode step."
+                )
+            enabled_configs.append(f"shared_expert_tensor_parallel_size={self.shared_expert_tensor_parallel_size}")
         projection_tp = self.qkv_iproj_tensor_parallel_size > 1 or self.gproj_tensor_parallel_size > 1
         text_config = getattr(vc.model_config, "hf_text_config", None)
         is_kimi = getattr(text_config, "model_type", None) == "kimi_linear"
@@ -1540,6 +1577,7 @@ class FinegrainedTPConfig:
             self.lmhead_tensor_parallel_size,
             self.embedding_tensor_parallel_size,
             self.mlp_tensor_parallel_size,
+            self.shared_expert_tensor_parallel_size,
             self.qkv_iproj_tensor_parallel_size,
             self.gproj_tensor_parallel_size,
         ]

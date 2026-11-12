@@ -193,6 +193,7 @@ class NPUModelRunner(GPUModelRunner):
             or ftpc.mlp_tensor_parallel_size > 1
             or ftpc.qkv_iproj_tensor_parallel_size > 1
             or ftpc.gproj_tensor_parallel_size > 1
+            or ftpc.shared_expert_tensor_parallel_size > 1
         ) and self.dp_size > 1
 
         self.use_aclgraph = (
