@@ -29,6 +29,114 @@ def test_dsa_v41_custom_op_forwards_its_output_buffer(monkeypatch):
     impl.forward.assert_called_once_with(attn, None, hidden, output)
 
 
+@pytest.mark.parametrize(
+    "configured,capturing,threshold,query_tokens,cache_tokens,expected",
+    [
+        (False, False, 1024, 4, 4, False),
+        (False, True, 1024, 4, 4, False),
+        (True, False, 0, 4, 4, True),
+        (True, True, 0, 4, 4, False),
+        (True, True, 4, 4, 4, True),
+        (True, True, 3, 4, 4, False),
+        (True, True, 4, 2, 5, False),
+    ],
+)
+def test_qkv_multistream_policy_uses_largest_input(
+    monkeypatch,
+    configured,
+    capturing,
+    threshold,
+    query_tokens,
+    cache_tokens,
+    expected,
+):
+    monkeypatch.setattr(dsa_v41.envs, "VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD", threshold)
+    monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: capturing)
+    impl = dsa_v41.AscendDSAV41Impl.__new__(dsa_v41.AscendDSAV41Impl)
+    impl.multistream_dsv4_dsa_overlap = configured
+
+    assert impl._use_qkv_multistream(query_tokens, cache_tokens) is expected
+
+
+@pytest.mark.parametrize(
+    "configured,capturing,threshold,expected_qkv_multistream",
+    [
+        (False, False, 4, False),
+        (True, True, 3, False),
+        (True, True, 4, True),
+        (True, False, 3, True),
+    ],
+)
+def test_indexer_streams_are_independent_of_qkv_policy(
+    monkeypatch, configured, capturing, threshold, expected_qkv_multistream
+):
+    trace = []
+    active_stream = "main"
+
+    class Stream:
+        def __init__(self, name):
+            self.name = name
+
+        def record_event(self):
+            event = f"event{len(trace)}"
+            trace.append((self.name, "record", event))
+            return event
+
+        def wait_event(self, event):
+            trace.append((self.name, "wait", event))
+
+    main_stream = Stream("main")
+    aux_stream = Stream("aux")
+
+    @contextmanager
+    def switch(stream):
+        nonlocal active_stream
+        previous, active_stream = active_stream, stream.name
+        try:
+            yield
+        finally:
+            active_stream = previous
+
+    def record(name, value):
+        trace.append((active_stream, name, None))
+        return value.clone()
+
+    indexer = SimpleNamespace(
+        project_query=lambda value: record("query", value),
+        project_weights=lambda value: record("weights", value),
+        apply_query_rope=lambda *args: trace.append((active_stream, "rope", None)),
+        quantize_query=lambda value: (record("quantize", value), torch.ones(value.shape[0])),
+    )
+    attn = SimpleNamespace(indexer=indexer)
+    metadata = SimpleNamespace(indexer=SimpleNamespace(cache=SimpleNamespace(max_cache_seq_len=1)))
+    hidden_states = torch.zeros(4, 8)
+
+    monkeypatch.setattr(torch.npu, "current_stream", lambda: main_stream)
+    monkeypatch.setattr(torch.npu, "stream", switch)
+    monkeypatch.setattr(dsa_v41, "dsv4_dsa_overlap_stream", lambda: aux_stream)
+    monkeypatch.setattr(dsa_v41.envs, "VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD", threshold)
+    monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: capturing)
+
+    impl = dsa_v41.AscendDSAV41Impl.__new__(dsa_v41.AscendDSAV41Impl)
+    impl.multistream_dsv4_dsa_overlap = configured
+    impl.role = SimpleNamespace(has_long_context=True, is_index_source=True)
+    assert impl._use_qkv_multistream(hidden_states.shape[0], hidden_states.shape[0]) is expected_qkv_multistream
+
+    prepared = impl._prepare_indexer_inputs(
+        attn,
+        hidden_states,
+        hidden_states,
+        None,
+        None,
+        metadata,
+    )
+    impl._quantize_indexer_query(attn, prepared, metadata)
+
+    assert next(stream for stream, operation, _ in trace if operation == "weights") == "aux"
+    assert next(stream for stream, operation, _ in trace if operation == "quantize") == "aux"
+    assert prepared.quantize_done is not None
+
+
 @pytest.mark.parametrize("overlap", [False, True])
 @pytest.mark.parametrize(
     "layout,num_tokens,quantized_kv,a5_batch,communication",
