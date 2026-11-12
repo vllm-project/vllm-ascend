@@ -20,35 +20,6 @@ from vllm.distributed.weight_transfer.base import ParamMeta, WeightSource
 from tests.e2e.common.rlhf.weight_transfer.case import WeightUpdateModelCase
 
 
-def expand_fused_mlp_params(name: str, shape: tuple[int, ...]) -> list[tuple[str, tuple[int, ...]]]:
-    """Expand native fused MLP tensors into checkpoint-facing projections.
-
-    Routed experts use per-expert gate/up/down tensors; dense and shared
-    experts split their fused gate-up projection into gate/up weights.
-    """
-    for suffix, kind in ((".mlp.experts.gate_up_proj", "gate_up"), (".mlp.experts.down_proj", "down")):
-        if not name.endswith(suffix):
-            continue
-        prefix = name[: -len(suffix.rsplit(".", 1)[-1])]  # keeps the trailing dot
-        if kind == "gate_up":
-            num_experts, fused_inter, hidden = shape
-            inter = fused_inter // 2
-            out: list[tuple[str, tuple[int, ...]]] = []
-            for expert in range(num_experts):
-                out.append((f"{prefix}{expert}.gate_proj.weight", (inter, hidden)))
-                out.append((f"{prefix}{expert}.up_proj.weight", (inter, hidden)))
-            return out
-        num_experts, hidden, inter = shape
-        return [(f"{prefix}{expert}.down_proj.weight", (hidden, inter)) for expert in range(num_experts)]
-    if name.endswith(".gate_up_proj.weight"):
-        fused_intermediate, hidden = shape
-        assert fused_intermediate % 2 == 0, f"{name}: odd fused gate/up dimension"
-        shard_shape = (fused_intermediate // 2, hidden)
-        prefix = name.removesuffix(".gate_up_proj.weight")
-        return [(f"{prefix}.{projection}.weight", shard_shape) for projection in ("gate_proj", "up_proj")]
-    return [(name, shape)]
-
-
 def resize_expert_shape(name: str, shape: tuple[int, ...], intermediate_size: int | None) -> tuple[int, ...]:
     """Force expert MLP tensors to the checkpoint's intermediate dimension.
 
@@ -110,7 +81,7 @@ class FixedRandomWeightSource(WeightSource):
         # to the raw meta-model name (once), then the checkpoint rename map runs
         # on the *expanded* names, because the meta model exposes routed experts
         # fused and the per-expert names (gate/up/down -> w1/w3/w2) only exist
-        # after ``expand_fused_mlp_params`` has split them.
+        # after the case's checkpoint parameter expander has split them.
         parameters = [
             (
                 self._apply_name_map(expanded_name, case),
@@ -118,7 +89,7 @@ class FixedRandomWeightSource(WeightSource):
                 torch.bfloat16,
             )
             for name, parameter in meta_model.named_parameters()
-            for expanded_name, expanded_shape in expand_fused_mlp_params(
+            for expanded_name, expanded_shape in case.checkpoint_param_expander(
                 self._checkpoint_name(name, case), tuple(parameter.shape)
             )
         ]
