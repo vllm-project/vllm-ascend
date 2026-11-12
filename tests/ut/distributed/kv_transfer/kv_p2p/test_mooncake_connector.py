@@ -3430,6 +3430,42 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         for p in self.patches:
             p.stop()  # type: ignore
 
+    def _set_parallel_config(self, extra: dict[str, Any]) -> None:
+        self.vllm_config.kv_transfer_config.get_from_extra_config.side_effect = lambda k, d: extra.get(k, d)
+
+    def test_prefill_tp_lt_decode_tp_broadcasts_prefill_ranks(self):
+        self.vllm_config.model_config.is_deepseek_mla = True
+        worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+        worker._prefill_tp_size = 1
+        worker._decode_tp_size = 2
+        worker._prefill_pp_size = 1
+
+        # One full-copy prefill rank feeds every decode rank.
+        self.assertEqual(worker._get_remote_ranks_for_req("req"), [[0], [0]])
+        self.assertEqual(worker._get_tp_num_need_pulls(1), 1)
+
+    def test_prefill_tp_lt_decode_tp_requires_explicit_opt_in(self):
+        self._set_parallel_config(
+            {
+                "prefill": {"tp_size": 1, "dp_size": 4, "pp_size": 1},
+                "decode": {"tp_size": 2, "dp_size": 16, "pp_size": 1},
+            }
+        )
+        with self.assertRaises(ValueError):
+            MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+
+    def test_prefill_tp_lt_decode_tp_requires_dsa_offload(self):
+        self._set_parallel_config(
+            {
+                "prefill": {"tp_size": 1, "dp_size": 4, "pp_size": 1},
+                "decode": {"tp_size": 2, "dp_size": 16, "pp_size": 1},
+                "allow_prefill_tp_lt_decode_tp": True,
+            }
+        )
+        self.vllm_config.model_config.is_deepseek_mla = True
+        with self.assertRaises(NotImplementedError):
+            MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+
     def test_dp_replica_handshake_ports_are_distinct_and_match_scheduler(self):
         module = MooncakeConnectorWorker.__module__
         with patch(f"{module}.init_ascend_config"):

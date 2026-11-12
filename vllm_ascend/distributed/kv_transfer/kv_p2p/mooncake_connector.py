@@ -2882,10 +2882,7 @@ class MooncakeConnectorWorker:
         self._get_prefill_decode_size(vllm_config)
         os.environ["ASCEND_TRANSFER_TIMEOUT"] = str(get_transfer_timeout_value())
         if self._prefill_tp_size < self._decode_tp_size:
-            raise ValueError(
-                f"prefill_tp_size: {self._prefill_tp_size} must be greater than"
-                f" or equal to the decode_tp_size: {self._decode_tp_size}"
-            )
+            self._enable_prefill_tp_fanout(vllm_config)
 
         # Metadata.
         self.vllm_config = vllm_config
@@ -2980,7 +2977,7 @@ class MooncakeConnectorWorker:
         else:
             num_d_block_heads = max(1, self.num_key_value_heads // self.tp_size)
             num_p_block_heads = max(1, self.num_key_value_heads // self._prefill_tp_size)
-            self.tp_num_need_pulls = num_d_block_heads // num_p_block_heads
+            self.tp_num_need_pulls = max(1, num_d_block_heads // num_p_block_heads)
         self.local_remote_block_port_mapping: dict[str, list[list[int]] | None] = {}
         self.remote_port_send_num: dict[str, dict[int, RemotePortInfo]] = {}
         self._dsa_pd_offload = vllm_config.kv_transfer_config.get_from_extra_config("dsa_pd_offload", False)
@@ -3003,6 +3000,37 @@ class MooncakeConnectorWorker:
                 self.pcp_size,
                 self.dcp_size,
             )
+
+    def _enable_prefill_tp_fanout(self, vllm_config: VllmConfig) -> None:
+        """Accept prefill_tp_size < decode_tp_size by broadcasting prefill ranks.
+
+        The default P/D layout strips the prefill TP dimension, which needs at least as
+        many prefill ranks as decode ranks. MLA/DSA models are the exception: there is a
+        single KV head, so every prefill rank already holds the complete KV cache of its
+        context-parallel shard and can be read by several decode ranks at the same time.
+        """
+        if not vllm_config.kv_transfer_config.get_from_extra_config("allow_prefill_tp_lt_decode_tp", False):
+            raise ValueError(
+                f"prefill_tp_size: {self._prefill_tp_size} must be greater than"
+                f" or equal to the decode_tp_size: {self._decode_tp_size}, unless"
+                " kv_transfer_config.extra_config.allow_prefill_tp_lt_decode_tp is enabled"
+            )
+        if not (vllm_config.model_config.is_deepseek_mla or model_uses_sfa_sparse(vllm_config.model_config)):
+            raise ValueError(
+                "prefill_tp_size < decode_tp_size (prefill rank broadcast) is only supported for MLA/DSA"
+                " models, where every prefill rank holds all KV heads"
+            )
+        if not vllm_config.kv_transfer_config.get_from_extra_config("dsa_pd_offload", False):
+            raise NotImplementedError(
+                "prefill_tp_size < decode_tp_size is only implemented for the blockwise DSA path, set"
+                " kv_transfer_config.extra_config.dsa_pd_offload=true"
+            )
+        logger.info(
+            "MooncakeConnector enables prefill rank broadcast: prefill_tp_size=%s < decode_tp_size=%s, "
+            "every decode rank reads the full KV cache of a prefill rank",
+            self._prefill_tp_size,
+            self._decode_tp_size,
+        )
 
     def _get_prefill_decode_size(self, vllm_config: VllmConfig):
         # get prefill tp and dp size from extra config
@@ -5283,6 +5311,10 @@ class MooncakeConnectorWorker:
         if prefill_tp_size is None:
             prefill_tp_size = self._prefill_tp_size
 
+        if prefill_tp_size < self._decode_tp_size:
+            # Fan-out layout: one full-copy prefill rank per decode rank pull.
+            return 1
+
         if prefill_tp_size == self._prefill_tp_size:
             return self.tp_num_need_pulls
 
@@ -5334,6 +5366,11 @@ class MooncakeConnectorWorker:
 
     def _get_prefill_ranks_for_group(self, req_id: str, group_spec: dict[str, Any]) -> set[int]:
         if group_spec["kv_cache_spec_type"] == "MambaSpec":
+            if self._prefill_tp_size < self._decode_tp_size:
+                raise NotImplementedError(
+                    "Mamba state shards cannot be shared by several decode ranks; "
+                    "prefill_tp_size < decode_tp_size is only supported for attention-only P/D."
+                )
             assert self._prefill_tp_size % self._decode_tp_size == 0, (
                 f"Hybrid Mamba prefill tp size({self._prefill_tp_size}) must be divisible by "
                 f"decode tp size({self._decode_tp_size})."
@@ -5415,6 +5452,17 @@ class MooncakeConnectorWorker:
                 )
             )
             return sampled_nums
+        if prefill_tp_size < self._decode_tp_size:
+            # Fan-out layout: fewer prefill ranks than decode ranks, but each prefill
+            # rank owns a full copy, so decode ranks cycle over them instead of
+            # splitting them.
+            return [
+                [
+                    (decode_rank * tp_num_need_pulls) % prefill_tp_size + pp * prefill_tp_size
+                    for pp in range(self._prefill_pp_size)
+                ]
+                for decode_rank in range(self._decode_tp_size)
+            ]
         num_kv_head = num_key_value_heads
         ori_data = np.arange(prefill_tp_size * self._prefill_pp_size)
         seed = string_to_int64_hash(req_id)

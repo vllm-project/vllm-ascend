@@ -686,6 +686,8 @@ def test_request_level_results_reach_core_before_worker_metadata(transfer_result
         (4, 2, 8, 2),
         (8, 2, 2, 4),
         (8, 2, 16, 4),
+        (1, 8, 8, 2),
+        (1, 8, 1, 2),
         (2, 4, 8, 2),
     ],
 )
