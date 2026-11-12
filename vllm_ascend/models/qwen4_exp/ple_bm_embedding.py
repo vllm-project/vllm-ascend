@@ -10,6 +10,8 @@ from .ple_bm_reader import open_bm_reader
 
 
 def shared_ple_config(vllm_config):
+    if vllm_config is None:
+        return None
     config = (vllm_config.additional_config or {}).get("shared_ple")
     if config is None:
         return None

@@ -10,6 +10,22 @@ from vllm_ascend.models.qwen4_exp.model_state import AscendQwen4ExpModelState, Q
 
 
 def test_remote_embedding_requires_state_binding_and_uses_prepared_rows(monkeypatch):
+    # This contract test needs no NPU; map the embedding's NPU allocation and
+    # synchronization calls to CPU equivalents in the no-card CI job.
+    original_zeros = torch.zeros
+
+    def cpu_zeros(*args, **kwargs):
+        if kwargs.get("device") == "npu":
+            kwargs["device"] = "cpu"
+        return original_zeros(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "zeros", cpu_zeros)
+    monkeypatch.setattr(
+        torch,
+        "npu",
+        SimpleNamespace(synchronize=lambda *_: None, is_current_stream_capturing=lambda: False),
+        raising=False,
+    )
     prefix = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding"
     config = SimpleNamespace(
         additional_config={"shared_ple": {"backend": "rdma", "endpoint": "127.0.0.1:1", "checkpoint_prefix": prefix}},
@@ -42,7 +58,7 @@ def test_remote_embedding_requires_state_binding_and_uses_prepared_rows(monkeypa
     embedding = ple_rdma_embedding.AscendRemotePLEEmbedding(
         prefix="model.layers.1.ple.ple_embedding.ngram_embedding", max_total_tokens=2, num_ngram_heads=2
     )
-    ids = torch.tensor([[1, 2]], device="npu")
+    ids = torch.tensor([[1, 2]])
     with pytest.raises(RuntimeError, match="model-state"):
         embedding(ids)
     embedding.bind_preparation()

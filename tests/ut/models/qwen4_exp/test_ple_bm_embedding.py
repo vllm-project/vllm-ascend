@@ -9,6 +9,7 @@ from vllm_ascend.models.qwen4_exp import ple_bm_embedding
 
 
 def test_shared_config_requires_explicit_bm_and_cpu_offload():
+    assert ple_bm_embedding.shared_ple_config(None) is None
     config = SimpleNamespace(additional_config={}, engram_config=None)
     assert ple_bm_embedding.shared_ple_config(config) is None
     config.additional_config = {"shared_ple": {"backend": "bm", "root": "/pool", "checkpoint_prefix": "table"}}
