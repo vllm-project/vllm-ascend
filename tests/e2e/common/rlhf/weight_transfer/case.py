@@ -28,7 +28,7 @@ class WeightUpdateModelCase:
     # Build this case's payload source instead of ``FixedRandomWeightSource``.
     # DeepSeek-V4.1 overrides it: Transformers has no ``deepseek_v41``, so its
     # layout comes from the published checkpoint's safetensors headers
-    # (see ``deepseek_v41_weight_source``).
+    # (``DeepseekV41WeightSource`` in ``weight_source``).
     weight_source_factory: Callable[[Any, torch.device], WeightSource] | None = None
     meta_config_attribute: str | None = None
     checkpoint_model_prefix: str | None = None
@@ -131,11 +131,9 @@ def _dsv41_engram_args() -> tuple[str, ...]:
 
 def _deepseek_v41_weight_source(case: WeightUpdateModelCase, device: torch.device) -> WeightSource:
     """Payload source for DeepSeek-V4.1, which has no Transformers meta model."""
-    # Imported lazily: the header reader pulls in ``requests`` and the vLLM
-    # Engram layout, neither of which the rest of the matrix needs.
-    from tests.e2e.common.rlhf.weight_transfer.deepseek_v41_weight_source import (
-        DeepseekV41WeightSource,
-    )
+    # Imported lazily: ``weight_source`` imports this module, and the header
+    # reader it needs is not part of every lane's import path.
+    from tests.e2e.common.rlhf.weight_transfer.weight_source import DeepseekV41WeightSource
 
     return DeepseekV41WeightSource(case, device)
 
