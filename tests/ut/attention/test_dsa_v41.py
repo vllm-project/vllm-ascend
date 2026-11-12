@@ -3,6 +3,7 @@
 """Regression tests for V4.1 index selection and compressor scheduling."""
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -129,6 +130,64 @@ def test_deferred_metadata_keeps_compressor_state_outside_graph(in_graph, stage)
         task.run()
     assert calls == [stage]
     assert builder.take_device_metadata_tasks() == ()
+
+
+@pytest.mark.parametrize("in_graph", [False, True])
+@pytest.mark.parametrize("num_actual_tokens", [0, 2])
+def test_a5_qli_preserves_graph_mode_after_defer_scope(monkeypatch, in_graph, num_actual_tokens):
+    builder_cls = dsa_v41.AscendDSAV41IndexerMetadataBuilder
+    builder = builder_cls.__new__(builder_cls)
+    builder._device_metadata_enabled = False
+    builder._device_metadata_in_graph = False
+    builder._device_metadata_tasks = ()
+    builder._supports_device_ops = True
+    builder._uses_a5_packed_cache = True
+    builder.common_v41_batch_metadata = {}
+    buffer = torch.full((8,), -1, dtype=torch.int32)
+    builder._qli_metadata = buffer
+    output = torch.ones_like(buffer)
+    metadata_op = Mock(return_value=output)
+    builder._device_backend = SimpleNamespace(quant_lightning_indexer_metadata=metadata_op)
+    builder.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(index_topk=512, index_n_heads=64, index_head_dim=128)
+        )
+    )
+    monkeypatch.setattr(builder, "prepare_source_rope", lambda: None)
+    req = dsa_v41.AscendDSAV41Metadata(
+        block_table=torch.zeros((1, 1), dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+        seq_lens=torch.tensor([2], dtype=torch.int32),
+        slot_mapping=torch.full((2,), -1, dtype=torch.int64),
+        compress_ratio=2,
+        storage_block_size=16,
+        is_compressor_state=False,
+        cache_kind="index_k",
+        num_actual_tokens=num_actual_tokens,
+        num_input_tokens=2,
+        num_reqs=1,
+        cache_seq_lens=torch.tensor([1], dtype=torch.int32),
+    )
+    with builder.defer_device_metadata(in_graph=in_graph):
+        builder._build_qli_metadata(SimpleNamespace(query_start_loc=req.query_start_loc), req)
+        tasks = builder.take_device_metadata_tasks()
+        metadata_op.assert_not_called()
+
+    # Match TargetDeviceMetadata: run collected tasks only after leaving the scope.
+    assert not builder._device_metadata_in_graph
+    assert not builder._device_metadata_enabled
+    assert len(tasks) == 1
+    assert tasks[0].stage == dsa_v41.DeviceMetadataStage.INDEXER
+    assert tasks[0].group_id == id(builder._qli_metadata)
+    assert req.qli_metadata is builder._qli_metadata
+    tasks[0].run()
+    if in_graph or num_actual_tokens:
+        metadata_op.assert_called_once()
+        torch.testing.assert_close(req.qli_metadata, output)
+    else:
+        metadata_op.assert_not_called()
+        torch.testing.assert_close(req.qli_metadata, torch.zeros_like(output))
+    assert builder._qli_metadata is buffer
 
 
 def _impl(role):

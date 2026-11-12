@@ -1,0 +1,8 @@
+pr: 21067
+entries:
+  - category: bugfix
+    text: >-
+      COMPILE_CUSTOM_KERNELS and VERBOSE now treat an empty value as unset and
+      reject any value other than 1/0 with a ValueError that names the variable,
+      instead of failing inside int() with an opaque traceback and silently
+      accepting other numbers.

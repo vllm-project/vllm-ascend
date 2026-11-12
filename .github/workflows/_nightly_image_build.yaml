@@ -197,6 +197,22 @@ jobs:
           fetch-depth: 0
           ref: ${{ inputs.vllm_ascend_branch }}
 
+      - name: Record source commit
+        if: ${{ inputs.should_push }}
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          mkdir -p /tmp/source-commit
+          git rev-parse HEAD > /tmp/source-commit/commit.txt
+
+      - name: Upload source commit
+        if: ${{ inputs.should_push }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-info-source-nightly-${{ github.run_attempt }}-${{ inputs.target }}-${{ matrix.os }}-${{ matrix.arch_name }}
+          path: /tmp/source-commit/commit.txt
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Login to SWR
         id: login-swr
         if: ${{ inputs.should_push }}
@@ -319,6 +335,8 @@ jobs:
 
           MISSING_VARIANT=0
           MERGED_VARIANT=0
+          PUBLISHED_DIR="${RUNNER_TEMP}/published-nightly"
+          mkdir -p "$PUBLISHED_DIR"
           for OS_NAME in $OS_LIST; do
             if [ "$OS_NAME" = "openeuler" ]; then
               OS_MARK="-openeuler"
@@ -361,8 +379,14 @@ jobs:
               docker buildx imagetools create \
                 -t "${DEST}:${TAG}" \
                 -t "${DEST}:${UNIQUE_TAG}" \
+                --metadata-file "$PUBLISHED_DIR/${OS_NAME}-$(printf '%s' "$DEST" | sha256sum | cut -c1-16).json" \
                 "${TEMP}-amd64" \
                 "${TEMP}-arm64"
+              metadata_file="$PUBLISHED_DIR/${OS_NAME}-$(printf '%s' "$DEST" | sha256sum | cut -c1-16).json"
+              digest=$(jq -er '."containerimage.descriptor".digest' "$metadata_file")
+              jq -n --arg image_ref "${DEST}:${UNIQUE_TAG}" --arg digest "$digest" \
+                '{image_ref: $image_ref, digest: $digest}' > "$metadata_file.tmp"
+              mv "$metadata_file.tmp" "$metadata_file"
             done
             MERGED_VARIANT=1
           done
@@ -390,3 +414,95 @@ jobs:
               workflow_id: 'sync-vllm-ascend.yml',
               ref: 'main',
             });
+
+      - name: Download source commits for build information
+        if: ${{ steps.merge.outputs.merged == '1' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          path: ${{ runner.temp }}/source-commits
+          pattern: build-info-source-nightly-*-${{ inputs.target }}-*
+
+      - name: Restore source commits from previous complete attempt
+        if: ${{ steps.merge.outputs.merged == '1' && github.run_attempt > 1 }}
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          path: ${{ runner.temp }}/previous-build-info-bundles
+          pattern: build-info-run-*
+
+      - name: Merge restored source commits
+        if: ${{ steps.merge.outputs.merged == '1' && github.run_attempt > 1 }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ runner.temp }}/source-commits"
+          for bundle in "${{ runner.temp }}"/previous-build-info-bundles/build-info-run-*/sources; do
+            [ -d "$bundle" ] || continue
+            cp -R "$bundle/." "${{ runner.temp }}/source-commits/"
+          done
+
+      - name: Collect published image information
+        if: ${{ steps.merge.outputs.merged == '1' }}
+        env:
+          TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          REPORT_DIR="${RUNNER_TEMP}/build-info-image"
+          mkdir -p "$REPORT_DIR"
+          for OS_NAME in ubuntu openeuler; do
+            REPOSITORIES=()
+            UNIQUE_TAG=""
+            IMAGE_DIGEST=""
+            for published_file in "$RUNNER_TEMP"/published-nightly/"${OS_NAME}"-*.json; do
+              [ -f "$published_file" ] || continue
+              IMAGE_REF=$(jq -er '.image_ref' "$published_file")
+              tag="${IMAGE_REF##*:}"
+              digest=$(jq -er '.digest' "$published_file")
+              if [ -n "$UNIQUE_TAG" ] && [ "$tag" != "$UNIQUE_TAG" ]; then
+                echo "::error::Published tags differ for $OS_NAME"
+                exit 1
+              fi
+              if [ -n "$IMAGE_DIGEST" ] && [ "$digest" != "$IMAGE_DIGEST" ]; then
+                echo "::error::Published digests differ for $OS_NAME"
+                exit 1
+              fi
+              UNIQUE_TAG="$tag"
+              IMAGE_DIGEST="$digest"
+              REPOSITORIES+=("${IMAGE_REF%:*}")
+            done
+            [ "${#REPOSITORIES[@]}" -gt 0 ] || continue
+            latest_attempt=0
+            for ARCH in amd64 arm64; do
+              selected=""
+              for file in "$RUNNER_TEMP"/source-commits/build-info-source-nightly-*-"$TARGET"-"$OS_NAME"-"$ARCH"/commit.txt; do
+                [ -f "$file" ] || continue
+                attempt=$(basename "$(dirname "$file")")
+                attempt="${attempt#build-info-source-nightly-}"
+                attempt="${attempt%%-*}"
+                if (( attempt <= GITHUB_RUN_ATTEMPT && attempt > latest_attempt )); then
+                  selected="$file"
+                  latest_attempt="$attempt"
+                fi
+              done
+              [ -n "$selected" ] || { echo "::error::Missing source commit for $OS_NAME-$ARCH"; exit 1; }
+              if [ "$ARCH" = amd64 ]; then AMD_COMMIT=$(cat "$selected"); else ARM_COMMIT=$(cat "$selected"); fi
+              latest_attempt=0
+            done
+            REPOSITORIES_JSON=$(printf '%s\n' "${REPOSITORIES[@]}" | jq -R . | jq -s .)
+            jq -n --arg hardware "$TARGET" --arg os "$OS_NAME" \
+              --arg arm_commit "$ARM_COMMIT" --arg amd_commit "$AMD_COMMIT" \
+              --arg tag "$UNIQUE_TAG" --arg digest "$IMAGE_DIGEST" --argjson repositories "$REPOSITORIES_JSON" \
+              '{type: "nightly", hardware: $hardware, os: $os,
+                commits: {arm64: $arm_commit, amd64: $amd_commit},
+                tag: $tag, digest: $digest, repositories: $repositories}' > "$REPORT_DIR/${OS_NAME}.json"
+          done
+          compgen -G "$REPORT_DIR/*.json" >/dev/null
+
+      - name: Upload published image information
+        if: ${{ steps.merge.outputs.merged == '1' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-info-image-${{ github.run_attempt }}-nightly-${{ inputs.target }}-${{ inputs.os_filter }}
+          path: ${{ runner.temp }}/build-info-image/*.json
+          if-no-files-found: error
+          retention-days: 30

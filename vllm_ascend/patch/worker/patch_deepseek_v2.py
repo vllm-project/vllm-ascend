@@ -22,6 +22,7 @@ from vllm.model_executor.layers.mla import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2ForCausalLM,
     DeepSeekV2FusedQkvAProjLinear,
@@ -32,10 +33,12 @@ from vllm.model_executor.models.deepseek_v2 import (
     yarn_get_mscale,
 )
 from vllm.model_executor.models.interfaces import EagleModelMixin
-from vllm.model_executor.models.utils import extract_layer_index
+from vllm.model_executor.models.utils import PPMissingLayer, extract_layer_index, spec_decode_needs_target_embed
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.mla.index_group import SparseMLAIndexGroupBuilder
 
+from vllm_ascend.attention.context_parallel.common_cp import use_dcp_q_replicate
+from vllm_ascend.ops.linear import AscendDCPGroupColumnParallelLinear
 from vllm_ascend.utils import is_mtp_layer, should_reuse_topk
 from vllm_ascend.worker.v2 import pp_transport
 from vllm_ascend.worker.v2.pp_transport import (
@@ -131,12 +134,14 @@ def _deepseek_v2_mla_attention_init(
             prefix=f"{prefix}.kv_a_proj_with_mqa",
         )
 
+    dcp_q_replicate_enabled = use_dcp_q_replicate(vllm_config)
+    q_proj_cls = AscendDCPGroupColumnParallelLinear if dcp_q_replicate_enabled else ColumnParallelLinear
     if self.q_lora_rank is not None:
         self.q_a_layernorm = RMSNorm(
             self.q_lora_rank,
             eps=config.rms_norm_eps,
         )
-        self.q_b_proj = ColumnParallelLinear(
+        self.q_b_proj = q_proj_cls(
             self.q_lora_rank,
             self.num_heads * self.qk_head_dim,
             bias=False,
@@ -144,7 +149,7 @@ def _deepseek_v2_mla_attention_init(
             prefix=f"{prefix}.q_b_proj",
         )
     else:
-        self.q_proj = ColumnParallelLinear(
+        self.q_proj = q_proj_cls(
             proj_input_size,
             self.num_heads * self.qk_head_dim,
             bias=False,
@@ -303,6 +308,19 @@ def _find_topk_indices_buffer(layers: Iterable[object]) -> torch.Tensor | None:
 
 def _patched_deepseek_v2_model_init(self, *args, **kwargs):
     _original_deepseek_v2_model_init(self, *args, **kwargs)
+    vllm_config = kwargs["vllm_config"]
+    # GLM-5.x uses the generic DeepseekV2Model on Ascend. Provision the
+    # last-stage embedding before the normal target checkpoint load, so
+    # upstream DFlash sharing needs no override. Preserve an embedding that
+    # a newer upstream constructor already provides. Draft QuaRot alignment
+    # remains a separate post-processing step on private draft weights.
+    if isinstance(self.embed_tokens, PPMissingLayer) and spec_decode_needs_target_embed(vllm_config):
+        self.embed_tokens = VocabParallelEmbedding(
+            self.config.vocab_size,
+            self.hidden_size,
+            quant_config=vllm_config.quant_config,
+            prefix=f"{kwargs.get('prefix', '')}.embed_tokens",
+        )
     # V2 relays aux slots upstream; V1 still uses the Ascend tensor payload.
     self._use_upstream_aux_relay = kwargs["vllm_config"].use_v2_model_runner
     self.topk_indices_buffer = _find_topk_indices_buffer(self.layers)

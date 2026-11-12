@@ -405,7 +405,7 @@ void QSFAMlaTiling::InitParams()
     perfMode_ = QSFAPerfMode::V_TEMPLATE_MODE;
     coreNum_ = aicNum_;
 
-    // The kernel pads absent RoPE lanes internally; retain the original UB/workspace layout.
+    // Retain the existing UB/workspace capacity; arch22 no-RoPE computes 512 dimensions.
     headDimAlign_ = Align(MLA_NOPE_HEAD_DIM + MLA_ROPE_HEAD_DIM, BYTE_BLOCK);
     ZeroTensorProcess();
 }
@@ -604,6 +604,17 @@ void QSFAMlaTiling::GetWorkspaceSize()
 
 void QSFAMlaTiling::CalcBlockDim()
 {
+    // Reduce idle launches on arch22 for both RoPE and no-RoPE paths.
+    if (qsfaInfo_->npuArch == NpuArch::DAV_2201) {
+        uint64_t taskNum = qsfaInfo_->s1Size;
+        if (qsfaInfo_->qLayout != QSFALayout::TND) {
+            taskNum = static_cast<uint64_t>(qsfaInfo_->bSize) * qsfaInfo_->s1Size;
+        }
+        if (taskNum > 0 && taskNum < usedCoreNum_) {
+            usedCoreNum_ = taskNum;
+            tilingData_.singleCoreParams.set_usedCoreNum(usedCoreNum_);
+        }
+    }
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(qsfaInfo_->platformInfo);
     auto aicNum = usedCoreNum_;
     auto aivNum = 2 * usedCoreNum_;
@@ -1266,19 +1277,10 @@ ge::graphStatus QSFATilingCheck::CheckFeatureMlaAntiquantShapeSizes() const
             "q_head_num must be divisible by kv_head_num."),
         return ge::GRAPH_FAILED);
 
-    if (isA5_) {
-        std::vector<uint32_t> gSizeSupportList = {1, 2, 4, 8, 16, 32, 48, 64, 128};
-        OP_CHECK_IF(std::find(gSizeSupportList.begin(), gSizeSupportList.end(), gSize_) == gSizeSupportList.end(),
-            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "group num", std::to_string(gSize_).c_str(),
-                "group num should be in 1, 2, 4, 8, 16, 32, 48, 64, 128."),
-            return ge::GRAPH_FAILED);
-    } else {
-        std::vector<uint32_t> gSizeSupportList = {1, 2, 4, 8, 16, 32, 64, 128};
-        OP_CHECK_IF(std::find(gSizeSupportList.begin(), gSizeSupportList.end(), gSize_) == gSizeSupportList.end(),
-            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "group num", std::to_string(gSize_).c_str(),
-                "group num should be in 1, 2, 4, 8, 16, 32, 64, 128."),
-            return ge::GRAPH_FAILED);
-    }
+    OP_CHECK_IF(gSize_ < 1U || gSize_ > 128U,
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "group num", std::to_string(gSize_).c_str(),
+            "group num should be in [1, 128]."),
+        return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
 }

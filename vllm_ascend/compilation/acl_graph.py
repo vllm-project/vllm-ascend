@@ -16,7 +16,7 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphOptions
 from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.forward_context import BatchDescriptor, get_forward_context
+from vllm.forward_context import BatchDescriptor, get_forward_context, is_forward_context_available
 from vllm.logger import logger
 from vllm.platforms import current_platform
 
@@ -66,6 +66,10 @@ class ACLGraphEntry:
 class ACLGraphWrapper:
     """Wraps a runnable to add acl graph capturing and replaying ability. And
     provide attribute access to the underlying `runnable` via `__getattr__`.
+
+    Calls without a forward context invoke the runnable directly, bypassing
+    this wrapper's capture/replay. Device operations still participate in an
+    already-active outer capture.
 
     The workflow of this wrapper in the aclgraph dispatching is as follows:
     1. At initialization, a runtime mode is assigned to the wrapper (FULL or
@@ -154,6 +158,10 @@ class ACLGraphWrapper:
         return self.runnable
 
     def __call__(self, *args, **kwargs):
+        if not is_forward_context_available():
+            # Standalone modules can run outside the model's forward context.
+            return self.runnable(*args, **kwargs)
+
         forward_context = get_forward_context()
         batch_descriptor = forward_context.batch_descriptor
         aclgraph_runtime_mode = forward_context.cudagraph_runtime_mode

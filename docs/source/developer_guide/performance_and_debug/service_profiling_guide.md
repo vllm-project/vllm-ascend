@@ -318,7 +318,7 @@ The `attributes` field supports flexible custom attribute collection and allows 
 ###### Example
 
 ```yaml
-- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner.execute_model
+- symbol: vllm_ascend.worker.v2.model_runner:NPUModelRunner.execute_model
   name: ModelRunnerExecuteModel
   domain: ModelExecute
   attributes:

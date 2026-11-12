@@ -6,7 +6,7 @@ import torch
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.ops.triton.v2.mamba.precopy import precopy_mamba_align_fused_kernel
+from vllm_ascend.ops.triton.mamba.precopy import precopy_mamba_align_fused_kernel
 
 NUM_LAYERS = 2
 CONV_WIDTH = 4

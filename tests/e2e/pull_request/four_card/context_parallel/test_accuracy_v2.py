@@ -100,6 +100,7 @@ EAGLE3_PCP_GOLDENS = (
 # Five reference PCP1 runs with the shared prompts and the same generation configuration.
 EAGLE3_PCP_MIN_ACCEPTANCE_RATES = [0.54, 0.29, 0.15]
 ACCEPTANCE_RATE_TOLERANCE = 0.03
+DCP_Q_REPLICATE_MLA_MODEL = "deepseek-ai/DeepSeek-V2-Lite"
 
 
 @dataclass(frozen=True)
@@ -192,6 +193,115 @@ def _run_inference_case(case: InferenceCase) -> None:
     for token_ids, output_text in outputs:
         assert token_ids, "Each request should return at least one generated token"
         assert isinstance(output_text, str) and output_text, "Each request should return non-empty text"
+
+
+class DCPQReplicationWorker:
+    """Read the actual group and attention state in each model worker."""
+
+    model_runner: Any
+
+    def check_dcp_q_replication(self, enabled: bool) -> int:
+        from vllm.distributed import get_dcp_group
+
+        group = get_dcp_group()
+        assert group.world_size == 2
+        assert group.ranks == [0, 1]
+        config = self.model_runner.vllm_config
+        implementations = [
+            layer.impl
+            for layer in config.compilation_config.static_forward_context.values()
+            if hasattr(getattr(layer, "impl", None), "dcp_q_replicate_enabled")
+        ]
+        assert len(implementations) == config.model_config.hf_text_config.num_hidden_layers
+        assert all(impl.dcp_q_replicate_enabled is enabled for impl in implementations)
+        return group.rank_in_group
+
+
+DCP_Q_REPLICATE_MLA_CASE = InferenceCase(
+    model=DCP_Q_REPLICATE_MLA_MODEL,
+    prompts=[
+        "The capital of France is",
+        "Explain how context parallel attention works. " * 40,
+        "A computer scientist studies algorithms. " * 70,
+    ],
+    max_tokens=16,
+    runner_kwargs={
+        "dtype": "bfloat16",
+        "tensor_parallel_size": 2,
+        "prefill_context_parallel_size": 1,
+        "decode_context_parallel_size": 2,
+        "worker_extension_cls": f"{__name__}.DCPQReplicationWorker",
+        "max_model_len": 2048,
+        "max_num_seqs": MAX_NUM_SEQS,
+        "max_num_batched_tokens": 128,
+        "block_size": 128,
+        "enable_chunked_prefill": True,
+        "enable_prefix_caching": True,
+        "cp_kv_cache_interleave_size": 1,
+        "additional_config": {"enable_mlapo": False},
+        "seed": 0,
+    },
+)
+
+
+@pytest.mark.parametrize(
+    "graph_mode",
+    [
+        pytest.param(
+            graph_mode,
+            id=f"mla-{graph_mode or 'eager'}",
+            marks=pytest.mark.e2e_model(DCP_Q_REPLICATE_MLA_MODEL),
+        )
+        for graph_mode in (None, "FULL_DECODE_ONLY")
+    ],
+)
+@pytest.mark.e2e_coverage(
+    arch="moe",
+    feature="chunked_prefill,prefix_caching",
+    parallel="TP,DCP",
+    deploy="pd_mix",
+    hardware="A3",
+    quantization="BF16",
+    graph_mode="eager,full_decode_only",
+)
+@patch.dict(
+    os.environ,
+    {"VLLM_USE_V2_MODEL_RUNNER": "1", "VLLM_WORKER_MULTIPROC_METHOD": "spawn"},
+)
+@wait_until_npu_memory_free(target_free_percentage=0.8)
+def test_dcp_q_replication(graph_mode: str | None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Compare MRV2 MLA Q replication OFF/ON with TP2 and DCP2 on two NPUs."""
+    monkeypatch.delenv("VLLM_DCP_Q_REPLICATE", raising=False)
+    case = DCP_Q_REPLICATE_MLA_CASE
+    results = []
+    for enabled in (False, True):
+        with VllmRunner(
+            case.model,
+            **case.runner_kwargs,
+            dcp_q_replicate=enabled,
+            enforce_eager=graph_mode is None,
+            compilation_config=(
+                {"cudagraph_mode": graph_mode, "cudagraph_capture_sizes": [1, 2, 4]} if graph_mode else {}
+            ),
+        ) as runner:
+            ranks = runner.model.collective_rpc("check_dcp_q_replication", args=(enabled,))
+            assert sorted(ranks) == [0, 1]
+            generations = []
+            for _ in range(2):
+                generated_outputs = runner.generate_greedy_logprobs(
+                    list(case.prompts),
+                    case.max_tokens,
+                    num_logprobs=None,
+                )
+                outputs = []
+                for prompt, (token_ids, text, _) in zip(case.prompts, generated_outputs, strict=True):
+                    assert token_ids
+                    outputs.append((token_ids, prompt + text))
+                generations.append(outputs)
+            results.append(generations)
+    # Compare OFF/ON at matching cache states, using OFF outputs as reference goldens.
+    for baseline, replicated in zip(*results, strict=True):
+        _match_outputs_with_goldens(replicated, [text for _, text in baseline])
 
 
 DSV3_2_SFA_PCP_CASE = InferenceCase(

@@ -90,6 +90,8 @@ class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
                 f"and {compress_ratio}."
             )
         self.head_dim = head_dim
+        if dtype not in (torch.bfloat16, torch.float8_e4m3fn):
+            raise ValueError(f"GLM KPool cache requires BF16 or FP8, got {dtype}.")
         self.dtype = dtype
         self.cache_role = cache_role
         self.cache_config = cache_config
@@ -110,6 +112,8 @@ class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
+            scale_dim=1 if self.dtype == torch.float8_e4m3fn else 0,
+            scale_dtype=torch.float32 if self.dtype == torch.float8_e4m3fn else torch.int8,
             cache_dtype_str=None,
             model_version="glm5_next",
             indexes_kv_by_block_stride=True,
@@ -145,8 +149,8 @@ class Glm5NextTailCache(nn.Module, AttentionLayerBase):
             raise ValueError(f"GLM-Next tail must use torch.float32, got {dtype}.")
         if compress_ratio <= 1:
             raise ValueError(f"GLM-Next tail requires compress_ratio greater than one, got {compress_ratio}.")
-        self.block_size = compress_ratio if ring_capacity is None else ring_capacity
-        if self.block_size < compress_ratio or head_dim <= 0:
+        self.ring_capacity = compress_ratio if ring_capacity is None else ring_capacity
+        if self.ring_capacity < compress_ratio or head_dim <= 0:
             raise ValueError("Tail requires a positive head_dim and ring_capacity >= compress_ratio.")
         self.head_dim = head_dim
         self.dtype = dtype
@@ -162,7 +166,8 @@ class Glm5NextTailCache(nn.Module, AttentionLayerBase):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         del vllm_config
         return AscendIndexerKPoolTailSpec(
-            block_size=self.block_size,
+            block_size=self.compress_ratio,
+            ring_capacity=self.ring_capacity,
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,

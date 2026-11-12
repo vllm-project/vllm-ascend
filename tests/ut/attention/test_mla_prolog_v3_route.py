@@ -25,6 +25,7 @@ from vllm_ascend.quantization.methods import (
     AscendW8A8FP8DynamicLinearMethod,
     AscendW8A8LinearMethod,
 )
+from vllm_ascend.utils import enable_sfa
 
 NOPE_DIM = 512
 ROPE_DIM = 64
@@ -36,6 +37,7 @@ def _make_impl() -> AscendMLAImpl:
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
     impl.layer_name = "model.layers.0.self_attn.attn"
     impl.use_flashmla = False
+    impl.dcp_q_replicate_enabled = False
     impl.use_mla_rope = True
     impl.qk_rope_head_dim = ROPE_DIM
     impl.dtype = torch.bfloat16
@@ -77,7 +79,9 @@ def _make_impl() -> AscendMLAImpl:
 def _construct_impl(pcp_size: int, dcp_size: int) -> AscendMLAImpl:
     """Construct the production MLA implementation without weight processing."""
     config = SimpleNamespace(
-        model_config=SimpleNamespace(runner_type="generate", dtype=torch.float16),
+        model_config=SimpleNamespace(
+            runner_type="generate", dtype=torch.float16, hf_config=SimpleNamespace(model_type="deepseek_v3")
+        ),
         parallel_config=SimpleNamespace(
             prefill_context_parallel_size=pcp_size,
             decode_context_parallel_size=dcp_size,
@@ -308,7 +312,6 @@ def test_post_load_offloader_keeps_prolog_weights_lazy(monkeypatch, offloader_ty
         "sharded_pcp",
         "nz",
         "indexer",
-        "sparse",
         "sparse_offload",
         "compress",
         "fa_quant",
@@ -334,8 +337,6 @@ def test_post_load_skips_unused_prolog_weights(monkeypatch, excluded_path):
         impl.enable_kv_nz = True
     elif excluded_path == "indexer":
         owner.indexer = nn.Identity()
-    elif excluded_path == "sparse":
-        config.model_config.hf_text_config.index_topk = 4
     elif excluded_path == "sparse_offload":
         monkeypatch.setattr(
             mla_v1,
@@ -744,11 +745,12 @@ def test_dcp_post_load_allocates_only_consumed_workspaces(use_dcp, use_pcp, deco
         assert impl._dcp_prefill_current_kv_buffers[2].numel() == 8192
 
 
-def test_dcp_current_kv_buffers_survive_reloads():
+@pytest.mark.parametrize("block_size", [128, 1536])
+def test_dcp_current_kv_buffers_survive_reloads(block_size):
     impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
     impl.vllm_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=256, max_num_seqs=256),
-        cache_config=SimpleNamespace(block_size=128),
+        cache_config=SimpleNamespace(block_size=block_size),
     )
     impl.speculative_config = None
     impl.num_kv_heads = 1
@@ -775,11 +777,12 @@ def test_dcp_current_kv_buffers_survive_reloads():
     )
 
 
-def test_dcp_prolog_buffers_survive_reloads_and_use_disjoint_workspaces():
+@pytest.mark.parametrize("block_size", [128, 1536])
+def test_dcp_prolog_buffers_survive_reloads_and_use_disjoint_workspaces(block_size):
     impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
     impl.vllm_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=4096, max_num_seqs=32),
-        cache_config=SimpleNamespace(block_size=128),
+        cache_config=SimpleNamespace(block_size=block_size),
     )
     impl.speculative_config = SimpleNamespace(num_speculative_tokens=3)
     impl.num_kv_heads = 1
@@ -1550,3 +1553,35 @@ def test_wide_draft_forward_uses_regular_projection_for_fused_cache():
     impl._mla_preprocess.assert_called_once()
     impl.mla_preprocess_prolog_v3.assert_not_called()
     impl.mla_preprocess_only_decode.assert_not_called()
+
+
+@pytest.mark.parametrize("use_v2_runner", [False, True])
+def test_dense_writer_prepares_weights_with_sparse_target(monkeypatch, use_v2_runner):
+    impl = _make_post_load_impl(monkeypatch)
+    impl.vllm_config.use_v2_model_runner = use_v2_runner
+    impl.vllm_config.parallel_config.decode_context_parallel_size = 1
+    impl.vllm_config.model_config.hf_text_config.index_topk = 2048
+    impl.use_flashmla = True
+    impl._flashmla_writer_buffers = None
+    assert enable_sfa(impl.vllm_config)
+
+    impl.process_weights_after_loading(torch.bfloat16)
+
+    assert impl._prolog_v3_weights is not None
+
+
+@pytest.mark.parametrize("use_v2_runner", [False, True])
+def test_fia_draft_skips_unused_prolog_weights_with_sparse_target(monkeypatch, use_v2_runner):
+    impl = _make_post_load_impl(monkeypatch)
+    config = impl.vllm_config
+    config.use_v2_model_runner = use_v2_runner
+    config.model_config.hf_text_config.index_topk = 2048
+    config.parallel_config.decode_context_parallel_size = 1
+    assert enable_sfa(config)
+    assert not impl.use_flashmla and not impl.enable_mlapo
+    cache = (torch.empty(2, BLOCK_SIZE, 1, 4), torch.empty(2, BLOCK_SIZE, 1, 2))
+    assert not impl._cache_requires_prolog_v3_writer(cache)
+
+    impl.process_weights_after_loading(torch.bfloat16)
+
+    assert impl._prolog_v3_weights is None
