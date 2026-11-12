@@ -1842,6 +1842,8 @@ e2e-upstream_a2_2:
     estimated_time: 20
   - name: tests/v1/e2e/spec_decode/test_sharded_sampling.py
     estimated_time: 20
+  - name: tests/models/language/pooling_mteb_test/test_qwen3_reranker.py
+    estimated_time: 20
 e2e-upstream_a2_4:
   - name: tests/v1/distributed/test_hybrid_lb_dp.py
     estimated_time: 20

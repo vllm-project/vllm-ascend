@@ -1765,3 +1765,9 @@
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
 #
+
+# worker/patch_qwen3_5.py: GDN internal prefill checkpoints.
+# Why: Ascend replaces the upstream GDN forward/backend.
+# How: initialize the capability-gated per-layer NPU adaptation after upstream init.
+# Related PR: vllm-project/vllm#60050.
+# Future Plan: remove this initialization hook when a shared backend extension supports it.

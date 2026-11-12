@@ -35,7 +35,7 @@ def test_indexer_page_scatter_replay_refreshes_metadata(dtype):
     ):
         pytest.skip("FP8 indexer cache requires arch35")
     # Two component views share each page; writes must retain its stride.
-    backing = torch.full((4, 128, 1, 256), 7, device="npu").to(dtype)
+    backing = torch.full((4, 128, 1, 256), 7.0, device="npu").to(dtype)
     cache = backing[..., :128]
     updates = torch.ones((4, 128), device="npu").to(dtype)
     slots = torch.tensor([0, 127, 128, -1], device="npu", dtype=torch.int64)
@@ -61,10 +61,10 @@ def test_indexer_page_scatter_replay_refreshes_metadata(dtype):
     slots.copy_(next_slots)
     refreshed = builder._build_cache_scatter_indices(slots, 4, 3, 3, False, key)
     assert refreshed.data_ptr() == indices.data_ptr()
-    backing.copy_(torch.full((4, 128, 1, 256), 7, device="npu").to(dtype))
+    backing.copy_(torch.full((4, 128, 1, 256), 7.0, device="npu").to(dtype))
     graph.replay()
     torch.npu.synchronize()
-    expected = torch.full((4, 128, 1, 256), 7).to(dtype)
+    expected = torch.full((4, 128, 1, 256), 7.0).to(dtype)
     for row, (block, offset) in ((0, (1, 127)), (1, (2, 0)), (3, (3, 127))):
         expected.view(torch.uint8)[block, offset, 0, : 128 * expected.element_size()] = updates.view(torch.uint8)[
             row
