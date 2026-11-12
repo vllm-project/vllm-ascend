@@ -1332,7 +1332,7 @@ class AscendGDNFusedAttentionBackend(AscendGDNAttentionBackend):
     def get_builder_cls() -> type[AscendGDNAttentionMetadataBuilder]:
         # Import lazily to avoid the gdn <-> builder import cycle at module
         # initialization.  The probe result is cached by the attention class.
-        from vllm_ascend.attention.gdn import AscendGatedDeltaNetAttention
+        from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 
         if get_pcp_group().world_size == 1 and AscendGatedDeltaNetAttention._supports_host_metadata_prefill():
             return AscendGDNHostMetadataBuilder

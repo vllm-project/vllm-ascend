@@ -25,7 +25,7 @@ from tests.ut.ops.test_gdn_layerwise_kv import (
     _make_prefill_metadata,
     _run_gdn_forward,
 )
-from vllm_ascend.attention.gdn import AscendGatedDeltaNetAttention
+from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 
 
 def test_npu_connector_observes_updated_gdn_state_after_compile():
@@ -69,23 +69,20 @@ def test_npu_connector_observes_updated_gdn_state_after_compile():
         inductor_config.patch(compile_threads=1),
         override_forward_context(forward_context),
         patch.object(AscendGatedDeltaNetAttention, "_probe_fused_chunk", return_value=False),
-        patch("vllm_ascend.attention.gdn._get_fla_gdn_prefill_op", return_value=None),
-        patch("vllm_ascend.attention.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
-        patch("vllm_ascend.attention.gdn.DeviceOperator.fused_gdn_gating", return_value=gating),
-        patch("vllm_ascend.attention.gdn.clear_ssm_states"),
-        patch("vllm_ascend.attention.gdn.chunk_gated_delta_rule", side_effect=chunk_attention),
-        patch("vllm_ascend.attention.gdn.causal_conv1d_fn", side_effect=lambda x, *a, **k: causal_conv1d(x, *a, **k)),
-        patch(
-            "vllm_ascend.attention.gdn.causal_conv1d_update",
-            side_effect=lambda x, *a, **k: causal_conv1d(x, *a, **k),
-        ),
+        patch("vllm_ascend.ops.gdn._get_fla_gdn_prefill_op", return_value=None),
+        patch("vllm_ascend.ops.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
+        patch("vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating", return_value=gating),
+        patch("vllm_ascend.ops.gdn.clear_ssm_states"),
+        patch("vllm_ascend.ops.gdn.chunk_gated_delta_rule", side_effect=chunk_attention),
+        patch("vllm_ascend.ops.gdn.causal_conv1d_fn", side_effect=lambda x, *a, **k: causal_conv1d(x, *a, **k)),
+        patch("vllm_ascend.ops.gdn.causal_conv1d_update", side_effect=lambda x, *a, **k: causal_conv1d(x, *a, **k)),
         patch("vllm_ascend.attention.utils.has_kv_transfer_group", return_value=True),
         patch("vllm_ascend.attention.utils.is_v1_kv_transfer_group", return_value=True),
         patch("vllm_ascend.attention.utils.get_kv_transfer_group", return_value=connector),
         # NPU-only side effects live in the compiled forward on device; stub them
         # so the inductor graph stays fullgraph (no graph break).
-        patch("vllm_ascend.attention.gdn.wait_for_kv_layer_from_connector", lambda *a, **k: None),
-        patch("vllm_ascend.attention.gdn.record_attention_compute_start", lambda: None),
+        patch("vllm_ascend.ops.gdn.wait_for_kv_layer_from_connector", lambda *a, **k: None),
+        patch("vllm_ascend.ops.gdn.record_attention_compute_start", lambda: None),
     ):
         eager_output = _run_gdn_forward(model, hidden_states, output)
         torch.testing.assert_close(eager_output, hidden_states + 1)

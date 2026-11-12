@@ -21,16 +21,16 @@ import pytest
 import torch
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 
-from vllm_ascend._310p.attention.gdn_310 import (
+from vllm_ascend._310p.ops.fla.gdn_310 import (
     AscendGatedDeltaNetAttention310,
+    _mask_padded_recurrent_accepted_tokens,
     _zero_padded_tokens,
 )
-from vllm_ascend._310p.attention.gdn_attn_builder_310 import (
+from vllm_ascend._310p.ops.gdn_attn_builder_310 import (
     AscendGDNAttentionBackend310,
     AscendGDNAttentionMetadataBuilder310,
 )
-from vllm_ascend._310p.ops.fla.gdn_310 import _mask_padded_recurrent_accepted_tokens
-from vllm_ascend.attention.gdn_attn_builder import AscendGDNAttentionMetadataBuilder
+from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionMetadataBuilder
 
 
 def test_ascend_gdn_attention_310_uses_310p_backend():
