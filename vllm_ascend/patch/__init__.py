@@ -295,6 +295,22 @@
 #       planning functions.
 #    Related PR:
 #       https://github.com/vllm-project/vllm/pull/53558
+#   2. `vllm.v1.core.kv_cache_planning.get_kv_cache_config_from_groups`
+#      `vllm.v1.core.kv_cache_planning._pool_bytes_per_block`
+#    Why:
+#       Ascend dense GQA attention requires contiguous K/V pools. Replicated
+#       draft pages cannot alias block-strided target/Mamba pages with different
+#       scheduler block IDs in hybrid DCP models.
+#    How:
+#       Use dcp_sharded to identify replicated dense attention groups, then
+#       delegate each physical pool's descriptors to the upstream planner.
+#       Sum the pools' bytes per block to keep allocation within the budget.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/56723 supplies dcp_sharded;
+#       the remaining physical-layout restriction is specific to Ascend.
+#    Future Plan:
+#       Remove pool separation when Ascend dense attention supports the
+#       upstream block-strided shared-pool layout.
 #
 # ** 11. File: platform/patch_mamba_block_aligned_split.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
