@@ -1,0 +1,5 @@
+pr: 20617
+entries:
+  - category: bugfix
+    text: Fixed Ascend MLA draft identification using the upstream EAGLE construction tag, preventing incorrect MLAPO initialization without replacing the runtime configuration.
+    model: kimi-k2.6

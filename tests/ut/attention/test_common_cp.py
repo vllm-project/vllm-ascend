@@ -272,12 +272,25 @@ class TestDCPQReplicationConfig(unittest.TestCase):
                     expected,
                 )
 
-    def test_sparse_q_replication_is_rejected(self):
-        with (
-            patch.object(common_cp.envs, "is_set", return_value=False),
-            self.assertRaisesRegex(ValueError, "only supports dense MLA; SFA is not supported"),
-        ):
-            use_dcp_q_replicate(self._make_dcp_q_replicate_config(index_topk=2048))
+    def test_sparse_q_replication_is_disabled(self):
+        for legacy in (None, True):
+            with (
+                self.subTest(legacy=legacy),
+                patch.object(common_cp.envs, "is_set", return_value=legacy is not None),
+                patch.object(common_cp.envs, "VLLM_DCP_Q_REPLICATE", legacy, create=True),
+            ):
+                self.assertFalse(use_dcp_q_replicate(self._make_dcp_q_replicate_config(index_topk=2048)))
+
+    def test_lora_q_replication_is_disabled(self):
+        config = self._make_dcp_q_replicate_config()
+        config.lora_config = SimpleNamespace()
+        for legacy in (None, True):
+            with (
+                self.subTest(legacy=legacy),
+                patch.object(common_cp.envs, "is_set", return_value=legacy is not None),
+                patch.object(common_cp.envs, "VLLM_DCP_Q_REPLICATE", legacy, create=True),
+            ):
+                self.assertFalse(use_dcp_q_replicate(config))
 
     def test_compressed_attention_is_not_classified_as_sfa(self):
         with patch.object(common_cp.envs, "is_set", return_value=False):

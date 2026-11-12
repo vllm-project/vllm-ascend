@@ -231,24 +231,31 @@ Run the following commands on each node in order:
 
 === "950DT Products"
 
+    950DT Products connect NPUs over UB instead of RoCE. The RoCE-oriented `hccn_tool`
+    subcommands used on A2 and A3 (`-lldp`, `-ip`, `-gateway`, `-net_health`, `-ping`)
+    reject the `-i <dev> -<cmd> -g` argument order on this product, and some of them are
+    not supported at all (`Unsupported operation: The command is not supported on this
+    product`). Use the UB-oriented checks below instead.
+
     ```bash
-    # Check the remote switch ports
-    for i in {0..7}; do hccn_tool -i $i -lldp -g | grep Ifname; done
-    # Get the link status of the Ethernet ports (UP or DOWN)
-    for i in {0..7}; do hccn_tool -i $i -link -g ; done
-    # Check the network health status
-    for i in {0..7}; do hccn_tool -i $i -net_health -g ; done
-    # View the network detected IP configuration
-    for i in {0..7}; do hccn_tool -i $i -netdetect -g ; done
-    # View gateway configuration
-    for i in {0..7}; do hccn_tool -i $i -gateway -g ; done
+    # Show the UB port matrix of each NPU (UDie, port, speed, link status)
+    for i in {0..7}; do hccn_tool -g -dev_info -i $i; done
+    # Get the link status of individual UB ports (UP or DOWN)
+    # -u selects the UDie and -p the port; see dev_info above for valid values
+    for i in {0..7}; do for u in 0 1; do for p in {0..7}; do
+        hccn_tool -g -link -i $i -u $u -p $p
+    done; done; done
+    # Check the driver and firmware version of the NPU network
+    hccn_tool -g -version -i 0
+    # List the UB endpoints, their EIDs and link state
+    urma_admin show
     # View NPU network configuration
     cat /etc/hccn.conf
     ```
 
 #### Verify inter-node connectivity {: #installation-multi-node-interconnect }
 
-##### Obtain NPU IP addresses {: #installation-multi-node-npu-ip }
+##### Obtain NPU addresses {: #installation-multi-node-npu-ip }
 
 === "A2"
 
@@ -264,26 +271,61 @@ Run the following commands on each node in order:
 
 === "950DT Products"
 
+    950DT Products address the peer NPUs by UB EID rather than by an IPv4 address. Run this on each node and keep the `ACTIVE` entries:
+
     ```bash
-    for i in {0..7}; do hccn_tool -i $i -ip -g | grep ipaddr; done
+    urma_admin show
     ```
 
 ##### Run a cross-node ping test {: #installation-multi-node-ping }
 
-On the source node, use a local NPU device ID and an NPU IP address obtained from the other node. The destination is the remote NPU's network address, not the host's management IP:
+A2 and A3 Products address the peer NPU by IPv4. 950DT Products connect the NPUs over UB and address them by UB EID instead; run `urma_admin show` on the peer node to obtain its EIDs.
 
-```bash
-# Replace 0 with the source NPU device ID and x.x.x.x with the remote NPU IP.
-hccn_tool -i 0 -ping -g address x.x.x.x
-```
+=== "A2"
 
-Successful output includes received replies and a summary with equal transmitted/received packet counts and zero packet loss, for example:
+    On the source node, use a local NPU device ID and an NPU IP address obtained from the other node. The destination is the remote NPU's network address, not the host's management IP:
+
+    ```bash
+    # Replace 0 with the source NPU device ID and x.x.x.x with the remote NPU IP.
+    hccn_tool -i 0 -ping -g address x.x.x.x
+    ```
+
+=== "A3"
+
+    On the source node, use a local NPU device ID and an NPU IP address obtained from the other node. The destination is the remote NPU's network address, not the host's management IP:
+
+    ```bash
+    # Replace 0 with the source NPU device ID and x.x.x.x with the remote NPU IP.
+    hccn_tool -i 0 -ping -g address x.x.x.x
+    ```
+
+=== "950DT Products"
+
+    A UB EID is a 128-bit endpoint identifier written as eight hexadecimal groups, and
+    each NPU exposes several of them. The EID after `-I` is a local EID of the source
+    node, and the argument is the EID of the remote node, both taken from the `ACTIVE`
+    rows of `urma_admin show` on the respective node:
+
+    ```bash
+    # Replace the placeholders with a local and a remote UB EID.
+    urma_ping -I <local-eid> <remote-eid>
+    ```
+
+    This requires a working UB stack on both nodes: `urma_admin show topo` must return the
+    fabric topology built from `/etc/hixlep`, `/lib/route.conf` and
+    `/etc/hccl_rootinfo.json`. If it reports `Failed to recv netlink msg, ret=-1` or
+    `Failed to get ubagg topo, ret:-1`, the UB stack is not ready and `urma_ping` cannot
+    send any packet.
+
+Successful output includes received replies and a summary with equal transmitted/received packet counts and zero packet loss. For A2 and A3 Products (`hccn_tool`), for example:
 
 ```text
 3 packets transmitted, 3 received, 0.00% packet loss
 ```
 
-Repeat for the NPU pairs used by your deployment in both directions. Missing replies or packet loss require checking the links, NPU IP addresses, and network configuration. This checks basic connectivity; it does not replace a distributed inference test.
+`urma_ping` reports the same counters in its own `N packets transmitted, N received, 0% packet loss` summary.
+
+Repeat for the NPU pairs used by your deployment in both directions. Missing replies or packet loss require checking the links, the NPU IP addresses (A2/A3 Products) or EIDs (950DT Products), and the network configuration. This checks basic connectivity; it does not replace a distributed inference test.
 
 #### Start containers on each node {: #installation-multi-node-container }
 

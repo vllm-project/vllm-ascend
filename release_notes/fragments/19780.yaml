@@ -1,0 +1,9 @@
+pr: 19780
+entries:
+  - category: bugfix
+    text: >-
+      Fixed garbled output (and out-of-bounds crashes) from the FUSED_MC2
+      dispatch_ffn_combine op for W8A8/W4A8 MoE models with
+      2 * moe_intermediate_size > hidden_size (e.g. DeepSeek-V2-Lite,
+      Qwen1.5-MoE, Mixtral): the GMM1 workspace row stride now uses max(N, K).
+      Models with N <= K are unaffected (bit-identical).

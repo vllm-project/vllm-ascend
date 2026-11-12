@@ -9,7 +9,8 @@ import torch
 from torch import nn
 from vllm.model_executor.models.utils import AutoWeightsLoader
 
-from vllm_ascend.models import kimi_k3_dspark, qwen3_dspark
+from vllm_ascend.models import qwen3_dspark
+from vllm_ascend.models.kimi_k3 import kimi_k3_dspark
 
 
 @pytest.fixture
