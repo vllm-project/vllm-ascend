@@ -10,6 +10,10 @@ from vllm.v1.worker.cp_utils import get_total_cp_world_size
 
 
 class BlockTable:
+    # Global generation counter bumped whenever any block table's GPU content
+    # is (re)written via commit or clear. Consumers use it to skip redundant
+    # per-step device copies of data derived from the tables.
+    _commit_gen: int = 0
     def __init__(
         self,
         block_size: int,
@@ -94,6 +98,9 @@ class BlockTable:
             duplicate_size += num_speculative_tokens
         self.block_table = self._make_buffer(max_num_reqs * duplicate_size, logical_table_size, dtype=torch.int32)
         self.num_blocks_per_row = np.zeros(max_num_reqs, dtype=np.int32)
+        # Dirty flag for commit_block_table: skip the staging copy + H2D when
+        # the CPU table has not changed since the last commit.
+        self._dirty = True
         # MTP slot preparation appends up to num_speculative_tokens - 1
         # draft positions for every request in addition to graph padding.
         num_mtp_draft_slots = max(num_speculative_tokens - 1, 0) * self.max_num_reqs
@@ -121,6 +128,7 @@ class BlockTable:
 
         self.block_table.np[row_idx, start : start + num_blocks] = block_ids
         self.num_blocks_per_row[row_idx] += num_blocks
+        self._dirty = True
 
     def add_row(self, block_ids: list[int], row_idx: int) -> None:
         self.num_blocks_per_row[row_idx] = 0
@@ -131,11 +139,13 @@ class BlockTable:
         if num_blocks > 0:
             self.block_table.np[row_idx, :num_blocks] = 0
         self.num_blocks_per_row[row_idx] = 0
+        self._dirty = True
 
     def move_row(self, src: int, tgt: int) -> None:
         num_blocks = self.num_blocks_per_row[src]
         self.block_table.np[tgt, :num_blocks] = self.block_table.np[src, :num_blocks]
         self.num_blocks_per_row[tgt] = num_blocks
+        self._dirty = True
 
     def swap_row(self, src: int, tgt: int) -> None:
         num_blocks_src = self.num_blocks_per_row[src]
@@ -144,6 +154,7 @@ class BlockTable:
         self.num_blocks_per_row[tgt] = num_blocks_src
 
         self.block_table.np[[src, tgt]] = self.block_table.np[[tgt, src]]
+        self._dirty = True
 
     def compute_slot_mapping(
         self,
@@ -276,14 +287,29 @@ class BlockTable:
             self.slot_mapping.cpu[: req_indices.shape[0]] = torch.where(mask, slot_mapping, -1)
 
     def commit_block_table(self, num_reqs: int) -> None:
-        self.block_table.gpu[:num_reqs].copy_(
-            self.block_table.cpu[:num_reqs].clone().pin_memory(),
-            non_blocking=True,
-        )
+        # Dirty-tracking: during steady decode the table is unchanged, so the
+        # per-step staging copy + H2D can be skipped entirely.
+        if not getattr(self, "_dirty", True):
+            return
+        # Persistent pinned staging instead of per-call clone().pin_memory():
+        # avoids a fresh pinned allocation every decode step while keeping the
+        # snapshot semantics (async H2D never reads a host-mutated buffer).
+        staging = getattr(self, "_pinned_staging", None)
+        if staging is None:
+            cpu = self.block_table.cpu
+            staging = torch.empty(cpu.shape, dtype=cpu.dtype, pin_memory=True)
+            self._pinned_staging = staging
+        staging[:num_reqs].copy_(self.block_table.cpu[:num_reqs])
+        self.block_table.gpu[:num_reqs].copy_(staging[:num_reqs], non_blocking=True)
+        self._dirty = False
+        BlockTable._commit_gen += 1
 
     def clear(self) -> None:
         self.block_table.fill_(0)
         self.block_table.cpu.fill_(0)
+        # The GPU content was just zeroed without a commit; bump so consumers
+        # never skip a refresh based on a stale generation.
+        BlockTable._commit_gen += 1
 
     def _convert_physical_to_logical_blocks(self, physical_blocks: np.ndarray) -> np.ndarray:
         """Convert physical block IDs to logical block IDs."""

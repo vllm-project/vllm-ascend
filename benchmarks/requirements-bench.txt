@@ -1,4 +1,0 @@
-pandas
-datasets
-modelscope
-tabulate
