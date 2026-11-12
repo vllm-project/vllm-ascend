@@ -30,6 +30,25 @@ from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 
 
+def test_use_updatable_graph_does_not_require_current_vllm_config():
+    from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+    from vllm_ascend.attention.mla_v1 import AscendMLABackend
+
+    with (
+        mock.patch(
+            "vllm_ascend.attention.utils.get_current_vllm_config",
+            side_effect=AssertionError("Current vLLM config is not set"),
+        ),
+        mock.patch("vllm.distributed.get_dcp_group") as get_dcp_group,
+    ):
+        get_dcp_group.return_value.world_size = 1
+        assert utils.use_updatable_graph(AscendMLABackend)
+        get_dcp_group.return_value.world_size = 2
+        assert not utils.use_updatable_graph(AscendMLABackend)
+        assert utils.use_updatable_graph(AscendAttentionBackend)
+        assert not utils.use_updatable_graph(None)
+
+
 @pytest.mark.parametrize("device_type", list(AscendDeviceType))
 def test_register_customop_selects_gdn_before_import(device_type):
     from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310

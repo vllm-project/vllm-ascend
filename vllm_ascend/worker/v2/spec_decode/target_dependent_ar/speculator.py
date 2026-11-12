@@ -27,6 +27,7 @@ import torch
 from vllm.config import VllmConfig, replace, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_dcp_group
+from vllm.logger import logger as vllm_logger
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -704,6 +705,43 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         """Build all draft steps' FIA parameters for a single graph update."""
         if self.use_dcp:
             return self.build_fia_params_dcp(num_reqs_padded, draft_attn_metadata, is_draft_model_prefill)
+        mla_metadata = {
+            layer_name: metadata
+            for layer_name, metadata in draft_attn_metadata.items()
+            if getattr(metadata, "decode", None) is not None and getattr(metadata, "external_flashmla", None) is None
+        }
+        if mla_metadata:
+            if is_draft_model_prefill:
+                vllm_logger.warning_once("DEBUG_SPEC_FIA path=target_dependent_ar backend=mla phase=prefill")
+                return [
+                    {
+                        "layer_name": layer_name,
+                        "actual_seq_qlen": metadata.decode.actual_seq_lengths_q,
+                        "actual_seq_kvlen": metadata.decode.seq_lens_list,
+                        "block_table": metadata.decode.block_table,
+                    }
+                    for layer_name, metadata in mla_metadata.items()
+                ]
+            assert self.input_batch is not None
+            num_reqs = self.input_batch.num_reqs
+            query_start_loc = list(range(1, num_reqs_padded + 1))
+            fia_params: list[dict[str, Any]] = []
+            for step in range(1, self.num_speculative_steps):
+                seq_lens = [
+                    min(int(seq_len) + step, self.max_model_len) for seq_len in self.input_batch.seq_lens_np[:num_reqs]
+                ]
+                seq_lens.extend([0] * (num_reqs_padded - num_reqs))
+                for layer_name, metadata in mla_metadata.items():
+                    fia_params.append(
+                        {
+                            "layer_name": layer_name,
+                            "actual_seq_qlen": query_start_loc,
+                            "actual_seq_kvlen": seq_lens,
+                            "block_table": metadata.decode.block_table,
+                        }
+                    )
+            vllm_logger.warning_once("DEBUG_SPEC_FIA path=target_dependent_ar backend=mla phase=decode")
+            return fia_params
         block_table = next(iter(draft_attn_metadata.values())).block_tables
         if is_draft_model_prefill:
             return [
@@ -718,7 +756,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         assert self.input_batch is not None
         num_reqs = self.input_batch.num_reqs
         query_start_loc = list(range(1, num_reqs_padded + 1))
-        fia_params: list[dict[str, Any]] = []
+        fia_params = []
         for step in range(1, self.num_speculative_steps):
             seq_lens = [
                 min(int(seq_len) + step, self.max_model_len) for seq_len in self.input_batch.seq_lens_np[:num_reqs]
