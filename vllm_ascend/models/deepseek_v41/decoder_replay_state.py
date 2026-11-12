@@ -97,6 +97,8 @@ class DecoderReplayState:
         if not (global_kept < global_lens).any():
             return None
         num_padded = int(global_kept.sum())
+        if self.layers.sequence_parallel:
+            num_padded = round_up(num_padded, self.config.parallel_config.tensor_parallel_size)
         if num_padded >= batch.num_tokens_after_padding:
             return None
 
@@ -297,6 +299,8 @@ class DecoderReplayState:
             num_tokens = batch.num_tokens_after_padding
         else:
             num_tokens = int(kept_lens.sum())
+            if self.layers.sequence_parallel:
+                num_tokens = round_up(num_tokens, self.config.parallel_config.tensor_parallel_size)
 
         return _DecoderReplayPlan(
             kept_lens=kept_lens,
@@ -349,8 +353,11 @@ class DecoderReplayState:
             self.layers.num_padded_rows = plan.num_tokens
 
         self.metadata = self._build_metadata(plan.replay_inputs, offsets)
-        # PCP selects valid rows and pads downstream; other paths may include padding row indices.
-        num_selected_rows = self.num_actual_tokens if plan.uses_pcp_replay else plan.num_tokens
+        # PCP and SP pad after selecting valid rows, before TP sharding.
+        padded = plan.uses_pcp_replay or self.layers.sequence_parallel
+        if padded:
+            self.layers.num_padded_rows = plan.num_tokens
+        num_selected_rows = self.num_actual_tokens if padded else plan.num_tokens
         self.layers.rows = self.rows[:num_selected_rows]
         self.layers.num_actual_rows = self.num_actual_tokens
         self.layers.context_factory = self.forward_context

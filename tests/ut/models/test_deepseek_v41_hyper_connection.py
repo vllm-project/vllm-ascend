@@ -266,7 +266,7 @@ def test_v41_dspark_propagates_delayed_mix_and_collapses_final_stream():
     assert [x[0].tolist() for x in seen] == [[1, 0], [0, 1], [1, 0]]
 
 
-def test_v41_target_emits_input_residual_for_selected_aux_layers():
+def test_v41_target_captures_aux_after_layer():
     from vllm_ascend.models.deepseek_v41.model import DeepseekV41Model
 
     model = DeepseekV41Model.__new__(DeepseekV41Model)
@@ -314,8 +314,8 @@ def test_v41_target_emits_input_residual_for_selected_aux_layers():
     embedded = model.embed_tokens(ids)
     torch.testing.assert_close(output, embedded + 3)
     assert len(aux) == 2
-    torch.testing.assert_close(aux[0], embedded)
-    torch.testing.assert_close(aux[1], embedded + 2)
+    torch.testing.assert_close(aux[0], embedded + 1)
+    torch.testing.assert_close(aux[1], embedded + 3)
 
 
 def test_v41_dspark_decoder_uses_draft_experts_instead_of_target_config():

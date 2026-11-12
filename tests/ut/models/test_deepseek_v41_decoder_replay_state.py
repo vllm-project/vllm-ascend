@@ -78,6 +78,15 @@ def test_prefill_trims_but_decode_and_prompt_logprobs_keep_rows(state):
     assert state._build_metadata.call_args.args[1].tolist() == [0, 1, 7, 9]
 
 
+def test_sp_replay_pads_execution_before_selecting_tp_shards(state):
+    state.layers.sequence_parallel = True
+    state.config.parallel_config.tensor_parallel_size = 4
+    state.prepare(inputs(), CUDAGraphMode.NONE)
+    assert state.num_actual_tokens == 5
+    assert state.num_tokens == state.layers.num_padded_rows == 8
+    assert state.layers.rows.numel() == 5
+
+
 @pytest.mark.parametrize(
     ("local_end", "expected_kept"),
     [(4, 0), (8, 2)],
