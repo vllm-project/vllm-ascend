@@ -136,6 +136,23 @@ def test_memfabric_initialization_failure_does_not_publish_session():
         _ = manager.unique_id
 
 
+def test_memfabric_failed_initialization_is_not_retried():
+    """A failed native initialize() leaks resources, so a retry must not
+    construct a second engine (mirrors GlobalTE's no-retry guard)."""
+    raw_engine = MagicMock()
+    raw_engine.initialize.return_value = 1
+    manager = GlobalMemfabricTE()
+    manager.configure(role=MEMFABRIC_ROLE_DECODE, device_id=0)
+
+    with patch.dict(sys.modules, {"memfabric_hybrid": _fake_memfabric(raw_engine)}):
+        with pytest.raises(RuntimeError, match="initialization failed"):
+            manager.get_transfer_engine("127.0.0.1")
+        with pytest.raises(RuntimeError, match="previously failed"):
+            manager.get_transfer_engine("127.0.0.1")
+
+    raw_engine.initialize.assert_called_once()
+
+
 def test_memfabric_transfer_protocol_defaults_to_sdma():
     raw_engine = MagicMock()
     raw_engine.get_rpc_port.return_value = 23456
