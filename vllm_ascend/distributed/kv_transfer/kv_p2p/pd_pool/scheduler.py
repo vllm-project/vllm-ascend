@@ -28,11 +28,13 @@ class PoolPDScheduler:
         self.pool = pool
         self.mtp_tokens = mtp_tokens
         self.handoff_protocol = POOL_PD_MTP_PROTOCOL if transfer_mtp else POOL_PD_PROTOCOL
+        self.transfer_mtp = transfer_mtp
         self.need_truncate = need_truncate
         self.original_prompts = {}
         self.requests = {}
         self.receives = {}
         self.matches = {}
+        self.published_prompt_ends: dict[str, int] = {}
         self.tail_scheduled = set()
         self.pd_load_requests = set()
 
@@ -82,16 +84,24 @@ class PoolPDScheduler:
             receive = self._request(request, blocks.get_block_ids(), local)
             receive.unhashed_block_ids = blocks.get_unhashed_block_ids_all_groups()
             self.receives[request.request_id] = receive
-        # Ordinary pool scheduling tracks subsequent decode and writeback,
-        # while this module exclusively owns the CPD external load.
+        # The validated handoff covers P's computed prompt, including locally
+        # matched blocks. A failed restore clears this hint before recompute.
+        self.published_prompt_ends[request.request_id] = self._cache_tokens(len(request.prompt_token_ids))
         self.pool.update_state_after_alloc(request, blocks, 0)
         request.kv_transfer_params["do_remote_prefill"] = False
+
+    def _cache_tokens(self, prompt_tokens):
+        return prompt_tokens - 1 if self.need_truncate and prompt_tokens > 1 else prompt_tokens
+
+    def update_connector_output(self, output):
+        for req_id in output.failed_recving or ():
+            self.published_prompt_ends.pop(req_id, None)
+        self.pool.update_connector_output(output)
 
     def _request(self, request, blocks, local=0):
         length, digest = self.original_prompts.get(
             request.request_id, (len(request.prompt_token_ids), prompt_digest(request))
         )
-        cache_tokens = length - 1 if self.need_truncate and length > 1 else length
         return PoolPDRequest(
             request.request_id,
             length,
@@ -99,7 +109,7 @@ class PoolPDScheduler:
             [list(group) for group in blocks],
             list(request.block_hashes),
             local,
-            cache_tokens,
+            self._cache_tokens(length),
             self.handoff_deadlines.get(request.request_id)
             if (request.kv_transfer_params or {}).get("do_remote_decode")
             else (request.kv_transfer_params or {}).get("pool_pd_handoff_deadline"),
@@ -115,10 +125,19 @@ class PoolPDScheduler:
             self.original_prompts.pop(rid, None)
             self.requests.pop(rid, None)
             self.matches.pop(rid, None)
+            self.published_prompt_ends.pop(rid, None)
             self.receives.pop(rid, None)
         for rid in output.preempted_req_ids or ():
             self.receives.pop(rid, None)
-        metadata = PoolPDMetadata(self.pool.build_connector_meta(output), list(self.receives.values()))
+        # A draft block is reusable only if P knew its following prefix
+        # hash. Leave that boundary eligible to publish under its regular key.
+        writeback_starts = self.published_prompt_ends
+        if writeback_starts and self.transfer_mtp:
+            writeback_starts = {rid: max(0, end - self.pool.hash_block_size) for rid, end in writeback_starts.items()}
+        pool_meta = self.pool.build_connector_meta(output, writeback_starts=writeback_starts)
+        for req in pool_meta.requests:
+            req.published_prompt_end = self.published_prompt_ends.get(req.req_id, 0)
+        metadata = PoolPDMetadata(pool_meta, list(self.receives.values()))
         self.receives.clear()
         for rid, scheduled in output.num_scheduled_tokens.items():
             request = self.requests.get(rid)

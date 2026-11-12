@@ -51,9 +51,10 @@ def target_group_specs(group, draft_names=()):
 def transfers_mtp_cache(config):
     transfer = config.kv_transfer_config
     speculative = getattr(config, "speculative_config", None)
-    return getattr(transfer, "kv_connector", None) == "LayerwisePoolConnector" and getattr(
-        speculative, "method", None
-    ) == "mtp"
+    return (
+        getattr(transfer, "kv_connector", None) == "LayerwisePoolConnector"
+        and getattr(speculative, "method", None) == "mtp"
+    )
 
 
 def draft_block_digest(hashes, block_hash_index):
@@ -212,7 +213,9 @@ class SharedPoolTransfer:
                     gid, group.kv_cache_spec.block_size, draft, caches, self.draft_layouts, self.draft_request_states
                 )
         worker.m_store.register_buffer(list(self.regions), list(self.regions.values()))
-        layouts = [layout for _, layout, _ in self.prefix_layouts()] + [layout for _, layout in self.request_state_layouts()]
+        layouts = [layout for _, layout, _ in self.prefix_layouts()] + [
+            layout for _, layout in self.request_state_layouts()
+        ]
         if any(layout.replicated for layout in layouts):
             from vllm_ascend.core.kv_cache_placement import build_layer_cache_bundles
 
@@ -297,6 +300,11 @@ class SharedPoolTransfer:
             # A last-token recompute still requires restoring its complete
             # immutable source block. Local APC blocks preceding it are skipped.
             first = math.ceil(start / layout.chunk_size) if writing else start // layout.chunk_size
+            if writing and request.published_prompt_end:
+                # MTP's next-token hash can become available only after D
+                # starts computing. Only skip keys P could have published.
+                published = request.published_prompt_end - (layout.hash_block_size if draft else 0)
+                first = max(first, published // layout.chunk_size)
             last = length // layout.chunk_size if writing else math.ceil(length / layout.chunk_size)
             blocks = request.block_ids_by_group[gid]
             if layout.state and not writing:
@@ -338,6 +346,10 @@ class SharedPoolTransfer:
             for request in metadata.requests:
                 if request.can_save and self.worker.can_put:
                     plans = tuple(plan for plan in self._plans(request, writing=True) if plan.key not in seen)
+                    if request.published_prompt_end and not plans:
+                        if request.event_id is not None:
+                            self.completed_events[request.event_id] = 1
+                        continue
                     seen.update(plan.key for plan in plans)
                     self.saves.append((request, self.io.begin(plans, writing=True)))
         except Exception:

@@ -877,6 +877,49 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         self.assertEqual(req_meta.token_ids, list(range(48)))
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_pd_consumer_skips_published_prompt_and_saves_completed_tail(self, mock_client_cls):
+        scheduler = KVPoolScheduler(
+            self._make_config(kv_role="kv_consumer", extra_config={"save_decode_cache": True}),
+            use_layerwise=False,
+        )
+        request = MagicMock(
+            request_id="r1",
+            prompt_token_ids=list(range(35)),
+            block_hashes=[b"h0", b"h1"],
+            all_token_ids=list(range(36)),
+        )
+        scheduler._unfinished_requests["r1"] = (request, [[1, 2, 3]])
+        new = MagicMock(
+            req_id="r1",
+            prompt_token_ids=request.prompt_token_ids,
+            prefill_token_ids=None,
+            num_computed_tokens=34,
+            block_ids=[1, 2, 3],
+        )
+        output = self._make_running_chunk_output([])
+        output.scheduled_cached_reqs.req_ids = []
+        output.scheduled_new_reqs = [new]
+        output.num_scheduled_tokens = {"r1": 1}
+
+        meta = scheduler.build_connector_meta(output, writeback_starts={"r1": 34})
+        self.assertFalse(meta.requests)
+        self.assertEqual(scheduler._request_trackers["r1"].num_saved_tokens, 32)
+
+        output = self._make_running_chunk_output([], num_computed_tokens=35)
+        output.num_scheduled_tokens = {"r1": 1}
+        request.num_computed_tokens = 35
+        self.assertFalse(scheduler.build_connector_meta(output).requests)
+
+        request.num_computed_tokens = 47
+        request.all_token_ids = list(range(48))
+        request.block_hashes.append(b"h2")
+        output = self._make_running_chunk_output([], num_computed_tokens=47)
+        output.num_scheduled_tokens = {"r1": 1}
+        meta = scheduler.build_connector_meta(output)
+        self.assertEqual(len(meta.requests), 1)
+        self.assertEqual((meta.requests[0].save_start_token, meta.requests[0].save_end_token), (32, 48))
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_consumer_does_not_save_unaccepted_speculative_tokens(self, mock_client_cls):
         scheduler = KVPoolScheduler(
             self._make_config(kv_role="kv_consumer", extra_config={"save_decode_cache": True}),

@@ -103,7 +103,7 @@ class LayerwisePoolConnector(KVConnectorBase_V1, SupportsHMA):
         self.scheduler.pool.bind_gpu_block_pool(block_pool)
 
     def update_connector_output(self, output):
-        self.scheduler.pool.update_connector_output(output)
+        self.scheduler.update_connector_output(output)
 
     def build_connector_worker_meta(self):
         # Pool saves pin committed Mamba checkpoints until every worker has

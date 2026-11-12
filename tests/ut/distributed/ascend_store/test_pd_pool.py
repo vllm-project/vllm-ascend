@@ -58,7 +58,7 @@ def test_pd_forwards_pool_checkpoint_completion_and_releases_pins():
     assert blocks[1].ref_cnt == 2
     assert blocks[2].ref_cnt == 1  # speculative scratch must stay exclusive
     connector = object.__new__(LayerwisePoolConnector)
-    connector.scheduler = SimpleNamespace(pool=scheduler)
+    connector.scheduler = PoolPDScheduler(scheduler)
     assert connector.has_pending_push_work()
     # Simulate request finish/cancellation releasing its own allocation while
     # the save still owns one reference. Only the eighth ACK may release it.
@@ -69,7 +69,9 @@ def test_pd_forwards_pool_checkpoint_completion_and_releases_pins():
         connector.worker = SimpleNamespace(pool=worker, failed_handoffs=set())
         ack = connector.build_connector_worker_meta()
         assert connector.build_connector_worker_meta() is None
-        connector.update_connector_output(SimpleNamespace(finished_recving=None, kv_connector_worker_meta=ack))
+        connector.update_connector_output(
+            SimpleNamespace(finished_recving=None, failed_recving=None, kv_connector_worker_meta=ack)
+        )
         assert blocks[1].ref_cnt == (0 if rank == 7 else 1)
     assert not connector.has_pending_push_work()
     assert scheduler.sending_blocks == {}
@@ -156,13 +158,12 @@ def test_pd_tail_and_full_block_copy_and_retention(monkeypatch, layerwise, lengt
     assert not backend.leases
 
 
-
 @pytest.mark.parametrize("layerwise", [False, True])
 @pytest.mark.parametrize("cache_end", [4, 7, 8])
 def test_mtp_handoff_transfers_draft_history_without_changing_target_keys(monkeypatch, layerwise, cache_end):
     monkeypatch.setattr(torch, "npu", SimpleNamespace(Event=MagicMock), raising=False)
     backend = MemoryBackend()
-    hashes = [b"h2", b"h4", b"h6", b"h8"][:cache_end // 2]
+    hashes = [b"h2", b"h4", b"h6", b"h8"][: cache_end // 2]
     prompt_tokens = cache_end + 1
     source = PoolPDRequest("p", prompt_tokens, "prompt", [[1, 2]], hashes, cache_tokens=cache_end)
     full = ReqMeta(
@@ -446,6 +447,29 @@ def test_finished_decode_clears_pending_receive_and_request_identity():
     assert not metadata.receives
     assert not scheduler.requests and not scheduler.receives and not scheduler.matches
     assert not scheduler.pd_load_requests and not scheduler.original_prompts and not scheduler.tail_scheduled
+    assert not scheduler.published_prompt_ends
+
+
+@pytest.mark.parametrize("external_tokens", [0, 31])
+def test_decode_writeback_inherits_only_validated_producer_prompt(external_tokens):
+    pool = MagicMock()
+    pool.build_connector_meta.return_value = step()
+    scheduler = PoolPDScheduler(pool, need_truncate=True)
+    req = request(
+        list(range(32)),
+        kv_transfer_params=dict(do_remote_prefill=True, pool_pd_protocol=POOL_PD_PROTOCOL, remote_num_prompt_tokens=32),
+    )
+    assert scheduler.get_num_new_matched_tokens(req, 31 - external_tokens) == (external_tokens, bool(external_tokens))
+    blocks = SimpleNamespace(get_block_ids=lambda: ([4, 5],), get_unhashed_block_ids_all_groups=lambda: [[4, 5]])
+    scheduler.update_state_after_alloc(req, blocks, external_tokens)
+
+    output = SimpleNamespace(finished_req_ids=set(), preempted_req_ids=set(), num_scheduled_tokens={})
+    scheduler.build_connector_meta(output)
+    assert pool.build_connector_meta.call_args.kwargs["writeback_starts"] == {"r": 31}
+
+    scheduler.update_connector_output(SimpleNamespace(failed_recving={"r"}))
+    scheduler.build_connector_meta(output)
+    assert pool.build_connector_meta.call_args.kwargs["writeback_starts"] == {}
 
 
 @pytest.mark.parametrize("length", [1, 4, 5, 8, 9])

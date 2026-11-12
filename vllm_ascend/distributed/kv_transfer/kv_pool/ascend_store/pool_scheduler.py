@@ -555,6 +555,7 @@ class KVPoolScheduler:
         request: Request,
         scheduler_output: SchedulerOutput,
         force_skip_save: bool,
+        writeback_start: int = 0,
     ) -> ReqMeta | None:
         if self.vllm_config.use_v2_model_runner:
             # MRV2 resumes through scheduled_new_reqs with a full block table.
@@ -578,7 +579,7 @@ class KVPoolScheduler:
             req_id=request.req_id,
             token_len=num_tokens_to_compute,
             allocated_block_ids_by_group=block_ids_by_group,
-            num_saved_tokens=0,
+            num_saved_tokens=self._floor_to_cache_transfer_granularity(writeback_start),
             token_ids=(prefill_tokens[:num_tokens_to_compute].copy() if self.enable_kv_events else None),
             num_prompt_tokens=len(request.prompt_token_ids),
             prefill_end_tokens=len(prefill_tokens),
@@ -743,7 +744,9 @@ class KVPoolScheduler:
             hash_block_size=self.hash_block_size,
         )
 
-    def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
+    def build_connector_meta(
+        self, scheduler_output: SchedulerOutput, *, writeback_starts: dict[str, int] | None = None
+    ) -> KVConnectorMetadata:
         """Attach the connector metadata to the request object.
 
         This function should NOT modify other fields in the scheduler_output
@@ -774,8 +777,11 @@ class KVPoolScheduler:
             scheduler_output.finished_req_ids or ()
         )
 
+        writeback_starts = writeback_starts or {}
         for request in scheduler_output.scheduled_new_reqs:
-            req_meta = self._process_new_request(request, scheduler_output, force_skip_save)
+            req_meta = self._process_new_request(
+                request, scheduler_output, force_skip_save, writeback_starts.get(request.req_id, 0)
+            )
             if req_meta is not None:
                 self.touch_sending_mamba_blocks(req_meta)
                 meta.add_request(req_meta)

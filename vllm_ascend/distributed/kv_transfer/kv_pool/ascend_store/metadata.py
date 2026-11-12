@@ -937,6 +937,8 @@ class ReqMeta:
 
     # First token that has not been saved before this metadata was built.
     save_start_token: int = 0
+    # Exact producer-computed boundary for an admitted shared PD handoff.
+    published_prompt_end: int = 0
 
     can_save: bool | None = None
     # load_spec
@@ -1001,6 +1003,8 @@ class ReqMeta:
         load_key_block_offset: int = 0,
         load_last_block_key: str | None = None,
         load_keys: list[str] | None = None,
+        *,
+        published_prompt_end: int = 0,
     ) -> None:
         if token_len_chunk is None:
             token_len_chunk = 0 if save_end_token is None else save_end_token
@@ -1009,6 +1013,7 @@ class ReqMeta:
         self.save_end_token = token_len_chunk if save_end_token is None else save_end_token
         self.target_token_len = token_len_chunk if target_token_len is None else target_token_len
         self.save_start_token = save_start_token
+        self.published_prompt_end = published_prompt_end
         if block_ids_by_group is None:
             block_ids_by_group = normalize_block_ids_by_group(block_ids or [])
         self.block_ids_by_group = block_ids_by_group

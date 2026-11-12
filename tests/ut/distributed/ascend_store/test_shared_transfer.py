@@ -160,7 +160,7 @@ def test_layerwise_failure_drains_pending_tasks_without_publication(monkeypatch)
     assert writer._sender.request_queue.unfinished_tasks == 0
 
 
-def transfer(backend, tp, rank, layerwise, source, *, enforce_eager=True, mtp=False):
+def transfer(backend, tp, rank, layerwise, source, *, enforce_eager=True, mtp=False, kv_role=None):
     layout, caches = attention(tp, rank, source=source, chunk=4)
     spec = next(iter(layout.specs.values()))
     if mtp:
@@ -175,11 +175,12 @@ def transfer(backend, tp, rank, layerwise, source, *, enforce_eager=True, mtp=Fa
             speculative_config=SimpleNamespace(method="mtp") if mtp else None,
             kv_transfer_config=SimpleNamespace(
                 kv_connector="LayerwisePoolConnector",
+                kv_role=kv_role,
                 kv_connector_extra_config={
                     "store_tp_size": 4,
                     "use_layerwise": layerwise,
                     "cache_prefix": "weights-v1",
-                }
+                },
             ),
         ),
         m_store=backend,
@@ -230,6 +231,31 @@ def saved_request():
     )
 
 
+def test_pd_decode_only_prepares_new_mtp_keys(monkeypatch):
+    writer, _ = transfer(MemoryBackend(), 2, 0, False, True, mtp=True)
+    request = ReqMeta(
+        "d",
+        block_ids_by_group=[[1]],
+        block_hashes=[b"hash2", b"hash4"],
+        can_save=True,
+        save_end_token=4,
+        event_id=123,
+        published_prompt_end=5,
+    )
+    begin = MagicMock()
+    monkeypatch.setattr(writer.io, "begin", begin)
+    writer.prepare_step(step(request))
+    begin.assert_not_called()
+    assert writer.completed_events == {123: 1}
+    writer.finish_step()
+
+    request.block_hashes.append(b"hash6")
+    plans = writer._plans(request, writing=True)
+    assert plans
+    assert {segment.owner for plan in plans for segment in plan.ranges} == {"draft.attn"}
+    writer.close()
+
+
 def test_unnamed_layer_save_uses_execution_wait_not_prefetch(monkeypatch):
     monkeypatch.setattr(torch, "npu", SimpleNamespace(Event=MagicMock), raising=False)
     writer, caches = transfer(MemoryBackend(), 2, 0, True, True)
@@ -261,8 +287,9 @@ def test_unnamed_draft_save_cannot_reuse_previous_target_owner():
     writer.close()
 
 
-def test_sparse_state_lookup_requires_an_exact_common_checkpoint():
-    executor, _ = transfer(MemoryBackend(), 2, 0, False, False)
+@pytest.mark.parametrize("kv_role", ["kv_producer", "kv_consumer"])
+def test_sparse_state_lookup_requires_an_exact_common_checkpoint(kv_role):
+    executor, _ = transfer(MemoryBackend(), 2, 0, False, False, kv_role=kv_role)
     executor.layouts = {
         0: SimpleNamespace(
             chunk_size=4, hash_block_size=4, store_tp=1, state=False, key=lambda shard, digest: "kv:" + digest
@@ -283,6 +310,27 @@ def test_sparse_state_lookup_requires_an_exact_common_checkpoint():
     assert executor.lookup(12, hashes) == 0  # Do not invent an aligned state.
 
 
+def test_producer_lookup_checks_each_block_and_requires_every_shard():
+    executor, _ = transfer(MemoryBackend(), 2, 0, False, True, kv_role="kv_producer")
+    executor.layouts = {
+        0: SimpleNamespace(
+            chunk_size=4, hash_block_size=4, store_tp=2, state=False, key=lambda shard, digest: (shard, digest)
+        ),
+    }
+    hashes = [i.to_bytes(2, "big") for i in range(65)]
+    missing = (1, block_hash_to_str(hashes[34]))
+    lookup = MagicMock(side_effect=lambda keys: [key != missing for key in keys])
+    executor.io.batch_is_exist = lookup
+
+    assert executor.lookup(260, hashes) == 136
+    assert [len(call.args[0]) for call in lookup.call_args_list] == [2] * 35
+
+    lookup.reset_mock(side_effect=True)
+    lookup.side_effect = lambda keys: [True] * len(keys)
+    assert executor.lookup(260, hashes) == 260
+    assert [len(call.args[0]) for call in lookup.call_args_list] == [2] * 65
+
+
 def test_state_plans_skip_null_history_and_load_only_final_checkpoint():
     executor, _ = transfer(MemoryBackend(), 2, 0, False, False)
     layout = SimpleNamespace(
@@ -293,7 +341,8 @@ def test_state_plans_skip_null_history_and_load_only_final_checkpoint():
         objects=lambda start, block, digest: [(start, block, digest)],
     )
     executor.layouts = {0: layout}
-    request = SimpleNamespace(
+    request = ReqMeta(
+        "reader",
         save_start_token=0,
         save_end_token=12,
         block_ids_by_group=[[0, 1, 2]],
