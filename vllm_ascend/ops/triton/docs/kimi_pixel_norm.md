@@ -82,11 +82,25 @@ The nightly E2E case is
 It checks both output dtypes, all pixel values against the CPU reference, empty
 inputs, both dispatch boundaries, large inputs, invalid metadata, dtype/device
 lifecycle, changing graph inputs and a shared dynamic Torch compile graph.
-Cold-cache cases compile through the real registry, then prohibit further JIT
-compilation while executing previously unseen patch counts and graph replay.
+The warmup coverage case uses the real registry, then prohibits further JIT
+compilation while executing multiple patch counts and graph replay. The nightly
+file does not clear or isolate Triton compilation caches, so this case does not
+independently establish cold-cache compilation coverage.
 
 ```bash
 pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_kimi_pixel_norm.py
+```
+
+CPU unit tests are in
+`tests/ut/model_executor/warmup/test_jit_warmup_kimi_pixel_norm.py`. They check
+scoped and deduplicated registration, deferred final-dtype key expansion and
+table restoration, metadata-only compilation of all three BLOCK variants, and
+runtime launch coverage at both element-count dispatch boundaries. Compiler and
+device launches are mocked; these tests do not establish NPU output correctness
+or actual cold-cache compilation behavior.
+
+```bash
+pytest -q tests/ut/model_executor/warmup/test_jit_warmup_kimi_pixel_norm.py
 ```
 
 A5 real-image validation was refreshed after the integer-index update using
