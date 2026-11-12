@@ -89,11 +89,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         self.dcp_manager = DCPManager(
             dcp_world_size=self.attn_vllm_config.parallel_config.decode_context_parallel_size,
             dcp_rank=get_dcp_group().rank_in_group,
-            max_buffer_num_tokens=self.max_num_tokens,
-            max_num_reqs=self.max_num_reqs,
-            device=self.device,
             vllm_config=self.attn_vllm_config,
-            use_async_scheduling=self.vllm_config.scheduler_config.async_scheduling,
         )
 
     def load_draft_model(

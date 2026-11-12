@@ -141,11 +141,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         self.dcp_manager = DCPManager(
             dcp_world_size=self.draft_vllm_config.parallel_config.decode_context_parallel_size,
             dcp_rank=get_dcp_group().rank_in_group,
-            max_buffer_num_tokens=self.max_num_tokens,
-            max_num_reqs=self.max_num_reqs,
-            device=self.device,
             vllm_config=self.draft_vllm_config,
-            use_async_scheduling=self.vllm_config.scheduler_config.async_scheduling,
         )
 
     @draft_config_context()

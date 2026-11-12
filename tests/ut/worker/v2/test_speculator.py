@@ -679,11 +679,7 @@ def test_init_dcp_enabled():
     dcp_manager_cls.assert_called_once_with(
         dcp_world_size=2,
         dcp_rank=1,
-        max_buffer_num_tokens=128,
-        max_num_reqs=16,
-        device=torch.device("cpu"),
         vllm_config=speculator.draft_vllm_config,
-        use_async_scheduling=True,
     )
 
 
