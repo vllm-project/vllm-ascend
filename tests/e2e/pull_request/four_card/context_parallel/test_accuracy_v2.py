@@ -559,7 +559,7 @@ MTP_PCP_CASE = AccuracyCase(
 
 
 EAGLE3_PCP_CASE = AccuracyCase(
-    name="eagle3_gqa_pcp_dcp",
+    name="eagle3_gqa_pcp",
     model=EAGLE3_PCP_TARGET_MODEL,
     prompts=ACCURACY_PROMPTS,
     expected_outputs=EAGLE3_PCP_GOLDENS,
@@ -569,7 +569,7 @@ EAGLE3_PCP_CASE = AccuracyCase(
     runner_kwargs={
         "tensor_parallel_size": 2,
         "prefill_context_parallel_size": 2,
-        "decode_context_parallel_size": 2,
+        "decode_context_parallel_size": 1,
         "max_model_len": 2048,
         "max_num_seqs": 256,
         "distributed_executor_backend": "mp",
@@ -617,7 +617,7 @@ def test_mtp_mla_spec_decode_with_pcp() -> None:
 @pytest.mark.e2e_coverage(
     arch="dense",
     feature="eagle3,chunked_prefill",
-    parallel="TP,PCP,DCP",
+    parallel="TP,PCP",
     deploy="pd_mix",
     hardware="A3",
     quantization="BF16",
@@ -633,7 +633,7 @@ def test_mtp_mla_spec_decode_with_pcp() -> None:
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_eagle3_gqa_spec_decode_with_pcp() -> None:
-    """Verify MRV2 Eagle3 PCP+DCP output accuracy and acceptance in one generation."""
+    """Verify MRV2 Eagle3 PCP-only output accuracy and acceptance in one generation."""
     _run_accuracy_case(EAGLE3_PCP_CASE)
 
 

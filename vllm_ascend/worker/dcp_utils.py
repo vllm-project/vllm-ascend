@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -30,7 +30,6 @@ from vllm_ascend.worker.spec_decode_utils import correct_optimistic_seq_lens_cpu
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu.input_batch import InputBatch
-    from vllm.v1.worker.utils import AttentionGroup
 
 
 @dataclass(frozen=True)
@@ -554,43 +553,6 @@ class DCPManager:
             cp_kv_cache_interleave_size=self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
         )
 
-    def prepare_parallel_draft_metadata(
-        self,
-        common_attn_metadata: Any,
-        draft_attn_groups: Sequence["AttentionGroup"],
-    ) -> None:
-        """Refresh DCP metadata after a parallel drafter replaces the query block."""
-        from vllm.v1.kv_cache_interface import MLAAttentionSpec
-
-        if common_attn_metadata.is_prefilling is not None:
-            common_attn_metadata.is_prefilling.fill_(False)
-        # Target query metadata no longer describes this parallel draft block.
-        common_attn_metadata.context_parallel_metadata = None
-        self.prepare_common_attn_metadata(common_attn_metadata)
-        if any(not isinstance(group.kv_cache_spec, MLAAttentionSpec) for group in draft_attn_groups):
-            self.prepare_legacy_dcp_metadata(common_attn_metadata)
-
-    def prepare_legacy_dcp_metadata(self, common_attn_metadata: Any) -> None:
-        """Publish the all-rank lengths still consumed by the GQA backend.
-
-        The producer has already advanced the global lengths and query offsets.
-        MLA/SFA consume the common local-length fields instead.
-        """
-        from vllm_ascend.attention.utils import AscendDCPMetadata
-
-        seq_lens_cpu = common_attn_metadata._seq_lens_cpu
-        if seq_lens_cpu is None:
-            seq_lens_cpu = common_attn_metadata.seq_lens_cpu
-        assert seq_lens_cpu is not None
-        local_seq_lens = self._get_dcp_local_seq_lens(seq_lens_cpu[: common_attn_metadata.num_reqs])
-        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-        common_attn_metadata.context_parallel_metadata = AscendDCPMetadata(
-            num_computed_tokens_of_dcp=local_seq_lens.numpy(),
-            query_lens_cpu=query_start_loc_cpu[1:] - query_start_loc_cpu[:-1],
-            max_query_len=common_attn_metadata.max_query_len,
-            dcp_mtp_attn_mask=None,
-        )
-
     @staticmethod
     def _is_mla_kv_cache_spec(kv_cache_spec: Any) -> bool:
         from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
@@ -639,12 +601,6 @@ class DCPManager:
                     "before backend-specific metadata is finalized."
                 )
                 assert attn_metadata.decode.cp_seq_len is not None
-            else:
-                assert attn_metadata.decode is not None, (
-                    "GQA DCP speculative draft metadata must be classified as decode "
-                    "before backend-specific metadata is finalized."
-                )
-                assert attn_metadata.decode.cp_history_seq_len is not None
             return
 
         # SFA updates its graph-stable device buffer without a CPU->NPU copy.

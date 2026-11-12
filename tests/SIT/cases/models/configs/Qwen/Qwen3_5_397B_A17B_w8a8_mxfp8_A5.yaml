@@ -78,8 +78,6 @@ test_cases:
       <<: *envs
     server_cmd: *server_cmd
     server_cmd_extra:
-      - "--decode-context-parallel-size"
-      - "2"
       - "--max-num-batched-tokens"
       - "32000"
       - "--max-num-seqs"

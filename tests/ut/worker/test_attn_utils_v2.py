@@ -21,6 +21,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu import attn_utils as upstream_attn_utils
+from vllm.v1.worker.gpu import model_runner as upstream_model_runner
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention import dsa_attn_kv_plan, dsa_v1
@@ -32,7 +33,6 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionState,
     AscendC8AttentionBackendImpl,
 )
-from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionDCPImpl
 from vllm_ascend.attention.dsa_v1 import (
     AscendDSAC4Backend,
     AscendDSAC4StateBackend,
@@ -64,6 +64,7 @@ from vllm_ascend.worker.v2 import utils as v2_utils
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states import default as model_state_module
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
+from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.utils import AscendV2KVBlockZeroer
 
 
@@ -130,7 +131,7 @@ def _configure_pa_allocation_check(monkeypatch, vllm_config, pa_enabled):
         for cache_kind in ("full", "sliding_window", "sparse", "full_sparse", "mixed")
         for pa_enabled in (False, True)
     ]
-    + [("c8", True), ("dcp", True)],
+    + [("c8", True)],
 )
 def test_main_allocator_attention_layout(
     monkeypatch, block_size, kernel_block_size, kv_transfer, cache_kind, pa_enabled
@@ -162,7 +163,6 @@ def test_main_allocator_attention_layout(
     )
     impl_cls = {
         "c8": AscendC8AttentionBackendImpl,
-        "dcp": AscendAttentionDCPImpl,
     }.get(cache_kind, AscendAttentionBackendImpl)
     impl = impl_cls.__new__(impl_cls)
     impl.sliding_window = extra_args.get("sliding_window")
@@ -183,7 +183,7 @@ def test_main_allocator_attention_layout(
         cache_config=SimpleNamespace(cache_dtype="auto"),
         kv_transfer_config=object() if kv_transfer else None,
         model_config=SimpleNamespace(hf_config=SimpleNamespace()),
-        parallel_config=SimpleNamespace(decode_context_parallel_size=2 if cache_kind == "dcp" else 1),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         quant_config=None,
     )
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
@@ -1105,8 +1105,7 @@ def test_build_attn_metadata_factory_applies_state(monkeypatch, state_kwargs, fa
     assert captured_kwargs["copy_sfa_draft_index"] == 2
 
 
-@pytest.mark.parametrize("dcp_size", [2])
-def test_gqa_pcp_dcp_cache_keeps_tp_local_kv_heads(monkeypatch, dcp_size):
+def test_gqa_pcp_cache_keeps_tp_local_kv_heads(monkeypatch):
     source_spec = FullAttentionSpec(
         block_size=128,
         num_kv_heads=1,
@@ -1129,7 +1128,7 @@ def test_gqa_pcp_dcp_cache_keeps_tp_local_kv_heads(monkeypatch, dcp_size):
         parallel_config=SimpleNamespace(
             tensor_parallel_size=8,
             prefill_context_parallel_size=2,
-            decode_context_parallel_size=dcp_size,
+            decode_context_parallel_size=1,
         ),
         attention_config=SimpleNamespace(indexer_kv_dtype="auto"),
         cache_config=SimpleNamespace(cache_dtype="auto", block_size=128),
@@ -1147,7 +1146,8 @@ def test_gqa_pcp_dcp_cache_keeps_tp_local_kv_heads(monkeypatch, dcp_size):
 
 
 @pytest.mark.parametrize("is_draft_layer", [True, False])
-def test_draft_layer_specs_are_tagged_for_eagle_groups(monkeypatch, is_draft_layer):
+@pytest.mark.parametrize("dcp_size", [1, 2, 4])
+def test_draft_layer_specs_keep_ownership_and_sequence_capacity(monkeypatch, is_draft_layer, dcp_size):
     """Draft specs carry ``is_draft`` so EAGLE groups get flagged on main.
 
     vLLM #42309 annotates ``is_eagle_group`` from ``spec.is_draft``; without the
@@ -1168,14 +1168,15 @@ def test_draft_layer_specs_are_tagged_for_eagle_groups(monkeypatch, is_draft_lay
     )
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(
-            use_mla=False,
+            use_mla=True,
+            max_model_len=1024,
             dtype=torch.bfloat16,
             get_total_num_kv_heads=lambda: 4,
         ),
         parallel_config=SimpleNamespace(
             tensor_parallel_size=1,
             prefill_context_parallel_size=1,
-            decode_context_parallel_size=1,
+            decode_context_parallel_size=dcp_size,
         ),
         attention_config=SimpleNamespace(indexer_kv_dtype="auto"),
         cache_config=SimpleNamespace(cache_dtype="auto", block_size=128),
@@ -1187,9 +1188,20 @@ def test_draft_layer_specs_are_tagged_for_eagle_groups(monkeypatch, is_draft_lay
     )
     monkeypatch.setattr(attn_utils, "enable_sfa_dcp_replicated_indexer", lambda _config: False)
 
-    spec = attn_utils.get_kv_cache_spec(vllm_config)["model.layers.0.self_attn.attn"]
+    # Ascend delegates to the upstream runner, which marks replicated draft
+    # groups using the speculator's effective DCP size before cache planning.
+    monkeypatch.setattr(upstream_model_runner, "get_kv_cache_spec", attn_utils.get_kv_cache_spec)
+    speculator = object.__new__(AscendEagleSpeculator)
+    speculator.dcp_size = 1
+    speculator.draft_attn_layer_names = {"model.layers.0.self_attn.attn"} if is_draft_layer else set()
+    runner = SimpleNamespace(vllm_config=vllm_config, speculator=speculator, dcp_size=dcp_size)
+    spec = upstream_model_runner.GPUModelRunner.get_kv_cache_spec(runner)["model.layers.0.self_attn.attn"]
 
     assert spec.is_draft is is_draft_layer
+    assert spec.dcp_sharded is (not is_draft_layer or dcp_size == 1)
+    expected_blocks = 8 if is_draft_layer else 8 // dcp_size
+    assert spec.max_num_blocks_per_req(vllm_config, 1024) == expected_blocks
+    assert spec.max_memory_usage_bytes(vllm_config) == expected_blocks * spec.page_size_bytes
 
 
 @pytest.mark.parametrize(

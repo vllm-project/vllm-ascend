@@ -60,6 +60,7 @@ from vllm_ascend.utils import (
     check_kv_extra_config,
     enable_sfa_dcp_replicated_indexer,
     is_moe_model,
+    model_supports_dcp,
     model_uses_kpool_indexer,
     model_uses_sfa_sparse,
     refresh_block_size,
@@ -1988,42 +1989,14 @@ def _validate_parallel_config(vllm_config: VllmConfig) -> None:
             )
 
 
-def _validate_model_pcp_dcp_config(
-    model_config: ModelConfig,
-    pcp_size: int,
-    dcp_size: int,
-) -> None:
-    """Require equal PCP/DCP sizes for GQA/MQA stacking."""
-    if model_config.use_mla or pcp_size <= 1 or dcp_size <= 1:
-        return
-    if pcp_size != dcp_size:
-        raise ValueError(
-            "GQA/MQA PCP+DCP requires prefill_context_parallel_size "
-            "to equal decode_context_parallel_size; "
-            f"got PCP={pcp_size}, DCP={dcp_size}."
-        )
-
-
 def _validate_pcp_dcp_config(vllm_config: VllmConfig) -> None:
-    """Validate GQA/MQA PCP+DCP sizes for the target model."""
-    parallel_config = vllm_config.parallel_config
-    model_config = vllm_config.model_config
-    if (
-        parallel_config.decode_context_parallel_size > 1
-        and not getattr(model_config, "use_mla", False)
-        and not model_uses_sfa_sparse(model_config)
+    """Validate DCP support for the target model."""
+    if vllm_config.parallel_config.decode_context_parallel_size > 1 and not model_supports_dcp(
+        vllm_config.model_config
     ):
-        logger.warning_once(
-            "Decode Context Parallelism (DCP) for GQA models is deprecated as of v0.32.0 "
-            "and has entered the sunset process. It will be removed in a future release. "
-            "GQA draft models can maintain native TP sharding under target DCP. "
-            "See RFC #21305 (https://github.com/vllm-project/vllm-ascend/issues/21305) for details."
+        raise ValueError(
+            "Decode Context Parallelism (DCP) is not supported for GQA/MQA models. Only MLA and SFA models support DCP."
         )
-    _validate_model_pcp_dcp_config(
-        vllm_config.model_config,
-        parallel_config.prefill_context_parallel_size,
-        parallel_config.decode_context_parallel_size,
-    )
 
 
 def _get_deepseek_v4_variant(model_config: ModelConfig) -> str | None:
@@ -2109,61 +2082,4 @@ def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> N
             "--decode-context-parallel-size to 1 or remove "
             "num_speculative_tokens_per_batch_size from "
             "--speculative-config."
-        )
-
-    draft_model_config = speculative_config.draft_model_config
-    if draft_model_config is None:
-        return
-
-    # Upstream DFlashSpeculator runs dense DSpark drafts at DCP=1 and the
-    # target runner marks their KV groups with dcp_sharded=False.
-    if vllm_config.use_v2_model_runner and speculative_config.use_dspark() and not draft_model_config.use_mla:
-        return
-
-    # MLA draft models do not use the GQA/MQA head-sharding rules below.
-    if draft_model_config.use_mla:
-        return
-
-    pcp_size = parallel_config.prefill_context_parallel_size
-    if pcp_size > 1:
-        _validate_model_pcp_dcp_config(draft_model_config, pcp_size, decode_context_parallel_size)
-        return
-
-    draft_parallel_config = speculative_config.draft_parallel_config
-    if draft_parallel_config is not None:
-        draft_tensor_parallel_size = draft_parallel_config.tensor_parallel_size
-    elif speculative_config.draft_tensor_parallel_size is not None:
-        draft_tensor_parallel_size = speculative_config.draft_tensor_parallel_size
-    else:
-        draft_tensor_parallel_size = parallel_config.tensor_parallel_size
-
-    total_num_attention_heads = draft_model_config.model_arch_config.total_num_attention_heads
-    total_num_kv_heads = draft_model_config.get_total_num_kv_heads()
-
-    if draft_tensor_parallel_size <= total_num_kv_heads:
-        raise ValueError(
-            "Invalid draft model parallel config for speculative decoding: "
-            f"tensor parallel size {draft_tensor_parallel_size} must be "
-            f"greater than total num kv heads {total_num_kv_heads} when "
-            "enable decode context parallel for GQA/MQA draft model"
-        )
-
-    max_dcp_size = draft_tensor_parallel_size // total_num_kv_heads
-    if decode_context_parallel_size > max_dcp_size:
-        raise ValueError(
-            "Invalid draft model parallel config for speculative decoding: "
-            "decode context parallel size must less than or equal to "
-            f"(draft tensor parallel size {draft_tensor_parallel_size} // "
-            f"draft total num kv heads {total_num_kv_heads}) = "
-            f"{max_dcp_size}, but got {decode_context_parallel_size}"
-        )
-
-    num_q_per_kv = total_num_attention_heads // total_num_kv_heads
-    if num_q_per_kv % decode_context_parallel_size != 0:
-        raise ValueError(
-            "Invalid draft model parallel config for speculative decoding: "
-            f"total number of q per kv attn heads ({num_q_per_kv}) must "
-            "be divisible by dcp world size when enable decode context "
-            f"parallel for GQA draft model "
-            f"({decode_context_parallel_size})."
         )

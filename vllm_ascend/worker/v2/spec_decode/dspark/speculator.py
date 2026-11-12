@@ -456,7 +456,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             num_draft_reqs = min(num_draft_reqs, sync_state.num_reqs)
         seq_lens_cpu = None
         is_prefilling = torch.from_numpy(self.input_batch.is_prefilling_np)
-        if self.use_dcp and self.attn_architecture in ("GQA", "MLA") and not (dummy_run and skip_attn_for_dummy_run):
+        if self.use_dcp and self.attn_architecture == "MLA" and not (dummy_run and skip_attn_for_dummy_run):
             # DSpark drafts one block with a fixed step; zero unused request slots
             # before upstream selects the padded batch size and slices this view.
             seq_lens_cpu, is_prefilling = self._prepare_draft_dcp_metadata_inputs(

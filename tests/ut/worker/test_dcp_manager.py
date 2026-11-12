@@ -195,38 +195,6 @@ def test_prepare_non_uniform_dummy_run_metadata_uses_input_batch_state() -> None
     manager.query_lens_full.copy_to_gpu.assert_called_once_with()
 
 
-@pytest.mark.parametrize("prefill_flags", [[False, False], [True, False]])
-def test_prepare_legacy_dcp_metadata_uses_full_query_kv_length(prefill_flags) -> None:
-    manager = _make_dcp_manager(
-        dcp_world_size=2,
-        dcp_rank=0,
-        interleave_size=1,
-    )
-    common_attn_metadata = SimpleNamespace(
-        num_reqs=2,
-        _seq_lens_cpu=torch.tensor([133, 261], dtype=torch.int32),
-        seq_lens=torch.tensor([133, 261], dtype=torch.int32),
-        is_prefilling=torch.tensor(prefill_flags),
-        context_parallel_metadata=None,
-    )
-
-    common_attn_metadata.query_start_loc_cpu = torch.tensor([0, 5, 10], dtype=torch.int32)
-    common_attn_metadata.max_query_len = 5
-    manager.prepare_legacy_dcp_metadata(common_attn_metadata)
-
-    metadata = common_attn_metadata.context_parallel_metadata
-    np.testing.assert_array_equal(
-        metadata.num_computed_tokens_of_dcp,
-        np.array([[67, 66], [131, 130]], dtype=np.int32),
-    )
-    assert torch.equal(
-        metadata.query_lens_cpu,
-        torch.tensor([5, 5], dtype=torch.int32),
-    )
-    assert metadata.max_query_len == 5
-    assert metadata.dcp_mtp_attn_mask is None
-
-
 @pytest.mark.parametrize("dcp_rank", [0, 1])
 def test_generate_dcp_metadata_does_not_allocate_heterogeneous_mask(dcp_rank: int) -> None:
     manager = _make_dcp_manager(2, dcp_rank, 1)
@@ -268,23 +236,6 @@ def test_generate_dcp_mtp_input_fills_query_start_loc_tail() -> None:
         np.array([0, 2, 5, -1, -1], dtype=np.int32),
     )
     manager.query_start_loc_full.copy_to_gpu.assert_called_once_with()
-
-
-def test_update_spec_decode_drafting_metadata_requires_gqa_decode() -> None:
-    manager = object.__new__(DCPManager)
-    attn_metadata = SimpleNamespace(decode=None)
-
-    with (
-        patch.object(DCPManager, "_is_mla_kv_cache_spec", return_value=False),
-        patch.object(DCPManager, "_is_sfa_dcp_metadata_builder", return_value=False),
-        pytest.raises(AssertionError, match="must be classified as decode"),
-    ):
-        manager.update_spec_decode_drafting_cp_metadata(
-            attn_metadata=attn_metadata,
-            kv_cache_spec=object(),
-            seq_lens=torch.tensor([3]),
-            draft_index=1,
-        )
 
 
 def test_prepare_spec_decode_drafting_metadata_transitions_to_decode() -> None:

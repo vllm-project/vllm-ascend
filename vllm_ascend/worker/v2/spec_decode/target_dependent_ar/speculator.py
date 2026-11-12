@@ -28,7 +28,6 @@ from vllm.config import VllmConfig, replace, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_dcp_group
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
@@ -41,13 +40,11 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_config import draft_config_context, get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
-from vllm_ascend.attention.context_parallel.attention_cp import build_dcp_fia_params
-from vllm_ascend.attention.context_parallel.common_cp import CPKVScope
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAMetadata
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import model_supports_dcp, vllm_version_is
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
@@ -73,11 +70,10 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
     GQA, MLA, DSA, and SFA draft decode state share one path. The current MTP path
     uses the draft attention backend recorded by ``set_attn``.
 
-    MLA and GQA DCP keep their per-step state in ``.decode``, cloned
-    before per-step updates. Both rebuild the base metadata for the padded
-    draft batch. MLA also forwards rotary ``positions`` into
-    build_attn_metadata. DSA and SFA manage their draft state in their metadata
-    builders and skip the generic MLA/GQA init and update logic.
+    MLA DCP keeps its per-step state in ``.decode``, cloned before updates,
+    and forwards rotary ``positions`` into build_attn_metadata. GQA drafts
+    retain TP head sharding and a complete sequence cache under target DCP.
+    DSA and SFA manage their draft state in their metadata builders.
     """
 
     model_state: "AscendModelState"
@@ -134,7 +130,8 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         )
 
     def _init_dcp(self) -> None:
-        self.use_dcp = self.draft_vllm_config.parallel_config.decode_context_parallel_size > 1
+        self.dcp_size = self.draft_vllm_config.parallel_config.decode_context_parallel_size
+        self.use_dcp = self.dcp_size > 1
         self.dcp_manager: DCPManager | None = None
         if not self.use_dcp:
             return
@@ -157,6 +154,11 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         parallel_config = replace(
             source_parallel_config,
             pipeline_parallel_size=1,
+            decode_context_parallel_size=(
+                source_parallel_config.decode_context_parallel_size
+                if model_supports_dcp(self.draft_model_config)
+                else 1
+            ),
         )
         with disable_profiling_chunk_for_draft(self.vllm_config):
             draft_config = replace(
@@ -170,6 +172,13 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         # replace() used to re-run post_init's is_moe_model recompute; mirror it.
         draft_config.parallel_config.is_moe_model = self.draft_model_config.is_moe
         return draft_config
+
+    @property
+    def attn_vllm_config(self) -> VllmConfig:
+        config = super().attn_vllm_config
+        # Builders and graph replay must use the same topology as model loading.
+        config.parallel_config = self.draft_vllm_config.parallel_config
+        return config
 
     # TODO: Remove this method once vllm-project/vllm#53458 or an
     # equivalent upstream fix is merged.
@@ -195,10 +204,17 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         target_model: torch.nn.Module,
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
-        draft_model = super().load_draft_model(
-            target_model,
-            target_attn_layer_names,
-        )
+        target_config = self.vllm_config
+        loading_config = copy(target_config)
+        loading_config.parallel_config = self.draft_vllm_config.parallel_config
+        self.vllm_config = loading_config
+        try:
+            draft_model = super().load_draft_model(
+                target_model,
+                target_attn_layer_names,
+            )
+        finally:
+            self.vllm_config = target_config
         self._maybe_remove_d2t(draft_model)
         return draft_model
 
@@ -639,7 +655,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             for metadata in per_step_attn_metadata.values():
                 metadata.attn_state = attn_state
                 metadata.seq_lens_cpu = seq_lens_cpu
-                if self.attn_architecture == "MLA" or (self.use_dcp and self.attn_architecture == "GQA"):
+                if self.attn_architecture == "MLA":
                     # Clone per-step decode state so length updates do not alias.
                     metadata.decode = copy(metadata.decode)
             draft_attn_metadatas.append(per_step_attn_metadata)
@@ -702,8 +718,6 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         is_draft_model_prefill: bool,
     ) -> list[dict[str, Any]]:
         """Build all draft steps' FIA parameters for a single graph update."""
-        if self.use_dcp:
-            return self.build_fia_params_dcp(num_reqs_padded, draft_attn_metadata, is_draft_model_prefill)
         block_table = next(iter(draft_attn_metadata.values())).block_tables
         if is_draft_model_prefill:
             return [
@@ -731,55 +745,6 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
                         "actual_seq_lengths": query_start_loc,
                         "actual_seq_lengths_kv": seq_lens,
                         "block_table": block_table,
-                    }
-                )
-        return fia_params
-
-    def build_fia_params_dcp(
-        self,
-        num_reqs_padded: int,
-        draft_attn_metadata: dict[str, Any],
-        is_draft_model_prefill: bool,
-    ) -> list[dict[str, Any]]:
-        """Build all GQA DCP draft steps' history/current or cache parameters."""
-        assert self.dcp_manager is not None
-        if is_draft_model_prefill:
-            return [
-                params
-                for layer_name, metadata in draft_attn_metadata.items()
-                for params in build_dcp_fia_params(
-                    layer_name,
-                    metadata,
-                    self.dcp_manager.dcp_world_rank,
-                    is_draft_model=True,
-                    is_draft_model_prefill=True,
-                )
-            ]
-        assert self.input_batch is not None
-        parallel_config = self.draft_vllm_config.parallel_config
-        num_reqs = self.input_batch.num_reqs
-        query_start_loc = list(range(1, num_reqs_padded + 1))
-        fia_params: list[dict[str, Any]] = []
-        for step in range(1, self.num_speculative_steps):
-            seq_lens = [
-                min(int(seq_len) + step, self.max_model_len) for seq_len in self.input_batch.seq_lens_np[:num_reqs]
-            ]
-            seq_lens.extend([0] * (num_reqs_padded - num_reqs))
-            kv_lens_cpu = torch.tensor(seq_lens, dtype=torch.int32)
-            local_kv_lens = get_dcp_local_seq_lens(
-                kv_lens_cpu,
-                dcp_size=parallel_config.decode_context_parallel_size,
-                dcp_rank=self.dcp_manager.dcp_world_rank,
-                cp_kv_cache_interleave_size=parallel_config.cp_kv_cache_interleave_size,
-            ).tolist()
-            for layer_name in self.draft_attn_layer_names:
-                metadata = draft_attn_metadata[layer_name]
-                fia_params.append(
-                    {
-                        "layer_name": (layer_name, CPKVScope.FULL),
-                        "actual_seq_lengths": query_start_loc,
-                        "actual_seq_lengths_kv": local_kv_lens,
-                        "block_table": metadata.decode.block_tables,
                     }
                 )
         return fia_params

@@ -73,7 +73,7 @@ def use_history_current_split_decode(
     is_draft_model_prefill: bool = False,
     use_spec_decode: bool = False,
 ) -> bool:
-    """Choose one split policy for MLA and GQA decode attention."""
+    """Choose the history/current split policy for MLA decode attention."""
     if not attn_metadata.causal or attn_metadata.decode is None:
         return False
     # Preserve the task layout of speculative target and draft-prefill graphs.
@@ -117,46 +117,6 @@ class DCPMetadataBuilderMixin:
         dcp_group = get_dcp_group()
         self.dcp_size = dcp_group.world_size
         self.dcp_rank = dcp_group.rank_in_group
-
-    @staticmethod
-    def _require_dcp_metadata(
-        common_attn_metadata: Any,
-    ) -> Any:
-        dcp_metadata = common_attn_metadata.context_parallel_metadata
-        if dcp_metadata is None or dcp_metadata.num_computed_tokens_of_dcp is None:
-            raise AssertionError("DCP metadata must be populated.")
-        return dcp_metadata
-
-    def _get_dcp_context_lens(
-        self,
-        common_attn_metadata: Any,
-        *,
-        start: int = 0,
-        end: int | None = None,
-        device: torch.device | None = None,
-    ) -> torch.Tensor:
-        dcp_metadata = self._require_dcp_metadata(common_attn_metadata)
-        context_lens = torch.as_tensor(
-            dcp_metadata.num_computed_tokens_of_dcp[start:end],
-            dtype=torch.int32,
-            device=device,
-        )
-        return context_lens.reshape(-1, self.dcp_size)
-
-    def _get_dcp_rank_context_lens(
-        self,
-        common_attn_metadata: Any,
-        *,
-        start: int = 0,
-        end: int | None = None,
-        device: torch.device | None = None,
-    ) -> torch.Tensor:
-        return self._get_dcp_context_lens(
-            common_attn_metadata,
-            start=start,
-            end=end,
-            device=device,
-        )[:, self.dcp_rank]
 
 
 class DCPImplMixin:

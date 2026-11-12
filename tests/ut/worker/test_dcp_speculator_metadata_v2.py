@@ -354,8 +354,10 @@ def test_draft_decode_hooks_forward_parallel_config(monkeypatch, architecture, u
 
 
 @pytest.mark.parametrize("mode", ["NONE", "PIECEWISE", "FULL"])
-@pytest.mark.parametrize("use_dcp", [False, True])
-@pytest.mark.parametrize("architecture", ["MLA", "GQA", "SFA"])
+@pytest.mark.parametrize(
+    ("architecture", "use_dcp"),
+    [("MLA", False), ("MLA", True), ("GQA", False), ("SFA", False), ("SFA", True)],
+)
 def test_dspark_propose_passes_cpu_lengths_through_existing_factory(monkeypatch, mode, use_dcp, architecture):
     from vllm.config import CUDAGraphMode
     from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor

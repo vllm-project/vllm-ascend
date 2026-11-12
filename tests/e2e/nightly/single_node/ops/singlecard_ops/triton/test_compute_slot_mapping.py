@@ -19,7 +19,7 @@ from vllm_ascend.worker.v2.block_table import (
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
 )
-@pytest.mark.parametrize("replicated_draft", [False, True])
+@pytest.mark.parametrize("sharded_groups", [(True, True), (True, False), (False, True)])
 @pytest.mark.parametrize(
     ("cp_size", "cp_rank", "cp_interleave"),
     [
@@ -30,7 +30,7 @@ from vllm_ascend.worker.v2.block_table import (
     ],
 )
 def test_compute_slot_mapping_npu_kernel_cp(
-    cp_size: int, cp_rank: int, cp_interleave: int, replicated_draft: bool
+    cp_size: int, cp_rank: int, cp_interleave: int, sharded_groups: tuple[bool, bool]
 ) -> None:
     """Check sharded and replicated groups against global-token CPU mapping."""
     device = "npu"
@@ -54,7 +54,7 @@ def test_compute_slot_mapping_npu_kernel_cp(
     )
 
     num_groups = 2
-    sharded = torch.tensor([True, not replicated_draft], dtype=torch.bool, device=device)
+    sharded = torch.tensor(sharded_groups, dtype=torch.bool, device=device)
     block_tables = [torch.randint(0, 320, (3, 320), dtype=torch.int32, device=device) for _ in range(num_groups)]
     block_table_ptrs = torch.tensor(
         [table.data_ptr() for table in block_tables],
@@ -126,8 +126,9 @@ def test_compute_slot_mapping_npu_kernel_cp(
             ref_slot_mappings[group, start:end] = torch.where(owned, slots, -1).to(torch.int32)
 
     torch.testing.assert_close(slot_mappings.cpu(), ref_slot_mappings)
-    if replicated_draft:
-        assert torch.all(slot_mappings[1, : positions.numel()] >= 0)
+    for group, is_sharded in enumerate(sharded_groups):
+        if not is_sharded:
+            assert torch.all(slot_mappings[group, : positions.numel()] >= 0)
 
 
 @pytest.mark.skipif(
