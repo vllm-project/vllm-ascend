@@ -2347,3 +2347,54 @@ def test_sample_tokens_refreshes_lmhead_padding_each_step(monkeypatch, lmhead_tp
             assert runner._lmhead_pad_size is None
 
     assert observed == ([4, 8, None] if lmhead_tp else [None, None, None])
+
+
+def test_shutdown_keeps_shared_reader_until_parent_finishes():
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    reader = MagicMock()
+    reader._shared_pool_client = object()
+    runner.model = MagicMock()
+    runner.model.modules.return_value = [reader]
+    calls = []
+    reader.close_host_offload.side_effect = lambda: calls.append("release")
+    with patch.object(GPUModelRunner, "shutdown", side_effect=lambda: calls.append("parent")):
+        runner.shutdown()
+    assert calls == ["parent", "release"]
+
+
+def test_shutdown_retains_readers_when_parent_fails_after_model_deletion():
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    reader = MagicMock()
+    reader._shared_pool_client = object()
+    runner.model = MagicMock()
+    runner.model.modules.return_value = [reader]
+    calls = []
+
+    def parent_shutdown():
+        calls.append("parent")
+        if hasattr(runner, "model"):
+            del runner.model
+            raise RuntimeError("parent failed")
+
+    reader.close_host_offload.side_effect = lambda: calls.append("release")
+    with patch.object(GPUModelRunner, "shutdown", side_effect=parent_shutdown):
+        with pytest.raises(RuntimeError, match="parent failed"):
+            runner.shutdown()
+        assert calls == ["parent"]
+        runner.shutdown()
+    assert calls == ["parent", "parent", "release"]
+
+
+def test_shutdown_retries_failed_reader_without_rerunning_parent():
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    reader, other = MagicMock(), MagicMock()
+    reader._shared_pool_client = other._shared_pool_client = object()
+    reader.close_host_offload.side_effect = [RuntimeError("close failed"), None]
+    runner.model = MagicMock()
+    runner.model.modules.return_value = [reader, other]
+    with patch.object(GPUModelRunner, "shutdown") as parent:
+        with pytest.raises(RuntimeError, match="close failed"):
+            runner.shutdown()
+        runner.shutdown()
+    parent.assert_called_once()
+    assert reader.close_host_offload.call_count == 2

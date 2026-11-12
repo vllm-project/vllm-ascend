@@ -1,0 +1,4 @@
+pr: 21638
+entries:
+  - category: feature
+    text: Added opt-in sharing of BF16 Qwen PLE tables across independent Ascend service instances.

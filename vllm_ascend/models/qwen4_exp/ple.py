@@ -341,6 +341,27 @@ def patch_upstream_ple_short_conv() -> None:
     # only that model-local binding; other platforms keep the upstream kernel.
     upstream_ple_layer.ple_conv = _ple_conv_ascend
 
+    embedding_attr = "_ascend_original_ple_host_embedding"
+    if not hasattr(upstream_ple_layer, embedding_attr):
+        original_embedding = upstream_ple_layer.Qwen4ExpPLEPinnedHostEmbedding
+        setattr(upstream_ple_layer, embedding_attr, original_embedding)
+
+        def select_ple_embedding(*args, **kwargs):
+            from vllm.config import get_current_vllm_config
+
+            from .ple_bm_embedding import AscendSharedPLEEmbedding, shared_ple_config
+
+            shared = shared_ple_config(get_current_vllm_config())
+            if shared is None:
+                return original_embedding(*args, **kwargs)
+            if shared["backend"] == "rdma":
+                from .ple_rdma_embedding import AscendRemotePLEEmbedding
+
+                return AscendRemotePLEEmbedding(*args, **kwargs)
+            return AscendSharedPLEEmbedding(*args, **kwargs)
+
+        upstream_ple_layer.Qwen4ExpPLEPinnedHostEmbedding = select_ple_embedding
+
     original_attr = "_ascend_original_short_conv"
     if not hasattr(Qwen4ExpPLELayer, original_attr):
         original = Qwen4ExpPLELayer._short_conv
