@@ -154,10 +154,31 @@ def get_layerwise_reuse_config(kv_transfer_config: Any) -> dict[str, Any] | None
 def _parse_int_config(value: Any, name: str) -> int:
     if isinstance(value, bool):
         raise TypeError(f"{name} must be an integer, got bool")
-    try:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and re.fullmatch(r"-?[0-9]+", value):
         return int(value)
-    except (TypeError, ValueError) as err:
-        raise TypeError(f"{name} must be an integer, got {value!r}") from err
+    raise TypeError(f"{name} must be an integer, got {value!r}")
+
+
+def parse_layerwise_prefetch_layers(value: Any, default: int = 1) -> int:
+    if default < 1:
+        raise ValueError(f"{_PREFETCH_LAYERS} default must be at least 1")
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        raise TypeError(f"{_PREFETCH_LAYERS} must be a positive integer, got bool")
+    if isinstance(value, int):
+        num_prefetch_layers = value
+    elif isinstance(value, str):
+        if not re.fullmatch(r"[0-9]+", value):
+            raise ValueError(f"{_PREFETCH_LAYERS} must be a positive integer, got {value!r}")
+        num_prefetch_layers = int(value)
+    else:
+        raise TypeError(f"{_PREFETCH_LAYERS} must be a positive integer, got {value!r}")
+    if num_prefetch_layers < 1:
+        raise ValueError(f"{_PREFETCH_LAYERS} must be at least 1")
+    return num_prefetch_layers
 
 
 def build_layerwise_cache_layout(
@@ -175,12 +196,10 @@ def build_layerwise_cache_layout(
             raise ValueError(f"{_NUM_SHARED_BUFFERS} must be at least 1")
 
     prefetch_value = extra_config.get(_PREFETCH_LAYERS) if extra_config else None
-    if prefetch_value is None:
-        num_prefetch_layers = min(num_shared_buffers, _DEFAULT_MAX_PREFETCH_LAYERS)
-    else:
-        num_prefetch_layers = _parse_int_config(prefetch_value, _PREFETCH_LAYERS)
-        if num_prefetch_layers < 1:
-            raise ValueError(f"{_PREFETCH_LAYERS} must be at least 1")
+    num_prefetch_layers = parse_layerwise_prefetch_layers(
+        prefetch_value,
+        default=min(num_shared_buffers, _DEFAULT_MAX_PREFETCH_LAYERS),
+    )
 
     independent_value = extra_config.get(_INDEPENDENT_LAYERS) if extra_config else None
     if independent_value is None:
