@@ -21,6 +21,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_b
 
 
 class TestBoundLayerwiseKeys(unittest.TestCase):
+    # PCP > 1 resolves PP partitions with get_pp_indices; match make_config.
+    @patch.dict("os.environ", {"VLLM_PP_LAYER_PARTITION": "3,4"})
     def test_attention_keys_share_pcp_replicas(self):
         for pp_size in (1, 2):
             for num_groups, backend_class in product((1, 2), (MooncakeBackend, MemcacheBackend)):
@@ -289,18 +291,21 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
                 grouped_block_size=[32, 48],
             )
 
-    def test_pcp_rejects_layer_sharded_kvpp(self):
+    def test_kvpp_pcp_keys_share_attention_layout(self):
         config = self.make_config()
         config.parallel_config.prefill_context_parallel_size = 4
         config.additional_config = {"enable_kvpp": True}
-        with self.assertRaisesRegex(ValueError, "layer-sharded caches"):
-            MooncakeBackend.bind_layerwise_keys(
-                vllm_config=config,
-                kv_cache_config=self.make_cache_config(1),
-                model_name="model",
-                use_hybrid=False,
-                grouped_block_size=[16],
-            )
+        builder = MooncakeBackend.bind_layerwise_keys(
+            vllm_config=config,
+            kv_cache_config=self.make_cache_config(1),
+            model_name="model",
+            use_hybrid=False,
+            grouped_block_size=[16],
+        )
+        keys = builder.make_hit_check_keys(0, "hash", 8)
+        self.assertEqual(len(keys), 8)
+        self.assertEqual(len(set(keys)), 8)
+        self.assertNotIn("@pcp_size", keys[0])
 
     def test_kvpp_lookup_covers_every_owner_and_uses_separate_layout_keys(self):
         for pp_size in (1, 2):
@@ -333,9 +338,16 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
     @staticmethod
     def make_config(pp_size=1):
         return SimpleNamespace(
-            parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size, tensor_parallel_size=2, rank=0),
+            parallel_config=SimpleNamespace(
+                pipeline_parallel_size=pp_size,
+                tensor_parallel_size=2,
+                prefill_context_parallel_size=1,
+                rank=0,
+            ),
             model_config=SimpleNamespace(
-                get_layers_start_end_indices=lambda p: ((0, 3), (3, 7))[p.rank // p.tensor_parallel_size],
+                get_layers_start_end_indices=lambda p: ((0, 3), (3, 7))[
+                    p.rank // (p.tensor_parallel_size * p.prefill_context_parallel_size)
+                ],
                 get_total_num_hidden_layers=lambda: 7,
                 get_total_num_kv_heads=lambda: 1,
                 compute_hash=lambda: "model-config",
@@ -361,6 +373,25 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
                 for group in range(num_groups)
             ]
         )
+
+    def test_pp_pcp_namespace_does_not_depend_on_vllm_pp_rank_formula(self):
+        # vLLM 0.33.0 derives the PP stage as rank // TP; vLLM main (#65539)
+        # uses rank // (TP x PCP). Both must yield the same stage partitions.
+        def blind(p):
+            return ((0, 3), (3, 7))[(p.rank // p.tensor_parallel_size) % p.pipeline_parallel_size]
+
+        def aware(p):
+            stride = p.tensor_parallel_size * p.prefill_context_parallel_size
+            return ((0, 3), (3, 7))[(p.rank // stride) % p.pipeline_parallel_size]
+
+        reference = mooncake_layerwise.layerwise_topology_namespace(self.make_config(pp_size=2))
+        with patch.dict("os.environ", {"VLLM_PP_LAYER_PARTITION": "3,4"}):
+            for pcp_size, formula in product((2, 4), (blind, aware)):
+                with self.subTest(pcp_size=pcp_size, formula=formula.__name__):
+                    config = self.make_config(pp_size=2)
+                    config.parallel_config.prefill_context_parallel_size = pcp_size
+                    config.model_config.get_layers_start_end_indices = formula
+                    self.assertEqual(mooncake_layerwise.layerwise_topology_namespace(config), reference)
 
     def test_wire_compatibility_and_all_stage_writer_keys(self):
         for backend_class in (MooncakeBackend, MemcacheBackend):
