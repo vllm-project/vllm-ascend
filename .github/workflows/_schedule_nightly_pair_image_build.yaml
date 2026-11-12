@@ -110,6 +110,7 @@ jobs:
       dockerfile: ${{ inputs.dockerfile }}
       suffix: ${{ inputs.suffix }}
       soc: ${{ inputs.soc }}
+      target: ${{ inputs.target }}
       should_push: ${{ inputs.should_push }}
       schedule_tag_pattern: 'main'
       branch_ref: ${{ inputs.vllm_ascend_branch || 'main' }}
