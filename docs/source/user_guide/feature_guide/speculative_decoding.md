@@ -602,25 +602,14 @@ uses the checkpoint's zero-based auxiliary layer IDs unchanged and captures
 the residual entering each selected layer in both normal and decoder-replay
 execution. No draft-side layer-ID translation is required.
 
-Run the focused NPU state/graph regression and then real-checkpoint parity:
+Run the focused NPU budget-allocation/graph regression:
 
 ```shell
-pytest -q tests/e2e/pull_request/one_card/test_dsv41_adaptive_compressor.py
-
-DSV41_TARGET_MODEL=/path/to/DeepSeek-V4.1-Flash \
-DSV41_TP_SIZE=4 DSV41_QUANTIZATION=ascend \
-pytest -xq tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v41_adaptive.py
+pytest -q tests/e2e/pull_request/one_card/test_dsv41_adaptive_allocator.py
 ```
 
-Omit `DSV41_QUANTIZATION` when the checkpoint does not use Ascend
-quantization. The model regression compares plain, fixed DSpark and natural
-adaptive outputs, then changes the test cost curves to exercise full,
-partial, and alternating full/partial/zero budgets through the real allocator
-and sampler. Partial-budget probes assert that the upstream device allocator runs.
-It also checks that TP workers agree on the admitted budgets.
-
 Validate each hardware/operator/weight combination before deployment. Measure
-performance using natural budgets, with test probes removed, against both
+performance using natural budgets against both
 plain decoding and tuned fixed DSpark under identical prompts, concurrency,
 context length, precision and graph settings. Record throughput, TTFT, TPOT,
 tail latency, memory, and admitted draft counts. Adaptive verification does
