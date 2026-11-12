@@ -4,6 +4,16 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
+from vllm.distributed.eplb.policy import EplbStats
+
+
+@dataclass
+class AscendEplbStats(EplbStats):
+    """One planning snapshot, including STAIR's temporal and topology inputs."""
+
+    sample_counts: np.ndarray | None = None
+    rank_node_ids: np.ndarray | None = None
+    last_committed_mean_ratios: np.ndarray | None = None
 
 
 @dataclass(frozen=True)

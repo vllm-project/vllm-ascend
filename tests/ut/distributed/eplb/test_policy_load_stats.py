@@ -222,6 +222,7 @@ def test_publish_async_load_stats_is_atomic(monkeypatch):
             num_expert_groups=1,
         ),
         rebalanced=False,
+        _last_committed_mean_ratios=np.array([1.2]),
     )
     state = AscendEplbState.__new__(AscendEplbState)
     state.model_states = {"model": model_state}
@@ -231,7 +232,15 @@ def test_publish_async_load_stats_is_atomic(monkeypatch):
 
     state.publish_async_load_stats({"model": stats})
 
-    assert model_state._policy_load_stats is stats
+    snapshot = model_state.eplb_stats
+    assert isinstance(snapshot, state_module.AscendEplbStats)
+    assert snapshot.global_expert_load_window is stats.values
+    stats.sample_counts[:] = 0
+    model_state._last_committed_mean_ratios[:] = 9
+    state.get_rank_node_ids.return_value[:] = 0
+    np.testing.assert_array_equal(snapshot.sample_counts, [2, 1])
+    np.testing.assert_array_equal(snapshot.rank_node_ids, [0, 0, 1, 1])
+    np.testing.assert_array_equal(snapshot.last_committed_mean_ratios, [1.2])
     assert model_state.eplb_stats.num_nodes == 2
     assert model_state.eplb_stats.num_gpus == 4
     assert model_state.rebalanced

@@ -7,10 +7,10 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 import torch
-from vllm.distributed.eplb.policy import AbstractEplbPolicy
+from vllm.distributed.eplb.policy import AbstractEplbPolicy, EplbStats
 
 from vllm_ascend.ascend_config import StairConfig
-from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
+from vllm_ascend.distributed.eplb.policy import AscendEplbStats
 from vllm_ascend.distributed.eplb.policy.stair import (
     PlacementImbalance,
     PlacementPlan,
@@ -39,12 +39,10 @@ class TestStairLoadStatistics(unittest.TestCase):
             patch.object(policy, "plan_sharded_rebalance", return_value=plan),
             patch.object(policy, "placement_imbalance", side_effect=AssertionError("parent recomputed metrics")),
         ):
+            weight = torch.tensor([[8.0, 7.0, 6.0, 5.0]])
             result = policy.rebalance_experts(
-                torch.tensor([[8.0, 7.0, 6.0, 5.0]]),
-                4,
-                1,
-                1,
-                2,
+                weight,
+                EplbStats(weight, 4, 1, 1, 2),
                 torch.tensor([[0, 1, 2, 3]]),
             )
 
@@ -64,11 +62,29 @@ class TestStairLoadStatistics(unittest.TestCase):
             predicted_mean_ratios=np.array([np.nan]),
             imbalance_ratios=np.ones((1, 4)),
         )
-        prepared = PreparedLoadStats(torch.tensor([[[4, 6]], [[9, 3]]]), np.array([2, 3]))
+        prepared = AscendEplbStats(
+            torch.tensor([[[4, 6]], [[9, 3]]]),
+            2,
+            1,
+            2,
+            2,
+            sample_counts=np.array([2, 3]),
+            rank_node_ids=np.array([1, 0]),
+            last_committed_mean_ratios=np.array([1.3]),
+        )
         with patch.object(policy, "plan_sharded_rebalance", return_value=plan) as planner:
-            policy.rebalance_experts(prepared, 2, 1, 1, 2, torch.tensor([[0, 1]]))
+            policy.rebalance_experts(prepared.global_expert_load_window, prepared, torch.tensor([[0, 1]]))
 
         np.testing.assert_array_equal(planner.call_args.kwargs["sample_counts"], prepared.sample_counts)
+        np.testing.assert_array_equal(planner.call_args.kwargs["rank_node_ids"], [1, 0])
+        np.testing.assert_array_equal(planner.call_args.kwargs["last_committed_mean_ratios"], [1.3])
+
+    def test_prepared_stats_require_sample_counts(self):
+        policy = StairEplbPolicy(StairConfig())
+        stats = AscendEplbStats(torch.ones(2, 1, 2), 2, 1, 1, 2)
+
+        with self.assertRaisesRegex(ValueError, "sample counts"):
+            policy.rebalance_experts(stats.global_expert_load_window, stats, torch.tensor([[0, 1]]))
 
     def test_compression_preserves_all_steps_as_weighted_bins(self):
         samples = np.arange(20).reshape(5, 2, 2)

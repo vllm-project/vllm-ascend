@@ -13,9 +13,9 @@ from vllm.v1.worker.gpu.eplb_utils import EPLBController
 
 from vllm_ascend.ascend_config import EplbConfig
 from vllm_ascend.device.hardware_profile import MoECommPolicy, get_current_hardware_profile
+from vllm_ascend.distributed.eplb.config import resolve_ascend_eplb_communicator
 from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 from vllm_ascend.distributed.eplb.policy.factory import create_eplb_policy
-from vllm_ascend.patch.platform.patch_eplb import resolve_ascend_eplb_communicator
 
 
 def is_eplb_load_collection_phase_matched(
@@ -54,9 +54,10 @@ class AscendEPLBController(EPLBController):
             if parallel_config.enable_eplb
             else ascend_eplb_config.stair_config
         )
-        self.eplb_policy = create_eplb_policy(
-            parallel_config.eplb_config.policy,
-            stair_config,
+        self.eplb_policy = (
+            create_eplb_policy(parallel_config.eplb_config.policy, stair_config)
+            if parallel_config.enable_eplb
+            else None
         )
         self._load_collection_phase_matched = True
 
