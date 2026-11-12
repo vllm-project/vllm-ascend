@@ -28,6 +28,19 @@ def test_mooncake_connector_aliases_pull_connector() -> None:
     assert MooncakeConnector is MooncakePullConnector
 
 
+@pytest.mark.parametrize("connector_cls", [MooncakeBaseConnector, MooncakePullConnector, MooncakePushConnector])
+def test_non_pull_facade_skips_sparse_preparation_hook(connector_cls) -> None:
+    connector = connector_cls.__new__(connector_cls)
+    connector.connector_worker = connector_module.MooncakePushConnectorWorker.__new__(
+        connector_module.MooncakePushConnectorWorker
+    )
+    # ModelRunner V2 invokes this optional hook before every connector step.
+    prepare = getattr(connector, "prepare_sparse_kv_offload", None)
+    if prepare is not None:
+        prepare(MooncakeConnectorMetadata())
+    assert prepare is None
+
+
 def test_loaded_group_ids_hook_is_version_gated() -> None:
     assert "get_loaded_kv_cache_group_ids" in MooncakeBaseConnector.__dict__
 
@@ -54,30 +67,34 @@ def test_required_layout_is_hnd_for_regular_attention_and_none_for_mla() -> None
 
 def test_facade_delegates_scheduler_methods() -> None:
     connector = make_facade()
+    scheduler = connector.connector_scheduler
+    assert isinstance(scheduler, MagicMock)
     request = MagicMock()
     blocks = MagicMock()
     output = MagicMock()
-    connector.connector_scheduler.get_num_new_matched_tokens.return_value = (8, True)
-    connector.connector_scheduler.request_finished.return_value = (True, {"remote": True})
+    scheduler.get_num_new_matched_tokens.return_value = (8, True)
+    scheduler.request_finished.return_value = (True, {"remote": True})
 
     assert connector.get_num_new_matched_tokens(request, 4) == (8, True)
     connector.update_state_after_alloc(request, blocks, 8)
     connector.update_connector_output(output)
     assert connector.request_finished(request, [1, 2]) == (True, {"remote": True})
 
-    connector.connector_scheduler.update_state_after_alloc.assert_called_once_with(request, blocks, 8)
-    connector.connector_scheduler.request_finished.assert_called_once_with(request, ([1, 2],))
+    scheduler.update_state_after_alloc.assert_called_once_with(request, blocks, 8)
+    scheduler.request_finished.assert_called_once_with(request, ([1, 2],))
 
 
 def test_facade_delegates_worker_methods_and_metadata() -> None:
     connector = make_facade()
-    connector.connector_worker.get_finished.return_value = ({"sent"}, {"received"})
+    worker = connector.connector_worker
+    assert isinstance(worker, MagicMock)
+    worker.get_finished.return_value = ({"sent"}, {"received"})
     results = KVConnectorTransferResults(
         finished_sending={"sent"}, finished_recving={"received", "failed"}, failed_recving={"failed"}
     )
-    connector.connector_worker.get_transfer_results.return_value = results
-    connector.connector_worker.get_block_ids_with_load_errors.return_value = {10}
-    connector.connector_worker.xfer_handshake_metadata = MagicMock()
+    worker.get_transfer_results.return_value = results
+    worker.get_block_ids_with_load_errors.return_value = {10}
+    worker.xfer_handshake_metadata = MagicMock()
     connector._connector_metadata.requests["request"] = MagicMock()
 
     connector.register_kv_caches({})
@@ -85,11 +102,11 @@ def test_facade_delegates_worker_methods_and_metadata() -> None:
 
     assert connector.get_finished(set()) == ({"sent"}, {"received"})
     assert connector.get_transfer_results(set()) is results
-    connector.connector_worker.get_transfer_results.assert_called_once_with()
+    worker.get_transfer_results.assert_called_once_with()
     assert connector.get_block_ids_with_load_errors() == {10}
-    assert connector.get_handshake_metadata() is connector.connector_worker.get_handshake_metadata.return_value
-    connector.connector_worker.get_handshake_metadata.assert_called_once_with()
-    connector.connector_worker.start_load_kv.assert_called_once_with(connector._connector_metadata)
+    assert connector.get_handshake_metadata() is worker.get_handshake_metadata.return_value
+    worker.get_handshake_metadata.assert_called_once_with()
+    worker.start_load_kv.assert_called_once_with(connector._connector_metadata)
 
 
 @pytest.mark.parametrize(

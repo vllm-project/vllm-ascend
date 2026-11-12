@@ -250,11 +250,19 @@ class MooncakePullConnector(MooncakeBaseConnector):
         super().__init__(vllm_config, role, kv_cache_config)
 
         if role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler = MooncakePullConnectorScheduler(vllm_config, str(self.engine_id), kv_cache_config)
+            self.connector_scheduler = self._create_scheduler(vllm_config, kv_cache_config)
         elif role == KVConnectorRole.WORKER:
-            self.connector_worker = MooncakePullConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
+            self.connector_worker = self._create_worker(vllm_config, kv_cache_config)
         else:
             raise ValueError(f"Unsupported KVConnectorRole: {role}")
+
+    def _create_scheduler(
+        self, vllm_config: VllmConfig, kv_cache_config: "KVCacheConfig"
+    ) -> MooncakePullConnectorScheduler:
+        return MooncakePullConnectorScheduler(vllm_config, str(self.engine_id), kv_cache_config)
+
+    def _create_worker(self, vllm_config: VllmConfig, kv_cache_config: "KVCacheConfig") -> MooncakePullConnectorWorker:
+        return MooncakePullConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
 
 
 class MooncakePushConnector(MooncakeBaseConnector):
