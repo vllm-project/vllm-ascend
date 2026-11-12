@@ -27,9 +27,9 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import get_layerwise_reuse_config
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    LayerwiseCacheConfig,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
+    get_layerwise_offload_config,
+    get_spec_reuse_rules,
 )
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_pool_bytes_per_block,
@@ -99,13 +99,11 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
 
         Native multi-allocation layouts retain their existing accounting.
         """
-        extra_config = get_layerwise_reuse_config(getattr(vllm_config, "kv_transfer_config", None))
-        if extra_config is not None:
-            num_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
-            if LayerwiseCacheConfig.has_layer_reuse_for_stage(num_layers, extra_config):
-                plan = self.get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks=1)
-                if getattr(plan, "layerwise_kv_cache_reuse", False):
-                    return next(tensor.size for tensor in plan.kv_cache_tensors if not tensor.host_resident)
+        extra_config = get_layerwise_offload_config(getattr(vllm_config, "kv_transfer_config", None))
+        if extra_config is not None and kv_cache_groups and get_spec_reuse_rules(vllm_config) is not None:
+            plan = self.get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks=1)
+            if getattr(plan, "layerwise_kv_cache_reuse", False):
+                return next(tensor.size for tensor in plan.kv_cache_tensors if not tensor.host_resident)
         if vllm_config.model_config.hf_config.model_type == "kimi_k31":
             return paired_sfa_pool_bytes(kv_cache_groups)
         if is_deepseek_v41_cache(kv_cache_groups):

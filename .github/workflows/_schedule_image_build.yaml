@@ -26,6 +26,11 @@ on:
         required: false
         type: boolean
         default: False
+      isolated_build:
+        description: "If true, publish an isolated (/presmoke) runtime image. The tag is unchanged; isolation comes from the caller having pointed swr_repo at the isolated '-presmoke' repository. Only the quay.io sync is skipped. Default false keeps the standard nightly behaviour."
+        required: false
+        type: boolean
+        default: false
       dockerfile:
         description: 'The Dockerfile to use'
         required: false
@@ -51,7 +56,7 @@ on:
         type: string
         default: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann'
       cann_image_version:
-        description: 'CANN image version for the CI job container only. It is independent of the CANN version baked into the built image, which comes from the FROM line in the Dockerfile.'
+        description: 'CANN image version for the CI job container only. It is independent of the CANN version baked into the built image, which comes from the FROM line in the Dockerfile. It must exist in the cann_swr_url repository, which does not carry every CANN release, hence the fixed default.'
         required: false
         type: string
         default: '9.1.0'
@@ -60,6 +65,11 @@ on:
         required: false
         type: string
         default: '910b'
+      source_ref:
+        description: "Optional git ref the whole source tree is built from (e.g. refs/pull/<n>/head). When set, the build checks out this ref ('pre-merge') instead of the branch, but branch_ref still decides the published tag. /presmoke always passes the triggering PR so the image contains the code and Dockerfiles under review. Default '' builds vllm_ascend_branch."
+        required: false
+        type: string
+        default: ''
     secrets:
       SWR_USERNAME:
         description: 'SWR username for pushing images'
@@ -110,8 +120,12 @@ jobs:
         submodules: recursive
         fetch-depth: 0
         persist-credentials: false
-        # Empty on tag pushes and PR events, so the default event ref is used.
-        ref: ${{ inputs.branch_ref }}
+        # source_ref (e.g. refs/pull/<n>/head for /presmoke) makes the whole
+        # source tree come from that ref, not just the Dockerfile, so the image is
+        # a full 'pre-merge' build of the ref under review. The branch (branch_ref)
+        # still decides the published tag. Empty on tag pushes and PR events, so the
+        # default event ref is used.
+        ref: ${{ inputs.source_ref || inputs.branch_ref }}
 
     - name: Compute cache tag
       id: cache-tag
@@ -282,6 +296,10 @@ jobs:
           # to the tag (e.g. suffix=310p-openeuler → SUFFIX=-310p-openeuler,
           # resulting in tags like main-310p-openeuler).
           # Leave SUFFIX empty when no suffix is provided (plain tags like main).
+          #
+          # An isolated (/presmoke) build keeps exactly the same tag: it is
+          # distinguished only by the repository it is pushed to, which the caller
+          # selects via swr_repo.
           if [ -n "${{ inputs.suffix }}" ]; then
             echo "SUFFIX=-${{ inputs.suffix }}" >> "$GITHUB_ENV"
           else
@@ -381,7 +399,7 @@ jobs:
           done
 
       - name: Dispatch quay.io sync
-        if: ${{ inputs.should_push }}
+        if: ${{ inputs.should_push && !inputs.isolated_build }}
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.SYNC_TOOLS_TOKEN }}

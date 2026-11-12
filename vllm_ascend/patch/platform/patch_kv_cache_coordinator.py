@@ -278,7 +278,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         block_size = kv_cache_spec.block_size
         if isinstance(kv_cache_spec, MambaSpec):
             return block_size
-        if self.dcp_world_size > 1:
+        if kv_cache_spec.dcp_sharded:
             block_size *= self.dcp_world_size
         return block_size
 
@@ -451,7 +451,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     kv_cache_spec=spec,
                     drop_eagle_block=drop_eagle_block,
                     alignment_tokens=self._cache_hit_alignment_tokens,
-                    dcp_world_size=self.dcp_world_size,
+                    dcp_world_size=self.dcp_world_size if spec.dcp_sharded else 1,
                     pcp_world_size=1,
                 )
                 hit_blocks, _new_hit_length = hit_result
@@ -587,7 +587,11 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
             use_eagle=use_eagle,
             # A SWA-only bounded-replay backbone has no persistent KV to hit.
             # Keep its private managers without constructing a hybrid lookup.
-            enable_caching=enable_caching and num_cacheable_groups > 0,
+            enable_caching=(
+                enable_caching
+                and num_cacheable_groups > 0
+                and not getattr(kv_cache_config, "layerwise_kv_cache_reuse", False)
+            ),
             enable_kv_cache_events=enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
             pcp_world_size=1,

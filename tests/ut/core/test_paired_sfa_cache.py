@@ -7,7 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.models.kimi_k3.paired_sfa_cache import (
@@ -146,6 +146,39 @@ def test_dspark_preserves_target_recurrent_budget_and_order():
     projected = [replace(g, layer_names=[n for n in g.layer_names if n in draft]) for g in groups]
     assert projected[0].kv_cache_spec is groups[0].kv_cache_spec
     assert paired_sfa_pool_bytes(projected) == draft_bytes
+
+
+@pytest.mark.parametrize("dcp_size", [1, 8])
+@pytest.mark.parametrize("dcp_sharded", [False, True])
+def test_dense_draft_retains_sharding_coverage_and_separate_storage(dcp_size, dcp_sharded):
+    config = make_config()
+    config.model_config.max_model_len = 32768
+    config.parallel_config = SimpleNamespace(decode_context_parallel_size=dcp_size)
+    specs = make_specs()
+    target_groups = paired_sfa_cache_groups(config, specs)
+    name = "model.layers.93.attn"
+    draft = FullAttentionSpec(
+        block_size=1536,
+        num_kv_heads=2,
+        head_size=64,
+        dtype=torch.bfloat16,
+        is_draft=True,
+        dcp_sharded=dcp_sharded,
+    )
+    groups = paired_sfa_cache_groups(config, {**specs, name: draft})
+    draft_group = next(group for group in groups if name in group.layer_names)
+    assert draft_group.kv_cache_spec.dcp_sharded == dcp_sharded
+    assert not draft_group.is_eagle_group
+    assert draft_group.kv_cache_spec.max_num_blocks_per_req(config, 32768) == draft.max_num_blocks_per_req(
+        config, 32768
+    )
+    assert (draft_group is groups[0]) == dcp_sharded
+    assert groups[1:4] == target_groups[1:]
+    assert paired_sfa_pool_bytes(groups) == paired_sfa_pool_bytes(target_groups) + draft.page_size_bytes
+    plan = paired_sfa_cache_config(config, groups, 2**30)
+    draft_tensor = next(tensor for tensor in plan.kv_cache_tensors if tensor.layers == [name])
+    assert draft_tensor.block_stride == draft.page_size_bytes
+    assert draft_tensor.offset + draft_tensor.layer_stride == draft_tensor.size
 
 
 def test_target_only_without_recurrent_layers_keeps_one_full_history_group():

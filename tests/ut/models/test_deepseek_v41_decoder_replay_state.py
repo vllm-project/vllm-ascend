@@ -178,20 +178,21 @@ def test_decoder_replay_builder_prepares_pcp_rope(state, monkeypatch):
     prepared.assert_called_once_with()
 
 
+@pytest.mark.parametrize("world", [1, 2, 16])
 @pytest.mark.parametrize("actual_tokens", [0, 2])
-def test_replay_metadata_preserves_pcp_layout_contract(state, monkeypatch, actual_tokens):
+def test_replay_metadata_preserves_pcp_layout_contract(state, monkeypatch, actual_tokens, world):
     state.num_tokens = 2
     state.num_actual_tokens = actual_tokens
     state.config.model_config = SimpleNamespace(max_model_len=16)
     state.slots = torch.arange(64).reshape(2, 32)
-    state.replay_pcp_context = SimpleNamespace(global_batch=object())
+    state.replay_pcp_context = SimpleNamespace(global_batch=object()) if world > 1 else None
     offsets = np.array([0, actual_tokens], dtype=np.int32)
     state.offsets[:2] = torch.from_numpy(offsets)
     monkeypatch.setattr(replay_mod, "get_cos_and_sin_dsa", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         replay_mod,
         "get_pcp_group",
-        lambda: SimpleNamespace(all_gather=lambda tensor, dim: torch.cat((tensor, tensor), dim=dim)),
+        lambda: SimpleNamespace(all_gather=lambda tensor, dim: torch.cat([tensor] * world, dim=dim)),
     )
     metadata = object()
 
@@ -199,10 +200,12 @@ def test_replay_metadata_preserves_pcp_layout_contract(state, monkeypatch, actua
         # Exercise the same layout guard as the real PCP attention builder.
         # Gathered slots are invalid unless the common metadata owns a context,
         # including on ranks with no retained suffix queries.
-        assert uses_pcp_sharded_layout(common, True)
+        assert uses_pcp_sharded_layout(common, True) == (world > 1)
         assert common.pcp_context is state.replay_pcp_context
-        assert common.pcp_cache_group_idx == 1
-        assert common.slot_mapping.numel() == 4
+        assert common.pcp_cache_group_idx == (1 if world > 1 else None)
+        assert common.slot_mapping.tolist() == [32, 33] * world
+        if world == 1:
+            assert common.slot_mapping.data_ptr() == state.slots[1].data_ptr()
         assert common.num_actual_tokens == actual_tokens
         assert common.num_input_tokens == 2
         return metadata

@@ -38,6 +38,16 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             "HMA should not be enabled unless all sub-connectors support it"
         )
         self._configure_layerwise_reuse_completion()
+        if (
+            role == KVConnectorRole.WORKER
+            and getattr(kv_cache_config, "layerwise_kv_cache_reuse", False)
+            and len(self._connectors) > 1
+            and (
+                len(self._layerwise_slot_release_providers) != len(self._connectors) - 1
+                or not self._external_slot_release_sink_configured
+            )
+        ):
+            raise ValueError("Layerwise offload requires a slot-release fence for every PD connector.")
         # Handle to the (V2) mamba hybrid model state while its per-layer
         # align pre-copy is deferred behind a layerwise child connector.
         self._mamba_state: Any = None

@@ -12,15 +12,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     resolve_backend,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    LayerwiseCacheConfig,
-)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
     RequestTracker,
     block_hash_to_str,
     get_block_hashes,
     get_group_block_size,
+    get_sharded_mamba_group_ids,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import BaseKVPoolScheduler
 
@@ -64,9 +62,10 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         self.dspark_prefix_keys: DSparkPrefixKeys | None = None
         self.dspark_draft_only_group_ids = frozenset(getattr(kv_cache_config, "dspark_draft_only_group_ids", ()))
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
+        self.sharded_mamba_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
         self.load_async = False
         if self.use_layerwise_transfer:
-            self._init_layerwise_offload(kv_cache_config, extra_config)
+            self._init_layerwise_offload(kv_cache_config)
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
         self.layerwise_keys = (
             self.layerwise_backend.bind_layerwise_keys(
@@ -97,16 +96,11 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
     def _async_load_enabled(self) -> bool:
         return False
 
-    def _init_layerwise_offload(self, kv_cache_config: KVCacheConfig | None, extra_config: dict[str, Any]) -> None:
+    def _init_layerwise_offload(self, kv_cache_config: KVCacheConfig | None) -> None:
         reuse_layout = getattr(kv_cache_config, "layerwise_reuse_layout", None)
-        if reuse_layout is not None:
-            if reuse_layout.layers:
-                self.num_layers = max(self.num_layers, max(reuse_layout.layers) + 1)
-            self.layerwise_offload = reuse_layout.has_layer_reuse
-            return
-        if LayerwiseCacheConfig.parse(self.num_layers, extra_config).has_layer_reuse:
-            raise ValueError("Layerwise offload requires a compiled model reuse plan.")
-        self.layerwise_offload = False
+        self.layerwise_offload = reuse_layout is not None and reuse_layout.has_layer_reuse
+        if self.layerwise_offload and reuse_layout.layers:
+            self.num_layers = max(self.num_layers, max(reuse_layout.layers) + 1)
 
     def get_running_target_token_len(self, request: Request, num_new_tokens: int) -> int:
         target_token_len = request.num_computed_tokens + num_new_tokens
@@ -120,9 +114,6 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
                 vllm_cached_tokens=num_current_tokens,
                 kvpool_cached_tokens=num_current_tokens,
                 can_load=True,
-                layerwise_snapshot_end_token=request_tracker.last_layerwise_snapshot_end_token,
-                layerwise_snapshot_block_index=request_tracker.last_layerwise_snapshot_block_index,
-                layerwise_snapshot_start_block=request_tracker.last_layerwise_snapshot_start_block,
                 layerwise_previous_step=True,
             )
         return None
@@ -320,17 +311,18 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         backend's protocol module.
 
         Single-group uses PR #11585 format; multi-group includes group_id.
-        A block is a hit only when every PP stage and PCP rank has saved it,
-        so the protocol helper enumerates all stages, PCP ranks and heads.
+        The protocol helper covers every PP stage and head, and every PCP
+        rank for sharded Mamba groups. PCP replicas share one object.
         """
         assert self.layerwise_keys is not None
         draft_keys = self.dspark_prefix_keys
         if draft_keys is not None and group_id in self.dspark_draft_only_group_ids:
             # Draft-only groups have no ordinary layerwise target object.
             return draft_keys.make_hit_check_keys(block_hash_hex)
-        head_or_tp_ranks = (
-            self.tp_size if group_id in self.num_speculative_blocks_by_group else self.tp_size // self.put_step
-        )
+        if group_id in self.sharded_mamba_group_ids or group_id in self.num_speculative_blocks_by_group:
+            head_or_tp_ranks = self.tp_size
+        else:
+            head_or_tp_ranks = self.tp_size // self.put_step
         keys = self.layerwise_keys.make_hit_check_keys(group_id, block_hash_hex, head_or_tp_ranks)
         if draft_keys is not None:
             keys.extend(draft_keys.make_hit_check_keys(block_hash_hex))

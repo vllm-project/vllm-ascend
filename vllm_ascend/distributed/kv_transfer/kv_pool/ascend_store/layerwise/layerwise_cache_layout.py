@@ -4,9 +4,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
-from functools import lru_cache
 from math import lcm
 from typing import Any
 
@@ -87,6 +86,14 @@ def allocate_shared_indexer_cache(
     return views
 
 
+def cache_view_alignment(spec: KVCacheSpec) -> int:
+    dtypes = getattr(spec, "dtypes", (getattr(spec, "dtype", torch.uint8),))
+    alignment = lcm(*(get_dtype_size(dtype) for dtype in dtypes))
+    if getattr(spec, "scale_dim", 0):
+        alignment = lcm(alignment, get_dtype_size(spec.scale_dtype))
+    return alignment
+
+
 def get_cache_views(config: KVCacheConfig, specs: dict[str, KVCacheSpec]) -> dict[str, tuple[int, int, int]]:
     """Validate physical byte windows without collecting packs or planning reuse."""
     if config.num_blocks <= 0:
@@ -105,10 +112,7 @@ def get_cache_views(config: KVCacheConfig, specs: dict[str, KVCacheSpec]) -> dic
         for ordinal, name in enumerate(tensor.layers):
             start = tensor.offset + ordinal * tensor.layer_stride
             spec = specs[name]
-            dtypes = getattr(spec, "dtypes", (getattr(spec, "dtype", torch.uint8),))
-            alignment = lcm(*(get_dtype_size(dtype) for dtype in dtypes))
-            if getattr(spec, "scale_dim", 0):
-                alignment = lcm(alignment, get_dtype_size(spec.scale_dtype))
+            alignment = cache_view_alignment(spec)
             if start % alignment or tensor.block_stride % alignment:
                 raise ValueError(f"Cache view for {name} is not aligned to its element sizes")
             end = (
@@ -164,54 +168,25 @@ def get_physical_layer_index(layer_name: str, base_layers: int) -> int:
 
 @dataclass(frozen=True)
 class LayerwiseCacheConfig:
-    num_shared_buffers: int
+    num_shared_buffers: int | None
     num_prefetch_layers: int
     independent_layers: list[int]
-    has_layer_reuse: bool
 
     @classmethod
-    def has_layer_reuse_for_stage(cls, num_layers: int, extra_config: dict[str, Any]) -> bool:
-        """Share the stage-level reuse decision across Core planning calls."""
-        shared_buffers = extra_config.get(_NUM_SHARED_BUFFERS)
-        prefetch_layers = extra_config.get(_PREFETCH_LAYERS)
-        independent_layers = extra_config.get(_INDEPENDENT_LAYERS)
-        scalar_types = (type(None), int, float, str)
-        # Cache plain config values. Other inputs retain parse() validation.
-        if type(shared_buffers) not in scalar_types or type(prefetch_layers) not in scalar_types:
-            return cls.parse(num_layers, extra_config).has_layer_reuse
-        if type(independent_layers) is list and all(type(index) in scalar_types for index in independent_layers):
-            independent_layers = tuple(independent_layers)
-        elif type(independent_layers) not in (type(None), str):
-            return cls.parse(num_layers, extra_config).has_layer_reuse
-        return cls._cached_stage_layer_reuse(num_layers, shared_buffers, prefetch_layers, independent_layers)
-
-    @classmethod
-    @lru_cache(maxsize=128)
-    def _cached_stage_layer_reuse(
+    def parse(
         cls,
         num_layers: int,
-        shared_buffers: Any,
-        prefetch_layers: Any,
-        independent_layers: tuple[Any, ...] | str | None,
-    ) -> bool:
-        return cls.parse(
-            num_layers,
-            {
-                _NUM_SHARED_BUFFERS: shared_buffers,
-                _PREFETCH_LAYERS: prefetch_layers,
-                _INDEPENDENT_LAYERS: (
-                    list(independent_layers) if isinstance(independent_layers, tuple) else independent_layers
-                ),
-            },
-        ).has_layer_reuse
-
-    @classmethod
-    def parse(cls, num_layers: int, extra_config: dict[str, Any] | None = None) -> LayerwiseCacheConfig:
+        extra_config: dict[str, Any] | None = None,
+        *,
+        stage_layers: Collection[int] | None = None,
+    ) -> LayerwiseCacheConfig:
+        """Parse model-global layer indices and project them onto the stage, if supplied."""
+        stage_num_layers = num_layers if stage_layers is None else len(stage_layers)
         shared_buffers_value = extra_config.get(_NUM_SHARED_BUFFERS) if extra_config else None
+        num_shared_buffers = None
         if shared_buffers_value is None:
             if num_layers < 1:
                 raise ValueError("num_layers must be at least 1")
-            num_shared_buffers = num_layers
         else:
             num_shared_buffers = _parse_int_config(shared_buffers_value, _NUM_SHARED_BUFFERS)
             if num_shared_buffers < 1:
@@ -219,7 +194,7 @@ class LayerwiseCacheConfig:
 
         prefetch_value = extra_config.get(_PREFETCH_LAYERS) if extra_config else None
         if prefetch_value is None:
-            num_prefetch_layers = min(num_shared_buffers, _DEFAULT_MAX_PREFETCH_LAYERS)
+            num_prefetch_layers = min(num_shared_buffers or max(1, stage_num_layers), _DEFAULT_MAX_PREFETCH_LAYERS)
         else:
             num_prefetch_layers = _parse_int_config(prefetch_value, _PREFETCH_LAYERS)
             if num_prefetch_layers < 1:
@@ -245,13 +220,14 @@ class LayerwiseCacheConfig:
                     f"{layer_index}; valid range is [0, {num_layers - 1}]"
                 )
             normalized_indices.add(layer_index)
+        if stage_layers is not None:
+            normalized_indices.intersection_update(stage_layers)
         independent_layers = sorted(normalized_indices)
 
         return cls(
             num_shared_buffers=num_shared_buffers,
             num_prefetch_layers=num_prefetch_layers,
             independent_layers=independent_layers,
-            has_layer_reuse=num_layers - len(independent_layers) > num_shared_buffers,
         )
 
 

@@ -53,6 +53,8 @@ TAB_RE = __import__("re").compile(r'^===\s+"[^"]*"\s*$')
 # cell is either a number, a date, a link, a single word, a checkmark,
 # or a short identifier.
 TABLE_ROW_RE = __import__("re").compile(r"^\|.*\|$")
+# Match the entire delimiter row, not just an empty first header cell.
+TABLE_SEPARATOR_RE = __import__("re").compile(r"^\|(?:[ \t]*:?-+:?[ \t]*\|)+$")
 
 
 def _is_translatable_paragraph(paragraph: str) -> bool:
@@ -119,7 +121,7 @@ def _is_table_data_row(row: str) -> bool:
         cell = cell.strip()
         if not cell:
             continue
-        if cell in {"✅", "❌", "❔", "✔", "✘", "🟠", "🔵", "—"}:
+        if cell in {"✅", "❌", "❔", "✔", "✘", "🟠", "🔵", "🟡", "🔴", "—"}:
             has_data_cell = True
             continue
         if __import__("re").match(r"^[\d\s\.\/\-,:]+$", cell):
@@ -154,13 +156,14 @@ def _flush_paragraph(current: list[str], paragraphs: list[str]) -> None:
     # Check if this is a multi-line table block.
     lines = para.split("\n")
     if len(lines) > 1 and all(TABLE_ROW_RE.match(line.strip()) for line in lines):
-        sep_re = __import__("re").compile(r"^\|[\s:-]+\|")
         for i, line in enumerate(lines):
-            if sep_re.match(line.strip()):
+            if TABLE_SEPARATOR_RE.fullmatch(line.strip()):
                 # Keep header rows (before separator).
                 if i > 0:
                     header = "\n".join(lines[:i])
-                    if _is_translatable_paragraph(header):
+                    # Headers can contain links or numbers without being data
+                    # rows. Keep all levels together, including || and ^^.
+                    if any(c.isalpha() for c in header):
                         paragraphs.append(header)
                 # Treat each data row (after separator) as an individual
                 # paragraph and let _is_translatable_paragraph decide
@@ -221,10 +224,7 @@ def _extract_paragraphs(content: str) -> list[str]:
             if not in_code:
                 # Entering code block.
                 if current:
-                    para = "\n".join(current).strip()
-                    if _is_translatable_paragraph(para):
-                        paragraphs.append(para)
-                    current = []
+                    _flush_paragraph(current, paragraphs)
                 in_code = True
                 fence_marker = m.group(1)[0]
                 continue
@@ -295,7 +295,8 @@ def _relative_to_source(path: Path) -> str:
 def _write_po_from_paragraphs(po_path: Path, rel: str, paragraphs: list[str], dry_run: bool = False) -> bool:
     """Write a fresh .po file from extracted paragraphs, discarding any existing translations."""
     header = _po_header(str(rel))
-    body_entries = "\n\n".join(_po_entry_block(p) for p in paragraphs)
+    # Shared multi-row headers need one catalog entry even on a fresh build.
+    body_entries = "\n\n".join(_po_entry_block(p) for p in dict.fromkeys(paragraphs))
     if dry_run:
         print(f"  [DRY-RUN] Would force-regenerate: {po_path} ({len(paragraphs)} entries)")
         return {"has_new_or_modified": True, "has_empty": True}

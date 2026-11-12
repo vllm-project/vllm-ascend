@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 
 from collections import defaultdict
+from dataclasses import replace
 from typing import Any
 
 # Both supported versions use the KV-cache planner and builder API from #61183/#42309.
@@ -10,6 +11,7 @@ from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.core.kv_cache_planning import _approximate_gcd, may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -23,10 +25,8 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
     apply_layerwise_kv_cache_plan,
-    get_layerwise_reuse_config,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    LayerwiseCacheConfig,
+    get_layerwise_offload_config,
+    get_spec_reuse_rules,
 )
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
@@ -67,24 +67,6 @@ _orig_annotate_eagle_groups = getattr(_kv_cache_planning, "_annotate_eagle_group
 _orig_get_kv_cache_config_from_groups = _kv_cache_planning.get_kv_cache_config_from_groups
 _orig_max_memory_usage_bytes_from_groups = _kv_cache_planning._max_memory_usage_bytes_from_groups
 _orig_pool_bytes_per_block = _kv_cache_planning._pool_bytes_per_block
-if UniformTypeKVCacheSpecs.max_num_blocks_per_req is KVCacheSpec.max_num_blocks_per_req:
-
-    def _uniform_type_max_num_blocks_per_req(
-        self: UniformTypeKVCacheSpecs,
-        vllm_config: VllmConfig,
-        max_len: int,
-    ) -> int:
-        """Preserve the inner spec's block-table width."""
-        widths = {spec.max_num_blocks_per_req(vllm_config, max_len) for spec in self.kv_cache_specs.values()}
-        assert len(widths) == 1, (
-            "All layers in the same KV cache group must need the same number "
-            f"of block table entries, got {sorted(widths)}."
-        )
-        return next(iter(widths))
-
-    UniformTypeKVCacheSpecs.max_num_blocks_per_req = (  # type: ignore[method-assign]
-        _uniform_type_max_num_blocks_per_req
-    )
 
 
 def _page_sizes(spec: UniformTypeKVCacheSpecs) -> set[int]:
@@ -104,11 +86,6 @@ def _get_kv_cache_groups_uniform_page_size(
     if kimi_k3_groups is not None:
         return kimi_k3_groups
     return _orig_get_kv_cache_groups_uniform_page_size(kv_cache_spec)
-
-
-def _kv_cache_config_has_mamba_layers(self: KVCacheConfig) -> bool:
-    """Recognize Mamba layers nested in UniformType cache groups."""
-    return any(get_kv_cache_spec_kind(group.kv_cache_spec) == KVCacheSpecKind.MAMBA for group in self.kv_cache_groups)
 
 
 def group_and_unify_kv_cache_specs(
@@ -469,6 +446,29 @@ def _is_deepseek_v4_groups(kv_cache_groups: list[KVCacheGroupSpec]) -> bool:
     return False
 
 
+def _get_replicated_draft_pools(
+    groups: list[KVCacheGroupSpec],
+) -> list[list[KVCacheGroupSpec]] | None:
+    """Keep contiguous dense draft K/V outside the target/state alias pool."""
+    if not any(get_kv_cache_spec_kind(group.kv_cache_spec) == KVCacheSpecKind.MAMBA for group in groups):
+        return None
+    target_groups = []
+    draft_pools = []
+    for group in groups:
+        spec = group.kv_cache_spec
+        specs = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,)
+        if all(
+            isinstance(s, FullAttentionSpec) and not isinstance(s, MLAAttentionSpec) and not s.dcp_sharded
+            for s in specs
+        ):
+            draft_pools.append([group])
+        else:
+            target_groups.append(group)
+    if target_groups and draft_pools:
+        return [target_groups, *draft_pools]
+    return None
+
+
 def _ascend_pool_bytes_per_block(  # type: ignore[misc]
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
@@ -483,6 +483,9 @@ def _ascend_pool_bytes_per_block(  # type: ignore[misc]
     """
     if vllm_config.model_config.hf_config.model_type == "kimi_k31":
         return paired_sfa_pool_bytes(kv_cache_groups)
+    pools = _get_replicated_draft_pools(kv_cache_groups)
+    if pools is not None:
+        return sum(_orig_pool_bytes_per_block(vllm_config, pool) for pool in pools)
     if tq_cache.uses_turboquant_groups(kv_cache_groups):
         return tq_cache.pool_bytes_per_block(kv_cache_groups)
     if is_deepseek_v41_cache(kv_cache_groups):
@@ -505,10 +508,10 @@ def _ascend_max_memory_usage_bytes_from_groups(
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> int:
     """Keep Ascend admission accounting with the upstream builder API."""
-    extra_config = get_layerwise_reuse_config(getattr(vllm_config, "kv_transfer_config", None))
-    if extra_config is not None:
-        num_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
-        if LayerwiseCacheConfig.has_layer_reuse_for_stage(num_layers, extra_config):
+    extra_config = get_layerwise_offload_config(getattr(vllm_config, "kv_transfer_config", None))
+    if extra_config is not None and kv_cache_groups and get_spec_reuse_rules(vllm_config) is not None:
+        probe = builder.get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks=1)
+        if getattr(probe, "layerwise_kv_cache_reuse", False):
             return _orig_max_memory_usage_bytes_from_groups(builder, vllm_config, kv_cache_groups)
     if vllm_config.model_config.hf_config.model_type == "kimi_k31":
         return paired_sfa_max_memory(vllm_config, kv_cache_groups)
@@ -567,23 +570,45 @@ def _ascend_get_kv_cache_config_from_groups(
     ``copy.deepcopy`` in ``generate_scheduler_kv_cache_config`` and is
     dropped by worker pickle IPC, which never reads it.
     """
-    extra_config = get_layerwise_reuse_config(getattr(vllm_config, "kv_transfer_config", None))
-    if extra_config is not None:
-        if available_memory < 0:
-            raise ValueError("available_memory must be non-negative")
-        if vllm_config.cache_config.num_gpu_blocks_override is not None:
-            num_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
-            if LayerwiseCacheConfig.has_layer_reuse_for_stage(num_layers, extra_config):
-                raise ValueError(
-                    "Layerwise offload does not support num_gpu_blocks_override; use automatic block sizing."
-                )
+    extra_config = get_layerwise_offload_config(getattr(vllm_config, "kv_transfer_config", None))
+    offload_requested = (
+        extra_config is not None and bool(kv_cache_groups) and get_spec_reuse_rules(vllm_config) is not None
+    )
+    if offload_requested and available_memory < 0:
+        raise ValueError("available_memory must be non-negative")
     qwen_config = (
         None
         if vllm_version_is("0.28.0")
         else get_qwen4_exp_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     )
+    pools = _get_replicated_draft_pools(kv_cache_groups)
     if vllm_config.model_config.hf_config.model_type == "kimi_k31":
         kv_cache_config = paired_sfa_cache_config(vllm_config, kv_cache_groups, available_memory)
+    elif pools is not None:
+        # Every physical pool shares the scheduler's block count, but owns a
+        # disjoint byte range. Use the same aggregate divisor as admission and
+        # rank re-planning, then retain upstream's per-pool stride descriptors.
+        pool_bytes = [_orig_pool_bytes_per_block(vllm_config, pool) for pool in pools]
+        bytes_per_block = sum(pool_bytes)
+        num_blocks = may_override_num_blocks(vllm_config, available_memory // bytes_per_block)
+        total_size = num_blocks * bytes_per_block
+        tensors: list[KVCacheTensor] = []
+        offset = 0
+        for pool, pool_bytes_per_block in zip(pools, pool_bytes):
+            pool_size = num_blocks * pool_bytes_per_block
+            pool_config = _orig_get_kv_cache_config_from_groups(vllm_config, pool, pool_size)
+            assert pool_config.num_blocks == num_blocks
+            tensors.extend(
+                replace(tensor, size=total_size, offset=offset + tensor.offset)
+                for tensor in pool_config.kv_cache_tensors
+            )
+            offset += pool_size
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=tensors,
+            kv_cache_groups=kv_cache_groups,
+            prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
+        )
     elif qwen_config is not None:
         kv_cache_config = qwen_config
     elif is_deepseek_v41_cache(kv_cache_groups):
@@ -617,7 +642,7 @@ def _ascend_get_kv_cache_config_from_groups(
         # Remove these snapshots once upstream preserves per-layer ownership.
         kv_cache_config.dspark_context_group_ids = resident_mla_context_group_ids(kv_cache_config.kv_cache_groups)
         kv_cache_config.dspark_draft_only_group_ids = draft_only_group_ids(kv_cache_config.kv_cache_groups)
-    if extra_config is not None:
+    if offload_requested:
         apply_layerwise_kv_cache_plan(kv_cache_config, vllm_config)
     return kv_cache_config
 
@@ -628,9 +653,6 @@ if _orig_annotate_eagle_groups is not None:
 _kv_cache_planning._get_packed_kv_cache_groups = _ascend_get_packed_kv_cache_groups
 _kv_cache_planning._get_kv_cache_groups_uniform_page_size = _get_kv_cache_groups_uniform_page_size
 _kv_cache_planning.get_kv_cache_groups = _get_ascend_kv_cache_groups
-KVCacheConfig.has_mamba_layers = property(  # type: ignore[assignment]
-    _kv_cache_config_has_mamba_layers
-)
 _kv_cache_planning.get_kv_cache_config_from_groups = _ascend_get_kv_cache_config_from_groups
 _kv_cache_planning._max_memory_usage_bytes_from_groups = _ascend_max_memory_usage_bytes_from_groups
 _kv_cache_planning._pool_bytes_per_block = _ascend_pool_bytes_per_block
