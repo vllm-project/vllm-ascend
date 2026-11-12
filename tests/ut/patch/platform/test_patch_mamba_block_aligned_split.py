@@ -344,6 +344,25 @@ def test_sparse_index_kpool_pd_consumer_still_preserves_verifier_window():
     assert result == 8
 
 
+@pytest.mark.parametrize(
+    ("has_internal_checkpoint", "checkpoint_alignment", "expected_tokens"),
+    [(False, 1, 32), (True, 1, 33), (True, 64, 32)],
+)
+def test_consumer_uses_internal_checkpoint_only_when_export_is_valid(
+    has_internal_checkpoint, checkpoint_alignment, expected_tokens
+):
+    scheduler = _scheduler(is_kv_consumer=True)
+    scheduler.block_size = scheduler.cache_config.block_size = scheduler.hash_block_size = 16
+    scheduler.use_eagle = scheduler.use_eagle_block_drop = False
+    scheduler.mamba_has_prefill_checkpoint_blocks = has_internal_checkpoint
+    scheduler.mamba_prefill_checkpoint_alignment = checkpoint_alignment
+    request = _request(num_computed_tokens=16, num_prompt_tokens=49, num_tokens=49)
+
+    # A valid backend checkpoint exports state at 48 inside this final query.
+    # Without that export, scheduling must stop at 48 before the final token.
+    assert _mamba_block_aligned_split(scheduler, request, num_new_tokens=33) == expected_tokens
+
+
 def test_patch_is_registered_with_upstream_signature():
     registered = scheduler_module.Scheduler._mamba_block_aligned_split
     # The producer/standalone EAGLE-backoff suppression is applied inline
