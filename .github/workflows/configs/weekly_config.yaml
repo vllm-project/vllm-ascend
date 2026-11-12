@@ -119,6 +119,7 @@ a3:
         config_file_path: GLM-5.3-W8A8C8-A3-200k-PP-Memcache-PD.yaml
         config_base_path: tests/SIT/cases/features/kv_pool
         size: 4
+
   double_node:
     test_config:
       - name: GLM-5.3-Flash-W8A8-130k-PD
@@ -228,6 +229,10 @@ a3:
       - name: DeepSeek-V4-Flash-w8a8-bugtest-acc
         config_file_path: DeepSeek-V4-Flash-w8a8-bugtest-acc.yaml
         config_base_path: tests/SIT/cases/models/configs/DeepSeek
+        size: 2
+      - name: DeepSeek-V4-Flash-Memcache-PD-perf
+        config_file_path: DeepSeek-V4-Flash-Memcache-PD.yaml
+        config_base_path: tests/SIT/cases/features/kv_pool
         size: 2
   single_node:
     test_config:
