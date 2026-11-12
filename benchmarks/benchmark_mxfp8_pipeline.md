@@ -88,4 +88,4 @@ done
   tests/ut/distributed/device_communicators/test_mxfp8_pipeline_benchmark.py
 ```
 
-这是独立流水可行性测试，尚未证明 A5 实机加速或模型 TTFT 改善。先确认正确性和完整路径收益，再决定是否接入运行时。
+分块方案、当前运行时状态和已回传的 TP2/4/8 A5 微基准数据见 [分块流水方案与性能记录](quantized_communication_pipeline_report.md)。各 shape 的收益不同，模型 TTFT、真实模型精度和图模式需独立验收。

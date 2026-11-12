@@ -87,3 +87,5 @@ done
 ```
 
 CPU 模拟验证共享 scale、整数求和、异步提交/等待顺序、张量生命周期、尾块与连续调用；实际算子精度、重叠和收益仍须在 A5 上验证，模型 TTFT/精度另行测试。
+
+当前方案、MXFP8 已测性能和 INT8 待补数据见 [分块流水方案与性能记录](quantized_communication_pipeline_report.md)。
