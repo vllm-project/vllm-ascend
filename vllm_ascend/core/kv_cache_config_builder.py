@@ -5,9 +5,10 @@
 vLLM plans the KV cache in ``vllm.v1.core.kv_cache_planning`` and resolves the
 planner through ``Platform.get_kv_cache_config_builder_cls`` (see
 ``NPUPlatform.get_kv_cache_config_builder_cls``). Ascend-specific grouping and
-pool accounting live here. The inherited default materialization delegates to
-``patch_kv_cache_utils.py``, which applies layerwise offload after native placement.
-Capacity accounting probes that same entry with one block.
+pool accounting live here; materialization stays in the patched planning
+functions (see ``patch_kv_cache_utils.py``), which
+``DefaultKVCacheConfigBuilder.get_kv_cache_config_from_groups`` calls with the
+Core-resolved ``num_blocks``.
 """
 
 from collections import defaultdict
@@ -27,9 +28,9 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import get_layerwise_reuse_config
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    LayerwiseCacheConfig,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
+    get_layerwise_offload_config,
+    get_spec_reuse_rules,
 )
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_pool_bytes_per_block,
@@ -95,17 +96,19 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         vllm_config: VllmConfig,
         kv_cache_groups: list[KVCacheGroupSpec],
     ) -> int:
-        """Count physical device bytes per block, including layerwise reuse.
+        """Return the device memory cost per global block ID.
 
-        Native multi-allocation layouts retain their existing accounting.
+        The default implementation materializes a one-block pool and requires a
+        single device backing size, which the DSV4 shared-tuple, the TurboQuant
+        packed, the DSV4.1, and the GLM-Next layouts all violate.
         """
-        extra_config = get_layerwise_reuse_config(getattr(vllm_config, "kv_transfer_config", None))
-        if extra_config is not None:
-            num_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
-            if LayerwiseCacheConfig.has_layer_reuse_for_stage(num_layers, extra_config):
-                plan = self.get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks=1)
-                if getattr(plan, "layerwise_kv_cache_reuse", False):
-                    return next(tensor.size for tensor in plan.kv_cache_tensors if not tensor.host_resident)
+        extra_config = get_layerwise_offload_config(getattr(vllm_config, "kv_transfer_config", None))
+        if extra_config is not None and kv_cache_groups and get_spec_reuse_rules(vllm_config) is not None:
+            plan = self.get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks=1)
+            if getattr(plan, "layerwise_kv_cache_reuse", False):
+                # Each reuse descriptor reports the size of the same device backing.
+                # This plan has one block, so that size is the cost per block.
+                return next(tensor.size for tensor in plan.kv_cache_tensors if not tensor.host_resident)
         if vllm_config.model_config.hf_config.model_type == "kimi_k31":
             return paired_sfa_pool_bytes(kv_cache_groups)
         if is_deepseek_v41_cache(kv_cache_groups):

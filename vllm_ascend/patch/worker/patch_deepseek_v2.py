@@ -321,13 +321,8 @@ def _patched_deepseek_v2_model_init(self, *args, **kwargs):
             quant_config=vllm_config.quant_config,
             prefix=f"{kwargs.get('prefix', '')}.embed_tokens",
         )
-    # V2 relays aux slots upstream; V1 still uses the Ascend tensor payload.
-    self._use_upstream_aux_relay = kwargs["vllm_config"].use_v2_model_runner
     self.topk_indices_buffer = _find_topk_indices_buffer(self.layers)
-    transport_data_type_list = [PPTransportDataType.TOPK_INDICES]
-    if not self._use_upstream_aux_relay:
-        transport_data_type_list.insert(0, PPTransportDataType.AUX_HIDDEN_STATES)
-    transport_data_types = tuple(transport_data_type_list)
+    transport_data_types = (PPTransportDataType.TOPK_INDICES,)
     configure_pp_topk_transport(self, transport_data_types)
     self.make_empty_intermediate_tensors = pp_transport.make_empty_intermediate_tensors(
         self,
@@ -354,10 +349,7 @@ DeepseekV2Model.supports_aux_hidden_states_over_pp = True
 
 
 def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-    if self.model._use_upstream_aux_relay:
-        self.model._set_aux_hidden_state_layers(layers)
-    else:
-        self.model.aux_hidden_state_layers = layers
+    self.model._set_aux_hidden_state_layers(layers)
 
 
 DeepseekV2ForCausalLM.set_aux_hidden_state_layers = _set_aux_hidden_state_layers
@@ -394,13 +386,7 @@ def _patched_forward(
         assert intermediate_tensors is not None
         hidden_states = intermediate_tensors["hidden_states"]
         residual = intermediate_tensors["residual"]
-        if self._use_upstream_aux_relay:
-            aux_hidden_states = self.collect_remote_aux_hidden_states(intermediate_tensors)
-        else:
-            aux_hidden_states = pp_transport.get_pp_transport_tensors(
-                intermediate_tensors,
-                pp_transport.PPTransportDataType.AUX_HIDDEN_STATES,
-            )
+        aux_hidden_states = self.collect_remote_aux_hidden_states(intermediate_tensors)
 
     llama_4_scaling_config = getattr(self.config, "llama_4_scaling", None)
     llama_4_scaling: torch.Tensor | None
@@ -425,18 +411,9 @@ def _patched_forward(
 
     if not pp_group.is_last_rank:
         pp_output = IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
-        if self._use_upstream_aux_relay:
-            # vLLM's buffer-mutation check also sees names in traced-out branches.
-            # Avoid leaving "update" in the forward's co_names for PP=1.
-            pp_output = IntermediateTensors(
-                {**pp_output.tensors, **self.pack_local_aux_hidden_states(aux_hidden_states)}
-            )
-        else:
-            pp_transport.add_pp_transport_tensors(
-                pp_output,
-                pp_transport.PPTransportDataType.AUX_HIDDEN_STATES,
-                aux_hidden_states,
-            )
+        # vLLM's buffer-mutation check also sees names in traced-out branches.
+        # Avoid leaving "update" in the forward's co_names for PP=1.
+        pp_output = IntermediateTensors({**pp_output.tensors, **self.pack_local_aux_hidden_states(aux_hidden_states)})
         if self.send_pp_topk_indices:
             assert self.topk_indices_buffer is not None
             num_tokens = positions.shape[0]

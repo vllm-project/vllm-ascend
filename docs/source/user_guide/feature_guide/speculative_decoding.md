@@ -900,11 +900,11 @@ and devices:
 ```
 
 RecoverSSM requires speculative decoding, PP=1 and DCP=1. PCP is limited to
-Prefill producers with TP=1 using the Mooncake connectors below;
+Prefill producers with TP=1;
 PCP Decode consumers and colocated PCP execution are not supported.
 Stochastic rounding must be disabled.
 
-For prefill/decode separation, use `MooncakeConnectorV2` or
+For direct prefill-to-decode transfer, use `MooncakeConnectorV2` or
 `MooncakePullConnector` with matching model weights, speculative window,
 cache dtypes, convolution layout and RecoverSSM settings on both sides.
 PCP producers may use a different KDA head-shard count from Decode consumers:
@@ -932,6 +932,15 @@ configuration on both roles.
 PCP does not require `--enforce-eager` for the entire P model. Its KDA path has
 an eager dispatch boundary, allowing the surrounding model to be compiled.
 Validate the selected P graph configuration separately for your deployment.
+
+For external prefix-cache storage and recovery with RecoverSSM, use
+`AscendStoreConnector` with the Memcache or Mooncake backend. When combining
+external prefix caching with direct prefill-to-decode transfer, use
+`MultiConnector` to combine the Store connector with the transfer connector.
+Follow the cache-layout and parallelism requirements in the
+[AscendStore deployment guide](kv_cache_pool_ascend_store.md) and, for Mooncake
+layerwise hybrid pooling, the
+[hybrid attention guide](mooncake_hybrid_attention.md).
 
 !!! warning
 

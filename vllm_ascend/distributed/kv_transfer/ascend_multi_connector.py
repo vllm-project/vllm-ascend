@@ -38,6 +38,16 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             "HMA should not be enabled unless all sub-connectors support it"
         )
         self._configure_layerwise_reuse_completion()
+        if (
+            role == KVConnectorRole.WORKER
+            and getattr(kv_cache_config, "layerwise_kv_cache_reuse", False)
+            and len(self._connectors) > 1
+            and (
+                len(self._layerwise_slot_release_providers) != len(self._connectors) - 1
+                or not self._external_slot_release_sink_configured
+            )
+        ):
+            raise ValueError("Layerwise offload requires a slot-release fence for every PD connector.")
         # Handle to the (V2) mamba hybrid model state while its per-layer
         # align pre-copy is deferred behind a layerwise child connector.
         self._mamba_state: Any = None
@@ -182,6 +192,13 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
                 blocks if needs_full_blocks else empty_blocks,
                 num_external_tokens if needs_full_blocks else 0,
             )
+
+    def get_local_prefix_cache_limit(self, request: "Request") -> int | None:
+        for connector in self._connectors:
+            get_limit = getattr(connector, "get_local_prefix_cache_limit", None)
+            if get_limit is not None and (limit := get_limit(request)) is not None:
+                return limit
+        return None
 
     def get_num_new_matched_tokens(
         self,

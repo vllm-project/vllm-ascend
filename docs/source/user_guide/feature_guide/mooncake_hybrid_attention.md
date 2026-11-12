@@ -32,7 +32,7 @@ The common Mooncake dependency and deployment requirements are listed in the
 | Recurrent state | Recurrent and linear-attention groups, including GDN and KDA state, require `mamba_cache_mode="align"`. |
 | Parallelism | Use matching TP, PP, PCP, and PP layer partitions on sharing instances. DCP greater than `1` and TP mismatch are not supported. |
 | PP | Uneven partitions and stage-local groups are supported only when every stage owns layers in every required group. Empty stage-local groups are not supported. |
-| PCP | Each PCP rank stores its own snapshot. Account for these copies in Store capacity and bandwidth. |
+| PCP | Replicated cache groups share Store objects and only one PCP rank saves them. PCP-sharded Mamba groups retain a distinct state shard per PCP rank. |
 | KVPP | Hybrid layerwise pooling does not support KVPP. Mooncake layerwise PCP also cannot be combined with `enable_kvpp`. |
 | Cache storage | Partial-block offloading and cross-layer cache-buffer reuse are not supported. |
 | Load failures | Hybrid models do not support `kv_load_failure_policy=recompute`. A load failure must not continue with incomplete state. |
@@ -46,7 +46,9 @@ be checked in the corresponding model deployment guide.
 
 A hybrid model can use different block sizes and cache entries in different
 groups. Mooncake stores one object per group, logical block, and storing
-rank within each pipeline stage. Each object contains that group's layer data;
+TP rank or head within each pipeline stage. PCP-sharded Mamba groups also
+include the PCP size and rank in their object keys. Replicated groups share
+objects across PCP ranks. Each object contains that group's layer data;
 range transfers read or write only the entries needed by the current layer.
 
 For example, a model may have the following layout:
@@ -161,14 +163,17 @@ To use PCP, add these options to the model's launch command:
 --decode-context-parallel-size 1
 ```
 
-Use the same TP, PP, and PCP topology on every instance sharing these objects.
-Each PCP worker owns separate Store objects and transfer sessions. Prefix lookup
-requires committed objects from every required PCP rank, PP stage, and storing
-TP rank or head. Objects from different PCP sizes are isolated, and PCP does
-not change the logical token coverage of a group block.
+Use matching TP and PP layouts on instances sharing these objects.
+Replicated cache groups share object keys across PCP ranks, and
+only one PCP rank saves them. Other PCP ranks restore from the same objects.
+PCP-sharded Mamba groups store distinct state shards rather than complete
+replicas. Their keys include both PCP size and rank, and prefix lookup requires
+committed shards from every required PCP rank. Lookup also checks every required
+PP stage and storing TP rank or head. PCP does not change the logical token
+coverage of a group block.
 
-PCP keeps a separate cache copy per PCP rank, so increasing PCP can increase
-Store capacity and transfer-bandwidth requirements. Keep `enable_kvpp` disabled.
+Size the Store for unique cache objects and state shards. Replicated groups do
+not require one stored copy per PCP rank. Keep `enable_kvpp` disabled.
 
 ## Configuration Parameters
 
@@ -191,8 +196,10 @@ model's cache configuration.
 - Start with a prefetch distance of `2` and adjust it to the model's attention
   time and transfer bandwidth. A larger distance can hide loads but can also
   increase contention with HCCL or expert-parallel communication.
-- Size the Store for all cache groups and PCP copies, including indexer and
-  recurrent state. Full-attention KV size alone is insufficient for capacity planning.
+- Size the Store for unique objects across all cache groups, including indexer
+  caches and recurrent-state shards. Count replicated objects once per storing
+  TP rank or head and PP stage, rather than once per PCP rank. Full-attention KV
+  size alone is insufficient for capacity planning.
 - Use representative prompt lengths and shared prefixes when measuring reuse.
   Different group block sizes and checkpoint boundaries determine how much of
   a prefix can be restored.

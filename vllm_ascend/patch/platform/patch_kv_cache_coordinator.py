@@ -4,6 +4,8 @@ import sys
 from collections.abc import Mapping
 from copy import copy
 from dataclasses import replace
+from functools import wraps
+from inspect import signature
 from math import lcm
 
 import vllm
@@ -21,6 +23,7 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHashList,
     KVCacheBlock,
 )
+from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import (
     MambaManager,
     get_manager_for_kv_cache_spec,
@@ -36,6 +39,32 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
+_original_get_local_prefix_cache_hit = Scheduler._get_local_prefix_cache_hit
+_supports_prefix_hit_limit = "max_cache_hit_length" in signature(_original_get_local_prefix_cache_hit).parameters
+
+
+@wraps(_original_get_local_prefix_cache_hit)
+def _get_local_prefix_cache_hit(self, request, max_cache_hit_length=None):
+    get_limit = getattr(self.connector, "get_local_prefix_cache_limit", None)
+    if get_limit is not None and self.kv_cache_manager.prefix_cache_lookup_enabled(request):
+        limit = get_limit(request)
+        if limit is not None:
+            max_cache_hit_length = limit if max_cache_hit_length is None else min(limit, max_cache_hit_length)
+    if _supports_prefix_hit_limit:
+        return _original_get_local_prefix_cache_hit(self, request, max_cache_hit_length)
+    if max_cache_hit_length is None:
+        return _original_get_local_prefix_cache_hit(self, request)
+    # v0.32 has no upper-bound argument on KVCacheManager. Query its
+    # coordinator with the verified limit and keep the common boundary.
+    manager = self.kv_cache_manager
+    coordinator = manager.coordinator
+    cached, hit, unmatched = coordinator.find_longest_cache_hit(request.block_hashes, max_cache_hit_length)
+    if hit > 0 and manager.enable_kv_cache_events and request.kv_cache_report_mode == "full":
+        coordinator.emit_cached_block_events(request, cached)
+    return manager.create_kv_cache_blocks(cached), hit, (hit + unmatched if unmatched else 0), False
+
+
+Scheduler._get_local_prefix_cache_hit = _get_local_prefix_cache_hit
 
 
 def _skips_eagle_block_drop(kv_transfer_config) -> bool:
@@ -278,7 +307,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         block_size = kv_cache_spec.block_size
         if isinstance(kv_cache_spec, MambaSpec):
             return block_size
-        if self.dcp_world_size > 1:
+        if kv_cache_spec.dcp_sharded:
             block_size *= self.dcp_world_size
         return block_size
 
@@ -386,12 +415,6 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 - The number of tokens of the longest cache hit.
         """
 
-        if getattr(self.kv_cache_config, "layerwise_kv_cache_reuse", False):
-            # Scratch-slot hashes outlive their overwritten payload. Admit
-            # only externally verified prefixes through the store connector.
-            # Remove when upstream can reject nonresident scratch-cache hits.
-            return tuple([] for _ in self.kv_cache_config.kv_cache_groups), 0, 0
-
         def _get_block_hashes(kv_cache_spec: KVCacheSpec) -> BlockHashList:
             return block_hashes
 
@@ -451,7 +474,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     kv_cache_spec=spec,
                     drop_eagle_block=drop_eagle_block,
                     alignment_tokens=self._cache_hit_alignment_tokens,
-                    dcp_world_size=self.dcp_world_size,
+                    dcp_world_size=self.dcp_world_size if spec.dcp_sharded else 1,
                     pcp_world_size=1,
                 )
                 hit_blocks, _new_hit_length = hit_result
@@ -497,10 +520,6 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
     ) -> tuple[tuple[list[KVCacheBlock], ...], tuple[int, ...]]:
-        if getattr(self.kv_cache_config, "layerwise_kv_cache_reuse", False):
-            return tuple([] for _ in self.kv_cache_config.kv_cache_groups), tuple(
-                0 for _ in self.kv_cache_config.kv_cache_groups
-            )
         # PD + hybrid connector path. Skip the EAGLE drop on the prefill
         # producer and on standalone instances (see
         # ``self.skips_eagle_block_drop``): matched content blocks are

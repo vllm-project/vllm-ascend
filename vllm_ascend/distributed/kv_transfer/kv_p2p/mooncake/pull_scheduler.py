@@ -6,12 +6,12 @@ import queue
 import threading
 import time
 from collections import OrderedDict, defaultdict, deque
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 import msgspec
 import zmq
-from vllm import envs
+from cachetools import TTLCache
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
@@ -24,15 +24,17 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
+    GET_META_MSG,
     MooncakeBaseConnectorScheduler,
+    MooncakeMetadataThread,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.heartbeat import (
+    DEFAULT_KV_LEASE_DURATION,
+    HEARTBEAT_MSG,
+    MooncakeHeartbeatThread,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
-    MooncakePCPTransferMetadata,
-    MooncakePPTransferMetadata,
-    MooncakeTPTransferMetadata,
-    MooncakeTransferMetadata,
-    MooncakeTransferMetadataGroups,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     ensure_zmq_recv,
@@ -47,12 +49,13 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 
-GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
 ACK_MSG = b"ACK"
+PRODUCER_LEASE_CACHE_TTL_SECONDS = 600
+PRODUCER_LEASE_CACHE_MAX_SIZE = 1024
 
 
-class MooncakeSchedulerSendingThread(threading.Thread):
+class MooncakeSchedulerSendingThread(MooncakeMetadataThread):
     """Serve worker metadata and collect D-side completion messages."""
 
     def __init__(
@@ -67,258 +70,37 @@ class MooncakeSchedulerSendingThread(threading.Thread):
         dcp_size: int,
         use_kv_pp: bool,
         ready_event: threading.Event,
+        kv_lease_duration: int = DEFAULT_KV_LEASE_DURATION,
     ) -> None:
-        super().__init__(daemon=True, name="MooncakeSchedulerSendingThread")
-        encoder = msgspec.msgpack.Encoder()
-        self.host = host
-        self.port = port
-        self.tp_size = tp_size
-        self.pp_size = pp_size
-        self.pcp_size = pcp_size
-        self.dcp_size = dcp_size
-        self.engine_id = engine_id
-        self.use_kv_pp = use_kv_pp
-        if self.use_kv_pp and self.dcp_size != 1:
-            raise ValueError(f"Mooncake KVPP cannot be combined with DCP, got dcp_size={self.dcp_size}")
-        metadata_by_pp_rank = self._merge_metadata_by_pp_rank(metadata)
-        self.encoded_metadata = encoder.encode(
-            MooncakeTransferMetadataGroups(
-                engine_id=engine_id,
-                scheduler_host=host,
-                scheduler_port=port,
-                pp_size=pp_size,
-                pcp_size=pcp_size,
-                dcp_size=dcp_size,
-                tp_size=tp_size,
-                use_kv_pp=self.use_kv_pp,
-                metadata_by_pp_rank=metadata_by_pp_rank,
-            )
-        )
-        logger.info(
-            "Initialized Mooncake scheduler handshake metadata: engine_id=%s, "
-            "worker_count=%d, pp_ranks=%s, tp_size=%d, pp_size=%d, "
-            "pcp_size=%d, dcp_size=%d, use_kv_pp=%s",
-            engine_id,
-            len(metadata),
-            sorted(metadata_by_pp_rank),
-            tp_size,
-            pp_size,
-            pcp_size,
-            dcp_size,
-            self.use_kv_pp,
-        )
-        self.ready_event = ready_event
-        self.stop_event = threading.Event()
+        super().__init__(host, port, engine_id, metadata, tp_size, pp_size, pcp_size, dcp_size, use_kv_pp, ready_event)
         self.delayed_free_requests: OrderedDict[str, float] = OrderedDict()
+        self.renewed_requests: OrderedDict[str, float] = OrderedDict()
+        self.kv_lease_duration = kv_lease_duration
+        self.lease_extension = kv_lease_duration * 2 // 3
         self.finished_requests: queue.SimpleQueue[str] = queue.SimpleQueue()
         self.state_lock = threading.Lock()
 
-    def _merge_metadata_by_pp_rank(
-        self,
-        metadata: Mapping[int | tuple[int, ...], KVConnectorHandshakeMetadata],
-    ) -> dict[int, MooncakePPTransferMetadata]:
-        """Merge worker metadata into one PP-wide layer table.
-
-        LayerSplit may assign different layers to any PCP/TP worker. Per-layer
-        fields are therefore aligned by layer name instead of requiring every
-        worker to expose the same layer list. Worker-private address tables are
-        padded to the PP-union layer order, while ``layer_indices`` records the
-        entries physically owned by each PCP/TP worker.
-        """
-        # pp_rank -> pcp_rank -> tp_rank -> worker handshake metadata.
-        workers_by_pp_rank: dict[int, dict[int, dict[int, MooncakeTransferMetadata]]] = {}
-        for metadata_key, rank_metadata in metadata.items():
-            if isinstance(metadata_key, int):
-                pp_rank, pcp_rank, tp_rank = 0, 0, metadata_key
-            elif len(metadata_key) == 2:
-                pp_rank, tp_rank = metadata_key
-                pcp_rank = 0
-            elif len(metadata_key) == 3:
-                pp_rank, pcp_rank, tp_rank = metadata_key
-            else:
-                raise ValueError(
-                    "Mooncake handshake metadata key must be tp_rank, "
-                    f"(pp_rank, tp_rank), or (pp_rank, pcp_rank, tp_rank), got {metadata_key!r}"
-                )
-
-            if not isinstance(rank_metadata, MooncakeTransferMetadata):
-                raise ValueError(
-                    "Mooncake scheduler expects MooncakeTransferMetadata, "
-                    f"got {type(rank_metadata).__name__} for key {metadata_key!r}"
-                )
-            if rank_metadata.engine_id != self.engine_id:
-                raise ValueError(
-                    "Mooncake worker metadata engine ID mismatch: expected "
-                    f"{self.engine_id!r}, got {rank_metadata.engine_id!r}"
-                )
-
-            workers_by_tp_rank = workers_by_pp_rank.setdefault(pp_rank, {}).setdefault(pcp_rank, {})
-            if tp_rank in workers_by_tp_rank:
-                raise ValueError(
-                    f"Duplicate Mooncake metadata for PP rank {pp_rank}, PCP rank {pcp_rank}, TP rank {tp_rank}"
-                )
-            workers_by_tp_rank[tp_rank] = rank_metadata
-
-        expected_pp_ranks = set(range(self.pp_size))
-        if set(workers_by_pp_rank) != expected_pp_ranks:
-            raise ValueError(
-                "Mooncake worker metadata has incomplete PP ranks: expected "
-                f"{sorted(expected_pp_ranks)}, got {sorted(workers_by_pp_rank)}"
-            )
-
-        expected_pcp_ranks = set(range(self.pcp_size))
-        expected_tp_ranks = set(range(self.tp_size))
-        merged: dict[int, MooncakePPTransferMetadata] = {}
-        for pp_rank, workers_by_pcp_rank in sorted(workers_by_pp_rank.items()):
-            if set(workers_by_pcp_rank) != expected_pcp_ranks:
-                raise ValueError(
-                    "Mooncake worker metadata has incomplete PCP ranks for "
-                    f"PP rank {pp_rank}: expected {sorted(expected_pcp_ranks)}, "
-                    f"got {sorted(workers_by_pcp_rank)}"
-                )
-            for pcp_rank, workers_by_tp_rank in workers_by_pcp_rank.items():
-                if set(workers_by_tp_rank) != expected_tp_ranks:
-                    raise ValueError(
-                        "Mooncake worker metadata has incomplete TP ranks for "
-                        f"PP rank {pp_rank}, PCP rank {pcp_rank}: "
-                        f"expected {sorted(expected_tp_ranks)}, got {sorted(workers_by_tp_rank)}"
-                    )
-
-            reference_pcp_rank = min(workers_by_pcp_rank)
-            reference_tp_rank = min(workers_by_pcp_rank[reference_pcp_rank])
-            reference = workers_by_pcp_rank[reference_pcp_rank][reference_tp_rank]
-            for pcp_rank, workers_by_tp_rank in workers_by_pcp_rank.items():
-                for tp_rank, worker_metadata in workers_by_tp_rank.items():
-                    mismatched_fields = [
-                        field_name
-                        for field_name in ("block_size", "num_blocks", "cp_kv_cache_interleave_size")
-                        if getattr(worker_metadata, field_name) != getattr(reference, field_name)
-                    ]
-                    if mismatched_fields:
-                        raise ValueError(
-                            "Mooncake worker metadata differs across PCP/TP ranks for "
-                            f"PP rank {pp_rank}: PCP/TP {reference_pcp_rank}/{reference_tp_rank} and "
-                            f"{pcp_rank}/{tp_rank} mismatch in {mismatched_fields}"
-                        )
-
-            # layer_name -> (first owning worker metadata, its local layer index).
-            # The source supplies PP-shared fields after all duplicate owners
-            # have been checked against the corresponding structural signature.
-            layer_source_by_name: dict[str, tuple[MooncakeTransferMetadata, int]] = {}
-            # layer_name -> (group index, block size, strides, lengths, shapes,
-            #                block-size scales, indexer replication size).
-            layer_signature_by_name: dict[str, tuple[object, ...]] = {}
-            reference_layer_names: set[str] | None = None
-            for pcp_rank, workers_by_tp_rank in sorted(workers_by_pcp_rank.items()):
-                for tp_rank, worker_metadata in sorted(workers_by_tp_rank.items()):
-                    worker_layer_names = set(worker_metadata.layer_names)
-                    if len(worker_layer_names) != len(worker_metadata.layer_names):
-                        raise ValueError(
-                            f"Mooncake worker metadata for PP rank {pp_rank}, PCP rank {pcp_rank}, "
-                            f"TP rank {tp_rank} contains duplicate layers"
-                        )
-                    if reference_layer_names is None:
-                        reference_layer_names = worker_layer_names
-                    elif not self.use_kv_pp and worker_layer_names != reference_layer_names:
-                        raise ValueError(
-                            "Mooncake workers expose different KV-cache layers while KVPP is disabled: "
-                            f"PP rank {pp_rank}, PCP/TP rank {pcp_rank}/{tp_rank}"
-                        )
-                    for local_layer_index, layer_name in enumerate(worker_metadata.layer_names):
-                        layer_signature = (
-                            worker_metadata.group_indices[local_layer_index],
-                            worker_metadata.layer_block_sizes[local_layer_index],
-                            worker_metadata.block_strides[local_layer_index],
-                            worker_metadata.block_lens[local_layer_index],
-                            worker_metadata.block_shapes[local_layer_index],
-                            worker_metadata.block_size_scales[local_layer_index],
-                            worker_metadata.indexer_replication_sizes[local_layer_index],
-                        )
-                        previous_signature = layer_signature_by_name.get(layer_name)
-                        if previous_signature is not None and previous_signature != layer_signature:
-                            layer_field_names = (
-                                "group_indices",
-                                "layer_block_sizes",
-                                "block_strides",
-                                "block_lens",
-                                "block_shapes",
-                                "block_size_scales",
-                                "indexer_replication_sizes",
-                            )
-                            mismatched_layer_fields = [
-                                field_name
-                                for field_name, previous_value, value in zip(
-                                    layer_field_names, previous_signature, layer_signature
-                                )
-                                if previous_value != value
-                            ]
-                            raise ValueError(
-                                "Mooncake worker metadata differs across PCP/TP ranks for "
-                                f"PP rank {pp_rank}, layer {layer_name!r}: mismatch in {mismatched_layer_fields}"
-                            )
-                        if previous_signature is None:
-                            layer_source_by_name[layer_name] = (worker_metadata, local_layer_index)
-                            layer_signature_by_name[layer_name] = layer_signature
-            layer_names = sorted(layer_source_by_name)
-            layer_block_sizes: list[int] = []
-            group_indices: list[int] = []
-            block_strides: list[list[int]] = []
-            block_lens: list[list[int]] = []
-            block_shapes: list[list[tuple[int, ...]]] = []
-            block_size_scales: list[list[int]] = []
-            indexer_replication_sizes: list[int] = []
-            for layer_name in layer_names:
-                worker_metadata, local_layer_index = layer_source_by_name[layer_name]
-                layer_block_sizes.append(worker_metadata.layer_block_sizes[local_layer_index])
-                group_indices.append(worker_metadata.group_indices[local_layer_index])
-                block_strides.append(worker_metadata.block_strides[local_layer_index])
-                block_lens.append(worker_metadata.block_lens[local_layer_index])
-                block_shapes.append(worker_metadata.block_shapes[local_layer_index])
-                block_size_scales.append(worker_metadata.block_size_scales[local_layer_index])
-                indexer_replication_sizes.append(worker_metadata.indexer_replication_sizes[local_layer_index])
-
-            layer_index_by_name = {layer_name: layer_index for layer_index, layer_name in enumerate(layer_names)}
-            metadata_by_pcp_rank: dict[int, MooncakePCPTransferMetadata] = {}
-            for pcp_rank, workers_by_tp_rank in sorted(workers_by_pcp_rank.items()):
-                metadata_by_tp_rank: dict[int, MooncakeTPTransferMetadata] = {}
-                for tp_rank, worker_metadata in sorted(workers_by_tp_rank.items()):
-                    layer_indices = sorted(
-                        layer_index_by_name[layer_name] for layer_name in worker_metadata.layer_names
-                    )
-                    # PP-union layer index -> this worker's per-cache-tensor
-                    # addresses; unowned entries remain empty.
-                    aligned_base_addrs: list[list[int]] = [[] for _ in layer_names]
-                    for local_layer_index, layer_name in enumerate(worker_metadata.layer_names):
-                        layer_index = layer_index_by_name[layer_name]
-                        aligned_base_addrs[layer_index] = worker_metadata.kv_caches_base_addr[local_layer_index]
-                    metadata_by_tp_rank[tp_rank] = MooncakeTPTransferMetadata(
-                        te_rpc_port=worker_metadata.te_rpc_port,
-                        layer_indices=layer_indices,
-                        kv_caches_base_addr=aligned_base_addrs,
-                        local_ip=worker_metadata.local_ip,
-                        handshake_port=worker_metadata.handshake_port,
-                    )
-                metadata_by_pcp_rank[pcp_rank] = MooncakePCPTransferMetadata(metadata_by_tp_rank=metadata_by_tp_rank)
-
-            merged[pp_rank] = MooncakePPTransferMetadata(
-                block_size=reference.block_size,
-                cp_kv_cache_interleave_size=reference.cp_kv_cache_interleave_size,
-                num_blocks=reference.num_blocks,
-                layer_names=layer_names,
-                layer_block_sizes=layer_block_sizes,
-                group_indices=group_indices,
-                block_strides=block_strides,
-                block_lens=block_lens,
-                block_shapes=block_shapes,
-                block_size_scales=block_size_scales,
-                metadata_by_pcp_rank=metadata_by_pcp_rank,
-                indexer_replication_sizes=indexer_replication_sizes,
-            )
-        return merged
-
-    def add_delayed_request(self, request_id: str, delay_start_time: float) -> None:
+    def add_delayed_request(self, request_id: str) -> None:
         with self.state_lock:
-            self.delayed_free_requests[request_id] = delay_start_time
+            if request_id not in self.delayed_free_requests and request_id not in self.renewed_requests:
+                self.delayed_free_requests[request_id] = time.monotonic() + self.kv_lease_duration
+
+    def _handle_heartbeat(self, request_ids: Sequence[str]) -> None:
+        with self.state_lock:
+            now = time.monotonic()
+            for request_id in request_ids:
+                expiry = self.delayed_free_requests.get(request_id)
+                if expiry is None:
+                    expiry = self.renewed_requests.get(request_id)
+                if expiry is None:
+                    continue
+                if now >= expiry:
+                    self._mark_finished_locked(request_id)
+                    logger.error("Force freed expired Mooncake request %s after KV lease expired", request_id)
+                elif now + self.lease_extension > expiry:
+                    self.delayed_free_requests.pop(request_id, None)
+                    self.renewed_requests[request_id] = now + self.lease_extension
+                    self.renewed_requests.move_to_end(request_id)
 
     def get_and_clear_finished_requests(self) -> set[str]:
         finished: set[str] = set()
@@ -336,6 +118,7 @@ class MooncakeSchedulerSendingThread(threading.Thread):
             self.join()
         with self.state_lock:
             self.delayed_free_requests.clear()
+            self.renewed_requests.clear()
         while not self.finished_requests.empty():
             self.finished_requests.get_nowait()
 
@@ -373,6 +156,11 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                 elif msg[0] == DONE_RECVING_MSG and len(msg) == 2:
                     self._handle_finished_request(str(msg[1]))
                     sock.send_multipart((identity, b"", ACK_MSG))
+                elif msg[0] == HEARTBEAT_MSG and len(msg) == 2:
+                    if not isinstance(msg[1], (list, tuple)) or not all(isinstance(req_id, str) for req_id in msg[1]):
+                        raise ValueError("Invalid Mooncake heartbeat request IDs")
+                    self._handle_heartbeat(msg[1])
+                    sock.send_multipart((identity, b"", ACK_MSG))
                 else:
                     logger.warning("Unexpected Mooncake scheduler control message: %s", msg)
             except Exception:
@@ -386,29 +174,27 @@ class MooncakeSchedulerSendingThread(threading.Thread):
         # request_finished registers the request before exposing its transfer
         # parameters to D. Unknown IDs are therefore stale or duplicate DONEs;
         # the control loop still ACKs them so D can stop retrying.
-        if request_id not in self.delayed_free_requests:
+        if request_id not in self.delayed_free_requests and request_id not in self.renewed_requests:
             logger.warning(
                 "Received Mooncake DONE for request %s with no pending delayed free; ignoring completion",
                 request_id,
             )
             return
-        del self.delayed_free_requests[request_id]
+        self.delayed_free_requests.pop(request_id, None)
+        self.renewed_requests.pop(request_id, None)
         self.finished_requests.put(request_id)
 
     def _retrieve_expired_requests_locked(self) -> None:
-        current_time = time.time()
-        while self.delayed_free_requests:
-            request_id = next(iter(self.delayed_free_requests))
-            delay_start_time = self.delayed_free_requests[request_id]
-            if current_time - delay_start_time <= envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT:
-                break
-
-            self._mark_finished_locked(request_id)
-            logger.error(
-                "Force freed expired Mooncake request %s after %s seconds",
-                request_id,
-                envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
-            )
+        now = time.monotonic()
+        # Each queue has one fixed duration. Renewals only move to the tail
+        # when the deadline increases, keeping both queues expiry-ordered.
+        for requests in (self.delayed_free_requests, self.renewed_requests):
+            while requests:
+                request_id, expiry = next(iter(requests.items()))
+                if now < expiry:
+                    break
+                self._mark_finished_locked(request_id)
+                logger.error("Force freed expired Mooncake request %s after KV lease expired", request_id)
 
 
 class MooncakeSchedulerRecvingThread(threading.Thread):
@@ -537,16 +323,72 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         self._reqs_in_batch: set[str] = set()
         # D request -> (P scheduler host, port, P request id).
         self._reqs_recv_info: dict[str, tuple[str, int, str]] = {}
+        # Successful validations expire and have a bounded endpoint count.
+        # Only the scheduler thread accesses this cache.
+        self._validated_producer_leases: TTLCache[tuple[str, int], tuple[str, int]] = TTLCache(
+            maxsize=PRODUCER_LEASE_CACHE_MAX_SIZE,
+            ttl=PRODUCER_LEASE_CACHE_TTL_SECONDS,
+            timer=time.monotonic,
+        )
         self._sending_thread: MooncakeSchedulerSendingThread | None = None
         self._recving_thread: MooncakeSchedulerRecvingThread | None = None
+        self._heartbeat_thread: MooncakeHeartbeatThread | None = None
+        self._kv_lease_duration = self.kv_transfer_config.get_from_extra_config(
+            "kv_lease_duration", DEFAULT_KV_LEASE_DURATION
+        )
+        if type(self._kv_lease_duration) is not int or self._kv_lease_duration < 6:
+            raise ValueError("Mooncake kv_lease_duration must be an integer of at least 6 seconds")
 
         if self.kv_transfer_config.is_kv_consumer:
             recving_ready_event = threading.Event()
             self._recving_thread = MooncakeSchedulerRecvingThread(recving_ready_event)
             self._recving_thread.start()
             recving_ready_event.wait()
+            self._heartbeat_thread = MooncakeHeartbeatThread(self._kv_lease_duration // 6)
+            self._heartbeat_thread.start()
+
+    def on_new_request(self, request: "Request") -> None:
+        """Track remote KV leases from scheduler admission until receive completion."""
+        super().on_new_request(request)
+        params = request.kv_transfer_params
+        if (
+            self._heartbeat_thread is not None
+            and params is not None
+            and params.get("do_remote_prefill")
+            and any(params.get("remote_block_ids", ()))
+            and all(key in params for key in ("remote_host", "remote_port", "remote_request_id", "remote_engine_id"))
+        ):
+            endpoint = (params["remote_host"], params["remote_port"])
+            remote_duration = params.get("remote_kv_lease_duration")
+            producer_config = (params["remote_engine_id"], remote_duration)
+            # Reuse successful validation while this P's instance and lease
+            # configuration stay unchanged. Checking the advertised duration
+            # also covers restarts that reuse an explicitly configured engine ID.
+            if type(remote_duration) is not int or self._validated_producer_leases.get(endpoint) != producer_config:
+                self._validate_remote_lease_duration(remote_duration, *endpoint)
+                self._validated_producer_leases[endpoint] = producer_config
+            self._heartbeat_thread.add_request(
+                request.request_id, params["remote_host"], params["remote_port"], params["remote_request_id"]
+            )
+
+    def _validate_remote_lease_duration(self, remote_duration: Any, host: str, port: int) -> None:
+        """Validate a new producer configuration before any heartbeat or READ."""
+        if type(remote_duration) is not int or remote_duration < 6:
+            raise ValueError(
+                "Mooncake producer must provide remote_kv_lease_duration as an integer of at least 6 seconds; "
+                f"got {remote_duration!r} from {host}:{port}. "
+                "Upgrade P before D and preserve kv_transfer_params through the proxy."
+            )
+        if remote_duration != self._kv_lease_duration:
+            raise ValueError(
+                "Mooncake kv_lease_duration mismatch: "
+                f"P ({host}:{port})={remote_duration}s, "
+                f"D={self._kv_lease_duration}s. Configure the same kv_lease_duration on P and D."
+            )
 
     def shutdown(self) -> None:
+        if self._heartbeat_thread is not None:
+            self._heartbeat_thread.shutdown()
         if self._sending_thread is not None:
             self._sending_thread.shutdown()
         if self._recving_thread is not None:
@@ -555,6 +397,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         self._reqs_need_send.clear()
         self._reqs_in_batch.clear()
         self._reqs_recv_info.clear()
+        self._validated_producer_leases.clear()
 
     def set_xfer_handshake_metadata_from_workers(
         self,
@@ -575,31 +418,13 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             self.dcp_size,
             self.ascend_config.kvpp_config.size > 1,
             ready_event,
+            kv_lease_duration=self._kv_lease_duration,
         )
         self._sending_thread.start()
         if not ready_event.wait(timeout=10):
             raise RuntimeError("Timed out starting Mooncake scheduler sending thread")
         if not self._sending_thread.is_alive():
             raise RuntimeError("Mooncake scheduler sending thread failed to start")
-
-    def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
-        """Return prompt tokens that will be loaded from a remote producer."""
-        params = request.kv_transfer_params
-        logger.debug(
-            "MooncakeConnector get_num_new_matched_tokens: num_computed_tokens=%s, kv_transfer_params=%s",
-            num_computed_tokens,
-            params,
-        )
-
-        if params is not None and params.get("do_remote_prefill"):
-            token_ids = request.prompt_token_ids or []
-            actual = self._state_prefill_token_count(len(token_ids))
-            params["num_computed_tokens"] = num_computed_tokens
-            count = max(actual - num_computed_tokens, 0)
-            if count > 0:
-                return count, True
-
-        return 0, False
 
     def update_state_after_alloc(
         self,
@@ -646,6 +471,8 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
                     if self._recving_thread is None:
                         raise RuntimeError("Producer Mooncake scheduler cannot acknowledge a receive request")
                     self._recving_thread.add_request(*remote)
+                    if self._heartbeat_thread is not None:
+                        self._heartbeat_thread.remove_request(request.request_id)
             else:
                 logger.warning("Got invalid KVTransferParams. params=%s.", params)
         else:
@@ -683,6 +510,11 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
     ) -> tuple[bool, dict[str, Any] | None]:
         """Release unstarted consumer transfers or expose completed producer blocks."""
         params = request.kv_transfer_params
+        # Keep renewing in-flight READs even after client cancellation. Their
+        # workers must finish before P can release the source blocks.
+        if self._heartbeat_thread is not None and request.request_id not in self._reqs_recv_info:
+            # The unallocated remote-prefill path below owns the DONE notification.
+            self._heartbeat_thread.remove_request(request.request_id)
         logger.debug(
             "MooncakeConnector request_finished: request_status=%s, kv_transfer_params=%s",
             request.status,
@@ -727,14 +559,11 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
                 num_computed_blocks,
                 request.request_id,
             )
-            delay_start_time = time.time()
+            delay_start_time = time.monotonic()
             self._reqs_need_send[request.request_id] = delay_start_time
             if self._sending_thread is None:
                 raise RuntimeError("Mooncake scheduler metadata has not been initialized")
-            self._sending_thread.add_delayed_request(
-                request.request_id,
-                delay_start_time,
-            )
+            self._sending_thread.add_delayed_request(request.request_id)
 
         return delay_free_blocks, {
             "do_remote_prefill": True,
@@ -745,6 +574,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             "remote_request_id": request.request_id,
             "remote_host": self.side_channel_host,
             "remote_port": self.side_channel_port,
+            "remote_kv_lease_duration": self._kv_lease_duration,
             "last_token_id": request.output_token_ids[-1],
         }
 
@@ -755,6 +585,8 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         # D side: this output has already aggregated completion from all
         # workers. Send one scheduler-to-scheduler ACK for the request.
         for req_id in connector_output.finished_recving or ():
+            if self._heartbeat_thread is not None:
+                self._heartbeat_thread.remove_request(req_id)
             remote = self._reqs_recv_info.pop(req_id, None)
             if remote is not None:
                 if self._recving_thread is None:

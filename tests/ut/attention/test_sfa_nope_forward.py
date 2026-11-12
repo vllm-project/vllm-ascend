@@ -48,6 +48,7 @@ def test_nope_exec_kv_preserves_padding_and_special_values(block_size, dtype, sl
         kv_a_layernorm=lambda x: x,
         enable_sparse_sfa_c8=False,
     )
+    impl._exec_kv_local = AscendSFAImpl._exec_kv_local.__get__(impl)
     native = sparse_mla.torch_npu.npu_scatter_nd_update_
     with patch.object(sparse_mla.torch_npu, "npu_scatter_nd_update_", wraps=native) as scatter:
         result = AscendSFAImpl.exec_kv(impl, values, None, None, (cache,), slots, None)
@@ -71,6 +72,7 @@ def test_nope_exec_kv_trims_unused_slots_and_converts_values():
         kv_a_layernorm=lambda x: x,
         enable_sparse_sfa_c8=False,
     )
+    impl._exec_kv_local = AscendSFAImpl._exec_kv_local.__get__(impl)
     AscendSFAImpl.exec_kv(impl, values, None, None, (cache,), slots, None)
     expected = torch.zeros_like(cache)
     expected[0, 1, 0] = values[0].to(cache.dtype)
@@ -91,6 +93,7 @@ def test_nope_exec_kv_rejects_unmergeable_pages():
         kv_a_layernorm=lambda x: x,
         enable_sparse_sfa_c8=False,
     )
+    impl._exec_kv_local = AscendSFAImpl._exec_kv_local.__get__(impl)
     with (
         patch.object(sparse_mla.torch_npu, "npu_scatter_nd_update_") as scatter,
         pytest.raises(RuntimeError, match="view size is not compatible"),
@@ -122,6 +125,11 @@ class _RecordingIndexer:
     def __call__(self, hidden, q_c, k_hidden, metadata, compute_topk):
         self.call = (hidden.clone(), q_c.clone(), k_hidden.clone(), metadata, compute_topk)
         return self.indices
+
+
+class _PrefetchRecordingIndexer(_RecordingIndexer):
+    def prepare_pcp_hidden(self, hidden, metadata):
+        return hidden
 
 
 def _rms_norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -205,6 +213,7 @@ def _reference_sparse_attention(**kwargs):
 @pytest.mark.parametrize("empty_rope_handle", [False, True])
 @pytest.mark.parametrize("enable_c8", [False, True])
 def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, empty_rope_handle, enable_c8) -> None:
+    prefetch = not enable_c8
     torch.manual_seed(7)
     num_tokens = 3
     padded_tokens = 4
@@ -257,7 +266,7 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
     fused_qkv = _Linear(fused_weight)
     gate_proj = _Linear(gate_weight)
     output_proj = _Linear(output_weight)
-    indexer = _RecordingIndexer(indices)
+    indexer = _PrefetchRecordingIndexer(indices) if prefetch else _RecordingIndexer(indices)
     indexer_metadata = SimpleNamespace(
         block_table=torch.tensor([[7, 6], [4, 5]], dtype=torch.int32),
         slot_mapping=torch.full_like(slot_mapping, -1),
@@ -345,10 +354,33 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
             o_proj=output_proj,
         )
     impl.W_UK_T, impl.W_UV = uk_weight, uv_weight
+
+    def prepare_hidden(hidden, metadata):
+        assert metadata is indexer_metadata
+        # BF16 stores main KV here; packed C8 defers its cache write.
+        if not enable_c8:
+            assert not torch.equal(kv_cache[0], initial_cache)
+        return hidden.clone()
+
+    prepare_pcp_hidden = MagicMock(side_effect=prepare_hidden)
+    project_query = impl._q_proj_and_k_up_proj
+
+    def start_o_proj_gather():
+        if prefetch:
+            prepare_pcp_hidden.assert_called_once()
+
+    impl._start_o_proj_weight_gather = MagicMock(side_effect=start_o_proj_gather)
+
+    def project_after_launch(q_c):
+        impl._start_o_proj_weight_gather.assert_called_once()
+        return project_query(q_c)
+
+    impl._q_proj_and_k_up_proj = project_after_launch
     assert not impl.supports_dense_mha_prefill
     output = torch.full((padded_tokens, output_dim), 123.0)
 
     with (
+        patch.object(indexer, "prepare_pcp_hidden", prepare_pcp_hidden, create=True),
         patch.object(
             sparse_mla,
             "get_forward_context",
@@ -392,6 +424,7 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
             metadata,
             output=output,
         )
+    assert prepare_pcp_hidden.call_count == int(prefetch)
 
     real_hidden = hidden_states[:num_tokens]
     # Graph mode projects the full padded batch; preserve its FP32 rounding
@@ -514,7 +547,8 @@ def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
     impl._get_indexer_attn_metadata = MagicMock(return_value=object())
     impl.fused_qkv_a_proj = MagicMock(return_value=(torch.zeros(4, 4),))
     impl.q_a_layernorm = lambda value: value
-    impl.exec_kv = MagicMock(return_value=(None, torch.zeros(4, 2)))
+    # Cache exchange itself is covered by test_pcp_main_kv_overlap.
+    impl.exec_kv = MagicMock(return_value=lambda: (None, torch.zeros(4, 2)))
     impl._q_proj_and_k_up_proj = MagicMock(return_value=(torch.zeros(4, 1, 2), None))
     impl._record_dcp_kv_gather_context = MagicMock()
     impl._prepare_indexer_metadata = MagicMock()
@@ -536,6 +570,7 @@ def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
     impl._get_sfa_kv_slot_mapping.assert_called_once_with(metadata)
     assert impl.exec_kv.call_args.args[0].shape[0] == 4
     assert impl.exec_kv.call_args.args[4] is metadata.slot_mapping
+    assert impl.exec_kv.call_args.kwargs == {"defer_wait": True}
     assert impl.fused_qkv_a_proj.call_args.args[0].shape[0] == 4
     impl._finalize_o_proj.assert_called_once()
     assert impl._finalize_o_proj.call_args.args[0].shape[0] == 4

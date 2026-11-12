@@ -1245,6 +1245,8 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                 self.save_failure_checker()
             # CPU completion on a non-writing rank only records the NPU event.
             self.sync_save_events[source].synchronize()
+            if self.external_slot_release_waiter is not None:
+                self.external_slot_release_waiter(source)
         return True
 
     def _handle_range_layer_task(self, data: LayerLoadTask) -> None:
