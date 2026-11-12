@@ -9,9 +9,8 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol
 
 import torch
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig
-from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.forward_context import get_forward_context
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -331,40 +330,6 @@ def pp_cache_write_metadata(metadata):
     return global_metadata if global_metadata is not None else metadata
 
 
-def export_pp_cache_rows(specs: Sequence[PPTransportTensorSpec], rows: Sequence[torch.Tensor]) -> None:
-    """Gather model-declared cache planes using the current forward's slots."""
-    context = get_forward_context()
-    for spec, output in zip(specs, rows):
-        assert spec.cache is not None
-        prefix, plane = spec.cache
-        cache = context.no_compile_layers[prefix].kv_cache[0]
-        if plane is not None:
-            cache = cache[plane]
-        output = output.view(-1, output.shape[-1])
-        slots = pp_cache_write_metadata(context.attn_metadata[prefix]).flat_slot_mapping
-        assert slots.shape[0] <= output.shape[0], "PP cache payload cannot hold all cache writes"
-        gather_pp_cache_rows(cache, slots, output[: slots.shape[0]])
-
-
-def import_pp_cache_rows(
-    specs: Sequence[PPTransportTensorSpec],
-    rows: Sequence[torch.Tensor],
-    scatter_rows: Callable[[torch.Tensor, torch.Tensor, torch.Tensor], None],
-) -> None:
-    """Restore native cache planes while preserving the model's scatter ABI."""
-    context = get_forward_context()
-    for spec, values in zip(specs, rows):
-        assert spec.cache is not None
-        prefix, plane = spec.cache
-        cache = context.no_compile_layers[prefix].kv_cache[0]
-        if plane is not None:
-            cache = cache[plane]
-        values = values.view(-1, values.shape[-1])
-        slots = pp_cache_write_metadata(context.attn_metadata[prefix]).slot_mapping
-        assert slots.shape[0] <= values.shape[0], "PP cache payload cannot hold all cache writes"
-        scatter_rows(cache, slots, values[: slots.shape[0]])
-
-
 def _export_dependencies(
     hidden_states: torch.Tensor,
     cache_rows: list[torch.Tensor],
@@ -374,9 +339,9 @@ def _export_dependencies(
 ) -> None:
     # Dummy/profile traces have no metadata. Resolve the actual cache and
     # slots at execution time, so compilation cannot erase the transfer.
-    context = get_forward_context() if is_forward_context_available() else None
-    if cache_rows and context is not None and context.attn_metadata is not None:
-        context.no_compile_layers[transport_name].cache_handler.export_rows(cache_rows)
+    context = get_forward_context()
+    if cache_rows and context.attn_metadata is not None:
+        context.no_compile_layers[transport_name].copy_cache_rows(context, cache_rows, receive=False)
     n = hidden_states.shape[0]
     for source, output in zip(state_inputs, state_outputs):
         output.copy_(source[:n])
@@ -389,9 +354,9 @@ def _import_dependencies(
     state_outputs: list[torch.Tensor],
     transport_name: str,
 ) -> None:
-    context = get_forward_context() if is_forward_context_available() else None
-    if cache_rows and context is not None and context.attn_metadata is not None:
-        context.no_compile_layers[transport_name].cache_handler.import_rows(cache_rows)
+    context = get_forward_context()
+    if cache_rows and context.attn_metadata is not None:
+        context.no_compile_layers[transport_name].copy_cache_rows(context, cache_rows, receive=True)
     n = hidden_states.shape[0]
     for source, output in zip(state_inputs, state_outputs):
         output[:n].copy_(source)
@@ -407,7 +372,7 @@ def _dependency_fake(*args, **kwargs) -> None:
 # its values are unchanged. Tensor lists carry the exact boundary manifest.
 direct_register_custom_op(
     op_name="pp_dependency_export",
-    op_func=eager_break_during_capture(_export_dependencies),
+    op_func=_export_dependencies,
     mutates_args=["cache_rows", "state_outputs"],
     fake_impl=_dependency_fake,
     dispatch_key="PrivateUse1",
@@ -415,7 +380,7 @@ direct_register_custom_op(
 
 direct_register_custom_op(
     op_name="pp_dependency_import",
-    op_func=eager_break_during_capture(_import_dependencies),
+    op_func=_import_dependencies,
     mutates_args=["hidden_states", "state_outputs"],
     fake_impl=_dependency_fake,
     dispatch_key="PrivateUse1",
@@ -423,43 +388,27 @@ direct_register_custom_op(
 
 
 class PPDependencyTransport(torch.nn.Module):
-    """Transport a boundary's complete cache and per-forward dependencies.
+    """PP cache/state copies for model-declared incoming/outgoing manifests.
 
-    The model supplies its cache ABI and incoming/outgoing manifests. The
-    common PP path owns receive allocation, validation, snapshots and runtime
-    ordering, and carries all payloads in normal ``IntermediateTensors``.
+    The model owns the manifests, cache mirrors and native scatter operation;
+    the same object is registered in static_forward_context for the custom ops.
     """
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        name: str,
-        cache_handler: torch.nn.Module,
-        incoming_caches: tuple[PPTransportTensorSpec, ...],
-        outgoing_caches: tuple[PPTransportTensorSpec, ...],
-        incoming_states: Mapping[str, torch.Tensor],
-        outgoing_states: Mapping[str, torch.Tensor],
-    ) -> None:
-        super().__init__()
-        self.name = name
-        self.cache_handler = cache_handler
-        self.incoming_caches = incoming_caches
-        self.outgoing_caches = outgoing_caches
-        self.incoming_states = dict(incoming_states)
-        self.outgoing_states = dict(outgoing_states)
-        self.incoming_specs = incoming_caches + self._state_specs(incoming_states)
-        self.outgoing_specs = outgoing_caches + self._state_specs(outgoing_states)
-        for specs in (self.incoming_specs, self.outgoing_specs):
-            names = [spec.name for spec in specs]
-            if len(names) != len(set(names)):
-                raise ValueError(f"Duplicate PP dependency tensor names: {names}")
-        vllm_config.compilation_config.static_forward_context[name] = self
-
-    @staticmethod
-    def _state_specs(states: Mapping[str, torch.Tensor]) -> tuple[PPTransportTensorSpec, ...]:
-        return tuple(
-            PPTransportTensorSpec(name, tuple(tensor.shape[1:]), tensor.dtype) for name, tensor in states.items()
-        )
+    def copy_cache_rows(self, context, rows: Sequence[torch.Tensor], *, receive: bool) -> None:
+        specs = self.incoming_caches if receive else self.outgoing_caches
+        for spec, values in zip(specs, rows):
+            prefix, plane = spec.cache
+            cache = context.no_compile_layers[prefix].kv_cache[0]
+            if plane is not None:
+                cache = cache[plane]
+            metadata = pp_cache_write_metadata(context.attn_metadata[prefix])
+            slots = metadata.slot_mapping if receive else metadata.flat_slot_mapping
+            values = values.view(-1, values.shape[-1])
+            assert slots.shape[0] <= values.shape[0], "PP cache payload cannot hold all cache writes"
+            if receive:
+                self.scatter_cache_rows(cache, slots, values[: slots.shape[0]])
+            else:
+                gather_pp_cache_rows(cache, slots, values[: slots.shape[0]])
 
     def add_receive_buffers(self, intermediate: IntermediateTensors, num_tokens: int, device: torch.device):
         for spec in self.incoming_specs:

@@ -84,9 +84,7 @@ from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
     PPTransportTensorSpec,
     add_pp_transport_tensors,
-    export_pp_cache_rows,
     get_pp_transport_tensors,
-    import_pp_cache_rows,
     pp_cache_write_metadata,
 )
 from vllm_ascend.worker.v2.pp_transport import (
@@ -636,7 +634,7 @@ TOPK = "pp_transport_v41_topk"
 TOPK_LENGTHS = "pp_transport_v41_topk_lengths"
 
 
-class V41PPCacheHandler(nn.Module):
+class V41PPCacheHandler(PPDependencyTransport):
     """Register cache-only mirrors and copy the updated rows of each source.
 
     Identical logical names/specs share scheduler block IDs across workers;
@@ -645,8 +643,10 @@ class V41PPCacheHandler(nn.Module):
     Compressor rings, SWA and Engram state stay with their owning layers.
     """
 
-    def __init__(self, vllm_config, config, prefix, incoming, outgoing):
+    def __init__(self, vllm_config, config, prefix, incoming, outgoing, shared):
         super().__init__()
+        self.name = prefix + ".pp_dependencies"
+        self.scatter_cache_rows = scatter_cache_sk
         self.incoming = incoming
         self.outgoing = outgoing
         self.prefix = prefix
@@ -682,19 +682,35 @@ class V41PPCacheHandler(nn.Module):
                     self.remote_caches[f"{source}_folded"] = DeepseekV41CacheLayer(
                         vllm_config, index_prefix + "_folded", make_folded_index_cache_spec(block_size=block_size)
                     )
-        self.incoming_specs = tuple(spec for source in incoming.cache_sources for spec in cache_specs[source])
-        self.outgoing_specs = tuple(spec for source in outgoing.cache_sources for spec in cache_specs[source])
+        self.incoming_caches = tuple(spec for source in incoming.cache_sources for spec in cache_specs[source])
+        self.outgoing_caches = tuple(spec for source in outgoing.cache_sources for spec in cache_specs[source])
+
+        def states(plan):
+            result = {}
+            if plan.topk:
+                result.update({TOPK: shared.topk_indices, TOPK_LENGTHS: shared.topk_lengths})
+            if plan.candidates:
+                result.update({CANDIDATES: shared.candidates, CANDIDATE_LENGTHS: shared.candidate_lengths})
+            return result
+
+        self.incoming_states, self.outgoing_states = states(incoming), states(outgoing)
+        self.incoming_specs, self.outgoing_specs = (
+            caches + tuple(PPTransportTensorSpec(name, tuple(t.shape[1:]), t.dtype) for name, t in buffers.items())
+            for caches, buffers in (
+                (self.incoming_caches, self.incoming_states),
+                (self.outgoing_caches, self.outgoing_states),
+            )
+        )
+        vllm_config.compilation_config.static_forward_context[self.name] = self
 
     def cache_prefixes(self, source):
         root = f"{self.prefix}.layers.{source}.self_attn"
         return root + ".long_kv_cache", root + ".indexer.k_cache"
 
-    def export_rows(self, rows):
-        export_pp_cache_rows(self.outgoing_specs, rows)
-
-    def import_rows(self, rows):
-        import_pp_cache_rows(self.incoming_specs, rows, scatter_cache_sk)
-        context = get_forward_context()
+    def copy_cache_rows(self, context, rows, *, receive):
+        super().copy_cache_rows(context, rows, receive=receive)
+        if not receive:
+            return
         layers, metadata = context.no_compile_layers, context.attn_metadata
         for source in self.incoming.cache_sources:
             _, index_prefix = self.cache_prefixes(source)
@@ -717,27 +733,7 @@ def make_pp_cache_transport(vllm_config, config, prefix, start_layer, end_layer,
     rank = partitions.index((start_layer, end_layer))
     incoming = plans[rank - 1] if rank else V41PPBoundaryPlan(start_layer)
     outgoing = plans[rank] if rank < len(plans) else V41PPBoundaryPlan(end_layer)
-    handler = V41PPCacheHandler(vllm_config, config, prefix, incoming, outgoing)
-
-    def states(plan):
-        result = {}
-        if plan.topk:
-            result[TOPK] = shared.topk_indices
-            result[TOPK_LENGTHS] = shared.topk_lengths
-        if plan.candidates:
-            result[CANDIDATES] = shared.candidates
-            result[CANDIDATE_LENGTHS] = shared.candidate_lengths
-        return result
-
-    return PPDependencyTransport(
-        vllm_config,
-        prefix + ".pp_dependencies",
-        handler,
-        handler.incoming_specs,
-        handler.outgoing_specs,
-        states(incoming),
-        states(outgoing),
-    )
+    return V41PPCacheHandler(vllm_config, config, prefix, incoming, outgoing, shared)
 
 
 class AscendDeepseekV41SWACache(DeepseekV41CacheLayer):

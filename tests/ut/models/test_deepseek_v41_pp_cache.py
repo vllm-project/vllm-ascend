@@ -104,7 +104,6 @@ def runtime(monkeypatch):
     context = SimpleNamespace(attn_metadata=None, no_compile_layers={})
     monkeypatch.setattr(v41_model, "get_forward_context", lambda: context)
     monkeypatch.setattr(pp_transport, "get_forward_context", lambda: context)
-    monkeypatch.setattr(pp_transport, "is_forward_context_available", lambda: True)
     monkeypatch.setattr(replay_mod, "get_forward_context", lambda: context)
     library = torch.library.Library("vllm", "IMPL", "CPU")
     library.impl("pp_dependency_export", pp_transport._export_dependencies)
@@ -153,27 +152,23 @@ def test_transfer_retains_history_and_copies_all_live_states(runtime, monkeypatc
     shared = [_shared(), _shared(-77)]
     sender, source_layers = _stage(monkeypatch, partitions, 0, shared[0])
     receiver, mirrors = _stage(monkeypatch, partitions, 1, shared[1])
-    source = receiver.cache_handler.incoming.cache_sources[0]
-    sources = _bind_source(source_layers, sender.cache_handler, source)
+    source = receiver.incoming.cache_sources[0]
+    sources = _bind_source(source_layers, sender, source)
     for plane in sources:
         plane.copy_(torch.arange(plane.numel()).reshape(plane.shape).remainder(97))
-    dest = _bind_source(mirrors, receiver.cache_handler, source, -77)
+    dest = _bind_source(mirrors, receiver, source, -77)
     for source_slots, dest_slots in [([9, 1, -1, 19, 6], [5, 17, -1, 9, 3]), ([22, -1, 10], [6, -1, 17])]:
         n = len(source_slots)
         before = [p.clone() for p in dest]
         runtime.no_compile_layers = source_layers
-        runtime.attn_metadata = {
-            prefix: _metadata(source_slots) for prefix in sender.cache_handler.cache_prefixes(source)
-        }
+        runtime.attn_metadata = {prefix: _metadata(source_slots) for prefix in sender.cache_prefixes(source)}
         payload = sender.send(IntermediateTensors({"hidden_states": torch.zeros(n, 8)}), n)
         snapshots = {name: tensor.clone() for name, tensor in payload.tensors.items()}
         shared[0].candidates.add_(1)
         for name, tensor in snapshots.items():
             torch.testing.assert_close(payload[name], tensor)
         runtime.no_compile_layers = mirrors
-        runtime.attn_metadata = {
-            prefix: _metadata(dest_slots) for prefix in receiver.cache_handler.cache_prefixes(source)
-        }
+        runtime.attn_metadata = {prefix: _metadata(dest_slots) for prefix in receiver.cache_prefixes(source)}
         receiver.receive(payload, n)
         for source_plane, mirror, previous in zip(sources, dest, before):
             for src, dst in zip(source_slots, dest_slots):
@@ -194,7 +189,7 @@ def test_compile_without_metadata_keeps_all_runtime_dependencies(runtime, monkey
     partitions = ((0, 25), (25, 40))
     transport, layers = _stage(monkeypatch, partitions, int(receives), shared)
     source = 20
-    planes = _bind_source(layers, transport.cache_handler, source, 12)
+    planes = _bind_source(layers, transport, source, 12)
     hidden = torch.zeros(5, 8)
     incoming = transport.add_receive_buffers(IntermediateTensors({"hidden_states": hidden}), 5, torch.device("cpu"))
     if receives:
@@ -219,7 +214,7 @@ def test_compile_without_metadata_keeps_all_runtime_dependencies(runtime, monkey
     compiled(hidden)
     # Change slots after compilation, and again on the very same graph.
     for slots in ([9, 1, -1, 19, 6], [22, 3, -1, 10, 5]):
-        runtime.attn_metadata = {prefix: _metadata(slots) for prefix in transport.cache_handler.cache_prefixes(source)}
+        runtime.attn_metadata = {prefix: _metadata(slots) for prefix in transport.cache_prefixes(source)}
         runtime.no_compile_layers = layers
         output = compiled(hidden)
         if receives:
@@ -242,10 +237,8 @@ def test_all_dependencies_survive_multiple_stage_forwarding(runtime, monkeypatch
     partitions = _partitions(lengths)
     stages = [_stage(monkeypatch, partitions, rank, _shared(-77)) for rank in range(len(partitions))]
     for transport, layers in stages:
-        for source in set(
-            transport.cache_handler.incoming.cache_sources + transport.cache_handler.outgoing.cache_sources
-        ):
-            _bind_source(layers, transport.cache_handler, source, -77)
+        for source in set(transport.incoming.cache_sources + transport.outgoing.cache_sources):
+            _bind_source(layers, transport, source, -77)
     # Two forwards exercise retained state and overwrites, with C2 PAD rows.
     for slots in ([1, -1, 9, -1, 19], [3, -1, 11, -1, 21]):
         payload = None
@@ -255,23 +248,21 @@ def test_all_dependencies_survive_multiple_stage_forwarding(runtime, monkeypatch
             runtime.no_compile_layers = layers
             runtime.attn_metadata = {
                 prefix: _metadata(slots)
-                for source in set(
-                    transport.cache_handler.incoming.cache_sources + transport.cache_handler.outgoing.cache_sources
-                )
-                for prefix in transport.cache_handler.cache_prefixes(source)
+                for source in set(transport.incoming.cache_sources + transport.outgoing.cache_sources)
+                for prefix in transport.cache_prefixes(source)
             }
             if payload is not None:
                 transport.receive(payload, n)
-                for source in transport.cache_handler.incoming.cache_sources:
-                    for plane in layers[transport.cache_handler.cache_prefixes(source)[0]].kv_cache:
+                for source in transport.incoming.cache_sources:
+                    for plane in layers[transport.cache_prefixes(source)[0]].kv_cache:
                         for slot in slots:
                             if slot >= 0:
                                 assert (plane[slot // 4, slot % 4] == source + 1).all()
                 for name, buffer in transport.incoming_states.items():
                     torch.testing.assert_close(buffer[:n], payload[name])
-            for source in transport.cache_handler.outgoing.cache_sources:
+            for source in transport.outgoing.cache_sources:
                 if start <= source < end:
-                    long_prefix, index_prefix = transport.cache_handler.cache_prefixes(source)
+                    long_prefix, index_prefix = transport.cache_prefixes(source)
                     for plane in [layers[long_prefix].kv_cache[0], *layers[index_prefix].kv_cache[0]]:
                         plane.fill_(source + 1)
             # Stand in for producer layers, only overwriting their own outputs.
@@ -334,11 +325,11 @@ def test_pcp_transfer_copies_global_cache_rows_but_keeps_query_states_local(
     n = (len(global_slots) + pcp_size - 1) // pcp_size if sharded else len(global_slots)
     sender, source_layers = _stage(monkeypatch, partitions, 0, _shared(), pcp_size)
     receiver, mirrors = _stage(monkeypatch, partitions, 1, _shared(-77), pcp_size)
-    source = receiver.cache_handler.incoming.cache_sources[0]
-    sources = _bind_source(source_layers, sender.cache_handler, source)
+    source = receiver.incoming.cache_sources[0]
+    sources = _bind_source(source_layers, sender, source)
     for plane in sources:
         plane.copy_(torch.arange(plane.numel()).reshape(plane.shape).remainder(97))
-    dest = _bind_source(mirrors, receiver.cache_handler, source, -77)
+    dest = _bind_source(mirrors, receiver, source, -77)
     dest_slots = [slot + 1 if slot >= 0 else -1 for slot in global_slots]
 
     def metadata(slots):
@@ -353,14 +344,14 @@ def test_pcp_transfer_copies_global_cache_rows_but_keeps_query_states_local(
         return local
 
     runtime.no_compile_layers = source_layers
-    runtime.attn_metadata = {prefix: metadata(global_slots) for prefix in sender.cache_handler.cache_prefixes(source)}
+    runtime.attn_metadata = {prefix: metadata(global_slots) for prefix in sender.cache_prefixes(source)}
     payload = sender.send(IntermediateTensors({"hidden_states": torch.zeros(n, 8)}), n)
     for spec in sender.outgoing_caches:
         assert payload[spec.name].shape[0] == n
     for name in sender.outgoing_states:
         assert payload[name].shape[0] == n
     runtime.no_compile_layers = mirrors
-    runtime.attn_metadata = {prefix: metadata(dest_slots) for prefix in receiver.cache_handler.cache_prefixes(source)}
+    runtime.attn_metadata = {prefix: metadata(dest_slots) for prefix in receiver.cache_prefixes(source)}
     receiver.receive(payload, n)
     for source_plane, mirror in zip(sources, dest):
         expected = torch.full_like(mirror, -77)
@@ -517,15 +508,17 @@ def test_replay_preserves_pp_states_and_full_source_writes(runtime, monkeypatch,
                 names += (CANDIDATES, CANDIDATE_LENGTHS)
             return {name: states[name] for name in names}
 
-        model.pp_cache_transport = pp_transport.PPDependencyTransport(
-            settings,
-            f"stage_{rank}",
-            torch.nn.Module(),
-            (),
-            (),
-            boundary_states(plans[rank - 1] if rank else None),
-            boundary_states(plans[rank] if rank < len(plans) else None),
+        transport = pp_transport.PPDependencyTransport()
+        transport.name = f"stage_{rank}"
+        transport.incoming_caches = transport.outgoing_caches = ()
+        transport.incoming_states = boundary_states(plans[rank - 1] if rank else None)
+        transport.outgoing_states = boundary_states(plans[rank] if rank < len(plans) else None)
+        transport.incoming_specs, transport.outgoing_specs = (
+            tuple(pp_transport.PPTransportTensorSpec(name, tuple(t.shape[1:]), t.dtype) for name, t in buffers.items())
+            for buffers in (transport.incoming_states, transport.outgoing_states)
         )
+        runtime.no_compile_layers[transport.name] = transport
+        model.pp_cache_transport = transport
         model.decoder_replay_layers = replay_mod.make_decoder_replay(model, settings)
         model.decoder_replay_layer_name = f"stage_{rank}.replay"
         runtime.no_compile_layers[model.decoder_replay_layer_name] = model.decoder_replay_layers
