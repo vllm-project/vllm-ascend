@@ -386,6 +386,12 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 - The number of tokens of the longest cache hit.
         """
 
+        if getattr(self.kv_cache_config, "layerwise_kv_cache_reuse", False):
+            # Scratch-slot hashes outlive their overwritten payload. Admit
+            # only externally verified prefixes through the store connector.
+            # Remove when upstream can reject nonresident scratch-cache hits.
+            return tuple([] for _ in self.kv_cache_config.kv_cache_groups), 0, 0
+
         def _get_block_hashes(kv_cache_spec: KVCacheSpec) -> BlockHashList:
             return block_hashes
 
@@ -491,6 +497,10 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
     ) -> tuple[tuple[list[KVCacheBlock], ...], tuple[int, ...]]:
+        if getattr(self.kv_cache_config, "layerwise_kv_cache_reuse", False):
+            return tuple([] for _ in self.kv_cache_config.kv_cache_groups), tuple(
+                0 for _ in self.kv_cache_config.kv_cache_groups
+            )
         # PD + hybrid connector path. Skip the EAGLE drop on the prefill
         # producer and on standalone instances (see
         # ``self.skips_eagle_block_drop``): matched content blocks are
@@ -536,6 +546,13 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
     # Keep pcp_world_size in this patched function for upstream call
     # compatibility; platform validation guarantees that it is one.
     del pcp_world_size
+    if getattr(kv_cache_config, "layerwise_kv_cache_reuse", False) or getattr(
+        kv_cache_config, "layerwise_kv_cache_scratch", False
+    ):
+        # Content hashes outlive scratch-buffer payloads. External prefix
+        # verification remains in the connector; reject local HBM hits.
+        # Remove when upstream supports nonresident cache descriptors.
+        enable_caching = False
     token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens)
     hybrid_kwargs = dict(
         kv_cache_config=kv_cache_config,

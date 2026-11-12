@@ -260,6 +260,12 @@ class MooncakePullConnector(MooncakeBaseConnector):
 class MooncakePushConnector(MooncakeBaseConnector):
     """Layerwise Push facade with role-specific initialization."""
 
+    supports_layerwise_buffer_reuse = True
+
+    @property
+    def requires_full_blocks_on_update_after_alloc(self) -> bool:
+        return self.is_producer
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -274,6 +280,14 @@ class MooncakePushConnector(MooncakeBaseConnector):
             self.connector_worker = MooncakePushConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
         else:
             raise ValueError(f"Unsupported KVConnectorRole: {role}")
+
+    @property
+    def is_producer(self) -> bool:
+        return self.kv_transfer_config.is_kv_producer
+
+    def wait_for_layer_reuse(self, layer_idx: int) -> None:
+        assert isinstance(self.connector_worker, MooncakePushConnectorWorker)
+        self.connector_worker.wait_for_layer_reuse(layer_idx)
 
     def save_kv_layer(
         self, layer_name: str, kv_layer: torch.Tensor, attn_metadata: "AttentionMetadata", **kwargs: Any

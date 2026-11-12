@@ -928,6 +928,8 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
             if failed_keys:
                 self._revoke_range_keys(failed_keys)
                 self._active_put_keys.difference_update(failed_keys)
+                if self.raise_on_transfer_failure:
+                    raise RuntimeError("Mooncake offload range PUT failed before buffer reuse")
 
         if not (layer_id == self.final_layer_id if final_group_layer is None else final_group_layer):
             return
@@ -944,6 +946,8 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
             failed_keys = [key for key, result in zip(active_keys, commit_results, strict=True) if result != 0]
             if failed_keys:
                 self._revoke_range_keys(failed_keys)
+                if self.raise_on_transfer_failure:
+                    raise RuntimeError("Mooncake offload commit failed")
             committed_keys = [key for key, result in zip(active_keys, commit_results, strict=True) if result == 0]
             if self._session_tracker is not None:
                 self._session_tracker.commit_put_keys(committed_keys)
