@@ -925,8 +925,7 @@ class MLAParamProvider:
                 block_table = block_table[: len(actual_seq_qlen)]
             return {
                 "actual_seq_qlen": actual_seq_qlen,
-                "actual_seq_kvlen": decode.seq_lens_list
-                + [0] * (len(actual_seq_qlen) - len(decode.seq_lens_list)),
+                "actual_seq_kvlen": decode.seq_lens_list + [0] * (len(actual_seq_qlen) - len(decode.seq_lens_list)),
                 "block_table": block_table,
             }
 
@@ -2809,11 +2808,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             assert isinstance(self.layer_name, str)
             is_draft_model = _EXTRA_CTX.is_draft_model
             eagle_spec_multiple = None
-            if (
-                not is_draft_model
-                and self.speculative_config is not None
-                and self.speculative_config.use_eagle()
-            ):
+            if not is_draft_model and self.speculative_config is not None and self.speculative_config.use_eagle():
                 eagle_spec_multiple = self.speculative_config.num_speculative_tokens + 1
             provider = MLAParamProvider(
                 layer_name=self.layer_name,
