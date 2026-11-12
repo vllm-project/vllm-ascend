@@ -87,9 +87,8 @@ def test_target_geometry_and_recoverssm_record_layout_agree(tp):
         ("model_config", "dtype", torch.float16, "BF16 activations"),
         ("mamba_config", "enable_stochastic_rounding", True, "stochastic rounding"),
         ("parallel_config", "tensor_parallel_size", 3, "divide key and value heads"),
-        ("parallel_config", "pipeline_parallel_size", 2, "PP=PCP=DCP=1"),
-        ("parallel_config", "prefill_context_parallel_size", 2, "PP=PCP=DCP=1"),
-        ("parallel_config", "decode_context_parallel_size", 2, "PP=PCP=DCP=1"),
+        ("parallel_config", "prefill_context_parallel_size", 2, "PCP=DCP=1"),
+        ("parallel_config", "decode_context_parallel_size", 2, "PCP=DCP=1"),
         (None, "kv_transfer_config", NS(kv_connector="AscendStoreConnector"), "requires Mooncake"),
     ],
 )
@@ -104,6 +103,39 @@ def test_speculative_methods_share_recoverssm_validation():
     for method in ("mtp", "eagle3", "dspark"):
         config = make_config()
         config.speculative_config.method = method
+        helpers["validate_qwen_gdn_recoverssm"](config)
+
+
+@pytest.mark.parametrize("pp_size", [2, 4, 8])
+def test_pd_prefill_pipeline_parallel_preserves_recoverssm_layout(pp_size):
+    config = make_config()
+    config.parallel_config.pipeline_parallel_size = pp_size
+    config.kv_transfer_config = NS(
+        kv_connector="MooncakeConnectorV2",
+        kv_role="kv_producer",
+    )
+
+    helpers["validate_qwen_gdn_recoverssm"](config)
+    assert helpers["gdn_mamba_state_shape_from_config"](config) == (
+        *base_shapes(config),
+        (32, 5, 257),
+    )
+
+
+@pytest.mark.parametrize(
+    "transfer",
+    [
+        None,
+        NS(kv_connector="MooncakeConnectorV2", kv_role="kv_consumer"),
+        NS(kv_connector="AscendStoreConnector", kv_role="kv_producer"),
+    ],
+)
+def test_pipeline_parallel_rejects_non_mooncake_producer(transfer):
+    config = make_config()
+    config.parallel_config.pipeline_parallel_size = 4
+    config.kv_transfer_config = transfer
+
+    with pytest.raises(ValueError, match="pipeline parallelism is supported only for a Mooncake KV producer"):
         helpers["validate_qwen_gdn_recoverssm"](config)
 
 
