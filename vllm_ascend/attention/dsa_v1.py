@@ -2220,7 +2220,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 perm_x2=(0, 1, 2),
                 perm_y=(1, 0, 2),
             )
-        if self.n_local_groups == 1:
+        if self.n_local_groups == 1 and self.wo_a.weight.ndim == 2:
             # Single local group (TP >= o_groups): the grouped transpose matmul
             # degenerates to a plain linear. The 2D matmul on the NZ-format
             # weight computes the same math (x[T, 1, K] @ W[K, N]) several
