@@ -91,9 +91,8 @@ except ImportError:
     share_source_lm_heads = None
 
 try:
-    from vllm.model_executor.model_loader.reload.direct import (
-        direct_reload_enabled,
-    )
+    # The pinned vLLM in the mypy environment does not ship this module yet.
+    from vllm.model_executor.model_loader.reload.direct import direct_reload_enabled  # type: ignore[import-not-found]
 except ImportError:
     # vLLM builds without direct reload (e.g. v0.31.0) keep the session open
     # on a failed finish so it can be retried, like GPUWorker's default path.

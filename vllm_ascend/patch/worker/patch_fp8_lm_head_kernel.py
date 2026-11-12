@@ -34,7 +34,7 @@ try:
 except ImportError:
     # vLLM builds without the scaled_mm kernel package (< 0.26.0) cannot run
     # this OOT FP8 kernel at all; skip registration there.
-    register_ascend_fp8_lm_head_kernel = None
+    register_ascend_fp8_lm_head_kernel = None  # type: ignore[assignment]
 
 if register_ascend_fp8_lm_head_kernel is not None:
     register_ascend_fp8_lm_head_kernel()
