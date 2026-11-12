@@ -157,7 +157,7 @@ def precopy_mamba_align_fused_kernel(
 
     _copy_mamba_state_block(
         state_idx,
-        batch_idx,
+        req_idx,
         src_col,
         dst_col,
         token_bias,

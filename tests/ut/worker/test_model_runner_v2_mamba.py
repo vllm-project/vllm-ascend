@@ -238,7 +238,7 @@ def test_layerwise_connector_defers_mamba_pre_copy(mock_has_group, mock_get_grou
     spec = _mamba_spec()
     kv_cache_config = _kv_cache_config(spec)
     state = _make_defer_state(kv_cache_config)
-    ctx = MagicMock()
+    ctx = MagicMock(is_initialized=True)
     # vLLM main removed `MambaHybridModelState._ensure_align_ctx`; the
     # Ascend override must resolve the context built in initialize_kv_cache.
     state._mamba_ctx = ctx
@@ -265,16 +265,28 @@ def test_layerwise_connector_defers_mamba_pre_copy(mock_has_group, mock_get_grou
     connector.finish_mamba_state_copy.assert_called_once()
 
 
-def test_ensure_align_ctx_falls_back_to_mamba_ctx():
-    # vLLM main removed `MambaHybridModelState._ensure_align_ctx`; the Ascend
-    # override must return the context built in initialize_kv_cache instead of
-    # calling the (now absent) inherited helper.
+def test_ensure_align_ctx_preserves_initialized_persistent_tables():
     spec = _mamba_spec()
     kv_cache_config = _kv_cache_config(spec)
     state = _make_defer_state(kv_cache_config)
-    ctx = MagicMock()
+    persistent_tables = torch.tensor([11, 22], dtype=torch.int64)
+    aligned_index_tables = torch.tensor([33, 44], dtype=torch.int64)
+    ctx = SimpleNamespace(
+        is_initialized=True,
+        block_table_ptrs=persistent_tables,
+        aligned_index_block_table_ptrs=aligned_index_tables,
+        initialize_from_forward_context=MagicMock(),
+    )
     state._mamba_ctx = ctx
-    assert state._ensure_align_ctx(kv_cache_config, [0], ()) is ctx
+    batch_tables = (torch.tensor([[7], [2]], dtype=torch.int32),)
+
+    assert state._ensure_align_ctx(kv_cache_config, [0], batch_tables) is ctx
+
+    # Incoming attention tables are batch ordered. They must not replace the
+    # persistent request-slot pointers installed by initialize_kv_cache.
+    assert ctx.block_table_ptrs is persistent_tables
+    assert ctx.aligned_index_block_table_ptrs is aligned_index_tables
+    ctx.initialize_from_forward_context.assert_not_called()
 
 
 def test_ensure_align_ctx_lazily_recreates_mamba_ctx():
