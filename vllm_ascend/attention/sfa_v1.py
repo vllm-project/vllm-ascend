@@ -56,6 +56,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     OFFLOAD_V_CACHE_NPU_INDEX,
 )
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
+from vllm_ascend.ops.triton.kda.output_writeback import write_recurrent_output
 from vllm_ascend.quantization.methods import (
     AscendW8A8DynamicLinearMethod,
     AscendW8A8LinearMethod,
@@ -1687,8 +1688,14 @@ class AscendSFAImpl(MLAAttentionImpl):
         if self.qk_rope_head_dim == 0:
             # As in floating NoPE, graph-capacity rows may be unwritten by the kernel.
             assert isinstance(output, torch.Tensor)
-            valid = torch.arange(ql_nope.shape[0], device=ql_nope.device) < actual_seq_lengths_query[-1]
-            output = output.masked_fill(~valid[:, None, None], 0)
+            if output.dim() == 3 and output.is_contiguous():
+                # Same bytes, one launch: copy the valid rows and zero the
+                # captured padding rows in place, replacing the
+                # arange/cast/less/logical_not/masked_fill chain.
+                write_recurrent_output(output.unsqueeze(0), output.unsqueeze(0), actual_seq_lengths_query)
+            else:
+                valid = torch.arange(ql_nope.shape[0], device=ql_nope.device) < actual_seq_lengths_query[-1]
+                output = output.masked_fill(~valid[:, None, None], 0)
         return output
 
     def _record_query_gather_context(
