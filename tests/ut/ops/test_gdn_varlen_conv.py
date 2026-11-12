@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from typing import Any
+
 import torch
 
 from vllm_ascend.ops.triton.mamba import causal_conv1d as causal_conv1d_module
 
 
 def test_varlen_conv_launch_matches_pinned_vllm_kernel_abi(monkeypatch) -> None:
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     class FakeKernel:
         def __getitem__(self, grid):

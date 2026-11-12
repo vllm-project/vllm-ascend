@@ -46,6 +46,8 @@ def _load_adapter():
 
 
 class AscendQwen4ExpQSAAttention:
+    _qsa_prepared_cos_sin: torch.Tensor
+
     def __init__(self):
         self.layer_name = "model.layers.0.self_attn"
         self.num_heads = 4
