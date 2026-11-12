@@ -8,10 +8,6 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-NUM_DRAFT_TOKENS = 5
-VERIFY_WIDTH = NUM_DRAFT_TOKENS + 1
-MAX_VERIFY_REQUESTS = 2
-DEVICE_EXPERT_SLOTS = 84
 TOP_K = 6
 
 UNRESTRICTED = 0
@@ -38,16 +34,17 @@ def build_roles(
     return roles
 
 
-def verify_graph_eligible(batch_state, *, structured: bool) -> bool:
+def verify_graph_eligible(batch_state, *, num_speculative_tokens: int, structured: bool) -> bool:
     rows = batch_state.num_scheduled_tokens
     drafts = batch_state.num_draft_tokens_np
+    verify_width = num_speculative_tokens + 1
     return (
         not structured
-        and 1 <= len(rows) <= MAX_VERIFY_REQUESTS
         and drafts is not None
+        and len(rows) == len(drafts) > 0
         and not any(batch_state.is_prefilling_np)
-        and all(count == NUM_DRAFT_TOKENS for count in drafts)
-        and all(count == VERIFY_WIDTH for count in rows)
+        and all(count == num_speculative_tokens for count in drafts)
+        and all(count == verify_width for count in rows)
     )
 
 
@@ -72,9 +69,21 @@ def supports_router(layer) -> bool:
 
 
 class DSparkExpertPool:
-    def __init__(self, device: torch.device, capacity: int, protected_positions: int, suffix_experts: int):
+    def __init__(
+        self,
+        device: torch.device,
+        capacity: int,
+        protected_positions: int,
+        suffix_experts: int,
+        *,
+        num_speculative_tokens: int,
+        num_device_experts: int,
+    ):
         self.protected_positions = protected_positions
         self.suffix_experts = suffix_experts
+        self.num_speculative_tokens = num_speculative_tokens
+        # Size only the reusable scratch. Graph admission remains with expert offload.
+        self.workspace_rows = min(capacity, num_device_experts // TOP_K)
         self.roles = torch.empty(capacity, dtype=torch.int32, device=device)
         self.workspaces: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
         self.active = False
@@ -108,8 +117,9 @@ class DSparkExpertPool:
 
     def prepare_capture(self, batch) -> None:
         boundaries = batch.query_start_loc_np[: batch.num_reqs + 1]
-        full_verify = 1 <= batch.num_reqs <= MAX_VERIFY_REQUESTS and np.all(np.diff(boundaries) == VERIFY_WIDTH)
-        drafts = [NUM_DRAFT_TOKENS] * batch.num_reqs if full_verify else None
+        verify_width = self.num_speculative_tokens + 1
+        full_verify = batch.num_reqs > 0 and np.all(np.diff(boundaries) == verify_width)
+        drafts = [self.num_speculative_tokens] * batch.num_reqs if full_verify else None
         self._prepare(batch, drafts, [False] * batch.num_reqs)
 
     def route(self, router, logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -118,15 +128,14 @@ class DSparkExpertPool:
         rows, experts = logits.shape
         if rows != self.num_rows or experts != router.num_logical_experts or logits.dtype != torch.float32:
             raise ValueError("DSpark routing requires aligned FP32 logits and one row per prepared token role")
-        graph_rows = VERIFY_WIDTH * MAX_VERIFY_REQUESTS
-        if rows > graph_rows:
+        if rows > self.workspace_rows:
             # Large mixed-prefill eager batches can have many shapes.
             raw_scores = torch.empty_like(logits, memory_format=torch.contiguous_format)
             votes = torch.empty(experts, dtype=torch.int32, device=logits.device)
         else:
             if experts not in self.workspaces:
                 self.workspaces[experts] = (
-                    torch.empty((graph_rows, experts), dtype=logits.dtype, device=logits.device),
+                    torch.empty((self.workspace_rows, experts), dtype=logits.dtype, device=logits.device),
                     torch.empty(experts, dtype=torch.int32, device=logits.device),
                 )
             raw_scores, votes = self.workspaces[experts]

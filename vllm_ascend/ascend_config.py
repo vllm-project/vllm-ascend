@@ -462,23 +462,17 @@ class DSparkExpertPoolConfig:
         if not self.enabled:
             return
 
-        from vllm_ascend.worker.v2.dspark_expert_pool import (
-            DEVICE_EXPERT_SLOTS,
-            MAX_VERIFY_REQUESTS,
-            NUM_DRAFT_TOKENS,
-            TOP_K,
-            VERIFY_WIDTH,
-        )
+        from vllm_ascend.worker.v2.dspark_expert_pool import TOP_K
 
-        if not offload.enabled or offload.num_device_experts != DEVICE_EXPERT_SLOTS:
-            raise ValueError(f"dspark_expert_pool requires enabled expert offload with {DEVICE_EXPERT_SLOTS} slots")
+        if not offload.enabled:
+            raise ValueError("dspark_expert_pool requires enabled expert offload")
         spec = vllm_config.speculative_config
-        if spec is None or spec.method != "dspark" or spec.num_speculative_tokens != NUM_DRAFT_TOKENS:
-            raise ValueError(f"dspark_expert_pool requires DSpark with {NUM_DRAFT_TOKENS} speculative tokens")
-        if not 1 <= vllm_config.scheduler_config.max_num_seqs <= MAX_VERIFY_REQUESTS:
-            raise ValueError(f"dspark_expert_pool requires max_num_seqs in [1, {MAX_VERIFY_REQUESTS}]")
-        if self.protected_positions is None or not 1 <= self.protected_positions <= VERIFY_WIDTH:
-            raise ValueError(f"dspark_expert_pool.protected_positions must be in [1, {VERIFY_WIDTH}]")
+        draft_tokens = spec.num_speculative_tokens if spec is not None and spec.method == "dspark" else None
+        if draft_tokens is None or draft_tokens <= 0:
+            raise ValueError("dspark_expert_pool requires DSpark with a positive number of speculative tokens")
+        verify_width = draft_tokens + 1
+        if self.protected_positions is None or not 1 <= self.protected_positions <= verify_width:
+            raise ValueError(f"dspark_expert_pool.protected_positions must be in [1, {verify_width}]")
         if self.suffix_experts is None or not 0 <= self.suffix_experts <= TOP_K:
             raise ValueError(f"dspark_expert_pool.suffix_experts must be in [0, {TOP_K}]")
 
