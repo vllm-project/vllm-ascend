@@ -448,11 +448,6 @@ class KVCacheStoreBatch:
         self.done = threading.Event()
 
 
-# Poll interval for waiting on a specific request's queued save chunks
-# (released-block fence; keep it small so scheduling stays responsive).
-SAVE_REQUEST_POLL_INTERVAL_S = 0.001
-
-
 class KVCacheStoreSendingThread(KVTransferThread):
     def __init__(
         self,
@@ -470,6 +465,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         group_uses_align_state: list[bool] | None = None,
         enable_kv_event: bool = False,
         worker: Any = None,
+        sharded_mamba_group_ids: set[int] | None = None,
     ):
         super().__init__(
             m_store, token_database, block_size, tp_rank, tp_size, dcp_size, ready_event, name="KVCacheSendingThread"
@@ -483,6 +479,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.stored_requests: dict[str, set[int]] = {}
         self._next_local_store_job_id = -1
         self.group_uses_align_state = group_uses_align_state or []
+        self.sharded_mamba_group_ids = sharded_mamba_group_ids or set()
         self.enable_kv_event = enable_kv_event
         self.completed_events_lock = threading.Lock()
         self.completed_events: dict[int, int] = {}
@@ -572,34 +569,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 self.request_queue.put(request)
             self.request_queue.put(save_batch)
         return save_batch
-
-    def wait_for_requests_saved(self, req_ids: set[str] | None) -> None:
-        """Block until every queued save chunk of these requests completed.
-
-        Block-reuse fence: the scheduler frees a finished or preempted
-        request's blocks immediately, so before this step's forward may
-        reallocate them, all of that request's queued puts must drain. A
-        request never queues new puts after it finishes or is preempted, so
-        draining it once makes its blocks safe to reuse from then on.
-        """
-        if not req_ids:
-            return
-        pending = set(req_ids)
-        wait_start = time.perf_counter()
-        while True:
-            self.raise_if_failed()
-            with self.done_task_lock:
-                pending &= self.stored_requests.keys()
-                if not pending:
-                    break
-            time.sleep(SAVE_REQUEST_POLL_INTERVAL_S)
-        elapsed = time.perf_counter() - wait_start
-        logger.debug(
-            "Released-block KV save fence (%s) completed after waiting %.3f ms tp_rank=%d",
-            ",".join(sorted(req_ids))[:200],
-            elapsed * 1000,
-            self.tp_rank,
-        )
 
     def is_live_store_job(self, req_meta: ReqMeta) -> bool:
         with self.done_task_lock:
@@ -853,6 +822,12 @@ class KVCacheStoreSendingThread(KVTransferThread):
             #  0        1 / 3            1      1, 5, ...
             #  1        0 / 2            2      2, 6, ...
             #  1        1 / 3            3      3, 7, ...
+            if group_id in self.sharded_mamba_group_ids:
+                # Each TP/PCP rank saves its own head shard for every candidate checkpoint.
+                shard_rank, shard_size = 0, 1
+            else:
+                shard_rank = self.pcp_rank * tp_replicas + self.tp_rank % tp_replicas
+                shard_size = self.pcp_size * tp_replicas
             iterator = self.token_database.process_token_key_strings_with_block_ids(
                 token_len,
                 req_meta.block_hashes,
@@ -860,8 +835,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 kv_cache_group_id=group_id,
                 skip_null_blocks=skip_null_blocks,
                 chunk_filter=chunk_filter,
-                shard_rank=self.pcp_rank * tp_replicas + self.tp_rank % tp_replicas,
-                shard_size=self.pcp_size * tp_replicas,
+                shard_rank=shard_rank,
+                shard_size=shard_size,
                 chunk_mask=group_store_mask,
             )
             for start, end, key, block_hash, block_id in iterator:

@@ -2,6 +2,10 @@
 
 CPP uses profiling-based dynamic chunking to equalize per-chunk latency and eliminate pipeline bubbles in PP scenarios.
 
+!!! warning "Sunset Notice"
+
+    Dynamic Chunked Pipeline Parallel (CPP) with dynamic chunk size is **deprecated** as of v0.32.0 and has entered the sunset process. It will be removed in a future release. See [RFC #21304](https://github.com/vllm-project/vllm-ascend/issues/21304) for design rationale and migration details.
+
 ## Background
 
 ### Problem Statement

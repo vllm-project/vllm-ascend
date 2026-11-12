@@ -400,7 +400,11 @@ class RemoteOpenAIServer:
         start = time.time()
         client = requests
 
-        ready = {node_ip: False for node_ip, _ in targets}
+        # Key by (node_ip, url): several servers may share one IP (e.g. the
+        # single-node PD/EPD modes start multiple engines on 127.0.0.1), so a
+        # plain-IP key would collapse their readiness state together and make
+        # the timeout message report an empty not-ready list.
+        ready = {(node_ip, url): False for node_ip, url in targets}
 
         last_log_time = 0.0
 
@@ -410,13 +414,13 @@ class RemoteOpenAIServer:
             should_log = (now - last_log_time) >= log_interval
 
             for node_ip, url in targets:
-                if ready[node_ip] and not always_check_nodes:
+                if ready[(node_ip, url)] and not always_check_nodes:
                     continue
 
                 try:
                     resp = client.get(url)
                     if resp.status_code == 200:
-                        ready[node_ip] = True
+                        ready[(node_ip, url)] = True
                         logger.info("[READY] Node %s: %s is ready.", node_ip, url)
                 except RequestException:
                     all_ready = False
@@ -436,7 +440,7 @@ class RemoteOpenAIServer:
                 break
 
             if now - start > timeout:
-                not_ready_nodes = [n for n, ok in ready.items() if not ok]
+                not_ready_nodes = [url for (_, url), ok in ready.items() if not ok]
                 self._terminate_server()
                 raise RuntimeError(
                     f"Timeout: these nodes did not become ready: {not_ready_nodes} in time: {timeout}s"
@@ -521,7 +525,8 @@ class RemotePDServer(RemoteOpenAIServer):
         vllm_serve_args: list[str] | list[list[str]],
         server_host: str = "127.0.0.1",
         env_dict: dict[str, str] | None = None,
-        max_wait_seconds: float | None = 600,
+        env_dicts: list[dict[str, str]] | None = None,
+        max_wait_seconds: float | None = 2800,
     ) -> None:
         self._proc_list = []
 
@@ -547,6 +552,15 @@ class RemotePDServer(RemoteOpenAIServer):
                 ]
         else:
             raise RuntimeError("vllm_serves_args must be a list")
+        if env_dicts is not None:
+            if not isinstance(env_dicts, list) or not all(isinstance(item, dict) for item in env_dicts):
+                raise TypeError("env_dicts must be a list of dicts")
+            if len(env_dicts) != len(self.vllm_serve_args_list):
+                raise ValueError(
+                    f"env_dicts has {len(env_dicts)} entries, "
+                    f"but there are {len(self.vllm_serve_args_list)} vllm serve instances"
+                )
+        self.env_dicts = env_dicts
         serve_arg_cmd = ["vllm", "serve"]
         start_device_id = 0
         visible_devices = self.env_dict.get(
@@ -563,6 +577,8 @@ class RemotePDServer(RemoteOpenAIServer):
 
             required_devices = _get_pd_server_required_devices(vllm_serve_arg)
             server_env = copy.deepcopy(self.env_dict)
+            if self.env_dicts is not None:
+                server_env.update(self.env_dicts[i])
             end_device_id = start_device_id + required_devices
             if available_device_ids is None:
                 assigned_device_ids = [str(device_id) for device_id in range(start_device_id, end_device_id)]

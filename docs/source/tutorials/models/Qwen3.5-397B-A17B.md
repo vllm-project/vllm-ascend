@@ -506,10 +506,6 @@ export VLLM_USE_FASTOKENS=1
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:${LD_LIBRARY_PATH:-}"
 
-if [[ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]]; then
-    export LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:${LD_PRELOAD:-}"
-fi
-
 vllm serve "${MODEL_PATH}" \
   --host "${local_ip}" \
   --port 30060 \
@@ -617,10 +613,6 @@ export VLLM_USE_FASTOKENS=1
 export VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0
 export ASCEND_RT_VISIBLE_DEVICES=8,9,10,11,12,13,14,15
 export LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:${LD_LIBRARY_PATH:-}"
-
-if [[ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]]; then
-    export LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:${LD_PRELOAD:-}"
-fi
 
 vllm serve "${MODEL_PATH}" \
   --host "${local_ip}" \
@@ -1054,7 +1046,6 @@ export HCCL_OP_EXPANSION_MODE=AIV
 export VLLM_USE_V2_MODEL_RUNNER=0
 export VLLM_USE_FASTOKENS=1
 export ASCEND_RT_VISIBLE_DEVICES="$1"
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
 
 vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp \
   --host "${local_ip}" \
@@ -1115,7 +1106,6 @@ export VLLM_USE_V2_MODEL_RUNNER=0
 export VLLM_USE_FASTOKENS=1
 export VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0
 export ASCEND_RT_VISIBLE_DEVICES="$1"
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
 
 vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp \
   --host "${local_ip}" \

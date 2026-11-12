@@ -1,0 +1,4 @@
+pr: 20446
+entries:
+  - category: bugfix
+    text: Fixed near-zero DFlash2 draft acceptance with QuaRot targets on Model Runner V2 by applying draft weight post-processing after loading.

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -17,12 +18,20 @@ def test_glm_kda_backend_declares_pcp_support() -> None:
     assert backend.get_builder_cls() is model_kda.AscendGDNHostMetadataBackend.get_builder_cls()
 
 
-@pytest.mark.parametrize("pcp_rank", [0, 1])
-@pytest.mark.parametrize("has_prefill", [False, True])
-def test_kda_pcp_restores_prefill_and_skips_decode_gather(monkeypatch, pcp_rank, has_prefill):
+@pytest.mark.parametrize(("pcp_size", "pcp_rank"), [(1, 0), (2, 0), (2, 1)])
+@pytest.mark.parametrize("is_prefilling", [[False], [True], [False, True]], ids=["decode", "prefill", "mixed"])
+@pytest.mark.parametrize("needs_output_buffer", [False, True])
+@pytest.mark.parametrize("pcp_projection", [False, True])
+def test_kda_pcp_restores_prefill_and_skips_decode_gather(
+    monkeypatch, pcp_size, pcp_rank, is_prefilling, needs_output_buffer, pcp_projection
+):
     layer = model_kda.Glm5NextLinearAttention.__new__(model_kda.Glm5NextLinearAttention)
     torch.nn.Module.__init__(layer)
     layer.prefix = "layer"
+    # Set by __init__ from the CUDA graph mode, which this fixture skips.
+    # True dispatches to the mutable op writing a graph-owned buffer, False to
+    # the variant returning its own output.
+    layer._needs_output_buffer = needs_output_buffer
     layer.local_projection_size = 2
     layer.local_num_heads = 1
     layer.head_dim = 2
@@ -35,9 +44,24 @@ def test_kda_pcp_restores_prefill_and_skips_decode_gather(monkeypatch, pcp_rank,
     layer.in_proj_qkvbfg_a = project
     layer.f_b_proj = lambda x: (torch.zeros(x.shape[0], 2), None)
     layer.g_b_proj = lambda x: (torch.zeros(x.shape[0], 2), None)
-    # The gated norm now runs inside the KDA custom op, which writes into `out`.
-    layer.o_norm = SimpleNamespace(forward_oot=lambda output, gate, *, out: out)
+    # The gated norm runs directly inside the unified custom op.
+    layer.o_norm = lambda output, gate: output
     layer.o_proj = lambda x: (x, None)
+    if pcp_projection:
+        projection = model_kda.PCPRowParallelLinear.__new__(model_kda.PCPRowParallelLinear)
+        torch.nn.Module.__init__(projection)
+        projection.input_is_parallel = True
+        projection.tp_rank, projection.tp_size = pcp_rank, pcp_size
+        projection.skip_bias_add = True
+        projection.bias = None
+        projection.reduce_results = True
+        projection.return_bias = True
+        projection.quant_method = SimpleNamespace(apply=lambda _, inputs, bias: inputs)
+        projection.tp_group = SimpleNamespace(
+            all_reduce=Mock(side_effect=lambda values: values),
+            reduce_scatter=Mock(side_effect=lambda values, dim: values.chunk(pcp_size, dim=dim)[pcp_rank]),
+        )
+        layer.o_proj = projection
     seen = []
 
     def run_kda(qkv_proj_states, g1, beta, core_attn_out):
@@ -45,38 +69,52 @@ def test_kda_pcp_restores_prefill_and_skips_decode_gather(monkeypatch, pcp_rank,
         core_attn_out[0, :, 0, 0] = qkv_proj_states[:, 0]
         core_attn_out[0, :, 0, 1].zero_()
 
-    layer._forward = run_kda
+    layer._forward_core = run_kda
+    mixed = is_prefilling == [False, True]
     pcp_context = SimpleNamespace(
-        global_batch=SimpleNamespace(is_prefilling_np=torch.tensor([has_prefill])),
-        hidden_restore_idx=torch.tensor([0, 1, 4, 5, 6, 7, 2]),
-        padded_gather_idx=torch.tensor([0, 1, 6, 0, 2, 3, 4, 5]),
+        global_batch=SimpleNamespace(is_prefilling_np=torch.tensor(is_prefilling)),
+        hidden_restore_idx=torch.tensor([0, 1, 2, 6, 7, 3] if mixed else [0, 1, 4, 5, 6, 7, 2]),
+        padded_gather_idx=torch.tensor([0, 1, 2, 5, 0, 1, 3, 4] if mixed else [0, 1, 6, 0, 2, 3, 4, 5]),
     )
-    metadata = SimpleNamespace(pcp_context=pcp_context)
+    uses_pcp_prefill = pcp_size > 1 and any(is_prefilling)
+    metadata = SimpleNamespace(pcp_context=pcp_context if pcp_size > 1 else None)
     monkeypatch.setattr(
         model_kda,
         "get_forward_context",
         lambda: SimpleNamespace(attn_metadata={"layer": metadata}, no_compile_layers={"layer": layer}),
     )
-    gathered = torch.tensor([[0.0], [1.0], [6.0], [-1.0], [2.0], [3.0], [4.0], [5.0]])
+    # The mixed layout repeats both decode rows on each PCP rank.
+    gathered_rows = [0, 1, 2, 5, 0, 1, 3, 4] if mixed else [0, 1, 6, -1, 2, 3, 4, 5]
+    gathered = torch.tensor(gathered_rows, dtype=torch.float32)[:, None].expand(-1, 2).clone()
     pcp_group = SimpleNamespace(
-        world_size=2,
+        world_size=pcp_size,
         rank_in_group=pcp_rank,
-        all_gather=lambda x, dim: gathered if has_prefill else pytest.fail("decode must not gather PCP tokens"),
+        all_gather=lambda x, dim: gathered if uses_pcp_prefill else pytest.fail("batch must not gather PCP tokens"),
     )
     layer.pcp_group = pcp_group
     layer.pcp_size = pcp_group.world_size
     layer.pcp_rank = pcp_group.rank_in_group
 
-    # The KDA custom op is registered against the NPU dispatch key, so a CPU
-    # runner cannot dispatch it. Call its implementation directly instead.
+    # Both KDA custom ops are registered against the NPU dispatch key, so a CPU
+    # runner cannot dispatch them. Call their implementations directly instead.
+    monkeypatch.setattr(torch.ops.vllm, "glm5next_kda_forward_with_output", model_kda.glm5next_kda_forward_with_output)
     monkeypatch.setattr(torch.ops.vllm, "glm5next_kda_forward", model_kda.glm5next_kda_forward)
 
     local_input = gathered[pcp_rank * 4 : (pcp_rank + 1) * 4]
     output = layer(local_input, torch.arange(4))
 
-    assert seen == (list(range(7)) if has_prefill else local_input[:, 0].tolist())
-    expected = ([0.0, 1.0, 6.0, 0.0] if pcp_rank == 0 else [2.0, 3.0, 4.0, 5.0]) if has_prefill else seen
+    assert seen == (list(range(6 if mixed else 7)) if uses_pcp_prefill else local_input[:, 0].tolist())
+    expected = local_input[:, 0].tolist()
+    if uses_pcp_prefill and not mixed:
+        expected = [0.0, 1.0, 6.0, 0.0] if pcp_rank == 0 else [2.0, 3.0, 4.0, 5.0]
     assert output[:, 0].tolist() == expected
+    assert torch.count_nonzero(output[:, 1]) == 0
+    if pcp_projection:
+        use_reduce_scatter = uses_pcp_prefill and not mixed
+        assert projection.tp_group.reduce_scatter.call_count == int(use_reduce_scatter)
+        assert projection.tp_group.all_reduce.call_count == int(pcp_size > 1 and not use_reduce_scatter)
+        if mixed and pcp_size > 1:
+            assert projection.tp_group.all_reduce.call_args.args[0].shape[0] == 6
 
 
 @pytest.mark.parametrize("recover", [False, True])
@@ -317,7 +355,7 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(
     query = query + torch.arange(128, dtype=torch.bfloat16)[None, :] / 128
     qkv = torch.cat((query, query + 8, query + 16), dim=-1)
     out = torch.full((1, tokens + 1, 1, 128), float("nan"), dtype=torch.bfloat16)
-    layer._forward(qkv, torch.zeros(1, tokens, 1, 128), torch.zeros(1, tokens, 1), out)
+    layer._forward_core(qkv, torch.zeros(1, tokens, 1, 128), torch.zeros(1, tokens, 1), out)
     expected = query * 3
     recurrent_tokens = 2 if speculative else 1
     expected[:recurrent_tokens] = query[:recurrent_tokens] * 2
@@ -374,7 +412,7 @@ def test_profile_does_not_touch_the_connector(monkeypatch, metadata):
     monkeypatch.setattr(model_kda, "wait_for_kv_layer_from_connector", unexpected)
     monkeypatch.setattr(model_kda, "maybe_save_kv_layer_to_connector", unexpected)
     output = torch.ones(1)
-    layer._forward(None, None, None, output)
+    layer._forward_core(None, None, None, output)
     assert output.item() == 0
 
 
@@ -437,7 +475,7 @@ def test_plain_decode_writes_padded_destination_directly(monkeypatch, empty):
 
     monkeypatch.setattr(model_kda, "recurrent_kda", recurrent)
     qkv = torch.arange(4 * 384, dtype=torch.float32).reshape(4, 384)
-    layer._forward(qkv, torch.zeros(1, 4, 1, 128), torch.zeros(1, 4, 1), target)
+    layer._forward_core(qkv, torch.zeros(1, 4, 1, 128), torch.zeros(1, 4, 1), target)
     assert events == (["load", "compute", "save"] if empty else ["load", "compute", "state_write", "save"])
     if empty:
         assert calls == []

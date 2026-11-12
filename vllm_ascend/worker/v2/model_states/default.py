@@ -60,6 +60,7 @@ class ReplayAttnMetadata(ModelSpecificAttnMetadata):
 
 
 if TYPE_CHECKING:
+    from vllm_ascend.ascend_config import XliteGraphConfig
     from vllm_ascend.attention.dsa_v41 import AscendDSAV41Metadata, AscendDSAV41MetadataBuilder
     from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
     from vllm_ascend.models.deepseek_v41.decoder_replay_layers import AscendDecoderReplayLayers
@@ -513,7 +514,7 @@ class AscendModelState(DefaultModelState):
         max_query_len = input_batch.num_scheduled_tokens.max().item()
         pcp_context = (
             self.pcp_manager.build_attention_context(input_batch, block_tables, slot_mappings)
-            if self.pcp_manager is not None
+            if self.pcp_manager is not None and self.pcp_manager.is_target_attn_groups(attn_groups)
             else None
         )
         # attn_metadata is needed when update_full_graph_params, but no way can get it now.
@@ -526,6 +527,7 @@ class AscendModelState(DefaultModelState):
         if self.device_metadata is not None:
             build_metadata = partial(self.device_metadata.run_build, build_attn_metadata)
         self._decoder_replay_common_metadata = {}
+        xlite_cfg: XliteGraphConfig | None = getattr(get_ascend_config(), "xlite_graph_config", None)
         self.attn_metadata = build_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
@@ -562,9 +564,9 @@ class AscendModelState(DefaultModelState):
             draft_layer_names=getattr(self, "_offload_draft_layer_names", None),
             common_metadata_callback=(
                 lambda group_id, common: self._decoder_replay_common_metadata.__setitem__(group_id, common)
-                if self.decoder_replay is not None
-                else None
-            ),
+            )
+            if self.decoder_replay is not None or (xlite_cfg is not None and xlite_cfg.enabled)
+            else None,
         )
         self._prepare_decoder_replay(input_batch, cudagraph_mode, attn_groups, kv_cache_config)
         if restore_copy_sfa_tails:

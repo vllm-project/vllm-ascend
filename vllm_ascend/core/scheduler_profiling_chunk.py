@@ -88,6 +88,13 @@ class ProfilingChunkScheduler(Scheduler):
 
         profiling_cfg = scheduler_extension_config.profiling_chunk_config
         self.profiling_chunk_config = profiling_cfg
+        if self.profiling_chunk_config.enabled:
+            logger.warning_once(
+                "Dynamic chunk size Chunked Pipeline Parallelism (CPP) is deprecated "
+                "as of v0.32.0 and has entered the sunset process. It will be removed "
+                "in a future release. See RFC #21304 (https://github.com/vllm-project/vllm-ascend/issues/21304) "
+                "for details and migration guidance."
+            )
 
         short_request_first_config = scheduler_extension_config.short_request_first_config
         self._short_request_first_enabled = short_request_first_config.enabled
@@ -526,6 +533,12 @@ class ProfilingChunkScheduler(Scheduler):
                         break
 
             if new_blocks is None:
+                if self.policy == SchedulingPolicy.PRIORITY and request.status == RequestStatus.PREEMPTED:
+                    # The request was the lowest-priority running request and
+                    # preempted itself. The requests after it have higher
+                    # priority and may still fit; it was removed from
+                    # `self.running`, so `req_index` already points at the next.
+                    continue
                 # Cannot schedule this request.
                 break
 
