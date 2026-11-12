@@ -15,6 +15,7 @@
 #
 
 import gc
+import glob
 import json
 import os
 import sys
@@ -316,6 +317,32 @@ def _make_fallback_load_config(load_config: LoadConfig) -> LoadConfig:
     return fallback_load_config
 
 
+def _checkpoint_index_weight_map(folder: str, files: list[str], index_file: str) -> dict[str, str] | None:
+    index_path = os.path.join(folder, index_file)
+    if os.path.isfile(index_path):
+        with open(index_path, encoding="utf-8") as index_stream:
+            index = json.load(index_stream)
+        weight_map = index.get("weight_map") if isinstance(index, dict) else None
+        if not isinstance(weight_map, dict):
+            raise ValueError(f"RFork could not read checkpoint metadata from {index_path}")
+        return weight_map
+
+    selected = {os.path.normpath(path) for path in files}
+    matches: list[dict[str, str]] = []
+    for candidate in sorted(glob.glob(os.path.join(glob.escape(folder), "*.safetensors.index.json"))):
+        try:
+            with open(candidate, encoding="utf-8") as index_stream:
+                weight_map = json.load(index_stream)["weight_map"]
+            shards = {os.path.normpath(os.path.join(folder, shard)) for shard in weight_map.values()}
+        except (OSError, ValueError, LookupError, TypeError, AttributeError):
+            continue
+        # Quantized checkpoints name their index differently; accept it only when it covers exactly the selected shards.
+        if shards == selected and weight_map not in matches:
+            matches.append(weight_map)
+    # Differing indexes over the same shards are ambiguous, so the caller reads the shard headers instead.
+    return matches[0] if len(matches) == 1 else None
+
+
 def _get_checkpoint_weight_names(model: Module, model_config: ModelConfig, load_config: LoadConfig) -> set[str]:
     from safetensors import SafetensorError, safe_open
     from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
@@ -341,13 +368,7 @@ def _get_checkpoint_weight_names(model: Module, model_config: ModelConfig, load_
         )
         if not use_safetensors:
             raise ValueError("RFork model-state preparation requires safetensors checkpoint metadata")
-        index_path = os.path.join(folder, index_file)
-        if os.path.isfile(index_path):
-            with open(index_path, encoding="utf-8") as index_stream:
-                index = json.load(index_stream)
-            weight_map = index.get("weight_map") if isinstance(index, dict) else None
-            if not isinstance(weight_map, dict):
-                raise ValueError(f"RFork could not read checkpoint metadata from {index_path}")
+        if (weight_map := _checkpoint_index_weight_map(folder, files, index_file)) is not None:
             weight_names.update(source.prefix + name for name in weight_map)
             continue
         for path in files:

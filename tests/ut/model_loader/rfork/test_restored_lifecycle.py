@@ -244,6 +244,105 @@ def test_checkpoint_names_reject_malformed_index_as_fallback_error(
     assert isinstance(error.value, rfork_helpers.loader.RFORK_FALLBACK_EXCEPTIONS)
 
 
+def test_checkpoint_names_use_quantized_index_without_opening_shards(
+    rfork_helpers, checkpoint_loader, monkeypatch, tmp_path
+):
+    weight_map = {
+        "mtp.0.embed.weight": "shard-a.safetensors",
+        "mtp.1.head.weight": "shard-b.safetensors",
+    }
+    (tmp_path / "quant_model_weights.safetensors.index.json").write_text(
+        json.dumps({"weight_map": weight_map}), encoding="utf-8"
+    )
+    checkpoint_loader.folders["model"] = str(tmp_path)
+    checkpoint_loader.selections["model"] = (
+        [str(tmp_path / "shard-a.safetensors"), str(tmp_path / "shard-b.safetensors")],
+        True,
+    )
+
+    def fail_open(*args, **kwargs):
+        raise AssertionError("an index covering the selected shards must be used instead of opening shards")
+
+    monkeypatch.setattr("safetensors.safe_open", fail_open)
+    names = rfork_helpers.loader._get_checkpoint_weight_names(
+        Module(),
+        SimpleNamespace(model="model", revision=None),
+        SimpleNamespace(load_format="rfork", model_loader_extra_config={}),
+    )
+
+    assert names == set(weight_map)
+
+
+@pytest.mark.parametrize("index_text", ["{", '{"weight_map": ["a.weight"]}'])
+def test_checkpoint_names_skip_unreadable_fallback_index(rfork_helpers, checkpoint_loader, tmp_path, index_text):
+    save_file({"model.layers.0.weight": torch.ones(2)}, tmp_path / "shard-a.safetensors")
+    (tmp_path / "quant_model_weights.safetensors.index.json").write_text(index_text, encoding="utf-8")
+    checkpoint_loader.folders["model"] = str(tmp_path)
+    checkpoint_loader.selections["model"] = ([str(tmp_path / "shard-a.safetensors")], True)
+
+    names = rfork_helpers.loader._get_checkpoint_weight_names(
+        Module(),
+        SimpleNamespace(model="model", revision=None),
+        SimpleNamespace(load_format="rfork", model_loader_extra_config={}),
+    )
+
+    assert names == {"model.layers.0.weight"}
+
+
+def test_checkpoint_names_find_quantized_index_in_folder_with_glob_characters(
+    rfork_helpers, checkpoint_loader, monkeypatch, tmp_path
+):
+    folder = tmp_path / "model[AWQ]"
+    folder.mkdir()
+    weight_map = {"mtp.0.embed.weight": "shard-a.safetensors"}
+    (folder / "quant_model_weights.safetensors.index.json").write_text(
+        json.dumps({"weight_map": weight_map}), encoding="utf-8"
+    )
+    checkpoint_loader.folders["model"] = str(folder)
+    checkpoint_loader.selections["model"] = ([str(folder / "shard-a.safetensors")], True)
+
+    def fail_open(*args, **kwargs):
+        raise AssertionError("glob characters in the checkpoint folder must not hide its index")
+
+    monkeypatch.setattr("safetensors.safe_open", fail_open)
+    names = rfork_helpers.loader._get_checkpoint_weight_names(
+        Module(),
+        SimpleNamespace(model="model", revision=None),
+        SimpleNamespace(load_format="rfork", model_loader_extra_config={}),
+    )
+
+    assert names == set(weight_map)
+
+
+@pytest.mark.parametrize(
+    ("second_map", "expected"),
+    [
+        ({"mtp.2.head.weight": "shard-a.safetensors"}, {"header.weight"}),
+        ({"mtp.0.embed.weight": "shard-a.safetensors"}, {"mtp.0.embed.weight"}),
+        ({"mtp.2.head.weight": "shard-z.safetensors"}, {"mtp.0.embed.weight"}),
+    ],
+)
+def test_checkpoint_names_use_fallback_index_only_without_ambiguity(
+    rfork_helpers, checkpoint_loader, tmp_path, second_map, expected
+):
+    save_file({"header.weight": torch.ones(2)}, tmp_path / "shard-a.safetensors")
+    for index_name, weight_map in (
+        ("a.safetensors.index.json", {"mtp.0.embed.weight": "shard-a.safetensors"}),
+        ("quant_model_weights.safetensors.index.json", second_map),
+    ):
+        (tmp_path / index_name).write_text(json.dumps({"weight_map": weight_map}), encoding="utf-8")
+    checkpoint_loader.folders["model"] = str(tmp_path)
+    checkpoint_loader.selections["model"] = ([str(tmp_path / "shard-a.safetensors")], True)
+
+    names = rfork_helpers.loader._get_checkpoint_weight_names(
+        Module(),
+        SimpleNamespace(model="model", revision=None),
+        SimpleNamespace(load_format="rfork", model_loader_extra_config={}),
+    )
+
+    assert names == expected
+
+
 @pytest.mark.parametrize("processed_layout", [False, True])
 @pytest.mark.parametrize("outcome", ["transfer", "shared", "metadata_error", "state_error"])
 def test_model_state_preparation_precedes_registration_and_guards_fallback(
