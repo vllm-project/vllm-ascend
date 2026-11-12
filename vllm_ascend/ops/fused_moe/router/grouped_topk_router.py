@@ -38,6 +38,31 @@ class AscendGroupedTopKRouter(BaseRouter):
         self.use_grouped_topk = use_grouped_topk
 
     @property
+    def supports_local_routing(self) -> bool:
+        """Whether routing scores/ids can be computed independently per token."""
+        return True
+
+    def select_experts_locally(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        *,
+        input_ids: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute logical routes without callbacks, mapping or load recording."""
+        self._validate_eplb_state()
+        return self._compute_routing(hidden_states, router_logits, None, input_ids=input_ids)
+
+    def finalize_local_routing(
+        self, topk_weights: torch.Tensor, topk_ids: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Apply BaseRouter's post-routing semantics to the gathered token rows."""
+        if self.capture_fn is not None:
+            self.capture_fn(topk_ids)
+        topk_ids = self._apply_eplb_mapping(topk_ids)
+        return topk_weights, self._convert_indices_dtype(topk_ids, None)
+
+    @property
     def routing_method_type(self) -> RoutingMethodType:
         return get_routing_method_type(
             scoring_func=self.scoring_func,

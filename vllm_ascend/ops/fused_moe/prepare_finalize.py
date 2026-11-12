@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 
 import torch
 import torch.distributed as dist
@@ -402,6 +403,54 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
 
         return self._prepare_with_dp_group(hidden_states, router_logits, replace_allreduce)
 
+    def prepare_with_local_topk(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        select_experts: Callable[[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Route each PCP shard, then gather hidden states and packed routes.
+
+        The DP prepare stage is preserved before local routing on each PCP shard.
+        Padding precedes routing so empty shards and padded expert assignments
+        follow the same semantics as routing the gathered logits.
+        """
+        assert self.moe_config.pcp_size > 1
+        assert not self._use_ep_sequence_parallel()
+        hidden_states, router_logits = self._prepare_dp_inputs(hidden_states, router_logits)
+        self.num_tokens_pcp = hidden_states.shape[0]
+        pad_size = _EXTRA_CTX.max_tokens_across_pcp - self.num_tokens_pcp
+        if pad_size > 0:
+            hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
+            router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
+
+        topk_weights, topk_ids = select_experts(hidden_states, router_logits)
+        weight_dtype, id_dtype = topk_weights.dtype, topk_ids.dtype
+        compact_int32 = weight_dtype == torch.float32 and id_dtype == torch.int32
+        if compact_int32:
+            top_k = topk_ids.shape[-1]
+            packed_routes = torch.cat((topk_weights.view(torch.int32), topk_ids), dim=-1)
+        else:
+            # Preserve native dtypes, including INT64 ids from grouped routing.
+            weight_bytes = topk_weights.shape[-1] * topk_weights.element_size()
+            id_bytes = topk_ids.shape[-1] * topk_ids.element_size()
+            packed_bytes = torch.cat(
+                (topk_weights.contiguous().view(torch.uint8), topk_ids.contiguous().view(torch.uint8)), dim=-1
+            )
+            packed_bytes = nn.functional.pad(packed_bytes, (0, -(weight_bytes + id_bytes) % 4))
+            packed_routes = packed_bytes.view(torch.int32)
+        pcp_group = get_pcp_group()
+        hidden_states = pcp_group.all_gather(hidden_states, dim=0)
+        packed_routes = pcp_group.all_gather(packed_routes, dim=0)
+        if compact_int32:
+            topk_weights = packed_routes[:, :top_k].contiguous().view(torch.float32)
+            topk_ids = packed_routes[:, top_k:].contiguous()
+        else:
+            packed_bytes = packed_routes.view(torch.uint8)
+            topk_weights = packed_bytes[:, :weight_bytes].contiguous().view(weight_dtype)
+            topk_ids = packed_bytes[:, weight_bytes : weight_bytes + id_bytes].contiguous().view(id_dtype)
+        return hidden_states, topk_weights, topk_ids
+
     def _prepare_with_ep_group(
         self, hidden_states: torch.Tensor, router_logits: torch.Tensor, quant_type=QuantType.NONE
     ) -> MoEPrepareOutput:
@@ -437,6 +486,25 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             pertoken_scale=pertoken_scale,
         )
 
+    def _prepare_dp_inputs(
+        self, hidden_states: torch.Tensor, router_logits: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Keep DP padding/gather and finalize metadata identical on both paths."""
+        if self.moe_config.dp_size > 1:
+            max_tokens_across_dp = _EXTRA_CTX.max_tokens_across_dp
+
+            self.num_tokens = hidden_states.shape[0]
+            pad_size = max_tokens_across_dp - self.num_tokens
+            if pad_size > 0:
+                hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
+                router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
+
+            # All-gather across DP group
+            hidden_states = self.moe_config.dp_group.all_gather(hidden_states, 0)
+            router_logits = self.moe_config.dp_group.all_gather(router_logits, 0)
+
+        return hidden_states, router_logits
+
     def _prepare_with_dp_group(
         self,
         hidden_states: torch.Tensor,
@@ -453,18 +521,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         Returns:
             MoEPrepareOutput with global tensors.
         """
-        if self.moe_config.dp_size > 1:
-            max_tokens_across_dp = _EXTRA_CTX.max_tokens_across_dp
-
-            self.num_tokens = hidden_states.shape[0]
-            pad_size = max_tokens_across_dp - self.num_tokens
-            if pad_size > 0:
-                hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
-                router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
-
-            # All-gather across DP group
-            hidden_states = self.moe_config.dp_group.all_gather(hidden_states, 0)
-            router_logits = self.moe_config.dp_group.all_gather(router_logits, 0)
+        hidden_states, router_logits = self._prepare_dp_inputs(hidden_states, router_logits)
 
         if self.moe_config.pcp_size > 1:
             max_tokens_across_pcp = _EXTRA_CTX.max_tokens_across_pcp

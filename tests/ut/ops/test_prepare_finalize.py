@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -331,3 +332,74 @@ class TestSequenceParallelPCP(unittest.TestCase):
             reduce.assert_called_once_with(gathered_inputs)
             config.dp_group.all_gather.assert_not_called()
             pcp_group.assert_not_called()
+
+
+class TestLocalTopKPrepare(unittest.TestCase):
+    def test_local_routes_match_global_routing_with_padding(self):
+        # Distinct shards, including an empty rank, expose ordering/padding bugs.
+
+        torch.manual_seed(123)
+        sizes = (3, 0, 2)
+        hidden = [torch.randn(n, 16) for n in sizes]
+        logits = [torch.randn(n, 12) for n in sizes]
+        bias = torch.linspace(-0.2, 0.2, 12)
+
+        def route(h, r):
+            self.assertEqual(h.shape[0], r.shape[0])
+            scores = r.abs() + 1
+            ids = (scores + bias).topk(4, dim=-1).indices
+            weights = scores.gather(1, ids)
+            weights = weights / weights.sum(-1, keepdim=True) * 2.5
+            return weights, ids.int()
+
+        padded_h = [torch.nn.functional.pad(x, (0, 0, 0, 3 - len(x))) for x in hidden]
+        padded_r = [torch.nn.functional.pad(x, (0, 0, 0, 3 - len(x))) for x in logits]
+        global_h, global_r = torch.cat(padded_h), torch.cat(padded_r)
+        expected_w, expected_i = route(global_h, global_r)
+        packed = torch.cat((expected_w.view(torch.int32), expected_i), -1)
+        for rank in range(3):
+            layer = object.__new__(PrepareAndFinalizeWithAllGather)
+            layer.moe_config = SimpleNamespace(dp_size=1, pcp_size=3, is_sequence_parallel=False)
+            calls = []
+
+            def gather(x, dim, calls=calls, rank=rank):
+                calls.append(x)
+                if len(calls) == 1:
+                    torch.testing.assert_close(x, padded_h[rank], rtol=0, atol=0)
+                    return global_h.clone()
+                self.assertEqual(x.dtype, torch.int32)
+                self.assertEqual(x.shape, (3, 8))
+                self.assertTrue(torch.equal(x, packed[rank * 3 : (rank + 1) * 3]))
+                return packed.clone()
+
+            group = SimpleNamespace(all_gather=gather)
+            with (
+                patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_pcp_group", return_value=group),
+                patch("vllm_ascend.ops.fused_moe.prepare_finalize._EXTRA_CTX") as context,
+            ):
+                context.max_tokens_across_pcp = 3
+                actual_h, actual_w, actual_i = layer.prepare_with_local_topk(hidden[rank], logits[rank], route)
+            self.assertEqual(layer.num_tokens_pcp, sizes[rank])
+            self.assertEqual(len(calls), 2)
+            self.assertTrue(torch.equal(actual_h, global_h))
+            self.assertTrue(torch.equal(actual_w, expected_w))
+            self.assertTrue(torch.equal(actual_i, expected_i))
+            self.assertTrue(actual_w.is_contiguous())
+            self.assertTrue(actual_i.is_contiguous())
+
+    def test_pack_preserves_float_bits(self):
+        layer = object.__new__(PrepareAndFinalizeWithAllGather)
+        layer.moe_config = SimpleNamespace(dp_size=1, pcp_size=2, is_sequence_parallel=False)
+        weights = torch.tensor([[0.0, -0.0, float("inf"), float("nan")]])
+        ids = torch.tensor([[0, 127, 255, 287]], dtype=torch.int32)
+        group = SimpleNamespace(all_gather=lambda x, dim: torch.cat((x, x), dim))
+        with (
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_pcp_group", return_value=group),
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize._EXTRA_CTX") as context,
+        ):
+            context.max_tokens_across_pcp = 1
+            _, actual_w, actual_i = layer.prepare_with_local_topk(
+                torch.ones(1, 16), torch.ones(1, 288), lambda h, r: (weights, ids)
+            )
+        self.assertTrue(torch.equal(actual_w.view(torch.int32), torch.cat((weights, weights)).view(torch.int32)))
+        self.assertTrue(torch.equal(actual_i, torch.cat((ids, ids))))
