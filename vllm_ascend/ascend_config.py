@@ -717,6 +717,11 @@ class AscendConfig:
     enable_transpose_kv_cache_by_block: bool = True
     weight_nz_mode: int = 1
 
+    # FlashStates hybrid-state frontier checkpoints (optional, off by default).
+    # Declared so additional_config["flashstate"] passes extra="forbid"; the
+    # feature itself reads the raw dict in patch_hybrid_checkpoint.
+    flashstate: dict[str, Any] = dataclasses.field(default_factory=dict)
+
     # ---- sub-configs (no vllm_config dep): pydantic dict→dataclass coercion ----
     ascend_compilation_config: AscendCompilationConfig = dataclasses.field(default_factory=AscendCompilationConfig)
     ascend_fusion_config: AscendFusionConfig = dataclasses.field(default_factory=AscendFusionConfig)
