@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 
 from collections import defaultdict
+from dataclasses import replace
 from typing import Any
 
 # Both supported versions use the KV-cache planner and builder API from #61183/#42309.
@@ -10,6 +11,7 @@ from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.core.kv_cache_planning import _approximate_gcd, may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -462,6 +464,29 @@ def _is_deepseek_v4_groups(kv_cache_groups: list[KVCacheGroupSpec]) -> bool:
     return False
 
 
+def _get_replicated_draft_pools(
+    groups: list[KVCacheGroupSpec],
+) -> list[list[KVCacheGroupSpec]] | None:
+    """Keep contiguous dense draft K/V outside the target/state alias pool."""
+    if not any(get_kv_cache_spec_kind(group.kv_cache_spec) == KVCacheSpecKind.MAMBA for group in groups):
+        return None
+    target_groups = []
+    draft_pools = []
+    for group in groups:
+        spec = group.kv_cache_spec
+        specs = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,)
+        if all(
+            isinstance(s, FullAttentionSpec) and not isinstance(s, MLAAttentionSpec) and not s.dcp_sharded
+            for s in specs
+        ):
+            draft_pools.append([group])
+        else:
+            target_groups.append(group)
+    if target_groups and draft_pools:
+        return [target_groups, *draft_pools]
+    return None
+
+
 def _ascend_pool_bytes_per_block(  # type: ignore[misc]
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
@@ -476,6 +501,9 @@ def _ascend_pool_bytes_per_block(  # type: ignore[misc]
     """
     if vllm_config.model_config.hf_config.model_type == "kimi_k31":
         return paired_sfa_pool_bytes(kv_cache_groups)
+    pools = _get_replicated_draft_pools(kv_cache_groups)
+    if pools is not None:
+        return sum(_orig_pool_bytes_per_block(vllm_config, pool) for pool in pools)
     if tq_cache.uses_turboquant_groups(kv_cache_groups):
         return tq_cache.pool_bytes_per_block(kv_cache_groups)
     if is_deepseek_v41_cache(kv_cache_groups):
@@ -560,8 +588,34 @@ def _ascend_get_kv_cache_config_from_groups(
         if vllm_version_is("0.28.0")
         else get_qwen4_exp_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     )
+    pools = _get_replicated_draft_pools(kv_cache_groups)
     if vllm_config.model_config.hf_config.model_type == "kimi_k31":
         kv_cache_config = paired_sfa_cache_config(vllm_config, kv_cache_groups, available_memory)
+    elif pools is not None:
+        # Every physical pool shares the scheduler's block count, but owns a
+        # disjoint byte range. Use the same aggregate divisor as admission and
+        # rank re-planning, then retain upstream's per-pool stride descriptors.
+        pool_bytes = [_orig_pool_bytes_per_block(vllm_config, pool) for pool in pools]
+        bytes_per_block = sum(pool_bytes)
+        num_blocks = may_override_num_blocks(vllm_config, available_memory // bytes_per_block)
+        total_size = num_blocks * bytes_per_block
+        tensors: list[KVCacheTensor] = []
+        offset = 0
+        for pool, pool_bytes_per_block in zip(pools, pool_bytes):
+            pool_size = num_blocks * pool_bytes_per_block
+            pool_config = _orig_get_kv_cache_config_from_groups(vllm_config, pool, pool_size)
+            assert pool_config.num_blocks == num_blocks
+            tensors.extend(
+                replace(tensor, size=total_size, offset=offset + tensor.offset)
+                for tensor in pool_config.kv_cache_tensors
+            )
+            offset += pool_size
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=tensors,
+            kv_cache_groups=kv_cache_groups,
+            prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
+        )
     elif qwen_config is not None:
         kv_cache_config = qwen_config
     elif is_deepseek_v41_cache(kv_cache_groups):

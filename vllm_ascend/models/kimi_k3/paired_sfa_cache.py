@@ -5,7 +5,8 @@
 Each full-history block owns both components. Recurrent groups use disjoint
 IDs from the same pool and may alias main-page physical slots. Token ownership
 never depends on the relative byte sizes of the two attention components.
-DSpark shares full-history block IDs, with a separate region in the backing.
+DSpark shares full-history block IDs when its sharding matches the target,
+with a separate region in the backing for every draft layer.
 """
 
 from dataclasses import replace
@@ -65,8 +66,8 @@ def paired_sfa_cache_groups(config, specs):
     target = {name: spec for name, spec in specs.items() if not spec.is_draft}
     groups = _paired_sfa_target_cache_groups(config, target)
     specs.update(target)
-    if any(spec.uses_packed_sfa_main_cache for spec in draft.values()):
-        raise ValueError("Kimi DSpark draft groups require ordinary MLA cache specs.")
+    if any(isinstance(spec, AscendMLAAttentionSpec) and spec.uses_packed_sfa_main_cache for spec in draft.values()):
+        raise ValueError("Kimi DSpark draft groups require ordinary attention cache specs.")
     ordered = dict(sorted(draft.items(), key=lambda item: extract_layer_index(item[0])))
 
     # Share logical ownership while retaining separate physical regions.
@@ -74,6 +75,22 @@ def paired_sfa_cache_groups(config, specs):
     # AscendMLAAttentionSpec.merge must not merge these different MLA specs.
     full = groups[0]
     assert isinstance(full.kv_cache_spec, UniformTypeKVCacheSpecs)
+    # Replicated and DCP-sharded attention have different logical coverage.
+    # Preserve their own block tables while retaining independent physical
+    # regions in the paired backing allocation.
+    separate = {name: spec for name, spec in ordered.items() if spec.dcp_sharded != full.kv_cache_spec.dcp_sharded}
+    ordered = {name: spec for name, spec in ordered.items() if name not in separate}
+    if separate:
+        uniform_draft = UniformTypeKVCacheSpecs.from_specs(separate)
+        if uniform_draft is None:
+            raise ValueError("Draft layers must share full-attention semantics and logical block size.")
+        groups.append(
+            KVCacheGroupSpec(
+                list(separate),
+                uniform_draft,
+                is_eagle_group=any(getattr(spec, "non_causal_multi_token_decode", False) for spec in separate.values()),
+            )
+        )
     shared = {**full.kv_cache_spec.kv_cache_specs, **ordered}
     if any(spec.tokens_per_state != 1 for spec in shared.values()):
         raise ValueError("Shared DSpark ownership requires uncompressed full-history token slots.")
@@ -92,7 +109,8 @@ def paired_sfa_cache_groups(config, specs):
         full,
         layer_names=list(shared),
         kv_cache_spec=uniform,
-        is_eagle_group=full.is_eagle_group or any(spec.non_causal_multi_token_decode for spec in ordered.values()),
+        is_eagle_group=full.is_eagle_group
+        or any(getattr(spec, "non_causal_multi_token_decode", False) for spec in ordered.values()),
     )
     return groups
 

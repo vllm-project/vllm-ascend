@@ -32,9 +32,9 @@ from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
+from vllm_ascend.quantization.nz import mxfp8_nz
 from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg, get_dynamic_mx_quant_scale_alg
 from vllm_ascend.utils import (
-    ACL_FORMAT_FRACTAL_NZ,
     FP8_METHOD,
     _should_trans_nz,
     dispose_tensor,
@@ -288,7 +288,7 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             # First call: allocate the persistent transformed buffers.
             layer._mxfp8_weight_buf = transposed_weight
             if not getattr(layer, "_fused_preprocess_managed", False):
-                layer._mxfp8_weight_buf = maybe_trans_nz(layer._mxfp8_weight_buf, customize_dtype=torch.float8_e4m3fn)
+                layer._mxfp8_weight_buf = maybe_trans_nz(layer._mxfp8_weight_buf, **mxfp8_nz().cast_kwargs())
             layer._mxfp8_scale_buf = target_scale.contiguous()
         else:
             # Subsequent calls (RL reload path): copy in place to keep data_ptr stable.
@@ -560,11 +560,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 for expert in weight_nd.unbind(dim=0):
                     expert = expert.clone()
                     if expert.device.type == "npu":
-                        torch_npu.npu_format_cast_(
-                            expert,
-                            ACL_FORMAT_FRACTAL_NZ,
-                            customize_dtype=torch.float8_e4m3fn,
-                        )
+                        mxfp8_nz().cast_(expert)
                     weight_list.append(expert)
                 list_prefix = ""
             # Checkpoint E8M0 scales are stored as bytes; CANN requires their semantic dtype.
@@ -595,7 +591,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                     weight.data,
                     target_scale,
                     transpose_dims=(1, 2),
-                    customize_dtype=torch.float8_e4m3fn,
+                    **mxfp8_nz().cast_kwargs(),
                 )
             else:
                 weight_buffer, scale_buffer = layer._mxfp8_moe_buffers[weight_name]

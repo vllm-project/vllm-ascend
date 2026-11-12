@@ -630,6 +630,7 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
             block_shapes=block_shapes_per_layer,
             block_size_scales=block_size_scales_per_layer,
             indexer_replication_sizes=indexer_replication_sizes,
+            dcp_sharded=[self.kv_cache_specs[self.layer_name_to_spec_index[name]].dcp_sharded for name in layer_names],
             local_ip=self.side_channel_host,
             handshake_port=self.handshake_port,
         )

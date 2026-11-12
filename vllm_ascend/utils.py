@@ -404,6 +404,18 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
     return True
 
 
+def is_internal_npu_format(tensor: torch.Tensor) -> bool:
+    """Whether a tensor's storage uses a device-internal layout rather than ND.
+
+    FRACTAL_NZ is not a single format: a weight cast with
+    ``customize_dtype``/``input_dtype`` reports a C0 variant such as
+    FRACTAL_NZ_C0_16, so checking against FRACTAL_NZ alone misses it.
+    """
+    if tensor.device.type != "npu":
+        return False
+    return int(torch_npu.get_npu_format(tensor)) not in (0, ACL_FORMAT_FRACTAL_ND)
+
+
 # NZ conversion policy:
 # - 310P: always convert supported weights to FRACTAL_NZ
 # - non-310P: follow additional_config.weight_nz_mode

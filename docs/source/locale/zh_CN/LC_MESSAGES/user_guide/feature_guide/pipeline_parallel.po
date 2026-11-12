@@ -753,11 +753,6 @@ msgstr "| 与 PP 叠加的功能 | 支持情况 |"
 msgid "| MTP | Supported. |"
 msgstr "| MTP | 支持。 |"
 
-msgid ""
-"| EAGLE3 | Supported only for MiniMax-M3 sparse models; the upstream Model "
-"Runner V2 restriction is lifted for these architectures. |"
-msgstr "| EAGLE3 | 仅支持 MiniMax-M3 稀疏模型；针对这些架构解除了上游 Model Runner V2 的限制。 |"
-
 msgid "| DFlash | Not supported. |"
 msgstr "| DFlash | 不支持。 |"
 
@@ -797,9 +792,6 @@ msgstr "| 异步调度 | 支持。 |"
 msgid "| Sequence parallelism | Supported. |"
 msgstr "| 序列并行 | 支持。 |"
 
-msgid "Notes for speculative decoding with PP on Model Runner V2:"
-msgstr "在 Model Runner V2 上使用 PP 进行投机解码的注意事项："
-
 msgid ""
 "- DSpark drafts from taps on intermediate target layers\n"
 "  (`dspark_target_layer_ids`). Taps that fall on an earlier PP stage are\n"
@@ -829,15 +821,6 @@ msgstr ""
 "- `MooncakeConnectorV1` 目前要求 Decode 侧的 PP size 为 `1`。\n"
 "- 对于基于 RoCE 的跨节点 MoE 部署，PP 和 DP 目前无法同时启用，因为 `MoeDistributeDispatch` 通信路径不支持这种组合拓扑。\n"
 "- 特性组合仍因模型而异。在生产部署前，请查阅相关特性指南。"
-
-msgid ""
-"The following matrix lists the features that can be stacked with PP on\n"
-"Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`). Support describes each individual\n"
-"feature combination with PP and remains subject to the model and hardware\n"
-"requirements in the relevant feature guide."
-msgstr ""
-"以下矩阵列出了在 Model Runner V2（`VLLM_USE_V2_MODEL_RUNNER=1`）上可与 PP "
-"叠加使用的特性。支持情况描述了每个特性与 PP 的单独组合，并且仍需满足相关特性指南中的模型和硬件要求。"
 
 msgid ""
 "| Graph mode (ACL graph) | Supported with `FULL_DECODE_ONLY` and "
@@ -880,3 +863,17 @@ msgstr "| 量化 | 支持模型和硬件可用的所有量化方法，包括 W4A
 
 msgid "| Weight NZ | Supported. |"
 msgstr "| Weight NZ | 支持。 |"
+
+msgid ""
+"The following matrix lists the features that can be stacked with PP. Support\n"
+"describes each individual feature combination with PP and remains subject to\n"
+"the model and hardware requirements in the relevant feature guide."
+msgstr "下表列出了可与 PP 叠加使用的特性。支持情况描述了每种特性与 PP 组合时的具体情况，并且仍受相关特性指南中的模型和硬件要求约束。"
+
+msgid ""
+"| EAGLE3 | Supported only for MiniMax-M3 sparse models; the upstream "
+"restriction is lifted for these architectures. |"
+msgstr "| EAGLE3 | 仅支持 MiniMax-M3 稀疏模型；针对这些架构已解除上游限制。 |"
+
+msgid "Notes for speculative decoding with PP:"
+msgstr "PP 与投机解码配合使用的注意事项："

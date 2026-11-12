@@ -28,6 +28,7 @@ from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_expert
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
+from vllm_ascend.quantization.nz import bf16_nz
 from vllm_ascend.utils import dispose_tensor
 
 from ..base import AscendMoEScheme, QuantType
@@ -141,12 +142,12 @@ class AscendW4A16MXFP4FusedMoEMethod(AscendMoEScheme):
     def process_weights_after_loading(self, layer):
         layer.w13_weight.data = unpack_uint8_to_fp4_return_float32(layer.w13_weight.data)
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
-        layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, 29, customize_dtype=torch.bfloat16)
+        layer.w13_weight.data = bf16_nz().cast(layer.w13_weight.data)
         layer.w13_weight.data = torch_npu.npu_convert_weight_to_int4pack(layer.w13_weight.data).contiguous()
 
         layer.w2_weight.data = unpack_uint8_to_fp4_return_float32(layer.w2_weight.data)
         layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
-        layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, 29, customize_dtype=torch.bfloat16)
+        layer.w2_weight.data = bf16_nz().cast(layer.w2_weight.data)
         layer.w2_weight.data = torch_npu.npu_convert_weight_to_int4pack(layer.w2_weight.data).contiguous()
 
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2).contiguous()

@@ -108,6 +108,7 @@ def _get_kimi_k3_dspark_mixed_kv_cache_groups(
     # own groups and may use max_model_len as block_size when cache_mode=none.
     if (
         len({spec.block_size for spec in attention_specs}) != 1
+        or len({spec.dcp_sharded for spec in attention_specs}) != 1
         or len({spec.page_size_bytes for spec in all_specs}) != 1
     ):
         return None
