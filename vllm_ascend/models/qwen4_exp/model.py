@@ -513,11 +513,7 @@ class AscendQwen4ExpForCausalLM(upstream_model.Qwen4ExpForCausalLM):
     def get_mamba_specs_from_config(cls, vllm_config: VllmConfig):
         # vLLM uses these specs to align attention pages. PLE has a private
         # dense bank; only GDN's complete conv+SSM state shares QSA pages.
-        return tuple(
-            spec
-            for spec in super().get_mamba_specs_from_config(vllm_config)
-            if not spec.tp_replicated
-        )
+        return tuple(spec for spec in super().get_mamba_specs_from_config(vllm_config) if not spec.tp_replicated)
 
     @staticmethod
     def get_model_state_cls():

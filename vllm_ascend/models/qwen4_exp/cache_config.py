@@ -239,17 +239,13 @@ def build_qwen4_kv_cache_layout(
     alignment = math.lcm(16, *dtype_sizes)
     gdn_specs = [spec for _, spec in role_members[GDN] if isinstance(spec, MambaSpec)]
     state_counts = {len(spec.shapes) for spec in gdn_specs}
-    if state_counts not in ({2}, {3}) or any(
-        len(spec.dtypes) != len(spec.shapes) for spec in gdn_specs
-    ):
+    if state_counts not in ({2}, {3}) or any(len(spec.dtypes) != len(spec.shapes) for spec in gdn_specs):
         raise ValueError(
-            "Qwen4 GDN owners must expose one uniform two- or three-state "
-            f"layout, got state counts {state_counts}"
+            f"Qwen4 GDN owners must expose one uniform two- or three-state layout, got state counts {state_counts}"
         )
     num_gdn_states = next(iter(state_counts))
     state_component_bytes = tuple(
-        max(_state_bytes(spec, state_index) for spec in gdn_specs)
-        for state_index in range(num_gdn_states)
+        max(_state_bytes(spec, state_index) for spec in gdn_specs) for state_index in range(num_gdn_states)
     )
     gdn_page_bytes = sum(state_component_bytes)
     for layer_name, spec in role_members[QSA_MAIN]:

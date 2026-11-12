@@ -25,6 +25,13 @@ def can_skip_qwen_cpu_length_sync(runner: Any) -> bool:
             PleShortConvAttentionMetadataBuilder,
         )
 
+        from vllm_ascend.attention.gdn_attn_builder import (
+            AscendGDNAttentionBackend,
+            AscendGDNAttentionMetadataBuilder,
+            AscendGDNFusedAttentionBackend,
+            AscendGDNHostMetadataBackend,
+            AscendGDNHostMetadataBuilder,
+        )
         from vllm_ascend.models.qwen4_exp import qsa as ascend_qsa
         from vllm_ascend.models.qwen4_exp.model_state import AscendQwen4ExpModelState
         from vllm_ascend.models.qwen4_exp.ple import (
@@ -35,13 +42,6 @@ def can_skip_qwen_cpu_length_sync(runner: Any) -> bool:
             AscendQSABackend,
             AscendQSAImpl,
             AscendQSAMetadataBuilder,
-        )
-        from vllm_ascend.attention.gdn_attn_builder import (
-            AscendGDNAttentionBackend,
-            AscendGDNAttentionMetadataBuilder,
-            AscendGDNFusedAttentionBackend,
-            AscendGDNHostMetadataBackend,
-            AscendGDNHostMetadataBuilder,
         )
         from vllm_ascend.worker.v2.spec_decode.mtp.speculator import AscendMTPSpeculator
 
