@@ -286,7 +286,7 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch, selected, repla
     output, aux = result if selected else (result, [])
     all_rows = [0, 1, 2, 3]
     if compacted:
-        expected = [(i, all_rows) for i in range(replay_start)]
+        expected: list[tuple[int | str, list[int]]] = [(i, all_rows) for i in range(replay_start)]
         expected += [(f"write_kv_{replay_start}", all_rows)]
         expected += [(i, [2, 3]) for i in range(replay_start, 3)]
     else:

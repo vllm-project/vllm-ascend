@@ -5,6 +5,7 @@
 import math
 import os
 from copy import deepcopy
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -111,7 +112,7 @@ def test_deepseek_v41_dspark_adaptive_output_and_graph_replay():
         "The capital of France is",
     ]
     sampling = SamplingParams(temperature=0, seed=0, max_tokens=64, ignore_eos=True, logprobs=1)
-    kwargs = dict(
+    kwargs: dict[str, Any] = dict(
         tensor_parallel_size=int(os.getenv("DSV41_TP_SIZE", "4")),
         enable_expert_parallel=True,
         max_model_len=2048,

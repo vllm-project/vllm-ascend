@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -161,7 +162,7 @@ def test_v41_a5_replay_window_keeps_current_token_and_masks_padding(monkeypatch,
         common.query_start_loc.copy_(torch.tensor([0, lengths[0], end, end, end]))
         common.seq_lens[:2] = torch.tensor([121 + lengths[0], 255 + lengths[1]])
         common.positions[:end] = torch.cat([torch.arange(121, 121 + lengths[0]), torch.arange(255, 255 + lengths[1])])
-        shared = {}
+        shared: dict[str, Any] = {}
         metadata = builder.build(0, common, num_actual_reqs=2, common_v41_batch_metadata=shared)
         # A peer shares request coordinates but has a different replay floor.
         # Its build must not reuse or overwrite this group's sparse window.
