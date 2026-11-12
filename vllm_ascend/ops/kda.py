@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Shared fla_npu KDA execution; callers own projections and cache updates."""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 import torch
 
@@ -28,19 +28,28 @@ def run_recurrent_kda(
     lower_bound: float | None,
     beta_is_preprocessed: bool = True,
     num_accepted_tokens: torch.Tensor | None = None,
+    before_recurrent: Callable[[], None] | None = None,
 ) -> torch.Tensor:
     # Recurrent KDA consumes independent Q/K/V token/head strides directly.
+    raw_gate = raw_gate.contiguous()
+    beta = beta.contiguous()
+    a_log = a_log.reshape(-1).contiguous()
+    dt_bias = dt_bias.contiguous()
+    # The caller's communication event must follow all input Vector copies,
+    # while leaving the recurrent kernel itself independent of that exchange.
+    if before_recurrent is not None:
+        before_recurrent()
     output, _ = recurrent_kda(
         q,
         k,
         v,
-        raw_gate.contiguous(),
-        beta.contiguous(),
+        raw_gate,
+        beta,
         state,
         cu_seqlens=cu_seqlens,
         ssm_state_indices=state_indices,
-        A_log=a_log.reshape(-1).contiguous(),
-        dt_bias=dt_bias.contiguous(),
+        A_log=a_log,
+        dt_bias=dt_bias,
         num_accepted_tokens=num_accepted_tokens,
         layout="BSND",
         scale=q.shape[-1] ** -0.5,

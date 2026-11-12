@@ -139,9 +139,8 @@ class KDAProjectionTP:
         self.qkv_group, self.gate_group = qkv_group, gate_group
         self.heads, self.head_dim = heads, head_dim
         self.communication = TPCommunication()
-        self.aux_stream: torch.npu.Stream | None = None
 
-    def project(self, layer, hidden):
+    def project(self, layer, hidden, *, aux_stream: torch.npu.Stream):
         capacity = projection_capacity(hidden)
         owner = F.pad(hidden, (0, 0, 0, capacity - hidden.shape[0]))
         if capacity == 0:
@@ -153,22 +152,20 @@ class KDAProjectionTP:
             g_input = self.communication.gather(owner, self.gate_group) if self.gate_group is not None else None
 
         main = torch.npu.current_stream()
-        if self.aux_stream is None:
-            self.aux_stream = torch.npu.Stream()
         owner_ready = main.record_event()
-        owner.record_stream(self.aux_stream)
+        owner.record_stream(aux_stream)
         # C1: owner F needs no gathered input and runs during input AG.
-        with npu_stream_switch(self.aux_stream):
-            self.aux_stream.wait_event(owner_ready)
+        with npu_stream_switch(aux_stream):
+            aux_stream.wait_event(owner_ready)
             forget = layer.f_b_proj(layer.f_a_proj(owner)[0])[0]
         q_hidden = q_input.wait() if q_input is not None else owner
         input_ready = main.record_event()
-        q_hidden.record_stream(self.aux_stream)
+        q_hidden.record_stream(aux_stream)
         # C2: raw BF16 beta Cube and MX input quant Vector have the same input.
-        with npu_stream_switch(self.aux_stream):
-            self.aux_stream.wait_event(input_ready)
+        with npu_stream_switch(aux_stream):
+            aux_stream.wait_event(input_ready)
             beta = layer.b_proj(q_hidden)[0]
-            beta_ready = self.aux_stream.record_event()
+            beta_ready = aux_stream.record_event()
         quantized = layer._quantize_fused_qkv(q_hidden)
         main.wait_event(beta_ready)
         beta.record_stream(main)
@@ -183,17 +180,6 @@ class KDAProjectionTP:
         # C3: enqueue G Cube before waiting for the QKV/beta return.
         g_hidden = g_input.wait() if g_input is not None else owner
         gate = layer.g_proj(g_hidden)[0]
-        if self.gate_group is not None:
-            pending_gate = PendingGate(
-                self.communication.exchange(gate, self.gate_group),
-                None,
-                self.gate_group.world_size,
-                capacity,
-                self.heads,
-                self.head_dim,
-            )
-        else:
-            pending_gate = PendingGate(None, gate, 1, capacity, self.heads, self.head_dim)
         if q_pending is not None:
             size = self.qkv_group.world_size
             local_heads = self.heads // size
@@ -204,8 +190,20 @@ class KDAProjectionTP:
             qkv = qkv.reshape(size, capacity, 3, local_heads, self.head_dim)
             qkv = qkv.permute(1, 2, 0, 3, 4).reshape(capacity, -1)
             beta = beta.permute(1, 0, 2).reshape(capacity, self.heads)
-        # G deliberately remains pending through conv/recurrent (C4).
-        return qkv, forget.view(1, capacity, self.heads, self.head_dim), beta.unsqueeze(0), pending_gate
+        # Keep G local until recurrent inputs are ready. Starting its A2A
+        # here would contend with reorder/beta/conv Vector work for AIVs.
+        return qkv, forget.view(1, capacity, self.heads, self.head_dim), beta.unsqueeze(0), gate
+
+    def exchange_gate(self, gate: torch.Tensor) -> PendingGate:
+        size = self.gate_group.world_size if self.gate_group is not None else 1
+        return PendingGate(
+            self.communication.exchange(gate, self.gate_group) if self.gate_group is not None else None,
+            gate if self.gate_group is None else None,
+            size,
+            gate.shape[0] // size,
+            self.heads,
+            self.head_dim,
+        )
 
 
 class ChunkedMLPTP:
