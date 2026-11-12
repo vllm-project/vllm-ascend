@@ -95,16 +95,7 @@ def fetch_seed_transfer_info(
             logger.error("RFork seed returned an invalid session or weight manifest.")
             return None
 
-        formats_candidate = response_payload.get("rfork_transfer_engine_format_info")
-        if not isinstance(formats_candidate, Mapping) or any(
-            not isinstance(name, str) or not isinstance(value, int) or isinstance(value, bool)
-            for name, value in formats_candidate.items()
-        ):
-            logger.error("RFork seed returned malformed format metadata.")
-            return None
-        formats = dict(formats_candidate)
-
-        return SeedTransferInfo(session_id=session_id, weights=weights, formats=formats)
+        return SeedTransferInfo(session_id=session_id, weights=weights)
     except Exception as exc:
         logger.error("RFork seed metadata request failed for %s: %s", seed_url, exc)
         return None

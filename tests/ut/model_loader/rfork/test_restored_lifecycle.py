@@ -7,6 +7,7 @@ from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -17,28 +18,24 @@ from torch.utils.hooks import RemovableHandle
 from .rfork_test_support import _load_module, _stub
 
 
-class _WeightsMapperStub:
-    """Functional stand-in: AscendDeepSeekMTP.load_weights constructs and applies it."""
-
-    def __init__(self, *, orig_to_new_prefix=None):
-        self.orig_to_new_prefix = orig_to_new_prefix or {}
-
-    def apply(self, weights):
-        for name, tensor in weights:
-            for old, new in self.orig_to_new_prefix.items():
-                if name.startswith(old):
-                    name = (new or "") + name[len(old) :]
-                    break
-            yield name, tensor
-
-
-class _AutoWeightsLoaderStub:
-    def __init__(self, *args, **kwargs):
-        pass
-
-
 @pytest.fixture
 def mtp_model(rfork_helpers, tensor_runtime, monkeypatch):
+    class WeightsMapper:
+        def __init__(self, *, orig_to_new_prefix):
+            self.orig_to_new_prefix = orig_to_new_prefix
+
+        def _map_name(self, name):
+            for prefix, replacement in self.orig_to_new_prefix.items():
+                if name.startswith(prefix):
+                    return replacement + name[len(prefix) :] if replacement is not None else None
+            return name
+
+        def apply_list(self, names):
+            return [mapped for name in names if (mapped := self._map_name(name)) is not None]
+
+        def apply(self, weights):
+            return ((mapped, tensor) for name, tensor in weights if (mapped := self._map_name(name)) is not None)
+
     class DeepSeekMTP(torch.nn.Module):
         def load_weights(self, weights):
             return {name for name, _ in weights}
@@ -47,12 +44,7 @@ def mtp_model(rfork_helpers, tensor_runtime, monkeypatch):
     _stub(monkeypatch, "vllm.config", VllmConfig=object)
     _stub(monkeypatch, "vllm.model_executor.models.deepseek_mtp", DeepSeekMTP=DeepSeekMTP)
     _stub(monkeypatch, "vllm.model_executor.models.deepseek_v2", GlmMoeDsaForCausalLM=torch.nn.Module)
-    _stub(
-        monkeypatch,
-        "vllm.model_executor.models.utils",
-        AutoWeightsLoader=_AutoWeightsLoaderStub,
-        WeightsMapper=_WeightsMapperStub,
-    )
+    _stub(monkeypatch, "vllm.model_executor.models.utils", AutoWeightsLoader=object, WeightsMapper=WeightsMapper)
     _stub(monkeypatch, "vllm.sequence", IntermediateTensors=object)
     _stub(monkeypatch, "vllm_ascend.utils", is_rot_weight_used=lambda _config: False)
     module = _load_module(monkeypatch, "_rfork_test_mtp_model", "../../models/deepseek_mtp.py")
@@ -68,7 +60,7 @@ def mtp_model(rfork_helpers, tensor_runtime, monkeypatch):
     layer.shared_head.head = torch.nn.Linear(2, 2, bias=False)
     model.model.layers = torch.nn.ModuleDict({"3": layer})
     monkeypatch.setattr(tensor_runtime.tensor_layout, "is_tensor_on_transfer_device", lambda _tensor: True)
-    return SimpleNamespace(model=model)
+    return SimpleNamespace(model=model, mapper=WeightsMapper)
 
 
 @pytest.mark.parametrize(
@@ -76,12 +68,13 @@ def mtp_model(rfork_helpers, tensor_runtime, monkeypatch):
     [
         ("model.layers.3.shared_head.head.weight", True),
         ("lm_head.weight", False),
+        ("layers.3.shared_head.head.weight", False),
+        ("model.language_model.layers.3.shared_head.head.weight", False),
         (None, False),
     ],
 )
-@pytest.mark.parametrize("processed_layout", [False, True])
 def test_mtp_checkpoint_preparation_preserves_registered_structure(
-    rfork_helpers, tensor_runtime, mtp_model, monkeypatch, head_name, has_own_head, processed_layout
+    rfork_helpers, tensor_runtime, mtp_model, monkeypatch, head_name, has_own_head
 ):
     model = mtp_model.model
     layout = tensor_runtime.tensor_layout
@@ -89,14 +82,14 @@ def test_mtp_checkpoint_preparation_preserves_registered_structure(
     original = head.weight.detach().clone()
     assert not hasattr(model, "lm_head")
     names = {head_name} if head_name is not None else set()
-    unprepared_digest = layout.build_structural_digest(layout.collect_transferable_tensors(model, processed_layout))
+    unprepared_digest = layout.build_structural_digest(layout.collect_transferable_tensors(model))
 
     monkeypatch.setattr(rfork_helpers.loader, "_get_checkpoint_weight_names", lambda *args: names)
     rfork_helpers.loader._prepare_rfork_model_state(model, SimpleNamespace(), SimpleNamespace())
-    before = layout.collect_transferable_tensors(model, processed_layout)
+    before = layout.collect_transferable_tensors(model)
     digest = layout.build_structural_digest(before)
     loaded = model.load_weights((name, original) for name in names)
-    after = layout.collect_transferable_tensors(model, processed_layout)
+    after = layout.collect_transferable_tensors(model)
 
     assert loaded == names
     assert model.has_own_lm_head is has_own_head
@@ -109,6 +102,63 @@ def test_mtp_checkpoint_preparation_preserves_registered_structure(
     assert (digest != unprepared_digest) is has_own_head
     assert layout.build_structural_digest(after) == digest
     torch.testing.assert_close(head.weight, original)
+
+
+def test_mtp_checkpoint_preparation_ignores_nonlocal_head(rfork_helpers, mtp_model, monkeypatch):
+    model = mtp_model.model
+    model.model.layers = torch.nn.ModuleDict()
+    monkeypatch.setattr(
+        rfork_helpers.loader,
+        "_get_checkpoint_weight_names",
+        lambda *args: {"model.layers.3.shared_head.head.weight"},
+    )
+
+    rfork_helpers.loader._prepare_rfork_model_state(model, SimpleNamespace(), SimpleNamespace())
+
+    assert model.has_own_lm_head is False
+    assert not hasattr(model, "lm_head")
+
+
+def test_mtp_preparation_applies_same_checkpoint_mappers_as_loading(rfork_helpers, mtp_model, monkeypatch):
+    model = mtp_model.model
+    mapper = mtp_model.mapper(
+        orig_to_new_prefix={"checkpoint_head.": "model.layers.3.shared_head.head.", "checkpoint_rot.": "rot."}
+    )
+    model.quant_config = SimpleNamespace(get_cache_scale_mapper=lambda: mapper)
+    raw_names = {"checkpoint_head.weight", "checkpoint_rot.weight"}
+
+    monkeypatch.setattr(rfork_helpers.loader, "_get_checkpoint_weight_names", lambda *args: raw_names)
+    rfork_helpers.loader._prepare_rfork_model_state(model, SimpleNamespace(), SimpleNamespace())
+    assert model.has_own_lm_head is True
+    assert model.lm_head is model.model.layers["3"].shared_head.head
+    loaded = model.load_weights((name, torch.ones(2)) for name in raw_names)
+
+    assert loaded == {"model.layers.3.shared_head.head.weight", "model.layers.3.rot.weight"}
+    assert model.has_own_lm_head is True
+    model.load_weights([])
+    assert model.has_own_lm_head is False
+
+
+@pytest.mark.parametrize(
+    ("model_sleep", "vllm_sleep", "weight_transfer", "expected"),
+    [
+        (True, False, False, "sleep mode"),
+        (False, True, False, "sleep mode"),
+        (False, False, True, "online weight transfer (weight_transfer_config)"),
+        (False, False, False, None),
+        (True, False, True, "sleep mode"),
+    ],
+)
+def test_mutable_weights_bypass_reason_reports_sleep_and_weight_transfer(
+    rfork_helpers, model_sleep, vllm_sleep, weight_transfer, expected
+):
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(enable_sleep_mode=vllm_sleep),
+        weight_transfer_config=object() if weight_transfer else None,
+    )
+    model_config = SimpleNamespace(enable_sleep_mode=model_sleep)
+
+    assert rfork_helpers.safety.mutable_weights_bypass_reason(vllm_config, model_config) == expected
 
 
 def _add_dynamo_hook(hooks, owner):
@@ -183,6 +233,7 @@ def checkpoint_loader(monkeypatch, rfork_helpers):
 
     calls = []
     folders: dict[str, str] = {}
+    repo_files: dict[str, list[str]] = {}
     selections: dict[str, tuple[list[str], bool]] = {}
     configs = []
 
@@ -194,13 +245,23 @@ def checkpoint_loader(monkeypatch, rfork_helpers):
 
         def _prepare_weights(self, *args):
             calls.append(args)
-            return folders.get(args[0], "unused"), *selections[args[0]], "model.safetensors.index.json"
+            index_file = (
+                "consolidated.safetensors.index.json" if repo_files.get(args[0]) else "model.safetensors.index.json"
+            )
+            return folders.get(args[0], "unused"), *selections[args[0]], index_file
 
     _stub(monkeypatch, "vllm.model_executor.model_loader.default_loader", DefaultModelLoader=DefaultModelLoader)
+    _stub(monkeypatch, "transformers.utils", SAFE_WEIGHTS_INDEX_NAME="model.safetensors.index.json")
+    _stub(
+        monkeypatch,
+        "vllm.transformers_utils.repo_utils",
+        list_filtered_repo_files=lambda **kwargs: repo_files.get(kwargs["model_name_or_path"], []),
+    )
     return SimpleNamespace(
         Source=CheckpointSource,
         calls=calls,
         folders=folders,
+        repo_files=repo_files,
         selections=selections,
         configs=configs,
     )
@@ -236,13 +297,18 @@ def test_checkpoint_names_follow_selected_sources_and_prefixes(rfork_helpers, ch
     assert load_config.model_loader_extra_config == {"rfork_scheduler_url": "planner"}
 
 
-def test_checkpoint_names_use_index_without_opening_shards(rfork_helpers, checkpoint_loader, monkeypatch, tmp_path):
+@pytest.mark.parametrize("mistral", [False, True])
+def test_checkpoint_names_use_index_without_opening_shards(
+    rfork_helpers, checkpoint_loader, monkeypatch, tmp_path, mistral
+):
     weight_map = {
         "model.layers.0.weight": "shard-a.safetensors",
         "model.layers.1.weight": "shard-b.safetensors",
     }
-    (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": weight_map}), encoding="utf-8")
+    index_file = "consolidated.safetensors.index.json" if mistral else "model.safetensors.index.json"
+    (tmp_path / index_file).write_text(json.dumps({"weight_map": weight_map}), encoding="utf-8")
     checkpoint_loader.folders["model"] = str(tmp_path)
+    checkpoint_loader.repo_files["model"] = ["consolidated.safetensors"] if mistral else []
     checkpoint_loader.selections["model"] = (
         [str(tmp_path / "shard-a.safetensors"), str(tmp_path / "shard-b.safetensors")],
         True,
@@ -252,8 +318,10 @@ def test_checkpoint_names_use_index_without_opening_shards(rfork_helpers, checkp
         raise AssertionError("indexed checkpoint must not open every shard")
 
     monkeypatch.setattr("safetensors.safe_open", fail_open)
+    model = Module()
+    model.allow_patterns_overrides = ["shard-*.safetensors"]
     names = rfork_helpers.loader._get_checkpoint_weight_names(
-        Module(),
+        model,
         SimpleNamespace(model="model", revision=None),
         SimpleNamespace(load_format="rfork", model_loader_extra_config={}),
     )
@@ -261,10 +329,38 @@ def test_checkpoint_names_use_index_without_opening_shards(rfork_helpers, checkp
     assert names == set(weight_map)
 
 
-@pytest.mark.parametrize("processed_layout", [False, True])
-@pytest.mark.parametrize("outcome", ["transfer", "shared", "metadata_error", "state_error"])
+@pytest.mark.parametrize(
+    ("metadata", "expected_error"),
+    [
+        ("pt", "requires safetensors checkpoint metadata"),
+        ("corrupt", "could not read checkpoint metadata"),
+        ("empty", "received empty checkpoint metadata"),
+        ("missing", "model.safetensors"),
+    ],
+)
+def test_checkpoint_names_reject_unavailable_metadata(
+    rfork_helpers, checkpoint_loader, tmp_path, metadata, expected_error
+):
+    path = tmp_path / "model.safetensors"
+    if metadata == "corrupt":
+        path.write_bytes(b"invalid safetensors")
+    elif metadata == "empty":
+        save_file({}, path)
+    checkpoint_loader.selections["model"] = ([str(path)], metadata != "pt")
+    config = SimpleNamespace(load_format="rfork", model_loader_extra_config={})
+
+    with pytest.raises((OSError, ValueError), match=expected_error):
+        rfork_helpers.loader._get_checkpoint_weight_names(
+            Module(), SimpleNamespace(model="model", revision=None), config
+        )
+
+
+@pytest.mark.parametrize("quantization", [None, "ascend"])
+@pytest.mark.parametrize(
+    "outcome", ["transfer", "local", "transfer_error", "metadata_error", "state_error", "other_model"]
+)
 def test_model_state_preparation_precedes_registration_and_guards_fallback(
-    rfork_helpers, monkeypatch, processed_layout, outcome
+    rfork_helpers, monkeypatch, outcome, quantization
 ):
     module = rfork_helpers.loader
     # Pytest's log capture would retain fallback exceptions and their model-owning tracebacks.
@@ -291,11 +387,15 @@ def test_model_state_preparation_precedes_registration_and_guards_fallback(
                 raise ValueError("head state unavailable")
             self.has_own_lm_head = True
 
+    class OtherModel(Module):
+        def _maybe_set_own_lm_head(self, weight_names):
+            raise AssertionError("RFork must not prepare unrelated model types")
+
     monkeypatch.setattr(rfork_helpers.mtp_module, "AscendDeepSeekMTP", Model)
 
     def initialize(**kwargs):
         nonlocal model_ref
-        model = Model()
+        model = OtherModel() if outcome == "other_model" else Model()
         model_ref = weakref.ref(model)
         events.append("initialize")
         return model
@@ -306,6 +406,7 @@ def test_model_state_preparation_precedes_registration_and_guards_fallback(
         return record("default", fallback_model)
 
     def metadata(*args):
+        assert outcome != "other_model"
         events.append("metadata")
         if outcome == "metadata_error":
             raise ValueError("checkpoint metadata unavailable")
@@ -313,30 +414,28 @@ def test_model_state_preparation_precedes_registration_and_guards_fallback(
 
     def record(event, result=None):
         events.append(event)
-        if event in ("shared", "process", "register"):
+        if event in ("process", "register") and outcome != "other_model":
             live_model = model_ref()
             assert isinstance(live_model, Model)
             assert live_model.has_own_lm_head is True
         return result
 
     session = SimpleNamespace(
-        can_reuse_shared_weights=lambda *args: record("shared", outcome == "shared"),
-        register_destination=lambda *args: record("register", True),
-        acquire_seed=lambda: record("acquire", True),
-        transfer_from_seed=lambda *args: record("transfer", True),
-        log_transferred_model_layout=lambda *args: record("digest", "prepared-digest"),
-        prepare_for_fallback=lambda: record("cleanup", SimpleNamespace(can_schedule_seed=True)),
+        loading=nullcontext,
+        register_receiver_weights=lambda *args: record("register", True),
+        acquire_seed_lease=lambda: record("acquire", outcome != "local"),
+        read_weights_from_seed=lambda *args: record("transfer", outcome != "transfer_error"),
+        validate_transferred_model_layout=lambda *args: record("digest", "prepared-digest"),
+        prepare_for_fallback=lambda: record("cleanup", True),
     )
     loader = module.RForkModelLoader.__new__(module.RForkModelLoader)
     loader.load_config = SimpleNamespace(device=None)
-    monkeypatch.setattr(loader, "_ensure_rfork_session", lambda *args: session)
-    monkeypatch.setattr(loader, "_get_target_registered_blocks", lambda *args: [(1, 2)])
-    monkeypatch.setattr(loader, "_requires_processed_layout_transfer", lambda *args: processed_layout)
+    monkeypatch.setattr(loader, "_get_session", lambda *args: session)
     monkeypatch.setattr(module, "_get_checkpoint_weight_names", metadata)
     monkeypatch.setattr(module, "initialize_model", initialize)
     monkeypatch.setattr(module, "process_weights_after_loading", lambda *args: record("process"))
-    monkeypatch.setattr(module, "_rfork_skip_unquantized_moe_post_load_processing", lambda *args: nullcontext())
-    monkeypatch.setattr(module, "_start_rfork_seed_service", lambda *args, **kwargs: record("seed", True))
+    monkeypatch.setattr(module, "_validate_rfork_shared_experts", lambda *args: record("validate"))
+    monkeypatch.setattr(module, "_schedule_seed_publication", lambda *args, **kwargs: record("seed", True))
     monkeypatch.setattr(module, "_load_with_default_loader", default_load)
     monkeypatch.setattr(
         torch, "npu", SimpleNamespace(synchronize=lambda: None, empty_cache=lambda: None), raising=False
@@ -346,22 +445,39 @@ def test_model_state_preparation_precedes_registration_and_guards_fallback(
         "get_ascend_config",
         lambda: SimpleNamespace(eplb_config=SimpleNamespace(dynamic_eplb=False, expert_map_record_path=None)),
     )
-    model_config = SimpleNamespace(dtype=torch.float32)
+    model_config = SimpleNamespace(dtype=torch.float32, quantization=quantization)
     vllm_config = SimpleNamespace(device_config=SimpleNamespace(device="cpu"), model_config=model_config)
 
     result = loader.load_model(vllm_config, model_config)
 
-    prefix = ["initialize", "metadata"]
-    if outcome != "metadata_error":
+    prefix = ["initialize"] + ([] if outcome == "other_model" else ["metadata"])
+    if outcome not in ("other_model", "metadata_error"):
         prefix.append("prepare")
     if outcome in ("metadata_error", "state_error"):
         assert result is fallback_model
         assert events == prefix + ["cleanup", "default"]
-    elif outcome == "shared":
-        assert result is model_ref()
-        assert events == prefix + ["shared"]
     else:
-        assert result is model_ref()
-        expected = prefix + ["shared"] + (["process"] if processed_layout else []) + ["register", "acquire"]
-        expected += ["transfer"] + ([] if processed_layout else ["process"]) + ["digest", "seed"]
+        assert result is (fallback_model if outcome in ("local", "transfer_error") else model_ref())
+        expected = prefix + ["process", "register", "acquire"]
+        if outcome in ("local", "transfer_error"):
+            expected += ([] if outcome == "local" else ["transfer"]) + ["cleanup", "default", "seed"]
+        else:
+            expected += ["transfer", "validate", "digest", "seed"]
         assert events == expected
+
+
+def test_shared_expert_validation_runs_only_when_overlap_enabled(rfork_helpers):
+    enabled = Mock()
+    enabled.multistream_overlap = True
+    disabled = Mock()
+    disabled.multistream_overlap = False
+    model = Module()
+    model.enabled = rfork_helpers.AscendMoERunner()
+    model.enabled.ascend_shared_experts = enabled
+    model.disabled = rfork_helpers.AscendMoERunner()
+    model.disabled.ascend_shared_experts = disabled
+
+    rfork_helpers.loader._validate_rfork_shared_experts(model)
+
+    enabled.validate_consistency.assert_called_once_with()
+    disabled.validate_consistency.assert_not_called()

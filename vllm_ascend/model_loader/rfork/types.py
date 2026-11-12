@@ -6,16 +6,12 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Any
 
 RFORK_PROTOCOL_VERSION = 1
 
 
 class RForkLifecycleState(Enum):
     INITIALIZED = auto()
-    REGISTERED = auto()
-    LEASED = auto()
-    TRANSFERRED = auto()
     READY = auto()
     CLEANUP_REQUIRED = auto()
     SERVING = auto()
@@ -56,30 +52,6 @@ class SeedReportResult:
         return self.status is SeedReportStatus.ACCEPTED
 
 
-class RForkSeedServiceStartResult(Enum):
-    STARTED = auto()
-    DEFERRED = auto()
-    FAILED = auto()
-
-    def __bool__(self) -> bool:
-        return self is RForkSeedServiceStartResult.STARTED
-
-
-@dataclass(frozen=True, slots=True)
-class RForkFallbackCleanupResult:
-    service_stopped: bool
-    lease_released: bool
-    memory_reset: bool
-
-    def __bool__(self) -> bool:
-        return self.service_stopped and self.lease_released and self.memory_reset
-
-    @property
-    def can_schedule_seed(self) -> bool:
-        """Whether fallback may start now or defer only on lease release."""
-        return self.service_stopped and self.memory_reset
-
-
 @dataclass(frozen=True, slots=True)
 class RForkIdentity:
     tp_rank: int
@@ -115,6 +87,4 @@ class SeedAdvertisement:
 @dataclass(frozen=True, slots=True)
 class SeedTransferInfo:
     session_id: str
-    weights: Mapping[str, Any]
-    # NPU storage format per weight; receivers reject divergent layouts.
-    formats: Mapping[str, Any] | None = None
+    weights: Mapping[str, int]

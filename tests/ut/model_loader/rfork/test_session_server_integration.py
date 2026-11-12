@@ -5,6 +5,7 @@ import importlib.util
 import socket
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,7 +14,7 @@ from unittest.mock import Mock
 import pytest
 import requests
 
-from tests.ut.model_loader.rfork.session_test_utils import dummy_model
+from tests.ut.model_loader.rfork.session_test_utils import dummy_model, join_seed_worker
 
 
 @pytest.fixture
@@ -27,8 +28,6 @@ def live_session(runtime, monkeypatch):
     monkeypatch.setitem(sys.modules, name, module)
     spec.loader.exec_module(module)
     monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
-    monkeypatch.setattr(runtime.session, "start_rfork_server", module.start_rfork_server)
-    monkeypatch.setattr(runtime.session, "RForkSeedServerStartupError", module.RForkSeedServerStartupError)
     cfg = replace(
         runtime.config,
         seed_bind_host="127.0.0.1",
@@ -41,19 +40,19 @@ def live_session(runtime, monkeypatch):
     session.planner.report_seed_once.return_value = True
     session.planner.remove_seed.return_value = True
     session.transfer_backend.transfer_session_id = "native-session"
-    session.transfer_backend.weight_manifest = {"weight": [1234, 4, 4, [4], "float32"]}
+    session.transfer_backend.weight_manifest = {"weight": 1234}
     session.transfer_backend.weight_formats = {"weight": 2}
     handles = []
-    original = module.start_rfork_server
+    original = module.create_rfork_server
 
     def start(*args, **kwargs):
         handle = original(*args, **kwargs)
         handles.append(handle)
         return handle
 
-    monkeypatch.setattr(runtime.session, "start_rfork_server", start)
+    monkeypatch.setattr(runtime.session, "create_rfork_server", start)
     client = sys.modules["vllm_ascend.model_loader.rfork.seed_client"]
-    yield SimpleNamespace(session=session, handles=handles, client=client, runtime=runtime)
+    yield SimpleNamespace(session=session, handles=handles, client=client, runtime=runtime, server=module)
     session.planner.remove_seed.side_effect = None
     session.planner.remove_seed.return_value = True
     session.shutdown()
@@ -63,15 +62,14 @@ def live_session(runtime, monkeypatch):
 
 def test_session_serves_real_metadata_and_closes_listener(live_session):
     r = live_session
-    assert r.session.start_seed_service(dummy_model(), True) is r.runtime.types.RForkSeedServiceStartResult.STARTED
+    assert (r.session.register_local_weights_for_seed(dummy_model()) and r.session.schedule_seed_service()) is True
+    join_seed_worker(r.session)
     handle = r.session.seed_server
     assert handle.is_alive
     url = f"http://127.0.0.1:{handle.port}"
     info = r.client.fetch_seed_transfer_info(url, "live-key", 1.0)
     assert info.session_id == "native-session"
     assert info.weights == r.session.transfer_backend.weight_manifest
-    assert info.formats == r.session.transfer_backend.weight_formats
-    assert requests.get(f"{url}/health_check_with_key", params={"seed_key": "wrong"}, timeout=1).status_code == 400
     assert (
         requests.get(f"{url}/get_rfork_transfer_engine_info", params={"seed_key": "wrong"}, timeout=1).status_code
         == 404
@@ -85,6 +83,71 @@ def test_session_serves_real_metadata_and_closes_listener(live_session):
     r.session.transfer_backend.finalize_transfer_engine.assert_called_once()
     assert r.session.shutdown()
     r.session.transfer_backend.finalize_transfer_engine.assert_called_once()
+
+
+def test_start_timeout_retains_socket_until_server_thread_stops(live_session):
+    entered, resume = threading.Event(), threading.Event()
+    server = SimpleNamespace(started=False, should_exit=False)
+
+    def run(*, sockets):
+        entered.set()
+        assert resume.wait(3)
+
+    server.run = run
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    handle = live_session.server.RForkSeedServerHandle(server, sock)
+    try:
+        with pytest.raises(TimeoutError):
+            handle.start(0.01)
+        assert entered.is_set()
+        assert not handle.stop(timeout=0.01)
+        assert sock.fileno() != -1
+    finally:
+        resume.set()
+        assert handle.stop()
+    assert sock.fileno() == -1
+
+
+def test_concurrent_and_repeated_stop(live_session):
+    r = live_session
+    assert r.session.register_local_weights_for_seed(dummy_model())
+    assert r.session.schedule_seed_service()
+    join_seed_worker(r.session)
+    handle = r.session.seed_server
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        assert all(executor.map(lambda _: handle.stop(), range(4)))
+    assert handle.stop()
+    assert handle.sock.fileno() == -1
+
+
+def test_stop_before_start_closes_listener(live_session):
+    server = SimpleNamespace(should_exit=False, run=Mock())
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    handle = live_session.server.RForkSeedServerHandle(server, sock)
+
+    assert handle.stop()
+    assert handle.stop()
+    assert server.should_exit
+    assert sock.fileno() == -1
+
+
+def test_failed_start_keeps_server_if_thread_cannot_stop(live_session, monkeypatch):
+    r = live_session
+    handle = Mock(port=1234, is_alive=True)
+    handle.start.side_effect = TimeoutError("startup timed out")
+    handle.stop.return_value = False
+    monkeypatch.setattr(r.runtime.session, "create_rfork_server", lambda *args, **kwargs: handle)
+
+    assert r.session.register_local_weights_for_seed(dummy_model())
+    assert r.session.schedule_seed_service()
+    join_seed_worker(r.session)
+    assert r.session.seed_server is handle
+    r.session.transfer_backend.unregister_memory_region.assert_not_called()
+    handle.stop.return_value = True
+    assert r.session.shutdown()
 
 
 @pytest.mark.parametrize(
@@ -118,7 +181,8 @@ def test_configured_seed_port_falls_back_when_already_in_use(live_session):
     r.session.config = replace(r.session.config, seed_port_base=occupied_port)
 
     try:
-        assert r.session.start_seed_service(dummy_model(), True) is r.runtime.types.RForkSeedServiceStartResult.STARTED
+        assert (r.session.register_local_weights_for_seed(dummy_model()) and r.session.schedule_seed_service()) is True
+        join_seed_worker(r.session)
         assert r.session.seed_server.port != occupied_port
     finally:
         occupied.close()
@@ -136,7 +200,8 @@ def test_rejected_advertisement_cleans_real_server_before_unregister(live_sessio
         return True
 
     r.session.transfer_backend.unregister_memory_region.side_effect = unregister
-    assert r.session.start_seed_service(dummy_model(), True) is r.runtime.types.RForkSeedServiceStartResult.FAILED
+    assert (r.session.register_local_weights_for_seed(dummy_model()) and r.session.schedule_seed_service()) is True
+    join_seed_worker(r.session)
     assert r.session.seed_server is None
     r.session.transfer_backend.unregister_memory_region.assert_called_once()
 
@@ -155,7 +220,8 @@ def test_transient_initial_advertisement_recovers_without_restarting_instance(li
         return accepted
 
     r.session.planner.report_seed_once.side_effect = report
-    assert r.session.start_seed_service(dummy_model(), True) is r.runtime.types.RForkSeedServiceStartResult.STARTED
+    assert (r.session.register_local_weights_for_seed(dummy_model()) and r.session.schedule_seed_service()) is True
+    join_seed_worker(r.session)
     handle = r.session.seed_server
     assert handle.is_alive
     assert recovered.wait(2)
@@ -188,21 +254,22 @@ def test_lost_publish_response_cleans_or_retains_live_resources(live_session, mo
         return SimpleNamespace(status_code=200)
 
     monkeypatch.setattr(requests, "post", post)
-    assert r.session.start_seed_service(dummy_model(), True) is r.runtime.types.RForkSeedServiceStartResult.STARTED
+    assert (r.session.register_local_weights_for_seed(dummy_model()) and r.session.schedule_seed_service()) is True
+    join_seed_worker(r.session)
     assert planner.last_advertisement is not None
     assert remote_seeds and r.session.seed_server.is_alive
     r.session.transfer_backend.unregister_memory_region.assert_not_called()
     if removal_fails:
-        assert not r.session.prepare_for_fallback().can_schedule_seed
+        assert not r.session.shutdown()
         assert r.session.seed_server.is_alive
         # A later acknowledged removal releases the resources in order.
         removal_fails = False
-    assert r.session.prepare_for_fallback().can_schedule_seed
+    assert r.session.shutdown()
     assert not remote_seeds
     assert planner.last_advertisement is None
     assert r.session.seed_server is None
     assert not r.handles[0].is_alive
-    r.session.transfer_backend.unregister_memory_region.assert_called_once()
+    r.session.transfer_backend.finalize_transfer_engine.assert_called_once()
 
 
 @pytest.mark.parametrize("phase", ["health", "report"])
@@ -210,14 +277,14 @@ def test_start_network_work_does_not_hold_state_lock(live_session, monkeypatch, 
     r = live_session
     entered, resume = threading.Event(), threading.Event()
     if phase == "health":
-        original = r.runtime.session.start_rfork_server
+        original = r.runtime.session.create_rfork_server
 
         def start(*args, **kwargs):
             entered.set()
             assert resume.wait(4)
             return original(*args, **kwargs)
 
-        monkeypatch.setattr(r.runtime.session, "start_rfork_server", start)
+        monkeypatch.setattr(r.runtime.session, "create_rfork_server", start)
     else:
 
         def report(*args, **kwargs):
@@ -229,7 +296,7 @@ def test_start_network_work_does_not_hold_state_lock(live_session, monkeypatch, 
     results = []
 
     def startup():
-        results.append(r.session.start_seed_service(dummy_model(), True))
+        results.append(r.session.register_local_weights_for_seed(dummy_model()) and r.session.schedule_seed_service())
 
     worker = threading.Thread(target=startup, daemon=True)
     try:
@@ -238,17 +305,16 @@ def test_start_network_work_does_not_hold_state_lock(live_session, monkeypatch, 
         assert r.session._lock.acquire(timeout=0.5), f"{phase} I/O still holds session state lock"
         try:
             assert r.session.state is r.runtime.types.RForkLifecycleState.CLEANUP_REQUIRED
-            assert not r.session.register_destination(object(), True)
-            assert not r.session.acquire_seed()
             # Cancellation during startup must suppress or roll back publication.
-            r.session.lease_release_stop_event.set()
+            r.session._shutdown_event.set()
         finally:
             r.session._lock.release()
     finally:
         resume.set()
         worker.join(5)
     assert not worker.is_alive()
-    assert results == [r.runtime.types.RForkSeedServiceStartResult.FAILED]
+    join_seed_worker(r.session)
+    assert results == [True]
     assert r.session.seed_server is None
     assert r.handles and all(not handle.is_alive for handle in r.handles)
     if phase == "health":
