@@ -246,8 +246,19 @@ else:
 
     @wraps(_GDN_ORIGINAL_INIT)
     def _gdn_init_with_packed_weight(self, *args, **kwargs):
+        # GatedDeltaNetAttention consumes ``vllm_config`` but does not retain
+        # it on the layer.  Capture the constructor argument before delegating
+        # so this wrapper also works for model implementations (for example
+        # Qwen4Exp) that do not assign ``self.vllm_config`` themselves.
+        vllm_config = kwargs.get("vllm_config")
+        if vllm_config is None and len(args) > 1:
+            vllm_config = args[1]
         _GDN_ORIGINAL_INIT(self, *args, **kwargs)
-        self.use_gdn_recoverssm = _uses_gdn_recoverssm(self.vllm_config)
+        if vllm_config is None:
+            vllm_config = getattr(self, "vllm_config", None)
+        if vllm_config is None:
+            raise RuntimeError("Qwen GDN initialization requires vllm_config")
+        self.use_gdn_recoverssm = _uses_gdn_recoverssm(vllm_config)
         initialize_packed_conv_weight(self)
 
     _GDN_PATCH_TARGET.__init__ = _gdn_init_with_packed_weight
