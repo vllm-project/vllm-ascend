@@ -34,7 +34,7 @@ from vllm_ascend.ops.triton.qwen4_exp.hc import (
     hc_silu,
 )
 
-from .ple import patch_upstream_ple_short_conv
+from .ple import AscendPCPPLELayer, patch_upstream_ple_short_conv
 
 # Keep the upstream model and weight loader authoritative. HyperConnection's
 # CUDA glue functions are module globals, so replace them before importing the
@@ -61,7 +61,39 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
     """Qwen4Exp backbone with Ascend-safe graph shape annotations."""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        parallel = vllm_config.parallel_config
+        use_pcp = parallel.prefill_context_parallel_size > 1
+        if use_pcp:
+            if parallel.decode_context_parallel_size != 1:
+                raise NotImplementedError("Qwen4Exp PCP requires DCP=1")
+
+            from vllm_ascend.ops.kda_parallel import get_kda_parallel_size
+
+            text_config = vllm_config.model_config.hf_text_config
+            head_shards = get_kda_parallel_size(parallel)
+            if text_config.linear_num_key_heads % head_shards or text_config.linear_num_value_heads % head_shards:
+                raise ValueError("Qwen4Exp GDN key and value heads must be divisible by TP * PCP")
         super().__init__(vllm_config=vllm_config, prefix=prefix)
+        if use_pcp:
+            from vllm_ascend.ops.gdn import shard_gdn_heads_over_pcp
+
+            static_context = vllm_config.compilation_config.static_forward_context
+            for layer in self.layers[self.start_layer : self.end_layer]:
+                if hasattr(layer, "linear_attn"):
+                    shard_gdn_heads_over_pcp(layer.linear_attn, parallel)
+                if layer.ple is not None:
+                    ple_prefix = layer.ple.prefix
+                    ple_id = layer.ple.ple_dense_layer_id
+                    del static_context[ple_prefix]
+                    del layer.ple
+                    layer.ple = AscendPCPPLELayer(
+                        self.config,
+                        vllm_config,
+                        layer_idx=layer.layer_idx,
+                        ple_dense_layer_id=ple_id,
+                        prefix=ple_prefix,
+                        use_sequence_parallel=layer.use_hc_sequence_parallel,
+                    )
         # With max_num_seqs=1 the PLE query-start buffer has a static length of
         # two. Marking that length dynamic makes TorchDynamo reject the static
         # specialization used by PLE during FULL_DECODE_ONLY graph capture.
@@ -78,6 +110,15 @@ upstream_model.Qwen4ExpModel = AscendQwen4ExpModel
 
 class AscendQwen4ExpForCausalLM(upstream_model.Qwen4ExpForCausalLM):
     """Qwen3.8-Flash-Next text model using Ascend platform operators."""
+
+    @classmethod
+    def get_gdn_mamba_state_shape_from_config(cls, vllm_config: VllmConfig):
+        upstream_shape = super().get_gdn_mamba_state_shape_from_config
+        if vllm_config.parallel_config.prefill_context_parallel_size == 1:
+            return upstream_shape(vllm_config)
+        from vllm_ascend.ops.kda_parallel import get_kda_state_shape
+
+        return get_kda_state_shape(vllm_config, upstream_shape)
 
     @classmethod
     def get_mamba_specs_from_config(cls, vllm_config: VllmConfig):
@@ -105,6 +146,10 @@ class AscendQwen4ExpProcessingInfo(_AscendProcessorMixin, upstream_model.Qwen4Ex
 )
 class AscendQwen4ExpForConditionalGeneration(_AscendVLPreprocessMixin, upstream_model.Qwen4ExpForConditionalGeneration):
     """Qwen3.8-Flash-Next multimodal model using Ascend operators."""
+
+    @classmethod
+    def get_mamba_state_shape_from_config(cls, vllm_config: VllmConfig):
+        return AscendQwen4ExpForCausalLM.get_mamba_state_shape_from_config(vllm_config)
 
     @classmethod
     def get_mamba_specs_from_config(cls, vllm_config: VllmConfig):
