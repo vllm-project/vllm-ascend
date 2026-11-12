@@ -554,11 +554,13 @@ def test_full_visible_bypass_preserves_cache_writes_and_selective_history(
     op._prepare_keypool_state = MagicMock(return_value=torch.empty(7, 4, 4))
     op._key_pool = MagicMock(return_value=torch.ones(3, 2, dtype=torch.bfloat16))
 
-    def write_caches(*args):
+    def write_caches(*args, scale_cache=None):
+        assert scale_cache is None
         cache.fill_(3)
         tail.fill_(5)
 
     op._write_keypool_caches = MagicMock(side_effect=write_caches)
+    op._cann_pool_key_indexer = MagicMock()
     op._pool_key_indexer = MagicMock(return_value=(torch.empty(11, 11, dtype=torch.int32), None))
     op._pack_keypool_indices = MagicMock(return_value=op.topk_indices_buffer[:11, :11].unsqueeze(1))
     hidden = torch.arange(33, dtype=torch.float32).view(11, 3)
@@ -584,11 +586,12 @@ def test_full_visible_bypass_preserves_cache_writes_and_selective_history(
         rows = plan.selective_rows if bypass else torch.arange(11)
         torch.testing.assert_close(projection_inputs[0], query[rows])
         call = op._pool_key_indexer.call_args
-        torch.testing.assert_close(call.args[0], query[rows].repeat(1, 2).view(-1, 2, 2).bfloat16())
+        assert call.args[0] is op._cann_pool_key_indexer
+        torch.testing.assert_close(call.args[1], query[rows].repeat(1, 2).view(-1, 2, 2).bfloat16())
         expected_weights = (linear(hidden, op._head_weight_f32) + hidden.shape[0])[rows] * (0.5 * 2**-0.5)
-        torch.testing.assert_close(call.args[2], expected_weights.bfloat16())
+        torch.testing.assert_close(call.args[3], expected_weights.bfloat16())
         assert call.kwargs["actual_seq_k"] is metadata.seq_lens
-        assert call.args[3] is metadata.pool_tail
+        assert call.args[4] is metadata.pool_tail
         assert call.kwargs["block_table"] is metadata.block_table
         expected_ends = plan.cum_query_lens if bypass else metadata.cum_query_lens
         torch.testing.assert_close(call.kwargs["actual_seq_q"], expected_ends)
