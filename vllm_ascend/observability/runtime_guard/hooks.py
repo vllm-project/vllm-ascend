@@ -244,12 +244,21 @@ def take_pre_sample_logits(runner: Any) -> Any:
     return logits
 
 
+def _rare_chars_active(guard: Any) -> bool:
+    """Config enable and not latched off after warmup/native failure."""
+    detectors = getattr(guard, "detectors", None)
+    if detectors is not None and hasattr(detectors, "rare_chars_enabled"):
+        return bool(detectors.rare_chars_enabled())
+    cfg = getattr(guard, "runtime_config", None)
+    if cfg is None:
+        return False
+    return bool(cfg.detector_get("rare_chars", "enabled", False))
+
+
 def need_pre_sample_hook(guard: Any) -> bool:
     """True when wrapping ``compute_logits`` is useful (detector on + gate open)."""
     cfg = guard.runtime_config
-    need_logits = bool(cfg.detector_get("logits_finite", "enabled", False)) or bool(
-        cfg.detector_get("rare_chars", "enabled", False)
-    )
+    need_logits = bool(cfg.detector_get("logits_finite", "enabled", False)) or _rare_chars_active(guard)
     if not need_logits:
         return False
     return bool(guard.action_executor.can_run_detection())
@@ -266,7 +275,7 @@ def check_before_sample_from_batch(
     can be computed after sample without ``SamplingParams.logprobs``.
     """
     cfg = guard.runtime_config
-    if bool(cfg.detector_get("rare_chars", "enabled", False)):
+    if _rare_chars_active(guard):
         stash_pre_sample_logits(guard.runner, logits)
     logits_indices = getattr(input_batch, "logits_indices", None)
     if logits_indices is None:

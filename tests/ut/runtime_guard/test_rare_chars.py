@@ -163,3 +163,33 @@ def test_rare_chars_disabled_is_quiet(tmp_path: Path):
     cfg._invalidate_hot_path_gates()
     det = RareCharsDetector(runtime_config=cfg, runner=SimpleNamespace(tp_rank=0))
     assert det.feed_precomputed(req_ids=["r"], token_ids=[1], top1_logprobs=[0.0], chosen_logprobs=[0.0]) == []
+
+
+def test_warmup_fail_latches_off_until_config_disable(tmp_path: Path):
+    """Warmup/native failure must stop stash/collect; clearing enabled resets latch."""
+    import contextlib
+
+    from vllm_ascend.observability.runtime_guard.hooks import _rare_chars_active
+
+    cfg = _cfg(tmp_path)
+    det = RareCharsDetector(runtime_config=cfg, runner=SimpleNamespace(tp_rank=0))
+    with contextlib.suppress(Exception):
+        det.warmup(tokenizer=None)
+    assert det.warmup_failed is True
+
+    def _active() -> bool:
+        return (not det.warmup_failed) and bool(cfg.detector_get("rare_chars", "enabled", False))
+
+    guard = SimpleNamespace(
+        runtime_config=cfg,
+        detectors=SimpleNamespace(rare_chars_enabled=_active),
+        action_executor=SimpleNamespace(can_run_detection=lambda: True),
+        runner=SimpleNamespace(),
+    )
+    assert _rare_chars_active(guard) is False
+    assert need_pre_sample_hook(guard) is False
+
+    cfg._data["detector"]["rare_chars"]["enabled"] = False
+    cfg._invalidate_hot_path_gates()
+    det.refresh_from_config()
+    assert det.warmup_failed is False

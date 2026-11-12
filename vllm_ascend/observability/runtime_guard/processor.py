@@ -416,11 +416,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         if not finished_req_ids:
             return
         ids = [str(r) for r in finished_req_ids if r]
-        if (
-            ids
-            and not self._rare_chars_finish_deferred()
-            and bool(self.runtime_config.detector_get("rare_chars", "enabled", False))
-        ):
+        if ids and not self._rare_chars_finish_deferred() and self.detectors.rare_chars_enabled():
             for alert in self.detectors.finish_rare_chars(ids):
                 self._handle_alert(alert, detector=self.detectors.get(alert.incident_type))
         RequestGuardStore.get().mark_finished(finished_req_ids, wave=self._current_wave())
@@ -436,9 +432,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         if not reapable:
             return
         # Async pair path: feeds done (rare_pair_jobs==0). Flush look-ahead, then clear.
-        if self._rare_chars_finish_deferred() and bool(
-            self.runtime_config.detector_get("rare_chars", "enabled", False)
-        ):
+        if self._rare_chars_finish_deferred() and self.detectors.rare_chars_enabled():
             for alert in self.detectors.finish_rare_chars(reapable):
                 self._handle_alert(alert, detector=self.detectors.get(alert.incident_type))
         store.clear_many(reapable, detectors=self.detectors)
@@ -634,7 +628,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         # Lazy import avoids hooks ↔ processor cycle (hooks imports SamplePhaseResult).
         from vllm_ascend.observability.runtime_guard.hooks import take_pre_sample_logits
 
-        want_rare = bool(self.runtime_config.detector_get("rare_chars", "enabled", False))
+        want_rare = self.detectors.rare_chars_enabled()
         if not want_rare:
             # Drop any stale stash so logits are not retained across steps.
             take_pre_sample_logits(self.runner)

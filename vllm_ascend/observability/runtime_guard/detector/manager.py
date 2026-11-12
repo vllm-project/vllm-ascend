@@ -166,14 +166,29 @@ class DetectorManager:
         return bool(self._token_repeat_det.enabled)
 
     def rare_chars_enabled(self) -> bool:
-        """True when Guard should stash logits and run rare_chars."""
+        """True when Guard should stash logits and run rare_chars.
+
+        False when JSON ``enabled`` is off, or after a process-local warmup/
+        native-bind failure latch (cleared when config disables rare_chars).
+        """
         if self._runtime_config is not None and self._runtime_config.hot_reload_enabled:
-            return bool(self._runtime_config.detector_get("rare_chars", "enabled", False))
-        return bool(self._rare_chars_det.enabled)
+            cfg_on = bool(self._runtime_config.detector_get("rare_chars", "enabled", False))
+        else:
+            cfg_on = bool(self._rare_chars_det.enabled)
+        if not cfg_on:
+            self._rare_chars_det.note_config_disabled()
+            return False
+        return not self._rare_chars_det.warmup_failed
 
     def warmup_rare_chars(self, tokenizer: Any | None = None) -> None:
         """Build rare_chars tables from the served tokenizer (no-op when disabled)."""
-        if not self.rare_chars_enabled():
+        # Use config enable (not the fail latch) so a fresh process can warm up.
+        if self._runtime_config is not None and self._runtime_config.hot_reload_enabled:
+            cfg_on = bool(self._runtime_config.detector_get("rare_chars", "enabled", False))
+        else:
+            self._rare_chars_det.refresh_from_config()
+            cfg_on = bool(self._rare_chars_det.enabled)
+        if not cfg_on or self._rare_chars_det.warmup_failed:
             return
         self._rare_chars_det.warmup(tokenizer)
 
