@@ -12,6 +12,8 @@ from vllm_ascend.ops.triton.kimi_pixel_norm import _KIMI_PIXEL_NORM_KERNEL
 
 
 class KimiPixelNormLut(nn.Module):
+    lut: torch.Tensor
+
     def __init__(self, reference: torch.Tensor, *, dtype: torch.dtype, device: torch.device):
         super().__init__()
         if dtype not in (torch.bfloat16, torch.float16):
