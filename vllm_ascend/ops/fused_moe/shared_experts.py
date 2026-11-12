@@ -691,9 +691,10 @@ class AscendSharedExperts:
         TP-sharded shared-expert weights need the full activations, so
         all-gather the shards back to [T_padded, H] and drop the padding rows.
         """
-        if getattr(self, "finegrained_tp_group", None) is not None:
+        finegrained_tp_group = getattr(self, "finegrained_tp_group", None)
+        if finegrained_tp_group is not None:
             # These are different DP requests, not SP slices of num_tokens.
-            return self.finegrained_tp_group.all_gather(hidden_states, dim=0)
+            return finegrained_tp_group.all_gather(hidden_states, dim=0)
         gathered = tensor_model_parallel_all_gather(hidden_states, dim=0)
         return gathered[: _EXTRA_CTX.num_tokens]
 
@@ -706,8 +707,9 @@ class AscendSharedExperts:
         (down_proj is built with reduce_results=False), replacing the usual
         TP all-reduce.
         """
-        if getattr(self, "finegrained_tp_group", None) is not None:
-            return self.finegrained_tp_group.reduce_scatter(shared_out, dim=0)
+        finegrained_tp_group = getattr(self, "finegrained_tp_group", None)
+        if finegrained_tp_group is not None:
+            return finegrained_tp_group.reduce_scatter(shared_out, dim=0)
         tp_size = self.moe_config.tp_group.world_size
         original_num_tokens = shared_out.shape[0]
         pad_size = (tp_size - original_num_tokens % tp_size) % tp_size

@@ -53,7 +53,7 @@ class ProjectionMergedColumnParallelLinear(MergedColumnParallelLinear, Projectio
 @dataclass
 class PendingTensor:
     tensor: torch.Tensor
-    work: object
+    work: dist.Work
     # Retain the send buffer until the corresponding receive has completed.
     source: torch.Tensor
 
@@ -139,7 +139,7 @@ class KDAProjectionTP:
         self.qkv_group, self.gate_group = qkv_group, gate_group
         self.heads, self.head_dim = heads, head_dim
         self.communication = TPCommunication()
-        self.aux_stream = None
+        self.aux_stream: torch.npu.Stream | None = None
 
     def project(self, layer, hidden):
         capacity = projection_capacity(hidden)
