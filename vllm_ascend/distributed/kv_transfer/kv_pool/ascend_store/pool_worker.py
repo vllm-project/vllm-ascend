@@ -3297,15 +3297,14 @@ class KVPoolWorker:
             request.current_event = current_event
             requests.append(request)
 
-        if not requests:
-            return
-
         if not isinstance(send_thread, KVCacheStoreSendingThread):
             raise TypeError(
                 f"Non-layerwise KV save requires KVCacheStoreSendingThread, but got {type(send_thread).__name__}"
             )
-        self._previous_save_batch = send_thread.add_save_batch(requests)
+        if requests:
+            self._previous_save_batch = send_thread.add_save_batch(requests)
         send_thread.request_queue.join()
+        send_thread.raise_if_failed()
 
     def retrieve_layer(
         self,
