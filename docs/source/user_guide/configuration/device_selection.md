@@ -29,6 +29,7 @@ For TP2 on a machine exposing IDs `0` through `7`:
 | Unset | Omitted | `0,1` | `npu:0`, `npu:1` |
 | Unset | `1,3` | `1,3` | `npu:1`, `npu:3` |
 | `4,5,6,7` | Omitted | `4,5` | `npu:0`, `npu:1` |
+| `4,5,6,7` | `1,3` | `5,7` | `npu:1`, `npu:3` |
 | `4,5,6,7` | `3,1` | `7,5` | `npu:3`, `npu:1` |
 
 For example, `ASCEND_RT_VISIBLE_DEVICES=4,5,6,7 --device-ids 3,1` selects entries
