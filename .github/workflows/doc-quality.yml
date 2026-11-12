@@ -64,7 +64,7 @@ concurrency:
 
 jobs:
   doc_quality:
-    runs-on: linux-amd64-cpu-2-hk
+    runs-on: ${{ github.repository_owner == 'vllm-project' && 'linux-amd64-cpu-2-hk' || 'ubuntu-latest' }}
     timeout-minutes: 35
     if: >-
       vars.DOC_QUALITY_ENABLED == 'true' &&
