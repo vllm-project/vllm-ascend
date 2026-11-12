@@ -223,7 +223,7 @@ def _run_recurrent_gdn(
     b: torch.Tensor,
     A_log: torch.Tensor,
     dt_bias: torch.Tensor,
-    actual_seq_lengths: torch.Tensor,
+    actual_seq_lengths: torch.Tensor | None,
     state_indices: torch.Tensor,
     num_accepted_tokens: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
@@ -233,7 +233,8 @@ def _run_recurrent_gdn(
 
     Q/K/V are [1,T,H,128]; a/b are raw projection outputs [T,HV].
     Keep all metadata request rows, including zero-length graph padding rows.
-    Requires the fla_npu unified fused ABI with rank-2 state-index support.
+    Fusion requires the published fla_npu fused ABI; existing upstream
+    dispatch policies and older wheels retain external preprocessing.
     """
     if use_upstream_recurrent or not _supports_recurrent_gdn_fusion():
         g, beta = DeviceOperator.fused_gdn_gating(A_log, a.contiguous(), b.contiguous(), dt_bias)
@@ -271,6 +272,7 @@ def _run_recurrent_gdn(
             num_accepted_tokens=(num_accepted_tokens.to(torch.int32) if num_accepted_tokens is not None else None),
         ).unsqueeze(0)
 
+    assert actual_seq_lengths is not None
     num_sequences = actual_seq_lengths.shape[0] - 1
     if state_indices.ndim == 1:
         state_indices = state_indices.unsqueeze(-1)
