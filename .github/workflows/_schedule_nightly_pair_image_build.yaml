@@ -88,6 +88,11 @@ on:
         type: string
         default: ''
         description: "Suffix applied to both the runtime base image tag and the published nightly image tag, including the leading dash (e.g. '-presmoke'). Isolates a build from the standard nightly artifacts; callers that set it must pass the same value to their test jobs, otherwise the tests pull the standard nightly image. Default '' keeps the standard tags."
+      image_repo_suffix:
+        required: false
+        type: string
+        default: ''
+        description: "Suffix appended to the SWR repository name of both image layers (ascend/vllm-ascend<suffix> and base_image/ascend-ci/vllm-ascend<suffix>). Used by presmoke to publish to its own isolated repositories; callers that set it must pass the same value to their test jobs. Default '' keeps the standard repositories."
     secrets:
       SWR_USERNAME:
         required: false
@@ -109,6 +114,7 @@ jobs:
       schedule_tag_pattern: 'main'
       branch_ref: ${{ inputs.vllm_ascend_branch || 'main' }}
       swr_registry: ${{ inputs.swr_registry }}
+      swr_repo: ${{ inputs.swr_registry }}/ascend/vllm-ascend${{ inputs.image_repo_suffix }}
       skip_sync: ${{ inputs.skip_sync }}
       tag_suffix: ${{ inputs.tag_suffix }}
     secrets:
@@ -131,6 +137,7 @@ jobs:
       soc: ${{ inputs.soc }}
       base_tag_suffix: ${{ inputs.tag_suffix }}
       image_tag_suffix: ${{ inputs.tag_suffix }}
+      image_repo_suffix: ${{ inputs.image_repo_suffix }}
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
