@@ -60,19 +60,14 @@ on:
         default: ''
         type: string
       os_matrix:
-        description: "JSON array of OS variants to build and test, e.g. '[\"ubuntu\"]' or '[\"ubuntu\",\"openeuler\"]'. Each entry adds one lane (runtime base image + nightly image + tests). /presmoke passes both; the default keeps the ubuntu-only nightly."
+        description: "JSON array of OS variants to build and test, e.g. '[\"ubuntu\"]' or '[\"ubuntu\",\"openeuler\"]'. Each entry adds one lane (runtime base image + nightly image + tests). /nightly --presmoke passes both so the presmoke images are exercised on both OSes; the default keeps the ubuntu-only nightly."
         required: false
         default: '["ubuntu"]'
         type: string
       image_repo_suffix:
-        description: 'Suffix appended to the SWR repository of both image layers (ascend/vllm-ascend<suffix> and base_image/ascend-ci/vllm-ascend<suffix>). /presmoke publishes to its own repositories; empty uses the standard ones.'
+        description: 'Suffix appended to the SWR repository of both image layers (ascend/vllm-ascend<suffix> and base_image/ascend-ci/vllm-ascend<suffix>). /nightly --presmoke sets it to consume the images published by /presmoke; empty uses the standard ones.'
         required: false
         default: ''
-        type: string
-      skip_test:
-        description: 'If true, only build the image and skip every test lane. Used by /presmoke, which prepares an image for a later /nightly --presmoke run.'
-        required: false
-        default: 'false'
         type: string
       vllm_ascend_ref:
         description: 'PR commit SHA for PR-triggered tests'
@@ -145,13 +140,6 @@ jobs:
           script: |
             const eventName = context.eventName;
             const testCases = '${{ inputs.test_cases }}'.trim();
-
-            // /presmoke only prepares the image; skip every test lane.
-            if ('${{ inputs.skip_test }}' === 'true') {
-              core.setOutput('run', 'false');
-              core.setOutput('filter', '');
-              return;
-            }
 
             core.setOutput('ref', context.sha || 'unknown');
 
