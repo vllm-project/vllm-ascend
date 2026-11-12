@@ -9,7 +9,7 @@ import torch
 from vllm_ascend.worker.v2.dspark_expert_pool import (
     DSparkExpertPool,
     build_roles,
-    verify_graph_eligible,
+    has_short_drafts,
 )
 
 
@@ -36,24 +36,20 @@ def test_roles_follow_real_requests(boundaries, drafts, prefilling, padded_rows,
 
 
 @pytest.mark.parametrize(
-    ("configured_drafts", "rows", "drafts", "prefilling", "structured", "expected"),
+    ("configured_drafts", "drafts", "expected"),
     [
-        (5, [6], [5], [False], False, True),
-        (5, [6, 6], [5, 5], [False, False], False, True),
-        (5, [6, 6], [5, 5], [True, False], False, False),
-        (5, [6, 6], [5, 5], [False, False], True, False),
-        (5, [6, 6], [5, 1], [False, False], False, False),
-        (5, [1, 1], None, [False, False], False, False),
-        (5, [6, 6, 6], [5, 5, 5], [False] * 3, False, True),
-        (3, [4, 4, 4], [3, 3, 3], [False] * 3, False, True),
-        (7, [6, 6], [5, 5], [False, False], False, False),
+        (5, [5], False),
+        (5, [5, 5], False),
+        (5, [5, 5, 5], False),
+        (5, [5, 1], True),
+        (5, [1], True),
+        (5, None, False),
+        (7, [5, 5], True),
     ],
 )
-def test_verify_graph_dispatch(configured_drafts, rows, drafts, prefilling, structured, expected):
-    state = SimpleNamespace(
-        num_scheduled_tokens=np.array(rows), num_draft_tokens_np=drafts, is_prefilling_np=prefilling
-    )
-    assert verify_graph_eligible(state, num_speculative_tokens=configured_drafts, structured=structured) is expected
+def test_short_draft_steps_run_eager(configured_drafts, drafts, expected):
+    state = SimpleNamespace(num_draft_tokens_np=drafts)
+    assert has_short_drafts(state, num_speculative_tokens=configured_drafts) is expected
 
 
 def make_batch(boundaries, drafts, padded_rows, *, structured=False):
@@ -85,6 +81,8 @@ def test_same_graph_bucket_refreshes_padding_and_disables_on_ordinary_decode():
     assert pool.roles.data_ptr() == address
     pool.prepare(make_batch([0, 1], None, 1))
     assert not pool.active
+    # Inactive steps still stage, so a replayed graph cannot read stale roles.
+    assert pool.roles[:1].tolist() == [0]
 
 
 def test_structured_step_clears_active_routing():
@@ -100,6 +98,9 @@ def test_structured_step_clears_active_routing():
     assert pool.active
     pool.prepare(make_batch([0, 6], [5], 6, structured=True))
     assert not pool.active
+    # Same width, inactive: the staged roles must be fully cleared so a
+    # replayed graph routes every row with the native outputs.
+    assert pool.roles.tolist() == [0] * 6
 
 
 def test_mixed_step_preserves_native_outputs_only_outside_verification():

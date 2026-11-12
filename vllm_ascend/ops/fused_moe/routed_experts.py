@@ -626,9 +626,12 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         pool = self.dspark_expert_pool
         if pool is not None and (not pool.active or enable_force_load_balance or _EXTRA_CTX.is_draft_model):
             pool = None
+        # Replay cannot re-evaluate host branches, so graphs record the merged
+        # sequence unconditionally; the roles staged per step drive the merge.
+        capturing = pool is not None and torch.npu.is_current_stream_capturing()
         if pool is not None:
             topk_weights, topk_ids = pool.route(self.router, router_logits)
-        if pool is None or pool.has_native_rows:
+        if pool is None or capturing or pool.has_native_rows:
             native = self.router._select_experts(
                 hidden_states=hidden_states,
                 router_logits=router_logits,

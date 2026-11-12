@@ -693,9 +693,11 @@ ASCEND_RT_VISIBLE_DEVICES=0 VLLM_USE_V2_MODEL_RUNNER=1 \
 
 With five draft tokens, a complete verification uses six rows per request.
 The 6-row and 12-row graph sizes cover one and two complete requests. Expert
-offload checks the padded row count times Top-6 against the slot budget. Mixed
-or shorter verification batches use eager execution, where eligible verification
-rows can still use the expert pool.
+offload checks the padded row count times Top-6 against the slot budget. The
+verification-width graphs replay any role layout, including steps with
+structured output, rejected drafts, or prefilling requests; mixed or
+short-draft verification batches use eager execution, where eligible
+verification rows can still use the expert pool.
 
 Set `dspark_expert_pool.enabled` to `false` or omit `dspark_expert_pool` to
 return to native routing with expert offload. See the

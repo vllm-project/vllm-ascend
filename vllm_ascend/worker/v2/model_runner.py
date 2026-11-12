@@ -123,7 +123,7 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_state,
     skip_ring_state_update,
 )
-from vllm_ascend.worker.v2.dspark_expert_pool import DSparkExpertPool, supports_router, verify_graph_eligible
+from vllm_ascend.worker.v2.dspark_expert_pool import DSparkExpertPool, has_short_drafts, supports_router
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.kv_connector import MambaCopyKVConnector
@@ -852,15 +852,14 @@ class NPUModelRunner(GPUModelRunner):
             self.dspark_expert_pool is not None
             and batch_state is not None
             and uniform_token_count not in (None, 1)
-            and not verify_graph_eligible(
+            and has_short_drafts(
                 batch_state,
                 num_speculative_tokens=self.dspark_expert_pool.num_speculative_tokens,
-                structured=scheduler_output.has_structured_output_requests
-                or bool(scheduler_output.num_invalid_spec_tokens),
             )
         ):
-            # Verification graphs capture the pure verification routing path.
-            # Mixed or short verification still uses L in eager mode.
+            # Full-width graphs capture the merged routing sequence and replay
+            # any role layout; narrower graphs capture native-only routing, so
+            # short-draft verification still runs L in eager mode.
             uniform_token_count = None
         return batch_state, uniform_token_count
 

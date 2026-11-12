@@ -34,18 +34,15 @@ def build_roles(
     return roles
 
 
-def verify_graph_eligible(batch_state, *, num_speculative_tokens: int, structured: bool) -> bool:
-    rows = batch_state.num_scheduled_tokens
+def has_short_drafts(batch_state, *, num_speculative_tokens: int) -> bool:
+    """True when any request verifies fewer drafts than configured.
+
+    Only graphs at the full verify width capture pool routing; a uniform
+    short-draft step would replay a native-only graph and lose the pool
+    restriction, so such steps must run in eager mode.
+    """
     drafts = batch_state.num_draft_tokens_np
-    verify_width = num_speculative_tokens + 1
-    return (
-        not structured
-        and drafts is not None
-        and len(rows) == len(drafts) > 0
-        and not any(batch_state.is_prefilling_np)
-        and all(count == num_speculative_tokens for count in drafts)
-        and all(count == verify_width for count in rows)
-    )
+    return drafts is not None and any(count != num_speculative_tokens for count in drafts)
 
 
 def supports_router(layer) -> bool:
@@ -103,13 +100,14 @@ class DSparkExpertPool:
         )
         self.active = bool(np.any(values == RESTRICTED))
         self.has_native_rows = self.active and bool(np.any(values[: batch.num_tokens] == UNRESTRICTED))
-        if self.active:
-            source = torch.from_numpy(values)
-            # Stage each submission independently so a later step cannot
-            # overwrite host memory while an asynchronous copy is pending.
-            if self.roles.device.type == "npu":
-                source = source.pin_memory()
-            self.roles[: self.num_rows].copy_(source, non_blocking=True)
+        # Stage every step: replayed graphs read the roles buffer unconditionally,
+        # so an inactive step must overwrite stale roles with UNRESTRICTED.
+        source = torch.from_numpy(values)
+        # Stage each submission independently so a later step cannot
+        # overwrite host memory while an asynchronous copy is pending.
+        if self.roles.device.type == "npu":
+            source = source.pin_memory()
+        self.roles[: self.num_rows].copy_(source, non_blocking=True)
 
     def prepare(self, batch, *, invalid_drafts: bool = False) -> None:
         drafts = None if batch.has_structured_output_reqs or invalid_drafts else batch.num_draft_tokens_per_req

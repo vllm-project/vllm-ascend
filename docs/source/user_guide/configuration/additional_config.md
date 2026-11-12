@@ -53,7 +53,9 @@ Every suffix row still selects six experts from the batch union.
 The verification width is `num_speculative_tokens + 1`. Expert offload admits
 a graph when its padded token count times Top-K fits the configured device
 slots, subject to its normal descriptor checks. L adds no slot or batch-size
-limit. Mixed or short verification batches use eager execution.
+limit. Graphs at the verification width replay any role layout, including
+steps with structured output, rejected drafts, or prefilling requests; mixed
+or short-draft verification batches use eager execution.
 
 For the initial example, set `max_num_seqs=2` and include 6 and 12 in
 `cudagraph_capture_sizes` with `FULL_DECODE_ONLY` and compilation mode `NONE`.
