@@ -164,7 +164,7 @@ def qsa_union_gbsa_attention(
 ) -> torch.Tensor:
     # Lazy import isolates the optional vendor package from model discovery and
     # from stock decode/graph capture. Missing support must fail visibly.
-    import cann_ops_transformer_gbsa_union as union_ops
+    import cann_ops_transformer_gbsa_union as union_ops  # type: ignore[import-not-found]
 
     if key_cache.shape[2] != 1 or query.shape[1] > 16:
         raise ValueError("Union GBSA requires one KV head and at most 16 Q heads per launch")
@@ -210,7 +210,7 @@ def build_qsa_union_batch_inputs(
     # Padding is per request, never across a request boundary. Keep actual Q
     # unpadded; metadata uses its original cu_seqlens_q to locate union groups.
     padded_rows = 0
-    destinations = []
+    destinations: list[int] = []
     for length in lengths:
         start = padded_rows
         destinations.extend(range(start, start + length))
@@ -245,7 +245,7 @@ def qsa_union_gbsa_attention_batch(
     request_indices: tuple[int, ...],
 ) -> torch.Tensor:
     """Run adjacent packed Prefill requests in one union GBSA launch."""
-    import cann_ops_transformer_gbsa_union as union_ops
+    import cann_ops_transformer_gbsa_union as union_ops  # type: ignore[import-not-found]
 
     if not request_indices or len(request_indices) + 1 != len(query_starts):
         raise ValueError("Each packed query segment must have one request")
