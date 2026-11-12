@@ -1,6 +1,6 @@
 # Four-node RP4 FUNCTION ablation: disable fused MC2 (MegaMoE) only.
 # Baseline FUNCTION passed in run 43135676501; retain topology, gates and memory ratios.
-test_name: GLM-5.3-W8A8C8-A3-FUNCTION-DISABLE-MEGAMOE
+test_name: GLM-5.3-W8A8C8-A3-FUNCTION-NO-MEGAMOE
 model: Eco-Tech/GLM-5.3-w8a8c8
 num_nodes: 4
 npu_per_node: 16

@@ -123,8 +123,8 @@ a3:
         config_file_path: GLM-5.3-W8A8C8-A3-FUNCTION-DISABLE-LIC8.yaml
         config_base_path: tests/SIT/cases/models/configs/GLM
         size: 4
-      - name: GLM-5.3-W8A8C8-A3-FUNCTION-DISABLE-MEGAMOE
-        config_file_path: GLM-5.3-W8A8C8-A3-FUNCTION-DISABLE-MEGAMOE.yaml
+      - name: GLM-5.3-W8A8C8-A3-FUNCTION-NO-MEGAMOE
+        config_file_path: GLM-5.3-W8A8C8-A3-FUNCTION-NO-MEGAMOE.yaml
         config_base_path: tests/SIT/cases/models/configs/GLM
         size: 4
       - name: GLM-5.3-W8A8C8-A3-FUNCTION-DISABLE-SFAC8
