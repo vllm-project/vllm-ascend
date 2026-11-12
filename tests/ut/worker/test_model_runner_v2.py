@@ -64,7 +64,7 @@ def _make_runner(need_timing: bool = True):
     runner.debugger = None
     runner._debugger_started = False
     runner.attn_groups = []
-    runner._uses_flashmla = False
+    runner._target_uses_flashmla = False
     runner.adaptive_verification = None
     runner.input_buffers = SimpleNamespace(dummy_num_tokens=None)  # type: ignore[assignment]
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
@@ -197,11 +197,85 @@ def _make_batch_state(
     )
 
 
+@pytest.mark.parametrize(
+    ("group_specs", "expected_target_flashmla"),
+    [
+        pytest.param(
+            [(("target.0",), False), (("draft.0",), True)],
+            False,
+            id="draft-only-flashmla",
+        ),
+        pytest.param(
+            [(("target.0",), False), (("draft.0",), False)],
+            False,
+            id="no-flashmla",
+        ),
+        pytest.param(
+            [(("target.0",), True), (("draft.0",), False)],
+            True,
+            id="target-only-flashmla",
+        ),
+        pytest.param(
+            [(("target.0",), True), (("draft.0",), True)],
+            True,
+            id="target-and-draft-flashmla",
+        ),
+        pytest.param(
+            [(("target.0", "draft.0"), True)],
+            True,
+            id="shared-group-containing-target",
+        ),
+    ],
+)
+@pytest.mark.parametrize("batch_kind", ["pd_tail", "decode", "prefill"])
+def test_flashmla_target_graph_gate_preserves_batch_semantics(group_specs, expected_target_flashmla, batch_kind):
+    runner = _make_runner()
+    runner.speculator = SimpleNamespace(draft_attn_layer_names={"draft.0"})
+    runner.attn_groups = [
+        [
+            SimpleNamespace(
+                layer_names=layer_names,
+                get_metadata_builder=Mock(return_value=SimpleNamespace(flashmla_state=object() if flashmla else None)),
+            )
+            for layer_names, flashmla in group_specs
+        ]
+    ]
+    runner._target_uses_flashmla = runner._has_target_flashmla_attention()
+    assert runner._target_uses_flashmla is expected_target_flashmla
+    runner.decode_query_len = 4
+    runner.vllm_config.kv_transfer_config = SimpleNamespace(is_kv_consumer=True, is_kv_producer=False)
+    if batch_kind == "pd_tail":
+        batch_state = _make_batch_state([127, 128], [4, 4], [128, 128], draft_tokens=3)
+        upstream_uniform = 4
+    elif batch_kind == "decode":
+        batch_state = _make_batch_state([128, 128], [4, 4], [128, 128], draft_tokens=3)
+        upstream_uniform = 4
+    else:
+        batch_state = _make_batch_state([0, 128], [4, 1], [128, 128])
+        upstream_uniform = None
+
+    with patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, upstream_uniform)):
+        gathered, uniform = runner.gather_batch_req_state(SimpleNamespace(), False)
+
+    target_prefill = expected_target_flashmla and batch_state.has_prefill
+    order = [1, 0] if target_prefill else [0, 1]
+    assert gathered.req_ids == [batch_state.req_ids[index] for index in order]
+    for field in batch_state._fields:
+        values = getattr(batch_state, field)
+        if isinstance(values, np.ndarray):
+            np.testing.assert_array_equal(getattr(gathered, field), values[order])
+    assert gathered.has_prefill is batch_state.has_prefill
+    assert gathered.decode_graph_eligible is (batch_state.decode_graph_eligible and not target_prefill)
+    assert uniform == (None if target_prefill else upstream_uniform)
+    if not expected_target_flashmla:
+        assert gathered is batch_state
+
+
 @pytest.mark.parametrize("uses_flashmla", [False, True])
 @pytest.mark.parametrize("draft_tokens", [0, 3])
 def test_gather_batch_preserves_pd_tail_and_flashmla_request_order(uses_flashmla, draft_tokens):
     runner = _make_runner()
-    runner._uses_flashmla = uses_flashmla
+    runner._target_uses_flashmla = uses_flashmla
     runner.decode_query_len = 1 + draft_tokens
     runner.vllm_config.kv_transfer_config = SimpleNamespace(is_kv_consumer=True, is_kv_producer=False)
     batch_state = _make_batch_state([127, 128], [runner.decode_query_len] * 2, [128, 128], draft_tokens)
@@ -231,7 +305,7 @@ def test_gather_batch_preserves_pd_tail_and_flashmla_request_order(uses_flashmla
 @pytest.mark.parametrize("graph_eligible", [False, True])
 def test_gather_decode_batch_preserves_upstream_graph_gate(uses_flashmla, graph_eligible):
     runner = _make_runner()
-    runner._uses_flashmla = uses_flashmla
+    runner._target_uses_flashmla = uses_flashmla
     batch_state = _make_batch_state([128, 64], [1, 1], [128, 64])._replace(decode_graph_eligible=graph_eligible)
     expected_uniform = 1 if graph_eligible else None
     with patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, expected_uniform)):
@@ -247,7 +321,7 @@ def test_gather_decode_batch_preserves_upstream_graph_gate(uses_flashmla, graph_
 @pytest.mark.parametrize("uses_flashmla", [False, True])
 def test_gather_dummy_batch_bypasses_flashmla(uses_flashmla):
     runner = _make_runner()
-    runner._uses_flashmla = uses_flashmla
+    runner._target_uses_flashmla = uses_flashmla
     scheduler_output = SimpleNamespace()
     with (
         patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(None, 4)) as parent,

@@ -160,7 +160,7 @@ class NPUModelRunner(GPUModelRunner):
         # Adaptive verification uses this flag to apply FIA-specific query
         # boundary and sequence length padding during FULL graph execution.
         self.use_fia = False
-        self._uses_flashmla = False
+        self._target_uses_flashmla = False
         # FusedMoE can be constructed by the parent initializer and reads this
         # capacity while setting up MC2 communication.
         set_potential_max_tokens(vllm_config)
@@ -413,6 +413,17 @@ class NPUModelRunner(GPUModelRunner):
                 kv_cache_allocation_context=kv_cache_allocation_context,
             )
 
+    def _has_target_flashmla_attention(self) -> bool:
+        # Draft attention has its own graph dispatch. Only target layers may
+        # restrict target batches containing decode-like PD prompt tails.
+        draft_layer_names = getattr(self.speculator, "draft_attn_layer_names", ())
+        return any(
+            any(layer_name not in draft_layer_names for layer_name in group.layer_names)
+            and getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None
+            for groups in self.attn_groups
+            for group in groups
+        )
+
     def initialize_kv_cache(
         self,
         kv_cache_config: KVCacheConfig,
@@ -448,11 +459,7 @@ class NPUModelRunner(GPUModelRunner):
             )
         with graph_manager_wrapper(self):
             self._initialize_kv_cache_upstream(kv_cache_config, kv_cache_allocation_context)
-            self._uses_flashmla = any(
-                getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None
-                for groups in self.attn_groups
-                for group in groups
-            )
+            self._target_uses_flashmla = self._has_target_flashmla_attention()
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
                 self.pcp_manager.set_runner_state(self.vllm_config, kv_cache_config, self.input_buffers)
@@ -788,7 +795,7 @@ class NPUModelRunner(GPUModelRunner):
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
-        if self._uses_flashmla and batch_state is not None:
+        if self._target_uses_flashmla and batch_state is not None:
             # The backend order must precede derived inputs and graph dispatch.
             batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
         return batch_state, uniform_token_count
