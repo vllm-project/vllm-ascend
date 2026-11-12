@@ -30,8 +30,6 @@ a3:
         config_file_path: Kimi-K3.1-Pro-W4A8-A3-1M-PD.yaml
         config_base_path: tests/SIT/cases/models/configs/Kimi
         size: 8
-  multi_node:
-    test_config:
       - name: GLM-5.3-W8A8C8-A3-ALL-E2E
         size: 4
         config_file_path: GLM-5.3-W8A8C8-A3-ALL-E2E.yaml
