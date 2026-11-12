@@ -163,6 +163,9 @@ class RareCharsDetector(ConfigBackedDetector):
         self._think_end_id: int | None = None
         self._alert_monitor = False
         self._warmed = False
+        # Process-local latch: warmup/native bind failed → skip stash/collect until
+        # config disables rare_chars (then re-enable can retry).
+        self._warmup_failed = False
         self._states: dict[str, RareCharsReqState] = {}
         self._row_batch: RareRowBatch | None = None
         self._row_of: dict[str, int] = {}
@@ -172,17 +175,45 @@ class RareCharsDetector(ConfigBackedDetector):
         if runtime_config is not None:
             self.refresh_from_config()
 
+    @property
+    def warmup_failed(self) -> bool:
+        return bool(self._warmup_failed)
+
+    def note_config_disabled(self) -> None:
+        """Clear the warmup-fail latch when JSON ``enabled`` is false."""
+        self._warmup_failed = False
+
+    def _apply_detector_section(self, section: dict[str, Any]) -> None:
+        self._enabled = bool(section.get("enabled", self._enabled))
+        if not self._enabled:
+            self._warmup_failed = False
+        self._apply_detector_values(section.get)
+
     def _apply_detector_values(self, getter) -> None:
         # Only ``enabled`` is runtime-configurable; algorithm knobs live in rare.json.
         return
 
+    def _mark_warmup_failed(self, exc: BaseException) -> None:
+        self._warmup_failed = True
+        self._warmed = False
+        logger.warning(
+            "[runtime_guard: rare_chars] warmup failed; latching off stash/collect until "
+            "detector.rare_chars.enabled is turned off then on again: %s",
+            exc,
+        )
+
     def warmup(self, tokenizer: Any | None = None) -> None:
         """Build the rare table from the served tokenizer (model warmup)."""
         self.refresh_from_config()
-        if not self._enabled:
+        if not self._enabled or self._warmup_failed:
             return
-        with self._lock:
-            self._warmup_locked(tokenizer)
+        try:
+            with self._lock:
+                self._warmup_locked(tokenizer)
+        except Exception as exc:
+            with self._lock:
+                self._mark_warmup_failed(exc)
+            raise
 
     def _warmup_locked(self, tokenizer: Any | None) -> None:
         if tokenizer is None:
@@ -203,6 +234,7 @@ class RareCharsDetector(ConfigBackedDetector):
         self._think_end_id = resolve_think_end_id(tokenizer, self._think_end_cfg)
         self._ensure_engine_locked(_cfg)
         self._warmed = True
+        self._warmup_failed = False
 
     def clear_finished(self, req_id: str) -> None:
         with self._lock:
@@ -252,16 +284,18 @@ class RareCharsDetector(ConfigBackedDetector):
         if n <= 0:
             return []
         with self._lock:
+            if self._warmup_failed:
+                return []
             if not self._warmed:
                 try:
                     self._warmup_locked(None)
                 except Exception as exc:
-                    logger.warning("[runtime_guard: rare_chars] lazy warmup failed: %s", exc)
+                    self._mark_warmup_failed(exc)
                     return []
             try:
                 self._ensure_engine_locked()
             except Exception as exc:
-                logger.warning("[runtime_guard: rare_chars] engine init failed: %s", exc)
+                self._mark_warmup_failed(exc)
                 return []
             keep_ids: list[str] = []
             keep_idx: list[int] = []
