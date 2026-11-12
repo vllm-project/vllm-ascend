@@ -19,7 +19,10 @@ ARG VLLM_ASCEND_BRANCH=""
 ARG BASE_IMAGE="quay.io/ascend/vllm-ascend"
 ARG OS_MARK=""
 ARG TAG_SUFFIX=""
-FROM ${BASE_IMAGE}:nightly-${VLLM_ASCEND_BRANCH}-a5${OS_MARK}${TAG_SUFFIX}
+# Variant of the A5 runtime image to build on, e.g. "-ubx". Empty for the
+# standard A5 image; the resulting tag matches the base image tag suffix.
+ARG BASE_VARIANT=""
+FROM ${BASE_IMAGE}:nightly-${VLLM_ASCEND_BRANCH}-a5${BASE_VARIANT}${OS_MARK}${TAG_SUFFIX}
 
 # Build-time configuration. Defaults are the public community mirrors so this
 # Dockerfile can be built standalone.
