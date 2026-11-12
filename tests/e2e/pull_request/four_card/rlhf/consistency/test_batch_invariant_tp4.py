@@ -51,15 +51,18 @@ QWEN35_MODEL = "Qwen/Qwen3.5-35B-A3B"
 
 # gpu_memory_utilization for the Qwen3.5 case. The slice above keeps a single
 # full-attention layer, and the decode attention path reserves a fused-infer
-# workspace the size of that layer's whole KV cache (attention_v1.py sizes it
-# from the layer's key/value cache). Measured, the request is the cache divided
-# by the number of full-attention layers: 51.93 GiB next to a 51.82 GiB cache
-# here at 0.9, and 28.17 GiB next to 56.12 GiB for the two-full-attention-layer
-# Qwen3 case. So this slice has to fit the cache twice: at 0.45 the cache is
-# 25.5 GiB, which is ~51 GiB plus ~2.2 GiB of weights against 61 GiB. The 0.95
-# the other cases use is only reachable when the cache is spread over many
-# full-attention layers, as it is in the real 40-layer model.
-# VLLM_GPU_MEMORY_UTILIZATION may lower the value further, never raise it.
+# workspace sized from that layer's whole KV cache (attention_v1.py asks
+# torch_npu for the max workspace of the layer's key/value cache). Measured, the
+# workspace is the cache divided by the number of full-attention layers: 51.93
+# GiB next to a 51.82 GiB cache here at 0.9, and 28.17 GiB next to 56.12 GiB for
+# the two-full-attention-layer Qwen3 case. One full-attention layer therefore
+# means the slice holds the cache twice, so the peak is roughly
+# weights + 2 x (utilization x die): at 0.45 the cache is ~25 GiB and the peak
+# ~53 GiB of the 61 GiB die, while 0.95 (the other cases' default) would ask for
+# the cache twice at 0.95 and cannot fit. That default is only reachable when
+# the cache is spread over many full-attention layers, as it is in the real
+# 40-layer model. VLLM_GPU_MEMORY_UTILIZATION may lower the value further, never
+# raise it.
 QWEN35_GPU_MEMORY_UTILIZATION = 0.45
 
 SMALL_QWEN35_OVERRIDES = {
@@ -398,6 +401,10 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(vllm_runner):
 )
 def test_qwen35_moe_logprobs_bitwise_batch_invariance_bs1_vs_bsN(vllm_runner):
     """Same bitwise check as above, for the hybrid linear/full attention MoE model."""
+    # This case only gets here because the Ascend GDN backend declares
+    # `supports_batch_invariance()`: vLLM #60271 rejects every backend that does
+    # not, and Qwen3.5's GDN layers assign that backend directly, so without the
+    # declaration the engine refuses to start under VLLM_BATCH_INVARIANT.
     # Pin the shape of the served slice, not just "the override merged": if the
     # upstream 40-layer 3:1 interleave changed or the text tower stopped
     # resolving to Qwen3_5MoeForCausalLM -- the upstream vLLM class this case
