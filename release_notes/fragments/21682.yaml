@@ -1,0 +1,4 @@
+pr: 21682
+entries:
+  - category: bugfix
+    text: Bound upstream ShortConv layers to the selected Ascend convolution implementations.
