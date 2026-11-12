@@ -29,8 +29,8 @@ from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEQuantParams
 from vllm_ascend.ops.fused_moe.dataclass.router_input import MoeRouterInput
 from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import MoETokenDispatchInput
 from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAllGather
+from vllm_ascend.ops.fused_moe.router.eplb_router import AscendEplbRouter
 from vllm_ascend.ops.fused_moe.token_dispatcher import TokenDispatcherWithAllGather
-from vllm_ascend.patch.platform.patch_fused_moe import _ascend_apply_eplb_mapping
 from vllm_ascend.utils import is_950
 
 MODELS = ["Qwen/Qwen3-30B-A3B"]
@@ -175,7 +175,7 @@ def _run_a5_allgather_eplb(rank, port, graph_mode):
 
             def forward_once():
                 prepared = prepare.prepare(hidden, logits)
-                physical = _ascend_apply_eplb_mapping(router, logical_ids)
+                physical = AscendEplbRouter._apply_eplb_mapping(router, logical_ids)
                 dispatched = dispatcher.token_dispatch(
                     MoETokenDispatchInput(
                         prepared.hidden_states,
