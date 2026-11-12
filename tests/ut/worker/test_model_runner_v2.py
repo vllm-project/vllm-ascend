@@ -43,13 +43,14 @@ def _make_runner(need_timing: bool = True):
     runner.vllm_config = SimpleNamespace(
         kv_transfer_config=None,
         use_v2_model_runner=False,
-        parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1),
     )
     runner.max_num_tokens = 16
     runner.model_config = SimpleNamespace(
         hf_config=SimpleNamespace(model_type="other_model"),
         # GPUModelRunner.load_model reads this on main (sleep-mode memory pool).
         enable_sleep_mode=False,
+        use_mla=False,
     )
     runner.kv_cache_config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
     runner.kvpp = SimpleNamespace(complete_forward=lambda: None)  # type: ignore[assignment]
@@ -1494,7 +1495,7 @@ def _prepare_inputs_runner(*, draft=False, full_cg=False, use_dcp=False, use_pp=
     runner.use_pp = use_pp
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL if full_cg else CUDAGraphMode.NONE)
     runner.model_config = SimpleNamespace(
-        rswa_window=(4 if rswa else None), hf_config=SimpleNamespace(model_type="other_model")
+        rswa_window=(4 if rswa else None), hf_config=SimpleNamespace(model_type="other_model"), use_mla=False
     )
     runner.model_state = SimpleNamespace(num_new_sampled_tokens_per_step=1)
     runner.eplb = SimpleNamespace(set_batch_phase=MagicMock())
@@ -1975,9 +1976,9 @@ def test_device_only_cpu_lengths_remain_upper_bounds_without_event_wait():
         assert runner.input_buffers.seq_lens_cpu[i] == before[index] + output.num_scheduled_tokens[req_id]
 
 
-def _device_length_runner():
+def _device_length_runner(model_type="glm_moe_dsa"):
     runner, output, batch, _ = _prepare_inputs_runner(speculator=True)
-    runner.model_config.hf_text_config = SimpleNamespace(model_type="glm_moe_dsa")
+    runner.model_config.hf_text_config = SimpleNamespace(model_type=model_type)
     runner.speculative_config = SimpleNamespace(
         method="dflash",
         draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
@@ -1985,8 +1986,9 @@ def _device_length_runner():
     return runner, output, batch
 
 
-def test_glm_dflash2_device_lengths_do_not_require_attention_groups():
-    runner, _, _ = _device_length_runner()
+@pytest.mark.parametrize("model_type", ["glm_moe_dsa", "glm5_next_text"])
+def test_glm_dflash2_device_lengths_do_not_require_attention_groups(model_type):
+    runner, _, _ = _device_length_runner(model_type)
     del runner.attn_groups
     assert runner._can_skip_spec_cpu_length_sync() is True
 
