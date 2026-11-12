@@ -728,6 +728,11 @@ class BaseKVPoolWorker(ABC):
         if self.use_kvpp:
             self.physical_layer_to_group_layers.clear()
             owners = map_kvpp_layers_to_owners(self.vllm_config, kv_caches.keys())
+            missing_owners = set(range(self.tp_size * self.pcp_size)) - set(owners.values())
+            if missing_owners:
+                raise ValueError(
+                    f"KVPP requires at least one target layer per owner; missing {sorted(missing_owners)}."
+                )
             kv_caches = {
                 name: caches for name, caches in kv_caches.items() if owners.get(name) in (None, self.kvpp_rank)
             }
