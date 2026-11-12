@@ -407,14 +407,14 @@ class TestNPUWorkerV2(TestBase):
 
 class TestNPUWorkerV2WeightUpdate(TestBase):
     @staticmethod
-    def _make_worker():
+    def _make_worker(*, supports_draft_weight_update: bool = True):
         from vllm_ascend.worker.worker import NPUWorker
 
         worker = NPUWorker.__new__(NPUWorker)
         draft = torch.nn.Linear(2, 2)
         worker.use_v2_model_runner = True
         worker.weight_transfer_engine = MagicMock()
-        worker.weight_transfer_engine.supports_draft_weight_update = True
+        worker.weight_transfer_engine.supports_draft_weight_update = supports_draft_weight_update
         worker._weight_update_active = False
         worker._weight_update_is_draft = False
         worker.vllm_config = SimpleNamespace()
@@ -498,9 +498,8 @@ class TestNPUWorkerV2WeightUpdate(TestBase):
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     def test_engine_without_draft_support_still_accepts_target_updates(self, ascend_config):
         ascend_config.return_value.weight_nz_mode = 0
-        worker, _ = self._make_worker()
+        worker, _ = self._make_worker(supports_draft_weight_update=False)
         engine = worker.weight_transfer_engine
-        engine.supports_draft_weight_update = False
         with (
             patch("vllm.v1.worker.gpu_worker.share_source_lm_heads") as share,
             patch("vllm_ascend.worker.worker.restore_quantized_lm_heads") as restore,

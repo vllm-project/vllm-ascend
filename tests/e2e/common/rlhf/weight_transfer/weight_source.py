@@ -244,10 +244,7 @@ class FixedRandomWeightSource(WeightSource):
 
         target = Path(directory)
         target.mkdir(parents=True, exist_ok=True)
-        config_path = Path(self._case.model) / "config.json"
-        if not config_path.is_file():
-            config_path = Path(hf_hub_download(self._case.model, "config.json"))
-        shutil.copyfile(config_path, target / "config.json")
+        shutil.copyfile(hf_hub_download(self._case.model, "config.json"), target / "config.json")
         state = {name: tensor.detach().to("cpu").contiguous() for name, tensor in self}
         save_file(state, str(target / "model.safetensors"), metadata={"format": "pt"})
         if self.draft_source is not None:
