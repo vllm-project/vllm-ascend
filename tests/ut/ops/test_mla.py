@@ -329,6 +329,70 @@ class TestAscendSFAIndexerBackend(TestBase):
 
 
 class TestIndexerWrapper(TestBase):
+    def test_gate_join_reaches_real_backend_vector_boundary(self):
+        # Exercise both real forward methods: accepting the keyword on a mock
+        # indexer alone misses the model-facing wrapper's call contract.
+        for q_overlap, rope_dim, quantized_q in [(False, 0, True), (True, 0, True), (True, 64, True), (True, 0, False)]:
+            with self.subTest(q_overlap=q_overlap, rope_dim=rope_dim, quantized_q=quantized_q):
+                self._check_gate_join(q_overlap, rope_dim, quantized_q)
+
+    def _check_gate_join(self, q_overlap, rope_dim, quantized_q):
+        trace = []
+        hidden = torch.ones(2, 4)
+        projected = torch.zeros(2, 4)
+        q_result = (projected, None, None)
+        indices = torch.zeros(2, 1, dtype=torch.int32)
+        backend = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
+        nn.Module.__init__(backend)
+        backend.qk_rope_head_dim = rope_dim
+        backend._q_stream = object() if q_overlap else None
+        backend._use_fused_cache_store = False
+        backend._can_fuse_k_cache = lambda hidden: False
+        backend.wk_weights_proj = MagicMock()
+        backend.wq_b = MagicMock()
+
+        def forward_qk(*args, before_vector=None):
+            trace.append("Q-cube")
+            if before_vector is not None:
+                before_vector()
+            trace.append("K-vector")
+            return q_result, projected, None, projected
+
+        def forward_k(*args, **kwargs):
+            trace.append("K-vector")
+            return projected, None, projected
+
+        backend._forward_qk = forward_qk
+        backend.forward_k = forward_k
+        backend._forward_q = lambda *args: q_result
+        backend._gather_cache_inputs = lambda *args: (projected, None, None)
+        backend.write_cache = lambda *args: trace.append("cache-vector")
+        wrapper = IndexerWrapper.__new__(IndexerWrapper)
+        nn.Module.__init__(wrapper)
+        wrapper.impl = backend
+        metadata = SimpleNamespace(
+            cos=None,
+            sin=None,
+            cache_scatter_indices=None,
+            actual_seq_lengths_query=torch.tensor([2]),
+            actual_seq_lengths_key=torch.tensor([2]),
+            topk_selector=lambda *args: indices,
+        )
+        q_c = (hidden, hidden) if quantized_q else hidden
+        result = wrapper(
+            hidden,
+            q_c,
+            hidden,
+            metadata,
+            before_vector=lambda: trace.append("join-G"),
+        )
+        self.assertIs(result, indices)
+        self.assertEqual(trace.count("join-G"), 1)
+        self.assertLess(trace.index("join-G"), trace.index("K-vector"))
+        self.assertLess(trace.index("K-vector"), trace.index("cache-vector"))
+        if q_overlap:
+            self.assertEqual(trace.index("Q-cube") < trace.index("join-G"), rope_dim == 0 and quantized_q)
+
     def test_prepare_pcp_hidden_leaves_ordinary_backend_inputs_unchanged(self):
         backend = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
         nn.Module.__init__(backend)

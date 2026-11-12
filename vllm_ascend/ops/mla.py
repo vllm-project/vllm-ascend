@@ -115,13 +115,17 @@ class IndexerWrapper(nn.Module):
         k_hidden_states: torch.Tensor | Callable[[], torch.Tensor],
         indexer_metadata: AttentionMetadata,
         compute_topk: bool = True,
+        *,
+        before_vector: Callable[[], None] | None = None,
     ) -> torch.Tensor | None:
+        kwargs = {"before_vector": before_vector} if before_vector is not None else {}
         return self.impl(
             hidden_states,
             q_c,
             k_hidden_states,
             indexer_metadata,
             compute_topk,
+            **kwargs,
         )
 
 
