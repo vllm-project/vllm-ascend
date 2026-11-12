@@ -1692,14 +1692,13 @@
 #       `weight_scale`/`scale_bias` params the checkpoint ships), failing with
 #       a KeyError.
 #    How：
-#       For same-checkpoint drafts (`draft_model_config.model ==
-#       model_config.model`), temporarily redirect `get_draft_quant_config` to
-#       the target quant config during `load_dspark_model`, then restore it.
-#       Self-contained drafts (e.g. Qwen3 DSpark speculators) keep their own
-#       quant config.
+#       For drafts that use the target's quantization scheme, temporarily
+#       redirect `get_draft_quant_config` during `load_dspark_model`, then
+#       restore it. Self-contained drafts and Mistral Large 4's same-checkpoint
+#       BF16 draft keep their own quant config.
 #    Future Plan:
-#       Remove this patch once upstream `load_dspark_model` inherits the target
-#       quant config for same-checkpoint drafts.
+#       Remove this patch once upstream `load_dspark_model` supports
+#       same-checkpoint drafts that require the target's quant config.
 #
 # ** 31. File: worker/patch_adaptive_verification.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

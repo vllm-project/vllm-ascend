@@ -703,7 +703,10 @@ class AscendMistralLarge4DSparkForCausalLM(MistralLarge4DSparkForCausalLM):
         # Draft attention must rotate with the same plain YaRN table as its
         # context KV writer. The target publishes a separate LeRoPE table.
         for layer in self.model.layers:
-            layer.self_attn.attn.impl.rope_metadata_source = self.model.rotary_emb
+            impl = layer.self_attn.attn.impl
+            # The MLA wrapper defaults to no rotation without a rotary module.
+            impl.use_mla_rope = True
+            impl.rope_metadata_source = self.model.rotary_emb
 
     @staticmethod
     def _normalize_draft_kv_cache(

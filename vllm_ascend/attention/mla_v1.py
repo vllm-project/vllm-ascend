@@ -44,6 +44,7 @@ from vllm_ascend.attention.flashmla import (
     get_flashmla_ops,
     split_flashmla_requests,
 )
+from vllm_ascend.attention.mla_draft_window import MLADraftWindow
 from vllm_ascend.attention.utils import (
     ATTENTION_UPDATE_MAX_INPUTS,
     MLA_FLASH_SUPPORTED_Q_HEADS,
@@ -1018,6 +1019,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.scale = float(scale)
         self.num_kv_heads = num_kv_heads
         self.kv_cache_dtype = kv_cache_dtype
+        self.sliding_window = sliding_window
 
         # MLA Args
         self.q_lora_rank = kwargs["q_lora_rank"]
@@ -1183,6 +1185,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                     softmax_lse,
                     dequant_scale_q_nope,
                     fak_descale_float,
+                    *draft_window_params,
                 ) = param
                 if _EXTRA_CTX.is_draft_model:
                     draft_step = attn_count // num_layers
@@ -1207,6 +1210,12 @@ class AscendMLAImpl(MLAAttentionImpl):
                     seq_lens_list = seq_lens_list + [0] * (len(actual_seq_lengths) - len(seq_lens_list))
                 else:
                     seq_lens_list = seq_lens_list + [0] * (num_tokens - len(seq_lens_list))
+
+                if draft_window_params:
+                    (draft_window,) = draft_window_params
+                    block_table, attn_mask, seq_lens_list = draft_window.prepare(
+                        block_table, seq_lens_list, len(actual_seq_lengths), replay=True
+                    )
 
                 extra_args = {}
                 if dequant_scale_q_nope is not None:
@@ -2822,6 +2831,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 k_pe = k_pe.view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
 
         attn_output_shape: tuple | None = None
+        draft_window = None
         # TODO: Drop SpecDecoding after V1/310P MTP paths use DecodeOnly and
         # verify that their FIA query layout still matches graph capture.
         if (
@@ -2857,6 +2867,16 @@ class AscendMLAImpl(MLAAttentionImpl):
                 sparse_mode = 3
                 attn_mask = decode_meta.attn_mask
             actual_seq_lengths = decode_meta.actual_seq_lengths_q
+            if (
+                self.sliding_window is not None
+                and not attn_metadata.causal
+                and _EXTRA_CTX.is_draft_model
+                and self.speculative_config.use_dspark()
+                and not self.use_dcp
+                and not self.is_pcp_decode_sharded
+            ):
+                query_width = max(end - start for start, end in zip([0, *actual_seq_lengths], actual_seq_lengths))
+                draft_window = MLADraftWindow(self.sliding_window, block_size, query_width)
             if self.fa_quant_layer:
                 assert dequant_scale_q_nope is not None
                 dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, self.num_heads)
@@ -2928,6 +2948,13 @@ class AscendMLAImpl(MLAAttentionImpl):
             q_pe = _mla_nope_zero_rope(q_nope, rope_dim, zero_rope_cache)
             k_pe = _mla_nope_zero_rope(k_nope, rope_dim, zero_rope_cache)
 
+        block_table = decode_meta.block_table
+        seq_lens_list = decode_meta.seq_lens_list
+        if draft_window is not None:
+            block_table, attn_mask, seq_lens_list = draft_window.prepare(
+                block_table, seq_lens_list, len(actual_seq_lengths), capture=_EXTRA_CTX.capturing
+            )
+
         common_kwargs = {
             "num_query_heads": self.num_heads_padded,
             "num_key_value_heads": self.num_kv_heads,
@@ -2935,10 +2962,10 @@ class AscendMLAImpl(MLAAttentionImpl):
             "atten_mask": attn_mask,
             "sparse_mode": sparse_mode,
             "softmax_scale": self.scale,
-            "block_table": decode_meta.block_table,
+            "block_table": block_table,
             "block_size": block_size,
             "actual_seq_qlen": actual_seq_lengths,
-            "actual_seq_kvlen": decode_meta.seq_lens_list,
+            "actual_seq_kvlen": seq_lens_list,
         }
         common_kwargs["query_rope"] = q_pe
         common_kwargs["key_rope"] = k_pe
@@ -2984,9 +3011,9 @@ class AscendMLAImpl(MLAAttentionImpl):
                 weak_ref_tensors(attn_mask) if attn_mask is not None else None,
                 sparse_mode,
                 self.scale,
-                decode_meta.block_table,
+                block_table,
                 block_size,
-                decode_meta.seq_lens_list,
+                seq_lens_list,
                 actual_seq_lengths,
                 weak_ref_tensors(attn_output),
                 weak_ref_tensors(softmax_lse),
@@ -2998,6 +3025,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                 )  # type: ignore
             else:
                 attn_params = attn_params + (None, None)  # type: ignore
+            if draft_window is not None:
+                attn_params = (*attn_params, draft_window)  # type: ignore
 
             if workspace is None:
                 workspace = torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(

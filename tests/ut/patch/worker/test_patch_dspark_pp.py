@@ -9,15 +9,28 @@ from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
 from vllm_ascend.patch.worker import patch_dspark
 
 
-@pytest.mark.parametrize("inherits_quant", [True, False])
+@pytest.mark.parametrize(
+    ("draft_architecture", "same_checkpoint", "inherits_quant"),
+    [
+        ("Glm5DSparkForCausalLM", True, True),
+        ("Qwen3DSparkModel", False, False),
+        ("MistralLarge4DSparkModel", True, False),
+    ],
+)
 @pytest.mark.parametrize("pp_size", [1, 2])
 @pytest.mark.parametrize("fail", [True, False])
-def test_dspark_draft_partition_isolation(monkeypatch, inherits_quant, pp_size, fail):
+def test_dspark_draft_partition_isolation(
+    monkeypatch, draft_architecture, same_checkpoint, inherits_quant, pp_size, fail
+):
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size),
         model_config=SimpleNamespace(model="target", architecture="GlmMoeDsaForCausalLM"),
         speculative_config=SimpleNamespace(
-            method="dspark", draft_model_config=SimpleNamespace(model="target" if inherits_quant else "draft")
+            method="dspark",
+            draft_model_config=SimpleNamespace(
+                model="target" if same_checkpoint else "draft",
+                architectures=[draft_architecture],
+            ),
         ),
         quant_config=object(),
     )

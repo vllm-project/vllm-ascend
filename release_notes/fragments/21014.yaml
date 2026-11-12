@@ -15,6 +15,13 @@ entries:
       Corrected Mistral Large 4 sparse indexer rotary embeddings and aligned DSpark draft attention with its cache writer.
     model: mistral-large-4
     hardware: [Ascend 950]
+  - category: bugfix
+    text: >-
+      Fixed Mistral Large 4 DSpark draft RoPE and BF16 weight loading, and enforced its
+      sliding attention window in eager and graph decode without decode context parallelism.
+      Fixed a draft graph replay crash when data-parallel synchronization reduces a dummy batch.
+    model: mistral-large-4
+    hardware: [Ascend 950]
   - category: performance
     text: >-
       Block-wise FP8 checkpoints now requantize to MXFP8 one row band at a time, so loading a

@@ -352,6 +352,7 @@ def test_replay_metadata_preserves_architecture_behavior(monkeypatch, architectu
     spec.arange_np = np.arange(3, dtype=np.int32)
     spec.attn_architecture = architecture
     spec.input_batch = SimpleNamespace(num_reqs=1, is_prefilling_np=np.array([True, True]))
+    spec._num_draft_reqs = 1
     spec._group_causal = {0: False}
     query_metadata = SimpleNamespace(actual_seq_lengths_q=[5, 5])
     metadata = {"draft": SimpleNamespace(decode=query_metadata) if architecture == "MLA" else query_metadata}
@@ -453,6 +454,7 @@ def test_query_builder_overrides_and_restores_target_context(monkeypatch, archit
         return module.build_attn_metadata(attn_state=None)
 
     spec.input_batch = SimpleNamespace(num_reqs=1)
+    spec._num_draft_reqs = 1
     spec._group_causal = {}
     monkeypatch.setattr(attn_utils, "build_attn_metadata", build)
     monkeypatch.setattr(DSparkSpeculator, "_build_attn_metadata", parent)

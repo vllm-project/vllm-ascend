@@ -16,21 +16,22 @@
 #
 """Patch DSpark draft loading to inherit the target quant config.
 
-DSpark supports two kinds of drafts:
+DSpark drafts can use different quantization schemes from their targets:
 
 * Self-contained drafts (e.g. Qwen3 DSpark speculators) ship their own weights
   and ``quantization_config``; ``get_draft_quant_config`` resolves their own
   quant scheme and must be left alone.
-* Same-checkpoint drafts (DeepSeek-V4 DSpark, weights under ``mtp.*``) declare
-  no quantization of their own, but reuse the target weights. Upstream
-  ``load_dspark_model`` derives the draft quant config via
+* DeepSeek-V4 DSpark drafts stored under ``mtp.*`` use the target's quantization
+  scheme. Upstream ``load_dspark_model`` derives the draft quant config via
   ``get_draft_quant_config``, which returns ``None`` here. That builds an
   unquantized draft, and a W4A8/W8A8 target checkpoint cannot be loaded into it
   (the draft linear layers lack the ``weight_offset``/``weight_scale``/
   ``scale_bias`` params the checkpoint ships), failing with a KeyError.
+* Mistral Large 4 DSpark stores BF16 draft weights in the target checkpoint.
+  Upstream's draft quantization setting must be preserved for these weights.
 
-The same-checkpoint fix is a general one; a long-term plan exists to contribute
-it upstream to ``load_dspark_model``.
+This compatibility patch can be removed once upstream supports loading the
+same-checkpoint drafts that need the target quantization scheme.
 """
 
 from contextlib import AbstractContextManager, nullcontext
@@ -68,11 +69,13 @@ def _pp_safe_maybe_share_target_embed(draft_model, draft_inner, target_inner):
 def _load_dspark_model_with_target_quant(target_model, vllm_config):
     # ``load_dspark_model`` imports ``get_draft_quant_config`` from inside the
     # function body, so overriding the module attribute before the call and
-    # restoring it afterwards is enough to redirect it. Only alias it for
-    # same-checkpoint drafts; self-contained drafts keep their own quant.
+    # restoring it afterwards is enough to redirect it.
     speculative_config = vllm_config.speculative_config
     draft_model_config = speculative_config.draft_model_config
-    inherits_target_quant = draft_model_config.model == vllm_config.model_config.model
+    inherits_target_quant = (
+        draft_model_config.model == vllm_config.model_config.model
+        and "MistralLarge4DSparkModel" not in draft_model_config.architectures
+    )
     spec_pp_support = resolve_spec_pp_support(vllm_config)
     if inherits_target_quant:
         model_utils.get_draft_quant_config = lambda _vllm_config: vllm_config.quant_config

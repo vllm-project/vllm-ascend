@@ -112,6 +112,8 @@ def _speculator(monkeypatch, kind, architecture, width, padded, step, use_dcp=Tr
         is_prefilling_np=np.array([True, False]),
         seq_lens_cpu_upper_bound=target[:2],
     )
+    if kind == "dspark":
+        spec._num_draft_reqs = spec.input_batch.num_reqs
     # Deliberately different from the CPU view: the device path must not be
     # overwritten while rejection correction on CPU remains deferred.
     device_lengths = torch.tensor([30 + step, 126, 0, 0], dtype=torch.int32)

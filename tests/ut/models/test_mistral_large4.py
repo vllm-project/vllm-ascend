@@ -578,6 +578,23 @@ def test_nontriton_indexer_restores_interleaved_cache_layout(monkeypatch):
     torch.testing.assert_close(out, torch.tensor([[[-2, 1, -4, 3, 5, 6]]]))
 
 
+def test_dspark_constructor_enables_local_rope(monkeypatch):
+    rotary_emb = object()
+    impls = [SimpleNamespace(use_mla_rope=False) for _ in range(3)]
+
+    def init_draft(self, *, vllm_config, prefix):
+        torch.nn.Module.__init__(self)
+        layers = [SimpleNamespace(self_attn=SimpleNamespace(attn=SimpleNamespace(impl=impl))) for impl in impls]
+        self.model = SimpleNamespace(rotary_emb=rotary_emb, layers=layers)
+
+    monkeypatch.setattr(ml4.MistralLarge4DSparkForCausalLM, "__init__", init_draft)
+    ml4.AscendMistralLarge4DSparkForCausalLM(vllm_config=SimpleNamespace())
+
+    for impl in impls:
+        assert impl.use_mla_rope
+        assert impl.rope_metadata_source is rotary_emb
+
+
 def test_dspark_draft_uses_local_rope_and_stable_metadata_buffers(monkeypatch):
     from vllm_ascend.attention import mla_v1
 

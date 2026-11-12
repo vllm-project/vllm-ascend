@@ -86,6 +86,7 @@ def test_regular_and_graph_metadata_get_same_exact_cpu_view(monkeypatch, entrypo
     spec.num_query_per_req = 8
     spec.arange_np = np.arange(5, dtype=np.int32)
     spec.input_batch = SimpleNamespace(num_reqs=1)
+    spec._num_draft_reqs = 1
     spec._group_causal = False
     spec.vllm_config = SimpleNamespace(parallel_config=object())
     monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
@@ -119,3 +120,35 @@ def test_regular_and_graph_metadata_get_same_exact_cpu_view(monkeypatch, entrypo
     assert supplied and all(value is not None and value.tolist() == [22666, 0, 0, 0] for value in supplied)
     assert upper_bound.tolist() == [22666]
     assert decode.actual_seq_lengths_q == [8, 16, 24, 32]
+
+
+@pytest.mark.parametrize("padded", [3, 5])
+def test_dummy_replay_uses_dp_agreed_request_count(monkeypatch, padded):
+    spec = _spec([20, 40, 60, 99999, 99999])
+    spec.num_query_per_req = 4
+    spec.max_num_tokens = 20
+    spec.arange_np = np.arange(6, dtype=np.int32)
+    spec.replicated_pcp = False
+    spec.enable_adaptive_verification = False
+    spec._group_causal = False
+    spec.vllm_config = SimpleNamespace(parallel_config=object())
+    monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
+    monkeypatch.setattr(speculator_module, "build_attn_metadata_wrapper", nullcontext)
+    factory = MagicMock(return_value=nullcontext())
+    monkeypatch.setattr(speculator_module, "build_attn_metadata_factory", factory)
+    decode = SimpleNamespace()
+    builder = MagicMock(return_value={"draft.0": SimpleNamespace(decode=decode)})
+    monkeypatch.setattr(DSparkSpeculator, "_build_attn_metadata", builder)
+    upper_bound = torch.tensor([20, 40, 60, 99999], dtype=torch.int32)
+    batch = SimpleNamespace(num_reqs=4, is_prefilling_np=np.zeros(4, dtype=np.bool_))
+
+    def replay(self, *args, **kwargs):
+        return self.build_draft_attn_metadatas(padded, upper_bound)
+
+    monkeypatch.setattr(DSparkSpeculator, "propose", replay)
+    spec.propose(batch, *[None] * 10, dp_sync_state=SimpleNamespace(num_reqs=3), dummy_run=True)
+
+    assert builder.call_args.kwargs["num_reqs"] == 3
+    np.testing.assert_array_equal(builder.call_args.kwargs["query_start_loc_np"], [0, 4, 8, 12])
+    assert factory.call_args.kwargs["seq_lens_cpu"].tolist() == [20, 40, 60] + [0] * (padded - 3)
+    assert decode.actual_seq_lengths_q == [4 * (i + 1) for i in range(padded)]
