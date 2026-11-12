@@ -1,0 +1,4 @@
+pr: 21705
+entries:
+  - category: feature
+    text: Added opt-in DSpark expert-pool routing for compatible DeepSeek models using ModelRunner V2 and single-device expert offload.

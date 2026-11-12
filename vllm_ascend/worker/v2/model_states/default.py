@@ -65,6 +65,7 @@ if TYPE_CHECKING:
     from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
     from vllm_ascend.models.deepseek_v41.decoder_replay_layers import AscendDecoderReplayLayers
     from vllm_ascend.worker.device_metadata import TargetDeviceMetadata
+    from vllm_ascend.worker.v2.dspark_expert_pool import DSparkExpertPool
     from vllm_ascend.worker.v2.kvpp import KVPPRuntime
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext, AscendPCPManager
 
@@ -77,6 +78,7 @@ class AscendModelState(DefaultModelState):
     kvpp_runtime: "KVPPRuntime | None" = None
     kvpp_is_dummy_run: bool = False
     device_metadata: "TargetDeviceMetadata | None" = None
+    dspark_expert_pool: "DSparkExpertPool | None" = None
 
     def finish_execution(self, *, failed: bool) -> None:
         """Join auxiliary metadata work even if input preparation failed."""
@@ -427,6 +429,8 @@ class AscendModelState(DefaultModelState):
         model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     ) -> dict[str, Any]:
         """Override prepare_attn method because `build_attn_metadata` is different from vllm."""
+        if for_capture and self.dspark_expert_pool is not None:
+            self.dspark_expert_pool.prepare_capture(input_batch)
         # vLLM #50945 adds this contract; Ascend still disables DBO.
         assert ubatch_idx == 0, "DBO is not supported on Ascend"
         if cudagraph_mode == CUDAGraphMode.FULL:

@@ -94,6 +94,8 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     allocate_kv_offload_topk_profile_buffers,
     init_sparse_kv_offload_manager,
 )
+from vllm_ascend.expert_offload.expert_offload_manager import ExpertOffloadManager
+from vllm_ascend.expert_offload.utils import initialize_expert_offload
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
 from vllm_ascend.observability.runtime_guard.hooks import (
     runtime_guard_sample_tokens,
@@ -120,6 +122,7 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_state,
     skip_ring_state_update,
 )
+from vllm_ascend.worker.v2.dspark_expert_pool import DSparkExpertPool, has_short_drafts, supports_router
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.kv_connector import MambaCopyKVConnector
@@ -150,10 +153,15 @@ class NPUModelRunner(GPUModelRunner):
     kv_connector: KVConnector
     max_num_reqs: int
     max_num_tokens: int
+    expert_offload_manager: ExpertOffloadManager | None = None
+    dspark_expert_pool: DSparkExpertPool | None = None
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
+        expert_offload_config = getattr(self.ascend_config, "expert_offload_config", None)
+        if expert_offload_config is not None and expert_offload_config.enabled:
+            self.expert_offload_manager = ExpertOffloadManager()
         self.sparse_kv_offload_manager = None
         self.kvpp = KVPPRuntime()
         # Adaptive verification uses this flag to apply FIA-specific query
@@ -296,6 +304,11 @@ class NPUModelRunner(GPUModelRunner):
         return AscendPCPManager
 
     def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
+        expert_offload_manager = self.expert_offload_manager
+        if expert_offload_manager is not None and load_dummy_weights:
+            raise ValueError(
+                "expert offload requires checkpoint shard tracking; dummy checkpoint loading is unsupported"
+            )
         from vllm_ascend.model_executor.warmup.nz_warmup import (
             join_nz_warm_thread,
             start_nz_warm_thread,
@@ -313,6 +326,37 @@ class NPUModelRunner(GPUModelRunner):
             # device and must not outlive this call. Joining here is also before
             # memory profiling.
             join_nz_warm_thread()
+
+        if expert_offload_manager is not None:
+            initialize_expert_offload(self)
+
+        pool_config = (
+            getattr(self.ascend_config, "dspark_expert_pool", None) if expert_offload_manager is not None else None
+        )
+        if pool_config is not None and pool_config.enabled:
+            assert pool_config.protected_positions is not None and pool_config.suffix_experts is not None
+            assert self.speculative_config is not None and self.speculative_config.num_speculative_tokens is not None
+            num_device_experts = self.ascend_config.expert_offload_config.num_device_experts
+            assert num_device_experts is not None
+            layers = [
+                layer
+                for layer in self.model.modules()
+                if getattr(layer, "_expert_offload_binding", None) is not None and supports_router(layer)
+            ]
+            if not layers:
+                raise ValueError("dspark_expert_pool found no supported target routed expert layer")
+            pool = DSparkExpertPool(
+                self.device,
+                self.max_num_tokens,
+                pool_config.protected_positions,
+                pool_config.suffix_experts,
+                num_speculative_tokens=self.speculative_config.num_speculative_tokens,
+                num_device_experts=num_device_experts,
+            )
+            self.dspark_expert_pool = pool
+            self.model_state.dspark_expert_pool = pool
+            for layer in layers:
+                layer.dspark_expert_pool = pool
 
         # In cudagraph modes the dumper must be started before graph capture so
         # that aclgraph capture/replay is instrumented (v1 parity: v1 starts
@@ -549,6 +593,10 @@ class NPUModelRunner(GPUModelRunner):
                 fill_mxfp_v_scale_cache(layer.v_cache_scale, value_scale_cache)
 
     def shutdown(self) -> None:
+        if self.expert_offload_manager is not None:
+            self.expert_offload_manager.unsubscribe_graph_streams()
+            self.expert_offload_manager = None
+
         # Drop C8 packet views before the parent collects tensors and
         # empties the allocator cache.
         entries = getattr(self, "_c8_mxfp_v_scale_caches", None)
@@ -657,6 +705,13 @@ class NPUModelRunner(GPUModelRunner):
         dp_coordination_context = skip_dp_coordination() if skip_dp_metadata_sync else nullcontext()
         profile_kwargs = {"randomize_inputs": randomize_inputs}
         forward_failed = True
+        expert_offload_manager = self.expert_offload_manager
+        if self.dspark_expert_pool is not None:
+            self.dspark_expert_pool.active = False
+        if expert_offload_manager is not None:
+            # Dummy runs have no batch state and keep the full-pool default.
+            # Real batch metadata below selects prefill or decode.
+            expert_offload_manager.has_prefill = True
         with dp_coordination_context:
             try:
                 output = super().execute_model(
@@ -775,6 +830,21 @@ class NPUModelRunner(GPUModelRunner):
         if self._uses_flashmla and batch_state is not None:
             # The backend order must precede derived inputs and graph dispatch.
             batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
+        if self.expert_offload_manager is not None and batch_state is not None:
+            self.expert_offload_manager.has_prefill = batch_state.has_prefill
+        if (
+            self.dspark_expert_pool is not None
+            and batch_state is not None
+            and uniform_token_count not in (None, 1)
+            and has_short_drafts(
+                batch_state,
+                num_speculative_tokens=self.dspark_expert_pool.num_speculative_tokens,
+            )
+        ):
+            # Full-width graphs capture the merged routing sequence and replay
+            # any role layout; narrower graphs capture native-only routing, so
+            # short-draft verification still runs L in eager mode.
+            uniform_token_count = None
         return batch_state, uniform_token_count
 
     def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:
@@ -1059,6 +1129,9 @@ class NPUModelRunner(GPUModelRunner):
         # helper; PCPManager.partition_batch now takes the batch descriptor.
         if self.pcp_manager is not None:
             input_batch = self.pcp_manager.partition_batch(input_batch, batch_desc)
+
+        if self.dspark_expert_pool is not None:
+            self.dspark_expert_pool.prepare(input_batch, invalid_drafts=bool(scheduler_output.num_invalid_spec_tokens))
 
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(input_batch.positions)

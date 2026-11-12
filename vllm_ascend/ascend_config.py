@@ -26,7 +26,7 @@ from contextvars import ContextVar
 from statistics import NormalDist
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import ConfigDict, TypeAdapter, field_validator, model_validator
+from pydantic import ConfigDict, StrictBool, StrictInt, TypeAdapter, field_validator, model_validator
 from pydantic_core import ArgsKwargs
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
@@ -34,6 +34,7 @@ from vllm.utils.math_utils import cdiv
 from vllm_ascend.config_utils import config
 from vllm_ascend.device.device_config import is_950
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
+from vllm_ascend.expert_offload.config import ExpertOffloadConfig
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -449,6 +450,33 @@ class QuantizedAllReduceConfig:
             )
 
 
+@config(config=ConfigDict(frozen=True))
+class DSparkExpertPoolConfig:
+    """Opt-in L routing for the single-device DSpark expert-offload path."""
+
+    enabled: StrictBool = False
+    protected_positions: StrictInt | None = None
+    suffix_experts: StrictInt | None = None
+
+    def validate(self, vllm_config: VllmConfig, offload: ExpertOffloadConfig) -> None:
+        if not self.enabled:
+            return
+
+        from vllm_ascend.worker.v2.dspark_expert_pool import TOP_K
+
+        if not offload.enabled:
+            raise ValueError("dspark_expert_pool requires enabled expert offload")
+        spec = vllm_config.speculative_config
+        draft_tokens = spec.num_speculative_tokens if spec is not None and spec.method == "dspark" else None
+        if draft_tokens is None or draft_tokens <= 0:
+            raise ValueError("dspark_expert_pool requires DSpark with a positive number of speculative tokens")
+        verify_width = draft_tokens + 1
+        if self.protected_positions is None or not 1 <= self.protected_positions <= verify_width:
+            raise ValueError(f"dspark_expert_pool.protected_positions must be in [1, {verify_width}]")
+        if self.suffix_experts is None or not 0 <= self.suffix_experts <= TOP_K:
+            raise ValueError(f"dspark_expert_pool.suffix_experts must be in [0, {TOP_K}]")
+
+
 @config
 class AscendConfig:
     """Configuration Object for additional_config from vllm.configs.
@@ -696,6 +724,8 @@ class AscendConfig:
     # Still factory-injected: construction depends on vllm_config.
     sparse_kv_offload_config: Any = dataclasses.field(kw_only=True)
     kvpp_config: KVPPConfig = dataclasses.field(default_factory=KVPPConfig, kw_only=True)
+    expert_offload_config: ExpertOffloadConfig = dataclasses.field(default_factory=ExpertOffloadConfig)
+    dspark_expert_pool: DSparkExpertPoolConfig = dataclasses.field(default_factory=DSparkExpertPoolConfig)
 
     # ---- derived fields: sentinel default, after-validator overwrites ----
     # This switches the prefill recurrence; keep opt-in until cold/cache-hit
@@ -758,6 +788,8 @@ class AscendConfig:
     # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        self.expert_offload_config.validate(vc, self)
+        self.dspark_expert_pool.validate(vc, self.expert_offload_config)
         engram_config = getattr(vc, "engram_config", None)
         if (
             engram_config is not None
