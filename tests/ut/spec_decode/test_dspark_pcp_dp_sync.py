@@ -66,7 +66,7 @@ def test_dspark_vocab_tp_agrees_on_query_pass(
             is_profile=is_profile,
             num_speculative_tokens=local_k,
         )
-    expected_k = ([0, 0, 0] if skip_drafts is True else [None, 3, None]) if applies else [0, 3, None]
+    expected_k: list[int | None] = ([0, 0, 0] if skip_drafts is True else [None, 3, None]) if applies else [0, 3, None]
     assert forwarded_k == expected_k
     assert query_passes == [k != 0 for k in expected_k]
 

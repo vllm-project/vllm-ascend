@@ -1489,7 +1489,7 @@ class FinegrainedTPConfig:
                 or parallel.pipeline_parallel_size != 1
             ):
                 raise ValueError("Kimi projection TP requires TP=PCP=DCP=PP=1.")
-            if not is_kimi:
+            if text_config is None or not is_kimi:
                 raise ValueError("QKV/G projection TP currently supports Kimi linear attention only.")
             if vc.kv_transfer_config is None or not vc.kv_transfer_config.is_kv_consumer:
                 raise ValueError("Kimi projection TP requires a PD decode node.")

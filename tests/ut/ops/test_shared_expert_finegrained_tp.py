@@ -155,7 +155,7 @@ def test_shared_shards_restore_dp_owners_without_latent_projection(monkeypatch, 
     up = torch.randn_like(gate)
     down = torch.randn(hidden, intermediate)
     expert_gate = torch.randn(1, hidden)
-    parts = [None, None]
+    parts: list[torch.Tensor | None] = [None, None]
     barrier = Barrier(2)
     monkeypatch.setattr(shared_module, "npu_stream_switch", lambda *a, **k: nullcontext())
     monkeypatch.setattr(shared_module, "shared_experts_calculation_stream", lambda: None)
@@ -164,7 +164,9 @@ def test_shared_shards_restore_dp_owners_without_latent_projection(monkeypatch, 
         def reduce_scatter(partial, dim):
             parts[rank] = partial
             barrier.wait(timeout=10)
-            return (parts[0] + parts[1]).chunk(2, dim=dim)[rank]
+            first, second = parts
+            assert first is not None and second is not None
+            return (first + second).chunk(2, dim=dim)[rank]
 
         executor = AscendSharedExperts.__new__(AscendSharedExperts)
         shard = slice(rank * 3, (rank + 1) * 3)

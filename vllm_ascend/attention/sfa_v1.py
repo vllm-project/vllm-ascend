@@ -2187,7 +2187,10 @@ class AscendSFAImpl(MLAAttentionImpl):
             self._on_kv_cache_written(kv_cache, attn_metadata)
 
         # G Cube follows prolog; return communication runs during indexer/SFA.
-        pending_gate = gate_tp.project(gate_input, self.g_proj) if gate_input is not None else None
+        pending_gate = None
+        if gate_input is not None:
+            assert gate_tp is not None
+            pending_gate = gate_tp.project(gate_input, self.g_proj)
 
         # A sharded-decode PCP rank can own no request but must still write
         # and gather KV with the other ranks.
