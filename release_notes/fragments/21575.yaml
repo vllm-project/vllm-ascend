@@ -1,4 +1,7 @@
 pr: 21575
 entries:
   - category: bugfix
-    text: Fixed KV-consumer chunked prefills skipping reusable Mamba/KDA state checkpoints after an existing computed prefix.
+    text: >-
+      Fixed non-MTP KV-consumer chunked prefills skipping reusable Mamba/KDA
+      state checkpoints after an existing computed prefix, while preserving
+      existing MTP consumer scheduling.

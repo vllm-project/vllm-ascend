@@ -19,8 +19,29 @@ from vllm_ascend.core.kv_cache_interface import register_ascend_kv_cache_specs
 from vllm_ascend.patch.platform import patch_mamba_block_aligned_split as split_patch
 
 
-def _make_scheduler(monkeypatch, tmp_path, scheduler_cls, *, has_mamba, cache_mode, budget, role="kv_both"):
-    config = create_vllm_config(max_num_batched_tokens=128, block_size=16)
+def _make_scheduler(
+    monkeypatch,
+    tmp_path,
+    scheduler_cls,
+    *,
+    has_mamba,
+    cache_mode,
+    budget,
+    role="kv_both",
+    speculative_method=None,
+    num_speculative_tokens=2,
+    eagle_block_drop=True,
+):
+    config = create_vllm_config(
+        max_num_batched_tokens=128,
+        block_size=16,
+        speculative_method=speculative_method,
+        num_speculative_tokens=num_speculative_tokens,
+    )
+    if config.speculative_config is not None:
+        # Use the real MTP configuration and derived lookahead properties.
+        config.speculative_config.draft_model_config.hf_config.num_nextn_predict_layers = num_speculative_tokens
+        config.speculative_config.disable_eagle_block_drop = not eagle_block_drop
     # BalanceScheduler initializes real runtime reporting; isolate its writes
     # without requiring the source checkout to be writable.
     config.additional_config.update(
@@ -134,3 +155,40 @@ def test_generic_hybrid_scheduler_keeps_chunks_without_an_alignment_stop(monkeyp
     assert [end - start for start, end in intervals] == [4] * 12 + [1]
     assert intervals[1] == (4, 8)
     assert split.call_count == len(intervals)
+
+
+@pytest.mark.parametrize("scheduler_cls", [Scheduler, AsyncScheduler])
+@pytest.mark.parametrize("role", ["kv_consumer", "kv_both"])
+@pytest.mark.parametrize("lookahead", [1, 2, 4])
+@pytest.mark.parametrize("eagle_block_drop", [False, True])
+@pytest.mark.parametrize("budget", [16, 32])
+def test_mtp_consumer_prefill_keeps_legacy_forward_progress(
+    monkeypatch, tmp_path, scheduler_cls, role, lookahead, eagle_block_drop, budget
+):
+    scheduler = _make_scheduler(
+        monkeypatch,
+        tmp_path,
+        scheduler_cls,
+        has_mamba=True,
+        cache_mode="align",
+        budget=budget,
+        role=role,
+        speculative_method="mtp",
+        num_speculative_tokens=lookahead,
+        eagle_block_drop=eagle_block_drop,
+    )
+    assert scheduler.vllm_config.speculative_config.method == "mtp"
+    assert scheduler.num_prefill_lookahead == lookahead
+    assert scheduler.use_eagle and scheduler.use_eagle_block_drop == eagle_block_drop
+    assert scheduler.num_hash_lookahead_tokens == 0
+    assert scheduler.need_mamba_block_aligned_split
+    assert not scheduler.mamba_has_prefill_checkpoint_blocks
+    request = create_request(401, num_tokens=49, block_size=16)
+
+    intervals = _prefill_intervals(scheduler, request)
+
+    assert intervals[-1][1] == 49
+    if budget == 32:
+        assert intervals == [(0, 32), (32, 49)]
+    # Every unfinished prefill leaves the real MTP drafter's prompt runway.
+    assert all(49 - end >= lookahead for _, end in intervals[:-1])
