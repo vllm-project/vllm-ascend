@@ -21,15 +21,22 @@ class A2MegaMoEPrefillConfig:
     """Opt-in EP8 BF16/W8A8 backend; keep the original config name for compatibility."""
 
     enabled: bool = Field(default=False, strict=True)
-    scope: Literal["all", "prefill"] = "all"
+    scope: Literal["all", "prefill", "prefill_mixed"] = "all"
 
     def selects(self, metadata: Any, *, in_profile_run: bool = False, graph_enabled: bool = False) -> bool:
         # An all-stage policy must also select fusion during metadata-free graph
         # warmup/capture, so replay cannot retain a different communication backend.
-        # The original prefill-only experiment remains eager-only.
-        return self.enabled and (
-            self.scope == "all" or (not graph_enabled and (in_profile_run or is_pure_prefill(metadata)))
-        )
+        # Phase-scoped policies remain eager-only: captured graphs must not
+        # switch communication backends based on live phase metadata.
+        if not self.enabled:
+            return False
+        if self.scope == "all":
+            return True
+        if graph_enabled:
+            return False
+        if in_profile_run:
+            return True
+        return has_prefill(metadata) if self.scope == "prefill_mixed" else is_pure_prefill(metadata)
 
 
 def is_pure_prefill(metadata: Any) -> bool:
@@ -58,6 +65,31 @@ def is_pure_prefill(metadata: Any) -> bool:
                 return False
             evidence.append(True)
     return bool(evidence)
+
+
+def has_prefill(metadata: Any) -> bool:
+    """Select a whole pure-prefill or mixed batch using explicit CPU evidence.
+
+    Decode tokens do not veto prefill in a mixed batch. A complete QSA plan
+    still takes precedence: an empty, ambiguous or pure-decode plan cannot
+    enable fusion, even if another layer reports a positive prefill counter.
+    Unknown GDN metadata may coexist with a valid prefill/mixed QSA plan.
+    """
+    entries = metadata.values() if isinstance(metadata, dict) else (metadata,)
+    evidence = False
+    for meta in entries:
+        if hasattr(meta, "qsa_request_plan"):
+            requests = getattr(meta.qsa_request_plan, "requests", ())
+            phases = tuple(getattr(req, "is_prefill", None) for req in requests)
+            if not phases or any(phase is not True and phase is not False for phase in phases):
+                return False
+            if not any(phase is True for phase in phases):
+                return False
+            evidence = True
+        prefills = getattr(meta, "num_prefills", None)
+        if isinstance(prefills, int) and prefills > 0:
+            evidence = True
+    return evidence
 
 
 def validate_a2_prefill_model(config: Any, *, dynamic_eplb: bool, redundant_experts: int, mix_placement: bool) -> None:

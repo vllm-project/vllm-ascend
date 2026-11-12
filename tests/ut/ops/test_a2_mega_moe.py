@@ -91,6 +91,45 @@ def test_standard_metadata_and_profile():
 
 
 @pytest.mark.parametrize(
+    "metadata,expected",
+    [
+        (qsa_metadata(True), True),
+        (qsa_metadata(True, False), True),
+        (qsa_metadata(False, True), True),
+        ({"gdn": SimpleNamespace(), "qsa": qsa_metadata(True, False)}, True),
+        (SimpleNamespace(num_prefills=1, num_decode_tokens=0), True),
+        (SimpleNamespace(num_prefills=1, num_decode_tokens=10), True),
+        (SimpleNamespace(num_prefills=1), True),
+        (None, False),
+        ({}, False),
+        (SimpleNamespace(), False),
+        (qsa_metadata(False), False),
+        (qsa_metadata(), False),
+        (qsa_metadata(None), False),
+        (qsa_metadata(True, None), False),
+        (qsa_metadata(1), False),
+        (SimpleNamespace(qsa_request_plan=None), False),
+        (SimpleNamespace(num_prefills=0, num_decode_tokens=1), False),
+        (SimpleNamespace(num_prefills=torch.tensor(1)), False),
+        ({"qsa": qsa_metadata(False), "other": SimpleNamespace(num_prefills=1)}, False),
+        ({"other": SimpleNamespace(num_prefills=1), "qsa": qsa_metadata(False)}, False),
+    ],
+)
+def test_prefill_mixed_requires_explicit_prefill_and_excludes_pure_decode(metadata, expected):
+    settings = TypeAdapter(Settings).validate_python({"enabled": True, "scope": "prefill_mixed"})
+    assert settings.selects(metadata) is expected
+    assert not Settings(scope="prefill_mixed").selects(metadata)
+
+
+@pytest.mark.parametrize("scope", ["prefill", "prefill_mixed"])
+def test_phase_scopes_profile_without_metadata_but_never_switch_graph_backend(scope):
+    settings = Settings(enabled=True, scope=scope)
+    assert settings.selects(None, in_profile_run=True)
+    assert not settings.selects(qsa_metadata(True, False), graph_enabled=True)
+    assert not settings.selects(None, in_profile_run=True, graph_enabled=True)
+
+
+@pytest.mark.parametrize(
     "kwargs",
     [{"min_tokens": 1024}, {"max_tokens": 4096}, {"enabled": "true"}, {"unknown": 1}, {"scope": "decode"}],
 )
@@ -243,6 +282,22 @@ def test_real_selector_dispatch(tokens, phase, graph, expected):
     assert result.name == expected
 
 
+@pytest.mark.parametrize("tokens", [1, 32, 4096, 32768])
+@pytest.mark.parametrize(
+    "metadata,expected",
+    [
+        (qsa_metadata(True), "FUSED_MC2"),
+        (qsa_metadata(True, False), "FUSED_MC2"),
+        (qsa_metadata(False), "ALLGATHER"),
+        (None, "ALLGATHER"),
+    ],
+)
+def test_prefill_mixed_selector_has_no_token_threshold(tokens, metadata, expected):
+    policy, _ = load_forward_policy(Settings(enabled=True, scope="prefill_mixed"))
+    result = policy.select_moe_comm_method(tokens, make_config(), attn_metadata=metadata)
+    assert result.name == expected
+
+
 def test_disabled_ep_lora_and_draft_paths():
     policy, _ = load_forward_policy(Settings())
     assert not policy.use_cann_megamoe(make_config())
@@ -290,9 +345,9 @@ def test_prefill_scope_never_captures_fusion_even_during_profiling():
     assert not settings.selects(qsa_metadata(True), in_profile_run=True, graph_enabled=True)
 
 
-@pytest.mark.parametrize("scope", ["all", "prefill"])
+@pytest.mark.parametrize("scope", ["all", "prefill", "prefill_mixed"])
 @pytest.mark.parametrize("graph", ["NONE", "FULL", "PIECEWISE"])
-@pytest.mark.parametrize("phase", [None, qsa_metadata(True), qsa_metadata(True, False)])
+@pytest.mark.parametrize("phase", [None, qsa_metadata(True), qsa_metadata(True, False), qsa_metadata(False)])
 def test_mrv2_platform_entry_uses_real_a2_selector(monkeypatch, scope, graph, phase):
     policy, _ = load_forward_policy(Settings(enabled=True, scope=scope))
     mask = torch.zeros(16, dtype=torch.bool)
@@ -329,7 +384,8 @@ def test_mrv2_platform_entry_uses_real_a2_selector(monkeypatch, scope, graph, ph
     extras = namespace[method.name](
         None, phase, cfg, None, num_tokens=9, cudagraph_runtime_mode=getattr(policy.CUDAGraphMode, graph)
     )
-    fused = scope == "all" or (graph == "NONE" and MODULE.is_pure_prefill(phase))
+    phase_selected = MODULE.has_prefill(phase) if scope == "prefill_mixed" else MODULE.is_pure_prefill(phase)
+    fused = scope == "all" or (graph == "NONE" and phase_selected)
     assert extras["moe_comm_type"].name == ("FUSED_MC2" if fused else "ALLGATHER")
     assert extras["use_mega_moe"] is True
     assert extras["moe_comm_method"] is comm

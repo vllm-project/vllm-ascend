@@ -30,14 +30,31 @@ vllm serve /path/to/Qwen3.8-Flash-Next \
 `enable_fused_mc2=2` explicitly selects the CANN package rather than the legacy
 `dispatch_ffn_combine` operator. Both options above are required. The historical
 `a2_mega_moe_prefill` key is retained for compatibility; its name does not limit
-the default scope. Valid scope values are `all` and `prefill`. Existing enabled
+the default scope. Valid scope values are `all`, `prefill` and `prefill_mixed`. Existing enabled
 configurations without a scope now use all-stage execution. Token-range options
 are not supported.
 
 No compilation mode is forced by this feature. Keep or tune the model's graph
 configuration separately; `FULL_DECODE_ONLY` is one candidate, not a requirement.
 `scope="prefill"` restores the original pure-prefill, eager-only policy for
-comparison with the all-stage policy.
+comparison with the all-stage policy. `scope="prefill_mixed"` also selects eager
+mixed batches while leaving pure decode on the ordinary backend.
+
+For prefill/mixed MegaMoE with ordinary decode graph replay on MRv2:
+
+```shell
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve /path/to/Qwen3.8-Flash-Next \
+  --dtype bfloat16 \
+  --tensor-parallel-size 8 \
+  --enable-expert-parallel \
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+  --additional-config '{"enable_fused_mc2":2,"a2_mega_moe_prefill":{"enabled":true,"scope":"prefill_mixed"}}'
+```
+
+In that configuration, pure prefill and mixed batches run MegaMoE eagerly;
+pure decode uses ALLGATHER, with graph replay when a compatible graph exists
+and ordinary eager execution otherwise. The whole mixed batch, including its
+decode rows, uses MegaMoE; rows are not split into separate backends.
 
 This implementation requires BF16 activations, TP8/EP8, DP1, PP1 and PCP1, static contiguous
 experts, and no LoRA, speculative decoding, EPLB or mixed placement. Invalid
@@ -66,20 +83,29 @@ FP32 first-layer scale copy. No per-forward repacking is introduced.
 
 ## Selection
 
-| Forward | `scope="all"` (default when enabled) | `scope="prefill"` |
-| --- | --- | --- |
-| Confirmed pure prefill, eager | CANN MegaMoE | CANN MegaMoE |
-| Mixed prefill/decode, eager | CANN MegaMoE | ALLGATHER |
-| Pure decode, eager | CANN MegaMoE | ALLGATHER |
-| Missing or ambiguous phase metadata, eager | CANN MegaMoE | ALLGATHER |
-| FULL / PIECEWISE warmup and capture | CANN MegaMoE | ALLGATHER |
-| Graph replay | Replays captured MegaMoE | Replays captured ALLGATHER |
-| Explicit eager memory-profile dummy run | CANN MegaMoE | CANN MegaMoE |
+| Forward | `scope="all"` (default when enabled) | `scope="prefill"` | `scope="prefill_mixed"` |
+| --- | --- | --- | --- |
+| Confirmed pure prefill, eager | CANN MegaMoE | CANN MegaMoE | CANN MegaMoE |
+| Mixed prefill/decode, eager | CANN MegaMoE | ALLGATHER | CANN MegaMoE |
+| Pure decode, eager | CANN MegaMoE | ALLGATHER | ALLGATHER |
+| Missing or ambiguous phase metadata, eager | CANN MegaMoE | ALLGATHER | ALLGATHER |
+| FULL / PIECEWISE warmup and capture | CANN MegaMoE | ALLGATHER | ALLGATHER |
+| Graph replay | Captured MegaMoE | Captured ALLGATHER | Captured ALLGATHER |
+| Explicit eager memory-profile dummy run | CANN MegaMoE | CANN MegaMoE | CANN MegaMoE |
 
-Only `scope="prefill"` checks the phase, using explicit prefill/decode counters
-or Qwen's complete QSA request plan. Query length is not used to guess the
-phase. Unknown GDN metadata can coexist with a complete QSA plan. A mixed/decode
-plan vetoes fusion in that scope, including the prefill rows of a mixed batch.
+The two phase-scoped policies check explicit CPU counters or Qwen's complete
+QSA request plan. Query length is not used to guess the phase. Unknown GDN
+metadata can coexist with a complete QSA plan. `scope="prefill"` requires a pure
+prefill batch; a mixed/decode plan vetoes fusion. `scope="prefill_mixed"` requires
+at least one explicitly identified prefill request, or a positive `num_prefills`
+counter when no QSA plan is available. A complete pure-decode, empty or ambiguous
+QSA plan vetoes fusion even if another layer reports prefill.
+
+Both phase-scoped policies keep captured execution on ALLGATHER because phase
+metadata may be absent during capture and graphs cannot change backends on
+replay. To use MegaMoE for prefill/mixed with `scope="prefill_mixed"`, keep those
+batches eager, for example with `FULL_DECODE_ONLY` or `--enforce-eager`. Selecting
+PIECEWISE capture does not enable MegaMoE inside those phase-scoped graphs.
 
 Graph support here means ACL Graph / NPUGraph capture of the existing ACLNN
 execution path; it does not use or validate the CANN TorchAir/GE converter.
@@ -137,7 +163,7 @@ active mask excludes padding; each rank must still participate in collectives.
 ## Throughput tuning
 
 Compare the disabled backend (`enable_fused_mc2=0`, `enabled=false`), the original
-`scope="prefill"` policy and `scope="all"` under identical workload conditions.
+`scope="prefill"` policy, `scope="prefill_mixed"` and `scope="all"` under identical workload conditions.
 For all-stage execution compare `--enforce-eager` with the model/runtime-supported
 `cudagraph_mode` settings: `FULL_DECODE_ONLY`, `FULL`, `PIECEWISE` and
 `FULL_AND_PIECEWISE`. Check the actual selected modes in runtime logs; model or
