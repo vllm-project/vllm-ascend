@@ -481,11 +481,14 @@ def test_capture_preparation_failure_retires_metadata(state, monkeypatch):
 
     import torch
 
+    from vllm_ascend.ascend_config import RlConfig
     from vllm_ascend.worker.v2 import aclgraph_utils
 
     prepare(state, Builder(), full=True)
     manager = aclgraph_utils.ModelAclGraphManager.__new__(aclgraph_utils.ModelAclGraphManager)
     manager.model_runner = SimpleNamespace()
+    manager.pool = (0, 0)
+    monkeypatch.setattr(aclgraph_utils, "get_ascend_config", lambda: SimpleNamespace(rl_config=RlConfig()))
     monkeypatch.setattr(aclgraph_utils, "communicator_switch", nullcontext)
 
     def fail(*args, **kwargs):
