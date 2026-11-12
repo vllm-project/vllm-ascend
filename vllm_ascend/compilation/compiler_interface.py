@@ -80,7 +80,7 @@ def _compute_decode_cudagraph_batch_sizes(vllm_config: VllmConfig) -> list[int]:
     capture_sizes = {
         size for size in compilation_config.cudagraph_capture_sizes if target_query_len <= size <= target_max_num_tokens
     }
-    
+
     # DSpark captures its draft graph with num_spec_tokens tokens per
     # request, while the target verification graph uses
     # num_spec_tokens + 1. Include both concrete graph-size families in the
