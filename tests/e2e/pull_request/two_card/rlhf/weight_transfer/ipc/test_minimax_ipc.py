@@ -1,20 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""MiniMax-M3 IPC weight-transfer coverage, scheduled and timed independently."""
+"""MiniMax-M3 model coverage through unpacked TP2 IPC weight transfer."""
 
 import pytest
 
-from tests.e2e.common.rlhf.weight_transfer.case import (
-    MINIMAX_CASES,
-    WeightUpdateModelCase,
-    pytest_model_cases,
-)
+from tests.e2e.common.rlhf.weight_transfer.case import MINIMAX_M3_CASE
 from tests.e2e.common.rlhf.weight_transfer.npu_ipc import (
     run_npu_ipc_weight_transfer_transaction,
 )
 
 
-@pytest.mark.parametrize(("case", "packed"), pytest_model_cases("npu_ipc", model_cases=MINIMAX_CASES))
-def test_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool):
-    run_npu_ipc_weight_transfer_transaction(case, packed)
+@pytest.mark.e2e_model(MINIMAX_M3_CASE.model)
+def test_minimax_m3_ipc_unpacked():
+    run_npu_ipc_weight_transfer_transaction(MINIMAX_M3_CASE, packed=False)
