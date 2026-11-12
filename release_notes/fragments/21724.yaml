@@ -1,0 +1,4 @@
+pr: 21724
+entries:
+  - category: bugfix
+    text: Fixed DequantSituQuant UB capacity failures for wide BF16 rows by processing bounded column tiles while preserving per-row quantization scales.
