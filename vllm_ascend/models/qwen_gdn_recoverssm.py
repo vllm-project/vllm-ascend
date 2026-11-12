@@ -32,6 +32,7 @@ _GDN_ARCHITECTURES = frozenset(
         "Qwen3_5ForConditionalGeneration",
         "Qwen3_5MoeForConditionalGeneration",
         "Qwen4ExpForConditionalGeneration",
+        "Qwen4ExpMTP",
     }
 )
 
