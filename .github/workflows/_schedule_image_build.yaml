@@ -61,10 +61,10 @@ on:
         type: string
         default: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann'
       cann_image_version:
-        description: "CANN image version for the CI job container only. It is independent of the CANN version baked into the built image, which comes from the FROM line in the Dockerfile. Leave empty (default) to read that version from the Dockerfile, so a PR that bumps CANN in the root Dockerfiles also builds with the matching job container."
+        description: 'CANN image version for the CI job container only. It is independent of the CANN version baked into the built image, which comes from the FROM line in the Dockerfile. It must exist in the cann_swr_url repository, which does not carry every CANN release, hence the fixed default.'
         required: false
         type: string
-        default: ''
+        default: '9.1.0'
       soc:
         description: 'Ascend SoC type for the CANN base image (e.g. 910b, a3, 310p, 950)'
         required: false
@@ -94,43 +94,11 @@ env:
   SWR_REPO: ${{ inputs.swr_repo }}
 
 jobs:
-  detect-cann-version:
-    name: detect-cann-version
-    runs-on: linux-amd64-cpu-2-hk
-    outputs:
-      value: ${{ steps.detect.outputs.value }}
-    steps:
-      # The job container must match the CANN version the Dockerfile builds on, so
-      # a PR that bumps CANN in the root Dockerfiles builds with the new version
-      # instead of the pinned default.
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-          ref: ${{ inputs.branch_ref }}
-
-      - name: Read CANN version from the Dockerfile
-        id: detect
-        run: |
-          OVERRIDE="${{ inputs.cann_image_version }}"
-          if [ -n "$OVERRIDE" ]; then
-            echo "value=${OVERRIDE}" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          DOCKERFILE="${{ inputs.dockerfile || 'Dockerfile' }}"
-          VERSION=$(sed -n 's|^FROM .*cann:\([^-]*\)-.*|\1|p' "$DOCKERFILE" | head -n 1 | tr '[:upper:]' '[:lower:]')
-          if [ -z "$VERSION" ]; then
-            echo "::error::Could not read the CANN version from ${DOCKERFILE}"
-            exit 1
-          fi
-          echo "value=${VERSION}" >> "$GITHUB_OUTPUT"
-
   build-push-digest:
     name: build
-    needs: detect-cann-version
     runs-on: ${{ matrix.runner_info.runner }}
     container:
-      image: ${{ format('{0}:{1}-{2}-ubuntu22.04-py3.12', inputs.cann_swr_url, needs.detect-cann-version.outputs.value, inputs.soc) }}
+      image: ${{ format('{0}:{1}-{2}-ubuntu22.04-py3.12', inputs.cann_swr_url, inputs.cann_image_version, inputs.soc) }}
       env:
         SOC: ${{ inputs.soc }}
     permissions:
