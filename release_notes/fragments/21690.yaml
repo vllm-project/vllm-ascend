@@ -1,0 +1,4 @@
+pr: 21690
+entries:
+  - category: bugfix
+    text: Fixed missing KV block information when using MooncakePushConnector with AscendMultiConnector.
