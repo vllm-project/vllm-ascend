@@ -69,9 +69,24 @@ def _mock_scheduler_clients():
         yield
 
 
+@pytest.mark.parametrize("tp_size,pcp_size", [(1, 4), (2, 1)])
+def test_layerwise_state_lookup_keeps_tp_rank_separate_from_pcp_without_scratch_blocks(tp_size, pcp_size):
+    scheduler = LayerwiseKVPoolScheduler.__new__(LayerwiseKVPoolScheduler)
+    scheduler.sharded_mamba_group_ids = {2}
+    scheduler.tp_size = scheduler.put_step = tp_size
+    scheduler.pcp_size = pcp_size
+    scheduler.num_speculative_blocks_by_group = {}
+    scheduler.dspark_prefix_keys = None
+    scheduler.layerwise_keys = SimpleNamespace(make_hit_check_keys=MagicMock(return_value=["state-key"]))
+
+    assert scheduler._make_layerwise_hit_check_keys(2, "block-hash") == ["state-key"]
+    scheduler.layerwise_keys.make_hit_check_keys.assert_called_once_with(2, "block-hash", tp_size)
+
+
 @pytest.mark.parametrize("dspark", [False, True])
 def test_joint_prefix_keys_keep_target_keys_and_require_every_final_pp_draft_replica(dspark):
     scheduler = LayerwiseKVPoolScheduler.__new__(LayerwiseKVPoolScheduler)
+    scheduler.sharded_mamba_group_ids = set()
     target_keys = ["target-pp0-rank0", "target-pp1-rank0"]
     scheduler.layerwise_keys = SimpleNamespace(make_hit_check_keys=MagicMock(return_value=target_keys.copy()))
     scheduler.tp_size, scheduler.put_step = 4, 4
@@ -97,6 +112,7 @@ def test_joint_prefix_keys_keep_target_keys_and_require_every_final_pp_draft_rep
 @pytest.mark.parametrize("draft_only", [False, True])
 def test_joint_prefix_draft_only_group_uses_companion_keys_without_losing_mixed_target_keys(draft_only):
     scheduler = LayerwiseKVPoolScheduler.__new__(LayerwiseKVPoolScheduler)
+    scheduler.sharded_mamba_group_ids = set()
     scheduler.layerwise_keys = SimpleNamespace(make_hit_check_keys=MagicMock(return_value=["target-group3"]))
     scheduler.tp_size, scheduler.put_step = 4, 4
     scheduler.num_speculative_blocks_by_group = {}
@@ -124,6 +140,7 @@ def test_joint_prefix_draft_only_group_uses_companion_keys_without_losing_mixed_
 @pytest.mark.parametrize("mode", ["dspark", "reuse"])
 def test_prefix_lookup_rechecks_after_save_and_eviction(mode):
     scheduler = LayerwiseKVPoolScheduler.__new__(LayerwiseKVPoolScheduler)
+    scheduler.sharded_mamba_group_ids = set()
     # A fresh key list per call: _make_layerwise_hit_check_keys extends the
     # returned list in place when dspark joint keys are active, so a shared
     # return_value would accumulate draft keys across lookups.
@@ -161,20 +178,35 @@ def test_prefix_lookup_rechecks_after_save_and_eviction(mode):
 
 
 @pytest.mark.parametrize("draft_first", [False, True])
-def test_joint_prefix_group_ownership_survives_scheduler_conversion_and_empty_pp_layer_names(draft_first):
+@pytest.mark.parametrize("non_causal", [False, True])
+@pytest.mark.parametrize("empty_pp_layers", [False, True])
+def test_joint_prefix_group_ownership_survives_scheduler_conversion_and_empty_pp_layer_names(
+    draft_first, non_causal, empty_pp_layers
+):
     from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 
     from vllm_ascend.patch.platform import patch_kv_cache_utils
 
     target = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
-    draft = replace(target, non_causal_multi_token_decode=True)
+    # Ownership comes from is_draft, independently of the attention mask.
+    target = replace(target, non_causal_multi_token_decode=non_causal)
+    draft = replace(target, is_draft=True)
     layer_specs = {"draft": draft, "target": target} if draft_first else {"target": target, "draft": draft}
     mixed = UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs=layer_specs)
-    config = SimpleNamespace(speculative_config=SimpleNamespace(method="dspark"), kv_transfer_config=None)
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="kimi_k3")),
+        speculative_config=SimpleNamespace(method="dspark"),
+        kv_transfer_config=None,
+    )
     kv_config = SimpleNamespace(
         num_blocks=4,
         hisparse_host_num_blocks=0,
-        kv_cache_groups=[KVCacheGroupSpec([], draft), KVCacheGroupSpec(list(layer_specs), mixed)],
+        kv_cache_groups=[
+            KVCacheGroupSpec([], draft, is_eagle_group=True),
+            KVCacheGroupSpec([] if empty_pp_layers else list(layer_specs), mixed, is_eagle_group=True),
+            KVCacheGroupSpec(["target-only"], target),
+            KVCacheGroupSpec([], UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs={"draft": draft})),
+        ],
     )
     original_groups = copy.deepcopy(kv_config.kv_cache_groups)
     with (
@@ -184,12 +216,35 @@ def test_joint_prefix_group_ownership_survives_scheduler_conversion_and_empty_pp
         patch.object(patch_kv_cache_utils, "_orig_get_kv_cache_config_from_groups", return_value=kv_config),
     ):
         result = patch_kv_cache_utils._ascend_get_kv_cache_config_from_groups(config, kv_config.kv_cache_groups, 0)
-    assert result.dspark_draft_only_group_ids == (0,)
+    assert result.dspark_draft_only_group_ids == (0, 3)
     scheduler_config = generate_scheduler_kv_cache_config([result])
-    assert scheduler_config.dspark_draft_only_group_ids == (0,)
+    assert scheduler_config.dspark_draft_only_group_ids == (0, 3)
     assert scheduler_config.kv_cache_groups[0].layer_names == []
     assert scheduler_config.kv_cache_groups[1].kv_cache_spec == next(iter(layer_specs.values()))
     assert result.kv_cache_groups == original_groups
+
+    # Feed the preserved ownership to its real consumer. A mixed group must
+    # retain target keys even if its representative is draft or this PP stage
+    # has no local layers; standalone draft groups have no target object.
+    scheduler = LayerwiseKVPoolScheduler.__new__(LayerwiseKVPoolScheduler)
+    scheduler.sharded_mamba_group_ids = set()
+    scheduler.layerwise_keys = SimpleNamespace(
+        make_hit_check_keys=MagicMock(side_effect=lambda group_id, *_: [f"target-group{group_id}"])
+    )
+    scheduler.tp_size, scheduler.put_step = 4, 4
+    scheduler.num_speculative_blocks_by_group = {}
+    scheduler.dspark_prefix_keys = DSparkPrefixKeys("draft-contract", pp_size=2, tp_size=4)
+    scheduler.dspark_draft_only_group_ids = frozenset(scheduler_config.dspark_draft_only_group_ids)
+    draft_keys = scheduler.dspark_prefix_keys.make_hit_check_keys("block-hash")
+    for group_id in (0, 3):
+        assert scheduler._make_layerwise_hit_check_keys(group_id, "block-hash") == draft_keys
+    scheduler.layerwise_keys.make_hit_check_keys.assert_not_called()
+    for group_id in (1, 2):
+        assert scheduler._make_layerwise_hit_check_keys(group_id, "block-hash") == [
+            f"target-group{group_id}",
+            *draft_keys,
+        ]
+    assert scheduler.layerwise_keys.make_hit_check_keys.call_count == 2
 
 
 def make_config(kv_role="kv_producer", extra_config=None, block_size=16):
@@ -244,6 +299,7 @@ def test_mooncake_layerwise_accepts_aligned_recurrent_state(num_speculative_bloc
     assert scheduler.num_speculative_blocks_by_group == (
         {} if num_speculative_blocks is None else {1: num_speculative_blocks}
     )
+    assert scheduler.sharded_mamba_group_ids == ({1} if num_speculative_blocks is not None else set())
 
 
 class TestGetZmqRpcPathLookup(unittest.TestCase):

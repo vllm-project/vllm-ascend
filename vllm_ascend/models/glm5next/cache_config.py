@@ -128,7 +128,7 @@ def _align_glm5_next_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]) -> None:
         # C8 shares pages with the FP32 tail; keep whole tail rows and aligned
         # scales when a scheduler page is split into indexer kernel blocks.
         small_page_alignment = lcm(
-            *(_unpadded_page_size(spec) // spec.block_size for spec in tail_specs), *scale_alignments
+            *(_unpadded_page_size(spec) // spec.ring_capacity for spec in tail_specs), *scale_alignments
         )
         small_page_size = (small_page_size + small_page_alignment - 1) // small_page_alignment * small_page_alignment
 
@@ -182,7 +182,7 @@ def _create_glm5_next_attention_groups(
                 f"compression ratio: block_size={main_spec.block_size}, "
                 f"compress_ratio={compress_ratio}."
             )
-        if tail_spec.compress_ratio != compress_ratio or tail_spec.block_size < compress_ratio:
+        if tail_spec.compress_ratio != compress_ratio or tail_spec.ring_capacity < compress_ratio:
             raise ValueError(
                 f"GLM-Next tail must use compression ratio {compress_ratio} and have at least that ring capacity."
             )

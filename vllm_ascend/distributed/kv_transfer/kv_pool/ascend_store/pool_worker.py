@@ -18,12 +18,14 @@ from vllm.distributed import (
 )
 from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
+from vllm.model_executor.model_loader.utils import get_model_cls
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.worker.mamba_utils import get_mamba_groups
 
 from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.core.kv_cache_placement import map_kvpp_layers_to_owners
@@ -53,6 +55,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ReqMeta,
     get_block_hashes,
     get_group_cache_family,
+    get_sharded_mamba_group_ids,
     infer_cache_transfer_granularity,
     infer_cacheable_group_ids,
     infer_group_block_sizes,
@@ -84,6 +87,7 @@ class BaseKVPoolWorker(ABC):
         parallel_config = vllm_config.parallel_config
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.vllm_config = vllm_config
+        self.use_recoverssm = getattr(vllm_config.cache_config, "use_kda_recoverssm", False) is True
         self.use_kvpp = KVPPConfig.from_vllm_config(vllm_config).size > 1
         self.kv_cache_config = kv_cache_config
         hf_text_config = getattr(model_config, "hf_text_config", None)
@@ -216,6 +220,7 @@ class BaseKVPoolWorker(ABC):
         self.num_kv_cache_groups = len(self.grouped_block_size)
         self.kv_cache_group_families = infer_group_cache_families(kv_cache_groups, self.compress_ratios, self.hf_config)
         self.group_uses_align_state = self._infer_group_uses_align_state()
+        self.sharded_mamba_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
         self.cache_transfer_granularity = infer_cache_transfer_granularity(
             self.grouped_block_size, self.lcm_block_size, self.cacheable_group_ids
         )
@@ -329,6 +334,9 @@ class BaseKVPoolWorker(ABC):
         for group_id in range(self.num_kv_cache_groups):
             # the mamba kv_heads is not same with the full attention, can't share the cache data
             group_tp_rank = self.tp_rank if self.group_uses_align_state[group_id] else self.head_or_tp_rank
+            if group_id in self.sharded_mamba_group_ids:
+                # Layerwise keys carry PCP coordinates in their own suffix.
+                group_tp_rank = self.tp_rank if self.use_layerwise else self.tp_rank * self.pcp_size + self.pcp_rank
             self.metadata.append(
                 KeyMetadata(
                     model_config.model.rstrip("/").split("/")[-1],
@@ -651,7 +659,37 @@ class BaseKVPoolWorker(ABC):
             assert new_start >= storage_key, "invalid kv cache tensor, raw tensor ptr must be align to 2MB"
             registered_regions[storage_key] = (new_start, end)
 
+    def _recoverssm_store_caches(self, kv_caches):
+        """Export the model's copyable state prefix, leaving verification records local."""
+        if self.kv_cache_config is None:
+            raise ValueError("RecoverSSM pooling requires KV cache specs")
+        result = dict(kv_caches)
+        copy_funcs = None
+        for group in self.kv_cache_config.kv_cache_groups:
+            specs = group.kv_cache_spec
+            for name in group.layer_names:
+                spec = specs.kv_cache_specs[name] if isinstance(specs, UniformTypeKVCacheSpecs) else specs
+                if not isinstance(spec, MambaSpec):
+                    continue
+                if spec.num_speculative_blocks != 0:
+                    raise ValueError("RecoverSSM pooling requires zero speculative state blocks")
+                if copy_funcs is None:
+                    mamba_groups = get_mamba_groups(self.kv_cache_config)
+                    model_cls = get_model_cls(self.vllm_config.model_config)
+                    copy_funcs = model_cls.get_mamba_state_copy_funcs({s.mamba_type for s in mamba_groups})
+                caches = self._as_cache_tuple(kv_caches[name])
+                num_states = len(copy_funcs[spec.mamba_type])
+                if len(caches) < num_states:
+                    raise ValueError(
+                        f"RecoverSSM pooling layer {name!r} requires at least {num_states} persistent state tensors, "
+                        f"got {len(caches)}"
+                    )
+                result[name] = caches[:num_states]
+        return result
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+        if self.use_recoverssm:
+            kv_caches = self._recoverssm_store_caches(kv_caches)
         self._set_num_blocks(kv_caches)
         self._register_kv_caches(kv_caches)
 
@@ -987,6 +1025,8 @@ class BaseKVPoolWorker(ABC):
             return self.tp_size * self.pcp_size
         if self.tp_mismatch:
             return self.effective_tp_size
+        if kv_cache_group_id in self.sharded_mamba_group_ids:
+            return self.tp_size * self.pcp_size
         if self.group_uses_align_state[kv_cache_group_id]:
             return self.tp_size
         return min(self.tp_size, self._get_group_num_kv_heads(kv_cache_group_id))
@@ -1317,6 +1357,7 @@ class KVPoolWorker(BaseKVPoolWorker):
                 self.group_uses_align_state,
                 self.enable_kv_events,
                 worker=self if self.tp_mismatch else None,
+                sharded_mamba_group_ids=self.sharded_mamba_group_ids,
             )
             self.kv_send_thread.start()
             ready_event_sending.wait()

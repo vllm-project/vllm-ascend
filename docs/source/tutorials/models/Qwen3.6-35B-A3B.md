@@ -307,7 +307,6 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
       --safetensors-load-strategy lazy \
       --gpu-memory-utilization 0.90 \
       --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3}' \
-      --dtype float16 \
       --enable-prefix-caching \
       --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE"}' \
       --additional-config '{"enable_cpu_binding":true, "multistream_overlap_shared_expert": true}'
@@ -320,7 +319,7 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
     - `HCCL_BUFFSIZE=1024` sets the HCCL communication buffer size for this example.
     - `--enable-expert-parallel` enables expert parallelism for MoE layers.
     - `--safetensors-load-strategy lazy` uses lazy loading for Safetensors model weights.
-    - `--dtype float16` selects FP16 for this deployment example.
+    - The example keeps the model's native `bfloat16` dtype (from the model config, no `--dtype` override is needed). `float16` is required only on Atlas 300I DUO.
     - `--max-model-len 135168` sets the maximum input plus output length for a single request. Ensure enough KV cache is available for the required context length.
     - `--max-num-seqs 128` sets the maximum number of active requests scheduled concurrently. Reduce it if KV cache or graph capture memory is insufficient.
     - `--max-num-batched-tokens 4096` limits the number of tokens processed in one scheduler step. Increase it only after checking prefill throughput and activation memory usage.

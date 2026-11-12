@@ -21,7 +21,6 @@ import inspect
 import logging
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
-from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -103,6 +102,7 @@ from vllm_ascend.observability.runtime_guard.hooks import (
 from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
+    enable_sfa_dcp_sharded_indexer,
     is_c8_mxfp_kv_quant,
     is_deepseek_v41,
     lmhead_tp_enable,
@@ -359,8 +359,10 @@ class NPUModelRunner(GPUModelRunner):
         return output
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
+        kv_cache_spec = super().get_kv_cache_spec()
+
         return apply_dspark_resident_kv_specs(
-            super().get_kv_cache_spec(),
+            kv_cache_spec,
             self.vllm_config,
             self.speculator,
             sparse_offload_enabled=self.ascend_config.sparse_kv_offload_config.enabled,
@@ -478,7 +480,15 @@ class NPUModelRunner(GPUModelRunner):
         # throwaway model state and must not leak event/buffer bindings.
         self.model_state.device_metadata = (
             TargetDeviceMetadata()
-            if uses_a5_packed_cache() and self.model_config.architecture == "DeepseekV41ForCausalLM"
+            if uses_a5_packed_cache()
+            and (
+                self.model_config.architecture == "DeepseekV41ForCausalLM"
+                or (
+                    self.model_config.architecture == "KimiK31ForConditionalGeneration"
+                    and enable_sfa_dcp_sharded_indexer(self.vllm_config)
+                    and self.vllm_config.attention_config.indexer_kv_dtype == "fp8"
+                )
+            )
             else None
         )
 
@@ -694,21 +704,6 @@ class NPUModelRunner(GPUModelRunner):
             execution_start_time,
         )
 
-        # TODO: Remove this workaround once upstream vLLM restores idle DP ranks'
-        # logical request counts before draft DP synchronization.
-        # In adaptive verification, idle DP ranks dummy-run at target graph capacity.
-        # Restore their request counts before draft DP sync to avoid inflating all ranks.
-        if (
-            dummy_run
-            and not is_profile
-            and context_len == 0
-            and self.adaptive_verification is not None
-            and self.execute_model_state is not None
-        ):
-            state = self.execute_model_state
-            self.execute_model_state = state._replace(
-                input_batch=replace(state.input_batch, num_reqs=len(scheduler_output.num_scheduled_tokens))
-            )
         return output
 
     def _maybe_send_draft_kv(self, scheduler_output: SchedulerOutput) -> None:
