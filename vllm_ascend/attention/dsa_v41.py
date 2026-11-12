@@ -2,6 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DeepSeek V4.1 DSA metadata and fused attention execution.
 
+[Role] Build cache-plane metadata and execute V4.1 attention.
+[Invariants] Deferred producers write builder-owned, address-stable buffers.
+[Timeouts & Locks] NPU stream events order producers and their consumers.
+[Side-Effect Policy] Metadata tasks never update model weights or KV caches.
+
 The model file owns the network topology and projection modules.  This module
 owns the attention execution boundary: it gathers every cache plane's metadata
 before running the compressor, indexer and sparse-attention operators without
@@ -978,8 +983,6 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         """Defer this target build without changing the drafter's builder mode."""
         was_enabled = self._device_metadata_enabled
         was_in_graph = self._device_metadata_in_graph
-        if in_graph and not self._uses_a5_packed_cache:
-            raise ValueError("Captured V4.1 device metadata currently requires the A5 packed-cache backend")
         self.enable_device_metadata()
         self._device_metadata_in_graph = in_graph
         try:
@@ -1545,10 +1548,12 @@ class AscendDSAV41AttentionMetadataBuilder(AscendDSAV41MetadataBuilder):
             has_compressed = operator_ratio in (1, 2)
             cmp_seq_lens = req.cache_seq_lens if has_compressed else None
             cmp_residual = req.cmp_residual
+            metadata_in_graph = self._device_metadata_in_graph
 
             def build_smla_metadata() -> None:
-                # Keep graph event frontiers stable even when this CP rank has no query.
-                if req.num_actual_tokens == 0:
+                # A dummy capture must record the producer: replay refreshes
+                # the padded input tensors without rerunning this Python branch.
+                if req.num_actual_tokens == 0 and not metadata_in_graph:
                     self._smla_metadata.zero_()
                     return
                 value = torch.ops._C_ascend.npu_sparse_flash_mla_metadata(
@@ -1560,9 +1565,9 @@ class AscendDSAV41AttentionMetadataBuilder(AscendDSAV41MetadataBuilder):
                     seqused_cmp_kv=cmp_seq_lens,
                     cmp_residual_kv=cmp_residual,
                     batch_size=req.num_reqs,
-                    max_seqlen_q=int(getattr(common, "max_query_len", 0)),
-                    max_seqlen_ori_kv=max_ori_seq_len,
-                    max_seqlen_cmp_kv=(req.max_cache_seq_len if has_compressed else 0),
+                    max_seqlen_q=-1 if metadata_in_graph else int(getattr(common, "max_query_len", 0)),
+                    max_seqlen_ori_kv=-1 if metadata_in_graph else max_ori_seq_len,
+                    max_seqlen_cmp_kv=(-1 if metadata_in_graph else req.max_cache_seq_len) if has_compressed else 0,
                     ori_topk=req.ori_sparse_indices.shape[-1] if req.ori_sparse_indices is not None else 0,
                     ori_topk_length=req.ori_topk_length,
                     cmp_topk=index_topk if has_compressed else 0,
@@ -1631,6 +1636,8 @@ class AscendDSAV41IndexerMetadataBuilder(AscendDSAV41AttentionMetadataBuilder):
         index_topk = int(_config_value(text_config, "index_topk"))
         if self._supports_device_ops and req.cache_kind == "index_k":
             residual = req.cmp_residual
+            # Tasks execute after defer_device_metadata restores the builder mode.
+            metadata_in_graph = self._device_metadata_in_graph
 
             if self._uses_a5_packed_cache:
                 candidate_source = int(_config_value(text_config, "candidate_source_layer_id", -1))
@@ -1644,8 +1651,6 @@ class AscendDSAV41IndexerMetadataBuilder(AscendDSAV41AttentionMetadataBuilder):
                 candidate_block_size = (
                     int(_config_value(text_config, "candidate_block_size")) if emits_candidates else -1
                 )
-                # Deferred tasks run after the build context restores the builder's mode.
-                metadata_in_graph = self._device_metadata_in_graph
 
                 def build_qli_metadata() -> None:
                     if req.num_actual_tokens == 0 and not metadata_in_graph:
@@ -1674,6 +1679,9 @@ class AscendDSAV41IndexerMetadataBuilder(AscendDSAV41AttentionMetadataBuilder):
             else:
 
                 def build_qli_metadata() -> None:
+                    if req.num_actual_tokens == 0 and not metadata_in_graph:
+                        self._qli_metadata.zero_()
+                        return
                     value = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
                         int(_config_value(text_config, "index_n_heads")),
                         1,
@@ -1684,8 +1692,8 @@ class AscendDSAV41IndexerMetadataBuilder(AscendDSAV41AttentionMetadataBuilder):
                         seqused_k=req.cache_seq_lens,
                         cmp_residual_k=residual,
                         batch_size=req.num_reqs,
-                        max_seqlen_q=int(getattr(common, "max_query_len", 0)),
-                        max_seqlen_k=req.max_cache_seq_len,
+                        max_seqlen_q=-1 if metadata_in_graph else int(getattr(common, "max_query_len", 0)),
+                        max_seqlen_k=-1 if metadata_in_graph else req.max_cache_seq_len,
                         layout_q="TND",
                         layout_k="PA_BBND",
                         mask_mode=3,
