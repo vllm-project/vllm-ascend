@@ -823,6 +823,13 @@ class NPUModelRunner(GPUModelRunner):
                 "scheduled locally — a request sent directly to the decode node)."
             )
 
+    def prepare_padding_mask(self, num_tokens: int, num_tokens_after_padding: int) -> torch.Tensor:
+        # EPLB and decoder replay also consume validity when MoE padding skipping is off.
+        mask = self.input_buffers.is_padding[:num_tokens_after_padding]
+        mask[:num_tokens].fill_(False)
+        mask[num_tokens:].fill_(True)
+        return mask
+
     def _prepare_inputs_impl(
         self,
         scheduler_output: SchedulerOutput,
@@ -1080,7 +1087,7 @@ class NPUModelRunner(GPUModelRunner):
             **pp_kwargs,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
-            is_padding=self.input_buffers.is_padding[:num_tokens_after_padding],
+            is_padding=self.prepare_padding_mask(num_tokens, num_tokens_after_padding),
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
