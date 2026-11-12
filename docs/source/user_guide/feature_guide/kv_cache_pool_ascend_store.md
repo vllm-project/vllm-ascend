@@ -1662,6 +1662,107 @@ QoS can be configured through `kv_connector_extra_config`, which is injected int
 
 Values in `kv_connector_extra_config` take precedence over environment variables; a WARN log is emitted on override. For the Mooncake backend, `qos_priority` is merged into existing `ASCEND_GLOBAL_RESOURCE_CONFIG` (other fields preserved). When `ASCEND_GLOBAL_RESOURCE_CONFIG` was not set, configuring `qos_priority` also creates it.
 
+## External hash-boundary recovery
+
+Configure fine-grained prefix matching only with `--prefix-match-unit`.
+AscendStore consumes Core's resolved hash size and hit alignment. When Core's
+Mooncake Store coordinator permits partial hash hits, the same connector uses
+Core's boundary-state lookup and recovery. Otherwise it retains whole-page
+behavior. The requested PMU alone is not proof that a model can recover a
+sub-page boundary. No connector-specific granularity or mode option is needed:
+
+```json
+{
+  "kv_connector": "AscendStoreConnector",
+  "kv_role": "kv_both",
+  "kv_connector_extra_config": {
+    "backend": "mooncake",
+    "load_async": true
+  }
+}
+```
+
+Partial recovery requires a vLLM Core version with Mooncake Store
+`prefix_cacheable_groups` and partial-tail boundary-state handoff APIs. It fails
+explicitly on older versions; it does not patch Core or silently fall back to
+whole-page recovery when Core advertises finer recoverability. An unresolved
+Core hit alignment is not guessed from the command-line PMU. No custom module
+path is needed. Legacy connector-specific mode and setup-lock settings are
+rejected with a migration error; they do not override Core's decision.
+
+The scheduler, group recoverability checks, pinned checkpoint lifecycle,
+rank acknowledgements, lookup protocol, and metrics are inherited from Core's
+Mooncake Store connector. The NPU worker adapts registration, strided attention
+descriptors, and completion events. Like Core, Store objects contain complete
+logical blocks, with no inter-layer padding. Partial-tail keys identify the
+hash boundary up to which each block can be reused. Recurrent objects contain
+the **complete checkpoint at that boundary**, not a proportional slice of the
+state. Fine-grained logical hits do not imply PMU-sized I/O objects. A hash match alone is insufficient:
+Core only advertises a boundary recoverable across all required cache groups.
+Physical page sizes and local APC arbitration are not changed.
+
+The initial implementation supports rank-local Mooncake bulk transfers,
+asynchronous loads, NHD/HND attention views, and contiguous recurrent checkpoint
+components, including inter-layer slab padding. It rejects layerwise transfers,
+context parallelism, store TP sharing, custom memory pools, sleep mode, and
+HiSparse host caches. Other AscendStore backends are not supported by this
+path. Hash objects use a separate schema namespace and cannot be mixed
+with legacy whole-page objects. Use consistent model weights and configuration
+across workers sharing a pool, as with the upstream connector.
+
+For P/D deployments, place this connector on P (for example, in a
+`MultiConnector` with the P/D transport). External Store recovery on P and KV
+transfer to D are separate operations. Verify both, and do not interpret D's
+transport hits as proof of a fine-grained Store hit on P.
+
+To validate external recovery, seed a prefix whose end is not a physical-page
+boundary, wait for Store writes, reset **local APC only**, and submit a request
+sharing that prefix. Compare counter deltas for
+`vllm:external_prefix_cache_hits` and `vllm:prefix_cache_hits`: the former must
+show a non-page-aligned, hash-aligned hit while the latter remains zero.
+Compare restored output with a cold reference under the same topology and
+sampling settings. A short-output comparison is a functional check, not a full
+model-accuracy or throughput benchmark.
+
+For a pure P/D prefill producer, Ascend's existing scheduler/coordinator omit
+the EAGLE checkpoint backoff. The hash Store scheduler and worker reuse that
+same role policy, so Attention payload keys and Mamba state keys describe the
+same boundary. This does not disable MTP or change engine configuration.
+Consumers and `kv_both` deployments keep upstream Store's EAGLE policy.
+
+Fabric shared-handle self-import is unsupported by CANN: use a separate Store
+provider with capacity and configure inference clients with
+`"mode": "standalone-store"` and `"global_segment_size": "0GB"`
+if the installed SDK routes same-process pool reads through Fabric self-import.
+This deployment choice does not change Core's hash-boundary lookup or local APC.
+
+### Automatic Mooncake V2 engine compatibility
+
+Some SDKs cannot register the same NPU allocation with two Fabric engines.
+For a producer using `MultiConnector` with `MooncakeConnectorV2`, the Core-backed
+partial-recovery worker automatically borrows the process-local V2 engine.
+Independent mixed deployments keep their own Store engine. This is internal
+transport compatibility, not another user-facing prefix granularity setting.
+
+Sharing requires Mooncake `protocol="ascend"`, an independent external Store
+provider, and client `global_segment_size=0`. Keep a positive `local_buffer_size`
+in the Mooncake configuration: Core still parses and validates that value.
+The Ascend instance adapter explicitly maps it to native `local_buffer_size=0`
+because the hash worker uses direct NPU multi-buffer reads/writes rather than a
+host bounce buffer. Startup logs report both `configured_local_buffer_bytes`
+and `effective_native_local_buffer_bytes=0`; the configured buffer is **not**
+allocated on this internal direct-I/O path. No engine, pool, Fabric, APC, or model feature is
+disabled. Provider capacity is configured separately and is unchanged.
+
+Only reviewed direct multi-buffer and metadata APIs are exposed on this path.
+Calls requiring staging (including native `get`, `put`, `get_into`, or buffer
+allocation), and unknown future APIs, fail explicitly rather than silently
+using an unavailable buffer. V2 owns native KV registration and its lifecycle;
+Store validates coverage of every real strided view and does not re-register or
+unregister V2's live ranges. Store teardown retains the borrowed engine owner.
+This path does not cover host-resident cache groups or local Store capacity;
+unsupported protocol/provider combinations fail before native engine use.
+
 ## FAQ
 
 For common environment, installation, and general parameter issues, see the [Public FAQ](../../faqs.md). This chapter only covers issues specific to this feature.

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib
-import math
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -9,7 +8,7 @@ from collections.abc import Callable, Sequence
 
 import torch
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config_or_none
 from vllm.distributed import (
     get_pcp_group,
     get_pp_group,
@@ -19,6 +18,7 @@ from vllm.distributed import (
 from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
 from vllm.model_executor.model_loader.utils import get_model_cls
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -32,7 +32,11 @@ from vllm_ascend.core.kv_cache_placement import map_kvpp_layers_to_owners
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
+    AscendStoreCoordinator,
+    ExternalCachedBlockPool,
+    _HBMPrefixBlockHashes,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreBatch,
     KVCacheStoreRecvingThread,
@@ -53,14 +57,18 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
     KeyMetadata,
     ReqMeta,
+    StoreLookupResult,
+    TailKeyBoundary,
+    block_hash_to_bytes,
+    block_hash_to_str,
+    dense_cache_segments,
     get_block_hashes,
     get_group_cache_family,
     get_sharded_mamba_group_ids,
-    infer_cache_transfer_granularity,
-    infer_cacheable_group_ids,
     infer_group_block_sizes,
     infer_group_cache_families,
     infer_tp_mismatch_info,
+    resolve_pool_cache_geometry,
     uses_hybrid_kv_cache,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
@@ -74,8 +82,29 @@ from vllm_ascend.distributed.utils import (
 SAVE_BATCH_FAILURE_POLL_INTERVAL_S = 1.0
 
 
+def _engine_transfer_config(vllm_config, kv_cache_config):
+    # MultiConnector replaces only the child's transfer config. The scheduler
+    # planner retains the engine config; worker RPCs run in Core's explicit
+    # current-config context (the dynamic planner attribute may not cross IPC).
+    resolved = getattr(kv_cache_config, "kv_transfer_config", None)
+    if resolved is not None:
+        return resolved
+    current = get_current_vllm_config_or_none()
+    return (current if current is not None else vllm_config).kv_transfer_config
+
+
+def _shares_mooncake_v2_engine(transfer):
+    """Only the V2/Store MultiConnector pair borrows the process-local engine."""
+    if transfer is None or getattr(transfer, "kv_connector", None) != "MultiConnector":
+        return False
+    children = transfer.kv_connector_extra_config.get("connectors", ())
+    return any(child.get("kv_connector") == "MooncakeConnectorV2" for child in children)
+
+
 class BaseKVPoolWorker(ABC):
     """Common cache registration, metadata, lookup, and lifecycle for pool workers."""
+
+    enable_partial_hash_hits = False
 
     def __init__(
         self,
@@ -203,27 +232,23 @@ class BaseKVPoolWorker(ABC):
         use_eagle_fn = getattr(speculative_config, "use_eagle", None)
         self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
-        self.cacheable_group_ids = infer_cacheable_group_ids(kv_cache_groups)
-        cacheable_block_sizes = [self.original_block_size[i] for i in self.cacheable_group_ids]
-        self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
-        requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
-        if not isinstance(requested_hash_block_size, int):
-            requested_hash_block_size = None
-        self.hash_block_size = (
-            requested_hash_block_size if requested_hash_block_size is not None else min(cacheable_block_sizes)
-        ) * self.dcp_size
-        for group_id in self.cacheable_group_ids:
-            group_block_size = self.grouped_block_size[group_id]
-            assert group_block_size % self.hash_block_size == 0, "block_size must be divisible by hash_block_size"
+        self.pool_cache_geometry = resolve_pool_cache_geometry(
+            vllm_config, kv_cache_config, use_layerwise=use_layerwise
+        )
+        self.cacheable_group_ids = list(self.pool_cache_geometry.cacheable_group_ids)
+        self.enable_partial_hash_hits = self.pool_cache_geometry.partial_hits
+        if self.enable_partial_hash_hits:
+            self.use_eagle = self.pool_cache_geometry.use_eagle
+            self.load_async = extra_config.get("load_async", True)
+        self.grouped_block_size = list(self.pool_cache_geometry.block_sizes)
+        self.hash_block_size = self.pool_cache_geometry.hash_block_size
         self.block_size = self.grouped_block_size[0]
-        self.lcm_block_size = math.lcm(*(self.grouped_block_size[i] for i in self.cacheable_group_ids))
+        self.lcm_block_size = self.pool_cache_geometry.transfer_granularity
         self.num_kv_cache_groups = len(self.grouped_block_size)
         self.kv_cache_group_families = infer_group_cache_families(kv_cache_groups, self.compress_ratios, self.hf_config)
         self.group_uses_align_state = self._infer_group_uses_align_state()
         self.sharded_mamba_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
-        self.cache_transfer_granularity = infer_cache_transfer_granularity(
-            self.grouped_block_size, self.lcm_block_size, self.cacheable_group_ids
-        )
+        self.cache_transfer_granularity = self.pool_cache_geometry.transfer_granularity
         self.h2d_stagger_us = int(extra_config.get("h2d_stagger_us", 0))
 
         logger.info(
@@ -369,6 +394,10 @@ class BaseKVPoolWorker(ABC):
         # The connector's extra_config (with MultiConnector the child's own
         # config, not the top-level one) carries the QoS the backends inject.
         backend_kwargs["extra_config"] = extra_config
+        if self.backend.lower() == "mooncake" and self.enable_partial_hash_hits:
+            backend_kwargs["direct_only"] = _shares_mooncake_v2_engine(
+                _engine_transfer_config(self.vllm_config, self.kv_cache_config)
+            )
         self.m_store = real_backend(  # type: ignore[misc]
             parallel_config,
             **backend_kwargs,
@@ -404,19 +433,22 @@ class BaseKVPoolWorker(ABC):
         self._closed = True
 
     def _build_cache_coordinator(self, vllm_config: VllmConfig) -> AscendStoreCoordinator | None:
-        if self.kv_cache_config is None or not self.use_hybrid:
+        if self.kv_cache_config is None or not (self.use_hybrid or self.enable_partial_hash_hits):
             return None
         speculative_config = getattr(vllm_config, "speculative_config", None)
         use_eagle_fn = getattr(speculative_config, "use_eagle", None)
         use_eagle = bool(use_eagle_fn()) if callable(use_eagle_fn) else False
         return AscendStoreCoordinator(
-            self.kv_cache_config.kv_cache_groups,
+            list(self.pool_cache_geometry.groups),
             scheduler_block_size=self.cache_transfer_granularity,
             hash_block_size=self.hash_block_size,
             group_block_sizes=self.grouped_block_size,
             group_cache_families=self.kv_cache_group_families,
-            use_eagle=use_eagle,
-            retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
+            use_eagle=self.pool_cache_geometry.use_eagle if self.enable_partial_hash_hits else use_eagle,
+            retention_interval=self.pool_cache_geometry.retention_interval
+            if self.enable_partial_hash_hits
+            else vllm_config.cache_config.prefix_cache_retention_interval,
+            enable_partial_hash_hits=self.enable_partial_hash_hits,
         )
 
     def _infer_group_uses_align_state(self) -> list[bool]:
@@ -481,13 +513,35 @@ class BaseKVPoolWorker(ABC):
         Partial layerwise transfers also retain each segment's token interval.
         """
         block_len, block_stride, _, scale = self._get_cache_block_metadata(cache)
+        if getattr(self, "enable_partial_hash_hits", False) and not cache[0].is_contiguous():
+            # A shared HND slab can interleave heads/layers inside a physical
+            # page as well as between pages. Enumerate dense suffixes using
+            # actual strides; never copy the intervening padding or siblings.
+            suffix_axis = cache.ndim - 1
+            suffix_elements = cache.shape[suffix_axis]
+            if cache.stride(suffix_axis) != 1:
+                raise ValueError("AscendStore requires a dense innermost KV dimension")
+            while suffix_axis > 1 and cache.stride(suffix_axis - 1) == suffix_elements:
+                suffix_axis -= 1
+                suffix_elements *= cache.shape[suffix_axis]
+            import itertools
+
+            return [
+                (
+                    cache.data_ptr()
+                    + (kernel * cache.stride(0) + sum(i * s for i, s in zip(indices, cache.stride()[1:suffix_axis])))
+                    * cache.element_size(),
+                    suffix_elements * cache.element_size(),
+                    block_stride,
+                )
+                for kernel in range(scale)
+                for indices in itertools.product(*(range(n) for n in cache.shape[1:suffix_axis]))
+            ]
         physical_bytes = block_len // scale
         physical_stride = block_stride // scale
-        if scale == 1 or physical_stride == physical_bytes:
-            return [(cache.data_ptr(), block_len, block_stride)]
-        if not cache[0].is_contiguous():
+        if scale > 1 and physical_stride != physical_bytes and not cache[0].is_contiguous():
             raise ValueError("Segmented KV pool transfer requires contiguous data inside each physical block.")
-        return [(cache.data_ptr() + index * physical_stride, physical_bytes, block_stride) for index in range(scale)]
+        return dense_cache_segments(cache.data_ptr(), block_len, block_stride, scale, kernel_stride=physical_stride)
 
     def _get_combined_cache_transfer_segments(
         self, caches: tuple[torch.Tensor, ...], group_id: int
@@ -620,7 +674,11 @@ class BaseKVPoolWorker(ABC):
                 )
                 for segments in cache_segments:
                     for segment_index, (base_addr, block_len, block_stride) in enumerate(segments):
-                        group_cache_entry_segments.append((segment_index, len(segments)))
+                        # Hash recovery reads physical pages, not token slices:
+                        # each strided head descriptor spans the entire page.
+                        group_cache_entry_segments.append(
+                            (0, 1) if self.enable_partial_hash_hits else (segment_index, len(segments))
+                        )
                         group_addrs.append(base_addr)
                         group_block_lens.append(block_len)
                         group_block_strides.append(block_stride)
@@ -648,6 +706,36 @@ class BaseKVPoolWorker(ABC):
         This results in the calculated start address not being the previously aligned address.
         Therefore, we down-align the start address to meet the 2MB alignment requirement.
         """
+        if getattr(self, "enable_partial_hash_hits", False):
+            if _shares_mooncake_v2_engine(_engine_transfer_config(self.vllm_config, self.kv_cache_config)):
+                from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
+                    collect_configured_register_regions,
+                )
+
+                regions = collect_configured_register_regions(self.kv_cache_config, self.kv_caches)
+                registered_regions.clear()
+                registered_regions.update(
+                    {ptr: (ptr, ptr + size) for ptr, size in zip(regions.ptrs, regions.lengths, strict=True)}
+                )
+                return
+            registered_regions.clear()
+            alignment = 2 * 1024 * 1024
+            for caches in self.kv_caches.values():
+                for view in self._as_cache_tuple(caches):
+                    if not view.numel():
+                        continue
+                    storage = view.untyped_storage()
+                    raw, size = storage.data_ptr(), storage.nbytes()
+                    aligned = cdiv(raw, alignment) * alignment
+                    span = (
+                        1 + sum((n - 1) * stride for n, stride in zip(view.shape, view.stride()))
+                    ) * view.element_size()
+                    if any(stride <= 0 for stride in view.stride()) or not aligned <= view.data_ptr() < raw + size:
+                        raise ValueError("KV view is outside the aligned allocation")
+                    if view.data_ptr() + span > raw + size:
+                        raise ValueError("Strided KV view exceeds its allocation")
+                    registered_regions[raw] = (aligned, raw + size)
+            return
         if not self.use_hybrid:
             return
         alignment = 2 * 1024 * 1024
@@ -1076,6 +1164,57 @@ class BaseKVPoolWorker(ABC):
         if sorted(kv_cache_group_ids) != list(range(self.num_kv_cache_groups)):
             return None
         coordinator = self.cache_coordinator
+        if coordinator.enable_partial_hash_hits:
+            # Query hash keys, then let Core's cache managers arbitrate a joint
+            # recoverable boundary. IO later restores the containing pages.
+            keys, candidates, widths = [], [], []
+            hashes = block_hashes[: token_len // self.hash_block_size]
+            for group in coordinator.cacheable_group_ids:
+                prefix = self.token_database._get_key_prefix(group)
+                for value in hashes:
+                    variants = self._expand_lookup_key_variants(
+                        prefix + block_hash_to_str(value),
+                        group,
+                        include_all_ranks,
+                    )
+                    keys.extend(variants)
+                    candidates.append((group, block_hash_to_bytes(value)))
+                    widths.append(len(variants))
+            if not keys:
+                return StoreLookupResult(0)
+            values = self.m_store.exists(keys)
+            if values is None or len(values) != len(keys):
+                raise ValueError("Incomplete Store existence response")
+            present, offset = set(), 0
+            for candidate, width in zip(candidates, widths, strict=True):
+                if width and all(value == 1 for value in values[offset : offset + width]):
+                    present.add(candidate)
+                offset += width
+            pool = ExternalCachedBlockPool(self.hash_block_size, present)
+            core_hashes = _HBMPrefixBlockHashes(hashes, hbm_hit_tokens // self.hash_block_size)
+            _, hit = coordinator.find_longest_cache_hit(core_hashes, coordinator.align_lookup_length(token_len), pool)
+            if hit >= token_len:
+                _, hit = coordinator.find_longest_cache_hit(
+                    core_hashes,
+                    coordinator.align_lookup_length(token_len - 1),
+                    pool,
+                )
+            if hit <= hbm_hit_tokens:
+                return StoreLookupResult(hit)
+            boundaries = []
+            hit_index = hit // self.hash_block_size - 1
+            for group in coordinator.cacheable_group_ids:
+                page = coordinator.group_effective_block_sizes[group]
+                # A later key in this page can contain all Attention bytes
+                # needed at hit. Mamba managers require an exact state key.
+                page_end = min(((hit - 1) // page + 1) * page // self.hash_block_size, len(hashes))
+                for index in range(hit_index, page_end):
+                    if pool.contains(group, hashes[index]):
+                        boundaries.append(TailKeyBoundary(group, (index + 1) * self.hash_block_size))
+                        break
+                else:
+                    raise ValueError(f"No recoverable tail value for group {group} at {hit}")
+            return StoreLookupResult(hit, tuple(boundaries))
 
         def query_group_hits(
             group_id: int,
@@ -1290,6 +1429,14 @@ class BaseKVPoolWorker(ABC):
 
     def build_connector_worker_meta(self) -> AscendStoreKVConnectorWorkerMetadata | None:
         if isinstance(self.kv_send_thread, KVCacheStoreSendingThread):
+            if self.enable_partial_hash_hits:
+                completed, failed = self.kv_send_thread.take_save_outcomes()
+                if completed:
+                    rank = self.vllm_config.parallel_config.rank
+                    return AscendStoreKVConnectorWorkerMetadata(
+                        completed, {event: {rank} for event in completed}, failed
+                    )
+                return None
             if ce := self.kv_send_thread.get_completed_events():
                 return AscendStoreKVConnectorWorkerMetadata(ce)
         return None
@@ -1465,10 +1612,11 @@ class KVPoolWorker(BaseKVPoolWorker):
                     kv_cache_group_id=group_id,
                     skip_null_blocks=skip_null,
                     chunk_filter=chunk_filter,
+                    tail_key_boundary=dict(load_spec.tail_key_boundaries).get(group_id),
                 ):
                     addr, size, block_id = self.token_database.prepare_value(
                         start,
-                        end,
+                        start + group_block_size if self.enable_partial_hash_hits else end,
                         block_ids,
                         kv_cache_group_id=group_id,
                         block_id=block_id,
@@ -1498,7 +1646,7 @@ class KVPoolWorker(BaseKVPoolWorker):
                 time.perf_counter() - load_get_start,
                 len(key_list_c),
             )
-            if self.backend_name == "memcache" and (
+            if (self.backend_name == "memcache" or self.enable_partial_hash_hits) and (
                 ret is None or len(ret) != len(key_list_c) or any(r != 0 for r in ret)
             ):
                 self._record_failed_request(request)

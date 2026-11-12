@@ -606,6 +606,24 @@ class TestAscendStoreConnector(unittest.TestCase):
             mock_worker_cls.return_value.get_kv_events.return_value = events
             self.assertIsInstance(connector.get_kv_connector_kv_cache_events(), expected_type)
 
+    def test_shutdown_closes_scheduler_backend_even_when_lookup_close_fails(self):
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
+
+        for layerwise, fail in product((False, True), (False, True)):
+            with self.subTest(layerwise=layerwise, fail=fail), patch.object(KVConnectorBase_V1, "shutdown"):
+                connector = AscendStoreConnector.__new__(AscendStoreConnector)
+                connector.use_layerwise = layerwise
+                connector.connector_scheduler = MagicMock()
+                connector.connector_worker = None
+                scheduler = connector.connector_scheduler
+                if fail:
+                    scheduler.client.close.side_effect = RuntimeError("lookup close failed")
+                    with self.assertRaisesRegex(RuntimeError, "lookup close failed"):
+                        connector.shutdown()
+                else:
+                    connector.shutdown()
+                scheduler.store_scheduler.close.assert_called_once_with()
+
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
     def test_shutdown_closes_lookup_server(self, mock_worker_cls, mock_lookup_cls):
