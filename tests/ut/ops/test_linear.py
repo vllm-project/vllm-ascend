@@ -187,8 +187,9 @@ class TestShouldReshapeWoATo3d(unittest.TestCase):
         """fp8/int8 wo_a layout stays owned by the quantization path even with
         a single local group."""
         self.assertTrue(
-            self._reshape_decision("model.layers.0.self_attn.wo_a", torch.float8_e4m3fn, mx_quant_fusion=False,
-                                   n_local_groups=1)
+            self._reshape_decision(
+                "model.layers.0.self_attn.wo_a", torch.float8_e4m3fn, mx_quant_fusion=False, n_local_groups=1
+            )
         )
 
     def test_quantized_wo_a_not_reshaped_by_weight_loader(self):
