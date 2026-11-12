@@ -15,6 +15,7 @@
 #
 
 import gc
+import socket
 import sys
 import threading
 import weakref
@@ -127,10 +128,34 @@ class _FakeYrEngine:
         return SimpleNamespace(is_error=lambda: False)
 
 
+class _PortZeroRejectingYrEngine(_FakeYrEngine):
+    """Mimic openyuanrong-datasystem builds that reject an endpoint with port 0."""
+
+    def __init__(self, rpc_port=45678):
+        super().__init__(rpc_port=rpc_port)
+        self.accepted_port: int | None = None
+
+    def initialize(self, endpoint, protocol, device_name):
+        port = int(endpoint.rsplit(":", 1)[1])
+        if port == 0:
+            self.initialize_calls.append((endpoint, protocol, device_name))
+            return SimpleNamespace(
+                is_error=lambda: True,
+                to_string=lambda: "code=2, msg=targetHostname port should be positive",
+            )
+        self.accepted_port = port
+        return super().initialize(endpoint, protocol, device_name)
+
+    def get_rpc_port(self):
+        return self.accepted_port if self.accepted_port is not None else self.rpc_port
+
+
 def _install_yr_module_with_engine(monkeypatch, engine):
+    """Stub ``yr.datasystem``; ``engine`` is an instance or a zero-argument factory."""
     yr_module = ModuleType("yr")
     datasystem_module = ModuleType("yr.datasystem")
-    datasystem_module.TransferEngine = lambda: engine  # type: ignore[attr-defined]
+    factory = engine if callable(engine) else (lambda: engine)
+    datasystem_module.TransferEngine = factory  # type: ignore[attr-defined]
     datasystem_module.MemoryRegistration = object  # type: ignore[attr-defined]
     datasystem_module.ErrorCode = SimpleNamespace(kNotReady=1, kNotFound=2)  # type: ignore[attr-defined]
     yr_module.datasystem = datasystem_module  # type: ignore[attr-defined]
@@ -200,17 +225,67 @@ def test_initialize_transfer_engine_finalizes_engine_when_rpc_port_raises(monkey
     assert not backend._is_initialized
 
 
-def test_initialize_transfer_engine_propagates_initialize_failure(monkeypatch):
-    engine = _install_yr_module_with_engine(monkeypatch, _FakeYrEngine(initialize_error=True))
+def test_initialize_transfer_engine_retries_with_reserved_port(monkeypatch):
+    engines = [_PortZeroRejectingYrEngine(), _PortZeroRejectingYrEngine()]
+    pending = list(engines)
+    _install_yr_module_with_engine(monkeypatch, lambda: pending.pop(0))
     backend = RForkTransferBackend()
 
-    with pytest.raises(RuntimeError, match="mock initialize error"):
+    backend._initialize_transfer_engine()
+
+    rejected, accepted = engines
+    assert rejected.initialize_calls == [("10.0.0.1:0", "ascend", "npu:2")]
+    assert rejected.finalize_calls == 1
+    assert len(accepted.initialize_calls) == 1
+    endpoint, protocol, device_name = accepted.initialize_calls[0]
+    assert protocol == "ascend"
+    assert device_name == "npu:2"
+    assert not endpoint.endswith(":0")
+    reserved_port = int(endpoint.rsplit(":", 1)[1])
+    assert 0 < reserved_port <= transfer_backend.MAX_TRANSFER_ENGINE_RPC_PORT
+    assert backend.transfer_engine is accepted
+    assert backend.transfer_session_id == f"10.0.0.1:{accepted.get_rpc_port()}"
+    assert backend._is_initialized
+
+
+def test_initialize_transfer_engine_gives_up_after_bounded_attempts(monkeypatch):
+    engines = [_FakeYrEngine(initialize_error=True) for _ in range(transfer_backend.TRANSFER_ENGINE_PORT_ATTEMPTS)]
+    pending = list(engines)
+    _install_yr_module_with_engine(monkeypatch, lambda: pending.pop(0))
+    backend = RForkTransferBackend()
+
+    with pytest.raises(
+        RuntimeError,
+        match=f"failed after {transfer_backend.TRANSFER_ENGINE_PORT_ATTEMPTS} attempts",
+    ):
         backend._initialize_transfer_engine()
 
-    assert engine.initialize_calls == [("10.0.0.1:0", "ascend", "npu:2")]
-    assert engine.finalize_calls == 0
+    assert pending == []
+    assert all(engine.finalize_calls == 1 for engine in engines)
+    endpoints = [engine.initialize_calls[0][0] for engine in engines]
+    assert endpoints[0] == "10.0.0.1:0"
+    assert all(not endpoint.endswith(":0") for endpoint in endpoints[1:])
     assert backend.transfer_engine is None
     assert not backend._is_initialized
+
+
+def test_reserve_local_transfer_port_returns_a_bindable_port():
+    port = transfer_backend._reserve_local_transfer_port("10.0.0.1")
+
+    assert 0 < port <= transfer_backend.MAX_TRANSFER_ENGINE_RPC_PORT
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("", port))
+
+
+def test_reserve_local_transfer_port_uses_ipv6_for_ipv6_hosts():
+    try:
+        port = transfer_backend._reserve_local_transfer_port("::1")
+    except OSError:
+        pytest.skip("IPv6 loopback is unavailable")
+
+    assert 0 < port <= transfer_backend.MAX_TRANSFER_ENGINE_RPC_PORT
+    with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as sock:
+        sock.bind(("::1", port))
 
 
 def test_iter_transfer_chunks_splits_single_large_tensor():
