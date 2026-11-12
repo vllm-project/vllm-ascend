@@ -1050,8 +1050,9 @@ class BaseDeviceAdaptor:
             layout=layout,
             use_exp2=False,
             use_qk_l2norm_in_kernel=True,
+            use_beta_sigmoid_in_kernel=True,
             allow_neg_eigval=False,
-            disable_recompute=True,
+            disable_recompute=False,
             state_v_first=True,
         )
         if keep_meta is not None:
