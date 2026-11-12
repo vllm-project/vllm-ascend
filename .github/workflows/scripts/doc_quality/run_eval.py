@@ -276,6 +276,17 @@ def eval_one(rel, cfg):
         if os.path.isfile(p) and valid_problem_json(p):
             expect.append(out_json)
 
+    # 跨 H2 / 跨维度归并同一处缺陷（同一锚点被多条规则命中时只保留一条），
+    # 必须在 merge_and_score.py 之前执行，否则重复计分与重复行内评论无法消除。
+    # 开关：DOC_EVAL_CROSS_H2_DEDUP=0 关闭
+    try:
+        registry = llm_eval.load_registry(std_dir)
+    except (OSError, json.JSONDecodeError):
+        registry = None
+    absorbed = llm_eval.dedup_problem_files(temp_dir, expect, registry)
+    if absorbed:
+        print(f"[run_eval] 跨 H2 归并：吸收 {absorbed} 条重复命中")
+
     raw_path = os.path.join(temp_dir, "problems_raw.json")
     expect, dropped, merge_err = run_merge(temp_dir, raw_path, expect, merge_py)
     if dropped:

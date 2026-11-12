@@ -55,6 +55,13 @@ SCRIPT_LINKED = {
 REGISTRY_PATH = "common/h2_registry.json"
 SCORING_RULES_PATH = "common/_文档评分规则.md"
 
+# 同维度内跨 H2 归并开关（DOC_EVAL_CROSS_H2_DEDUP=0 关闭）
+CROSS_H2_MERGE = os.environ.get("DOC_EVAL_CROSS_H2_DEDUP", "1") != "0"
+
+# 严重度档位（与上游 merge_and_score.py 的 _sev_class 口径一致）
+SEV_CLASS_RANK = {"致命": 3, "严重": 2, "一般": 1, "提示": 0}
+SEV_CLASS_LETTER = {"致命": "F", "严重": "S", "一般": "N", "提示": "H"}
+
 SEV_RE = re.compile(r"^\s*(致命|严重|一般|提示)\s*([FSNH])?\s*[-－]\s*(\d+(?:\.\d+)?)")
 THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
@@ -298,6 +305,286 @@ def _call_llm(cfg, sys_prompt, user_prompt):
         [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_prompt}],
         max_tokens=cfg["max_tokens"],
     )
+
+
+# ---------------------------------------------------------------- 跨 H2 归并 ----
+
+# 同一行 + 同一锚点片段被多条规则命中 → 视为同一处缺陷，合并为一条，
+# 避免同一缺陷被多次计分、并在 PR 上产生多条重复的行内评论。
+# 上游 merge_and_score.py 的去重键含 H2（跨维度各自保留），CI 侧在 merge 之前先归并一次。
+
+# 维度优先级（与上游 merge_and_score.py 的 dim_priority 口径一致）
+DIM_PRIORITY = {"正确性": 0, "完整性": 1, "易理解": 2}
+
+# 链接类 H2（URL 锚点的归属判定）
+LINK_H2 = "链接错误或失效"
+
+# 锚点中的 URL（用于把「URL 本身」与「包含该 URL 的 markdown 链接」归到同一处）
+ANCHOR_URL_RE = re.compile(r"https?://[^\s\)\]>'\"，。；、]+")
+
+ALSO_HIT_ISSUE_MAX = 200  # also_hit 中保留的问题描述最大长度
+
+
+def _core_text(prob):
+    """取问题点原文：优先取【】标注的问题文字，否则取整段 original。
+
+    LLM 提示词要求用【】标出问题文字（如 「文本，【逗号】后面」），【】内才是
+    真正的问题片段；上下文仅用于定位，故锚点只用【】内文本，避免同一缺陷因
+    上下文长度差异被视为不同锚点。脚本产物无【】标记，直接用 original。
+    """
+    original = str(prob.get("original", "") or "")
+    m = re.search(r"【([^】]*)】", original)
+    if m and m.group(1).strip():
+        return m.group(1)
+    return original
+
+
+def _norm_anchor(text):
+    """锚点归一：去掉空白，避免同一片段因空白差异被视为不同锚点。"""
+    return re.sub(r"\s+", "", str(text or "")).strip()
+
+
+def _script_urls_by_line(loaded):
+    """收集脚本确证（_script）且原文为裸 URL 的链接类问题，按行号索引。
+
+    上游 merge_and_score.merge_script_llm_link_issues 的匹配口径是
+    「同行 + URL 出现在 LLM 问题的 original/issue 文本中」，且只作用于
+    正确性「链接错误或失效」H2；这里沿用同一口径，避免 CI 侧归并后上游又
+    重复合并一次（上游重建记录会丢弃 also_hit 等自定义字段）。
+    """
+    urls = {}
+    for _fname, _data, probs in loaded:
+        for p in probs:
+            if not isinstance(p, dict) or not p.get("_script"):
+                continue
+            if p.get("h2") != LINK_H2:
+                continue
+            original = str(p.get("original", "") or "").strip()
+            if ANCHOR_URL_RE.fullmatch(original):
+                urls.setdefault(str(p.get("line", "")), []).append(original)
+    return urls
+
+
+def _anchor_of(prob, script_urls=None):
+    """取归并锚点。
+
+    1) 链接类问题：同行存在脚本确证的 URL，且该 URL 出现在 original/issue
+       文本中 → 按该 URL 归一（与上游链接合并口径完全一致）；
+    2) 问题点原文含 URL → 按 URL 归一（把「裸 URL」与「含该 URL 的 markdown
+       链接」归到同一处）；
+    3) 其余按归一化的问题点原文归一。
+
+    脚本产物（_script）除链接类外不参与归并：其 original 是规则命中的粗粒度
+    片段（如某个词），与 LLM 的【问题点】同名并不代表同一处缺陷，强行归并会
+    吞掉不同问题。
+    """
+    core = _core_text(prob)
+    original = str(prob.get("original", "") or "")
+    line = str(prob.get("line", ""))
+
+    if prob.get("h2") == LINK_H2:
+        # 脚本产物原文就是裸 URL → 锚点即该 URL（同行可能有多个失效链接，
+        # 必须按自身 URL 锚定，否则会被同行另一条链接的锚点吸走）
+        own = original.strip()
+        if ANCHOR_URL_RE.fullmatch(own):
+            return "url:" + own
+        haystack = original + str(prob.get("issue", "") or "")
+        for url in (script_urls or {}).get(line, []):
+            if url in haystack:
+                return "url:" + url
+
+    if prob.get("_script"):
+        # 非链接类脚本问题：不参与归并（锚点唯一）
+        return "skip:" + str(id(prob))
+
+    m = ANCHOR_URL_RE.search(core)
+    if m:
+        return "url:" + m.group(0)
+
+    norm = _norm_anchor(core)
+    if not norm:
+        # 无有效问题点（如仅描述空白/行尾空格）→ 不参与归并，避免同行的空锚点被误并
+        return "skip:" + str(id(prob))
+    return "txt:" + norm
+
+
+def _sev_class(severity):
+    """取严重度档位（致命/严重/一般/提示）。"""
+    m = SEV_RE.match(str(severity or ""))
+    return m.group(1) if m else ""
+
+
+def _sev_rank(severity):
+    return SEV_CLASS_RANK.get(_sev_class(severity), 0)
+
+
+def _merge_group(group, seq_map):
+    """把命中同一锚点的多条问题合并为一条。
+
+    group: 问题字典列表（同一行 + 同一锚点）
+
+    合并口径：
+    - severity / h2 / h3 / dim 取自「严重度最高」的一条（严重度字符串内嵌 H3 编号，
+      必须与 h3 同源，不能交叉拼装），同为最高时按维度优先级（正确性 > 完整性 >
+      易理解）与 H2 序号决定；
+    - original 取带上下文的那一条（裸 URL 信息量最少），与上游链接合并口径一致；
+    - issue 合并全部描述，patch / fix_suggestion 取首个可用值，fixable 取「有则 ✅」；
+    - 脚本标记透传；被折叠条目写入 also_hit，信息不丢失。
+    """
+    def sev_key(p):
+        return _sev_rank(p.get("severity"))
+
+    def primary_key(p):
+        dim = str(p.get("dim", "") or "")
+        h2 = str(p.get("h2", "") or "")
+        return (
+            sev_key(p),
+            -DIM_PRIORITY.get(dim, 9),  # 正确性 > 完整性 > 易理解
+            -seq_map.get((dim, h2), 99),  # H2 序号靠前者优先
+        )
+
+    primary = max(group, key=primary_key)
+    merged = dict(primary)
+
+    # original：优先取带上下文的原文（裸 URL 仅是链接本身，信息量最少）
+    def ctx_key(p):
+        original = str(p.get("original", "") or "").strip()
+        bare = bool(ANCHOR_URL_RE.fullmatch(original))
+        same_dim = 1 if p.get("dim") == primary.get("dim") else 0
+        return (same_dim, 0 if bare else 1, len(original))
+
+    merged["original"] = max(group, key=ctx_key)["original"]
+
+    # issue：合并全部描述（去重、保留顺序）
+    texts = []
+    for p in group:
+        t = str(p.get("issue", "") or "").strip()
+        if t and t not in texts:
+            texts.append(t)
+    merged["issue"] = "；".join(texts)
+
+    # patch / fix_suggestion：取首个可精确定位的修复建议
+    if not merged.get("patch"):
+        for p in group:
+            if p.get("patch"):
+                merged["patch"] = p["patch"]
+                break
+    if not merged.get("fix_suggestion"):
+        for p in group:
+            if p.get("fix_suggestion"):
+                merged["fix_suggestion"] = p["fix_suggestion"]
+                break
+    merged["fixable"] = (
+        "✅" if any("✅" in str(p.get("fixable", "")) for p in group) else merged.get("fixable", "❌")
+    )
+
+    # 脚本标记：脚本确证 + LLM 语义同时命中 → 标记为「脚本+LLM」
+    has_script = any(p.get("_script") for p in group)
+    has_llm = any(not p.get("_script") for p in group)
+    if has_script:
+        merged["_script"] = True
+        merged["_script_llm_merged"] = True if has_llm else bool(primary.get("_script_llm_merged"))
+
+    merged["also_hit"] = [
+        {
+            "h2": p.get("h2", ""),
+            "h3": p.get("h3", ""),
+            "dim": p.get("dim", ""),
+            "severity": p.get("severity", ""),
+            "issue": str(p.get("issue", ""))[:ALSO_HIT_ISSUE_MAX],
+        }
+        for p in group
+        if p is not primary
+    ]
+    return primary, merged
+
+
+def dedup_problem_files(temp_dir, files, registry=None):
+    """跨 H2 / 跨维度归并同一处缺陷（发生在 merge_and_score.py 之前）。
+
+    files: 检测文件列表（LLM 逐 H2 文件 + 脚本产物）
+    registry: h2_registry.json 内容，用于取 H2 序号
+    命中同一锚点的多条问题只保留一条，其余折叠进幸存者的 also_hit 字段。
+    """
+    if not CROSS_H2_MERGE:
+        return 0
+    seq_map = {}
+    if registry:
+        for dim, items in registry.items():
+            if not isinstance(items, list):
+                continue  # 跳过 _comment 等非列表字段
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                seq_map[(dim, it.get("h2", ""))] = it.get("seq", 99)
+
+    loaded = []
+    for fname in files:
+        path = os.path.join(temp_dir, fname)
+        try:
+            data = json.loads(read_text(path))
+        except (OSError, json.JSONDecodeError):
+            continue
+        probs = data.get("problems")
+        if not isinstance(probs, list):
+            continue
+        loaded.append((fname, data, probs))
+
+    script_urls = _script_urls_by_line(loaded)
+
+    # 收集锚点分组（同一行 + 同一锚点视为同一处缺陷）
+    groups = {}
+    for fname, data, probs in loaded:
+        for p in probs:
+            if not isinstance(p, dict):
+                continue
+            key = (str(p.get("line", "")), _anchor_of(p, script_urls))
+            groups.setdefault(key, []).append((fname, data, probs, p))
+
+    removals = set()  # 被吸收条目的 id()
+    replacements = {}  # id(幸存者) → 合并后的字典
+    absorbed = 0
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        records = [g[3] for g in group]
+        primary, merged = _merge_group(records, seq_map)
+        replacements[id(primary)] = merged
+        for p in records:
+            if p is not primary:
+                removals.add(id(p))
+                absorbed += 1
+
+    if not absorbed:
+        return 0
+
+    for fname, data, probs in loaded:
+        new_probs = []
+        changed = False
+        for p in probs:
+            if id(p) in removals:
+                changed = True
+                continue
+            rep = replacements.get(id(p))
+            if rep is not None:
+                new_probs.append(rep)
+                changed = True
+            else:
+                new_probs.append(p)
+        if not changed:
+            continue
+        data["problems"] = new_probs
+        # h2_summaries 的问题计数同步（上游 merge 会再次重算，此处保持文件自洽）
+        hs = data.get("h2_summaries")
+        if isinstance(hs, list):
+            for h in hs:
+                if not isinstance(h, dict):
+                    continue
+                h["problems"] = sum(1 for p in new_probs if p.get("h2") == h.get("h2"))
+        path = os.path.join(temp_dir, fname)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    return absorbed
 
 
 def eval_regular_h2(dim, item, lines, total, rel_path, cfg, scoring):

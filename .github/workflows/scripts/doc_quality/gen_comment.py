@@ -70,6 +70,26 @@ def load_problems(out_dir, entry):
         return []
 
 
+def also_hit_note(p):
+    """被归并的其他规则命中（同一处缺陷被多条规则命中时折叠进 also_hit）。"""
+    hits = p.get("also_hit")
+    if not isinstance(hits, list) or not hits:
+        return ""
+    descs = []
+    for h in hits:
+        if not isinstance(h, dict):
+            continue
+        h2 = h.get("h2", "")
+        h3 = h.get("h3", "")
+        rule = f"{h2} {h3}".strip()
+        letter, code, _ = parse_sev(h.get("severity"))
+        tag = f"{letter}-{code}" if code else letter
+        descs.append(f"[{tag}] {rule}")
+    if not descs:
+        return ""
+    return f"Also matched ({len(descs)} more rule{'s' if len(descs) > 1 else ''}): " + ", ".join(descs)
+
+
 def problem_line(entry, repo, sha, p):
     letter, code, _ = parse_sev(p.get("severity"))
     tag = f"{letter}-{code}" if code else letter
@@ -86,6 +106,9 @@ def problem_line(entry, repo, sha, p):
         text += f"\n  - Suggested fix: {fmt_code(patch['old'])} → {fmt_code(patch.get('new', ''))}"
     elif p.get("fix_suggestion"):
         text += f"\n  - Suggestion: {p['fix_suggestion']}"
+    note = also_hit_note(p)
+    if note:
+        text += f"\n  - {note}"
     return text
 
 
