@@ -1827,12 +1827,13 @@ def _reshape_kv_cache_v2(
                     continue
                 if owner.role == GDN:
                     assert isinstance(kv_cache_spec, MambaSpec)
-                    region_names = ("r1", "r2")
-                    if len(region_names) != len(kv_cache_spec.shapes):
-                        raise RuntimeError(
-                            f"Invalid Qwen4 hybrid Mamba role/shape for {layer_name}: "
-                            f"role={owner.role}, shapes={kv_cache_spec.shapes}."
+                    region_names = tuple(
+                        f"r{state_index}"
+                        for state_index in range(
+                            1,
+                            len(kv_cache_spec.shapes) + 1,
                         )
+                    )
                     kv_caches[layer_name] = [
                         make_slab_view(
                             raw_slab,
