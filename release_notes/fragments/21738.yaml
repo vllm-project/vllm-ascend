@@ -1,0 +1,5 @@
+pr: 21738
+entries:
+  - category: feature
+    text: Added DSpine speculative decoding integration for Model Runner V2 through the DFlash serving path, requiring a vLLM revision with DSpine support.
+    model: DSpine
