@@ -34,6 +34,40 @@ from vllm_ascend.utils import (
 )
 
 
+@pytest.mark.parametrize("block_size,interleave", [(768, 128), (768, 384), (768, 768), (1536, 768), (1536, 1536)])
+def test_kimi_hybrid_pd_keeps_kernel_interleave_after_manager_block_growth(block_size, interleave):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(architecture="KimiK31ForConditionalGeneration"),
+        cache_config=SimpleNamespace(block_size=block_size, cache_dtype="fp8"),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=8, cp_kv_cache_interleave_size=interleave),
+        kv_transfer_config=SimpleNamespace(kv_connector="MooncakeConnectorV2"),
+        use_v2_model_runner=True,
+    )
+    with (
+        patch("vllm_ascend.platform.model_uses_sfa_sparse", return_value=True),
+        patch("vllm_ascend.platform.enable_sp", return_value=False),
+    ):
+        _validate_sfa_dcp_kv_sp(config)
+    assert config.parallel_config.cp_kv_cache_interleave_size == interleave
+
+
+@pytest.mark.parametrize("connector,interleave", [("MooncakeConnectorV2", 64), ("MooncakePullConnector", 192)])
+def test_kimi_hybrid_pd_rejects_sub_kernel_interleave(connector, interleave):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(architecture="KimiK31ForConditionalGeneration"),
+        cache_config=SimpleNamespace(block_size=768, cache_dtype="fp8"),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=2, cp_kv_cache_interleave_size=interleave),
+        kv_transfer_config=SimpleNamespace(kv_connector=connector),
+        use_v2_model_runner=True,
+    )
+    with (
+        patch("vllm_ascend.platform.model_uses_sfa_sparse", return_value=True),
+        patch("vllm_ascend.platform.enable_sp", return_value=False),
+        pytest.raises(ValueError, match="interleave.*kernel block size"),
+    ):
+        _validate_sfa_dcp_kv_sp(config)
+
+
 @pytest.mark.parametrize(
     "partition",
     ["20,23", "19,24", "28,15", "20,8,15", "23,20", "21,22", "17,26", "20,4,19"],
@@ -431,6 +465,11 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(NPUPlatform.simple_compile_backend, "eager")
         self.assertEqual(NPUPlatform.ray_device_key, "NPU")
         self.assertEqual(NPUPlatform.device_control_env_var, "ASCEND_RT_VISIBLE_DEVICES")
+
+    def test_get_kv_cache_config_builder_cls(self):
+        assert NPUPlatform.get_kv_cache_config_builder_cls(self.mock_vllm_config()) == (
+            "vllm_ascend.core.kv_cache_config_builder.AscendKVCacheConfigBuilder"
+        )
 
     @patch("vllm_ascend.platform.enable_sp", return_value=False)
     @patch("vllm_ascend.platform.enable_sfa_dcp_replicated_indexer", return_value=True)

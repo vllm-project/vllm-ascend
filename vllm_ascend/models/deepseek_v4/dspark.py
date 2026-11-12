@@ -385,14 +385,14 @@ class DeepseekV4DSparkModel(nn.Module):
     ) -> torch.Tensor:
         return logits_processor(lm_head, self.norm(hidden_states))
 
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+    def get_expert_mapping(self, *, num_redundant_experts: int = 0) -> list[tuple[str, str, int, str]]:
         return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
             num_experts=self.config.n_routed_experts,
-            num_redundant_experts=0,
+            num_redundant_experts=num_redundant_experts,
         )
 
 
@@ -439,6 +439,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
                 self.moe_mlp_layers.append(layer.mlp)
                 self.moe_layers.append(layer.mlp.experts)
 
+        self.num_moe_layers = len(self.moe_layers)
         self.extract_moe_parameters(example_moe)
 
     def forward(
@@ -506,7 +507,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
         Non-MTP weights belong to the target model and are skipped, except for
         standalone embedding/head weights used by the Ascend draft loader.
         """
-        expert_mapping = self.model.get_expert_mapping()
+        expert_mapping = self.model.get_expert_mapping(num_redundant_experts=self.num_redundant_experts)
 
         # (param_name, checkpoint shard name, shard_id) for non-expert
         # stacked parameters. Ascend keeps wq_a and wkv as separate parameters.

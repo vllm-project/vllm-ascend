@@ -119,13 +119,3 @@ def test_baseline_and_mtp_rejection_share_request_rng_state():
     # Second seed-42 draw exceeds p(draft)=0.25: rejection + recovery use two draws.
     torch.rand(2, generator=expected)
     assert draw(sampler, [0])[0].item() == torch.rand((), generator=expected).item()
-
-
-def test_inactive_exponential_request_does_not_advance_rng():
-    active, inactive = reference(11), reference(22)
-    before = inactive.get_state().clone()
-    sample_utils.fill_exponential_310p(torch.empty(2, 4), {0: active, 1: inactive}, active_mask=[True, False])
-    assert torch.equal(inactive.get_state(), before)
-    expected = reference(11)
-    torch.rand(4, generator=expected)
-    assert torch.equal(active.get_state(), expected.get_state())

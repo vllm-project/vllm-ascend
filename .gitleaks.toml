@@ -70,6 +70,24 @@ paths = [
 ]
 rules = ["generic-api-key"]
 
+# Reviewed operator identifiers in PR #20878; both path and exact code line must match.
+[[allowlists]]
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['^csrc/attention/attn_res_fwd/op_host/attn_res_fwd_tiling\.cpp$']
+regexTarget = "line"
+regexes = [
+    '^\s*tilingKey_ = plan\.tokenGroupSize != 0 \? TILING_KEY_BF16_TOKEN_GROUP : TILING_KEY_BF16_COOPERATIVE;\s*$',
+    '^\s*if \(tilingKey_ == TILING_KEY_BF16_COOPERATIVE \|\| tilingKey_ == TILING_KEY_BF16_TOKEN_GROUP\) \{\s*$',
+]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['^vllm_ascend/attention/indexer\.py$']
+regexTarget = "line"
+regexes = ['^\s*key\.dtype == torch\.float8_e4m3fn\s*$']
+
 # Placeholder allowlist for syntax validation; does not permit any files
 [[allowlists]]
 paths = ["^$"]

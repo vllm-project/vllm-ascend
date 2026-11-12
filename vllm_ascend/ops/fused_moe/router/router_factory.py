@@ -49,7 +49,6 @@ def create_ascend_fused_moe_router(
     eplb_state: EplbLayerState | None = None,
     num_logical_experts: int | None = None,
     hash_indices_table: torch.Tensor | None = None,
-    tid2eid: torch.Tensor | None = None,
     bias_vl: torch.Tensor | None = None,
     image_sentinel_lo: int = 129257,
 ) -> FusedMoERouter:
@@ -99,7 +98,7 @@ def create_ascend_fused_moe_router(
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             num_logical_experts=num_logical_experts,
-            tid2eid=tid2eid,
+            tid2eid=hash_indices_table,
             bias_vl=bias_vl,
             image_sentinel_lo=image_sentinel_lo,
         )

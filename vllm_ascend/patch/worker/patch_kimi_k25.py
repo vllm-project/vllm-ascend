@@ -26,8 +26,8 @@ from vllm.model_executor.models.kimi_k25_vit import (
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.utils import vllm_version_is
 
-if vllm_version_is("0.32.0"):
-    # 0.32.0 decorates its torch-compiled `get_rope_shape` with a first-call
+if vllm_version_is("0.33.0"):
+    # 0.33.0 decorates its torch-compiled `get_rope_shape` with a first-call
     # warmup; main removed both the decorator and the compile wrapper.
     import vllm.model_executor.models.kimi_k25_vit as kimi_k25_vit  # type: ignore[import-not-found]
 
@@ -47,7 +47,7 @@ def get_rope_shape(org, interpolation_mode, shape):
     )
 
 
-if vllm_version_is("0.32.0"):
+if vllm_version_is("0.33.0"):
     # Keep the release lane's first-call warmup; the Ascend function is plain,
     # so on main the decorator no longer exists and nothing is dropped.
     get_rope_shape = get_rope_shape_decorate(get_rope_shape)

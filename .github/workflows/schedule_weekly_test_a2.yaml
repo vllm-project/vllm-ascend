@@ -72,7 +72,7 @@ defaults:
 
 # only cancel in-progress runs of the same workflow
 concurrency:
-  group: ascend-weekly-${{ github.ref }}-a2${{ inputs.request_id && format('-{0}', inputs.request_id) || '' }}
+  group: ascend-weekly-${{ github.ref }}-a2-${{ inputs.vllm_ascend_branch }}${{ inputs.request_id && format('-{0}', inputs.request_id) || '' }}
   cancel-in-progress: true
 
 env:
@@ -247,9 +247,18 @@ jobs:
     runs-on: linux-aarch64-a2b3-0
     steps:
       - name: Clear pre-logs on pvc
+        env:
+          VLLM_ASCEND_BRANCH: ${{ inputs.vllm_ascend_branch }}
         run: |
-          # Clear logs generated before the test to avoid confusion
-          rm -rf "${ASCEND_LOG_PREFIX:?}"/* || true
+          # Only clear this branch's directory so a concurrent run of another
+          # branch keeps its in-flight logs on the shared PVC.
+          branch=$(printf '%s' "$VLLM_ASCEND_BRANCH" | tr '/' '-')
+          if [ -z "$branch" ]; then
+            echo "vllm_ascend_branch is empty; skip clearing logs"
+            exit 0
+          fi
+          echo "Clearing ${ASCEND_LOG_PREFIX}/${branch}"
+          rm -rf "${ASCEND_LOG_PREFIX:?}/${branch:?}"/* || true
 
   merge-benchmark-artifacts:
     name: Merge benchmark artifacts into weekly-a2.zip
