@@ -166,7 +166,7 @@ def run_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed:
                 # That wake leaves nothing asleep, so the engine resumes scheduling on
                 # its own and no explicit `/resume` is needed.
                 post_control(server, "wake_up", params={"tags": ["kv_cache"]})
-                signatures.append(generation_signature(client, case.model))
+                signatures.append(generation_signature(client, case.model, image_prompt=case.image_prompt))
             if not peer.join(timeout=CONTROL_TIMEOUT):
                 raise TimeoutError("IPC trainer peer did not exit after the two updates")
         finally:

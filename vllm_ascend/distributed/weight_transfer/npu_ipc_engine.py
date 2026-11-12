@@ -144,13 +144,13 @@ class NPUIPCWeightTransferEngine(IPCWeightTransferEngine):
     def start_weight_update(self) -> None:
         patterns = getattr(self.model_config, "sleep_preserve_parameter_names", [])
         retained = []
-        
+
         if patterns:
             selected = set()
             for name, parameter in self.model.named_parameters():
                 if any(fnmatchcase(name, pattern) for pattern in patterns):
                     selected.add(id(parameter))
-    
+
             for module in self.model.modules():
                 named_parameters = module.named_parameters(
                     recurse=False,
@@ -167,7 +167,7 @@ class NPUIPCWeightTransferEngine(IPCWeightTransferEngine):
         try:
             # Only fill omitted parameters after all trainer weights arrive.
             from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
-            
+
             for module, name, value in getattr(self, "_retained_parameters", []):
                 parameter = getattr(module, name)
                 if parameter is value:

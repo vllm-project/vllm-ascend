@@ -90,7 +90,7 @@ def run_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bo
                     engine.send_weights()
                 finally:
                     post_control(server, "resume")
-                signatures.append(generation_signature(client, case.model))
+                signatures.append(generation_signature(client, case.model, image_prompt=case.image_prompt))
         finally:
             engine.shutdown()
 
