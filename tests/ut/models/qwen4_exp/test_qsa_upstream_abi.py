@@ -91,6 +91,49 @@ def test_indexer_compressed_key_falls_back_when_fused_abi_is_not_satisfied(monke
     upstream_projection.assert_called_once_with(pooled, first_positions)
 
 
+def test_indexer_compression_falls_back_when_graph_shape_misses_fused_abi(monkeypatch) -> None:
+    layer = qsa.AscendQSAIndexer.__new__(qsa.AscendQSAIndexer)
+    torch.nn.Module.__init__(layer)
+    raw_cache = torch.empty((4, 1, 4))
+    compressed_cache = torch.empty_like(raw_cache)
+    layer.raw_key_cache = SimpleNamespace(key_cache=raw_cache, rope_position_cache=None)
+    layer.compressed_key_cache = SimpleNamespace(kv_cache=compressed_cache)
+    layer.compress_ratio = 4
+    layer._fused_norm_rope_eligible = Mock(return_value=False)
+
+    pooled = torch.empty((1, 4))
+    first_positions = torch.zeros((1, 3), dtype=torch.long)
+    compress = Mock(return_value=(pooled, first_positions))
+    normalize = Mock(return_value=torch.ones_like(pooled))
+    store = Mock()
+    fused_compress = Mock(side_effect=AssertionError("fused path must not run"))
+    monkeypatch.setattr(qsa, "_compress_qsa_groups", compress)
+    monkeypatch.setattr(qsa, "_store_qsa_cache_rows", store)
+    monkeypatch.setattr(qsa, "qsa_compress_groups_with_ratio_fused", fused_compress)
+    layer.normalize_compressed_keys = normalize
+
+    raw_metadata = SimpleNamespace(
+        num_actual_tokens=2,
+        logical_positions=torch.tensor([0, 1]),
+        block_table=torch.empty((1, 1), dtype=torch.int32),
+        token_to_req=torch.zeros(2, dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+        slot_mapping=torch.tensor([0, 1]),
+    )
+    compressed_metadata = SimpleNamespace(slot_mapping=torch.tensor([0]))
+    token_k = torch.empty((2, 1, 4))
+    positions = torch.arange(2)
+
+    layer._update_and_compress(token_k, positions, raw_metadata, compressed_metadata)
+
+    compress.assert_called_once()
+    normalize.assert_called_once_with(pooled, first_positions)
+    fused_compress.assert_not_called()
+    assert store.call_count == 2
+    assert store.call_args_list[0].args[0] is compressed_cache
+    assert store.call_args_list[1].args[0] is raw_cache
+
+
 def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch) -> None:
     layer = qsa.AscendQwen4ExpQSAAttention.__new__(qsa.AscendQwen4ExpQSAAttention)
     torch.nn.Module.__init__(layer)
