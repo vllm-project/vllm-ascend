@@ -244,8 +244,6 @@ MINIMAX_M3_CASE = WeightUpdateModelCase(
     extra_server_args=("--block-size", "128", "--kv-cache-memory-bytes", str(MINIMAX_M3_KV_CACHE_BYTES)),
 )
 
-MINIMAX_CASES = (MINIMAX_M3_CASE,)
-
 
 # Keep packed lanes skipped until #18763 fixes cross-stream chunk loading.
 # HCCL's second update diverged in #18726 (38570793020, attempts 1/2) and
@@ -259,7 +257,7 @@ PACKED_LANE_SKIP_REASON = (
 )
 
 
-MODEL_CASES = (*QWEN_CASES, *DEEPSEEK_CASES, *DEEPSEEK_V41_CASES, *GLM_CASES, *MINIMAX_CASES)
+MODEL_CASES = (*QWEN_CASES, *DEEPSEEK_CASES, *DEEPSEEK_V41_CASES, *GLM_CASES, MINIMAX_M3_CASE)
 
 
 def pytest_model_cases(backend: str, *, model_cases: tuple[WeightUpdateModelCase, ...] = MODEL_CASES) -> list[Any]:
