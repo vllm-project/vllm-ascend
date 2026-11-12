@@ -716,40 +716,38 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         return [getattr(layer, name)]
 
     def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
-        if mlp_compute_input.activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
-            # GMM produces contiguous [gate | up] BF16 output. Mode 2 applies
-            # the clipped, non-interleaved SwiGLU-OAI before MXFP8 quantization;
+        if mlp_compute_input.activation in (MoEActivation.SWIGLUOAI_UNINTERLEAVE, MoEActivation.SWIGLUSTEP):
+            # Both modes consume GMM's contiguous [gate | up] BF16 output;
             # mode 1 would instead interpret alternating gate/up elements.
             hidden_states = self.apply_gmm1(mlp_compute_input)
+            activation_kwargs: dict[str, Any]
+            if mlp_compute_input.activation == MoEActivation.SWIGLUSTEP:
+                # Mode 3 clamps gate after SiLU, matching SwigluStepAndMul
+                # without alpha/bias or interleaving.
+                # vLLM list type 1 and operator group_mode 0 both mean token counts.
+                activation_kwargs = dict(
+                    group_index=cumsum_group_list(mlp_compute_input.group_list, mlp_compute_input.group_list_type, 1),
+                    group_mode=0,
+                    swiglu_mode=3,
+                    # Step3p5 may omit the limit from MoE config. Fall back to
+                    # 7.0 when it is missing, None or zero; otherwise use its value.
+                    clamp_limit=getattr(mlp_compute_input, "swiglu_limit", 0.0) or 7.0,
+                )
+            else:
+                # Mode 2 applies the non-interleaved SwiGLU-OAI activation:
+                # clamp before activation, using the configured alpha/bias.
+                activation_kwargs = dict(
+                    swiglu_mode=2,
+                    clamp_limit=mlp_compute_input.swiglu_limit,
+                    glu_alpha=mlp_compute_input.swiglu_alpha,
+                    glu_bias=mlp_compute_input.swiglu_beta,
+                )
             hidden_states, out_scale = torch_npu.npu_swiglu_mx_quant(
                 hidden_states,
                 activate_left=True,
-                swiglu_mode=2,
-                clamp_limit=mlp_compute_input.swiglu_limit,
-                glu_alpha=mlp_compute_input.swiglu_alpha,
-                glu_bias=mlp_compute_input.swiglu_beta,
                 dst_type=self.act_quant_type,
                 scale_alg=self._dynamic_mx_quant_scale_alg,
-            )
-            return hidden_states, maybe_normalize_mxfp_scale_layout(out_scale)
-
-        if mlp_compute_input.activation == MoEActivation.SWIGLUSTEP:
-            # Mode 3 consumes [gate | up] and clamps gate after SiLU,
-            # matching SwigluStepAndMul without alpha/bias or interleaving.
-            hidden_states = self.apply_gmm1(mlp_compute_input)
-            # vLLM list type 1 and operator group_mode 0 both mean token counts.
-            group_index = cumsum_group_list(mlp_compute_input.group_list, mlp_compute_input.group_list_type, 1)
-            hidden_states, out_scale = torch_npu.npu_swiglu_mx_quant(
-                hidden_states,
-                activate_left=True,
-                group_index=group_index,
-                group_mode=0,
-                swiglu_mode=3,
-                # Step3p5 may omit the limit from MoE config. Fall back to
-                # 7.0 when it is missing, None or zero; otherwise use its value.
-                clamp_limit=getattr(mlp_compute_input, "swiglu_limit", 0.0) or 7.0,
-                dst_type=self.act_quant_type,
-                scale_alg=self._dynamic_mx_quant_scale_alg,
+                **activation_kwargs,
             )
             return hidden_states, maybe_normalize_mxfp_scale_layout(out_scale)
 
