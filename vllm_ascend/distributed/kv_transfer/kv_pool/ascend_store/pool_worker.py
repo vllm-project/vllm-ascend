@@ -394,10 +394,6 @@ class BaseKVPoolWorker(ABC):
         # The connector's extra_config (with MultiConnector the child's own
         # config, not the top-level one) carries the QoS the backends inject.
         backend_kwargs["extra_config"] = extra_config
-        if self.backend.lower() == "mooncake" and self.enable_partial_hash_hits:
-            backend_kwargs["direct_only"] = _shares_mooncake_v2_engine(
-                _engine_transfer_config(self.vllm_config, self.kv_cache_config)
-            )
         self.m_store = real_backend(  # type: ignore[misc]
             parallel_config,
             **backend_kwargs,
