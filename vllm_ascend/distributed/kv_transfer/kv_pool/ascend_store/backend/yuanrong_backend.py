@@ -4,7 +4,6 @@ from dataclasses import dataclass
 
 import torch
 from vllm.config import ParallelConfig
-from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import logger
 from vllm.utils.network_utils import split_host_port
 
@@ -102,14 +101,16 @@ class YuanrongBackend(Backend):
         )
         self._registered_buffers: tuple[list[int], list[int]] | None = None
         self._buffers_registered = False
+        self.device_id = torch.npu.current_device() if enable_data_plane else None
 
     def set_device(self):
-        local_rank = get_world_group().local_rank
-        device = torch.device(f"npu:{local_rank}")
-        torch.npu.set_device(device)
+        if self.device_id is None:
+            raise RuntimeError("Metadata-only Yuanrong clients do not bind an NPU device.")
+        torch.npu.set_device(self.device_id)
 
     @classmethod
     def create_scheduler_client(cls, parallel_config: ParallelConfig):
+        # Scheduler clients are metadata-only and never bind an NPU device.
         return cls(parallel_config, enable_data_plane=False)
 
     def register_buffer(self, ptrs: list[int], lengths: list[int]):
