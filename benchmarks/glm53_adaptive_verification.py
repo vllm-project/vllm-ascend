@@ -56,17 +56,21 @@ def compare_accuracy(reference, actual):
     for expected, observed in zip(reference["cases"], actual["cases"], strict=True):
         if expected["batch_size"] != observed["batch_size"] or expected["prefix_len"] != observed["prefix_len"]:
             raise ValueError("Reference and candidate must use identical workload cases")
+        if len(expected["accuracy"]) != expected["batch_size"] or len(observed["accuracy"]) != observed["batch_size"]:
+            raise ValueError("Accuracy results must include every request in the workload")
         for request, (left, right) in enumerate(zip(expected["accuracy"], observed["accuracy"], strict=True)):
+            left_rows = list(zip(left["token_ids"], left["logprobs"], strict=True))
+            right_rows = list(zip(right["token_ids"], right["logprobs"], strict=True))
+            if any(not math.isfinite(logprob) for _, logprob in left_rows + right_rows):
+                raise ValueError("Accuracy logprobs must be finite")
             if left["token_ids"] != right["token_ids"]:
                 differences.append(
                     {"batch_size": observed["batch_size"], "prefix_len": observed["prefix_len"], "request": request}
                 )
-            for a, b, a_lp, b_lp in zip(left["token_ids"], right["token_ids"], left["logprobs"], right["logprobs"]):
-                if a != b:
+            for (left_token, left_logprob), (right_token, right_logprob) in zip(left_rows, right_rows):
+                if left_token != right_token:
                     break
-                if not math.isfinite(a_lp) or not math.isfinite(b_lp):
-                    raise ValueError("Accuracy logprobs must be finite")
-                max_logprob_delta = max(max_logprob_delta, abs(a_lp - b_lp))
+                max_logprob_delta = max(max_logprob_delta, abs(left_logprob - right_logprob))
     return {"greedy_token_mismatches": differences, "max_shared_prefix_logprob_delta": max_logprob_delta}
 
 
