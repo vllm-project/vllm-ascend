@@ -1,5 +1,16 @@
-name: 'Image build lint'
+name: Image Build Lint
 on:
+  pull_request:
+    branches:
+      - main
+      - 'releases/v*'
+    paths:
+      - '.github/workflows/schedule_lint_image_build.yaml'
+      - '.github/vllm-main-verified.commit'
+      - '.github/workflows/dockerfiles/Dockerfile.lint'
+      - 'requirements-lint.txt'
+      - 'requirements-dev.txt'
+      - 'requirements.txt'
   schedule:
     # Runs daily at 20:00 UTC
     - cron: '0 20 * * *'
@@ -28,8 +39,11 @@ env:
 
 jobs:
   build:
-    # Only maintained branches may publish; manual runs follow the same rule.
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/releases/v')
+    # PRs only build; maintained branches may publish.
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.ref == 'refs/heads/main' ||
+      startsWith(github.ref, 'refs/heads/releases/v')
     name: vllm-ascend lint image build
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -42,7 +56,7 @@ jobs:
       - name: Resolve image tag
         id: image
         env:
-          LINT_REF: ${{ github.ref_name }}
+          LINT_REF: ${{ github.base_ref || github.ref_name }}
         shell: bash
         run: |
           tag=lint-main
@@ -56,6 +70,7 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Log in to Quay
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v4
         with:
           registry: quay.io
@@ -71,14 +86,14 @@ jobs:
           [[ "$commit" =~ ^[0-9a-f]{7,40}$ ]] || { echo '::error::Invalid vLLM commit'; exit 1; }
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push lint image
+      - name: Build lint image
         uses: docker/build-push-action@v7
         with:
           context: .
           file: .github/workflows/dockerfiles/Dockerfile.lint
           platforms: linux/amd64
           tags: ${{ env.IMAGE_REPOSITORY }}:${{ steps.image.outputs.tag }}
-          push: true
+          push: ${{ github.event_name != 'pull_request' }}
           provenance: false
           build-args: |
             VLLM_COMMIT=${{ steps.vllm.outputs.commit }}
