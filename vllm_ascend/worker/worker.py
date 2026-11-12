@@ -523,16 +523,29 @@ class NPUWorker(WorkerBase):
         with set_current_vllm_config(self.vllm_config):
             try:
                 if isinstance(update_info, list):
-                    parallel_config = self.vllm_config.parallel_config
-                    local_update_info = update_info[
-                        parallel_config.data_parallel_index * parallel_config.world_size + self.rank
-                    ]
+                    local_update_info = update_info[self._global_update_rank()]
                 else:
                     local_update_info = update_info
                 self.weight_transfer_engine.update_weights(local_update_info)
             except BaseException:
                 self._end_weight_update(refresh=False)
                 raise
+
+    def _global_update_rank(self) -> int:
+        """This worker's index into a list payload ordered by global worker
+        rank across data parallel replicas.
+
+        The internal executors (mp/uni/ray) rank workers within each data
+        parallel replica from 0, so the replica offset must be added. The
+        external launcher runs every worker as its own process instead:
+        ``self.rank`` already spans all replicas and ``world_size`` already
+        includes the data parallel dimension, so adding the offset again
+        would index past the end of the list.
+        """
+        parallel_config = self.vllm_config.parallel_config
+        if parallel_config.distributed_executor_backend == "external_launcher":
+            return self.rank
+        return parallel_config.data_parallel_index * parallel_config.world_size + self.rank
 
     def finish_weight_update(self) -> None:
         """Finish the current weight update; runs layerwise postprocessing."""
