@@ -122,13 +122,14 @@ class LayerBatchBuilder:
             dtype=np.int64,
         )
         self._block_stride_np = np.asarray(layout.block_strides, dtype=np.int64)
-        layer_cache_entry_offsets = layout.layer_offsets
-        if layer_cache_entry_offsets is None:
+        if layout.layer_offsets is not None:
+            self._layer_cache_entry_offsets_np = np.asarray(layout.layer_offsets, dtype=np.int64)
+        else:
             caches_per_layer = max(1, self._block_len_np.shape[0] // max(1, num_layers))
-            layer_cache_entry_offsets = [
-                min(layer * caches_per_layer, self._block_len_np.shape[0]) for layer in range(num_layers + 1)
-            ]
-        self._layer_cache_entry_offsets_np = np.asarray(layer_cache_entry_offsets, dtype=np.int64)
+            self._layer_cache_entry_offsets_np = np.asarray(
+                [min(layer * caches_per_layer, self._block_len_np.shape[0]) for layer in range(num_layers + 1)],
+                dtype=np.int64,
+            )
         self._block_ids_buf: np.ndarray | None = None
         self._block_gvas_buf: np.ndarray | None = None
 
