@@ -1115,6 +1115,19 @@ class AscendGDNAttentionBackend(GDNAttentionBackend):
     def get_builder_cls() -> type[AscendGDNAttentionMetadataBuilder]:
         return AscendGDNAttentionMetadataBuilder
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # vLLM #60271 rejects in ``init_attn_backend`` every backend that does
+        # not declare support while ``VLLM_BATCH_INVARIANT`` is set. Qwen3.5's
+        # GDN layers assign this backend directly (``patch_qwen3_5`` replaces
+        # ``get_attn_backend``), so the selector's own check never sees them and
+        # the engine would refuse to start. The Ascend GDN path is per-sequence:
+        # the chunk size is a constant and every prefill/decode kernel is keyed
+        # on ``cu_seqlens`` or the per-request state indices, so one request's
+        # arithmetic does not depend on the rest of the batch. The TP4
+        # batch-invariance e2e case for Qwen3.5-35B-A3B judges the numerics.
+        return True
+
 
 class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
     """Build only the descriptors consumed by AscendC host-metadata paths."""
