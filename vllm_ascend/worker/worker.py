@@ -445,6 +445,7 @@ class NPUWorker(WorkerBase):
 
         assert self.weight_transfer_engine is not None
         self.weight_transfer_engine.finish_weight_update()
+        self._refresh_recurrent_gate_biases()
         self.model_runner.reset_lora_state()
         self._weight_update_active = False
 
@@ -1481,8 +1482,15 @@ class NPUWorker(WorkerBase):
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)
 
+    def _refresh_recurrent_gate_biases(self) -> None:
+        # Keep the optional GDN implementation lazy for worker initialization.
+        from vllm_ascend.ops.gdn import refresh_recurrent_gate_biases
+
+        refresh_recurrent_gate_biases(self.model_runner.get_model())
+
     def reload_weights(self, *args, **kwargs) -> None:
         self.model_runner.reload_weights(*args, **kwargs)
+        self._refresh_recurrent_gate_biases()
 
     def check_health(self) -> None:
         import subprocess
