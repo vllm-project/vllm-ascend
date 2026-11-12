@@ -1,0 +1,6 @@
+pr: 21662
+entries:
+  - category: performance
+    text: >-
+      PCP prefill reuses ND communication copies of static O-projection
+      weight shards to avoid repeated format conversions before weight all-gather.
