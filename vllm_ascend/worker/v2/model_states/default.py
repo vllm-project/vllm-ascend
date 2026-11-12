@@ -43,7 +43,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     get_sparse_kv_offload_manager,
     update_sparse_kv_offload_metadata,
 )
-from vllm_ascend.utils import should_skip_allreduce_across_dp_group
+from vllm_ascend.utils import embedding_tp_enable, should_skip_allreduce_across_dp_group
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, ring_state_update_skipped
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
@@ -374,6 +374,16 @@ class AscendModelState(DefaultModelState):
             "slot_mapping": slot_mappings[group_id],
             "block_table": block_tables[group_id][: batch.num_reqs],
         }
+
+    def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor:
+        inputs_embeds = super().dummy_inputs_embeds(num_tokens)
+        if ring_state_update_skipped() and self.supports_mm_inputs and embedding_tp_enable():
+            # Active MM-capable ranks exchange embeddings before graph replay.
+            # Runtime idle peers must join that exchange before their graph too.
+            # Preserve the persistent buffer address read by the captured graph.
+            input_ids = torch.zeros(num_tokens, dtype=torch.int32, device=inputs_embeds.device)
+            inputs_embeds.copy_(self.model.embed_input_ids(input_ids))
+        return inputs_embeds
 
     def prepare_inputs_embeds(self, scheduled_encoder_inputs, input_batch, req_states) -> torch.Tensor:
         # MRV2 prepares MM embeddings before entering ForwardContext. Upstream

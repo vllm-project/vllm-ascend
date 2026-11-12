@@ -8,7 +8,37 @@ from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 
 import vllm_ascend.ops.vocab_parallel_embedding as vocab_embedding
+import vllm_ascend.worker.v2.model_states.default as model_state_module
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
+
+
+@pytest.mark.parametrize("runtime_idle", [False, True])
+@pytest.mark.parametrize("fine_embedding", [False, True])
+@pytest.mark.parametrize("supports_mm", [False, True])
+def test_idle_embedding_joins_exchange_and_keeps_graph_buffer(monkeypatch, runtime_idle, fine_embedding, supports_mm):
+    state = AscendModelState.__new__(AscendModelState)
+    state.supports_mm_inputs = supports_mm
+    persistent = torch.full((6, 4), -1.0)
+    state.encoder_runner = SimpleNamespace(inputs_embeds=persistent)
+    state.inputs_embeds = persistent
+    joined = torch.arange(16, dtype=torch.float32).reshape(4, 4)
+    state.model = SimpleNamespace(embed_input_ids=Mock(return_value=joined))
+    monkeypatch.setattr(model_state_module, "ring_state_update_skipped", lambda: runtime_idle)
+    monkeypatch.setattr(model_state_module, "embedding_tp_enable", lambda: fine_embedding)
+
+    result = state.dummy_inputs_embeds(4)
+
+    assert result.data_ptr() == persistent.data_ptr()
+    assert result.shape == (4, 4)
+    if runtime_idle and fine_embedding and supports_mm:
+        state.model.embed_input_ids.assert_called_once()
+        ids = state.model.embed_input_ids.call_args.args[0]
+        torch.testing.assert_close(ids, torch.zeros(4, dtype=torch.int32))
+        torch.testing.assert_close(result, joined)
+    else:
+        state.model.embed_input_ids.assert_not_called()
+        torch.testing.assert_close(result, torch.full((4, 4), -1.0))
+    torch.testing.assert_close(persistent[4:], torch.full((2, 4), -1.0))
 
 
 @pytest.mark.parametrize(
