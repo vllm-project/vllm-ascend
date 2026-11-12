@@ -2227,9 +2227,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             # times faster at decode batch sizes, where M << N makes
             # npu_transpose_batchmatmul's kernel selection the bottleneck.
             num_tokens = o_proj_input.shape[0]
-            return torch.ops.vllm.unquantized_gemm(
-                o_proj_input.view(num_tokens, -1), self.wo_a.weight
-            ).unsqueeze(1)
+            return torch.ops.vllm.unquantized_gemm(o_proj_input.view(num_tokens, -1), self.wo_a.weight).unsqueeze(1)
         return torch_npu.npu_transpose_batchmatmul(
             o_proj_input,
             self.wo_a.weight,
