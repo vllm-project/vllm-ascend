@@ -718,7 +718,7 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
 
 === "A3 series"
 
-    This W4A8 PD deployment uses one 16-device A3 series host specified by `local_ip`. Prefill uses TP2 × PP4 × DP1 (EP2) on devices 0–7. Decode uses TP2 × PP1 × DP4 (EP8) on devices 8–15. Both roles load the same checkpoint. The proxy routes requests through one Prefill API endpoint and one Decode API endpoint (1P1D); Decode runs four DP replicas behind its endpoint.
+    This W4A8 PD deployment uses one 16-device A3 series host specified by `local_ip`. Prefill uses TP2 × PP4 × DP1 (EP2) on devices 0–7. Decode uses TP2 × DP4 (EP8) on devices 8–15. Both roles load the same checkpoint. The proxy routes requests through one Prefill API endpoint and one Decode API endpoint (1P1D); Decode runs four DP replicas behind its endpoint.
 
     Before starting:
 
@@ -841,7 +841,7 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
 
     **Service Verification:**
 
-    Check the startup logs for TP2 × PP4 × DP1 (EP2) on Prefill and TP2 × PP1 × DP4 (EP8) with `enable_static_kernel=true` on Decode. From the serving host, check that both APIs list `qwen38-flash-next-a3-pd`:
+    Check the startup logs for TP2 × PP4 × DP1 (EP2) on Prefill and TP2 × DP4 (EP8) with `enable_static_kernel=true` on Decode. From the serving host, check that both APIs list `qwen38-flash-next-a3-pd`:
 
     ```bash
     curl --fail "http://127.0.0.1:25568/v1/models"
@@ -865,7 +865,7 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
 
 === "950DT products"
 
-    This W4A8-MXFP deployment uses eight devices on one 950DT products host. Prefill and Decode each use TP2 × PP1 × DP2 (EP4), with one command per role managing both DP replicas behind a single API endpoint. MooncakeConnectorV2 transfers KV cache between the two roles.
+    This W4A8-MXFP deployment uses eight devices on one 950DT products host. Prefill and Decode each use TP2 × DP2 (EP4), with one command per role managing both DP replicas behind a single API endpoint. MooncakeConnectorV2 transfers KV cache between the two roles.
 
     | Setting | Prefill | Decode |
     | --- | --- | --- |
@@ -1031,7 +1031,7 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
 
     **Service Verification:**
 
-    Check the startup logs for TP2 × PP1 × DP2 (EP4) on each role, `cudagraph_mode=NONE` on Prefill, and `FULL_DECODE_ONLY` with static kernels on Decode. Check that both APIs list `qwen38-flash-next-950-dt-pd` before starting the proxy:
+    Check the startup logs for TP2 × DP2 (EP4) on each role, `cudagraph_mode=NONE` on Prefill, and `FULL_DECODE_ONLY` with static kernels on Decode. Check that both APIs list `qwen38-flash-next-950-dt-pd` before starting the proxy:
 
     ```bash
     local_ip="<LOCAL_SERVICE_IP>"
@@ -1053,7 +1053,7 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
 **A2/A3 key parameters:**
 
 - A2 Prefill uses TP4 × PP2 × DP1 (EP4), and A3 Prefill uses TP2 × PP4 × DP1 (EP2). Both run in eager mode with `enable_prefill_mc2=true` and fused MC2 disabled. Check MC2 token limits before increasing the batch budget.
-- A2 and A3 Decode use TP2 × PP1 × DP4 (EP8), `FULL_DECODE_ONLY`, NPU graph extension, static kernels, and recompute scheduling; super kernels are disabled.
+- A2 and A3 Decode use TP2 × DP4 (EP8), `FULL_DECODE_ONLY`, NPU graph extension, static kernels, and recompute scheduling; super kernels are disabled.
 - Both roles use three MTP draft tokens, with `enforce_eager=true` on P and `false` on D. Batch tokens are 8192; P/D HCCL buffers are 8192/512.
 - Engram CPU offload requires supported n-gram layers and sufficient host memory. P uses `dp_shared_memory=false`; D uses `true`. Shared-memory DP replicas must share a host and shared-memory namespace.
 - Both roles set prefix caching, Mamba cache mode `align`, and Mamba state dtype `bfloat16`. Keep Mooncake TP/PP/DP declarations consistent with the model commands; clear `VLLM_PP_LAYER_PARTITION` to use the default partition.
@@ -1061,7 +1061,7 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
 
 **950DT products key parameters:**
 
-- Each command starts TP2 × PP1 × DP2 (EP4) on four devices. `--api-server-count 1` exposes one API endpoint per role; use distinct DP RPC ports for Prefill and Decode.
+- Each command starts TP2 × DP2 (EP4) on four devices. `--api-server-count 1` exposes one API endpoint per role. Use distinct DP RPC ports for Prefill and Decode.
 - Model Runner V2, async scheduling, and expert parallelism are enabled.
 - Engram uses CPU offload and DP shared memory. DP replicas must share the same host and shared-memory namespace.
 - Prefill enables prefix caching and uses `cudagraph_mode=NONE`; static kernels are disabled.
@@ -1077,7 +1077,7 @@ The 10K target is the processed input length, including text and image tokens. K
 
 === "A3 series"
 
-    This single-host W4A8 example uses TP4 × PP2 × DP1 (EP4) on devices 0–7 for Prefill and TP2 × PP1 × DP4 (EP8) on devices 8–15 for Decode. The proxy routes to one Prefill API and four Decode APIs, one per DP rank.
+    This single-host W4A8 example uses TP4 × PP2 × DP1 (EP4) on devices 0–7 for Prefill and TP2 × DP4 (EP8) on devices 8–15 for Decode. The proxy routes to one Prefill API and four Decode APIs, one per DP rank.
 
     Initialize the A3 container and runtime as described in [Section 4.1](#41-docker-image-installation). Use a W4A8 checkpoint with the vision encoder and image processor. Run the following environment setup in both the Prefill and Decode terminals. Set `local_ip` and `nic_name` to the serving host's address and interface.
 
@@ -1833,11 +1833,11 @@ Use the templates shipped inside the selected image: `/usr/local/python3.11.10/l
 
 === "A3 series"
 
-    Use the A3 model topology from Section 5.2. Prefill uses TP2 × PP4 × DP1 (EP2), and Decode uses TP2 × PP1 × DP4 (EP8).
+    Use the A3 model topology from Section 5.2. Prefill uses TP2 × PP4 × DP1 (EP2), and Decode uses TP2 × DP4 (EP8).
 
     !!! note "A3 128K/1K multi-prefix pooling topology"
 
-        The steady-state workload with 128K input tokens, 1K output tokens, and multiple prefixes uses 16 devices, eight per role. Prefill uses DP2, TP2, EP4, and PP2. Decode uses DP4, TP2, EP8, and PP1. Keep the Mooncake topology consistent with both roles. The startup commands below show the base A3 pooling configuration.
+        The steady-state workload with 128K input tokens, 1K output tokens, and multiple prefixes uses 16 devices, eight per role. Prefill uses DP2, TP2, EP4, and PP2. Decode uses DP4, TP2, and EP8. Keep the Mooncake topology consistent with both roles. The startup commands below show the base A3 pooling configuration.
 
     !!! note "Check host huge pages if A3 pooling stalls"
 
@@ -2052,7 +2052,7 @@ Use the templates shipped inside the selected image: `/usr/local/python3.11.10/l
 
 === "950DT products"
 
-    This single-host example uses TP2 × PP1 × DP2 (EP4) per role, with Prefill on devices 0–3 and Decode on devices 4–7. Use the prepared runtime from Section 4.3 and the same W4A8-MXFP checkpoint for both roles.
+    This single-host example uses TP2 × DP2 (EP4) per role, with Prefill on devices 0–3 and Decode on devices 4–7. Use the prepared runtime from Section 4.3 and the same W4A8-MXFP checkpoint for both roles.
 
     **Prepare a new pool:**
 
