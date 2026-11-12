@@ -60,6 +60,11 @@ from vllm_ascend.utils import vllm_version_is
 
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 
+# The fla_npu AscendC recurrent GDN kernel silently returns without writing
+# output when a sequence exceeds this many tokens. Wider speculative windows
+# must use the uncapped FLA Triton recurrent kernel instead.
+_MAX_RECURRENT_GDN_TOKENS = 8
+
 
 @lru_cache(maxsize=1)
 def _get_fla_gdn_prefill_op():
