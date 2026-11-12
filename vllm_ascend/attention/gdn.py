@@ -31,13 +31,13 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.model_executor.utils import replace_parameter
+from vllm.third_party.flash_linear_attention.ops.fused_recurrent import fused_recurrent_gated_delta_rule
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 from vllm.triton_utils import triton
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
-from vllm_ascend.attention.gdn_attn_builder import AscendGDNFusedAttentionBackend
 from vllm_ascend.attention.gdn_recoverssm_metadata import AscendGDNRecoverSSMAttentionBackend
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
