@@ -1669,6 +1669,27 @@ Use the templates shipped inside the selected image: `/usr/local/python3.11.10/l
 
 `dram.size` and `ubsio.mem.size_in_gb` apply per DRAM-enabled LocalService; budget their total alongside Engram, vLLM, and operating-system memory. `world_size` is pool capacity; `device_count` counts the host's DRAM-enabled LocalServices, not SSDs. LocalServices run inside P/D workers; the `ubsio.standalone.*` keys do not require a separate process.
 
+!!! note "Check host huge pages if pooling stalls"
+
+    If a P or D worker stalls during MemCache DRAM initialization and the host kernel repeatedly reports `alloc_contig_range ... PFNs busy`, check the reserved 1 GiB HugeTLB pages on each affected host. The following example assumes NUMA nodes 0–7.
+
+    ```bash
+    for n in 0 1 2 3 4 5 6 7; do
+        printf 'node%s: ' "$n"
+        cat "/sys/devices/system/node/node${n}/hugepages/hugepages-1048576kB/nr_hugepages"
+    done
+    ```
+
+    To test with preallocated pages, run the following as root on the host before starting Prefill and Decode. Adjust the node IDs and page count for the available host memory. This example reserves 32 GiB per node, or 256 GiB total. Leave enough memory for MemCache, Engram, and vLLM.
+
+    ```bash
+    for n in 0 1 2 3 4 5 6 7; do
+        echo 32 > "/sys/devices/system/node/node${n}/hugepages/hugepages-1048576kB/nr_hugepages"
+    done
+    ```
+
+    Repeat the first command and confirm that each selected node reports the requested count. Recheck after a host reboot. Use the P/D startup logs and API checks to verify that the services are ready. Watchdog dumps and shared-memory broadcast wait messages can also occur while static kernels compile. Check the worker stack and kernel log before attributing the wait to huge-page allocation.
+
 === "A2 series"
 
     Keep the A2 model configuration from Section 5.2: TP4 × PP2 × DP1 for Prefill and TP2 × DP4 for Decode, on separate eight-device hosts.
@@ -1873,27 +1894,6 @@ Use the templates shipped inside the selected image: `/usr/local/python3.11.10/l
     !!! note "A3 128K/1K multi-prefix pooling topology"
 
         The steady-state workload with 128K input tokens, 1K output tokens, and multiple prefixes uses 16 devices, eight per role. Prefill uses DP2, TP2, EP4, and PP2. Decode uses DP4, TP2, and EP8. Keep the Mooncake topology consistent with both roles. The startup commands below show the base A3 pooling configuration.
-
-    !!! note "Check host huge pages if A3 pooling stalls"
-
-        If a P or D worker stalls during MemCache DRAM initialization and the host kernel repeatedly reports `alloc_contig_range ... PFNs busy`, check the reserved 1 GiB HugeTLB pages on the host. The following example assumes NUMA nodes 0–7.
-
-        ```bash
-        for n in 0 1 2 3 4 5 6 7; do
-            printf 'node%s: ' "$n"
-            cat "/sys/devices/system/node/node${n}/hugepages/hugepages-1048576kB/nr_hugepages"
-        done
-        ```
-
-        To test with preallocated pages, run the following as root on the host before starting Prefill and Decode. Adjust the node IDs and page count for the available host memory. This example reserves 32 GiB per node, or 256 GiB total. Leave enough memory for MemCache, Engram, and vLLM.
-
-        ```bash
-        for n in 0 1 2 3 4 5 6 7; do
-            echo 32 > "/sys/devices/system/node/node${n}/hugepages/hugepages-1048576kB/nr_hugepages"
-        done
-        ```
-
-        Repeat the first command and confirm that each selected node reports the requested count. Recheck after a host reboot. Use the P/D startup logs and API checks to verify that the services are ready. Watchdog dumps and shared-memory broadcast wait messages can also occur while static kernels compile. Check the worker stack and kernel log before attributing the wait to huge-page allocation.
 
     **Prepare a new pool:**
 
