@@ -29,6 +29,8 @@ from vllm.compilation import breakable_cudagraph
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
+from vllm.distributed.parallel_state import get_pp_group
+from vllm.distributed.utils import get_distributed_timeout_or_none
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
@@ -102,6 +104,7 @@ from vllm_ascend.observability.runtime_guard.hooks import (
 from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
+    create_hccl_pg_options,
     enable_sfa_dcp_sharded_indexer,
     is_c8_mxfp_kv_quant,
     is_deepseek_v41,
@@ -168,6 +171,20 @@ class NPUModelRunner(GPUModelRunner):
         spec_pp_support = resolve_spec_pp_support(vllm_config)
         with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
+        if self.use_pp:
+            assert self.pp_handler is not None
+            old_broadcast_group = self.pp_handler.broadcast_group
+            if torch.distributed.get_backend(old_broadcast_group) == "hccl":
+                broadcast_group, _ = torch.distributed.new_subgroups_by_enumeration(
+                    get_pp_group().group_ranks,
+                    timeout=get_distributed_timeout_or_none(),
+                    backend="hccl",
+                    pg_options=create_hccl_pg_options("pp_broadcast"),
+                    group_desc="pp_broadcast",
+                )
+                assert broadcast_group is not None
+                self.pp_handler.broadcast_group = broadcast_group
+                torch.distributed.destroy_process_group(old_broadcast_group)
         # These FIA models need post-rejection host counts on every PP stage.
         # TODO: Remove this extra PP sync when FIA and its metadata builders
         # use device lengths instead of exact CPU lengths.
@@ -1309,7 +1326,7 @@ class NPUModelRunner(GPUModelRunner):
             spec is not None
             and self.speculator is not None
             and spec.method == "dflash"
-            and self.model_config.hf_text_config.model_type == "glm_moe_dsa"
+            and self.model_config.hf_text_config.model_type in ("glm_moe_dsa", "glm5_next_text")
             and spec.draft_model_config is not None
             and "DFlash2DraftModel" in (spec.draft_model_config.architectures or [])
         ):

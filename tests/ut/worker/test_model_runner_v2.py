@@ -1,5 +1,6 @@
 import ast
 from contextlib import contextmanager, nullcontext
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -43,13 +44,14 @@ def _make_runner(need_timing: bool = True):
     runner.vllm_config = SimpleNamespace(
         kv_transfer_config=None,
         use_v2_model_runner=False,
-        parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1),
     )
     runner.max_num_tokens = 16
     runner.model_config = SimpleNamespace(
         hf_config=SimpleNamespace(model_type="other_model"),
         # GPUModelRunner.load_model reads this on main (sleep-mode memory pool).
         enable_sleep_mode=False,
+        use_mla=False,
     )
     runner.kv_cache_config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
     runner.kvpp = SimpleNamespace(complete_forward=lambda: None)  # type: ignore[assignment]
@@ -1101,8 +1103,22 @@ def _parent_init(self, vllm_config, device, *, full_graph=False, speculative=Fal
     self.speculator = object()
 
 
-@pytest.mark.parametrize("use_pp", [False, True])
-def test_init_without_speculation(use_pp):
+@pytest.mark.parametrize(
+    ("use_pp", "backend_name", "env_buffer_size"),
+    [
+        pytest.param(False, None, None, id="pp1"),
+        pytest.param(True, "gloo", None, id="gloo"),
+        pytest.param(True, "hccl", None, id="hccl-default-buffer"),
+        pytest.param(True, "hccl", "64", id="hccl-small-buffer"),
+        pytest.param(True, "hccl", "512", id="hccl-large-buffer"),
+    ],
+)
+def test_init_without_speculation(monkeypatch, use_pp, backend_name, env_buffer_size):
+    if env_buffer_size is None:
+        monkeypatch.delenv("HCCL_BUFFSIZE", raising=False)
+    else:
+        monkeypatch.setenv("HCCL_BUFFSIZE", env_buffer_size)
+
     vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(enable_eplb=False, pipeline_parallel_size=2 if use_pp else 1)
     )
@@ -1115,12 +1131,42 @@ def test_init_without_speculation(use_pp):
         embedding_tensor_parallel_size=0,
         mlp_tensor_parallel_size=0,
     )
+    # The old group exposes no private backend API.
+    old_group = object()
+    new_group = object()
+    pp_handler = SimpleNamespace(broadcast_group=old_group)
+    group_ranks = [[0, 2], [1, 3]]
+    timeout = timedelta(seconds=30)
+
+    def parent_init(self, cfg, dev):
+        _parent_init(self, cfg, dev, use_pp=use_pp)
+        if use_pp:
+            self.pp_handler = pp_handler
+
+    def destroy_old_group(group):
+        assert group is old_group
+        assert pp_handler.broadcast_group is new_group
+
+    get_backend = Mock(return_value=backend_name)
+    new_subgroups = Mock(return_value=(new_group, [new_group, torch.distributed.GroupMember.NON_GROUP_MEMBER]))
+    destroy_group = Mock(side_effect=destroy_old_group)
+    broadcast = Mock()
+    monkeypatch.setattr(torch.distributed, "get_backend", get_backend)
+    monkeypatch.setattr(torch.distributed, "new_subgroups_by_enumeration", new_subgroups)
+    monkeypatch.setattr(torch.distributed, "destroy_process_group", destroy_group)
+    monkeypatch.setattr(torch.distributed, "broadcast", broadcast)
+    monkeypatch.setattr(
+        "vllm_ascend.worker.v2.model_runner.get_pp_group", lambda: SimpleNamespace(group_ranks=group_ranks)
+    )
+    monkeypatch.setattr("vllm_ascend.worker.v2.model_runner.get_distributed_timeout_or_none", lambda: timeout)
+    monkeypatch.setattr("vllm_ascend.utils.calculate_dp_buffer_size", lambda: 50)
+
     with (
         patch("vllm_ascend.worker.v2.model_runner.get_ascend_config", return_value=ascend_config),
         patch("vllm_ascend.worker.v2.model_runner.set_potential_max_tokens"),
         patch("vllm_ascend.worker.v2.model_runner.resolve_spec_pp_support", return_value=None),
         patch("vllm_ascend.worker.v2.model_runner.torch_cuda_wrapper", return_value=nullcontext()),
-        patch.object(GPUModelRunner, "__init__", lambda self, cfg, dev: _parent_init(self, cfg, dev, use_pp=use_pp)),
+        patch.object(GPUModelRunner, "__init__", parent_init),
         patch("vllm_ascend.worker.v2.model_runner.AscendEPLBController", return_value="eplb"),
         patch("vllm_ascend.worker.v2.model_runner.AscendRequestState", return_value="req"),
         patch("vllm_ascend.worker.v2.model_runner.AscendInputBuffers", return_value="buf"),
@@ -1148,9 +1194,24 @@ def test_init_without_speculation(use_pp):
     assert runner._dspark_prefill_progress == {}
     assert runner.sync_spec_pp_cpu_counts is False
     assert runner.decode_query_len == 1
-    if use_pp:
-        assert vars(runner.pp_handler) == {}
+    broadcast.assert_not_called()
+    if backend_name == "hccl":
+        options = new_subgroups.call_args.kwargs["pg_options"]
+        new_subgroups.assert_called_once_with(
+            group_ranks, timeout=timeout, backend="hccl", pg_options=options, group_desc="pp_broadcast"
+        )
+        assert options.hccl_config == {"group_name": "pp_broadcast", "hccl_buffer_size": 200}
+        destroy_group.assert_called_once_with(old_group)
+        assert runner.pp_handler.broadcast_group is new_group
     else:
+        new_subgroups.assert_not_called()
+        destroy_group.assert_not_called()
+        assert pp_handler.broadcast_group is old_group
+    if use_pp:
+        get_backend.assert_called_once_with(old_group)
+        assert runner.pp_handler is pp_handler
+    else:
+        get_backend.assert_not_called()
         assert runner.pp_handler is None
 
 
@@ -1168,10 +1229,12 @@ def test_init_spec_pp_full_graph_and_speculator(method):
     )
     spec_pp = SimpleNamespace(needs_aux_hidden_states=True)
     speculator = SimpleNamespace()
+    broadcast_group = object()
 
     def parent_init(self, cfg, dev):
         _parent_init(self, cfg, dev, full_graph=True, speculative=True, use_pp=True)
         self.speculative_config.method = method
+        self.pp_handler.broadcast_group = broadcast_group
 
     with (
         patch("vllm_ascend.worker.v2.model_runner.get_ascend_config", return_value=ascend_config),
@@ -1183,6 +1246,7 @@ def test_init_spec_pp_full_graph_and_speculator(method):
             "__init__",
             parent_init,
         ),
+        patch("torch.distributed.get_backend", return_value="gloo"),
         patch("vllm_ascend.worker.v2.model_runner.AscendEPLBController", return_value="eplb") as eplb_cls,
         patch("vllm_ascend.worker.v2.model_runner.init_speculator", return_value=speculator) as speculator_factory,
         patch("vllm_ascend.worker.v2.model_runner.AscendRequestState", return_value="req") as request_state_cls,
@@ -1213,7 +1277,7 @@ def test_init_spec_pp_full_graph_and_speculator(method):
     assert request_state_cls.call_args.kwargs["use_dense_all_token_ids"] is (method in ("ngram", "ngram_gpu"))
     assert speculator.update_stream is runner.update_stream
     assert runner.sync_spec_pp_cpu_counts is True
-    assert vars(runner.pp_handler) == {}
+    assert runner.pp_handler.broadcast_group is broadcast_group
     assert runner.update_stream is not None
     assert runner.decode_query_len == 2
 
@@ -1494,7 +1558,7 @@ def _prepare_inputs_runner(*, draft=False, full_cg=False, use_dcp=False, use_pp=
     runner.use_pp = use_pp
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL if full_cg else CUDAGraphMode.NONE)
     runner.model_config = SimpleNamespace(
-        rswa_window=(4 if rswa else None), hf_config=SimpleNamespace(model_type="other_model")
+        rswa_window=(4 if rswa else None), hf_config=SimpleNamespace(model_type="other_model"), use_mla=False
     )
     runner.model_state = SimpleNamespace(num_new_sampled_tokens_per_step=1)
     runner.eplb = SimpleNamespace(set_batch_phase=MagicMock())
@@ -1975,9 +2039,9 @@ def test_device_only_cpu_lengths_remain_upper_bounds_without_event_wait():
         assert runner.input_buffers.seq_lens_cpu[i] == before[index] + output.num_scheduled_tokens[req_id]
 
 
-def _device_length_runner():
+def _device_length_runner(model_type="glm_moe_dsa"):
     runner, output, batch, _ = _prepare_inputs_runner(speculator=True)
-    runner.model_config.hf_text_config = SimpleNamespace(model_type="glm_moe_dsa")
+    runner.model_config.hf_text_config = SimpleNamespace(model_type=model_type)
     runner.speculative_config = SimpleNamespace(
         method="dflash",
         draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
@@ -1985,8 +2049,9 @@ def _device_length_runner():
     return runner, output, batch
 
 
-def test_glm_dflash2_device_lengths_do_not_require_attention_groups():
-    runner, _, _ = _device_length_runner()
+@pytest.mark.parametrize("model_type", ["glm_moe_dsa", "glm5_next_text"])
+def test_glm_dflash2_device_lengths_do_not_require_attention_groups(model_type):
+    runner, _, _ = _device_length_runner(model_type)
     del runner.attn_groups
     assert runner._can_skip_spec_cpu_length_sync() is True
 
