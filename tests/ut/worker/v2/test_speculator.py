@@ -809,3 +809,59 @@ def test_generate_draft_capture_uses_request_rows(num_reqs, num_tokens):
     expected.append(None)
     generate.assert_called_once_with(*expected)
     assert speculator._lmhead_pad_size is None
+
+
+@pytest.mark.parametrize(
+    "sp,tp,num_batch_tokens,expected",
+    [(True, 8, 2, 8), (True, 8, 8, 8), (True, 8, 9, 16), (True, 1, 3, 3), (False, 8, 3, 3)],
+)
+def test_build_uniform_batch_dp_sync_pads_tokens_for_sp(sp, tp, num_batch_tokens, expected):
+    from dataclasses import dataclass
+
+    from vllm_ascend.worker.v2.spec_decode.target_dependent_ar import speculator as spec_module
+
+    @dataclass
+    class _Sync:
+        num_tokens_across_dp: torch.Tensor
+        uniform_token_count: int = 1
+        num_reqs: int = 0
+
+    sync_state = _Sync(
+        num_tokens_across_dp=torch.full((2,), num_batch_tokens, dtype=torch.int32),
+        uniform_token_count=1,
+        num_reqs=num_batch_tokens,
+    )
+    obj = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
+    obj.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(tensor_parallel_size=tp))
+    with (
+        patch.object(spec_module, "enable_sp", return_value=sp),
+        patch.object(
+            TargetDependentARSpeculator,
+            "_build_uniform_batch_dp_sync",
+            return_value=(sync_state, num_batch_tokens),
+        ),
+    ):
+        out_state, out_tokens = obj._build_uniform_batch_dp_sync(sync_state, num_batch_tokens)
+    assert out_tokens == expected
+    assert out_state.num_tokens_across_dp.tolist() == [expected, expected]
+    # the reused target sync must never be mutated in place
+    assert sync_state.num_tokens_across_dp.tolist() == [num_batch_tokens, num_batch_tokens]
+
+
+def test_build_uniform_batch_dp_sync_noop_when_env_disabled(monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_SP_DISPATCH_ALIGN", "0")
+    sync_state = SimpleNamespace(
+        num_tokens_across_dp=torch.full((2,), 2, dtype=torch.int32),
+        uniform_token_count=1,
+        num_reqs=2,
+    )
+    obj = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
+    obj.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(tensor_parallel_size=8))
+    with patch.object(
+        TargetDependentARSpeculator,
+        "_build_uniform_batch_dp_sync",
+        return_value=(sync_state, 2),
+    ):
+        out_state, out_tokens = obj._build_uniform_batch_dp_sync(sync_state, 2)
+    assert out_state is sync_state
+    assert out_tokens == 2

@@ -8,8 +8,45 @@ from vllm.v1.worker.gpu import model_runner as upstream
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp as _dispatch_cg_and_sync_dp
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import enable_sp, vllm_version_is
 from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
+
+# Upstream binds ``dispatch_cg_and_sync_dp`` by name into every module that
+# calls it, so rebinding only ``model_runner`` silently misses the drafters.
+_DISPATCH_MODULES = (
+    "vllm.v1.worker.gpu.model_runner",
+    "vllm.v1.worker.gpu.spec_decode.autoregressive.speculator",
+    "vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator",
+    "vllm.v1.worker.gpu.spec_decode.standalone_ar.speculator",
+    "vllm.v1.worker.gpu.spec_decode.dflash.speculator",
+)
+
+
+def _sp_dispatch_align_enabled() -> bool:
+    import os
+
+    return os.getenv("VLLM_ASCEND_SP_DISPATCH_ALIGN", "1").strip() != "0"
+
+
+def _sp_pad_tokens(num_tokens: int, vllm_config, parallel_config) -> int:
+    """Round a dispatch token count up to a TP multiple under MoE SP.
+
+    Ascend SP shards the token axis across TP, so every dispatch that feeds the
+    MoE collectives must agree on a TP-divisible row count; otherwise the
+    descriptor, DP metadata and prepared inputs disagree with the padded
+    collective shape.
+    """
+    if not num_tokens:
+        return num_tokens
+    if parallel_config is None and vllm_config is not None:
+        parallel_config = vllm_config.parallel_config
+    sp_enabled = bool(getattr(parallel_config, "use_sequence_parallel_moe", False)) or (
+        enable_sp(vllm_config) if vllm_config is not None else enable_sp()
+    )
+    tp_size = getattr(parallel_config, "tensor_parallel_size", 1)
+    if not (sp_enabled and tp_size > 1):
+        return num_tokens
+    return (num_tokens + tp_size - 1) // tp_size * tp_size
 
 
 # TODO: Remove once upstream GPUModelRunner dispatches sharded PCP decode with
@@ -18,8 +55,11 @@ def dispatch_cg_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, uniform_tok
     vllm_config = getattr(cudagraph_manager, "vllm_config", None)
     if uniform_token_count and vllm_config is not None and is_pcp_decode_sharding_enabled(vllm_config):
         # num_tokens is already the largest rank-local count, and each sharded
-        # decode request stays whole on one rank.
+        # decode request stays whole on one rank. Derive the request count from
+        # the pre-pad value: padding only compensates the token axis.
         num_reqs = num_tokens // uniform_token_count
+    if _sp_dispatch_align_enabled():
+        num_tokens = _sp_pad_tokens(num_tokens, vllm_config, kwargs.get("parallel_config"))
     return _dispatch_cg_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, uniform_token_count, *args, **kwargs)
 
 
@@ -233,6 +273,22 @@ def initialize_kv_cache(
 
 upstream.copy_kv_cache_blocks_inplace = copy_kv_cache_blocks_inplace
 
-upstream.dispatch_cg_and_sync_dp = dispatch_cg_and_sync_dp
-
 upstream.GPUModelRunner.initialize_kv_cache = initialize_kv_cache
+
+
+def _rebind_dispatch_cg_and_sync_dp() -> None:
+    import importlib
+
+    for module_name in _DISPATCH_MODULES:
+        try:
+            module = importlib.import_module(module_name)
+        except ModuleNotFoundError:
+            # Optional speculators (standalone/dflash) may be absent on some
+            # vLLM lanes; the remaining namespaces still need the rebind.
+            continue
+        attr = "dispatch_cg_and_sync_dp"
+        if getattr(module, attr, None) is not None:
+            setattr(module, attr, dispatch_cg_and_sync_dp)
+
+
+_rebind_dispatch_cg_and_sync_dp()
