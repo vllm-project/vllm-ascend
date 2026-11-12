@@ -146,6 +146,7 @@ jobs:
         sparse-checkout: ${{ inputs.dockerfile || 'Dockerfile' }}
         sparse-checkout-cone-mode: false
         fetch-depth: 1
+        persist-credentials: false
 
     - name: Overlay Dockerfile from ref
       if: ${{ inputs.dockerfile_ref != '' }}
