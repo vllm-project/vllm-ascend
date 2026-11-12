@@ -512,6 +512,28 @@ def test_build_fia_params_prefill():
     assert result[0]["block_table"].shape == (4, 3)
 
 
+def test_build_fia_params_prefill_mla():
+    """Test building MLA-specific FIA parameters for prefill."""
+    speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
+    decode = SimpleNamespace(
+        actual_seq_lengths_q=[1, 2],
+        seq_lens_list=[10, 20],
+        block_table=torch.arange(12).reshape(4, 3),
+    )
+    metadata = SimpleNamespace(decode=decode, external_flashmla=None)
+    speculator.use_dcp = False
+    speculator.model_state = SimpleNamespace(attn_metadata={"draft": metadata})
+    speculator.draft_attn_layer_names = {"draft"}
+
+    result = speculator.build_fia_params(3, {"draft": metadata}, True)
+
+    assert len(result) == 1
+    assert result[0]["layer_name"] == "draft"
+    assert result[0]["actual_seq_qlen"] == [1, 2]
+    assert result[0]["actual_seq_kvlen"] == [10, 20]
+    assert result[0]["block_table"] is decode.block_table
+
+
 def test_build_fia_params_decode():
     """Test building FIA parameters for decode."""
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)

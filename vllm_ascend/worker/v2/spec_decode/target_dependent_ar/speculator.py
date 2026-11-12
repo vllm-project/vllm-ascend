@@ -704,19 +704,29 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         """Build all draft steps' FIA parameters for a single graph update."""
         if self.use_dcp:
             return self.build_fia_params_dcp(num_reqs_padded, draft_attn_metadata, is_draft_model_prefill)
-        block_table = next(iter(draft_attn_metadata.values())).block_tables
         if is_draft_model_prefill:
-            return [
-                {
-                    "layer_name": layer_name,
-                    "actual_seq_lengths": metadata.actual_seq_lengths_q,
-                    "actual_seq_lengths_kv": metadata.seq_lens_list,
-                    "actual_seq_qlen": metadata.decode.actual_seq_lengths_q,
-                    "actual_seq_kvlen": metadata.decode.seq_lens_list,
-                    "block_table": metadata.block_tables,
-                }
-                for layer_name, metadata in draft_attn_metadata.items()
-            ]
+            fia_params = []
+            for layer_name, metadata in draft_attn_metadata.items():
+                decode = getattr(metadata, "decode", None)
+                if decode is not None and getattr(metadata, "external_flashmla", None) is None:
+                    fia_params.append(
+                        {
+                            "layer_name": layer_name,
+                            "actual_seq_qlen": decode.actual_seq_lengths_q,
+                            "actual_seq_kvlen": decode.seq_lens_list,
+                            "block_table": decode.block_table,
+                        }
+                    )
+                else:
+                    fia_params.append(
+                        {
+                            "layer_name": layer_name,
+                            "actual_seq_lengths": metadata.actual_seq_lengths_q,
+                            "actual_seq_lengths_kv": metadata.seq_lens_list,
+                            "block_table": metadata.block_tables,
+                        }
+                    )
+            return fia_params
         assert self.input_batch is not None
         num_reqs = self.input_batch.num_reqs
         query_start_loc = list(range(1, num_reqs_padded + 1))
@@ -727,16 +737,26 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             ]
             seq_lens.extend([0] * (num_reqs_padded - num_reqs))
             for layer_name in self.draft_attn_layer_names:
-                fia_params.append(
-                    {
-                        "layer_name": layer_name,
-                        "actual_seq_lengths": query_start_loc,
-                        "actual_seq_lengths_kv": seq_lens,
-                        "actual_seq_qlen": query_start_loc,
-                        "actual_seq_kvlen": seq_lens,
-                        "block_table": block_table,
-                    }
-                )
+                metadata = draft_attn_metadata[layer_name]
+                decode = getattr(metadata, "decode", None)
+                if decode is not None and getattr(metadata, "external_flashmla", None) is None:
+                    fia_params.append(
+                        {
+                            "layer_name": layer_name,
+                            "actual_seq_qlen": query_start_loc,
+                            "actual_seq_kvlen": seq_lens,
+                            "block_table": decode.block_table,
+                        }
+                    )
+                else:
+                    fia_params.append(
+                        {
+                            "layer_name": layer_name,
+                            "actual_seq_lengths": query_start_loc,
+                            "actual_seq_lengths_kv": seq_lens,
+                            "block_table": next(iter(draft_attn_metadata.values())).block_tables,
+                        }
+                    )
         return fia_params
 
     def build_fia_params_dcp(
