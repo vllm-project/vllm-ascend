@@ -4,9 +4,10 @@
 import inspect
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from typing import Any, Self
+from typing import Any
 
 import torch
+from typing_extensions import Self
 from vllm.config import CacheConfig, VllmConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
