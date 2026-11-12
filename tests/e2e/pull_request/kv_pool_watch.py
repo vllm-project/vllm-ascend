@@ -2,11 +2,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 """KV pool watch helpers for PR-level e2e tests.
 
-口径来源：``Proposals/ascend_project/pool_ci/analysis.md §0``
-- H1/H2/H3 三级命中断言；spec-decode/hybrid 用精确命中 token 数
-- 必须用快照差值，禁止读累计值（冷启动 miss 会永久抬高分母）
-- 普通命中用例必须显式关闭本地 prefix cache；hybrid（mamba align）例外，
-  轮次之间只清本地 KV（``reset_connector=False``），保留池内容
+The hit sequence asserts that a prompt written to the pool on its cold run is
+served from the pool afterwards:
+
+- H1: the hit round records at least one external hit;
+- H2: the hit count matches what the scheduler can reuse (ratio for plain
+  cases, exact token count for spec-decode / hybrid models);
+- H3: the hit round reproduces the cold-start tokens exactly;
+- R4: a prompt with no shared prefix must not hit, which catches key
+  collisions.
+
+All assertions compare snapshots, never cumulative counters: the cold run
+misses every block and would permanently inflate the denominator.
+
+Plain cases must disable the local prefix cache explicitly
+(``enable_prefix_caching=False``); hybrid (mamba align) cases keep it on and
+call ``reset_prefix_cache(reset_connector=False)`` between rounds so only
+local KV is dropped and the pool content survives.
 
 Typical use inside a test::
 
@@ -17,8 +29,8 @@ Typical use inside a test::
     ) as runner:
         run_pool_hit_sequence(runner, block_size=128, prompt_tokens=16384)
 
-Hybrid / MTP cases (Qwen3.8-27B, GLM-5.3-Flash) pass the lcm block size and
-reset the local prefix cache between rounds::
+Hybrid / MTP cases pass the lcm block size and reset the local prefix cache
+between rounds::
 
     run_pool_hit_sequence(
         runner,
@@ -274,8 +286,6 @@ def run_pool_hit_sequence(
 ) -> dict[str, float]:
     """Run R1 cold write -> R2/R3 hit -> R4 disjoint miss.
 
-    Criteria: ``Proposals/ascend_project/pool_ci/analysis.md`` §0.1 / §0.2.
-
     ``replicas`` sends identical copies of a prompt in one call. The DP runner
     shards prompts across ranks, so ``replicas=dp_size`` exercises every DP
     rank in the same round instead of only rank 0.
@@ -344,22 +354,17 @@ def run_pool_hit_sequence(
             tag=round_full_tag,
         )
 
-    # R1: cold start, no pool content yet -> writes the pool.
-    # No fence between R1 and R2 on purpose: measured on DSV4 TP4 16K, writes
-    # are visible as soon as generate() returns (0.9999 hit on R2/R3 with no
-    # sleep). If R2 ever misses intermittently in CI, check backend flush
-    # behavior first -- do not paper over it with a sleep.
+    # R1: cold run; the pool write is visible as soon as generate() returns,
+    # so R2 follows without a fence or sleep.
     cold = _generate(prompt_a)
     snap1 = snapshot_metrics(runner)
 
-    # R2: first hit
     hit_1 = _generate(prompt_a)
     snap2 = snapshot_metrics(runner)
     ratio_r2 = _assert_hit(snap1, snap2, "R2")
     if check_output:
         _assert_outputs(cold, hit_1, "R2")
 
-    # R3: repeated hit must not decay
     hit_2 = _generate(prompt_a)
     snap3 = snapshot_metrics(runner)
     ratio_r3 = _assert_hit(snap2, snap3, "R3")
@@ -377,7 +382,7 @@ def run_pool_hit_sequence(
         "expected_hits": float(expected_hits),
         "expected_hits_total": float(expected_total),
         "load_keys": snap4.load_keys,
-        # A/B 对照用：R1 冷输出与 R3 命中轮输出
+        # Cold and hit outputs feed the A/B token-equivalence check.
         "cold_outputs": cold,
         "hit_outputs": hit_2,
     }

@@ -97,7 +97,6 @@ def _leg(use_pool: bool, case_name: str):
             quantization="ascend",
             enforce_eager=False,
             async_scheduling=True,
-            # A leg disables the local cache; B leg turns it on.
             enable_prefix_caching=not use_pool,
             disable_log_stats=False,
             speculative_config={
@@ -141,21 +140,18 @@ def _leg(use_pool: bool, case_name: str):
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_deepseek_v4_dspark_spec_decoding_dp4_full_graph() -> None:
     def _accuracy(runner) -> None:
-        # Both legs keep the original non-empty output assertion; DSpark does
-        # not compare tokens here.
         outputs = runner.generate_greedy(PROMPTS, max_tokens=32)
         assert len(outputs) == len(PROMPTS)
         assert all(output_ids and output_text.strip() for output_ids, output_text in outputs)
 
     def _hit(runner) -> dict:
-        # Only leg A; the helper runs the cold + local-hit rounds for leg B.
         return run_pool_hit_sequence(
             runner,
             block_size=128,
             prompt_tokens=POOL_PROMPT_TOKENS,
             replicas=DATA_PARALLEL_SIZE,
             lcm_block_size=POOL_LCM_BLOCK_SIZE,
-            check_output=False,  # DSpark cold/hit differ deterministically; H3 stays on #6
+            check_output=False,  # DSpark cold/hit outputs differ deterministically, so H3 is off
             tag="dsv4-dp2-memcache",
         )
 
@@ -164,5 +160,5 @@ def test_deepseek_v4_dspark_spec_decoding_dp4_full_graph() -> None:
         build_leg=_leg,
         accuracy=_accuracy,
         hit=_hit,
-        token_identity=False,  # DSpark cold/hit tokens are not comparable
+        token_identity=False,
     )

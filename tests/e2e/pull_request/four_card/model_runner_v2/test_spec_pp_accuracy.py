@@ -43,9 +43,11 @@ from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMooncakeManag
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from tests.e2e.pull_request.kv_pool_watch import run_pool_ab, run_pool_hit_sequence
 
-# A3 mooncake ascend store uses the fabric-mem direct-transfer path. Keep an
-# explicit escape hatch for environments that need to probe the legacy path.
-os.environ.setdefault("ASCEND_ENABLE_USE_FABRIC_MEM", "1")
+# Temporary RoCE fallback: the CI runner does not support fabric-mem
+# (32 TiB VA reservation / share-handle export).
+# TODO: switch back to ASCEND_ENABLE_USE_FABRIC_MEM=1 once the runner supports it.
+os.environ["ASCEND_ENABLE_USE_FABRIC_MEM"] = "0"
+os.environ["HCCL_INTRA_ROCE_ENABLE"] = "1"
 
 DEEPSEEK_V4_MODEL = os.environ.get(
     "DEEPSEEK_V4_DSPARK_MODEL_PATH",
@@ -56,9 +58,9 @@ DEEPSEEK_V4_MODEL = os.environ.get(
 # zero reusable tokens; the 4-token tail keeps exactly 16,384 hit tokens.
 POOL_LCM_BLOCK_SIZE = 16384
 POOL_PROMPT_TOKENS = POOL_LCM_BLOCK_SIZE + 4
-# 16K 在 PP2xTP2 + gpu_memory_utilization=0.9 下放不下：
-# CI 实测 16,516 序列需要 4.76 GiB KV，可用仅 2.85 GiB。
-# 4096 = 32 x 128 block 的 chunked prefill，命中序列仍精确 16,384。
+# A 16K budget does not fit PP2xTP2 at gpu_memory_utilization=0.9
+# (4.76 GiB required for 16,516 sequences vs 2.85 GiB available);
+# 4,096 is chunked prefill and still yields exactly 16,384 hits.
 POOL_BATCHED_TOKENS = 4096
 POOL_MAX_MODEL_LEN = POOL_PROMPT_TOKENS + 128
 
@@ -147,7 +149,6 @@ def _leg(use_pool: bool, case_name: str):
             tokenizer_mode="deepseek_v4",
             block_size=128,
             enforce_eager=True,
-            # A leg disables the local cache; B leg turns it on.
             enable_prefix_caching=not use_pool,
             disable_log_stats=False,
             attention_config={"indexer_kv_dtype": "int8"},
@@ -187,14 +188,12 @@ def _leg(use_pool: bool, case_name: str):
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_deepseek_v4_dspark_pp_accuracy() -> None:
     def _accuracy(runner) -> None:
-        # Both legs run the GSM8K answer and draft/acceptance checks.
         outputs = runner.generate_greedy([GSM8K_PROMPT], max_tokens=512)
         metrics = runner.model.get_metrics()
         _assert_speculative_accuracy(outputs, metrics)
 
     def _hit(runner) -> dict:
-        # Only leg A: DSpark asserts the exact 16,384 hit tokens. cold/hit token
-        # identity is not comparable under DSpark (see P3 / §13.3), so H3 is off.
+        # DSpark cold/hit tokens are not comparable, so H3 stays off.
         return run_pool_hit_sequence(
             runner,
             block_size=128,
@@ -209,5 +208,5 @@ def test_deepseek_v4_dspark_pp_accuracy() -> None:
         build_leg=_leg,
         accuracy=_accuracy,
         hit=_hit,
-        token_identity=False,  # DSpark cold/hit tokens are not comparable
+        token_identity=False,
     )

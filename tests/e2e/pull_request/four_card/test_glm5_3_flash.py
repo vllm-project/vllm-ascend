@@ -37,11 +37,11 @@ OUTPUT_TOKENS = 16
 TP_SIZE = 4
 LOADER = "glm53flash_functional_dummy"
 
-# Measured on 80.5.9.133: `kv cache group sizes [1152, 1152, 1152, 1152]`,
+# Measured on A3: `kv cache group sizes [1152, 1152, 1152, 1152]` and
 # `kv lcm block sizes 1152` for the 9-layer GLM-5.3-Flash dummy model.
-# Measured hits: 1,156 -> 0; 2,308 -> 1,152; 16,388 -> 16,128. The scheduler
-# drops the final engine block before grouping into lcm chunks, so the exact
-# expectation is pinned to the measured value instead of the generic formula.
+# Hit tokens: 1,156 -> 0; 2,308 -> 1,152; 16,388 -> 16,128. The scheduler
+# drops the final engine block before grouping into lcm chunks, so pin the
+# measured value instead of the generic formula.
 POOL_LCM_BLOCK_SIZE = 1152
 POOL_PROMPT_TOKENS = 16388
 POOL_EXPECTED_HIT_TOKENS = 16128
@@ -314,7 +314,6 @@ def test_glm53flash_tp4_pool(tmp_path, monkeypatch):
     _write_model(model)
 
     def _accuracy(runner) -> None:
-        # Both legs only check structure; dummy weights carry no accuracy claim.
         assert runner.model.collective_rpc("check_flash_paths") == [True] * TP_SIZE
 
     def _hit(runner) -> dict:
@@ -339,5 +338,5 @@ def test_glm53flash_tp4_pool(tmp_path, monkeypatch):
         hit=_hit,
         token_identity=False,  # dummy weights do not compare tokens
         perf_reset_local=True,  # hybrid pooled leg also keeps a local cache
-        gate=False,  # P11 only records the A/B comparison
+        gate=False,  # dummy weights: record only, do not gate
     )

@@ -35,7 +35,6 @@ from tests.e2e.pull_request.kv_pool_watch import run_pool_ab, run_pool_hit_seque
 from tests.e2e.pull_request.one_card.model_runner_v2.utils import calculate_acceptance_per_pos
 from tests.e2e.pull_request.utils import PROMPTS_SHORT
 
-# Local verification uses mounted checkpoints; CI uses the HF ids.
 MTP_MODEL = os.environ.get("DEEPSEEK_V4_MTP_MODEL_PATH", "gdydems/DeepSeek-V4-Flash-w4a8-mtp")
 DSPARK_MODEL = os.environ.get("DEEPSEEK_V4_DSPARK_MODEL_PATH", "UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test")
 
@@ -70,10 +69,10 @@ ACCEPTANCE_RATE_TOLERANCE = 0.03
 # 16,384-token prompt would hit 0; the 4-token tail keeps 16,384 hit tokens.
 POOL_LCM_BLOCK_SIZE = 16384
 POOL_PROMPT_TOKENS = POOL_LCM_BLOCK_SIZE + 4
-# 16K 预算在 TP2xPCP2 + 0.9 下放不下（8.72 GiB 需求 vs 4.53 GiB 可用）。
-# 4096 = 32 x 128 block 的 chunked prefill，实测 H3 仍逐 token 一致。
+# A 16K budget does not fit TP2xPCP2 at gpu_memory_utilization=0.9
+# (8.72 GiB required vs 4.53 GiB available); 4,096 keeps chunked prefill and
+# still produces bitwise-identical H3 outputs.
 POOL_BATCHED_TOKENS = 4096
-# max_model_len needs headroom for output tokens
 POOL_MAX_MODEL_LEN = POOL_PROMPT_TOKENS + 128
 
 POOL_KV_TRANSFER_CONFIG = {
@@ -131,7 +130,6 @@ def _run_test(
                 block_size=128,
                 enforce_eager=False,
                 compilation_config=compilation_config,
-                # A leg disables the local cache; B leg turns it on.
                 enable_prefix_caching=not use_pool,
                 disable_log_stats=False,  # required by LLM.get_metrics()
                 speculative_config=speculative_config,
@@ -149,7 +147,6 @@ def _run_test(
             yield stack.enter_context(VllmRunner(model, **kwargs))
 
     def _accuracy(runner) -> None:
-        # Both legs run the original output-prefix and acceptance assertions.
         outputs = runner.generate(PROMPTS_SHORT, sampling_params)
         metrics = runner.model.get_metrics()
         for prompt, (_, texts) in zip(PROMPTS_SHORT, outputs, strict=True):
@@ -183,7 +180,6 @@ def _run_test(
             )
 
     def _hit(runner) -> dict:
-        # Only leg A; the helper runs the cold + local-hit rounds for leg B.
         return run_pool_hit_sequence(
             runner,
             block_size=128,

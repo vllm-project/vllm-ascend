@@ -30,21 +30,21 @@ from tests.e2e.pull_request.kv_pool_watch import run_pool_ab, run_pool_hit_seque
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-# RoCE 对照实验：显式关闭 fabric-mem 并打开 ROCE，确保 store 走 RoCE 路径。
+# Temporary RoCE fallback: the CI runner does not support fabric-mem
+# (32 TiB VA reservation / share-handle export).
+# TODO: switch back to ASCEND_ENABLE_USE_FABRIC_MEM=1 once the runner supports it.
 os.environ["ASCEND_ENABLE_USE_FABRIC_MEM"] = "0"
 os.environ["HCCL_INTRA_ROCE_ENABLE"] = "1"
 
-# Local verification uses a mounted checkpoint; CI uses the HF id.
 POOL_MODEL = os.environ.get("DEEPSEEK_V4_MTP_MODEL_PATH", "gdydems/DeepSeek-V4-Flash-w4a8-mtp")
 
 # 16,388 = lcm(16,384) + 4. MTP trims the final lcm block, so a 16,384-token
 # prompt would hit 0; the 4-token tail keeps 16,384 hit tokens.
 POOL_LCM_BLOCK_SIZE = 16384
 POOL_PROMPT_TOKENS = POOL_LCM_BLOCK_SIZE + 4
-# max_model_len needs headroom for output tokens.
 POOL_MAX_MODEL_LEN = POOL_PROMPT_TOKENS + 128
 
-# DSV4-Flash block-key layerwise is the only mooncake layerwise slot in PR-A3.
+# DSV4-Flash is the only block-key layerwise mooncake case in this PR.
 POOL_KV_TRANSFER_CONFIG = {
     "kv_connector": "AscendStoreConnector",
     "kv_role": "kv_both",
@@ -89,7 +89,6 @@ def _leg(use_pool: bool, case_name: str):
             quantization="ascend",
             tokenizer_mode="deepseek_v4",
             block_size=128,
-            # A leg disables the local cache; B leg turns it on.
             enable_prefix_caching=not use_pool,
             disable_log_stats=False,
             attention_config={"indexer_kv_dtype": "int8"},
@@ -127,7 +126,6 @@ def test_deepseek_v4_w4a8_tp4_basic_greedy():
     ]
 
     def _accuracy(runner) -> None:
-        # Both legs run the original greedy assertion.
         outputs = runner.generate_greedy(example_prompts, max_tokens)
         assert len(outputs) == len(example_prompts)
         for i, (output_ids, output_str) in enumerate(outputs):
@@ -136,7 +134,6 @@ def test_deepseek_v4_w4a8_tp4_basic_greedy():
             assert output_ids == expected_token_ids[i]
 
     def _hit(runner) -> dict:
-        # Only leg A: R1 cold write -> R2/R3 exact 16,384 hits -> R4 disjoint key.
         return run_pool_hit_sequence(
             runner,
             block_size=128,

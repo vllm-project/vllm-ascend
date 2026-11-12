@@ -20,8 +20,8 @@ from tests.e2e.pull_request.kv_pool_watch import run_pool_ab, run_pool_hit_seque
 MODEL = os.environ.get("QWEN38_DENSE_MODEL", "Qwen/Qwen3.8-27B")
 NUM_REQUESTS = 8
 
-# 实测 A3：`kv cache group sizes [896, 896, 896, 896]` / `kv lcm block sizes 896`。
-# 16,388 = 18 x 896 + 260 -> 命中 16,128 tokens。
+# Measured on A3: `kv cache group sizes [896, 896, 896, 896]` and
+# `kv lcm block sizes 896`; 16,388 = 18 x 896 + 260 -> 16,128 hit tokens.
 POOL_LCM_BLOCK_SIZE = 896
 POOL_PROMPT_TOKENS = 16388
 POOL_MAX_MODEL_LEN = POOL_PROMPT_TOKENS + 128
@@ -164,7 +164,6 @@ def test_qwen38_pp_mtp_prefix_cache():
     state: dict[str, int] = {}
 
     def _accuracy(runner) -> None:
-        # Original align probe, two generation rounds and 5959 assertion.
         block_sizes = runner.model.collective_rpc("install_align_probe")
         block_size = next(size for size in block_sizes if size is not None)
         state["block_size"] = block_size
@@ -203,7 +202,6 @@ def test_qwen38_pp_mtp_prefix_cache():
         assert answer[0].outputs[0].text.strip() == "5959", answer
 
     def _hit(runner) -> dict:
-        # Only leg A; hybrid rounds drop local KV only and keep pool content.
         return run_pool_hit_sequence(
             runner,
             block_size=state["block_size"],
