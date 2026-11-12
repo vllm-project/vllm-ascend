@@ -1,0 +1,14 @@
+pr: 17557
+entries:
+  - category: feature
+    text: >-
+      GLM-5.3-Flash now supports DFlash2 speculative decoding on Model Runner
+      V2: the target captures mHC auxiliary hidden states for the standard
+      DFlash2 drafter (draft side runs eager).
+    model: GLM-5.3-Flash
+    hardware: [A3, A5]
+  - category: bugfix
+    text: >-
+      Fixed GLM-5.3-Flash failing to initialize on Model Runner V2 (pooled
+      KV-cache allocation, foreign draft cache grouping, block-size
+      recomputation, tail-ring divisibility, and NoPE rope registration).
