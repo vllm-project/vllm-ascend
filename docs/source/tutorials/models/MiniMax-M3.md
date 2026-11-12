@@ -10,7 +10,7 @@
 
 MiniMax-M3 is a multimodal large language model that supports text, image, and video inputs. On Ascend, it supports BF16 and W8A8 on A2/A3, Prefill-Decode disaggregation on Atlas 800I A3 (W8A8) and 950DT products (MXFP8), thinking mode, reasoning parsing, tool-call parsing, and multimodal inputs.
 
-This document covers supported features, environment and model preparation, single-node deployment, multi-node deployment, PD separation, thinking and parser configuration, functional verification, accuracy evaluation, and troubleshooting.
+This document covers supported features, environment and model preparation, single-node deployment, multi-node deployment, PD separation, thinking and parser configuration, functional verification, accuracy evaluation, performance evaluation, tuning, and troubleshooting. After following it, you can deploy the model and validate both accuracy and performance.
 
 This document is written based on the vLLM Ascend main branch. This model is supported on this branch.
 
@@ -26,10 +26,12 @@ Refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for featur
 
 | Weight Version | Hardware Requirements | Download Links | Notes |
 | --- | --- | --- | --- |
-| `MiniMax-M3` (BF16) | 2 Atlas 800I A3 nodes (64GB × 16 per node) | [ModelScope](https://www.modelscope.cn/collections/MiniMax/MiniMax-M3) | / |
+| `MiniMax-M3` (BF16) | 2 Atlas 800I A3 nodes (64GB × 16 per node) | [Hugging Face](https://huggingface.co/MiniMaxAI/MiniMax-M3) \| [ModelScope](https://www.modelscope.cn/collections/MiniMax/MiniMax-M3) | / |
 | `MiniMax-M3-w8a8` (W8A8) | 1 Atlas 800I A3 node (64GB × 16) or 1 Atlas 800 A2 node (64GB × 8) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/MiniMax-M3-w8a8-0626) | / |
 | `MiniMax-M3-MXFP8` (MXFP8) | 1 950DT node (96GB × 8) | [ModelScope](https://www.modelscope.cn/models/MiniMax/MiniMax-M3-MXFP8) | Supports a W8A8C8 configuration: C8 is dynamic KV-cache quantization. Set `--kv-cache-dtype fp8` in the serving command to enable FP8 KV cache. |
 | `MiniMax-M3-EAGLE3-GQA` | / | [ModelScope](https://www.modelscope.cn/models/Inferact/MiniMax-M3-EAGLE3-GQA) | Draft model for EAGLE3 speculative decoding; uses Grouped Query Attention (GQA). |
+
+> The W8A8, MXFP8, and EAGLE3 weights above are Ascend-adapted releases published on ModelScope only; no Hugging Face mirror is provided for them.
 
 It is recommended to place the model weight in a shared cache directory.
 
@@ -149,6 +151,39 @@ pip show vllm-ascend
 
 Expected result: The version information is displayed, matching the pulled image version.
 
+### 4.2 Source Code Installation
+
+If you prefer not to use the Docker image, build both packages from source. MiniMax-M3 support is available on the vLLM Ascend main branch (see [Section 1](#1-introduction)), so install that branch rather than an older release.
+
+1. Clone and install vLLM:
+
+    ```bash
+    git clone https://github.com/vllm-project/vllm.git
+    cd vllm
+    pip install -v -e .
+    ```
+
+2. Clone and install vLLM Ascend (main branch):
+
+    ```bash
+    git clone https://github.com/vllm-project/vllm-ascend.git
+    cd vllm-ascend
+    git checkout main
+    pip install -v -e .
+    ```
+
+3. Verify the installation:
+
+    ```bash
+    pip show vllm vllm-ascend
+    ```
+
+    Expected result: The version information for both packages is displayed, confirming a successful installation.
+
+!!! note
+
+    For a multi-node deployment, repeat the setup on every node and make sure both packages are built at the same commit.
+
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
 Start the online serving service with the deployment commands in the following sections. Select the tab for your hardware platform and weight format.
@@ -157,7 +192,7 @@ For descriptions of the standard `vllm serve` arguments used in the deployment e
 
 The `--speculative-config` examples use single-quoted JSON. The `'"${EAGLE3_WEIGHT_PATH}"'` segment expands the draft-weight path within that JSON.
 
-### 5.1 Single-Node Deployment
+### 5.1 Single-Node Online Deployment
 
 Single-node deployment completes both Prefill and Decode within the same node. The MiniMax-M3 (BF16) model can be deployed on 1 Atlas 800I A3 (64GB × 16), but dual-node deployment is recommended for BF16 on A3 series; single-node is not recommended. The MiniMax-M3-w8a8 (W8A8) quantized model is recommended for single-node deployment on 1 Atlas 800I A3 (64GB × 16) or 1 Atlas 800 A2 (64GB × 8). The MiniMax-M3-MXFP8 (MXFP8) quantized model can be deployed on 1 950DT products (96GB × 8).
 
@@ -465,6 +500,8 @@ curl --noproxy '*' -fsS http://127.0.0.1:11223/v1/models
 ```
 
 Expected result: `/health` returns HTTP 200, and `/v1/models` lists `minimax-m3`. If startup fails or either check fails, inspect both nodes' logs before sending inference requests.
+
+**Common Issues Tip:** If the two nodes cannot form a DP group, check that `node0_ip`, `--data-parallel-address`, and `--data-parallel-rpc-port` match on both nodes, that `--data-parallel-start-rank` values do not overlap, and that `HCCL_SOCKET_IFNAME` names an interface reachable between the hosts. For other environment, installation, and parameter issues, refer to the [Public FAQs](../../faqs.md) and [Chapter 10 FAQ](#10-faq).
 
 ### 5.3 Sub-1M-Token Context Deployment
 
@@ -883,7 +920,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
 
     python load_balance_proxy_server_example.py \
     --port 8009 \
-    --host $PREFILL_IP \
+    --host 0.0.0.0 \
     --prefiller-hosts \
         $PREFILL_IP \
     --prefiller-ports \
@@ -895,7 +932,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
         31260 31261 31262 31263 31260 31261 31262 31263
     ```
 
-    The service is then accessible at `<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in [Section 7](#7-functional-verification).
+    The service is then accessible at `<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in [Section 6](#6-functional-verification).
 
     To use MindIE PyMotor instead of the example proxy, follow [Deploy vLLM Ascend with MindIE-Motor](../../user_guide/deployment_guide/using_mindie_motor.md) and register the same one Prefill and eight Decode endpoints. Send benchmark requests to the Motor inference endpoint. Changing the request router does not require changing the P/D parallel sizes or scheduler limits above.
 
@@ -957,6 +994,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
         --data-parallel-rpc-port "$DP_RPC_PORT" \
         --tensor-parallel-size "$TP_SIZE" \
         --pipeline-parallel-size "$PP_SIZE" \
+        --seed 1024 \
         --served-model-name minimax-m3 \
         --trust-remote-code \
         --dtype bfloat16 \
@@ -1130,7 +1168,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
 
     python load_balance_proxy_server_example.py \
     --port 8009 \
-    --host $PREFILL_IP \
+    --host 0.0.0.0 \
     --prefiller-hosts \
         $PREFILL_IP $PREFILL_IP \
     --prefiller-ports \
@@ -1141,7 +1179,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
         31060 31061
     ```
 
-    The service is then accessible at `<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in [Section 7](#7-functional-verification).
+    The service is then accessible at `<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in [Section 6](#6-functional-verification).
 
     **Scaling to three nodes (still 1P1D)**
 
@@ -1199,7 +1237,7 @@ The following values match the configurations in Sections 5.3.1 and 5.3.2. P/D n
 
     python load_balance_proxy_server_example.py \
     --port 8009 \
-    --host $PREFILL_IP \
+    --host 0.0.0.0 \
     --prefiller-hosts \
         $PREFILL_IP $PREFILL_IP \
     --prefiller-ports \
@@ -1973,7 +2011,7 @@ Proxy (:8009)
 
     python load_balance_proxy_server_example.py \
     --port 8009 \
-    --host $PREFILL_IP \
+    --host 0.0.0.0 \
     --prefiller-hosts \
         $PREFILL_IP \
     --prefiller-ports \
@@ -1985,7 +2023,7 @@ Proxy (:8009)
         31260 31261 31262 31263 31260 31261 31262 31263
     ```
 
-    On 950DT, use the Section 5.3.1 two-node proxy command (two P and two D endpoints). The service is accessible at `<proxy_ip>:8009`; use this endpoint in [Section 7](#7-functional-verification).
+    On 950DT, use the Section 5.3.1 two-node proxy command (two P and two D endpoints). The service is accessible at `<proxy_ip>:8009`; use this endpoint in [Section 6](#6-functional-verification).
 
 ##### 5.3.2.5 Verification
 
@@ -2070,7 +2108,7 @@ Prepare the container and weights as described in Sections 3 and 4. Replace `<MO
         }' > ./minimax-m3-1m-a3.log 2>&1 &
     ```
 
-    `--long-prefill-token-threshold 8192` sets the long-prefill threshold used with chunked prefill. The scheduler uses this threshold to limit the prefill tokens scheduled for a long request in one iteration, while `--max-num-batched-tokens 8192` bounds the total token budget for the iteration. In this single-request example both values are 8192, so the 1M prompt is processed in chunks within that budget. This parameter does not reduce the total context limit configured by `--max-model-len`. See the [vLLM scheduler arguments](https://docs.vllm.ai/en/latest/configuration/engine_args/#--long-prefill-token-threshold) for details.
+    `--long-prefill-token-threshold 8192` sets the long-prefill threshold used with chunked prefill. The scheduler uses this threshold to limit the prefill tokens scheduled for a long request in one iteration, while `--max-num-batched-tokens 8192` bounds the total token budget for the iteration. In this single-request example both values are 8192, so the 1M prompt is processed in chunks within that budget. This parameter does not reduce the total context limit configured by `--max-model-len`. See the [vLLM scheduler arguments](https://docs.vllm.ai/en/latest/configuration/engine_args/#-long-prefill-token-threshold) for details.
 
 === "950DT Products (MXFP8)"
 
@@ -2568,9 +2606,9 @@ FLASHCOMM1 and `--language-model-only` can be enabled together for text-only ser
 --language-model-only
 ```
 
-## 6 Thinking and Parser Configuration
+### 5.6 Thinking and Parser Configuration
 
-### 6.1 Thinking Mode
+#### 5.6.1 Thinking Mode
 
 MiniMax-M3 supports three thinking modes, controlled via `thinking_mode` in `chat_template_kwargs`:
 
@@ -2580,7 +2618,7 @@ MiniMax-M3 supports three thinking modes, controlled via `thinking_mode` in `cha
 | `disabled` | No thinking; the model answers directly | Latency-sensitive turns |
 | `adaptive` | The model decides whether to think based on the task (default when unset) | General use |
 
-#### 6.1.1 Request Examples
+##### 5.6.1.1 Request Examples
 
 **With thinking disabled (curl):**
 
@@ -2620,11 +2658,11 @@ print(getattr(msg, "reasoning", None))  # the <mm:think> block
 print(msg.content)                       # the final answer
 ```
 
-### 6.2 Reasoning Parser
+#### 5.6.2 Reasoning Parser
 
 The MiniMax-M3 reasoning parser (`--reasoning-parser minimax_m3`) extracts the thinking block `<mm:think>...</mm:think>` from model output and exposes it as the `reasoning` field. The remaining text is returned as `content`.
 
-#### 6.2.1 Server Configuration
+##### 5.6.2.1 Server Configuration
 
 The `--reasoning-parser minimax_m3` flag enables the MiniMax-M3 reasoning parser, which splits model output into reasoning and content using `<mm:think>...</mm:think>` delimiters:
 
@@ -2637,7 +2675,7 @@ vllm serve ${WEIGHT_PATH} \
   ...
 ```
 
-#### 6.2.2 Output Format
+##### 5.6.2.2 Output Format
 
 MiniMax-M3 uses explicit thinking delimiters:
 
@@ -2645,18 +2683,18 @@ MiniMax-M3 uses explicit thinking delimiters:
 <mm:think>reasoning process...</mm:think>final answer
 ```
 
-#### 6.2.3 Parser Behavior
+##### 5.6.2.3 Parser Behavior
 
 - **`thinking_mode="enabled"`**: The chat template pre-fills `<mm:think>` in the prompt. Generated text starts inside the reasoning block and transitions to content after `</mm:think>`.
 - **`thinking_mode="disabled"` or default**: Model output is treated as plain content. If `<mm:think>` appears, the parser splits on the delimiters.
 - **Streaming**: Reasoning and content are streamed incrementally via `DeltaMessage.reasoning` and `DeltaMessage.content` token-by-token.
 - **Token counting**: Reasoning tokens inside `<mm:think>` blocks are correctly counted.
 
-### 6.3 Tool Call Parser
+#### 5.6.3 Tool Call Parser
 
 MiniMax-M3 uses a namespace-delimited XML format for tool calls. Enable it with `--tool-call-parser minimax_m3`.
 
-#### 6.3.1 Server Configuration
+##### 5.6.3.1 Server Configuration
 
 When both `--reasoning-parser minimax_m3` and `--tool-call-parser minimax_m3` are specified, the parsers work together automatically to handle responses that contain both reasoning blocks and tool calls:
 
@@ -2671,7 +2709,7 @@ vllm serve ${WEIGHT_PATH} \
   ...
 ```
 
-#### 6.3.2 Tool Call Format
+##### 5.6.3.2 Tool Call Format
 
 Each structural tag is preceded by the `]<]minimax[>[` namespace marker:
 
@@ -2687,14 +2725,14 @@ Each structural tag is preceded by the `]<]minimax[>[` namespace marker:
 ]<]minimax[>[</tool_call>
 ```
 
-#### 6.3.3 Key Features
+##### 5.6.3.3 Key Features
 
 - **Recursive parameter parsing**: Supports nested objects and arrays (e.g., `shipping` containing `city`/`zip`).
 - **Schema-aware type coercion**: String parameter values are automatically converted to the correct types (integer, boolean, object, array) based on the function's JSON Schema definition.
 - **Multiple invocations**: A single `<tool_call>` block can contain multiple `<invoke>` blocks.
 - **Streaming**: Tool name and argument fragments are streamed incrementally as the `<invoke>` block is received.
 
-#### 6.3.4 Request Example (curl)
+##### 5.6.3.4 Request Example (curl)
 
 ```bash
 curl http://{ip}:{port}/v1/chat/completions \
@@ -2729,9 +2767,9 @@ curl http://{ip}:{port}/v1/chat/completions \
   }'
 ```
 
-## 7 Functional Verification
+## 6 Functional Verification
 
-### 7.1 Text
+### 6.1 Text
 
   ```bash
   curl http://{ip}:{port}/v1/chat/completions \
@@ -2753,7 +2791,7 @@ curl http://{ip}:{port}/v1/chat/completions \
 
   Expected result: the answer is C.
 
-### 7.2 Single Image
+### 6.2 Single Image
 
   Start the service with image input enabled, for example `--limit-mm-per-prompt '{"image":1,"video":0}'`. Replace `${IMAGE_PATH}` with a local image path on the client side.
 
@@ -2783,7 +2821,7 @@ curl http://{ip}:{port}/v1/chat/completions \
 
   Expected result: HTTP 200 response with a JSON body containing non-empty `choices` and generated text describing the image.
 
-### 7.3 Single Video
+### 6.3 Single Video
 
   Start the service with video input enabled, for example `--limit-mm-per-prompt '{"image":0,"video":1}'`. If the request uses `file://` local video paths, also add `--allowed-local-media-path /` or a narrower allowed directory. If `media_io_kwargs.video.num_frames` is not specified, vLLM samples 32 frames by default.
 
@@ -2816,7 +2854,7 @@ curl http://{ip}:{port}/v1/chat/completions \
 
   Expected result: HTTP 200 response with a JSON body containing non-empty `choices` and generated text describing the video content.
 
-### 7.4 Mixed Image and Video Request
+### 6.4 Mixed Image and Video Request
 
   Start the service with both image and video input enabled. For the following request, use `--limit-mm-per-prompt '{"image":1,"video":1}'`. If the request uses `file://` local video paths, also add `--allowed-local-media-path /` or a narrower allowed directory.
 
@@ -2846,15 +2884,15 @@ curl http://{ip}:{port}/v1/chat/completions \
 
   Expected result: HTTP 200 response with a JSON body containing non-empty `choices` and generated text that describes the image and video separately and explains whether they are related.
 
-## 8 Accuracy Evaluation
+## 7 Accuracy Evaluation
 
-The context-limit entries below use the unified serving setting `max-model-len=133000`. Accuracy scores are retained from the existing evaluations and have not been remeasured with this documentation update.
+The context-limit entries below use the unified serving setting `max-model-len=133000`, except the GPQA-Diamond row for 8 Atlas 800I A3, which was measured with `263000`. Accuracy scores are retained from the existing evaluations and have not been remeasured with this documentation update.
 
-### 8.1 Using AISBench
+### 7.1 Using AISBench
 
 For detailed instructions, refer to [Using AISBench for accuracy evaluation](../../developer_guide/evaluation/using_ais_bench.md).
 
-### 8.2 Text Evaluation
+### 7.2 Text Evaluation
 
 | Dataset | Hardware | Score | max-model-len | max-num-seqs | max_out_len | batch_size | generation_kwargs |
 |---------|----------|-------|---------------|--------------|-------------|------------|-------------------|
@@ -2867,7 +2905,7 @@ For detailed instructions, refer to [Using AISBench for accuracy evaluation](../
 | GPQA-Diamond | 8 950DT products (96GB × 8)      | 92.9    | 133000 | 128       | 131072       | 128       | temperature=1.0, top_p=0.95 |
 | MMMU-pro | 8 950DT products (96GB × 8)      | 78.9    | 133000 | 128       | 131072       | 50       | temperature=1.0, top_p=0.95 |
 
-### 8.3 Multimodal Evaluation
+### 7.3 Multimodal Evaluation
 
 MiniMax-M3 multimodal accuracy is evaluated with AISBench. The ViT DP path is optional and can be enabled by adding `--mm-encoder-tp-mode data` to the serving command, but it is not required for all multimodal accuracy runs. For video evaluation, if no frame count is specified in the request or evaluation config, vLLM samples 32 frames by default.
 
@@ -2902,6 +2940,31 @@ ais_bench \
 | Video-MME chunk1+chunk2 | Video | AISBench | GPU | - | 133000 | 8192 | `--limit-mm-per-prompt '{"image":0,"video":1}'`, default 32 frames | temperature=1.0, top_p=0.95 | 73.41 |
 | Video-MME chunk1+chunk2 | Video | AISBench | NPU | - | 133000 | 8192 | `--limit-mm-per-prompt '{"image":0,"video":1}'`, default 32 frames | temperature=1.0, top_p=0.95 | 74.21 |
 
+## 8 Performance Evaluation
+
+### 8.1 Using AISBench
+
+For setup details, including installation, dataset download, and configuration, refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation).
+
+Reuse the accuracy evaluation configuration from [Section 7](#7-accuracy-evaluation), but set `stream=True`, `ignore_eos=True`, and a `max_out_len` that matches your target output length, so that TPOT is measured consistently. Point `host_ip`/`host_port` at the endpoint you deployed: `127.0.0.1:11223` for the single-node service, or `<proxy_ip>:8009` for PD and KV-pool topologies.
+
+**Run the performance evaluation using the GSM8K dataset as an example:**
+
+```bash
+ais_bench --models vllm_api_stream_chat --datasets gsm8k_gen_0_shot_cot_str_perf --debug --summarizer default_perf --mode perf
+```
+
+**Expected result:**
+
+AISBench prints one line per finished request and then a summary table. Check the following fields; the exact values depend on hardware, concurrency, and input/output lengths:
+
+- `Request throughput (req/s)`: completed requests per second.
+- `Output token throughput (tok/s)`: generated tokens per second.
+- `Mean TTFT (ms)` / `P99 TTFT (ms)`: time to first token, average and 99th percentile.
+- `Mean TPOT (ms)` / `P99 TPOT (ms)`: time per output token, average and 99th percentile.
+
+Detailed results are written under `outputs/` (or the directory given by `--work-dir`), including the per-request CSV and the summary JSON.
+
 ## 9 Performance Tuning
 
 > **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
@@ -2928,6 +2991,8 @@ Use the following adjustments as starting points for the target workload. Rechec
 | Short-input workloads, such as 4K input tokens | `--max-num-batched-tokens` | Reduce from `32768` to `8192`. | Use a smaller per-iteration token budget to reduce memory pressure and tune short-sequence performance. |
 
 ## 10 FAQ
+
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md). This chapter only covers issues specific to MiniMax-M3.
 
 - **Q: How can I reinstall vLLM Ascend?**
 
