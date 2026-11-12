@@ -85,7 +85,7 @@ jobs:
       DOC_EVAL_MAX_FILES: ${{ vars.DOC_EVAL_MAX_FILES || '8' }}
       # Bot identity: prefer the repo's PAT_TOKEN (vllm-ascend-ci account,
       # same as Auto Doc Translate); fall back to github.token.
-      GH_TOKEN: ${{ secrets.PAT_TOKEN || github.token }}
+      GITHUB_TOKEN: ${{ secrets.PAT_TOKEN || github.token }}
 
     steps:
       - name: Resolve PR number
