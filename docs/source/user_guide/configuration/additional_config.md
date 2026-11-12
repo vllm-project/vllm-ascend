@@ -413,9 +413,9 @@ A2, A3 and A5 use the same routing conditions:
 
 The wrapper is created for every parallel group, including non-TP groups. Groups larger than 8 ranks use ordinary BF16 all-reduce; configuring TP greater than 8 while enabling the feature raises an error at startup. A single-rank communicator bypasses quantization.
 
-Routing does not inspect attention metadata, prefill/decode phase, draft-model flags, profiling, graph mode or input contiguity. A mixed prefill/decode batch meeting the same payload and shape conditions takes the INT8 path for its entire tensor. Decode and draft-model calls below the size threshold keep ordinary all-reduce. ReduceScatter and fused communication paths are not intercepted.
+Quantization eligibility does not inspect attention metadata, prefill/decode phase, draft-model flags, profiling, graph mode or input contiguity. A mixed prefill/decode batch meeting the same payload and shape conditions takes the INT8 path for its entire tensor. Decode and draft-model calls below the size threshold keep ordinary all-reduce. ReduceScatter and fused communication paths are not intercepted.
 
-There is no A5-specific Eager restriction. During graph capture, the path is selected for the captured input shape and recorded in the graph; graph replay does not rerun the Python routing conditions.
+Whole-tensor INT8 has no A5-specific Eager restriction. During graph capture, the path is selected for the captured input shape and recorded in the graph; graph replay does not rerun the Python routing conditions. Optional chunked pipelining, described below, uses the original whole-tensor INT8 path during capture.
 
 Each rank computes a per-channel maximum. An FP32 MAX all-reduce creates a shared scale, with `max_q = 127 // TP`; the activations are quantized, summed through ordinary INT8 HCCL all-reduce, then dequantized directly to a BF16 result. The bound guarantees `TP * max_q <= 127`, so same-sign INT8 sums do not wrap. This path uses `npu_quantize`, `npu_anti_quant` and ordinary HCCL; it does not require `ops-transformer`, native QuantAllReduce or a separate communication domain.
 
@@ -433,6 +433,34 @@ python3 -m torch.distributed.run --standalone --nproc-per-node 2 \
 ```
 
 For routing diagnostics, enable debug logging for `distributed.device_communicators.quantized_all_reduce` through `runtime_config.ascend_log.debug` and inspect `QAR-HIT` / `QAR-SKIP`. Disable debug logging for performance measurements. A microbenchmark gain does not establish model-level accuracy, TTFT or throughput improvement.
+
+##### INT8 chunked pipeline (Eager)
+
+Set `pipeline_chunks` to `2` or `4` to overlap INT8 SUM communication with other chunks' quantization and BF16 dequantization. The default `1` preserves the original whole-tensor algorithm. Both INT8 and MXFP8 accept the same pipeline fields:
+
+```json
+{
+    "quantized_all_reduce_config": {
+        "enable": true,
+        "quant_dtype": "int8",
+        "min_numel": 16777216,
+        "pipeline_chunks": 4,
+        "pipeline_min_numel": 83886080
+    }
+}
+```
+
+`pipeline_min_numel` counts original BF16 elements and defaults to `min_numel`. The example enables quantization at 32 MiB and pipelining at 160 MiB, corresponding to `[16384,5120]`; smaller eligible inputs remain whole-tensor INT8. All ranks must use the same thresholds and chunk count.
+
+Each call computes one whole-input per-channel amax and performs one FP32 MAX all-reduce. Every chunk reuses that scale and the same `max_q=127//TP` bound; chunking does not change quantization granularity or add per-chunk MAX communication. The pipeline uses two-chunk lookahead, ordinary asynchronous INT8 SUM all-reduces and `Work.wait()` dependencies on the existing group. It adds no process groups, user streams, device-wide synchronization or cross-call payload cache. It returns a separate BF16 tensor with the original shape and preserves the input, including noncontiguous inputs.
+
+The existing INT8 device/group/dtype/shape eligibility conditions still apply. For eligible inputs, `pipeline_chunks=1`, a payload below `pipeline_min_numel`, fewer flattened rows than chunks, or graph capture select the original whole-tensor INT8 path. Calls outside quantization eligibility continue to use ordinary all-reduce. Thus small decode graphs keep the previous BF16 route, and eligible captured calls keep whole-tensor INT8; asynchronous chunks are Eager-only. No pure-prefill condition is added. Unlike MXFP8's owner sharding, INT8 chunk row counts do not need to be divisible by TP.
+
+On the measured A5 `[tokens,5120]` microbenchmarks, selecting between 2/4 chunks reduced p50 by about 3.15%–13.04% versus whole-tensor INT8. TP2/TP4 favored 2 chunks at 8192 tokens and 4 at 16384/32768; TP8 favored 2/4/2 respectively. The configuration fixes one chunk count rather than automatically selecting by TP or shape. The algorithm retains the common A2/A3/A5 eligibility rules; the quoted hardware evidence is A5 only. Tune on the intended hardware and validate the runtime/model rather than assuming the example threshold or benchmark memory peaks transfer directly.
+
+`QAR-HIT` reports `mode=full|pipeline`, actual `chunks`, `pipeline_min_numel` and `pipeline_reason`. Whole-tensor selection reasons are `disabled`, `below_pipeline_threshold`, `insufficient_rows` and `graph_capture`. `QAR-SKIP` continues to describe ordinary all-reduce fallback. Disable debug logging during performance measurements.
+
+Use `benchmarks/benchmark_int8_pipeline.py` for BF16, whole-tensor, serial-chunked and pipelined comparisons, or add its `--profile-dir` option to inspect device overlap. The benchmark mutates its working input, while the runtime returns an independent output, so allocator peaks differ. Validate model quality, MTP acceptance, TTFT/throughput and decode graph capture on the target stack.
 
 #### MXFP8 AllToAll/AllGather (A5)
 
@@ -483,7 +511,7 @@ For runtime routing diagnostics, add `distributed.device_communicators.mxfp8_all
 
 ##### Chunked MXFP8 pipeline (A5, Eager)
 
-Set `pipeline_chunks` to `2` or `4` to overlap different row chunks' quantization, communication and local reduction. The default `1` preserves whole-tensor MXFP8. These settings require `quant_dtype="mxfp8"`; INT8 remains available with its existing configuration.
+Set `pipeline_chunks` to `2` or `4` to overlap different row chunks' quantization, communication and local reduction. The default `1` preserves whole-tensor MXFP8. Select `quant_dtype="mxfp8"` for this algorithm; INT8 uses the same configuration fields with its shared-scale AllReduce algorithm described above.
 
 ```json
 {

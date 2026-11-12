@@ -23,7 +23,8 @@ Group scope
 The wrapper uses the same routing rules on A2, A3 and A5. It is constructed
 for every parallel group, and groups with at most 8 ranks can take the int8
 path. Larger EP/MC2 groups keep bf16. Eligible bf16 tensors are selected by
-shape and payload size, without inspecting the forward phase or graph mode.
+shape and payload size, without inspecting the forward phase. Optional chunked
+pipelining is Eager-only; graph capture keeps the original whole-tensor path.
 
 Configuration
 -------------
@@ -39,6 +40,12 @@ Enable it through ``--additional-config`` (see vllm_ascend.ascend_config):
              matters only through the collective payload. Mixed batches and
              decode take the int8 path if they meet the same size/shape gates.
 
+  pipeline_chunks  1 (whole tensor, default), 2 or 4. All chunks reuse one
+                   whole-input per-channel scale. Two-chunk lookahead can
+                   overlap quantization/dequantization and INT8 SUM in Eager.
+  pipeline_min_numel  Additional element threshold for pipelining, defaulting
+                     to min_numel. Smaller eligible calls remain whole-tensor.
+
   The optimized A2/A3 implementation breaks even at ~20-24 MiB: 16 MiB +13%,
   32 MiB -29%, 42 MiB -32%, 64 MiB -37%, 128 MiB -37% versus BF16 on
   4x910B3. A5 TP=2/4 measurements also support a conservative 32 MiB gate.
@@ -46,7 +53,7 @@ Enable it through ``--additional-config`` (see vllm_ascend.ascend_config):
 
   The setting is read when the TP communicator is created (server start-up) and
   is active when every TP worker logs
-  "INT8 quantized all-reduce enabled (group=..., min_numel=..., max_q=...)".
+  "INT8 quantized all-reduce enabled (group=..., min_numel=..., max_q=..., ...)".
   To diagnose actual calls, add the following to the same --additional-config:
   "runtime_config": {"ascend_log": {"debug":
   ["distributed.device_communicators.quantized_all_reduce"]}}
@@ -57,6 +64,8 @@ Enable it through ``--additional-config`` (see vllm_ascend.ascend_config):
 
 import logging
 import math
+from collections import deque
+from typing import NamedTuple
 
 import torch
 import torch.distributed as dist
@@ -74,12 +83,46 @@ _VALID_DEVICE_TYPES = (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceTyp
 # Groups larger than 8 ranks leave too few int8 levels (ws=16 -> max_q=7), so
 # they keep bf16 instead of failing. The TP degree is rejected at config time.
 _MAX_VALID_WORLD_SIZE = 8
+_PIPELINE_LOOKAHEAD = 2
+
+
+def _chunk_ranges(rows: int, chunks: int) -> list[tuple[int, int]]:
+    """Partition rows without requiring divisibility by TP or the chunk count."""
+    if not 1 <= chunks <= rows:
+        raise ValueError("INT8 chunks require at least one row per chunk.")
+    size, remainder = divmod(rows, chunks)
+    ranges = []
+    start = 0
+    for index in range(chunks):
+        end = start + size + int(index < remainder)
+        ranges.append((start, end))
+        start = end
+    return ranges
+
+
+class _Reduction(NamedTuple):
+    start: int
+    end: int
+    quantized: torch.Tensor
+    work: dist.Work
 
 
 class QuantizedAllReduce:
     """Wrapper adding int8 quantized all-reduce around a base all_reduce."""
 
-    def __init__(self, group: "dist.ProcessGroup", min_numel: int, group_name: str = "") -> None:
+    def __init__(
+        self,
+        group: "dist.ProcessGroup",
+        min_numel: int,
+        group_name: str = "",
+        *,
+        pipeline_chunks: int = 1,
+        pipeline_min_numel: int | None = None,
+    ) -> None:
+        if pipeline_chunks not in (1, 2, 4):
+            raise ValueError("INT8 pipeline_chunks must be 1, 2 or 4.")
+        if pipeline_min_numel is not None and pipeline_min_numel < 1:
+            raise ValueError("INT8 pipeline_min_numel must be >= 1.")
         self.group = group
         self.group_name = group_name
         self.world_size = dist.get_world_size(group)
@@ -104,6 +147,8 @@ class QuantizedAllReduce:
         # Payload gate in elements (bf16 payload = 2 bytes per element);
         # 32 MiB by default, the measured break-even rounded up. See docstring.
         self.min_numel = min_numel
+        self.pipeline_chunks = pipeline_chunks
+        self.pipeline_min_numel = min_numel if pipeline_min_numel is None else pipeline_min_numel
 
     def _skip_reason(self, input_: torch.Tensor) -> str | None:
         if not self.supported:
@@ -114,6 +159,18 @@ class QuantizedAllReduce:
             return "degenerate_shape"
         if input_.numel() < self.min_numel:
             return "below_threshold"
+        return None
+
+    def _pipeline_skip_reason(self, input_: torch.Tensor) -> str | None:
+        if self.pipeline_chunks == 1:
+            return "disabled"
+        if input_.numel() < self.pipeline_min_numel:
+            return "below_pipeline_threshold"
+        rows = input_.numel() // input_.shape[-1]
+        if rows < self.pipeline_chunks:
+            return "insufficient_rows"
+        if torch.npu.is_current_stream_capturing():
+            return "graph_capture"
         return None
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
@@ -143,8 +200,7 @@ class QuantizedAllReduce:
         if reason is not None:
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
-                    "[QAR-SKIP] reason=%s group=%s world_size=%d shape=%s dtype=%s "
-                    "numel=%d min_numel=%d",
+                    "[QAR-SKIP] reason=%s group=%s world_size=%d shape=%s dtype=%s numel=%d min_numel=%d",
                     reason,
                     self.group_name,
                     self.world_size,
@@ -156,10 +212,12 @@ class QuantizedAllReduce:
             dist.all_reduce(input_, group=self.group)
             return input_
 
+        pipeline_reason = self._pipeline_skip_reason(input_)
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "[QAR-HIT] group=%s world_size=%d shape=%s dtype=%s numel=%d "
-                "payload_bytes=%d min_numel=%d max_q=%d",
+                "payload_bytes=%d min_numel=%d max_q=%d mode=%s chunks=%d "
+                "pipeline_min_numel=%d pipeline_reason=%s",
                 self.group_name,
                 self.world_size,
                 tuple(input_.shape),
@@ -168,11 +226,17 @@ class QuantizedAllReduce:
                 input_.numel() * input_.element_size(),
                 self.min_numel,
                 self.max_q,
+                "pipeline" if pipeline_reason is None else "full",
+                self.pipeline_chunks if pipeline_reason is None else 1,
+                self.pipeline_min_numel,
+                pipeline_reason or "eligible",
             )
 
-        # [*, C] view: the last dim carries the channels that share a scale.
-        flat = input_.reshape(-1, input_.shape[-1])
+        if pipeline_reason is None:
+            return self._all_reduce_pipelined(input_)
+        return self._all_reduce_full(input_)
 
+    def _global_scale(self, flat: torch.Tensor) -> torch.Tensor:
         # 1. per-channel global amax (tiny fp32 all-reduce, [C] elements).
         # vector_norm(ord=inf) fuses abs+max and avoids a payload-sized
         # temporary tensor. This is the optimized PR #19000 implementation.
@@ -180,7 +244,12 @@ class QuantizedAllReduce:
         dist.all_reduce(amax, op=dist.ReduceOp.MAX, group=self.group)
         # Exact-bound scale: rounding a value <= max_q cannot exceed max_q, so
         # the int8 sum over TP ranks stays in range and no clamp is needed.
-        scale = (amax / float(self.max_q)).clamp_min(1e-8)
+        return (amax / float(self.max_q)).clamp_min(1e-8)
+
+    def _all_reduce_full(self, input_: torch.Tensor) -> torch.Tensor:
+        # [*, C] view: the last dim carries the channels that share a scale.
+        flat = input_.reshape(-1, input_.shape[-1])
+        scale = self._global_scale(flat)
 
         # 2. int8 payload reduce. Do not add a clamp here (see the docstring).
         q = torch_npu.npu_quantize(flat, scale, None, torch.int8, 1, True)
@@ -191,3 +260,42 @@ class QuantizedAllReduce:
         # returned tensor, so copying the full payload back is unnecessary.
         out = torch_npu.npu_anti_quant(q, scale, dst_dtype=input_.dtype)
         return out.reshape(input_.shape)
+
+    def _all_reduce_pipelined(self, input_: torch.Tensor) -> torch.Tensor:
+        hidden = input_.shape[-1]
+        flat = input_.reshape(-1, hidden)
+        # Match the measured benchmark: one whole-input scale/MAX, not one
+        # per chunk. This preserves quantization levels and INT8 SUM bounds.
+        scale = self._global_scale(flat)
+        output = torch.empty_like(input_, memory_format=torch.contiguous_format)
+        flat_output = output.view(-1, hidden)
+        ranges = iter(_chunk_ranges(flat.shape[0], self.pipeline_chunks))
+
+        def submit(start: int, end: int) -> _Reduction:
+            quantized = torch_npu.npu_quantize(flat[start:end], scale, None, torch.int8, 1, True)
+            work = dist.all_reduce(quantized, group=self.group, async_op=True)
+            return _Reduction(start, end, quantized, work)
+
+        pending = deque()
+        for _ in range(min(_PIPELINE_LOOKAHEAD, self.pipeline_chunks)):
+            pending.append(submit(*next(ranges)))
+        while pending:
+            reduction = pending.popleft()
+            # Submit Q1/AR1 before waiting for AR0, allowing computation on
+            # different chunks to overlap the group's ordered communication.
+            reduction.work.wait()
+            dequantized = torch_npu.npu_anti_quant(reduction.quantized, scale, dst_dtype=input_.dtype)
+            if dequantized.dtype != input_.dtype or tuple(dequantized.shape) != (
+                reduction.end - reduction.start,
+                hidden,
+            ):
+                raise RuntimeError("INT8 dequantization must produce a BF16 tensor matching the reduced chunk.")
+            flat_output[reduction.start : reduction.end].copy_(dequantized)
+            del reduction, dequantized
+            next_range = next(ranges, None)
+            if next_range is not None:
+                pending.append(submit(*next_range))
+        # Every SUM is joined and all BF16 copies are on the caller's stream.
+        # Return a separate result without mutating input or adding a device
+        # synchronize, new process group, user stream or persistent cache.
+        return output

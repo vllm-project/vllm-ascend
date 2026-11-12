@@ -19,3 +19,9 @@ entries:
       threshold. Eager calls can overlap computation and communication while
       graph capture retains the existing whole-tensor path.
     hardware: [A5]
+  - category: feature
+    text: >-
+      Added opt-in two- or four-chunk pipelining for shared-scale INT8 all-reduce
+      through pipeline_chunks and pipeline_min_numel. Eager calls reuse one
+      whole-input scale and overlap INT8 SUM with computation; graph capture
+      retains the original whole-tensor INT8 path.

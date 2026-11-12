@@ -255,7 +255,7 @@ class TestQuantizedBackendSelection(unittest.TestCase):
             comm.unique_name = unique_name
             comm.world_size = 2
 
-        for dtype, chunks in (("int8", 1), ("mxfp8", 1), ("mxfp8", 2), ("mxfp8", 4)):
+        for dtype, chunks in (("int8", 1), ("int8", 2), ("int8", 4), ("mxfp8", 1), ("mxfp8", 2), ("mxfp8", 4)):
             with self.subTest(quant_dtype=dtype, chunks=chunks):
                 config = SimpleNamespace(
                     enable=True, min_numel=512, quant_dtype=dtype, pipeline_chunks=chunks, pipeline_min_numel=1024
@@ -284,8 +284,9 @@ class TestQuantizedBackendSelection(unittest.TestCase):
                     source = torch.ones(4, 128, dtype=torch.bfloat16)
                     comm.all_reduce(source)
                 selected, other = (int8, mxfp8) if dtype == "int8" else (mxfp8, int8)
-                kwargs = {} if dtype == "int8" else {"pipeline_chunks": chunks, "pipeline_min_numel": 1024}
-                selected.assert_called_once_with(group, min_numel=512, group_name="tp:0", **kwargs)
+                selected.assert_called_once_with(
+                    group, min_numel=512, group_name="tp:0", pipeline_chunks=chunks, pipeline_min_numel=1024
+                )
                 other.assert_not_called()
                 wrapper.all_reduce.assert_called_once_with(source)
 

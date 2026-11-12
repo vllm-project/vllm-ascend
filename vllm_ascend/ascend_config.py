@@ -414,10 +414,11 @@ class QuantizedAllReduceConfig:
     keep bf16. MXFP8 supports groups of 2/4/8 ranks, while INT8 supports up to
     8 ranks. The TP degree itself is validated here before group construction.
 
-    For MXFP8, ``pipeline_chunks`` selects 1 (whole tensor, default), 2 or 4
+    For either backend, ``pipeline_chunks`` selects 1 (whole tensor, default), 2 or 4
     chunks. The pipeline additionally requires ``pipeline_min_numel`` elements
     (defaults to ``min_numel``) and Eager execution. Graph capture retains the
-    original whole-tensor path. No prefill/decode phase gate is added.
+    original whole-tensor path. INT8 chunks share one whole-input per-channel
+    scale and one MAX collective. No prefill/decode phase gate is added.
     """
 
     enable: bool = False
@@ -446,12 +447,6 @@ class QuantizedAllReduceConfig:
         if value is not None and value < 1:
             raise ValueError("additional_config.quantized_all_reduce_config.pipeline_min_numel must be >= 1")
         return value
-
-    @model_validator(mode="after")
-    def _check_pipeline_backend(self) -> QuantizedAllReduceConfig:
-        if self.quant_dtype != "mxfp8" and (self.pipeline_chunks != 1 or self.pipeline_min_numel is not None):
-            raise ValueError("MXFP8 pipeline settings require quantized_all_reduce_config.quant_dtype='mxfp8'.")
-        return self
 
     def _validate_preconditions(self, vllm_config: Any) -> None:
         if not self.enable:

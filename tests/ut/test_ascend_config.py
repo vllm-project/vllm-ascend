@@ -154,25 +154,30 @@ class TestQuantizedAllReduceConfig(TestBase):
         ):
             config._validate_preconditions(vllm_config)
 
-    def test_mxfp8_pipeline_values_and_lax_integer_coercion(self):
-        for chunks in (1, 2, 4):
-            config = QuantizedAllReduceConfig(quant_dtype="mxfp8", pipeline_chunks=chunks, pipeline_min_numel=83886080)
-            self.assertEqual(config.pipeline_chunks, chunks)
-            self.assertEqual(config.pipeline_min_numel, 83886080)
-        config = QuantizedAllReduceConfig(quant_dtype="mxfp8", pipeline_chunks="2", pipeline_min_numel="41943040")  # type: ignore[arg-type]
-        self.assertEqual(config.pipeline_chunks, 2)
-        self.assertEqual(config.pipeline_min_numel, 41943040)
+    def test_pipeline_values_and_lax_integer_coercion(self):
+        for dtype in ("int8", "mxfp8"):
+            for chunks in (1, 2, 4):
+                with self.subTest(dtype=dtype, chunks=chunks):
+                    config = QuantizedAllReduceConfig(
+                        quant_dtype=dtype, pipeline_chunks=chunks, pipeline_min_numel=83886080
+                    )
+                    self.assertEqual(config.pipeline_chunks, chunks)
+                    self.assertEqual(config.pipeline_min_numel, 83886080)
+            config = QuantizedAllReduceConfig(quant_dtype=dtype, pipeline_chunks="2", pipeline_min_numel="41943040")  # type: ignore[arg-type]
+            self.assertEqual(config.pipeline_chunks, 2)
+            self.assertEqual(config.pipeline_min_numel, 41943040)
 
     def test_rejects_invalid_pipeline_settings(self):
-        for chunks in (0, -1, 3, 8):
-            with self.subTest(chunks=chunks), self.assertRaisesRegex(ValueError, "pipeline_chunks"):
-                QuantizedAllReduceConfig(quant_dtype="mxfp8", pipeline_chunks=chunks)
-        for threshold in (0, -1):
-            with self.subTest(threshold=threshold), self.assertRaisesRegex(ValueError, "pipeline_min_numel"):
-                QuantizedAllReduceConfig(quant_dtype="mxfp8", pipeline_min_numel=threshold)
-        for kwargs in ({"pipeline_chunks": 2}, {"pipeline_min_numel": 1024}):
-            with self.subTest(kwargs=kwargs), self.assertRaisesRegex(ValueError, "quant_dtype='mxfp8'"):
-                QuantizedAllReduceConfig(**kwargs)
+        for dtype in ("int8", "mxfp8"):
+            for chunks in (0, -1, 3, 8):
+                with self.subTest(dtype=dtype, chunks=chunks), self.assertRaisesRegex(ValueError, "pipeline_chunks"):
+                    QuantizedAllReduceConfig(quant_dtype=dtype, pipeline_chunks=chunks)
+            for threshold in (0, -1):
+                with (
+                    self.subTest(dtype=dtype, threshold=threshold),
+                    self.assertRaisesRegex(ValueError, "pipeline_min_numel"),
+                ):
+                    QuantizedAllReduceConfig(quant_dtype=dtype, pipeline_min_numel=threshold)
 
     def test_mxfp8_tp_validation(self):
         config = QuantizedAllReduceConfig(enable=True, quant_dtype="mxfp8")
