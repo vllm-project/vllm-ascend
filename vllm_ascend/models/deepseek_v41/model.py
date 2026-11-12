@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek V4.1 text model and source-shared hybrid-cache graph."""
+"""[Role] DeepSeek V4.1 text model and source-shared hybrid-cache graph.
+[Invariants] Projection weights follow their linear method's layout policy.
+[Timeouts & Locks] Model runner owns execution synchronization.
+[Side-Effect Policy] Parameters are prepared at load time.
+"""
 
 from __future__ import annotations
 
@@ -431,10 +435,6 @@ def init_attention_projections(self, config, quant_config, prefix, reduce_result
         prefix=f"{prefix}.wo_a",
         return_bias=False,
     )
-    # Every DSA o_proj path consumes wo_a.weight directly via
-    # npu_transpose_batchmatmul / npu_transpose_quant_batchmatmul,
-    # so the weight must remain ND.
-    self.wo_a.skip_weight_nz_conversion = True
     self.wo_b = RowParallelLinear(
         self.n_groups * config.o_lora_rank,
         self.dim,
