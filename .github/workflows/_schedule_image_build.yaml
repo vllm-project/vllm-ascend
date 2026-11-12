@@ -21,11 +21,21 @@ on:
         description: 'The tag subfix to use'
         required: true
         type: string
+      tag_suffix:
+        description: "Extra suffix appended to the published image tag only, after 'suffix', including the leading dash (e.g. '-presmoke' → nightly-main-310p-presmoke). Cache tags and artifact names keep using 'suffix', so isolated builds still reuse the warm build cache. Default '' leaves the tag unchanged."
+        required: false
+        type: string
+        default: ''
       should_push:
         description: 'Whether to push the image'
         required: false
         type: boolean
         default: False
+      skip_sync:
+        description: 'If true, do not dispatch the quay.io sync after pushing. Used by presmoke builds, whose images are for issue localization only and must not be mirrored to quay.io.'
+        required: false
+        type: boolean
+        default: false
       dockerfile:
         description: 'The Dockerfile to use'
         required: false
@@ -282,8 +292,13 @@ jobs:
           # to the tag (e.g. suffix=310p-openeuler → SUFFIX=-310p-openeuler,
           # resulting in tags like main-310p-openeuler).
           # Leave SUFFIX empty when no suffix is provided (plain tags like main).
+          # tag_suffix is appended after the suffix and already carries its own
+          # leading dash (e.g. '-presmoke' → main-310p-presmoke). It only affects
+          # the published tag, not the cache tag or the artifact names.
           if [ -n "${{ inputs.suffix }}" ]; then
-            echo "SUFFIX=-${{ inputs.suffix }}" >> "$GITHUB_ENV"
+            echo "SUFFIX=-${{ inputs.suffix }}${{ inputs.tag_suffix }}" >> "$GITHUB_ENV"
+          elif [ -n "${{ inputs.tag_suffix }}" ]; then
+            echo "SUFFIX=${{ inputs.tag_suffix }}" >> "$GITHUB_ENV"
           else
             echo "SUFFIX=" >> "$GITHUB_ENV"
           fi
@@ -381,7 +396,7 @@ jobs:
           done
 
       - name: Dispatch quay.io sync
-        if: ${{ inputs.should_push }}
+        if: ${{ inputs.should_push && !inputs.skip_sync }}
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.SYNC_TOOLS_TOKEN }}
