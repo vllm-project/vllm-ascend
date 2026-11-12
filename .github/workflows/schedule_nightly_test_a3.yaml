@@ -50,6 +50,16 @@ on:
         required: false
         default: 'false'
         type: string
+      image_repo_suffix:
+        description: 'Suffix appended to the SWR repository the tests pull the nightly image from (base_image/ascend-ci/vllm-ascend<suffix>). Used by /nightly --presmoke to consume the images published by /presmoke. Empty uses the standard repository.'
+        required: false
+        default: ''
+        type: string
+      image_tag_suffix:
+        description: 'Suffix appended to the nightly image tag the tests pull (nightly-ci-<branch>-<target><suffix>). Used by /nightly --presmoke to consume the images published by /presmoke. Empty uses the standard tag.'
+        required: false
+        default: ''
+        type: string
       vllm_ascend_ref:
         description: 'PR commit SHA for PR-triggered tests'
         required: false
@@ -282,7 +292,7 @@ jobs:
     with:
       soc_version: a3
       runner: linux-aarch64-a3-800t-0
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend${{ inputs.image_repo_suffix }}:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3${{ inputs.image_tag_suffix }}"
       ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       replicas: 1
@@ -336,7 +346,7 @@ jobs:
     with:
       soc_version: a3
       runner: linux-aarch64-a3-800t-0
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend${{ inputs.image_repo_suffix }}:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3${{ inputs.image_tag_suffix }}"
       ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       replicas: 1
@@ -393,7 +403,7 @@ jobs:
     with:
       runner: ${{ matrix.test_config.os }}
       soc_version: a3
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend${{ inputs.image_repo_suffix }}:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3${{ inputs.image_tag_suffix }}"
       config_file_path: ${{ matrix.test_config.config_file_path }}
       config_base_path: ${{ matrix.test_config.config_base_path }}
       name: ${{ matrix.test_config.name }}
@@ -445,7 +455,7 @@ jobs:
     with:
       runner: ${{ matrix.test_config.os }}
       soc_version: a3
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend${{ inputs.image_repo_suffix }}:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3${{ inputs.image_tag_suffix }}"
       tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       config_base_path: ${{ matrix.test_config.config_base_path }}
@@ -496,7 +506,7 @@ jobs:
         test_config: ${{ fromJSON(needs.setup-vars.outputs.multi_node) }}
     uses: ./.github/workflows/_e2e_profile_parse.yaml
     with:
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend${{ inputs.image_repo_suffix }}:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3${{ inputs.image_tag_suffix }}"
       prefix: nightly-profiling/${{ github.repository }}/${{ github.run_id }}/${{ github.run_attempt }}/multi-node/${{ matrix.vllm_ascend_branch }}-${{ matrix.test_config.name }}
       ref: ${{ github.sha }}
       should_run: >-
@@ -521,7 +531,7 @@ jobs:
         test_config: ${{ fromJSON(needs.setup-vars.outputs.double_node) }}
     uses: ./.github/workflows/_e2e_profile_parse.yaml
     with:
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend${{ inputs.image_repo_suffix }}:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3${{ inputs.image_tag_suffix }}"
       prefix: nightly-profiling/${{ github.repository }}/${{ github.run_id }}/${{ github.run_attempt }}/multi-node/${{ matrix.vllm_ascend_branch }}-${{ matrix.test_config.name }}
       ref: ${{ github.sha }}
       should_run: >-
@@ -546,7 +556,7 @@ jobs:
         test_config: ${{ fromJSON(needs.setup-vars.outputs.single_node) }}
     uses: ./.github/workflows/_e2e_profile_parse.yaml
     with:
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend${{ inputs.image_repo_suffix }}:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3${{ inputs.image_tag_suffix }}"
       prefix: nightly-profiling/${{ github.repository }}/${{ github.run_id }}/${{ github.run_attempt }}/single-node/${{ matrix.vllm_ascend_branch }}-${{ matrix.test_config.name }}
       ref: ${{ github.sha }}
       should_run: >-
@@ -572,7 +582,7 @@ jobs:
         test_config: ${{ fromJSON(needs.setup-vars.outputs.multi_card) }}
     uses: ./.github/workflows/_e2e_profile_parse.yaml
     with:
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
+      image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend${{ inputs.image_repo_suffix }}:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3${{ inputs.image_tag_suffix }}"
       prefix: nightly-profiling/${{ github.repository }}/${{ github.run_id }}/${{ github.run_attempt }}/single-node/${{ matrix.vllm_ascend_branch }}-${{ matrix.test_config.name }}
       ref: ${{ github.sha }}
       should_run: >-
@@ -619,4 +629,3 @@ jobs:
           pattern: nightly-test-benchmark-results-*
           compression-level: 0
           delete-merged: true
-
