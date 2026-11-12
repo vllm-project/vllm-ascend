@@ -1260,17 +1260,26 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             # contents never advance with decoding.
             num_spec_tokens = self.vllm_config.speculative_config.num_speculative_tokens
             index_width = _aligned_dspark_index_width(window_size, num_spec_tokens)
+            use_triton = (
+                build_dspark_swa_indices_triton is not None and common.query_start_loc.device.type == "npu"
+            )
             if self._dspark_swa_indices is None:
                 self._dspark_swa_indices = torch.empty(
                     (self._max_tokens, 1, index_width), dtype=torch.int32, device=req.seq_lens.device
                 )
+                # The triton variant emits [T, 1] lengths while the eager
+                # chain emits [T]; shape the persistent buffer after the
+                # path that fills it so each device keeps its existing
+                # graph-visible contract.
                 self._dspark_swa_lengths = torch.empty(
-                    (self._max_tokens, 1), dtype=torch.int32, device=req.seq_lens.device
+                    (self._max_tokens, 1) if use_triton else (self._max_tokens,),
+                    dtype=torch.int32,
+                    device=req.seq_lens.device,
                 )
             indices_view = self._dspark_swa_indices[: req.num_actual_tokens]
             assert self._dspark_swa_lengths is not None
             lengths_view = self._dspark_swa_lengths[: req.num_actual_tokens]
-            if build_dspark_swa_indices_triton is not None and common.query_start_loc.device.type == "npu":
+            if use_triton:
                 req.ori_sparse_indices, req.ori_topk_length = build_dspark_swa_indices_triton(
                     common.query_start_loc[: req.num_reqs + 1],
                     req.seq_lens,
