@@ -157,8 +157,8 @@ a3:
         size: 3
   double_node:
     test_config:
-      - name: GLM-5.3-W8A8C8-A3-FUNCTION-DISABLE-PP
-        config_file_path: GLM-5.3-W8A8C8-A3-FUNCTION-DISABLE-PP.yaml
+      - name: GLM-5.3-W8A8C8-A3-FUNCTION-NO-PP
+        config_file_path: GLM-5.3-W8A8C8-A3-FUNCTION-NO-PP.yaml
         config_base_path: tests/SIT/cases/models/configs/GLM
         size: 2
       - name: Kimi-K2.6-W4A8-64k-1k-TPOT50-PD

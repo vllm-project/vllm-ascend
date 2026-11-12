@@ -1,7 +1,6 @@
-# GLM-5.3 W8A8C8 RP3 PD coverage.
-# Reduced-layer weights are pending: temporarily reuse the current full-model path.
-# Replace the model and PP partition together when reduced-layer weights are available.
-test_name: GLM-5.3-W8A8C8-A3-FUNCTION-DISABLE-PP
+# PP ablation of the validated Wiki baseline: two nodes, P PCP16/PP1, D DP8/TP2.
+# Retain full-model weights and smoke gates; PP2 partitioning is intentionally absent.
+test_name: GLM-5.3-W8A8C8-A3-FUNCTION-NO-PP
 model: Eco-Tech/GLM-5.3-w8a8c8
 num_nodes: 2
 npu_per_node: 16
@@ -40,9 +39,10 @@ config:
 env_common:
   SERVER_PORT: ${PORT}
   ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
+  TORCH_EXTENSIONS_DIR: /tmp/glm53_no_pp_torch_extensions/node-${NODE_INDEX}/dp-${DP_RANK}
   PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
   HCCL_OP_EXPANSION_MODE: AIV
-  HCCL_BUFFSIZE: '1024'
+  HCCL_BUFFSIZE: '2314'
   TASK_QUEUE_ENABLE: '1'
   VLLM_USE_V2_MODEL_RUNNER: '1'
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
@@ -50,12 +50,15 @@ env_common:
   HCCL_CONNECT_TIMEOUT: '1800'
   ASCEND_TRANSFER_TIMEOUT: '10000'
   VLLM_USE_MODELSCOPE: true
+  PYTHONHASHSEED: '0'
+  ACL_OP_INIT_MODE: '1'
 env_prefill:
   SERVER_PORT: ${PORT}
   ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
+  TORCH_EXTENSIONS_DIR: /tmp/glm53_no_pp_torch_extensions/node-${NODE_INDEX}/dp-${DP_RANK}
   PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
   HCCL_OP_EXPANSION_MODE: AIV
-  HCCL_BUFFSIZE: '2560'
+  HCCL_BUFFSIZE: '2314'
   TASK_QUEUE_ENABLE: '1'
   VLLM_USE_V2_MODEL_RUNNER: '1'
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
@@ -64,9 +67,12 @@ env_prefill:
   ASCEND_TRANSFER_TIMEOUT: '10000'
   VLLM_USE_MODELSCOPE: true
   VLLM_USE_FASTOKENS: '1'
+  PYTHONHASHSEED: '0'
+  ACL_OP_INIT_MODE: '1'
 env_decode:
   SERVER_PORT: ${PORT}
   ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
+  TORCH_EXTENSIONS_DIR: /tmp/glm53_no_pp_torch_extensions/node-${NODE_INDEX}/dp-${DP_RANK}
   PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
   HCCL_OP_EXPANSION_MODE: AIV
   HCCL_BUFFSIZE: '1024'
@@ -79,14 +85,17 @@ env_decode:
   VLLM_USE_MODELSCOPE: true
   OMP_PROC_BIND: 'false'
   OMP_NUM_THREADS: '10'
+  PYTHONHASHSEED: '0'
+  ACL_OP_INIT_MODE: '1'
 templates:
 - node_index: 0
   envs:
     SERVER_PORT: ${PORT}
     ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
+    TORCH_EXTENSIONS_DIR: /tmp/glm53_no_pp_torch_extensions/node-${NODE_INDEX}/dp-${DP_RANK}
     PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
     HCCL_OP_EXPANSION_MODE: AIV
-    HCCL_BUFFSIZE: '2560'
+    HCCL_BUFFSIZE: '2314'
     TASK_QUEUE_ENABLE: '1'
     VLLM_USE_V2_MODEL_RUNNER: '1'
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
@@ -95,6 +104,8 @@ templates:
     ASCEND_TRANSFER_TIMEOUT: '10000'
     VLLM_USE_MODELSCOPE: true
     VLLM_USE_FASTOKENS: '1'
+    PYTHONHASHSEED: '0'
+    ACL_OP_INIT_MODE: '1'
   server_cmd_template:
   - --host
   - 0.0.0.0
@@ -118,7 +129,7 @@ templates:
   - --max-num-seqs
   - '64'
   - --gpu-memory-utilization
-  - '0.92'
+  - '0.85'
   - --quantization
   - ascend
   - --safetensors-load-strategy
@@ -134,8 +145,7 @@ templates:
   - --attention_config.indexer_kv_dtype
   - int8
   - --additional-config
-  - '{"enable_fused_mc2": 2, "enable_flashcomm1": true, "enable_shared_expert_dp": true, "enable_sparse_li_c8": true, "enable_sparse_sfa_c8":
-    true}'
+  - '{"enable_fused_mc2": 1, "enable_flashcomm1": true}'
   - --speculative-config
   - '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}'
   - --kv-transfer-config
@@ -146,6 +156,7 @@ templates:
   envs:
     SERVER_PORT: ${PORT}
     ASCEND_RT_VISIBLE_DEVICES: ${VISIBLE_DEVICES}
+    TORCH_EXTENSIONS_DIR: /tmp/glm53_no_pp_torch_extensions/node-${NODE_INDEX}/dp-${DP_RANK}
     PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
     HCCL_OP_EXPANSION_MODE: AIV
     HCCL_BUFFSIZE: '1024'
@@ -158,6 +169,8 @@ templates:
     VLLM_USE_MODELSCOPE: true
     OMP_PROC_BIND: 'false'
     OMP_NUM_THREADS: '10'
+    PYTHONHASHSEED: '0'
+    ACL_OP_INIT_MODE: '1'
   server_cmd_template:
   - --host
   - 0.0.0.0
@@ -175,7 +188,7 @@ templates:
   - ${TP_SIZE}
   - --enable-expert-parallel
   - --enable-chunked-prefill
-  - --no-enable-prefix-caching
+  - --enable-prefix-caching
   - --seed
   - '1024'
   - --max-model-len
@@ -202,8 +215,7 @@ templates:
   - --attention_config.indexer_kv_dtype
   - int8
   - --additional-config
-  - '{"recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel":
-    true}, "multistream_overlap_shared_expert": true, "enable_sparse_li_c8": true, "enable_sparse_sfa_c8": true}'
+  - '{"recompute_scheduler_enable": true, "enable_fused_mc2": 1}'
   - --speculative-config
   - '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
   - --compilation-config
