@@ -2186,11 +2186,17 @@ class AscendSFAImpl(MLAAttentionImpl):
                 self._store_packed_kv_cache(k_pe, k_nope, knope_scale, kv_cache, slot_mapping_sfa, attn_metadata)
             self._on_kv_cache_written(kv_cache, attn_metadata)
 
-        # G Cube follows prolog; return communication runs during indexer/SFA.
+        # G Cube follows prolog; AIV return communication joins before Vector.
         pending_gate = None
+        indexer_kwargs = {}
         if gate_input is not None:
             assert gate_tp is not None
             pending_gate = gate_tp.project(gate_input, self.g_proj)
+            if gate_tp.uses_aiv:
+                if self.runtime_has_indexer:
+                    indexer_kwargs["before_vector"] = pending_gate.wait
+                else:
+                    pending_gate.wait()
 
         # A sharded-decode PCP rank can own no request but must still write
         # and gather KV with the other ranks.
@@ -2212,6 +2218,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 k_hidden_states,
                 indexer_attn_metadata,
                 compute_topk=not self.skip_topk and has_local_query,
+                **indexer_kwargs,
             )
             # Release pending indexer receive buffers after their consumer.
             k_hidden_states = None

@@ -689,6 +689,7 @@ def test_projection_communication_mode_honors_pg_override(monkeypatch, env_mode,
     group = SimpleNamespace(device_group=SimpleNamespace(_get_backend=lambda device: backend))
     assert projection_module.uses_aiv_communication(group) is expected
     assert not projection_module.uses_aiv_communication(None)
+    assert projection_module.FullRankGateTP(group, 2, 2).uses_aiv is expected
 
 
 @pytest.mark.parametrize("aiv", [True, False])

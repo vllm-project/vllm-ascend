@@ -13,6 +13,7 @@ import vllm_ascend.attention.sfa_v1 as sparse_mla
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata, PreprocessType
+from vllm_ascend.ops.finegrained_tp import PendingGate, PendingTensor
 
 
 @pytest.fixture(autouse=True)
@@ -499,12 +500,13 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
 
 @pytest.mark.parametrize("graph_mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL])
 @pytest.mark.parametrize("actual_tokens", [0, 1, 3])
+@pytest.mark.parametrize("gate_aiv,has_indexer", [(None, True), (False, True), (True, True), (True, False)])
 @pytest.mark.parametrize(
     "dcp_enabled,sharded_decode,global_prefill",
     [(False, False, True), (False, True, False), (True, False, True)],
 )
 def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
-    dcp_enabled, sharded_decode, global_prefill, actual_tokens, graph_mode
+    dcp_enabled, sharded_decode, global_prefill, actual_tokens, graph_mode, gate_aiv, has_indexer
 ):
     """Run the real forward entry; PCP peers need the same padded row count."""
     impl_cls = AscendSFADCPImpl if dcp_enabled else AscendSFAImpl
@@ -524,8 +526,9 @@ def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
     impl.local_num_heads = 1
     impl.preprocess_type = PreprocessType.NATIVE
     impl.g_proj = impl.layerwise_kv_cache_hook = None
-    impl.has_indexer = True
-    impl.skip_topk = impl.use_index_cache = False
+    impl.has_indexer = has_indexer
+    impl.skip_topk = not has_indexer
+    impl.use_index_cache = False
     impl.layer_name = "layer"
     impl._is_mtp_layer = False
     hidden = torch.ones(4, 2)
@@ -552,8 +555,31 @@ def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
     impl._q_proj_and_k_up_proj = MagicMock(return_value=(torch.zeros(4, 1, 2), None))
     impl._record_dcp_kv_gather_context = MagicMock()
     impl._prepare_indexer_metadata = MagicMock()
-    impl.indexer = MagicMock(return_value=torch.zeros(4, 1, 1, dtype=torch.int32))
-    impl._execute_sparse_flash_attention_process = MagicMock(return_value=torch.ones(4, 2))
+    trace = []
+    indices = torch.zeros(4, 1, 1, dtype=torch.int32)
+
+    def indexer(*args, before_vector=None, **kwargs):
+        if before_vector is not None:
+            before_vector()
+        trace.append("indexer-vector")
+        return indices
+
+    impl.indexer = MagicMock(side_effect=indexer)
+    impl._get_indexcache_topk_indices = MagicMock(return_value=indices)
+    impl._execute_sparse_flash_attention_process = MagicMock(
+        side_effect=lambda *args: (trace.append("SFA"), torch.ones(4, 2))[1]
+    )
+    gate_work = MagicMock()
+    gate_work.wait.side_effect = lambda: trace.append("join-G")
+    if gate_aiv is not None:
+        gate = torch.zeros(4, 2)
+        pending_gate = PendingGate(PendingTensor(gate, gate_work, gate), None, 1, 4, 1, 2)
+        impl.g_proj = MagicMock()
+        impl.gproj_tp = SimpleNamespace(
+            uses_aiv=gate_aiv,
+            gather=MagicMock(return_value=object()),
+            project=MagicMock(return_value=pending_gate),
+        )
     impl._v_up_proj = lambda value: value
     impl._finalize_o_proj = MagicMock(side_effect=lambda value, output: output.copy_(value))
     with (
@@ -564,6 +590,7 @@ def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
         patch.object(sparse_mla, "notify_kv_cache_written"),
         patch.object(sparse_mla, "attention_transfer_window"),
         patch.object(sparse_mla, "maybe_save_kv_layer_to_connector"),
+        patch.object(sparse_mla, "flash_attention_gate"),
     ):
         output = torch.empty_like(hidden)
         assert impl.forward("layer", hidden, (), metadata, output) is output
@@ -574,7 +601,17 @@ def test_nope_pcp_forward_preserves_collective_rows_on_empty_and_uneven_ranks(
     assert impl.fused_qkv_a_proj.call_args.args[0].shape[0] == 4
     impl._finalize_o_proj.assert_called_once()
     assert impl._finalize_o_proj.call_args.args[0].shape[0] == 4
-    assert impl.indexer.call_args.kwargs["compute_topk"] == (actual_tokens > 0)
+    if has_indexer:
+        assert impl.indexer.call_args.kwargs["compute_topk"] == (actual_tokens > 0)
+        assert ("before_vector" in impl.indexer.call_args.kwargs) == (gate_aiv is True)
+    else:
+        impl.indexer.assert_not_called()
+    if gate_aiv is not None:
+        gate_work.wait.assert_called_once()
+        if has_indexer:
+            assert (trace.index("join-G") < trace.index("indexer-vector")) == gate_aiv
+        if actual_tokens > 0:
+            assert (trace.index("join-G") < trace.index("SFA")) == gate_aiv
     assert impl._execute_sparse_flash_attention_process.call_count == int(actual_tokens > 0)
     assert impl._record_dcp_kv_gather_context.call_count == int(dcp_enabled)
     torch.testing.assert_close(output, torch.full_like(output, float(actual_tokens > 0)))

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import nullcontext
 from types import ModuleType, SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, Mock, patch
@@ -107,6 +108,107 @@ def test_sfa_indexer_backend_contract():
         160,
     )
     assert AscendSFAIndexerBackend.get_supported_kernel_block_sizes() == [128]
+
+
+def test_nope_qk_joins_gate_after_q_cube_before_k_vector(monkeypatch):
+    trace = []
+
+    class Stream:
+        def __init__(self, name):
+            self.name = name
+
+        def wait_stream(self, other):
+            trace.append(f"{self.name}.wait:{other.name}")
+
+    class Tensor:
+        shape = (2, 1, 4)
+
+        def __init__(self, name):
+            self.name = name
+
+        def __matmul__(self, other):
+            trace.append(f"{self.name}-hadamard-cube")
+            return self
+
+        def record_stream(self, stream):
+            trace.append(f"{self.name}.record:{stream.name}")
+
+    main, aux = Stream("main"), Stream("aux")
+    monkeypatch.setattr(torch_npu.npu, "current_stream", lambda: main)
+    monkeypatch.setattr(torch_npu.npu, "stream", lambda stream: nullcontext())
+    hidden, q, k = Tensor("hidden"), Tensor("Q"), Tensor("K")
+
+    def project_q(*args):
+        trace.append("Q-cube")
+        return q
+
+    def project_k(*args, **kwargs):
+        trace.append("K-vector")
+        return k, None
+
+    def quantize(value):
+        trace.append(f"{value.name}-quant-vector")
+        return torch.zeros(2, 4), torch.ones(2)
+
+    indexer = SimpleNamespace(
+        _q_stream=aux,
+        wk_weights_proj=lambda hidden: (None, None),
+        q_hadamard=None,
+        head_dim=4,
+        _project_q=project_q,
+        _project_k=project_k,
+        _quantize_transformed_li_tensor=quantize,
+    )
+    AscendSFAIndexerBackend._forward_qk(
+        indexer, hidden, (hidden, hidden), hidden, None, None, False, before_vector=lambda: trace.append("join-G")
+    )
+    assert trace.index("Q-cube") < trace.index("Q-hadamard-cube") < trace.index("join-G")
+    assert trace.index("join-G") < trace.index("K-vector") < trace.index("main.wait:aux")
+    # The existing stage edge carries main's G join to subsequent aux work.
+    assert trace.index("K-vector") < trace.index("aux.wait:main", trace.index("K-vector"))
+    assert trace.index("aux.wait:main", trace.index("K-vector")) < trace.index("K-hadamard-cube")
+    assert trace.index("K-hadamard-cube") < trace.index("Q-quant-vector") < trace.index("K-quant-vector")
+    assert trace.count("join-G") == 1
+
+
+@pytest.mark.parametrize(
+    "q_overlap,rope_dim,quantized_q", [(False, 0, True), (True, 0, True), (True, 64, True), (True, 0, False)]
+)
+def test_indexer_gate_join_uses_first_vector_boundary(q_overlap, rope_dim, quantized_q):
+    trace = []
+
+    def forward_qk(*args, before_vector=None):
+        trace.append("Q-cube")
+        if before_vector is not None:
+            before_vector()
+        trace.append("K-vector")
+        return None, None, None, None
+
+    def forward_k(*args, **kwargs):
+        trace.append("K-vector")
+        return None, None, None
+
+    indexer = SimpleNamespace(
+        qk_rope_head_dim=rope_dim,
+        _select_execution_paths=lambda *args: (object() if q_overlap else None, False, False),
+        _forward_qk=forward_qk,
+        forward_k=forward_k,
+        _gather_cache_inputs=lambda *args: (None, None, None),
+        write_cache=lambda *args: trace.append("cache-vector"),
+    )
+    AscendSFAIndexerBackend.forward(
+        indexer,
+        None,
+        (None, None) if quantized_q else None,
+        None,
+        SimpleNamespace(cos=None, sin=None, cache_scatter_indices=None),
+        compute_topk=False,
+        before_vector=lambda: trace.append("join-G"),
+    )
+    assert trace.count("join-G") == 1
+    assert trace.index("join-G") < trace.index("K-vector") < trace.index("cache-vector")
+    if q_overlap:
+        assert (trace.index("Q-cube") < trace.index("join-G")) == (rope_dim == 0 and quantized_q)
 
 
 @patch("vllm_ascend.attention.indexer.get_ascend_config")
