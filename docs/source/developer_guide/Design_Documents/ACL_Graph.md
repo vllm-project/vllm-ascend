@@ -62,6 +62,32 @@ These checks document the subset of upstream graph behavior that the current Asc
 
 ## Key Ascend-Specific Mechanisms
 
+### DeepSeek V4.1 Engram in MRV2 breakable PIECEWISE graphs
+
+`EngramModelState` stages lookback tokens, request boundaries and the valid token
+count in persistent device buffers. The model's `forward()` computes Engram
+hashes and the keep mask in a graph segment. An `eager_break_during_capture`
+prefetch boundary then runs table lookup and any required communication, writing
+to persistent row buffers. With Engram overlap enabled, this work runs on an
+auxiliary stream while the earlier decoder layers execute. Each Engram consumer
+waits on its layer's ordinary event at an eager boundary before consuming rows
+in the next graph segment. The graph manager needs no Engram preparation hook.
+
+Capture uses the same device hash path as replay, including when the initial
+batch is dummy. The device valid token count masks padding and idle DP ranks;
+it must not become a Python branch specialized to the capture inputs. Row
+buffers and ready events remain stable across replays of a token bucket.
+
+Metadata resources are allocated independently of the configured graph mode.
+PIECEWISE and NONE submit device metadata tasks during preparation; FULL keeps
+its captured producer protocol. PIECEWISE attention waits at eager consumers,
+and an Engram model hook retires any remaining tasks at an eager boundary after
+forward, including on replay. The generic graph manager is unchanged.
+Normal execution passes the dispatched batch mode to `prepare_attn`. Capture
+preparation retains upstream's NONE mode and `for_capture` flag: Engram dummy
+inputs do not depend on that mode, and the model selects its producer from the
+forward context. This also supports `FULL_AND_PIECEWISE` configurations.
+
 ### Host-side attention parameter update for full graph replay
 
 Full graph replay on Ascend has an extra problem that upstream generic documentation does not cover in detail: some attention operators need runtime metadata updates even when the overall graph is static. The Ascend implementation handles this by separating graph capture from host-side task parameter updates.

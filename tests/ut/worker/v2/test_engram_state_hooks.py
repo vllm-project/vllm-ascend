@@ -201,6 +201,63 @@ def test_prepare_dummy_inputs_skips_models_without_engram(monkeypatch):
     assert state.prepare_dummy_inputs(num_reqs=4, num_tokens=64) == {}
 
 
+@pytest.mark.parametrize("mode", [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL, CUDAGraphMode.FULL_AND_PIECEWISE])
+def test_engram_capture_stages_coordinates_independently_of_config(mode):
+    from vllm_ascend.models.deepseek_v41.engram.model_state import EngramModelState
+
+    state = EngramModelState.__new__(EngramModelState)
+    state.vllm_config = SimpleNamespace(
+        compilation_config=SimpleNamespace(cudagraph_mode=mode),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
+    )
+    state.lookback_token_ids = torch.full((1, 2), 7, dtype=torch.int32)
+    state._engram_graph_inputs = {
+        "engram_query_start_loc": torch.full((2,), 7, dtype=torch.int32),
+        "engram_valid_token_count": torch.tensor([7], dtype=torch.int32),
+    }
+    state._engram_piecewise_inputs = state._engram_graph_inputs
+    state.model = Mock()
+    result = state.prepare_engram_dummy_inputs(num_reqs=1, num_tokens=4)
+    assert torch.all(state.lookback_token_ids == -1)
+    for key, buffer in state._engram_graph_inputs.items():
+        assert result[key] is buffer
+        assert torch.all(buffer == 0)
+    state.model.prepare_engram_graph_inputs.assert_not_called()
+    state.model.prime_engram_v2_graph_inputs.assert_not_called()
+    assert state._engram_inputs is None
+
+
+@pytest.mark.parametrize("breakable", [False, True])
+def test_piecewise_manager_does_not_submit_model_specific_producers(breakable):
+    from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
+
+    manager = ModelAclGraphManager.__new__(ModelAclGraphManager)
+    manager.use_breakable_cg = breakable
+    state = SimpleNamespace(prepare_engram=Mock(side_effect=AssertionError("external producer")))
+    manager.model_runner = SimpleNamespace(model_state=state)
+    model = Mock(side_effect=lambda **kwargs: kwargs["input_ids"].clone())
+    manager.breakable_cg_runner = model
+    inputs = torch.zeros(4)
+    for value in (3, 0, 7):
+        inputs.fill_(value)
+        torch.testing.assert_close(manager.run_pw_graph(model, {"input_ids": inputs}), inputs)
+    assert model.call_count == 3
+    state.prepare_engram.assert_not_called()
+
+
+@pytest.mark.parametrize("breakable", [False, True])
+def test_piecewise_models_without_engram_keep_their_inputs(breakable):
+    from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
+
+    manager = ModelAclGraphManager.__new__(ModelAclGraphManager)
+    manager.use_breakable_cg = breakable
+    manager.model_runner = SimpleNamespace(model_state=SimpleNamespace())
+    model = Mock(return_value="output")
+    manager.breakable_cg_runner = model
+    assert manager.run_pw_graph(model, {"input_ids": "fixed"}) == "output"
+    model.assert_called_once_with(input_ids="fixed")
+
+
 @pytest.fixture
 def engram_model():
     model = model_mod.DeepseekV41Model.__new__(model_mod.DeepseekV41Model)

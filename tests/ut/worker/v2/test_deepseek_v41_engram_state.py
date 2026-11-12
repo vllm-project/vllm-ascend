@@ -30,7 +30,7 @@ class EngramModel(torch.nn.Module):
     def prime_engram_v2_graph_inputs(self, num_tokens):
         return self.buffers_for_graph
 
-    def prepare_engram_graph_inputs(self, num_tokens):
+    def prepare_engram_graph_inputs(self, num_tokens, *, cg_mode=None):
         return self.buffers_for_graph
 
     def forward(self, **kwargs):
@@ -49,7 +49,8 @@ def state(monkeypatch, request):
     monkeypatch.setattr(DefaultModelState, "prepare_dummy_inputs", lambda *args: {})
     monkeypatch.setattr(deepseek_v41, "ring_state_update_skipped", lambda: False)
     config = SimpleNamespace(
-        parallel_config=SimpleNamespace(prefill_context_parallel_size=getattr(request, "param", 1))
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=getattr(request, "param", 1)),
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL),
     )
     return deepseek_v41.EngramModelState(config, EngramModel(), None, torch.device("cpu"))
 
@@ -129,6 +130,47 @@ def test_capture_discards_pending_lookup_and_resets_history(state):
     assert result["lookback_token_ids"] is state.lookback_token_ids
 
 
+@pytest.mark.parametrize("full_capture", [False, True])
+def test_capture_preparation_preserves_none_mode_and_staged_inputs(state, monkeypatch, full_capture):
+    # Upstream prepares dummy model inputs before attention metadata, and passes
+    # NONE for both captures. No adapter or configured-mode inference is needed.
+    state._cg_mode = CUDAGraphMode.FULL
+    inputs = state.prepare_dummy_inputs(2, 8)
+    state._replay_groups = (0, torch.empty(0, dtype=torch.int32))
+    capture_batch = SimpleNamespace(
+        num_reqs=2,
+        is_dummy=True,
+        is_prefilling_np=np.zeros(2, dtype=np.bool_),
+        idx_mapping_np=np.arange(2),
+    )
+    prepare = Mock(return_value={})
+    monkeypatch.setattr(AscendModelState, "prepare_attn", prepare)
+    state.prepare_attn(capture_batch, CUDAGraphMode.NONE, (), torch.empty(0), [], None, for_capture=full_capture)
+    assert state._cg_mode == CUDAGraphMode.NONE
+    assert prepare.call_args.args[1] == CUDAGraphMode.NONE
+    assert prepare.call_args.kwargs["for_capture"] == full_capture
+    assert inputs["engram_query_start_loc"] is state._engram_piecewise_inputs["engram_query_start_loc"]
+    assert torch.count_nonzero(inputs["engram_valid_token_count"]) == 0
+    state.model(**inputs)
+    state.model.prepare_engram_inputs.assert_not_called()
+
+
+@pytest.mark.parametrize("has_metadata", [False, True])
+def test_forward_retires_metadata_only_in_piecewise_context(state, monkeypatch, has_metadata):
+    resource = Mock()
+    state.device_metadata = resource if has_metadata else None
+    context = SimpleNamespace(cudagraph_runtime_mode=CUDAGraphMode.NONE)
+    monkeypatch.setattr(deepseek_v41, "is_forward_context_available", lambda: True)
+    monkeypatch.setattr(deepseek_v41, "get_forward_context", lambda: context)
+    # prepare_attn's mode can still be NONE during capture. Use forward context.
+    state._cg_mode = CUDAGraphMode.NONE
+    for mode in (CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE, CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE):
+        resource.reset_mock()
+        context.cudagraph_runtime_mode = mode
+        assert state.model(value=17) == {"value": 17}
+        assert resource.finish.call_count == int(has_metadata and mode == CUDAGraphMode.PIECEWISE)
+
+
 def test_model_selects_ascend_state():
     from vllm_ascend.models.deepseek_v41.model import AscendDeepseekV41LLMForCausalLM
 
@@ -145,6 +187,64 @@ def test_eager_hook_forwards_lookup_events(state):
     assert result["engram_pending"] is events
     state.prepare_engram()
     state.model.prepare_engram_inputs.assert_called_once()
+
+
+def test_piecewise_stages_current_batch_without_a_pending_producer(state, monkeypatch):
+    state._cg_mode = CUDAGraphMode.PIECEWISE
+    monkeypatch.setattr(deepseek_v41, "triton", SimpleNamespace(next_power_of_2=lambda n: 4))
+    kernel = Mock()
+    kernel.__getitem__ = Mock(return_value=Mock())
+    monkeypatch.setattr(engram_lookback, "_gather_lookback_kernel", kernel)
+    reqs = SimpleNamespace(
+        all_token_ids=SimpleNamespace(gpu=torch.zeros(4, 8, dtype=torch.int32)),
+        num_computed_tokens=SimpleNamespace(gpu=torch.zeros(4, dtype=torch.int32)),
+    )
+    query = state._engram_piecewise_inputs["engram_query_start_loc"]
+    valid = state._engram_piecewise_inputs["engram_valid_token_count"]
+    for dummy in (False, True, False):
+        current = batch()
+        current.is_dummy = dummy
+        state._engram_inputs = {"stale": True}
+        result = state.prepare_inputs(current, reqs)
+        assert state._engram_inputs is None
+        assert "engram_lookups" not in result
+        assert result["engram_query_start_loc"] is query
+        assert result["engram_valid_token_count"] is valid
+        assert query.tolist() == ([0] * 5 if dummy else [0, 1, 3, 3, 3])
+        assert valid.item() == (0 if dummy else 3)
+        state.model(**result)
+        state.prepare_engram()
+    state.model.prepare_engram_inputs.assert_not_called()
+
+
+@pytest.mark.parametrize("state", [2], indirect=True)
+def test_piecewise_pcp_coordinates_keep_addresses_and_mask_local_padding(state, monkeypatch):
+    state._cg_mode = CUDAGraphMode.PIECEWISE
+    monkeypatch.setattr(deepseek_v41, "triton", SimpleNamespace(next_power_of_2=lambda n: 4))
+    kernel = Mock()
+    kernel.__getitem__ = Mock(return_value=Mock())
+    monkeypatch.setattr(engram_lookback, "_gather_lookback_kernel", kernel)
+    reqs = SimpleNamespace(
+        all_token_ids=SimpleNamespace(gpu=torch.zeros(4, 8, dtype=torch.int32)),
+        num_computed_tokens=SimpleNamespace(gpu=torch.zeros(4, dtype=torch.int32)),
+    )
+    current = batch()
+    global_batch = batch()
+    global_batch.num_tokens = 6
+    global_batch.query_start_loc = torch.tensor([0, 2, 6], dtype=torch.int32)
+    state.pcp_context = SimpleNamespace(global_batch=global_batch, local_token_indices=torch.tensor([0, 4, 5]))
+    bound = state.prepare_engram_dummy_inputs(2, 8)
+    addresses = {key: bound[key].data_ptr() for key in state._piecewise_graph_inputs(8)}
+    for dummy in (False, True, False):
+        current.is_dummy = dummy
+        inputs = state.prepare_engram_inputs(current, reqs)
+        assert {key: inputs[key].data_ptr() for key in addresses} == addresses
+        assert inputs["engram_valid_token_count"].item() == (0 if dummy else 6)
+        indices = inputs["engram_token_indices"]
+        if not dummy:
+            assert indices[:3].tolist() == [0, 4, 5]
+        assert torch.all(indices[3:] == inputs["engram_input_ids"].numel() - 1)
+        assert state._engram_inputs is None
 
 
 @pytest.mark.parametrize("state", [1, 2, 4], indirect=True)
