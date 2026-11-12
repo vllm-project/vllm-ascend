@@ -196,7 +196,7 @@ run_pytest_target() {
   else
     set +e
     #run_logged_command "${log_file}" python -m slipcover --source="${project_root}/vllm_ascend" --omit="*/tests/*,*/ops/triton/*" --json --out "${project_root}/tests/coverage.json" -m pytest -n "${pytest_xdist_workers}" -sv --color=yes "${target}"
-    run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${target}"
+    run_logged_command "${log_file}" pytest -sv --color=yes "${target}"
   fi
   local status=$?
   set -e
@@ -210,7 +210,7 @@ run_pytest_target() {
     local elapsed_ns=$(( $(date +%s%N) - start_time ))
     local elapsed=$(( elapsed_ns / 1000000000 )).$(( (elapsed_ns % 1000000000) / 100000000 ))
     timing_entries+=("{\"name\":\"${target}\",\"passed\":$([ ${status} -eq 0 ] && echo true || echo false),\"elapsed\":${elapsed}}")
-    echo -e "\033[1;34m=== UT run time for coverage.py ===\033[0m"
+    echo -e "\033[1;34m=== UT run time for no coverage ===\033[0m"
     echo -e "    time elapsed: ${elapsed}"
   fi
   echo "::endgroup::"
@@ -250,7 +250,7 @@ run_pytest_batch() {
   else
     set +e
     #run_logged_command "${log_file}" python -m slipcover --source="${project_root}/vllm_ascend" --omit="*/tests/*,*/ops/triton/*" --json --out "${project_root}/tests/coverage.json" -m pytest -n "${pytest_xdist_workers}" -sv --color=yes "${batch_targets[@]}"
-    run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${batch_targets[@]}"
+    run_logged_command "${log_file}" pytest -sv --color=yes "${batch_targets[@]}"
   fi
   local status=$?
   set -e
@@ -261,7 +261,7 @@ run_pytest_batch() {
     local elapsed_ns=$(( $(date +%s%N) - start_time ))
     local elapsed=$(( elapsed_ns / 1000000000 )).$(( (elapsed_ns % 1000000000) / 100000000 ))
     timing_entries+=("{\"name\":\"${target}\",\"passed\":$([ ${status} -eq 0 ] && echo true || echo false),\"elapsed\":${elapsed}}")
-    echo -e "\033[1;34m=== UT run time for coverage.py ===\033[0m"
+    echo -e "\033[1;34m=== UT run time for no coverage ===\033[0m"
     echo -e "    time elapsed: ${elapsed}"
   fi
   echo "::endgroup::"
