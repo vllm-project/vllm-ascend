@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 from vllm.utils.torch_utils import canonicalize_singleton_dim_strides
 
