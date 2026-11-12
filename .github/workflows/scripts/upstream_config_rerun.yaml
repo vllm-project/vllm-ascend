@@ -12,6 +12,8 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/v1/worker/test_gpu_warmup_blocks.py
     estimated_time: 20
+  - name: tests/v1/worker/test_gpu_warmup_blocks.py
+    estimated_time: 20
 e2e-upstream_online_1:
   - name: tests/model_executor/model_loader/runai_streamer_loader/test_runai_model_streamer_s3.py
     estimated_time: 20
