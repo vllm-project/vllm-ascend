@@ -113,6 +113,8 @@ Do not set `sparse_kv_offload_config` on Prefill. The
 | :--- | :--- |
 | `layerwise_num_shared_buffers` | Defaults to the number of cache-bearing layers, so omitting it does not enable cross-layer buffer reuse. Explicitly set a smaller count, such as `3`, to enable reuse. Independent layers keep dedicated buffers in addition to this shared-buffer budget; unused slots are not allocated. |
 | `layerwise_independent_layers` | Layers that keep dedicated buffers. The default is `[0]`; `"all"` disables cross-layer reuse. |
+| `layerwise_prefetch_layers` | Positive integer prefetch distance in layers (or lossless positive decimal integer string). On the Memcache/GVA path, defaults to `min(layerwise_num_shared_buffers, 8)`. Zero, negative values, booleans, floats, and non-integer strings are rejected during initialization. |
+| `discard_partial_chunks` | Defaults to `true` (consistent with non-layerwise mode), discarding trailing partial KV blocks during save/load. |
 
 The following log confirms that buffer reuse is enabled:
 
