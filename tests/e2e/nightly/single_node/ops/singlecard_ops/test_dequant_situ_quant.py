@@ -496,3 +496,85 @@ def test_kimi_k3_zero_routed_rows_return_empty_outputs():
 
     assert tuple(actual_y.shape) == (0, K3_ROUTED_INPUT_WIDTH // 2)
     assert tuple(actual_scale.shape) == (0,)
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+    reason="DequantSituQuant UB regression targets Ascend A2/A3",
+)
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("rows", [1, 3])
+@pytest.mark.parametrize(
+    ("width", "activate_left", "linear_beta", "zero_input"),
+    [
+        (2, True, 25.0, False),
+        (126, False, 25.0, False),
+        (128, True, 25.0, False),
+        (130, True, 25.0, False),
+        # 9280 output columns fit the 196352-byte UB reported by the logs.
+        (18558, True, 25.0, False),
+        (18560, True, 25.0, False),
+        (18562, True, 25.0, False),
+        (33792, True, 25.0, False),
+        (67584, True, 25.0, False),
+        (67586, False, 0.0, False),
+        (67586, True, 25.0, True),
+    ],
+)
+@torch.inference_mode()
+def test_bf16_ub_tiling(rows, width, activate_left, linear_beta, zero_input):
+    x = _bf16_input(rows, width)
+    if zero_input:
+        x.zero_()
+    else:
+        # Keep most columns small and put a much larger maximum in the
+        # LAST column. Per-tile scales would fail the whole-row reference.
+        x *= 0.03125
+        gate, up = x.chunk(2, dim=-1)
+        gate[:, -1] = 8.0
+        up[:, -1] = 16.0
+    left, right = x.float().chunk(2, dim=-1)
+    gate, up = (left, right) if activate_left else (right, left)
+    situ = SITU_BETA * torch.tanh(gate / SITU_BETA) * torch.sigmoid(gate)
+    if linear_beta > 0:
+        up = linear_beta * torch.tanh(up / linear_beta)
+    expected_y, expected_scale = _dynamic_int8_quant(situ * up)
+    actual_y, actual_scale = OP(
+        x.npu(),
+        beta=SITU_BETA,
+        linear_beta=linear_beta,
+        activate_left=activate_left,
+        quant_mode="dynamic",
+    )
+    torch.npu.synchronize()
+    assert actual_y.dtype == torch.int8
+    assert actual_scale.dtype == torch.float32
+    assert tuple(actual_y.shape) == (rows, width // 2)
+    assert tuple(actual_scale.shape) == (rows,)
+    torch.testing.assert_close(actual_y.cpu(), expected_y, rtol=0, atol=1)
+    torch.testing.assert_close(actual_scale.cpu(), expected_scale, rtol=5e-3, atol=1e-5)
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3),
+    reason="DequantSituQuant UB regression targets Ascend A2/A3",
+)
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("counts", [[0, 1, 2], [1, 1, 0], [2, 9, 0]])
+@torch.inference_mode()
+def test_bf16_ub_tiling_groups(counts):
+    x = _bf16_input(3, 67586)
+    live_rows = min(sum(counts), x.shape[0])
+    expected_y, expected_scale = _dynamic_int8_quant(_situ(x[:live_rows]))
+    actual_y, actual_scale = OP(
+        x.npu(),
+        group_index=torch.tensor(counts, dtype=torch.int64).npu(),
+        beta=SITU_BETA,
+        linear_beta=SITU_LINEAR_BETA,
+        activate_left=True,
+        quant_mode="dynamic",
+    )
+    torch.npu.synchronize()
+    # Unowned tail rows are deliberately unspecified; do not read them.
+    torch.testing.assert_close(actual_y[:live_rows].cpu(), expected_y, rtol=0, atol=1)
+    torch.testing.assert_close(actual_scale[:live_rows].cpu(), expected_scale, rtol=5e-3, atol=1e-5)

@@ -45,6 +45,11 @@ constexpr uint32_t PERFORMANCE_ROW_LEN = 128;
 constexpr uint32_t MIN_CORE = 12;
 constexpr uint64_t USER_WORKSPACE = 16777216; // 16 * 1024 * 1024
 constexpr uint64_t BLOCK_BYTES = 32;
+// Per output column: two BF16 inputs, two FP32 dequant values,
+// two FP32 temporaries and one INT8 output. All tile buffers are aligned.
+constexpr uint64_t BF16_BYTES_PER_COLUMN = 21;
+constexpr uint64_t BF16_TILE_ALIGN = 64;
+constexpr uint64_t BF16_MAX_TILE_COLUMNS = 64 * 256; // reduction repeat count <= 255
 
 constexpr size_t INDEX_IN_X = 0;
 constexpr size_t INDEX_IN_WEIGHT_SCALE = 1;
@@ -356,6 +361,9 @@ ge::graphStatus DequantSituQuantTiling::ValidateInt32Contract()
 
 ge::graphStatus DequantSituQuantTiling::CheckInputShapesBF16()
 {
+    OP_CHECK_IF(inDimy <= 0 || static_cast<uint64_t>(inDimy) > std::numeric_limits<uint32_t>::max(),
+                OP_LOGE(context_->GetNodeName(), "bfloat16 input width must be positive and fit uint32"),
+                return ge::GRAPH_FAILED);
     OP_CHECK_IF(quantMode != QUANT_MODE_DYNAMIC,
                 OP_LOGE(context_->GetNodeName(), "quant_mode must be dynamic for bfloat16 x"),
                 return ge::GRAPH_FAILED);
@@ -405,16 +413,8 @@ ge::graphStatus DequantSituQuantTiling::CheckInputShapesBF16()
                 OP_LOGE(context_->GetNodeName(), "scale shape must be [rows]"),
                 return ge::GRAPH_FAILED);
 
-    // UB capacity check
-    const uint64_t inputBytes = static_cast<uint64_t>(inDimy) * 2; // BF16 = 2 bytes
-    const uint64_t tempBytes = static_cast<uint64_t>(inDimy) * sizeof(float);
-    const uint64_t dequantBytes = tempBytes;
-    const uint64_t outputBytes = static_cast<uint64_t>(outDimy) * sizeof(int8_t) + BLOCK_BYTES;
-    const uint64_t requiredUb = inputBytes + tempBytes + dequantBytes + outputBytes + UB_RESERVED_BUFF;
-    OP_CHECK_IF(aicoreParams_.ubSize < requiredUb,
-                OP_LOGE(context_->GetNodeName(), "UB size %lu is smaller than required %lu bytes",
-                        aicoreParams_.ubSize, requiredUb),
-                return ge::GRAPH_FAILED);
+    // Capacity is checked against the aligned tile in CalcTiling, rather
+    // than rejecting valid wide rows before column tiling can run.
 
     hasDequantBias = false;
     tilingData.set_dequantBiasIsEmpty(1);
@@ -554,11 +554,26 @@ bool DequantSituQuantTiling::CalcTiling(const uint32_t totalCores, const uint64_
     cacheLineLen = PACK_UINT_IN_CACHE_512B / inputDTypeLen;
 
     if (xDtype_ == ge::DT_INT32 || xDtype_ == ge::DT_BF16) {
-        // INT32/BF16 path: no column tiling, whole row in UB
+        // INT32 retains its whole-row capacity check. BF16 uses bounded
+        // gate/up column pairs and a row-wide scale across all tiles.
+        uint64_t tileColumns = static_cast<uint64_t>(outDimy);
+        if (xDtype_ == ge::DT_BF16) {
+            const uint64_t fixedBytes = UB_RESERVED_BUFF + BLOCK_BYTES;
+            const uint64_t minRequired = fixedBytes + BF16_BYTES_PER_COLUMN * BF16_TILE_ALIGN;
+            OP_CHECK_IF(ubSize < minRequired,
+                        OP_LOGE(opName, "UB size %lu cannot fit a BF16 tile requiring %lu bytes",
+                                ubSize, minRequired),
+                        return false);
+            uint64_t maxColumns = (ubSize - fixedBytes) / BF16_BYTES_PER_COLUMN;
+            maxColumns = std::min(maxColumns / BF16_TILE_ALIGN * BF16_TILE_ALIGN, BF16_MAX_TILE_COLUMNS);
+            const uint64_t alignedColumns =
+                (tileColumns + BF16_TILE_ALIGN - 1) / BF16_TILE_ALIGN * BF16_TILE_ALIGN;
+            tileColumns = std::min(alignedColumns, maxColumns);
+        }
         tilingData.set_is32BAligned(1);
         tilingData.set_isDoubleBuffer(1);
         tilingData.set_baseRowLen(1);
-        tilingData.set_baseColLen(static_cast<uint32_t>(outDimy));
+        tilingData.set_baseColLen(static_cast<uint32_t>(tileColumns));
         totalUsedCoreNum = inDimx == 0 ? 0 : std::min(static_cast<uint32_t>(inDimx), totalCore);
         tilingData.set_usedCoreNum(totalUsedCoreNum);
         return true;
