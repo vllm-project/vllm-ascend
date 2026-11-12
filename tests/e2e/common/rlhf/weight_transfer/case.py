@@ -213,6 +213,7 @@ DEEPSEEK_V41_CASES = (DEEPSEEK_V41_ENGRAM_CASE,)
 DEEPSEEK_V4_VISION_CASE = WeightUpdateModelCase(
     id="deepseek-v4-flash-vision-bf16-4l-vit2-e8-hash3",
     model="deepseek-ai/DeepSeek-V4-Flash-Vision-Exp",
+    full_transfer_matrix=True,
     hf_overrides={
         "architectures": ["DeepseekV4ForConditionalGeneration"],
         "num_hidden_layers": 4,
