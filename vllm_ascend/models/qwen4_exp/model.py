@@ -178,6 +178,8 @@ class AscendQwen4ExpPLELayer(upstream_model.Qwen4ExpPLELayer):
         gated_output_size = gated_output.shape[-1]
         gathered_ple = sp_all_gather(torch.cat((gated_output, conv_input), dim=-1))[: input_ids.shape[0]]
         gated_output, conv_input = gathered_ple.split((gated_output_size, conv_input.shape[-1]), dim=-1)
+        # split() leaves a packed row stride, but short-conv kernels read dense rows.
+        conv_input = conv_input.contiguous()
         conv_output = torch.zeros_like(conv_input)
         torch.ops.vllm.qwen4_exp_ple_short_conv(
             conv_input,
