@@ -1359,21 +1359,138 @@ On 950DT products, this case reuses ports 8247, 8248, and 8246 from the image-an
 
 === "A3 series"
 
-    Use the A3 Prefill, Decode, and Proxy commands from [Section 5.2](#52-basic-pd-separation-deployment). Prefill uses TP2 × PP4 × DP1 (EP2) on devices 0–7. Decode uses TP2 × DP4 (EP8) on devices 8–15.
+    This example uses one 16-device A3 series host. Prefill uses TP2 × PP4 × DP1 (EP2) on devices 0–7. Decode uses TP2 × DP4 (EP8) on devices 8–15. Set `local_ip` and `nic_name` in the commands for the serving host.
 
-    In both the Prefill and Decode terminals, export the following before starting vLLM.
+    Prepare the container as in [Section 5.2](#52-basic-pd-separation-deployment) and run Prefill and Decode in separate terminals. Stop any A3 deployment already using ports 25568, 25569, or 25570. After both model APIs are ready, run Proxy from the vLLM-Ascend repository root.
+
+    **Prefill:**
 
     ```bash
+    local_ip="<LOCAL_SERVICE_IP>"
+    nic_name="<SERVICE_NETWORK_INTERFACE>"
+
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+
+    unset VLLM_PP_LAYER_PARTITION
+    export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export VLLM_ENGINE_READY_TIMEOUT_S=4800
+    export VLLM_HOST_IP="${local_ip}"
+    export HCCL_IF_IP="${local_ip}"
+    export GLOO_SOCKET_IFNAME="${nic_name}"
+    export TP_SOCKET_IFNAME="${nic_name}"
+    export HCCL_SOCKET_IFNAME="${nic_name}"
+    export no_proxy="localhost,127.0.0.1,${local_ip}"
+    export NO_PROXY="${no_proxy}"
+    export LD_LIBRARY_PATH="$(python -c 'import mooncake; print(next(iter(mooncake.__path__)))'):${LD_LIBRARY_PATH:-}"
+    export VLLM_USE_MODELSCOPE=True
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export HCCL_NPU_SOCKET_PORT_RANGE=61400-61499
+    export HCCL_BUFFSIZE=8192
+
+    vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8 \
+        --host 0.0.0.0 \
+        --port 25568 \
+        --served-model-name qwen38-flash-next-a3-pd \
+        --trust-remote-code \
+        --quantization ascend \
+        --tensor-parallel-size 2 \
+        --pipeline-parallel-size 4 \
+        --data-parallel-size 1 \
+        --max-model-len 1010000 \
+        --max-num-seqs 32 \
+        --max-num-batched-tokens 8192 \
+        --gpu-memory-utilization 0.90 \
+        --enable-prefix-caching \
+        --async-scheduling \
+        --enable-expert-parallel \
+        --mamba-cache-mode align \
+        --mamba-ssm-cache-dtype bfloat16 \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
+        --enforce-eager \
+        --additional-config '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}' \
+        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}' \
+        --hf-overrides '{"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":4.0,"original_max_position_embeddings":262144}}}' \
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32600,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":4},"decode":{"dp_size":4,"tp_size":2}}}'
     ```
 
-    In both `vllm serve` commands, replace `--max-model-len 141312` with `--max-model-len 1010000` and add the following YaRN override. Apply both options together with the environment variable above.
+    **Decode:**
 
     ```bash
-    --hf-overrides '{"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":4.0,"original_max_position_embeddings":262144}}}'
+    local_ip="<LOCAL_SERVICE_IP>"
+    nic_name="<SERVICE_NETWORK_INTERFACE>"
+
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+
+    unset VLLM_PP_LAYER_PARTITION
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export VLLM_ENGINE_READY_TIMEOUT_S=4800
+    export VLLM_HOST_IP="${local_ip}"
+    export HCCL_IF_IP="${local_ip}"
+    export GLOO_SOCKET_IFNAME="${nic_name}"
+    export TP_SOCKET_IFNAME="${nic_name}"
+    export HCCL_SOCKET_IFNAME="${nic_name}"
+    export no_proxy="localhost,127.0.0.1,${local_ip}"
+    export NO_PROXY="${no_proxy}"
+    export LD_LIBRARY_PATH="$(python -c 'import mooncake; print(next(iter(mooncake.__path__)))'):${LD_LIBRARY_PATH:-}"
+    export VLLM_USE_MODELSCOPE=True
+    export ASCEND_RT_VISIBLE_DEVICES=8,9,10,11,12,13,14,15
+    export HCCL_NPU_SOCKET_PORT_RANGE=61500-61599
+    export HCCL_BUFFSIZE=512
+
+    vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8 \
+        --host 0.0.0.0 \
+        --port 25569 \
+        --served-model-name qwen38-flash-next-a3-pd \
+        --trust-remote-code \
+        --quantization ascend \
+        --tensor-parallel-size 2 \
+        --data-parallel-size 4 \
+        --max-model-len 1010000 \
+        --max-num-seqs 32 \
+        --max-num-batched-tokens 8192 \
+        --gpu-memory-utilization 0.90 \
+        --enable-prefix-caching \
+        --async-scheduling \
+        --enable-expert-parallel \
+        --mamba-cache-mode align \
+        --mamba-ssm-cache-dtype bfloat16 \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --additional-config '{"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}' \
+        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}' \
+        --hf-overrides '{"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":4.0,"original_max_position_embeddings":262144}}}' \
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32700,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":4},"decode":{"dp_size":4,"tp_size":2}}}'
     ```
 
-    After both APIs are ready, start the Section 5.2 proxy on port `25570`. Prepare `long-context-request.json` with `model` set to `qwen38-flash-next-a3-pd`, the input in `messages`, and the requested output budget in `max_tokens`. Keep the input token count plus the maximum output token count within 1,010,000 tokens.
+    **Proxy:**
+
+    ```bash
+    local_ip="<LOCAL_SERVICE_IP>"
+
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+    export no_proxy="localhost,127.0.0.1,${local_ip}"
+    export NO_PROXY="${no_proxy}"
+
+    python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+        --host 0.0.0.0 --port 25570 \
+        --prefiller-hosts "${local_ip}" --prefiller-ports 25568 \
+        --decoder-hosts "${local_ip}" --decoder-ports 25569
+    ```
+
+    **Service Verification:**
+
+    Check that both model APIs are ready and confirm `max_model_len=1010000` in the startup logs.
+
+    ```bash
+    curl --fail "http://127.0.0.1:25568/v1/models"
+    curl --fail "http://127.0.0.1:25569/v1/models"
+    ```
+
+    Start Proxy after both checks succeed. Prepare `long-context-request.json` with `model` set to `qwen38-flash-next-a3-pd`, the input in `messages`, and the requested output budget in `max_tokens`. Keep the input token count plus the maximum output token count within 1,010,000 tokens.
 
     ```bash
     curl --fail "http://127.0.0.1:25570/v1/chat/completions" \
