@@ -17,6 +17,7 @@
 from collections.abc import Iterable
 from copy import copy
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import torch
 import torch_npu
@@ -49,6 +50,9 @@ from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
 from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAllGather
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
+
+if TYPE_CHECKING:
+    from vllm_ascend.worker.v2.dspark_expert_pool import DSparkExpertPool
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -393,6 +397,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
     """
 
     moe_counter = -1
+    dspark_expert_pool: "DSparkExpertPool | None" = None
 
     def __init__(
         self,
@@ -618,11 +623,17 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.router is None:
             raise RuntimeError("AscendRoutedExperts requires a router for expert selection.")
-        topk_weights, topk_ids = self.router._select_experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            input_ids=input_ids,
-        )
+        pool = self.dspark_expert_pool
+        use_pool = pool is not None and pool.active and not enable_force_load_balance and not _EXTRA_CTX.is_draft_model
+        if use_pool:
+            topk_weights, topk_ids = pool.route(self.router, router_logits)
+        if not use_pool or pool.has_native_rows:
+            native = self.router._select_experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                input_ids=input_ids,
+            )
+            topk_weights, topk_ids = pool.merge_native((topk_weights, topk_ids), native) if use_pool else native
         if self.log2phy is not None:
             topk_ids = self.log2phy[topk_ids]
 
