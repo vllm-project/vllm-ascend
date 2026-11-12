@@ -39,6 +39,13 @@ def _is_device_sdma() -> bool:
 MEMCACHE_THREAD_START_WAIT_S = 0.1
 MEMCACHE_SSD_MEDIA_TYPE = 2
 
+# memfabric (hybm) validates the host Ascend driver against its internal
+# minimum-version whitelist at store init time. The Innerversion field is read
+# from the driver version.info; a missing or empty file (e.g. a container that
+# only mounts driver/lib64) makes that check fail with a misleading
+# "driver does not support mf" error, so surface the file path explicitly.
+ASCEND_DRIVER_VERSION_INFO_PATH = "/usr/local/Ascend/driver/version.info"
+
 
 def _validate_device_ub_qos() -> None:
     """Validate MF_DEVICE_UB_QOS used by the MemCache store transfers.
@@ -60,6 +67,33 @@ def _validate_device_ub_qos() -> None:
         raise ValueError(
             f"Invalid MF_DEVICE_UB_QOS value {qos}: QoS must be an integer in [{QOS_VALUE_MIN}, {QOS_VALUE_MAX}]."
         )
+
+
+def _read_driver_innerversion() -> str | None:
+    """Read the Ascend driver Innerversion used by memfabric's whitelist check.
+
+    Returns ``None`` when the version file is missing, empty, or lacks both the
+    ``Innerversion`` and ``Version`` fields, which is exactly the situation
+    that makes memfabric fail with a misleading "driver does not support mf".
+    """
+    if not os.path.isfile(ASCEND_DRIVER_VERSION_INFO_PATH):
+        return None
+    innerversion = None
+    fallback_version = None
+    try:
+        with open(ASCEND_DRIVER_VERSION_INFO_PATH, encoding="utf-8", errors="replace") as version_file:
+            for line in version_file:
+                key, separator, value = line.strip().partition("=")
+                if not separator:
+                    continue
+                key = key.strip()
+                if key == "Innerversion":
+                    innerversion = value.strip() or None
+                elif key == "Version":
+                    fallback_version = value.strip() or None
+    except OSError:
+        return None
+    return innerversion or fallback_version
 
 
 class MmcDirect(Enum):
@@ -238,6 +272,22 @@ class MemcacheBackend(Backend):
             self.set_device()
         store = DistributedObjectStore()
 
+        # memfabric validates the host driver version during init. A missing or
+        # empty version.info makes that check fail with a misleading "driver
+        # does not support mf" message, so surface the effective version here
+        # before the store is created.
+        driver_version = _read_driver_innerversion()
+        if driver_version is None:
+            logger.warning(
+                "Memcache driver version file %s is missing or empty. "
+                "memfabric will fail to validate the Ascend driver; mount the "
+                "host driver directory into the container (e.g. "
+                "-v /usr/local/Ascend/driver:/usr/local/Ascend/driver).",
+                ASCEND_DRIVER_VERSION_INFO_PATH,
+            )
+        else:
+            logger.info("Memcache driver Innerversion=%s", driver_version)
+
         try:
             res = store.init(self.device_id, init_bm=self._init_bm)
         except ValueError as e:
@@ -247,7 +297,17 @@ class MemcacheBackend(Backend):
             logger.error("Store initialization failed. error=%s. Check memcache setup and dependencies.", exc)
             raise
 
-        assert res == 0
+        if res != 0:
+            raise RuntimeError(
+                f"MemCache (hybm) store initialization failed with return code {res}. "
+                "A common cause is an Ascend driver version that does not meet "
+                "the memfabric minimum requirement, or a missing/empty driver "
+                f"version file at {ASCEND_DRIVER_VERSION_INFO_PATH} "
+                f"(detected Innerversion: {driver_version or '<unknown>'}). "
+                "Ensure the host Ascend driver directory is mounted into the "
+                "container (e.g. -v /usr/local/Ascend/driver:/usr/local/Ascend/driver) "
+                "and that the installed driver is supported by memfabric."
+            )
         time.sleep(MEMCACHE_THREAD_START_WAIT_S)
         return store
 
