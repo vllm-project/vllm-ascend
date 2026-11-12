@@ -197,9 +197,10 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
     def build_fia_params(
         self,
         num_reqs_padded: int,
-        num_tokens: int,
         draft_attn_metadatas: list[dict],
         is_draft_model_prefill: bool,
+        *,
+        num_tokens: int | None = None,
     ) -> list[dict]:
         """Per-layer FIA parameters for the UpdatableGraph task update.
 

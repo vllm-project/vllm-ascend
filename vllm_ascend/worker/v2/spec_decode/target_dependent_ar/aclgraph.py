@@ -227,9 +227,9 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
         assert isinstance(graph, UpdatableGraph)
         fia_params = self.speculator.build_fia_params(
             desc.num_reqs,
-            desc.num_tokens,
             draft_attn_metadatas,
             self.is_draft_model_prefill,
+            num_tokens=desc.num_tokens,
         )
         resolved_tasks = graph.resolve_tasks(SharedSource(fia_params))
         self.update_stream.wait_stream(torch.npu.current_stream())

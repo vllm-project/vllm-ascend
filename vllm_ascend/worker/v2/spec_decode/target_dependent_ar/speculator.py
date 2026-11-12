@@ -698,13 +698,16 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
     def build_fia_params(
         self,
         num_reqs_padded: int,
-        num_tokens: int,
         draft_attn_metadatas: list[dict[str, Any]],
         is_draft_model_prefill: bool,
+        *,
+        num_tokens: int | None = None,
     ) -> list[dict[str, Any]]:
         """Build all draft steps' FIA parameters for a single graph update."""
         if self.use_dcp:
             if self.attn_architecture == "MLA":
+                if num_tokens is None:
+                    raise ValueError("num_tokens is required for MLA with DCP")
                 return self.build_mla_dcp_fia_params(num_tokens, draft_attn_metadatas, is_draft_model_prefill)
             return self.build_fia_params_dcp(num_reqs_padded, draft_attn_metadatas[0], is_draft_model_prefill)
         draft_attn_metadata = draft_attn_metadatas[0]
