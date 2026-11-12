@@ -334,6 +334,9 @@ class NPUModelRunner(GPUModelRunner):
         pool_config = getattr(self.ascend_config, "dspark_expert_pool", None)
         if pool_config is not None and pool_config.enabled:
             assert pool_config.protected_positions is not None and pool_config.suffix_experts is not None
+            assert self.speculative_config is not None and self.speculative_config.num_speculative_tokens is not None
+            num_device_experts = self.ascend_config.expert_offload_config.num_device_experts
+            assert num_device_experts is not None
             layers = [
                 layer
                 for layer in self.model.modules()
@@ -342,7 +345,12 @@ class NPUModelRunner(GPUModelRunner):
             if not layers:
                 raise ValueError("dspark_expert_pool found no supported target routed expert layer")
             pool = DSparkExpertPool(
-                self.device, self.max_num_tokens, pool_config.protected_positions, pool_config.suffix_experts
+                self.device,
+                self.max_num_tokens,
+                pool_config.protected_positions,
+                pool_config.suffix_experts,
+                num_speculative_tokens=self.speculative_config.num_speculative_tokens,
+                num_device_experts=num_device_experts,
             )
             self.dspark_expert_pool = pool
             self.model_state.dspark_expert_pool = pool
@@ -844,6 +852,7 @@ class NPUModelRunner(GPUModelRunner):
             and uniform_token_count not in (None, 1)
             and not verify_graph_eligible(
                 batch_state,
+                num_speculative_tokens=self.dspark_expert_pool.num_speculative_tokens,
                 structured=scheduler_output.has_structured_output_requests
                 or bool(scheduler_output.num_invalid_spec_tokens),
             )
