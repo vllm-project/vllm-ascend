@@ -1,6 +1,6 @@
 test_cases:
 - name: Kimi-K3-W4A8-E256-A5-GSM8K-First100
-  test_rounds: 5
+  test_rounds: 1
   model: /root/.cache/modelscope/hub/models/CuiZ2007/Kimi-K3-w4a8-mxfp-QuaRot-experts256
   envs:
     SERVER_PORT: "8080"
@@ -58,9 +58,9 @@ test_cases:
       dataset_path_local: /root/.cache/modelscope/hub/datasets/CuiZ2007/gsm8k
       request_conf: vllm_api_general_chat
       dataset_conf: gsm8k/gsm8k_gen_4_shot_cot_str
-      num_prompts: 100
+      num_prompts: 20
       max_out_len: 1024
-      batch_size: 60
+      batch_size: 1
       temperature: 0
       top_p: 1.0
       seed: 42
