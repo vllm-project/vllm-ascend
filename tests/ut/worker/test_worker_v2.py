@@ -14,6 +14,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from tests.ut.base import TestBase
+from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.mark.parametrize("enforce_eager", [False, True])
@@ -304,7 +305,9 @@ class TestNPUWorkerV2(TestBase):
             worker.profiler = None
             worker._pp_send_work = []
 
-            pooling_output = ModelRunnerOutput(req_ids=[], req_id_to_index={})
+            pooling_output = ModelRunnerOutput(
+                req_ids=[], **({"req_id_to_index": {}} if vllm_version_is("0.33.0") else {})
+            )
             worker.model_runner.execute_model.return_value = None
             worker.model_runner.pool.return_value = pooling_output
 

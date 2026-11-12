@@ -4,7 +4,7 @@
 from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -247,7 +247,10 @@ def test_raw_prefix_capture_does_not_add_attnres_bank(layer_idx, has_residual):
     target.config = SimpleNamespace(attn_res_block_size=2)
     target.aux_hidden_state_layers = (1, 3)
 
-    captured = target._maybe_add_hidden_state([], layer_idx, state, residual)
+    # Isolate allocation while retaining the original raw-prefix/bank checks.
+    # Native snapshot ownership is exercised without this fixture below.
+    with patch.object(torch.Tensor, "clone", new=lambda value: value):
+        captured = target._maybe_add_hidden_state([], layer_idx, state, residual)
     if layer_idx in target.aux_hidden_state_layers:
         assert len(captured) == 1
         assert captured[0] is state
@@ -256,6 +259,22 @@ def test_raw_prefix_capture_does_not_add_attnres_bank(layer_idx, has_residual):
         assert captured == []
     if residual is not None:
         torch.testing.assert_close(residual, torch.ones(2, 3, 4))
+
+
+def test_raw_prefix_capture_preserves_the_native_snapshot():
+    target = AscendKimiLinearModel.__new__(AscendKimiLinearModel)
+    torch.nn.Module.__init__(target)
+    target.config = SimpleNamespace(attn_res_block_size=2)
+    target.aux_hidden_state_layers = (1,)
+    state = torch.arange(8).view(2, 4)
+    expected = state.clone()
+    captured = target._maybe_add_hidden_state([], 1, state, torch.ones(2, 3, 4))
+    assert len(captured) == 1
+    torch.testing.assert_close(captured[0], expected, rtol=0, atol=0)
+    if not vllm_version_is("0.33.0"):
+        assert captured[0] is not state
+        state.add_(100)
+        torch.testing.assert_close(captured[0], expected, rtol=0, atol=0)
 
 
 def test_padded_mla_query_lengths_are_nested():

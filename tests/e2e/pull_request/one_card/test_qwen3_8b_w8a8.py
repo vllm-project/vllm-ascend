@@ -21,6 +21,7 @@ from vllm.config import CompilationConfig
 
 from tests.e2e.conftest import VllmRunner, cleanup_dist_env_and_memory, wait_until_npu_memory_free
 from tests.e2e.pull_request.utils import PROMPTS_SHORT
+from vllm_ascend.utils import vllm_version_is
 
 
 @wait_until_npu_memory_free()
@@ -44,7 +45,7 @@ def test_dense_w8a8_eagle3_full_graph():
         async_scheduling=False,
         quantization="ascend",
         speculative_config={
-            "disable_padded_drafter_batch": False,
+            **({"disable_padded_drafter_batch": False} if vllm_version_is("0.33.0") else {}),
             "method": "eagle3",
             "model": "RedHatAI/Qwen3-8B-speculator.eagle3",
             "num_speculative_tokens": 2,

@@ -13,6 +13,7 @@ from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 
 from vllm_ascend._310p.worker.v2.states import Ascend310PStagedWriteTensor
+from vllm_ascend.utils import vllm_version_is
 
 
 class Ascend310PRopeState:
@@ -96,13 +97,20 @@ class Ascend310PRopeState:
                 # Write directly into persistent host storage.
                 # Writes directly into persistent output; no per-request
                 # torch.arange allocation or intermediate CPU copy.
-                MRotaryEmbedding.get_next_input_positions_tensor(
-                    out=self.positions_np,
-                    out_offset=query_start,
-                    mrope_position_delta=delta,
-                    context_len=num_computed,
-                    num_new_tokens=query_len,
-                )
+                if vllm_version_is("0.33.0"):
+                    MRotaryEmbedding.get_next_input_positions_tensor(
+                        out=self.positions_np,
+                        out_offset=query_start,
+                        mrope_position_delta=delta,
+                        context_len=num_computed,
+                        num_new_tokens=query_len,
+                    )
+                else:
+                    # Native #63373 removed the NumPy output-buffer helper.
+                    # Keep its row broadcast and persistent host destination.
+                    self.positions_np[:, query_start:query_end] = np.arange(
+                        delta + num_computed, delta + num_computed + query_len, dtype=self.positions_np.dtype
+                    )
 
         # Keep the extra dummy column in the transfer. Slicing all rows but
         # only active columns makes a non-contiguous 2D view because storage

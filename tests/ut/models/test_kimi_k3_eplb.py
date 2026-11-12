@@ -313,6 +313,7 @@ def test_expert_loading_initializes_every_replica(
         num_experts=num_experts,
         num_hidden_layers=2,
         num_nextn_predict_layers=1,
+        dsa_config=None,
         linear_attn_config={},
         q_lora_rank=None,
         is_linear_attn=False,

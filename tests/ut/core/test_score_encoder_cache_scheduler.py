@@ -14,6 +14,7 @@ from vllm.v1.request import Request, RequestStatus
 
 from tests.ut.kv_offload.utils import create_model_runner_output, create_scheduler, create_vllm_config
 from vllm_ascend.ec_manager.score_ec_manager import ScoreEncoderCacheManager
+from vllm_ascend.utils import vllm_version_is
 
 
 def _make_scheduler(npu_slots: int = 8) -> Scheduler:
@@ -84,10 +85,22 @@ def _capacity(manager: ScoreEncoderCacheManager) -> tuple[int, int, int, int]:
     )
 
 
+def _policy_metadata(scheduler: Scheduler, scheduler_output):
+    if vllm_version_is("0.33.0"):
+        return scheduler_output.ec_manager_metadata
+    # These CPU tests check the Score policy, not worker-side transport.
+    # MRv1 removal moved this local snapshot outside native SchedulerOutput.
+    assert not hasattr(scheduler_output, "ec_manager_metadata")
+    return scheduler.encoder_cache_manager.get_manager_metadata()
+
+
 def _assert_error_and_finish(scheduler: Scheduler, request: Request, scheduler_output) -> None:
     assert scheduler_output.total_num_scheduled_tokens == 0
     assert not scheduler_output.scheduled_encoder_inputs
-    outputs = scheduler.update_from_output(scheduler_output, ModelRunnerOutput(req_ids=[], req_id_to_index={}))
+    outputs = scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(req_ids=[], **({"req_id_to_index": {}} if vllm_version_is("0.33.0") else {})),
+    )
     assert request.status == RequestStatus.FINISHED_ERROR
     assert request.request_id not in scheduler.requests
     assert request.request_id not in scheduler.encoder_cache_manager.request_cached_ids
@@ -119,12 +132,13 @@ def test_mismatched_cache_hit_is_request_error(residency: str, requested_count: 
     scheduler.add_request(request)
 
     scheduler_output = scheduler.schedule()
+    metadata = _policy_metadata(scheduler, scheduler_output)
 
     _assert_error_and_finish(scheduler, request, scheduler_output)
     assert manager.cached["shared"] == set()
     assert _capacity(manager) == capacity_before
-    assert not scheduler_output.ec_manager_metadata.promoting_mm_hashes
-    assert not scheduler_output.ec_manager_metadata.cpu_get_encoder_mm_hashes
+    assert not metadata.promoting_mm_hashes
+    assert not metadata.cpu_get_encoder_mm_hashes
     manager._check_invariant()
 
     # The rejected UUID does not poison later requests, including reuse of the
@@ -145,9 +159,9 @@ def test_matching_embed_count_accepts_different_placeholder_layout(residency: st
     scheduler.add_request(request)
 
     scheduler_output = scheduler.schedule()
+    metadata = _policy_metadata(scheduler, scheduler_output)
 
     assert not scheduler_output.scheduled_encoder_inputs
-    metadata = scheduler_output.ec_manager_metadata
     if residency == "cpu":
         assert metadata.promoting_mm_hashes == ["shared"]
     elif residency == "cpu-no-promotion":
@@ -188,6 +202,7 @@ def test_mismatch_releases_an_earlier_cache_hit(npu_slots: int):
     scheduler.add_request(request)
 
     scheduler_output = scheduler.schedule()
+    metadata = _policy_metadata(scheduler, scheduler_output)
 
     assert manager.cached["valid"] == {request.request_id}
     assert manager.cpu_num_freeable_slots == capacity_before[1] - 2
@@ -196,7 +211,6 @@ def test_mismatch_releases_an_earlier_cache_hit(npu_slots: int):
     assert manager.cached["mismatch"] == set()
     assert _capacity(manager)[:2] == capacity_before[:2]
     assert manager.npu_num_freeable_slots == capacity_before[3]
-    metadata = scheduler_output.ec_manager_metadata
     if npu_slots == 8:
         # A valid prior hit can promote before the later input is rejected.
         # Keep that reusable entry while restoring its reclaimable capacity.

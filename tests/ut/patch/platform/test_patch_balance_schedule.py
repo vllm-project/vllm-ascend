@@ -100,6 +100,7 @@ from vllm_ascend.patch.platform.patch_balance_schedule import (  # noqa: E402
     BalanceScheduler,
     _balance_scheduling_enabled,
 )
+from vllm_ascend.utils import vllm_version_is  # noqa: E402
 
 # Importing any vLLM module can activate the Ascend platform plugin before this
 # test module finishes importing, so a direct ``Scheduler`` import may already
@@ -675,7 +676,7 @@ def _make_output(scheduler):
     req_ids = [req.request_id for req in scheduler.running]
     return ModelRunnerOutput(
         req_ids=req_ids,
-        req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
+        **({"req_id_to_index": {req_id: i for i, req_id in enumerate(req_ids)}} if vllm_version_is("0.33.0") else {}),
         sampled_token_ids=[[1000]] * len(req_ids),
         logprobs=None,
         prompt_logprobs_dict={},
@@ -1123,7 +1124,7 @@ def _make_step_output(output, sampled):
     req_ids = list(output.num_scheduled_tokens)
     return ModelRunnerOutput(
         req_ids=req_ids,
-        req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
+        **({"req_id_to_index": {req_id: i for i, req_id in enumerate(req_ids)}} if vllm_version_is("0.33.0") else {}),
         sampled_token_ids=[[1000] if sampled[req_id] else [] for req_id in req_ids],
         logprobs=None,
         prompt_logprobs_dict={},

@@ -1149,6 +1149,7 @@ class TestNPUWorker(TestBase):
             worker.vllm_config = MagicMock()
             mock_model_runner = MagicMock()
             mock_uniform_decode_query_len = mock_model_runner.uniform_decode_query_len
+            mock_model_runner.decode_query_len = mock_uniform_decode_query_len
             worker.model_runner = mock_model_runner
 
             # Test execute_dummy_batch
@@ -2403,7 +2404,8 @@ class TestNPUWorkerWeightUpdate(TestBase):
         worker = self._make_worker(engine=engine)
         worker._weight_update_active = True
 
-        worker.finish_weight_update()
+        with patch("vllm_ascend.worker.worker.vllm_version_is", return_value=True):
+            worker.finish_weight_update()
 
         engine.finish_weight_update.assert_called_once_with()
         worker.model_runner.reset_lora_state.assert_called_once_with()

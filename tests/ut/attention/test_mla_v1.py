@@ -6,7 +6,7 @@ import pytest
 import torch
 from vllm.compilation import backends
 from vllm.compilation.backends import set_model_tag
-from vllm.config import CacheConfig, SchedulerConfig, VllmConfig
+from vllm.config import CacheConfig, SchedulerConfig, SpeculativeConfig, VllmConfig
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 
@@ -32,6 +32,19 @@ from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod, Asce
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8fp8_dynamic import AscendW8A8FP8DynamicLinearMethod
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ, vllm_version_is
+
+
+def test_mla_block_table_uses_actual_native_padding_default():
+    speculative = object.__new__(SpeculativeConfig)
+    if vllm_version_is("0.33.0"):
+        speculative.disable_padded_drafter_batch = False
+    builder = object.__new__(AscendMLAMetadataBuilder)
+    builder.speculative_config = speculative
+    builder.graph_pad_size = 8
+    builder.num_decodes = 2
+    metadata = SimpleNamespace(num_reqs=4)
+    assert builder.get_block_table_size(metadata, 0) == 4
+    assert builder.get_block_table_size(metadata, 1) == 2
 
 
 @pytest.mark.parametrize("num_tokens", [1, 3])
@@ -1116,7 +1129,10 @@ class TestAscendMLAMetadataBuilder(TestBase):
         block_table = torch.Tensor([[1, 0], [2, 0], [3, 0], [4, 0]]).int()
         common_metadata.block_table_tensor = block_table
         mock_get_cos_and_sin_mla.return_value = (torch.tensor([6, 6]), torch.Tensor([6, 6]))
-        metadata = builder.build(0, common_metadata)
+        # Preserve this original MRv1 unpadded-layout contract on both lanes;
+        # main's actual native default is exercised separately above.
+        with patch("vllm_ascend.attention.mla_v1.vllm_version_is", return_value=True):
+            metadata = builder.build(0, common_metadata)
         self.assertFalse(metadata.causal)
 
         self.assertEqual(metadata.decode.actual_seq_lengths_q, [1, 2, 4, 5, 6, 6, 7, 8])

@@ -830,7 +830,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             attn_cg_support.min_cg_support,
             attn_cg_support.min_cg_attn_backend,
             self.decode_query_len,
-            use_v2_model_runner=True,
+            **({"use_v2_model_runner": True} if vllm_version_is("0.33.0") else {}),
             kv_cache_config=kv_cache_config,
             max_num_reqs=self.max_num_reqs,
             **{},

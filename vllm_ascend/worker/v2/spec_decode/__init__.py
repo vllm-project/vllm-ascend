@@ -22,8 +22,22 @@ from typing import TYPE_CHECKING
 import torch
 from vllm.config import CompilationMode, VllmConfig
 
+from vllm_ascend.utils import vllm_version_is
+
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.states import RequestState
+
+
+def uses_step3p5_mtp(speculative_config) -> bool:
+    if vllm_version_is("0.33.0"):
+        return speculative_config.use_step3p5_mtp()
+    # Native #63373 removed this predicate with MRv1. Retain the same model
+    # distinction so Step3.5 keeps its existing fallback instead of generic MTP.
+    return (
+        speculative_config.method == "mtp"
+        and speculative_config.draft_model_config is not None
+        and getattr(speculative_config.draft_model_config.hf_config, "model_type", None) == "step3p5_mtp"
+    )
 
 
 def init_speculator(
@@ -89,7 +103,7 @@ def init_speculator(
         )
 
         return AscendGemma4Speculator(vllm_config, device)
-    if speculative_config.method == "mtp" and not speculative_config.use_step3p5_mtp():
+    if speculative_config.method == "mtp" and not uses_step3p5_mtp(speculative_config):
         from vllm_ascend.worker.v2.spec_decode.mtp.speculator import (
             AscendMTPSpeculator,
         )

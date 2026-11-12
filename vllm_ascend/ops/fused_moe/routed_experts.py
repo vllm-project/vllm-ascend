@@ -376,6 +376,12 @@ class EplbExpertTensorList(list[torch.Tensor]):
         self.nz_cast_spec: NzCastSpec | None = nz_cast_spec
 
     @property
+    def is_cuda(self) -> bool:
+        # NPU expert lists take the native per-row copy path rather than the
+        # CUDA kernel, which requires a single contiguous weight allocation.
+        return self[0].is_cuda
+
+    @property
     def shape(self) -> torch.Size:
         return torch.Size((len(self), *self[0].shape))
 

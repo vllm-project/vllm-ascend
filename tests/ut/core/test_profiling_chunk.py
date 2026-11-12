@@ -37,6 +37,7 @@ from vllm_ascend.core.scheduler_profiling_chunk import ProfilingChunkAsyncSchedu
 from vllm_ascend.core.short_request_first_scheduler import (
     ShortRequestFirstRequestQueue,
 )
+from vllm_ascend.utils import vllm_version_is
 
 MODEL = "Qwen/Qwen3-0.6B"
 BLOCK_SIZE = 16
@@ -67,7 +68,7 @@ def make_output(scheduler):
     sampled_token_ids = [[1000]] * len(scheduler.running)
     return ModelRunnerOutput(
         req_ids=req_ids,
-        req_id_to_index=req_id_to_index,
+        **({"req_id_to_index": req_id_to_index} if vllm_version_is("0.33.0") else {}),
         sampled_token_ids=sampled_token_ids,
         logprobs=None,
         prompt_logprobs_dict={},

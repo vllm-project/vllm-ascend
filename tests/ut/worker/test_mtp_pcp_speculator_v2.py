@@ -3,7 +3,7 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 
 import json
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from copy import deepcopy
 from dataclasses import replace as dataclass_replace
 from types import SimpleNamespace
@@ -120,10 +120,12 @@ def eplb_worker_config(tmp_path):
             "vllm.model_executor.models.ModelRegistry.inspect_model_cls",
             return_value=(model_info, model_info.architecture),
         ),
-        patch("vllm.envs.VLLM_USE_V2_MODEL_RUNNER", True),
-        patch("vllm.config.vllm.HAS_TRITON", True),
+        ExitStack() as legacy_runner,
         patch("vllm.config.parallel.current_platform.is_cuda_alike", return_value=True),
     ):
+        if vllm_version_is("0.33.0"):
+            legacy_runner.enter_context(patch("vllm.envs.VLLM_USE_V2_MODEL_RUNNER", True))
+            legacy_runner.enter_context(patch("vllm.config.vllm.HAS_TRITON", True))
         # Keep the model dtype float-compatible with the bfloat16 KV cache the
         # draft loader override below sets: vLLM main rejects a mismatched
         # explicit float KV dtype.

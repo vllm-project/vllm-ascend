@@ -116,7 +116,7 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
     _register_m3_sparse_packed_modules,
     _use_fused_qkv_indexer,
 )
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_version_is
 from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
     add_pp_transport_tensors,
@@ -1181,9 +1181,10 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-            aux_hidden_states = get_pp_transport_tensors(
-                intermediate_tensors,
-                PPTransportDataType.AUX_HIDDEN_STATES,
+            aux_hidden_states = (
+                get_pp_transport_tensors(intermediate_tensors, PPTransportDataType.AUX_HIDDEN_STATES)
+                if vllm_version_is("0.33.0")
+                else []
             )
 
         hidden_states_are_sp = False
@@ -1231,6 +1232,10 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
                 residual = sp_all_gather(residual)[: positions.shape[0]]
             intermediate_tensors = IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
+            if not vllm_version_is("0.33.0"):
+                return IntermediateTensors(
+                    {**intermediate_tensors.tensors, **self.pack_local_aux_hidden_states(aux_hidden_states)}
+                )
             return add_pp_transport_tensors(
                 intermediate_tensors,
                 PPTransportDataType.AUX_HIDDEN_STATES,

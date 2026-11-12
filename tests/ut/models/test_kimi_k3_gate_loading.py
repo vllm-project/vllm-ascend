@@ -40,6 +40,7 @@ def make_model(tp_size=1, tp_rank=0, fused_gate=False):
     nn.Module.__init__(model)
     model.config = SimpleNamespace(
         is_moe=False,
+        dsa_config=None,
         is_linear_attn=True,
         linear_attn_config={"use_full_rank_gate": True},
         q_lora_rank=1536,

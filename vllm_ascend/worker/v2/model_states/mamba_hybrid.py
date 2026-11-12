@@ -225,14 +225,15 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             # vLLM #55688 counts state tensors from each layer's bindings.
             # v0.33 still uses the constructor without forward_context.
             context_kwargs: dict[str, Any] = {}
-            if not vllm_version_is("0.33.0"):
+            if vllm_version_is("0.33.0"):
+                context_kwargs["make_buffer"] = lambda n, dtype: CpuGpuBuffer(n, dtype=dtype, device=self.device)
+            else:
                 context_kwargs["forward_context"] = self.vllm_config.compilation_config.static_forward_context
             self._mamba_ctx = MambaSpecDecodeGPUContext.create(
                 max_num_reqs=self.max_num_reqs,
                 kv_cache_config=kv_cache_config,
                 copy_funcs=self._mamba_state_copy_funcs,
                 device=self.device,
-                make_buffer=lambda n, dtype: CpuGpuBuffer(n, dtype=dtype, device=self.device),
                 **context_kwargs,
             )
         ctx = self._mamba_ctx

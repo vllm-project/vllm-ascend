@@ -15,6 +15,7 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend, AscendFlashAttentionImpl
 from vllm_ascend.models.minimax_m3 import msa_m3
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 
 
@@ -389,7 +390,12 @@ def test_metadata_builder_does_not_materialize_exact_device_lengths(monkeypatch,
     with monkeypatch.context() as patches:
         for operation in ("tolist", "item", "cpu"):
             patches.setattr(torch.Tensor, operation, forbidden_host_materialization)
-        result = builder.build_for_drafting(common, draft_index=0)
+        if vllm_version_is("0.33.0"):
+            result = builder.build_for_drafting(common, draft_index=0)
+        else:
+            # MRv2 builds each draft step directly; the V1 drafting helper was
+            # removed upstream. Retain the same device-length assertions.
+            result = builder.build(common_prefix_len=0, common_attn_metadata=common, fast_build=True)
     assert result.seq_lens_gpu.data_ptr() == common.seq_lens.data_ptr()
     assert result.query_start_loc_gpu.data_ptr() == common.query_start_loc.data_ptr()
     assert not result.causal

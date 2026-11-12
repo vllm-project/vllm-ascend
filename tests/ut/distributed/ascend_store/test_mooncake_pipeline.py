@@ -298,6 +298,9 @@ class TestMooncakePipeline(unittest.TestCase):
                 # Upstream CacheConfig.compute_hash includes block_size.
                 return f"{self.block_size}:{self.cache_dtype}"
 
+            def compile_factors(self):
+                return {"block_size": self.block_size, "cache_dtype": self.cache_dtype}
+
         worker, _ = self.make_stage(0, MemoryRangeStore())
         config = worker.vllm_config
         config.cache_config = CacheConfig(32)

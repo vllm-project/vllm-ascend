@@ -43,7 +43,7 @@ def test_boundary_state_is_drained_consumed_and_not_dispatched(monkeypatch, sche
     scheduler.ec_connector = None
     scheduler.requests = {"cached": object(), "boundary": object()}
     cached_data = SimpleNamespace(req_ids=["cached", "unchanged"], new_block_ids=[([9],), None])
-    monkeypatch.setattr(scheduler, "_make_cached_request_data", lambda *args: cached_data)
+    monkeypatch.setattr(scheduler, "_make_cached_request_data", lambda *args, **kwargs: cached_data)
     offers = {"boundary": [(0, 42, 128)], "finished": [(0, 43, 128)]}
     drain = Mock(side_effect=[offers, {}])
     get_blocks = Mock(side_effect=lambda req_id: {"cached": ([1, 9],), "boundary": ([42],)}[req_id])

@@ -218,7 +218,9 @@ def _make_sparse_builder(
     device: torch.device, kv_cache_dtype: torch.dtype = torch.bfloat16
 ) -> AscendMiniMaxM3SparseMetadataBuilder:
     vllm_config = _make_vllm_config()
-    vllm_config.speculative_config = SimpleNamespace(num_speculative_tokens=7, parallel_drafting=False)
+    vllm_config.speculative_config = SimpleNamespace(
+        num_speculative_tokens=7, max_num_new_slots_for_drafting=0, parallel_drafting=False
+    )
     spec = FullAttentionSpec(
         block_size=128,
         num_kv_heads=2,
@@ -2256,7 +2258,9 @@ def test_sparse_builder_keeps_unverified_gbsa_paths_in_layers(dtype, block_size,
     config = _make_vllm_config()
     config.model_config.dtype = dtype
     spec = FullAttentionSpec(block_size=block_size, num_kv_heads=2, head_size=128, dtype=dtype)
-    config.speculative_config = SimpleNamespace(num_speculative_tokens=3, parallel_drafting=False)
+    config.speculative_config = SimpleNamespace(
+        num_speculative_tokens=3, max_num_new_slots_for_drafting=0, parallel_drafting=False
+    )
     with patch.object(
         msa_m3_module, "get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A3)
     ):
@@ -2819,7 +2823,9 @@ def test_gbsa_schedule_lengths_follow_speculative_config(spec_tokens, mock_gbsa_
     )
     config = _make_vllm_config(max_num_batched_tokens=1024)
     config.speculative_config = (
-        SimpleNamespace(num_speculative_tokens=spec_tokens, parallel_drafting=False) if spec_tokens else None
+        SimpleNamespace(num_speculative_tokens=spec_tokens, max_num_new_slots_for_drafting=0, parallel_drafting=False)
+        if spec_tokens
+        else None
     )
     spec = FullAttentionSpec(block_size=128, num_kv_heads=2, head_size=128, dtype=torch.bfloat16)
     builder = AscendMiniMaxM3SparseMetadataBuilder(spec, ["layer0.attn"], config, torch.device("cpu"))

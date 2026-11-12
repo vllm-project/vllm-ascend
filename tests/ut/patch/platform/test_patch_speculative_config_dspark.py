@@ -104,6 +104,9 @@ class _DraftModelConfig(SimpleNamespace):
     def get_total_num_kv_heads(self):
         return self.model_arch_config.total_num_kv_heads
 
+    def get_sliding_window(self):
+        return getattr(self.hf_text_config, "sliding_window", None)
+
     def get_model_arch_config(self):
         return replace(
             self.model_arch_config,
