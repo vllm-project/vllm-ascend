@@ -107,12 +107,13 @@ def test_speculative_methods_share_recoverssm_validation():
 
 
 @pytest.mark.parametrize("pp_size", [2, 4, 8])
-def test_pd_prefill_pipeline_parallel_preserves_recoverssm_layout(pp_size):
+@pytest.mark.parametrize("role", ["kv_producer", "kv_consumer"])
+def test_pd_pipeline_parallel_preserves_recoverssm_layout(pp_size, role):
     config = make_config()
     config.parallel_config.pipeline_parallel_size = pp_size
     config.kv_transfer_config = NS(
         kv_connector="MooncakeConnectorV2",
-        kv_role="kv_producer",
+        kv_role=role,
     )
 
     helpers["validate_qwen_gdn_recoverssm"](config)
@@ -126,16 +127,16 @@ def test_pd_prefill_pipeline_parallel_preserves_recoverssm_layout(pp_size):
     "transfer",
     [
         None,
-        NS(kv_connector="MooncakeConnectorV2", kv_role="kv_consumer"),
         NS(kv_connector="AscendStoreConnector", kv_role="kv_producer"),
+        NS(kv_connector="MooncakeConnectorV2", kv_role="kv_both"),
     ],
 )
-def test_pipeline_parallel_rejects_non_mooncake_producer(transfer):
+def test_pipeline_parallel_rejects_non_mooncake_pd_role(transfer):
     config = make_config()
     config.parallel_config.pipeline_parallel_size = 4
     config.kv_transfer_config = transfer
 
-    with pytest.raises(ValueError, match="pipeline parallelism is supported only for a Mooncake KV producer"):
+    with pytest.raises(ValueError, match="pipeline parallelism requires a Mooncake PD role"):
         helpers["validate_qwen_gdn_recoverssm"](config)
 
 

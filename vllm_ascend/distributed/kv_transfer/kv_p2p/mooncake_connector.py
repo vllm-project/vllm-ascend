@@ -2176,6 +2176,12 @@ class MooncakeConnectorWorker:
 
         self.max_device_id = self.tp_size * self.dp_size * self.pcp_size * self.pp_size
         self.kv_role = vllm_config.kv_transfer_config.kv_role
+        configured_pp_size = self._prefill_pp_size if self.kv_role == "kv_producer" else self._decode_pp_size
+        if self.pp_size != configured_pp_size:
+            raise ValueError(
+                f"Mooncake {self.kv_role} pipeline_parallel_size={self.pp_size} does not match "
+                f"kv_connector_extra_config pp_size={configured_pp_size}"
+            )
         if self.kv_role == "kv_consumer" and self.pcp_size > 1:
             raise ValueError(
                 "In P/D disaggregation, Mooncake supports PCP only on the prefill (kv_producer) engine. "
@@ -2266,10 +2272,28 @@ class MooncakeConnectorWorker:
         self._decode_tp_size = decode_parallel_config["tp_size"]
         assert "dp_size" in decode_parallel_config
         self._decode_dp_size = decode_parallel_config["dp_size"]
-        # get prefill pp size from extra config
+        # Decode PP is supported when P and D use matching pipeline stages.
+        # Each D stage pulls only the corresponding P-stage cache partition.
         self._decode_pp_size = decode_parallel_config.get("pp_size", 1)
-        assert self._decode_pp_size == 1, "decode pp size must be 1"
+        if self._decode_pp_size > 1 and self._decode_pp_size != self._prefill_pp_size:
+            raise ValueError(
+                "Mooncake decode PP requires matching prefill/decode pp_size; "
+                f"got prefill={self._prefill_pp_size}, decode={self._decode_pp_size}"
+            )
         self._prefill_pp_layer_partition = prefill_parallel_config.get("pp_layer_partition")
+
+    def _filter_prefill_ranks_for_decode_pp(
+        self,
+        ranks_by_decode_tp: list[list[int]],
+        prefill_tp_size: int,
+    ) -> list[list[int]]:
+        """Keep only the matching P stage for a pipeline-parallel D worker."""
+        if self.kv_role != "kv_consumer" or self._decode_pp_size <= 1:
+            return ranks_by_decode_tp
+        return [
+            [rank for rank in ranks if rank // prefill_tp_size == self.pp_rank]
+            for ranks in ranks_by_decode_tp
+        ]
 
     @staticmethod
     def _serialize_kv_group_spec(
@@ -3683,13 +3707,18 @@ class MooncakeConnectorWorker:
         def add_group_pull(remote_rank: int, group_pull: GroupPull) -> None:
             rank_group_pulls.setdefault(remote_rank, []).append(group_pull)
 
+        prefill_pp_ranks = (
+            (self.pp_rank,)
+            if self.kv_role == "kv_consumer" and self._decode_pp_size > 1
+            else range(self._prefill_pp_size)
+        )
         for group_id, (group_spec, layer_indices) in self.kv_group2layeridx.items():
             if not layer_indices:
                 continue
 
             if group_spec["kv_cache_spec_type"] == "MambaSpec":
                 num_group_pulls = mamba_num_group_pulls
-                for pp_rank in range(self._prefill_pp_size):
+                for pp_rank in prefill_pp_ranks:
                     pp_rank_offset = pp_rank * prefill_tp_size
                     local_tp_offset = tp_rank * num_group_pulls
                     for remote_tp_offset in range(num_group_pulls):
@@ -3724,12 +3753,15 @@ class MooncakeConnectorWorker:
                     prefill_tp_size,
                     tp_rank,
                 )
-            assert len(chosen_rank_list) == num_group_pulls * self._prefill_pp_size, (
+            expected_pp_stages = (
+                1 if self.kv_role == "kv_consumer" and self._decode_pp_size > 1 else self._prefill_pp_size
+            )
+            assert len(chosen_rank_list) == num_group_pulls * expected_pp_stages, (
                 f"chosen_rank_list({chosen_rank_list}) does not match num_group_pulls({num_group_pulls}) "
-                f"and prefill pp size({self._prefill_pp_size})."
+                f"and selected prefill pp stages({expected_pp_stages})."
             )
             for rank_idx, remote_rank in enumerate(chosen_rank_list):
-                prefill_pp_rank = rank_idx // num_group_pulls
+                prefill_pp_rank = remote_rank // prefill_tp_size
                 add_group_pull(
                     remote_rank,
                     GroupPull(
@@ -4187,7 +4219,7 @@ class MooncakeConnectorWorker:
                     range(prefill_tp_size),
                 )
             )
-            return sampled_nums
+            return self._filter_prefill_ranks_for_decode_pp(sampled_nums, prefill_tp_size)
         num_kv_head = num_key_value_heads
         ori_data = np.arange(prefill_tp_size * self._prefill_pp_size)
         seed = string_to_int64_hash(req_id)
@@ -4217,7 +4249,7 @@ class MooncakeConnectorWorker:
             for pp_index in range(self._prefill_pp_size):
                 group.extend(all_results[pp_index][group_index])
             sampled_nums.append(group)
-        return sampled_nums
+        return self._filter_prefill_ranks_for_decode_pp(sampled_nums, prefill_tp_size)
 
 
 @contextlib.contextmanager
