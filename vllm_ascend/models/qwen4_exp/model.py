@@ -47,6 +47,7 @@ from vllm_ascend.ops.triton.qwen4_exp.hc import (
     hc_silu,
 )
 
+from .hc_fused import AscendTextGatedResidual, prepare_model_textgr_weights
 from .ple import AscendQwen4ExpPLEBackend, patch_upstream_ple_short_conv
 
 # Keep the upstream model and weight loader authoritative. HyperConnection's
@@ -57,6 +58,7 @@ upstream_hc.hc_combine = hc_combine
 upstream_hc.hc_combine_norm = hc_combine_norm
 upstream_hc.hc_gate_mix = hc_gate_mix
 upstream_hc.hc_silu = hc_silu
+upstream_hc.GatedResidual = AscendTextGatedResidual
 
 # PLE's depthwise F.conv1d otherwise lowers to ACLop Conv2D when torch-npu
 # internal formats are enabled. Scope the graph-safe option override to the
@@ -69,6 +71,7 @@ from vllm.models.qwen4_exp.amd import ple_layer as upstream_ple  # noqa: E402
 from .qsa import AscendQwen4ExpQSAAttention  # noqa: E402
 
 upstream_model.Qwen4ExpQSAAttention = AscendQwen4ExpQSAAttention
+upstream_model.GatedResidual = AscendTextGatedResidual
 
 
 class AscendQwen4ExpPLELayer(upstream_model.Qwen4ExpPLELayer):
@@ -506,6 +509,12 @@ class AscendQwen4ExpForCausalLM(upstream_model.Qwen4ExpForCausalLM):
     # The runner must therefore transport full-token intermediate tensors.
     pp_intermediate_tensors_are_full_tokens = True
 
+    def process_weights_after_loading(self) -> None:
+        parent_hook = getattr(super(), "process_weights_after_loading", None)
+        if parent_hook is not None:
+            parent_hook()
+        prepare_model_textgr_weights(self)
+
     @classmethod
     def get_gdn_mamba_state_shape_from_config(cls, vllm_config: VllmConfig):
         return gdn_mamba_state_shape_from_config(vllm_config)
@@ -531,6 +540,12 @@ class AscendQwen4ExpForConditionalGeneration(upstream_model.Qwen4ExpForCondition
     """Qwen3.8-Flash-Next multimodal model using Ascend operators."""
 
     pp_intermediate_tensors_are_full_tokens = True
+
+    def process_weights_after_loading(self) -> None:
+        parent_hook = getattr(super(), "process_weights_after_loading", None)
+        if parent_hook is not None:
+            parent_hook()
+        prepare_model_textgr_weights(self)
 
     @classmethod
     def get_mamba_state_shape_from_config(cls, vllm_config: VllmConfig):
