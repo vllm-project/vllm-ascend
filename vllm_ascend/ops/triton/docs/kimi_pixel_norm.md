@@ -41,6 +41,10 @@ The launch wrapper is `kimi_pixel_norm_lut(pixels, lut, vector_cores)` in
 
 - Model integration is limited to Kimi-K3/K3.1, patch size 14 and RGB mean/std
   `[0.5, 0.5, 0.5]`. These conditions are checked once during construction.
+- Legacy `preprocessor_config.json` metadata is also read when processor-class
+  resolution and cached image metadata do not provide `media_proc_cfg`. A
+  `processor_class` field is not required there; missing media settings still
+  raise an error.
 - RGB channels use one table built from the checked processor configuration.
   The module checks BF16/FP16 support when constructed or moved and retains
   only 16-bit recovery data outside checkpoint state; its

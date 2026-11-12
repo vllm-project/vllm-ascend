@@ -7,6 +7,7 @@ from torch import nn
 from vllm.model_executor.models.utils import StageMissingLayer
 from vllm.transformers_utils.processor import get_processor_config
 from vllm.transformers_utils.processors.kimi_k25_vision_fused import KimiK25FusedVisionProcessor
+from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 
 from vllm_ascend.ops.triton.kimi_pixel_norm import _KIMI_PIXEL_NORM_KERNEL
 
@@ -72,6 +73,12 @@ def build_kimi_pixel_norm(model_config, vision_tower: nn.Module) -> KimiPixelNor
     config = config.get("image_processor", config)
     if "media_proc_cfg" not in config:
         config = model_config.hf_image_processor_config
+    if "media_proc_cfg" not in config:
+        # Legacy preprocessor files need not declare processor_class, so the
+        # processor-class resolver can skip otherwise valid media metadata.
+        config = (
+            get_hf_file_to_dict("preprocessor_config.json", model_config.model, revision=model_config.revision) or {}
+        )
     media_config = config["media_proc_cfg"]
     if media_config["patch_size"] != 14:
         raise ValueError("Kimi pixel LUT currently requires 14x14 RGB patches")
