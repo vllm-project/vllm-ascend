@@ -19,7 +19,7 @@ msgstr ""
 "Generated-By: detect_po_changes.py\n"
 
 msgid "# runtime_config"
-msgstr "# runtime_config"
+msgstr "# 运行时配置"
 
 msgid ""
 "JSON schema for Runtime Guard. Default path: "
