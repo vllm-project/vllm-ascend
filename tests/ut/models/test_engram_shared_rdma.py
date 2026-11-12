@@ -45,7 +45,7 @@ def test_shared_engram_entry_dispatches_to_owner(rdma, monkeypatch, backend):
     entry = Path(rdma.__file__).resolve().parents[3] / "shared_engram.py"
     module = ast.parse(entry.read_text())
     dispatch = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "dispatch")
-    namespace = {"argparse": argparse, "main": lambda: calls.append("a3")}
+    namespace: dict[str, Any] = {"argparse": argparse, "main": lambda: calls.append("a3")}
     exec(compile(ast.Module(body=[dispatch], type_ignores=[]), str(entry), "exec"), namespace)
     argv = ["owner", "--help"] if backend is None else ["owner", "--backend", backend]
     monkeypatch.setattr(sys, "argv", argv)
