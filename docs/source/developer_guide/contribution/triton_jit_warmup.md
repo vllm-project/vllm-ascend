@@ -53,11 +53,14 @@ Create one wrapper instance for registration and execution. In the public operat
 
 Place `register_warmup(...)` in the initialization path of the component that selects and uses the operator. Pass the configuration expected by the wrapper's `get_warmup_keys`.
 
-| Situation | Registration location | Existing reference |
+| Operator owner | Where to register or integrate | Source reference |
 | --- | --- | --- |
-| Required parameters are available during component construction | The model layer or attention metadata builder's `__init__`, inside an existing runner registration window | `AscendDSAMetadataBuilder.__init__` in [dsa_v1.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/attention/dsa_v1.py) registers Q-RMS; see the example below. |
-| Parameters depend on allocated cache layouts | The cache initialization path, after allocation, inside the runner's registry window | `initialize_kv_cache` in the [Ascend runner](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/worker/v2/model_runner.py) registers state-copy layouts. |
-| Parameters are only final after component and input-batch setup | A late-registration helper called from `kernel_warmup(worker)`, before `registry.warmup()` | `_register_dspark_swa_indices_warmup` in [kernel_warmup.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/model_executor/warmup/kernel_warmup.py). |
+| Model | Register in the model layer's `__init__`, while the runner constructs the model inside its registry window. | `DeepseekV41Indexer.__init__` registers indexer kernels in [indexer.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/models/deepseek_v41/indexer.py). |
+| Attention | Register in the selected metadata builder's `__init__`. If keys need allocated cache layouts, register after allocation in the runner's cache initialization window. | `AscendDSAMetadataBuilder.__init__` in [dsa_v1.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/attention/dsa_v1.py); `initialize_kv_cache` in the [runner](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/worker/v2/model_runner.py). |
+| Sampling | Register when the selected sampling stack is initialized. Keep registrations specific to that stack. | The [v1 runner](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/worker/v1/model_runner.py) calls `register_v1_sampling_warmup(vllm_config)` inside its registry window. |
+| Worker / runner | Own registry windows and compilation timing. For keys requiring final component or input-batch metadata, call a late-registration helper before `registry.warmup()`. | `_register_dspark_swa_indices_warmup` and `kernel_warmup` in [kernel_warmup.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/model_executor/warmup/kernel_warmup.py). |
+| Compilation pass | If a pass introduces a wrapped Triton operator, provide its key domain through an initialization or late-registration path above, once its configuration is known. A graph rewrite alone does not register the wrapper. | Follow the wrapper and registration steps in this guide; the current Ascend compilation directory has no dedicated `register_warmup` entry point. |
+| Runtime | Call the same wrapper instance with real tensors. Register variants before serving; a runtime call alone does not populate the warmup registry. | `triton_q_rms` in [rms_norm.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/ops/triton/rms_norm.py). |
 
 For the Q-RMS path, the runner's `_initialize_kv_cache_upstream` activates the registry around the upstream cache initialization that constructs attention metadata builders. The builder then registers the same wrapper instance used by `triton_q_rms`.
 
