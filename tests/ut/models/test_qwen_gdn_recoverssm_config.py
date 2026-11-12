@@ -173,6 +173,24 @@ def test_qwen4_exp_release_config_is_registered_without_widening_selector():
     assert not helpers["is_gdn_model"](config)
 
 
+def test_qwen4_exp_mtp_draft_config_is_registered_exactly():
+    config = make_config()
+    config.model_config.hf_text_config.model_type = "qwen4_exp_text"
+    config.model_config.hf_config = NS(architectures=["Qwen4ExpMTP"])
+
+    assert helpers["is_gdn_model"](config)
+    assert helpers["_uses_gdn_recoverssm"](config)
+
+    for architecture in (
+        "CustomQwen4ExpMTP",
+        "Qwen4ExpMTPForConditionalGeneration",
+        "Qwen4ExpMTPDerivative",
+    ):
+        config.model_config.hf_config.architectures = [architecture]
+        assert not helpers["is_gdn_model"](config)
+        assert not helpers["_uses_gdn_recoverssm"](config)
+
+
 @pytest.mark.parametrize("model_type", ["glm5_next_text", "kimi_k3", "qwen3"])
 def test_target_selector_does_not_enable_models_without_gdn_fields(model_type):
     config = make_config()
