@@ -21,11 +21,17 @@ def _make_norm(dtype):
     return norm_ops.KimiPixelNormLut(reference, dtype=dtype, device=torch.device("cpu"))
 
 
-@pytest.fixture
-def kernel_owner():
+@pytest.fixture(params=[False, True], ids=["configured-kernel", "plain-function"])
+def kernel_owner(request, monkeypatch):
+    if request.param:
+        kernel = pixel_ops.KimiPixelNormKernel.kernel
+        # Without Triton, its placeholder decorator leaves a plain function.
+        monkeypatch.setattr(pixel_ops.KimiPixelNormKernel, "kernel", getattr(kernel, "fn", kernel))
     owner = pixel_ops.KimiPixelNormKernel()
     kernel = Mock()
-    kernel.arg_names = list(inspect.signature(getattr(owner.kernel, "fn", owner.kernel)).parameters)
+    # Class access avoids binding away `pixels` when the kernel is a function.
+    kernel_definition = type(owner).kernel
+    kernel.arg_names = list(inspect.signature(getattr(kernel_definition, "fn", kernel_definition)).parameters)
     kernel.__getitem__ = Mock(return_value=Mock())
     owner.kernel = kernel
     return owner
