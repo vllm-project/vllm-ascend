@@ -26,8 +26,9 @@
   4. Mask the last tile; empty input returns an empty output without a launch.
 - **Supported modes**: A3 and 950PR&950DT Products, eager execution, dynamic Torch
   compile and ACL graph capture/replay. The integer-index update was validated on
-  Ascend950DT_9582. Ascend910_9382 results below used the previous FP16-index
-  kernel; an A3 rerun is pending an available card. A2 has not been validated.
+  Ascend950DT_9582 and Ascend910_9382. A3 quick checks covered both output dtypes,
+  precision, cold-cache warmup and changed-input graph replay. A3 preprocessing
+  throughput below still uses the previous kernel. A2 has not been validated.
 
 ## Parameters
 
