@@ -1,3 +1,4 @@
+# mypy: disable-error-code="annotation-unchecked, arg-type, attr-defined, method-assign"
 # SPDX-License-Identifier: Apache-2.0
 """Exercise the DSpark/MTP entry points, not just the length helper."""
 
@@ -11,7 +12,9 @@ from vllm.config import AttentionConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode import speculator as upstream_speculator
-from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import AutoRegressiveSpeculator
+from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
+    TargetDependentARSpeculator,
+)
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel import sfa_cp
@@ -65,6 +68,7 @@ class FakeDecodeMetadata:
 def _speculator(monkeypatch, kind, architecture, width, padded, step, use_dcp=True):
     config = SimpleNamespace(
         attention_config=AttentionConfig(),
+        model_config=SimpleNamespace(max_model_len=128),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=8 if use_dcp else 1,
             cp_kv_cache_interleave_size=4,
@@ -77,19 +81,25 @@ def _speculator(monkeypatch, kind, architecture, width, padded, step, use_dcp=Tr
     cls = AscendDSparkSpeculator if kind == "dspark" else AscendMTPSpeculator
     spec = object.__new__(cls)
     spec.replicated_pcp = False
+    spec.pcp_manager = None
     spec.enable_adaptive_verification = False
     if kind == "mtp":
         spec._sparse_kv_offload_metadata = SimpleNamespace(build_kwargs=lambda *args: None)
         spec.model_state = object()
     spec.attn_architecture = architecture
+    if kind == "dspark":
+        spec.use_flashmla = False
     spec.use_dcp = use_dcp
     spec.dcp_manager = manager
     # vLLM main (#56723) reads speculator.dcp_size in _build_attn_metadata.
     spec.dcp_size = config.parallel_config.decode_context_parallel_size
-    spec.max_model_len = 128
     spec.draft_max_seq_len = 128
     spec.num_query_per_req = width
     spec.vllm_config = spec.draft_vllm_config = config
+    # vLLM main reads the draft overrides from the speculator's own config.
+    spec.speculative_config = SimpleNamespace(  # type: ignore[assignment]
+        moe_backend=None, attention_backend=None, kv_cache_dtype=None
+    )
     spec.requires_non_causal = kind == "dspark"
     spec._group_causal = {0: False} if kind == "dspark" else True
     spec.draft_attn_layer_names = {"draft.layer"}
@@ -140,9 +150,17 @@ def _speculator(monkeypatch, kind, architecture, width, padded, step, use_dcp=Tr
                 seq_lens_cpu = common.seq_lens
             return SimpleNamespace(common=common, decode=decode, seq_lens_cpu=seq_lens_cpu.clone())
 
-    spec.attn_groups = [
-        [SimpleNamespace(get_metadata_builder=lambda _: RecordingBuilder(), layer_names=["draft.layer"])]
-    ]
+    class RecordingAttnGroup:
+        # Both supported vLLM lanes (#56723) call the group's build_metadata.
+        layer_names = ["draft.layer"]
+
+        def get_metadata_builder(self, ubatch_idx=0):
+            return RecordingBuilder()
+
+        def build_metadata(self, common_attn_metadata, ubatch_idx=0, **kwargs):
+            return self.get_metadata_builder(ubatch_idx).build(0, common_attn_metadata)
+
+    spec.attn_groups = [[RecordingAttnGroup()]]
 
     def prepare_device(out, seq_lens, num_reqs, size, rank, interleave):
         out.zero_()
@@ -184,7 +202,7 @@ def test_dspark_common_dcp_preparation(monkeypatch, architecture, padded, width,
         # field names/values apply (upstream now forwards is_prefilling).
         torch.testing.assert_close(common.seq_lens, device_lengths[:padded])
         assert _dcp_local_cpu(common) is None
-        # vLLM 0.31 slices is_prefilling to the padded request count.
+        # Upstream slices is_prefilling to the padded request count.
         expected_is_prefilling = [False] * padded
         assert common.is_prefilling.tolist() == expected_is_prefilling
     else:
@@ -278,14 +296,13 @@ def test_sfa_consumer_uses_device_local_lengths_and_ignores_cpu(monkeypatch):
     builder.dcp_local_seq_lens_buf = torch.empty(4, dtype=torch.int32)
     builder.decode_threshold = 4
     builder.vllm_config = None
-    monkeypatch.setattr(AscendSFADCPMetadataBuilder, "dcp_enabled", False, raising=False)
+    monkeypatch.setattr(AscendSFADCPMetadataBuilder, "use_dcp", False, raising=False)
     monkeypatch.setattr(sfa_cp, "split_decodes_and_prefills", lambda *a, **kw: (4, 0, 4, 0))
     block_table = torch.zeros((4, 2), dtype=torch.int32)
     slots = torch.arange(4)
     builder._get_dcp_local_block_table = lambda *_: block_table
     builder._build_block_table_replicated_view = lambda *_: block_table
     builder._build_slot_mapping_replicated_view = lambda *_: slots
-    builder._update_parallel_slot_mapping = lambda *_: None
     common = SimpleNamespace(
         slot_mapping=slots,
         block_table_tensor=block_table,
@@ -315,10 +332,10 @@ def test_draft_decode_hooks_forward_parallel_config(monkeypatch, architecture, u
         yield
 
     monkeypatch.setattr(
-        "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.build_attn_metadata_factory",
+        "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator.build_attn_metadata_factory",
         factory,
     )
-    monkeypatch.setattr(AutoRegressiveSpeculator, "_build_attn_metadata", lambda *a, **k: None)
+    monkeypatch.setattr(TargetDependentARSpeculator, "_build_attn_metadata", lambda *a, **k: None)
     batch = SimpleNamespace(num_tokens=2, num_reqs=2)
     seq_lens = spec.input_batch.seq_lens_cpu_upper_bound
     dcp_local = spec.input_buffers.dcp_local_seq_lens
@@ -328,12 +345,12 @@ def test_draft_decode_hooks_forward_parallel_config(monkeypatch, architecture, u
     assert len(seen) == 2
     for parallel_config, seq_lens_cpu, is_prefilling in seen:
         assert parallel_config is spec.draft_vllm_config.parallel_config
+        # Draft decode steps pass no prefilling request, like upstream.
+        assert is_prefilling.tolist() == [False, False]
         if use_dcp:
             assert seq_lens_cpu.tolist() == [32, 128]
-            assert is_prefilling.tolist() == [False, False]
         else:
             assert seq_lens_cpu is None
-            assert is_prefilling.tolist() == [True, False]
 
 
 @pytest.mark.parametrize("mode", ["NONE", "PIECEWISE", "FULL"])

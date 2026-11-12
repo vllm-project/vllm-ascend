@@ -5,18 +5,140 @@
 
 import unittest
 from copy import deepcopy
+from itertools import product
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 
 # isort: split
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
+import torch
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import memcache_backend, mooncake_layerwise
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_layerwise
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MemcacheBackend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
 
 
 class TestBoundLayerwiseKeys(unittest.TestCase):
+    def test_attention_keys_share_pcp_replicas(self):
+        for pp_size in (1, 2):
+            for num_groups, backend_class in product((1, 2), (MooncakeBackend, MemcacheBackend)):
+                with self.subTest(pp_size=pp_size, num_groups=num_groups, backend=backend_class.__name__):
+                    config = self.make_config(pp_size)
+                    cache = self.make_cache_config(num_groups)
+                    builders = []
+                    for pcp_size in (1, 2, 4):
+                        config.parallel_config.prefill_context_parallel_size = pcp_size
+                        builders.append(
+                            backend_class.bind_layerwise_keys(
+                                vllm_config=config,
+                                kv_cache_config=cache,
+                                model_name="model",
+                                use_hybrid=num_groups > 1,
+                                grouped_block_size=[16 * (g + 1) for g in range(num_groups)],
+                            )
+                        )
+                    for group in range(num_groups):
+                        for heads in (1, 2):
+                            sets = []
+                            for builder in builders:
+                                keys = builder.make_hit_check_keys(group, "hash", heads)
+                                writers = [
+                                    builder.make_full_key(group, "hash", head, stage, pcp_rank)
+                                    for stage in range(pp_size)
+                                    for pcp_rank in range(builder.pcp_size)
+                                    for head in range(heads)
+                                ]
+                                self.assertEqual(set(keys), set(writers))
+                                self.assertEqual(len(keys), pp_size * heads)
+                                self.assertEqual(len(set(keys)), len(keys))
+                                sets.append(set(keys))
+                            self.assertEqual(sets[0], sets[1])
+                            self.assertEqual(sets[1], sets[2])
+
+    def test_sharded_mamba_keys_isolate_pcp_topologies_without_scratch_blocks(self):
+        config = self.make_config()
+        config.parallel_config.tensor_parallel_size = 1
+        cache = self.make_cache_config(2)
+        cache.kv_cache_groups[1].kv_cache_spec = MambaSpec(
+            block_size=32,
+            shapes=((4,),),
+            dtypes=(torch.float32,),
+            mamba_cache_mode="align",
+        )
+        for backend_class in (MooncakeBackend, MemcacheBackend):
+            with self.subTest(backend=backend_class.__name__):
+                key_sets = []
+                for pcp_size in (1, 2, 4):
+                    config.parallel_config.prefill_context_parallel_size = pcp_size
+                    builder = backend_class.bind_layerwise_keys(
+                        vllm_config=config,
+                        kv_cache_config=cache,
+                        model_name="model",
+                        use_hybrid=True,
+                        grouped_block_size=[16, 32],
+                    )
+                    keys = builder.make_hit_check_keys(1, "hash", 1)
+                    self.assertEqual(keys, [builder.make_full_key(1, "hash", 0, 0, rank) for rank in range(pcp_size)])
+                    self.assertEqual(len(set(keys)), pcp_size)
+                    key_sets.append(set(keys))
+                self.assertFalse(key_sets[0] & key_sets[1] or key_sets[0] & key_sets[2] or key_sets[1] & key_sets[2])
+
+    def test_pcp_does_not_enable_dcp(self):
+        with self.assertRaisesRegex(ValueError, "decode_context_parallel_size=2"):
+            config = self.make_config()
+            config.parallel_config.prefill_context_parallel_size = 4
+            config.parallel_config.decode_context_parallel_size = 2
+            MooncakeBackend.bind_layerwise_keys(
+                vllm_config=config,
+                kv_cache_config=self.make_cache_config(1),
+                model_name="model",
+                use_hybrid=False,
+                grouped_block_size=[16],
+            )
+
+    def test_pcp_rejects_layer_sharded_kvpp(self):
+        config = self.make_config()
+        config.parallel_config.prefill_context_parallel_size = 4
+        config.additional_config = {"enable_kvpp": True}
+        with self.assertRaisesRegex(ValueError, "layer-sharded caches"):
+            MooncakeBackend.bind_layerwise_keys(
+                vllm_config=config,
+                kv_cache_config=self.make_cache_config(1),
+                model_name="model",
+                use_hybrid=False,
+                grouped_block_size=[16],
+            )
+
+    def test_kvpp_lookup_covers_every_owner_and_uses_separate_layout_keys(self):
+        for pp_size in (1, 2):
+            for num_groups in (1, 2):
+                with self.subTest(pp_size=pp_size, num_groups=num_groups):
+                    config = self.make_config(pp_size)
+                    config.additional_config = {"enable_kvpp": True}
+                    config.parallel_config.prefill_context_parallel_size = 1
+                    cache = self.make_cache_config(num_groups)
+                    args = dict(
+                        vllm_config=config,
+                        kv_cache_config=cache,
+                        model_name="model",
+                        use_hybrid=num_groups > 1,
+                        grouped_block_size=[16 * (group + 1) for group in range(num_groups)],
+                    )
+                    kvpp_keys = MooncakeBackend.bind_layerwise_keys(**args)
+                    config.additional_config = {"enable_kvpp": False}
+                    replicated_keys = MooncakeBackend.bind_layerwise_keys(**args)
+                    for group in range(num_groups):
+                        owners = [
+                            kvpp_keys.make_full_key(group, "hash", owner, stage)
+                            for stage in range(pp_size)
+                            for owner in range(2)
+                        ]
+                        self.assertEqual(kvpp_keys.make_hit_check_keys(group, "hash", 2), owners)
+                        ordinary = replicated_keys.make_hit_check_keys(group, "hash", 1)
+                        self.assertTrue(set(owners).isdisjoint(ordinary))
+
     @staticmethod
     def make_config(pp_size=1):
         return SimpleNamespace(
@@ -43,14 +165,14 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
         )
 
     def test_wire_compatibility_and_all_stage_writer_keys(self):
-        for protocol in (mooncake_layerwise, memcache_backend):
+        for backend_class in (MooncakeBackend, MemcacheBackend):
             for pp_size in (1, 2):
                 for num_groups in (1, 2):
-                    with self.subTest(protocol=protocol.__name__, pp_size=pp_size, num_groups=num_groups):
+                    with self.subTest(backend=backend_class.__name__, pp_size=pp_size, num_groups=num_groups):
                         config = self.make_config(pp_size)
                         cache = self.make_cache_config(num_groups)
                         sizes = [16 * (group + 1) for group in range(num_groups)]
-                        builder = protocol.bind_layerwise_keys(
+                        builder = backend_class.bind_layerwise_keys(
                             vllm_config=config,
                             kv_cache_config=cache,
                             model_name="model",
@@ -63,7 +185,7 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
                             expected = []
                             for stage in range(pp_size):
                                 for head in range(2):
-                                    if protocol is memcache_backend:
+                                    if backend_class is MemcacheBackend:
                                         group_tag = f"@{group}" if num_groups > 1 else ""
                                         stage_tag = f"@pp{stage}" if pp_size > 1 else ""
                                         key = f"model{group_tag}{stage_tag}@hash@{head}"
@@ -84,12 +206,12 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
                             self.assertEqual(builder.make_hit_check_keys(group, "hash", 0), [])
 
     def test_binding_snapshots_identity_and_does_not_rehash_on_lookup(self):
-        for protocol in (mooncake_layerwise, memcache_backend):
-            with self.subTest(protocol=protocol.__name__):
+        for backend_class in (MooncakeBackend, MemcacheBackend):
+            with self.subTest(backend=backend_class.__name__):
                 config = self.make_config(2)
                 cache = self.make_cache_config(2)
                 sizes = [16, 32]
-                builder = protocol.bind_layerwise_keys(
+                builder = backend_class.bind_layerwise_keys(
                     vllm_config=config,
                     kv_cache_config=cache,
                     model_name="model",
@@ -113,7 +235,7 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
         cache = self.make_cache_config(2)
         cache.kv_cache_groups[1].layer_names.clear()
         with self.assertRaisesRegex(ValueError, "empty groups"):
-            mooncake_layerwise.bind_layerwise_keys(
+            MooncakeBackend.bind_layerwise_keys(
                 vllm_config=self.make_config(2),
                 kv_cache_config=cache,
                 model_name="model",
@@ -127,7 +249,7 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
         changed_cache = deepcopy(cache)
         changed_cache.kv_cache_groups[1].layer_names.append("model.layers.2.kv")
         builders = [
-            mooncake_layerwise.bind_layerwise_keys(
+            MooncakeBackend.bind_layerwise_keys(
                 vllm_config=config,
                 kv_cache_config=c,
                 model_name="model",

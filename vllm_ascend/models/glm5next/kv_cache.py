@@ -90,6 +90,8 @@ class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
                 f"and {compress_ratio}."
             )
         self.head_dim = head_dim
+        if dtype not in (torch.bfloat16, torch.float8_e4m3fn):
+            raise ValueError(f"GLM KPool cache requires BF16 or FP8, got {dtype}.")
         self.dtype = dtype
         self.cache_role = cache_role
         self.cache_config = cache_config
@@ -110,6 +112,8 @@ class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
+            scale_dim=1 if self.dtype == torch.float8_e4m3fn else 0,
+            scale_dtype=torch.float32 if self.dtype == torch.float8_e4m3fn else torch.int8,
             cache_dtype_str=None,
             model_version="glm5_next",
             indexes_kv_by_block_stride=True,
@@ -145,8 +149,8 @@ class Glm5NextTailCache(nn.Module, AttentionLayerBase):
             raise ValueError(f"GLM-Next tail must use torch.float32, got {dtype}.")
         if compress_ratio <= 1:
             raise ValueError(f"GLM-Next tail requires compress_ratio greater than one, got {compress_ratio}.")
-        self.block_size = compress_ratio if ring_capacity is None else ring_capacity
-        if self.block_size < compress_ratio or head_dim <= 0:
+        self.ring_capacity = compress_ratio if ring_capacity is None else ring_capacity
+        if self.ring_capacity < compress_ratio or head_dim <= 0:
             raise ValueError("Tail requires a positive head_dim and ring_capacity >= compress_ratio.")
         self.head_dim = head_dim
         self.dtype = dtype
@@ -162,7 +166,8 @@ class Glm5NextTailCache(nn.Module, AttentionLayerBase):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         del vllm_config
         return AscendIndexerKPoolTailSpec(
-            block_size=self.block_size,
+            block_size=self.compress_ratio,
+            ring_capacity=self.ring_capacity,
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
@@ -254,15 +259,18 @@ class KpoolTailManager(FullAttentionManager):
     ) -> int:
         return 0 if self.req_to_blocks.get(request_id) else 1
 
-    def allocate_new_blocks(self, request_id: str, num_tokens: int, num_tokens_main_model: int) -> list[KVCacheBlock]:
+    def _claim_ring_block(self, request_id: str, record_for_zeroing: bool = True) -> list[KVCacheBlock]:
         req_blocks = self.req_to_blocks[request_id]
         if req_blocks:
             return []
         new_blocks = self.block_pool.get_new_blocks(1)
         req_blocks.extend(new_blocks)
-        if self._record_new_block_ids:
+        if self._record_new_block_ids and record_for_zeroing:
             self.new_block_ids.extend(block.block_id for block in new_blocks)
         return new_blocks
+
+    def allocate_new_blocks(self, request_id: str, num_tokens: int, num_tokens_main_model: int) -> list[KVCacheBlock]:
+        return self._claim_ring_block(request_id)
 
     def add_local_computed_blocks(
         self,
@@ -274,6 +282,12 @@ class KpoolTailManager(FullAttentionManager):
         assert not new_computed_blocks, "Tail blocks cannot be shared through prefix caching."
 
     def allocate_external_computed_blocks(
-        self, request_id: str, num_local_computed_tokens: int, num_external_computed_tokens: int
+        self,
+        request_id: str,
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+        record_for_zeroing: bool = True,
     ) -> None:
-        self.allocate_new_blocks(request_id, num_local_computed_tokens + num_external_computed_tokens, 0)
+        # An asynchronous connector load initializes the ring; zeroing it after
+        # the transfer starts would race with and overwrite the received state.
+        self._claim_ring_block(request_id, record_for_zeroing)

@@ -59,7 +59,7 @@ This is pure data movement. Compare copied values and zero-filled rows with `rto
 The existing NPU tests cover BF16/FP32 fresh/history selection, NaN/Inf cache contents, sentinel indices, unchanged input state, and graph replay with changed indices, flags, and history. CPU unit tests additionally cover int32/int64 indices, multiple row shapes, and empty batches; CPU runs exercise the fallback, not the Triton kernel.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_glm5next_state_gather_npu.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_glm5next_state_gather_npu.py
 pytest -sv tests/ut/models/test_glm5next_state_ops.py
 ```
 

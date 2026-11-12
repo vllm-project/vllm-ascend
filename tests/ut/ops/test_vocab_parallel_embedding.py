@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from torch._dynamo.backends.common import aot_autograd
 from vllm.config.vllm import set_current_vllm_config
 from vllm.forward_context import ForwardContext, override_forward_context
 
@@ -311,7 +312,7 @@ def _exchange_embedding(monkeypatch, mode, tp_rank=0, tp_size=1, exchange_rank=0
     """Keep real planning, weight loading and lookup; replace only runtime topology."""
     module = "vllm_ascend.ops.vocab_parallel_embedding"
     tp_group = SimpleNamespace(rank_in_group=tp_rank, world_size=tp_size, unique_name="tp")
-    exchange_group = SimpleNamespace(rank_in_group=exchange_rank, world_size=2, device_group="exchange")
+    exchange_group = SimpleNamespace(rank_in_group=exchange_rank, world_size=2)
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(prefill_context_parallel_size=2 if mode is VocabParallelMode.PCP_X_TP else 1),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
@@ -349,21 +350,17 @@ def test_embedding_exchange_batch_lifecycle(monkeypatch, mode, tp_size):
         tp_contribution = expected * (gathered // (8 // tp_size) == tp_rank).unsqueeze(-1)
         events = []
 
-        def all_gather(output, input_, *, group):
+        def all_gather(input_, dim):
             events.append("gather")
-            assert group == "exchange"
-            assert input_.data_ptr() == layer._embed_ag_in_buf.data_ptr()
-            assert output.data_ptr() == layer._embed_ag_out_buf.data_ptr()
+            assert dim == 0
             torch.testing.assert_close(input_, padded_ids[rank])
-            output.copy_(gathered)
+            return gathered.clone()
 
-        def reduce_scatter(output, input_, *, group):
+        def reduce_scatter(input_, dim):
             events.append("scatter")
-            assert group == "exchange"
-            assert input_.data_ptr() == layer._embed_rs_in_buf.data_ptr()
-            assert output.data_ptr() == layer._embed_rs_out_buf.data_ptr()
+            assert dim == 0
             torch.testing.assert_close(input_, local_contribution)
-            output.copy_(tp_contribution.reshape(2, span, 2)[rank])
+            return tp_contribution.reshape(2, span, 2)[rank].clone()
 
         def all_reduce(output, group_name):
             events.append("reduce")
@@ -371,9 +368,8 @@ def test_embedding_exchange_batch_lifecycle(monkeypatch, mode, tp_size):
             torch.testing.assert_close(output, tp_contribution.reshape(2, span, 2)[rank, : ids[rank].numel()])
             return weight[ids[rank]]
 
-        module = "vllm_ascend.ops.vocab_parallel_embedding"
-        monkeypatch.setattr(f"{module}.dist.all_gather_into_tensor", all_gather)
-        monkeypatch.setattr(f"{module}.dist.reduce_scatter_tensor", reduce_scatter)
+        monkeypatch.setattr(layer.token_exchange_group, "all_gather", all_gather, raising=False)
+        monkeypatch.setattr(layer.token_exchange_group, "reduce_scatter", reduce_scatter, raising=False)
         monkeypatch.setattr(torch.ops.vllm, "all_reduce", all_reduce)
         output = layer(ids[rank])
         torch.testing.assert_close(output, weight[ids[rank]])
@@ -392,7 +388,6 @@ def test_embedding_exchange_batch_lifecycle(monkeypatch, mode, tp_size):
     for tp_rank in range(tp_size):
         for rank in range(2):
             layer, weight = _exchange_embedding(monkeypatch, mode, tp_rank, tp_size, rank)
-            addresses = None
             for first_ids, second_ids, published_span, in_forward, pcp_span in batches:
                 ids = [torch.tensor(first_ids, dtype=torch.long), torch.tensor(second_ids, dtype=torch.long)]
                 span = pcp_span if mode is VocabParallelMode.PCP_X_TP else 8
@@ -400,17 +395,6 @@ def test_embedding_exchange_batch_lifecycle(monkeypatch, mode, tp_size):
                     layer.set_embedding_num_tokens_padded(published_span)
                 with override_forward_context(ForwardContext({}, {}, {}) if in_forward else None):
                     run_batch(layer, weight, ids, span, tp_rank, rank)
-                buffers = (
-                    layer._embed_ag_in_buf,
-                    layer._embed_ag_out_buf,
-                    layer._embed_rs_in_buf,
-                    layer._embed_rs_out_buf,
-                )
-                current_addresses = tuple(buffer.data_ptr() for buffer in buffers)
-                if addresses is not None:
-                    assert current_addresses == addresses
-                addresses = current_addresses
-                assert [buffer.shape[0] for buffer in buffers] == [8, 16, 16, 8]
 
 
 @pytest.mark.parametrize("num_tokens,padded_tokens", [(3, 2), (1, 9)])
@@ -419,11 +403,41 @@ def test_embedding_exchange_rejects_invalid_batch_before_communication(monkeypat
     layer.set_embedding_num_tokens_padded(padded_tokens)
     with (
         override_forward_context(None),
-        patch("vllm_ascend.ops.vocab_parallel_embedding.dist.all_gather_into_tensor") as gather,
+        patch.object(layer.token_exchange_group, "all_gather", create=True) as gather,
         pytest.raises(ValueError, match="must cover .* tokens and fit the static capacity"),
     ):
         layer(torch.ones(num_tokens, dtype=torch.long))
     gather.assert_not_called()
+
+
+def test_embedding_exchange_compilation(monkeypatch):
+    """AOT must keep scratch batch-sized and preserve outputs across calls."""
+    # CPU UTs mock NPU APIs; Dynamo must not query a real accelerator stream.
+    monkeypatch.setattr(torch.accelerator, "is_available", lambda: False)
+    layer, weight = _exchange_embedding(monkeypatch, VocabParallelMode.PCP_X_TP)
+    monkeypatch.setattr(layer.token_exchange_group, "all_gather", lambda x, dim: x.repeat(2), raising=False)
+    monkeypatch.setattr(
+        layer.token_exchange_group, "reduce_scatter", lambda x, dim: x[: x.shape[0] // 2].clone(), raising=False
+    )
+    graphs = []
+
+    def compiler(graph, inputs):
+        graphs.append(graph)
+        return graph.forward
+
+    torch._dynamo.reset()
+    compiled = torch.compile(layer.forward, backend=aot_autograd(fw_compiler=compiler), fullgraph=True, dynamic=True)
+    outputs = []
+    with override_forward_context(ForwardContext({}, {}, {})):
+        for ids in [[1, 2], [3], [2, 1, 3, 2], [], [1, 3]]:
+            ids = torch.tensor(ids, dtype=torch.long)
+            output = compiled(ids)
+            outputs.append((output, weight[ids]))
+        for output, expected in outputs:
+            torch.testing.assert_close(output, expected)
+    assert graphs
+    assert all("slice_scatter" not in str(node.target) for graph in graphs for node in graph.graph.nodes)
+    assert not any(name.startswith("_embed_") for name in vars(layer))
 
 
 class TestVocabParallelPlan(unittest.TestCase):

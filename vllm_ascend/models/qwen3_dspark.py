@@ -85,7 +85,10 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
         if not self.enable_confidence_head:
             raise RuntimeError("The DSpark confidence head is disabled.")
         assert self.model.confidence_head is not None
-        return torch.sigmoid(self.model.confidence_head(head_hidden, markov_embed))
+        confidence = torch.sigmoid(self.model.confidence_head(head_hidden, markov_embed))
+        # Non-finite estimates must not poison the adaptive budget or its
+        # device-side draft ranking. Target verification checks every draft.
+        return torch.nan_to_num(confidence, nan=1.0)
 
     def configure_target_aux_hidden_capture(self, target_model: torch.nn.Module) -> None:
         """Select draft auxiliary inputs, without changing target Eager/Graph mode."""

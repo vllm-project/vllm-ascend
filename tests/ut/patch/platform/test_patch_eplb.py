@@ -11,6 +11,7 @@ import pytest
 import torch
 from vllm.config import EPLBConfig, ParallelConfig, VllmConfig
 from vllm.config import parallel as parallel_module
+from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
 from vllm.platforms import current_platform
 from vllm.v1.executor.multiproc_executor import WorkerProc
 
@@ -539,6 +540,198 @@ def test_async_worker_only_publishes_changed_layers(monkeypatch, changed_layer):
     assert patch_eplb._async_worker.transfer_layer.call_count == int(changed_layer is not None)
 
 
+@pytest.mark.parametrize("rank", [0, 1])
+@pytest.mark.parametrize("scenario", ["complete", "counts", "missing_topology", "plain", "noop", "canceled", "failed"])
+def test_async_worker_logs_cycle_statistics_after_consumption(monkeypatch, rank, scenario):
+    old_mapping = torch.tensor([[0, 1], [0, 1], [0, 1]])
+    communicator = SimpleNamespace(set_stream=MagicMock())
+    model_state = SimpleNamespace(
+        communicator=communicator,
+        physical_to_logical_map=old_mapping,
+        logical_to_physical_map=torch.empty((3, 2, 1), dtype=torch.int32),
+        model=SimpleNamespace(expert_weights=[[object()] for _ in range(3)]),
+        model_name="model",
+        expert_buffer=[object()],
+        rebalanced=True,
+        pending_result=None,
+    )
+    state = AscendEplbState.__new__(AscendEplbState)
+    state._hixl_session = None
+    state.model_states = {"model": model_state}
+    cycles = iter(
+        [True, True, False] if scenario in ("complete", "counts", "missing_topology", "plain") else [True, False]
+    )
+    state.wait_for_rearrangement = lambda _stream: next(cycles)
+    call_order: list[int | str | None] = []
+    log_info = MagicMock(side_effect=lambda *_args: call_order.append("log"))
+    monkeypatch.setattr(patch_eplb.logger, "info", log_info)
+    planned: list[torch.Tensor] = []
+
+    def rebalance(_model_state, _state, current_mapping, _stream):
+        target = current_mapping.clone()
+        if scenario != "noop":
+            target[:2] = target[:2].flip(1)
+        # A second plain-policy cycle must not reuse the first cycle's metrics.
+        if not planned and scenario in ("complete", "counts", "missing_topology"):
+            target.source_rank_ids = np.array([[[1], [0]], [[1], [0]], [[0], [1]]])
+            target.source_slot_ids = np.zeros((3, 2, 1), dtype=np.int64)
+            if scenario != "counts":
+                target.predicted_imbalance_summary = (1.4, 1.6, 1.1, 1.2)
+            if scenario != "missing_topology":
+                target.rank_node_ids = np.array([0, 1])
+            setattr(communicator, patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR, target)
+        planned.append(target)
+        model_state.rebalanced = scenario != "canceled"
+        return target
+
+    def consume_result(*, stream):
+        result = model_state.pending_result
+        call_order.append(result.layer_idx)
+        if result.layer_idx is not None:
+            model_state.physical_to_logical_map[result.layer_idx].copy_(result.new_physical_to_logical_map)
+        if result.is_last_result:
+            model_state.rebalanced = False
+            # Emulate the foreground cleanup before the worker resumes.
+            patch_eplb._clear_transfer_target(communicator)
+        model_state.pending_result = None
+
+    def transfer_layer(**kwargs):
+        if scenario == "failed" and kwargs["layer_idx"] == 1:
+            raise RuntimeError("layer transfer failed")
+        return object()
+
+    monkeypatch.setattr(
+        patch_eplb._async_worker,
+        "get_eplb_group",
+        lambda: SimpleNamespace(
+            device_group=SimpleNamespace(rank=lambda: rank),
+            cpu_group=SimpleNamespace(size=lambda: 2),
+        ),
+    )
+    monkeypatch.setattr(patch_eplb._async_worker, "run_rebalance_experts", rebalance)
+    monkeypatch.setattr(patch_eplb._async_worker, "CpuGpuEvent", lambda: SimpleNamespace(wait=consume_result))
+    monkeypatch.setattr(patch_eplb._async_worker, "transfer_layer", transfer_layer)
+    monkeypatch.setattr(torch.distributed, "all_reduce", lambda flag, **_kwargs: flag.mul_(2))
+    # Exercise replacement of all host maps without requiring pinned-memory support.
+    monkeypatch.setattr(patch_eplb, "_pin_host_map", lambda tensor: tensor.clone())
+
+    def original_worker(state, stream, is_profile=False):
+        raise AssertionError("Ascend state must use the patched worker")
+
+    worker = patch_eplb._wrap_async_worker(original_worker)
+    if scenario == "failed":
+        with pytest.raises(RuntimeError, match="layer transfer failed"):
+            worker(state, MagicMock())
+    else:
+        worker(state, MagicMock())
+
+    messages = [args[0] % args[1:] for args, _kwargs in log_info.call_args_list]
+    if rank != 0 or scenario in ("noop", "canceled", "failed"):
+        assert messages == []
+    else:
+        prefix = "Ascend async EPLB cycle committed: model=model"
+        first_message = prefix
+        if scenario == "complete":
+            first_message += (
+                " mean=1.4000->1.1000 p95=1.6000->1.2000 changed_layers=2 rank_transfers=4 cross_node_transfers=4"
+            )
+        elif scenario in ("counts", "missing_topology"):
+            first_message += " rank_transfers=4"
+        assert messages == [first_message, prefix]
+        assert call_order == [0, 1, "log", 0, 1, "log"]
+    assert not hasattr(communicator, patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR)
+
+
+@pytest.mark.parametrize("fail_transfer", [False, True])
+def test_hixl_worker_consumption_events_are_scoped_to_model_cycle_and_layer(monkeypatch, fail_transfer):
+    session, communicators, _engine = _shared_models(monkeypatch)
+    session.initialize(communicators)
+    old_mapping = torch.tensor([[0, 1, 2, 3], [0, 1, 2, 3]])
+    new_mapping = old_mapping.flip(1)
+    model_states = {
+        name: SimpleNamespace(
+            communicator=communicator,
+            physical_to_logical_map=old_mapping,
+            logical_to_physical_map=torch.empty((2, 4, 1), dtype=torch.int32),
+            model=SimpleNamespace(expert_weights=[[object()], [object()]]),
+            expert_buffer=[object()],
+            rebalanced=True,
+            pending_result=None,
+        )
+        for name, communicator in communicators.items()
+    }
+    cycles = iter(range(2))
+    previous_events = {}
+    transfers = []
+    active_model = ""
+    failure = RuntimeError("layer transfer failed")
+    monkeypatch.setattr(torch, "Event", MagicMock(side_effect=lambda: MagicMock()))
+
+    class ConsumedEvent(CpuGpuEvent):
+        def wait(self, stream=None):
+            # Emulate the foreground acknowledgement after publication, including
+            # the real CpuGpuEvent.record() replacement of the device event.
+            model_state = model_states[active_model]
+            assert model_state.pending_result.consumed_event is self
+            self.record()
+            super().wait(stream=stream)
+            previous_events[active_model] = self._event
+            model_state.pending_result = None
+
+    def wait_for_rearrangement(_stream):
+        if next(cycles, None) is None:
+            return False
+        previous_events.clear()
+        return True
+
+    def transfer_layer(**kwargs):
+        nonlocal active_model
+        communicator = kwargs["communicator"]
+        active_model = next(name for name, candidate in communicators.items() if candidate is communicator)
+        layer = kwargs["layer_idx"]
+        dependency = communicator._consumed_event
+        assert dependency is (previous_events[active_model] if layer else None)
+        transfers.append((active_model, layer))
+        if fail_transfer and layer == 1:
+            raise failure
+        communicator.set_transfer_context(kwargs["old_layer_indices"].numpy(), layer)
+        communicator.execute()
+        if dependency is not None:
+            dependency.synchronize.assert_called_once_with()
+        return object()
+
+    monkeypatch.setattr(patch_eplb._async_worker, "CpuGpuEvent", ConsumedEvent)
+    monkeypatch.setattr(patch_eplb._async_worker, "run_rebalance_experts", lambda *_args: new_mapping)
+    monkeypatch.setattr(patch_eplb._async_worker, "transfer_layer", transfer_layer)
+    monkeypatch.setattr(
+        patch_eplb._async_worker,
+        "get_eplb_group",
+        lambda: SimpleNamespace(device_group=MagicMock(), cpu_group=MagicMock(size=lambda: 1)),
+    )
+    monkeypatch.setattr(patch_eplb.torch.distributed, "all_reduce", MagicMock())
+    state = AscendEplbState.__new__(AscendEplbState)
+    state.model_states = model_states
+    state._hixl_session = session
+    state.wait_for_rearrangement = wait_for_rearrangement
+
+    def original_worker(state, stream, is_profile=False):
+        raise AssertionError("Ascend state must use the patched worker")
+
+    worker = patch_eplb._wrap_async_worker(original_worker)
+    if fail_transfer:
+        with pytest.raises(RuntimeError, match="layer transfer failed") as error:
+            worker(state, MagicMock())
+        assert session._error is error.value is failure
+        assert not session._usable
+        assert transfers == [("draft", 0), ("draft", 1)]
+    else:
+        worker(state, MagicMock())
+        assert transfers == [(name, layer) for _ in range(2) for name in communicators for layer in range(2)]
+        session.close()
+    assert all(communicator._consumed_event is None for communicator in communicators.values())
+    assert all(model_state.pending_result is None for model_state in model_states.values())
+
+
 @pytest.mark.parametrize("failure_stage", ["context", "synchronize"])
 def test_hixl_async_failure_outside_execute_exits_rpc_and_retains_shared_storage(monkeypatch, failure_stage):
     session, communicators, engine = _shared_models(monkeypatch)
@@ -669,21 +862,7 @@ def test_async_workspace_refreshes_layer_and_clears_target_after_last(monkeypatc
     assert result == "moved"
     refresh.assert_called_once_with(model_state, layer_idx)
     assert model_state._last_committed_mean_ratios[layer_idx] == 1.2
-    if is_last_layer:
-        log_info.assert_called_once_with(
-            "%s: model=%s mean=%.4f->%.4f p95=%.4f->%.4f changed_layers=%d rank_transfers=%d cross_node_transfers=%d",
-            patch_eplb.ASYNC_EPLB_CYCLE_COMMITTED_LOG,
-            "model",
-            1.4,
-            1.1,
-            1.6,
-            1.2,
-            1,
-            2,
-            2,
-        )
-    else:
-        log_info.assert_not_called()
+    log_info.assert_not_called()
     assert call_order == ["move", "refresh", "ack"]
     assert hasattr(model_state.communicator, patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR) == (not is_last_layer)
 

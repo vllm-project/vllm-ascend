@@ -1,3 +1,4 @@
+# mypy: disable-error-code="annotation-unchecked, arg-type, assignment, attr-defined, method-assign, union-attr"
 # SPDX-License-Identifier: Apache-2.0
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -16,7 +17,7 @@ from vllm_ascend.attention.context_parallel.attention_cp import (
 )
 from vllm_ascend.attention.context_parallel.common_cp import CPKVScope, use_history_current_split_decode
 from vllm_ascend.compilation.updatable_graph import ContextSource, GraphUpdateTask, SharedSource, UpdatableGraph
-from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import AscendAutoRegressiveSpeculator
+from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import AscendTargetDependentARSpeculator
 
 
 @pytest.mark.parametrize("size,rank", [(2, 0), (2, 1), (4, 0), (4, 1), (4, 2), (4, 3)])
@@ -307,9 +308,10 @@ def test_decode_only_historical_shards_are_exchanged_current_contributes_once(dc
 
 @pytest.mark.parametrize("interleave", [1, 8])
 def test_v2_draft_steps_update_history_and_current_independently(interleave):
-    speculator = object.__new__(AscendAutoRegressiveSpeculator)
+    speculator = object.__new__(AscendTargetDependentARSpeculator)
     speculator.attn_architecture = "GQA"
-    speculator.max_model_len = 32
+    # vLLM main exposes max_model_len as a read-only view of vllm_config.
+    speculator.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=32))
     speculator.use_dcp = True
     prepare_local = MagicMock(
         side_effect=lambda lengths: get_dcp_local_seq_lens(
@@ -340,7 +342,7 @@ def test_v2_draft_steps_update_history_and_current_independently(interleave):
 @pytest.mark.parametrize("rank", [0, 1])
 @pytest.mark.parametrize("interleave", [1, 8])
 def test_v2_graph_shared_source_preserves_steps_layers_and_padding(is_prefill, causal, rank, interleave):
-    speculator = object.__new__(AscendAutoRegressiveSpeculator)
+    speculator = object.__new__(AscendTargetDependentARSpeculator)
     speculator.use_dcp = True
     speculator.attn_architecture = "GQA"
     speculator.dcp_manager = SimpleNamespace(dcp_world_rank=rank)
@@ -352,7 +354,8 @@ def test_v2_graph_shared_source_preserves_steps_layers_and_padding(is_prefill, c
     )
     speculator.input_batch = SimpleNamespace(num_reqs=2, seq_lens_np=[13, 31])
     speculator.num_speculative_steps = 3
-    speculator.max_model_len = 32
+    # vLLM main exposes max_model_len as a read-only view of vllm_config.
+    speculator.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=32))
     query = (4, 2, 1) if is_prefill else (1, 1, 1)
     steps = [
         {
@@ -410,7 +413,7 @@ def test_v2_graph_shared_source_preserves_steps_layers_and_padding(is_prefill, c
 
 
 def test_v2_draft_metadata_does_not_alias_history_between_steps():
-    speculator = object.__new__(AscendAutoRegressiveSpeculator)
+    speculator = object.__new__(AscendTargetDependentARSpeculator)
     speculator.attn_architecture = "GQA"
     speculator.use_dcp = True
     speculator.input_batch = SimpleNamespace(num_reqs=2, seq_lens_cpu_upper_bound=torch.tensor([13, 23]))
@@ -431,7 +434,7 @@ def test_v1_draft_builder_owns_history_and_padding_without_manager_override(rank
     from vllm_ascend.worker.dcp_utils import DCPManager
 
     builder = object.__new__(AscendAttentionDCPMetadataBuilder)
-    builder.pcp_enabled = False
+    builder.use_pcp = False
     builder.dcp_size, builder.dcp_rank = 2, rank
     builder.decode_threshold = 4
     builder.speculative_config = SimpleNamespace(parallel_drafting=False)
@@ -446,6 +449,8 @@ def test_v1_draft_builder_owns_history_and_padding_without_manager_override(rank
     builder.attn_mask_builder = SimpleNamespace(get_attention_mask=lambda *args: None)
     advanced = torch.tensor([12, 13, 14, 15], dtype=torch.int32)
     common = SimpleNamespace(
+        pcp_context=None,
+        pcp_cache_group_idx=None,
         num_reqs=16,
         num_actual_tokens=4,
         max_query_len=1,

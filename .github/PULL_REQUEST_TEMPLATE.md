@@ -17,6 +17,10 @@ If possible, please consider writing useful notes for better and faster reviews 
 <!--
 Note that it means *any* user-facing change including all aspects such as API, interface or other behavior changes.
 Documentation-only updates are not considered user-facing changes.
+
+If yes, add a release note fragment `release_notes/fragments/<PR number>.yaml` in this PR.
+If no, no fragment is needed. When unsure, add one; the release manager can drop extras later.
+See release_notes/README.md for the principles and format.
 -->
 
 ### How was this patch tested?

@@ -35,7 +35,13 @@ def runner_cls(mamba_state_cls):
         node
         for node in cls.body
         if getattr(node, "name", None)
-        in {"__init__", "postprocess_sampled", "postprocess_num_computed_tokens", "_update_seq_lens_cpu"}
+        in {
+            "__init__",
+            "_can_skip_spec_cpu_length_sync",
+            "postprocess_sampled",
+            "postprocess_num_computed_tokens",
+            "_update_seq_lens_cpu",
+        }
     ]
     cls.bases = [ast.Name(id="Parent", ctx=ast.Load())]
 
@@ -92,6 +98,7 @@ def test_exact_counts_after_rejection_or_chunk(
     runner.model_config = SimpleNamespace(
         architecture=architecture, hf_config=SimpleNamespace(architectures=[architecture])
     )
+    runner.speculative_config = None
     runner.__init__(None, None)
     assert runner.sync_spec_pp_cpu_counts == (enabled and use_pp and steps > 0)
     runner.speculator = object() if owns_speculator else None

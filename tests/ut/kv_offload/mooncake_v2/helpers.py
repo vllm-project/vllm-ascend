@@ -73,7 +73,8 @@ def make_circular_spec(block_size: int = 16) -> CircularBufferSpec:
 
 def make_kpool_tail_spec(block_size: int = 16) -> AscendIndexerKPoolTailSpec:
     return AscendIndexerKPoolTailSpec(
-        block_size=block_size,
+        block_size=8,
+        ring_capacity=block_size,
         num_kv_heads=1,
         head_size=8,
         dtype=torch.float32,
@@ -116,6 +117,7 @@ def make_transfer_metadata(
         engine_id=engine_id,
         te_rpc_port=te_rpc_port,
         block_size=16,
+        cp_kv_cache_interleave_size=16,
         num_blocks=32,
         layer_names=layer_names,
         layer_block_sizes=layer_block_sizes or [16] * num_layers,
@@ -125,6 +127,7 @@ def make_transfer_metadata(
         block_lens=block_lens or [[128] for _ in range(num_layers)],
         block_shapes=block_shapes or [[(1, 16, 4)] for _ in range(num_layers)],
         block_size_scales=block_size_scales or [[1] for _ in range(num_layers)],
+        indexer_replication_sizes=[0] * num_layers,
         local_ip=local_ip,
         handshake_port=handshake_port,
     )
@@ -150,6 +153,7 @@ def make_pp_metadata(
     tp_layer_indices = tp_layer_indices or {}
     return MooncakePPTransferMetadata(
         block_size=16,
+        cp_kv_cache_interleave_size=16,
         num_blocks=32,
         layer_names=layer_names,
         layer_block_sizes=layer_block_sizes or [16] * num_layers,
@@ -158,6 +162,7 @@ def make_pp_metadata(
         block_lens=block_lens or [[128] for _ in range(num_layers)],
         block_shapes=block_shapes or [[(1, 16, 4)] for _ in range(num_layers)],
         block_size_scales=block_size_scales or [[1] for _ in range(num_layers)],
+        indexer_replication_sizes=[0] * num_layers,
         metadata_by_pcp_rank={
             pcp_rank: MooncakePCPTransferMetadata(
                 metadata_by_tp_rank={
@@ -212,9 +217,17 @@ def make_request(**overrides: Any) -> SimpleNamespace:
         "output_token_ids": [100],
         "_all_token_ids": list(range(32)),
         "max_tokens": 16,
+        "block_hashes": [],
     }
     values.update(overrides)
-    return SimpleNamespace(**values)
+    request = SimpleNamespace(**values)
+    if "update_block_hashes" not in overrides:
+
+        def update_block_hashes() -> None:
+            request.block_hashes.append(tuple(request._all_token_ids))
+
+        request.update_block_hashes = update_block_hashes
+    return request
 
 
 def make_blocks(

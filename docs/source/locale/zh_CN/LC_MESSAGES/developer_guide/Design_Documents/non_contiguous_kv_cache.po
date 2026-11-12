@@ -120,6 +120,8 @@ msgid ""
 "region, an Mamba SSM region, and an Attention V region are always adjacent or\n"
 "interleaved within one raw tensor."
 msgstr ""
+"这些视图可以具有不同的形状、步长和存储偏移量。它们使用相同的逻辑块编号，并且在缓存池需要时，使用相同的物理页步长。实现不得假设 Attention K "
+"区域、Mamba SSM 区域和 Attention V 区域在一个原始张量内始终相邻或交错。"
 
 msgid ""
 "Whether two layers share a backing tensor is determined by the cache allocator\n"

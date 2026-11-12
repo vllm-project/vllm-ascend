@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import unittest
 from contextlib import contextmanager
 from dataclasses import fields
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ import pytest
 import torch
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 
+from vllm_ascend.attention import mla_v1
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel import mla_cp
 from vllm_ascend.attention.context_parallel.common_cp import CPKVScope
@@ -26,6 +28,7 @@ from vllm_ascend.attention.mla_v1 import (
     AscendMLAPrefillMetadata,
     DecodeMLAPreprocessResult,
 )
+from vllm_ascend.ops.linear import AscendDCPGroupColumnParallelLinear
 
 
 def test_mla_dcp_extends_v1_backend() -> None:
@@ -204,7 +207,7 @@ def test_mla_dcp_uses_padded_local_chunk_lengths() -> None:
     "vllm_ascend.attention.context_parallel.mla_cp._EXTRA_CTX",
     SimpleNamespace(is_draft_model=False, is_draft_model_prefill=False, capturing=False),
 )
-@patch("vllm_ascend.attention.context_parallel.mla_cp.torch_npu.npu_fused_infer_attention_score")
+@patch("vllm_ascend.attention.context_parallel.mla_cp.torch_npu.npu_fused_infer_attention_score_v2")
 def test_mla_dcp_mixed_cache_hit_batch_uses_decode_bsnd_metadata(mock_fia) -> None:
     impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
     impl.dcp_size = 1
@@ -266,16 +269,16 @@ def test_mla_dcp_mixed_cache_hit_batch_uses_decode_bsnd_metadata(mock_fia) -> No
     call_kwargs = mock_fia.call_args.kwargs
     assert call_args[0].shape == (1, 4, 2, 3)
     assert call_kwargs["input_layout"] == "BSND"
-    assert call_kwargs["actual_seq_lengths"] == [4]
+    assert call_kwargs["actual_seq_qlen"] == [4]
     assert call_kwargs["block_table"].shape[0] == 1
-    assert call_kwargs["actual_seq_lengths_kv"].tolist() == [10]
+    assert call_kwargs["actual_seq_kvlen"].tolist() == [10]
 
 
 @patch(
     "vllm_ascend.attention.context_parallel.mla_cp._EXTRA_CTX",
     SimpleNamespace(is_draft_model=False, is_draft_model_prefill=False, capturing=False),
 )
-@patch("vllm_ascend.attention.context_parallel.mla_cp.torch_npu.npu_fused_infer_attention_score")
+@patch("vllm_ascend.attention.context_parallel.mla_cp.torch_npu.npu_fused_infer_attention_score_v2")
 def test_mla_dcp_uses_native_global_query_heads_for_fia(mock_fia) -> None:
     impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
     impl.dcp_size = 8
@@ -345,9 +348,272 @@ def test_mla_dcp_uses_native_global_query_heads_for_fia(mock_fia) -> None:
     call_kwargs = mock_fia.call_args.kwargs
     assert call_args[0].shape == (1, 4, 96, 3)
     assert call_kwargs["query_rope"].shape == (1, 4, 96, 2)
-    assert call_kwargs["num_heads"] == 96
+    assert call_kwargs["num_query_heads"] == 96
     assert merged["output_shape"] == (4, 96, 3)
     assert merged["softmax_lse_shape"] == (4, 96, 1)
+
+
+@pytest.fixture
+def fia_v2_boundary(monkeypatch):
+    """Model the v2 schema and LSE outputs without accepting legacy kwargs."""
+    calls = []
+    workspace_calls = []
+
+    def fia(
+        query,
+        key,
+        value,
+        *,
+        query_rope,
+        key_rope,
+        num_query_heads,
+        num_key_value_heads,
+        input_layout,
+        atten_mask,
+        sparse_mode,
+        softmax_scale,
+        actual_seq_qlen,
+        actual_seq_kvlen,
+        return_softmax_lse,
+        block_table=None,
+        block_size=0,
+        workspace=None,
+        out=None,
+    ):
+        assert return_softmax_lse is True
+        assert value is key
+        assert num_key_value_heads == 1
+        assert softmax_scale == 0.5
+        lse_shape: tuple[int, ...]
+        if input_layout == "TND":
+            lse_shape = (query.shape[0], num_query_heads, 1)
+        else:
+            seq_len = query.shape[1] if input_layout == "BSND" else query.shape[2]
+            lse_shape = (query.shape[0], num_query_heads, seq_len, 1)
+        calls.append(
+            SimpleNamespace(
+                query=query,
+                key=key,
+                query_rope=query_rope,
+                key_rope=key_rope,
+                num_query_heads=num_query_heads,
+                input_layout=input_layout,
+                atten_mask=atten_mask,
+                sparse_mode=sparse_mode,
+                actual_seq_qlen=actual_seq_qlen,
+                actual_seq_kvlen=actual_seq_kvlen,
+                block_table=block_table,
+                block_size=block_size,
+                workspace=workspace,
+                out=out,
+            )
+        )
+        if out is not None:
+            assert tuple(out[0].shape) == tuple(query.shape)
+            assert tuple(out[1].shape) == lse_shape
+            assert out[1].dtype == torch.float32
+            out[0].fill_(1)
+            out[1].zero_()
+            return tuple(out)
+        return torch.ones_like(query), torch.zeros(lse_shape, dtype=torch.float32)
+
+    def get_workspace(*args, **kwargs):
+        fia(*args, **kwargs)
+        workspace_calls.append(calls.pop())
+        return torch.empty(128, dtype=torch.uint8)
+
+    monkeypatch.setattr(fia, "out", fia, raising=False)
+    monkeypatch.setattr(mla_cp.torch_npu, "npu_fused_infer_attention_score_v2", fia)
+    monkeypatch.setattr(
+        mla_cp.torch_npu, "_npu_fused_infer_attention_score_v2_get_max_workspace", get_workspace, raising=False
+    )
+    monkeypatch.setattr(
+        mla_cp.torch_npu,
+        "npu_fused_infer_attention_score",
+        Mock(side_effect=AssertionError("DCP decode must use FIA v2")),
+    )
+    return SimpleNamespace(calls=calls, workspace_calls=workspace_calls)
+
+
+@pytest.fixture
+def mla_fia_graph(monkeypatch):
+    num_tokens = 2
+    graph = SimpleNamespace(
+        events={num_tokens: []},
+        handles={num_tokens: []},
+        attn_params={num_tokens: []},
+        workspaces={num_tokens: None},
+    )
+    monkeypatch.setattr(mla_cp, "get_graph_params", lambda: graph)
+    monkeypatch.setattr(
+        mla_cp, "update_graph_params_workspaces", lambda count, workspace: graph.workspaces.update({count: workspace})
+    )
+    monkeypatch.setattr(mla_cp, "weak_ref_tensors", lambda tensor: tensor)
+    monkeypatch.setattr(mla_cp.torch_npu.npu, "current_stream", Mock())
+    monkeypatch.setattr(torch.npu, "ExternalEvent", Mock())
+    monkeypatch.setattr(torch.npu, "graph_task_group_begin", Mock())
+    monkeypatch.setattr(torch.npu, "graph_task_group_end", Mock(return_value="fia-v2-handle"))
+    return graph
+
+
+def _make_page_strided_mla_cache():
+    # Both components start inside a larger backing allocation, as with
+    # component-major hybrid pages. The leading stride includes page padding.
+    raw = torch.arange(64, dtype=torch.float32)
+    nope = raw.as_strided((2, 2, 1, 4), (24, 4, 4, 1), storage_offset=3)
+    rope = raw.as_strided((2, 2, 1, 2), (24, 2, 2, 1), storage_offset=11)
+    return nope, rope
+
+
+def _assert_cache_view_preserved(actual, original):
+    assert actual.untyped_storage().data_ptr() == original.untyped_storage().data_ptr()
+    assert actual.storage_offset() == original.storage_offset()
+    assert actual.stride(0) == original.stride(0)
+    assert not actual.is_contiguous()
+    torch.testing.assert_close(actual, original.view(actual.shape))
+
+
+@pytest.mark.parametrize("capturing", [False, True], ids=["eager", "capture"])
+@pytest.mark.parametrize("layout", ["BNSD", "BSND"])
+def test_mla_dcp_fia_v2_preserves_strided_cache_and_lse(monkeypatch, fia_v2_boundary, mla_fia_graph, capturing, layout):
+    impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
+    impl.num_heads = 2
+    impl.num_kv_heads = 1
+    impl.kv_lora_rank = 4
+    impl.qk_rope_head_dim = 2
+    impl.scale = 0.5
+    impl.speculative_config = object() if layout == "BSND" else None
+    impl._v_up_proj_batch_major = lambda output: output
+    merged = []
+
+    def merge(output, lse):
+        assert output.shape == (2, 2, 4)
+        assert lse.shape == (2, 2, 1)
+        assert lse.dtype == torch.float32
+        merged.append(lse)
+        return output
+
+    impl._merge_dcp_attention_output = merge
+    num_decodes = 1 if layout == "BSND" else 2
+    query_lens = [2] if layout == "BSND" else [1, 1]
+    decode = AscendMLADCPDecodeMetadata(
+        input_positions=torch.arange(2),
+        block_table=torch.zeros((num_decodes, 2), dtype=torch.int32),
+        seq_lens=torch.tensor([4] * num_decodes),
+        max_seq_lens=4,
+        seq_lens_list=[4] * num_decodes,
+        cp_seq_len=[4] * num_decodes,
+    )
+    metadata = SimpleNamespace(
+        external_flashmla=None,
+        causal=False,
+        decode=decode,
+        attn_state=AscendAttentionState.DecodeOnly,
+        num_decodes=num_decodes,
+        query_lens=query_lens,
+    )
+    monkeypatch.setattr(
+        mla_cp,
+        "_EXTRA_CTX",
+        SimpleNamespace(capturing=capturing, is_draft_model=False, is_draft_model_prefill=False),
+    )
+    nope, rope = _make_page_strided_mla_cache()
+    fused_query = torch.randn(2, 2, 6)
+    q_nope, q_pe = fused_query.split([4, 2], dim=-1)
+    result = impl._forward_decode(DecodeMLAPreprocessResult(q_nope, q_pe, nope, rope), 2, metadata)
+
+    assert result.shape == (2, 2, 4)
+    assert len(merged) == 1
+    assert len(fia_v2_boundary.calls) == 1
+    assert len(fia_v2_boundary.workspace_calls) == int(capturing)
+    for call in fia_v2_boundary.calls + fia_v2_boundary.workspace_calls:
+        _assert_cache_view_preserved(call.key, nope)
+        _assert_cache_view_preserved(call.key_rope, rope)
+        assert call.query.is_contiguous()
+        assert call.query_rope.untyped_storage().data_ptr() == fused_query.untyped_storage().data_ptr()
+        assert call.query_rope.storage_offset() == q_pe.storage_offset()
+        assert call.input_layout == layout
+        assert call.num_query_heads == 2
+        assert call.actual_seq_qlen == (query_lens if layout == "BSND" else None)
+        assert call.actual_seq_kvlen == decode.cp_seq_len
+        assert call.block_table is decode.block_table
+        assert call.block_size == 2
+    call = fia_v2_boundary.calls[0]
+    if capturing:
+        assert call.workspace is mla_fia_graph.workspaces[2]
+        assert call.out is not None
+        assert len(mla_fia_graph.attn_params[2]) == 1
+        assert mla_fia_graph.handles[2] == ["fia-v2-handle"]
+    else:
+        assert call.out is None
+        assert not mla_fia_graph.attn_params[2]
+
+
+@pytest.mark.parametrize("capturing", [False, True], ids=["eager", "capture"])
+@pytest.mark.parametrize("scope", [CPKVScope.HISTORY, CPKVScope.CURRENT])
+def test_mla_dcp_split_fia_v2_returns_lse(monkeypatch, fia_v2_boundary, mla_fia_graph, capturing, scope):
+    impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
+    impl.num_kv_heads = 1
+    impl.scale = 0.5
+    impl.layer_name = "model.layers.0.self_attn.attn"
+    monkeypatch.setattr(
+        mla_cp,
+        "_EXTRA_CTX",
+        SimpleNamespace(capturing=capturing, is_draft_model=False, is_draft_model_prefill=False),
+    )
+    mla_fia_graph.workspaces[2] = torch.empty(128, dtype=torch.uint8)
+    q_nope, q_pe = torch.randn(2, 2, 4), torch.randn(2, 2, 2)
+    if scope is CPKVScope.HISTORY:
+        nope, rope = _make_page_strided_mla_cache()
+        key, key_rope = nope.view(2, 1, 2, 4), rope.view(2, 1, 2, 2)
+        block_table, block_size = torch.zeros(1, 2, dtype=torch.int32), 2
+        mask, sparse_mode, kv_lengths = None, 0, [4]
+    else:
+        key, key_rope = torch.randn(2, 1, 4), torch.randn(2, 1, 2)
+        block_table, block_size = None, 0
+        mask, sparse_mode, kv_lengths = torch.zeros(2, 2, dtype=torch.bool), 3, [2]
+
+    output, lse = impl._run_dcp_mtp_split_attention_op(
+        q_nope,
+        q_pe,
+        key,
+        key_rope,
+        attn_mask=mask,
+        sparse_mode=sparse_mode,
+        block_table=block_table,
+        block_size=block_size,
+        actual_seq_lengths=[2],
+        actual_seq_lengths_kv=kv_lengths,
+        attention_kind=scope,
+    )
+
+    assert output.shape == (2, 2, 4)
+    assert lse.shape == (2, 2, 1)
+    assert lse.dtype == torch.float32
+    assert len(fia_v2_boundary.calls) == 1
+    call = fia_v2_boundary.calls[0]
+    assert call.key is key and call.key_rope is key_rope
+    assert call.input_layout == "TND"
+    assert call.actual_seq_qlen == [2]
+    assert call.actual_seq_kvlen == kv_lengths
+    assert call.block_table is block_table
+    assert call.block_size == block_size
+    assert call.atten_mask is mask
+    assert call.sparse_mode == sparse_mode
+    if scope is CPKVScope.HISTORY:
+        _assert_cache_view_preserved(call.key, nope)
+        _assert_cache_view_preserved(call.key_rope, rope)
+    if capturing:
+        assert call.workspace is mla_fia_graph.workspaces[2]
+        params = mla_fia_graph.attn_params[2][0]
+        assert params.attention_kind is scope
+        assert params.layer_name == impl.layer_name
+        assert params.attention_params[1] is key
+        assert params.attention_params[3] is key_rope
+        assert mla_fia_graph.handles[2] == ["fia-v2-handle"]
+    else:
+        assert call.out is None
+        assert not mla_fia_graph.attn_params[2]
 
 
 @pytest.mark.parametrize(
@@ -364,7 +630,9 @@ def test_mla_dcp_uses_native_global_query_heads_for_fia(mock_fia) -> None:
 def test_mla_split_selection_matches_shared_policy(use_spec_decode, is_draft, is_prefill, query_ends, expected):
     impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
     impl.speculative_config = object() if use_spec_decode else None
-    metadata = SimpleNamespace(causal=True, decode=SimpleNamespace(actual_seq_lengths_q=query_ends))
+    metadata = SimpleNamespace(
+        external_flashmla=None, causal=True, decode=SimpleNamespace(actual_seq_lengths_q=query_ends)
+    )
     with patch(
         "vllm_ascend.attention.context_parallel.mla_cp._EXTRA_CTX",
         SimpleNamespace(is_draft_model=is_draft, is_draft_model_prefill=is_prefill, capturing=True),
@@ -532,7 +800,9 @@ def test_split_decode_packs_on_main_overlapping_current_attention(
             SimpleNamespace(capturing=workspace_sizes is not None, is_draft_model=False, is_draft_model_prefill=False),
         ),
         patch.object(mla_cp, "get_graph_params", return_value=graph_params),
-        patch.object(mla_cp.torch_npu, "_npu_fused_infer_attention_score_get_max_workspace", workspace_query),
+        patch.object(
+            mla_cp.torch_npu, "_npu_fused_infer_attention_score_v2_get_max_workspace", workspace_query, create=True
+        ),
         patch.object(mla_cp, "cp_decode_comm_stream", return_value=attn),
         patch.object(torch.npu, "current_stream", return_value=main),
         patch.object(torch.npu, "stream", side_effect=on_stream),
@@ -541,7 +811,7 @@ def test_split_decode_packs_on_main_overlapping_current_attention(
         patch.object(mla_cp, "fused_dcp_lse_combine", side_effect=merge) as update,
         patch("torch_npu.npu_attention_update", side_effect=AssertionError("unexpected NPU update")),
     ):
-        metadata = SimpleNamespace(decode=decode, causal=True)
+        metadata = SimpleNamespace(external_flashmla=None, decode=decode, causal=True)
         assert impl._decode_requires_current_kv(metadata)
         assert not AscendMLAImpl.__new__(AscendMLAImpl)._decode_requires_current_kv(metadata)
         actual = impl._forward_decode(
@@ -558,6 +828,14 @@ def test_split_decode_packs_on_main_overlapping_current_attention(
         )
     torch.testing.assert_close(actual, expected)
     assert workspace_query.call_count == (2 if workspace_sizes is not None and cached_size is None else 0)
+    for index, call in enumerate(workspace_query.call_args_list):
+        kwargs = call.kwargs
+        assert kwargs["return_softmax_lse"] is True
+        assert kwargs["num_query_heads"] == (query_head_count if index == 0 else impl.num_heads)
+        assert kwargs["softmax_scale"] == impl.scale
+        assert kwargs["actual_seq_qlen"] == [2]
+        assert kwargs["actual_seq_kvlen"] == [2]
+        assert {"softmax_lse_flag", "num_heads", "scale", "antiquant_mode", "antiquant_scale"}.isdisjoint(kwargs)
     history_update.assert_called_once()
     update.assert_called_once()
     assert record_stream.call_count == 7
@@ -571,3 +849,100 @@ def test_split_decode_packs_on_main_overlapping_current_attention(
         ("main_wait", "done"),
         "merge",
     ]
+
+
+class TestMLADCPQReplication(unittest.TestCase):
+    @staticmethod
+    def _make_impl(dcp=2, rank=0):
+        impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
+        impl.num_heads = 2
+        impl.dcp_size = dcp
+        impl.dcp_rank = rank
+        impl.use_dcp = dcp > 1
+        impl.use_pcp = False
+        impl.is_pcp_decode_sharded = False
+        impl.speculative_config = None
+        impl.dcp_q_replicate_enabled = True
+        impl.q_projection_heads = 2 * dcp
+        impl.qk_nope_head_dim = 3
+        impl.qk_rope_head_dim = 2
+        impl.qk_head_dim = 5
+        impl.kv_lora_rank = 2
+        impl.v_head_dim = 3
+        impl.num_kv_heads = 1
+        impl.enable_mlapo = impl.fa_quant_layer = False
+        impl.use_mla_rope = impl.enable_kv_nz = False
+        return impl
+
+    def test_direct_and_low_rank_preprocess_projects_prefill_and_decode_separately(self):
+        for q_rank in (None, 4):
+            with self.subTest(q_rank=q_rank):
+                self._check_split_projection(q_rank)
+
+    def _check_split_projection(self, q_rank):
+        dcp, rank = 2, 1
+        decode_tokens, prefill_tokens = 4, 3
+        torch.manual_seed(31)
+        impl = self._make_impl(dcp=dcp, rank=rank)
+        impl.layerwise_kv_cache_hook = None
+        num_tokens = decode_tokens + prefill_tokens
+        hidden = torch.randn(num_tokens, 6)
+        kv = torch.randn(num_tokens, 4)
+        impl.q_lora_rank = q_rank
+        impl.fused_qkv_a_proj = (lambda x: (torch.cat((x[:, :4], kv), -1),)) if q_rank else None
+        impl.q_a_layernorm = lambda x: x * 2
+        impl.kv_a_proj_with_mqa = lambda x: (kv,)
+        q_c = hidden if q_rank is None else hidden[:, :4] * 2
+        weight = torch.randn(impl.q_projection_heads * 5, q_c.shape[-1])
+
+        class Projection:
+            group_size = dcp
+            rank_in_group = rank
+            _local_view = AscendDCPGroupColumnParallelLinear._local_view
+
+            def __call__(self, x):
+                return project(x)
+
+        project = Mock(side_effect=lambda x: (torch.nn.functional.linear(x, weight),))
+        impl.q_proj = Projection()
+        impl.W_UK_T = torch.randn(impl.q_projection_heads, 3, 2)
+        impl.rope_single = lambda x, cos, sin: x
+        impl._dcp_all_gather_fragments = Mock(side_effect=AssertionError("Unexpected Q gather"))
+        impl.exec_kv_decode = Mock(return_value=tuple(torch.zeros(decode_tokens, 1, 2) for _ in range(4)))
+        impl.exec_kv_prefill = Mock(return_value=(torch.zeros(prefill_tokens, 1, 2), torch.zeros(prefill_tokens, 2)))
+        impl.kv_b_proj = lambda x: (torch.zeros(prefill_tokens, 12),)
+        impl._get_num_prefill_kv_tokens = lambda _: prefill_tokens
+        metadata = SimpleNamespace(
+            external_flashmla=None,
+            causal=True,
+            num_decodes=2,
+            num_prefills=1,
+            num_decode_tokens=decode_tokens,
+            num_actual_tokens=num_tokens,
+            slot_mapping=torch.arange(num_tokens),
+            decode=SimpleNamespace(cos=None, sin=None, actual_seq_lengths_q=[1, 4]),
+            prefill=SimpleNamespace(cos=None, sin=None),
+        )
+        with (
+            patch.object(mla_cp, "_EXTRA_CTX", SimpleNamespace(is_draft_model=False, is_draft_model_prefill=False)),
+            patch.object(mla_v1, "wait_for_kv_layer_from_connector"),
+            patch.object(mla_v1, "notify_kv_cache_written"),
+        ):
+            decode, prefill, _ = impl._mla_preprocess("layer", hidden, None, metadata)
+        expected_inputs = [q_c[:decode_tokens], q_c[decode_tokens:num_tokens]]
+        self.assertEqual(project.call_count, 2)
+        for actual_call, expected_input in zip(project.call_args_list, expected_inputs):
+            torch.testing.assert_close(actual_call.args[0], expected_input)
+        projected = torch.nn.functional.linear(q_c, weight).view(num_tokens, impl.q_projection_heads, 5)
+        expected = torch.einsum("thp,hpl->thl", projected[:decode_tokens, :, :3], impl.W_UK_T)
+        torch.testing.assert_close(decode.ql_nope, expected)
+        torch.testing.assert_close(decode.q_pe, projected[:decode_tokens, :, 3:])
+        self.assertIs(impl.exec_kv_decode.call_args.kwargs["return_current_kv"], True)
+        torch.testing.assert_close(impl.exec_kv_decode.call_args.args[0], kv[:decode_tokens])
+        local = projected[decode_tokens:num_tokens, rank * 2 : (rank + 1) * 2]
+        torch.testing.assert_close(prefill.q_nope, local[..., :3])
+        torch.testing.assert_close(prefill.q_pe, local[..., 3:])
+        torch.testing.assert_close(
+            impl.exec_kv_prefill.call_args.args[4], metadata.slot_mapping[decode_tokens:num_tokens]
+        )
+        impl._dcp_all_gather_fragments.assert_not_called()

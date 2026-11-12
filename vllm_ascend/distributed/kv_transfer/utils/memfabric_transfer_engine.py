@@ -19,7 +19,7 @@ MEMFABRIC_ROLE_DECODE = "Decode"
 _VALID_MEMFABRIC_ROLES = (MEMFABRIC_ROLE_PREFILL, MEMFABRIC_ROLE_DECODE)
 # MemFabric data-path protocol, selected via kv_connector_extra_config so this
 # module never needs to branch on machine type: sdma/device_rdma for A3 nodes,
-# device_urma for A5 nodes.
+# device_urma for 950PR&950DT Products.
 _VALID_MEMFABRIC_TRANSFER_PROTOCOLS = ("sdma", "device_rdma", "device_urma")
 _DEFAULT_MEMFABRIC_TRANSFER_PROTOCOL = "sdma"
 
@@ -92,7 +92,7 @@ class GlobalMemfabricTE:
         ``transfer_protocol`` comes from
         ``kv_connector_extra_config["memfabric_transfer_protocol"]`` and selects
         the data path: ``sdma``/``device_rdma`` for A3 nodes, ``device_urma``
-        for A5 nodes. It defaults to ``sdma``, the memfabric_hybrid library
+        for 950PR&950DT Products. It defaults to ``sdma``, the memfabric_hybrid library
         default, so launch scripts pick the value per machine type instead of
         this module branching on hardware.
         """

@@ -116,9 +116,12 @@ class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
                     kv_cache_config,
                 )
 
-    # ------------------------------------------------------------------
-    # Scheduler side
-    # ------------------------------------------------------------------
+    def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
+        # vLLM main's scheduler uses this for skip_zeroing_group_ids: only
+        # the decode side pulls the request's own blocks.
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.get_loaded_kv_cache_group_ids(request)
+
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(request, num_computed_tokens)

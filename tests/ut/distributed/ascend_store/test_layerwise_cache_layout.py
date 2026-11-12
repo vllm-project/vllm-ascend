@@ -13,12 +13,12 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
-    get_layerwise_physical_layer_index,
     get_layerwise_reuse_config,
+    get_physical_layer_index,
 )
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 
@@ -177,7 +177,7 @@ def test_prefetch_count_can_be_overridden():
     assert layout.num_prefetch_layers == 3
 
 
-def test_reuse_config_is_scoped_to_layerwise_protocol_connector():
+def test_reuse_config_is_scoped_to_layerwise_backend_connector():
     ascend_store_config = {
         "backend": "memcache",
         "use_layerwise": True,
@@ -306,13 +306,14 @@ def test_layout_includes_mtp_layers():
         ("mtp.layers.0.self_attn", 4),
         ("model.mtp.layers.1.self_attn", 5),
         ("model.layers.4.self_attn", 4),
+        ("notlayers.2.model.layers.3.attn", 2),
     ],
 )
 def test_physical_layer_index_supports_mtp_names(
     layer_name,
     expected,
 ):
-    assert get_layerwise_physical_layer_index(layer_name, 4) == expected
+    assert get_physical_layer_index(layer_name, 4) == expected
 
 
 def test_main_spec_controls_reuse_regardless_of_indexer():
@@ -753,8 +754,8 @@ def _make_generic_indexer_descriptors(replication=1, quantized=True):
 def test_reuse_rebuilds_generic_indexer_descriptors_with_physical_capacity(replication, quantized):
     config, spec, names = _make_generic_indexer_descriptors(replication, quantized)
     original = config.kv_cache_tensors[-1]
-    # The spec keeps upstream MLA semantics, including outside the reuse path.
-    content_bytes = 128 if quantized else 256
+    # Stored rows include scale bytes and all replicated indexer regions.
+    content_bytes = replication * (130 if quantized else 256)
     assert spec.state_content_size_bytes == content_bytes
     assert original.block_stride == spec.block_size * content_bytes
     assert spec.page_size_bytes == spec.block_size * replication * (130 if quantized else 256)
@@ -780,8 +781,8 @@ def test_generic_indexer_descriptors_unchanged_without_reuse(reuse_disabled):
     apply_layerwise_kv_cache_plan(config, vllm_config)
 
     assert config.kv_cache_tensors is original
-    assert spec.state_content_size_bytes == 128
-    assert original[-1].block_stride == 256
+    assert spec.state_content_size_bytes == 2 * 130
+    assert original[-1].block_stride == 2 * 2 * 130
 
 
 def test_reuse_rejects_unknown_indexer_stride():

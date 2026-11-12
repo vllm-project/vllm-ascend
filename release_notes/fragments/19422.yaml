@@ -1,0 +1,7 @@
+pr: 19422
+entries:
+  - category: bugfix
+    text: >-
+      Fixed incomplete layerwise KV transfers under pipeline parallelism when
+      physical cache registration expands the local layer count, including
+      SSD-backed pooling.

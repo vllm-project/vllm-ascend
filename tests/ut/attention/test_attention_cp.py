@@ -34,10 +34,6 @@ def test_gqa_dcp_extends_v1_backend_without_polluting_base_metadata() -> None:
     assert not hasattr(AscendMetadata(), "prefill")
 
 
-def test_gqa_dcp_builder_consumes_pcp_context() -> None:
-    assert AscendAttentionDCPMetadataBuilder.consumes_pcp_context
-
-
 def test_gqa_tp_only_dcp_still_gathers_heads() -> None:
     impl = AscendAttentionDCPImpl.__new__(AscendAttentionDCPImpl)
     impl.pcp_group = SimpleNamespace(world_size=1)
@@ -70,18 +66,6 @@ def test_gqa_pcp_dcp_preserves_tp_local_heads_and_merges_pcp_shards(kv_heads) ->
     combine.assert_called_once_with(query, lse, 1, 1, "tp-heads", "pcp-kv-shards", defer_combine=False)
 
 
-def test_gqa_dcp_capture_forwards_pcp_context() -> None:
-    builder = AscendAttentionDCPMetadataBuilder.__new__(AscendAttentionDCPMetadataBuilder)
-    builder.build = Mock(return_value="metadata")
-    common = object()
-    context = object()
-
-    assert builder.build_for_cudagraph_capture(common, pcp_context=context, pcp_cache_group_idx=2) == "metadata"
-    builder.build.assert_called_once_with(
-        common_prefix_len=0, common_attn_metadata=common, pcp_context=context, pcp_cache_group_idx=2
-    )
-
-
 @pytest.mark.parametrize("rank", [0, 1], ids=["head-tail", "middle"])
 @pytest.mark.parametrize("history", [0, 101], ids=["first-chunk", "uneven-history"])
 @pytest.mark.parametrize("causal", [False, True])
@@ -91,7 +75,7 @@ def test_gqa_pcp_dcp_metadata_separates_current_prefix_and_dcp_history(
 ) -> None:
     builder = AscendAttentionDCPMetadataBuilder.__new__(AscendAttentionDCPMetadataBuilder)
     builder.pcp_group = SimpleNamespace(world_size=2, rank_in_group=rank)
-    builder.pcp_enabled = True
+    builder.use_pcp = True
     builder.chunked_prefill_enabled = chunked_prefill_enabled
     builder.dcp_size = 2
     builder.dcp_rank = rank
@@ -137,7 +121,7 @@ def test_gqa_pcp_dcp_metadata_separates_current_prefix_and_dcp_history(
         assert prefill.chunked_context.pcp_query_restore_idx.tolist() == [0, 1, 4, 5, 6, 7, 2, 3]
         assert prefill.chunked_context.pcp_local_query_indices.tolist() == ([0, 1, 6, 7] if rank == 0 else [2, 3, 4, 5])
         impl = AscendAttentionDCPImpl.__new__(AscendAttentionDCPImpl)
-        impl.pcp_enabled = True
+        impl.use_pcp = True
         gathered_query = torch.tensor([0, 1, 6, 7, 2, 3, 4, 5]).view(8, 1, 1)
         impl.pcp_group = SimpleNamespace(all_gather=Mock(return_value=gathered_query))
         impl._dcp_all_gather_fragments = Mock(side_effect=lambda query, dim: (query,))
@@ -155,7 +139,7 @@ def test_gqa_pcp_dcp_metadata_separates_current_prefix_and_dcp_history(
 
 def test_gqa_first_prefill_uses_current_kv_prefixes_without_cache_tables() -> None:
     builder = AscendAttentionDCPMetadataBuilder.__new__(AscendAttentionDCPMetadataBuilder)
-    builder.pcp_enabled = True
+    builder.use_pcp = True
     builder.pcp_group = SimpleNamespace(world_size=2)
     builder.chunked_prefill_enabled = True
     builder._pcp_context = SimpleNamespace(
@@ -181,11 +165,11 @@ def test_gqa_first_prefill_uses_current_kv_prefixes_without_cache_tables() -> No
     assert cache_order_tokens[indices].tolist() == [0, 1, 0, 1, 2, 3, 4, 5, 6, 7]
 
 
-@pytest.mark.parametrize("pcp_enabled", [False, True], ids=["dcp-only", "pcp-dcp"])
+@pytest.mark.parametrize("use_pcp", [False, True], ids=["dcp-only", "pcp-dcp"])
 @pytest.mark.parametrize("causal", [False, True], ids=["noncausal", "causal"])
-def test_gqa_current_attention_routes_local_q_and_ordered_kv(pcp_enabled, causal) -> None:
+def test_gqa_current_attention_routes_local_q_and_ordered_kv(use_pcp, causal) -> None:
     impl = AscendAttentionDCPImpl.__new__(AscendAttentionDCPImpl)
-    impl.pcp_enabled = pcp_enabled
+    impl.use_pcp = use_pcp
     impl.num_heads, impl.num_kv_heads = 4, 1
     impl.scale = 0.5
     ordered = [1, 2, 5, 6, 7, 8, 3, 4]
@@ -217,13 +201,13 @@ def test_gqa_current_attention_routes_local_q_and_ordered_kv(pcp_enabled, causal
     attention.assert_called_once()
     sent_query, sent_key, sent_value = attention.call_args.args
     torch.testing.assert_close(sent_query, expected_query)
-    expected_rows = kv_rows if pcp_enabled else [1, 2, 3, 4]
+    expected_rows = kv_rows if use_pcp else [1, 2, 3, 4]
     torch.testing.assert_close(sent_key, key[expected_rows])
     torch.testing.assert_close(sent_value, value[expected_rows])
     torch.testing.assert_close(actual, expected_query)
     assert actual_lse is lse
     assert attention.call_args.kwargs["actual_seq_lengths"] is prefill.actual_seq_lengths_q
-    assert attention.call_args.kwargs["actual_seq_lengths_kv"] == (kv_ends if pcp_enabled else [2, 4])
+    assert attention.call_args.kwargs["actual_seq_lengths_kv"] == (kv_ends if use_pcp else [2, 4])
     assert attention.call_args.kwargs["sparse_mode"] == (3 if causal else 0)
     assert attention.call_args.kwargs["atten_mask"] is (metadata.attn_mask if causal else None)
 
@@ -236,7 +220,7 @@ def test_gqa_pcp_dcp_merges_history_only_for_local_query_fragments(has_history, 
 
     impl = AscendAttentionDCPImpl.__new__(AscendAttentionDCPImpl)
     impl.head_size = 2
-    impl.pcp_enabled = True
+    impl.use_pcp = True
     impl._forward_decode_dcp = Mock(return_value=torch.full((decode_tokens, 1, 2), 9.0))
     current_output = torch.ones(4, 1, 2)
     current_lse = torch.zeros(4, 1, 1)
@@ -300,7 +284,7 @@ def test_gqa_pcp_dcp_merges_history_only_for_local_query_fragments(has_history, 
 
 def test_gqa_chunked_prefill_uses_shared_dcp_merge_for_pcp_overlap() -> None:
     impl = AscendAttentionDCPImpl.__new__(AscendAttentionDCPImpl)
-    impl.pcp_enabled = False
+    impl.use_pcp = False
     impl.num_heads = 4
     impl.num_kv_heads = 1
     impl.head_size = 2
@@ -372,7 +356,7 @@ def test_dcp_chunked_prefill_keeps_host_parameters_and_device_history_separate(
 ):
     builder = object.__new__(AscendAttentionDCPMetadataBuilder)
     builder.chunked_prefill_enabled = True
-    builder.pcp_enabled = False
+    builder.use_pcp = False
     builder.dcp_size, builder.dcp_rank = size, rank
     builder.device = torch.device("cpu")
     builder.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=interleave))
@@ -473,9 +457,9 @@ def test_dcp_partial_attention_merge_matches_weighted_reference() -> None:
     "is_consumer,is_producer,recompute", [(True, False, True), (True, False, False), (False, True, True)]
 )
 @pytest.mark.parametrize("query_lens", [[1, 1], [3, 3], [3, 5]])
-@pytest.mark.parametrize("pcp_enabled", [False, True])
+@pytest.mark.parametrize("use_pcp", [False, True])
 def test_dcp_split_uses_builder_config_without_current_context(
-    is_consumer, is_producer, recompute, query_lens, pcp_enabled
+    is_consumer, is_producer, recompute, query_lens, use_pcp
 ):
     config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(is_kv_consumer=is_consumer, is_kv_producer=is_producer),
@@ -484,7 +468,7 @@ def test_dcp_split_uses_builder_config_without_current_context(
         patch(
             "vllm_ascend.attention.context_parallel.attention_cp.DCPMetadataBuilderMixin.__init__", return_value=None
         ),
-        patch("vllm_ascend.attention.context_parallel.attention_cp.enable_dcp", return_value=True) as dcp,
+        patch("vllm_ascend.attention.context_parallel.attention_cp.is_dcp_enabled", return_value=True) as dcp,
         patch(
             "vllm_ascend.attention.context_parallel.attention_cp.get_pcp_group",
             return_value=SimpleNamespace(world_size=1, rank_in_group=0),
@@ -495,7 +479,7 @@ def test_dcp_split_uses_builder_config_without_current_context(
     pcp_group.assert_called_once_with()
     assert builder.pcp_group is pcp_group.return_value
     builder.vllm_config = config
-    builder.pcp_enabled = pcp_enabled
+    builder.use_pcp = use_pcp
     builder.decode_threshold = 3
     builder.speculative_config = None
     query_start_loc = torch.tensor([0, query_lens[0], sum(query_lens)], dtype=torch.int32)
@@ -514,13 +498,13 @@ def test_dcp_split_uses_builder_config_without_current_context(
             return_value=SimpleNamespace(scheduler_config=SimpleNamespace(recompute_scheduler_enable=recompute)),
         ),
         patch(
-            "vllm_ascend.attention.context_parallel.attention_cp.enable_dcp",
+            "vllm_ascend.attention.context_parallel.attention_cp.is_dcp_enabled",
             side_effect=AssertionError("use cached DCP state"),
         ),
     ):
         actual = builder._split_decodes_and_prefills(common)
     num_decodes = (
-        sum(q <= 3 for q in query_lens) if not pcp_enabled and is_consumer and not is_producer and recompute else 0
+        sum(q <= 3 for q in query_lens) if not use_pcp and is_consumer and not is_producer and recompute else 0
     )
     num_decode_tokens = sum(query_lens[:num_decodes])
     assert actual == (num_decodes, 2 - num_decodes, num_decode_tokens, sum(query_lens) - num_decode_tokens)

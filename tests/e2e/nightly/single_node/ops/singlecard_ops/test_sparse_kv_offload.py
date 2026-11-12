@@ -1,5 +1,8 @@
 import pytest
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
+
 torch = pytest.importorskip("torch")
 torch_npu = pytest.importorskip("torch_npu")
 
@@ -127,10 +130,18 @@ class PlannerState:
         ]
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() != AscendDeviceType.A3,
+    reason="Sparse KV offload native bindings are built only for Ascend A3",
+)
 def test_sparse_kv_warmup_threads(sparse_kv_ops):
     assert sparse_kv_ops.sparse_kv_warmup_lru_resident_threads(1) == 1
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() != AscendDeviceType.A3,
+    reason="Sparse KV offload native bindings are built only for Ascend A3",
+)
 def test_sparse_kv_restore_tensor_views(sparse_kv_ops):
     bf16 = torch.tensor([1.0, 2.0], dtype=torch.bfloat16)
     int16 = torch.tensor([3, 4], dtype=torch.int16)
@@ -144,6 +155,10 @@ def test_sparse_kv_restore_tensor_views(sparse_kv_ops):
     assert int16_view.dtype == torch.int16
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() != AscendDeviceType.A3,
+    reason="Sparse KV offload native bindings are built only for Ascend A3",
+)
 def test_stable_rows_suffix_invalidation_and_plan_encoding(sparse_kv_ops):
     state = PlannerState()
     first = torch.stack([torch.arange(0, TOPK), torch.arange(TOPK, TOPK * 2)]).to(torch.int32)
@@ -180,6 +195,10 @@ def test_stable_rows_suffix_invalidation_and_plan_encoding(sparse_kv_ops):
     assert state.plan[:2, TOPK + 4].tolist() == [1, 0]
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() != AscendDeviceType.A3,
+    reason="Sparse KV offload native bindings are built only for Ascend A3",
+)
 def test_mtp_future_tokens_are_not_encoded_before_visible(sparse_kv_ops):
     state = PlannerState()
     topk = torch.arange(8, 16, dtype=torch.int32).repeat(ROWS, 1)
@@ -202,6 +221,10 @@ def test_mtp_future_tokens_are_not_encoded_before_visible(sparse_kv_ops):
         assert state.physical_rows[ROWS * 2 + row] == (row * CAPACITY + state.plan[row, visible_count - 1] - 1)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() != AscendDeviceType.A3,
+    reason="Sparse KV offload native bindings are built only for Ascend A3",
+)
 def test_missing_current_token_uses_reserved_row_sentinel(sparse_kv_ops):
     state = PlannerState()
     topk = torch.arange(TOPK, dtype=torch.int32).repeat(ROWS, 1)
@@ -217,6 +240,10 @@ def test_missing_current_token_uses_reserved_row_sentinel(sparse_kv_ops):
     assert state.physical_rows[ROWS * 2 : ROWS * 3].tolist() == [row * CAPACITY + CAPACITY - 1 for row in range(ROWS)]
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() != AscendDeviceType.A3,
+    reason="Sparse KV offload native bindings are built only for Ascend A3",
+)
 def test_enqueued_planner_callback_owns_payload_until_stream_completion(sparse_kv_ops):
     if not torch_npu.npu.is_available():
         pytest.skip("Ascend NPU is unavailable")
@@ -234,6 +261,10 @@ def test_enqueued_planner_callback_owns_payload_until_stream_completion(sparse_k
     assert bool((state.plan[0, :TOPK] < 0).all())
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() != AscendDeviceType.A3,
+    reason="Sparse KV offload native bindings are built only for Ascend A3",
+)
 def test_enqueued_planner_callback_survives_graph_replays(sparse_kv_ops):
     if not torch_npu.npu.is_available():
         pytest.skip("Ascend NPU is unavailable")

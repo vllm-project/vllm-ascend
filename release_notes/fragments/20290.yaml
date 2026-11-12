@@ -1,0 +1,9 @@
+pr: 20290
+entries:
+  - category: performance
+    text: >-
+      Enabled AscendC sparse decode index scoring on A5 and fused MiniMax M3
+      MXFP8 MoE clipped SwiGLU with CEIL-scale activation quantization.
+      Other activation and quantization paths retain their existing behavior.
+    model: minimax-m3
+    hardware: [A5]

@@ -1,11 +1,65 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import torch
 
 from vllm_ascend.models.deepseek_v4 import dspark as dspark_module
 from vllm_ascend.models.deepseek_v4.dspark import DeepseekV4DSparkModel
+
+
+def test_draft_constructor_shares_and_reserves_oproj_buffers(monkeypatch):
+    config = SimpleNamespace(
+        hc_mult=4,
+        hidden_size=8,
+        vocab_size=32,
+        draft_vocab_size=None,
+        dspark_block_size=6,
+        dspark_target_layer_ids=[37, 38, 39],
+        dspark_markov_rank=4,
+        num_hidden_layers=40,
+        n_mtp_layers=3,
+        head_dim=4,
+        rms_norm_eps=1e-6,
+        hc_eps=1e-5,
+        quantization_config={"quant_method": "fp8"},
+    )
+    quant_config = object()
+    vllm_config = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            draft_model_config=SimpleNamespace(hf_config=config),
+        ),
+        model_config=SimpleNamespace(dtype=torch.float16),
+        quant_config=quant_config,
+    )
+    draft_impls = []
+
+    def layer(*args, **kwargs):
+        result = torch.nn.Module()
+        result.use_sequence_parallel_moe = False
+        impl = MagicMock(spec=dspark_module.AscendDSAImpl)
+        draft_impls.append(impl)
+        result.self_attn = SimpleNamespace(dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=impl)))
+        return result
+
+    monkeypatch.setattr(dspark_module, "DeepseekV4DecoderLayer", layer)
+    monkeypatch.setattr(dspark_module, "VocabParallelEmbedding", lambda *a, **kw: torch.nn.Identity())
+    monkeypatch.setattr(dspark_module, "MergedColumnParallelLinear", lambda *a, **kw: torch.nn.Identity())
+    monkeypatch.setattr(dspark_module, "ColumnParallelLinear", lambda *a, **kw: torch.nn.Identity())
+    monkeypatch.setattr(dspark_module, "RMSNorm", lambda *a, **kw: torch.nn.Identity())
+    with (
+        patch.object(dspark_module, "DSparkMarkovHead", autospec=True, return_value=torch.nn.Identity()),
+        patch.object(dspark_module, "DSparkConfidenceHead", autospec=True, return_value=torch.nn.Identity()),
+    ):
+        model = DeepseekV4DSparkModel(vllm_config=vllm_config, prefix="model")
+
+    assert len(draft_impls) == 3
+    for impl in draft_impls:
+        assert impl._oproj_buffer_pool is model._oproj_buffer_pool
+        impl.reserve_oproj_buffers.assert_called_once_with(
+            torch.device(dspark_module.current_platform.device_type), torch.float16
+        )
 
 
 def test_context_wkv_weights_are_duplicated_by_layer():

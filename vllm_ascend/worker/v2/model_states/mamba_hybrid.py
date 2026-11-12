@@ -17,14 +17,15 @@
 # This file is a part of the vllm-ascend project.
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
+from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
@@ -33,13 +34,19 @@ from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
 )
 from vllm.v1.worker.mamba_utils import (
     MambaSpecDecodeGPUContext,
+    get_mamba_groups,
     preprocess_mamba_align_fused_kernel,
+    validate_mamba_state_copy_funcs,
 )
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend.utils import model_uses_kimi_kda, model_uses_kpool_indexer
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
+
+if TYPE_CHECKING:
+    from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 # Copy block size used by the upstream fused mamba kernels.
 _COPY_BLOCK_SIZE = 1024
@@ -77,10 +84,16 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
     time right after that layer's KV load finishes.
     """
 
+    # Annotated locally because mypy (``--follow-imports skip``) does not
+    # analyze the upstream base class body where these are defined.
+    _mamba_ctx: MambaSpecDecodeGPUContext | None
+    _mamba_state_copy_funcs: Any
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._layerwise_mamba_copy: _LayerwiseMambaCopyState | None = None
         self._layer_state_ranges: dict[str, tuple[int, int]] | None = None
+        self._pending_bulk_copy: tuple[MambaSpecDecodeGPUContext, int, torch.Tensor] | None = None
 
     def _get_layer_state_ranges(self, kv_cache_config: KVCacheConfig) -> dict[str, tuple[int, int]]:
         """Map every mamba layer name to its (start, end) range in the
@@ -89,12 +102,14 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         ``initialize_from_forward_context``)."""
         if self._layer_state_ranges is None:
             assert self._mamba_spec is not None
-            num_state_types = len(self.model.get_mamba_state_copy_func())
             ranges: dict[str, tuple[int, int]] = {}
             idx = 0
             for mamba_group_id in self._mamba_group_ids:
-                layer_names = kv_cache_config.kv_cache_groups[mamba_group_id].layer_names
-                for layer_name in layer_names:
+                group = kv_cache_config.kv_cache_groups[mamba_group_id]
+                for layer_name in group.layer_names:
+                    # Match the per-type rows populated by the existing copy context.
+                    spec = mamba_utils._get_mamba_spec_for_layer(group, layer_name)
+                    num_state_types = len(self._mamba_state_copy_funcs[spec.mamba_type])
                     ranges[layer_name] = (idx, idx + num_state_types)
                     idx += num_state_types
             self._layer_state_ranges = ranges
@@ -194,6 +209,36 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         )
         pending.pending_layers.discard(layer_name)
 
+    def _ensure_align_ctx(
+        self,
+        kv_cache_config: KVCacheConfig,
+        mamba_group_ids: list[int],
+        block_tables: tuple[torch.Tensor, ...],
+    ) -> MambaSpecDecodeGPUContext:
+        if self._mamba_ctx is None:
+            if self._mamba_state_copy_funcs is None:
+                mamba_groups = get_mamba_groups(kv_cache_config)
+                mamba_types = {spec.mamba_type for spec in mamba_groups}
+                copy_funcs = self.model.get_mamba_state_copy_funcs(mamba_types)
+                validate_mamba_state_copy_funcs(mamba_groups, copy_funcs)
+                self._mamba_state_copy_funcs = copy_funcs
+            self._mamba_ctx = MambaSpecDecodeGPUContext.create(
+                max_num_reqs=self.max_num_reqs,
+                kv_cache_config=kv_cache_config,
+                copy_funcs=self._mamba_state_copy_funcs,
+                device=self.device,
+                make_buffer=lambda n, dtype: CpuGpuBuffer(n, dtype=dtype, device=self.device),
+            )
+        ctx = self._mamba_ctx
+        if not ctx.is_initialized:
+            ctx.initialize_from_forward_context(
+                kv_cache_config,
+                self.vllm_config.compilation_config.static_forward_context,
+                self._mamba_state_copy_funcs,
+                [block_tables[gid] for gid in mamba_group_ids],
+            )
+        return ctx
+
     def preprocess_state(
         self,
         input_batch: AscendInputBatch,
@@ -209,10 +254,19 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         layer from the connector's ``wait_for_layer_load`` hook so each copy
         only reads state that has already been loaded remotely. Running the
         bulk pre-copy here instead would race with the in-flight layerwise
-        loads and read half-loaded state.
+        loads and read half-loaded state. Non-layerwise connectors can opt in
+        to a bulk copy after the runner connector completes pre_forward.
         """
         if not self._align_mode:
             return
+        pcp_manager = getattr(self, "pcp_manager", None)
+        if pcp_manager is not None and (
+            model_uses_kpool_indexer(self.vllm_config.model_config)
+            or model_uses_kimi_kda(self.vllm_config.model_config)
+        ):
+            pcp_context = pcp_manager.build_attention_context(input_batch, block_tables)
+            input_batch = pcp_context.global_batch
+            block_tables = pcp_context.global_block_tables
         num_reqs = input_batch.num_reqs
         if num_reqs == 0:
             return
@@ -240,6 +294,14 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             # Per-layer copies are executed by the connector right after each
             # layer's KV load finishes (do_mamba_copy_for_layer).
             return
+        if has_kv_transfer_group() and getattr(get_kv_transfer_group(), "requires_mamba_state_copy_after_load", False):
+            # Sync KV loads run later in KVConnector.pre_forward. Keep the
+            # decision kernel above before attention metadata construction,
+            # but copy the loaded state only after pre_forward has completed.
+            if self._pending_bulk_copy is not None:
+                raise RuntimeError("Previous Mamba bulk copy was not consumed")
+            self._pending_bulk_copy = (ctx, num_reqs, input_batch.idx_mapping)
+            return
         ctx.run_fused_precopy(
             num_reqs,
             self._mamba_state_idx_gpu,
@@ -247,6 +309,26 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             self._mamba_src_off_gpu,
             input_batch.idx_mapping,
         )
+
+    def copy_state_after_kv_load(self) -> None:
+        """Run bulk pre-copy before eager execution or FULL graph replay."""
+        pending = self._pending_bulk_copy
+        if pending is None:
+            return
+        self._pending_bulk_copy = None
+        ctx, num_reqs, idx_mapping = pending
+        ctx.run_fused_precopy(
+            num_reqs,
+            self._mamba_state_idx_gpu,
+            self._mamba_src_col_gpu,
+            self._mamba_src_off_gpu,
+            idx_mapping,
+        )
+
+    def finish_execution(self, *, failed: bool) -> None:
+        if failed:
+            self._pending_bulk_copy = None
+        super().finish_execution(failed=failed)
 
     def prepare_attn(
         self,
@@ -262,18 +344,117 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
     ) -> dict[str, Any]:
         # Match the upstream Mamba contract without enabling DBO.
         assert ubatch_idx == 0, "DBO is not supported on Ascend"
+        pcp_manager = getattr(self, "pcp_manager", None)
+        pcp_context = None
+        if (
+            pcp_manager is not None
+            and (
+                model_uses_kpool_indexer(self.vllm_config.model_config)
+                or model_uses_kimi_kda(self.vllm_config.model_config)
+            )
+            and pcp_manager.is_target_attn_groups(attn_groups)
+        ):
+            pcp_context = pcp_manager.build_attention_context(input_batch, block_tables, slot_mappings)
+
+        def build_metadata(**kwargs):
+            if pcp_context is not None and not getattr(input_batch, "is_dummy", False):
+                # Recurrent state uses global request order; SFA keeps local queries.
+                local_groups = [
+                    [group for group in groups if not isinstance(group.kv_cache_spec, MambaSpec)]
+                    for groups in attn_groups
+                ]
+                mamba_groups = [
+                    [group for group in groups if isinstance(group.kv_cache_spec, MambaSpec)] for groups in attn_groups
+                ]
+                metadata = AscendMambaHybridModelState._build_attn_metadata_for_batch(
+                    self,
+                    input_batch,
+                    cudagraph_mode,
+                    block_tables,
+                    slot_mappings,
+                    local_groups,
+                    kv_cache_config,
+                    for_capture,
+                    use_pcp_padding=True,
+                    pcp_context=pcp_context,
+                )
+                metadata.update(
+                    AscendMambaHybridModelState._build_attn_metadata_for_batch(
+                        self,
+                        pcp_context.global_batch,
+                        cudagraph_mode,
+                        pcp_context.global_block_tables,
+                        pcp_context.global_slot_mappings,
+                        mamba_groups,
+                        kv_cache_config,
+                        for_capture,
+                        use_pcp_padding=False,
+                        pcp_context=pcp_context,
+                    )
+                )
+                return metadata
+            return AscendMambaHybridModelState._build_attn_metadata_for_batch(
+                self,
+                input_batch,
+                cudagraph_mode,
+                block_tables,
+                slot_mappings,
+                attn_groups,
+                kv_cache_config,
+                for_capture,
+                use_pcp_padding=pcp_context is not None,
+                pcp_context=pcp_context,
+            )
+
+        device_metadata = getattr(self, "device_metadata", None)
+        if device_metadata is not None:
+            # Real, capture and idle batches share one producer lifecycle.
+            self.attn_metadata = device_metadata.run_build(
+                build_metadata,
+                attn_groups=attn_groups,
+                full_graph_mode=cudagraph_mode == CUDAGraphMode.FULL,
+                for_cudagraph_capture=for_capture,
+            )
+        else:
+            self.attn_metadata = build_metadata()
+        if self.recoverssm is not None:
+            self.recoverssm.record_step(self.attn_metadata, attn_groups, for_capture=for_capture)
+        return self.attn_metadata
+
+    def _build_attn_metadata_for_batch(
+        self,
+        input_batch: AscendInputBatch,
+        cudagraph_mode: CUDAGraphMode,
+        block_tables: tuple[torch.Tensor, ...],
+        slot_mappings: torch.Tensor,
+        attn_groups: list[list[AttentionGroup]],
+        kv_cache_config: KVCacheConfig,
+        for_capture: bool,
+        *,
+        use_pcp_padding: bool,
+        pcp_context: "AscendPCPAttentionContext | None" = None,
+    ) -> dict[str, Any]:
         if cudagraph_mode == CUDAGraphMode.FULL:
             num_reqs = input_batch.num_reqs_after_padding
             num_tokens = input_batch.num_tokens_after_padding
         else:
             num_reqs = input_batch.num_reqs
-            num_tokens = input_batch.num_tokens
+            # PCP pads all ranks to the largest local token count. Attention
+            # metadata must describe the actual model-input tensor width.
+            num_tokens = input_batch.num_tokens_after_padding if use_pcp_padding else input_batch.num_tokens
 
-        is_prefilling_np = input_batch.is_prefilling_np
+        # Keep recurrent queries logical while attention inputs include graph padding.
+        # TODO: Remove this dummy-padding special case once the common metadata
+        # path handles padded attention inputs separately from logical queries.
+        num_input_tokens = num_tokens
+        if cudagraph_mode == CUDAGraphMode.PIECEWISE and input_batch.is_dummy:
+            num_input_tokens = input_batch.num_tokens_after_padding
+
+        is_prefilling_np = input_batch.is_prefilling_np[: input_batch.num_reqs]
         if input_batch.prefill_runs_as_decode_np is not None:
             # vLLM #58400 runs one-token prompt tails as decodes. Their
             # placeholder drafts need rollback-capable decode metadata.
-            is_prefilling_np = is_prefilling_np & ~input_batch.prefill_runs_as_decode_np
+            is_prefilling_np = is_prefilling_np & ~input_batch.prefill_runs_as_decode_np[: input_batch.num_reqs]
         is_prefilling = torch.zeros(num_reqs, dtype=torch.bool, device="cpu")
         is_prefilling[: input_batch.num_reqs] = torch.from_numpy(is_prefilling_np)
 
@@ -281,27 +462,38 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         num_decode_draft_tokens_cpu = None
         if not for_capture and self.vllm_config.num_speculative_tokens > 0:
             num_accepted_tokens = self.num_accepted_tokens_gpu.new_ones(num_reqs)
-            num_accepted_tokens[: input_batch.num_reqs] = self.num_accepted_tokens_gpu[input_batch.idx_mapping]
+            num_accepted_tokens[: input_batch.num_reqs] = self.num_accepted_tokens_gpu[
+                input_batch.idx_mapping[: input_batch.num_reqs]
+            ]
 
             num_decode_draft_tokens_np = np.full(num_reqs, -1, dtype=np.int32)
             num_draft_tokens_per_req = input_batch.num_draft_tokens_per_req
-            if num_draft_tokens_per_req is not None:
-                is_decode = input_batch.num_scheduled_tokens == num_draft_tokens_per_req + 1
-                spec_decode_mask = (num_draft_tokens_per_req > 0) & is_decode
-                num_decode_draft_tokens_np[: input_batch.num_reqs] = np.where(
-                    spec_decode_mask,
-                    num_draft_tokens_per_req,
-                    -1,
+            if num_draft_tokens_per_req is None:
+                num_draft_tokens_per_req = np.zeros(input_batch.num_reqs, dtype=np.int32)
+            # Match upstream request-state classification. Adaptive verification
+            # changes query lengths independently of the scheduled draft count.
+            scheduled_tokens = input_batch.num_scheduled_tokens[: input_batch.num_reqs]
+            spec_decode_mask = (
+                ~is_prefilling_np
+                & (scheduled_tokens > 0)
+                & (scheduled_tokens <= self.vllm_config.num_speculative_tokens + 1)
+            )
+            spec_config = getattr(self.vllm_config, "speculative_config", None)
+            if not (spec_config and getattr(spec_config, "enable_adaptive_verification", False)):
+                # Static graphs retain the native recurrent operator and its
+                # original no-draft decode route. Adaptive graphs use vLLM's
+                # strided operator even for one-token capture/replay rows.
+                spec_decode_mask &= (num_draft_tokens_per_req[: input_batch.num_reqs] > 0) & (
+                    scheduled_tokens == num_draft_tokens_per_req[: input_batch.num_reqs] + 1
                 )
-                if cudagraph_mode == CUDAGraphMode.FULL and num_reqs > input_batch.num_reqs and spec_decode_mask.all():
-                    padded_query_lens = np.diff(input_batch.query_start_loc_np[: num_reqs + 1])[input_batch.num_reqs :]
-                    expected_query_len = self.vllm_config.num_speculative_tokens + 1
-                    if np.all(padded_query_lens == expected_query_len):
-                        # Full graph capture represents every padded request as
-                        # a speculative decode request. Keep replay on the same
-                        # pure-spec GDN path so its persistent state metadata is
-                        # refreshed before graph replay.
-                        num_decode_draft_tokens_np[input_batch.num_reqs :] = padded_query_lens - 1
+            num_decode_draft_tokens_np[: input_batch.num_reqs] = np.where(
+                spec_decode_mask, num_draft_tokens_per_req[: input_batch.num_reqs], -1
+            )
+            if cudagraph_mode == CUDAGraphMode.FULL and num_reqs > input_batch.num_reqs and spec_decode_mask.all():
+                padded_query_lens = np.diff(input_batch.query_start_loc_np[: num_reqs + 1])[input_batch.num_reqs :]
+                expected_query_len = self.vllm_config.num_speculative_tokens + 1
+                if np.all(padded_query_lens == expected_query_len):
+                    num_decode_draft_tokens_np[input_batch.num_reqs :] = padded_query_lens - 1
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
         model_specific_metadata = MambaHybridAttnMetadata(
@@ -309,17 +501,21 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
         )
-        # The Mamba model state builds its own complete attention metadata.
-        # The optional argument is accepted to match AscendModelState's API.
-        self.attn_metadata = build_attn_metadata(
+        # Varlen graphs capture evenly split dummy rows (possibly one token
+        # each), but must allow the descriptor's full K+1 replay query bound.
+        max_query_len = getattr(input_batch, "max_query_len", None)
+        if max_query_len is None:
+            max_query_len = input_batch.num_scheduled_tokens.max().item()
+        return build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
             num_actual_reqs=input_batch.num_reqs,
             num_tokens=num_tokens,
             num_actual_tokens=input_batch.num_tokens,
+            num_input_tokens=num_input_tokens,
             query_start_loc_gpu=input_batch.query_start_loc,
             query_start_loc_cpu=torch.from_numpy(input_batch.query_start_loc_np),
-            max_query_len=input_batch.num_scheduled_tokens.max().item(),
+            max_query_len=max_query_len,
             seq_lens=input_batch.seq_lens,
             max_seq_len=self.max_model_len,
             block_tables=block_tables,
@@ -331,6 +527,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             positions=input_batch.positions,
             attn_state=input_batch.attn_state,
             model_specific_attn_metadata=model_specific_metadata,
+            pcp_context=pcp_context,
+            full_graph_mode=cudagraph_mode == CUDAGraphMode.FULL,
             for_cudagraph_capture=for_capture,
         )
-        return self.attn_metadata

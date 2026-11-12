@@ -124,6 +124,8 @@ class AscendInputBatch(InputBatch):
         # The incoming count includes graph padding. Save it for the model input
         # views below, while building query metadata from the original scheduled
         # count used for DP synchronization. Only _dummy_run supplies that override.
+        # TODO: Remove this workaround once upstream dummy-batch preparation
+        # preserves logical query lengths separately from graph padding.
         num_tokens_after_padding = num_tokens
         if input_buffers.dummy_num_tokens is not None:
             # PIECEWISE pads model inputs without adding scheduled queries.

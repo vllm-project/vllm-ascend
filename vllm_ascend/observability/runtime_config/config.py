@@ -801,12 +801,32 @@ class RuntimeConfig:
         return bool(self._hot_path_gates_cached()["needs_cumulative_io"])
 
     def needs_sample_phase_hooks(self) -> bool:
-        """True when post-sample runtime_guard hooks must run (not a pure sample fast-path).
+        """True when at least one auto detector is enabled.
 
-        Covers detectors and finish-output logging.
-        Dump-only / hot-reload-only does not need the sample-phase hook chain.
+        Sample-phase hooks follow detectors only. Dump and hot-reload do not
+        set this flag.
         """
         return bool(self._hot_path_gates_cached()["needs_sample_phase_hooks"])
+
+    def is_fully_off(self) -> bool:
+        """True when observability is fully off (default-off cold path).
+
+        Requires: hot-reload off, no detectors, no dump, no manual trigger.
+        Distinct from detectors off with dump still configured — that path
+        still runs wave advance / claim / end-of-wave.
+
+        When True, hooks skip sync/sample shells entirely. Enabling any axis
+        needs restart if hot-reload is off; with hot-reload on this is always
+        False and full shells run.
+        """
+        if self.hot_reload_enabled:
+            return False
+        gates = self._hot_path_gates_cached()
+        return (
+            not gates["needs_sample_phase_hooks"]
+            and not gates["dump_enabled"]
+            and int(gates["manual_trigger_count"]) <= 0
+        )
 
     # Detector section order comes from ``detector_catalog``.
     DETECTOR_SECTIONS = _CATALOG_DETECTOR_SECTIONS
@@ -834,7 +854,7 @@ class RuntimeConfig:
                 names.append(_DISPLAY.get(section, section))
         dump_on = self.dump_enabled()
         auto_on = self.auto_dump_on()
-        max_times = self.dump_max_times()
+        max_times = self.auto_dump_max_times()
         if names and dump_on and auto_on:
             mode = "detect+auto_dump"
         elif names and dump_on:
@@ -867,10 +887,12 @@ class RuntimeConfig:
                 _process_role_tag(),
             )
 
-    def dump_max_times(self) -> int:
+    def auto_dump_max_times(self) -> int:
+        """``dump.auto_max_times``. Manual watermark does not use this quota."""
         return int(self.dump.get("auto_max_times", 0))
 
-    def dump_cooldown_seconds(self) -> int:
+    def auto_dump_cooldown_seconds(self) -> int:
+        """``dump.auto_cooldown_seconds`` between auto-dump arms."""
         return int(self.dump.get("auto_cooldown_seconds", 300))
 
     def manual_trigger_continuous(self) -> bool:

@@ -85,6 +85,7 @@ class _FakeFAManager:
 class _FakeMambaManager:
     def __init__(self, **kwargs):
         self.use_eagle = False
+        self.drop_eagle_checkpoint_block = False
         self.block_size = kwargs["kv_cache_spec"].block_size
 
 
@@ -111,6 +112,7 @@ def _make_coordinator(
     mamba_eagle: bool = False,
 ):
     monkeypatch.setattr(mod, "BlockPool", _FakeBlockPool)
+    monkeypatch.setattr(mod, "MambaManager", _FakeMambaManager)
     monkeypatch.setattr(mod, "get_manager_for_kv_cache_spec", _fake_manager_factory)
     kv_cache_config = _hybrid_config(mamba_eagle=mamba_eagle)
     # The kv-transfer config is attached by the
@@ -209,6 +211,30 @@ def test_skips_eagle_block_drop_role_semantics(kv_transfer_config, expected):
 
 
 @pytest.mark.parametrize(
+    ("kv_transfer_config", "drop_for_role"),
+    [
+        pytest.param(None, False, id="standalone"),
+        pytest.param(_kv_transfer_config(is_kv_producer=True, is_kv_consumer=False), False, id="producer"),
+        pytest.param(_kv_transfer_config(is_kv_producer=False, is_kv_consumer=True), True, id="consumer"),
+        pytest.param(_kv_transfer_config(is_kv_producer=True, is_kv_consumer=True), True, id="both"),
+    ],
+)
+@pytest.mark.parametrize("use_eagle", [False, True])
+@pytest.mark.parametrize("mamba_eagle", [False, True])
+def test_mamba_checkpoint_drop_follows_lookup_policy(
+    monkeypatch, kv_transfer_config, drop_for_role, use_eagle, mamba_eagle
+):
+    coordinator = _make_coordinator(
+        monkeypatch,
+        use_eagle=use_eagle,
+        kv_transfer_config=kv_transfer_config,
+        mamba_eagle=mamba_eagle,
+    )
+    manager = coordinator.single_type_managers[1]
+    assert manager.drop_eagle_checkpoint_block is (use_eagle and mamba_eagle and drop_for_role)
+
+
+@pytest.mark.parametrize(
     "kv_transfer_config",
     [
         SimpleNamespace(is_kv_producer=True, is_kv_consumer=False),
@@ -216,12 +242,13 @@ def test_skips_eagle_block_drop_role_semantics(kv_transfer_config, expected):
     ],
 )
 def test_kv_cache_config_builder_mounts_kv_transfer_config(monkeypatch, kv_transfer_config):
-    import vllm.v1.core.kv_cache_utils as kcu
-
     from vllm_ascend.patch.platform import patch_kv_cache_utils as kcu_patch
 
     sentinel_config = SimpleNamespace()
-    vllm_config = SimpleNamespace(kv_transfer_config=kv_transfer_config)
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="kimi_k3")),
+        kv_transfer_config=kv_transfer_config,
+    )
     monkeypatch.setattr(
         kcu_patch,
         "_orig_get_kv_cache_config_from_groups",
@@ -230,7 +257,8 @@ def test_kv_cache_config_builder_mounts_kv_transfer_config(monkeypatch, kv_trans
     result = kcu_patch._ascend_get_kv_cache_config_from_groups(vllm_config, [], 0)
     # The builder replaces the upstream entry point, so the coordinator-side
     # getattr in __init__ sees the attached role on every real engine path.
-    assert kcu.get_kv_cache_config_from_groups is kcu_patch._ascend_get_kv_cache_config_from_groups
+    live_module = kcu_patch._kv_cache_planning
+    assert live_module.get_kv_cache_config_from_groups is kcu_patch._ascend_get_kv_cache_config_from_groups
     assert result is sentinel_config
     assert result.kv_transfer_config is kv_transfer_config
 

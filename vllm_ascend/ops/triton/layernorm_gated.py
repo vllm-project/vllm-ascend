@@ -9,6 +9,17 @@
 import torch
 from vllm.triton_utils import tl, triton
 
+_ACTIVATION_SWISH = 0
+_ACTIVATION_SIGMOID = 1
+
+
+def _activation_id(activation: str) -> int:
+    if activation in ("swish", "silu"):
+        return _ACTIVATION_SWISH
+    if activation == "sigmoid":
+        return _ACTIVATION_SIGMOID
+    raise ValueError(f"Unsupported activation: {activation}")
+
 
 @triton.heuristics({"HAS_BIAS": lambda args: args["B"] is not None})
 @triton.heuristics({"HAS_Z": lambda args: args["Z"] is not None})
@@ -33,6 +44,7 @@ def _layer_norm_fwd_1pass_kernel_npu(
     HAS_Z: tl.constexpr,
     NORM_BEFORE_GATE: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
+    ACTIVATION: tl.constexpr,
 ):
     # Map the program id to the row of X and Y it should compute.
     pid_m = tl.program_id(0)
@@ -66,7 +78,10 @@ def _layer_norm_fwd_1pass_kernel_npu(
         z_ptrs = Z + rows[:, None] * stride_z_row + cols[None, :] + group * N
         z = tl.load(z_ptrs, mask=row_mask[:, None] & col_mask[None, :]).to(tl.float32)
         if not NORM_BEFORE_GATE:
-            x *= z * tl.sigmoid(z)
+            if ACTIVATION == 0:
+                x *= z * tl.sigmoid(z)
+            else:
+                x *= tl.sigmoid(z)
 
     # Compute statistics per row
     if not IS_RMS_NORM:
@@ -93,7 +108,10 @@ def _layer_norm_fwd_1pass_kernel_npu(
 
     # Post-gate
     if HAS_Z and NORM_BEFORE_GATE:
-        y *= z * tl.sigmoid(z)
+        if ACTIVATION == 0:
+            y *= z * tl.sigmoid(z)
+        else:
+            y *= tl.sigmoid(z)
 
     # Store output
     y_ptrs = Y + rows[:, None] * stride_y_row + cols[None, :] + group * N
@@ -110,6 +128,7 @@ def layer_norm_fwd_npu(
     group_size=None,
     norm_before_gate=True,
     is_rms_norm=False,
+    activation: str = "swish",
 ):
     M, N = x.shape
     if group_size is None:
@@ -163,6 +182,7 @@ def layer_norm_fwd_npu(
         BLOCK_N=BLOCK_N,
         NORM_BEFORE_GATE=norm_before_gate,
         IS_RMS_NORM=is_rms_norm,
+        ACTIVATION=_activation_id(activation),
         # Remove multibuffer if not needed
     )
     return out, mean, rstd

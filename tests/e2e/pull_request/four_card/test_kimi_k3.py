@@ -301,9 +301,9 @@ def _write_w4a8_description(path: Path) -> None:
     (path / "quant_model_description.json").write_text(json.dumps(description), encoding="utf-8")
 
 
-@pytest.fixture(scope="module")
-def k3_models(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
-    tmp_path = tmp_path_factory.mktemp("k3-dummy")
+def build_k3_models(tmp_path: Path) -> dict[str, str]:
+    """Build reduced local models for both Model Runner versions."""
+
     models = {"target": _write_target(tmp_path / "target")}
     models["w4a8"] = _write_target(tmp_path / "w4a8")
     _write_w4a8_description(tmp_path / "w4a8")
@@ -313,9 +313,13 @@ def k3_models(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
     return models
 
 
+@pytest.fixture(scope="module")
+def k3_models(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
+    return build_k3_models(tmp_path_factory.mktemp("k3-dummy"))
+
+
 @pytest.fixture(autouse=True)
 def k3_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     monkeypatch.setenv("HCCL_OP_EXPANSION_MODE", "AIV")
     monkeypatch.setenv("HCCL_BUFFSIZE", "512")
@@ -384,7 +388,7 @@ def _generate(llm, prompts: list[dict]):
     return outputs
 
 
-def test_k3_mla_block5_tp4(k3_models: dict[str, str]) -> None:
+def run_k3_mla_block5_tp4(k3_models: dict[str, str]) -> None:
     args = _engine_args(k3_models, "mla_block5")
     args["max_model_len"] = PREFIX_CACHE_MODEL_LEN
     # Exercise hybrid-cache page creation with dense checkpoint retention.
@@ -462,7 +466,7 @@ def _draft_counts(url: str) -> dict[str, float]:
     }
 
 
-def test_k3_gqa_w4a8_dp2_tp2(k3_models: dict[str, str]) -> None:
+def run_k3_gqa_w4a8_dp2_tp2(k3_models: dict[str, str]) -> None:
     args = _engine_args(k3_models, "gqa", tp=2)
     args["data_parallel_size"] = 2
     args["quantization"] = "ascend"
@@ -487,7 +491,7 @@ def test_k3_gqa_w4a8_dp2_tp2(k3_models: dict[str, str]) -> None:
         assert len(counts) == 2 and all(count > 0 for count in counts.values()), counts
 
 
-def test_k3_mtp_image_tp4(k3_models: dict[str, str]) -> None:
+def run_k3_mtp_image_tp4(k3_models: dict[str, str]) -> None:
     args = _engine_args(k3_models, "gqa")
     args["speculative_config"] = {
         "method": "mtp",
@@ -506,7 +510,7 @@ def test_k3_mtp_image_tp4(k3_models: dict[str, str]) -> None:
         assert drafts and sum(m.value for m in drafts) > 0, "Requests bypassed MTP"
 
 
-def test_k3_mla_pd_tp2(k3_models: dict[str, str]) -> None:
+def run_k3_mla_pd_tp2(k3_models: dict[str, str]) -> None:
     prefill_port, decode_port = get_open_port(), get_open_port()
     transfer_config = {
         "kv_connector": "MooncakeConnectorV1",
@@ -554,3 +558,19 @@ def test_k3_mla_pd_tp2(k3_models: dict[str, str]) -> None:
         _completion(decode_url, _prompt(257, salt=911)["prompt_token_ids"])
         counts = _draft_counts(f"http://127.0.0.1:{decode_port}/metrics")
         assert counts and sum(counts.values()) > 0
+
+
+def test_k3_mla_block5_tp4(k3_models: dict[str, str]) -> None:
+    run_k3_mla_block5_tp4(k3_models)
+
+
+def test_k3_gqa_w4a8_dp2_tp2(k3_models: dict[str, str]) -> None:
+    run_k3_gqa_w4a8_dp2_tp2(k3_models)
+
+
+def test_k3_mtp_image_tp4(k3_models: dict[str, str]) -> None:
+    run_k3_mtp_image_tp4(k3_models)
+
+
+def test_k3_mla_pd_tp2(k3_models: dict[str, str]) -> None:
+    run_k3_mla_pd_tp2(k3_models)

@@ -18,14 +18,23 @@
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+
+# isort: split
+import torch
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
+
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
+    LayerMultiBlockReqMeta,
+    LayerPoolKey,
+    masked_block_runs,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     ChunkedTokenDatabase,
     KeyMetadata,
-    LayerMultiBlockReqMeta,
-    LayerPoolKey,
     LoadSpec,
     PoolKey,
     ReqMeta,
@@ -33,15 +42,33 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_block_hashes,
     get_group_block_size,
     get_group_cache_family,
+    get_sharded_mamba_group_ids,
     infer_cache_transfer_granularity,
     infer_dcp_mismatch_info,
     infer_group_block_sizes,
-    masked_block_runs,
     uses_hybrid_kv_cache,
 )
 
 
 class TestCacheLayoutHelpers(unittest.TestCase):
+    def test_sharded_mamba_groups_exclude_tp_replicas(self):
+        mamba_spec = MambaSpec(
+            shapes=((4,),),
+            dtypes=(torch.float32,),
+            block_size=16,
+            mamba_cache_mode="align",
+        )
+        specs = [
+            FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32),
+            mamba_spec,
+            replace(mamba_spec, tp_replicated=True),
+            UniformTypeKVCacheSpecs.from_specs({"layer.3": mamba_spec}),
+        ]
+        config = SimpleNamespace(
+            kv_cache_groups=[KVCacheGroupSpec([f"layer.{group_id}"], spec) for group_id, spec in enumerate(specs)]
+        )
+        self.assertEqual(get_sharded_mamba_group_ids(config), {1, 3})
+
     def test_uses_hybrid_kv_cache(self):
         groups = [
             SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16)),
@@ -218,12 +245,14 @@ class TestChunkedTokenDatabase(unittest.TestCase):
     def test_process_tokens_with_tail_clipped_block_ids_maps_tail_chunks(self):
         db = ChunkedTokenDatabase([self.meta], block_size=[128], partitions=None)
         hashes = [bytes([idx % 251]) * 32 for idx in range(128)]
+        predicate = MagicMock(return_value=True)
 
         result = list(
             db.process_token_key_strings_with_block_ids(
                 128 * 128,
                 hashes,
                 [1000, 1001, 1002, 1003],
+                chunk_filter=predicate,
             )
         )
 
@@ -235,6 +264,7 @@ class TestChunkedTokenDatabase(unittest.TestCase):
             [block_id for _, _, _, _, block_id in result],
             [1000, 1001, 1002, 1003],
         )
+        self.assertEqual(predicate.call_count, 4)
 
     def test_process_tokens_token_len_shorter_than_all_blocks(self):
         hashes = ["a", "b", "c", "d"]
@@ -296,17 +326,26 @@ class TestChunkedTokenDatabase(unittest.TestCase):
     def test_key_strings_pre_shard_after_filtering(self):
         hashes = ["a", "b", "c", "d"]
         store_mask = [True, False, True, True]
+        predicate = MagicMock(return_value=True)
         result = list(
             self.db.process_token_key_strings_with_block_ids(
                 64,
                 hashes,
                 [10, 11, 12, 13],
-                chunk_filter=lambda start: store_mask[start // 16],
+                chunk_mask=store_mask,
+                chunk_filter=predicate,
                 shard_rank=1,
                 shard_size=2,
             )
         )
         self.assertEqual([(start, end, block_id) for start, end, _, _, block_id in result], [(32, 48, 12)])
+        self.assertEqual(predicate.call_count, 3)
+
+    def test_lookup_mask_start_and_short_mask_bounds(self):
+        for mask, expected in ((None, [32, 48]), ([], []), ([True, True, True], [32])):
+            with self.subTest(mask=mask):
+                result = list(self.db.process_token_key_strings(64, ["a", "b", "c", "d"], mask_num=17, chunk_mask=mask))
+                self.assertEqual([item[0] for item in result], expected)
 
     def test_compressed_keys_use_logical_spans_and_values_use_physical_rows(self):
         db = ChunkedTokenDatabase(
@@ -788,12 +827,6 @@ class TestAscendConnectorMetadata(unittest.TestCase):
         meta.add_request(req)
         self.assertEqual(len(meta.requests), 1)
         self.assertEqual(meta.requests[0].req_id, "r1")
-
-    def test_released_req_ids_seed_from_preempted(self):
-        meta = AscendConnectorMetadata(preempted_req_ids={"p1"})
-        self.assertEqual(meta.released_req_ids, {"p1"})
-        self.assertEqual(AscendConnectorMetadata(preempted_req_ids=None).released_req_ids, set())
-        self.assertEqual(AscendConnectorMetadata(preempted_req_ids=set()).released_req_ids, set())
 
 
 class TestLayerMultiBlockReqMeta(unittest.TestCase):

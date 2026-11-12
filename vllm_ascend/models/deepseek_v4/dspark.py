@@ -40,7 +40,9 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import SupportsEagle3
 from vllm.model_executor.models.qwen3_dspark import DSparkConfidenceHead, DSparkMarkovHead
 from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix, process_eagle_weight
+from vllm.platforms import current_platform
 
+from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
 from vllm_ascend.models.common.ops.sequence_parallel import sp_padding_mask, sp_shard
 from vllm_ascend.models.deepseek_v4.model import (
     DeepseekV2MixtureOfExperts,
@@ -48,7 +50,6 @@ from vllm_ascend.models.deepseek_v4.model import (
     DeepseekV4MoE,
 )
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
-from vllm_ascend.utils import enable_dsa_cp
 
 
 def _apply_dsv4_rope(
@@ -134,6 +135,13 @@ class DeepseekV4DSparkModel(nn.Module):
                 for idx in range(self.num_dspark_layers)
             }
         )
+        self._oproj_buffer_pool = OProjBufferPool()
+        for layer in self.layers.values():
+            impl = layer.self_attn.dsa_attn.dsa_attn.impl
+            if not isinstance(impl, AscendDSAImpl):
+                continue
+            impl._oproj_buffer_pool = self._oproj_buffer_pool
+            impl.reserve_oproj_buffers(torch.device(current_platform.device_type), vllm_config.model_config.dtype)
 
         first_layer = self.layers[str(self.mtp_start_layer_idx)]
         self.use_sequence_parallel_moe = first_layer.use_sequence_parallel_moe
@@ -377,14 +385,14 @@ class DeepseekV4DSparkModel(nn.Module):
     ) -> torch.Tensor:
         return logits_processor(lm_head, self.norm(hidden_states))
 
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+    def get_expert_mapping(self, *, num_redundant_experts: int = 0) -> list[tuple[str, str, int, str]]:
         return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
             num_experts=self.config.n_routed_experts,
-            num_redundant_experts=0,
+            num_redundant_experts=num_redundant_experts,
         )
 
 
@@ -431,6 +439,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
                 self.moe_mlp_layers.append(layer.mlp)
                 self.moe_layers.append(layer.mlp.experts)
 
+        self.num_moe_layers = len(self.moe_layers)
         self.extract_moe_parameters(example_moe)
 
     def forward(
@@ -498,7 +507,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
         Non-MTP weights belong to the target model and are skipped, except for
         standalone embedding/head weights used by the Ascend draft loader.
         """
-        expert_mapping = self.model.get_expert_mapping()
+        expert_mapping = self.model.get_expert_mapping(num_redundant_experts=self.num_redundant_experts)
 
         # (param_name, checkpoint shard name, shard_id) for non-expert
         # stacked parameters. Ascend keeps wq_a and wkv as separate parameters.
@@ -608,11 +617,8 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
                     # direct ``copy_`` lands on the meta tensor and is lost, so
                     # the draft model's sinks would keep their dummy values.
                     weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                    if enable_dsa_cp():
-                        weight_loader(param, loaded_weight)
-                    else:
-                        # Handle attention sinks (distributed across ranks)
-                        weight_loader(param, loaded_weight[head_start:head_end])
+                    # Handle attention sinks (distributed across ranks)
+                    weight_loader(param, loaded_weight[head_start:head_end])
                     loaded_params.add(name)
                     continue
                 param = params_dict[name]

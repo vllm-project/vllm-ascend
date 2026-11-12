@@ -149,6 +149,7 @@ def test_hixl_communicator_reads_through_hixl_compat(monkeypatch):
         _Tensor(5000, device),
         [_Tensor(6100, device, (4,), 16), _Tensor(6200, device, (4,), 16)],
     ]
+    monkeypatch.setattr(torch.accelerator, "current_stream", MagicMock())
     communicator = eplb_communicator.AscendHixlEplbCommunicator(group, weights, buffers)
 
     session = eplb_communicator._HixlSession(group)

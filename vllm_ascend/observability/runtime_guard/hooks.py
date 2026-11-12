@@ -41,6 +41,7 @@ from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from typing import Any
 
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorOutput
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 from vllm.v1.worker.gpu.async_utils import AsyncOutput
@@ -59,7 +60,7 @@ def runtime_guard_step(execute_model_fn):
 
     - before the step body: ``sync_for_step`` (config bus, wave arm, reap;
       no-op on non-last PP)
-    - ``finally``: ``end_of_wave_sync(allow_manual_dump=False)`` on no-sample paths
+    - ``finally``: ``end_of_wave_sync(has_scheduled_tokens=False)`` on no-sample paths
       (early return / exception / dummy wave) so last-PP lockstep collectives
       can never be skipped.
 
@@ -73,16 +74,18 @@ def runtime_guard_step(execute_model_fn):
         guard = getattr(self, "runtime_guard", None)
         if guard is None:
             return execute_model_fn(self, scheduler_output, *args, **kwargs)
+        if guard.is_fully_off():
+            return execute_model_fn(self, scheduler_output, *args, **kwargs)
         setattr(self, _SCHEDULER_OUTPUT_ATTR, scheduler_output)
         dummy_run = kwargs.get("dummy_run", args[1] if len(args) > 1 else False)
-        allow_manual_dump = int(getattr(scheduler_output, "total_num_scheduled_tokens", 0) or 0) > 0
-        guard.sync_for_step(scheduler_output=scheduler_output, allow_manual_dump=allow_manual_dump)
+        has_scheduled_tokens = int(getattr(scheduler_output, "total_num_scheduled_tokens", 0) or 0) > 0
+        guard.sync_for_step(scheduler_output=scheduler_output, has_scheduled_tokens=has_scheduled_tokens)
         try:
             return execute_model_fn(self, scheduler_output, *args, **kwargs)
         finally:
             # Collectives must stay lockstep — do not soft-fail this gate.
             if dummy_run or self.execute_model_state is None:
-                guard.end_of_wave_sync(allow_manual_dump=False)
+                guard.end_of_wave_sync(has_scheduled_tokens=False)
 
     return wrapper
 
@@ -99,8 +102,8 @@ def runtime_guard_idle_step(dummy_batch_fn):
     def wrapper(self, *args, **kwargs):
         # Worker may still construct unwired v1 runners — skip when unbound.
         guard = getattr(self.model_runner, "runtime_guard", None)
-        if guard is not None:
-            guard.sync_for_step(allow_manual_dump=False)
+        if guard is not None and not guard.is_fully_off():
+            guard.sync_for_step(has_scheduled_tokens=False)
         return dummy_batch_fn(self, *args, **kwargs)
 
     return wrapper
@@ -137,6 +140,9 @@ def runtime_guard_sample_tokens(sample_tokens_fn):
     The decorated method keeps its original functional body (PCP swap, spec-PP
     draft broadcast). This wrapper adds ``run_sample_phase`` around it, reading
     the ``postprocess_sampled`` stash and the pre-pop ``execute_model_state`` peek.
+
+    Fully off (default-off: no hot-reload / detectors / dump) returns the
+    bare ``sample_tokens`` body — no stash wrap, SamplePhaseResult, or eow.
     """
 
     @functools.wraps(sample_tokens_fn)
@@ -144,6 +150,8 @@ def runtime_guard_sample_tokens(sample_tokens_fn):
         guard = getattr(self, "runtime_guard", None)
         if guard is None:
             # UT shells / unbound runners: keep the bare sample path.
+            return sample_tokens_fn(self, grammar_output)
+        if guard.is_fully_off():
             return sample_tokens_fn(self, grammar_output)
         note_postprocess_sampled(self, None, None)  # clear prior-step stash
         # Peek before the method pops execute_model_state (inside the parent
@@ -336,3 +344,7 @@ class AscendAsyncOutput(AsyncModelRunnerOutput):
         output = self._inner.get_output()
         _safe_check_after_sample(self._runner, output)
         return output
+
+    # Both supported versions require get_kv_connector_output on async outputs.
+    def get_kv_connector_output(self) -> KVConnectorOutput | None:
+        return self._inner.get_kv_connector_output()

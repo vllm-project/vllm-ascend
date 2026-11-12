@@ -3,6 +3,7 @@
 """Regression tests for V4.1 index selection and compressor scheduling."""
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -13,6 +14,80 @@ from vllm_ascend.attention.dsa_v41 import AscendDSAV41Impl, DeepseekV41PreparedI
 from vllm_ascend.models.deepseek_v41 import mixed_quant_attention as a5_indexer
 
 TOKENS, TOPK = 4, 512
+
+
+@pytest.mark.parametrize("otp_enabled,pcp_sharding", [(False, None), (False, False), (True, False), (False, True)])
+@pytest.mark.parametrize("num_tokens", [0, 1, 7])
+@pytest.mark.parametrize("provide_output", [False, True])
+def test_profile_initializes_sharded_o_proj(monkeypatch, otp_enabled, pcp_sharding, num_tokens, provide_output):
+    impl = AscendDSAV41Impl.__new__(AscendDSAV41Impl)
+    hidden_states = torch.ones(num_tokens, 8, dtype=torch.bfloat16)
+    output = torch.full_like(hidden_states, float("nan")) if provide_output else None
+    calls = []
+
+    def project_o_proj(inputs, projected):
+        assert inputs.shape == (num_tokens, 4, 2)
+        assert inputs.dtype == hidden_states.dtype
+        assert inputs.device == hidden_states.device
+        assert torch.count_nonzero(inputs) == 0
+        assert projected.shape == hidden_states.shape
+        calls.append(projected)
+        projected.zero_()
+        return projected
+
+    projector = SimpleNamespace(_forward_o_proj=project_o_proj)
+    if pcp_sharding is not None:
+        projector.enable_pcp_o_proj_weight_sharding = pcp_sharding
+    attn = SimpleNamespace(
+        n_local_heads=4,
+        head_dim=2,
+        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=projector)),
+    )
+    monkeypatch.setattr(dsa_v41, "get_forward_context", lambda: SimpleNamespace(attn_metadata=None))
+    monkeypatch.setattr(dsa_v41, "oproj_tp_enable", lambda: otp_enabled)
+    monkeypatch.setattr(dsa_v41, "get_potential_max_tokens", lambda: num_tokens)
+
+    result = impl.forward(attn, None, hidden_states, output)
+
+    should_project = otp_enabled or bool(pcp_sharding)
+    assert len(calls) == int(should_project)
+    if should_project:
+        assert calls[0].untyped_storage().data_ptr() == result.untyped_storage().data_ptr()
+        assert calls[0].storage_offset() == result.storage_offset()
+    if provide_output:
+        assert result is output
+    assert result.shape == hidden_states.shape
+    assert result.dtype == hidden_states.dtype
+    assert torch.equal(result, torch.zeros_like(hidden_states))
+
+
+def test_v41_otp_profile_exercises_only_decode_capacity(monkeypatch):
+    impl = AscendDSAV41Impl.__new__(AscendDSAV41Impl)
+    capacity = 3
+    seen = []
+
+    def project(inputs, outputs):
+        seen.append((inputs.shape, outputs.shape, torch.count_nonzero(inputs).item()))
+        outputs.fill_(1)
+
+    projector = SimpleNamespace(
+        _oproj_send_buf=torch.empty((2, capacity, 1, 2)),
+        _forward_o_proj=project,
+        enable_pcp_o_proj_weight_sharding=False,
+    )
+    attn = SimpleNamespace(
+        n_local_heads=2,
+        head_dim=2,
+        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=projector)),
+    )
+    monkeypatch.setattr(dsa_v41, "get_forward_context", lambda: SimpleNamespace(attn_metadata=None))
+    monkeypatch.setattr(dsa_v41, "oproj_tp_enable", lambda: True)
+    output = torch.full((5, 2), -1.0)
+
+    assert impl.forward(attn, None, torch.empty(5, 2), output) is output
+    assert seen == [((capacity, 2, 2), (capacity, 2), 0)]
+    torch.testing.assert_close(output[:capacity], torch.ones_like(output[:capacity]))
+    torch.testing.assert_close(output[capacity:], torch.zeros_like(output[capacity:]))
 
 
 @pytest.mark.parametrize("in_graph", [False, True])
@@ -55,6 +130,64 @@ def test_deferred_metadata_keeps_compressor_state_outside_graph(in_graph, stage)
         task.run()
     assert calls == [stage]
     assert builder.take_device_metadata_tasks() == ()
+
+
+@pytest.mark.parametrize("in_graph", [False, True])
+@pytest.mark.parametrize("num_actual_tokens", [0, 2])
+def test_a5_qli_preserves_graph_mode_after_defer_scope(monkeypatch, in_graph, num_actual_tokens):
+    builder_cls = dsa_v41.AscendDSAV41IndexerMetadataBuilder
+    builder = builder_cls.__new__(builder_cls)
+    builder._device_metadata_enabled = False
+    builder._device_metadata_in_graph = False
+    builder._device_metadata_tasks = ()
+    builder._supports_device_ops = True
+    builder._uses_a5_packed_cache = True
+    builder.common_v41_batch_metadata = {}
+    buffer = torch.full((8,), -1, dtype=torch.int32)
+    builder._qli_metadata = buffer
+    output = torch.ones_like(buffer)
+    metadata_op = Mock(return_value=output)
+    builder._device_backend = SimpleNamespace(quant_lightning_indexer_metadata=metadata_op)
+    builder.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(index_topk=512, index_n_heads=64, index_head_dim=128)
+        )
+    )
+    monkeypatch.setattr(builder, "prepare_source_rope", lambda: None)
+    req = dsa_v41.AscendDSAV41Metadata(
+        block_table=torch.zeros((1, 1), dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+        seq_lens=torch.tensor([2], dtype=torch.int32),
+        slot_mapping=torch.full((2,), -1, dtype=torch.int64),
+        compress_ratio=2,
+        storage_block_size=16,
+        is_compressor_state=False,
+        cache_kind="index_k",
+        num_actual_tokens=num_actual_tokens,
+        num_input_tokens=2,
+        num_reqs=1,
+        cache_seq_lens=torch.tensor([1], dtype=torch.int32),
+    )
+    with builder.defer_device_metadata(in_graph=in_graph):
+        builder._build_qli_metadata(SimpleNamespace(query_start_loc=req.query_start_loc), req)
+        tasks = builder.take_device_metadata_tasks()
+        metadata_op.assert_not_called()
+
+    # Match TargetDeviceMetadata: run collected tasks only after leaving the scope.
+    assert not builder._device_metadata_in_graph
+    assert not builder._device_metadata_enabled
+    assert len(tasks) == 1
+    assert tasks[0].stage == dsa_v41.DeviceMetadataStage.INDEXER
+    assert tasks[0].group_id == id(builder._qli_metadata)
+    assert req.qli_metadata is builder._qli_metadata
+    tasks[0].run()
+    if in_graph or num_actual_tokens:
+        metadata_op.assert_called_once()
+        torch.testing.assert_close(req.qli_metadata, output)
+    else:
+        metadata_op.assert_not_called()
+        torch.testing.assert_close(req.qli_metadata, torch.zeros_like(output))
+    assert builder._qli_metadata is buffer
 
 
 def _impl(role):

@@ -5,6 +5,7 @@ from unittest.mock import ANY, MagicMock, patch
 
 import torch
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, ProfilerConfig, VllmConfig
+from vllm.sequence import IntermediateTensors
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -20,6 +21,51 @@ from vllm_ascend.distributed.eplb.eplb_state import AscendEplbState
 
 init_cached_hf_modules_path = "vllm.utils.import_utils.init_cached_hf_modules"
 kw_module = importlib.import_module("vllm_ascend.model_executor.warmup.kernel_warmup")
+
+
+class TestPPSequenceParallelTransport(unittest.TestCase):
+    @patch("vllm.config.get_current_vllm_config", side_effect=AssertionError("No current config"))
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    @patch("vllm_ascend.worker.worker.get_pp_group")
+    @patch("vllm_ascend.worker.worker.get_tp_group")
+    def test_transport_without_current_config(self, tp_group, pp_group, ascend_config, _current_config):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        ascend_config.return_value.msmonitor_use_daemon = False
+        pp_group.return_value.is_first_rank = False
+        pp_group.return_value.is_last_rank = False
+        pp_group.return_value.irecv_tensor_dict.return_value = ({"hidden_states": torch.ones(2, 4)}, [], [])
+        for sp_enabled, use_v2 in ((False, False), (True, False), (False, True), (True, True)):
+            for forward_pass in (False, True):
+                with self.subTest(sp=sp_enabled, v2=use_v2, forward=forward_pass):
+                    pp_group.return_value.reset_mock()
+                    worker = NPUWorker.__new__(NPUWorker)
+                    worker.vllm_config = SimpleNamespace(
+                        parallel_config=SimpleNamespace(
+                            use_sequence_parallel_moe=sp_enabled,
+                            distributed_executor_backend="mp",
+                        )
+                    )
+                    worker.log_memory_stats = MagicMock()
+                    worker._pp_send_work = []
+                    worker.profiler = None
+                    worker.use_v2_model_runner = use_v2
+                    output = IntermediateTensors({"hidden_states": torch.ones(2, 4)})
+                    output.kv_connector_output = None
+                    worker.model_runner = MagicMock()
+                    worker.model_runner.execute_model.return_value = output
+                    scheduler_output = SimpleNamespace(total_num_scheduled_tokens=int(forward_pass))
+
+                    self.assertIsNone(worker.execute_model(scheduler_output))
+
+                    group = None if use_v2 and sp_enabled else tp_group.return_value
+                    if forward_pass:
+                        pp_group.return_value.irecv_tensor_dict.assert_called_once_with(all_gather_group=group)
+                    else:
+                        pp_group.return_value.irecv_tensor_dict.assert_not_called()
+                    pp_group.return_value.isend_tensor_dict.assert_called_once_with(
+                        output.tensors, all_gather_group=group
+                    )
 
 
 class TestNPUWorker(TestBase):
@@ -39,6 +85,7 @@ class TestNPUWorker(TestBase):
             delattr(self.hf_config_mock, "index_topk")
 
         self.model_config_mock.hf_config = self.hf_config_mock
+        self.model_config_mock.hf_text_config = self.hf_config_mock
 
         self.parallel_config_mock = MagicMock(spec=ParallelConfig)
 
@@ -428,6 +475,7 @@ class TestNPUWorker(TestBase):
     ):
         """Test NPUWorker normal initialization"""
         # Setup mock behavior
+        self.model_config_mock.enable_sleep_mode = False
         mock_ops.register_dummy_fusion_op.return_value = None
         mock_ascend_config = MagicMock()
         mock_ascend_config.enable_cpu_binding = True
@@ -454,6 +502,8 @@ class TestNPUWorker(TestBase):
 
         # Verify cache_dtype setting
         self.assertEqual(worker.cache_dtype, torch.float16)
+        self.assertEqual(worker._sleep_saved_buffers, {})
+        self.assertEqual(worker._sleep_saved_parameters, {})
         # Profiler is lazily initialized - not created during __init__ (RFC #6954)
         mock_profiler_wrapper.assert_not_called()
 
@@ -527,6 +577,7 @@ class TestNPUWorker(TestBase):
         """Test NPUWorker initialization with custom cache_dtype"""
         # Set custom cache_dtype
         self.cache_config_mock.cache_dtype = "float32"
+        self.model_config_mock.enable_sleep_mode = True
         mock_ops.register_dummy_fusion_op.return_value = None
         mock_ascend_config = MagicMock()
         mock_ascend_config.enable_cpu_binding = True
@@ -546,6 +597,8 @@ class TestNPUWorker(TestBase):
 
         # Verify cache_dtype is set to custom value
         self.assertEqual(worker.cache_dtype, torch.float32)
+        self.assertEqual(worker._sleep_saved_buffers, {})
+        self.assertEqual(worker._sleep_saved_parameters, {})
 
     def test_initialize_cache(self):
         """Test initialize_cache method"""
@@ -743,6 +796,7 @@ class TestNPUWorker(TestBase):
             speculative_config=SimpleNamespace(method="mtp"),
         )
         worker._sleep_saved_buffers = {}
+        worker._sleep_saved_parameters = {}
 
         worker.wake_up(tags=["weights"])
 
@@ -830,6 +884,34 @@ class TestNPUWorker(TestBase):
             self.assertEqual(str(result), "npu:1")
             self.assertEqual(worker.init_snapshot, mock_snapshot)
             self.assertEqual(worker.requested_memory, 2000 * 0.5)
+
+    def test_init_device_selects_mm_encoder_runner_under_cuda_wrapper(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        device = torch.device("npu:0")
+        wrapper = MagicMock()
+        wrapper_context = wrapper.return_value
+
+        with (
+            patch.object(NPUWorker, "__init__", lambda self, **kwargs: None),
+            patch.object(NPUWorker, "_init_device", return_value=device),
+            patch("vllm_ascend.worker.worker.init_workspace_manager"),
+            patch("vllm_ascend.worker.worker.report_usage_stats") as report_usage_stats,
+            patch("vllm_ascend.worker.v2.utils.torch_cuda_wrapper", wrapper),
+            patch("vllm.v1.worker.mm_encoder_model_runner.MMEncoderModelRunner") as mm_encoder_runner,
+        ):
+            worker = NPUWorker()
+            worker.use_v2_model_runner = True
+            worker.vllm_config = SimpleNamespace(is_mm_encoder_only=True)
+            worker.rank = 1
+
+            worker.init_device()
+
+        wrapper.assert_called_once_with()
+        wrapper_context.__enter__.assert_called_once_with()
+        mm_encoder_runner.assert_called_once_with(worker.vllm_config, device)
+        self.assertIs(worker.model_runner, mm_encoder_runner.return_value)
+        report_usage_stats.assert_not_called()
 
     def test_profile_start_stop(self):
         """Test profile method start and stop"""
@@ -1050,6 +1132,7 @@ class TestNPUWorker(TestBase):
             worker = NPUWorker()
             worker.compilation_config = MagicMock()
             worker.compilation_config.cudagraph_mode = MagicMock()
+            worker.vllm_config = MagicMock()
             mock_model_runner = MagicMock()
             mock_uniform_decode_query_len = mock_model_runner.uniform_decode_query_len
             worker.model_runner = mock_model_runner
@@ -1161,20 +1244,62 @@ class TestNPUWorker(TestBase):
         worker.get_kv_cache_spec.assert_called_once_with()
 
     def test_explicit_kv_cache_memory_applies_sparse_offload_constraints(self):
+        from vllm.config import get_current_vllm_config
+
         from vllm_ascend.worker.worker import NPUWorker
 
         worker = NPUWorker.__new__(NPUWorker)
         worker._kvpp_cache_allocation_plan = None
         worker.cache_config = SimpleNamespace(kv_cache_memory_bytes=8192)
-        worker.model_runner = MagicMock()
+        worker.vllm_config = MagicMock(kv_transfer_config=None)
         worker.init_snapshot = SimpleNamespace(free_memory=16384)
+        worker._scale_kv_cache_memory_for_multi_group = MagicMock(return_value=6144)
         worker._apply_kv_offload_decode_memory_constraints = MagicMock(return_value=4096)
+
+        # Capture the active vLLM config while profile_run() executes, so we can
+        # verify the fast path runs it inside set_current_vllm_config().
+        profile_run_configs = []
+
+        def record_active_config(*args, **kwargs):
+            profile_run_configs.append(get_current_vllm_config())
+
+        worker.model_runner = MagicMock()
+        worker.model_runner.profile_run.side_effect = record_active_config
 
         result = worker.determine_available_memory()
 
         self.assertEqual(result, 4096)
-        worker.model_runner.profile_run.assert_called_once_with()
-        worker._apply_kv_offload_decode_memory_constraints.assert_called_once_with(8192)
+        worker.model_runner.profile_run.assert_called_once_with(randomize_inputs=False)
+        worker._scale_kv_cache_memory_for_multi_group.assert_called_once_with(8192)
+        worker._apply_kv_offload_decode_memory_constraints.assert_called_once_with(6144)
+        self.assertEqual(profile_run_configs, [worker.vllm_config])
+
+    def test_explicit_kv_cache_memory_converts_kvpp_budget_after_offload(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.cache_config = SimpleNamespace(kv_cache_memory_bytes=8192)
+        worker.vllm_config = MagicMock(kv_transfer_config=None)
+        worker.init_snapshot = SimpleNamespace(free_memory=16384)
+        worker.model_runner = MagicMock()
+        worker._scale_kv_cache_memory_for_multi_group = MagicMock(return_value=6144)
+        worker._apply_kv_offload_decode_memory_constraints = MagicMock(return_value=4096)
+        # The KVPP plan consumes physical bytes and returns a block count;
+        # the worker advertises the corresponding logical cache bytes.
+        plan = SimpleNamespace(
+            get_num_blocks=MagicMock(return_value=8),
+            logical_cache_spec={
+                "layer0": SimpleNamespace(page_size_bytes=64),
+                "layer1": SimpleNamespace(page_size_bytes=32),
+            },
+        )
+        worker._kvpp_cache_allocation_plan = plan
+
+        self.assertEqual(worker.determine_available_memory(), 8 * (64 + 32))
+        self.assertEqual(worker.available_kv_cache_memory_bytes, 4096)
+        worker._scale_kv_cache_memory_for_multi_group.assert_called_once_with(8192)
+        worker._apply_kv_offload_decode_memory_constraints.assert_called_once_with(6144)
+        plan.get_num_blocks.assert_called_once_with(4096)
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.memory_profiling")
@@ -1381,6 +1506,7 @@ class TestNPUWorker(TestBase):
             worker.init_snapshot = mock_init_snapshot
             worker.requested_memory = 10000 * 0.8
             worker.model_runner = MagicMock()
+            worker.vllm_config = MagicMock(kv_transfer_config=None)
             worker.cache_config = MagicMock()
             worker.cache_config.gpu_memory_utilization = 0.8
             worker.cache_config.kv_cache_memory_bytes = None
@@ -1718,13 +1844,11 @@ class TestNPUWorker(TestBase):
 
             with (
                 patch("vllm_ascend.model_executor.warmup.nz_warmup.join_nz_warm_thread") as join_nz,
-                patch("vllm_ascend.model_executor.warmup.early_kernel_warmup.join_early_kernel_warmup") as join_early,
             ):
                 worker.load_model()
 
             worker.model_runner.load_model.assert_called_once()
             join_nz.assert_not_called()
-            join_early.assert_not_called()
 
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
     def test_load_model_sleep_mode_assertion_error(self, mock_allocator_class):
@@ -2077,58 +2201,6 @@ class TestNPUWorker(TestBase):
             )
             worker.model_runner._init_kv_zero_meta.assert_called_once_with()
 
-    @patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized")
-    def test_initialize_from_config_initializes_kv_block_zeroer_for_mrv1_mamba_eagle3(self, mock_ensure_kv_transfer):
-        """MRV1 keeps the original Mamba plus multi-step Eagle3 zeroing path."""
-        from vllm_ascend.worker.worker import NPUWorker
-
-        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
-            worker = NPUWorker()
-            worker.model_runner = MagicMock()
-            worker.vllm_config = MagicMock()
-            worker.vllm_config.speculative_config.method = "eagle3"
-            worker.vllm_config.speculative_config.num_speculative_tokens = 2
-            worker.vllm_config.model_config.enable_sleep_mode = False
-            worker.use_v2_model_runner = False
-
-            mock_kv_cache_config = MagicMock()
-            mock_kv_cache_config.needs_kv_cache_zeroing = True
-            mock_kv_cache_config.has_mamba_layers = True
-
-            worker.initialize_from_config(mock_kv_cache_config)
-
-            worker.model_runner.initialize_kv_cache.assert_called_once_with(
-                mock_kv_cache_config,
-                kv_cache_allocation_context=ANY,
-            )
-            worker.model_runner._init_kv_zero_meta.assert_called_once_with()
-
-    @patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized")
-    def test_initialize_from_config_skips_mrv1_zeroer_for_mixed_precision_only(self, mock_ensure_kv_transfer):
-        """MRV1 mixed-precision attention must not enter the Mamba zeroer."""
-        from vllm_ascend.worker.worker import NPUWorker
-
-        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
-            worker = NPUWorker()
-            worker.model_runner = MagicMock()
-            worker.vllm_config = MagicMock()
-            worker.vllm_config.speculative_config.method = "eagle3"
-            worker.vllm_config.speculative_config.num_speculative_tokens = 2
-            worker.vllm_config.model_config.enable_sleep_mode = False
-            worker.use_v2_model_runner = False
-
-            mock_kv_cache_config = MagicMock()
-            mock_kv_cache_config.needs_kv_cache_zeroing = True
-            mock_kv_cache_config.has_mamba_layers = False
-
-            worker.initialize_from_config(mock_kv_cache_config)
-
-            worker.model_runner.initialize_kv_cache.assert_called_once_with(
-                mock_kv_cache_config,
-                kv_cache_allocation_context=ANY,
-            )
-            worker.model_runner._init_kv_zero_meta.assert_not_called()
-
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.enable_sp", return_value=False)
     @patch("vllm_ascend.worker.worker.get_pp_group")
@@ -2405,7 +2477,7 @@ class TestKVPPWorkerBudget(TestBase):
         worker = worker_module.NPUWorker.__new__(worker_module.NPUWorker)
         worker.vllm_config = make_kvpp_config()
         worker.model_runner = SimpleNamespace(
-            get_kv_cache_spec=lambda: specs, drafter=SimpleNamespace(_draft_attn_layer_names={layer_name(17)})
+            get_kv_cache_spec=lambda: specs, speculator=SimpleNamespace(draft_attn_layer_names={layer_name(17)})
         )
         worker._kvpp_cache_allocation_plan = None
         ascend_config = SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False))
@@ -2435,7 +2507,7 @@ class TestKVPPWorkerBudget(TestBase):
         worker = worker_module.NPUWorker.__new__(worker_module.NPUWorker)
         worker.vllm_config = make_kvpp_config(tp=2, pcp=2)
         worker.model_runner = SimpleNamespace(
-            get_kv_cache_spec=lambda: specs, drafter=SimpleNamespace(_draft_attn_layer_names={layer_name(17)})
+            get_kv_cache_spec=lambda: specs, speculator=SimpleNamespace(draft_attn_layer_names={layer_name(17)})
         )
         worker._kvpp_cache_allocation_plan = None
         ascend_config = SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False))

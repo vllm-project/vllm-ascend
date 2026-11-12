@@ -5,12 +5,29 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
 import torch
+from vllm.distributed.kv_transfer import get_kv_transfer_group
 
 from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.core.kv_cache_placement import build_kvpp_layer_layout, create_kvpp_cache_allocation_plan
 from vllm_ascend.distributed.kvpp import BroadcastKVPPTransport
 from vllm_ascend.distributed.parallel_state import get_kvpp_group
 from vllm_ascend.worker.kvpp_cache import get_kvpp_cache_specs
+
+
+def _uses_layerwise_store(transfer: Any) -> bool:
+    if transfer is None:
+        return False
+    extra_config = getattr(transfer, "kv_connector_extra_config", None) or {}
+    connectors = (
+        extra_config.get("connectors", [])
+        if transfer.kv_connector == "MultiConnector"
+        else [{"kv_connector": transfer.kv_connector, "kv_connector_extra_config": extra_config}]
+    )
+    return any(
+        connector.get("kv_connector") == "AscendStoreConnector"
+        and (connector.get("kv_connector_extra_config") or {}).get("use_layerwise", False)
+        for connector in connectors
+    )
 
 
 class KVPPRuntime:
@@ -57,6 +74,7 @@ class KVPPRuntime:
         scheduler = KVPPScheduler(
             transport=BroadcastKVPPTransport(group, plan.layer_owner_ranks, layer_buffers),
             attention_layer_names=tuple(layer_buffers),
+            layerwise=_uses_layerwise_store(vllm_config.kv_transfer_config),
         )
         for name in layer_buffers:
             static_forward_context[name].impl.layerwise_kv_cache_hook = scheduler
@@ -74,7 +92,10 @@ class KVPPRuntime:
 class KVPPScheduler:
     """Prefetch one layer ahead; Target execution ordinal selects scratch."""
 
-    def __init__(self, transport: BroadcastKVPPTransport, attention_layer_names: tuple[str, ...]) -> None:
+    def __init__(
+        self, transport: BroadcastKVPPTransport, attention_layer_names: tuple[str, ...], *, layerwise: bool = False
+    ) -> None:
+        self.layerwise = layerwise
         self.transport = transport
         self.attention_layer_names = attention_layer_names
         self._has_history = False
@@ -87,7 +108,7 @@ class KVPPScheduler:
     def schedule_forward(self, has_history: bool) -> None:
         self._has_history = has_history
         self._next_attention_layer_index = 0
-        if has_history:
+        if has_history and not self.layerwise:
             self.start_layer_prefetch(self.attention_layer_names[0])
 
     def start_layer_prefetch(self, layer_name: str) -> None:
@@ -97,11 +118,15 @@ class KVPPScheduler:
 
     def run_layer_prefetch(self, layer_name: str, cache_ready: Any) -> None:
         torch.npu.set_device(self._npu_device_id)
+        if self.layerwise:
+            get_kv_transfer_group().wait_for_layer_load_ready(layer_name)
         self.transport.prefetch(layer_name, cache_ready, self._kv_transfer_stream)
 
     def wait_for_layer(self, layer_name: str) -> None:
         if not self._has_history:
             return
+        if self.layerwise and self._prefetch_future is None:
+            self.start_layer_prefetch(layer_name)
         assert self._prefetch_future is not None
         self._prefetch_future.result()
         self._prefetch_future = None

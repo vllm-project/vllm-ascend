@@ -55,10 +55,15 @@ public:
     __aicore__ inline HcCubeCompute(){};
 
     __aicore__ inline void Init(const GlobalTensor<float>& xGm, const GlobalTensor<float>& fnGm, TPipe *tpipe);
-    __aicore__ inline void ComputeDecode(const AscendC::GlobalTensor<float> &xGm, const AscendC::GlobalTensor<float> &workspaceGlobalA2,
-        const AscendC::GlobalTensor<float> &workspaceGlobalAB, const MmParams &mmParams);
+    __aicore__ inline void ComputeDecode(const AscendC::GlobalTensor<float> &xGm,
+        const AscendC::GlobalTensor<float> &nextXGm,
+        const AscendC::GlobalTensor<float> &workspaceGlobalA2,
+        const AscendC::GlobalTensor<float> &workspaceGlobalAB, const MmParams &mmParams,
+        bool a1Preloaded, bool preloadNextTile, uint64_t nextB1Offset, uint64_t nextB1Size);
     __aicore__ inline void CopyInB1(
     uint64_t mGmOffset, uint64_t kGmOffset, uint64_t kL1Size, const MmParams &mmParams);
+    __aicore__ inline void PreloadNextB1(
+    uint64_t kGmOffset, uint64_t kL1Size, const MmParams &mmParams);
     __aicore__ inline void SetBL1Mte1ToMte2Flag();
     __aicore__ inline void WaitBL1Mte1ToMte2Flag();
     __aicore__ inline void End();
@@ -80,6 +85,8 @@ private:
         uint64_t kL1Offset, uint64_t kL0Size, uint64_t l1LoopIdx, const MmParams &mmParams);
     __aicore__ inline void MmadAB(
     uint64_t kGmOffset, uint64_t kL0Size, bool isLastK, const MmParams &mmParams);
+    __aicore__ inline void ComputeL0Pairs(
+        uint64_t l1BaseKOffset, uint64_t curKL1Size, bool closeAccumulator, const MmParams &mmParams);
 
     TPipe *pipe_;
     const HcPreTilingData *tiling_;
@@ -96,11 +103,16 @@ private:
     GlobalTensor<float> yGm_;
 
     static constexpr uint64_t MM1_MTE2_MTE1_EVENT = 2;
+    static constexpr uint64_t B_MTE2_MTE1_EVENT = 4;
     static constexpr uint64_t X_MTE1_MTE2_EVENT = 2;
     static constexpr uint64_t B_MTE1_MTE2_EVENT = 4;
     static constexpr uint64_t M_MTE1_EVENT_L0A = 3;
     static constexpr uint64_t M_MTE1_EVENT_L0B = 5;
+    // Keep the MTE1->M flag tied to the L0B slot. A2 and AB use different
+    // double-buffer slots, so sharing one event serializes otherwise
+    // independent Mmad launches.
     static constexpr uint64_t MTE1_M_EVENT = 2;
+    static constexpr uint64_t SYNC_AIV_TO_AIC_FLAG = 8;
 
     static constexpr uint64_t L1_BUF_NUM = 2;
     static constexpr uint64_t L0A_BUF_NUM = 2;
@@ -172,6 +184,7 @@ __aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::Init(const GlobalTens
         SetFlag<HardEvent::MTE1_MTE2>(X_MTE1_MTE2_EVENT + i);
         SetFlag<HardEvent::MTE1_MTE2>(B_MTE1_MTE2_EVENT + i);
     }
+    AscendC::SetHF32TransMode(1);
 }
 
 HC_PRE_CUBE_COMPUTE_TEMPLATE_PARAM
@@ -205,6 +218,27 @@ __aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::CopyInB1(
     nd2nzParams.dstNzNStride = 1;
     nd2nzParams.dstNzMatrixStride = 1;
     DataCopy(l1b_[(l1bLoopIdx_ % L1_BUF_NUM) * L1_BUF_OFFSET], fnGm_[kGmOffset], nd2nzParams);
+    SetFlag<HardEvent::MTE2_MTE1>(B_MTE2_MTE1_EVENT + l1bLoopIdx_ % L1_BUF_NUM);
+}
+
+HC_PRE_CUBE_COMPUTE_TEMPLATE_PARAM
+__aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::PreloadNextB1(
+    uint64_t kGmOffset, uint64_t kL1Size, const MmParams &mmParams)
+{
+    uint64_t nextB1Idx = (l1bLoopIdx_ + 1) % L1_BUF_NUM;
+    WaitFlag<HardEvent::MTE1_MTE2>(B_MTE1_MTE2_EVENT + nextB1Idx);
+
+    AscendC::Nd2NzParams nd2nzParams;
+    nd2nzParams.ndNum = 1;
+    nd2nzParams.nValue = mmParams.curNL1;
+    nd2nzParams.dValue = kL1Size;
+    nd2nzParams.srcNdMatrixStride = 1;
+    nd2nzParams.srcDValue = mmParams.kGmSize;
+    nd2nzParams.dstNzC0Stride = CeilAlign(mmParams.curNL1, BLOCK_CUBE);
+    nd2nzParams.dstNzNStride = 1;
+    nd2nzParams.dstNzMatrixStride = 1;
+    DataCopy(l1b_[nextB1Idx * L1_BUF_OFFSET], fnGm_[kGmOffset], nd2nzParams);
+    SetFlag<HardEvent::MTE2_MTE1>(B_MTE2_MTE1_EVENT + nextB1Idx);
 }
 
 HC_PRE_CUBE_COMPUTE_TEMPLATE_PARAM
@@ -247,7 +281,7 @@ __aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::Fixp(const AscendC::G
         mmParams.curML1,
         mmParams.curNL1,
         true,
-        mmParams.nOutSize);  // ND M/N are 512B aligned.
+        mmParams.nOutSize);  // ND row stride is aligned to 512B.
 }
 
 HC_PRE_CUBE_COMPUTE_TEMPLATE_PARAM
@@ -264,17 +298,79 @@ __aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::WaitBL1Mte1ToMte2Flag
 }
 
 HC_PRE_CUBE_COMPUTE_TEMPLATE_PARAM
+__aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::ComputeL0Pairs(
+    uint64_t l1BaseKOffset, uint64_t curKL1Size, bool closeAccumulator, const MmParams &mmParams)
+{
+    for (uint64_t kL1Offset = 0; kL1Offset < curKL1Size; kL1Offset += K_L0_SIZE * 2) {
+        uint64_t firstKOffset = l1BaseKOffset + kL1Offset;
+        bool firstIsLast = closeAccumulator && kL1Offset + K_L0_SIZE >= curKL1Size;
+
+        WaitFlag<HardEvent::M_MTE1>(M_MTE1_EVENT_L0A + l0aLoopIdx_ % L0A_BUF_NUM);
+        LoadAToL0A(kL1Offset, K_L0_SIZE, l1aLoopIdx_, mmParams);
+
+        WaitFlag<HardEvent::M_MTE1>(M_MTE1_EVENT_L0B + l0bLoopIdx_ % L0B_BUF_NUM);
+        LoadAToL0B(kL1Offset, K_L0_SIZE, l1aLoopIdx_, mmParams);
+        MmadA2(firstKOffset, K_L0_SIZE, firstIsLast, mmParams);
+        SetFlag<HardEvent::M_MTE1>(M_MTE1_EVENT_L0B + l0bLoopIdx_ % L0B_BUF_NUM);
+        l0bLoopIdx_++;
+
+        WaitFlag<HardEvent::M_MTE1>(M_MTE1_EVENT_L0B + l0bLoopIdx_ % L0B_BUF_NUM);
+        LoadBToL0B(firstKOffset % mmParams.xWsKSize, K_L0_SIZE, l1bLoopIdx_, mmParams);
+        AscendC::SetHF32Mode(1);
+        MmadAB(firstKOffset, K_L0_SIZE, firstIsLast, mmParams);
+        AscendC::SetHF32Mode(0);
+        SetFlag<HardEvent::M_MTE1>(M_MTE1_EVENT_L0B + l0bLoopIdx_ % L0B_BUF_NUM);
+        l0bLoopIdx_++;
+        SetFlag<HardEvent::M_MTE1>(M_MTE1_EVENT_L0A + l0aLoopIdx_ % L0A_BUF_NUM);
+        l0aLoopIdx_++;
+
+        uint64_t secondKL1Offset = kL1Offset + K_L0_SIZE;
+        if (secondKL1Offset >= curKL1Size) {
+            AscendC::SetHF32Mode(0);
+            continue;
+        }
+
+        uint64_t secondKOffset = l1BaseKOffset + secondKL1Offset;
+        bool secondIsLast = closeAccumulator && secondKL1Offset + K_L0_SIZE >= curKL1Size;
+        WaitFlag<HardEvent::M_MTE1>(M_MTE1_EVENT_L0A + l0aLoopIdx_ % L0A_BUF_NUM);
+        LoadAToL0A(secondKL1Offset, K_L0_SIZE, l1aLoopIdx_, mmParams);
+
+        WaitFlag<HardEvent::M_MTE1>(M_MTE1_EVENT_L0B + l0bLoopIdx_ % L0B_BUF_NUM);
+        LoadAToL0B(secondKL1Offset, K_L0_SIZE, l1aLoopIdx_, mmParams);
+        MmadA2(secondKOffset, K_L0_SIZE, secondIsLast, mmParams);
+        SetFlag<HardEvent::M_MTE1>(M_MTE1_EVENT_L0B + l0bLoopIdx_ % L0B_BUF_NUM);
+        l0bLoopIdx_++;
+
+        WaitFlag<HardEvent::M_MTE1>(M_MTE1_EVENT_L0B + l0bLoopIdx_ % L0B_BUF_NUM);
+        LoadBToL0B(secondKOffset % mmParams.xWsKSize, K_L0_SIZE, l1bLoopIdx_, mmParams);
+        AscendC::SetHF32Mode(1);
+        MmadAB(secondKOffset, K_L0_SIZE, secondIsLast, mmParams);
+        SetFlag<HardEvent::M_MTE1>(M_MTE1_EVENT_L0B + l0bLoopIdx_ % L0B_BUF_NUM);
+        l0bLoopIdx_++;
+        AscendC::SetHF32Mode(0);
+        SetFlag<HardEvent::M_MTE1>(M_MTE1_EVENT_L0A + l0aLoopIdx_ % L0A_BUF_NUM);
+        l0aLoopIdx_++;
+    }
+}
+
+HC_PRE_CUBE_COMPUTE_TEMPLATE_PARAM
 __aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::ComputeDecode(
     const AscendC::GlobalTensor<float> &xGm,
+    const AscendC::GlobalTensor<float> &nextXGm,
     const AscendC::GlobalTensor<float> &workspaceGlobalA2, const AscendC::GlobalTensor<float> &workspaceGlobalAB,
-    const MmParams &mmParams)
+    const MmParams &mmParams, bool a1Preloaded, bool preloadNextTile,
+    uint64_t nextB1Offset, uint64_t nextB1Size)
 {
-    WaitFlag<HardEvent::MTE1_MTE2>(X_MTE1_MTE2_EVENT + l1aLoopIdx_ % L1_BUF_NUM);
+    WaitFlag<HardEvent::MTE2_MTE1>(B_MTE2_MTE1_EVENT + l1bLoopIdx_ % L1_BUF_NUM);
     uint64_t kGmOffset = 0;
+    bool nextB1Issued = false;
     uint64_t curKL1Size = (kGmOffset + mmParams.curKL1 >= mmParams.singleCoreK) ? (mmParams.singleCoreK - kGmOffset) : mmParams.curKL1;
-    CopyInA1(curKL1Size, xGm[kGmOffset], l1a_[(l1aLoopIdx_ % DOUBLE_BUFFER) * L1_BUF_OFFSET], mmParams);
-
-    SetFlag<HardEvent::MTE2_MTE1>(MM1_MTE2_MTE1_EVENT + l1aLoopIdx_ % L1_BUF_NUM);
+    if (!a1Preloaded) {
+        WaitFlag<HardEvent::MTE1_MTE2>(X_MTE1_MTE2_EVENT + l1aLoopIdx_ % L1_BUF_NUM);
+        CopyInA1(curKL1Size, xGm[kGmOffset],
+            l1a_[(l1aLoopIdx_ % DOUBLE_BUFFER) * L1_BUF_OFFSET], mmParams);
+        SetFlag<HardEvent::MTE2_MTE1>(MM1_MTE2_MTE1_EVENT + l1aLoopIdx_ % L1_BUF_NUM);
+    }
     kGmOffset += mmParams.curKL1;
     while (kGmOffset < mmParams.singleCoreK) {
         WaitFlag<HardEvent::MTE1_MTE2>(X_MTE1_MTE2_EVENT + (l1aLoopIdx_ + 1) % L1_BUF_NUM);
@@ -282,64 +378,39 @@ __aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::ComputeDecode(
         CopyInA1(nextKL1Size, xGm[kGmOffset], l1a_[((l1aLoopIdx_ + 1) % DOUBLE_BUFFER) * L1_BUF_OFFSET], mmParams);
 
         SetFlag<HardEvent::MTE2_MTE1>(MM1_MTE2_MTE1_EVENT + (l1aLoopIdx_ + 1) % L1_BUF_NUM);
+        if (preloadNextTile && kGmOffset + nextKL1Size >= mmParams.singleCoreK) {
+            // Queue the next B1 behind the final current-tile A1.
+            PreloadNextB1(nextB1Offset, nextB1Size, mmParams);
+            nextB1Issued = true;
+        }
         WaitFlag<HardEvent::MTE2_MTE1>(MM1_MTE2_MTE1_EVENT + l1aLoopIdx_ % L1_BUF_NUM);
 
-        for (uint64_t kL1Offset = 0; kL1Offset < curKL1Size; kL1Offset += K_L0_SIZE) {  // K_L0_SIZE 32
-            WaitFlag<HardEvent::M_MTE1>(M_MTE1_EVENT_L0A + l0aLoopIdx_ % L0A_BUF_NUM);
-            LoadAToL0A(kL1Offset, K_L0_SIZE, l1aLoopIdx_, mmParams);
-
-            WaitFlag<HardEvent::M_MTE1>(M_MTE1_EVENT_L0B + l0bLoopIdx_ % L0B_BUF_NUM);
-            LoadAToL0B(kL1Offset, K_L0_SIZE, l1aLoopIdx_, mmParams);
-            MmadA2(kGmOffset + kL1Offset - mmParams.curKL1, K_L0_SIZE,
-            false,
-            mmParams);
-            SetFlag<HardEvent::M_MTE1>(M_MTE1_EVENT_L0B + l0bLoopIdx_ % L0B_BUF_NUM);
-            l0bLoopIdx_++;
-
-            WaitFlag<HardEvent::M_MTE1>(M_MTE1_EVENT_L0B + l0bLoopIdx_ % L0B_BUF_NUM);
-            LoadBToL0B((kGmOffset + kL1Offset - mmParams.curKL1) % mmParams.xWsKSize, K_L0_SIZE, l1bLoopIdx_, mmParams);
-            MmadAB(kGmOffset + kL1Offset - mmParams.curKL1, K_L0_SIZE,
-                false,
-                mmParams);
-            SetFlag<HardEvent::M_MTE1>(M_MTE1_EVENT_L0B + l0bLoopIdx_ % L0B_BUF_NUM);
-            l0bLoopIdx_++;
-
-            SetFlag<HardEvent::M_MTE1>(M_MTE1_EVENT_L0A + l0aLoopIdx_ % L0A_BUF_NUM);
-            l0aLoopIdx_++;
-        }
+        ComputeL0Pairs(kGmOffset - mmParams.curKL1, curKL1Size, false, mmParams);
         SetFlag<HardEvent::MTE1_MTE2>(X_MTE1_MTE2_EVENT + l1aLoopIdx_ % L1_BUF_NUM);
         l1aLoopIdx_++;
         kGmOffset += mmParams.curKL1;
         curKL1Size = nextKL1Size;
     }
 
-    WaitFlag<HardEvent::MTE2_MTE1>(MM1_MTE2_MTE1_EVENT + l1aLoopIdx_ % L1_BUF_NUM);
-    for (uint64_t kL1Offset = 0; kL1Offset < curKL1Size; kL1Offset += K_L0_SIZE) {
-        WaitFlag<HardEvent::M_MTE1>(M_MTE1_EVENT_L0A + l0aLoopIdx_ % L0A_BUF_NUM);
-        LoadAToL0A(kL1Offset, K_L0_SIZE, l1aLoopIdx_, mmParams);  // to l0a
-
-        WaitFlag<HardEvent::M_MTE1>(M_MTE1_EVENT_L0B + l0bLoopIdx_ % L0B_BUF_NUM);
-        LoadAToL0B(kL1Offset, K_L0_SIZE, l1aLoopIdx_, mmParams);  // to l0b
-        MmadA2(kGmOffset + kL1Offset - mmParams.curKL1, K_L0_SIZE,
-            mmParams.isLastK && kL1Offset + K_L0_SIZE >= curKL1Size, mmParams);
-        SetFlag<HardEvent::M_MTE1>(M_MTE1_EVENT_L0B + l0bLoopIdx_ % L0B_BUF_NUM);
-        l0bLoopIdx_++;
-
-        WaitFlag<HardEvent::M_MTE1>(M_MTE1_EVENT_L0B + l0bLoopIdx_ % L0B_BUF_NUM);
-        LoadBToL0B((kGmOffset + kL1Offset - mmParams.curKL1)  % mmParams.xWsKSize, K_L0_SIZE, l1bLoopIdx_, mmParams);  // to l0b
-        MmadAB(kGmOffset + kL1Offset - mmParams.curKL1, K_L0_SIZE,
-            mmParams.isLastK && kL1Offset + K_L0_SIZE >= curKL1Size,
-            mmParams);
-        SetFlag<HardEvent::M_MTE1>(M_MTE1_EVENT_L0B + l0bLoopIdx_ % L0B_BUF_NUM);
-        l0bLoopIdx_++;
-
-        SetFlag<HardEvent::M_MTE1>(M_MTE1_EVENT_L0A + l0aLoopIdx_ % L0A_BUF_NUM);
-        l0aLoopIdx_++;
+    if (preloadNextTile) {
+        // Keep the shared MTE2 queue bounded to the next B1 transfer and first
+        // A1 tile. Single-L1 tiles use this fallback to issue B1 here.
+        if (!nextB1Issued) {
+            PreloadNextB1(nextB1Offset, nextB1Size, mmParams);
+        }
+        CrossCoreWaitFlag(SYNC_AIV_TO_AIC_FLAG);
+        uint64_t nextA1Idx = (l1aLoopIdx_ + 1) % L1_BUF_NUM;
+        WaitFlag<HardEvent::MTE1_MTE2>(X_MTE1_MTE2_EVENT + nextA1Idx);
+        uint64_t nextA1Size = nextB1Size < mmParams.curKL1 ? nextB1Size : mmParams.curKL1;
+        CopyInA1(nextA1Size, nextXGm, l1a_[nextA1Idx * L1_BUF_OFFSET], mmParams);
+        SetFlag<HardEvent::MTE2_MTE1>(MM1_MTE2_MTE1_EVENT + nextA1Idx);
     }
+    WaitFlag<HardEvent::MTE2_MTE1>(MM1_MTE2_MTE1_EVENT + l1aLoopIdx_ % L1_BUF_NUM);
+    ComputeL0Pairs(kGmOffset - mmParams.curKL1, curKL1Size, mmParams.isLastK, mmParams);
     SetFlag<HardEvent::MTE1_MTE2>(X_MTE1_MTE2_EVENT + l1aLoopIdx_ % L1_BUF_NUM);
     l1aLoopIdx_++;
     if (mmParams.isLastK) {
-        Fixp(workspaceGlobalA2, workspaceGlobalAB, mmParams);  // l0cLoopIdx_++;
+        Fixp(workspaceGlobalA2, workspaceGlobalAB, mmParams);
     }
 }
 
@@ -418,8 +489,9 @@ HC_PRE_CUBE_COMPUTE_TEMPLATE_PARAM
 __aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::MmadA2(
     uint64_t kGmOffset, uint64_t kL0Size, bool isLastK, const MmParams &mmParams)
 {
-    SetFlag<HardEvent::MTE1_M>(MTE1_M_EVENT);
-    WaitFlag<HardEvent::MTE1_M>(MTE1_M_EVENT);
+    uint64_t mte1MEvent = MTE1_M_EVENT + (l0bLoopIdx_ % L0B_BUF_NUM);
+    SetFlag<HardEvent::MTE1_M>(mte1MEvent);
+    WaitFlag<HardEvent::MTE1_M>(mte1MEvent);
     for (uint64_t mL0Offset = 0; mL0Offset < mmParams.curML1; mL0Offset += BLOCK_CUBE) {
         MmadParams mmadParams;
         mmadParams.m = BLOCK_CUBE;
@@ -457,10 +529,9 @@ HC_PRE_CUBE_COMPUTE_TEMPLATE_PARAM
 __aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::MmadAB(
     uint64_t kGmOffset, uint64_t kL0Size, bool isLastK, const MmParams &mmParams)
 {
-    SetFlag<HardEvent::MTE1_M>(MTE1_M_EVENT);
-    WaitFlag<HardEvent::MTE1_M>(MTE1_M_EVENT);
-    AscendC::SetHF32Mode(1);
-    AscendC::SetHF32TransMode(1);
+    uint64_t mte1MEvent = MTE1_M_EVENT + (l0bLoopIdx_ % L0B_BUF_NUM);
+    SetFlag<HardEvent::MTE1_M>(mte1MEvent);
+    WaitFlag<HardEvent::MTE1_M>(mte1MEvent);
     MmadParams mmadParams;
     mmadParams.m = CeilAlign(mmParams.curML1, BLOCK_CUBE);
     mmadParams.n = mmParams.curNL1;
@@ -473,7 +544,6 @@ __aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::MmadAB(
         l0a_[(l0aLoopIdx_ % L0A_BUF_NUM) * L0AB_BUF_OFFSET],
         l0b_[(l0bLoopIdx_ % L0AB_BUF_NUM) * L0AB_BUF_OFFSET],
         mmadParams);
-    AscendC::SetHF32Mode(0);
 }
 
 }  // namespace HcPre

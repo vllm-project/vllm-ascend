@@ -80,13 +80,6 @@ msgid "Batch invariance has been tested and verified on the following models:"
 msgstr "批次不变性已在以下模型上进行了测试和验证："
 
 msgid ""
-"- **Qwen3 (Dense)**: `Qwen/Qwen3-1.7B`, `Qwen/Qwen3-8B`\n"
-"- **Qwen3 (MoE)**: `Qwen/Qwen3-30B-A3B`, `Qwen/Qwen3-235B-A22B`"
-msgstr ""
-"- **Qwen3 (密集模型)**：`Qwen/Qwen3-1.7B`、`Qwen/Qwen3-8B`\n"
-"- **Qwen3 (MoE)**：`Qwen/Qwen3-30B-A3B`、`Qwen/Qwen3-235B-A22B`"
-
-msgid ""
 "Other models may also work, but these have been explicitly validated. If you"
 " encounter issues with a specific model, please report them on the [GitHub "
 "issue tracker](https://github.com/vllm-project/vllm-"
@@ -304,3 +297,12 @@ msgstr ""
 "request`）根据 KV 缓存容量来规划你的工作负载，并关注引擎统计信息：`GPU KV cache usage` 接近 100% "
 "表示即将发生抢占。详情请参阅[抢占常见问题](../../faqs.md#22-why-does-tpot-increase-drastically-"
 "as-concurrency-grows)。"
+
+msgid "| Model | Atlas A2 | Atlas A3 | 950PR&950DT Products |"
+msgstr "| 模型 | Atlas A2 | Atlas A3 | Ascend 950PR&950DT系列产品 |"
+
+msgid "| `Qwen/Qwen3-1.7B` | ✅ | ✅ | ✅ |"
+msgstr "| `Qwen/Qwen3-1.7B` | ✅ | ✅ | ✅ |"
+
+msgid "| `Qwen/Qwen3.5-35B-A3B` | ✅ | ✅ | ❌ |"
+msgstr "| `Qwen/Qwen3.5-35B-A3B` | ✅ | ✅ | ❌ |"

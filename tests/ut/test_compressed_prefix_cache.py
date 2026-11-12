@@ -8,12 +8,15 @@ import torch
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
+
+# vLLM #61183 moved `is_kv_cache_spec_uniform` to `kv_cache_planning` on main;
+# the v0.33.0 lane still ships it in `kv_cache_utils`.
+from vllm.v1.core.kv_cache_planning import is_kv_cache_spec_uniform
 from vllm.v1.core.kv_cache_utils import (
     BlockHashListWithBlockSize,
     get_block_hash,
     get_request_block_hasher,
     init_none_hash,
-    is_kv_cache_spec_uniform,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,

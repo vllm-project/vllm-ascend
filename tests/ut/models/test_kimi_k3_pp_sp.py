@@ -5,6 +5,7 @@
 import __future__
 
 import ast
+import logging
 import threading
 from bisect import bisect_left, bisect_right
 from concurrent.futures import ThreadPoolExecutor
@@ -268,7 +269,7 @@ def runtime(monkeypatch):
         monkeypatch.setattr(torch.ops.vllm, name, namespace[f"_{name}"], raising=False)
     monkeypatch.setattr(torch.ops._C_ascend, "attn_res_fwd", attn_res_fwd_cpu, raising=False)
     load_definitions(
-        "vllm_ascend/models/kimi_k3.py",
+        "vllm_ascend/models/kimi_k3/kimi_k3.py",
         {"AscendKimiLinearModel", "AscendKimiDecoderLayer", "AscendKimiMLP"},
         namespace,
         bases={
@@ -467,15 +468,19 @@ def test_draft_mapper_reuses_upstream_rules(owns_embed):
         {".gate_proj": (".gate_up_proj", 0)},
     )
     captured = []
+
+    def load_weights(weights, *, mapper):
+        captured.append(mapper)
+        return {name for name, _ in weights}
+
     namespace = {
         "BaseModel": nn.Module,
         "replace": replace,
-        "AutoWeightsLoader": lambda model: SimpleNamespace(
-            load_weights=lambda weights, mapper: captured.append(mapper)
-        ),
+        "logger": logging.getLogger(__name__),
+        "AutoWeightsLoader": lambda model: SimpleNamespace(load_weights=load_weights),
     }
     load_definitions(
-        "vllm_ascend/models/kimi_k3_dspark.py",
+        "vllm_ascend/models/kimi_k3/kimi_k3_dspark.py",
         {"AscendK3DSparkForCausalLM"},
         namespace,
         bases={"AscendK3DSparkForCausalLM": "BaseModel"},
@@ -484,7 +489,7 @@ def test_draft_mapper_reuses_upstream_rules(owns_embed):
     model = namespace["AscendK3DSparkForCausalLM"]()
     model.hf_to_vllm_mapper = mapper
     model._owns_embed_tokens = owns_embed
-    model.load_weights([])
+    assert model.load_weights([]) == set()
     selected = captured[0]
     expected = dict(mapper.orig_to_new_substr)
     if owns_embed:
@@ -577,9 +582,17 @@ def test_host_positions_after_rejection_or_chunk(
         {"NPUModelRunner"},
         namespace,
         bases={"NPUModelRunner": "BaseStateRunner"},
-        methods={"NPUModelRunner": {"postprocess_sampled", "postprocess_num_computed_tokens", "_update_seq_lens_cpu"}},
+        methods={
+            "NPUModelRunner": {
+                "_can_skip_spec_cpu_length_sync",
+                "postprocess_sampled",
+                "postprocess_num_computed_tokens",
+                "_update_seq_lens_cpu",
+            }
+        },
     )
     runner = namespace["NPUModelRunner"]()
+    runner.speculative_config = None
     runner.speculator = object() if owns_speculator else None
     runner.use_pp = use_pp
     runner.is_last_pp_rank = not use_pp

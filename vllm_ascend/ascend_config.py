@@ -20,6 +20,9 @@ import importlib.util
 import json
 import math
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from statistics import NormalDist
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
@@ -29,6 +32,7 @@ from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.config_utils import config
+from vllm_ascend.device.device_config import is_950
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
 
 if TYPE_CHECKING:
@@ -263,10 +267,14 @@ class StairConfig:
 class AscendWarmupConfig:
     """Configuration for startup warmup that overlaps weight loading.
 
-    Both threads are joined at the end of ``load_model``, before memory
-    profiling, so they never touch the KV cache budget.
+    The early warmup threads are joined at the end of ``load_model``, before
+    memory profiling, so they never touch the KV cache budget.
     """
 
+    # Deprecated no-op: Triton kernels now register into the upstream
+    # JitWarmupRegistry and compile in ``kernel_warmup`` (see
+    # vllm_ascend/model_executor/warmup/kernel_warmup.py). Kept so existing
+    # additional_config JSON keeps parsing.
     enable_early_kernel_warmup: bool = False
     enable_early_nz_warmup: bool = False
 
@@ -349,6 +357,11 @@ class RejectionSamplerConfig:
 
     @model_validator(mode="after")
     def _validate(self):
+        if self.enable_block_verify:
+            raise ValueError(
+                "rejection_sampler_config.enable_block_verify is no longer supported: Block Verify was only "
+                "implemented in Model Runner V1. Use enable_entropy_verify instead."
+            )
         if not (0 < self.posterior_threshold <= 1):
             raise ValueError(
                 f"rejection_sampler_config.posterior_threshold must be in (0, 1], got {self.posterior_threshold}"
@@ -392,6 +405,50 @@ class RlConfig:
         os.environ["VLLM_SERVER_DEV_MODE"] = "1"
 
 
+@config(config=ConfigDict(frozen=True))
+class QuantizedAllReduceConfig:
+    """Configuration Object for ``additional_config["quantized_all_reduce_config"]``.
+
+    Opt-in int8 quantized all-reduce for large bf16 TP collectives (Atlas A2 only,
+    1 < TP <= 8). A collective takes the int8 path only when its payload reaches
+    ``min_numel`` elements, i.e. ``min_numel * 2`` bytes of bf16 data: the default
+    16,777,216 elements is 32 MiB, the measured break-even rounded up.
+
+    The wrapper is built for every parallel group, but only groups with at most
+    8 ranks take the int8 path; EP/MC2 groups (``DP x PCP x TP``) keep bf16. The
+    TP degree itself is validated here, so an unsupported TP fails at config
+    parsing time instead of when some parallel group is constructed.
+    """
+
+    enable: bool = False
+    min_numel: int = 16777216
+
+    @field_validator("min_numel")
+    @classmethod
+    def _check_min_numel(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("additional_config.quantized_all_reduce_config.min_numel must be >= 1")
+        return value
+
+    def _validate_preconditions(self, vllm_config: Any) -> None:
+        if not self.enable:
+            return
+        # Imported lazily: the wrapper module imports torch_npu, which should not
+        # be pulled in from the config factory at module import time.
+        from vllm_ascend.distributed.device_communicators.quantized_all_reduce import (
+            _MAX_VALID_WORLD_SIZE,
+        )
+
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
+        if tp_size > _MAX_VALID_WORLD_SIZE:
+            raise ValueError(
+                "additional_config.quantized_all_reduce_config supports "
+                f"tensor_parallel_size <= {_MAX_VALID_WORLD_SIZE} (the integer-safe "
+                f"int8 bound leaves too few quantization levels beyond that), but "
+                f"tensor_parallel_size is {tp_size}. Disable the feature or lower TP."
+            )
+
+
 @config
 class AscendConfig:
     """Configuration Object for additional_config from vllm.configs.
@@ -425,16 +482,15 @@ class AscendConfig:
             "enable_prefill_mc2": false,
             "multistream_overlap_shared_expert": false,
             "enable_kv_nz": false,
+            "kv_pool_range_debug": false,
             "enable_mc2_hierarchy_comm": false,
-            "enable_dsa_cp": false,
             "sfa_dcp_force_tmajor_restore": false,
             "enable_force_eplb": false,
             "enable_pcp_o_proj_weight_sharding": true,
             "enable_pcp_embedding_lmhead_weight_sharding": true,
-            "draft_window_size": null,
             "mix_placement": false,
             "pa_shape_list": [],
-            "mega_moe_max_tokens": 65536,
+            "mega_moe_max_tokens": 0,
             "ascend_log_path": "~/ascend/log/vllm_ascend",
             "enable_fused_mc2": 0,
             "enable_mlapo": true,
@@ -473,7 +529,6 @@ class AscendConfig:
                 "stair_config": {}
             },
             "rejection_sampler_config": {
-                "enable_block_verify": false,
                 "enable_entropy_verify": false,
                 "posterior_threshold": 0.95,
                 "posterior_alpha": 0.4
@@ -484,15 +539,19 @@ class AscendConfig:
                 "enable_training_consistency": false,
                 "enable_batch_invariant": false
             },
+            "quantized_all_reduce_config": {
+                "enable": false,
+                "min_numel": 16777216
+            },
             "xlite_graph_config": {
                 "enabled": false,
                 "full_mode": false
             },
             "finegrained_tp_config": {
-                "oproj_tensor_parallel_size": 0,
-                "lmhead_tensor_parallel_size": 0,
-                "embedding_tensor_parallel_size": 0,
-                "mlp_tensor_parallel_size": 0
+                "oproj_tensor_parallel_size": 1,
+                "lmhead_tensor_parallel_size": 1,
+                "embedding_tensor_parallel_size": 1,
+                "mlp_tensor_parallel_size": 1
             },
             "scheduler_config": {
                 "enable_balance_scheduling": false,
@@ -528,14 +587,10 @@ class AscendConfig:
                     "dynamic_max_step": 256
                 }
             },
-            "dynamic_spec_config": {
-                "method": null,
-                "method_params": {}
-            },
             "sparse_kv_offload_config": {
                 "enabled": false,
                 "topk_buffer_size": -1,
-                "dram_size_per_dp_GB": 128,
+                "dram_size_per_dp_GB": 110,
                 "keep_device_kv_cache": false
             }
         }
@@ -567,19 +622,19 @@ class AscendConfig:
     # FULL graphs wait on descriptor-specific external events at consumers.
     # Default to overlap on A5 only; explicit settings override this policy.
     multistream_engram_overlap: bool = dataclasses.field(
-        default_factory=lambda: get_current_hardware_profile().device_adaptor_family
-        == DeviceAdaptorFamily.FP8_OPTIMIZED
+        default_factory=lambda: (
+            get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
+        )
     )
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
+    kv_pool_range_debug: bool = False
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
-    enable_dsa_cp: bool = False
     sfa_dcp_force_tmajor_restore: bool = False
     enable_force_eplb: bool = False
     enable_pcp_o_proj_weight_sharding: bool = True
     enable_pcp_embedding_lmhead_weight_sharding: bool = True
-    draft_window_size: int | None = None
     mix_placement: bool = False
     # When non-zero, force the MC2 combine stage's comm quant_mode to this
     # value (e.g. 4 = MXFP float8_e4m3 communication quantization) regardless of the
@@ -587,13 +642,16 @@ class AscendConfig:
     combine_quant_mode: Literal[0, 2, 3, 4] = 0
     pa_shape_list: list[Any] = dataclasses.field(default_factory=list)
     # Per-rank token capacity after dispatch in the fused MC2/MegaMoe path.
-    # The same value is passed as dispatch_ffn_combine's max_output_size
-    # and CANN MegaMoe buffer's max_recv_token_num.
-    # This is a reference value: if the actual per-rank received token
-    # count exceeds it, tokens may be truncated, causing precision
-    # degradation. Do not set it too large because workspace memory scales
-    # linearly with this value. Default 65536.
-    mega_moe_max_tokens: int = 65536
+    # MegaMoe (enable_fused_mc2=2/3): passed as the symm buffer's
+    # max_recv_token_num. 0 (default) lets the operator auto-compute it as
+    # num_max_tokens_per_rank * ep_world_size * min(num_topk, expert_per_rank).
+    # A positive value is used as a reference capacity instead: if the actual
+    # per-rank received token count exceeds it, tokens may be truncated,
+    # causing precision degradation. Do not set it too large because
+    # workspace memory scales linearly with this value.
+    # Plain MC2 (enable_fused_mc2=1): the same value is passed as
+    # dispatch_ffn_combine's max_output_size; 0 falls back to 65536 there.
+    mega_moe_max_tokens: int = 0
     ascend_log_path: str = dataclasses.field(
         default_factory=lambda: os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
     )
@@ -606,6 +664,10 @@ class AscendConfig:
 
     # ---- A-family (envs fallback): default = envs module value, before-validator injects ----
     enable_fused_mc2: int = 0
+    # Derived from enable_fused_mc2=3: MegaMoE runs the shared expert inside
+    # the operator instead of the separate shared-expert forward. enable_fused_mc2=2
+    # keeps the shared expert separate. Internal flag, not user-settable.
+    megamoe_shared_expert_fusion: bool = False
     enable_mlapo: bool = True
     # When True, keep MLAPO prefill weights on NPU instead of freeing them
     # on kv_consumer D nodes. Trades NPU memory for stability — D nodes have
@@ -624,18 +686,21 @@ class AscendConfig:
     eplb_config: EplbConfig = dataclasses.field(default_factory=EplbConfig)
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)
+    quantized_all_reduce_config: QuantizedAllReduceConfig = dataclasses.field(default_factory=QuantizedAllReduceConfig)
 
     # ---- sub-configs declared later in this module ----
     # Lambdas defer class lookup until construction, after module initialization.
     xlite_graph_config: XliteGraphConfig = dataclasses.field(default_factory=lambda: XliteGraphConfig())
     finegrained_tp_config: FinegrainedTPConfig = dataclasses.field(default_factory=lambda: FinegrainedTPConfig())
     scheduler_config: SchedulerConfig = dataclasses.field(default_factory=lambda: SchedulerConfig())
-    dynamic_spec_config: DynamicSpecConfig = dataclasses.field(default_factory=lambda: DynamicSpecConfig())
     # Still factory-injected: construction depends on vllm_config.
     sparse_kv_offload_config: Any = dataclasses.field(kw_only=True)
     kvpp_config: KVPPConfig = dataclasses.field(default_factory=KVPPConfig, kw_only=True)
 
     # ---- derived fields: sentinel default, after-validator overwrites ----
+    # This switches the prefill recurrence; keep opt-in until cold/cache-hit
+    # numerical equivalence and performance are qualified on supported NPUs.
+    gdn_internal_prefill_checkpoints: bool = False
     enable_shared_expert_dp: bool = False
     enable_sp_by_pass: bool = False
     enable_sparse_sfa_turboquant: bool = False
@@ -668,9 +733,22 @@ class AscendConfig:
         if self.enable_fused_mc2 in (0, 1):
             # When enable_fused_mc2=1, roll back to dispatch_ffn_combine.
             _MEGA_MOE_SUPPORTED = False
-        elif self.enable_fused_mc2 == 2:
+        elif self.enable_fused_mc2 in (2, 3):
+            # =2: MegaMoe with the shared expert kept separate; =3: MegaMoe
+            # with the shared expert fused into the operator.
+            self.megamoe_shared_expert_fusion = self.enable_fused_mc2 == 3
             _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
+            if self.enable_fused_mc2 == 3 and not _MEGA_MOE_SUPPORTED:
+                logger.warning_once(
+                    "enable_fused_mc2=3 requires the cann_ops_transformer package; "
+                    "MegaMoe (and its shared-expert fusion) will be disabled."
+                )
             self.enable_fused_mc2 = 1
+        else:
+            raise ValueError(
+                "enable_fused_mc2 must be one of 0, 1, 2 (MegaMoE) or 3 "
+                f"(MegaMoE + shared-expert fusion); got {self.enable_fused_mc2}"
+            )
         return self
 
     # ---- derivations + cross-config downgrades/mutex ----
@@ -690,6 +768,14 @@ class AscendConfig:
             # DP-dummy ranks have no hash work in MRV2. Share host tables
             # across DP and PCP peers to avoid per-step lookup collectives.
             engram_config.dp_shared_memory = True
+        if self.enable_force_eplb:
+            logger.warning(
+                "enable_force_eplb is enabled: it forces a deterministic round-robin "
+                "expert routing that replaces the real MoE router output. The model "
+                "results and accuracy are therefore invalid. This is an analysis-only "
+                "switch for measuring the EPLB performance ceiling and must not be "
+                "used in production."
+            )
         if (
             self.enable_force_eplb
             and self.eplb_config.dynamic_eplb
@@ -697,22 +783,16 @@ class AscendConfig:
             and vc.model_config.is_moe
         ):
             raise ValueError("enable_force_eplb cannot be mixed with dynamic_eplb.")
-        if self.enable_dsa_cp and vc.parallel_config.prefill_context_parallel_size > 1:
-            raise ValueError(
-                "DSA-CP and PCP cannot be enabled at the same time. "
-                "Use PCP instead: remove enable_dsa_cp from additional_config "
-                "when --prefill-context-parallel-size is greater than 1."
-            )
-        if self.enable_dsa_cp and vc.use_v2_model_runner:
-            raise ValueError(
-                "DSA-CP is not supported by Model Runner V2. "
-                "Remove enable_dsa_cp from additional_config and use "
-                "prefill context parallelism (PCP) instead."
-            )
         self._check_mooncake_c8_kv_cache_quant(vc)
 
         # profiling_chunk vs min_chunk clamp
         if self.scheduler_config.profiling_chunk_config.enabled:
+            logger.warning_once(
+                "Dynamic chunk size Chunked Pipeline Parallelism (CPP) is deprecated "
+                "as of v0.32.0 and has entered the sunset process. It will be removed "
+                "in a future release. See RFC #21304 (https://github.com/vllm-project/vllm-ascend/issues/21304) "
+                "for details and migration guidance."
+            )
             max_batched = vc.scheduler_config.max_num_batched_tokens
             if max_batched < self.scheduler_config.profiling_chunk_config.min_chunk:
                 logger.warning(
@@ -747,16 +827,10 @@ class AscendConfig:
             and vc.parallel_config.tensor_parallel_size > 1
         )
         # FlashComm remains the SP MoE switch on Ascend.
-        flashcomm_explicitly_enabled = validate_additional_config_bool(
+        effective_flashcomm = validate_additional_config_bool(
             (vc.additional_config or {}).get("enable_flashcomm1", False),
             "additional_config.enable_flashcomm1",
         ) or os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0").strip().lower() in ("1", "true")
-        # DSA-CP depends on FlashComm: auto-enable FlashComm when DSA-CP is on
-        # so users only need `enable_dsa_cp=true` in additional_config.
-        if self.enable_dsa_cp and not flashcomm_explicitly_enabled:
-            logger.info_once("DSA-CP is enabled. Auto-enabling FlashComm .")
-
-        effective_flashcomm = flashcomm_explicitly_enabled or self.enable_dsa_cp
 
         if not effective_flashcomm:
             vllm_config.parallel_config.all2all_backend = (
@@ -768,40 +842,18 @@ class AscendConfig:
         else:
             logger.info_once("FlashComm1 is enabled.")
 
-        if self.enable_dsa_cp:
-            tp_size = vc.parallel_config.tensor_parallel_size
-            if tp_size > 1:
-                migration = (
-                    "Consider trying prefill context parallelism with "
-                    f"--tensor-parallel-size 1 --prefill-context-parallel-size {tp_size} "
-                    "to preserve the current world size. Remove enable_dsa_cp from "
-                    "additional_config when enabling PCP."
-                )
-            else:
-                migration = (
-                    "Consider trying prefill context parallelism with "
-                    "--prefill-context-parallel-size greater than 1 (requires additional ranks). "
-                    "Remove enable_dsa_cp from additional_config when enabling PCP."
-                )
+        # quantized_all_reduce_config and FlashComm1/SP are mutually exclusive:
+        # SP replaces TP all-reduce with all-gather/reduce-scatter, so the
+        # quantized all-reduce wrapper would never be invoked.
+        sp_active = effective_flashcomm and vc.parallel_config.use_sequence_parallel_moe
+        if sp_active and self.quantized_all_reduce_config.enable:
             logger.warning_once(
-                "enable_dsa_cp will be fully deprecated once PCP is ready. %s "
-                "Check PCP support for your model and deployment configuration.",
-                migration,
+                "additional_config.quantized_all_reduce_config is enabled together "
+                "with FlashComm1/SP. Sequence parallelism replaces TP all-reduce "
+                "with all-gather/reduce-scatter, so the int8 quantized all-reduce "
+                "would never be used. Disabling quantized_all_reduce_config."
             )
-
-        # DSA CP is only applicable to models with an indexer (for example,
-        # DeepSeek V3.2/V4). Resolve this while vllm_config is explicitly
-        # available so runtime reads do not depend on vLLM's temporary config
-        # context.
-        has_indexer = hasattr(vc.model_config, "hf_text_config") and hasattr(
-            vc.model_config.hf_text_config, "index_topk"
-        )
-        if self.enable_dsa_cp and not vc.parallel_config.use_sequence_parallel_moe:
-            logger.warning_once(
-                "DSA-CP is enabled, but the current config does not support sequence-parallel MoE. Disabling DSA-CP."
-            )
-        self.enable_dsa_cp = self.enable_dsa_cp and has_indexer and vc.parallel_config.use_sequence_parallel_moe
-
+            self.quantized_all_reduce_config = dataclasses.replace(self.quantized_all_reduce_config, enable=False)
         # Sequence-parallel max_num_batched_tokens divisibility writeback
         if vc.parallel_config.prefill_context_parallel_size > 1 and enable_sp(vllm_config=vc):
             tp_pcp_size = vc.parallel_config.tensor_parallel_size * vc.parallel_config.prefill_context_parallel_size
@@ -817,8 +869,8 @@ class AscendConfig:
                 )
 
         finegrained_tp_enabled = (
-            self.finegrained_tp_config.oproj_tensor_parallel_size > 0
-            or self.finegrained_tp_config.mlp_tensor_parallel_size > 0
+            self.finegrained_tp_config.oproj_tensor_parallel_size > 1
+            or self.finegrained_tp_config.mlp_tensor_parallel_size > 1
         )
         if finegrained_tp_enabled and not self.scheduler_config.recompute_scheduler_enable:
             raise AssertionError(
@@ -923,32 +975,51 @@ class AscendConfig:
         (
             self._sparse_li_c8_layer_ids,
             self._sparse_li_c8_layer_names,
-        ) = self._parse_sparse_li_layers_from_quant_config(quant_config, ("INT8_DYNAMIC", "W8A8_MXFP8"))
+        ) = self._parse_sparse_li_layers_from_quant_config(
+            quant_config,
+            # Some ModelSlim checkpoints describe only the INT8 projection,
+            # not indexer.quant_type. Treat it as C8 only when explicitly
+            # requested; W8A8 projection alone does not imply a C8 cache.
+            ("INT8_DYNAMIC", "W8A8_MXFP8", "W8A8_DYNAMIC")
+            if get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE)
+            and vllm_config.attention_config.indexer_kv_dtype == "int8"
+            else ("INT8_DYNAMIC", "W8A8_MXFP8"),
+        )
         (
             self._sparse_li_c4_layer_ids,
             self._sparse_li_c4_layer_names,
         ) = self._parse_sparse_li_layers_from_quant_config(quant_config, ("W8A8_MXFP8",))
         self._sparse_li_layer_filter_enabled = self._has_sparse_li_layer_config(quant_config)
-        self.enable_sp_by_pass = (
-            vc.model_config is not None
-            and not vc.model_config.enforce_eager
-            and vc.compilation_config.pass_config.enable_sp
-        )
+        # vLLM #60517 removed the torch.compile-based sequence-parallelism pass
+        # (and `PassConfig.enable_sp`) in both v0.33.0 and verified main.
+
+        enable_sp_by_pass = False
+        self.enable_sp_by_pass = vc.model_config is not None and not vc.model_config.enforce_eager and enable_sp_by_pass
 
         self._validate_mc2_comm_alg(vc)
+        self._validate_megamoe_shared_expert_fusion(vc)
 
-        # mega_moe_max_tokens range
-        if self.mega_moe_max_tokens <= 0:
-            raise ValueError(f"mega_moe_max_tokens must be a positive integer, got {self.mega_moe_max_tokens}")
+        # mega_moe_max_tokens range (0 = let the MegaMoe operator auto-compute)
+        if self.mega_moe_max_tokens < 0:
+            raise ValueError(f"mega_moe_max_tokens must be a non-negative integer, got {self.mega_moe_max_tokens}")
 
         # batch-sharded sampling (Model Runner V2) shards the sampler inputs
         # per TP rank, while lmhead TP overrides NPUModelRunner.sample with a
         # whole-group LM-head collective path; the two are mutually exclusive.
         if vc.parallel_config.enable_batch_sharded_sampling:
-            if self.finegrained_tp_config.lmhead_tensor_parallel_size > 0:
+            if self.finegrained_tp_config.lmhead_tensor_parallel_size > 1:
                 raise ValueError(
                     "enable_batch_sharded_sampling is incompatible with "
                     "finegrained_tp_config.lmhead_tensor_parallel_size. "
+                    "Please disable one of them."
+                )
+            if (
+                self.enable_pcp_embedding_lmhead_weight_sharding
+                and vc.parallel_config.prefill_context_parallel_size > 1
+            ):
+                raise ValueError(
+                    "batch-sharded sampling is incompatible with "
+                    "enable_pcp_embedding_lmhead_weight_sharding when PCP is enabled. "
                     "Please disable one of them."
                 )
 
@@ -998,6 +1069,36 @@ class AscendConfig:
                 "Please set additional_config.enable_fused_mc2 to 0."
             )
 
+    def _validate_megamoe_shared_expert_fusion(self, vllm_config: VllmConfig) -> None:
+        """Reject ``enable_fused_mc2=3`` on A3 and latent-MoE models.
+
+        The shared expert is fused into the routed A5 MegaMoe operator, so this
+        contract is A5-only (``CANN_MEGAMOE_SHARED_EXPERT_FUSION``) and assumes
+        the shared expert and routed experts share the residual width. Latent-MoE
+        models (e.g. Kimi K3) project the residual stream before the routed FFN and
+        expose ``routed_expert_hidden_size``; the shared expert cannot be fused in
+        that layout. Fail fast instead of silently downgrading, because a silent
+        downgrade would change results without failing the launch.
+        """
+        if not self.megamoe_shared_expert_fusion:
+            return
+
+        hardware_profile = get_current_hardware_profile()
+        if not hardware_profile.supports(HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION):
+            raise NotImplementedError(
+                "enable_fused_mc2=3 (MegaMoe shared-expert fusion) is only supported on A5; "
+                "the current hardware profile does not support it. "
+                "Set additional_config.enable_fused_mc2 to 0, 1, or 2."
+            )
+
+        model_config = getattr(vllm_config, "model_config", None)
+        hf_text_config = getattr(model_config, "hf_text_config", None)
+        if getattr(hf_text_config, "routed_expert_hidden_size", None) is not None:
+            raise NotImplementedError(
+                "enable_fused_mc2=3 (MegaMoe shared-expert fusion) does not support latent-MoE models "
+                "such as Kimi K3. Set additional_config.enable_fused_mc2 to 0, 1, or 2."
+            )
+
     def _validate_sparse_packed_kv_offload_compatibility(self) -> None:
         if self.sparse_kv_offload_config.enabled and self.uses_packed_sfa_main_cache:
             raise NotImplementedError(
@@ -1038,26 +1139,109 @@ class AscendConfig:
 
     @staticmethod
     def _is_megamoe_supported_by_config(vllm_config: VllmConfig) -> bool:
-        if get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP):
-            mega_moe_supported_by_config = AscendConfig._is_a5_megamoe_supported_by_config(vllm_config)
-            logger.debug("mega moe operator is supported by current a5 config: %r", mega_moe_supported_by_config)
-            return mega_moe_supported_by_config
-        hf_text_config = vllm_config.model_config.hf_text_config
-        hidden_size = getattr(hf_text_config, "hidden_size", None)
-        if hidden_size is None and hasattr(vllm_config.model_config, "get_hidden_size"):
-            hidden_size = vllm_config.model_config.get_hidden_size()
+        """Unified MegaMoe config eligibility check for A3 and A5.
+
+        The A3 and A5 MegaMoe operators are converging on the same supported
+        ranges, so this check intentionally uses one set of bounds for both
+        platforms. Where the operators currently differ, the stricter bound is
+        applied and the per-platform actuals are documented inline.
+        """
+        # Guard against early-init phases where model_config is still None
+        # (derive_and_validate may run before it is populated; other validators
+        # in it check for None as well). Dense models need no extra guard here:
+        # a non-MiniMax config without moe_intermediate_size is rejected below,
+        # and the MiniMax family has no dense variants.
+        model_config = vllm_config.model_config
+        if model_config is None:
+            return False
+        model_architectures = getattr(model_config, "architectures", None) or []
+        # MiniMax-family configs (MiniMaxM2/M3/...) have no moe_intermediate_size
+        # field; their intermediate_size IS the MoE expert FFN width (the dense
+        # layers use a separate dense_intermediate_size field). For every other
+        # family intermediate_size carries dense-FFN semantics and must NOT be
+        # used as a fallback, so this quirk is gated on the architecture.
+        is_minimax = any(architecture.startswith("MiniMaxM") for architecture in model_architectures)
+        hf_text_config = model_config.hf_text_config
+
+        # Latent-MoE models (e.g. Kimi K3) project the residual stream before the
+        # routed FFN and expose the expert width as routed_expert_hidden_size;
+        # other models simply don't have that field and fall through.
+        hidden_size = getattr(hf_text_config, "routed_expert_hidden_size", None)
+        if hidden_size is None:
+            hidden_size = getattr(hf_text_config, "hidden_size", None)
+        if hidden_size is None and hasattr(model_config, "get_hidden_size"):
+            hidden_size = model_config.get_hidden_size()
         if hidden_size is None:
             return False
+        # hidden must be in [1024, 8192] and aligned to 512.
+        # Actual operator bounds: A3 requires %512 == 0; the A5 operator only
+        # requires %64 == 0. The unified %512 check is the intersection of both
+        # and stays valid on every platform.
         hidden_size = int(hidden_size)
         if hidden_size < 1024 or hidden_size > 8192 or hidden_size % 512 != 0:
+            logger.warning(
+                "MegaMoe requires hidden_size in [1024, 8192] aligned to 512; got %s.",
+                hidden_size,
+            )
             return False
 
+        # MiniMax-family quirk (see the is_minimax comment above): fall back to
+        # intermediate_size, which for MiniMax configs is the MoE expert width.
         moe_intermediate_size = getattr(hf_text_config, "moe_intermediate_size", None)
-        if moe_intermediate_size is None:
+        if moe_intermediate_size is None and is_minimax:
             moe_intermediate_size = getattr(hf_text_config, "intermediate_size", None)
         if moe_intermediate_size is None:
             return False
-        if moe_intermediate_size < 1024 or moe_intermediate_size > 3072 or moe_intermediate_size % 512 != 0:
+        # intermediate_hidden (the post-activation intermediate width) must be in
+        # [256, 4096] and aligned to 128.
+        # Actual operator bounds: A5 supports [256, 4096] aligned to 128; the A3
+        # operator only supports [512, 3072] aligned to 256. The unified A5-style
+        # bound is kept here; tighten per-platform if A3 rejects a passing model.
+        moe_intermediate_size = int(moe_intermediate_size)
+        if not (256 <= moe_intermediate_size <= 4096) or moe_intermediate_size % 128 != 0:
+            logger.warning(
+                "MegaMoe requires moe_intermediate_size in [256, 4096] aligned to 128; got %s.",
+                moe_intermediate_size,
+            )
+            return False
+
+        # num_experts must divide evenly across the EP group (required by both
+        # the A3 and A5 operators; MegaMoe assumes an equal per-rank expert
+        # count for its symmetric-memory dispatch layout).
+        ep_world_size = (
+            vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
+        )
+        if ep_world_size < 2:
+            return False
+        if int(vllm_config.model_config.get_num_experts()) % ep_world_size != 0:
+            logger.warning(
+                "MegaMoe requires num_experts divisible by ep_world_size (%s).",
+                ep_world_size,
+            )
+            return False
+
+        # num_top_k must be in [1, 16].
+        # Actual operator bounds: A3 supports [1, 16]; the A5 operator supports
+        # [1, 32]. The unified [1, 16] bound is the intersection of both and
+        # stays valid on every platform.
+        # Field-name chain covers model config variations: Kimi K3 uses
+        # num_experts_per_token, most models num_experts_per_tok, older
+        # configs top_k_experts.
+        num_top_k = getattr(
+            hf_text_config,
+            "num_experts_per_tok",
+            getattr(hf_text_config, "num_experts_per_token", getattr(hf_text_config, "top_k_experts", 1)),
+        )
+        # The getattr chain only falls back on *missing* attributes; a field
+        # explicitly set to null in the HF config resolves to None and would
+        # crash int(num_top_k) below.
+        if num_top_k is None:
+            num_top_k = 1
+        if not (1 <= int(num_top_k) <= 16):
+            logger.warning(
+                "MegaMoe requires num_top_k in [1, 16]; got %s.",
+                num_top_k,
+            )
             return False
 
         quant_type = getattr(hf_text_config, "moe_quantize", getattr(hf_text_config, "quantize", None))
@@ -1073,79 +1257,6 @@ class AscendConfig:
             "quanttype.w4a8",
         }
         return quant_name in supported_quant_names
-
-    @staticmethod
-    def _is_a5_megamoe_supported_by_config(vllm_config) -> bool:
-        model_architectures = getattr(vllm_config.model_config, "architectures", None) or []
-        is_minimax_m3 = any(architecture.startswith("MiniMaxM3") for architecture in model_architectures)
-        is_kimi_k3 = any(
-            architecture in ("KimiK3ForCausalLM", "KimiLinearForCausalLM", "KimiK3ForConditionalGeneration")
-            for architecture in model_architectures
-        )
-        hf_text_config = vllm_config.model_config.hf_text_config
-        # K3 projects the residual stream before the routed FFN. Other models
-        # retain the existing hidden-size lookup and supported dimensions.
-        hidden_size = getattr(hf_text_config, "routed_expert_hidden_size", None) if is_kimi_k3 else None
-        if hidden_size is None:
-            hidden_size = getattr(hf_text_config, "hidden_size", None)
-        if hidden_size is None and hasattr(vllm_config.model_config, "get_hidden_size"):
-            hidden_size = vllm_config.model_config.get_hidden_size()
-        if hidden_size is None:
-            return False
-        supported_hidden_sizes = {1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192}
-        if is_kimi_k3:
-            supported_hidden_sizes.add(3584)
-        if int(hidden_size) not in supported_hidden_sizes:
-            logger.warning(
-                "MegaMoe requires hidden_size in %s; got %s.",
-                sorted(supported_hidden_sizes),
-                int(hidden_size),
-            )
-            return False
-
-        moe_intermediate_size = getattr(hf_text_config, "moe_intermediate_size", None)
-        if moe_intermediate_size is None and is_minimax_m3:
-            moe_intermediate_size = getattr(hf_text_config, "intermediate_size", None)
-        if moe_intermediate_size is None:
-            return False
-        # Preserve MiniMax-M3's 6144-wide first projection and also allow K3's
-        # validated SiTU shape without widening support for unrelated models.
-        supported_intermediate_sizes = {1024, 2048, 3072, 4096, 7168}
-        if is_minimax_m3 or is_kimi_k3:
-            supported_intermediate_sizes.add(6144)
-        # intermediate_hidden == l1_weights.dim1 == 2 * moe_intermediate_size.
-        intermediate_hidden = 2 * int(moe_intermediate_size)
-        if intermediate_hidden not in supported_intermediate_sizes:
-            logger.warning(
-                "mega moe operator is not supported by current a5 config, for intermediate_hidden size %s is not in %s",
-                intermediate_hidden,
-                sorted(supported_intermediate_sizes),
-            )
-            return False
-
-        # num_experts must divide evenly across the EP group.
-        ep_world_size = (
-            vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
-        )
-        if ep_world_size < 2:
-            return False
-        if int(vllm_config.model_config.get_num_experts()) % ep_world_size != 0:
-            return False
-
-        num_top_k = getattr(
-            hf_text_config,
-            "num_experts_per_tok",
-            getattr(hf_text_config, "top_k_experts", 1),
-        )
-        if is_kimi_k3:
-            num_top_k = getattr(hf_text_config, "num_experts_per_token", num_top_k)
-        if not (1 <= int(num_top_k) <= 32):
-            logger.warning(
-                "mega moe operator is not supported by current a5 config, for num_top_k %s is not between 1 and 32",
-                num_top_k,
-            )
-            return False
-        return True
 
     @staticmethod
     def _materialize_dump_config_to_file(dump_config: dict[str, Any]) -> str:
@@ -1187,6 +1298,7 @@ class AscendConfig:
     def _parse_sparse_li_layers_from_quant_config(
         cls, quant_config: Any, valid_quant_types: tuple[str, ...]
     ) -> tuple[set[int], set[str]]:
+        """Prefer explicit indexer cache types over projection-type fallback."""
         quant_description = getattr(quant_config, "quant_description", None)
         if not isinstance(quant_description, dict):
             return set(), set()
@@ -1201,10 +1313,20 @@ class AscendConfig:
             if not isinstance(key, str):
                 continue
             matched_suffix = next((s for s in QUANT_SUFFIXES if key.endswith(s)), None)
-            if matched_suffix is None or value not in valid_quant_types:
+            if matched_suffix is None:
                 continue
             layer_name = key[: -len(matched_suffix)].rstrip(".")
             if not layer_name:
+                continue
+            # A projection's quantization does not override an explicit
+            # indexer cache rollback, such as quant_type="FLOAT".
+            if (
+                get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE)
+                and matched_suffix == ".indexer.wq_b.weight"
+                and f"{layer_name}.indexer.quant_type" in quant_description
+            ):
+                continue
+            if value not in valid_quant_types:
                 continue
             layer_names.add(layer_name)
             layer_ids.add(extract_layer_index(layer_name))
@@ -1278,34 +1400,6 @@ class AscendConfig:
 
 
 @config
-class DynamicSpecConfig:
-    """
-    Configuration Object for dynamic_spec_config from additional_config
-    """
-
-    # Dynamic speculative-length methods. "dspark" relies on the DSpark
-    # confidence head; models without such a head need another method.
-    SUPPORTED_METHODS: ClassVar[tuple[str, ...]] = ("dspark", "dflash")
-
-    # None disables the dynamic speculative-length path.
-    method: str | None = None
-    # Custom parameters of the selected dynamic method; the expected keys
-    # depend on `method` (e.g. dspark accepts
-    # initial_verify_budget_per_req, budget_update_interval and
-    # budget_threshold). Empty by default, in which case each method
-    # falls back to its own built-in defaults.
-    method_params: dict[str, Any] = dataclasses.field(default_factory=dict)
-
-    @model_validator(mode="after")
-    def _validate(self):
-        if self.method is not None and self.method not in self.SUPPORTED_METHODS:
-            raise ValueError(
-                f"dynamic_spec_config.method must be one of {self.SUPPORTED_METHODS} or None, got {self.method!r}"
-            )
-        return self
-
-
-@config
 class FinegrainedTPConfig:
     """Configuration Object for ``additional_config["finegrained_tp_config"]``.
 
@@ -1315,12 +1409,16 @@ class FinegrainedTPConfig:
     a plain method invoked explicitly by ``init_ascend_config`` (Plan B:
     business validation stays out of pydantic). ``vllm_config`` is no longer a
     member field.
+
+    Size semantics follow vLLM ``ParallelConfig``: ``1`` (the default) means no
+    sharding and only sizes > 1 enable a knob. ``0`` is tolerated as a disabled
+    alias for older configs but is not part of the documented range.
     """
 
-    oproj_tensor_parallel_size: int = 0
-    lmhead_tensor_parallel_size: int = 0
-    embedding_tensor_parallel_size: int = 0
-    mlp_tensor_parallel_size: int = 0
+    oproj_tensor_parallel_size: int = 1
+    lmhead_tensor_parallel_size: int = 1
+    embedding_tensor_parallel_size: int = 1
+    mlp_tensor_parallel_size: int = 1
 
     @model_validator(mode="after")
     def _validate_sizes(self):
@@ -1392,16 +1490,16 @@ class FinegrainedTPConfig:
                     str(capture_bound),
                     max_step,
                 )
-                self.oproj_tensor_parallel_size = 0
-                self.mlp_tensor_parallel_size = 0
+                self.oproj_tensor_parallel_size = 1
+                self.mlp_tensor_parallel_size = 1
             else:
                 if self.oproj_tensor_parallel_size > 1:
                     enabled_configs.append(f"oproj_tensor_parallel_size={self.oproj_tensor_parallel_size}")
                 if self.mlp_tensor_parallel_size > 1:
                     enabled_configs.append(f"mlp_tensor_parallel_size={self.mlp_tensor_parallel_size}")
-        if self.lmhead_tensor_parallel_size > 0:
+        if self.lmhead_tensor_parallel_size > 1:
             enabled_configs.append(f"lmhead_tensor_parallel_size={self.lmhead_tensor_parallel_size}")
-        if self.embedding_tensor_parallel_size > 0:
+        if self.embedding_tensor_parallel_size > 1:
             enabled_configs.append(f"embedding_tensor_parallel_size={self.embedding_tensor_parallel_size}")
         module_tp_sizes = [
             self.oproj_tensor_parallel_size,
@@ -1415,11 +1513,11 @@ class FinegrainedTPConfig:
             # to greater than 1 in the model launch configuration, its value will be changed to 1 later.
             # This will cause an issue when finegrained tp is enabled, as it
             # cannot be split into the data parallel communication group, leading to an error.
-            if module_tp_size > 0 and not vc.model_config.is_moe:
+            if module_tp_size > 1 and not vc.model_config.is_moe:
                 raise AssertionError("The finegrained tp sizes can be enabled only for MOE models.")
-            if module_tp_size > 0 and vc.parallel_config.data_parallel_size % module_tp_size != 0:
+            if module_tp_size > 1 and vc.parallel_config.data_parallel_size % module_tp_size != 0:
                 raise AssertionError("finegrained tp sizes must divide by data_parallel_size.")
-        if any(size > 0 for size in module_tp_sizes) and enabled_configs:
+        if any(size > 1 for size in module_tp_sizes) and enabled_configs:
             logger.info("finegrained_tp_config enabled: %s", ", ".join(enabled_configs))
 
 
@@ -1676,7 +1774,7 @@ class SparseKVOffloadConfig:
     enabled: bool = False
     # -1 resolves to (1 + num_speculative_tokens) * 2048.
     topk_buffer_size: int = -1
-    dram_size_per_dp_GB: int = 128
+    dram_size_per_dp_GB: int = 110
     keep_device_kv_cache: bool = False
     topk: int = dataclasses.field(default=0, init=False)
     use_fused_overlap: bool = False
@@ -1711,6 +1809,13 @@ class SparseKVOffloadConfig:
     def _validate_preconditions(self, vllm_config: VllmConfig) -> None:
         if not self.enabled:
             return
+
+        if is_950():
+            raise ValueError("Sparse KV offload is not supported on 950PR&950DT Products")
+
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if kv_transfer_config is not None and kv_transfer_config.has_connector("PreemptOffloadConnector"):
+            raise ValueError("Sparse KV offload cannot be combined with PreemptOffloadConnector")
 
         if hasattr(vllm_config.model_config.hf_text_config, "compress_ratios"):
             raise ValueError("Sparse KV offload don't support compress now.")
@@ -1757,6 +1862,23 @@ _ASCEND_CONFIG: AscendConfig | None = None
 # ``getattr(_ASCEND_CONFIG, "vllm_config", None) is vllm_config`` check, now
 # that vllm_config is no longer a member of AscendConfig.
 _INIT_VLLM_CONFIG: Any = None
+# Only marks synchronous draft construction/loading for platform validation.
+# Nested scopes restore their caller's marker, including on failure.
+_DRAFT_CONFIG_CONTEXT: ContextVar[bool] = ContextVar("ascend_draft_config", default=False)
+
+
+def is_draft_config_context() -> bool:
+    return _DRAFT_CONFIG_CONTEXT.get()
+
+
+@contextmanager
+def draft_config_context() -> Iterator[None]:
+    """Identify draft reconstruction without changing configuration values."""
+    token = _DRAFT_CONFIG_CONTEXT.set(True)
+    try:
+        yield
+    finally:
+        _DRAFT_CONFIG_CONTEXT.reset(token)
 
 
 def _is_ascend_config_initialized(config: AscendConfig | None) -> bool:
@@ -1911,6 +2033,7 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
     # the single legitimate entry point — bypassing the factory leaves derived
     # fields at their sentinel defaults.
     new_config.derive_and_validate(vllm_config)
+    new_config.quantized_all_reduce_config._validate_preconditions(vllm_config)
     new_config.rl_config.apply(new_config)
     new_config.finegrained_tp_config._validate_preconditions(vllm_config)
     new_config.xlite_graph_config._validate_preconditions(vllm_config)
