@@ -24,17 +24,15 @@ from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
-    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
-from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, is_circular_kv_cache_spec
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.core.kv_cache_placement import map_kvpp_layers_to_owners
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
@@ -117,58 +115,6 @@ class MooncakeTransferAddressMixin:
     block_shapes: list[list[tuple[int, ...]]]
     block_strides: list[list[int]]
     block_lens: list[list[int]]
-
-    @staticmethod
-    def _attention_transfer_slices(
-        local_shape: tuple[int, ...],
-        remote_shape: tuple[int, ...],
-        local_strides: tuple[int, ...],
-        remote_strides: tuple[int, ...],
-        local_head_offset: int,
-        remote_head_offset: int,
-        num_heads: int,
-    ) -> list[tuple[int, int, int]]:
-        """Map overlapping heads using logical HND shapes and physical byte strides."""
-        if len(local_shape) != 3 or len(remote_shape) != 3 or local_shape[1:] != remote_shape[1:]:
-            raise ValueError("Mooncake P/D attention token/head dimensions differ")
-        if len(local_strides) != 3 or len(remote_strides) != 3 or local_strides[2] != remote_strides[2]:
-            raise ValueError("Mooncake P/D attention element strides differ")
-        tokens, dim = local_shape[1:]
-        width = dim * local_strides[2]
-        if min(*local_strides, *remote_strides) <= 0:
-            raise ValueError("Mooncake attention strides must be positive")
-        if local_strides[:2] == remote_strides[:2] == (tokens * width, width):
-            return [
-                (local_head_offset * tokens * width, remote_head_offset * tokens * width, num_heads * tokens * width)
-            ]
-        if (
-            local_head_offset == remote_head_offset == 0
-            and num_heads == local_shape[0] == remote_shape[0]
-            and local_strides[:2] == remote_strides[:2] == (width, num_heads * width)
-        ):
-            return [(0, 0, num_heads * tokens * width)]
-        slices: list[tuple[int, int, int]] = []
-        # Iterate in the destination's physical order and coalesce only when
-        # both endpoints are contiguous. This also supports NHD/HND conversion.
-        head_major = local_strides[0] >= local_strides[1]
-        indices = (
-            ((head, token) for head in range(num_heads) for token in range(tokens))
-            if head_major
-            else ((head, token) for token in range(tokens) for head in range(num_heads))
-        )
-        for head, token in indices:
-            local_offset = (local_head_offset + head) * local_strides[0] + token * local_strides[1]
-            remote_offset = (remote_head_offset + head) * remote_strides[0] + token * remote_strides[1]
-            if (
-                slices
-                and slices[-1][0] + slices[-1][2] == local_offset
-                and slices[-1][1] + slices[-1][2] == remote_offset
-            ):
-                previous_local, previous_remote, previous_length = slices[-1]
-                slices[-1] = (previous_local, previous_remote, previous_length + width)
-            else:
-                slices.append((local_offset, remote_offset, width))
-        return slices
 
     def _append_mamba_transfer_addresses(
         self,
@@ -525,30 +471,6 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
             num_tensor_blocks // self.num_blocks,
         )
 
-    @staticmethod
-    def _get_transfer_block_shape(spec: KVCacheSpec, cache: torch.Tensor) -> tuple[int, ...]:
-        """Describe attention blocks in logical HND order; strides retain their layout."""
-        shape = tuple(cache.shape[1:])
-        if (
-            not isinstance(spec, (FullAttentionSpec, SlidingWindowSpec))
-            or isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec, AscendSFAIndexerCacheSpec))
-            or is_circular_kv_cache_spec(spec)
-        ):
-            return shape
-
-        heads = spec.num_kv_heads
-        if len(shape) != 3:
-            raise ValueError(f"MooncakeConnector expects a three-dimensional GQA KV block, got {shape}.")
-        if shape[0] == shape[1] == heads and heads > 1:
-            raise ValueError(f"MooncakeConnector cannot distinguish HND from NHD for {shape} with {heads} KV heads.")
-        if shape[0] == heads:
-            return shape  # HND
-        if shape[1] != heads:
-            raise ValueError(f"MooncakeConnector KV block shape {shape} does not match the spec's {heads} KV heads.")
-        if not cache[0].is_contiguous():
-            raise ValueError("MooncakeConnector NHD requires contiguous bytes within each KV block.")
-        return (heads, shape[0], shape[2])
-
     def register_kv_caches(
         self,
         kv_caches: dict[str, torch.Tensor | list[torch.Tensor]],
@@ -571,7 +493,6 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
         block_strides_per_layer: list[list[int]] = []
         block_lens_per_layer: list[list[int]] = []
         block_shapes_per_layer: list[list[tuple[int, ...]]] = []
-        block_inner_strides_per_layer: list[list[tuple[int, ...]]] = []
         block_size_scales_per_layer: list[list[int]] = []
         indexer_replication_sizes: list[int] = []
         configured_layer_names: set[str] = set()
@@ -598,7 +519,6 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
                 block_strides: list[int] = []
                 block_lens: list[int] = []
                 block_shapes: list[tuple[int, ...]] = []
-                block_inner_strides: list[tuple[int, ...]] = []
                 block_size_scales: list[int] = []
 
                 spec_index = self.layer_name_to_spec_index[layer_name]
@@ -628,24 +548,16 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
                     block_strides.append(page_stride)
                     block_lens.append(page_stride)
                     block_shapes.append(block_shape)
-                    element_size = page_stride // math.prod(block_shape)
-                    block_inner_strides.append(
-                        tuple(math.prod(block_shape[i + 1 :]) * element_size for i in range(len(block_shape)))
-                    )
                     block_size_scales.append(block_size_scale)
                 else:
                     for cache in caches:
                         tensor_num_blocks = cache.shape[0]
                         element_size = cache.element_size()
-                        block_shape = self._get_transfer_block_shape(spec, cache)
+                        block_shape = tuple(cache.shape[1:])
                         base_addrs.append(cache.data_ptr())
                         block_strides.append(cache.stride(0) * element_size)
                         block_lens.append(math.prod(block_shape) * element_size)
                         block_shapes.append(block_shape)
-                        inner_strides = tuple(stride * element_size for stride in cache.stride()[1:])
-                        if block_shape != tuple(cache.shape[1:]):
-                            inner_strides = (inner_strides[1], inner_strides[0], inner_strides[2])
-                        block_inner_strides.append(inner_strides)
                         block_size_scales.append(tensor_num_blocks // self.num_blocks)
 
                 layer_names.append(layer_name)
@@ -662,7 +574,6 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
                 block_strides_per_layer.append(block_strides)
                 block_lens_per_layer.append(block_lens)
                 block_shapes_per_layer.append(block_shapes)
-                block_inner_strides_per_layer.append(block_inner_strides)
                 block_size_scales_per_layer.append(block_size_scales)
                 indexer_replication_sizes.append(
                     spec.sfa_dcp_replicated_indexer_size if isinstance(spec, AscendSFAIndexerCacheSpec) else 0
@@ -689,7 +600,6 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
             block_strides=block_strides_per_layer,
             block_lens=block_lens_per_layer,
             block_shapes=block_shapes_per_layer,
-            block_inner_strides=block_inner_strides_per_layer,
             block_size_scales=block_size_scales_per_layer,
             indexer_replication_sizes=indexer_replication_sizes,
             dcp_sharded=[self.kv_cache_specs[self.layer_name_to_spec_index[name]].dcp_sharded for name in layer_names],

@@ -98,7 +98,6 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         self.block_strides = local_metadata.block_strides
         self.block_lens = local_metadata.block_lens
         self.block_shapes = local_metadata.block_shapes
-        self.block_inner_strides = local_metadata.block_inner_strides
         self.block_size_scales = local_metadata.block_size_scales
 
         self.use_mla = self.model_config.is_deepseek_mla
@@ -1122,54 +1121,31 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                         f"Mooncake P/D head length mismatch for layer {self.layer_names[local_layer_index]!r}, "
                         f"cache {cache_index}: local={local_head_len}, remote={remote_head_len}"
                     )
-                local_strides_by_layer = getattr(self, "block_inner_strides", None)
-                remote_strides_by_layer = remote_metadata.block_inner_strides
-                local_element_size = local_head_len // (local_block_shape[1] * local_block_shape[2])
-                remote_element_size = remote_head_len // (remote_block_shape[1] * remote_block_shape[2])
-                local_strides = (
-                    local_strides_by_layer[local_layer_index][cache_index]
-                    if local_strides_by_layer is not None
-                    else (local_head_len, local_block_shape[2] * local_element_size, local_element_size)
+                transfer_len = num_transfer_heads * local_head_len
+                local_inner_offset = local_head_offset * local_head_len
+                remote_inner_offset = remote_head_offset * remote_head_len
+                block_ids_to_transfer = (
+                    contiguous_block_ids_by_request
+                    if local_block_stride == local_block_len == transfer_len
+                    and remote_block_stride == remote_block_len == transfer_len
+                    else single_block_ids_by_request
                 )
-                remote_strides = (
-                    remote_strides_by_layer[remote_layer_index][cache_index]
-                    if remote_strides_by_layer is not None
-                    else (remote_head_len, remote_block_shape[2] * remote_element_size, remote_element_size)
-                )
-                if local_strides[-1] != local_element_size or remote_strides[-1] != remote_element_size:
-                    raise ValueError("Mooncake attention head dimensions must be contiguous")
-                address_slices = self._attention_transfer_slices(
-                    local_block_shape,
-                    remote_block_shape,
-                    local_strides,
-                    remote_strides,
-                    local_head_offset,
-                    remote_head_offset,
-                    num_transfer_heads,
-                )
-                for local_inner_offset, remote_inner_offset, transfer_len in address_slices:
-                    block_ids_to_transfer = (
-                        contiguous_block_ids_by_request
-                        if local_block_stride == local_block_len == transfer_len
-                        and remote_block_stride == remote_block_len == transfer_len
-                        else single_block_ids_by_request
+                for request_id, _, _ in transfer_entries:
+                    local_block_groups, remote_block_groups = block_ids_to_transfer[request_id]
+                    self._append_block_transfer_addresses(
+                        local_block_groups=local_block_groups,
+                        remote_block_groups=remote_block_groups,
+                        local_base_addr=local_base_addr,
+                        remote_base_addr=remote_base_addr,
+                        local_block_stride=local_block_stride,
+                        remote_block_stride=remote_block_stride,
+                        transfer_len=transfer_len,
+                        local_inner_offset=local_inner_offset,
+                        remote_inner_offset=remote_inner_offset,
+                        src_list=src_list,
+                        dst_list=dst_list,
+                        length_list=length_list,
                     )
-                    for request_id, _, _ in transfer_entries:
-                        local_block_groups, remote_block_groups = block_ids_to_transfer[request_id]
-                        self._append_block_transfer_addresses(
-                            local_block_groups=local_block_groups,
-                            remote_block_groups=remote_block_groups,
-                            local_base_addr=local_base_addr,
-                            remote_base_addr=remote_base_addr,
-                            local_block_stride=local_block_stride,
-                            remote_block_stride=remote_block_stride,
-                            transfer_len=transfer_len,
-                            local_inner_offset=local_inner_offset,
-                            remote_inner_offset=remote_inner_offset,
-                            src_list=src_list,
-                            dst_list=dst_list,
-                            length_list=length_list,
-                        )
 
     def _execute_tp_transfer_bucket(
         self,

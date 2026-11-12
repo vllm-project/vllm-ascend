@@ -185,7 +185,6 @@ def worker(monkeypatch, request):
                 block_size_scales=[[1], [1], [1]],
                 indexer_replication_sizes=[0, 0, 0],
                 dcp_sharded=[True] * 3,
-                block_inner_strides=None,
             )
         self.kv_cache_specs = [spec]
         self.layer_name_to_spec_index = {name: 0 for name in self.transfer_metadata.layer_names}

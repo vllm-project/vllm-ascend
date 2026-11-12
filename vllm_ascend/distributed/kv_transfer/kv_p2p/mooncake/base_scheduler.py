@@ -221,8 +221,6 @@ class MooncakeMetadataThread(threading.Thread):
                             f"PP rank {pp_rank}, PCP/TP rank {pcp_rank}/{tp_rank}"
                         )
                     for local_layer_index, layer_name in enumerate(worker_metadata.layer_names):
-                        # Metadata initialization materializes missing inner strides.
-                        assert worker_metadata.block_inner_strides is not None
                         layer_signature = (
                             worker_metadata.group_indices[local_layer_index],
                             worker_metadata.dcp_sharded[local_layer_index],
@@ -230,7 +228,6 @@ class MooncakeMetadataThread(threading.Thread):
                             worker_metadata.block_strides[local_layer_index],
                             worker_metadata.block_lens[local_layer_index],
                             worker_metadata.block_shapes[local_layer_index],
-                            worker_metadata.block_inner_strides[local_layer_index],
                             worker_metadata.block_size_scales[local_layer_index],
                             worker_metadata.indexer_replication_sizes[local_layer_index],
                         )
@@ -243,7 +240,6 @@ class MooncakeMetadataThread(threading.Thread):
                                 "block_strides",
                                 "block_lens",
                                 "block_shapes",
-                                "block_inner_strides",
                                 "block_size_scales",
                                 "indexer_replication_sizes",
                             )
@@ -268,19 +264,16 @@ class MooncakeMetadataThread(threading.Thread):
             block_strides: list[list[int]] = []
             block_lens: list[list[int]] = []
             block_shapes: list[list[tuple[int, ...]]] = []
-            block_inner_strides: list[list[tuple[int, ...]]] = []
             block_size_scales: list[list[int]] = []
             indexer_replication_sizes: list[int] = []
             for layer_name in layer_names:
                 worker_metadata, local_layer_index = layer_source_by_name[layer_name]
-                assert worker_metadata.block_inner_strides is not None
                 layer_block_sizes.append(worker_metadata.layer_block_sizes[local_layer_index])
                 group_indices.append(worker_metadata.group_indices[local_layer_index])
                 dcp_sharded.append(worker_metadata.dcp_sharded[local_layer_index])
                 block_strides.append(worker_metadata.block_strides[local_layer_index])
                 block_lens.append(worker_metadata.block_lens[local_layer_index])
                 block_shapes.append(worker_metadata.block_shapes[local_layer_index])
-                block_inner_strides.append(worker_metadata.block_inner_strides[local_layer_index])
                 block_size_scales.append(worker_metadata.block_size_scales[local_layer_index])
                 indexer_replication_sizes.append(worker_metadata.indexer_replication_sizes[local_layer_index])
 
@@ -318,7 +311,6 @@ class MooncakeMetadataThread(threading.Thread):
                 block_strides=block_strides,
                 block_lens=block_lens,
                 block_shapes=block_shapes,
-                block_inner_strides=block_inner_strides,
                 block_size_scales=block_size_scales,
                 metadata_by_pcp_rank=metadata_by_pcp_rank,
                 indexer_replication_sizes=indexer_replication_sizes,
