@@ -1,7 +1,0 @@
-pr: 21677
-entries:
-  - category: performance
-    text: >-
-      Supported PCP prefill paths compute token-local MoE TopK before PCP
-      all-gather and communicate selected routes instead of full router logits,
-      including combined DP and PCP configurations.
