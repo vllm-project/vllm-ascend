@@ -21,7 +21,7 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 
 
-def _update_out_and_lse(out_list: torch.Tensor, lse_list: torch.Tensor) -> torch.Tensor:
+def _update_out_and_lse(out_list: torch.Tensor, lse_list: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """LSE_final = log(sum(exp(LSE_i))), O_final = sum(exp(LSE_i - LSE_final) * O_i)
     Args:
         out_list: shape = [N, batch_size, num_heads, head_size]
