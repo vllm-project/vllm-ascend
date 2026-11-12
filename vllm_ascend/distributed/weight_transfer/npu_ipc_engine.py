@@ -5,7 +5,6 @@
 import os
 import socket
 from dataclasses import dataclass
-from fnmatch import fnmatchcase
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -140,45 +139,6 @@ class NPUIPCWeightTransferEngine(IPCWeightTransferEngine):
             "NPUIPCTrainerInitInfo(...), client=..., "
             "source=...) and drive it with send_weights()."
         )
-
-    def start_weight_update(self) -> None:
-        patterns = getattr(self.model_config, "sleep_preserve_parameter_names", [])
-        retained = []
-
-        if patterns:
-            selected = set()
-            for name, parameter in self.model.named_parameters():
-                if any(fnmatchcase(name, pattern) for pattern in patterns):
-                    selected.add(id(parameter))
-
-            for module in self.model.modules():
-                named_parameters = module.named_parameters(
-                    recurse=False,
-                    remove_duplicate=False,
-                )
-                for name, parameter in named_parameters:
-                    if id(parameter) in selected:
-                        retained.append((module, name, parameter))
-
-        self._retained_parameters = retained
-        super().start_weight_update()
-
-    def finish_weight_update(self) -> None:
-        try:
-            # Only fill omitted parameters after all trainer weights arrive.
-            from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
-
-            for module, name, value in getattr(self, "_retained_parameters", []):
-                parameter = getattr(module, name)
-                if parameter is value:
-                    continue
-
-                info = get_layerwise_info(module)
-                if not any(loaded_name == name for loaded_name, _ in info.loaded_weights):
-                    parameter.weight_loader(parameter, value)
-            super().finish_weight_update()
-        finally:
-            self._retained_parameters = []
 
     def receive_weights(self, update_info: IPCWeightTransferUpdateInfo) -> None:
         """Receive weights from the trainer via NPU IPC handles.
