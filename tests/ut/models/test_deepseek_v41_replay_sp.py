@@ -20,7 +20,7 @@ from vllm_ascend.models.deepseek_v41.decoder_replay_sp import SPReplayPlan
 
 
 def _kept_rows(lengths, kept):
-    rows = []
+    rows: list[int] = []
     start = 0
     for length, count in zip(lengths, kept):
         rows.extend(range(start + length - count, start + length))
@@ -45,7 +45,7 @@ def test_sp_replay_plan_matches_global_selection(tp_size):
         ]
         selected = _kept_rows(lengths, kept)
         source_values = [plan.local_rows + rank * original_width for rank, plan in enumerate(plans)]
-        received = [[] for _ in plans]
+        received: list[list[torch.Tensor]] = [[] for _ in plans]
         for source, (plan, values) in enumerate(zip(plans, source_values)):
             for destination, part in enumerate(values.split(plan.send_counts)):
                 assert part.numel() == plans[destination].recv_counts[source]
@@ -92,7 +92,7 @@ def _sp_replay_worker(rank, world_size, init_method):
                 ids = full_ids[rank * original_width : (rank + 1) * original_width]
                 hidden = (ids.float() + 1).reshape(-1, 1, 1).expand(-1, 2, 3).clone()
                 mix = (ids.float() + 2).reshape(-1, 1).expand(-1, 2).clone()
-                observed_calls = []
+                observed_calls: list[int] = []
                 all_to_all = dist.all_to_all_single
 
                 def exchange(output, source, calls=observed_calls, collective=all_to_all, **kwargs):
