@@ -2222,7 +2222,10 @@ class MooncakeConnectorWorker:
         device_index = (self.pp_rank * self.pcp_size + self.pcp_rank) * self.tp_size + self.tp_rank
         self.handshake_port = self.side_channel_port + device_index
         self.sockets: dict = {}
-        device_name = str(torch.npu.current_device()) if self.pp_size > 1 else None
+        # The Ascend ADXL transport requires an explicit device binding even
+        # for single-PP workers; without it rtsHostRegister fails with an
+        # invalid device handle during HcclCommPrepare.
+        device_name = str(torch.npu.current_device())
         inject_qos(vllm_config.kv_transfer_config.get_from_extra_config("qos_priority", PD_QOS_DEFAULT))
         self.engine = global_te.get_transfer_engine(
             self.side_channel_host,

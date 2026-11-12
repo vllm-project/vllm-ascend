@@ -3549,7 +3549,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                     patch.object(module.torch.npu, "current_device", return_value=5),
                 ):
                     worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
-                backend.assert_called_once_with("127.0.0.1", device_name="5" if local_pp > 1 else None)
+                backend.assert_called_once_with("127.0.0.1", device_name="5")
                 self.assertEqual((worker._prefill_tp_size, worker._decode_tp_size), (prefill_tp, decode_tp))
                 self.assertEqual(worker.handshake_port, 5000)
 
@@ -3705,11 +3705,10 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertEqual(lengths, [4 * alignment, alignment])
 
     def test_device_id_selection_with_physical_devices(self):
-        # V1 delegates non-PP device selection to the backend. With PP it
-        # explicitly passes the current device, not the TP rank or a stale
-        # hard-coded physical index. The backend boundary is the contract.
+        # Ascend ADXL needs explicit current-device binding with or without
+        # PP. The device is neither the TP rank nor a hard-coded index.
         module = sys.modules[MooncakeConnectorWorker.__module__]
-        for pp_size, expected_device in ((1, None), (2, "5")):
+        for pp_size in (1, 2):
             with self.subTest(pp_size=pp_size):
                 self.vllm_config.parallel_config.pipeline_parallel_size = pp_size
                 with (
@@ -3719,11 +3718,8 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                     patch.object(module.torch.npu, "current_device", return_value=5) as current_device,
                 ):
                     worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
-                get_te.assert_called_once_with("127.0.0.1", device_name=expected_device)
-                if pp_size == 1:
-                    current_device.assert_not_called()
-                else:
-                    current_device.assert_called_once_with()
+                get_te.assert_called_once_with("127.0.0.1", device_name="5")
+                current_device.assert_called_once_with()
                 self.assertIs(worker.engine, self.mock_transfer_engine)
                 self.assertEqual(worker.te_rpc_port, 9090)
 

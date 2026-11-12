@@ -636,7 +636,11 @@ class NPUModelRunner(GPUModelRunner):
         if has_kv_transfer_group():
             kv_connector_metadata = scheduler_output.kv_connector_metadata
             assert kv_connector_metadata is not None
-            get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
+            connector = get_kv_transfer_group()
+            connector.handle_preemptions(kv_connector_metadata)
+            prepare_offload = getattr(connector, "prepare_sparse_kv_offload", None)
+            if prepare_offload is not None:
+                prepare_offload(kv_connector_metadata)
 
         dump_forward = dummy_run or scheduler_output.total_num_scheduled_tokens > 0
         # Eager PrecisionDebugger is started only for real scheduler steps.

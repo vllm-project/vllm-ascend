@@ -23,6 +23,19 @@ CLASS_NAME_ALIASES = {
 }
 
 
+def test_mooncake_entries_resolve_to_generic_explicit_and_compatible_implementations(monkeypatch):
+    from vllm_ascend.distributed.kv_transfer import register_connector
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import MooncakePullConnector
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.compat import MooncakeConnector
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.connector import MooncakeSFAConnector
+
+    monkeypatch.setattr(KVConnectorFactory, "_registry", {})
+    register_connector()
+    assert KVConnectorFactory._registry["MooncakePullConnector"]() is MooncakePullConnector
+    assert KVConnectorFactory._registry["MooncakeConnectorV2"]() is MooncakeConnector
+    assert KVConnectorFactory._registry["MooncakeSFAConnector"]() is MooncakeSFAConnector
+
+
 def test_connectors_with_mismatched_names_register_class_name_alias(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
