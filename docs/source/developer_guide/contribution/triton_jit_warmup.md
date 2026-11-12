@@ -14,9 +14,15 @@ This guide describes how to register and precompile Triton kernels during vLLM-A
 
 Register an `AscendTritonJitKernel` instance inside the runner's active window. Registration outside a window is a no-op; the current orchestrator removes instances that do not derive from the Ascend base.
 
-The [worker](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/worker/worker.py) executes configured model dummy runs, then [JIT warmup](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/model_executor/warmup/kernel_warmup.py), followed by graph capture when enabled. Dummy runs may already trigger compilation.
+## Startup and execution flow
 
-For a non-autotuned wrapper, warmup follows `compile → warmup_inputs → __call__ → launch → kernel.warmup` without executing the kernel. Runtime calls use real inputs and the actual grid. `CompileKey` deduplicates warmup work; Triton's cache determines runtime reuse.
+1. **Initialize and register.** The runner activates its `jit_warmup_registry` while constructing selected components. Their `register_warmup(...)` calls record the wrapper and configuration; registration itself does not compile kernels.
+2. **Run configured dummy inputs.** The [worker](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/worker/worker.py) runs the configured model dummy inputs. These executions can already trigger Triton compilation.
+3. **Complete registration.** The worker calls [kernel_warmup(worker)](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/model_executor/warmup/kernel_warmup.py). It adds registrations that need final runtime metadata and removes wrappers that cannot compile through the Ascend base.
+4. **Compile required variants.** `registry.warmup()` expands registered configurations through `get_warmup_keys`, deduplicates keys per wrapper and compiles each required variant. For a non-autotuned wrapper, the path is `compile → warmup_inputs → __call__ → launch → kernel.warmup`; it compiles without executing the kernel.
+5. **Capture and serve.** The worker captures graphs when enabled. Runtime wrapper calls use real tensors and the actual grid; Triton reuses matching cached artifacts. A variant not covered by warmup can still compile on first use.
+
+`CompileKey` deduplicates warmup work; it does not replace Triton's runtime specialization and cache keys.
 
 ## Integration steps
 
@@ -45,7 +51,19 @@ Create one wrapper instance for registration and execution. In the public operat
 
 ### 4. Register in the selected component
 
-Register during model-layer or metadata-builder initialization inside the runner window. Ordinary integrations do not need a central operator list. If the key depends on final cache metadata, register after that metadata is available and before `registry.warmup()`, using the same runner registry.
+Place `register_warmup(...)` in the initialization path of the component that selects and uses the operator. Pass the configuration expected by the wrapper's `get_warmup_keys`.
+
+| Situation | Registration location | Existing reference |
+| --- | --- | --- |
+| Required parameters are available during component construction | The model layer or attention metadata builder's `__init__`, inside an existing runner registration window | `AscendDSAMetadataBuilder.__init__` in [dsa_v1.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/attention/dsa_v1.py) registers Q-RMS; see the example below. |
+| Parameters depend on allocated cache layouts | The cache initialization path, after allocation, inside the runner's registry window | `initialize_kv_cache` in the [Ascend runner](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/worker/v2/model_runner.py) registers state-copy layouts. |
+| Parameters are only final after component and input-batch setup | A late-registration helper called from `kernel_warmup(worker)`, before `registry.warmup()` | `_register_dspark_swa_indices_warmup` in [kernel_warmup.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/model_executor/warmup/kernel_warmup.py). |
+
+For the Q-RMS path, the runner's `_initialize_kv_cache_upstream` activates the registry around the upstream cache initialization that constructs attention metadata builders. The builder then registers the same wrapper instance used by `triton_q_rms`.
+
+For a new initialization path, check that the caller encloses component construction in `with runner.jit_warmup_registry.activate():`. If it does not, add the window at the runner call site using its existing registry. A late-registration helper must also activate that same registry. Registration outside a window is a no-op; importing a wrapper alone does not register it.
+
+Ordinary component registration does not require adding the operator to a central list or calling `registry.warmup()` from the component. The worker owns compilation timing.
 
 ## Example: Q-RMS
 
