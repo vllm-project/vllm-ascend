@@ -1501,7 +1501,7 @@ The 10K target is the processed input length, including text and image tokens. K
 
 ### 5.4 Long-Context PD Separation Deployment
 
-This section extends the model context for PD separation on A3 series and 950DT products.
+This section extends the model context for PD separation on A2 series, A3 series, and 950DT products.
 
 !!! note "Extending the native 256K context to approximately 1M"
 
@@ -1510,6 +1510,157 @@ This section extends the model context for PD separation on A3 series and 950DT 
     Each request must satisfy `input token count + maximum output token count <= max-model-len`. With this configuration, the total must not exceed 1,010,000 tokens.
 
 On 950DT products, this case reuses ports 8247, 8248, and 8246 from the image-and-text case. Stop that deployment before starting this case.
+
+=== "A2 series"
+
+    This example uses two eight-device A2 series hosts. Prefill uses TP2 × PP4 × DP1 (EP2) on `PREFILL_HOST`, and Decode uses TP2 × DP4 (EP8) on `DECODE_HOST`. Each host uses devices 0–7. Set the two service addresses and the local network interface in the commands.
+
+    Prepare the A2 containers as in [Section 5.2](#52-basic-pd-separation-deployment) and run each command on its designated host. Stop any deployment already using ports 25568, 25569, or 25570 on these hosts. After both model APIs are ready, run the proxy on the Prefill host from the vLLM-Ascend repository root.
+
+    **Prefill:**
+
+    ```bash
+    PREFILL_HOST="<PREFILL_LOCAL_IP>"
+    DECODE_HOST="<DECODE_LOCAL_IP>"
+    local_ip="${PREFILL_HOST}"
+    nic_name="<SERVICE_NETWORK_INTERFACE>"
+
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+
+    unset VLLM_PP_LAYER_PARTITION
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export VLLM_ENGINE_READY_TIMEOUT_S=4800
+    export VLLM_HOST_IP="${local_ip}"
+    export HCCL_IF_IP="${local_ip}"
+    export GLOO_SOCKET_IFNAME="${nic_name}"
+    export TP_SOCKET_IFNAME="${nic_name}"
+    export HCCL_SOCKET_IFNAME="${nic_name}"
+    export no_proxy="localhost,127.0.0.1,${PREFILL_HOST},${DECODE_HOST}"
+    export NO_PROXY="${no_proxy}"
+    export LD_LIBRARY_PATH="$(python -c 'import mooncake; print(next(iter(mooncake.__path__)))'):${LD_LIBRARY_PATH:-}"
+    export VLLM_USE_MODELSCOPE=True
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export HCCL_NPU_SOCKET_PORT_RANGE=61400-61499
+    export HCCL_BUFFSIZE=8192
+
+    vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8 \
+        --host 0.0.0.0 \
+        --port 25568 \
+        --served-model-name qwen38-flash-next-a2-pd \
+        --trust-remote-code \
+        --quantization ascend \
+        --tensor-parallel-size 2 \
+        --pipeline-parallel-size 4 \
+        --data-parallel-size 1 \
+        --max-model-len 1010000 \
+        --max-num-seqs 32 \
+        --max-num-batched-tokens 8192 \
+        --gpu-memory-utilization 0.90 \
+        --enable-prefix-caching \
+        --async-scheduling \
+        --enable-expert-parallel \
+        --mamba-cache-mode align \
+        --mamba-ssm-cache-dtype bfloat16 \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
+        --enforce-eager \
+        --additional-config '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}' \
+        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}' \
+        --hf-overrides '{"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":4.0,"original_max_position_embeddings":262144}}}' \
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":32600,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":4},"decode":{"dp_size":4,"tp_size":2}}}'
+    ```
+
+    **Decode:**
+
+    ```bash
+    PREFILL_HOST="<PREFILL_LOCAL_IP>"
+    DECODE_HOST="<DECODE_LOCAL_IP>"
+    local_ip="${DECODE_HOST}"
+    nic_name="<SERVICE_NETWORK_INTERFACE>"
+
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+
+    unset VLLM_PP_LAYER_PARTITION
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export VLLM_ENGINE_READY_TIMEOUT_S=4800
+    export VLLM_HOST_IP="${local_ip}"
+    export HCCL_IF_IP="${local_ip}"
+    export GLOO_SOCKET_IFNAME="${nic_name}"
+    export TP_SOCKET_IFNAME="${nic_name}"
+    export HCCL_SOCKET_IFNAME="${nic_name}"
+    export no_proxy="localhost,127.0.0.1,${PREFILL_HOST},${DECODE_HOST}"
+    export NO_PROXY="${no_proxy}"
+    export LD_LIBRARY_PATH="$(python -c 'import mooncake; print(next(iter(mooncake.__path__)))'):${LD_LIBRARY_PATH:-}"
+    export VLLM_USE_MODELSCOPE=True
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export HCCL_NPU_SOCKET_PORT_RANGE=61500-61599
+    export HCCL_BUFFSIZE=512
+
+    vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8 \
+        --host 0.0.0.0 \
+        --port 25569 \
+        --served-model-name qwen38-flash-next-a2-pd \
+        --trust-remote-code \
+        --quantization ascend \
+        --tensor-parallel-size 2 \
+        --data-parallel-size 4 \
+        --max-model-len 1010000 \
+        --max-num-seqs 32 \
+        --max-num-batched-tokens 8192 \
+        --gpu-memory-utilization 0.90 \
+        --enable-prefix-caching \
+        --async-scheduling \
+        --enable-expert-parallel \
+        --mamba-cache-mode align \
+        --mamba-ssm-cache-dtype bfloat16 \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --additional-config '{"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}' \
+        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}' \
+        --hf-overrides '{"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":4.0,"original_max_position_embeddings":262144}}}' \
+        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":32700,"kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":2,"pp_size":4},"decode":{"dp_size":4,"tp_size":2}}}'
+    ```
+
+    **Proxy:**
+
+    ```bash
+    PREFILL_HOST="<PREFILL_LOCAL_IP>"
+    DECODE_HOST="<DECODE_LOCAL_IP>"
+
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
+    export no_proxy="localhost,127.0.0.1,${PREFILL_HOST},${DECODE_HOST}"
+    export NO_PROXY="${no_proxy}"
+
+    python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+        --host 0.0.0.0 --port 25570 \
+        --prefiller-hosts "${PREFILL_HOST}" --prefiller-ports 25568 \
+        --decoder-hosts "${DECODE_HOST}" --decoder-ports 25569
+    ```
+
+    **Service Verification:**
+
+    Confirm `max_model_len=1010000` in both startup logs. Check the model APIs from the Prefill host.
+
+    ```bash
+    PREFILL_HOST="<PREFILL_LOCAL_IP>"
+    DECODE_HOST="<DECODE_LOCAL_IP>"
+
+    curl --fail --noproxy '*' "http://${PREFILL_HOST}:25568/v1/models"
+    curl --fail --noproxy '*' "http://${DECODE_HOST}:25569/v1/models"
+    ```
+
+    Start Proxy after both checks succeed. Prepare `long-context-request.json` with `model` set to `qwen38-flash-next-a2-pd`, the input in `messages`, and the requested output budget in `max_tokens`. Keep the input token count plus the maximum output token count within 1,010,000 tokens.
+
+    ```bash
+    curl --fail "http://127.0.0.1:25570/v1/chat/completions" \
+        -H "Content-Type: application/json" \
+        --data-binary @long-context-request.json
+    ```
+
+    Verify the response and compare `usage.prompt_tokens` with the test input.
 
 === "A3 series"
 
@@ -2465,6 +2616,7 @@ Verify generation through `/v1/chat/completions`, using the API address and mode
 | 950DT products colocated | `http://127.0.0.1:8087` | `qwen3.8-flash-next-950-dt` |
 | A2 series PD proxy | `http://127.0.0.1:25570` | `qwen38-flash-next-a2-pd` |
 | A3 series PD proxy | `http://127.0.0.1:25570` | `qwen38-flash-next-a3-pd` |
+| A2 series long-context PD proxy | `http://127.0.0.1:25570` | `qwen38-flash-next-a2-pd` |
 | A3 series long-context PD proxy | `http://127.0.0.1:25570` | `qwen38-flash-next-a3-pd` |
 | 950DT products PD proxy | `http://<LOCAL_SERVICE_IP>:8087` | `qwen38-flash-next-950-dt-pd` |
 | 950DT products image-and-text 10K PD proxy | `http://127.0.0.1:8246` | `qwen38-megamoe-sp-pd` |
@@ -2692,8 +2844,10 @@ Use the configuration for your hardware and deployment mode. The table summarize
 | A2 series | Decode (image-and-text 10K) | 0–7 on decode host | 2 × 1 × 4 (EP8) | 262144 | 32 | 4096 |
 | A3 series | Decode (image-and-text 10K) | 8–15 | 2 × 1 × 4 (EP8) | 262144 | 32 | 4096 |
 | 950DT products | Decode (image-and-text 10K) | 4–7 | 2 × 1 × 2 | 143360 | 64 | 8192 |
+| A2 series | Prefill (long-context) | 0–7 on prefill host | 2 × 4 × 1 (EP2) | 1010000 | 32 | 8192 |
 | A3 series | Prefill (long-context) | 0–7 | 2 × 4 × 1 (EP2) | 1010000 | 32 | 8192 |
 | 950DT products | Prefill (long-context) | 0–3 | 4 × 1 × 1 | 1010000 | 16 | 4096 |
+| A2 series | Decode (long-context) | 0–7 on decode host | 2 × 1 × 4 (EP8) | 1010000 | 32 | 8192 |
 | A3 series | Decode (long-context) | 8–15 | 2 × 1 × 4 (EP8) | 1010000 | 32 | 8192 |
 | 950DT products | Decode (long-context) | 4–7 | 4 × 1 × 1 | 1010000 | 16 | 4096 |
 | A3 series | Prefill (128K/1K three-tier pooling) | 0–7 | 2 × 2 × 2 (EP4) | 262144 | 32 | 8192 |
