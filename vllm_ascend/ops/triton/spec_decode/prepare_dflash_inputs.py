@@ -87,6 +87,7 @@ def _prepare_dflash_inputs_kernel(
     # Outputs
     out_input_ids_ptr,
     out_query_positions_ptr,
+    out_is_padding_ptr,
     out_query_start_loc_ptr,
     out_seq_lens_ptr,
     out_query_slot_mapping_ptr,
@@ -131,6 +132,7 @@ def _prepare_dflash_inputs_kernel(
     REQUEST_PADDING_BLOCK_SIZE: tl.constexpr,
     SAMPLE_PADDING_BLOCK_SIZE: tl.constexpr,
     QUERY_PADDING_BLOCK_SIZE: tl.constexpr,
+    HAS_IS_PADDING: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     worker_idx = tl.program_id(1)
@@ -219,6 +221,8 @@ def _prepare_dflash_inputs_kernel(
     )
 
     tl.store(out_input_ids_ptr + query_idx, input_id, mask=query_mask)
+    if HAS_IS_PADDING:
+        tl.store(out_is_padding_ptr + query_idx, False, mask=query_mask)
     tl.store(out_query_positions_ptr + query_idx, tl.minimum(query_pos, max_model_len - 1), mask=query_mask)
     tl.store(out_query_slot_mapping_ptr + query_idx, q_slot, mask=query_mask)
 
@@ -294,7 +298,12 @@ def _prepare_dflash_inputs_kernel(
 
     for i in range(qp_begin, qp_end, QUERY_PADDING_BLOCK_SIZE):
         qp_off = i + tl.arange(0, QUERY_PADDING_BLOCK_SIZE)
-        tl.store(out_query_slot_mapping_ptr + qp_off, PAD_SLOT_ID, mask=qp_off < qp_end)
+        qp_mask = qp_off < qp_end
+        tl.store(out_input_ids_ptr + qp_off, 0, mask=qp_mask)
+        tl.store(out_query_positions_ptr + qp_off, 0, mask=qp_mask)
+        if HAS_IS_PADDING:
+            tl.store(out_is_padding_ptr + qp_off, True, mask=qp_mask)
+        tl.store(out_query_slot_mapping_ptr + qp_off, PAD_SLOT_ID, mask=qp_mask)
 
 
 def prepare_dflash_inputs_triton(
@@ -374,6 +383,7 @@ def prepare_dflash_inputs_triton(
     _prepare_dflash_inputs_kernel[(num_reqs, workers_per_req)](
         input_buffers.input_ids,
         input_buffers.positions,
+        getattr(input_buffers, "is_padding", None),
         input_buffers.query_start_loc,
         input_buffers.seq_lens,
         query_slot_mapping,
@@ -414,4 +424,5 @@ def prepare_dflash_inputs_triton(
         REQUEST_PADDING_BLOCK_SIZE=_REQUEST_PADDING_BLOCK_SIZE,
         SAMPLE_PADDING_BLOCK_SIZE=_SAMPLE_PADDING_BLOCK_SIZE,
         QUERY_PADDING_BLOCK_SIZE=_QUERY_PADDING_BLOCK_SIZE,
+        HAS_IS_PADDING=getattr(input_buffers, "is_padding", None) is not None,
     )

@@ -79,15 +79,18 @@ VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen3.8-27B \
 Set `num_speculative_tokens` to the checkpoint block size minus one. Omit
 `draft_tensor_parallel_size` to inherit the target TP size. Draft sampling defaults
 to `greedy`; use `draft_sample_method="probabilistic"` for probabilistic proposals.
-The adapter reuses DFlash's eager and ACL graph execution paths and DFlash2's
-candidate sampler. NPU correctness, acceptance and graph replay validation remain
-pending.
+The adapter reuses DFlash's eager and ACL graph execution paths, with Ascend
+candidate-walk and proposal-cache kernels. NPU correctness, acceptance and graph
+replay validation remain pending.
 
 Adaptive verification, fine-grained LM head TP, PCP vocabulary weight sharding,
-QuaRot targets and quantized target LM heads are not supported by this adapter.
-Standard tensor parallelism uses upstream candidate gathering and transition-score
-reduction. Existing MRV2 DFlash restrictions on pipeline and context parallelism
-continue to apply.
+QuaRot targets, quantized causal-injection projections, FP64 Gumbel sampling and
+quantized target LM heads are not supported by this adapter. Standard tensor
+parallelism uses candidate gathering and transition-score reduction over TP.
+Existing MRV2 DFlash restrictions on pipeline and context parallelism continue
+to apply. Scoring uses cached FP32 bridge weights; an NZ target LM head also
+requires an ND copy of each rank's vocabulary shard, increasing device memory use.
+The scoring caches assume weights remain fixed during serving.
 
 ## Speculating by matching n-grams in the prompt
 
