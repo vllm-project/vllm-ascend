@@ -189,7 +189,9 @@ class NPUModelRunner(GPUModelRunner):
         # Only a real split (size > 1) exchanges across ranks, and graph dispatch keeps it aligned.
         ftpc = self.ascend_config.finegrained_tp_config
         self._finegrained_tp_requires_graph = (
-            ftpc.oproj_tensor_parallel_size > 1 or ftpc.mlp_tensor_parallel_size > 1
+            ftpc.oproj_tensor_parallel_size > 1
+            or ftpc.mlp_tensor_parallel_size > 1
+            or ftpc.shared_expert_tensor_parallel_size > 1
         ) and self.dp_size > 1
 
         self.use_aclgraph = (
@@ -657,7 +659,7 @@ class NPUModelRunner(GPUModelRunner):
         dp_coordination_context = skip_dp_coordination() if skip_dp_metadata_sync else nullcontext()
         profile_kwargs = {"randomize_inputs": randomize_inputs}
         forward_failed = True
-        with dp_coordination_context:
+        with self._finegrained_tp_dispatch_guard(is_profile), dp_coordination_context:
             try:
                 output = super().execute_model(
                     scheduler_output,
@@ -777,11 +779,40 @@ class NPUModelRunner(GPUModelRunner):
             batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
         return batch_state, uniform_token_count
 
+    @contextmanager
+    def _finegrained_tp_dispatch_guard(self, is_profile: bool):
+        manager = getattr(self, "cudagraph_manager", None)
+        if not getattr(self, "_finegrained_tp_requires_graph", False) or manager is None:
+            yield
+            return
+        previous = getattr(manager, "_ascend_finegrained_tp_check", None)
+        manager._ascend_finegrained_tp_check = (
+            None
+            if is_profile or getattr(self, "_finegrained_tp_warmup", False)
+            else self._check_finegrained_tp_graph_step
+        )
+        try:
+            yield
+        finally:
+            manager._ascend_finegrained_tp_check = previous
+
+    @contextmanager
+    def _finegrained_tp_warmup_context(self):
+        if not getattr(self, "_finegrained_tp_requires_graph", False):
+            yield
+            return
+        previous = getattr(self, "_finegrained_tp_warmup", False)
+        self._finegrained_tp_warmup = True
+        try:
+            yield
+        finally:
+            self._finegrained_tp_warmup = previous
+
     def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:
         # Eager dispatch keeps per-rank token counts; the cross-DP o_proj/MLP exchanges would desync.
         if self._finegrained_tp_requires_graph and cg_mode == CUDAGraphMode.NONE:
             raise RuntimeError(
-                "o_proj / MLP TP require every step on a captured graph: this step dispatched "
+                "Fine-grained projection / MLP TP require every step on a captured graph: this step dispatched "
                 "to eager, which desyncs the cross-DP HCCL collectives (mixed or oversized "
                 "batch, a request-arrival step misclassified as prefill, or a full prefill "
                 "scheduled locally — a request sent directly to the decode node)."
@@ -798,7 +829,6 @@ class NPUModelRunner(GPUModelRunner):
         npu attention backends need seq_lens_cpu to work, so we prepare
         seq_lens_cpu here.
         """
-        self._check_finegrained_tp_graph_step(batch_desc.cg_mode)
         num_tokens = batch_req_state.num_tokens
         num_tokens_after_padding = max(num_tokens, batch_desc.num_tokens)
         graph_num_reqs = batch_desc.num_reqs
@@ -1269,6 +1299,9 @@ class NPUModelRunner(GPUModelRunner):
         load_balance_ctx = override_mrv2_in_profile_run(True) if profile_adaptive_tail else nullcontext()
         with (
             # Disable the CPP drafter before entering contexts that inspect it.
+            # Worker.execute_dummy_batch marks runtime idle with skip_ring;
+            # it must retain the same post-dispatch check as active peers.
+            self._finegrained_tp_warmup_context() if not skip_ring else nullcontext(),
             self._cpp_profile_dummy(profile_cpp),
             # Preserve scheduled query tokens before PIECEWISE graph padding.
             self._preserve_dummy_query_tokens(num_tokens, uniform_decode),

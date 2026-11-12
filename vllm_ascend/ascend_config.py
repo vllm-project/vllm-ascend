@@ -872,6 +872,7 @@ class AscendConfig:
         finegrained_tp_enabled = (
             self.finegrained_tp_config.oproj_tensor_parallel_size > 1
             or self.finegrained_tp_config.mlp_tensor_parallel_size > 1
+            or self.finegrained_tp_config.shared_expert_tensor_parallel_size > 1
         )
         if finegrained_tp_enabled and not self.scheduler_config.recompute_scheduler_enable:
             raise AssertionError(
@@ -1404,7 +1405,7 @@ class AscendConfig:
 class FinegrainedTPConfig:
     """Configuration Object for ``additional_config["finegrained_tp_config"]``.
 
-    Migrated to ``@config`` (pydantic dataclass). 4 int fields get lax coercion
+    Migrated to ``@config`` (pydantic dataclass). Integer fields get lax coercion
     ('2'→2). vllm_config-dependent preconditions (TP/eager/kv_consumer/is_moe/
     data_parallel divisibility) are validated in ``_validate_preconditions()``,
     a plain method invoked explicitly by ``init_ascend_config`` (Plan B:
@@ -1420,6 +1421,7 @@ class FinegrainedTPConfig:
     lmhead_tensor_parallel_size: int = 1
     embedding_tensor_parallel_size: int = 1
     mlp_tensor_parallel_size: int = 1
+    shared_expert_tensor_parallel_size: int = 1
 
     @model_validator(mode="after")
     def _validate_sizes(self):
@@ -1428,6 +1430,7 @@ class FinegrainedTPConfig:
             "lmhead_tensor_parallel_size",
             "embedding_tensor_parallel_size",
             "mlp_tensor_parallel_size",
+            "shared_expert_tensor_parallel_size",
         )
         for field_name in size_fields:
             value = getattr(self, field_name)
@@ -1441,6 +1444,40 @@ class FinegrainedTPConfig:
 
         vc = vllm_config
         enabled_configs = []
+        if self.shared_expert_tensor_parallel_size > 1:
+            parallel = vc.parallel_config
+            if (
+                parallel.tensor_parallel_size != 1
+                or parallel.prefill_context_parallel_size != 1
+                or parallel.decode_context_parallel_size != 1
+                or parallel.pipeline_parallel_size != 1
+            ):
+                raise ValueError("Shared-expert fine-grained TP requires TP=PCP=DCP=PP=1.")
+            if not vc.use_v2_model_runner:
+                raise ValueError("Shared-expert fine-grained TP requires the V2 model runner.")
+            if vc.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
+                raise ValueError("Shared-expert fine-grained TP requires graph mode.")
+            if vc.kv_transfer_config is None or not vc.kv_transfer_config.is_kv_consumer:
+                raise ValueError("Shared-expert fine-grained TP requires a PD decode node.")
+            if (vc.additional_config or {}).get("enable_shared_expert_dp", False):
+                raise ValueError(
+                    "Shared-expert fine-grained TP cannot replicate shared weights with enable_shared_expert_dp."
+                )
+            if vc.lora_config is not None:
+                raise ValueError("Shared-expert fine-grained TP does not support LoRA.")
+            decode_query_len = 1 + (vc.speculative_config.num_speculative_tokens or 0) if vc.speculative_config else 1
+            max_step = min(
+                vc.scheduler_config.max_num_batched_tokens, vc.scheduler_config.max_num_seqs * decode_query_len
+            )
+            capture_bound = vc.compilation_config.max_cudagraph_capture_size
+            if capture_bound is None:
+                sizes = vc.compilation_config.cudagraph_capture_sizes
+                capture_bound = max(sizes) if sizes else None
+            if capture_bound is None or capture_bound < max_step:
+                raise ValueError(
+                    "Shared-expert fine-grained TP requires graph capture capacity covering every decode step."
+                )
+            enabled_configs.append(f"shared_expert_tensor_parallel_size={self.shared_expert_tensor_parallel_size}")
         if self.oproj_tensor_parallel_size > 1 or self.mlp_tensor_parallel_size > 1:
             # o_proj's _forward_o_proj reshape misaligns under tp > 1; mlp is untested there.
             if vc.parallel_config.tensor_parallel_size > 1:
@@ -1507,6 +1544,7 @@ class FinegrainedTPConfig:
             self.lmhead_tensor_parallel_size,
             self.embedding_tensor_parallel_size,
             self.mlp_tensor_parallel_size,
+            self.shared_expert_tensor_parallel_size,
         ]
         for module_tp_size in module_tp_sizes:
             # If it is a dense model, then expert parallel is not needed,

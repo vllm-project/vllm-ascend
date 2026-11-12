@@ -221,6 +221,73 @@ All knobs live under `finegrained_tp_config` inside `--additional-config`. The d
 | `mlp_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | TP size of the MLP (feed-forward) blocks. Values > 1 require the [o_proj / MLP preconditions](#preconditions-for-o_proj--mlp-tp). |
 | `lmhead_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | TP size of the LM head. |
 | `embedding_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | TP size of the token embedding table. |
+| `shared_expert_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | Independent shared-expert TP; see [shared-expert requirements](#shared-expert-fine-grained-tp). |
+
+## Shared-expert fine-grained TP
+
+`shared_expert_tensor_parallel_size` independently shards the shared expert's
+gate/up output channels and matching down input channels along the DP axis.
+It does not enable dense MLP TP, change global TP, or change routed-expert EP
+placement. The default is `1`; `0` is also treated as disabled. Equal component
+sizes reuse a communicator, including when dense MLP TP is enabled separately.
+
+For example, on a DP32TP1 decode node, set:
+
+```json
+{
+  "finegrained_tp_config": {
+    "shared_expert_tensor_parallel_size": 8
+  },
+  "enable_shared_expert_dp": false,
+  "multistream_overlap_shared_expert": true,
+  "scheduler_config": {
+    "recompute_scheduler_enable": true
+  }
+}
+```
+
+The activation flow for each group of eight DP owners is:
+
+```text
+local [T,H] -> AllGather [8T,H]
+  -> local gate/up weight shards -> activation -> local down weight shard
+  -> ReduceScatter(sum) -> original owner's complete [T,H] output
+```
+
+The runner owns both collectives, outside the shared MLP's linear wrappers.
+This also covers the A3 INT8-activation fused path, which directly invokes
+quantized matmuls, and A5 MXFP paths, which retain their scheme-specific
+activation quantization and processed weight layouts. The shared-expert
+contribution stays on the separate branch when routed MegaMoe is used; its
+fused shared ABI does not implement these DP-axis collectives.
+
+With `multistream_overlap_shared_expert=true`, models providing routed input
+and output transforms, such as Kimi-K3's latent Down/Up projections, reuse the
+existing overlap windows: shared-input AllGather runs alongside latent Down,
+and shared-output ReduceScatter runs alongside latent Up. Input readiness is
+joined before routed EP collectives, and shared ReduceScatter waits for routed
+finalization before starting. Models without either transform use the regular
+input preparation/output join for the missing side; latent transforms are not
+a prerequisite. Profiling is needed to measure actual overlap and benefit.
+
+Requirements:
+
+- A MoE model using Ascend's shared runner and standard `gate_up_proj` /
+  `down_proj` linears, with the shared-expert prefix recognized by the linear
+  dispatcher. Incompatible shared modules fail explicitly during construction.
+- A3 or A5, global `TP=PCP=DCP=PP=1`, V2 runner, and a size evenly dividing DP.
+  The shared intermediate dimension must also divide evenly by the size.
+- P/D decode deployment with graph mode and capture capacity covering every
+  decode step, including speculative-token slots. Idle ranks still participate
+  with the graph's padded token capacity. Eager runtime dispatch is rejected.
+- Recompute scheduler and `PreemptOffloadConnector` in the connector chain,
+  configured as in the [preempt offload guide](preempt_offload_connector.md).
+- `enable_shared_expert_dp=false`; replicated shared weights and this sharding
+  mode are mutually exclusive. LoRA is not supported by this mode.
+
+Switching the new size back to `1` preserves the previous shared DP, global
+TP/SP and multistream paths. The existing dense-MLP size does not implicitly
+enable shared-expert sharding. No checkpoint conversion is required.
 
 ## Experimental Results
 

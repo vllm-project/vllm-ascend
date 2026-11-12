@@ -1669,9 +1669,12 @@
 #    How:
 #       When `is_pcp_decode_sharding_enabled()` holds, derive the request
 #       count from the local tokens and the uniform query length.
+#       Also invoke the runner-scoped fineTP graph-mode check after DP
+#       synchronization, before real and idle ranks take different paths.
 #    Related PR (if no, explain why):
 #       No upstream PR yet; vLLM #52162 still passes the global request count.
 #    Future Plan:
+#       Replace the fineTP callback with an upstream post-dispatch hook when available.
 #       Remove once upstream dispatches sharded PCP decode with local counts.
 #
 # ** 33. File: platform/patch_vision.py**
