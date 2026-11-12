@@ -59,7 +59,10 @@ from vllm_ascend.utils import clear_enable_sp, enable_sp, shared_expert_dp_enabl
 
 
 def test_shared_engram_requires_v2_runner():
-    config = AscendConfig(shared_engram={"backend": "a3", "endpoint": "127.0.0.1:29500"})
+    config = AscendConfig(
+        shared_engram={"backend": "a3", "endpoint": "127.0.0.1:29500"},
+        sparse_kv_offload_config=SparseKVOffloadConfig(),
+    )
     vc = SimpleNamespace(use_v2_model_runner=False, engram_config=SimpleNamespace(cpu_offload=True))
     try:
         config.derive_and_validate(vc)
