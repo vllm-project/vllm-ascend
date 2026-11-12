@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Ascend Kimi K3 delta attention with TP x PCP head-sharded state."""
 
-from collections.abc import Callable
 from functools import wraps
 
 import torch
@@ -40,7 +39,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
 from vllm_ascend.distributed.parallel_state import get_gproj_tp_group, get_qkv_iproj_tp_group
 from vllm_ascend.ops.finegrained_tp import (
     KDAProjectionTP,
-    PendingGate,
     ProjectionColumnParallelLinear,
     ProjectionMergedColumnParallelLinear,
     projection_capacity,
@@ -510,6 +508,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
     def _quantize_fused_qkv(
         self,
         hidden_states: torch.Tensor,
+        *,
+        for_finegrained_tp: bool = False,
     ) -> torch.Tensor | PreparedLinearInput | tuple[torch.Tensor, torch.Tensor]:
         quant_method = self.in_proj_qkvgfab.quant_method
         inner_quant_method = getattr(quant_method, "quant_method", quant_method)
@@ -517,7 +517,9 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             type(inner_quant_method) is AscendW8A8DynamicLinearMethod
             and hidden_states.dtype in (torch.float16, torch.bfloat16)
             and hidden_states.ndim == 2
-            and get_current_hardware_profile().supports(HardwareCapability.KDA_INT8_QUANT_OVERLAP)
+            and (
+                for_finegrained_tp or get_current_hardware_profile().supports(HardwareCapability.KDA_INT8_QUANT_OVERLAP)
+            )
         ):
             # Prepare on main before the BFG completion wait. apply() consumes
             # the INT8 tensor and per-token scales without quantizing again.
@@ -635,7 +637,6 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         state_indices: torch.Tensor,
         *,
         num_accepted_tokens: torch.Tensor | None = None,
-        before_recurrent: Callable[[], None] | None = None,
     ) -> torch.Tensor:
         return run_recurrent_kda(
             q,
@@ -650,7 +651,6 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             self.dt_bias,
             lower_bound=self.gate_lower_bound,
             num_accepted_tokens=num_accepted_tokens,
-            before_recurrent=before_recurrent,
         )
 
     def _run_prefill(
@@ -726,16 +726,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             self.o_norm.forward_oot(norm_input, g2[: norm_input.shape[1]], out=core_attn_out)
             maybe_save_kv_layer_to_connector("", [])
 
-    def _forward_core(
-        self,
-        mixed_qkv,
-        g1,
-        beta,
-        core_attn_out,
-        *,
-        beta_is_preprocessed=False,
-        before_recurrent: Callable[[], None] | None = None,
-    ):
+    def _forward_core(self, mixed_qkv, g1, beta, core_attn_out, *, beta_is_preprocessed=False):
         """Original conv/spec/recurrent dispatch, with no dependency on output G."""
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
@@ -792,7 +783,6 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             beta_non_spec = beta
 
         core_spec = None
-        has_non_spec_tokens = mixed_non_spec is not None and mixed_non_spec.shape[0] > 0
         if mixed_spec is not None:
             spec_meta = attn_metadata.spec_decode_metadata
             assert spec_meta is not None
@@ -824,14 +814,10 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 attn_metadata.spec_query_start_loc,
                 attn_metadata.spec_state_indices_tensor,
                 num_accepted_tokens=spec_conv_meta.num_accepted_tokens,
-                # Mixed branches still have Vector preparation/assembly;
-                # defer their G exchange until the whole core has finished.
-                before_recurrent=before_recurrent if not has_non_spec_tokens else None,
             )
 
         core_non_spec = None
-        if has_non_spec_tokens:
-            assert mixed_non_spec is not None
+        if mixed_non_spec is not None and mixed_non_spec.shape[0] > 0:
             if attn_metadata.num_prefills > 0:
                 prefill_meta = attn_metadata.non_spec_prefill_metadata
                 assert prefill_meta is not None
@@ -919,7 +905,6 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                     recurrent_state,
                     attn_metadata.non_spec_query_start_loc[: attn_metadata.num_decodes + 1],
                     attn_metadata.non_spec_state_indices_tensor,
-                    before_recurrent=before_recurrent if core_spec is None else None,
                 )
 
         if core_spec is None and core_non_spec is None:
@@ -968,21 +953,14 @@ def kimi_kda_finegrained_forward(hidden_states: torch.Tensor, output: torch.Tens
         return
     # Reuse the same worker-local stream as the original fused BFG path;
     # do not allocate a separate F/beta compute stream for every layer.
-    qkv, forget, beta, gate = layer.projection_tp.project(layer, hidden_states, aux_stream=_kda_bfg_stream())
-    capacity = qkv.shape[0]
+    pending = layer.projection_tp.project(layer, hidden_states, aux_stream=_kda_bfg_stream())
+    capacity = pending.capacity
+    # Non-AIV exchanges may overlap this independent Vector initialization.
+    # In AIV mode project() has already joined both communication operations.
     core_out = hidden_states.new_zeros((1, capacity, layer.local_num_heads, layer.head_dim))
-    pending_gate: PendingGate | None = None
-
-    def launch_gate_exchange() -> None:
-        nonlocal pending_gate
-        pending_gate = layer.projection_tp.exchange_gate(gate)
-
-    norm_input = layer._forward_core(qkv, forget, beta, core_out, before_recurrent=launch_gate_exchange)
-    # Startup, idle and mixed/prefill branches must still join the same A2A
-    # once, after their Vector work, even without a pure recurrent window.
-    if pending_gate is None:
-        pending_gate = layer.projection_tp.exchange_gate(gate)
-    owner_gate = pending_gate.wait()
+    qkv, forget, beta, gate = pending.wait()
+    norm_input = layer._forward_core(qkv, forget, beta, core_out)
+    owner_gate = gate.wait()
     if norm_input is not None:
         layer.o_norm.forward_oot(norm_input, owner_gate[: norm_input.shape[1]], out=core_out)
         maybe_save_kv_layer_to_connector("", [])
