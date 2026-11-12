@@ -112,6 +112,16 @@ class MemoryGVAStore:
         return 0
 
 
+class BoundsCheckingGVAStore(MemoryGVAStore):
+    """Reject copies beyond the allocated object instead of growing the buffer."""
+
+    def batch_copy(self, gvas, addrs, sizes, direction):
+        for gva, size in zip(gvas, sizes, strict=True):
+            if not any(base <= gva and gva + size <= base + length for base, length in self.objects.values()):
+                raise RuntimeError("GVA copy exceeds its allocated object")
+        return super().batch_copy(gvas, addrs, sizes, direction)
+
+
 def make_cross_worker(
     test,
     *,
@@ -120,6 +130,7 @@ def make_cross_worker(
     mode="NONE",
     sources=(2, 8),
     num_layers=12,
+    global_num_layers=None,
     method=None,
     architecture="DeepseekV41DSparkModel",
     use_v2=True,
@@ -150,6 +161,9 @@ def make_cross_worker(
     )
 
     def create(config, use_layerwise, kv_cache_config):
+        if global_num_layers is not None:
+            config.model_config.get_layers_start_end_indices.return_value = (0, num_layers)
+            config.model_config.get_total_num_hidden_layers.return_value = global_num_layers
         config.kv_transfer_config.kv_connector_extra_config["use_layerwise"] = True
         config.model_config.hf_text_config = SimpleNamespace(
             num_hidden_layers=num_layers, kv_source_layer_ids=list(sources), compress_ratios=[2] * num_layers
@@ -195,14 +209,16 @@ def make_cross_worker(
     worker.cache_coordinator = worker.token_database.cache_coordinator = None
     all_names = sum(groups, [])
     alignment = 2 * 1024 * 1024
-    backing = torch.empty(alignment + len(all_names) * 64, dtype=torch.uint8)
+    slot_bytes = 128 if segmented else 64
+    backing = torch.empty(alignment + len(all_names) * slot_bytes, dtype=torch.uint8)
     start = -backing.data_ptr() % alignment
     caches = {
-        name: backing[start + index * 64 : start + (index + 1) * 64].reshape(4, 16, 1).fill_(index + 1)
+        name: backing[start + index * slot_bytes : start + index * slot_bytes + 64].reshape(4, 16, 1).fill_(index + 1)
         for index, name in enumerate(all_names)
     }
     if segmented:
-        caches[all_names[0]] = caches[all_names[0]].reshape(8, 8, 1)
+        physical = backing[start : start + slot_bytes].reshape(8, 16, 1).fill_(165)
+        caches[all_names[0]] = physical[:, :8, :].fill_(1)
 
     def close():
         store.resume.set()
@@ -240,6 +256,72 @@ def save_prefix(worker):
 
 
 class TestCrossLayerGVA(unittest.TestCase):
+    def test_shared_source_objects_use_registered_payload_size(self):
+        cases = [
+            ((2, 8), 12, 12, False, 64),
+            ((2, 8, 14, 20), 40, 43, False, 128),
+            ((2, 8), 12, 12, True, 64),
+        ]
+        for sources, num_layers, global_num_layers, segmented, object_size in cases:
+            with self.subTest(sources=sources, segmented=segmented):
+                worker, store, caches = make_cross_worker(
+                    self,
+                    sources=sources,
+                    num_layers=num_layers,
+                    global_num_layers=global_num_layers,
+                    segmented=segmented,
+                    bounded=True,
+                    store=BoundsCheckingGVAStore(),
+                )
+                if segmented:
+                    cache = caches[next(iter(caches))]
+                    self.assertEqual(len(worker._get_cache_transfer_segments(cache)), 2)
+                expected = {name: cache.flatten()[16:32].clone() for name, cache in caches.items()}
+                save_prefix(worker)
+                key = worker._make_layerwise_full_key(0, b"h".hex())
+                self.assertEqual(store.objects[key][1], object_size)
+                for cache in caches.values():
+                    cache.zero_()
+                restore = metadata(worker, load=True, save=False)
+                worker.prepare_cross_layer_step(restore)
+                worker.start_load_kv(restore)
+                worker.finish_cross_layer_loads()
+                for name, cache in caches.items():
+                    torch.testing.assert_close(cache.flatten()[16:32], expected[name])
+                    self.assertEqual(int(cache.flatten()[:16].sum()), 0)
+                    self.assertEqual(int(cache.flatten()[32:].sum()), 0)
+                if segmented:
+                    cache = caches[next(iter(caches))]
+                    padding = cache.as_strided((8, 16, 1), (16, 1, 1))[:, 8:, :]
+                    self.assertTrue(bool(torch.all(padding == 165)))
+
+    def test_replay_disabled_keeps_full_swa_and_draft_objects(self):
+        worker, store, caches = make_cross_worker(
+            self, bounded=False, draft=True, global_num_layers=12, store=BoundsCheckingGVAStore()
+        )
+        expected = {name: cache[1].clone() for name, cache in caches.items()}
+        save_prefix(worker)
+        # Source KV/indexer: 2 sources x2 descriptors x16 bytes. SWA: all12
+        # target layers x16 bytes. The separate draft group needs16 bytes.
+        for group_id, object_size in [(0, 64), (1, 192), (2, 16)]:
+            key = worker._make_layerwise_full_key(group_id, b"h".hex())
+            self.assertEqual(store.objects[key][1], object_size)
+        for cache in caches.values():
+            cache.zero_()
+        restore = metadata(worker, load=True, save=False)
+        worker.prepare_cross_layer_step(restore)
+        worker.start_load_kv(restore)
+        worker.finish_cross_layer_loads()
+        for name, cache in caches.items():
+            torch.testing.assert_close(cache[1], expected[name])
+            self.assertEqual(int(cache[0].sum()), 0)
+
+    def test_empty_group_keeps_base_allocation_fallback(self):
+        worker = CrossLayerKVPoolWorker.__new__(CrossLayerKVPoolWorker)
+        worker.group_block_len = {}
+        worker.page_size_bytes = 96
+        self.assertEqual(worker._global_group_alloc_size(0), 96)
+
     def test_pcp_replicas_restore_same_gva_objects_with_local_layer_gates(self):
         writer, store, caches = make_cross_worker(
             self, pcp_size=2, tp_size=2, use_mla=True, draft=True, method="dspark"

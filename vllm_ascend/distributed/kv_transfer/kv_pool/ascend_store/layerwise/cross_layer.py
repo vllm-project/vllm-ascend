@@ -63,6 +63,15 @@ class CrossLayerKVPoolWorker(LayerwiseKVPoolWorker):
             and self._extra_config.get("discard_partial_chunks", True) is True
         )
 
+    def _global_group_alloc_size(self, group_id: int) -> int:
+        # PP/DCP/KVPP are rejected above, so this worker has the complete
+        # object's descriptors locally. Source KV, SWA and draft groups can
+        # contain different layer counts; reserve each group's actual bytes.
+        block_lens = self.group_block_len.get(group_id) or []
+        if block_lens:
+            return sum(block_lens)
+        return super()._global_group_alloc_size(group_id)
+
     def register_kv_caches(self, kv_caches: dict[str, Any]) -> None:
         # Keep draft descriptors registered too; they use synchronous GVA loads.
         BaseKVPoolWorker.register_kv_caches(self, kv_caches)

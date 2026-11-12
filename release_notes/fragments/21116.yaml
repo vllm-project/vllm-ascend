@@ -23,3 +23,10 @@ entries:
       mixed or nested MultiConnector deployments.
       Source layers derive from model parameters without a new public switch;
       Mooncake retains its block-key path.
+  - category: bugfix
+    text: >-
+      Size shared-source Memcache GVA objects from each cache group's registered
+      descriptors instead of the full model layer count, retaining eligible
+      SWA and draft data when bounded replay is disabled. Fresh pool objects
+      are required when switching from the previous allocation layout.
+    model: deepseek-v4.1

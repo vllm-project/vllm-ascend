@@ -67,6 +67,24 @@ SWA storage follows the existing coordinator's block masks:
   replay checkpoint. Keeping only the request's final window would discard
   shorter reusable prefixes and require coordinated lookup/load changes.
 
+## Per-group GVA object sizes
+
+Cross-layer objects reserve the sum of their registered group descriptor byte
+lengths, including indexer/scales and segmented cache views. They do not expand
+a sparse shared-source group to the model-wide layer count. This worker rejects
+PP, DCP and KVPP, so each group's complete object layout is available locally;
+ordinary workers retain their existing distributed allocation rules.
+
+Group eligibility and block masks are unchanged. With bounded replay disabled,
+SWA objects retain every registered SWA layer in their group, while shared-source
+and draft objects use their own registered members. With bounded replay enabled,
+non-cacheable target SWA remains excluded by the existing policy. Allocation,
+transfer builders and read-size validation use the same per-group byte layout.
+
+Existing GVA objects created with larger reservations do not match the compact
+layout's exact size checks. Use a fresh pool/cache namespace when validating or
+rolling out this change; do not mix old and compact-layout clients in one pool.
+
 ## Request scheduling and load overlap
 
 The common GVA scheduler queries readable group objects, applies the existing
