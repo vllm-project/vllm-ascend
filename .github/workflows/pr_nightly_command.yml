@@ -19,7 +19,7 @@ name: Handle /nightly Command
 
 on:
   repository_dispatch:
-    types: [nightly-command, weekly-command]
+    types: [nightly-command, presmoke-command, weekly-command]
 
 defaults:
   run:
@@ -51,6 +51,7 @@ jobs:
       profile_options_json: ${{ steps.resolve.outputs.profile_options_json }}
       bisect_args_json: ${{ steps.resolve.outputs.bisect_args_json }}
       command: ${{ steps.resolve.outputs.command }}
+      presmoke_image: ${{ steps.resolve.outputs.presmoke_image }}
       pr_number: ${{ steps.resolve.outputs.pr_number }}
       download_path: ${{ steps.resolve.outputs.download_path }}
       blocked: ${{ steps.block_window.outputs.blocked }}
@@ -230,6 +231,7 @@ jobs:
           AOP_ENABLED="false"
           PROFILE_OPTIONS_JSON='{}'
           IS_A3_560T="false"
+          IS_PRESMOKE_IMAGE="false"
           NEXT_IS_BRANCH=0
           NEXT_IS_DOWNLOAD=0
           DOWNLOAD_PATH=""
@@ -327,6 +329,8 @@ jobs:
               AOP_ENABLED="true"
             elif [ "$WORD" = "--a3-560t" ]; then
               IS_A3_560T="true"
+            elif [ "$WORD" = "--presmoke" ]; then
+              IS_PRESMOKE_IMAGE="true"
             elif [ "$WORD" = "--profile" ]; then
               PROFILE_OPTIONS_JSON=$(jq -c '.enabled = true' <<< "$PROFILE_OPTIONS_JSON")
             elif [ "$WORD" = "--profile-with-stack" ]; then
@@ -379,6 +383,10 @@ jobs:
           fi
           if jq -e '.enabled == true' <<< "$PROFILE_OPTIONS_JSON" >/dev/null && [ "$COMMAND" != "nightly" ]; then
             echo "ERROR: profiling is supported only by Nightly workflows"
+            exit 1
+          fi
+          if [ "$IS_PRESMOKE_IMAGE" = "true" ] && [ "$COMMAND" != "nightly" ]; then
+            echo "ERROR: --presmoke is supported only by the /nightly command (use /presmoke to build the image)"
             exit 1
           fi
 
@@ -436,6 +444,7 @@ jobs:
             echo "download_path=$DOWNLOAD_PATH"
             echo "aop_enabled=$AOP_ENABLED"
             echo "profile_options_json=$PROFILE_OPTIONS_JSON"
+            echo "presmoke_image=$IS_PRESMOKE_IMAGE"
             echo "vllm_ref=$VLLM_REF"
             echo "bisect_good_commit=$BISECT_GOOD_COMMIT"
             echo "bisect_bad_commit=$BISECT_BAD_COMMIT"
@@ -471,11 +480,11 @@ jobs:
 
           # Fetch the matching test matrix from the PR head ref via pull/<num>/head,
           # which is accessible through the base repo without fork access permission.
-          # Nightly reads nightly_config.yaml; weekly reads weekly_config.yaml.
-          # resolve_nightly_tests.py picks the non-empty one.
+          # Nightly and presmoke read nightly_config.yaml; weekly reads
+          # weekly_config.yaml. resolve_nightly_tests.py picks the non-empty one.
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
           case "$COMMAND" in
-            nightly)
+            nightly|presmoke)
               NIGHTLY_MATRIX=$(gh api "repos/$REPO/contents/.github/workflows/configs/nightly_config.yaml?ref=pull/$PR_NUMBER/head" --jq '.content' 2>/dev/null || echo "")
               ;;
             weekly)
@@ -488,6 +497,64 @@ jobs:
           export IS_A3_560T
 
           python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=dispatch
+
+  dispatch-presmoke:
+    name: Build presmoke images
+    needs: [authorize]
+    if: needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true' && needs.authorize.outputs.command == 'presmoke'
+    runs-on: linux-amd64-cpu-4-hk
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
+    outputs:
+      presmoke_run_id: ${{ steps.dispatch_presmoke.outputs.presmoke_run_id }}
+    steps:
+      - name: Install system dependencies
+        run: |
+          sudo mkdir -p -m 755 /etc/apt/keyrings
+          curl -sL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
+          sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          sudo apt-get update -y
+          sudo apt-get install gh -y
+
+      - name: Dispatch presmoke image build
+        id: dispatch_presmoke
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
+          # The selected test names decide which chips to build: /presmoke builds the
+          # images the matching tests would consume. The a3-560t tests run on the a3
+          # image, so both flags map to the a3 chip. build_type=release keeps the
+          # images in the CI repositories (never atlas_inference) and skip_sync keeps
+          # them out of quay.io; the -presmoke repo/tag suffix isolates them from the
+          # standard nightly images.
+          CHIPS='[]'
+          for CHIP in a2 a3 310p a5; do
+            case "$CHIP" in
+              a2) SELECTED='${{ needs.authorize.outputs.dispatch_a2 }}' ;;
+              a3) SELECTED='${{ (needs.authorize.outputs.dispatch_a3 == 'true' || needs.authorize.outputs.dispatch_a3_560t == 'true') && 'true' || 'false' }}' ;;
+              310p) SELECTED='${{ needs.authorize.outputs.dispatch_310p }}' ;;
+              a5) SELECTED='${{ needs.authorize.outputs.dispatch_a5 }}' ;;
+            esac
+            if [ "$SELECTED" = "true" ]; then
+              CHIPS=$(jq -c --arg chip "$CHIP" '. + [$chip]' <<< "$CHIPS")
+            fi
+          done
+          gh workflow run schedule_nightly_image_build_with_base.yaml \
+            --repo "$REPO" \
+            --ref main \
+            -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
+            -f chips="$CHIPS" \
+            -f build_type='release' \
+            -f image_repo_suffix='-presmoke' \
+            -f tag_suffix='-presmoke' \
+            -f skip_sync='true'
+          sleep 8
+          PRESMOKE_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_image_build_with_base.yaml/runs?per_page=1" \
+            --jq '.workflow_runs[0].id')
+          echo "presmoke_run_id=$PRESMOKE_RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "Dispatched presmoke image build for chips=$CHIPS, branch='${{ needs.authorize.outputs.branch }}'"
 
   dispatch-a2:
     name: Trigger Nightly-A2
@@ -524,7 +591,9 @@ jobs:
             -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
-            -f skip_build_image=true \
+            -f skip_build_image='true' \
+            -f image_tag_suffix='${{ needs.authorize.outputs.presmoke_image == 'true' && '-presmoke' || '' }}' \
+            -f image_repo_suffix='${{ needs.authorize.outputs.presmoke_image == 'true' && '-presmoke' || '' }}' \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
             -f download_path="$DOWNLOAD_PATH" \
@@ -572,7 +641,9 @@ jobs:
             -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
-            -f skip_build_image=true \
+            -f skip_build_image='true' \
+            -f image_tag_suffix='${{ needs.authorize.outputs.presmoke_image == 'true' && '-presmoke' || '' }}' \
+            -f image_repo_suffix='${{ needs.authorize.outputs.presmoke_image == 'true' && '-presmoke' || '' }}' \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
             -f download_path="$DOWNLOAD_PATH" \
@@ -620,7 +691,9 @@ jobs:
             -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
-            -f skip_build_image=true \
+            -f skip_build_image='true' \
+            -f image_tag_suffix='${{ needs.authorize.outputs.presmoke_image == 'true' && '-presmoke' || '' }}' \
+            -f image_repo_suffix='${{ needs.authorize.outputs.presmoke_image == 'true' && '-presmoke' || '' }}' \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
             -f download_path="$DOWNLOAD_PATH" \
@@ -668,7 +741,9 @@ jobs:
             -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
-            -f skip_build_image=true \
+            -f skip_build_image='true' \
+            -f image_tag_suffix='${{ needs.authorize.outputs.presmoke_image == 'true' && '-presmoke' || '' }}' \
+            -f image_repo_suffix='${{ needs.authorize.outputs.presmoke_image == 'true' && '-presmoke' || '' }}' \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
             -f download_path="$DOWNLOAD_PATH" \
@@ -716,7 +791,9 @@ jobs:
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
             -f download_path="$DOWNLOAD_PATH" \
-            -f skip_build_image=true \
+            -f skip_build_image='true' \
+            -f image_tag_suffix='${{ needs.authorize.outputs.presmoke_image == 'true' && '-presmoke' || '' }}' \
+            -f image_repo_suffix='${{ needs.authorize.outputs.presmoke_image == 'true' && '-presmoke' || '' }}' \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
             -f profile_options_json="$PROFILE_OPTIONS_JSON" \
@@ -903,7 +980,7 @@ jobs:
 
   post-links:
     name: Post workflow links
-    needs: [authorize, dispatch-a2, dispatch-a3, dispatch-a3-560t, dispatch-a5, dispatch-310p, dispatch-weekly-a2, dispatch-weekly-a3, dispatch-weekly-a3-560t, dispatch-weekly-310p]
+    needs: [authorize, dispatch-presmoke, dispatch-a2, dispatch-a3, dispatch-a3-560t, dispatch-a5, dispatch-310p, dispatch-weekly-a2, dispatch-weekly-a3, dispatch-weekly-a3-560t, dispatch-weekly-310p]
     if: always() && needs.authorize.outputs.is_authorized == 'true' && needs.authorize.outputs.blocked != 'true'
     runs-on: linux-amd64-cpu-2-hk
     steps:
@@ -911,6 +988,10 @@ jobs:
         id: body
         run: |
           BODY="${{ needs.authorize.outputs.command }} command triggered."
+          if [[ "${{ needs.dispatch-presmoke.result }}" == "success" ]]; then
+            BODY="$BODY
+          - Presmoke image build: [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ needs.dispatch-presmoke.outputs.presmoke_run_id }})"
+          fi
           if [[ "${{ needs.dispatch-a2.result }}" == "success" ]]; then
             BODY="$BODY
           - Nightly-A2: [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ needs.dispatch-a2.outputs.a2_run_id }})"
