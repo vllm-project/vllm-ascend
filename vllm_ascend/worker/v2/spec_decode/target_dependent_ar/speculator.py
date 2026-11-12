@@ -733,7 +733,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
                         "actual_seq_lengths": query_start_loc,
                         "actual_seq_lengths_kv": seq_lens,
                         "actual_seq_qlen": query_start_loc,
-                        "actual_seq_kvlen": seq_lens,                        
+                        "actual_seq_kvlen": seq_lens,
                         "block_table": block_table,
                     }
                 )
