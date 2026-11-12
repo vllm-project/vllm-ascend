@@ -21,7 +21,7 @@ This guide uses [Qwen3-0.6B](../tutorials/models/Qwen3-Dense.md) as an example t
 
 ## Installation {: #quick-start-installation }
 
-Before using containers, make sure Docker is installed on your system. If Docker is not installed, please refer to the [Docker installation guide](https://docs.docker.com/get-started/get-docker/) for installation instructions.
+Before using containers, make sure Docker is installed on your system. If Docker is not installed, please refer to the [Docker installation guide](https://docs.docker.com/get-started/get-docker/) for installation instructions. The commands below pass the NPU device nodes and the driver paths to `docker run` explicitly. If Ascend Docker Runtime is installed on the host, see [Installation Guide > Ascend Docker Runtime](installation.md#installation-ascend-docker-runtime) for the equivalent commands that need only `ASCEND_VISIBLE_DEVICES`.
 
 {% include "getting_started/quick_start/ascend_image/atlas-a2.inc.md" %}
 
