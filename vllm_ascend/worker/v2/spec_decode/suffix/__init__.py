@@ -13,7 +13,7 @@ def validate_suffix_runtime(speculative_config) -> None:
         "Ascend MRV2 suffix decoding requires vLLM #60339 "
         "(190df0b90007eead441d97d3abf6270f84f2c63e) or a descendant, "
         "including SuffixSpeculator, suffix configuration and request lifecycle hooks. "
-        "Use VLLM_USE_V2_MODEL_RUNNER=0 with an older vLLM version."
+        "Install a vLLM version containing the complete upstream change."
     )
     hooks = ("add_request", "on_requests_finished", "reset_state")
     if not hasattr(speculative_config, "suffix_decoding_corpus_tokens") or not all(
