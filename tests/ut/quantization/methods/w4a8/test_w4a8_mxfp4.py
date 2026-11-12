@@ -153,11 +153,14 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
         mock_vllm.return_value = create_mock_vllm_config()
         mock_ascend.return_value = create_mock_ascend_config()
         self.scheme = AscendW4A8MXFPDynamicFusedMoEMethod()
-        # The NZ cast recipes read torch_npu's FP4 enum from their own module,
-        # which environments without the NPU extension do not provide.
+        # The recipes read torch_npu's FP4 enum and perform the cast in their
+        # own module, which environments without the NPU extension do not
+        # provide, so that is also where the cast is observed.
         nz_npu_patcher = patch("vllm_ascend.quantization.nz.torch_npu")
         self.addCleanup(nz_npu_patcher.stop)
-        nz_npu_patcher.start().float4_e2m1fn_x2 = 296
+        self.mock_nz_npu = nz_npu_patcher.start()
+        self.mock_nz_npu.float4_e2m1fn_x2 = 296
+        self.mock_nz_npu.npu_format_cast.side_effect = lambda tensor, *args, **kwargs: tensor
 
     def test_v2_eplb_uses_expert_weight_list(self):
         vllm_config = create_mock_vllm_config()
@@ -247,11 +250,11 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
         self.assertTrue(all(expert.storage_offset() == 0 for experts in weight_views for expert in experts))
         self.assertFalse(hasattr(layer, "w13_weight"))
         self.assertFalse(hasattr(layer, "w13_weight_scale"))
-        self.assertEqual(mock_npu.npu_format_cast.call_count, 2 * self.num_experts)
+        self.assertEqual(self.mock_nz_npu.npu_format_cast.call_count, 2 * self.num_experts)
         self.assertTrue(
             all(
                 call.kwargs["input_dtype"] == torch.float4_e2m1fn_x2
-                for call in mock_npu.npu_format_cast.call_args_list[: self.num_experts]
+                for call in self.mock_nz_npu.npu_format_cast.call_args_list[: self.num_experts]
             )
         )
         mock_empty_cache.assert_called_once_with()
@@ -276,20 +279,19 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
         descriptions disagree. The cast below and the exported view share one
         spec, and this pins that neither side restates the dtypes on its own.
         """
-        mock_npu.npu_format_cast.side_effect = lambda tensor, *args, **kwargs: tensor
         self.scheme.use_expert_weight_list = True
         w13_specs = {}
 
         for activation in (MoEActivation.SITU, "silu"):
             with self.subTest(activation=activation):
-                mock_npu.npu_format_cast.reset_mock()
+                self.mock_nz_npu.npu_format_cast.reset_mock()
                 layer = self._make_moe_layer()
                 layer.activation = activation
 
                 self.scheme.process_weights_after_loading(layer)
                 views = self.scheme.get_eplb_weight_views(layer)
 
-                calls = mock_npu.npu_format_cast.call_args_list
+                calls = self.mock_nz_npu.npu_format_cast.call_args_list
                 self.assertEqual(len(calls), 2 * self.num_experts)
                 expected = [views[0]] * self.num_experts + [views[1]] * self.num_experts
                 for call, view in zip(calls, expected):
@@ -327,7 +329,7 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
             weights = self.scheme.get_fused_mc2_weights(layer)
         self.assertIs(weights.w1, layer.w13_weight_list)
         self.assertIs(weights.w2, layer.w2_weight_list)
-        self.assertEqual(mock_npu.npu_format_cast.call_count, 2 * self.num_experts)
+        self.assertEqual(self.mock_nz_npu.npu_format_cast.call_count, 2 * self.num_experts)
         for name, original in original_scales.items():
             scales = weights.w1_scale if name == "w13_weight_scale" else weights.w2_scale
             canonical_scales = getattr(layer, f"{name}_list")
@@ -361,7 +363,7 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
         self.assertEqual(weights.w1_scale[0].data_ptr(), eplb_views[2][0].data_ptr())
         self.assertEqual(weights.w2_scale[0].data_ptr(), eplb_views[3][0].data_ptr())
         self.scheme.process_weights_after_loading(layer)
-        self.assertEqual(mock_npu.npu_format_cast.call_count, 2 * self.num_experts)
+        self.assertEqual(self.mock_nz_npu.npu_format_cast.call_count, 2 * self.num_experts)
 
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_current_vllm_config")
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.use_cann_megamoe", return_value=False)

@@ -34,7 +34,7 @@ from vllm_ascend.ops.fused_moe.routed_experts import (
     EplbExpertTensorList,
 )
 from vllm_ascend.quantization.nz import NzCastSpec, fp4_packed_nz, fp4_semantic_nz
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, FP8_METHOD, dispose_tensor
+from vllm_ascend.utils import FP8_METHOD, dispose_tensor
 
 from ..base import (
     AscendLinearScheme,
@@ -136,12 +136,7 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
                 "weight": tuple(layer.weight.data.shape),
                 "weight_scale": tuple(layer.weight_scale.data.shape),
             }
-        layer.weight.data = torch_npu.npu_format_cast(
-            layer.weight.data,
-            ACL_FORMAT_FRACTAL_NZ,
-            customize_dtype=torch.float8_e4m3fn,
-            input_dtype=torch_npu.float4_e2m1fn_x2,
-        )
+        layer.weight.data = fp4_packed_nz().cast(layer.weight.data)
         layer.weight.data = layer.weight.data.transpose(-1, -2)
         n, k = layer.weight_scale.shape
         layer.weight_scale.data = layer.weight_scale.data.reshape(n, k // 2, 2).transpose(-3, -2)
@@ -333,20 +328,9 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                 if is_situ:
                     expert_weight = expert_weight.view(torch.float4_e2m1fn_x2)
 
-                layer.w13_weight_list.append(
-                    torch_npu.npu_format_cast(
-                        expert_weight,
-                        ACL_FORMAT_FRACTAL_NZ,
-                        **w13_cast_spec.cast_kwargs(),
-                    )
-                )
+                layer.w13_weight_list.append(w13_cast_spec.cast(expert_weight))
             layer.w2_weight_list = [
-                torch_npu.npu_format_cast(
-                    weight.clone(),
-                    ACL_FORMAT_FRACTAL_NZ,
-                    **fp4_packed_nz().cast_kwargs(),
-                )
-                for weight in layer.w2_weight.data.unbind(dim=0)
+                fp4_packed_nz().cast(weight.clone()) for weight in layer.w2_weight.data.unbind(dim=0)
             ]
             # GMM-SiTU consumes contiguous N-major expert lists. Ordinary GMM
             # gets zero-copy transposed views from _get_mlp_weights.
@@ -362,23 +346,11 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
             # Non-mega path (npu_grouped_matmul): format-cast to FRACTAL_NZ and
             # transpose to (in, out) so the packed FP4 K is interpreted correctly.
             w13 = layer.w13_weight.data
-            w13_input_dtype = torch_npu.float4_e2m1fn_x2
-            if getattr(layer, "activation", None) in (MoEActivation.SITU, "situ"):
+            if self._is_situ(layer):
                 # The native GMSQ schema requires FP4 semantic dtype metadata.
                 w13 = w13.view(torch.float4_e2m1fn_x2)
-                w13_input_dtype = torch.float4_e2m1fn_x2
-            layer.w13_weight.data = torch_npu.npu_format_cast(
-                w13,
-                ACL_FORMAT_FRACTAL_NZ,
-                customize_dtype=torch.float8_e4m3fn,
-                input_dtype=w13_input_dtype,
-            )
-            layer.w2_weight.data = torch_npu.npu_format_cast(
-                layer.w2_weight.data,
-                ACL_FORMAT_FRACTAL_NZ,
-                customize_dtype=torch.float8_e4m3fn,
-                input_dtype=torch_npu.float4_e2m1fn_x2,
-            )
+            layer.w13_weight.data = self._w13_cast_spec(layer).cast(w13)
+            layer.w2_weight.data = fp4_packed_nz().cast(layer.w2_weight.data)
             layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
             layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
             layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(-3, -2)
