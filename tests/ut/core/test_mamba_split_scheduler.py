@@ -94,7 +94,7 @@ def _make_scheduler(
 
 def _prefill_intervals(scheduler, request):
     scheduler.add_request(request)
-    intervals = []
+    intervals: list[tuple[int, int]] = []
     while request.num_computed_tokens < request.num_prompt_tokens:
         start = request.num_computed_tokens
         output = scheduler.schedule()
