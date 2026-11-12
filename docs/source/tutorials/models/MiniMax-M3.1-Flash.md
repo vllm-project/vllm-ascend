@@ -20,6 +20,31 @@ The features described below are those enabled by the deployment commands in thi
 
 Refer to the [Supported Models](../../user_guide/support_matrix/supported_models.md) page for the support matrix and the [Feature Guide](../../user_guide/feature_guide/index.md) for feature configuration.
 
+### Experimental indexer context sharding on A3
+
+For BF16 KV caches with TP2 or TP4, add
+`"enable_minimax_m3_indexer_dcp": true` to `--additional-config` to shard
+MiniMax's replicated index-key cache across the existing TP group. Keep the
+ordinary `--decode-context-parallel-size` and
+`--prefill-context-parallel-size` at their default value of `1`.
+
+This model-specific mode requires CANN MsaIndexScore, 128-token blocks, and
+128-dimensional index keys. Main K/V remain head-parallel. On TP4, each layer stores one quarter of
+the index keys on each rank; local block scores are combined with a MAX
+reduction before the normal TopK selection. With BF16 caches, the 60-layer
+main-model cache payload falls from 45 KiB to 33.75 KiB per cached token per
+rank. Decode uses the existing CANN score operator with a temporary
+128-token page made from repeated local keys and a rank-adjusted causal
+frontier. Weights, graph workspaces, this temporary buffer, and speculative
+model caches are separate.
+
+For PD deployments, enable this option on both Prefill and Decode, use the
+same TP size on both roles, and select `MooncakeConnectorV2`. Prefill gathers
+only the index pages referenced by its current batch and uses the existing
+prefill attention operator. PP layer partitioning can differ between roles.
+A producer without indexer sharding cannot send raw index pages to a sharded
+consumer. This mode does not configure the hosts' NPU interconnect.
+
 ## 3 Prerequisites
 
 ### 3.1 Model Weight
