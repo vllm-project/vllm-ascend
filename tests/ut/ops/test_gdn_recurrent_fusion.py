@@ -1,73 +1,51 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CPU routing tests, loading the real functions without an installed vLLM/NPU runtime."""
+"""Exercise GDN dispatch and tensor adaptation with mocked native operators."""
 
-import ast
-import inspect
-from functools import lru_cache
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 import torch
 
-
-def load_gdn():
-    source = Path(__file__).resolve().parents[3] / "vllm_ascend/ops/gdn.py"
-    tree = ast.parse(source.read_text(encoding="utf-8"))
-    names = {
-        "_supports_recurrent_gdn_fusion",
-        "_run_recurrent_gdn",
-        "_flatten_recurrent_state_indices",
-        "_rearrange_decode_qkv",
-    }
-    nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
-    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "AscendGatedDeltaNetAttention")
-    nodes += [n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "_forward_core"]
-    ns = dict(
-        torch=torch,
-        inspect=inspect,
-        lru_cache=lru_cache,
-        GDNAttentionMetadata=SimpleNamespace,
-        AttentionMetadata=object,
-        _MAX_RECURRENT_GDN_TOKENS=8,
-    )
-    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), "exec"), ns)
-    return ns
+from vllm_ascend.ops import gdn
 
 
 @pytest.fixture
-def runtime():
-    ns = load_gdn()
-    ns["_supports_recurrent_gdn_fusion"] = lambda: True
-    ns["recurrent_gated_delta_rule"] = Mock(side_effect=lambda q, k, v, state, **kw: v.clone())
-    ns["fused_recurrent_gated_delta_rule"] = Mock(side_effect=lambda **kw: (kw["v"].clone(), kw["initial_state"]))
-    ns["l2norm_fwd"] = Mock(side_effect=lambda x: x)
+def runtime(monkeypatch):
+    ns = gdn
+    monkeypatch.setattr(gdn, "GDNAttentionMetadata", SimpleNamespace)
+    monkeypatch.setattr(ns, "_supports_recurrent_gdn_fusion", lambda: True)
+    monkeypatch.setattr(ns, "recurrent_gated_delta_rule", Mock(side_effect=lambda q, k, v, state, **kw: v.clone()))
+    monkeypatch.setattr(
+        ns, "fused_recurrent_gated_delta_rule", Mock(side_effect=lambda **kw: (kw["v"].clone(), kw["initial_state"]))
+    )
+    monkeypatch.setattr(ns, "l2norm_fwd", Mock(side_effect=lambda x: x))
     gate = Mock(side_effect=lambda A, a, b, bias: (-a.unsqueeze(0), b.sigmoid().unsqueeze(0)))
     prefill = Mock(side_effect=lambda **kw: (kw["v"].clone(), kw["initial_state"]))
-    ns["DeviceOperator"] = SimpleNamespace(fused_gdn_gating=gate, fla_gdn_prefill=prefill)
-    ns["get_pcp_group"] = lambda: SimpleNamespace(world_size=1)
-    ns["get_current_hardware_profile"] = lambda: SimpleNamespace(supports=lambda cap: True)
-    ns["HardwareCapability"] = SimpleNamespace(FLA_GDN_PREFILL=1)
-    ns["_get_fla_gdn_prefill_op"] = lambda: object()
-    ns["_get_packed_conv_weights"] = lambda layer: None
-    ns["_normalize_causal_cache_indices"] = lambda x: x
-    ns["causal_conv1d_fn"] = lambda x, *a, **kw: x.clone()
-    ns["causal_conv1d_update"] = lambda x, *a, **kw: x.clone()
-    ns["gather_ssm_states"] = lambda state, *a: state[:1].clone()
-    ns["scatter_ssm_states_"] = Mock()
-    ns["PAD_SLOT_ID"] = -1
+    monkeypatch.setattr(ns, "DeviceOperator", SimpleNamespace(fused_gdn_gating=gate, fla_gdn_prefill=prefill))
+    monkeypatch.setattr(ns, "get_pcp_group", lambda: SimpleNamespace(world_size=1))
+    monkeypatch.setattr(ns, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda cap: True))
+    monkeypatch.setattr(ns, "HardwareCapability", SimpleNamespace(FLA_GDN_PREFILL=1))
+    monkeypatch.setattr(ns, "_get_fla_gdn_prefill_op", lambda: object())
+    monkeypatch.setattr(ns, "_get_packed_conv_weights", lambda layer: None)
+    monkeypatch.setattr(ns, "_normalize_causal_cache_indices", lambda x: x)
+    monkeypatch.setattr(ns, "causal_conv1d_fn", lambda x, *a, **kw: x.clone())
+    monkeypatch.setattr(ns, "causal_conv1d_update", lambda x, *a, **kw: x.clone())
+    monkeypatch.setattr(ns, "gather_ssm_states", lambda state, *a: state[:1].clone())
+    monkeypatch.setattr(ns, "scatter_ssm_states_", Mock())
+    monkeypatch.setattr(ns, "PAD_SLOT_ID", -1)
     for name in (
         "wait_for_kv_layer_from_connector",
         "record_attention_compute_start",
         "maybe_save_kv_layer_to_connector",
     ):
-        ns[name] = Mock()
+        monkeypatch.setattr(ns, name, Mock())
+    monkeypatch.setattr(gdn, "get_forward_context", gdn.get_forward_context)
     return ns
 
 
-def test_probe_only_accepts_explicit_fused_abi():
-    ns = load_gdn()
+def test_probe_only_accepts_explicit_fused_abi(monkeypatch):
+    ns = gdn
 
     def new(
         *args,
@@ -81,9 +59,10 @@ def test_probe_only_accepts_explicit_fused_abi():
         raise AssertionError("Capability detection must not execute the operator")
 
     for op, expected in [(new, True), (lambda *a, **kw: None, False), (lambda q, k, v: None, False)]:
-        ns["recurrent_gated_delta_rule"] = op
-        ns["_supports_recurrent_gdn_fusion"].cache_clear()
-        assert ns["_supports_recurrent_gdn_fusion"]() == expected
+        monkeypatch.setattr(gdn, "recurrent_gated_delta_rule", op)
+        ns._supports_recurrent_gdn_fusion.cache_clear()
+        assert ns._supports_recurrent_gdn_fusion() == expected
+    ns._supports_recurrent_gdn_fusion.cache_clear()
 
 
 @pytest.mark.parametrize(
@@ -103,8 +82,20 @@ def test_fused_retains_checkpoint_width_and_zero_length_rows(runtime, indices, l
     a, b = torch.randn(count, 1), torch.randn(count, 1)
     state = torch.zeros(24, 1, 128, 128)
     accepted = None if accepted is None else torch.tensor(accepted, dtype=torch.int64)
-    result = ns["_run_recurrent_gdn"](q, q, q, state, a, b, torch.zeros(1), torch.zeros(1), lengths, table, accepted)
-    args, kw = ns["recurrent_gated_delta_rule"].call_args
+    result = ns._run_recurrent_gdn(
+        q,
+        q,
+        q,
+        state,
+        a=a,
+        b=b,
+        A_log=torch.zeros(1),
+        dt_bias=torch.zeros(1),
+        actual_seq_lengths=lengths,
+        state_indices=table,
+        num_accepted_tokens=accepted,
+    )
+    args, kw = ns.recurrent_gated_delta_rule.call_args
     assert args[3] is state
     assert kw["g"] is a and kw["beta"] is b
     assert kw["ssm_state_indices"].data_ptr() == table.data_ptr()
@@ -116,8 +107,8 @@ def test_fused_retains_checkpoint_width_and_zero_length_rows(runtime, indices, l
     assert kw["A_log"].dtype == kw["dt_bias"].dtype == torch.float32
     if accepted is not None:
         torch.testing.assert_close(kw["num_accepted_tokens"], accepted.int())
-    ns["DeviceOperator"].fused_gdn_gating.assert_not_called()
-    ns["l2norm_fwd"].assert_not_called()
+    ns.DeviceOperator.fused_gdn_gating.assert_not_called()
+    ns.l2norm_fwd.assert_not_called()
     assert result.shape == q.shape
 
 
@@ -126,10 +117,19 @@ def test_decode_rows_follow_metadata_not_token_count(runtime):
     q = torch.zeros(1, 2, 1, 128, dtype=torch.bfloat16)
     lengths = torch.tensor([0, 1, 0, 1, 0], dtype=torch.int32)
     indices = torch.tensor([7, 0, 9, 0, 99], dtype=torch.int64)
-    ns["_run_recurrent_gdn"](
-        q, q, q, q, torch.zeros(2, 1), torch.zeros(2, 1), torch.zeros(1), torch.zeros(1), lengths, indices
+    ns._run_recurrent_gdn(
+        q,
+        q,
+        q,
+        q,
+        a=torch.zeros(2, 1),
+        b=torch.zeros(2, 1),
+        A_log=torch.zeros(1),
+        dt_bias=torch.zeros(1),
+        actual_seq_lengths=lengths,
+        state_indices=indices,
     )
-    kw = ns["recurrent_gated_delta_rule"].call_args.kwargs
+    kw = ns.recurrent_gated_delta_rule.call_args.kwargs
     torch.testing.assert_close(kw["ssm_state_indices"], torch.tensor([[7], [0], [9], [0]], dtype=torch.int32))
 
 
@@ -143,32 +143,32 @@ def test_missing_request_rows_fails_before_state_mutation(runtime):
 @pytest.mark.parametrize("upstream", [False, True])
 def test_legacy_and_upstream_keep_external_preprocessing(runtime, upstream):
     ns = runtime
-    ns["_supports_recurrent_gdn_fusion"] = lambda: False
+    ns._supports_recurrent_gdn_fusion = lambda: False
     q = torch.zeros(1, 3, 1, 128)
     a = torch.tensor([[1.0], [2.0], [3.0]])
     table = torch.tensor([[10, 11], [20, 21]], dtype=torch.int32)
-    ns["_run_recurrent_gdn"](
+    ns._run_recurrent_gdn(
         q,
         q,
         q,
         q,
-        a,
-        a,
-        torch.zeros(1),
-        torch.zeros(1),
-        torch.tensor([0, 2, 1]),
-        table,
-        torch.ones(2, dtype=torch.int32),
-        torch.tensor([0, 2, 3]),
-        upstream,
+        a=a,
+        b=a,
+        A_log=torch.zeros(1),
+        dt_bias=torch.zeros(1),
+        actual_seq_lengths=torch.tensor([0, 2, 1]),
+        state_indices=table,
+        num_accepted_tokens=torch.ones(2, dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 2, 3]),
+        use_upstream_recurrent=upstream,
     )
-    assert ns["l2norm_fwd"].call_count == 2
-    ns["DeviceOperator"].fused_gdn_gating.assert_called_once()
+    assert ns.l2norm_fwd.call_count == 2
+    ns.DeviceOperator.fused_gdn_gating.assert_called_once()
     if upstream:
-        ns["recurrent_gated_delta_rule"].assert_not_called()
-        assert ns["fused_recurrent_gated_delta_rule"].call_args.kwargs["ssm_state_indices"] is table
+        ns.recurrent_gated_delta_rule.assert_not_called()
+        assert ns.fused_recurrent_gated_delta_rule.call_args.kwargs["ssm_state_indices"] is table
     else:
-        kw = ns["recurrent_gated_delta_rule"].call_args.kwargs
+        kw = ns.recurrent_gated_delta_rule.call_args.kwargs
         assert "use_gate_in_kernel" not in kw
         torch.testing.assert_close(kw["g"], -a)
         torch.testing.assert_close(kw["ssm_state_indices"], torch.tensor([10, 11, 20], dtype=torch.int32))
@@ -235,26 +235,24 @@ def test_forward_routes_raw_gate_rows_and_merges_outputs(runtime, mode):
         A_log=torch.zeros(1),
         dt_bias=torch.zeros(1),
     )
-    layer.rearrange_mixed_qkv = lambda x: (
-        (None, None, None) if x is None else ns["_rearrange_decode_qkv"](x, 2, 2, 2, 2)
-    )
-    ns["get_forward_context"] = lambda: SimpleNamespace(attn_metadata={prefix: meta})
+    layer.rearrange_mixed_qkv = lambda x: (None, None, None) if x is None else ns._rearrange_decode_qkv(x, 2, 2, 2, 2)
+    ns.get_forward_context = lambda: SimpleNamespace(attn_metadata={prefix: meta})
     tokens = torch.arange(count, dtype=torch.bfloat16)
     packed = tokens[:, None].expand(-1, 6).contiguous()
     a, b = tokens[:, None].float() + 10, tokens[:, None].float() + 20
     output = torch.empty(count, 1, 2, dtype=torch.bfloat16)
-    ns["_forward_core"](layer, packed, b, a, output)
+    ns.AscendGatedDeltaNetAttention._forward_core(layer, packed, b, a, output)
     torch.testing.assert_close(output[:, 0, 0], tokens)
     expected_groups = ([spec_ids] if spec else []) + ([non_ids[:nd]] if decode else [])
-    for call, ids in zip(ns["recurrent_gated_delta_rule"].call_args_list, expected_groups, strict=True):
+    for call, ids in zip(ns.recurrent_gated_delta_rule.call_args_list, expected_groups, strict=True):
         torch.testing.assert_close(call.kwargs["g"], a[ids])
         torch.testing.assert_close(call.kwargs["beta"], b[ids])
         assert call.kwargs["ssm_state_indices"].ndim == 2
     if prefill:
-        gate_args = ns["DeviceOperator"].fused_gdn_gating.call_args.args
+        gate_args = ns.DeviceOperator.fused_gdn_gating.call_args.args
         torch.testing.assert_close(gate_args[1], a[non_ids[nd:]])
         torch.testing.assert_close(gate_args[2], b[non_ids[nd:]])
-        ns["DeviceOperator"].fused_gdn_gating.assert_called_once()
+        ns.DeviceOperator.fused_gdn_gating.assert_called_once()
     else:
-        ns["DeviceOperator"].fused_gdn_gating.assert_not_called()
-    ns["l2norm_fwd"].assert_not_called()
+        ns.DeviceOperator.fused_gdn_gating.assert_not_called()
+    ns.l2norm_fwd.assert_not_called()
