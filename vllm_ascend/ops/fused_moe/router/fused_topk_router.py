@@ -144,6 +144,7 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
         indices_type: torch.dtype | None,
         *,
         input_ids: torch.Tensor | None = None,
+        image_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.bias_vl is None and not self.is_fused_supported(hidden_states):
             return super()._compute_routing(
@@ -165,15 +166,22 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
                 if _EXTRA_CTX.moe_comm_type == MoECommType.ALLGATHER:
                     prepare_finalize = _EXTRA_CTX.moe_comm_method.prepare_finalize
                     input_ids = prepare_finalize.all_gather_input_ids(input_ids)
+                    if image_mask is not None:
+                        image_mask = prepare_finalize.all_gather_input_ids(image_mask)
                 else:
                     input_ids = _EXTRA_CTX.moe_comm_method.pad_and_split_input_ids(input_ids)
+                    if image_mask is not None:
+                        image_mask = _EXTRA_CTX.moe_comm_method.pad_and_split_input_ids(image_mask)
                 if _EXTRA_CTX.moe_comm_type != MoECommType.ALLGATHER and input_ids.numel() != router_logits.shape[0]:
                     # Native MoE SP chunks hidden states before MC2/All2All,
                     # while their replace-allreduce paths retain full token
                     # ids. Apply the identical TP chunk only when communication
                     # has not already aligned ids with local router rows.
                     input_ids = sequence_parallel_chunk(input_ids.reshape(-1, 1)).reshape(-1)
-                input_ids = torch.where(input_ids == -1, 0, input_ids)
+                    if image_mask is not None:
+                        image_mask = sequence_parallel_chunk(image_mask.reshape(-1, 1)).reshape(-1)
+                if image_mask is None:
+                    input_ids = torch.where(input_ids == -1, 0, input_ids)
             else:
                 input_ids = None
                 tid2eid_ones = None
@@ -219,6 +227,7 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
                 bias_vl=bias_vl,
                 image_sentinel_lo=self.image_sentinel_lo,
                 image_sentinel_count=DEEPSEEK_V4_IMAGE_SENTINEL_COUNT,
+                image_mask=image_mask,
             )
             return topk_weights.to(torch.float32), topk_ids.to(torch.int32 if indices_type is None else indices_type)
         norm_type = 0 if self.scoring_func == "softmax" else 1
