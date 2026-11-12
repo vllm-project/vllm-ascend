@@ -707,7 +707,7 @@ def _common():
     )
 
 
-@pytest.mark.parametrize("mode", ["normal", "capture", "draft", "replay", "stream_capture", "pcp"])
+@pytest.mark.parametrize("mode", ["normal", "capture", "draft", "replay", "stream_capture", "pcp", "row_shard"])
 def test_query_plan_is_built_only_for_uncaptured_target_queries(keypool_kernels, mode):
     config, common = _config(), _common()
     config.model_config.hf_text_config = SimpleNamespace(index_topk=16)
@@ -720,6 +720,14 @@ def test_query_plan_is_built_only_for_uncaptured_target_queries(keypool_kernels,
         builder.pcp_size = 8
         with patch("vllm_ascend.attention.indexer_kpool.build_kpool_query_plan", side_effect=AssertionError):
             metadata = builder.build(0, common)
+    elif mode == "row_shard":
+        row_shard = object()
+        with (
+            patch.object(builder, "_build_indexer_row_shard", return_value=row_shard),
+            patch("vllm_ascend.attention.indexer_kpool.build_kpool_query_plan", side_effect=AssertionError),
+        ):
+            metadata = builder.build(0, common)
+        assert metadata.indexer_row_shard is row_shard
     elif mode == "capture":
         metadata = builder.build_for_graph_capture(common)
     elif mode == "draft":
