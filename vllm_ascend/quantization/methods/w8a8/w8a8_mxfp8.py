@@ -302,7 +302,7 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
                 not getattr(layer, "_fused_preprocess_managed", False)
                 and not getattr(layer, "skip_weight_nz_conversion", False)
             ):
-                layer._mxfp8_weight_buf = maybe_trans_nz(layer._mxfp8_weight_buf, customize_dtype=torch.float8_e4m3fn)
+                layer._mxfp8_weight_buf = maybe_trans_nz(layer._mxfp8_weight_buf, **mxfp8_nz().cast_kwargs())
             layer._mxfp8_scale_buf = target_scale.contiguous()
         else:
             # Subsequent calls (RL reload path): copy in place to keep data_ptr stable.
