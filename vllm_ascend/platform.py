@@ -642,6 +642,9 @@ class NPUPlatform(Platform):
         _validate_deepseek_v4_tp_config(vllm_config)
         _check_ascend_config(vllm_config, ascend_config)
 
+        # 5.5.Reject multimodal encoder graphs, which have no Ascend implementation yet.
+        _reject_mm_encoder_cudagraph(vllm_config)
+
         # 6.Update compilation / cudagraph modes (ascend_config -> vllm_config).
         _update_compilation_modes(vllm_config, ascend_config)
 
@@ -1662,6 +1665,26 @@ def _set_pytorch_npu_alloc_env(vllm_config: VllmConfig) -> None:
             npu_alloc_configs += ",expandable_segments:True"
         os.environ["PYTORCH_NPU_ALLOC_CONF"] = npu_alloc_configs
         logger.info("Set PYTORCH_NPU_ALLOC_CONF=%s", npu_alloc_configs)
+
+
+def _reject_mm_encoder_cudagraph(vllm_config: VllmConfig) -> None:
+    """Reject ``cudagraph_mm_encoder`` instead of hanging during engine startup.
+
+    The encoder graph path calls ``GroupCoordinator.graph_capture()``, which asserts a
+    ``CudaCommunicator`` / ``XpuCommunicator``; Ascend installs its own communicator, so the
+    assertion fires inside the worker. With the multiprocess executor the exception text is lost
+    (``Worker failed with error ''``) and the client blocks forever, which is much harder to
+    diagnose than a startup error, so fail fast here instead.
+    """
+    compilation = getattr(vllm_config, "compilation_config", None)
+    if compilation is None or not getattr(compilation, "cudagraph_mm_encoder", False):
+        return
+    raise ValueError(
+        "cudagraph_mm_encoder=True is not supported on Ascend: the encoder graph path calls "
+        "GroupCoordinator.graph_capture(), which only accepts CudaCommunicator/XpuCommunicator, "
+        "so capture fails inside the worker and the engine never becomes ready. Unset "
+        "cudagraph_mm_encoder to run the multimodal encoder eagerly."
+    )
 
 
 def _disable_expandable_segments() -> None:
