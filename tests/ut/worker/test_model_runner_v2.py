@@ -1930,6 +1930,68 @@ def test_shutdown_releases_c8_views_and_unwraps_zeroer():
     assert runner.kv_block_zeroer is delegate
 
 
+def test_shutdown_releases_shared_engram_after_parent_cleanup():
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    embedding = MagicMock()
+    embedding._shared_pool_client = object()
+    runner.model = MagicMock()
+    runner.model.modules.return_value = [embedding]
+    calls = []
+    embedding.close_host_offload.side_effect = lambda: calls.append("release")
+    with patch.object(GPUModelRunner, "shutdown", side_effect=lambda: calls.append("parent")):
+        runner.shutdown()
+    assert calls == ["parent", "release"]
+
+
+def test_shutdown_keeps_shared_engram_if_parent_cleanup_fails():
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    embedding = MagicMock()
+    embedding._shared_pool_client = object()
+    runner.model = MagicMock()
+    runner.model.modules.return_value = [embedding]
+    with patch.object(GPUModelRunner, "shutdown", side_effect=RuntimeError("cleanup failed")):
+        error = pytest.raises(RuntimeError, runner.shutdown)
+    assert str(error.value) == "cleanup failed"
+    embedding.close_host_offload.assert_not_called()
+
+
+def test_shutdown_retries_failed_engram_and_closes_other_clients():
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    failing, other = MagicMock(), MagicMock()
+    failing._shared_pool_client = other._shared_pool_client = object()
+    failing.close_host_offload.side_effect = [RuntimeError("failed"), None]
+    runner.model = MagicMock()
+    runner.model.modules.return_value = [failing, other]
+    with patch.object(GPUModelRunner, "shutdown") as parent:
+        pytest.raises(RuntimeError, runner.shutdown)
+        other.close_host_offload.assert_called_once()
+        runner.shutdown()
+        parent.assert_called_once()
+    assert failing.close_host_offload.call_count == 2
+
+
+def test_shutdown_retains_engram_when_parent_fails_after_deleting_model():
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    embedding = MagicMock()
+    embedding._shared_pool_client = object()
+    runner.model = MagicMock()
+    runner.model.modules.return_value = [embedding]
+    calls = []
+
+    def parent_shutdown():
+        calls.append("parent")
+        if hasattr(runner, "model"):
+            del runner.model
+            raise RuntimeError("parent failed after model deletion")
+
+    embedding.close_host_offload.side_effect = lambda: calls.append("release")
+    with patch.object(GPUModelRunner, "shutdown", side_effect=parent_shutdown):
+        pytest.raises(RuntimeError, runner.shutdown)
+        assert calls == ["parent"]
+        runner.shutdown()
+    assert calls == ["parent", "parent", "release"]
+
+
 @pytest.mark.parametrize("model_type", ["deepseek_v41", "other_model"])
 @pytest.mark.parametrize("speculative", [False, True])
 @pytest.mark.parametrize("pp_sync", [False, True])
