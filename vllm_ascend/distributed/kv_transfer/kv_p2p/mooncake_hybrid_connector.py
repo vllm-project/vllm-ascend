@@ -207,10 +207,11 @@ class SizedDict(OrderedDict):
 
 
 class KVCacheTaskTracker:
-    def __init__(self):
+    def __init__(self, managed_shutdown: bool = False):
         super().__init__()
 
         self.done_task_lock = threading.Lock()
+        self._managed_shutdown = managed_shutdown
         self.finished_requests: set[str] = set()
         # Only used in prefill node. Tracks requests whose kv blocks freeing is
         # intentionally delayed. Each entry is a tuple of (request_id,
@@ -218,9 +219,16 @@ class KVCacheTaskTracker:
         # be force-freed.
         self.delayed_free_requests: OrderedDict[str, float] = OrderedDict()
         self.reqs_to_process: set[str] = set()
+        # A timeout frees scheduler blocks, but does not prove a remote DMA
+        # stopped.  Do not release the transport based on an empty set alone.
+        self.had_expired_request = False
 
     def add_req_to_process(self, request_id: str):
-        self.reqs_to_process.add(request_id)
+        if self._managed_shutdown:
+            with self.done_task_lock:
+                self.reqs_to_process.add(request_id)
+        else:
+            self.reqs_to_process.add(request_id)
 
     def add_not_transfer_request(self, request_id: str):
         with self.done_task_lock:
@@ -272,6 +280,7 @@ class KVCacheTaskTracker:
             if current_time - delay_start_time > envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT:
                 self.delayed_free_requests.popitem(last=False)
                 self.reqs_to_process.discard(request_id)
+                self.had_expired_request = True
                 expired_requests.add(request_id)
                 logger.info(
                     "Force freed expired request: %s. "
@@ -315,7 +324,9 @@ class KVCacheSendingThread(threading.Thread):
         self.kv_caches = kv_caches
         self.port_send_num: dict[str, int] = {}
 
-        self.task_tracker = KVCacheTaskTracker()
+        self._managed_shutdown = get_ascend_config().engram_local_vmm
+        self.task_tracker = KVCacheTaskTracker(self._managed_shutdown)
+        self._stop_requested = threading.Event()
 
     def get_and_clear_finished_requests(self) -> set[str]:
         """
@@ -361,6 +372,27 @@ class KVCacheSendingThread(threading.Thread):
                 e,
             )
 
+    def drain_and_stop(self, timeout: float = 20.0) -> None:
+        """Serve DONE acknowledgements until tracked requests leave the pending set.
+
+        DONE after a failed transfer is not proof of device access retirement.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            with self.task_tracker.done_task_lock:
+                if self.task_tracker.had_expired_request:
+                    raise RuntimeError("Mooncake producer has an expired request with unknown transfer state")
+                pending = bool(self.task_tracker.reqs_to_process)
+            if not pending:
+                break
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Mooncake producer requests did not drain")
+            time.sleep(0.05)
+        self._stop_requested.set()
+        self.join(timeout=max(0, deadline - time.monotonic()))
+        if self.is_alive():
+            raise TimeoutError("Mooncake producer thread did not stop")
+
     def run_busy_loop(self, sock: zmq.Socket):  # type: ignore
         encoder = msgspec.msgpack.Encoder()
         encoded_data = encoder.encode(self.metadata)
@@ -368,8 +400,10 @@ class KVCacheSendingThread(threading.Thread):
         logger.debug("Size of encoded MooncakeAgentMetadata: %s bytes", str(size_in_bytes))
 
         decoder = msgspec.msgpack.Decoder(type=tuple)
-        while True:
+        while not self._stop_requested.is_set():
             try:
+                if self._managed_shutdown and not sock.poll(timeout=100):
+                    continue
                 frames = sock.recv_multipart()
                 if len(frames) < 2:
                     logger.error(
@@ -493,6 +527,12 @@ class KVCacheRecvingThread(threading.Thread):
         self.remote_metadata_lock = threading.Lock()
 
         self.request_queue: queue.Queue[Any] = queue.Queue()
+        self._managed_shutdown = get_ascend_config().engram_local_vmm
+        self._accept_lock = threading.Lock()
+        self._stopping = False
+        self._executor_stopped = threading.Event()
+        self._executor_stop_thread: threading.Thread | None = None
+        self._executor_stop_error: Exception | None = None
         first_kv_cache = next(iter(self.kv_caches.values()))
         # NPU device selection is thread-local. Executor workers do not inherit
         # the device selected by the model worker thread and would otherwise
@@ -510,7 +550,7 @@ class KVCacheRecvingThread(threading.Thread):
         self.finished_request_markers: set[str] = set()
         self.request_task_counts_lock = threading.Lock()
 
-        self.task_tracker = KVCacheTaskTracker()
+        self.task_tracker = KVCacheTaskTracker(self._managed_shutdown)
 
         self.encoder = msgspec.msgpack.Encoder()
         self.decoder = msgspec.msgpack.Decoder(MooncakeAgentMetadata)
@@ -566,21 +606,26 @@ class KVCacheRecvingThread(threading.Thread):
         if remote_port_send_num is None:
             remote_port_send_num = {}
         logger.debug("Adding request %s to the queue.", request_id)
-        self.request_queue.put(
-            {
-                "request_id": request_id,
-                "local_block_ids": local_block_ids,
-                "remote_block_ids": remote_block_ids,
-                "remote_engine_id": remote_engine_id,
-                "remote_request_id": remote_request_id,
-                "remote_host": remote_host,
-                "remote_handshake_port": remote_handshake_port,
-                "offset": offset,
-                "tp_num_need_pulls": tp_num_need_pulls,
-                "remote_port_send_num": remote_port_send_num,
-                "all_task_done": all_task_done,
-            }
-        )
+        request_data = {
+            "request_id": request_id,
+            "local_block_ids": local_block_ids,
+            "remote_block_ids": remote_block_ids,
+            "remote_engine_id": remote_engine_id,
+            "remote_request_id": remote_request_id,
+            "remote_host": remote_host,
+            "remote_handshake_port": remote_handshake_port,
+            "offset": offset,
+            "tp_num_need_pulls": tp_num_need_pulls,
+            "remote_port_send_num": remote_port_send_num,
+            "all_task_done": all_task_done,
+        }
+        if not self._managed_shutdown:
+            self.request_queue.put(request_data)
+            return
+        with self._accept_lock:
+            if self._stopping:
+                raise RuntimeError("Mooncake receiver is shutting down")
+            self.request_queue.put(request_data)
 
     def get_and_clear_finished_requests(self) -> set[str]:
         """
@@ -597,12 +642,50 @@ class KVCacheRecvingThread(threading.Thread):
             try:
                 request_data = self.request_queue.get()
                 if request_data is None:
-                    logger.warning("Received a None request. ")
                     self.request_queue.task_done()
+                    if self._managed_shutdown:
+                        break
+                    logger.warning("Received a None request. ")
                     continue
                 self._submit_request(request_data)
             except Exception as e:
                 logger.error("Error in KVCacheTransferThread. error=%s. ", e)
+
+    def drain_and_stop(self, timeout: float = 20.0) -> None:
+        """Stop admission and wait for requests, acknowledgements, and executor."""
+        deadline = time.monotonic() + timeout
+        with self._accept_lock:
+            if not self._stopping:
+                self._stopping = True
+                self.request_queue.put(None)
+        self.join(timeout=max(0, deadline - time.monotonic()))
+        if self.is_alive():
+            raise TimeoutError("Mooncake receiver did not stop")
+        # task_done precedes the final acknowledgement. First wait for all
+        # submissions, then join the executor to include those acknowledgements.
+        with self.request_queue.all_tasks_done:
+            while self.request_queue.unfinished_tasks:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("Mooncake receiver requests did not drain")
+                self.request_queue.all_tasks_done.wait(remaining)
+        with self._accept_lock:
+            if self._executor_stop_thread is None:
+
+                def stop_executor():
+                    try:
+                        self.executor.shutdown(wait=True)
+                    except Exception as exc:  # noqa: BLE001 - propagated to caller
+                        self._executor_stop_error = exc
+                    finally:
+                        self._executor_stopped.set()
+
+                self._executor_stop_thread = threading.Thread(target=stop_executor, daemon=True)
+                self._executor_stop_thread.start()
+        if not self._executor_stopped.wait(max(0, deadline - time.monotonic())):
+            raise TimeoutError("Mooncake receiver acknowledgements did not drain")
+        if self._executor_stop_error is not None:
+            raise RuntimeError("Mooncake receiver executor shutdown failed") from self._executor_stop_error
 
     def _submit_request(self, request_data: dict[str, Any]) -> None:
         peer_key = (request_data["remote_host"], request_data["remote_handshake_port"])
@@ -1200,12 +1283,55 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
 
 
 class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
+    connector_worker: "MooncakeConnectorWorker | None"
+
+    def shutdown(self):
+        worker = self.connector_worker
+        if worker is None or not get_ascend_config().engram_local_vmm:
+            return
+        # This local VMM path does not own a shared multi/EC connector engine.
+        if self._kv_transfer_config.kv_connector != "MooncakeHybridConnector" or self._vllm_config.ec_transfer_config:
+            raise RuntimeError("Cannot release a shared Mooncake transfer engine")
+        receiver = worker.kv_recv_thread
+        sender = worker.kv_send_thread
+        thread: KVCacheRecvingThread | KVCacheSendingThread
+        if worker.kv_role == "kv_consumer":
+            if receiver is None:
+                raise RuntimeError("Cannot verify Mooncake receiver shutdown")
+            thread = receiver
+        elif worker.kv_role == "kv_producer":
+            if sender is None:
+                raise RuntimeError("Cannot verify Mooncake producer shutdown")
+            thread = sender
+        else:
+            raise RuntimeError("Unknown Mooncake transfer role")
+        engine = worker.engine
+        if (
+            engine is None
+            or (receiver is not None and receiver.engine is not engine)
+            or global_te.transfer_engine is not engine
+        ):
+            raise RuntimeError("Mooncake transfer engine ownership changed")
+        # A timeout skips explicit release here; it does not prevent the worker
+        # process from exiting or prove remote device accesses have stopped.
+        thread.drain_and_stop()
+        global_te.release_exclusive_engine(worker, engine)
+        if receiver is not None:
+            receiver.engine = None
+        worker.engine = None
+        self.connector_worker = None
+        del engine
+
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
         return True
 
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None):
         assert vllm_config.kv_transfer_config is not None
+        if get_ascend_config().engram_local_vmm and (
+            vllm_config.kv_transfer_config.kv_connector != "MooncakeHybridConnector" or vllm_config.ec_transfer_config
+        ):
+            raise ValueError("engram_local_vmm requires an exclusive MooncakeHybridConnector without EC transfer")
         # vLLM main's KVConnectorBase_V1.__init__ tracks `_kv_cache_config`
         # (and `_role`), which `get_loaded_kv_cache_group_ids` reads.
         super().__init__(vllm_config, role, kv_cache_config)
@@ -1216,7 +1342,7 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
             self.connector_scheduler: MooncakeConnectorScheduler | None = MooncakeConnectorScheduler(
                 vllm_config, str(self.engine_id), kv_cache_config
             )
-            self.connector_worker: MooncakeConnectorWorker | None = None
+            self.connector_worker = None
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
             self.connector_worker = MooncakeConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
@@ -1647,6 +1773,9 @@ class MooncakeConnectorScheduler:
 class MooncakeConnectorWorker:
     """Implementation of Worker side methods"""
 
+    kv_role: str | None
+    engine: Any
+
     def __init__(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: KVCacheConfig):
         self._get_prefill_decode_size(vllm_config)
         os.environ["ASCEND_TRANSFER_TIMEOUT"] = str(get_transfer_timeout_value())
@@ -1733,7 +1862,10 @@ class MooncakeConnectorWorker:
         self.handshake_port = self.side_channel_port + device_index
         self.sockets: dict = {}
         inject_qos(vllm_config.kv_transfer_config.get_from_extra_config("qos_priority", PD_QOS_DEFAULT))
-        self.engine = global_te.get_transfer_engine(self.side_channel_host, device_name=None)
+        if get_ascend_config().engram_local_vmm:
+            self.engine = global_te.get_transfer_engine(self.side_channel_host, device_name=None, owner=self)
+        else:
+            self.engine = global_te.get_transfer_engine(self.side_channel_host, device_name=None)
         self.te_rpc_port = self.engine.get_rpc_port()
 
         # Background thread for sending or receiving KV caches.

@@ -202,6 +202,7 @@ TITLES = {
         "zh": "动态分块流水线并行",
     },
     "user_guide/feature_guide/epd_disaggregation.md": {"en": "EPD Disaggregation", "zh": "EPD 分离"},
+    "user_guide/feature_guide/engram_local_vmm.md": {"en": "Local Shared Engram VMM", "zh": "本地共享 Engram VMM"},
     "user_guide/feature_guide/encoder_cache_cpu_offload.md": {
         "en": "Encoder Cache CPU Offload",
         "zh": "编码器缓存 CPU 卸载",

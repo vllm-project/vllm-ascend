@@ -302,6 +302,7 @@ nav:
         - user_guide/feature_guide/expert_parallelism_load_balancer.md
         - user_guide/feature_guide/netloader.md
         - user_guide/feature_guide/rfork.md
+        - user_guide/feature_guide/engram_local_vmm.md
         - user_guide/feature_guide/epd_disaggregation.md
         - user_guide/feature_guide/kv_cache_pool_ascend_store.md
         - user_guide/feature_guide/mooncake_layerwise_adaptation_and_optimization.md
