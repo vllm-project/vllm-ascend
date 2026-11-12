@@ -58,6 +58,11 @@ on:
         required: false
         default: ''
         type: string
+      os_matrix:
+        description: "JSON array of OS variants to build and test, e.g. '[\"ubuntu\"]' or '[\"ubuntu\",\"openeuler\"]'. Each entry adds one lane (runtime base image + nightly image + tests). /presmoke passes both; the default keeps the ubuntu-only nightly."
+        required: false
+        default: '["ubuntu"]'
+        type: string
       vllm_ascend_ref:
         description: 'PR commit SHA for PR-triggered tests'
         required: false
@@ -260,16 +265,21 @@ jobs:
     if: >-
       (github.event_name == 'workflow_dispatch' && inputs.skip_build_image != 'true')
     strategy:
+      fail-fast: false
       matrix:
         vllm_ascend_branch: >-
           ${{ fromJSON(format('["{0}"]', inputs.vllm_ascend_branch)) }}
+        # One lane per OS variant. The nightly shape stays 'release' (arm64); the
+        # OS selects the Dockerfile for the runtime base image and, together with
+        # image_tag_suffix, the tag of both layers.
+        os: ${{ fromJSON(inputs.os_matrix) }}
     uses: ./.github/workflows/_schedule_nightly_pair_image_build.yaml
     with:
       target: a5
-      os: ubuntu
+      os: ${{ matrix.os }}
       soc: '950'
-      dockerfile: Dockerfile.a5
-      suffix: 'a5'
+      dockerfile: ${{ matrix.os == 'openeuler' && 'Dockerfile.a5.openEuler' || 'Dockerfile.a5' }}
+      suffix: ${{ matrix.os == 'openeuler' && 'a5-openeuler' || 'a5' }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       # The nightly layer always keeps the release shape (ubuntu arm64). The
       # /presmoke command additionally rebuilds the runtime base image from CANN
@@ -298,12 +308,13 @@ jobs:
       fail-fast: false
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
+        os: ${{ fromJSON(inputs.os_matrix) }}
         test_config: ${{ fromJson(needs.setup-vars.outputs.multi_node) }}
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a5
       runner: linux-aarch64-a5-0
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5${{ inputs.image_tag_suffix }}'
+      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5${{ matrix.os == 'openeuler' && '-openeuler' || '' }}${{ inputs.image_tag_suffix }}'
       ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       replicas: 1
@@ -356,12 +367,13 @@ jobs:
       max-parallel: 9
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
+        os: ${{ fromJSON(inputs.os_matrix) }}
         test_config: ${{ fromJson(needs.setup-vars.outputs.single_node) }}
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
       soc_version: a5
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5${{ inputs.image_tag_suffix }}'
+      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5${{ matrix.os == 'openeuler' && '-openeuler' || '' }}${{ inputs.image_tag_suffix }}'
       tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       config_base_path: ${{ matrix.test_config.config_base_path }}
@@ -408,10 +420,11 @@ jobs:
       fail-fast: false
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
+        os: ${{ fromJSON(inputs.os_matrix) }}
         test_config: ${{ fromJSON(needs.setup-vars.outputs.multi_node) }}
     uses: ./.github/workflows/_e2e_profile_parse.yaml
     with:
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5${{ inputs.image_tag_suffix }}'
+      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5${{ matrix.os == 'openeuler' && '-openeuler' || '' }}${{ inputs.image_tag_suffix }}'
       prefix: nightly-profiling/${{ github.repository }}/${{ github.run_id }}/${{ github.run_attempt }}/multi-node/${{ matrix.vllm_ascend_branch }}-${{ matrix.test_config.name }}
       ref: ${{ github.sha }}
       should_run: >-
@@ -433,10 +446,11 @@ jobs:
       fail-fast: false
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
+        os: ${{ fromJSON(inputs.os_matrix) }}
         test_config: ${{ fromJSON(needs.setup-vars.outputs.single_node) }}
     uses: ./.github/workflows/_e2e_profile_parse.yaml
     with:
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5${{ inputs.image_tag_suffix }}'
+      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a5${{ matrix.os == 'openeuler' && '-openeuler' || '' }}${{ inputs.image_tag_suffix }}'
       prefix: nightly-profiling/${{ github.repository }}/${{ github.run_id }}/${{ github.run_attempt }}/single-node/${{ matrix.vllm_ascend_branch }}-${{ matrix.test_config.name }}
       ref: ${{ github.sha }}
       should_run: >-
