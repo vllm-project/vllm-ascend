@@ -208,7 +208,7 @@ def test_aux_capture_gathers_and_trims_sequence_parallel_states(monkeypatch, wit
     combined = hidden if residual is None else hidden + residual
     gather = Mock(side_effect=lambda states, dim: torch.cat([states, states + 100], dim=dim))
     monkeypatch.setattr(patch_deepseek_v2, "tensor_model_parallel_all_gather", gather)
-    captured = []
+    captured: list[torch.Tensor] = []
     patch_deepseek_v2._capture_aux_hidden_state(
         SimpleNamespace(aux_hidden_state_layers=(2,)), captured, 2, hidden, residual, torch.arange(3)
     )
