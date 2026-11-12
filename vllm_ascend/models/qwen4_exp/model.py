@@ -78,61 +78,6 @@ class AscendQwen4ExpPLELayer(upstream_model.Qwen4ExpPLELayer):
         super().__init__(*args, **kwargs)
         self.use_sequence_parallel = use_sequence_parallel
 
-    def _sequence_parallel_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        query_start_loc: torch.Tensor,
-        ngram_context: torch.Tensor,
-    ) -> torch.Tensor:
-        ple_embedding = self.ple_embedding
-        ngram_ids = input_ids.new_empty(
-            (input_ids.shape[0], ple_embedding.ngram_heads),
-            dtype=torch.int64,
-        )
-        torch.ops.vllm.qwen4_exp_amd_ple_ngram_ids(
-            input_ids,
-            query_start_loc,
-            ngram_context,
-            ngram_ids,
-            ple_embedding.layer_name,
-        )
-        local_ngram_ids = sp_shard(ngram_ids)
-        embedding = ple_embedding.ngram_embedding
-        output_dtype = embedding.weight.dtype if embedding.supports_prefetch else embedding.params_dtype
-        output = local_ngram_ids.new_empty(
-            (local_ngram_ids.shape[0], ple_embedding.embedding_dim),
-            dtype=output_dtype,
-        )
-        if embedding.supports_prefetch:
-            torch.ops.vllm.qwen4_exp_amd_ple_ngram_embedding_pinned(
-                local_ngram_ids,
-                output,
-                ple_embedding.layer_name,
-            )
-        else:
-            torch.ops.vllm.qwen4_exp_amd_ple_ngram_embedding(
-                local_ngram_ids,
-                output,
-                ple_embedding.layer_name,
-            )
-        return output
-
-    def _use_local_ngram_lookup(self) -> bool:
-        if not is_forward_context_available():
-            return True
-        attn_metadata = get_forward_context().attn_metadata
-        if isinstance(attn_metadata, list):
-            attn_metadata = attn_metadata[0]
-        if not isinstance(attn_metadata, dict):
-            return True
-        ple_metadata = attn_metadata.get(self.prefix)
-        if not isinstance(
-            ple_metadata,
-            upstream_ple.PleShortConvAttentionMetadata,
-        ):
-            return True
-        return ple_metadata.num_prefills > 0
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -149,19 +94,14 @@ class AscendQwen4ExpPLELayer(upstream_model.Qwen4ExpPLELayer):
             )
 
         input_ids = input_ids.reshape(-1)
-        if self._use_local_ngram_lookup():
-            embeddings = self._sequence_parallel_embeddings(
-                input_ids,
-                query_start_loc,
-                ngram_context,
-            )
-        else:
-            embeddings = self.ple_embedding(
-                input_ids,
-                query_start_loc,
-                ngram_context,
-            )
-            embeddings = sp_shard(embeddings)
+        # PLE weights are vocabulary-sharded. Every vocabulary owner must
+        # look up the same token rows before those rows are sequence-sharded.
+        embeddings = self.ple_embedding(
+            input_ids,
+            query_start_loc,
+            ngram_context,
+        )
+        embeddings = sp_shard(embeddings)
         embeddings = self.ple_embedding.ngram_embedding.dequantize(embeddings, hidden_states.dtype)
         kv, _ = self.kv_proj(embeddings)
         key, value = kv.split(self.kv_proj.output_sizes, dim=-1)

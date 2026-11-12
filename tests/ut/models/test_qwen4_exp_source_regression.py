@@ -45,9 +45,6 @@ def test_qwen4_exp_ascend_wrapper_owns_sequence_parallel_moe_region() -> None:
     assert "gated_output.add_(conv_output)" in model
     assert "ple_output_is_full_tokens = self.use_sequence_parallel" in model
     assert "injection = sp_shard(injection)" in model
-    assert "local_ngram_ids = sp_shard(ngram_ids)" in model
-    assert "qwen4_exp_amd_ple_ngram_embedding_pinned(" in model
-    assert "return ple_metadata.num_prefills > 0" in model
     assert "embeddings = sp_shard(embeddings)" in model
     assert "forward_context.is_padding = sp_padding_mask(" in model
     assert "hidden_states = sp_shard(hidden_states)" in model
