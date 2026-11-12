@@ -170,13 +170,13 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 "is not supported with layerwise KV transfer (use_layerwise=True). "
                 "The layerwise threads do not implement TP-mismatch handling."
             )
-        if self.dcp_size > 1:
-            expected_dcp_rank = (self.tp_rank * self.pcp_size + self.pcp_rank) % self.dcp_size
+        if self.dcp_size > 1 and self.pcp_size == 1:
+            expected_dcp_rank = self.tp_rank % self.dcp_size
             if expected_dcp_rank != self.dcp_rank:
                 raise ValueError(
                     f"Layerwise DCP rank mapping mismatch: tp_rank={self.tp_rank}, "
-                    f"pcp_rank={self.pcp_rank}, pcp_size={self.pcp_size}, dcp_size={self.dcp_size} "
-                    f"maps to dcp_rank={expected_dcp_rank}, but the DCP group reports {self.dcp_rank}."
+                    f"dcp_size={self.dcp_size} maps to dcp_rank={expected_dcp_rank}, "
+                    f"but the DCP group reports {self.dcp_rank}."
                 )
         # Both PD sides must derive the same GVA shard layout.
         if self.kv_role in ("kv_producer", "kv_consumer") and infer_dcp_mismatch_info(
