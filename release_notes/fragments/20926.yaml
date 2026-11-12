@@ -7,3 +7,8 @@ entries:
       operators and Core lifecycle interfaces. The native resolver requires
       its compiled extension and does not fall back to Triton.
     hardware: [A5]
+  - category: feature
+    text: >-
+      Added experimental colocated HiSparse and bulk AscendStore prefix reuse
+      with MemCache host_tcp.
+    hardware: [A5]
