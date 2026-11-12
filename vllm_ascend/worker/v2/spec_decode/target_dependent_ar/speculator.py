@@ -42,7 +42,7 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_config import draft_config_context, get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.context_parallel.attention_cp import build_dcp_fia_params
-from vllm_ascend.attention.context_parallel.common_cp import CPKVScope
+from vllm_ascend.attention.context_parallel.common_cp import CPKVScope, use_history_current_split_decode
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAMetadata
@@ -698,12 +698,16 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
     def build_fia_params(
         self,
         num_reqs_padded: int,
-        draft_attn_metadata: dict[str, Any],
+        num_tokens: int,
+        draft_attn_metadatas: list[dict[str, Any]],
         is_draft_model_prefill: bool,
     ) -> list[dict[str, Any]]:
         """Build all draft steps' FIA parameters for a single graph update."""
         if self.use_dcp:
-            return self.build_fia_params_dcp(num_reqs_padded, draft_attn_metadata, is_draft_model_prefill)
+            if self.attn_architecture == "MLA":
+                return self.build_mla_dcp_fia_params(num_tokens, draft_attn_metadatas, is_draft_model_prefill)
+            return self.build_fia_params_dcp(num_reqs_padded, draft_attn_metadatas[0], is_draft_model_prefill)
+        draft_attn_metadata = draft_attn_metadatas[0]
         block_table = next(iter(draft_attn_metadata.values())).block_tables
         if is_draft_model_prefill:
             return [
@@ -733,6 +737,31 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
                         "block_table": block_table,
                     }
                 )
+        return fia_params
+
+    def build_mla_dcp_fia_params(
+        self,
+        num_tokens: int,
+        draft_attn_metadatas: list[dict[str, Any]],
+        is_draft_model_prefill: bool,
+    ) -> list[dict[str, Any]]:
+        """Build MLA DCP parameters for each captured draft step and layer."""
+        from vllm_ascend.attention.context_parallel.mla_cp import MLADCPParamProvider
+
+        fia_params = []
+        for per_step_metadata in draft_attn_metadatas:
+            for layer_name, metadata in per_step_metadata.items():
+                if metadata.decode is None or metadata.external_flashmla is not None:
+                    continue
+                use_split = use_history_current_split_decode(
+                    metadata,
+                    is_draft_model=True,
+                    is_draft_model_prefill=is_draft_model_prefill,
+                )
+                kinds = (CPKVScope.HISTORY, CPKVScope.CURRENT) if use_split else (CPKVScope.FULL,)
+                for kind in kinds:
+                    provider = MLADCPParamProvider(layer_name, kind, num_tokens)
+                    fia_params.append({"layer_name": provider.layer_name, **provider.resolve({layer_name: metadata})})
         return fia_params
 
     def build_fia_params_dcp(

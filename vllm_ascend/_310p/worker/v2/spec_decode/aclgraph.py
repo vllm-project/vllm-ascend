@@ -63,7 +63,8 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
         assert isinstance(graph, UpdatableGraph)
         fia_params = self.speculator.build_fia_params(
             desc.num_reqs,
-            draft_attn_metadatas[0],
+            desc.num_tokens,
+            draft_attn_metadatas,
             self.is_draft_model_prefill,
         )
         resolved_tasks = graph.resolve_tasks(SharedSource(fia_params))

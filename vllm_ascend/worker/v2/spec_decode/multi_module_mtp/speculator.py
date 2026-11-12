@@ -197,7 +197,8 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
     def build_fia_params(
         self,
         num_reqs_padded: int,
-        draft_attn_metadata: dict,
+        num_tokens: int,
+        draft_attn_metadatas: list[dict],
         is_draft_model_prefill: bool,
     ) -> list[dict]:
         """Per-layer FIA parameters for the UpdatableGraph task update.
@@ -208,6 +209,7 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
         layer. All layers share the same batch-level values because the
         three module forwards reuse one metadata.
         """
+        draft_attn_metadata = draft_attn_metadatas[0]
         fia_params = []
         for layer_name, metadata in draft_attn_metadata.items():
             fia_params.append(

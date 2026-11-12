@@ -69,33 +69,6 @@ class MLADCPParamProvider:
         return {"actual_seq_qlen": query_lens, "actual_seq_kvlen": kv_lens, "block_table": block_table}
 
 
-def build_mla_dcp_fia_params(
-    layer_name: str,
-    metadata,
-    num_tokens: int,
-    *,
-    is_draft_model: bool = False,
-    is_draft_model_prefill: bool = False,
-    use_spec_decode: bool = False,
-) -> list[dict[str, object]]:
-    """Publish parameters for the captured split or ordinary MLA task."""
-    if metadata.decode is None or metadata.external_flashmla is not None:
-        return []
-
-    use_split = use_history_current_split_decode(
-        metadata,
-        is_draft_model=is_draft_model,
-        is_draft_model_prefill=is_draft_model_prefill,
-        use_spec_decode=use_spec_decode,
-    )
-    kinds = (CPKVScope.HISTORY, CPKVScope.CURRENT) if use_split else (CPKVScope.FULL,)
-    params = []
-    for kind in kinds:
-        provider = MLADCPParamProvider(layer_name, kind, num_tokens)
-        params.append({"layer_name": provider.layer_name, **provider.resolve({layer_name: metadata})})
-    return params
-
-
 @dataclass
 class DCPChunkedContextMetadata(ChunkedContextMetadata):
     """MLA chunk metadata for DCP-local context shards."""
