@@ -1031,8 +1031,6 @@ class AscendMLAImpl(MLAAttentionImpl):
 
     def _can_use_flashmla(self) -> bool:
         config = self.vllm_config
-        # Kimi K3.1 uses the same MLA draft geometry as K3. Select FlashMLA
-        # through the existing A5 capability, shape, dtype and cache guards.
         if not getattr(config, "use_v2_model_runner", False):
             return False
         if config.speculative_config is not None and config.speculative_config.method != "dspark":
