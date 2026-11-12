@@ -605,7 +605,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
 
         assert self.layer_name is not None
         workspace = get_capture_resource(
-            (MLADCPParamProvider, self.layer_name, attention_kind, q_nope.shape, k_nope.shape),
+            (MLADCPParamProvider, attention_kind, q_nope.shape, k_nope.shape, q_pe.shape, k_pe.shape),
             lambda: torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
                 q_nope, k_nope, k_nope, **common_kwargs
             ),
@@ -861,8 +861,13 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             assert self.layer_name is not None
             workspace = get_capture_resource(
                 (
-                    MLADCPParamProvider, self.layer_name, CPKVScope.FULL,
-                    input_layout, q_nope.shape, k_nope.shape,
+                    MLADCPParamProvider,
+                    CPKVScope.FULL,
+                    input_layout,
+                    q_nope.shape,
+                    k_nope.shape,
+                    q_pe.shape,
+                    k_pe.shape,
                 ),
                 lambda: torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
                     q_nope, k_nope, k_nope, **common_kwargs
