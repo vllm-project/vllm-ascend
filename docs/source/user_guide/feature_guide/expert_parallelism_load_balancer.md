@@ -126,9 +126,9 @@ above deviate from them, and when to do the same:
   increase rearrangement frequency and trade stability for faster response.
 
 These fields may also be passed together as JSON through `--eplb-config`.
-They must not be placed in `--additional-config` for MRv2: the only MRv2 EPLB
-fields under `additional_config.eplb_config` are `load_collection_phase` and
-`stair_config`; any other field is rejected at startup.
+Keep the upstream fields in `--eplb-config` for MRv2. The Ascend fields under
+`additional_config.eplb_config` are `load_collection_phase`,
+`mrv2_placement_export_path`, and `stair_config`.
 
 Ascend extends the upstream `policy` field without adding a second selector.
 For example, use `--eplb-config.policy default` to run the upstream policy;

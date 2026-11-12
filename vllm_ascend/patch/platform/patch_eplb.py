@@ -890,6 +890,10 @@ def _wrap_move_to_workspace(original_move):
                 pending_result.consumed_event = consumed_event
         if deferred_event is not None:
             deferred_event.flush()
+        if is_last_result:
+            export_placement = getattr(model_state, "_export_eplb_placement_after_commit", None)
+            if export_placement is not None:
+                export_placement()
         return result
 
     setattr(_move_to_workspace, _PATCH_MARKER, True)

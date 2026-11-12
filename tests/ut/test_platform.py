@@ -612,6 +612,19 @@ class TestNPUPlatform(TestBase):
         with patch.dict("os.environ", {}, clear=True):
             _validate_eplb_config(vllm_config)
 
+    def test_validate_eplb_config_preserves_v2_placement_export(self):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
+        vllm_config.parallel_config.enable_eplb = True
+        vllm_config.parallel_config.eplb_config.use_async = False
+        vllm_config.additional_config = {"eplb_config": {"mrv2_placement_export_path": "placement.json"}}
+
+        with patch.dict("os.environ", {}, clear=True):
+            _validate_eplb_config(vllm_config)
+
+        self.assertTrue(vllm_config.parallel_config.eplb_config.use_async)
+        self.assertEqual(vllm_config.additional_config["eplb_config"]["mrv2_placement_export_path"], "placement.json")
+
     def test_validate_eplb_config_warns_and_forces_async_mode(self):
         vllm_config = self.mock_vllm_config()
         vllm_config.use_v2_model_runner = True
