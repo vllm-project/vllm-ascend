@@ -939,6 +939,8 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
         --gpu-memory-utilization 0.90 \
         --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
         --enable-prefix-caching \
+        --mamba-cache-mode align \
+        --mamba-ssm-cache-dtype bfloat16 \
         --async-scheduling \
         --enable-expert-parallel \
         --compilation-config '{"cudagraph_mode":"NONE"}' \
@@ -1003,6 +1005,8 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
         --gpu-memory-utilization 0.90 \
         --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
         --enable-prefix-caching \
+        --mamba-cache-mode align \
+        --mamba-ssm-cache-dtype bfloat16 \
         --async-scheduling \
         --enable-expert-parallel \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
@@ -1064,8 +1068,9 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
 - Each command starts TP2 × DP2 (EP4) on four devices. `--api-server-count 1` exposes one API endpoint per role. Use distinct DP RPC ports for Prefill and Decode.
 - Model Runner V2, async scheduling, and expert parallelism are enabled.
 - Engram uses CPU offload and DP shared memory. DP replicas must share the same host and shared-memory namespace.
-- Prefill enables prefix caching and uses `cudagraph_mode=NONE`; static kernels are disabled.
-- Decode enables prefix caching, `FULL_DECODE_ONLY`, static kernels, and recompute scheduling; MTP sets `enforce_eager=false` to allow graph execution.
+- Both roles enable prefix caching with Mamba cache mode `align` and Mamba SSM cache dtype `bfloat16`.
+- Prefill uses `cudagraph_mode=NONE` with static kernels disabled.
+- Decode uses `FULL_DECODE_ONLY`, static kernels, and recompute scheduling. MTP sets `enforce_eager=false` to allow graph execution.
 - Both roles enable CPU binding, shared expert DP, FlashComm1, shared expert multistream overlap, and NPU graph extension. Fused MC2, norm/quantization fusion, and super kernels are disabled.
 - Both roles use three MTP draft tokens and `VLLM_ENGINE_READY_TIMEOUT_S=4800` for engine startup; model execution uses `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000`.
 - Both roles use `HCCL_BUFFSIZE=8192` and `ASCEND_BUFFER_POOL=0:0`. The validated configuration separates Prefill and Decode HCCL base ports (62000/63000) and NPU socket ranges (61400–61499/61500–61599).
@@ -1342,7 +1347,7 @@ The 10K target is the processed input length, including text and image tokens. K
 
 ### 5.4 Long-Context PD Separation Deployment
 
-This case uses eight devices on a single A3 series or 950DT products host, with TP4 × DP1 for both Prefill and Decode. Both roles set the maximum combined input and output length to 1,010,000 tokens, with up to 16 active sequences and 4096 batch tokens. Initialize the environment as described in [Section 4](#4-installation) and run each role in a separate terminal.
+This section extends the model context for PD separation on A3 series and 950DT products.
 
 !!! note "Extending the native 256K context to approximately 1M"
 
@@ -1354,126 +1359,34 @@ On 950DT products, this case reuses ports 8247, 8248, and 8246 from the image-an
 
 === "A3 series"
 
-    Prefill uses devices 0–3 and Decode uses devices 4–7. Both roles load the A3 W4A8 checkpoint.
+    Use the A3 Prefill, Decode, and Proxy commands from [Section 5.2](#52-basic-pd-separation-deployment). Prefill uses TP2 × PP4 × DP1 (EP2) on devices 0–7. Decode uses TP2 × DP4 (EP8) on devices 8–15.
 
-    **Prefill:**
+    In both the Prefill and Decode terminals, export the following before starting vLLM.
 
     ```bash
-    unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
-    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
-
-    export VLLM_USE_MODELSCOPE=True
-    export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
-    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-    export VLLM_ENGINE_READY_TIMEOUT_S=2400
-    export VLLM_ASCEND_PLE_BACKEND=torch
-    export HCCL_NPU_SOCKET_PORT_RANGE=61400-61499
-    export HCCL_BUFFSIZE=512
-    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-
-    vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8 \
-        --host 0.0.0.0 \
-        --port 8247 \
-        --served-model-name qwen38-megamoe-sp-pd \
-        --trust-remote-code \
-        --quantization ascend \
-        --tensor-parallel-size 4 \
-        --pipeline-parallel-size 1 \
-        --data-parallel-size 1 \
-        --max-model-len 1010000 \
-        --max-num-seqs 16 \
-        --max-num-batched-tokens 4096 \
-        --gpu-memory-utilization 0.9 \
-        --enable-prefix-caching \
-        --async-scheduling \
-        --enable-expert-parallel \
-        --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
-        --compilation-config '{"cudagraph_mode":"NONE"}' \
-        --additional-config '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false}}' \
-        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}' \
-        --hf-overrides '{"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":4.0,"original_max_position_embeddings":262144}}}' \
-        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"32470","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4},"decode":{"dp_size":1,"tp_size":4}}}'
     ```
 
-    **Decode:**
+    In both `vllm serve` commands, replace `--max-model-len 141312` with `--max-model-len 1010000` and add the following YaRN override. Apply both options together with the environment variable above.
 
     ```bash
-    unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
-    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
-
-    export VLLM_USE_MODELSCOPE=True
-    export VLLM_USE_V2_MODEL_RUNNER=1
-    export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
-    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-    export VLLM_ENGINE_READY_TIMEOUT_S=4800
-    export VLLM_ASCEND_PLE_BACKEND=torch
-    export HCCL_NPU_SOCKET_PORT_RANGE=61500-61599
-    export HCCL_BUFFSIZE=512
-    export ASCEND_RT_VISIBLE_DEVICES=4,5,6,7
-
-    vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8 \
-        --host 0.0.0.0 \
-        --port 8248 \
-        --served-model-name qwen38-megamoe-sp-pd \
-        --trust-remote-code \
-        --quantization ascend \
-        --tensor-parallel-size 4 \
-        --data-parallel-size 1 \
-        --max-model-len 1010000 \
-        --max-num-seqs 16 \
-        --max-num-batched-tokens 4096 \
-        --gpu-memory-utilization 0.9 \
-        --enable-prefix-caching \
-        --async-scheduling \
-        --enable-expert-parallel \
-        --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_flashcomm1":true,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}' \
-        --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}' \
-        --hf-overrides '{"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":4.0,"original_max_position_embeddings":262144}}}' \
-        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"32480","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4},"decode":{"dp_size":1,"tp_size":4}}}'
+    --hf-overrides '{"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":4.0,"original_max_position_embeddings":262144}}}'
     ```
 
-    **Proxy:**
-
-    After both model APIs are ready, run the proxy from the vLLM-Ascend repository root:
+    After both APIs are ready, start the Section 5.2 proxy on port `25570`. Prepare `long-context-request.json` with `model` set to `qwen38-flash-next-a3-pd`, the input in `messages`, and the requested output budget in `max_tokens`. Keep the input token count plus the maximum output token count within 1,010,000 tokens.
 
     ```bash
-    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY
-
-    python examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
-        --host 0.0.0.0 \
-        --port 8246 \
-        --prefiller-hosts 127.0.0.1 \
-        --prefiller-ports 8247 \
-        --decoder-hosts 127.0.0.1 \
-        --decoder-ports 8248
-    ```
-
-    **Service Verification:**
-
-    Check the startup logs for TP4 × DP1 on both roles and `max_model_len=1010000`. Prepare `long-context-request.json` as a chat-completion request with `model` set to `qwen38-megamoe-sp-pd`, the long input in `messages`, and `max_tokens` set to the required output budget. Keep the processed input plus output budget within 1,010,000 tokens, then run:
-
-    ```bash
-    curl --fail "http://127.0.0.1:8247/v1/models"
-    curl --fail "http://127.0.0.1:8248/v1/models"
-    curl --fail "http://127.0.0.1:8246/v1/chat/completions" \
+    curl --fail "http://127.0.0.1:25570/v1/chat/completions" \
         -H "Content-Type: application/json" \
         --data-binary @long-context-request.json
     ```
 
-    Verify the response content and `usage.prompt_tokens` against the test input. Successful API startup alone does not verify long-context inference.
-
-    **Key parameters:**
-
-    - Both roles use TP4 × DP1 without pipeline parallelism. The Mooncake declarations use `tp_size=4` and `dp_size=1` for both roles.
-    - Prefill disables graph capture and sets MTP `enforce_eager=true`. Decode uses `FULL_DECODE_ONLY`, sets MTP `enforce_eager=false`, and enables static kernels and recompute scheduling.
-    - Both roles enable Engram CPU offload with `dp_shared_memory=false` and use `HCCL_BUFFSIZE=512`. The supplied configuration sets the engine-ready timeout to 2400 seconds on Prefill and 4800 seconds on Decode; the model-execution timeout is 3000 seconds on both roles.
-    - `VLLM_ASCEND_PLE_BACKEND` only applies to runtimes that implement it; an unknown-variable warning means it has no effect.
+    Verify the response and compare `usage.prompt_tokens` with the test input.
 
 === "950DT products"
 
+    This case uses eight devices on a single 950DT products host, with TP4 × DP1 for both Prefill and Decode. Both roles set the maximum combined input and output length to 1,010,000 tokens, with up to 16 active sequences and 4096 batch tokens. Initialize the environment as described in [Section 4](#4-installation) and run each role in a separate terminal.
+
     **Prefill:**
 
     ```bash
@@ -1504,6 +1417,8 @@ On 950DT products, this case reuses ports 8247, 8248, and 8246 from the image-an
         --max-num-batched-tokens 4096 \
         --gpu-memory-utilization 0.9 \
         --enable-prefix-caching \
+        --mamba-cache-mode align \
+        --mamba-ssm-cache-dtype bfloat16 \
         --async-scheduling \
         --enable-expert-parallel \
         --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
@@ -1543,6 +1458,8 @@ On 950DT products, this case reuses ports 8247, 8248, and 8246 from the image-an
         --max-num-batched-tokens 4096 \
         --gpu-memory-utilization 0.9 \
         --enable-prefix-caching \
+        --mamba-cache-mode align \
+        --mamba-ssm-cache-dtype bfloat16 \
         --async-scheduling \
         --enable-expert-parallel \
         --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
@@ -1586,6 +1503,7 @@ On 950DT products, this case reuses ports 8247, 8248, and 8246 from the image-an
     **Key parameters:**
 
     - Both roles use TP4 × DP1 without pipeline parallelism. The Mooncake declarations use `tp_size=4` and `dp_size=1` for both roles.
+    - Both roles use Mamba cache mode `align` and Mamba SSM cache dtype `bfloat16`.
     - Prefill disables graph capture and sets MTP `enforce_eager=true`. Decode uses `FULL_DECODE_ONLY`, sets MTP `enforce_eager=false`, and enables static kernels and recompute scheduling.
     - Both roles enable Engram CPU offload with `dp_shared_memory=false` and use `HCCL_BUFFSIZE=512`. The supplied configuration sets the engine-ready timeout to 2400 seconds on Prefill and 4800 seconds on Decode; the model-execution timeout is 3000 seconds on both roles.
     - `VLLM_ASCEND_PLE_BACKEND` only applies to runtimes that implement it; an unknown-variable warning means it has no effect.
@@ -2052,7 +1970,7 @@ Use the templates shipped inside the selected image: `/usr/local/python3.11.10/l
 
 === "950DT products"
 
-    This single-host example uses TP2 × DP2 (EP4) per role, with Prefill on devices 0–3 and Decode on devices 4–7. Use the prepared runtime from Section 4.3 and the same W4A8-MXFP checkpoint for both roles.
+    This single-host example uses TP2 × DP2 (EP4) per role, with Prefill on devices 0–3 and Decode on devices 4–7. Use the prepared runtime from Section 4.3 and the same W4A8-MXFP checkpoint for both roles. Both roles use Mamba cache mode `align` and Mamba SSM cache dtype `bfloat16`.
 
     **Prepare a new pool:**
 
@@ -2177,6 +2095,8 @@ Use the templates shipped inside the selected image: `/usr/local/python3.11.10/l
       --max-num-batched-tokens 4096 \
       --gpu-memory-utilization 0.9 \
       --enable-prefix-caching \
+      --mamba-cache-mode align \
+      --mamba-ssm-cache-dtype bfloat16 \
       --async-scheduling \
       --enable-expert-parallel \
       --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
@@ -2215,6 +2135,8 @@ Use the templates shipped inside the selected image: `/usr/local/python3.11.10/l
       --max-num-batched-tokens 4096 \
       --gpu-memory-utilization 0.9 \
       --enable-prefix-caching \
+      --mamba-cache-mode align \
+      --mamba-ssm-cache-dtype bfloat16 \
       --async-scheduling \
       --enable-expert-parallel \
       --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
@@ -2276,7 +2198,7 @@ Verify generation through `/v1/chat/completions`, using the API address and mode
 | 950DT products colocated | `http://127.0.0.1:8087` | `qwen3.8-flash-next-950-dt` |
 | A2 series PD proxy | `http://127.0.0.1:25570` | `qwen38-flash-next-a2-pd` |
 | A3 series PD proxy | `http://127.0.0.1:25570` | `qwen38-flash-next-a3-pd` |
-| A3 series long-context PD proxy | `http://127.0.0.1:8246` | `qwen38-megamoe-sp-pd` |
+| A3 series long-context PD proxy | `http://127.0.0.1:25570` | `qwen38-flash-next-a3-pd` |
 | 950DT products PD proxy | `http://<LOCAL_SERVICE_IP>:8087` | `qwen38-flash-next-950-dt-pd` |
 | 950DT products image-and-text 10K PD proxy | `http://127.0.0.1:8246` | `qwen38-megamoe-sp-pd` |
 | 950DT products long-context PD proxy | `http://127.0.0.1:8246` | `qwen38-megamoe-sp-pd` |
@@ -2501,9 +2423,9 @@ Use the configuration for your hardware and deployment mode. The table summarize
 | 950DT products | Prefill (image-and-text 10K) | 0–3 | 2 × 2 × 1 | 143360 | 64 | 8192 |
 | A3 series | Decode (image-and-text 10K) | 8–15 | 2 × 1 × 4 (EP8) | 141312 | 32 | 4096 |
 | 950DT products | Decode (image-and-text 10K) | 4–7 | 2 × 1 × 2 | 143360 | 64 | 8192 |
-| A3 series | Prefill (long-context) | 0–3 | 4 × 1 × 1 (EP4) | 1010000 | 16 | 4096 |
+| A3 series | Prefill (long-context) | 0–7 | 2 × 4 × 1 (EP2) | 1010000 | 32 | 8192 |
 | 950DT products | Prefill (long-context) | 0–3 | 4 × 1 × 1 | 1010000 | 16 | 4096 |
-| A3 series | Decode (long-context) | 4–7 | 4 × 1 × 1 (EP4) | 1010000 | 16 | 4096 |
+| A3 series | Decode (long-context) | 8–15 | 2 × 1 × 4 (EP8) | 1010000 | 32 | 8192 |
 | 950DT products | Decode (long-context) | 4–7 | 4 × 1 × 1 | 1010000 | 16 | 4096 |
 | A3 series | Prefill (128K/1K three-tier pooling) | 0–7 | 2 × 2 × 2 (EP4) | | | |
 | A3 series | Decode (128K/1K three-tier pooling) | 8–15 | 2 × 1 × 4 (EP8) | | | |
