@@ -695,5 +695,3 @@ class SuffixKernelLaunchAdapter:
 
     def __getitem__(self, grid: tuple[int, ...]) -> Callable:
         return partial(self.launch, grid)
-
-

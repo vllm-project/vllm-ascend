@@ -14,6 +14,7 @@ The following speculative decoding methods are supported:
 | Method | Description |
 | ------ | ----------- |
 | `ngram` | Match n-grams from the prompt |
+| `suffix` | Match request history and reuse completed responses on the NPU; see the [experimental suffix guide](suffix_speculative_decoding.md) |
 | `medusa` | Medusa heads embedded in the target model |
 | `eagle` | EAGLE-based draft model |
 | `eagle3` | EAGLE-3 based draft model |
