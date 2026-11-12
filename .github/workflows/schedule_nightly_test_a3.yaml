@@ -65,6 +65,16 @@ on:
         required: false
         default: '["ubuntu"]'
         type: string
+      image_repo_suffix:
+        description: 'Suffix appended to the SWR repository of both image layers (ascend/vllm-ascend<suffix> and base_image/ascend-ci/vllm-ascend<suffix>). /presmoke publishes to its own repositories; empty uses the standard ones.'
+        required: false
+        default: ''
+        type: string
+      skip_test:
+        description: 'If true, only build the image and skip every test lane. Used by /presmoke, which prepares an image for a later /nightly --presmoke run.'
+        required: false
+        default: 'false'
+        type: string
       vllm_ascend_ref:
         description: 'PR commit SHA for PR-triggered tests'
         required: false
@@ -134,6 +144,13 @@ jobs:
           script: |
             const eventName = context.eventName;
             const testCases = '${{ inputs.test_cases }}'.trim();
+
+            // /presmoke only prepares the image; skip every test lane.
+            if ('${{ inputs.skip_test }}' === 'true') {
+              core.setOutput('run', 'false');
+              core.setOutput('filter', '');
+              return;
+            }
 
             core.setOutput('ref', context.sha || 'unknown');
 
@@ -291,6 +308,7 @@ jobs:
       should_push: ${{ github.repository == 'vllm-project/vllm-ascend' && github.event_name != 'pull_request' }}
       skip_base: ${{ inputs.skip_base != 'false' }}
       tag_suffix: ${{ inputs.image_tag_suffix }}
+      image_repo_suffix: ${{ inputs.image_repo_suffix }}
       # presmoke images are for issue localization only and must not be mirrored to quay.io.
       skip_sync: true
     secrets:
@@ -315,7 +333,7 @@ jobs:
     with:
       soc_version: a3
       runner: linux-aarch64-a3-800t-0
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3${{ matrix.os == 'openeuler' && '-openeuler' || '' }}${{ inputs.image_tag_suffix }}'
+      image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend${{ inputs.image_repo_suffix }}:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3${{ matrix.os == 'openeuler' && '-openeuler' || '' }}${{ inputs.image_tag_suffix }}"
       ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       replicas: 1
@@ -370,7 +388,7 @@ jobs:
     with:
       soc_version: a3
       runner: linux-aarch64-a3-800t-0
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3${{ matrix.os == 'openeuler' && '-openeuler' || '' }}${{ inputs.image_tag_suffix }}'
+      image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend${{ inputs.image_repo_suffix }}:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3${{ matrix.os == 'openeuler' && '-openeuler' || '' }}${{ inputs.image_tag_suffix }}"
       ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       replicas: 1
@@ -428,7 +446,7 @@ jobs:
     with:
       runner: ${{ matrix.test_config.os }}
       soc_version: a3
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3${{ matrix.os == 'openeuler' && '-openeuler' || '' }}${{ inputs.image_tag_suffix }}'
+      image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend${{ inputs.image_repo_suffix }}:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3${{ matrix.os == 'openeuler' && '-openeuler' || '' }}${{ inputs.image_tag_suffix }}"
       config_file_path: ${{ matrix.test_config.config_file_path }}
       config_base_path: ${{ matrix.test_config.config_base_path }}
       name: ${{ matrix.test_config.name }}
@@ -481,7 +499,7 @@ jobs:
     with:
       runner: ${{ matrix.test_config.os }}
       soc_version: a3
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3${{ matrix.os == 'openeuler' && '-openeuler' || '' }}${{ inputs.image_tag_suffix }}'
+      image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend${{ inputs.image_repo_suffix }}:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3${{ matrix.os == 'openeuler' && '-openeuler' || '' }}${{ inputs.image_tag_suffix }}"
       tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       config_base_path: ${{ matrix.test_config.config_base_path }}
@@ -533,7 +551,7 @@ jobs:
         test_config: ${{ fromJSON(needs.setup-vars.outputs.multi_node) }}
     uses: ./.github/workflows/_e2e_profile_parse.yaml
     with:
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3${{ matrix.os == 'openeuler' && '-openeuler' || '' }}${{ inputs.image_tag_suffix }}'
+      image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend${{ inputs.image_repo_suffix }}:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3${{ matrix.os == 'openeuler' && '-openeuler' || '' }}${{ inputs.image_tag_suffix }}"
       prefix: nightly-profiling/${{ github.repository }}/${{ github.run_id }}/${{ github.run_attempt }}/multi-node/${{ matrix.vllm_ascend_branch }}-${{ matrix.test_config.name }}
       ref: ${{ github.sha }}
       should_run: >-
@@ -559,7 +577,7 @@ jobs:
         test_config: ${{ fromJSON(needs.setup-vars.outputs.double_node) }}
     uses: ./.github/workflows/_e2e_profile_parse.yaml
     with:
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3${{ matrix.os == 'openeuler' && '-openeuler' || '' }}${{ inputs.image_tag_suffix }}'
+      image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend${{ inputs.image_repo_suffix }}:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3${{ matrix.os == 'openeuler' && '-openeuler' || '' }}${{ inputs.image_tag_suffix }}"
       prefix: nightly-profiling/${{ github.repository }}/${{ github.run_id }}/${{ github.run_attempt }}/multi-node/${{ matrix.vllm_ascend_branch }}-${{ matrix.test_config.name }}
       ref: ${{ github.sha }}
       should_run: >-
@@ -585,7 +603,7 @@ jobs:
         test_config: ${{ fromJSON(needs.setup-vars.outputs.single_node) }}
     uses: ./.github/workflows/_e2e_profile_parse.yaml
     with:
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3${{ matrix.os == 'openeuler' && '-openeuler' || '' }}${{ inputs.image_tag_suffix }}'
+      image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend${{ inputs.image_repo_suffix }}:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3${{ matrix.os == 'openeuler' && '-openeuler' || '' }}${{ inputs.image_tag_suffix }}"
       prefix: nightly-profiling/${{ github.repository }}/${{ github.run_id }}/${{ github.run_attempt }}/single-node/${{ matrix.vllm_ascend_branch }}-${{ matrix.test_config.name }}
       ref: ${{ github.sha }}
       should_run: >-
@@ -612,7 +630,7 @@ jobs:
         test_config: ${{ fromJSON(needs.setup-vars.outputs.multi_card) }}
     uses: ./.github/workflows/_e2e_profile_parse.yaml
     with:
-      image: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3${{ matrix.os == 'openeuler' && '-openeuler' || '' }}${{ inputs.image_tag_suffix }}'
+      image: "swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend${{ inputs.image_repo_suffix }}:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3${{ matrix.os == 'openeuler' && '-openeuler' || '' }}${{ inputs.image_tag_suffix }}"
       prefix: nightly-profiling/${{ github.repository }}/${{ github.run_id }}/${{ github.run_attempt }}/single-node/${{ matrix.vllm_ascend_branch }}-${{ matrix.test_config.name }}
       ref: ${{ github.sha }}
       should_run: >-
