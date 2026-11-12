@@ -154,6 +154,8 @@ class TestQuantizedAllReduceConfig(TestBase):
                 self.assertFalse(config.enable)
                 self.assertEqual(config.min_numel, 16777216)
                 self.assertEqual(config.quant_dtype, expected_dtype)
+                self.assertEqual(config.pipeline_chunks, 1)
+                self.assertIsNone(config.pipeline_min_numel)
                 self.assertEqual(dataclasses.asdict(config)["quant_dtype"], expected_dtype)
 
     def test_explicit_values_and_lax_bool(self):
@@ -192,6 +194,37 @@ class TestQuantizedAllReduceConfig(TestBase):
             self.assertRaisesRegex(ValueError, "requires Atlas A5"),
         ):
             config._validate_preconditions(vllm_config)
+
+    def test_mxfp8_pipeline_values_and_lax_integer_coercion(self):
+        for chunks in (1, 2, 4):
+            config = QuantizedAllReduceConfig(quant_dtype="mxfp8", pipeline_chunks=chunks, pipeline_min_numel=83886080)
+            self.assertEqual(config.pipeline_chunks, chunks)
+            self.assertEqual(config.pipeline_min_numel, 83886080)
+        config = QuantizedAllReduceConfig(quant_dtype="mxfp8", pipeline_chunks="2", pipeline_min_numel="41943040")  # type: ignore[arg-type]
+        self.assertEqual(config.pipeline_chunks, 2)
+        self.assertEqual(config.pipeline_min_numel, 41943040)
+
+    def test_rejects_invalid_pipeline_settings(self):
+        for chunks in (0, -1, 3, 8):
+            with self.subTest(chunks=chunks), self.assertRaisesRegex(ValueError, "pipeline_chunks"):
+                QuantizedAllReduceConfig(quant_dtype="mxfp8", pipeline_chunks=chunks)
+        for threshold in (0, -1):
+            with self.subTest(threshold=threshold), self.assertRaisesRegex(ValueError, "pipeline_min_numel"):
+                QuantizedAllReduceConfig(quant_dtype="mxfp8", pipeline_min_numel=threshold)
+        for kwargs in ({"pipeline_chunks": 2}, {"pipeline_min_numel": 1024}):
+            with self.subTest(kwargs=kwargs), self.assertRaisesRegex(ValueError, "quant_dtype='mxfp8'"):
+                QuantizedAllReduceConfig(quant_dtype="int8", **kwargs)
+
+    def test_pipeline_uses_hardware_default_backend(self):
+        for is_a5 in (False, True):
+            with self.subTest(is_a5=is_a5), patch("vllm_ascend.ascend_config.is_950", return_value=is_a5):
+                if is_a5:
+                    config = QuantizedAllReduceConfig(pipeline_chunks=2)
+                    self.assertEqual(config.quant_dtype, "mxfp8")
+                    self.assertEqual(config.pipeline_chunks, 2)
+                else:
+                    with self.assertRaisesRegex(ValueError, "quant_dtype='mxfp8'"):
+                        QuantizedAllReduceConfig(pipeline_chunks=2)
 
     def test_mxfp8_tp_validation(self):
         config = QuantizedAllReduceConfig(enable=True, quant_dtype="mxfp8")

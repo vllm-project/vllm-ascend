@@ -8,6 +8,8 @@ metadata and payload size, including for mixed prefill/decode batches.
 """
 
 import logging
+from collections import deque
+from typing import NamedTuple
 
 import torch
 import torch.distributed as dist
@@ -25,15 +27,53 @@ _SCALE_PAIR_SIZE = 2
 _HIDDEN_ALIGNMENT = _MX_BLOCK_SIZE * _SCALE_PAIR_SIZE
 _DTYPE_BF16 = 15
 _DTYPE_E4M3FN = 292
+_PIPELINE_LOOKAHEAD = 2
+
+
+def _chunk_ranges(rows: int, world_size: int, chunks: int) -> list[tuple[int, int]]:
+    """Partition rows in TP-sized units, including an uneven final partition."""
+    if rows % world_size or not 1 <= chunks <= rows // world_size:
+        raise ValueError("MXFP8 chunks require at least one group-sized row unit per chunk.")
+    units, remainder = divmod(rows // world_size, chunks)
+    ranges = []
+    start = 0
+    for index in range(chunks):
+        end = start + (units + int(index < remainder)) * world_size
+        ranges.append((start, end))
+        start = end
+    return ranges
+
+
+class _Exchange(NamedTuple):
+    start: int
+    end: int
+    send: torch.Tensor
+    received: torch.Tensor
+    scale_dtype: torch.dtype
+    work: dist.Work
 
 
 class Mxfp8AllReduce:
     """BF16 -> MXFP8 AllToAll -> BF16 local SUM -> BF16 AllGather."""
 
-    def __init__(self, group: "dist.ProcessGroup", min_numel: int, group_name: str = "") -> None:
+    def __init__(
+        self,
+        group: "dist.ProcessGroup",
+        min_numel: int,
+        group_name: str = "",
+        *,
+        pipeline_chunks: int = 1,
+        pipeline_min_numel: int | None = None,
+    ) -> None:
+        if pipeline_chunks not in (1, 2, 4):
+            raise ValueError("MXFP8 pipeline_chunks must be 1, 2 or 4.")
+        if pipeline_min_numel is not None and pipeline_min_numel < 1:
+            raise ValueError("MXFP8 pipeline_min_numel must be >= 1.")
         self.group = group
         self.group_name = group_name
         self.min_numel = min_numel
+        self.pipeline_chunks = pipeline_chunks
+        self.pipeline_min_numel = min_numel if pipeline_min_numel is None else pipeline_min_numel
         self.world_size = dist.get_world_size(group)
         device_type = get_ascend_device_type()
         if device_type != AscendDeviceType.A5:
@@ -65,6 +105,20 @@ class Mxfp8AllReduce:
             return "row_sharding"
         return None
 
+    def _pipeline_skip_reason(self, input_: torch.Tensor) -> str | None:
+        if self.pipeline_chunks == 1:
+            return "disabled"
+        if input_.numel() < self.pipeline_min_numel:
+            return "below_pipeline_threshold"
+        rows = input_.numel() // input_.shape[-1]
+        if rows // self.world_size < self.pipeline_chunks:
+            return "insufficient_rows"
+        # Async Work joins are validated in Eager only. Preserve the existing
+        # full-tensor path during capture, including for unusually large graphs.
+        if torch.npu.is_current_stream_capturing():
+            return "graph_capture"
+        return None
+
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         reason = self._skip_reason(input_)
         if reason is not None:
@@ -82,29 +136,37 @@ class Mxfp8AllReduce:
             dist.all_reduce(input_, group=self.group)
             return input_
 
+        pipeline_reason = self._pipeline_skip_reason(input_)
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
-                "[MXFP8-AR-HIT] group=%s world_size=%d shape=%s numel=%d payload_bytes=%d min_numel=%d",
+                "[MXFP8-AR-HIT] group=%s world_size=%d shape=%s numel=%d payload_bytes=%d min_numel=%d "
+                "mode=%s chunks=%d pipeline_min_numel=%d pipeline_reason=%s",
                 self.group_name,
                 self.world_size,
                 tuple(input_.shape),
                 input_.numel(),
                 input_.numel() * input_.element_size(),
                 self.min_numel,
+                "pipeline" if pipeline_reason is None else "full",
+                self.pipeline_chunks if pipeline_reason is None else 1,
+                self.pipeline_min_numel,
+                pipeline_reason or "eligible",
             )
 
-        hidden = input_.shape[-1]
-        rows = input_.numel() // hidden
-        flat = input_.reshape(rows, hidden)
+        if pipeline_reason is None:
+            return self._all_reduce_pipelined(input_)
+        return self._all_reduce_full(input_)
+
+    def _pack(self, flat: torch.Tensor) -> tuple[torch.Tensor, torch.dtype]:
+        rows, hidden = flat.shape
         values, scales = self.quantize_op(
             flat, axis=-1, dst_type=torch.float8_e4m3fn, block_size=_MX_BLOCK_SIZE, round_mode="rint"
         )
-        del flat
         if (
             values.dtype != torch.float8_e4m3fn
             or tuple(values.shape) != (rows, hidden)
             or scales.element_size() != 1
-            or scales.numel() != input_.numel() // _MX_BLOCK_SIZE
+            or scales.numel() != flat.numel() // _MX_BLOCK_SIZE
         ):
             raise RuntimeError("Unexpected MXFP8 quantization dtype or layout; cannot form the AllToAll payload.")
 
@@ -112,11 +174,10 @@ class Mxfp8AllReduce:
         scale_dtype = scales.dtype
         scale_bytes = scales.contiguous().view(torch.uint8).reshape(rows, -1)
         send = torch.cat((values.contiguous().view(torch.uint8), scale_bytes), dim=-1)
-        del values, scales, scale_bytes
-        received = torch.empty_like(send)
-        dist.all_to_all_single(received, send, group=self.group)
-        del send
+        return send, scale_dtype
 
+    def _partial(self, received: torch.Tensor, scale_dtype: torch.dtype, hidden: int) -> torch.Tensor:
+        rows = received.shape[0]
         values = received[:, :hidden].contiguous().view(torch.float8_e4m3fn)
         scales = received[:, hidden:].contiguous().view(scale_dtype)
         scales = scales.reshape(rows, hidden // _HIDDEN_ALIGNMENT, _SCALE_PAIR_SIZE)
@@ -125,10 +186,58 @@ class Mxfp8AllReduce:
             raise RuntimeError("MXFP8 dequantization must produce a BF16 tensor matching the received payload.")
         # Every source contributes the owner's row shard. Both dequantization
         # storage and SUM output are BF16; accumulation/workspace is backend-defined.
-        partial = dequantized.reshape(self.world_size, rows // self.world_size, hidden).sum(dim=0, dtype=torch.bfloat16)
-        del received, values, scales, dequantized
+        return dequantized.reshape(self.world_size, rows // self.world_size, hidden).sum(dim=0, dtype=torch.bfloat16)
+
+    def _all_reduce_full(self, input_: torch.Tensor) -> torch.Tensor:
+        hidden = input_.shape[-1]
+        rows = input_.numel() // hidden
+        send, scale_dtype = self._pack(input_.reshape(rows, hidden))
+        received = torch.empty_like(send)
+        dist.all_to_all_single(received, send, group=self.group)
+        del send
+        partial = self._partial(received, scale_dtype, hidden)
+        del received
 
         # Return a separate result, following the GroupCoordinator contract.
         output = torch.empty_like(input_, memory_format=torch.contiguous_format)
         dist.all_gather_into_tensor(output.view(rows, hidden), partial, group=self.group)
+        return output
+
+    def _all_reduce_pipelined(self, input_: torch.Tensor) -> torch.Tensor:
+        hidden = input_.shape[-1]
+        rows = input_.numel() // hidden
+        flat = input_.reshape(rows, hidden)
+        output = torch.empty_like(input_, memory_format=torch.contiguous_format)
+        flat_output = output.view(rows, hidden)
+        ranges = iter(_chunk_ranges(rows, self.world_size, self.pipeline_chunks))
+
+        def submit(start: int, end: int) -> _Exchange:
+            send, scale_dtype = self._pack(flat[start:end])
+            received = torch.empty_like(send)
+            work = dist.all_to_all_single(received, send, group=self.group, async_op=True)
+            return _Exchange(start, end, send, received, scale_dtype, work)
+
+        pending = deque()
+        gathers = []
+        # Match the measured benchmark: Q0/A0, Q1/A1, wait(A0), D0/G0,
+        # Q2/A2, ... . All ranks enqueue collectives in the same order.
+        for _ in range(min(_PIPELINE_LOOKAHEAD, self.pipeline_chunks)):
+            pending.append(submit(*next(ranges)))
+        while pending:
+            exchange = pending.popleft()
+            exchange.work.wait()
+            partial = self._partial(exchange.received, exchange.scale_dtype, hidden)
+            target = flat_output[exchange.start : exchange.end]
+            work = dist.all_gather_into_tensor(target, partial, group=self.group, async_op=True)
+            # Retain async inputs, output views and work handles through their
+            # joins; do not recycle a shard while HCCL may still access it.
+            gathers.append((partial, target, work))
+            del exchange
+            next_range = next(ranges, None)
+            if next_range is not None:
+                pending.append(submit(*next_range))
+        for partial, target, work in gathers:
+            work.wait()
+        # Work.wait joins every output onto the caller's stream. No device
+        # synchronize, new process group or persistent payload cache is needed.
         return output
