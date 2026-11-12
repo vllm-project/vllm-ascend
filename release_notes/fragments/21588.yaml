@@ -1,4 +1,0 @@
-pr: 21588
-entries:
-  - category: bugfix
-    text: Fixed undersized and truncated DSA attention metadata for DeepSeek V4 BF16, FP8, and TurboQuant paths, including speculative decoding.
