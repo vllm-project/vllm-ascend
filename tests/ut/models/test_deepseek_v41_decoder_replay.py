@@ -224,7 +224,10 @@ def test_untrimmed_replica_enters_decoder_context_without_gathering():
     assert torch.equal(buffer, torch.arange(6))
 
 
-def test_model_replays_only_layers_after_kv_sources(monkeypatch):
+@pytest.mark.parametrize("selected", [(), (0,), (1,), (2,), (0, 2), (1, 2), (0, 1, 2)])
+@pytest.mark.parametrize("replay_start", [0, 1, 2])
+@pytest.mark.parametrize("compacted", [False, True])
+def test_model_replays_only_layers_after_kv_sources(monkeypatch, selected, replay_start, compacted):
     seen = []
 
     class Layer:
@@ -255,24 +258,23 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch):
     model.end_layer = 3
     model.start_layer = 0
     model.needs_moe_input_ids = False
-    model.decoder_replay_start = 1
-    model.aux_hidden_state_layers = (1, 3)
+    model.decoder_replay_start = replay_start
+    model.aux_hidden_state_layers = selected
     model.decoder_replay_layer_name = "decoder_replay"
     replay = replay_mod.AscendDecoderReplayLayers(
-        2, model._run_replay_layers, [], write_batch_kv=model.layers[1].write_kv
+        2, model._run_replay_layers, [], write_batch_kv=model.layers[replay_start].write_kv
     )
-    replay.rows = torch.tensor([2, 3])
+    replay.rows = torch.tensor([2, 3]) if compacted else None
     replay.num_actual_rows = 2
     replay.context_factory = nullcontext
     model.decoder_replay_layers = replay
 
-    def run_replay(hidden, mix, positions, input_ids, num_late_aux, layer_name):
-        assert num_late_aux == 1
-        assert layer_name == model.decoder_replay_layer_name
-        return list(model.decoder_replay_layers(hidden, mix, positions, input_ids))
-
-    monkeypatch.setattr(torch.ops.vllm, "dsv41_decoder_replay_forward", run_replay, raising=False)
-    output, aux = DeepseekV41Model.forward(
+    context = SimpleNamespace(no_compile_layers={model.decoder_replay_layer_name: replay})
+    monkeypatch.setattr(replay_mod, "get_forward_context", lambda: context)
+    monkeypatch.setattr(
+        torch.ops.vllm, "dsv41_decoder_replay_forward", replay_mod.dsv41_decoder_replay_forward, raising=False
+    )
+    result = DeepseekV41Model.forward(
         model,
         torch.arange(4),
         torch.arange(4),
@@ -281,7 +283,19 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch):
         engram_lookups={},
         engram_mask=torch.empty(0, dtype=torch.bool),
     )
-    assert seen == [(0, [0, 1, 2, 3]), ("write_kv_1", [0, 1, 2, 3]), (1, [2, 3]), (2, [2, 3])]
-    assert output[:, 0].tolist() == [0, 0, 4, 4]
-    assert aux[0][:, 0].tolist() == [1, 1, 1, 1]
-    assert aux[1][:, 0].tolist() == [0, 0, 3, 3]
+    output, aux = result if selected else (result, [])
+    all_rows = [0, 1, 2, 3]
+    if compacted:
+        expected = [(i, all_rows) for i in range(replay_start)]
+        expected += [(f"write_kv_{replay_start}", all_rows)]
+        expected += [(i, [2, 3]) for i in range(replay_start, 3)]
+    else:
+        expected = [(i, all_rows) for i in range(3)]
+    assert seen == expected
+    assert output[:, 0].tolist() == ([0, 0, 4, 4] if compacted else [4] * 4)
+    assert len(aux) == len(selected)
+    for actual, index in zip(aux, selected):
+        values = [1 + index] * 4
+        if compacted and index >= replay_start:
+            values[:2] = [0, 0]
+        assert actual[:, 0].tolist() == values

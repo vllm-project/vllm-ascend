@@ -597,9 +597,10 @@ Padding rows do not write caches. On A5, replay also moves the sparse SWA
 index window with its visible length, preserving the current query's KV and
 excluding keys below the replay boundary. The graph capability is bounded by both
 `1 + num_speculative_tokens` and the 32-row C2 ring: configurations with more
-than 31 draft tokens are rejected by adaptive initialization. The existing
-MRV2 draft-load hook maps the checkpoint's auxiliary attention-input layer
-IDs to Ascend's capture convention before warmup.
+than 31 draft tokens are rejected by adaptive initialization. The target model
+uses the checkpoint's zero-based auxiliary layer IDs unchanged and captures
+the residual entering each selected layer in both normal and decoder-replay
+execution. No draft-side layer-ID translation is required.
 
 Run the focused NPU state/graph regression and then real-checkpoint parity:
 

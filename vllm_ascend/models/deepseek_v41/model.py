@@ -1596,7 +1596,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             if self.decoder_replay_layers is not None and layer.layer_idx == self.decoder_replay_start:
                 assert self.decoder_replay_layer_name is not None
                 num_late_aux = sum(
-                    self.decoder_replay_start < layer_idx <= self.end_layer
+                    self.decoder_replay_start <= layer_idx < self.end_layer
                     for layer_idx in self.aux_hidden_state_layers
                 )
                 replay_outputs = torch.ops.vllm.dsv41_decoder_replay_forward(
@@ -1612,9 +1612,9 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 last_layer = self.layers[self.end_layer - 1]
                 break
             last_layer = layer
-            # DSpark consumes the residual stream entering its configured
-            # target layers. The runner expresses checkpoint IDs as one-based.
-            if layer.layer_idx + 1 in self.aux_hidden_state_layers:
+            # Checkpoint IDs are zero-based. Capture the residual entering
+            # the selected layer, before its Engram and attention updates.
+            if layer.layer_idx in self.aux_hidden_state_layers:
                 aux_hidden_state = hidden_states.mean(dim=1)
                 if use_sequence_parallel:
                     aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
@@ -1668,7 +1668,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         aux = []
         for layer_idx in range(self.decoder_replay_start, self.end_layer):
             layer = self.layers[layer_idx]
-            if layer.layer_idx + 1 in self.aux_hidden_state_layers:
+            if layer.layer_idx in self.aux_hidden_state_layers:
                 residual = hidden_states.mean(dim=1)
                 if self.use_sequence_parallel:
                     residual = sp_all_gather(residual)[: positions.shape[0]]
@@ -1875,6 +1875,7 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         return getattr(self.model, "_mtp_hidden_buffer", None)
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        """Select zero-based target layer inputs, using checkpoint IDs as-is."""
         self.model._set_aux_hidden_state_layers(layers)
 
     def _load_model_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
