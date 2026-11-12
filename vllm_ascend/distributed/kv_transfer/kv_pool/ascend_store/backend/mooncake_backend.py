@@ -338,7 +338,7 @@ class MooncakeBackend(Backend):
         ):
             raise ValueError("Mooncake layerwise context parallelism does not support enable_kvpp layer-sharded caches")
         if dcp_size > 1:
-            min_block_size = mooncake_layerwise.validate_dcp_groups(kv_cache_config)
+            mooncake_layerwise.validate_dcp_groups(kv_cache_config)
             model_config = getattr(vllm_config, "model_config", None)
             num_kv_heads = (
                 1
@@ -353,12 +353,8 @@ class MooncakeBackend(Backend):
                     f"put_step={put_step}, num_kv_heads={num_kv_heads}, "
                     f"tensor_parallel_size={tp_size}, decode_context_parallel_size={dcp_size}."
                 )
-            prefix_match_unit = getattr(cache_config, "prefix_match_unit", None)
-            if prefix_match_unit is not None and prefix_match_unit != min_block_size:
-                raise ValueError(
-                    f"Mooncake layerwise DCP only accepts prefix_match_unit={min_block_size} (no-op); "
-                    f"got {prefix_match_unit}."
-                )
+            if getattr(cache_config, "prefix_match_unit", None) is not None:
+                raise ValueError("Mooncake layerwise DCP does not support prefix_match_unit.")
         mooncake_layerwise.validate_pp_groups(kv_cache_config, parallel)
         namespace = mooncake_layerwise.layerwise_topology_namespace(vllm_config, kv_cache_config)
         pp_size = parallel.pipeline_parallel_size

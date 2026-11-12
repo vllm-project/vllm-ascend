@@ -171,7 +171,7 @@ unchanged. A block is a hit only after every PP stage and DCP rank committed it.
 PCP and DCP cannot be combined. Every cache group must be DCP-sharded;
 sliding-window, recurrent/align-state, circular-buffer and other non-DCP-scaled
 groups must keep DCP disabled. The smallest cacheable block size must divide
-the others; `--prefix-match-unit` must be unset or equal to that block size.
+the others; `--prefix-match-unit` must be unset with DCP.
 GQA/MQA also requires `tensor_parallel_size // num_key_value_heads >=
 decode_context_parallel_size`.
 

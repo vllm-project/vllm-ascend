@@ -127,11 +127,8 @@ def validate_pp_groups(kv_cache_config: Any, parallel_config: Any) -> None:
         )
 
 
-def validate_dcp_groups(kv_cache_config: Any) -> int | None:
-    """Reject cache groups that cannot be sharded across DCP ranks.
-
-    Returns the smallest prefix-cacheable block size for the prefix_match_unit check.
-    """
+def validate_dcp_groups(kv_cache_config: Any) -> None:
+    """Reject cache groups that cannot be sharded across DCP ranks."""
     if kv_cache_config is None:
         return None
     groups = getattr(kv_cache_config, "kv_cache_groups", None) or []
@@ -168,7 +165,6 @@ def validate_dcp_groups(kv_cache_config: Any) -> int | None:
             "Mooncake layerwise DCP requires every cacheable block size to be a multiple "
             f"of the smallest block size ({smallest_block_size}); got {sorted(set(group_block_sizes))}."
         )
-    return smallest_block_size
 
 
 def group_block_size_signature(group) -> tuple[int, ...]:

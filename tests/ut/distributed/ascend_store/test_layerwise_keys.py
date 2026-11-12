@@ -198,25 +198,10 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
                 grouped_block_size=[16],
             )
 
-    def test_dcp_accepts_noop_prefix_match_unit(self):
+    def test_dcp_rejects_prefix_match_unit(self):
         config = self.make_config()
         config.parallel_config.decode_context_parallel_size = 2
         config.cache_config.prefix_match_unit = 16
-        builder = MooncakeBackend.bind_layerwise_keys(
-            vllm_config=config,
-            kv_cache_config=self.make_cache_config(1),
-            model_name="model",
-            use_hybrid=False,
-            grouped_block_size=[32],
-        )
-        keys = builder.make_hit_check_keys(0, "hash", 1)
-        self.assertEqual(len(keys), 2)
-        self.assertEqual(len(set(keys)), 2)
-
-    def test_dcp_rejects_prefix_match_unit_with_other_values(self):
-        config = self.make_config()
-        config.parallel_config.decode_context_parallel_size = 2
-        config.cache_config.prefix_match_unit = 32
         with self.assertRaisesRegex(ValueError, "prefix_match_unit"):
             MooncakeBackend.bind_layerwise_keys(
                 vllm_config=config,
