@@ -872,7 +872,7 @@ def test_qwen4_recoverssm_alignment_uses_complete_three_state_geometry(monkeypat
         monkeypatch.setattr(
             ModelRegistry,
             "resolve_model_cls",
-            lambda *args, **kwargs: (model_cls, "test"),
+            lambda *args, model_cls=model_cls, **kwargs: (model_cls, "test"),
         )
         monkeypatch.setattr(
             NPUPlatform,
@@ -918,10 +918,7 @@ def test_recoverssm_three_state_layout_materializes_all_state_views(monkeypatch)
     assert layout is not None
     assert layout.owner("model.layers.0.linear_attn").role == GDN
     assert layout.owner("model.ple").role == PLE
-    assert (
-        layout.region("r3").offset
-        == layout.region("r2").offset + layout.region("r2").page_size_bytes
-    )
+    assert layout.region("r3").offset == layout.region("r2").offset + layout.region("r2").page_size_bytes
 
     states = caches["model.layers.0.linear_attn"]
     assert len(states) == 3
@@ -936,9 +933,7 @@ def test_recoverssm_three_state_layout_materializes_all_state_views(monkeypatch)
         region = layout.region(region_name)
         assert state.dtype == expected_dtype
         assert state.untyped_storage().data_ptr() == backing.untyped_storage().data_ptr()
-        assert state.storage_offset() * state.element_size() == (
-            owner.slot * layout.slot_backing_size + region.offset
-        )
+        assert state.storage_offset() * state.element_size() == (owner.slot * layout.slot_backing_size + region.offset)
         assert state.stride(0) * state.element_size() == region.block_stride
 
 

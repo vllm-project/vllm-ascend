@@ -308,6 +308,7 @@ def test_decode_forward_does_not_reconcat_qkv(speculative, adaptive, recover):
             num_accepted_tokens=torch.tensor([1, 2], dtype=torch.int32),
         ),
         actual_seq_lengths=torch.tensor([0, 2, 2], dtype=torch.int32),
+        use_upstream_recurrent=adaptive,
     )
     output = torch.empty(4, 1, 2)
     context = ForwardContext(
@@ -329,8 +330,8 @@ def test_decode_forward_does_not_reconcat_qkv(speculative, adaptive, recover):
         torch.testing.assert_close(k[0], packed[:, 2:4].reshape(4, 1, 2))
         torch.testing.assert_close(v[0], packed[:, 4:].reshape(4, 1, 2))
         assert kwargs["ssm_state_indices"] is metadata.spec_state_indices_tensor
-        assert kwargs["cu_seqlens"] is conv_metadata.query_start_loc
-        assert kwargs["num_accepted_tokens"].tolist() == [3, 2]
+        assert kwargs["cu_seqlens"] is metadata.spec_decode_metadata.spec_causal_conv1d.query_start_loc
+        assert kwargs["num_accepted_tokens"].tolist() == [1, 2]
         return v.clone(), kwargs["initial_state"]
 
     def verify(
@@ -375,9 +376,7 @@ def test_decode_forward_does_not_reconcat_qkv(speculative, adaptive, recover):
         ),
         patch("vllm_ascend.attention.gdn.l2norm_fwd", side_effect=lambda x: x),
         patch("vllm_ascend.attention.gdn.causal_conv1d_update", side_effect=lambda x, *a, **k: x.clone()) as conv,
-        patch(
-            "vllm_ascend.attention.gdn.causal_conv1d_update_varlen", side_effect=lambda x, *a, **k: x.clone()
-        ) as varlen_conv,
+        patch("vllm_ascend.attention.gdn.causal_conv1d_update_varlen", side_effect=lambda x, *a, **k: x.clone()),
         patch("vllm_ascend.attention.gdn.recurrent_gated_delta_rule", side_effect=recurrent) as native,
         patch("vllm_ascend.attention.gdn.fused_recurrent_gated_delta_rule", side_effect=upstream_recurrent) as upstream,
         patch("vllm_ascend.attention.gdn.gdn_recoverssm_verify", side_effect=verify) as recovery,
