@@ -154,11 +154,12 @@ def make_worker(
     config.parallel_config.prefill_context_parallel_size = pcp_size
     config.parallel_config.decode_context_parallel_size = dcp_size
     if pp_partition is not None:
+        pcp_stride = tp_size * pcp_size
         config.parallel_config.pipeline_parallel_size = len(pp_partition)
-        config.parallel_config.rank = pp_rank * tp_size + tp_rank
+        config.parallel_config.rank = pp_rank * pcp_stride + pcp_rank * tp_size + tp_rank
         config.model_config.get_layers_start_end_indices.side_effect = lambda parallel: (
-            sum(pp_partition[: parallel.rank // tp_size]),
-            sum(pp_partition[: parallel.rank // tp_size + 1]),
+            sum(pp_partition[: parallel.rank // pcp_stride]),
+            sum(pp_partition[: parallel.rank // pcp_stride + 1]),
         )
         config.model_config.get_total_num_hidden_layers.return_value = sum(pp_partition)
         config.model_config.compute_hash.return_value = "test-model-config"

@@ -98,18 +98,21 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
                 grouped_block_size=[16],
             )
 
-    def test_pcp_rejects_layer_sharded_kvpp(self):
+    def test_kvpp_pcp_keys_share_attention_layout(self):
         config = self.make_config()
         config.parallel_config.prefill_context_parallel_size = 4
         config.additional_config = {"enable_kvpp": True}
-        with self.assertRaisesRegex(ValueError, "layer-sharded caches"):
-            MooncakeBackend.bind_layerwise_keys(
-                vllm_config=config,
-                kv_cache_config=self.make_cache_config(1),
-                model_name="model",
-                use_hybrid=False,
-                grouped_block_size=[16],
-            )
+        builder = MooncakeBackend.bind_layerwise_keys(
+            vllm_config=config,
+            kv_cache_config=self.make_cache_config(1),
+            model_name="model",
+            use_hybrid=False,
+            grouped_block_size=[16],
+        )
+        keys = builder.make_hit_check_keys(0, "hash", 8)
+        self.assertEqual(len(keys), 8)
+        self.assertEqual(len(set(keys)), 8)
+        self.assertNotIn("@pcp_size", keys[0])
 
     def test_kvpp_lookup_covers_every_owner_and_uses_separate_layout_keys(self):
         for pp_size in (1, 2):
@@ -142,9 +145,16 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
     @staticmethod
     def make_config(pp_size=1):
         return SimpleNamespace(
-            parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size, tensor_parallel_size=2, rank=0),
+            parallel_config=SimpleNamespace(
+                pipeline_parallel_size=pp_size,
+                tensor_parallel_size=2,
+                prefill_context_parallel_size=1,
+                rank=0,
+            ),
             model_config=SimpleNamespace(
-                get_layers_start_end_indices=lambda p: ((0, 3), (3, 7))[p.rank // 2],
+                get_layers_start_end_indices=lambda p: ((0, 3), (3, 7))[
+                    p.rank // (p.tensor_parallel_size * p.prefill_context_parallel_size)
+                ],
                 get_total_num_hidden_layers=lambda: 7,
                 compute_hash=lambda: "model-config",
             ),
