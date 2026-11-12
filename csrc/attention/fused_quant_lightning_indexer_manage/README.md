@@ -193,7 +193,7 @@ pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_quant_lig
 
 ## 典型时延
 
-下表为64K MTP4（Q=4）稳态卸载场景的实测结果。测试设备为Ascend 910_93（A3），CANN 9.1.0，Source长度为65536，HBM Cache容量为8192，`request_state=-1`。每一路Query约有200个Cache Miss，多路Query去重后的Union Miss为300；测试包含10次预热和300次计时迭代（2轮取min-of-medians），时延单位为μs。
+下表为64K MTP4（Q=4）稳态卸载场景的实测结果。测试设备为ascend910_93（A3），CANN 9.1.0，Source长度为65536，HBM Cache容量为8192，`request_state=-1`。每一路Query约有200个Cache Miss，多路Query去重后的Union Miss为300；测试包含10次预热和300次计时迭代（2轮取min-of-medians），时延单位为μs。
 
 其中，Official表示仅调用`torch_npu.npu_lightning_indexer`完成BF16 TopK检索的时延；Fused(BF16)表示调用BF16版`fused_lightning_indexer_manage`完成TopK检索和稀疏缓存管理的总时延；Fused(INT8)表示调用本算子的总时延；Speedup为Fused(INT8)相对Fused(BF16)的加速比。
 

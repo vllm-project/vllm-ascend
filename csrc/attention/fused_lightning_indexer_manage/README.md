@@ -194,7 +194,7 @@ pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_lightning
 
 ## 典型时延
 
-下表为64K MTP5（Q=6）稳态卸载场景的实测结果。测试设备为Ascend 910_93（`SOC_VERSION=ascend910_9391`），数据类型为BF16，Index Head数量为32，Source长度为65536，HBM Cache容量为12288，`request_state=-1`。每一路Query约有200个Cache Miss，多路Query去重后的Union Miss为400；测试包含10次预热和300次计时迭代，时延单位为μs。
+下表为64K MTP5（Q=6）稳态卸载场景的实测结果。测试设备为ascend910_93（`SOC_VERSION=ascend910_9391`），数据类型为BF16，Index Head数量为32，Source长度为65536，HBM Cache容量为12288，`request_state=-1`。每一路Query约有200个Cache Miss，多路Query去重后的Union Miss为400；测试包含10次预热和300次计时迭代，时延单位为μs。
 
 其中，Official表示仅调用`torch_npu.npu_lightning_indexer`完成TopK检索的时延；Fused表示调用`fused_lightning_indexer_manage`完成TopK检索和稀疏缓存管理的总时延；Overhead为两者之差。
 

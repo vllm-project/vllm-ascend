@@ -167,7 +167,7 @@ pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_scatter_c
 
 ## 典型时延
 
-下表为 Ascend 910_93、BF16、8 个 Query Head、MTP3、Source Length=65536、HBM Cache
+下表为 ascend910_93、BF16、8 个 Query Head、MTP3、Source Length=65536、HBM Cache
 容量=12288、Tail=64、每请求约 300 个 Unique Miss 的单算子实测数据。测试包含 10 次
 预热和 200 次计时，时延单位为 μs。
 
