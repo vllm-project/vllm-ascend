@@ -1,0 +1,4 @@
+pr: 21683
+entries:
+  - category: bugfix
+    text: AscendStoreConnector with the Memcache backend can now pass the C8 KV transfer connector check during PD startup.
