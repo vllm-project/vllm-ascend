@@ -905,15 +905,32 @@ class PrefillMLAPreprocessResult(NamedTuple):
 
 
 @dataclass(frozen=True, slots=True)
-class MLATargetParamProvider:
+class MLAParamProvider:
     layer_name: str
-    num_tokens: int
+    is_draft_model: bool = False
+    num_tokens: int | None = None
     eagle_spec_multiple: int | None = None
+    disable_padded_batch: bool = False
 
     def resolve(self, attn_metadata) -> dict[str, Any]:
         decode = attn_metadata[self.layer_name].decode
         assert decode is not None
-        logger.warning_once("DEBUG_MLA_PROVIDER_RESOLVE layer=%s role=target", self.layer_name)
+        role = "draft" if self.is_draft_model else "target"
+        logger.warning_once("DEBUG_MLA_PROVIDER_RESOLVE layer=%s role=%s", self.layer_name, role)
+
+        if self.is_draft_model:
+            actual_seq_qlen = decode.actual_seq_lengths_q
+            block_table = decode.block_table
+            if self.disable_padded_batch:
+                block_table = block_table[: len(actual_seq_qlen)]
+            return {
+                "actual_seq_qlen": actual_seq_qlen,
+                "actual_seq_kvlen": decode.seq_lens_list
+                + [0] * (len(actual_seq_qlen) - len(decode.seq_lens_list)),
+                "block_table": block_table,
+            }
+
+        assert self.num_tokens is not None
         num_sequences = self.num_tokens
         if self.eagle_spec_multiple is not None:
             num_sequences //= self.eagle_spec_multiple
@@ -925,26 +942,6 @@ class MLATargetParamProvider:
                 self.eagle_spec_multiple * (i + 1) for i in range(self.num_tokens // self.eagle_spec_multiple)
             ]
         return params
-
-
-@dataclass(frozen=True, slots=True)
-class MLADraftParamProvider:
-    layer_name: str
-    disable_padded_batch: bool = False
-
-    def resolve(self, attn_metadata) -> dict[str, Any]:
-        decode = attn_metadata[self.layer_name].decode
-        assert decode is not None
-        logger.warning_once("DEBUG_MLA_PROVIDER_RESOLVE layer=%s role=draft", self.layer_name)
-        actual_seq_qlen = decode.actual_seq_lengths_q
-        block_table = decode.block_table
-        if self.disable_padded_batch:
-            block_table = block_table[: len(actual_seq_qlen)]
-        return {
-            "actual_seq_qlen": actual_seq_qlen,
-            "actual_seq_kvlen": decode.seq_lens_list + [0] * (len(actual_seq_qlen) - len(decode.seq_lens_list)),
-            "block_table": block_table,
-        }
 
 
 class AscendMLAImpl(MLAAttentionImpl):
@@ -2810,23 +2807,25 @@ class AscendMLAImpl(MLAAttentionImpl):
                 "out": [attn_output, softmax_lse],
             }
             assert isinstance(self.layer_name, str)
-            provider: MLADraftParamProvider | MLATargetParamProvider
-            if _EXTRA_CTX.is_draft_model:
-                provider = MLADraftParamProvider(
-                    layer_name=self.layer_name,
-                    disable_padded_batch=(
-                        self.speculative_config is not None and self.speculative_config.disable_padded_drafter_batch
-                    ),
-                )
-            else:
-                eagle_spec_multiple = None
-                if self.speculative_config is not None and self.speculative_config.use_eagle():
-                    eagle_spec_multiple = self.speculative_config.num_speculative_tokens + 1
-                provider = MLATargetParamProvider(
-                    layer_name=self.layer_name,
-                    num_tokens=num_tokens,
-                    eagle_spec_multiple=eagle_spec_multiple,
-                )
+            is_draft_model = _EXTRA_CTX.is_draft_model
+            eagle_spec_multiple = None
+            if (
+                not is_draft_model
+                and self.speculative_config is not None
+                and self.speculative_config.use_eagle()
+            ):
+                eagle_spec_multiple = self.speculative_config.num_speculative_tokens + 1
+            provider = MLAParamProvider(
+                layer_name=self.layer_name,
+                num_tokens=num_tokens,
+                is_draft_model=is_draft_model,
+                eagle_spec_multiple=eagle_spec_multiple,
+                disable_padded_batch=(
+                    is_draft_model
+                    and self.speculative_config is not None
+                    and self.speculative_config.disable_padded_drafter_batch
+                ),
+            )
             logger.warning(
                 "DEBUG_MLA_REGISTER layer=%s role=%s tokens=%s",
                 self.layer_name,

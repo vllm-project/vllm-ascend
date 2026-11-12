@@ -22,8 +22,7 @@ from vllm_ascend.attention.mla_v1 import (
     AscendMLAPrefillMetadata,
     ChunkedContextMetadata,
     DecodeMLAPreprocessResult,
-    MLADraftParamProvider,
-    MLATargetParamProvider,
+    MLAParamProvider,
     PrefillMLAPreprocessResult,
     _mla_nope_zero_rope,
 )
@@ -2055,24 +2054,24 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(result.shape[0], batch_size)
         self.assertEqual(result.shape[1], self.impl.num_heads * self.impl.v_head_dim)
 
-    def test_target_param_provider_pads_sequence_lengths(self):
+    def test_mla_param_provider_target_pads_sequence_lengths(self):
         metadata = SimpleNamespace(decode=SimpleNamespace(seq_lens_list=[10, 20, 30]))
-        provider = MLATargetParamProvider(layer_name="layer_0", num_tokens=5)
+        provider = MLAParamProvider(layer_name="layer_0", num_tokens=5)
 
         params = provider.resolve({"layer_0": metadata})
 
         self.assertEqual(params, {"actual_seq_kvlen": [10, 20, 30, 0, 0]})
 
-    def test_target_param_provider_builds_eagle_query_lengths(self):
+    def test_mla_param_provider_target_builds_eagle_query_lengths(self):
         metadata = SimpleNamespace(decode=SimpleNamespace(seq_lens_list=[10, 20]))
-        provider = MLATargetParamProvider(layer_name="layer_0", num_tokens=6, eagle_spec_multiple=2)
+        provider = MLAParamProvider(layer_name="layer_0", num_tokens=6, eagle_spec_multiple=2)
 
         params = provider.resolve({"layer_0": metadata})
 
         self.assertEqual(params["actual_seq_qlen"], [2, 4, 6])
         self.assertEqual(params["actual_seq_kvlen"], [10, 20, 0])
 
-    def test_draft_param_provider_trims_padded_block_table(self):
+    def test_mla_param_provider_draft_trims_padded_block_table(self):
         block_table = torch.arange(16).view(4, 4)
         metadata = SimpleNamespace(
             decode=SimpleNamespace(
@@ -2081,7 +2080,11 @@ class TestAscendMLAImpl(TestBase):
                 block_table=block_table,
             )
         )
-        provider = MLADraftParamProvider(layer_name="layer_0", disable_padded_batch=True)
+        provider = MLAParamProvider(
+            layer_name="layer_0",
+            is_draft_model=True,
+            disable_padded_batch=True,
+        )
 
         params = provider.resolve({"layer_0": metadata})
 
