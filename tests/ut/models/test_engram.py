@@ -251,8 +251,7 @@ def test_preparation_overlap_supports_dp_tp_and_checks_runtime(monkeypatch, enab
     monkeypatch.setattr(
         model_module, "get_forward_context", lambda: SimpleNamespace(cudagraph_runtime_mode=CUDAGraphMode[mode])
     )
-    # The helper only reads the three attributes the stub carries.
-    assert model_module.DeepseekV41Model._can_overlap_engram_preparation(model) is expected  # type: ignore[arg-type]
+    assert model_module.DeepseekV41Model._can_overlap_engram_preparation(model) is expected
 
 
 def test_bf16_gate_without_rotation():
@@ -409,13 +408,13 @@ def test_shared_table_skips_per_step_dp_gather(monkeypatch):
 
     monkeypatch.setattr(embedding_mod, "gather_engram_hashes", gather)
     table = object.__new__(embedding_mod.AscendParallelEngramEmbedding)
-    monkeypatch.setattr(table, "embed_gathered", lambda ids, count: ids[:count])
+    table.embed_gathered = lambda ids, count: ids[:count]
     table._shared_group = object()
     ids = torch.tensor([[7, 8]])
     assert table.forward(ids).tolist() == [[7, 8]]
     table._shared_group = None
     table.dp_size = 2
-    monkeypatch.setattr(table, "embed_gathered", lambda gathered, count: gathered[count : 2 * count])
+    table.embed_gathered = lambda gathered, count: gathered[count : 2 * count]
     assert table.forward(ids).tolist() == [[7, 8]]
     assert calls == [True, False]
 

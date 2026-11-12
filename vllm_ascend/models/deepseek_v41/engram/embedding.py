@@ -272,22 +272,17 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         scale_key = key.removesuffix(".weight") + ".scale"
         index = self._checkpoint_index(root, key)
         start, end = (self.vocab_start_idx, self.vocab_end_idx)
-        weight = self.weight
-        assert weight is not None, "engram storage is not allocated"
-        # A BF16 table has no scale tensor at all; the quantized branches below
-        # are the only readers, and they always run with one allocated.
-        scale_inv = cast(torch.Tensor, self.weight_scale_inv)
         with safe_open(root / index[key], framework="pt", device="cpu") as file:
             tensor = file.get_slice(key)
             source_dtype = tensor.get_dtype()
-            if weight.dtype == torch.bfloat16:
+            if self.weight.dtype == torch.bfloat16:
                 if tensor.get_dtype() != "BF16":
                     raise ValueError(f"{key}: expected BF16 source for BF16 storage")
                 for chunk_start in range(start, end, chunk_rows):
                     stop = min(chunk_start + chunk_rows, end)
                     offset = chunk_start - start
-                    weight.data[offset : offset + stop - chunk_start].copy_(tensor[chunk_start:stop])
-            elif weight.dtype == torch.float8_e4m3fn:
+                    self.weight.data[offset : offset + stop - chunk_start].copy_(tensor[chunk_start:stop])
+            elif self.weight.dtype == torch.float8_e4m3fn:
                 if source_dtype not in ("F8_E4M3", "F8_E4M3FN"):
                     raise ValueError(f"{key}: expected MXFP8 source for MXFP8 storage")
                 with safe_open(root / index[scale_key], framework="pt", device="cpu") as sf:
@@ -300,10 +295,10 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
                         target_end = offset + stop - chunk_start
                         # Preserve the checkpoint bits; uint8 scales hold the
                         # E8M0 exponent, not a numerically cast integer value.
-                        weight.data[offset:target_end].view(torch.uint8).copy_(
+                        self.weight.data[offset:target_end].view(torch.uint8).copy_(
                             tensor[chunk_start:stop].view(torch.uint8)
                         )
-                        scale_inv.data[offset:target_end].copy_(scale[chunk_start:stop].view(torch.uint8))
+                        self.weight_scale_inv.data[offset:target_end].copy_(scale[chunk_start:stop].view(torch.uint8))
             elif source_dtype in ("I8", "INT8"):
                 with safe_open(root / index[scale_key], framework="pt", device="cpu") as sf:
                     scale = sf.get_slice(scale_key)
@@ -311,8 +306,8 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
                         stop = min(chunk_start + chunk_rows, end)
                         offset = chunk_start - self.vocab_start_idx
                         target_end = offset + (stop - chunk_start)
-                        weight.data[offset:target_end].copy_(tensor[chunk_start:stop])
-                        scale_inv.data[offset:target_end].copy_(scale[chunk_start:stop])
+                        self.weight.data[offset:target_end].copy_(tensor[chunk_start:stop])
+                        self.weight_scale_inv.data[offset:target_end].copy_(scale[chunk_start:stop])
             elif source_dtype in ("F8_E4M3", "F8_E4M3FN"):
                 # Older devices use INT8/FP32 storage. Decode the checkpoint's
                 # E8M0 group-32 scales before requantizing; A5 takes the native
@@ -327,16 +322,16 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
                         group_scales = scale[chunk_start:stop].float()
                         values = (values.unflatten(-1, (-1, self.block_size)) * group_scales.unsqueeze(-1)).flatten(-2)
                         codes, scales = quantize_engram_rows(values)
-                        weight.data[offset:target_end].copy_(codes)
-                        scale_inv.data[offset:target_end].copy_(scales)
+                        self.weight.data[offset:target_end].copy_(codes)
+                        self.weight_scale_inv.data[offset:target_end].copy_(scales)
             else:
                 for chunk_start in range(start, end, chunk_rows):
                     stop = min(chunk_start + chunk_rows, end)
                     offset = chunk_start - self.vocab_start_idx
                     target_end = offset + (stop - chunk_start)
                     codes, scales = quantize_engram_rows(tensor[chunk_start:stop].to(torch.float32))
-                    weight.data[offset:target_end].copy_(codes)
-                    scale_inv.data[offset:target_end].copy_(scales)
+                    self.weight.data[offset:target_end].copy_(codes)
+                    self.weight_scale_inv.data[offset:target_end].copy_(scales)
         logger.info("Engram rows [%d, %d) loaded from %s", start, end, index[key])
 
     def embed_gathered(self, gathered: torch.Tensor, num_tokens: int) -> torch.Tensor:

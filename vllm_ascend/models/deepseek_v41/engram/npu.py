@@ -31,14 +31,8 @@ CHUNK_ROWS = 1 << 22
 
 def _madvise_hugepage(shm: shared_memory.SharedMemory, size: int) -> None:
     """Ask the kernel to back a shared Engram mapping with shmem THPs."""
-    buf = shm.buf
-    if buf is None:  # pragma: no cover - the mapping exists once attached
-        return
     try:
-        mapping = cast(mmap.mmap, buf.obj)
-        # ``madvise`` and the THP advice are Linux-only; elsewhere the call
-        # raises AttributeError and the mapping keeps the default policy.
-        mapping.madvise(mmap.MADV_HUGEPAGE, 0, size)  # type: ignore[attr-defined]
+        cast(mmap.mmap, shm.buf.obj).madvise(mmap.MADV_HUGEPAGE, 0, size)
     except (AttributeError, OSError) as exc:
         logger.warning("madvise(MADV_HUGEPAGE) failed for shared Engram: %s", exc)
 
@@ -322,9 +316,7 @@ class SharedUvaBuffer:
                 with patch("multiprocessing.resource_tracker.register", lambda *args, **kwargs: None):
                     self.shm = shared_memory.SharedMemory(name=name)
             assert self.shm.size >= size
-            buffer = self.shm.buf
-            assert buffer is not None
-            address_of_mapping = ctypes.c_void_p(ctypes.addressof(ctypes.c_char.from_buffer(buffer)))
+            address_of_mapping = ctypes.c_void_p(ctypes.addressof(ctypes.c_char.from_buffer(self.shm.buf)))
             _madvise_hugepage(self.shm, size)
             rc = self.lib.aclrtHostRegisterV2(address_of_mapping, size, DeviceOperator.host_register_flags())
             if rc:
