@@ -1,0 +1,8 @@
+pr: 21646
+entries:
+  - category: bugfix
+    text: >-
+      Retained CANN FlashAttn for compatible native MiniMax M3.1 DSpark drafts
+      when draft graph execution is enabled, avoiding an unintended FIA fallback.
+    model: minimax-m3.1-flash
+    hardware: [A5]
