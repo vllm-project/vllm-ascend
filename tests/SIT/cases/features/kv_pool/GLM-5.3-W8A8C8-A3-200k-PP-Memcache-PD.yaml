@@ -135,7 +135,7 @@ prefill_master_cmd: &prefill_master_cmd
   - "--attention_config.indexer_kv_dtype"
   - "int8"
   - "--additional-config"
-  - '{"enable_dsa_cp": true, "enable_fused_mc2": 1, "enable_flashcomm1": true, "enable_shared_expert_dp": true}'
+  - '{"enable_fused_mc2": 1, "enable_flashcomm1": true, "enable_shared_expert_dp": true}'
   - "--speculative-config"
   - '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}'
   - "--kv-transfer-config"
@@ -191,7 +191,7 @@ prefill_worker_cmd: &prefill_worker_cmd
   - "--attention_config.indexer_kv_dtype"
   - "int8"
   - "--additional-config"
-  - '{"enable_dsa_cp": true, "enable_fused_mc2": 1, "enable_flashcomm1": true, "enable_shared_expert_dp": true}'
+  - '{"enable_fused_mc2": 1, "enable_flashcomm1": true, "enable_shared_expert_dp": true}'
   - "--speculative-config"
   - '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}'
   - "--kv-transfer-config"
