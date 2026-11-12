@@ -1295,18 +1295,20 @@ def test_sample_tokens_leaves_draft_broadcast_to_upstream():
 
 
 @pytest.mark.parametrize(
-    "a5,architecture,mode,pcp,dcp,full_graph_only",
+    "a5,architecture,mode,pcp,dcp,expect_device_metadata",
     [
-        (False, "OtherModel", CUDAGraphMode.FULL_DECODE_ONLY, 1, 1, None),
-        (True, "OtherModel", CUDAGraphMode.FULL_DECODE_ONLY, 1, 1, None),
-        (True, "DeepseekV41ForCausalLM", CUDAGraphMode.NONE, 2, 1, False),
-        (False, "DeepseekV41ForCausalLM", CUDAGraphMode.NONE, 1, 1, None),
+        (False, "OtherModel", CUDAGraphMode.FULL_DECODE_ONLY, 1, 1, False),
+        (True, "OtherModel", CUDAGraphMode.FULL_DECODE_ONLY, 1, 1, False),
+        (True, "DeepseekV41ForCausalLM", CUDAGraphMode.NONE, 2, 1, True),
+        (False, "DeepseekV41ForCausalLM", CUDAGraphMode.NONE, 1, 1, False),
         (False, "DeepseekV41ForCausalLM", CUDAGraphMode.FULL_DECODE_ONLY, 1, 1, True),
-        (False, "DeepseekV41ForCausalLM", CUDAGraphMode.FULL_DECODE_ONLY, 2, 1, None),
-        (False, "DeepseekV41ForCausalLM", CUDAGraphMode.FULL_DECODE_ONLY, 1, 2, None),
+        (False, "DeepseekV41ForCausalLM", CUDAGraphMode.FULL_DECODE_ONLY, 2, 1, False),
+        (False, "DeepseekV41ForCausalLM", CUDAGraphMode.FULL_DECODE_ONLY, 1, 2, False),
     ],
 )
-def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture, mode, pcp, dcp, full_graph_only):
+def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(
+    a5, architecture, mode, pcp, dcp, expect_device_metadata
+):
     """Cache binding precedes KDA preparation and preserves PCP setup."""
     runner = _make_runner()
     runner.input_buffers = object()
@@ -1360,12 +1362,12 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture,
         seen["factory"](runner.vllm_config, torch.device("cpu"), CUDAGraphMode.FULL, 1)
 
     prepare_kda.assert_called_once_with(runner.compilation_config.static_forward_context, 8)
-    if full_graph_only is None:
+    if expect_device_metadata:
+        assert runner.model_state.device_metadata == "metadata"
+        metadata_cls.assert_called_once_with()
+    else:
         assert runner.model_state.device_metadata is None
         metadata_cls.assert_not_called()
-    else:
-        assert runner.model_state.device_metadata == "metadata"
-        metadata_cls.assert_called_once_with(full_graph_only=full_graph_only)
     assert seen["cfg"] == kv_cache_config
     assert seen["cfg"] is not kv_cache_config
     assert vllm_model_runner.ModelCudaGraphManager is original

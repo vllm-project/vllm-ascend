@@ -496,15 +496,15 @@ class NPUModelRunner(GPUModelRunner):
         # Recreate along with KV initialization: profiling capture owns a
         # throwaway model state and must not leak event/buffer bindings.
         packed = uses_a5_packed_cache()
-        capture_native_metadata = (
+        enable_native_metadata = (
             not packed
             and self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
             and self.parallel_config.prefill_context_parallel_size == 1
             and self.parallel_config.decode_context_parallel_size == 1
         )
         self.model_state.device_metadata = (
-            TargetDeviceMetadata(full_graph_only=capture_native_metadata)
-            if (self.model_config.architecture == "DeepseekV41ForCausalLM" and (packed or capture_native_metadata))
+            TargetDeviceMetadata()
+            if (self.model_config.architecture == "DeepseekV41ForCausalLM" and (packed or enable_native_metadata))
             or (
                 packed
                 and self.model_config.architecture == "KimiK31ForConditionalGeneration"
