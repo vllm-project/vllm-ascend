@@ -1,0 +1,6 @@
+pr: 0
+entries:
+  - category: bugfix
+    text: >-
+      Fixed Chat Completions and Completions proxy cache usage reporting across
+      fragmented or coalesced responses, including continuous streaming usage.
