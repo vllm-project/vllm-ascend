@@ -71,6 +71,29 @@ def valid_engram_token_mask(
     return (input_ids != image_token_id) & (input_ids != image_pad_token_id)
 
 
+def restore_engram_hidden(hidden: torch.Tensor, rotation_block: torch.Tensor | None) -> torch.Tensor:
+    """Restore the FP32 gate basis without changing the residual tensor."""
+    original = hidden.float()
+    if rotation_block is not None:
+        if rotation_block.ndim == 2:
+            original = (
+                original.unflatten(-1, (hidden.shape[-1] // rotation_block.shape[0], rotation_block.shape[0]))
+                @ rotation_block.float().T
+            ).flatten(-2)
+        elif rotation_block.ndim == 3:
+            original = (
+                torch.matmul(
+                    original.unflatten(-1, (rotation_block.shape[0], _ROTATION_BLOCK_SIZE)).unsqueeze(-2),
+                    rotation_block.float().transpose(-1, -2),
+                )
+                .squeeze(-2)
+                .flatten(-2)
+            )
+        else:
+            raise ValueError("Engram gate rotation must be a block or block table")
+    return original
+
+
 def engram_gate(
     hidden: torch.Tensor,
     key: torch.Tensor,
@@ -87,21 +110,7 @@ def engram_gate(
     in FP32; the value projection already includes the forward rotation.
     """
     dim = hidden.shape[-1]
-    original = hidden.float()
-    if rotation_block is not None:
-        if rotation_block.ndim == 2:
-            original = (original.unflatten(-1, (-1, rotation_block.shape[0])) @ rotation_block.float().T).flatten(-2)
-        elif rotation_block.ndim == 3:
-            original = (
-                torch.matmul(
-                    original.unflatten(-1, (rotation_block.shape[0], _ROTATION_BLOCK_SIZE)).unsqueeze(-2),
-                    rotation_block.float().transpose(-1, -2),
-                )
-                .squeeze(-2)
-                .flatten(-2)
-            )
-        else:
-            raise ValueError("Engram gate rotation must be a block or block table")
+    original = restore_engram_hidden(hidden, rotation_block)
     key = key.float()
     rstd = torch.rsqrt(original.square().mean(-1) + eps)
     rstd *= torch.rsqrt(key.square().mean(-1) + eps)
