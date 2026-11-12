@@ -1089,7 +1089,7 @@ def _make_quantized_situ_shared_experts(quant_type, gate_up_proj, down_proj):
     )
     shared_experts.multistream_overlap = False
     shared_experts.quant_type = quant_type
-    with set_current_vllm_config(VllmConfig()):
+    with patch("vllm_ascend.logger.configure_ascend_file_logging"), set_current_vllm_config(VllmConfig()):
         shared_experts.situ_activation = SituAndMul(beta=4.0, linear_beta=25.0)
     shared_experts.lora_context = None
     shared_experts.parallel_mode = MagicMock(

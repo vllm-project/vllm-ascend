@@ -942,7 +942,7 @@ def test_requires_lmhead_dp_sync_is_scoped_to_v2_reduced_padding(monkeypatch, v2
     assert utils.requires_lmhead_dp_sync(config) is (v2 and lmhead and dcp == 1)
 
 
-@pytest.mark.parametrize("knob", ["qkv_iproj", "gproj", "oproj", "mlp"])
+@pytest.mark.parametrize("knob", ["qkv_iproj", "gproj", "oproj", "mlp", "shared_expert"])
 @pytest.mark.parametrize("draft", [False, True])
 def test_projection_dp_sync_does_not_change_dense_drafter(monkeypatch, knob, draft):
     config = SimpleNamespace(finegrained_tp_config=SimpleNamespace(**{f"{knob}_tensor_parallel_size": 8}))
