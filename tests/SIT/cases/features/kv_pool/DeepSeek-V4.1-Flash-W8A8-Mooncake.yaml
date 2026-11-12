@@ -1,5 +1,6 @@
 test_name: "DeepSeek-V4.1-Flash-W8A8-Mooncake-PD"
-model: "Eco-Tech/DeepSeek-V4.1-Flash-w8a8"
+#model: "Eco-Tech/DeepSeek-V4.1-Flash-w8a8"
+model: "/mnt/sfs-local/ascend-ci-share/modelscope/hub/models/Eco-Tech/DeepSeek-V4.1-Flash-w8a8"
 num_nodes: 2
 npu_per_node: 16
 dp_load_balancing: external
