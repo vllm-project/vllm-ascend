@@ -46,4 +46,4 @@ def test_minimax_native_checkpoint_metadata():
 
 def test_fused_projection_rejects_odd_dimension():
     with pytest.raises(AssertionError, match="odd fused gate/up dimension"):
-        utils.split_fused_mlp_params("model.layers.0.mlp.gate_up_proj.weight", (7, 16))
+        utils.expand_fused_mlp_params("model.layers.0.mlp.gate_up_proj.weight", (7, 16))

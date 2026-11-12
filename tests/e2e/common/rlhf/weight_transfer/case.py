@@ -28,7 +28,6 @@ class WeightUpdateModelCase:
     checkpoint_name_map: Callable[[str], str] | None = None
     expert_intermediate_size: int | None = None
     trust_remote_code: bool = True
-    split_fused_mlp: bool = False
     extra_server_args: tuple[str, ...] = ()
     # One representative model covers both backends and packing modes.
     full_transfer_matrix: bool = False
@@ -148,7 +147,6 @@ MINIMAX_M3_CASE = WeightUpdateModelCase(
     # The legacy remote config creates a generic text config; the native
     # Transformers config resolves to the registered text model instead.
     trust_remote_code=False,
-    split_fused_mlp=True,
     extra_server_args=("--block-size", "128", "--kv-cache-memory-bytes", str(MINIMAX_M3_KV_CACHE_BYTES)),
 )
 

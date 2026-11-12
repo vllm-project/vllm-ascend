@@ -20,16 +20,11 @@ from vllm.distributed.weight_transfer.base import ParamMeta, WeightSource
 from tests.e2e.common.rlhf.weight_transfer.case import WeightUpdateModelCase
 
 
-def expand_fused_expert_params(name: str, shape: tuple[int, ...]) -> list[tuple[str, tuple[int, ...]]]:
-    """Map HF fused routed-expert tensors onto checkpoint-facing per-expert names.
+def expand_fused_mlp_params(name: str, shape: tuple[int, ...]) -> list[tuple[str, tuple[int, ...]]]:
+    """Expand native fused MLP tensors into checkpoint-facing projections.
 
-    ``GlmMoeDsaForCausalLM`` keeps routed experts fused as
-    ``mlp.experts.gate_up_proj`` ``[E, 2I, H]`` and ``mlp.experts.down_proj``
-    ``[E, H, I]``, while the published checkpoint - and therefore vLLM's
-    ``expert_params_mapping`` - stores one tensor per expert
-    (``mlp.experts.{e}.gate_proj.weight`` etc.).  Without this expansion the
-    fused names reach ``load_weights`` unmatched and raise
-    ``KeyError: 'layers.N.mlp.experts.gate_up_proj'``.
+    Routed experts use per-expert gate/up/down tensors; dense and shared
+    experts split their fused gate-up projection into gate/up weights.
     """
     for suffix, kind in ((".mlp.experts.gate_up_proj", "gate_up"), (".mlp.experts.down_proj", "down")):
         if not name.endswith(suffix):
@@ -45,11 +40,6 @@ def expand_fused_expert_params(name: str, shape: tuple[int, ...]) -> list[tuple[
             return out
         num_experts, hidden, inter = shape
         return [(f"{prefix}{expert}.down_proj.weight", (hidden, inter)) for expert in range(num_experts)]
-    return [(name, shape)]
-
-
-def split_fused_mlp_params(name: str, shape: tuple[int, ...]) -> list[tuple[str, tuple[int, ...]]]:
-    """Split a fused dense/shared-expert gate-up projection."""
     if name.endswith(".gate_up_proj.weight"):
         fused_intermediate, hidden = shape
         assert fused_intermediate % 2 == 0, f"{name}: odd fused gate/up dimension"
@@ -120,7 +110,7 @@ class FixedRandomWeightSource(WeightSource):
         # to the raw meta-model name (once), then the checkpoint rename map runs
         # on the *expanded* names, because the meta model exposes routed experts
         # fused and the per-expert names (gate/up/down -> w1/w3/w2) only exist
-        # after ``expand_fused_expert_params`` has split them.
+        # after ``expand_fused_mlp_params`` has split them.
         parameters = [
             (
                 self._apply_name_map(expanded_name, case),
@@ -128,13 +118,8 @@ class FixedRandomWeightSource(WeightSource):
                 torch.bfloat16,
             )
             for name, parameter in meta_model.named_parameters()
-            for expert_name, expert_shape in expand_fused_expert_params(
+            for expanded_name, expanded_shape in expand_fused_mlp_params(
                 self._checkpoint_name(name, case), tuple(parameter.shape)
-            )
-            for expanded_name, expanded_shape in (
-                split_fused_mlp_params(expert_name, expert_shape)
-                if case.split_fused_mlp
-                else [(expert_name, expert_shape)]
             )
         ]
         # Include persistent checkpoint state in BF16, while integer tables
