@@ -1012,7 +1012,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.indexer.process_weights_after_loading()
 
         if self._parallel_o_proj is not None:
-            self._parallel_o_proj.enable()
+            self._parallel_o_proj.enable(refresh_gather_inputs=True)
 
     @staticmethod
     def _get_layer_quant_method(layer: torch.nn.Module | None):

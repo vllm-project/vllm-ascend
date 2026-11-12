@@ -21,6 +21,9 @@ from typing import Any, ClassVar, Literal
 
 import torch
 
+_NPU_FORMAT_ND = 2
+_NPU_FORMAT_FRACTAL_NZ = 29
+
 
 @dataclass(frozen=True)
 class WeightSwitchGatherSpec:
@@ -423,6 +426,41 @@ class WeightSwitchMixin:
         )
         layer.output_partition_sizes = [size // config.world_size for size in layer.output_partition_sizes]
 
+    @staticmethod
+    def _prepare_weight_switch_gather_input(tensor: torch.Tensor, dim: int) -> torch.Tensor:
+        """Prepare a reusable communication layout without changing compute weights."""
+        gather_input = tensor if dim == 0 else torch.movedim(tensor, dim, 0).contiguous()
+        if gather_input.device.type == "npu":
+            # Keep CPU-only loading/tests independent of the NPU runtime.
+            import torch_npu
+
+            if torch_npu.get_npu_format(gather_input) == _NPU_FORMAT_FRACTAL_NZ:
+                gather_input = torch_npu.npu_format_cast(
+                    gather_input, _NPU_FORMAT_ND, customize_dtype=gather_input.dtype
+                )
+        return gather_input
+
+    def refresh_weight_switch_gather_inputs(self, layer: torch.nn.Module, state: WeightSwitchState) -> None:
+        """Refresh communication copies after reloading weights, keeping cache addresses stable."""
+        if state.handles:
+            raise RuntimeError("Cannot refresh weight gather inputs while an all-gather is pending.")
+        for attr_name, part in state.gather_parts.items():
+            tensor = getattr(layer, attr_name).detach()
+            if (
+                tensor.shape != part.local_tensor.shape
+                or tensor.dtype != part.local_tensor.dtype
+                or tensor.device != part.local_tensor.device
+            ):
+                raise RuntimeError(f"Reloaded weight {attr_name!r} changed layout; recreate the weight-switch state.")
+            dim = part.spec.gather_dim % tensor.dim()
+            was_alias = part.gather_input.data_ptr() == part.local_tensor.data_ptr()
+            gather_input = self._prepare_weight_switch_gather_input(tensor, dim)
+            if was_alias:
+                part.gather_input = gather_input
+            else:
+                part.gather_input.copy_(gather_input)
+            part.local_tensor = tensor
+
     def enable_weight_switch(
         self,
         layer: torch.nn.Module,
@@ -465,10 +503,7 @@ class WeightSwitchMixin:
             full_shape_list = list(local_tensor.shape)
             full_shape_list[dim] *= config.world_size
             full_shape = tuple(full_shape_list)
-            if dim == 0:
-                gather_input = local_tensor
-            else:
-                gather_input = torch.movedim(local_tensor, dim, 0).contiguous()
+            gather_input = self._prepare_weight_switch_gather_input(local_tensor, dim)
             gather_shape = (full_shape[dim], *full_shape[:dim], *full_shape[dim + 1 :])
             pool_key = (
                 pool_key_prefix,
