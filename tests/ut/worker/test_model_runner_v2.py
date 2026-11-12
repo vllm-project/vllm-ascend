@@ -2126,10 +2126,12 @@ def m3_device_length_runner():
     "architecture", ["MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration", "GlmMoeDsaForCausalLM"]
 )
 @pytest.mark.parametrize("eager", [False, True])
-def test_m3_dspark_device_length_policy(m3_device_length_runner, architecture, eager):
+@pytest.mark.parametrize("kv_role", [None, "kv_producer", "kv_consumer"])
+def test_m3_dspark_device_length_policy(m3_device_length_runner, architecture, eager, kv_role):
     runner, _, _ = m3_device_length_runner
     runner.model_config.architecture = architecture
     runner.speculative_config.enforce_eager = eager
+    runner.vllm_config.kv_transfer_config = None if kv_role is None else SimpleNamespace(kv_role=kv_role)
     assert runner._can_skip_spec_cpu_length_sync() is True
 
 
@@ -2149,7 +2151,6 @@ def test_m3_dspark_device_length_policy(m3_device_length_runner, architecture, e
         "pipeline_parallel_size",
         "prefill_context_parallel_size",
         "decode_context_parallel_size",
-        "kv_transfer",
         "sparse_offload",
         "adaptive",
         "pp_exact_counts",
@@ -2159,6 +2160,7 @@ def test_m3_dspark_device_length_policy(m3_device_length_runner, architecture, e
 def test_m3_dspark_device_length_policy_falls_back(m3_device_length_runner, unsupported, architecture):
     runner, _, _ = m3_device_length_runner
     runner.model_config.architecture = architecture
+    runner.vllm_config.kv_transfer_config = SimpleNamespace(kv_role="kv_consumer")
     spec = runner.speculative_config
     if unsupported == "no_spec_config":
         runner.speculative_config = None
@@ -2182,8 +2184,6 @@ def test_m3_dspark_device_length_policy_falls_back(m3_device_length_runner, unsu
         runner.speculator.attn_backends["draft.1"] = AscendAttentionBackend
     elif unsupported.endswith("parallel_size"):
         setattr(runner.parallel_config, unsupported, 2)
-    elif unsupported == "kv_transfer":
-        runner.vllm_config.kv_transfer_config = object()
     elif unsupported == "sparse_offload":
         runner.ascend_config.sparse_kv_offload_config.enabled = True
     elif unsupported == "adaptive":
@@ -2206,10 +2206,12 @@ def _glm_mla_device_length_runner():
     "architecture", ["MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration", "GlmMoeDsaForCausalLM"]
 )
 @pytest.mark.parametrize("eager", [False, True])
-def test_glm_mla_dspark_flashmla_can_skip_cpu_length_sync(architecture, eager):
+@pytest.mark.parametrize("kv_role", [None, "kv_producer", "kv_consumer"])
+def test_glm_mla_dspark_flashmla_can_skip_cpu_length_sync(architecture, eager, kv_role):
     runner, _, _ = _glm_mla_device_length_runner()
     runner.model_config.architecture = architecture
     runner.speculative_config.enforce_eager = eager
+    runner.vllm_config.kv_transfer_config = None if kv_role is None else SimpleNamespace(kv_role=kv_role)
     assert runner._can_skip_spec_cpu_length_sync() is True
 
 
@@ -2226,7 +2228,6 @@ def test_glm_mla_dspark_flashmla_can_skip_cpu_length_sync(architecture, eager):
         "pipeline_parallel_size",
         "prefill_context_parallel_size",
         "decode_context_parallel_size",
-        "kv_transfer",
         "sparse_offload",
         "adaptive",
         "pp_exact_counts",
@@ -2234,6 +2235,7 @@ def test_glm_mla_dspark_flashmla_can_skip_cpu_length_sync(architecture, eager):
 )
 def test_glm_mla_dspark_requires_cpu_length_sync(unsupported):
     runner, _, _ = _glm_mla_device_length_runner()
+    runner.vllm_config.kv_transfer_config = SimpleNamespace(kv_role="kv_consumer")
     if unsupported == "no_speculator":
         runner.speculator = None
     elif unsupported == "method":
@@ -2250,8 +2252,6 @@ def test_glm_mla_dspark_requires_cpu_length_sync(unsupported):
         runner.speculator.use_flashmla = False
     elif unsupported.endswith("parallel_size"):
         setattr(runner.parallel_config, unsupported, 2)
-    elif unsupported == "kv_transfer":
-        runner.vllm_config.kv_transfer_config = object()
     elif unsupported == "sparse_offload":
         runner.ascend_config.sparse_kv_offload_config.enabled = True
     elif unsupported == "adaptive":
@@ -2271,9 +2271,11 @@ def _kimi_k31_device_length_runner():
 
 
 @pytest.mark.parametrize("eager", [False, True])
-def test_kimi_k31_dspark_flashmla_dcp_device_lengths(eager):
+@pytest.mark.parametrize("kv_role", [None, "kv_producer", "kv_consumer"])
+def test_kimi_k31_dspark_flashmla_dcp_device_lengths(eager, kv_role):
     runner, _, _ = _kimi_k31_device_length_runner()
     runner.speculative_config.enforce_eager = eager
+    runner.vllm_config.kv_transfer_config = None if kv_role is None else SimpleNamespace(kv_role=kv_role)
     assert runner._can_skip_spec_cpu_length_sync() is True
 
 
@@ -2286,7 +2288,6 @@ def test_kimi_k31_dspark_flashmla_dcp_device_lengths(eager):
         "no_backends",
         "pipeline_parallel_size",
         "prefill_context_parallel_size",
-        "kv_transfer",
         "sparse_offload",
         "adaptive",
         "pp_exact_counts",
@@ -2294,6 +2295,7 @@ def test_kimi_k31_dspark_flashmla_dcp_device_lengths(eager):
 )
 def test_kimi_k31_dspark_keeps_exact_cpu_lengths_for_unsupported_consumers(unsupported):
     runner, _, _ = _kimi_k31_device_length_runner()
+    runner.vllm_config.kv_transfer_config = SimpleNamespace(kv_role="kv_consumer")
     if unsupported == "draft_arch":
         runner.speculative_config.draft_model_config.architectures = ["Qwen3DSparkModel"]
     elif unsupported == "draft_fia":
@@ -2304,8 +2306,6 @@ def test_kimi_k31_dspark_keeps_exact_cpu_lengths_for_unsupported_consumers(unsup
         runner.speculator.attn_backends = {}
     elif unsupported.endswith("parallel_size"):
         setattr(runner.parallel_config, unsupported, 2)
-    elif unsupported == "kv_transfer":
-        runner.vllm_config.kv_transfer_config = object()
     elif unsupported == "sparse_offload":
         runner.ascend_config.sparse_kv_offload_config.enabled = True
     elif unsupported == "adaptive":
@@ -2315,8 +2315,10 @@ def test_kimi_k31_dspark_keeps_exact_cpu_lengths_for_unsupported_consumers(unsup
     assert runner._can_skip_spec_cpu_length_sync() is False
 
 
-def test_glm_mla_dspark_fallback_copies_and_waits():
-    runner, output, batch = _glm_mla_device_length_runner()
+@pytest.mark.parametrize("target", ["glm", "kimi_k31"])
+def test_mla_dspark_fallback_copies_and_waits(target):
+    runner, output, batch = _glm_mla_device_length_runner() if target == "glm" else _kimi_k31_device_length_runner()
+    runner.vllm_config.kv_transfer_config = SimpleNamespace(kv_role="kv_consumer")
     runner.speculator.use_flashmla = False
     runner.req_states.num_computed_tokens.gpu[:] = torch.tensor([98, 195, 0, 0])
     runner.num_computed_tokens_stream = Mock()
@@ -2335,7 +2337,8 @@ def test_glm_mla_dspark_fallback_copies_and_waits():
 
 @pytest.mark.parametrize("rejected", [0, 1, 5])
 @pytest.mark.parametrize("draft", ["dflash", "m3_dspark", "glm_dspark", "glm_mla_dspark", "kimi_k31_dspark"])
-def test_rejection_reorder_and_padding_keep_device_lengths_without_d2h(rejected, draft):
+@pytest.mark.parametrize("kv_role", [None, "kv_producer", "kv_consumer"])
+def test_rejection_reorder_and_padding_keep_device_lengths_without_d2h(rejected, draft, kv_role):
     runner, output, _ = _device_length_runner() if draft == "dflash" else _m3_device_length_runner()
     if draft == "glm_dspark":
         runner.model_config.architecture = "GlmMoeDsaForCausalLM"
@@ -2343,6 +2346,7 @@ def test_rejection_reorder_and_padding_keep_device_lengths_without_d2h(rejected,
         runner, output, _ = _glm_mla_device_length_runner()
     elif draft == "kimi_k31_dspark":
         runner, output, _ = _kimi_k31_device_length_runner()
+    runner.vllm_config.kv_transfer_config = None if kv_role is None else SimpleNamespace(kv_role=kv_role)
     runner.num_computed_tokens_cpu.fill_(-99)  # An old staging snapshot must never be read.
     runner.input_buffers.seq_lens_cpu.fill_(777)
     runner.req_states.num_computed_tokens_cpu[:] = torch.tensor([100, 200, 0, 0])

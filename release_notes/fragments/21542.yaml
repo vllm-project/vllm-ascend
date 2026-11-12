@@ -3,8 +3,8 @@ entries:
   - category: performance
     text: >-
       Enabled eligible Kimi K3.1 DSpark drafts to use FlashMLA on A5 and avoid
-      redundant CPU sequence-length synchronization during colocated decoding,
-      including configurations with decode context parallelism.
+      redundant CPU sequence-length synchronization during eligible colocated
+      and PD decoding, including configurations with decode context parallelism.
     model: kimi-k3.1
     hardware: [A5]
   - category: bugfix

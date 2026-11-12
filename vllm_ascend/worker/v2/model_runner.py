@@ -1369,7 +1369,7 @@ class NPUModelRunner(GPUModelRunner):
         # rules for hardware, Q dtype and KV dtype. Before set_attn, keep syncing.
         draft_backends = getattr(self.speculator, "attn_backends", {})
         parallel_config = self.parallel_config
-        # Keep unverified parallel, transfer, offload and adaptive paths on host counts.
+        # Keep unverified parallel, offload and adaptive paths on host counts.
         return (
             bool(draft_backends)
             and (
@@ -1379,7 +1379,6 @@ class NPUModelRunner(GPUModelRunner):
             and parallel_config.pipeline_parallel_size == 1
             and parallel_config.prefill_context_parallel_size == 1
             and (parallel_config.decode_context_parallel_size == 1 or kimi_k31_device_lengths)
-            and self.vllm_config.kv_transfer_config is None
             and not self.ascend_config.sparse_kv_offload_config.enabled
             and not spec.enable_adaptive_verification
         )
