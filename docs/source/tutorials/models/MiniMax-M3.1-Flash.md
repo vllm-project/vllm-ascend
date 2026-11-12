@@ -1608,7 +1608,7 @@ The 1P1D topology uses one Prefill service with `DP1 × TP4 × PP2` on one host 
         --enable-chunked-prefill \
         --enable-prefix-caching \
         --disable-hybrid-kv-cache-manager \
-        --speculative-config '{"method":"dspark","num_speculative_tokens":7,"enforce_eager":true,"kv_cache_dtype":"bfloat16"}' \
+        --speculative-config '{"method":"dspark","num_speculative_tokens":7,"enforce_eager":false,"kv_cache_dtype":"bfloat16"}' \
         --reasoning-parser minimax_m3 \
         --data-parallel-size 8 \
         --data-parallel-size-local 1 \
@@ -1727,7 +1727,7 @@ The 1P1D topology uses one Prefill service with `DP1 × TP4 × PP2` on one host 
         --enable-chunked-prefill \
         --enable-prefix-caching \
         --disable-hybrid-kv-cache-manager \
-        --speculative-config '{"method":"dspark","num_speculative_tokens":7,"enforce_eager":true,"kv_cache_dtype":"bfloat16"}' \
+        --speculative-config '{"method":"dspark","num_speculative_tokens":7,"enforce_eager":false,"kv_cache_dtype":"bfloat16"}' \
         --reasoning-parser minimax_m3 \
         --data-parallel-size 8 \
         --data-parallel-size-local 1 \
@@ -3380,7 +3380,7 @@ Use the commands in [Section 5](#5-online-service-deployment) as starting config
 
 #### 9.2.1 DSpark and KV Cache Configuration
 
-The single-node examples in Section 5.1 and Decode examples in Section 5.3 use platform-specific DSpark draft execution modes:
+The single-node examples in Section 5.1 and Decode examples in Sections 5.3 and 5.4 use platform-specific DSpark draft execution modes:
 
 | Setting | A3 | 950DT products |
 | --- | --- | --- |
@@ -3390,7 +3390,7 @@ The single-node examples in Section 5.1 and Decode examples in Section 5.3 use p
 
 For this release, 950DT products keep DSpark drafts eager to avoid the draft graph performance regression. Keep `fuse_qknorm_rope=true` with this eager draft configuration on the single-node service and on **both Decode nodes**.
 
-For the PD deployment in Section 5.3, keep Prefill's `--enforce-eager` and draft `"enforce_eager":true` on both platforms. Only A3 Decode enables draft graphs; 950DT Decode keeps its draft eager. To run the A3 draft eagerly again, set `"enforce_eager":true` inside `--speculative-config`. Draft execution mode is independent of the target model's `FULL_DECODE_ONLY` setting. The A2 multi-node, KV cache pool, and 950DT 1M examples retain their eager draft configuration; the A3 1M profile disables speculative decoding.
+For the PD deployments in Sections 5.3 and 5.4, keep Prefill's `--enforce-eager` and draft `"enforce_eager":true` on both platforms. Only A3 Decode enables draft graphs; 950DT Decode keeps its draft eager. To run the A3 draft eagerly again, set `"enforce_eager":true` inside `--speculative-config`. Draft execution mode is independent of the target model's `FULL_DECODE_ONLY` setting. The A2 multi-node and 950DT KV cache pool / 1M examples retain their eager draft configuration; the A3 1M profile disables speculative decoding.
 
 The examples explicitly enable FlashComm1 and seven-token DSpark. On 950DT products, the PD main model uses FP8 KV cache while the DSpark draft uses BF16 KV cache. Preserve that distinction when tuning; the draft cache dtype is configured inside `--speculative-config`.
 
