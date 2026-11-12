@@ -6,6 +6,8 @@
 
 ## 1. 当前结论与实现状态
 
+2026-11-12 状态更新：用户反馈 INT8 流水在实际运行测试中未观察到收益，考虑开发时间，已撤回运行时接入并恢复整块 INT8。未提供本次实测的完整配置和数值，不补写收益幅度。独立 INT8 流水 benchmark 与下文微基准数据继续保留，MXFP8 流水实现保留。
+
 MXFP8 流水在部分 TP2/TP4 大消息上超过整块方案；小消息增加分块后可能变慢，不能统一启用 4 块。TP8 的 [16384,5120] 两块流水相对 BF16 耗时下降 5.78%，相对整块 MXFP8 下降 1.19%，两项采用不同基线。
 
 INT8 共享 scale 分块流水已回传 TP2/4/8 实机数据，各采样点选择较快块数后，相对整块 INT8 的 p50 降低 3.15%～13.04%。共同采样点的 MXFP8 最优 p50 通常更低，INT8 额外显存更少；TP8 两路线差距较小且存在跨批基线漂移，不能直接认定速度排名。完整 INT8 数据及两路线对比见第 9、10 节。
@@ -15,7 +17,7 @@ INT8 共享 scale 分块流水已回传 TP2/4/8 实机数据，各采样点选�
 | MXFP8 整块 | [benchmark_mxfp8_all_reduce.py](benchmark_mxfp8_all_reduce.py) | A5 已接入 | 本文作为各组内的完整路径基线 |
 | MXFP8 分块流水 | [benchmark_mxfp8_pipeline.py](benchmark_mxfp8_pipeline.py) | 已接入，显式配置 2/4 块，默认整块 | 本文 TP2/4/8 微基准；实际设备重叠仍需对应 trace 确认 |
 | INT8 整块 | [benchmark_int8_all_reduce.py](benchmark_int8_all_reduce.py) | A2/A3/A5 已接入 | 第 9 节作为本轮 INT8 的完整路径基线 |
-| INT8 分块流水 | [benchmark_int8_pipeline.py](benchmark_int8_pipeline.py) | 已接入，复用 2/4 块与独立流水门槛，默认整块 | 已回传 A5 算法微基准；运行时 CPU 模拟与路由测试通过，真实模型集成待验收 |
+| INT8 分块流水 | [benchmark_int8_pipeline.py](benchmark_int8_pipeline.py) | 运行时接入已撤回，保留独立 benchmark | 已回传 A5 微基准；用户反馈实际运行测试无收益，当前不启用 |
 
 MXFP8 分块 benchmark 首次加入于 `89019458d`；INT8 分块 benchmark 首次加入于 `47d9fc829`。这些是实现记录，不代表本文每批日志的实际测试 commit。运行时参考 [mxfp8_all_reduce.py](../vllm_ascend/distributed/device_communicators/mxfp8_all_reduce.py) 和 [配置定义](../vllm_ascend/ascend_config.py)。
 
@@ -272,15 +274,15 @@ p50 收益未全面改善 p95：16384 tokens 的两块 p95 为 2.9356 ms，高�
 
 ## 7. 运行时配置与 benchmark 的区别
 
-当前 [MXFP8 运行时](../vllm_ascend/distributed/device_communicators/mxfp8_all_reduce.py) 与 [INT8 运行时](../vllm_ascend/distributed/device_communicators/quantized_all_reduce.py) 均支持以下配置：
+当前 [MXFP8 运行时](../vllm_ascend/distributed/device_communicators/mxfp8_all_reduce.py) 已支持：
 
 | 配置 | 含义 |
 | --- | --- |
 | `enable` | 显式启用通信量化，默认 false |
 | `quant_dtype` | `int8` 或 `mxfp8`，默认 int8 |
 | `min_numel` | 是否进入量化路径，单位为元素数，默认 16777216，即 BF16 32 MiB |
-| `pipeline_chunks` | 当前选定后端的固定块数 1/2/4；1 为整块，默认 1 |
-| `pipeline_min_numel` | 当前选定后端进入流水的独立门槛，默认使用 min_numel |
+| `pipeline_chunks` | MXFP8 固定块数 1/2/4；1 为整块，默认 1 |
+| `pipeline_min_numel` | MXFP8 是否进入流水的独立门槛，默认使用 min_numel |
 
 MXFP8 运行时仅允许在 A5 上初始化；每次调用检查组大小 2/4/8、BF16、shape、hidden 对齐、行分片及量化大小门槛。不满足调用量化条件时走普通 AllReduce；已满足量化条件但未满足流水门槛、行数不足或处于图捕获时，保持整块 MXFP8 路径。
 
@@ -302,9 +304,7 @@ MXFP8 运行时仅允许在 A5 上初始化；每次调用检查组大小 2/4/8�
 
 其中 83886080 元素对应 BF16 160 MiB / [16384,5120]。该示例依据现有采样点演示两级门槛，不宣称精确性能拐点，也不替代更小消息的量化收益测量。实际启动时合并到已有 `--additional-config`。
 
-当前运行时不会自动按 TP/shape 在 2、4 块间切换；块数由配置固定。INT8 也已接入运行时，可将上述 `quant_dtype` 改为 `int8` 并选择合适块数，例如已测 TP2/TP4 的 `[16384,5120]` 可从四块开始验证。INT8 保留 A2/A3/A5 原有量化资格与单次整张量 scale/MAX，行数只要求不少于块数，无需被 TP 整除。达到量化门槛但低于流水门槛、行数不足或正在图捕获时使用原整块 INT8；低于量化门槛继续走普通 AllReduce。
-
-两条运行时流水均返回独立输出，默认整块；本机 CPU 模拟验证了 INT8 的路由、图捕获回退、共享 scale、整数边界、非连续输入和连续调用，并包含 MXFP8 回归。该证据不替代 A5 实际服务中的模型精度、图重放与端到端收益验收。
+当前运行时不会自动按 TP/shape 在 2、4 块间切换；MXFP8 块数由配置固定。INT8 分块运行时接入已撤回，`quant_dtype="int8"` 与非默认流水配置组合会被配置校验拒绝；使用 INT8 时删除 `pipeline_chunks` 和 `pipeline_min_numel`，恢复整块路径。
 
 ## 8. 复现实验与后续数据
 
@@ -594,11 +594,13 @@ INT8 额外显存明显较少，同块数对照也支持这一点。例如 [1638
 
 这些都是合成输入的误差指标，不能代替模型输出质量验收。
 
-### 10.7 当前选型结论
+### 10.7 微基准候选与运行时状态
+
+以下比较仅总结算法微基准的取舍。INT8 流水运行时接入已撤回，服务使用整块 INT8；不将下列流水候选作为当前 INT8 启动配置建议。
 
 - TP2：优先性能可考虑 MXFP8 已测最优配置；显存或本批相对 L2 优先时，INT8 流水有明确取舍价值。
 - TP4：MXFP8 的已测最优 p50 更低、相对 L2 更低；INT8 流水额外显存更少。80 MiB 点的 MXFP8 优先整块。
 - TP8：INT8 按当前各点最优块数相对本批 BF16 降低约 9.46%～10.42%；共同 160 MiB 点两路线接近，速度排名待同批复测。该点 INT8 显存更少，MXFP8 量化误差更低。
 - 先按各自真实优势选候选，再进行模型 TTFT、平均 event 耗时和质量验证；当前数据不能证明模型端到端收益，也不能由 p50 推导 mean。
 
-运行时交付状态见第 1、7 节：MXFP8 与 INT8 流水均已接入并显式开启，默认仍为整块；本文实测为算法 benchmark 数据，运行时和模型验收独立记录。
+运行时交付状态见第 1、7 节：MXFP8 流水保留；INT8 流水因用户反馈实际运行测试无收益而撤回接入，当前仅保留独立 benchmark。第 9、10 节的算法微基准数据不作为启用 INT8 运行时流水的依据。

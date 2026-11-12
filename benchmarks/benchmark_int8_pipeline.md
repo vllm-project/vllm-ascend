@@ -1,5 +1,7 @@
 # INT8 共享 scale 分块流水 benchmark
 
+运行时状态：2026-11-12 按用户反馈撤回 INT8 流水接入，实际运行测试未观察到收益。本脚本和历史微基准数据保留用于实验；服务中的 INT8 恢复整块路径，MXFP8 流水保留。INT8 启动配置需删除 `pipeline_chunks` 和 `pipeline_min_numel`，流水参数仅用于 MXFP8 后端。
+
 脚本测试 Eager 下的 INT8 分块流水，不修改运行时或原有 INT8/MXFP8 benchmark。默认使用 `npu_quantize`、`npu_anti_quant`，输入、反量化输出和最终结果均为 BF16。
 
 ## 对照组与依赖
@@ -89,23 +91,3 @@ done
 CPU 模拟验证共享 scale、整数求和、异步提交/等待顺序、张量生命周期、尾块与连续调用；实际算子精度、重叠和收益仍须在 A5 上验证，模型 TTFT/精度另行测试。
 
 当前方案、INT8 / MXFP8 已测性能对照和后续待补数据见 [分块流水方案与性能记录](quantized_communication_pipeline_report.md)。
-
-## 运行时接入
-
-当前运行时也支持这套共享 scale 流水。通过现有 `--additional-config` 显式配置，例如针对已测 TP2/TP4 的 `[16384,5120]`：
-
-```json
-{
-  "quantized_all_reduce_config": {
-    "enable": true,
-    "quant_dtype": "int8",
-    "min_numel": 16777216,
-    "pipeline_chunks": 4,
-    "pipeline_min_numel": 83886080
-  }
-}
-```
-
-默认 `pipeline_chunks=1` 为整块，`pipeline_min_numel` 默认取 `min_numel`。低于量化门槛走普通 AllReduce；满足量化条件但低于流水门槛、行数不足或处于图捕获时走整块 INT8。Eager 下达到两级门槛后使用指定块数，不自动按 shape 切换 2/4 块。图重放执行捕获时选定的路径。
-
-每次调用只计算一次整张量 scale，并返回独立 BF16 输出，保持输入不变。运行时显存峰值与本脚本的原地写回口径不同。开启对应模块的 debug 日志后，`QAR-HIT` 包含 `mode=full|pipeline`、实际块数与选择原因；性能测试时关闭 debug。算法微基准结果已经归档，运行时在实际模型上的精度、图捕获与 TTFT 仍需验收。

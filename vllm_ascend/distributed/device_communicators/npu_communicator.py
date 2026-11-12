@@ -74,11 +74,7 @@ class NPUCommunicator(DeviceCommunicatorBase):
         if quantized_cfg.enable:
             if quantized_cfg.quant_dtype == "int8":
                 self.quantized_ar = QuantizedAllReduce(
-                    self.device_group,
-                    min_numel=quantized_cfg.min_numel,
-                    group_name=self.unique_name,
-                    pipeline_chunks=quantized_cfg.pipeline_chunks,
-                    pipeline_min_numel=quantized_cfg.pipeline_min_numel,
+                    self.device_group, min_numel=quantized_cfg.min_numel, group_name=self.unique_name
                 )
             else:
                 self.quantized_ar = Mxfp8AllReduce(
@@ -91,13 +87,10 @@ class NPUCommunicator(DeviceCommunicatorBase):
             if self.quantized_ar.supported:
                 if quantized_cfg.quant_dtype == "int8":
                     logger.info_once(
-                        "INT8 quantized all-reduce enabled (group=%s, min_numel=%d, max_q=%d, "
-                        "pipeline_chunks=%d, pipeline_min_numel=%d; pipeline is Eager-only).",
+                        "INT8 quantized all-reduce enabled (group=%s, min_numel=%d, max_q=%d).",
                         self.unique_name,
                         self.quantized_ar.min_numel,
                         self.quantized_ar.max_q,
-                        self.quantized_ar.pipeline_chunks,
-                        self.quantized_ar.pipeline_min_numel,
                     )
                 else:
                     logger.info_once(

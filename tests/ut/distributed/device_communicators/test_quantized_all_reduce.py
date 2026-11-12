@@ -54,7 +54,6 @@ def _make(
     min_numel: int = 8,
     device_type: AscendDeviceType = AscendDeviceType.A2,
     group_name: str = "",
-    **kwargs,
 ) -> QuantizedAllReduce:
     """Build a wrapper; raises on unvalidated device families only."""
     with patch(
@@ -66,7 +65,7 @@ def _make(
             "vllm_ascend.distributed.device_communicators.quantized_all_reduce.dist.get_world_size",
             return_value=world_size,
         ):
-            return QuantizedAllReduce(group, min_numel=min_numel, group_name=group_name, **kwargs)
+            return QuantizedAllReduce(group, min_numel=min_numel, group_name=group_name)
 
 
 class TestQuantizedAllReduce(unittest.TestCase):
