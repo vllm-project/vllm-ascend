@@ -5,8 +5,8 @@ post_comment.py - 评测结果发布到 PR：
   1. 总结评论（幂等）：按 MARKER 找到既有机器人评论原位更新；
   2. 行内评论（--inline）：F/S 级问题以 Review API 钉到 diff 具体行，
      仅锚定本次 diff 内的行（其余回退到总结评论）；
-  3. 过期治理：发布新行内评论前，将上一轮机器人行内评论线程 resolve 掉，
-     语义同 OCR 的 resolve_outdated。
+  3. 过期治理：发布新行内评论前，删除上一轮机器人留下的行内评论，
+     保证 PR 上只保留本轮的行内评论。
 
 用法:
   GITHUB_TOKEN=... python post_comment.py --repo <owner/name> --pr <n> \
@@ -34,21 +34,6 @@ for _stream in (sys.stdout, sys.stderr):
 MAX_BODY = 65000
 HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
-THREADS_QUERY = """
-query($owner:String!, $name:String!, $pr:Int!, $cursor:String) {
-  repository(owner:$owner, name:$name) {
-    pullRequest(number:$pr) {
-      reviewThreads(first:100, after:$cursor) {
-        pageInfo { hasNextPage endCursor }
-        nodes { id isResolved
-          comments(first:1) { nodes { body author { login } } } }
-      }
-    }
-  }
-}
-"""
-
-
 def api(method, url, token, payload=None):
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     req = urllib.request.Request(
@@ -67,53 +52,32 @@ def api(method, url, token, payload=None):
     return json.loads(body) if body else {}
 
 
-def graphql(url, token, query, variables):
-    req = urllib.request.Request(
-        url,
-        data=json.dumps({"query": query, "variables": variables}).encode("utf-8"),
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "User-Agent": "doc-quality-bot",
-        },
-    )
-    with urllib.request.urlopen(req) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    if data.get("errors"):
-        raise RuntimeError(f"GraphQL 错误: {data['errors'][0].get('message')}")
-    return data.get("data") or {}
+# ------------------------------------------------ 过期评论治理 ----
 
 
-# ------------------------------------------------ 过期线程治理 ----
+def delete_outdated_inline(api_base, repo, pr, token, marker):
+    """删除上一轮机器人留下的行内评论，返回删除条数。
 
-
-def resolve_outdated_threads(api_base, token, owner, name, pr, marker):
-    """resolve 掉首条评论含 marker 的未解决线程，返回处理条数。"""
-    cursor = None
-    resolved = 0
-    for _page in range(10):  # 上限 10 页 × 100 线程，防异常刷屏
-        data = graphql(
-            f"{api_base}/graphql", token, THREADS_QUERY, {"owner": owner, "name": name, "pr": pr, "cursor": cursor}
-        )
-        pr_node = (data.get("repository") or {}).get("pullRequest") or {}
-        threads = pr_node.get("reviewThreads") or {}
-        for node in threads.get("nodes") or []:
-            if node.get("isResolved"):
-                continue
-            first = ((node.get("comments") or {}).get("nodes") or [{}])[0]
-            if marker in (first.get("body") or ""):
-                graphql(
-                    f"{api_base}/graphql",
-                    token,
-                    "mutation($id:ID!){ resolveReviewThread(input:{threadId:$id}){ thread { isResolved } } }",
-                    {"id": node["id"]},
-                )
-                resolved += 1
-        if not threads.get("pageInfo", {}).get("hasNextPage"):
+    走 REST 而非 GraphQL：GITHUB_TOKEN 访问 reviewThreads 会被拒
+    ("Resource not accessible by integration")。机器人行内评论每轮全量重发，
+    删除旧的比 resolve 更干净——PR 上只保留本轮的行内评论。
+    """
+    deleted = 0
+    for page in range(1, 11):  # 上限 10 页 × 100 条
+        comments = api("GET", f"{api_base}/repos/{repo}/pulls/{pr}/comments?per_page=100&page={page}", token)
+        if not comments:
             break
-        cursor = threads["pageInfo"].get("endCursor")
-    return resolved
+        for c in comments:
+            if marker not in (c.get("body") or ""):
+                continue
+            try:
+                api("DELETE", f"{api_base}/repos/{repo}/pulls/comments/{c['id']}", token)
+                deleted += 1
+            except urllib.error.HTTPError as e:
+                print(f"[post_comment] 删除过期行内评论 {c['id']} 失败: {e}", file=sys.stderr)
+        if len(comments) < 100:
+            break
+    return deleted
 
 
 # ------------------------------------------------ diff 行解析 ----
@@ -244,15 +208,13 @@ def main():
         print("[post_comment] 缺少 GITHUB_TOKEN，跳过发布", file=sys.stderr)
         return 2
 
-    owner, name = args.repo.split("/", 1)
-
-    # 1) 过期治理：先把上一轮机器人行内评论线程 resolve 掉
+    # 1) 过期治理：先删掉上一轮机器人留下的行内评论
     try:
-        n = resolve_outdated_threads(api_base, token, owner, name, args.pr, "<!-- doc-quality-bot inline v1 -->")
+        n = delete_outdated_inline(api_base, args.repo, args.pr, token, "<!-- doc-quality-bot inline v1 -->")
         if n:
-            print(f"[post_comment] 已 resolve 上一轮行内评论线程 {n} 条")
+            print(f"[post_comment] 已删除上一轮行内评论 {n} 条")
     except Exception as e:  # noqa: BLE001 —— 治理失败不阻塞发布
-        print(f"[post_comment] 过期线程治理失败（忽略）: {e}", file=sys.stderr)
+        print(f"[post_comment] 过期评论治理失败（忽略）: {e}", file=sys.stderr)
 
     # 2) 总结评论（幂等更新）
     with open(args.comment_file, encoding="utf-8") as f:
