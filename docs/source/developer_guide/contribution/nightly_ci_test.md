@@ -29,8 +29,8 @@ The comment itself triggers the workflow — no label is required.
 | `/nightly all` | Run **all** nightly tests (same as above) |
 | `/nightly test1 test2 ...` | Run only the **named** tests |
 | `/nightly <tests> --aop_enabled` | Run named tests with AOP bisect / classify enabled |
-| `/presmoke <tests>` | Build the nightly image only (no tests); the test names are used solely to pick the target chips |
-| `/nightly <tests> --presmoke` | Run tests on the image previously built by `/presmoke` instead of the standard nightly image |
+| `/presmoke <tests>` | Build only the nightly images (no tests) for the chips the test names select, publishing them to the isolated `*-presmoke` repositories |
+| `/nightly <tests> --presmoke` | Run the tests on the images previously published by `/presmoke` instead of the standard nightly images |
 
 !!! note
 
