@@ -753,7 +753,7 @@ class Qwen4GdnInProjAGMMOp:
         # TRANSPOSED weight ([K, N], first dim == x1's last dim): pass
         # weight.t() (a free view; [K,N] column-major is the native GEMM-B
         # layout), NOT the raw [N, K] parameter.
-        qkvz_out, gathered = DeviceOperator.npu_all_gather_base_mm(
+        qkvz_out, gathered = torch_npu.npu_all_gather_base_mm(
             x_shard,
             self.qkvz.weight.t(),
             self.hcom,
