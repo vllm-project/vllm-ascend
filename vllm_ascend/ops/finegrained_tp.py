@@ -167,6 +167,7 @@ class FullRankGateTP:
     def __init__(self, group: GroupCoordinator, heads: int, head_dim: int):
         self.group, self.heads, self.head_dim = group, heads, head_dim
         self.communication = TPCommunication()
+        self.uses_aiv = uses_aiv_communication(group)
 
     def gather(self, hidden: torch.Tensor) -> PendingTensor:
         capacity = projection_capacity(hidden)

@@ -789,6 +789,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         cos: torch.Tensor,
         sin: torch.Tensor,
         fuse_cache: bool,
+        before_vector: Callable[[], None] | None = None,
     ) -> tuple[tuple[torch.Tensor, torch.Tensor, torch.Size], torch.Tensor, torch.Tensor | None, torch.Tensor]:
         """Pair Q Cube/K Vector, then Q Vector/K Cube; join before cache writes."""
         main_stream = torch_npu.npu.current_stream()
@@ -802,6 +803,10 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             q_hadamard = q_li @ self.q_hadamard
             for value in q_c if isinstance(q_c, tuple) else (q_c,):
                 value.record_stream(q_stream)
+        if before_vector is not None:
+            # NoPE Q contains only Cube work; keep it overlapped with the
+            # caller's communication, then join before K's first Vector op.
+            before_vector()
         k_li, indexer_weights = self._project_k(k_hidden_states, cos, sin, projected_kw=kw)
 
         # These two event edges form a stage boundary: both Q Hadamard and
@@ -855,6 +860,8 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         k_hidden_states: torch.Tensor,
         indexer_metadata: AscendSFAIndexerMetadata,
         compute_topk: bool = True,
+        *,
+        before_vector: Callable[[], None] | None = None,
     ) -> torch.Tensor | None:
         """Full indexer pipeline: k path -> cache write -> top-k selection.
 
@@ -869,10 +876,15 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         cos = indexer_metadata.cos
         sin = indexer_metadata.sin
         q_stream, fuse_cache, fuse_store = self._select_execution_paths(k_hidden_states, indexer_metadata, compute_topk)
+        if before_vector is not None and (q_stream is None or self.qk_rope_head_dim or not isinstance(q_c, tuple)):
+            # RoPE or input quantization can run Vector work on q_stream.
+            # Join before it inherits main's dependency; serial K joins here too.
+            before_vector()
+            before_vector = None
         q_result = None
         if q_stream is not None:
             q_result, k_li, k_li_scale, indexer_weights = self._forward_qk(
-                hidden_states, q_c, k_hidden_states, cos, sin, fuse_cache
+                hidden_states, q_c, k_hidden_states, cos, sin, fuse_cache, before_vector=before_vector
             )
         elif fuse_cache:
             k_li, k_li_scale, indexer_weights = self.forward_k(k_hidden_states, cos, sin, quantize=False)
