@@ -412,7 +412,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             num_computed_prefill_tokens_np=num_computed_prefill_tokens_np,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
-            is_padding=self.input_buffers.is_padding[:num_tokens_after_padding],
+            is_padding=self.prepare_padding_mask(num_tokens, num_tokens_after_padding),
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
