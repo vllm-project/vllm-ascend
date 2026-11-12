@@ -358,6 +358,14 @@ class BaseKVPoolWorker(ABC):
                     for i in range(2, remaining_layers + 2):
                         partitions[-i] += 1
 
+        model_name = model_config.model.rstrip("/").split("/")[-1]
+        if getattr(self.kv_cache_config, "hisparse_host_num_blocks", None) is not None:
+            # HiSparse packs Source and Indexer into separate pool objects.
+            # Separate these keys from ordinary AscendStore and other KV dtypes.
+            model_name = (
+                f"{model_name}:hisparse-v1:{model_config.dtype}:"
+                f"{vllm_config.cache_config.cache_dtype}:{vllm_config.attention_config.indexer_kv_dtype}"
+            )
         self.metadata: list[KeyMetadata] = []
         for group_id in range(self.num_kv_cache_groups):
             # the mamba kv_heads is not same with the full attention, can't share the cache data
@@ -367,7 +375,7 @@ class BaseKVPoolWorker(ABC):
                 group_tp_rank = self.tp_rank if self.use_layerwise else self.tp_rank * self.pcp_size + self.pcp_rank
             self.metadata.append(
                 KeyMetadata(
-                    model_config.model.rstrip("/").split("/")[-1],
+                    model_name,
                     group_tp_rank,
                     self.dcp_rank,
                     self.pp_rank,
@@ -483,10 +491,11 @@ class BaseKVPoolWorker(ABC):
 
     def _get_cache_block_metadata(self, cache: torch.Tensor) -> tuple[int, int, int, int]:
         tensor_num_blocks = cache.shape[0]
-        assert tensor_num_blocks % self.num_blocks == 0, (
+        num_blocks = getattr(self, "_hisparse_cache_num_blocks", {}).get(id(cache), self.num_blocks)
+        assert tensor_num_blocks % num_blocks == 0, (
             "The external block size must be an integer multiple of the kernel block size."
         )
-        block_size_scale = tensor_num_blocks // self.num_blocks
+        block_size_scale = tensor_num_blocks // num_blocks
         block_len = cache[0].numel() * cache.element_size() * block_size_scale
         block_stride = cache.stride(0) * cache.element_size() * block_size_scale
         # Registration covers the physical span, including gaps between kernel
@@ -665,6 +674,8 @@ class BaseKVPoolWorker(ABC):
             return
         alignment = 2 * 1024 * 1024
         for storage_key in registered_regions:
+            if storage_key in getattr(self, "_hisparse_host_storage_keys", set()):
+                continue
             start, end = registered_regions[storage_key]
             new_start = start // alignment * alignment
             # Because the addresses of raw tensors are aligned to 2MB,
@@ -703,8 +714,38 @@ class BaseKVPoolWorker(ABC):
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         if self.use_recoverssm:
             kv_caches = self._recoverssm_store_caches(kv_caches)
+        excluded_layer_names = None
+        if getattr(self.kv_cache_config, "hisparse_host_num_blocks", None) is not None:
+            excluded_layer_names = set()
+            normalized_caches = {}
+            self._hisparse_cache_num_blocks = {}
+            self._hisparse_host_storage_keys = set()
+            context = self.vllm_config.compilation_config.static_forward_context
+            for group in self.kv_cache_config.kv_cache_groups:
+                if not group.enable_kv_transfer:
+                    excluded_layer_names.update(group.layer_names)
+                    continue
+                num_blocks = (
+                    self.kv_cache_config.hisparse_host_num_blocks
+                    if group.host_resident
+                    else self.kv_cache_config.num_blocks
+                )
+                for name in group.layer_names:
+                    parts = self._as_cache_tuple(kv_caches[name])
+                    stride = getattr(context[name], "hisparse_block_stride", 1)
+                    if group.role == "hisparse_indexer" and stride > 1:
+                        parts = tuple(part[::stride] for part in parts)
+                    normalized_caches[name] = parts
+                    for part in parts:
+                        self._hisparse_cache_num_blocks[id(part)] = num_blocks
+                        if group.host_resident:
+                            self._hisparse_host_storage_keys.add(self._get_storage_key(part))
+            kv_caches = normalized_caches
         self._set_num_blocks(kv_caches)
-        self._register_kv_caches(kv_caches)
+        if excluded_layer_names is None:
+            self._register_kv_caches(kv_caches)
+        else:
+            self._register_kv_caches(kv_caches, excluded_layer_names=excluded_layer_names)
 
     def _set_num_blocks(self, kv_caches: dict[str, torch.Tensor]) -> None:
         _, first_kv_cache_tuple = next(iter(kv_caches.items()))
@@ -779,6 +820,8 @@ class BaseKVPoolWorker(ABC):
                     registered_regions[storage_key] = (start, end)
 
         self._align_kv_ptrs(registered_regions)
+        if host_keys := getattr(self, "_hisparse_host_storage_keys", None):
+            self.m_store.set_hisparse_host_ranges([registered_regions[key] for key in host_keys])
         ptrs = [start for start, _ in registered_regions.values()]
         lengths = [end - start for start, end in registered_regions.values()]
 
