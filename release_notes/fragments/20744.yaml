@@ -1,0 +1,9 @@
+pr: 20744
+entries:
+  - category: performance
+    text: >-
+      Added opt-in DeepSeek V4.1 shared/routed Add and FFN HcPost fusion on A3,
+      using hidden-size-aware Triton tiles while preserving BF16 intermediate
+      rounding and the native FP32 operation order.
+    model: deepseek-v4.1-flash
+    hardware: [A3]
