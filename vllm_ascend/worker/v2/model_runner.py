@@ -346,10 +346,7 @@ class NPUModelRunner(GPUModelRunner):
         ``DPMetadata.make`` can observe 55 scheduled rows and a 56-row batch.
         """
         parallel_config = self.vllm_config.parallel_config
-        if (
-            getattr(parallel_config, "data_parallel_size", 1) <= 1
-            or not self._requires_runner_dp_token_padding()
-        ):
+        if getattr(parallel_config, "data_parallel_size", 1) <= 1 or not self._requires_runner_dp_token_padding():
             return
 
         dispatch_and_sync = vllm_model_runner.dispatch_cg_and_sync_dp

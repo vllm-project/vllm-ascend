@@ -106,15 +106,9 @@ def test_requires_runner_dp_token_padding(
     expected,
 ):
     runner = NPUModelRunner.__new__(NPUModelRunner)
-    runner.vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size)
-    )
+    runner.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size))
     runner.model_config = SimpleNamespace(architecture=architecture)
-    runner.speculative_config = (
-        None
-        if speculative_method is None
-        else SimpleNamespace(method=speculative_method)
-    )
+    runner.speculative_config = None if speculative_method is None else SimpleNamespace(method=speculative_method)
     monkeypatch.setattr(
         "vllm_ascend.worker.v2.model_runner.enable_sp",
         lambda _config: sp_enabled,
