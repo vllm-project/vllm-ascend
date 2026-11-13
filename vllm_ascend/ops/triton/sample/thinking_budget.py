@@ -16,6 +16,8 @@ def _load_effective_token_ascend(
     pos,
 ):
     """Load one committed or in-flight token without branch-local returns."""
+    # The history row offset can exceed the signed int32 element range.
+    req_state_idx = req_state_idx.to(tl.int64)
     is_committed = pos < total_len
     committed = tl.load(
         all_token_ids_ptr + req_state_idx * all_token_ids_stride + pos,
@@ -48,7 +50,8 @@ def _update_committed_marker_cache_kernel_ascend(
     MAX_LEN: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    req_state_idx = tl.load(req_ids_ptr + tl.program_id(0))
+    # Widen before multiplication, including cold and incremental scans.
+    req_state_idx = tl.load(req_ids_ptr + tl.program_id(0)).to(tl.int64)
     budget = tl.load(thinking_token_budget_ptr + req_state_idx)
     if budget < 0:
         return
