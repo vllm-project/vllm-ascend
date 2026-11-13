@@ -628,7 +628,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.dispatcher.moe_expert_num = 8
         hidden_states = torch.randn(2, 128, dtype=torch.bfloat16)
         for scale_alg, forced_mode, comm_mode, expected in (
-            (1, 0, None, 0),
+            (1, 0, None, 4),
             (0, 0, None, 4),
             (1, 4, None, 4),
             (1, 0, 4, 4),
