@@ -229,4 +229,3 @@ def test_qwen4exp_ple_uses_mapped_npu_view():
 
     cpu.add_(100)
     torch.testing.assert_close(_read_on_npu(view), cpu)
-
