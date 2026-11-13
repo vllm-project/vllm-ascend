@@ -42,7 +42,7 @@ def test_loaded_group_ids_returns_transfer_groups() -> None:
 
 
 def test_required_layout_is_hnd_for_regular_attention_and_none_for_mla() -> None:
-    config = SimpleNamespace(model_config=SimpleNamespace(use_mla=False))
+    config = SimpleNamespace(model_config=SimpleNamespace(use_mla=False), speculative_config=None)
     assert MooncakeBaseConnector.get_required_kvcache_layout(config) == "HND"  # type: ignore[arg-type]
 
     config.model_config.use_mla = True
@@ -50,6 +50,30 @@ def test_required_layout_is_hnd_for_regular_attention_and_none_for_mla() -> None
 
     config.model_config = None
     assert MooncakeBaseConnector.get_required_kvcache_layout(config) is None  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("connector_cls", [MooncakeBaseConnector, MooncakePullConnector, MooncakePushConnector])
+@pytest.mark.parametrize(
+    "target_mla, draft_mla, expected",
+    [
+        (True, False, "HND"),
+        (True, True, None),
+        (True, None, None),
+        (False, False, "HND"),
+        (False, True, "HND"),
+        (False, None, "HND"),
+    ],
+)
+def test_required_layout_includes_speculative_draft(connector_cls, target_mla, draft_mla, expected) -> None:
+    # DFlash2 can use multi-head attention with an MLA target. The layout
+    # must be selected before allocating caches, rather than relaxing the
+    # worker's single-head NHD safety check during registration.
+    draft_config = None if draft_mla is None else SimpleNamespace(use_mla=draft_mla)
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(use_mla=target_mla),
+        speculative_config=SimpleNamespace(draft_model_config=draft_config),
+    )
+    assert connector_cls.get_required_kvcache_layout(config) == expected
 
 
 def test_facade_delegates_scheduler_methods() -> None:
