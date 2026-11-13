@@ -287,6 +287,13 @@ class MooncakePushConnector(MooncakeBaseConnector):
         assert isinstance(self.connector_worker, MooncakePushConnectorWorker)
         self.connector_worker.wait_for_save()
 
+    def on_dsv41_cache_written(
+        self, cache_name: str, swa_slots: torch.Tensor | None, *, cache_only: bool = False
+    ) -> None:
+        if self.kv_transfer_config.is_kv_producer and self.has_connector_metadata():
+            assert isinstance(self.connector_worker, MooncakePushConnectorWorker)
+            self.connector_worker.on_dsv41_cache_written(cache_name, swa_slots, cache_only=cache_only)
+
     def shutdown(self) -> None:
         if self.connector_worker is not None:
             assert isinstance(self.connector_worker, MooncakePushConnectorWorker)

@@ -41,6 +41,8 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
     dcp_sharded: list[bool]
     local_ip: str = ""
     handshake_port: int = 0
+    # Empty for ordinary connectors; V4.1 Push peers must agree on this plan.
+    dsv41_layout: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.cp_kv_cache_interleave_size <= 0:
@@ -122,6 +124,7 @@ class MooncakePPTransferMetadata:
     dcp_sharded: list[bool]
     metadata_by_pcp_rank: dict[int, MooncakePCPTransferMetadata]
     indexer_replication_sizes: list[int]
+    dsv41_layout: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

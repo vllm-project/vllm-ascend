@@ -86,6 +86,11 @@ Use
 as the proxy. This experimental path supports PCP/TP routing and PP layer
 lookup; workers currently require DCP=1 and do not support KVPP.
 
+DeepSeek V4.1 has an experimental explicit-cache-write path with matching P/D
+layouts and PP=PCP=DCP=1. See the
+[V4.1 V2 Push design and validation plan](deepseek_v41_mooncake_v2.md) for
+SWA bounded replay, supported configurations and required hardware validation.
+
 The proxy sends the request to D first. After allocating blocks, D's scheduler
 submits an immutable destination snapshot to a 32-worker HTTP thread pool,
 which posts to the proxy's `/v1/metaserver`. The scheduler continues scheduling
@@ -100,9 +105,9 @@ ranks, including ranks with no data to send, before reporting receive completion
 Completions that arrive before D's worker allocation metadata are buffered.
 P waits for this step's metadata queries, WRITEs and terminal DONE callbacks
 before returning worker results. Normal prefill completion releases KV without
-delay-free; asynchronous scheduling remains enabled. This path currently assumes
-successful transfer; request-level transfer failure reporting is TODO. Early
-cancellation still retains the existing delayed-release protection.
+delay-free; asynchronous scheduling remains enabled. WRITE failures are reported
+through DONE status and request-level receive results. Early cancellation still
+retains the existing delayed-release protection.
 
 P follows this lifecycle:
 

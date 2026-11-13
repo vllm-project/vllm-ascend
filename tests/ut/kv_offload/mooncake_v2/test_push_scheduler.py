@@ -135,6 +135,22 @@ def test_invalid_queries_do_not_stop_listener(scheduler):
     assert msgspec.msgpack.decode(query(scheduler._metadata_thread, (GET_META_MSG, "d")))["engine_id"] == "d"
 
 
+def test_dsv41_plan_signature_survives_metadata_aggregation(scheduler):
+    signature = ("bounded_replay=True", "cache-plan")
+    metadata = {rank: replace(worker, dsv41_layout=signature) for rank, worker in workers().items()}
+    scheduler.set_xfer_handshake_metadata_from_workers(metadata)
+    response = query(scheduler._metadata_thread, (GET_META_MSG, "d"))
+    groups = msgspec.msgpack.decode(response, type=MooncakeTransferMetadataGroups)
+    assert all(pp.dsv41_layout == signature for pp in groups.metadata_by_pp_rank.values())
+
+
+def test_inconsistent_dsv41_worker_signatures_are_rejected(scheduler):
+    metadata = workers()
+    metadata[(0, 0, 0)] = replace(metadata[(0, 0, 0)], dsv41_layout=("bounded_replay=True",))
+    with pytest.raises(ValueError, match="dsv41_layout"):
+        scheduler.set_xfer_handshake_metadata_from_workers(metadata)
+
+
 def test_missing_or_foreign_metadata_does_not_start_thread(scheduler):
     metadata = workers()
     with pytest.raises(ValueError, match="incomplete"):
@@ -227,6 +243,20 @@ def step(request, blocks=None, computed=0, scheduled=16, *, resumed=False):
 
 def allocate(scheduler, request, blocks=([1], [11])):
     scheduler.update_state_after_alloc(request, SimpleNamespace(get_block_ids=lambda: blocks), 0)
+
+
+@pytest.mark.parametrize("resumed", [False, True])
+def test_dsv41_producer_rejects_preemption_and_resumption(producer_scheduler, resumed):
+    producer_scheduler.vllm_config.model_config = SimpleNamespace(
+        hf_text_config=SimpleNamespace(model_type="deepseek_v41")
+    )
+    request = prefill_request()
+    allocate(producer_scheduler, request)
+    output = step(request, computed=16, resumed=resumed)
+    if not resumed:
+        output.preempted_req_ids = {request.request_id}
+    with pytest.raises(RuntimeError, match="preemption/resumption"):
+        producer_scheduler.build_connector_meta(output)
 
 
 def test_producer_snapshots_new_and_cached_prefill_chunks(producer_scheduler):
