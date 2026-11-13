@@ -1673,7 +1673,7 @@ def test_v2_fused_offload_splits_target_and_draft_metadata_in_one_sfa_group(for_
         max_seq_len=4096,
         block_tables=(torch.zeros((1, 1), dtype=torch.int32),),
         slot_mappings=(torch.zeros(1, dtype=torch.int32),),
-        kv_cache_config=SimpleNamespace(kv_cache_groups=[SimpleNamespace()]),
+        kv_cache_config=SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=None)]),
         seq_lens_np=np.array([129], dtype=np.int32),
         draft_layer_names={"draft.layer"},
         copy_sfa_restore_tails=True,

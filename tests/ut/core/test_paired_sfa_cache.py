@@ -58,7 +58,9 @@ def make_config():
             hf_text_config=SimpleNamespace(model_type="kimi_linear"),
         ),
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
-        cache_config=SimpleNamespace(num_gpu_blocks_override=None, prefix_cache_retention_interval=None),
+        cache_config=SimpleNamespace(
+            num_gpu_blocks_override=None, prefix_cache_retention_interval=None, kv_cache_layout=None
+        ),
     )
 
 

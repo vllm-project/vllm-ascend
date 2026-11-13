@@ -119,6 +119,7 @@ class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
     block_strides: list[list[int]]
     local_ip: str = ""
     handshake_port: int = 0
+    packed_row_strides: list[list[int]] = msgspec.field(default_factory=list)
 
 
 @dataclass
@@ -448,6 +449,7 @@ class KVCacheRecvingThread(threading.Thread):
         kv_group2layeridx: dict[int, tuple[dict[str, Any], list[int]]] | None = None,
         block_size_scale: list[list[int]] | None = None,
         use_request_level_recv_errors: bool = False,
+        packed_row_strides: list[list[int]] | None = None,
     ):
         super().__init__(daemon=True, name="KVCacheRecvingThread")
         self.tp_rank = tp_rank
@@ -468,6 +470,8 @@ class KVCacheRecvingThread(threading.Thread):
         self.kv_caches_base_addr[local_engine_id][local_handshake_port] = local_kv_caches_base_addr
         self.block_len_per_addr = block_len_per_addr
         self.block_stride_per_addr = block_stride_per_addr
+        self.packed_row_strides = packed_row_strides or []
+        self.remote_packed_row_strides: dict[str, dict[int, list[list[int]]]] = SizedDict()
         if kv_group2layeridx is None:
             kv_group2layeridx = {}
         self.kv_group2layeridx = kv_group2layeridx
@@ -838,6 +842,10 @@ class KVCacheRecvingThread(threading.Thread):
             local_kv_caches_base_addrs = self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port]
             remote_transfer_port = self.remote_te_port[remote_engine_id][remote_handshake_port]
             remote_block_stride_per_addr = self.remote_block_stride_per_addr[remote_engine_id][remote_handshake_port]
+            remote_packed_rows = self.remote_packed_row_strides.get(remote_engine_id, {}).get(remote_handshake_port, [])
+            remote_block_scales = (
+                self.remote_block_size_scale[remote_engine_id][remote_handshake_port] if remote_packed_rows else []
+            )
             remote_kv_group2layeridx = self.remote_kv_group2layeridx.get(remote_engine_id, {}).get(
                 remote_handshake_port,
                 self.kv_group2layeridx,
@@ -1023,12 +1031,27 @@ class KVCacheRecvingThread(threading.Thread):
                     else:
                         if not has_group_blocks:
                             continue
-                        transfer_remote_block_ids, transfer_local_block_ids = split_if_not_byte_contiguous(
+                        packed_row = self.packed_row_strides[layer_idx][cache_idx] if self.packed_row_strides else 0
+                        remote_packed_row = remote_packed_rows[remote_layer_idx][cache_idx] if remote_packed_rows else 0
+                        physical_remote_ids = map_packed_transfer_ids(
                             grouped_remote_block_ids,
+                            remote_block_scales[remote_layer_idx][cache_idx] if remote_packed_row else 1,
+                            remote_packed_row,
+                            remote_block_stride,
+                        )
+                        physical_local_ids = map_packed_transfer_ids(
                             grouped_local_block_ids,
+                            self.block_size_scale[layer_idx][cache_idx] if packed_row else 1,
+                            packed_row,
+                            block_stride,
+                        )
+                        transfer_remote_block_ids, transfer_local_block_ids = split_if_not_byte_contiguous(
+                            physical_remote_ids,
+                            physical_local_ids,
                             src_block_stride=remote_block_stride,
                             dst_block_stride=block_stride,
                             block_len=inner_block_len,
+                            force_regroup=bool(packed_row or remote_packed_row),
                         )
                     for remote_block_id, local_block_id in zip(transfer_remote_block_ids, transfer_local_block_ids):
                         src = src_layer_base_addr + local_block_id[0] * block_stride + inner_offset * inner_block_len
@@ -1510,6 +1533,7 @@ class KVCacheRecvingThread(threading.Thread):
                 self.remote_te_port[engine_id][remote_handshake_port] = agent_meta.te_rpc_port
                 self.remote_block_size_scale[engine_id][remote_handshake_port] = agent_meta.block_size_scale
                 self.remote_block_stride_per_addr[engine_id][remote_handshake_port] = agent_meta.block_strides
+                self.remote_packed_row_strides[engine_id][remote_handshake_port] = agent_meta.packed_row_strides
         except Exception:
             if isinstance(sock, zmq.Socket):  # type: ignore
                 sock.close()
@@ -2688,6 +2712,7 @@ class MooncakeConnectorWorker:
         # Per-layer byte stride between consecutive tensor blocks:
         # [layer_idx][cache_idx] -> stride(0) * element_size.
         self.block_stride_per_addr: list[list[int]] = [[] for _ in range(metadata_layers)]
+        self.packed_row_strides: list[list[int]] = [[] for _ in range(metadata_layers)]
 
         # TODO: For DSV4 use_compress, metadata/transfer can be optimized by
         # aggregating layer views that share the same raw KVCacheTensor.
@@ -2696,12 +2721,17 @@ class MooncakeConnectorWorker:
             for single_kv_cache in self._as_kv_cache_tuple(kv_cache_tuple):
                 tensor_num_blocks = single_kv_cache.shape[0]
                 block_size_scale = tensor_num_blocks // self.num_blocks
+                block_size_scale = getattr(single_kv_cache, "_ascend_packed_kernel_pages", block_size_scale)
+                self.packed_row_strides[layer_idx].append(getattr(single_kv_cache, "_ascend_packed_row_bytes", 0))
                 block_shape = single_kv_cache.shape[1:]
                 self.block_len_per_addr[layer_idx].append(single_kv_cache.element_size() * math.prod(block_shape))
                 self.block_stride_per_addr[layer_idx].append(single_kv_cache.stride(0) * single_kv_cache.element_size())
                 self.block_shape_per_addr[layer_idx].append(single_kv_cache.shape)
                 self.block_size_scale[layer_idx].append(block_size_scale)
                 self.kv_caches_base_addr[layer_idx].append(single_kv_cache.data_ptr())
+
+        if not any(stride for row in self.packed_row_strides for stride in row):
+            self.packed_row_strides = []
 
         if has_mamba_group:
             ptrs, lengths = self._get_registered_kv_tensor_buffers(kv_caches)
@@ -2742,6 +2772,7 @@ class MooncakeConnectorWorker:
             num_blocks=self.num_blocks,
             block_lens=self.block_len_per_addr,
             block_strides=self.block_stride_per_addr,
+            packed_row_strides=self.packed_row_strides,
             local_ip=get_ip(),
             handshake_port=self.handshake_port,
         )
@@ -2782,6 +2813,7 @@ class MooncakeConnectorWorker:
                 self.kv_group2layeridx,
                 self.block_size_scale,
                 use_request_level_recv_errors=self._use_request_level_recv_errors,
+                packed_row_strides=self.packed_row_strides,
             )
             self.kv_recv_thread.start()
         start_wait_time = time.time()
@@ -4373,14 +4405,30 @@ def group_concurrent_contiguous(
     return src_groups, dst_groups
 
 
+def map_packed_transfer_ids(groups, pages_per_manager, row_stride, kernel_stride):
+    """Map dense wire IDs into a role's packed physical kernel pages.
+
+    Wire block ownership and coverage remain unchanged. This last address
+    conversion is layer/component specific: MLA, indexer and draft have
+    different page strides even when they share one scheduler block table.
+    """
+    if not row_stride:
+        return groups
+    if pages_per_manager < 1 or kernel_stride < 1 or row_stride % kernel_stride:
+        raise ValueError("Invalid packed Mooncake kernel-page geometry.")
+    step = row_stride // kernel_stride
+    return [[bid // pages_per_manager * step + bid % pages_per_manager for bid in group] for group in groups]
+
+
 def split_if_not_byte_contiguous(
     src_groups: list[list[int]],
     dst_groups: list[list[int]],
     src_block_stride: int,
     dst_block_stride: int,
     block_len: int,
+    force_regroup: bool = False,
 ) -> tuple[list[list[int]], list[list[int]]]:
-    if src_block_stride == block_len and dst_block_stride == block_len:
+    if not force_regroup and src_block_stride == block_len and dst_block_stride == block_len:
         return src_groups, dst_groups
 
     src = [bid for group in src_groups for bid in group]

@@ -23,6 +23,13 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.models.kimi_k3.cache_config import make_kimi_cache_groups
+from vllm_ascend.models.kimi_k3.packed_sfa_cache import (
+    is_packed_sfa_groups,
+    packed_sfa_cache_config,
+    packed_sfa_cache_groups,
+    packed_sfa_row_bytes,
+    uses_block_outermost_sfa,
+)
 from vllm_ascend.utils import vllm_version_is
 
 # vLLM main moved this helper to kv_cache_planning after v0.32.0.
@@ -60,6 +67,8 @@ def _validate_paired_sfa_pages(specs) -> None:
 
 
 def paired_sfa_cache_groups(config, specs):
+    if uses_block_outermost_sfa(config):
+        return packed_sfa_cache_groups(config, specs)
     draft = {name: spec for name, spec in specs.items() if spec.is_draft}
     if not draft:
         return _paired_sfa_target_cache_groups(config, specs)
@@ -167,6 +176,8 @@ def _layout(groups):
 
 
 def paired_sfa_pool_bytes(groups):
+    if is_packed_sfa_groups(groups):
+        return packed_sfa_row_bytes(groups)
     _, _, indexer, _, main_page, indexer_page, slots = _layout(groups)
     # Every pool ID still reserves independent target/indexer/draft storage.
     draft_bytes = sum(spec.page_size_bytes for spec in _draft_layer_specs(groups).values())
@@ -178,6 +189,8 @@ def paired_sfa_cache_config(
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
 ) -> KVCacheConfig:
+    if is_packed_sfa_groups(kv_cache_groups):
+        return packed_sfa_cache_config(vllm_config, kv_cache_groups, available_memory, may_override_num_blocks)
     _, main_mla_names, indexer_names, kda_groups, main_page_size, indexer_page_size, num_main_slots = _layout(
         kv_cache_groups
     )

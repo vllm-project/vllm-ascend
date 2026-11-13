@@ -50,6 +50,7 @@ def copy_kv_cache_blocks_inplace(
         for tensor in tensors:
             if tensor is None:
                 continue
+            tensor = getattr(tensor, "_ascend_packed_copy_rows", tensor)
             data_ptr = tensor.data_ptr()
             # Hybrid models can overlay layers of different kinds on one
             # allocation, so views at the same address can differ in geometry.
@@ -177,8 +178,7 @@ def prepare_ascend_kernel_block_sizes(
         if (
             spec.has_layer_views
             and isinstance(spec, AttentionSpec)
-            and aliases_layers
-            and not block_outermost_packed
+            and ((aliases_layers and not block_outermost_packed) or getattr(spec, "block_outermost", False))
             and kernel_block_sizes[index] == manager_block_size
             and group_id < len(attn_groups)
             and attn_groups[group_id]

@@ -20,13 +20,153 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend.attention.sfa_v1 import AscendSFABackend
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.models.kimi_k3.paired_sfa_cache import paired_sfa_cache_config, paired_sfa_cache_groups
+from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace, prepare_ascend_kernel_block_sizes
 from vllm_ascend.worker.v2 import attn_utils
+from vllm_ascend.worker.v2.utils import AscendV2KVBlockZeroer
 
 NUM_BLOCKS = 4
 BLOCK_SIZE = 128
 ALIGNMENT = 2 * 1024 * 1024
+
+
+@pytest.mark.parametrize("capture", [False, True])
+def test_packed_roles_receive_independent_metadata(capture):
+    block = 256
+    main = AscendMLAAttentionSpec(
+        block_size=block,
+        num_kv_heads=1,
+        head_size=656,
+        dtype=torch.int8,
+        cache_sparse_sfa_c8=True,
+        block_outermost=True,
+    )
+    index = AscendSFAIndexerCacheSpec(
+        block_size=block,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.int8,
+        scale_dim=1,
+        scale_dtype=torch.float32,
+        block_outermost=True,
+    )
+    uniform = UniformTypeKVCacheSpecs.from_specs({"main": main, "index": index})
+    row = 2770944
+    plan = KVCacheConfig(
+        num_blocks=3,
+        kv_cache_groups=[KVCacheGroupSpec(["main", "index"], uniform)],
+        kv_cache_tensors=[
+            KVCacheTensor(size=3 * row, layers=["main"], block_stride=row, layer_stride=main.page_size_bytes),
+            KVCacheTensor(
+                size=3 * row,
+                layers=["index"],
+                offset=main.page_size_bytes,
+                block_stride=row,
+                layer_stride=index.page_size_bytes,
+            ),
+        ],
+    )
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=1024),
+        scheduler_config=SimpleNamespace(max_num_seqs=2, max_num_batched_tokens=4),
+        compilation_config=SimpleNamespace(cudagraph_capture_sizes=[4]),
+        speculative_config=None,
+    )
+
+    class Builder:
+        vllm_config = config
+
+        def build(self, common_prefix_len, common_attn_metadata, **kwargs):
+            return common_attn_metadata
+
+        def build_for_cudagraph_capture(self, common_attn_metadata, **kwargs):
+            return common_attn_metadata
+
+    attn_groups = [
+        [
+            AttentionGroup(AscendSFABackend, [name], spec, 0, metadata_builders=[Builder()])
+            for name, spec in (("main", main), ("index", index))
+        ]
+    ]
+    assert prepare_ascend_kernel_block_sizes(plan, attn_groups) == [128]
+    table = torch.tensor([[0, 1, 2, 3, 4, 5]], dtype=torch.int32)
+    slots = torch.tensor([[0, 256, 512]], dtype=torch.int64)
+    metadata = attn_utils.build_attn_metadata(
+        attn_groups=attn_groups,
+        num_reqs=1,
+        num_tokens=3,
+        query_start_loc_gpu=torch.tensor([0, 3], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 3], dtype=torch.int32),
+        max_query_len=3,
+        seq_lens=torch.tensor([513], dtype=torch.int32),
+        max_seq_len=513,
+        block_tables=[table],
+        slot_mappings=slots,
+        kv_cache_config=plan,
+        seq_lens_cpu_upper_bound=torch.tensor([513], dtype=torch.int32),
+        for_cudagraph_capture=capture,
+    )
+    assert metadata["main"].block_table_tensor[0, 2] == row // (main.page_size_bytes // 2)
+    assert metadata["index"].block_table_tensor[0, 2] == row // (index.page_size_bytes // 2)
+    assert metadata["main"].slot_mapping[1] != metadata["index"].slot_mapping[1]
+    assert metadata["main"].block_table_tensor.data_ptr() != metadata["index"].block_table_tensor.data_ptr()
+    assert table.tolist() == [[0, 1, 2, 3, 4, 5]]
+    assert slots.tolist() == [[0, 256, 512]]
+
+
+@pytest.mark.parametrize("draft_layers", [0, 3, 5])
+def test_block_outermost_views_and_pool_copy(monkeypatch, vllm_config, draft_layers):
+    vllm_config.cache_config.kv_cache_layout = "BLNHC"
+    vllm_config.parallel_config.prefill_context_parallel_size = 1
+    plan, specs = make_paired_cache(vllm_config, torch.float32, with_draft=False)
+    # Derive a new plan with the actual local draft specs; 3 and 5 are test
+    # inputs rather than allocator constants.
+    for layer in range(8, 8 + draft_layers):
+        specs[f"model.layers.{layer}.attn"] = AscendMLAAttentionSpec(
+            block_size=BLOCK_SIZE,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            is_draft=True,
+        )
+    groups = paired_sfa_cache_groups(vllm_config, specs)
+    plan = paired_sfa_cache_config(vllm_config, groups, 0)
+    raw = attn_utils._allocate_kv_cache(plan, shared_layers={}, device=torch.device("cpu"))
+    monkeypatch.setattr(attn_utils, "_get_attention_kv_cache_dims", lambda *_: (512, 64))
+    monkeypatch.setattr(attn_utils, "_uses_single_raw_mla_cache", lambda *_: False)
+    views = attn_utils._reshape_kv_cache_v2([], raw, "int8", [128] * len(groups), {}, plan)
+    assert views.keys() == specs.keys()
+    rows = next(iter(views.values()))[0]._ascend_packed_copy_rows
+    assert rows.shape == (NUM_BLOCKS, plan.kv_cache_tensors[0].block_stride)
+    assert len({v.untyped_storage().data_ptr() for parts in views.values() for v in parts}) == 1
+    for bid in range(NUM_BLOCKS):
+        rows[bid].fill_(bid + 1)
+    # A cycle must read both original rows before either write, even when
+    # every attention and KDA alias is passed to the copy helper.
+    copies = [SimpleNamespace(src_block_id=1, dst_block_id=2), SimpleNamespace(src_block_id=2, dst_block_id=1)]
+    copy_kv_cache_blocks_inplace(views.values(), NUM_BLOCKS, copies)
+    assert rows[:, 0].tolist() == [1, 3, 2, 4]
+    for bid, value in enumerate([1, 3, 2, 4]):
+        assert torch.all(rows[bid] == value)
+    attention_groups = [
+        AttentionGroup(SimpleNamespace(), [name], spec, group_id)
+        for group_id, group in enumerate(groups)
+        for name in group.layer_names
+        if isinstance((spec := specs[name]), AscendMLAAttentionSpec)
+    ]
+    zeroer = AscendV2KVBlockZeroer(
+        device=torch.device("cpu"),
+        attn_groups_iter=attention_groups,
+        kernel_block_sizes=[128] * len(groups),
+        static_forward_context={name: SimpleNamespace(kv_cache=cache) for name, cache in views.items()},
+        num_blocks=NUM_BLOCKS,
+    )
+    assert len(zeroer._zeroers) == 1
+    addresses, strides, spans, *_ = zeroer._zeroers[0]._meta
+    assert addresses.tolist() == [rows.data_ptr()]
+    assert strides.tolist() == spans.tolist() == [rows.shape[1] // 4]
 
 
 @pytest.fixture
@@ -43,7 +183,10 @@ def vllm_config(monkeypatch):
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         cache_config=SimpleNamespace(
-            num_gpu_blocks_override=NUM_BLOCKS, prefix_cache_retention_interval=None, cache_dtype="int8"
+            num_gpu_blocks_override=NUM_BLOCKS,
+            prefix_cache_retention_interval=None,
+            cache_dtype="int8",
+            kv_cache_layout=None,
         ),
     )
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)

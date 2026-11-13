@@ -455,6 +455,22 @@ class NPUPlatform(Platform):
 
     @classmethod
     def _align_hybrid_block_size(cls, vllm_config: VllmConfig, backend_cls) -> None:
+        from vllm_ascend.models.kimi_k3.packed_sfa_cache import uses_block_outermost_sfa
+
+        if uses_block_outermost_sfa(vllm_config):
+            from vllm.model_executor.layers.mamba.abstract import get_mamba_prefill_checkpoint_alignment
+
+            # A packed row covers MLA, indexer and every actual draft spec.
+            # Do not grow a token block until a *single* MLA page fits KDA,
+            # or pad each KDA layer to that page. Validate the row once the
+            # real per-layer specs are available in the planner.
+            vllm_config.cache_config.mamba_page_size_padded = None
+            if vllm_config.cache_config.mamba_cache_mode == "align":
+                alignment = get_mamba_prefill_checkpoint_alignment(vllm_config) or 1
+                if vllm_config.cache_config.block_size % alignment:
+                    raise ValueError(f"Kimi --block-size must be a multiple of checkpoint alignment {alignment}.")
+                vllm_config.cache_config.mamba_block_size = vllm_config.cache_config.block_size
+            return
         if (
             vllm_config.model_config.use_mla
             and vllm_config.cache_config.cache_dtype in ("int8", "fp8")
