@@ -1747,7 +1747,9 @@ def test_pcp_metadata_builds_global_view_when_batch_has_prefill():
     pcp_manager = AscendPCPManager.__new__(AscendPCPManager)
     pcp_manager.dcp_world_size = 1
     pcp_manager._global_batch = global_batch
-    pcp_manager._local_batch = SimpleNamespace(num_tokens=local_common.num_actual_tokens)
+    pcp_manager._local_batch = SimpleNamespace(
+        num_tokens=local_common.num_actual_tokens, num_tokens_after_padding=local_common.num_input_tokens
+    )
     pcp_manager._local_gather_idx = torch.tensor([0, 4, -1], dtype=torch.int64)
     pcp_manager._block_tables = SimpleNamespace(
         gather_block_tables=gather_block_tables,
@@ -2931,3 +2933,39 @@ def test_o_proj_without_sharding_skips_buffers_and_collectives(otp_size):
     get_capacity.assert_not_called()
     all_to_all.assert_not_called()
     reduce_scatter.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "adaptive,prefill_tokens,expected",
+    [(True, 0, 4), (False, 0, 3), (True, 1, 4), (True, 8, 8)],
+)
+def test_adaptive_query_bound_reaches_metadata(adaptive, prefill_tokens, expected):
+    builder = _make_builder(compressor_ratio=4, num_speculative_tokens=3)
+    builder.speculative_config.method = "mtp"
+    builder.speculative_config.enable_adaptive_verification = adaptive
+    builder.num_actual_tokens = 6 + prefill_tokens
+    builder.num_decode_tokens = 6
+    builder.num_prefills = int(prefill_tokens > 0)
+    builder.block_table = torch.tensor([[0, 1], [2, 3], [4, 5]], dtype=torch.int32)
+    builder.seq_lens = torch.tensor([12, 10, 16], dtype=torch.int32)
+    cpu_lengths = [3, 3] + ([prefill_tokens] if prefill_tokens else [])
+    device_lengths = ([4, 2] if adaptive else [3, 3]) + ([prefill_tokens] if prefill_tokens else [])
+    common = SimpleNamespace(
+        num_reqs=len(cpu_lengths),
+        num_input_tokens=builder.num_actual_tokens,
+        positions=torch.arange(builder.num_actual_tokens),
+        query_start_loc_cpu=torch.tensor([0] + cpu_lengths, dtype=torch.int32).cumsum(0, dtype=torch.int32),
+        query_start_loc=torch.tensor([0] + device_lengths, dtype=torch.int32).cumsum(0, dtype=torch.int32),
+        causal=True,
+    )
+    builder._build_sas_metadata = MagicMock()
+    builder._build_qli_metadata = MagicMock()
+    with (
+        patch("vllm_ascend.attention.dsa_v1.get_full_cos_and_sin_dsa", return_value=(None, None)),
+        patch("vllm_ascend.attention.dsa_v1.build_compressor_metadata_out"),
+    ):
+        builder.build_req_metadata(
+            common, builder.seq_lens, None, torch.ones(common.num_input_tokens), torch.zeros(common.num_input_tokens)
+        )
+    assert builder._build_sas_metadata.call_args.kwargs["max_seqlen_q"] == expected
+    assert builder._build_qli_metadata.call_args.kwargs["max_seqlen_q"] == expected

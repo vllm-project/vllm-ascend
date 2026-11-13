@@ -16,7 +16,6 @@
 # This file is a part of the vllm-ascend project.
 #
 from collections.abc import Mapping, Sequence
-from contextlib import contextmanager
 from typing import Any, cast
 
 import numpy as np
@@ -48,7 +47,10 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_factory,
     build_attn_metadata_wrapper,
 )
-from vllm_ascend.worker.v2.spec_decode.dflash.speculator import prepare_dflash_inputs_factory
+from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
+    draft_metadata_request_count,
+    prepare_dflash_inputs_factory,
+)
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     build_dspark_draft_config,
@@ -59,7 +61,7 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
 class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     _speculator_name = "DSpark"
     # DSpark samples via compute_draft_logits and never calls sample_draft, so
-    # the mixin sample_draft alignment is not used; instead load_draft_model
+    # the mixin's speculator-level logits hook is not used; load_draft_model
     # wraps the draft model's compute_draft_logits to pad the LM-head input to
     # the group-agreed capacity and trim the logits back (no _sample_sequential
     # override, upstream sampling logic untouched).
@@ -118,7 +120,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         DSpark feeds its vocab-sharded draft LM head directly through
         ``compute_draft_logits`` (inside upstream ``_sample_sequential`` /
         ``_sample_sequential_topk``), which bypasses the mixin's
-        ``sample_draft`` alignment. Wrap the method instead of overriding the
+        speculator-level logits hook. Wrap the method instead of overriding the
         sampling loop: every rank feeds the group-agreed capacity
         (``max_num_reqs * num_speculative_steps``) into the LM-head
         collectives, then the logits are trimmed back to the real rows.
@@ -298,18 +300,6 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             max_model_len=self.max_model_len,
         )
 
-    # TODO: Remove this helper and build_draft_attn_metadatas once tiling
-    # eliminates replay-time metadata rebuilding. The rebuild currently needs
-    # this count because it cannot access the effective num_reqs from upstream propose().
-    @contextmanager
-    def _draft_metadata_request_count(self, num_reqs: int):
-        previous = getattr(self, "_draft_metadata_num_reqs", None)
-        self._draft_metadata_num_reqs = num_reqs
-        try:
-            yield
-        finally:
-            self._draft_metadata_num_reqs = previous
-
     # Graph capture builds metadata from the padded request shape.
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         assert self.input_batch is not None
@@ -439,10 +429,8 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         assert self.input_batch is not None
         # PCP restores global requests for the replicated draft, whereas the
         # target DP sync describes its rank-local batch. Negotiate draft
-        # capacity independently, as adaptive verification also requires.
-        sync_state = dp_sync_state
-        if self.pcp_manager is not None or (self.enable_adaptive_verification and not is_profile):
-            sync_state = None
+        # capacity independently for PCP.
+        sync_state = None if self.pcp_manager is not None else dp_sync_state
         if dummy_run and skip_attn_for_dummy_run:
             # Profiling runs the draft with its own query token count, which
             # can differ from the target batch. Let forward_context coordinate
@@ -465,7 +453,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 num_draft_reqs, self.max_num_reqs, self.num_query_per_req
             )
         with (
-            self._draft_metadata_request_count(num_draft_reqs),
+            draft_metadata_request_count(self, num_draft_reqs),
             build_attn_metadata_wrapper(),
             build_attn_metadata_factory(
                 self.input_buffers.positions,

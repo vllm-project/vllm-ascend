@@ -333,7 +333,18 @@ The planner never connects to seed services; it only returns the advertised `SEE
 
 ## Supported Models
 
-RFork targets mainstream model families such as DeepSeek, Qwen, and GLM, but compatibility is determined by the transfer contract rather than the model family name. A model is eligible when its built NPU tensor inventory passes the structural-digest, tensor-ID, manifest, dtype, NPU-format, alias-graph, and non-NPU-state checks. DeepSeek V4.1 Engram CPU offload and `AscendDeepSeekMTP` checkpoint preparation have model-specific handling. For other models, quantization variants, or NPU formats, qualify RFork on the target model and hardware by confirming `source=transfer` and comparing output accuracy with the default loader.
+RFork targets mainstream model families such as DeepSeek, Qwen, and GLM, but compatibility is determined by the transfer contract rather than the model family name. A model is eligible when its built NPU tensor inventory passes the structural-digest, tensor-ID, manifest, dtype, NPU-format, alias-graph, and non-NPU-state checks. DeepSeek V4.1 Engram CPU offload and checkpoint preparation for `AscendDeepSeekMTP` and DeepSeek V4/V4.1 DSpark drafts have model-specific handling. For other models, quantization variants, or NPU formats, qualify RFork on the target model and hardware by confirming `source=transfer` and comparing output accuracy with the default loader.
+
+## Speculative Decoding { #speculative-decoding }
+
+With speculative decoding, each worker loads the target model first and then the draft model, and both go through the RFork loader. RFork handles the draft as a separate model:
+
+- **Draft detection.** A model is a draft when its model config has `runner_type="draft"`, or its Hugging Face config has a `model_type` ending in `_mtp` or an architecture ending in `MTPModel`.
+- **Separate seed.** The draft has its own RFork session and seed key. The seed key includes the `draft` marker, so a draft never matches a target seed. With a nonzero `rfork_seed_port_base`, the draft seed service uses `base + 2 * global_rank + 1`. When planner model identity headers are enabled, draft requests carry `IS_DRAFT: true`.
+- **Weights shared with the target.** Before registering the draft, RFork takes a snapshot of the weight blocks the target registered. If every transferable draft tensor lies inside those blocks, the draft reports `source=shared_target` and is neither transferred nor published (see [When does a draft model report `shared_target`?](#when-does-a-draft-model-report-shared_target)). Otherwise RFork registers and transfers only the draft tensors outside those blocks.
+- **Checkpoint-dependent draft state.** Many drafts decide in `load_weights`, from the checkpoint weight names, whether they own their embedding and LM head; the proposer then replaces the parts a draft does not own with the target's modules. RFork does not run `load_weights`, so it restores this state before registration for `AscendDeepSeekMTP` and DeepSeek V4/V4.1 DSpark drafts (see the draft checkpoint metadata entry in the [FAQ](#faq)). Other drafts, such as EAGLE/EAGLE3, DFlash, `Glm5NextMTP`, and Qwen3, GLM, or Kimi K3 DSpark, keep their constructor defaults under RFork, which can make the proposer use the wrong embedding or LM head.
+- **Weights rewritten after loading.** With a QuaRot-quantized target, Qwen3, GLM, and Kimi K3 DSpark drafts and DFlash2 drafts rotate a draft projection in place in `post_process`, after the loader has returned and the draft seed may already be published. A receiver can then copy weights that the seed has already rotated, and its own `post_process` rotates them again. RFork does not bypass these configurations.
+- **Qualifying a draft.** Wrong draft state usually lowers the draft acceptance rate rather than changing the output, because the target model still verifies every drafted token. When qualifying a draft with RFork, compare the acceptance rate with the default loader in addition to checking `source=transfer` and output accuracy.
 
 ## Performance Considerations
 
@@ -502,17 +513,19 @@ Tensor IDs are readable canonical paths such as `layers.0.self_attn.impl.scales[
 
 No. RFork intentionally reads exactly `numel * element_size` bytes for each tensor entry, including processed NZ, packed-weight, and derived-scale tensors. Allocation capacity, descriptor-only padding outside the tensor's dense logical range, and adjacent or shared storage are not part of that tensor's payload and are not copied implicitly. A future NPU format that requires bytes outside this range needs explicit manifest and transfer-protocol support. For dense transposes and reshapes, RFork transfers the one continuous byte range covered by a non-overlapping dense tensor and does not require a separate stride-equality check; gapped or overlapping layouts are rejected.
 
-### What happens when MTP checkpoint metadata cannot be read?
+### What happens when draft checkpoint metadata cannot be read?
 
-For MTP drafts using `AscendDeepSeekMTP`, RFork prepares checkpoint-dependent head ownership and module aliases before
-registering tensors. It reads the names in the selected safetensors headers using the default loader's source,
+For MTP drafts using `AscendDeepSeekMTP` and DeepSeek V4/V4.1 DSpark drafts, RFork prepares checkpoint-dependent
+state before registering tensors: head ownership and module aliases for `AscendDeepSeekMTP`, and embedding and head
+ownership for DSpark. It reads the names in the selected safetensors headers using the default loader's source,
 revision, and file-selection rules. Uncached remote checkpoints may be downloaded during this preparation. If the
-metadata cannot be read, including checkpoints selected in PT/bin format, RFork uses the default loader and does
-not publish that model as a seed. This adaptation stays within the RFork loader and reuses the model's existing
-head-ownership helper. It currently covers `AscendDeepSeekMTP` only. Other MTP implementations, such as
-`Glm5NextMTP`, also derive head ownership from checkpoint weights, and RFork does not run their normal `load_weights`
-before registration; qualify `source=transfer` and output accuracy on the target model and hardware before relying on
-MTP weight reuse.
+metadata cannot be read, including checkpoints selected in PT/bin format, RFork uses the default loader and does not
+publish that model as a seed. This adaptation stays within the RFork loader. For `AscendDeepSeekMTP`, it reuses the
+model's head-ownership helper. For DSpark, it reuses the model's checkpoint-name mapping together with the
+embedding/head naming rule from its `load_weights`. It currently covers only these drafts. Other draft
+implementations, such as `Glm5NextMTP` and other DSpark drafts, also derive head ownership from checkpoint weights,
+and RFork does not run their normal `load_weights` before registration; qualify `source=transfer` and output accuracy
+on the target model and hardware before relying on draft weight reuse.
 
 ### When does a draft model report `shared_target`? { #when-does-a-draft-model-report-shared_target }
 

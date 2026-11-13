@@ -173,7 +173,11 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
         "vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.torch_npu.npu_format_cast",
         side_effect=lambda weight, _fmt, **_kwargs: weight.clone(),
     )
-    def test_megamoe_uses_semantic_e8m0_scale_dtype(self, _mock_cast, _mock_use_megamoe, mock_vllm):
+    # The w2 experts go through the shared FP4 recipe, which casts in its own
+    # module and reads torch_npu's FP4 enum there.
+    @patch("vllm_ascend.quantization.nz.torch_npu")
+    def test_megamoe_uses_semantic_e8m0_scale_dtype(self, mock_nz_npu, _mock_cast, _mock_use_megamoe, mock_vllm):
+        mock_nz_npu.npu_format_cast.side_effect = lambda weight, _fmt, **_kwargs: weight.clone()
         mock_vllm.return_value = create_mock_vllm_config()
         layer = nn.Module()
         layer.w13_weight = nn.Parameter(
