@@ -27,6 +27,7 @@ def _config(max_len, interleave):
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=8,
             prefill_context_parallel_size=1,
+            pcp_shard_decode_requests=False,
             tensor_parallel_size=8,
             cp_kv_cache_interleave_size=interleave,
         ),

@@ -969,7 +969,11 @@ def _make_impl(
             compress_ratio=1,
             vllm_config=SimpleNamespace(
                 cache_config=SimpleNamespace(cache_dtype="auto"),
-                parallel_config=SimpleNamespace(prefill_context_parallel_size=2, decode_context_parallel_size=1),
+                parallel_config=SimpleNamespace(
+                    prefill_context_parallel_size=2,
+                    decode_context_parallel_size=1,
+                    pcp_shard_decode_requests=True,
+                ),
             ),
             wq_a=linear,
             wq_b=linear,

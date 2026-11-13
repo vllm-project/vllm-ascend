@@ -2219,6 +2219,7 @@ def _make_initialized_sfa_impl(pcp_size, dcp_size, physical_pcp_size=None):
         parallel_config=SimpleNamespace(
             prefill_context_parallel_size=pcp_size,
             decode_context_parallel_size=dcp_size,
+            pcp_shard_decode_requests=pcp_size > 1 and dcp_size == 1,
             cp_kv_cache_interleave_size=128,
         ),
         model_config=SimpleNamespace(
