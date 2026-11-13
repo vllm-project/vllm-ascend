@@ -47,6 +47,7 @@ public so a test can build a custom sequence when the shared one does not fit.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import time
@@ -506,10 +507,9 @@ def _collect_perf(runner: Any, prompt_tokens: int, *, reset_local_cache: bool = 
     started = time.perf_counter()
     for index in range(AB_WARMUP + AB_SAMPLES):
         if reset_local_cache:
-            try:
+            # DPVllmRunner does not expose `.model`.
+            with contextlib.suppress(RuntimeError):
                 runner.model.reset_prefix_cache(reset_connector=False)
-            except RuntimeError:
-                pass  # DPVllmRunner does not expose `.model`
         begin = time.perf_counter()
         runner.generate_greedy([prompt], 1)
         elapsed = (time.perf_counter() - begin) * 1000.0
