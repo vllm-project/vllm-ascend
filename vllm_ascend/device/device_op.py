@@ -285,6 +285,37 @@ class BaseDeviceAdaptor:
         return topk_weights, topk_ids.to(torch.int32), out
 
     @staticmethod
+    def npu_all_gather_base_mm(
+        x1: torch.Tensor,
+        x2: torch.Tensor,
+        hcom: str,
+        world_size: int,
+        *,
+        bias: torch.Tensor | None = None,
+        x1_scale: torch.Tensor | None = None,
+        x2_scale: torch.Tensor | None = None,
+        gather_index: int = 0,
+        gather_output: bool = True,
+        comm_turn: int = 0,
+        output_dtype: torch.dtype | None = None,
+        comm_mode: str | None = None,
+    ):
+        return torch_npu.npu_all_gather_base_mm(
+            x1,
+            x2,
+            hcom,
+            world_size,
+            bias=bias,
+            x1_scale=x1_scale,
+            x2_scale=x2_scale,
+            gather_index=gather_index,
+            gather_output=gather_output,
+            comm_turn=comm_turn,
+            output_dtype=output_dtype,
+            comm_mode=comm_mode,
+        )
+
+    @staticmethod
     def npu_mm_reduce_scatter_base(
         x1: torch.Tensor,
         x2: torch.Tensor,
