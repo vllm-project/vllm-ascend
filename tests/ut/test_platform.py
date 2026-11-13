@@ -22,6 +22,7 @@ from vllm_ascend.platform import (
     _validate_deepseek_v4_tp_config,
     _validate_draft_decode_context_parallel_config,
     _validate_eplb_config,
+    _validate_glm5next_dflash2_pp_config,
     _validate_parallel_config,
     _validate_pcp_dcp_config,
     _validate_sfa_dcp_kv_sp,
@@ -32,6 +33,70 @@ from vllm_ascend.utils import (
     AscendDeviceType,
     dsv4_skips_indexer_topk,
 )
+
+
+@pytest.mark.parametrize("block_size,interleave", [(768, 128), (768, 384), (768, 768), (1536, 768), (1536, 1536)])
+def test_kimi_hybrid_pd_keeps_kernel_interleave_after_manager_block_growth(block_size, interleave):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(architecture="KimiK31ForConditionalGeneration"),
+        cache_config=SimpleNamespace(block_size=block_size, cache_dtype="fp8"),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=8, cp_kv_cache_interleave_size=interleave),
+        kv_transfer_config=SimpleNamespace(kv_connector="MooncakeConnectorV2"),
+        use_v2_model_runner=True,
+    )
+    with (
+        patch("vllm_ascend.platform.model_uses_sfa_sparse", return_value=True),
+        patch("vllm_ascend.platform.enable_sp", return_value=False),
+    ):
+        _validate_sfa_dcp_kv_sp(config)
+    assert config.parallel_config.cp_kv_cache_interleave_size == interleave
+
+
+@pytest.mark.parametrize("connector,interleave", [("MooncakeConnectorV2", 64), ("MooncakePullConnector", 192)])
+def test_kimi_hybrid_pd_rejects_sub_kernel_interleave(connector, interleave):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(architecture="KimiK31ForConditionalGeneration"),
+        cache_config=SimpleNamespace(block_size=768, cache_dtype="fp8"),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=2, cp_kv_cache_interleave_size=interleave),
+        kv_transfer_config=SimpleNamespace(kv_connector=connector),
+        use_v2_model_runner=True,
+    )
+    with (
+        patch("vllm_ascend.platform.model_uses_sfa_sparse", return_value=True),
+        patch("vllm_ascend.platform.enable_sp", return_value=False),
+        pytest.raises(ValueError, match="interleave.*kernel block size"),
+    ):
+        _validate_sfa_dcp_kv_sp(config)
+
+
+@pytest.mark.parametrize(
+    ("pp_size", "method", "architecture", "model_type", "should_raise"),
+    [
+        (2, "dflash", "DFlash2DraftModel", "glm5_next_text", True),
+        (2, "dflash", "DFlash2DraftModel", "glm5_next", True),
+        (1, "dflash", "DFlash2DraftModel", "glm5_next_text", False),
+        (2, "dflash", "DFlashDraftModel", "glm5_next_text", False),
+        (2, "dspark", "DFlash2DraftModel", "glm5_next_text", False),
+        (2, "dflash", "DFlash2DraftModel", "qwen3", False),
+    ],
+)
+def test_glm5next_dflash2_rejects_pipeline_parallel_size_above_one(
+    pp_size, method, architecture, model_type, should_raise
+):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type=model_type)),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size),
+        speculative_config=SimpleNamespace(
+            method=method,
+            draft_model_config=SimpleNamespace(architectures=[architecture]),
+        ),
+    )
+
+    if should_raise:
+        with pytest.raises(ValueError, match="requires pipeline_parallel_size=1"):
+            _validate_glm5next_dflash2_pp_config(config)
+    else:
+        _validate_glm5next_dflash2_pp_config(config)
 
 
 @pytest.mark.parametrize(
@@ -199,6 +264,7 @@ def test_parallel_config_rejects_partial_tp_pcp_groups(dcp_size):
 
 def test_pcp_dcp_rejects_unequal_sizes_for_gqa_draft():
     config = SimpleNamespace(
+        use_v2_model_runner=False,
         parallel_config=SimpleNamespace(
             tensor_parallel_size=8,
             prefill_context_parallel_size=2,
@@ -239,6 +305,7 @@ def test_eagle3_gqa_pcp_dcp_skips_tp_only_head_limit():
         draft_tensor_parallel_size=None,
     )
     vllm_config = SimpleNamespace(
+        use_v2_model_runner=False,
         speculative_config=speculative_config,
         parallel_config=SimpleNamespace(
             tensor_parallel_size=4,
@@ -431,6 +498,51 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(NPUPlatform.simple_compile_backend, "eager")
         self.assertEqual(NPUPlatform.ray_device_key, "NPU")
         self.assertEqual(NPUPlatform.device_control_env_var, "ASCEND_RT_VISIBLE_DEVICES")
+
+    def test_kimi_k3_gqa_dspark_uses_replicated_draft_dcp_config(self):
+        target_parallel = SimpleNamespace(
+            decode_context_parallel_size=8,
+            tensor_parallel_size=8,
+        )
+        draft_parallel = SimpleNamespace(
+            decode_context_parallel_size=1,
+            tensor_parallel_size=8,
+        )
+        draft_model = SimpleNamespace(
+            use_mla=False,
+            hf_config=SimpleNamespace(
+                model_type="qwen3",
+                architectures=["DSparkDraftModel"],
+            ),
+        )
+        config = SimpleNamespace(
+            use_v2_model_runner=True,
+            parallel_config=target_parallel,
+            model_config=SimpleNamespace(
+                architectures=["KimiLinearForCausalLM"],
+                architecture="KimiK3ForConditionalGeneration",
+                hf_config=SimpleNamespace(
+                    architectures=["KimiK3ForConditionalGeneration"],
+                    model_type="kimi_k3",
+                ),
+            ),
+            speculative_config=SimpleNamespace(
+                num_speculative_tokens_per_batch_size=None,
+                draft_model_config=draft_model,
+                draft_parallel_config=draft_parallel,
+                use_dspark=lambda: True,
+            ),
+        )
+
+        _validate_draft_decode_context_parallel_config(config)
+
+        draft_parallel.tensor_parallel_size = 4
+        _validate_draft_decode_context_parallel_config(config)
+
+    def test_get_kv_cache_config_builder_cls(self):
+        assert NPUPlatform.get_kv_cache_config_builder_cls(self.mock_vllm_config()) == (
+            "vllm_ascend.core.kv_cache_config_builder.AscendKVCacheConfigBuilder"
+        )
 
     @patch("vllm_ascend.platform.enable_sp", return_value=False)
     @patch("vllm_ascend.platform.enable_sfa_dcp_replicated_indexer", return_value=True)

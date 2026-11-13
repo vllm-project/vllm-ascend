@@ -40,7 +40,6 @@ from vllm_ascend.ops.triton.fla.utils import (
     prepare_update_chunk_offsets,
 )
 from vllm_ascend.ops.triton.mamba.gdn_prepare import prepare_gdn
-from vllm_ascend.utils import vllm_version_is
 
 _GDN_CHUNK_SIZE = 64
 # Keep this aligned with solve_tril.LARGE_BLOCK_T in ops/triton/fla/solve_tril.py.
@@ -397,6 +396,14 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        context = getattr(vllm_config.compilation_config, "static_forward_context", {}) or {}
+        self._ascend_gdn_checkpoints = (
+            bool(layer_names)
+            and all(getattr(context.get(name), "_ascend_internal_checkpoint_enabled", False) for name in layer_names)
+            and bool(getattr(kv_cache_spec, "num_prefill_checkpoint_blocks", 0))
+        )
+        if getattr(kv_cache_spec, "num_prefill_checkpoint_blocks", 0) and not self._ascend_gdn_checkpoints:
+            raise ValueError("Internal GDN checkpoint specs require Ascend-owned checkpoint-capable layers")
         sequence_index_capacity = max(
             self.vllm_config.scheduler_config.max_num_seqs,
             self.decode_cudagraph_max_bs,
@@ -824,7 +831,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             num_spec_decode_tokens,
             non_spec_query_start_loc_cpu,
         ) = batch
-        if runtime_batch and num_actual_reqs > 0:
+        if runtime_batch and num_actual_reqs > 0 and not (self._ascend_gdn_checkpoints and num_prefills):
             fused = self._build_fused_metadata(
                 m, num_accepted_tokens, spec_sequence_masks_cpu, num_spec_decodes, graph_request_count, batch
             )
@@ -835,16 +842,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         query_start_loc_cpu = m.query_start_loc_cpu
         mamba_cache_mode = self.vllm_config.cache_config.mamba_cache_mode
         mamba_block_table = m.block_table_tensor
-        # vLLM #58737 derives num_reqs from the block table and asserts that
-        # seq_lens has the same number of rows. Ascend's unpadded() intentionally
-        # keeps the padded block-table rows, so on vLLM main pass only the real
-        # request rows. v0.32.0's align path already derives its output rows from
-        # seq_lens, so the result is unchanged there.
-        if (
-            not vllm_version_is("0.32.0")
-            and mamba_cache_mode != "none"
-            and mamba_block_table.shape[0] != m.seq_lens.shape[0]
-        ):
+        # Restrict recurrent state lookup to real request rows.
+        if mamba_cache_mode != "none" and mamba_block_table.shape[0] != m.seq_lens.shape[0]:
             mamba_block_table = mamba_block_table[: m.seq_lens.shape[0]]
         block_table_tensor = mamba_get_block_table_tensor(
             mamba_block_table,
@@ -969,6 +968,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         prefill_query_start_loc_cpu: torch.Tensor | None = None
         prefill_state_indices: torch.Tensor | None = None
         prefill_has_initial_state: torch.Tensor | None = None
+        checkpoint = None
+        active_prefill_rows = None
         non_spec_chunked_prefill_metadata: GDNChunkedPrefillMetadata | None = None
         if num_prefills > 0:
             if spec_sequence_masks is None and num_decodes > 0:
@@ -984,12 +985,35 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 prefill_state_indices = non_spec_state_indices_tensor
 
             assert prefill_query_start_loc_cpu is not None
+            if self._ascend_gdn_checkpoints:
+                assert prefill_state_indices is not None
+                if spec_sequence_masks_cpu is None:
+                    prefill_rows = list(range(num_decodes, m.num_reqs))
+                else:
+                    non_spec_rows = [i for i, is_spec in enumerate(spec_sequence_masks_cpu.tolist()) if not is_spec]
+                    prefill_rows = non_spec_rows[num_decodes:]
+                # Chunk indices use compact row numbers. Keep the planner and
+                # recurrence aligned when padded requests have no tokens.
+                live_rows = prefill_query_start_loc_cpu.diff() > 0
+                if not live_rows.all():
+                    active_rows_cpu = live_rows.nonzero(as_tuple=True)[0]
+                    active_prefill_rows = active_rows_cpu.to(query_start_loc.device, non_blocking=True)
+                    prefill_state_indices = prefill_state_indices.index_select(0, active_prefill_rows)
+                    prefill_rows = [prefill_rows[row] for row in active_rows_cpu.tolist()]
+                    prefill_query_start_loc_cpu = torch.cat(
+                        (prefill_query_start_loc_cpu[:1], prefill_query_start_loc_cpu[1:][live_rows])
+                    )
+                    prefill_query_start_loc = prefill_query_start_loc_cpu.to(query_start_loc.device, non_blocking=True)
+                checkpoint = self.checkpoint_builder.build(m, prefill_rows)
+                if checkpoint is not None:
+                    # Do not round at a boundary without a reserved cache page.
+                    checkpoint.checkpoint_offsets.masked_fill_(checkpoint.state_indices == NULL_BLOCK_ID, 0)
             if self._USE_COMMON_KERNEL_METADATA:
                 non_spec_chunked_prefill_metadata = _build_non_spec_chunked_prefill_metadata(
                     self,
                     prefill_query_start_loc_cpu,
                     query_start_loc.device,
-                    build_device_metadata=self.build_device_chunk_metadata,
+                    build_device_metadata=self.build_device_chunk_metadata or self._ascend_gdn_checkpoints,
                 )
                 # Common GDN/KDA callers also consume the upstream chunk fields.
                 chunk_indices = non_spec_chunked_prefill_metadata.chunk_indices_chunk64
@@ -1004,6 +1028,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 prefill_has_initial_state = has_initial_state[num_decodes:]
             else:
                 prefill_has_initial_state = has_initial_state
+            if active_prefill_rows is not None:
+                prefill_has_initial_state = prefill_has_initial_state.index_select(0, active_prefill_rows)
         else:
             has_initial_state = None
 
@@ -1033,6 +1059,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             spec_token_indx=spec_token_indx,
             non_spec_token_indx=non_spec_token_indx,
             num_accepted_tokens=num_accepted_tokens,
+            checkpoint=checkpoint,
         )
         if (
             self.use_full_cuda_graph

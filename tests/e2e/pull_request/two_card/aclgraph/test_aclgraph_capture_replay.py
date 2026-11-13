@@ -37,7 +37,7 @@ MODELS = [
 
 def _install_spies(counters: dict[str, Any]) -> contextlib.ExitStack:
     """Installs thread-safe spies on NPU methods to track invocation counts."""
-    from vllm_ascend.worker.v1.model_runner import NPUModelRunner
+    from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
     def make_spy(cls, method_name, counter):
         original = getattr(cls, method_name)

@@ -1949,7 +1949,7 @@ This is the second release candidate of v0.11.0 for vLLM Ascend. In this release
 
 ### Known Issues
 
-- Ray + EP doesn't work, if you run vLLM Ascend with ray, please disable expert parallelism. [#4123](https://github.com/vllm-project/vllm-ascend/issues/4123)
+- Ray + EP doesn't work, if you run vLLM Ascend with ray, please disable expert parallelism.
 - `response_format` parameter is not supported yet. We'll support it soon. [#4175](https://github.com/vllm-project/vllm-ascend/issues/4175)
 - cpu bind feature doesn't work for multi instance case(Such as multi DP on one node). We'll fix it in the next release.
 

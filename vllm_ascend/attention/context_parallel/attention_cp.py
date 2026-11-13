@@ -22,6 +22,7 @@ import numpy as np
 import torch
 import torch_npu
 from vllm.distributed import get_pcp_group
+from vllm.logger import logger
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -129,9 +130,23 @@ class AscendAttentionDCPMetadataBuilder(
 
     metadata_cls = AscendAttentionDCPMetadata
 
+    def __new__(cls, kv_cache_spec=None, *args, **kwargs):
+        # The target runner also creates builders for replicated draft groups,
+        # while the current config still describes the target's DCP topology.
+        # Use the upstream per-group flag to keep their metadata unsharded.
+        if kv_cache_spec is not None and not kv_cache_spec.dcp_sharded:
+            return AscendAttentionMetadataBuilder(kv_cache_spec, *args, **kwargs)
+        return super().__new__(cls)
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.use_dcp = is_dcp_enabled()
+        if self.use_dcp:
+            logger.warning_once(
+                "Decode Context Parallelism (DCP) for GQA models is deprecated as of v0.32.0 "
+                "and has entered the sunset process. It will be removed in a future release. "
+                "See RFC #21305 (https://github.com/vllm-project/vllm-ascend/issues/21305) for details."
+            )
         self.pcp_group = get_pcp_group()
         self._pcp_context: AscendPCPAttentionContext | None = None
         self._pcp_cache_group_idx: int | None = None
@@ -402,6 +417,11 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.use_pcp = self.vllm_config.parallel_config.prefill_context_parallel_size > 1
+        logger.warning_once(
+            "Decode Context Parallelism (DCP) for GQA models is deprecated as of v0.32.0 "
+            "and has entered the sunset process. It will be removed in a future release. "
+            "See RFC #21305 (https://github.com/vllm-project/vllm-ascend/issues/21305) for details."
+        )
 
     def _run_dcp_attention(
         self,

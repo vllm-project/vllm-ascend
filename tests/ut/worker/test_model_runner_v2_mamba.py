@@ -1,4 +1,5 @@
 import ast
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,20 +18,19 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MambaSpec,
     SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.worker.device_metadata import DeviceMetadataStage, DeviceMetadataTask, TargetDeviceMetadata
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.attn_utils import (
     _align_hybrid_attention_page_sizes,
     _allocate_kv_cache,
     _reshape_kv_cache_v2,
     get_kv_cache_spec,
-    unwrap_mamba_kv_cache_groups,
 )
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states import init_asecnd_model_state
@@ -107,56 +107,6 @@ def _group(spec: MambaSpec):
         kv_cache_spec=spec,
         layer_names=["linear_attn"],
     )
-
-
-def test_unwrap_uniform_mamba_groups_for_upstream_model_state():
-    spec = _mamba_spec()
-    layer_specs = {"mamba.0": spec, "mamba.1": spec}
-    wrapped = UniformTypeKVCacheSpecs.from_specs(layer_specs)
-    assert wrapped is not None
-    config = KVCacheConfig(
-        num_blocks=3,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                layer_names=list(layer_specs),
-                kv_cache_spec=wrapped,
-            )
-        ],
-    )
-
-    normalized = unwrap_mamba_kv_cache_groups(config)
-
-    assert normalized is not config
-    assert normalized.kv_cache_groups[0].kv_cache_spec == spec
-    assert config.kv_cache_groups[0].kv_cache_spec is wrapped
-
-
-def test_unwrap_preserves_distinct_mamba_layouts():
-    specs = {
-        "mamba.0": _mamba_spec(),
-        "mamba.1": MambaSpec(
-            block_size=16,
-            shapes=((3, 2), (1, 4)),
-            dtypes=(torch.float16, torch.float32),
-        ),
-    }
-    wrapped = UniformTypeKVCacheSpecs.from_specs(specs)
-    assert wrapped is not None
-    config = KVCacheConfig(
-        num_blocks=3,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                layer_names=list(specs),
-                kv_cache_spec=wrapped,
-            )
-        ],
-    )
-
-    normalized = unwrap_mamba_kv_cache_groups(config)
-
-    assert normalized.kv_cache_groups[0].kv_cache_spec is wrapped
 
 
 def test_mamba_model_state_inherits_upstream_state_management():
@@ -416,6 +366,7 @@ def test_prepare_attn_keeps_actual_counts_separate_from_padding(
             num_speculative_tokens=num_spec,
             parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         ),
+        device_metadata=None,
         num_accepted_tokens_gpu=torch.tensor([2, 3], dtype=torch.int32),
         max_model_len=1024,
         recoverssm=SimpleNamespace(record_step=MagicMock()) if recover else None,
@@ -530,25 +481,128 @@ def test_prepare_attn_classifies_one_token_prompt_tails(
     np.testing.assert_array_equal(input_batch.is_prefilling_np, [True, True, False])
 
 
-def test_prepare_attn_propagates_actual_request_count_to_metadata_builder():
-    model_state_path = (
-        Path(__file__).resolve().parents[3] / "vllm_ascend" / "worker" / "v2" / "model_states" / "mamba_hybrid.py"
+@pytest.mark.parametrize("is_target", [False, True])
+def test_kimi_pcp_metadata_respects_target_and_draft_groups(is_target):
+    context = SimpleNamespace(global_batch=object(), global_block_tables=object(), global_slot_mappings=object())
+    state = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            model_config=SimpleNamespace(
+                hf_text_config=SimpleNamespace(model_type="kimi_linear", linear_attn_config={"num_heads": 96})
+            )
+        ),
+        pcp_manager=SimpleNamespace(
+            is_target_attn_groups=MagicMock(return_value=is_target),
+            build_attention_context=MagicMock(return_value=context),
+        ),
+        device_metadata=None,
+        recoverssm=None,
     )
-    module = ast.parse(model_state_path.read_text(encoding="utf-8"))
-    prepare_attn = next(
-        node
-        for node in ast.walk(module)
-        if isinstance(node, ast.FunctionDef) and node.name == "_build_attn_metadata_for_batch"
-    )
-    build_call = next(
-        node
-        for node in ast.walk(prepare_attn)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "build_attn_metadata"
-    )
-    keywords = {keyword.arg: keyword.value for keyword in build_call.keywords}
+    mamba_group = _group(_mamba_spec())
+    sfa_group = SimpleNamespace(kv_cache_spec=object())
+    local_batch, blocks, slots = object(), object(), object()
+    with patch.object(
+        AscendMambaHybridModelState,
+        "_build_attn_metadata_for_batch",
+        side_effect=[{"sfa": "local"}, {"kda": "global"}] if is_target else [{"draft": "global"}],
+    ) as build:
+        result = AscendMambaHybridModelState.prepare_attn(
+            state,
+            local_batch,
+            CUDAGraphMode.NONE,
+            blocks,
+            slots,
+            [[sfa_group], [mamba_group]],
+            MagicMock(),
+        )
+    state.pcp_manager.is_target_attn_groups.assert_called_once_with([[sfa_group], [mamba_group]])
+    if not is_target:
+        state.pcp_manager.build_attention_context.assert_not_called()
+        assert result == {"draft": "global"}
+        build.assert_called_once()
+        assert build.call_args.args[1] is local_batch
+        assert build.call_args.args[5] == [[sfa_group], [mamba_group]]
+        assert build.call_args.kwargs == {"use_pcp_padding": False, "pcp_context": None}
+        return
+    assert result == {"sfa": "local", "kda": "global"}
+    local, global_ = build.call_args_list
+    assert local.args[1] is local_batch
+    assert local.args[3] is blocks
+    assert local.args[5] == [[sfa_group], []]
+    assert local.kwargs == {"use_pcp_padding": True, "pcp_context": context}
+    assert global_.args[1] is context.global_batch
+    assert global_.args[3] is context.global_block_tables
+    assert global_.args[5] == [[], [mamba_group]]
+    assert global_.kwargs == {"use_pcp_padding": False, "pcp_context": context}
 
-    assert ast.unparse(keywords["num_reqs"]) == "num_reqs"
-    assert ast.unparse(keywords["num_actual_reqs"]) == "input_batch.num_reqs"
+
+@pytest.mark.parametrize(
+    ("graph_mode", "for_capture"),
+    [
+        (CUDAGraphMode.NONE, False),
+        (CUDAGraphMode.NONE, True),
+        (CUDAGraphMode.FULL, True),
+        (CUDAGraphMode.FULL, False),
+    ],
+)
+@pytest.mark.parametrize("is_dummy", [False, True])
+def test_kimi_pcp_builds_metadata_in_one_device_lifecycle(graph_mode, for_capture, is_dummy):
+    owner = TargetDeviceMetadata()
+    produce = MagicMock()
+    task = DeviceMetadataTask(DeviceMetadataStage.ATTENTION, produce, 0)
+    provider = SimpleNamespace(
+        defer_device_metadata=lambda **kwargs: nullcontext(),
+        take_device_metadata_tasks=MagicMock(return_value=(task,)),
+    )
+    groups = [
+        [SimpleNamespace(kv_cache_spec=object(), get_metadata_builder=lambda _: provider)],
+        [SimpleNamespace(kv_cache_spec=_mamba_spec(), get_metadata_builder=lambda _: provider)],
+    ]
+    context = SimpleNamespace(global_batch=object(), global_block_tables=object(), global_slot_mappings=object())
+    state = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            model_config=SimpleNamespace(
+                hf_text_config=SimpleNamespace(model_type="kimi_linear", linear_attn_config={"num_heads": 96})
+            )
+        ),
+        pcp_manager=SimpleNamespace(
+            is_target_attn_groups=MagicMock(return_value=True),
+            build_attention_context=MagicMock(return_value=context),
+        ),
+        device_metadata=owner,
+        recoverssm=None,
+    )
+    sfa, kda = SimpleNamespace(), SimpleNamespace()
+    with patch.object(
+        AscendMambaHybridModelState,
+        "_build_attn_metadata_for_batch",
+        side_effect=[{"sfa": sfa, "kda": kda}] if is_dummy else [{"sfa": sfa}, {"kda": kda}],
+    ) as build:
+        result = AscendMambaHybridModelState.prepare_attn(
+            state,
+            SimpleNamespace(is_dummy=is_dummy),
+            graph_mode,
+            (),
+            object(),
+            groups,
+            MagicMock(),
+            for_capture=for_capture,
+        )
+    assert result == {"sfa": sfa, "kda": kda}
+    assert build.call_count == (1 if is_dummy else 2)
+    assert sfa.device_metadata_executor is owner.executor
+    assert kda.device_metadata_executor is owner.executor
+    provider.take_device_metadata_tasks.assert_called_once_with()
+    if graph_mode == CUDAGraphMode.FULL or for_capture:
+        produce.assert_not_called()
+    if graph_mode == CUDAGraphMode.FULL and not for_capture:
+        owner.finish_replay()
+        assert not owner.executor.submission_in_flight
+        return
+    if for_capture:
+        owner.begin_forward()
+    produce.assert_called_once()
+    owner.finish()
+    assert not owner.executor.submission_in_flight
 
 
 @patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.build_attn_metadata")
@@ -962,6 +1016,7 @@ def test_mamba_spec_follows_aligned_attention_spec(
 
     class FakeAttention:
         kv_sharing_target_layer_name = None
+        is_draft_layer = False
 
         def get_kv_cache_spec(self, _vllm_config):
             return attention_spec
@@ -1014,6 +1069,7 @@ def test_get_kv_cache_spec_rejects_nondivisible_hybrid_attention_pages(
 
     class FakeAttention:
         kv_sharing_target_layer_name = None
+        is_draft_layer = False
 
         def __init__(self, spec):
             self.spec = spec
@@ -1081,6 +1137,7 @@ def test_hybrid_dflash_writes_preserve_other_request_blocks(
     )
     layers = {
         name: SimpleNamespace(
+            is_draft_layer=name.startswith("draft."),
             get_kv_cache_spec=lambda _config, spec=spec: spec,
             get_attn_backend=lambda: SimpleNamespace(uses_descriptor_cache_view=False),
         )
