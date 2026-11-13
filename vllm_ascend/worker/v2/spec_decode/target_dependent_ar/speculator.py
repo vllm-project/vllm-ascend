@@ -698,7 +698,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
     def build_fia_params(
         self,
         num_reqs_padded: int,
-        draft_attn_metadatas: list[dict[str, Any]],
+        draft_attn_metadata: dict[str, Any],
         is_draft_model_prefill: bool,
         *,
         num_tokens: int | None = None,
@@ -707,12 +707,11 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         if self.use_dcp:
             if is_draft_model_prefill:
                 return self.build_fia_params_dcp(
-                    num_reqs_padded, draft_attn_metadatas[0], True, num_tokens=num_tokens
+                    num_reqs_padded, draft_attn_metadata, True, num_tokens=num_tokens
                 )
             return self.build_fia_params_dcp(
-                num_reqs_padded, draft_attn_metadatas[0], False, num_tokens=num_tokens
+                num_reqs_padded, draft_attn_metadata, False, num_tokens=num_tokens
             )
-        draft_attn_metadata = draft_attn_metadatas[0]
         block_table = next(iter(draft_attn_metadata.values())).block_tables
         if is_draft_model_prefill:
             return [

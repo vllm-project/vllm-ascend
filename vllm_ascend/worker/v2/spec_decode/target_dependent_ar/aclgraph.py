@@ -227,7 +227,7 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
         assert isinstance(graph, UpdatableGraph)
         fia_params = self.speculator.build_fia_params(
             desc.num_reqs,
-            draft_attn_metadatas,
+            draft_attn_metadatas[0],
             self.is_draft_model_prefill,
             num_tokens=desc.num_tokens,
         )
