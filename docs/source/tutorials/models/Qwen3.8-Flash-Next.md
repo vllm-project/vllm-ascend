@@ -413,7 +413,7 @@ Before starting:
 
 - All three examples enable Model Runner V2, async scheduling, expert parallelism, prefix caching, decode graph capture (`FULL_DECODE_ONLY`), and three-token MTP. MTP explicitly sets `enforce_eager=false` to allow graph execution; `true` forces eager execution for MTP.
 - `cpu_offload=true` places Engram embedding tables in host memory; `dp_shared_memory=false` disables sharing for DP1. Use a checkpoint with supported n-gram layers and sufficient host memory.
-- Qwen4Exp PLE CPU offload reads its pinned host table through Ascend UVA. Before starting `vllm serve`, set `PYTORCH_NPU_ALLOC_CONF=pinned_mem_register:True`; preserve any existing allocator options in the same comma-separated value. Use a `triton-ascend` release with UVA support.
+- Qwen4Exp PLE CPU offload reads its pinned host table through Ascend UVA. Before starting `vllm serve`, set `PYTORCH_NPU_ALLOC_CONF=pinned_mem_register:True`; preserve any existing allocator options in the same comma-separated value. UVA is unavailable with `triton-ascend` 3.2.1 and 3.2.2.
 - CPU binding, FlashComm1, shared expert DP, and shared expert overlap are enabled. Shared expert DP requires expert parallelism and TP > 1. `enable_fused_mc2=0` disables fused MC2; norm/quantization fusion is disabled.
 - `--mamba-cache-mode align` aligns GDN and PLE state checkpoints for prefix caching. Tool calling and reasoning parsing are covered in [Section 6](#6-functional-verification).
 - Multimodal requests require a vision encoder; add `--language-model-only` for text-only serving.
