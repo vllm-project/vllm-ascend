@@ -211,6 +211,26 @@ A new PR will be created with the title format `[Revert] Revert "original_title"
 
 Only merged PRs can be reverted. If the revert encounters merge conflicts (e.g., because the base branch has diverged significantly), the command will report the failure and the revert must be done manually.
 
+### `/run`
+
+Run the full PR gate (`pr_test.yaml`) on the **latest** commit of this PR. Pushing
+new commits does not start CI on its own, so use `/run` when the PR is ready for a
+gate run.
+
+Unlike `/rerun`, which only retries jobs that already failed inside an existing run,
+`/run` starts a fresh run against the current head commit. The test scope follows the
+labels the PR currently carries (`ready-precise`, `ready-all`, `ready-a5`,
+`main2main`); without any of them only `pre-commit` and `cpu-ut` run, which is the
+same scope a push used to get. If a run for the same commit is already queued or in
+progress, `/run` is a no-op.
+
+**Examples:**
+
+```text
+# Run the PR gate on the latest commit
+/run
+```
+
 ### `/rerun`
 
 Re-run failed CI workflows on the current PR commit. Useful when CI jobs failed or were cancelled due to infrastructure issues.
@@ -259,6 +279,7 @@ Force-cancel all workflow runs on the current PR commit. This cancels runs direc
 |---|---|---|
 | `/e2e` | ✅ | ❌ |
 | `/rerun` | ✅ | ❌ |
+| `/run` | ✅ | ❌ |
 | `/cancel` | ✅ | ❌ |
 | `/cherry-pick` | ✅ | ❌ |
 | `/revert` | ✅ | ❌ |
@@ -270,6 +291,7 @@ Force-cancel all workflow runs on the current PR commit. This cancels runs direc
 |---|---|
 | `/e2e` | PR author, or users with triage+ permission on the repository |
 | `/rerun` | PR author, or users with triage+ permission on the repository |
+| `/run` | PR author, or users with triage+ permission on the repository |
 | `/cancel` | PR author, or users with triage+ permission on the repository |
 | `/cherry-pick` | PR author, or users with triage+ permission on the repository |
 | `/revert` | PR author, or users with triage+ permission on the repository |
