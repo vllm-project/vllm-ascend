@@ -192,7 +192,9 @@ def compose_corrected(p, repo_root, rel_path):
     """Compose the full corrected source line by applying patch.old -> patch.new.
 
     Returns the corrected line string, or None when it cannot be composed
-    (multi-line patch, source line not found, patch.old absent from the line).
+    (multi-line patch, source line not found, patch.old absent from the line)
+    or when the patch is a no-op (the corrected line equals the original, e.g.
+    the LLM echoed the same text for both ``old`` and ``new``).
     Used to feed GitHub's native ``suggestion`` block so reviewers can apply
     the fix in one click instead of decoding a redundant -old/+new diff.
     """
@@ -203,6 +205,8 @@ def compose_corrected(p, repo_root, rel_path):
     if old is None:
         return None
     old_s = str(old)
+    if not old_s:
+        return None  # empty old would match anywhere and corrupt the line
     new = str(patch.get("new", "") or "")
     if "\n" in old_s or "\n" in new:
         return None  # multi-line patches need a range suggestion; keep compact form
@@ -220,14 +224,18 @@ def compose_corrected(p, repo_root, rel_path):
     if not (0 <= idx < len(src_lines)):
         return None
     src = src_lines[idx].rstrip("\n")
+    corrected = None
     if old_s in src:
-        return src.replace(old_s, new, 1)
-    old_stripped = old_s.strip()
-    if old_stripped and old_stripped in src:
-        return src.replace(old_stripped, new.strip(), 1)
-    if old_stripped == src.strip():
-        return new
-    return None
+        corrected = src.replace(old_s, new, 1)
+    else:
+        old_stripped = old_s.strip()
+        if old_stripped and old_stripped in src:
+            corrected = src.replace(old_stripped, new.strip(), 1)
+        elif old_stripped == src.strip():
+            corrected = new
+    if corrected is None or corrected == src:
+        return None  # patch not applicable or is a no-op (old == new)
+    return corrected
 
 
 def problem_line(entry, repo, sha, p, repo_root=""):
@@ -245,7 +253,9 @@ def problem_line(entry, repo, sha, p, repo_root=""):
     patch = p.get("patch")
     if corrected is not None:
         text += f"\n  - Suggested fix: {fmt_code(corrected)}"
-    elif isinstance(patch, dict) and patch.get("old") is not None:
+    elif (
+        isinstance(patch, dict) and patch.get("old") is not None and str(patch.get("old")) != str(patch.get("new", ""))
+    ):
         text += f"\n  - Suggested fix: {fmt_code(patch['old'])} → {fmt_code(patch.get('new', ''))}"
     elif p.get("fix_suggestion"):
         text += f"\n  - Suggestion: {translate_known_zh(p['fix_suggestion'])}"
@@ -383,7 +393,9 @@ def inline_body(p, repo_root="", rel_path=""):
     patch = p.get("patch")
     if corrected is not None:
         lines += ["Suggested change:", "", "```suggestion", corrected, "```", ""]
-    elif isinstance(patch, dict) and patch.get("old") is not None:
+    elif (
+        isinstance(patch, dict) and patch.get("old") is not None and str(patch.get("old")) != str(patch.get("new", ""))
+    ):
         old = patch["old"]
         new = patch.get("new", "")
         lines += [f"Suggested change: `{old}` → `{new}`", ""]
