@@ -257,6 +257,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # Pinned D2H staging for corrected device state after spec rejection.
         # The authoritative host state is the shared NumPy/torch RequestState view.
+        self._sample_tokens_copy_pending: bool | None = None
         self.num_computed_tokens_event = torch.npu.Event()
         self.num_computed_tokens_stream = torch.npu.Stream()
         self.num_computed_tokens_cpu = torch.empty(
@@ -372,7 +373,14 @@ class NPUModelRunner(GPUModelRunner):
         if pcp_manager is not None and isinstance(pcp_manager, AscendPCPManager):
             pcp_manager._sampling_hidden_restored = False
         self._restore_replicated_draft_target_states()
-        output = super().sample_tokens(grammar_output)
+        assert self._sample_tokens_copy_pending is None, "sample_tokens is not reentrant"
+        self._sample_tokens_copy_pending = False
+        try:
+            output = super().sample_tokens(grammar_output)
+            if self._sample_tokens_copy_pending:
+                self._copy_num_computed_tokens_to_cpu()
+        finally:
+            self._sample_tokens_copy_pending = None
         if self.use_spec_pp and self.is_last_pp_rank:
             assert self.pp_handler is not None
             self.pp_handler.broadcast_drafts()
@@ -1278,13 +1286,21 @@ class NPUModelRunner(GPUModelRunner):
         if (
             self.speculator is not None and not is_deepseek_v41(self.model_config.hf_config)
         ) or self.sync_spec_pp_cpu_counts:
-            self._copy_num_computed_tokens_to_cpu()
+            self._request_num_computed_tokens_copy()
 
     def postprocess_num_computed_tokens(self, input_batch: AscendInputBatch) -> None:
         super().postprocess_num_computed_tokens(input_batch)
         # Unsampled prefill chunks must also refresh the next step's snapshot.
         if self.sync_spec_pp_cpu_counts:
+            self._request_num_computed_tokens_copy()
+
+    def _request_num_computed_tokens_copy(self) -> None:
+        # Submit the proposal before a length-copy event can block the PTA queue.
+        # Deferred PP postprocessing outside sampling still copies immediately.
+        if self._sample_tokens_copy_pending is None:
             self._copy_num_computed_tokens_to_cpu()
+        else:
+            self._sample_tokens_copy_pending = True
 
     def _copy_num_computed_tokens_to_cpu(self):
         if self._skip_spec_cpu_length_sync:
