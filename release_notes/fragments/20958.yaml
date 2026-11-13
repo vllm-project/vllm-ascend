@@ -1,0 +1,17 @@
+pr: 20958
+entries:
+  - category: performance
+    text: >-
+      Dense sequence parallelism (FlashComm switch, Qwen3.5 dense family) now
+      fuses the sequence all-gather into the column GEMMs
+      (torch_npu.npu_all_gather_base_mm) and the reduce-scatter into the row
+      GEMMs (torch_npu.npu_mm_reduce_scatter_base) for unquantized batches at
+      TP size 2/4/8, overlapping the boundary communication with the matmuls.
+      The fusion decision is purely structural (shapes / dtypes / TP size),
+      hidden inside a registered custom op so torch.compile only sees the fake
+      shape impl during tracing and the real fused kernel runs identically
+      during warmup, ACL graph capture and replay.  The user's
+      `cudagraph_mode` is no longer demoted; FULL graphs are supported when
+      the underlying MC2 interface supports capture/replay.  Unsupported
+      configurations keep the unfused layout with identical numerics; no new
+      switch is required.
