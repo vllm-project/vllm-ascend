@@ -167,3 +167,14 @@ def test_hisparse_rejects_unsupported_store_mode(extra_config, kv_role):
     cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(role="hisparse_source", layer_names=[])])
     with pytest.raises(ValueError, match="requires bulk MemCache transfers"):
         AscendStoreConnector(config, KVConnectorRole.SCHEDULER, cache)
+
+
+@pytest.mark.parametrize("extra_config", [{"backend": "memcache"}, {"backend": "memcache", "load_async": False}])
+def test_hisparse_requires_async_store_load(extra_config):
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(),
+        kv_transfer_config=SimpleNamespace(kv_role="kv_both", kv_connector_extra_config=extra_config),
+    )
+    cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(role="hisparse_source", layer_names=[])])
+    with pytest.raises(ValueError, match="requires load_async=true"):
+        AscendStoreConnector(config, KVConnectorRole.SCHEDULER, cache)
