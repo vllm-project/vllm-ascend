@@ -45,8 +45,6 @@ def _layer_norm_fwd_1pass_kernel_npu(
     NORM_BEFORE_GATE: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
     ACTIVATION: tl.constexpr,
-    Z_HEADS: tl.constexpr,
-    Z_TOKEN_STRIDE: tl.constexpr,
 ):
     # Map the program id to the row of X and Y it should compute.
     pid_m = tl.program_id(0)
@@ -77,8 +75,7 @@ def _layer_norm_fwd_1pass_kernel_npu(
 
     # Load Z if needed
     if HAS_Z:
-        z_rows = (rows // Z_HEADS) * Z_TOKEN_STRIDE + (rows % Z_HEADS) * stride_z_row
-        z_ptrs = Z + z_rows[:, None] + cols[None, :] + group * N
+        z_ptrs = Z + rows[:, None] * stride_z_row + cols[None, :] + group * N
         z = tl.load(z_ptrs, mask=row_mask[:, None] & col_mask[None, :]).to(tl.float32)
         if not NORM_BEFORE_GATE:
             if ACTIVATION == 0:
@@ -142,8 +139,7 @@ def layer_norm_fwd_npu(
     assert x.stride(-1) == 1
     if z is not None:
         assert z.stride(-1) == 1
-        assert z.shape[-1] == N and z.numel() == M * N
-        assert z.ndim in (2, 3)
+        assert z.shape == (M, N)
     assert weight.shape == (N,)
     assert weight.stride(-1) == 1
     if bias is not None:
@@ -178,7 +174,7 @@ def layer_norm_fwd_npu(
         rstd,
         x.stride(0),
         out.stride(0),
-        z.stride(-2) if z is not None else 0,
+        z.stride(0) if z is not None else 0,
         M,
         group_size,
         eps,
@@ -187,8 +183,6 @@ def layer_norm_fwd_npu(
         NORM_BEFORE_GATE=norm_before_gate,
         IS_RMS_NORM=is_rms_norm,
         ACTIVATION=_activation_id(activation),
-        Z_HEADS=z.shape[1] if z is not None and z.ndim == 3 else 1,
-        Z_TOKEN_STRIDE=z.stride(0) if z is not None else 0,
         # Remove multibuffer if not needed
     )
     return out, mean, rstd
