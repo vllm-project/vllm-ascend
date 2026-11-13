@@ -671,6 +671,8 @@ class AscendConfig:
         default_factory=lambda: os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
     )
     dump_config_path: str | None = None
+    # Experimental fused add + two-stage argmax for V2 greedy drafting.
+    enable_dspark_fused_add_argmax: bool = False
     runtime_config_path: str | None = None
     runtime_config_hot_reload: bool = False
     # Runtime object constructed in init_ascend_config (not from additional_config dict).
