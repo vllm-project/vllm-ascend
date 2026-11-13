@@ -34,6 +34,7 @@ for _stream in (sys.stdout, sys.stderr):
 MAX_BODY = 65000
 HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
+
 def api(method, url, token, payload=None):
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     req = urllib.request.Request(

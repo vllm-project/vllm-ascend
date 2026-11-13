@@ -408,6 +408,7 @@ def main():
     summary = {
         "pr": cfg["pr"],
         "repo": cfg["repo"],
+        "repo_root": cfg["repo_root"],
         "head_sha": cfg["head_sha"],
         "model": cfg["model"],
         "dims": cfg["dims"],

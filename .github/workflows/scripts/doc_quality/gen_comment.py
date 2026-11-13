@@ -188,7 +188,49 @@ def also_hit_note(p):
     return f"Also matched ({len(descs)} more rule{'s' if len(descs) > 1 else ''}): " + ", ".join(descs)
 
 
-def problem_line(entry, repo, sha, p):
+def compose_corrected(p, repo_root, rel_path):
+    """Compose the full corrected source line by applying patch.old -> patch.new.
+
+    Returns the corrected line string, or None when it cannot be composed
+    (multi-line patch, source line not found, patch.old absent from the line).
+    Used to feed GitHub's native ``suggestion`` block so reviewers can apply
+    the fix in one click instead of decoding a redundant -old/+new diff.
+    """
+    patch = p.get("patch")
+    if not isinstance(patch, dict):
+        return None
+    old = patch.get("old")
+    if old is None:
+        return None
+    old_s = str(old)
+    new = str(patch.get("new", "") or "")
+    if "\n" in old_s or "\n" in new:
+        return None  # multi-line patches need a range suggestion; keep compact form
+    if not repo_root or not rel_path:
+        return None
+    n = line_anchor(p.get("line"))
+    if not n:
+        return None
+    try:
+        with open(os.path.join(repo_root, rel_path), encoding="utf-8") as f:
+            src_lines = f.readlines()
+    except OSError:
+        return None
+    idx = int(n) - 1
+    if not (0 <= idx < len(src_lines)):
+        return None
+    src = src_lines[idx].rstrip("\n")
+    if old_s in src:
+        return src.replace(old_s, new, 1)
+    old_stripped = old_s.strip()
+    if old_stripped and old_stripped in src:
+        return src.replace(old_stripped, new.strip(), 1)
+    if old_stripped == src.strip():
+        return new
+    return None
+
+
+def problem_line(entry, repo, sha, p, repo_root=""):
     letter, code, _ = parse_sev(p.get("severity"))
     tag = f"{letter}-{code}" if code else letter
     ln = line_anchor(p.get("line"))
@@ -199,8 +241,11 @@ def problem_line(entry, repo, sha, p):
     if p.get("issue"):
         parts.append(f"— {translate_known_zh(p['issue'])}")
     text = " ".join(parts)
+    corrected = compose_corrected(p, repo_root, entry.get("path", ""))
     patch = p.get("patch")
-    if isinstance(patch, dict) and patch.get("old") is not None:
+    if corrected is not None:
+        text += f"\n  - Suggested fix: {fmt_code(corrected)}"
+    elif isinstance(patch, dict) and patch.get("old") is not None:
         text += f"\n  - Suggested fix: {fmt_code(patch['old'])} → {fmt_code(patch.get('new', ''))}"
     elif p.get("fix_suggestion"):
         text += f"\n  - Suggestion: {translate_known_zh(p['fix_suggestion'])}"
@@ -218,7 +263,7 @@ def sort_problems(problems):
     return sorted(problems, key=key)
 
 
-def render(out_dir, summary, inline_count=0):
+def render(out_dir, summary, inline_count=0, repo_root=""):
     repo = summary["repo"]
     sha = summary["head_sha"]
     files = summary.get("files", [])
@@ -275,7 +320,7 @@ def render(out_dir, summary, inline_count=0):
         budget -= len(shown)
         lines.append(f"### {e['path']}")
         for p in shown:
-            lines.append(problem_line(e, repo, sha, p))
+            lines.append(problem_line(e, repo, sha, p, repo_root))
         hidden = len(probs) - len(shown)
         if hidden > 0:
             lines.append(f"\n({hidden} more not shown; see the full report in workflow Artifacts)")
@@ -322,19 +367,26 @@ def truncate_keep_marker(text, limit=MAX_COMMENT_CHARS):
     return cut + tail
 
 
-def inline_body(p):
-    """单条行内评论文本（钉在 diff 行上）。"""
+def inline_body(p, repo_root="", rel_path=""):
+    """单条行内评论文本（钉在 diff 行上）。
+
+    优先渲染 GitHub 原生 suggestion 代码块（完整修正行），评审者可一键应用；
+    无法拼出整行时退回紧凑的 ``old → new`` 片段展示，避免冗余的 -old/+new 双行 diff。
+    """
     letter, code, _ = parse_sev(p.get("severity"))
     sev_name = SEV_NAME.get(letter, letter)
     tag = f"{letter}-{code}" if code else letter
     lines = [f"**[{tag}] {sev_name}** · {h2_en(p.get('h2', ''))}", ""]
     if p.get("issue"):
         lines += [translate_known_zh(p["issue"]), ""]
+    corrected = compose_corrected(p, repo_root, rel_path)
     patch = p.get("patch")
-    if isinstance(patch, dict) and patch.get("old") is not None:
+    if corrected is not None:
+        lines += ["Suggested change:", "", "```suggestion", corrected, "```", ""]
+    elif isinstance(patch, dict) and patch.get("old") is not None:
         old = patch["old"]
         new = patch.get("new", "")
-        lines += ["Suggested change:", "", "```diff", f"- {old}", f"+ {new}", "```", ""]
+        lines += [f"Suggested change: `{old}` → `{new}`", ""]
     elif p.get("fix_suggestion"):
         lines += [f"Suggestion: {translate_known_zh(p['fix_suggestion'])}", ""]
     lines += [
@@ -344,7 +396,7 @@ def inline_body(p):
     return "\n".join(lines)
 
 
-def build_inline(out_dir, summary):
+def build_inline(out_dir, summary, repo_root=""):
     """选取行内评论候选：仅 F/S 级、行号可解析、按严重度排序，封顶 MAX_INLINE。
 
     是否在 PR diff 内由 post_comment.py 结合实际 diff 过滤。
@@ -362,7 +414,7 @@ def build_inline(out_dir, summary):
             n = line_anchor(p.get("line"))
             if not n:
                 continue
-            body = inline_body(p)
+            body = inline_body(p, repo_root, e["path"])
             if len(body) > 6000:  # GitHub 行内评论体上限 ~64KB，留余量防超长 patch
                 body = body[:6000] + f"\n{INLINE_MARKER}"
             out.append(
@@ -382,16 +434,20 @@ def generate(summary_path, out_path):
     out_dir = os.path.dirname(os.path.abspath(summary_path))
     with open(summary_path, encoding="utf-8") as f:
         summary = json.load(f)
+    repo_root = summary.get("repo_root", "") or ""
     inline = []
     if os.environ.get("DOC_EVAL_INLINE", "1") != "0":
-        inline = build_inline(out_dir, summary)
-    text = truncate_keep_marker(render(out_dir, summary, inline_count=len(inline)))
+        inline = build_inline(out_dir, summary, repo_root)
+    text = truncate_keep_marker(render(out_dir, summary, inline_count=len(inline), repo_root=repo_root))
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(text)
     inline_path = os.path.join(out_dir, "inline.json")
     with open(inline_path, "w", encoding="utf-8") as f:
         json.dump(inline, f, ensure_ascii=False, indent=2)
-    print(f"[gen_comment] comment generated: {out_path} ({len(text)} chars); inline candidates: {len(inline)} -> {inline_path}")
+    print(
+        f"[gen_comment] comment generated: {out_path} ({len(text)} chars); "
+        f"inline candidates: {len(inline)} -> {inline_path}"
+    )
     return out_path
 
 

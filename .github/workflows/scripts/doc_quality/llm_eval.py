@@ -100,7 +100,8 @@ SCHEMA_PROMPT = """\
 2. JSON 字符串值内禁止未转义英文双引号 "（引用术语/原文一律用{quote_rule}）；字符串单行不换行
 3. 每条 original 去掉【】后必须能逐字连续出现在 line 行原文中；line 行为空行时禁止上报（行号错位）
 4. issue 中引用的错误词必须能在 original 中找到
-5. issue 与 fix_suggestion 必须使用 {issue_lang} 输出，禁止混入其他语言（即使规则文本为中文，问题描述也必须用 {issue_lang}）
+5. issue 与 fix_suggestion 必须使用 {issue_lang} 输出，禁止混入其他语言
+   （即使规则文本为中文，问题描述也必须用 {issue_lang}）
 """
 
 SCRIPT_LINKED_EXTRA_SCHEMA = """
@@ -432,6 +433,7 @@ def _merge_group(group, seq_map):
     - issue 合并全部描述，patch / fix_suggestion 取首个可用值，fixable 取「有则 ✅」；
     - 脚本标记透传；被折叠条目写入 also_hit，信息不丢失。
     """
+
     def sev_key(p):
         return _sev_rank(p.get("severity"))
 
@@ -475,9 +477,7 @@ def _merge_group(group, seq_map):
             if p.get("fix_suggestion"):
                 merged["fix_suggestion"] = p["fix_suggestion"]
                 break
-    merged["fixable"] = (
-        "✅" if any("✅" in str(p.get("fixable", "")) for p in group) else merged.get("fixable", "❌")
-    )
+    merged["fixable"] = "✅" if any("✅" in str(p.get("fixable", "")) for p in group) else merged.get("fixable", "❌")
 
     # 脚本标记：脚本确证 + LLM 语义同时命中 → 标记为「脚本+LLM」
     has_script = any(p.get("_script") for p in group)
