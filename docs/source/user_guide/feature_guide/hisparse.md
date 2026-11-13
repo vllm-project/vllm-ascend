@@ -29,7 +29,7 @@ supported, with independent Main and Indexer KV dtype selection.
 | --- | --- |
 | Hardware and software | Ascend 950 with a SIMT-capable CANN 9.2 toolchain. |
 | Cache formats | C4, TurboQuant and INT8-format C8 are outside the current support scope. |
-| Parallelism and transport | Context parallelism and external P/D transport are outside the current support scope. |
+| Parallelism and transport | PCP=2 is validated for native C8 on one Ascend 950 node. DCP and external P/D transport remain outside the current support scope. |
 | Host storage | Use private Host pools per tensor-parallel rank and Core eager Host mirroring. |
 | TopK | The existing SFA requirement of divisibility by 128 applies. |
 | Feature mutual exclusion | HiSparse and `additional_config.sparse_kv_offload_config.enabled` cannot be enabled together. |
@@ -55,6 +55,31 @@ For native A5 C8, replace the two dtype options with:
 --kv-cache-dtype fp8 \
 --attention-config '{"indexer_kv_dtype":"fp8","hisparse_config":{"eager_host_mirror":true}}'
 ```
+
+### Prefill Context Parallelism
+
+For native C8 on an eight-device Ascend 950 node, add the following to the
+Model Runner V2 C8 command above:
+
+```bash
+--tensor-parallel-size 4 \
+--prefill-context-parallel-size 2 \
+--enable-expert-parallel \
+--attention-config '{"indexer_kv_dtype":"fp8","hisparse_config":{"eager_host_mirror":true,"device_buffer_size":10240}}' \
+--kv-transfer-config '{"kv_connector":"HiSparseConnector","kv_role":"kv_both","kv_connector_extra_config":{"host_pool_gib":64}}'
+```
+
+Use the direct `HiSparseConnector` with private per-rank Host pools. This path
+requires the Core HiSparse query/write-layout interface. PCP gathers packed C8
+KV rows before Resident writes and Host mirroring; sparse attention still uses
+local query rows. No additional custom kernel is needed.
+
+GLM-5.3 C8 has been validated with EP, full decode graphs and MTP3. The Hot
+buffer must hold the union of selected rows across verification tokens; 10240
+rows was used for top-k 2048 and three speculative tokens. Keep the same
+parallelism, graph and speculative settings when comparing offload on/off.
+Check both generated outputs and increasing miss counters under a constrained
+Resident budget; an all-Resident run does not exercise Host refill.
 
 ### Verifying the Feature
 
