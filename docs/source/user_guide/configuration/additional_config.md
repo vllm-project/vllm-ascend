@@ -408,9 +408,9 @@ Routing does not require pure prefill or Eager mode. Mixed prefill/decode batche
 
 For runtime routing diagnostics, add `distributed.device_communicators.mxfp8_all_reduce` to `runtime_config.ascend_log.debug` and inspect `MXFP8-AR-HIT` / `MXFP8-AR-SKIP`. Disable debug logging during performance measurements.
 
-##### Chunked MXFP8 pipeline (A5, Eager)
+##### Two-chunk MXFP8 pipeline (A5, Eager)
 
-Set `pipeline_chunks` to `2` or `4` to overlap different row chunks' quantization, communication and local reduction. The default `1` preserves whole-tensor MXFP8. These settings require `quant_dtype="mxfp8"`; INT8 remains available with its existing configuration.
+Set `enable_pipeline` to `true` to overlap two row chunks' quantization, communication and local reduction. The default `false` preserves whole-tensor MXFP8. The chunk count is fixed at two. These settings require `quant_dtype="mxfp8"`; INT8 remains available with its existing configuration.
 
 ```json
 {
@@ -418,7 +418,7 @@ Set `pipeline_chunks` to `2` or `4` to overlap different row chunks' quantizatio
         "enable": true,
         "quant_dtype": "mxfp8",
         "min_numel": 16777216,
-        "pipeline_chunks": 2,
+        "enable_pipeline": true,
         "pipeline_min_numel": 83886080
     }
 }
@@ -431,15 +431,15 @@ The wrapper uses these routes, with the existing group, dtype, hidden alignment 
 | Condition | Route |
 | --- | --- |
 | Below `min_numel` or ineligible tensor/group | Ordinary all-reduce |
-| Eligible, `pipeline_chunks=1` | Whole-tensor MXFP8 |
+| Eligible, `enable_pipeline=false` | Whole-tensor MXFP8 |
 | Eligible, below `pipeline_min_numel` | Whole-tensor MXFP8 |
 | Eligible, insufficient rows to give each chunk at least one row per rank | Whole-tensor MXFP8 |
 | Eligible, during graph capture | Whole-tensor MXFP8 |
-| Eligible, enough rows, both thresholds met, Eager execution | Chunked MXFP8 pipeline |
+| Eligible, `enable_pipeline=true`, enough rows, both thresholds met, Eager execution | Two-chunk MXFP8 pipeline |
 
 Decode calls below `min_numel` keep their existing BF16 graph path. Eligible graph-captured calls retain the original synchronous whole-tensor MXFP8 algorithm; asynchronous chunked communication is not captured. Replay executes the recorded path. Prefill and mixed prefill/decode batches in Eager mode can use the pipeline under the same metadata/size gates; no pure-prefill requirement is added.
 
-The pipeline uses a two-chunk lookahead, ordinary asynchronous AllToAll and BF16 AllGather, and `Work.wait()` dependencies on the existing HCCL group. There are no additional groups, manually created streams or device-wide synchronizations. All output shards are joined onto the caller's stream before return. Like the original runtime wrapper, it returns a separate BF16 tensor with the original shape and preserves the input.
+The pipeline submits both chunks' ordinary asynchronous AllToAll calls before waiting, followed by BF16 local reduction and asynchronous AllGather for each chunk. It uses `Work.wait()` dependencies on the existing HCCL group. There are no additional groups, manually created streams or device-wide synchronizations. All output shards are joined onto the caller's stream before return. Like the original runtime wrapper, it returns a separate BF16 tensor with the original shape and preserves the input.
 
 Rows are partitioned in group-sized units, preserving each hidden-axis MX block and its scale. Uneven partitions are supported. Send/receive buffers for at most two chunks remain in the queue; AllGather inputs and output views are kept alive through their joins. Temporary payloads are scoped to each call, with no cross-call payload cache. The full output tensor, in-flight payloads, local reductions and external HCCL resources still contribute to peak memory.
 
