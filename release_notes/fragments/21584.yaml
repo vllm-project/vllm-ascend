@@ -1,0 +1,5 @@
+pr: 21584
+entries:
+  - category: performance
+    text: Improve FP32 candidate packing for token-sharded indexers with exact radix sorting on Ascend A3.
+    hardware: [A3]
