@@ -124,6 +124,14 @@ _A3_560T_LABEL_MAP = {
     "linux-aarch64-a3-8": "linux-aarch64-a3-800i-8",
 }
 
+# Operator tests stay on the generic A3 2-card pool. They do not need the
+# 560T machines used by accuracy runs, and a full-suite run must not move them.
+_A3_OPS_PARTITION = "a3-2-ops"
+_OPS_TEST_PREFIX = "tests/e2e/pull_request/two_card/ops/"
+# Per-file budget used to split the packed operator groups. The files share
+# one pytest process, so this is well below the generic 600s default.
+_OPS_ESTIMATED_SECONDS = 45.0
+
 # Populated by _load_runner_mapping(). Ordered list of
 # (regex, {variant: logical partition key}).
 _RUNNER_MAPPING: list[tuple[re.Pattern, dict[str, PartitionKey]]] = []
@@ -491,10 +499,13 @@ def _prefer_560t_partitions(
 
     The generic ``linux-aarch64-a3-N-`` labels are mixed 560T/752T pools;
     accuracy runs must land on 560T only, so swap the labels. Counts are kept
-    because the 800i partitions declare the same group counts.
+    because the 800i partitions declare the same group counts. The operator
+    partition stays on its configured 2-card pool.
     """
     updated = dict(partition_config)
     for key, info in updated.items():
+        if key == _A3_OPS_PARTITION:
+            continue
         target_label = _A3_560T_LABEL_MAP.get(info.runner_label)
         if target_label is not None:
             updated[key] = PartitionInfo(runner_label=target_label, count=info.count)
@@ -544,12 +555,16 @@ def _lookup_estimated_time(
     """Look up the estimated time for *test_name*, falling back to defaults.
 
     Lookup is file-level only: strip any ``::nodeid`` suffix and try the
-    file path. Otherwise use *default*.
+    file path. Operator files under ``two_card/ops`` use a shorter budget
+    because each runner packs them into one pytest process. Otherwise use
+    *default*.
     """
     base = _pytest_node_file_path(test_name)
     val = estimated_times.get(base)
     if val is not None:
         return val
+    if _as_posix_path(base).startswith(_OPS_TEST_PREFIX):
+        return _OPS_ESTIMATED_SECONDS
     return default
 
 
