@@ -19,6 +19,11 @@ name: Selected Tests Upstream
 on:
   workflow_call:
     inputs:
+      runner:
+        type: string
+        required: false
+        default: 'linux-aarch64-a2b3-1'
+        description: 'The single-card A2 runner label.'
       vllm:
         type: string
         required: true
@@ -86,7 +91,7 @@ env:
 
 jobs:
     e2e-upstream_pr:
-        runs-on: linux-aarch64-a2b3-1
+        runs-on: ${{ inputs.runner }}
         env:
           RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
           RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
