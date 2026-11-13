@@ -219,13 +219,10 @@ def test_pool_real_path_returns_mapped_view(monkeypatch):
 @requires_registered_pinned
 @requires_triton_uva
 def test_qwen4exp_ple_uses_mapped_npu_view():
-    from vllm.models.qwen4_exp.common import ngram_embedding as upstream_ngram_embedding
-    from vllm_ascend.models.qwen4_exp.ple import patch_upstream_ple_short_conv
-
-    patch_upstream_ple_short_conv()
+    from vllm_ascend.models.qwen4_exp.ple import _get_npu_view_from_cpu_tensor
 
     cpu = torch.arange(32, dtype=torch.float32).pin_memory()
-    view = upstream_ngram_embedding.get_accelerator_view_from_cpu_tensor(cpu)
+    view = _get_npu_view_from_cpu_tensor(cpu)
 
     assert view.device.type == "npu"
     torch.testing.assert_close(_read_on_npu(view), cpu)
