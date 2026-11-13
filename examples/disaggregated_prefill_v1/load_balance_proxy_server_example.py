@@ -1071,6 +1071,108 @@ async def _replay_first_chunk(first_chunk: bytes, gen: Any):
         yield chunk
 
 
+def _is_cloze_request(req_data: dict) -> bool:
+    """echo+logprobs with max_tokens=0: the client wants prompt-side
+    logprobs only (no generation). Serving it via the PD two-hop pipeline
+    corrupts the logprob rows (decode hop returns nulls / misaligned rows),
+    so these requests are short-circuited to the prefill pool instead."""
+    return (
+        bool(req_data.get("echo"))
+        and req_data.get("max_tokens") == 0
+        and isinstance(req_data.get("logprobs"), (int, float))
+        and req_data.get("logprobs", 0) > 0
+        and "prompt" in req_data
+        and not req_data.get("stream", False)
+    )
+
+
+def build_cloze_request(req_data: dict) -> dict:
+    """Rewrite a cloze request into a prefill-pool request whose response is
+    semantically equivalent to a native echo+logprobs reply.
+
+    vLLM rejects max_tokens=0, so we ask for exactly 1 sampled token
+    (min_tokens=1) and inject prompt_logprobs; the P-pool response then
+    carries token_logprobs for all echoed prompt tokens plus 1 trailing
+    sampled row, which the caller strips before replying."""
+    payload = req_data.copy()
+    payload["max_tokens"] = 1
+    payload["min_tokens"] = 1
+    if "max_completion_tokens" in payload:
+        payload["max_completion_tokens"] = 1
+    payload.pop("stream_options", None)
+    payload["kv_transfer_params"] = {
+        "do_remote_decode": False,
+        "do_remote_prefill": False,
+        "remote_engine_id": None,
+        "remote_block_ids": None,
+        "remote_host": None,
+        "remote_port": None,
+    }
+    n_lp = payload.get("logprobs")
+    payload["prompt_logprobs"] = int(n_lp)
+    return payload
+
+
+def strip_sampled_row(response_json: dict) -> dict:
+    """Remove the single forced-sampled token from a cloze prefill response
+    so the reply matches native echo semantics (text/logprobs/usage)."""
+    choice = (response_json.get("choices") or [{}])[0]
+    lp = choice.get("logprobs") or {}
+    tok_lp = lp.get("token_logprobs") or []
+    toks = lp.get("tokens") or []
+    top_lp = lp.get("top_logprobs") or []
+    # With min_tokens=1 the engine appends exactly one sampled token after
+    # the echo, so the response text is echo_text + sampled_token: drop the
+    # last row of each logprob sequence and rebuild text from the remainder.
+    if len(tok_lp) > 1 and len(toks) == len(tok_lp):
+        tok_lp = tok_lp[:-1]
+        toks = toks[:-1]
+        if top_lp:
+            top_lp = top_lp[:-1]
+        lp["token_logprobs"] = tok_lp
+        lp["tokens"] = toks
+        if top_lp:
+            lp["top_logprobs"] = top_lp
+        choice["logprobs"] = lp
+        choice["text"] = "".join(toks)
+    usage = response_json.get("usage") or {}
+    usage["completion_tokens"] = 0
+    if choice.get("finish_reason") == "length":
+        choice["finish_reason"] = "stop"
+    return response_json
+
+
+async def handle_cloze_shortcut(api: str, req_data: dict, request_id: str):
+    """Serve echo+max_tokens=0 (cloze) directly from the prefill pool.
+    No decode hop: the misalignment risk source is eliminated."""
+    runtime = get_runtime()
+    args = get_global_args()
+    payload = build_cloze_request(req_data)
+    request_length = len(json.dumps(payload).encode("utf-8"))
+    prefiller_score = calculate_prefill_score(request_length)
+    # reserve_prefill_kv (not begin_request): no active-request counting;
+    # paired with release_prefill_kv below, so the counter stays balanced.
+    prefiller = await runtime.schedule("reserve_prefill_kv", prefiller_score)
+    prefiller_key = prefiller["key"]
+    try:
+        response = await send_request_to_service(
+            await runtime.get_client(ServerRole.PREFILL, prefiller_key),
+            api,
+            payload,
+            request_id,
+            max_retries=args.max_retries,
+            base_delay=args.retry_delay,
+        )
+        response_json = response.json()
+        response_json = strip_sampled_row(response_json)
+        return JSONResponse(content=response_json)
+    finally:
+        try:
+            await runtime.schedule("release_prefill_kv", prefiller_key, prefiller_score)
+        except Exception:
+            logger.warning("cloze shortcut: release_prefill_kv failed for %s", prefiller_key)
+
+
 async def handle_completions_impl(api: str, request: Request):
     runtime = get_runtime()
     args = get_global_args()
@@ -1081,6 +1183,12 @@ async def handle_completions_impl(api: str, request: Request):
             req_data["user"] = session_id
         if request_id := request.headers.get("X-Request-Id"):
             req_data["request_id"] = request_id
+        # cloze shortcut: echo+max_tokens=0 must not enter the PD two-hop
+        # pipeline (decode hop corrupts echo logprob rows). Serve from the
+        # prefill pool directly and return an equivalent echo response.
+        if _is_cloze_request(req_data):
+            rid = req_data.get("request_id") or next_req_id()
+            return await handle_cloze_shortcut(api, req_data, rid)
         req_body = await request.body()
         request_length = len(req_body)
         instance_info = await assign_instances(api, req_data, request_length, is_initial_request=True)
