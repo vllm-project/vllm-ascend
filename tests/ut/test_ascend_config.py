@@ -25,6 +25,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import PropertyMock, patch
 
+import pytest
 from vllm.config import DeviceConfig, KVTransferConfig
 from vllm.config import VllmConfig as _VllmConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -55,6 +56,26 @@ from vllm_ascend.ascend_config import (
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.utils import clear_enable_sp, enable_sp, shared_expert_dp_enabled
+
+
+@pytest.mark.parametrize("threshold", [-1, 101, float("nan"), float("inf")])
+def test_union_d8_threshold_range(threshold):
+    with pytest.raises(ValueError, match="minimax_m3_union_d8_threshold_pct"):
+        AscendConfig(sparse_kv_offload_config=None, minimax_m3_union_d8_threshold_pct=threshold)
+
+
+def test_union_d8_threshold_requires_calibration():
+    with pytest.raises(ValueError, match="minimax_m3_union_policy_path"):
+        AscendConfig(sparse_kv_offload_config=None, minimax_m3_union_d8_threshold_pct=50)
+    assert AscendConfig(sparse_kv_offload_config=None).minimax_m3_union_d8_threshold_pct == 100
+    assert (
+        AscendConfig(
+            sparse_kv_offload_config=None,
+            minimax_m3_union_d8_threshold_pct=50,
+            minimax_m3_union_policy_path="policy.json",
+        ).minimax_m3_union_d8_threshold_pct
+        == 50
+    )
 
 
 def VllmConfig(*args: Any, **kwargs: Any) -> _VllmConfig:

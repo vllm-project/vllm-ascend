@@ -2911,9 +2911,6 @@ Expected result: the run prints a performance summary that includes request thro
 
 ## 9 Performance Tuning
 
-For the default FP8 Union sparse attention path on Ascend 950 and its required CANN packages, see the
-[MiniMax-M3 Union guide](MiniMax-M3-Union.md).
-
 ### 9.1 Recommended Configurations
 
 Use the commands in [Section 5](#5-online-service-deployment) as starting configurations. They are not globally optimal: the appropriate settings depend on request lengths, concurrency, prefix-cache hit rate, and the available device memory. Evaluate each adjustment with the same workload and compare latency, throughput, and memory use.

@@ -617,6 +617,10 @@ class AscendConfig:
 
     # ---- user-input switches: bool/int/list/str, auto type validation ----
     enable_cpu_binding: bool = True
+    # Applied once to sampled per-layer/selector-head D8, never per token.
+    # 100 bypasses calibration and selects pure Union when available.
+    minimax_m3_union_d8_threshold_pct: float = 100
+    minimax_m3_union_policy_path: str | None = None
     multistream_dsv4_dsa_overlap: bool = True
     # Prepare Engram hashes, lookups and DP/TP exchanges on an auxiliary stream;
     # FULL graphs wait on descriptor-specific external events at consumers.
@@ -720,6 +724,12 @@ class AscendConfig:
 
     @model_validator(mode="after")
     def _validate_user_input_ranges(self):
+        if not math.isfinite(self.minimax_m3_union_d8_threshold_pct) or not (
+            0 <= self.minimax_m3_union_d8_threshold_pct <= 100
+        ):
+            raise ValueError("minimax_m3_union_d8_threshold_pct must be in [0, 100]")
+        if self.minimax_m3_union_d8_threshold_pct < 100 and not self.minimax_m3_union_policy_path:
+            raise ValueError("A D8 threshold below 100 requires minimax_m3_union_policy_path")
         if self.weight_nz_mode not in (0, 1, 2):
             raise ValueError(f"weight_nz_mode must be one of 0, 1, or 2; got {self.weight_nz_mode}")
         # TODO(zzzzwwjj): remove it after deprecating `enable_mc2_hierarchy_comm`.

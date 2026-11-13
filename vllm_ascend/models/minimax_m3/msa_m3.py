@@ -130,10 +130,20 @@ def _use_union_attention(
     head_size: int,
     block_size: int,
 ) -> bool:
-    """Select the default Union path only for its supported FP8 geometry."""
+    """Select Union for its supported A5 geometry and KV dtypes."""
     return (
-        get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
-        and kv_cache_dtype in ("fp8", "fp8_e4m3", torch.float8_e4m3fn)
+        get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
+        and kv_cache_dtype
+        in (
+            "auto",
+            "bfloat16",
+            "float16",
+            "fp8",
+            "fp8_e4m3",
+            torch.bfloat16,
+            torch.float16,
+            torch.float8_e4m3fn,
+        )
         and num_kv_heads == 1
         and 1 <= num_heads <= 16
         and head_size == _MSA_INDEX_BLOCK_SIZE
@@ -860,17 +870,11 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
         }
         hardware_profile = get_current_hardware_profile()
         context = vllm_config.compilation_config.static_forward_context
-        self.use_union = any(
-            _use_union_attention(
-                kv_cache_spec.dtype,
-                context[name].num_heads,
-                kv_cache_spec.num_kv_heads,
-                kv_cache_spec.head_size,
-                self.block_size,
-            )
-            for name in layer_names
-        )
-        self.reuse_decode_gbsa_metadata = not self.use_union and hardware_profile.supports(
+        # Use the resolved worker routes, including calibration and optional-op
+        # fallback. Mixed policy groups still prepare native decode schedules.
+        self.use_union = any(context[name].impl.use_union for name in layer_names)
+        native_layers = [context[name] for name in layer_names if not context[name].impl.use_union]
+        self.reuse_decode_gbsa_metadata = bool(native_layers) and hardware_profile.supports(
             HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE
         )
         self.decode_gbsa_kv_dtype = kv_cache_spec.dtype
@@ -888,8 +892,7 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
             and vllm_config.model_config.dtype == torch.bfloat16
         ):
             context = vllm_config.compilation_config.static_forward_context
-            for name in layer_names:
-                layer = context[name]
+            for layer in native_layers:
                 self.decode_gbsa_configs.add((layer.num_heads, layer.num_kv_heads, layer.head_dim, layer.topk_blocks))
         # CANN's fixed output layout is independent of batch size. Each layer
         # configuration/query length can share one persistent buffer across
@@ -1076,6 +1079,7 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
         *,
         topk_blocks: int,
         sparse_block_size: int,
+        union_enabled: bool = True,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -1085,12 +1089,13 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
         self.topk_blocks = topk_blocks
         self.block_size = sparse_block_size
         self._dequant_scale: torch.Tensor | None = None
-        self.use_union = _use_union_attention(
-            kv_cache_dtype, num_heads, self.num_kv_heads, head_size, sparse_block_size
+        self.use_union = (
+            union_enabled
+            and _use_union_attention(kv_cache_dtype, num_heads, self.num_kv_heads, head_size, sparse_block_size)
+            and load_union_extensions() is not None
         )
         if self.use_union:
-            load_union_extensions()
-            logger.info_once("MiniMax-M3 FP8 Union enabled: UnionSparseGen + GBSA exactMask, union_size=8")
+            logger.info_once("MiniMax-M3 Union enabled: UnionSparseGen + GBSA exactMask, union_size=8")
 
     def forward(
         self,

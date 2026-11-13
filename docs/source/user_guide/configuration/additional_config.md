@@ -51,6 +51,8 @@ The following table lists additional configuration options available in vLLM Asc
 | `dump_config`                       | dict | `None`  | Inline msprobe dump configuration. vLLM-Ascend will materialize it to a temporary JSON file and pass that file to the debugger. |
 | `dump_config_path`                  | str  | `None`  | Configuration file path for msprobe dump (compatible legacy option).                                      |
 | `enable_shared_expert_dp`           | bool | `False` | Replicate shared-expert weights across TP ranks and run the shared expert with data parallelism. This option is independent of upstream MoE sequence parallelism; either feature or both can be enabled. It improves performance but consumes more memory. |
+| `minimax_m3_union_d8_threshold_pct`  | float | `100` | MiniMax-M3 sampled D8 threshold in percent, in `[0, 100]`. `100` bypasses policy loading and uses pure Union where supported. |
+| `minimax_m3_union_policy_path`       | str | `None` | Frozen layer/selector-head calibration JSON, required when the D8 threshold is below `100`. See [MiniMax-M3 Union routing](#minimax-m3-union-routing). |
 | `enable_force_eplb`                 | bool | `False` | Force a deterministic round-robin expert routing to measure the EPLB performance ceiling. **Analysis and profiling only — never enable in production.** It replaces the real MoE router output, so model results and accuracy are invalid. Cannot be combined with `eplb_config.dynamic_eplb`. |
 | `multistream_overlap_shared_expert` | bool | `False` | Whether to enable multi-stream shared expert. This option only takes effect on MoE models with shared experts. |
 | `enable_cpu_binding`                | bool | `True`  | Enables Ascend-native CPU binding on ARM servers. Set to `False` to disable. See [CPU Binding](../feature_guide/cpu_binding.md). |
@@ -337,6 +339,50 @@ KVPP supports non-hybrid MLA/SFA models with eager execution or `PIECEWISE` grap
 KVPP can be combined with `MooncakeConnectorV2` for P/D disaggregation and `AscendStoreConnector` for KV pooling under the connector-specific restrictions in the [KVPP guide](../feature_guide/kvpp.md#kv-transfer-configuration). Enable KVPP only on the prefill node for P/D disaggregation. `MultiConnector` can combine these connectors; each child must satisfy its own type and role requirements.
 
 PCP gathers prefill KV before cache writes. KVPP layer broadcasts restore prior-forward cache contents before attention; the broadcast decision uses the global scheduled batch rather than PCP-local segment offsets.
+
+## MiniMax-M3 Union routing
+
+MiniMax-M3 uses Union on supported Ascend 950 geometry with BF16/FP16 or E4M3
+KV caches. If the separately installed UnionSparseGen and GBSA exactMask
+extensions cannot be loaded, it uses native Q-gather-KV instead.
+
+The default `minimax_m3_union_d8_threshold_pct=100` uses pure Union without
+loading a policy or calculating D8. To use a sampled policy, set a threshold
+below `100` and provide `minimax_m3_union_policy_path` on every worker:
+
+```json
+{
+  "minimax_m3_union_d8_threshold_pct": 50,
+  "minimax_m3_union_policy_path": "/path/to/calibration.json"
+}
+```
+
+The calibration file uses the existing frozen layer/selector-head format:
+
+```json
+{
+  "valid": true,
+  "routing": "frozen-layer-selector-head",
+  "per_token_dynamic": false,
+  "selector_modified": false,
+  "decisions": {
+    "3:0": {"D8": 0.49},
+    "3:1": {"D8": 0.52}
+  }
+}
+```
+
+Include every sparse layer and all its global selector heads. `D8` is the
+sampled mean of the union of eight aligned queries' selected block sets divided
+by `8 * topk_blocks`, expressed as a fraction in `[0, 1]`. It is unrelated to
+text repetition or prefix-cache hits. Use the same frozen calibration file on
+every worker. Existing `path` entries are ignored: at startup, each layer/head
+uses Q-gather-KV if `100 * D8` exceeds the configured threshold, and Union
+otherwise. Replicated TP ranks use the same global selector-head entry.
+
+These routes remain fixed during prefill, decode and graph replay. Inference
+does not sample selections, recalculate D8, or switch per token. A threshold
+tuned on one calibration dataset need not be optimal on other workloads.
 
 ## GDN internal prefill checkpoints
 
