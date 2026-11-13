@@ -2341,7 +2341,12 @@ def test_sfa_post_load_orders_weight_switch_after_shared_processing(pcp_size, dc
     events = []
     impl.indexer.process_weights_after_loading = lambda: events.append("indexer")
     if impl._parallel_o_proj is not None:
-        impl._parallel_o_proj.enable = lambda: events.append("switch")
+
+        def enable_weight_switch(*, refresh_gather_inputs):
+            assert refresh_gather_inputs is True
+            events.append("switch")
+
+        impl._parallel_o_proj.enable = enable_weight_switch
 
     def resolve_preprocess_type(_):
         events.append("preprocess")
