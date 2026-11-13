@@ -314,22 +314,30 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
+        # Compressor state specs are a subclass but must never merge with SWA:
+        # they use much smaller block_size (1/2) and prefix_cacheable=False.
         assert all(isinstance(spec, AscendSlidingWindowMLASpec) for spec in specs), (
             "All attention layers in the same KV cache group must be AscendSlidingWindowMLASpec."
+        )
+        assert all(type(spec) is cls for spec in specs), (
+            "Refuse merging different AscendSlidingWindowMLASpec subclasses "
+            f"(or mixed subclasses); got types={[type(s).__name__ for s in specs]}"
         )
         cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
         compress_ratio_set = set(spec.compress_ratio for spec in specs)
         model_version_set = set(spec.model_version for spec in specs)
         sliding_window_set = set(spec.sliding_window for spec in specs)
+        block_size_set = set(spec.block_size for spec in specs)
         assert (
             len(cache_dtype_str_set) == 1
             and len(compress_ratio_set) == 1
             and len(model_version_set) == 1
             and len(sliding_window_set) == 1
+            and len(block_size_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
-            "quantization method, compress ratio, model version and sliding "
-            "window size."
+            "quantization method, compress ratio, model version, sliding "
+            "window size and block size."
         )
         return cls(
             block_size=specs[0].block_size,

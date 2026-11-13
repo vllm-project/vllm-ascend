@@ -289,8 +289,8 @@ class AscendDSAC4Backend(AscendDSABackend):
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
         # Align with upstream's logical block-size contract: Ascend's physical
-        # 32/64/128-token C4 pages represent 128/256/512 raw scheduler tokens.
-        return [128, 256, 512]
+        # 16/32/64/128-token C4 pages represent 64/128/256/512 raw scheduler tokens.
+        return [64, 128, 256, 512]
 
 
 class AscendDSAC128Backend(AscendDSABackend):
@@ -301,8 +301,8 @@ class AscendDSAC128Backend(AscendDSABackend):
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
         # Align with upstream's logical block-size contract: Ascend's physical
-        # 32/64/128-token C128 pages represent 4096/8192/16384 raw scheduler tokens.
-        return [4096, 8192, 16384]
+        # 16/32/64/128-token C128 pages represent 2048/4096/8192/16384 raw scheduler tokens.
+        return [2048, 4096, 8192, 16384]
 
 
 class AscendDSASWABackend(AscendDSABackend):
@@ -312,7 +312,7 @@ class AscendDSASWABackend(AscendDSABackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
-        return [32, 64, 128]
+        return [16, 32, 64, 128]
 
 
 class AscendDSAC4StateBackend(AscendDSABackend):
@@ -322,7 +322,8 @@ class AscendDSAC4StateBackend(AscendDSABackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
-        return [2, 4, 8]
+        # Scheduler blocks 16/32/64/128 map to 1/2/4/8 state slots.
+        return [1, 2, 4, 8]
 
 
 class AscendDSAC128StateBackend(AscendDSABackend):
@@ -332,9 +333,12 @@ class AscendDSAC128StateBackend(AscendDSABackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
+        # Keep the previous 32/64/128 slots and add the block-size-16 slot.
+        # Dropping the largest size makes select_common_block_size split a
+        # block-128 page, which changes the PD transfer layout.
         if get_current_hardware_profile().supports(HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES):
-            return [4, 8, 16]
-        return [8, 16, 32]
+            return [2, 4, 8, 16]
+        return [4, 8, 16, 32]
 
 
 @dataclass
@@ -370,6 +374,7 @@ class AscendDSAReqMetadata:
     ori_win_right: int | None = None
     dspark_swa_indices: torch.Tensor | None = None
     vision_swa_indices: torch.Tensor | None = None
+    max_seqlen_kv: int | None = None
 
 
 @dataclass
@@ -1325,6 +1330,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ori_win_right=ori_win_right,
             dspark_swa_indices=dspark_swa_indices,
             vision_swa_indices=vision_swa_indices,
+            max_seqlen_kv=int(max_seqlen_kv) if max_seqlen_kv is not None else None,
         )
         if self._device_metadata_enabled and self.compressor_metadata_buffers is not None:
             assert num_compressed_tokens is not None
@@ -1551,6 +1557,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ori_win_left=ori_win_left,
             ori_win_right=ori_win_right,
             dspark_swa_indices=dspark_swa_indices,
+            max_seqlen_kv=int(max_seqlen_kv) if max_seqlen_kv is not None else None,
         )
 
     def build_for_graph_capture(
@@ -2336,11 +2343,15 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         if self.compress_ratio > 1:
             kv_plan.add_dsa_sparse_attn_extra_kwargs(attn_kwargs, cu_seqlens_cmp_kv=common_metadata.cu_cmp_seqlen_list)
 
+        max_seqlen_kv = common_metadata.max_seqlen_kv
+        if max_seqlen_kv is None:
+            max_seqlen_kv = swa_req_metadata.max_seqlen_kv
         attn_kwargs.update(
             ori_kv=swa_kv_cache,
             ori_block_table=swa_req_metadata.block_table,
             cu_seqlens_q=actual_seq_lengths_query,
             seqused_kv=actual_seq_lengths_key,
+            max_seqlen_kv=max_seqlen_kv,
             sinks=self.attn_sink,
             metadata=common_metadata.sas_metadata,
             softmax_scale=self.softmax_scale,

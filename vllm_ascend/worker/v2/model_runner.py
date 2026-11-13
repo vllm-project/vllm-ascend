@@ -95,7 +95,7 @@ from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
     is_c8_mxfp_kv_quant,
-    is_deepseek_v41,
+    is_deepseek_v4_family,
     lmhead_tp_enable,
     lmhead_tp_max_num_logits,
     lmhead_tp_pad_rows,
@@ -1276,7 +1276,7 @@ class NPUModelRunner(GPUModelRunner):
         # backends are on the audited device-length path.
         # Non-last PP stages receive rejections without owning a speculator.
         if (
-            self.speculator is not None and not is_deepseek_v41(self.model_config.hf_config)
+            self.speculator is not None and not is_deepseek_v4_family(self.model_config.hf_config)
         ) or self.sync_spec_pp_cpu_counts:
             self._copy_num_computed_tokens_to_cpu()
 
@@ -1313,7 +1313,7 @@ class NPUModelRunner(GPUModelRunner):
         # Keep the exact host mirror for consumers such as FIA and PCP.
         # Device-length backends retain the scheduler's CPU upper bound.
         if not self._skip_spec_cpu_length_sync and (
-            (self.speculator is not None and not is_deepseek_v41(self.model_config.hf_config))
+            (self.speculator is not None and not is_deepseek_v4_family(self.model_config.hf_config))
             or self.sync_spec_pp_cpu_counts
         ):
             # Blocks CPU submission until D2H completes; may stall the async pipeline.
