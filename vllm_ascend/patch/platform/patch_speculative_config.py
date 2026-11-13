@@ -1,5 +1,4 @@
 import math
-from contextlib import contextmanager
 from copy import copy
 from dataclasses import replace
 from typing import Any, Literal, get_args
@@ -185,26 +184,8 @@ def _normalize_deepseek_dspark_draft(draft_model_config) -> None:
     draft_model_config._architecture = architecture
 
 
-@contextmanager
-def _temporarily_disable_dspark_dcp(self: SpeculativeConfig):
-    target_parallel_config = self.target_parallel_config
-    if getattr(self, "method", None) != "dspark" or target_parallel_config.decode_context_parallel_size <= 1:
-        yield
-        return
-
-    guard_parallel_config = copy(target_parallel_config)
-    guard_parallel_config.decode_context_parallel_size = 1
-    self.target_parallel_config = guard_parallel_config
-    try:
-        yield
-    finally:
-        self.target_parallel_config = target_parallel_config
-
-
 def _dspark_post_init(self):
-    # TODO: This block can be deleted after the upstream supports the overlay of mla dcp and dspark
-    with _temporarily_disable_dspark_dcp(self):
-        _orig_post_init(self)
+    _orig_post_init(self)
     if self.use_dspark():
         draft_model_config = getattr(self, "draft_model_config", None)
         draft_hf_config = getattr(draft_model_config, "hf_config", None)
