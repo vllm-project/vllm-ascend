@@ -6,13 +6,9 @@
 #include <torch_npu/csrc/core/npu/NPUCachingAllocator.h>
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #include <torch_npu/csrc/core/npu/NPUGuard.h>
-#include <torch_npu/csrc/framework/OpCommand.h>
-#include <c10/core/impl/PyObjectSlot.h>
 #include <array>
 #include <algorithm>
 #include <optional>
-#include <vector>
-#include <utility>
 
 #include "../attention/hi_sparse_resolve_residency/op_kernel/resolver_scratch.h"
 
@@ -95,8 +91,6 @@ void resolve_residency(
         tensor_or_undefined(valid_rows)};
     c10_npu::NPUGuard guard(logical.device());
     auto npu_stream = c10_npu::getCurrentNPUStream();
-    std::vector<at::Tensor> owners;
-    owners.reserve(tensors.size());
     for (size_t i = 0; i < tensors.size(); ++i) {
         const auto& tensor = tensors[i];
         if (!tensor.defined()) continue;
@@ -143,15 +137,8 @@ void resolve_residency(
                         "Invalid HiSparse error scratch shape");
         }
         if (i == 18) TORCH_CHECK(tensor.numel() == 1, "Invalid HiSparse valid-row scalar");
-        // Separate TensorImpls retain storage until queue submission without
-        // Python-object destruction on a queue/release thread.
-        owners.emplace_back(tensor.detach());
-        TORCH_CHECK(owners.back().unsafeGetTensorImpl()->pyobj_slot()->load_pyobj() == nullptr &&
-                        owners.back().unsafeGetTensorImpl() != tensor.unsafeGetTensorImpl(),
-                    "HiSparse queue owner must have an independent, Python-free TensorImpl");
-        // Queue callback completion is not device completion. The allocator
-        // must keep every storage unavailable for reuse until this stream's
-        // work completes, including when graph capture is active.
+        // Register the use before dispatch so allocator reuse follows queued
+        // work on the resolver stream, even if the caller releases a view.
         c10_npu::NPUCachingAllocator::recordStream(tensor.storage().data_ptr(), npu_stream);
     }
     TORCH_CHECK(bool(swap_host) == bool(swap_device) && bool(swap_host) == bool(swap_counts),
@@ -173,9 +160,8 @@ void resolve_residency(
         int64_t(attention_capacity), int64_t(miss_mask && miss_mask->element_size() == 1)};
     at::IntArrayRef geometry_ref(geometry);
     // Generated ACLNN takes inputs, attributes, then caller-owned outputs.
-    // Keep storage owners through queue submission as on the direct path.
-    EXEC_NPU_CMD_RETAINED(
-        aclnnHiSparseResolveResidency, owners,
+    EXEC_NPU_CMD(
+        aclnnHiSparseResolveResidency,
         tensors[0], tensors[1], tensors[2], tensors[3], tensors[4], tensors[5], tensors[18],
         geometry_ref, tensors[6], tensors[7], tensors[8], tensors[9], tensors[10],
         tensors[11], tensors[12], tensors[13], tensors[14], tensors[15], tensors[16], tensors[17]);
