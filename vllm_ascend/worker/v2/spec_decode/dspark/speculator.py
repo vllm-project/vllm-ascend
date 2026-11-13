@@ -16,19 +16,17 @@
 # This file is a part of the vllm-ascend project.
 #
 from collections.abc import Mapping, Sequence
-from contextlib import contextmanager
 from typing import Any, cast
 
 import numpy as np
 import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed import get_dcp_group, get_pcp_group
+from vllm.distributed import get_dcp_group
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
-from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculator
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
@@ -48,7 +46,11 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_factory,
     build_attn_metadata_wrapper,
 )
-from vllm_ascend.worker.v2.spec_decode.dflash.speculator import prepare_dflash_inputs_factory
+from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
+from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
+    draft_metadata_request_count,
+    prepare_dflash_inputs_factory,
+)
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     build_dspark_draft_config,
@@ -59,7 +61,7 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
 class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
     _speculator_name = "DSpark"
     # DSpark samples via compute_draft_logits and never calls sample_draft, so
-    # the mixin sample_draft alignment is not used; instead load_draft_model
+    # the mixin's speculator-level logits hook is not used; load_draft_model
     # wraps the draft model's compute_draft_logits to pad the LM-head input to
     # the group-agreed capacity and trim the logits back (no _sample_sequential
     # override, upstream sampling logic untouched).
@@ -89,11 +91,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         self.dcp_manager = DCPManager(
             dcp_world_size=self.attn_vllm_config.parallel_config.decode_context_parallel_size,
             dcp_rank=get_dcp_group().rank_in_group,
-            max_buffer_num_tokens=self.max_num_tokens,
-            max_num_reqs=self.max_num_reqs,
-            device=self.device,
             vllm_config=self.attn_vllm_config,
-            use_async_scheduling=self.vllm_config.scheduler_config.async_scheduling,
         )
 
     def load_draft_model(
@@ -118,7 +116,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         DSpark feeds its vocab-sharded draft LM head directly through
         ``compute_draft_logits`` (inside upstream ``_sample_sequential`` /
         ``_sample_sequential_topk``), which bypasses the mixin's
-        ``sample_draft`` alignment. Wrap the method instead of overriding the
+        speculator-level logits hook. Wrap the method instead of overriding the
         sampling loop: every rank feeds the group-agreed capacity
         (``max_num_reqs * num_speculative_steps``) into the LM-head
         collectives, then the logits are trimmed back to the real rows.
@@ -298,18 +296,6 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
             max_model_len=self.max_model_len,
         )
 
-    # TODO: Remove this helper and build_draft_attn_metadatas once tiling
-    # eliminates replay-time metadata rebuilding. The rebuild currently needs
-    # this count because it cannot access the effective num_reqs from upstream propose().
-    @contextmanager
-    def _draft_metadata_request_count(self, num_reqs: int):
-        previous = getattr(self, "_draft_metadata_num_reqs", None)
-        self._draft_metadata_num_reqs = num_reqs
-        try:
-            yield
-        finally:
-            self._draft_metadata_num_reqs = previous
-
     # Graph capture builds metadata from the padded request shape.
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         assert self.input_batch is not None
@@ -439,10 +425,8 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         assert self.input_batch is not None
         # PCP restores global requests for the replicated draft, whereas the
         # target DP sync describes its rank-local batch. Negotiate draft
-        # capacity independently, as adaptive verification also requires.
-        sync_state = dp_sync_state
-        if self.pcp_manager is not None or (self.enable_adaptive_verification and not is_profile):
-            sync_state = None
+        # capacity independently for PCP.
+        sync_state = None if self.pcp_manager is not None else dp_sync_state
         if dummy_run and skip_attn_for_dummy_run:
             # Profiling runs the draft with its own query token count, which
             # can differ from the target batch. Let forward_context coordinate
@@ -465,7 +449,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 num_draft_reqs, self.max_num_reqs, self.num_query_per_req
             )
         with (
-            self._draft_metadata_request_count(num_draft_reqs),
+            draft_metadata_request_count(self, num_draft_reqs),
             build_attn_metadata_wrapper(),
             build_attn_metadata_factory(
                 self.input_buffers.positions,
@@ -494,14 +478,9 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 is_profile=is_profile,
                 num_speculative_tokens=num_speculative_tokens,
             )
-        if self.pcp_manager is not None and not dummy_run and not hasattr(PCPManager, "sync_drafts"):
-            # vLLM #61994 broadcasts proposals after drafting, outside the graph.
-            # Older vLLM lacks that runner hook; keep its token/logit contract
-            # here until both supported lanes provide PCPManager.sync_drafts.
-            pcp_group = get_pcp_group()
-            pcp_group.broadcast(draft_tokens, src=0)
-            if self.draft_logits is not None:
-                logits = self.draft_logits[input_batch.idx_mapping]
-                pcp_group.broadcast(logits, src=0)
-                self.draft_logits[input_batch.idx_mapping] = logits
+        # vLLM 0.33.0 needs this call; newer runners synchronize after
+        # propose(). Never communicate during dummy runs.
+        if vllm_version_is("0.33.0") and self.pcp_manager is not None and not dummy_run:
+            assert isinstance(self.pcp_manager, AscendPCPManager)
+            self.pcp_manager.sync_drafts(draft_tokens, input_batch.idx_mapping, self.draft_logits)
         return draft_tokens

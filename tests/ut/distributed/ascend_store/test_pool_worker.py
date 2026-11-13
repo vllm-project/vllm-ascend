@@ -23,11 +23,13 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 
 # isort: split
 import torch
+from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncCalculator
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
 
@@ -119,6 +121,8 @@ def make_worker(
     layer_offset=0,
     pp_partition=None,
     cache_block_size=16,
+    use_recoverssm=False,
+    mamba_copy_funcs=None,
 ):
     module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
     start_patch(test, f"{module}.get_tensor_model_parallel_rank", return_value=tp_rank)
@@ -171,8 +175,18 @@ def make_worker(
     if kv_cache_config is not None:
         config.scheduler_config.disable_hybrid_kv_cache_manager = False
     config.cache_config.block_size = cache_block_size
+    config.cache_config.prefix_cache_retention_interval = 0
     config.cache_config.prefix_match_unit = prefix_match_unit
     config.cache_config.prefix_cache_retention_interval = None
+    config.cache_config.use_kda_recoverssm = use_recoverssm
+    if use_recoverssm:
+        model_cls = start_patch(test, f"{module}.get_model_cls").return_value
+        if mamba_copy_funcs is None:
+            model_cls.get_mamba_state_copy_funcs.side_effect = lambda mamba_types: {
+                backend: MambaStateCopyFuncCalculator.kda_state_copy_func() for backend in mamba_types
+            }
+        else:
+            model_cls.get_mamba_state_copy_funcs.return_value = mamba_copy_funcs
     config.kv_events_config = None
     if enable_kv_events:
         config.kv_events_config = MagicMock(enable_kv_cache_events=True)
@@ -180,7 +194,100 @@ def make_worker(
     return create_kv_pool_worker(config, use_layerwise=use_layerwise, kv_cache_config=kv_cache_config)
 
 
+@pytest.mark.parametrize("retention_interval", [None, 0, 4096])
+def test_cache_coordinator_uses_kv_cache_config_retention_interval(retention_interval):
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_worker
+
+    worker = pool_worker.KVPoolWorker.__new__(pool_worker.KVPoolWorker)
+    worker.kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[object()], prefix_cache_retention_interval=retention_interval
+    )
+    worker.use_hybrid = True
+    worker.cache_transfer_granularity = 16
+    worker.hash_block_size = 16
+    worker.grouped_block_size = [16]
+    worker.kv_cache_group_families = ["mamba"]
+    config = SimpleNamespace(speculative_config=None)
+    with patch.object(pool_worker, "AscendStoreCoordinator") as coordinator_cls:
+        coordinator = worker._build_cache_coordinator(config)
+    assert coordinator is coordinator_cls.return_value
+    assert coordinator_cls.call_args.kwargs["retention_interval"] == retention_interval
+
+
 class TestPCPPoolWorker(unittest.TestCase):
+    def test_nonzero_pcp_rank_keeps_dcp_save_leader(self):
+        for dcp_size, tp_rank, expected in ((1, 0, False), (2, 1, True), (2, 3, False)):
+            with self.subTest(dcp_size=dcp_size, tp_rank=tp_rank):
+                worker = make_worker(
+                    self,
+                    use_layerwise=True,
+                    use_mla=True,
+                    extra_config={"backend": "memcache"},
+                    tp_size=4,
+                    tp_rank=tp_rank,
+                    pcp_size=2,
+                    pcp_rank=1,
+                    dcp_size=dcp_size,
+                )
+                worker.dcp_rank = dcp_size - 1
+                self.assertEqual(worker._is_layerwise_save_owner(0), expected)
+
+    def test_non_align_sharded_mamba_save_ownership_respects_write_role(self):
+        spec = MambaSpec(block_size=16, shapes=((8,),), dtypes=(torch.float32,), mamba_cache_mode="all")
+        plan = SimpleNamespace(kv_cache_groups=[KVCacheGroupSpec(["model.layers.0.attn"], spec)])
+        for tp_size, tp_rank, pcp_size, pcp_rank in ((2, 1, 1, 0), (1, 0, 2, 1)):
+            worker = make_worker(
+                self,
+                kv_cache_config=plan,
+                num_layers=1,
+                use_layerwise=True,
+                use_mla=True,
+                tp_size=tp_size,
+                tp_rank=tp_rank,
+                pcp_size=pcp_size,
+                pcp_rank=pcp_rank,
+            )
+            self.assertFalse(worker.group_uses_align_state[0])
+            for kv_role, consumer_is_to_put, expected in (
+                ("kv_producer", False, True),
+                ("kv_both", False, True),
+                ("kv_consumer", False, False),
+                ("kv_consumer", True, True),
+            ):
+                with self.subTest(tp_rank=tp_rank, pcp_rank=pcp_rank, role=kv_role, put=consumer_is_to_put):
+                    worker.kv_role = kv_role
+                    worker.consumer_is_to_put = consumer_is_to_put
+                    self.assertEqual(worker._is_layerwise_save_owner(0), expected)
+
+    def test_single_mamba_group_uses_pcp_state_shards(self):
+        plan = SimpleNamespace(
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["model.layers.0.attn"],
+                    MambaSpec(
+                        block_size=16,
+                        shapes=((8,),),
+                        dtypes=(torch.float32,),
+                        mamba_cache_mode="align",
+                    ),
+                )
+            ]
+        )
+        for use_layerwise in (False, True):
+            with self.subTest(use_layerwise=use_layerwise):
+                worker = make_worker(
+                    self,
+                    kv_cache_config=plan,
+                    num_layers=1,
+                    use_layerwise=use_layerwise,
+                    pcp_size=2,
+                    pcp_rank=1,
+                )
+                self.assertFalse(worker.use_hybrid)
+                self.assertEqual(worker.sharded_mamba_group_ids, {0})
+                self.assertEqual(worker.metadata[0].head_or_tp_rank, 0 if use_layerwise else 1)
+                self.assertEqual(worker.get_group_tp_size(0), 2)
+
     def test_dspark_draft_pool_exclusion_requires_layerwise_reuse(self):
         target_names = [f"model.layers.{index}.attn" for index in range(4)]
         draft_names = [f"draft.layers.{index}.attn" for index in range(4, 6)]
@@ -308,7 +415,8 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
                     FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32),
                 )
                 for layer in range(2)
-            ]
+            ],
+            prefix_cache_retention_interval=None,
         )
         worker = make_worker(self, use_layerwise=True, kv_cache_config=plan)
         worker.kv_send_thread = MagicMock(request_queue=queue.Queue())
@@ -329,6 +437,7 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
                 )
             ]
         )
+        plan.prefix_cache_retention_interval = None
         worker = make_worker(self, num_layers=1, use_layerwise=True, kv_cache_config=plan)
         worker.kv_recv_thread = MagicMock()
         worker.layer_load_finished_events = [threading.Event()]
@@ -363,7 +472,7 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
                     self,
                     num_layers=2,
                     use_layerwise=True,
-                    kv_cache_config=SimpleNamespace(kv_cache_groups=groups),
+                    kv_cache_config=SimpleNamespace(kv_cache_groups=groups, prefix_cache_retention_interval=None),
                     pp_rank=1,
                     pp_partition=(2, 2),
                 )
@@ -1431,7 +1540,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         kwargs["invalid_block_ids"].add(7)
         self.assertEqual(worker.get_block_ids_with_load_errors(), {7})
 
-    def test_wait_for_save_submits_batch_without_joining_queue(self):
+    def test_wait_for_save_submits_batch_and_joins_queue(self):
         worker = self._make_worker()
         worker.kv_send_thread = MagicMock(spec=KVCacheStoreSendingThread)
         worker.kv_send_thread.request_queue = MagicMock()
@@ -1450,9 +1559,9 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
         with patch(f"{module}.torch.npu", create=True):
             worker.wait_for_save(meta)
-        worker.kv_send_thread.raise_if_failed.assert_not_called()
+        worker.kv_send_thread.raise_if_failed.assert_called_once_with()
         worker.kv_send_thread.add_save_batch.assert_called_once_with([req])
-        worker.kv_send_thread.request_queue.join.assert_not_called()
+        worker.kv_send_thread.request_queue.join.assert_called_once_with()
         self.assertIs(worker._previous_save_batch, save_batch)
 
     def test_wait_for_save_skip_non_save(self):
@@ -1470,9 +1579,9 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         meta = AscendConnectorMetadata(set(), set())
         meta.add_request(req)
         worker.wait_for_save(meta)
-        worker.kv_send_thread.raise_if_failed.assert_not_called()
+        worker.kv_send_thread.raise_if_failed.assert_called_once_with()
         worker.kv_send_thread.add_save_batch.assert_not_called()
-        worker.kv_send_thread.request_queue.join.assert_not_called()
+        worker.kv_send_thread.request_queue.join.assert_called_once_with()
 
     def test_get_finished_producer_clears_synchronous_completions(self):
         worker = self._make_worker(kv_role="kv_producer")

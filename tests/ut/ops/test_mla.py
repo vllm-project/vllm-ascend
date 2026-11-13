@@ -329,6 +329,16 @@ class TestAscendSFAIndexerBackend(TestBase):
 
 
 class TestIndexerWrapper(TestBase):
+    def test_prepare_pcp_hidden_leaves_ordinary_backend_inputs_unchanged(self):
+        backend = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
+        nn.Module.__init__(backend)
+        wrapper = IndexerWrapper.__new__(IndexerWrapper)
+        nn.Module.__init__(wrapper)
+        wrapper.impl = backend
+        hidden = torch.ones(2, 3)
+
+        self.assertIs(wrapper.prepare_pcp_hidden(hidden, SimpleNamespace()), hidden)
+
     @patch("vllm_ascend.ops.mla.AscendSFAIndexerBackend")
     def test_constructs_backend_and_delegates_sfa_interface(self, mock_backend_cls):
         vllm_indexer = MagicMock(name="vllm_indexer")

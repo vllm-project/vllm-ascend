@@ -38,6 +38,7 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
     # Per layer: 0 for non-indexer caches, 1 for unreplicated indexers,
     # >1 for replicated indexers. Distinct from kernel blocks per scheduler page.
     indexer_replication_sizes: list[int]
+    dcp_sharded: list[bool]
     local_ip: str = ""
     handshake_port: int = 0
 
@@ -52,6 +53,7 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
         per_layer_fields: tuple[tuple[str, Sequence[object]], ...] = (
             ("layer_block_sizes", self.layer_block_sizes),
             ("group_indices", self.group_indices),
+            ("dcp_sharded", self.dcp_sharded),
             ("kv_caches_base_addr", self.kv_caches_base_addr),
             ("block_strides", self.block_strides),
             ("block_lens", self.block_lens),
@@ -117,6 +119,7 @@ class MooncakePPTransferMetadata:
     block_lens: list[list[int]]
     block_shapes: list[list[tuple[int, ...]]]
     block_size_scales: list[list[int]]
+    dcp_sharded: list[bool]
     metadata_by_pcp_rank: dict[int, MooncakePCPTransferMetadata]
     indexer_replication_sizes: list[int]
 
@@ -153,11 +156,50 @@ class ReqMeta:
     local_full_block_ids: BlockIds
 
 
+@dataclass(frozen=True)
+class PushReqMeta:
+    """D allocation snapshot, installed before consuming completion messages."""
+
+    request_id: str
+    local_block_ids: tuple[tuple[int, ...], ...]
+    num_computed_tokens: int
+    num_external_tokens: int
+
+
+@dataclass(frozen=True)
+class PushSendReqMeta:
+    """P source blocks and the prefill range scheduled for this step.
+
+    num_computed_tokens includes the cached prefix; the worker may publish
+    that prefix immediately, but must wait for layer events for new tokens.
+    """
+
+    # Full D request ID, also used by completion messages.
+    request_id: str
+    local_block_ids: tuple[tuple[int, ...], ...]
+    num_prompt_tokens: int
+    num_computed_tokens: int
+    num_scheduled_tokens: int
+    remote_engine_id: str
+    remote_host: str
+    remote_port: int
+    remote_block_ids: tuple[tuple[int, ...], ...]
+    remote_num_computed_tokens: int
+    remote_num_external_tokens: int
+    remote_worker_addresses: tuple[tuple[int, int, int, str], ...]
+
+
 class MooncakeConnectorMetadata(KVConnectorMetadata):
     """Scheduler-to-worker metadata for Mooncake KV transfers."""
 
     def __init__(self) -> None:
         self.requests: dict[str, ReqMeta] = {}
+        self.push_requests: dict[str, PushReqMeta] = {}
+        self.push_send_requests: dict[str, PushSendReqMeta] = {}
+        # P request ID -> D completion routing, including pre-dispatch aborts.
+        self.push_aborted_requests: dict[str, dict[str, Any]] = {}
+        # D request ID -> whether the failed metaserver call never dispatched P.
+        self.push_failed_requests: dict[str, bool] = {}
         self.requests_to_send: dict[str, float] = {}
         self.reqs_in_batch: set[str] = set()
 
@@ -184,6 +226,45 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             local_full_block_ids=local_full_block_ids or tuple(),
         )
 
+    def add_new_push_req(
+        self,
+        request_id: str,
+        local_block_ids: BlockIds,
+        num_external_tokens: int,
+        kv_transfer_params: dict[str, Any],
+    ) -> None:
+        self.push_requests[request_id] = PushReqMeta(
+            request_id=request_id,
+            local_block_ids=tuple(tuple(group) for group in local_block_ids),
+            num_computed_tokens=kv_transfer_params["num_computed_tokens"],
+            num_external_tokens=num_external_tokens,
+        )
+
+    def add_new_push_send_req(
+        self,
+        request_id: str,
+        local_block_ids: BlockIds,
+        num_prompt_tokens: int,
+        num_computed_tokens: int,
+        num_scheduled_tokens: int,
+        kv_transfer_params: dict[str, Any],
+    ) -> None:
+        """Snapshot one scheduled P chunk for the layerwise worker."""
+        self.push_send_requests[request_id] = PushSendReqMeta(
+            request_id=kv_transfer_params["remote_request_id"],
+            local_block_ids=tuple(tuple(group) for group in local_block_ids),
+            num_prompt_tokens=num_prompt_tokens,
+            num_computed_tokens=num_computed_tokens,
+            num_scheduled_tokens=num_scheduled_tokens,
+            remote_engine_id=kv_transfer_params["remote_engine_id"],
+            remote_host=kv_transfer_params["remote_host"],
+            remote_port=kv_transfer_params["remote_port"],
+            remote_block_ids=tuple(tuple(group) for group in kv_transfer_params["remote_block_ids"]),
+            remote_num_computed_tokens=kv_transfer_params["remote_num_computed_tokens"],
+            remote_num_external_tokens=kv_transfer_params["remote_num_external_tokens"],
+            remote_worker_addresses=tuple(tuple(worker) for worker in kv_transfer_params["remote_worker_addresses"]),
+        )
+
 
 __all__ = [
     "MooncakeConnectorMetadata",
@@ -192,5 +273,7 @@ __all__ = [
     "MooncakeTPTransferMetadata",
     "MooncakeTransferMetadata",
     "MooncakeTransferMetadataGroups",
+    "PushReqMeta",
+    "PushSendReqMeta",
     "ReqMeta",
 ]

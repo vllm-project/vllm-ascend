@@ -22,11 +22,14 @@ from vllm.distributed.weight_transfer.ipc_engine import (
 
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    NPUPackedBufferImporter,
     packed_npu_ipc_consumer,
     packed_npu_ipc_producer,
 )
 
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+    from vllm.config.weight_transfer import WeightTransferConfig
     from vllm.distributed.weight_transfer.base import (
         VLLMWeightSyncClient,
         WeightSource,
@@ -117,6 +120,16 @@ class NPUIPCWeightTransferEngine(IPCWeightTransferEngine):
     init_info_cls = NPUIPCWeightTransferInitInfo
     update_info_cls = NPUIPCWeightTransferUpdateInfo
 
+    def __init__(
+        self,
+        config: "WeightTransferConfig",
+        vllm_config: "VllmConfig",
+        device: torch.device,
+        model: torch.nn.Module,
+    ) -> None:
+        super().__init__(config, vllm_config, device, model)
+        self._packed_importer = NPUPackedBufferImporter()
+
     @staticmethod
     def trainer_send_weights(*args: Any, **kwargs: Any) -> None:
         raise NotImplementedError(
@@ -154,6 +167,7 @@ class NPUIPCWeightTransferEngine(IPCWeightTransferEngine):
                 dtype_names=update_info.dtype_names,
                 tensor_sizes=update_info.tensor_sizes,
                 device_index=device_index,
+                importer=self._packed_importer,
             )
         else:
             # Lazy import: ``rebuild_npu_tensor`` lives in ``torch_npu`` and

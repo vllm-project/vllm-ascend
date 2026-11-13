@@ -159,34 +159,6 @@ def ring_state_update_skipped() -> bool:
     return _SKIP_RING_STATE_UPDATE.get()
 
 
-def unwrap_mamba_kv_cache_groups(kv_cache_config: KVCacheConfig) -> KVCacheConfig:
-    """Expose homogeneous Mamba specs to the upstream MRV2 initializer.
-
-    vLLM 0.28 sizes block tables by checking MambaSpec directly. Leaving an identical
-    set of Mamba specs wrapped in UniformTypeKVCacheSpecs drops the extra
-    speculative state slots, so scheduler writes and GDN reads can overflow
-    the block table. Preserve the groups and allocation descriptors while
-    restoring the Mamba-specific sizing path.
-    """
-    # TODO: Remove this workaround once vLLM 0.28 support is dropped.
-    # vLLM 0.29 already handles wrapped Mamba block-table sizing correctly:
-    # https://github.com/vllm-project/vllm/pull/50493
-    # https://github.com/vllm-project/vllm/pull/50823
-    groups = []
-    for group in kv_cache_config.kv_cache_groups:
-        spec = group.kv_cache_spec
-        if isinstance(spec, UniformTypeKVCacheSpecs):
-            layer_specs = list(spec.kv_cache_specs.values())
-            if (
-                layer_specs
-                and isinstance(layer_specs[0], MambaSpec)
-                and all(layer_spec == layer_specs[0] for layer_spec in layer_specs)
-            ):
-                group = replace(group, kv_cache_spec=layer_specs[0])
-        groups.append(group)
-    return replace(kv_cache_config, kv_cache_groups=groups)
-
-
 def _align_hybrid_attention_page_sizes(kv_cache_specs: dict[str, KVCacheSpec], minimum_page_size: int = 0) -> None:
     """Align dense K/V segments before padding a shared Attention/Mamba pool."""
     if any(isinstance(spec, AscendSFAIndexerCacheSpec) for spec in kv_cache_specs.values()):
@@ -318,6 +290,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             ratio_kwargs: dict[str, Any] = {"tokens_per_state": compression_ratio}
             spec = AscendMLAAttentionSpec(
                 block_size=spec.block_size,
+                dcp_sharded=spec.dcp_sharded,
                 # ``num_heads`` describes physical cache head slots, not query
                 # heads. Kimi K3 publishes one latent KV slot per token; using
                 # the query-head count here makes vLLM's generic planner inflate
@@ -356,6 +329,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             head_dim = vllm_config.model_config.hf_text_config.index_head_dim
             kv_cache_spec[layer_name] = AscendSFAIndexerCacheSpec(
                 block_size=vllm_config.cache_config.block_size,
+                dcp_sharded=spec.dcp_sharded,
                 num_kv_heads=1,
                 head_size=head_dim // 2 if cache_sparse_li_c4 else head_dim,
                 dtype=torch.uint8
