@@ -29,6 +29,7 @@ from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.forward_context import is_forward_context_available, override_forward_context
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
+import vllm_ascend.worker.v2.pcp_manager as pcp_module
 import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_module
 from vllm_ascend.ops.vocab_parallel_embedding import VocabParallelMode
 from vllm_ascend.worker.v2.spec_decode import init_speculator
@@ -590,16 +591,20 @@ def test_dflash_dummy_metadata_fits_draft_graph(monkeypatch, num_reqs_padded):
 
 
 @pytest.mark.parametrize("dummy_run,skip_attn", [(False, False), (False, True), (True, False), (True, True)])
-def test_dflash_profiling_does_not_reuse_target_dp_counts(monkeypatch, dummy_run, skip_attn):
+@pytest.mark.parametrize("pcp_enabled", [False, True])
+def test_dflash_profiling_does_not_reuse_target_dp_counts(monkeypatch, dummy_run, skip_attn, pcp_enabled):
     speculator = AscendDFlashSpeculator.__new__(AscendDFlashSpeculator)
-    batch = SimpleNamespace(num_reqs=8)
+    speculator.pcp_manager = object.__new__(pcp_module.AscendPCPManager) if pcp_enabled else None
+    speculator.draft_logits = None
+    monkeypatch.setattr(pcp_module, "get_pcp_group", lambda: SimpleNamespace(broadcast=lambda tensor, src: tensor))
+    batch = SimpleNamespace(num_reqs=8, idx_mapping=torch.arange(8))
     sync_state = SimpleNamespace(num_reqs=1)
-    result = object()
+    result = torch.zeros(8, 1, dtype=torch.int64)
     received = []
 
     def propose(self, *args, **kwargs):
         assert self.input_batch is batch
-        expected_reqs = 1 if dummy_run and not skip_attn else 8
+        expected_reqs = 1 if dummy_run and not skip_attn and not pcp_enabled else 8
         assert self._draft_metadata_num_reqs == expected_reqs
         received.append(args[11])
         return result
@@ -614,7 +619,7 @@ def test_dflash_profiling_does_not_reuse_target_dp_counts(monkeypatch, dummy_run
         )
         is result
     )
-    assert received == [None if dummy_run and skip_attn else sync_state]
+    assert received == [None if pcp_enabled or (dummy_run and skip_attn) else sync_state]
     assert speculator._draft_metadata_num_reqs is None
     assert batch.num_reqs == 8
 
