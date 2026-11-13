@@ -1,0 +1,4 @@
+pr: 21825
+entries:
+  - category: performance
+    text: Reuse C2 Compressor kernels across cache pool and ring buffer sizes.
