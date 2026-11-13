@@ -705,12 +705,8 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
     ) -> list[dict[str, Any]]:
         """Build all draft steps' FIA parameters for a single graph update."""
         if self.use_dcp:
-            if is_draft_model_prefill:
-                return self.build_fia_params_dcp(
-                    num_reqs_padded, draft_attn_metadata, True, num_tokens=num_tokens
-                )
             return self.build_fia_params_dcp(
-                num_reqs_padded, draft_attn_metadata, False, num_tokens=num_tokens
+                num_reqs_padded, draft_attn_metadata, is_draft_model_prefill, num_tokens=num_tokens
             )
         block_table = next(iter(draft_attn_metadata.values())).block_tables
         if is_draft_model_prefill:
