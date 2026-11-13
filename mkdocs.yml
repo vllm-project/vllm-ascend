@@ -276,6 +276,7 @@ nav:
         - tutorials/models/Dots3-Note.md
     - Feature Tutorials:
         - tutorials/features/index.md
+        - tutorials/features/thinking_budget.md
         - tutorials/features/pd_colocated_mooncake_multi_instance.md
         - tutorials/features/pd_disaggregation_mooncake_single_node.md
         - tutorials/features/pd_disaggregation_mooncake_multi_node.md
