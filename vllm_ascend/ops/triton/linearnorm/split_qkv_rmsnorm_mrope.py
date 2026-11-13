@@ -57,6 +57,7 @@ def split_qkv_rmsnorm_mrope_kernel(
     half_rope_dim: tl.constexpr,
     IS_PARTIAL_ROPE: tl.constexpr,
     gate_size: tl.constexpr,
+    weight_offset: tl.constexpr,
     positions_ptr=None,
     position_stride_axis: tl.constexpr = 0,
     position_stride_token: tl.constexpr = 0,
@@ -78,8 +79,12 @@ def split_qkv_rmsnorm_mrope_kernel(
 
     q_rmsnorm_weight = tl.load(q_weight_ptr + tl.arange(0, head_size))
     k_rmsnorm_weight = tl.load(k_weight_ptr + tl.arange(0, head_size))
+    if weight_offset != 0.0:
+        weight_dtype = q_weight_ptr.dtype.element_ty
+        q_rmsnorm_weight = (q_rmsnorm_weight.to(tl.float32) + weight_offset).to(weight_dtype)
+        k_rmsnorm_weight = (k_rmsnorm_weight.to(tl.float32) + weight_offset).to(weight_dtype)
 
-    if GATHER_CACHE:
+    if GATHER_CACHE and weight_offset == 0.0:
         # Match (1 + weight) in the parameter dtype, including BF16 rounding.
         q_rmsnorm_weight = (q_rmsnorm_weight.to(tl.float32) + 1.0).to(q_rmsnorm_weight.dtype)
         k_rmsnorm_weight = (k_rmsnorm_weight.to(tl.float32) + 1.0).to(k_rmsnorm_weight.dtype)
@@ -315,13 +320,14 @@ def triton_split_qkv_rmsnorm_mrope(
     k_bias: torch.Tensor | None = None,
     has_gate: bool = False,
     positions: torch.Tensor | None = None,
+    weight_offset: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Split, normalize and rotate QKV, optionally gathering positions inline.
 
-    With ``positions=None``, preserve the original ABI: cos_sin contains
-    gathered rows and Q/K weights already include the unit offset. With
-    positions, cos_sin is the full rotary table and Q/K weights are the raw
-    zero-centered parameters; unit offsets are added in their dtype in-kernel.
+    ``positions`` optionally selects rows from the full rotary table in-kernel.
+    ``weight_offset`` moves the Gemma unit offset into the same launch. For
+    compatibility, callers that pass positions with the default offset still
+    receive the historical implicit +1 behavior.
     """
     core_num = get_vectorcore_num()
 
@@ -404,6 +410,7 @@ def triton_split_qkv_rmsnorm_mrope(
         rope_dim // 2,
         IS_PARTIAL_ROPE,
         gate_size,
+        weight_offset=weight_offset,
         positions_ptr=positions,
         position_stride_axis=positions.stride(0) if positions is not None and positions.ndim == 2 else 0,
         position_stride_token=positions.stride(-1) if positions is not None else 0,
@@ -431,6 +438,7 @@ def triton_split_qkv_rmsnorm_mrope_fake(
     k_bias: torch.Tensor | None = None,
     has_gate: bool = False,
     positions: torch.Tensor | None = None,
+    weight_offset: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     num_tokens = qkv.shape[0]
     q_size = num_q_heads * head_size
