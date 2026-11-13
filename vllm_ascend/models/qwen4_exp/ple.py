@@ -43,6 +43,27 @@ def _ple_conv_ascend(*args: Any, mode: Literal["decode", "spec", "prefill"], **k
         ple_conv_spec(*args, **kwargs)
 
 
+def _is_npu_uva_available() -> bool:
+    """Use the stricter capability check for mapped NPU host memory."""
+    from vllm_ascend.patch.worker.patch_uva import is_uva_available
+
+    return is_uva_available()
+
+
+def _get_npu_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
+    """Return an NPU view for a pinned host tensor used by Qwen4Exp PLE."""
+    import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401
+
+    view = torch.ops._C_ascend.get_npu_view_from_cpu_tensor(cpu_tensor)
+    if view is None:
+        raise RuntimeError(
+            "Qwen4Exp PLE CPU offload requires mapped pinned CPU memory. "
+            "Set PYTORCH_NPU_ALLOC_CONF=pinned_mem_register:True before starting "
+            "vLLM and use a triton-ascend version with UVA support."
+        )
+    return view
+
+
 def _get_allow_internal_format() -> bool:
     raw_value = torch_npu._C._npu_getOption("ALLOW_INTERNAL_FORMAT")
     # Ascend worker initialization enables this option before model construction. Preserve
@@ -326,12 +347,18 @@ def _patch_legacy_prefill(ple_layer_cls: type[Any]) -> None:
 
 def patch_upstream_ple_short_conv() -> None:
     """Install Ascend PLE runtime adaptations on the upstream classes."""
+    from vllm.models.qwen4_exp.common import ngram_embedding as upstream_ngram_embedding
     from vllm.models.qwen4_exp.amd import ple_layer as upstream_ple_layer
     from vllm.models.qwen4_exp.amd.ple_layer import Qwen4ExpPLELayer
     from vllm.models.qwen4_exp.common.ngram_embedding import (
         Qwen4ExpPLEEmbeddingMethod,
         Qwen4ExpPLEUnquantizedEmbeddingMethod,
     )
+
+    # Upstream's generic UVA helper rejects NPU tensors. Use the mapped view
+    # operator already validated by the Ascend UvaBuffer path instead.
+    upstream_ngram_embedding.is_uva_available = _is_npu_uva_available
+    upstream_ngram_embedding.get_accelerator_view_from_cpu_tensor = _get_npu_view_from_cpu_tensor
 
     from vllm_ascend.quantization.configs.modelslim_config import (
         AscendModelSlimConfig,
