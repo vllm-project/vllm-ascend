@@ -158,7 +158,7 @@ Similarly, let's take `Qwen2.5-VL-7B-Instruct` benchmark as an example:
   
     ```shell
     vllm bench serve --model Qwen2.5-VL-7B-Instruct\
-    --endpoint-type "openai-chat" --dataset-name hf \
+    --backend openai-chat --dataset-name hf \
     --hf-split train --endpoint "/v1/chat/completions" \
     --dataset-path "lmarena-ai/vision-arena-bench-v0.1" \
     --num-prompts 200 \
