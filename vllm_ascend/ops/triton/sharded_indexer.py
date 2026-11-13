@@ -142,72 +142,88 @@ def _sort_candidate_pairs(scores, ids, LOG_BLOCK: tl.constexpr, FIRST_STAGE: tl.
     return scores, ids
 
 
-@triton.jit(do_not_specialize=["ROWS"])
+@triton.jit(do_not_specialize=["num_rows"])
 def _pack_sorted_candidates(
-    indices,
-    scores,
-    packed,
-    ROWS,
-    INDEX_ROW: tl.constexpr,
-    INDEX_COL: tl.constexpr,
-    SCORE_ROW: tl.constexpr,
-    SCORE_COL: tl.constexpr,
-    WORLD: tl.constexpr,
+    indices_ptr,
+    scores_ptr,
+    packed_ptr,
+    num_rows,
+    INDEX_ROW_STRIDE: tl.constexpr,
+    INDEX_COL_STRIDE: tl.constexpr,
+    SCORE_ROW_STRIDE: tl.constexpr,
+    SCORE_COL_STRIDE: tl.constexpr,
+    WORLD_SIZE: tl.constexpr,
     RANK: tl.constexpr,
     INTERLEAVE: tl.constexpr,
     LOG_BLOCK: tl.constexpr,
     SCORE_BITS: tl.constexpr,
 ):
+    """Sort by descending score/ascending ID and pack global ID/score bits."""
+    FP32_SIGNIFICAND_BITS: tl.constexpr = 24
+    FP32_STORAGE_BITS: tl.constexpr = 32
+    FP32_MAGNITUDE_MASK: tl.constexpr = 0x7FFFFFFF
+    FP32_SIGN_MASK: tl.constexpr = -0x80000000
     BLOCK: tl.constexpr = 1 << LOG_BLOCK
-    DIGIT_BITS: tl.constexpr = 24 - LOG_BLOCK
+    DIGIT_BITS: tl.constexpr = FP32_SIGNIFICAND_BITS - LOG_BLOCK
+    # Retain the existing radix range; larger IDs use pair comparisons.
     MAX_ID_BITS: tl.constexpr = 25
     # Fill one fewer native-sort pass when the IDs fit its remaining bits.
     SHORT_ID_BITS: tl.constexpr = (
         (MAX_ID_BITS + SCORE_BITS + DIGIT_BITS - 1) // DIGIT_BITS - 1
     ) * DIGIT_BITS - SCORE_BITS
-    col = tl.arange(0, BLOCK)
-    lanes = tl.arange(0, 2 * BLOCK)
+    candidate_offsets = tl.arange(0, BLOCK)
+    packed_offsets = tl.arange(0, 2 * BLOCK)
     # Flat, loop-carried rows avoid the larger live set of a row/column tile.
-    for row in range(tl.program_id(0), ROWS, tl.num_programs(0)):
-        local = tl.load(indices + row * INDEX_ROW + col * INDEX_COL)
-        score = tl.load(scores + row * SCORE_ROW + col * SCORE_COL).to(tl.float32)
-        valid = (local.to(tl.float32) >= 0) & (tl.abs(score) < float("inf"))
+    for row_idx in range(tl.program_id(0), num_rows, tl.num_programs(0)):
+        local_ids = tl.load(indices_ptr + row_idx * INDEX_ROW_STRIDE + candidate_offsets * INDEX_COL_STRIDE)
+        candidate_scores = tl.load(scores_ptr + row_idx * SCORE_ROW_STRIDE + candidate_offsets * SCORE_COL_STRIDE).to(
+            tl.float32
+        )
+        valid = (local_ids.to(tl.float32) >= 0) & (tl.abs(candidate_scores) < float("inf"))
         # This rank's local-to-global map is strictly increasing. Sorting
         # local keys preserves global-ID ties without rounding mapped IDs.
-        keys = tl.where(valid, local.to(tl.float32), 0.0)
-        score = tl.where(valid, score, -float("inf"))
-        max_key = tl.max(keys, 0)
-        if max_key < (1 << MAX_ID_BITS):
+        local_id_keys = tl.where(valid, local_ids.to(tl.float32), 0.0)
+        candidate_scores = tl.where(valid, candidate_scores, -float("inf"))
+        max_local_id = tl.max(local_id_keys, 0)
+        if max_local_id < (1 << MAX_ID_BITS):
             # Compile short/full ID widths from one radix body for both dtypes.
             for ID_BITS in tl.static_range(SHORT_ID_BITS, MAX_ID_BITS + 1, MAX_ID_BITS - SHORT_ID_BITS):
-                if (max_key < (1 << SHORT_ID_BITS)) == (ID_BITS == SHORT_ID_BITS):
+                if (max_local_id < (1 << SHORT_ID_BITS)) == (ID_BITS == SHORT_ID_BITS):
                     # The position tag makes each native value sort stable;
                     # digit + tag fits exactly in FP32's 24 significant bits.
-                    for start in tl.static_range(0, ID_BITS + SCORE_BITS, DIGIT_BITS):
-                        raw = score.to(tl.int32, bitcast=True)
+                    for bit_offset in tl.static_range(0, ID_BITS + SCORE_BITS, DIGIT_BITS):
+                        score_bits = candidate_scores.to(tl.int32, bitcast=True)
                         # +/-0 compare equal; preserve the original payload.
-                        raw = tl.where((raw & 2147483647) == 0, 0, raw)
-                        word = tl.where(raw < 0, raw, ~(raw ^ (-2147483648))) >> (32 - SCORE_BITS)
-                        if start >= ID_BITS:
-                            digit = word >> (start - ID_BITS)
-                        elif start + DIGIT_BITS <= ID_BITS:
-                            digit = keys.to(tl.int32) >> start
+                        score_bits = tl.where((score_bits & FP32_MAGNITUDE_MASK) == 0, 0, score_bits)
+                        # Flip the sign bit for positive scores and invert the
+                        # ascending encoding to sort scores in descending order.
+                        descending_score_key = tl.where(score_bits < 0, score_bits, ~(score_bits ^ FP32_SIGN_MASK)) >> (
+                            FP32_STORAGE_BITS - SCORE_BITS
+                        )
+                        if bit_offset >= ID_BITS:
+                            digit = descending_score_key >> (bit_offset - ID_BITS)
+                        elif bit_offset + DIGIT_BITS <= ID_BITS:
+                            digit = local_id_keys.to(tl.int32) >> bit_offset
                         else:
-                            digit = (keys.to(tl.int32) >> start) | (word << (ID_BITS - start))
-                        digit &= (1 << min(DIGIT_BITS, ID_BITS + SCORE_BITS - start)) - 1
-                        key = digit.to(tl.float32) * BLOCK + col.to(tl.float32)
-                        order = _sort(key, descending=False)
-                        lookup = (order - tl.floor(order * (1.0 / BLOCK)) * BLOCK).to(tl.int32)
-                        score = tl.gather(score, lookup, 0)
-                        keys = tl.gather(keys, lookup, 0)
+                            digit = (local_id_keys.to(tl.int32) >> bit_offset) | (
+                                descending_score_key << (ID_BITS - bit_offset)
+                            )
+                        digit &= (1 << min(DIGIT_BITS, ID_BITS + SCORE_BITS - bit_offset)) - 1
+                        stable_digit_key = digit.to(tl.float32) * BLOCK + candidate_offsets.to(tl.float32)
+                        sorted_digit_keys = _sort(stable_digit_key, descending=False)
+                        permutation = (sorted_digit_keys - tl.floor(sorted_digit_keys * (1.0 / BLOCK)) * BLOCK).to(
+                            tl.int32
+                        )
+                        candidate_scores = tl.gather(candidate_scores, permutation, 0)
+                        local_id_keys = tl.gather(local_id_keys, permutation, 0)
         else:
             # Keep high ID bits rather than truncating them in the radix key.
-            score, keys = _sort_candidate_pairs(score, keys, LOG_BLOCK)
-        ordered = tl.where(tl.abs(score) < float("inf"), keys, 0).to(tl.int32)
-        mapped = ordered + (ordered // INTERLEAVE * (WORLD - 1) + RANK) * INTERLEAVE
-        ids = tl.where(tl.abs(score) < float("inf"), mapped, -1)
-        pair = tl.reshape(tl.join(ids, score.to(tl.int32, bitcast=True)), (2 * BLOCK,))
-        tl.store(packed + row * BLOCK * 2 + lanes, pair)
+            candidate_scores, local_id_keys = _sort_candidate_pairs(candidate_scores, local_id_keys, LOG_BLOCK)
+        sorted_local_ids = tl.where(tl.abs(candidate_scores) < float("inf"), local_id_keys, 0).to(tl.int32)
+        global_ids = sorted_local_ids + (sorted_local_ids // INTERLEAVE * (WORLD_SIZE - 1) + RANK) * INTERLEAVE
+        output_ids = tl.where(tl.abs(candidate_scores) < float("inf"), global_ids, -1)
+        packed_pairs = tl.reshape(tl.join(output_ids, candidate_scores.to(tl.int32, bitcast=True)), (2 * BLOCK,))
+        tl.store(packed_ptr + row_idx * BLOCK * 2 + packed_offsets, packed_pairs)
 
 
 @triton.jit(do_not_specialize=["ROWS"])
@@ -472,7 +488,12 @@ def _sort_local_candidates(indices, scores):
 def pack_local_candidates(
     indices, scores, world_size: int, rank: int, interleave: int, *, sort_candidates=False, fuse_sort=False
 ):
-    """Transport exact pairs; fuse_sort permits fusion when its work amortizes."""
+    """Pack local candidates as global INT32 IDs and FP32 score-bit pairs.
+
+    Scores must be BF16 or FP32; indices and scores have shape [rows, 1, topk].
+    Sorting orders scores descending, then IDs ascending. ``fuse_sort`` permits
+    fused sorting for workloads that meet the occupancy and merge-work gates.
+    """
     if scores.dtype not in (torch.bfloat16, torch.float32):
         raise TypeError(f"scores must have dtype torch.bfloat16 or torch.float32, got {scores.dtype}")
     score_bits = 16 if scores.dtype == torch.bfloat16 else 32

@@ -26,7 +26,7 @@
 ## Constraints
 
 - DCP/stripe sizes are positive; all ranks use identical collective tile boundaries. The owning backend requires complete replicated indexer heads and `max_model_len <= 2**24` for exact FP32 ID comparison.
-- K2048 has fused preparation/merge. Other supported K values retain native stable sorting. BF16 digit sorting uses its 16 meaningful comparator bits; FP32 scores are never rounded into that path.
+- K2048 has fused preparation/merge. Other supported K values retain native stable sorting. Fused preparation uses one inline stable radix algorithm for BF16 and FP32, with 16 and 32 score-key bits respectively. The public wrapper rejects other score dtypes before allocation or launch; the kernel receives `SCORE_BITS` as a compile-time parameter. BF16 values widen exactly to FP32 for transport; FP32 scores retain all their bits.
 - Owner-prefix merge requires `presorted=True`, `owner_sharded=True`, `K_local=topk=2048`, and a valid local rank. Other calls use full selection.
 - Non-power-of-two rank tiles clamp padded peer addresses before masked loads; this prevents A3 GM faults without changing any valid peer or selection result.
 - Invalid/nonfinite candidates do not enter the valid output prefix. Empty requests and graph padding produce zero lengths or -1 IDs. Normalization writes only the native QLI-owned output buffers in place.
@@ -37,6 +37,16 @@
 - **Origin**: DCP candidate exchange developed for token-sharded QLI.
 - **Differences**: Exchanges exact candidates rather than token-history KV. Owner-local output removes a later remap; occupancy-based preparation and grouped merge bound work without chip-model dispatch.
 
+## Fused candidate sorting
+
+The radix key orders scores descending and local IDs ascending. The local-to-global ID map is strictly increasing within a rank, so mapping IDs after sorting preserves the tie order. Signed zeros share one sorting key while the original score payload is retained. Invalid candidates receive a negative-infinity score and are written with ID -1.
+
+Each least-significant-digit pass extracts ID bits first, followed by the encoded score bits. A native FP32 value sort orders `digit * BLOCK + position`; the position tag makes the pass stable. With K2048, 11 position bits leave 13 digit bits within FP32's 24-bit significand. The resulting permutation gathers both scores and IDs before the next pass.
+
+The existing 25-bit radix range uses a shorter ID width when it saves one pass: BF16 takes three passes below `2**23` and four otherwise; FP32 takes four below `2**20` and five otherwise. IDs outside the radix range retain the existing pair-comparison path. These bounds do not relax the exact-ID constraint above.
+
+The wrapper keeps grid selection and routing outside the kernel. Fusion requires K2048, at least 75% as many rows as vector cores, and enough downstream merge levels to amortize local sorting. Other workloads keep separate sorting and packing. Runtime `num_rows` does not specialize the fused kernel; score width, strides, topology and block size do. This change adds no new warmup entry or routing policy.
+
 ## Test Cases
 
 Actual K2048 deployment shapes include T48/DCP16 and T128/DCP8. Shared tests also cover generic K, partial tiles, non-power-of-two DCP, ties, near-ULP scores, invalid owners, strided input, exact score bits, large mapped IDs and changing-input graph replay.
@@ -44,5 +54,6 @@ Actual K2048 deployment shapes include T48/DCP16 and T128/DCP8. Shared tests als
 ```bash
 pytest -q tests/ut/attention/test_sharded_indexer.py
 pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_candidates.py
+pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_candidate_radix.py
 pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_pre_post.py -k local_lengths
 ```
