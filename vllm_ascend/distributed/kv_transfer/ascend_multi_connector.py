@@ -6,6 +6,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     supports_hma,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
+from vllm.logger import init_logger
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
 
@@ -15,6 +16,8 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
+
+logger = init_logger(__name__)
 
 
 class AscendMultiConnector(MultiConnector, SupportsHMA):
@@ -96,6 +99,17 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         for provider in self._layerwise_slot_release_providers:
             provider.wait_for_layer_reuse(layer_idx)
 
+    @property
+    def composite_save_children(self) -> list[Any]:
+        """Composite-save dispatch order, slot-release providers first.
+
+        Composite-layer saves bypass ``save_kv_layer``, so expose the same
+        provider-first ordering that the two-phase root dispatch and shutdown
+        use; a sibling publishing reuse-enabling work before a provider has
+        closed its slot gate would break the documented save contract.
+        """
+        return [*self._layerwise_slot_release_providers, *self._non_slot_release_connectors]
+
     def shutdown(self) -> None:
         # Release provider waits before joining the store's receive threads.
         self._connectors[:] = [*self._layerwise_slot_release_providers, *self._non_slot_release_connectors]
@@ -169,6 +183,32 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             hook = getattr(connector, "on_kv_cache_written", None)
             if callable(hook):
                 hook(layer_name)
+
+    def _finish_all_children(self, method_name: str) -> None:
+        """Try all child fences; abort every backend on an unrecoverable error."""
+        first_error: Exception | None = None
+        for connector in self.sub_connectors:
+            try:
+                getattr(connector, method_name)()
+            except Exception as exc:
+                logger.exception("KV connector %s.%s failed", type(connector).__name__, method_name)
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            # Core skips post_forward if finish_forward raises. Do not call
+            # normal wait_for_save here: its fallback could publish unloaded KV.
+            # Existing shutdown stops/drains submitted accesses before fatal exit.
+            try:
+                self.shutdown()
+            except Exception:
+                logger.exception("KV connector shutdown failed after %s", method_name)
+            raise first_error
+
+    def finish_forward(self) -> None:
+        self._finish_all_children("finish_forward")
+
+    def wait_for_save(self) -> None:
+        self._finish_all_children("wait_for_save")
 
     def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
         chosen_connector = self._requests_to_connector.get(request.request_id, -1)

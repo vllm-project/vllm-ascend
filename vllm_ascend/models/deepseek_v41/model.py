@@ -756,6 +756,19 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
         )
         self.v41_layer_name = f"{prefix}.v41_attn"
         context = vllm_config.compilation_config.static_forward_context
+        # Declare ownership from registered cache nodes, not consumer aliases.
+        self.kv_transfer_cache_names = tuple(
+            name
+            for name, cache in context.items()
+            if name.startswith(f"{prefix}.") and isinstance(cache, DeepseekV41CacheLayer)
+        )
+        # The replay cut can be written first for the full batch and again for
+        # retained rows. Keep its transfer behind the existing step boundary.
+        self.kv_transfer_save_at_step_end = (
+            resolve_bounded_replay(vllm_config, cache_config)
+            and role.is_kv_source
+            and layer_idx == max(topology.kv_source_layer_ids)
+        )
         context[self.v41_layer_name] = self
 
     def forward(self, positions, hidden_states, llama_4_scaling=None):
