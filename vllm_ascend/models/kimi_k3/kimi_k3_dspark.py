@@ -40,7 +40,7 @@ from vllm.models.kimi_k3.nvidia.dspark_mla import (
 from vllm_ascend.models.kimi_k3.kimi_k3 import (
     AscendKimiMLAAttention,
 )
-from vllm_ascend.models.qwen3_dspark import align_draft_weights
+from vllm_ascend.models.quarot_utils import align_draft_weights
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 
 

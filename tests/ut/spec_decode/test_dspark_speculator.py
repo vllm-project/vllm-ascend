@@ -14,10 +14,8 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 import vllm_ascend.worker.v2.spec_decode.dspark.speculator as dspark_module
 from vllm_ascend.models import register_model
-from vllm_ascend.models.qwen3_dspark import (
-    AscendQwen3DSparkForCausalLM,
-    process_weight,
-)
+from vllm_ascend.models.quarot_utils import process_weight
+from vllm_ascend.models.qwen3_dspark import AscendQwen3DSparkForCausalLM
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
     AscendDSparkSpeculator,
 )

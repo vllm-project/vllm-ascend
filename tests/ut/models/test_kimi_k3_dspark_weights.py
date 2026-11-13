@@ -9,7 +9,7 @@ import torch
 from torch import nn
 from vllm.model_executor.models.utils import AutoWeightsLoader
 
-from vllm_ascend.models import qwen3_dspark
+from vllm_ascend.models import quarot_utils
 from vllm_ascend.models.kimi_k3 import kimi_k3_dspark
 
 
@@ -208,10 +208,10 @@ def test_checkpoint_head_survives_quarot_alignment(draft, monkeypatch):
     model.has_own_embed_tokens = True
     projection_before = model.model.context_proj.weight.detach().clone()
     rotation = torch.tensor([[0.0, -1.0], [1.0, 0.0]])
-    monkeypatch.setattr(qwen3_dspark, "get_rotation_path", lambda config: "rotation.safetensors")
-    monkeypatch.setattr(qwen3_dspark, "get_rotation_matrix", lambda path: rotation)
+    monkeypatch.setattr(quarot_utils, "get_rotation_path", lambda config: "rotation.safetensors")
+    monkeypatch.setattr(quarot_utils, "get_rotation_matrix", lambda path: rotation)
     target_loader = MagicMock()
-    monkeypatch.setattr(qwen3_dspark, "load_quarot_target_layer", target_loader)
+    monkeypatch.setattr(quarot_utils, "load_quarot_target_layer", target_loader)
     config = SimpleNamespace(model_config=SimpleNamespace(hf_text_config=SimpleNamespace()))
 
     model.post_process(config)

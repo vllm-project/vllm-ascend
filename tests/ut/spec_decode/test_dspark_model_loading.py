@@ -9,7 +9,7 @@ import pytest
 import torch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
-from vllm_ascend.models import qwen3_dflash2, qwen3_dspark
+from vllm_ascend.models import quarot_utils, qwen3_dflash2
 from vllm_ascend.models.kimi_k3.kimi_k3_dspark import AscendK3DSparkForCausalLM
 from vllm_ascend.models.qwen3_dflash2 import DFlash2Qwen3ForCausalLM
 from vllm_ascend.models.qwen3_dspark import AscendQwen3DSparkForCausalLM
@@ -93,11 +93,11 @@ def test_post_process_aligns_weights_without_modifying_target(
         model_config=SimpleNamespace(model="/target", hf_text_config=SimpleNamespace(vocab_size=4, hidden_size=2))
     )
     rotation = torch.tensor([[0.0, -1.0], [1.0, 0.0]], dtype=torch.float64)
-    monkeypatch.setattr(qwen3_dspark, "get_rotation_path", lambda received: "/rotation" if rotated else None)
+    monkeypatch.setattr(quarot_utils, "get_rotation_path", lambda received: "/rotation" if rotated else None)
     monkeypatch.setattr(qwen3_dflash2, "get_rotation_path", lambda received: "/rotation" if rotated else None)
-    monkeypatch.setattr(qwen3_dspark, "get_pp_group", lambda: SimpleNamespace(world_size=pp_size))
+    monkeypatch.setattr(quarot_utils, "get_pp_group", lambda: SimpleNamespace(world_size=pp_size))
     loader = MagicMock(return_value=rotation)
-    monkeypatch.setattr(qwen3_dspark, "get_rotation_matrix", loader)
+    monkeypatch.setattr(quarot_utils, "get_rotation_matrix", loader)
     created = []
 
     def make_layer(vocab, hidden, params_dtype):
@@ -110,9 +110,9 @@ def test_post_process_aligns_weights_without_modifying_target(
         source = target_embed_before if "embed_tokens" in label else target_head_before
         layer.weight.copy_(source @ matrix.T if matrix is not None else source)
 
-    monkeypatch.setattr(qwen3_dspark, "VocabParallelEmbedding", make_layer)
-    monkeypatch.setattr(qwen3_dspark, "ParallelLMHead", make_layer)
-    monkeypatch.setattr(qwen3_dspark, "load_quarot_target_layer", load_layer)
+    monkeypatch.setattr(quarot_utils, "VocabParallelEmbedding", make_layer)
+    monkeypatch.setattr(quarot_utils, "ParallelLMHead", make_layer)
+    monkeypatch.setattr(quarot_utils, "load_quarot_target_layer", load_layer)
     draft.post_process(config)
     assert projection.weight is original_parameter
 
