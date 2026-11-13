@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import importlib
+import json
 import math
 import threading
 import time
@@ -360,12 +362,7 @@ class BaseKVPoolWorker(ABC):
 
         model_name = model_config.model.rstrip("/").split("/")[-1]
         if getattr(self.kv_cache_config, "hisparse_host_num_blocks", None) is not None:
-            # HiSparse packs Source and Indexer into separate pool objects.
-            # Separate these keys from ordinary AscendStore and other KV dtypes.
-            model_name = (
-                f"{model_name}:hisparse-v1:{model_config.dtype}:"
-                f"{vllm_config.cache_config.cache_dtype}:{vllm_config.attention_config.indexer_kv_dtype}"
-            )
+            model_name = f"{model_name}:hisparse-v2:{model_config.dtype}:{self._hisparse_layout_id()}"
         self.metadata: list[KeyMetadata] = []
         for group_id in range(self.num_kv_cache_groups):
             # the mamba kv_heads is not same with the full attention, can't share the cache data
@@ -388,6 +385,42 @@ class BaseKVPoolWorker(ABC):
         )
         self.cache_coordinator = self._build_cache_coordinator()
         self.token_database.cache_coordinator = self.cache_coordinator
+
+    def _hisparse_layout_id(self) -> str:
+        # Hash planned page geometry, never addresses or pool capacity. Bump
+        # the key version for any serialization change outside these fields.
+        groups = []
+        layers = set()
+        for group_id, group in enumerate(self.kv_cache_config.kv_cache_groups):
+            if not group.enable_kv_transfer:
+                continue
+            group_layers = []
+            for name in sorted(group.layer_names):
+                spec = group.kv_cache_spec
+                if isinstance(spec, UniformTypeKVCacheSpecs):
+                    spec = spec.kv_cache_specs[name]
+                group_layers.append(
+                    (
+                        name,
+                        str(getattr(spec, "dtype", getattr(spec, "dtypes", None))),
+                        spec.block_size,
+                        spec.page_size_bytes,
+                        getattr(spec, "head_size", None),
+                        getattr(spec, "num_kv_heads", None),
+                        getattr(spec, "scale_dim", 0),
+                        str(getattr(spec, "scale_dtype", None)),
+                    )
+                )
+                layers.add(name)
+            groups.append((group_id, group.role, group.host_resident, group_layers))
+        block_strides = sorted(
+            (name, tensor.block_stride)
+            for tensor in self.kv_cache_config.kv_cache_tensors
+            for name in tensor.layers
+            if name in layers
+        )
+        identity = (self.dcp_size, self.cache_transfer_granularity, groups, block_strides)
+        return hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()[:24]
 
     def _init_backend(self, parallel_config, extra_config) -> None:
         backend = backend_map.get(self.backend.lower())
@@ -489,9 +522,12 @@ class BaseKVPoolWorker(ABC):
         # NoPE MLA exposes an empty RoPE view whose data_ptr() is zero.
         return tuple(cache for cache in cache_or_caches if cache.numel())
 
-    def _get_cache_block_metadata(self, cache: torch.Tensor) -> tuple[int, int, int, int]:
+    def _get_cache_block_metadata(
+        self, cache: torch.Tensor, *, num_blocks: int | None = None
+    ) -> tuple[int, int, int, int]:
         tensor_num_blocks = cache.shape[0]
-        num_blocks = getattr(self, "_hisparse_cache_num_blocks", {}).get(id(cache), self.num_blocks)
+        if num_blocks is None:
+            num_blocks = self.num_blocks
         assert tensor_num_blocks % num_blocks == 0, (
             "The external block size must be an integer multiple of the kernel block size."
         )
@@ -507,13 +543,15 @@ class BaseKVPoolWorker(ABC):
         )
         return block_len, block_stride, region_len, block_size_scale
 
-    def _get_cache_transfer_segments(self, cache: torch.Tensor) -> list[tuple[int, int, int]]:
+    def _get_cache_transfer_segments(
+        self, cache: torch.Tensor, *, num_blocks: int | None = None
+    ) -> list[tuple[int, int, int]]:
         """Describe full-block pool transfers without crossing kernel-page gaps.
 
         Both bulk and layerwise transfers must preserve physical-block gaps.
         Partial layerwise transfers also retain each segment's token interval.
         """
-        block_len, block_stride, _, scale = self._get_cache_block_metadata(cache)
+        block_len, block_stride, _, scale = self._get_cache_block_metadata(cache, num_blocks=num_blocks)
         physical_bytes = block_len // scale
         physical_stride = block_stride // scale
         if scale == 1 or physical_stride == physical_bytes:
@@ -523,7 +561,7 @@ class BaseKVPoolWorker(ABC):
         return [(cache.data_ptr() + index * physical_stride, physical_bytes, block_stride) for index in range(scale)]
 
     def _get_combined_cache_transfer_segments(
-        self, caches: tuple[torch.Tensor, ...], group_id: int
+        self, caches: tuple[torch.Tensor, ...], group_id: int, *, num_blocks: int | None = None
     ) -> list[tuple[int, int, int]] | None:
         """Coalesce adjacent MLA components for complete bulk pages only.
 
@@ -559,8 +597,8 @@ class BaseKVPoolWorker(ABC):
             or not second[0].is_contiguous()
         ):
             return None
-        first_len, block_stride, _, scale = self._get_cache_block_metadata(first)
-        second_len, second_stride, _, second_scale = self._get_cache_block_metadata(second)
+        first_len, block_stride, _, scale = self._get_cache_block_metadata(first, num_blocks=num_blocks)
+        second_len, second_stride, _, second_scale = self._get_cache_block_metadata(second, num_blocks=num_blocks)
         if scale <= 1 or scale != second_scale or block_stride != second_stride:
             return None
         first_bytes = first_len // scale
@@ -620,6 +658,9 @@ class BaseKVPoolWorker(ABC):
         group_block_strides: list[int] = []
         group_cache_entry_segments: list[tuple[int, int]] = []
         layer_names_by_physical: dict[int, list[str]] = {}
+        num_blocks = (
+            getattr(self, "_hisparse_host_num_blocks_by_layer", {}).get(layer_names[0]) if layer_names else None
+        )
         for layer_name in layer_names:
             phys = self._extract_physical_layer_index(layer_name)
             phys = self._global_to_local_layer.get(phys, phys)
@@ -634,11 +675,11 @@ class BaseKVPoolWorker(ABC):
             for layer_name in sorted(layer_names_by_physical[phys]):
                 cache_or_caches = self.kv_caches[layer_name]
                 caches = self._as_cache_tuple(cache_or_caches)
-                combined = self._get_combined_cache_transfer_segments(caches, group_id)
+                combined = self._get_combined_cache_transfer_segments(caches, group_id, num_blocks=num_blocks)
                 cache_segments = (
                     [combined]
                     if combined is not None
-                    else [self._get_cache_transfer_segments(cache) for cache in caches]
+                    else [self._get_cache_transfer_segments(cache, num_blocks=num_blocks) for cache in caches]
                 )
                 for segments in cache_segments:
                     for segment_index, (base_addr, block_len, block_stride) in enumerate(segments):
@@ -651,7 +692,7 @@ class BaseKVPoolWorker(ABC):
                         "KVPool coalesced bulk cache layer=%s group=%d descriptors=%d->%d",
                         layer_name,
                         group_id,
-                        2 * (caches[0].shape[0] // self.num_blocks),
+                        2 * (caches[0].shape[0] // (num_blocks or self.num_blocks)),
                         len(combined),
                     )
             layer_cache_entry_offsets.append(len(group_addrs))
@@ -715,32 +756,30 @@ class BaseKVPoolWorker(ABC):
         if self.use_recoverssm:
             kv_caches = self._recoverssm_store_caches(kv_caches)
         excluded_layer_names = None
+        self._hisparse_host_num_blocks_by_layer: dict[str, int] = {}
+        self._hisparse_host_storage_keys: set[int] = set()
+        host_resident_groups = set()
         if getattr(self.kv_cache_config, "hisparse_host_num_blocks", None) is not None:
             excluded_layer_names = set()
             normalized_caches = {}
-            self._hisparse_cache_num_blocks = {}
-            self._hisparse_host_storage_keys = set()
             context = self.vllm_config.compilation_config.static_forward_context
-            for group in self.kv_cache_config.kv_cache_groups:
+            for group_id, group in enumerate(self.kv_cache_config.kv_cache_groups):
                 if not group.enable_kv_transfer:
                     excluded_layer_names.update(group.layer_names)
                     continue
-                num_blocks = (
-                    self.kv_cache_config.hisparse_host_num_blocks
-                    if group.host_resident
-                    else self.kv_cache_config.num_blocks
-                )
+                if group.host_resident:
+                    host_resident_groups.add(group_id)
                 for name in group.layer_names:
                     parts = self._as_cache_tuple(kv_caches[name])
                     stride = getattr(context[name], "hisparse_block_stride", 1)
                     if group.role == "hisparse_indexer" and stride > 1:
                         parts = tuple(part[::stride] for part in parts)
                     normalized_caches[name] = parts
-                    for part in parts:
-                        self._hisparse_cache_num_blocks[id(part)] = num_blocks
-                        if group.host_resident:
-                            self._hisparse_host_storage_keys.add(self._get_storage_key(part))
+                    if group.host_resident:
+                        self._hisparse_host_num_blocks_by_layer[name] = self.kv_cache_config.hisparse_host_num_blocks
+                        self._hisparse_host_storage_keys.update(self._get_storage_key(part) for part in parts)
             kv_caches = normalized_caches
+        self._hisparse_host_resident_groups = frozenset(host_resident_groups)
         self._set_num_blocks(kv_caches)
         if excluded_layer_names is None:
             self._register_kv_caches(kv_caches)
@@ -761,14 +800,16 @@ class BaseKVPoolWorker(ABC):
         auxiliary_caches: dict[str, torch.Tensor] | None = None,
         excluded_layer_names: set[str] | None = None,
     ) -> None:
-        _, first_kv_cache_tuple = next(iter(kv_caches.items()))
+        first_name, first_kv_cache_tuple = next(iter(kv_caches.items()))
         first_kv_cache_tuple = self._as_cache_tuple(first_kv_cache_tuple)
         first_kv_cache = first_kv_cache_tuple[0]
         logger.info("num_blocks: %s", self.num_blocks)
         self.block_len = []
         self.block_stride = []
+        host_num_blocks_by_layer = getattr(self, "_hisparse_host_num_blocks_by_layer", {})
+        num_blocks = host_num_blocks_by_layer.get(first_name)
         for cache in first_kv_cache_tuple:
-            block_len, block_stride, _, _ = self._get_cache_block_metadata(cache)
+            block_len, block_stride, _, _ = self._get_cache_block_metadata(cache, num_blocks=num_blocks)
             logger.info("block_shape: %s", cache.shape[1:])
             self.block_len.append(block_len)
             self.block_stride.append(block_stride)
@@ -803,10 +844,11 @@ class BaseKVPoolWorker(ABC):
 
         registered_regions: dict[int, tuple[int, int]] = {}
         registration_caches = {**kv_caches, **auxiliary_caches} if auxiliary_caches else kv_caches
-        for cache_or_caches in registration_caches.values():
+        for layer_name, cache_or_caches in registration_caches.items():
+            num_blocks = host_num_blocks_by_layer.get(layer_name)
             for cache in self._as_cache_tuple(cache_or_caches):
                 base_addr = cache.data_ptr()
-                _, _, region_len, _ = self._get_cache_block_metadata(cache)
+                _, _, region_len, _ = self._get_cache_block_metadata(cache, num_blocks=num_blocks)
                 if not isinstance(region_len, int):
                     region_len = 0
                 self.kv_caches_base_addr.append(base_addr)
@@ -820,8 +862,6 @@ class BaseKVPoolWorker(ABC):
                     registered_regions[storage_key] = (start, end)
 
         self._align_kv_ptrs(registered_regions)
-        if host_keys := getattr(self, "_hisparse_host_storage_keys", None):
-            self.m_store.set_hisparse_host_ranges([registered_regions[key] for key in host_keys])
         ptrs = [start for start, _ in registered_regions.values()]
         lengths = [end - start for start, end in registered_regions.values()]
 
@@ -1472,6 +1512,7 @@ class KVPoolWorker(BaseKVPoolWorker):
     def _start_kv_transfer_threads(self) -> None:
         if self._transfer_threads_started:
             return
+        host_resident_groups = getattr(self, "_hisparse_host_resident_groups", frozenset())
 
         if self.can_put:
             ready_event_sending = threading.Event()
@@ -1492,6 +1533,7 @@ class KVPoolWorker(BaseKVPoolWorker):
                 self.enable_kv_events,
                 worker=self if self.tp_mismatch else None,
                 sharded_mamba_group_ids=self.sharded_mamba_group_ids,
+                host_resident_groups=host_resident_groups,
             )
             self.kv_send_thread.start()
             ready_event_sending.wait()
@@ -1509,6 +1551,7 @@ class KVPoolWorker(BaseKVPoolWorker):
                 invalid_block_ids_lock=self._invalid_block_ids_lock,
                 worker=self if self.tp_mismatch else None,
                 record_operation=self._record_kv_connector_operation,
+                host_resident_groups=host_resident_groups,
             )
             self.kv_recv_thread.start()
             ready_event.wait()

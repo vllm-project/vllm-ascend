@@ -41,6 +41,7 @@ class KVTransferThread(threading.Thread):
         dcp_size: int = 1,
         ready_event: threading.Event | None = None,
         name: str = "KVTransferThread",
+        host_resident_groups: frozenset[int] = frozenset(),
     ):
         super().__init__(daemon=True, name=name)
         self.m_store = m_store
@@ -50,6 +51,7 @@ class KVTransferThread(threading.Thread):
         self.tp_size = tp_size
         self.dcp_size = dcp_size
         self.token_database = token_database
+        self.host_resident_groups = host_resident_groups
         self.num_addrs_per_block = len(token_database.group_block_len[0])
         self.done_task_lock = threading.Lock()
         # Serialize request submission with the transition to a fatal state.
@@ -467,9 +469,18 @@ class KVCacheStoreSendingThread(KVTransferThread):
         enable_kv_event: bool = False,
         worker: Any = None,
         sharded_mamba_group_ids: set[int] | None = None,
+        host_resident_groups: frozenset[int] = frozenset(),
     ):
         super().__init__(
-            m_store, token_database, block_size, tp_rank, tp_size, dcp_size, ready_event, name="KVCacheSendingThread"
+            m_store,
+            token_database,
+            block_size,
+            tp_rank,
+            tp_size,
+            dcp_size,
+            ready_event,
+            name="KVCacheSendingThread",
+            host_resident_groups=host_resident_groups,
         )
         self.pcp_rank = pcp_rank
         self.pcp_size = pcp_size
@@ -1067,7 +1078,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 return False
             if current_event is not None:
                 current_event.synchronize()
-            put_result = self.m_store.put(keys, addrs, sizes)
+            if group_id in self.host_resident_groups:
+                assert isinstance(self.m_store, MemcacheBackend)
+                put_result = self.m_store.put(keys, addrs, sizes, host=True)
+            else:
+                put_result = self.m_store.put(keys, addrs, sizes)
             if isinstance(put_result, list):
                 if len(put_result) != len(keys):
                     logger.error("KV store backend returned %s results for %s keys", len(put_result), len(keys))
@@ -1105,6 +1120,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         invalid_block_ids_lock: threading.Lock | None = None,
         worker: Any = None,
         record_operation: Callable[[str, float, int], None] | None = None,
+        host_resident_groups: frozenset[int] = frozenset(),
     ):
         super().__init__(
             m_store,
@@ -1115,6 +1131,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             dcp_size,
             ready_event,
             name="KVCacheStoreRecvingThread",
+            host_resident_groups=host_resident_groups,
         )
         self._invalid_block_ids = invalid_block_ids if invalid_block_ids is not None else set()
         self._invalid_block_ids_lock = invalid_block_ids_lock or threading.Lock()
@@ -1149,7 +1166,8 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             size_list = []
             key_list = []
             block_id_list: list[int] = []
-            group_ids = self.token_database.project_group_ids(req_meta.kv_cache_group_ids or [0])
+            host_keys: list[bool] | None = [] if self.host_resident_groups else None
+            group_ids = req_meta.kv_cache_group_ids or [0]
             load_masks = self.token_database.load_mask(req_meta.block_hashes, token_len)
             tail_boundaries = {boundary.group_id: boundary.num_tokens for boundary in load_spec.tail_key_boundaries}
             for group_id in group_ids:
@@ -1182,6 +1200,8 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     addr_list.append(addr)
                     size_list.append(size)
                     block_id_list.append(block_id)
+                    if host_keys is not None:
+                        host_keys.append(group_id in self.host_resident_groups)
             if not key_list:
                 self.set_finished_request(req_id)
                 return
@@ -1200,7 +1220,14 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 key_list_c[:3],
             )
             load_get_start = time.perf_counter() if self._record_operation_cb is not None else 0.0
-            ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
+            if host_keys is None:
+                ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
+            else:
+                assert isinstance(self.m_store, MemcacheBackend)
+                rotation = self.tp_rank % len(host_keys)
+                ret = self.m_store.get(
+                    key_list_c, addr_list_c, size_list_c, host_keys=host_keys[rotation:] + host_keys[:rotation]
+                )
             if self._record_operation_cb is not None:
                 self._record_operation_cb(
                     "load_get",

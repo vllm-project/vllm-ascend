@@ -455,6 +455,10 @@ class NPUModelRunner(GPUModelRunner):
         kv_cache_config: KVCacheConfig,
         kv_cache_allocation_context: AbstractContextManager | None,
     ) -> None:
+        if isinstance(getattr(kv_cache_config, "hisparse_host_num_blocks", None), int):
+            from vllm_ascend.patch.worker.patch_hisparse_slab import install_hisparse_slab_allocator
+
+            install_hisparse_slab_allocator()
         # Upstream initialize_kv_cache builds the attention metadata builders
         # via init_attn_backend; the DSA builder registers its fused Q-RMS
         # JIT kernel during construction, so hold a registry window open

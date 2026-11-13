@@ -39,6 +39,7 @@ def _is_device_sdma() -> bool:
 
 MEMCACHE_THREAD_START_WAIT_S = 0.1
 MEMCACHE_SSD_MEDIA_TYPE = 2
+_HISPARSE_HOST_GET_MAX_BYTES = 256 * 1024 * 1024
 
 
 def _validate_device_ub_qos() -> None:
@@ -165,7 +166,6 @@ class MemcacheBackend(Backend):
         self._store_initialized = False
         self._store_init_lock = threading.Lock()
         self._pending_buffers: tuple[list[int], list[int]] | None = None
-        self._hisparse_host_ranges: tuple[tuple[int, int], ...] = ()
 
         if not self._lazy_init:
             self.store = self._setup_store()
@@ -242,52 +242,22 @@ class MemcacheBackend(Backend):
         self._pending_buffers = (list(ptrs), list(sizes))
         self._register_buffers_if_needed()
 
-    def set_hisparse_host_ranges(self, ranges: list[tuple[int, int]]) -> None:
-        self._hisparse_host_ranges = tuple(ranges)
-
-    def _transfer_hisparse(
+    def _get_hisparse(
         self,
         keys: list[str],
         addrs: list[list[int]],
         sizes: list[list[int]],
-        *,
-        put: bool,
+        host_keys: list[bool],
     ) -> list[int]:
         assert self.store is not None
-        if len(keys) != len(addrs) or len(keys) != len(sizes):
-            raise ValueError("KV pool transfer requires matching key, address and size counts")
-        directions = []
-        for addresses, lengths in zip(addrs, sizes, strict=True):
-            is_host = []
-            for address, length in zip(addresses, lengths, strict=True):
-                address_end = address + length
-                host = False
-                for start, end in self._hisparse_host_ranges:
-                    if address < end and start < address_end:
-                        if address < start or address_end > end:
-                            raise ValueError("KV pool transfer exceeds its registered host range")
-                        host = True
-                        break
-                is_host.append(host)
-            if is_host and any(is_host) != all(is_host):
-                raise ValueError("One KV pool key cannot combine host and device buffers")
-            directions.append(bool(is_host and is_host[0]))
         results = [-1] * len(keys)
-        transfer = self.store.batch_put_from_layers if put else self.store.batch_get_into_layers
-        for host in (False, True):
-            indices = [index for index, is_host in enumerate(directions) if is_host == host]
-            if not indices:
-                continue
-            direction = (
-                (MmcDirect.COPY_H2G if put else MmcDirect.COPY_G2H)
-                if host
-                else (MmcDirect.COPY_L2G if put else MmcDirect.COPY_G2L)
-            )
+
+        def get_batch(indices: list[int], direction: MmcDirect) -> None:
             selected_keys = [keys[index] for index in indices]
             batch_results = require_aligned_batch_results(
-                "HiSparse Memcache transfer",
+                "HiSparse Memcache GET",
                 selected_keys,
-                transfer(
+                self.store.batch_get_into_layers(
                     selected_keys,
                     [addrs[index] for index in indices],
                     [sizes[index] for index in indices],
@@ -296,6 +266,27 @@ class MemcacheBackend(Backend):
             )
             for index, result in zip(indices, batch_results, strict=True):
                 results[index] = result
+
+        device_indices = [index for index, is_host in enumerate(host_keys) if not is_host]
+        if device_indices:
+            get_batch(device_indices, MmcDirect.COPY_G2L)
+
+        # The SDK leases every object in a GET batch until its data copy
+        # finishes. Start a fresh lease for each bounded Host Source batch.
+        host_indices: list[int] = []
+        host_bytes = 0
+        for index, is_host in enumerate(host_keys):
+            if not is_host:
+                continue
+            key_bytes = sum(sizes[index])
+            if host_indices and host_bytes + key_bytes > _HISPARSE_HOST_GET_MAX_BYTES:
+                get_batch(host_indices, MmcDirect.COPY_G2H)
+                host_indices = []
+                host_bytes = 0
+            host_indices.append(index)
+            host_bytes += key_bytes
+        if host_indices:
+            get_batch(host_indices, MmcDirect.COPY_G2H)
         return results
 
     def unregister_buffer(self, ptrs: list[int], sizes: list[int]):
@@ -466,7 +457,14 @@ class MemcacheBackend(Backend):
         key: list[str],
         addr: list[list[int]],
         size: list[list[int]],
+        *,
+        host_keys: list[bool] | None = None,
     ):
+        if host_keys is not None and not (len(host_keys) == len(key) == len(addr) == len(size)):
+            logger.error(
+                "Invalid HiSparse MemCache GET metadata: expected one memory location, address and size per key"
+            )
+            return None
         if self._lazy_init and not self._store_initialized:
             logger.error(
                 "Failed to get %d keys out of %d. Store is not initialized; "
@@ -479,8 +477,8 @@ class MemcacheBackend(Backend):
         assert self.store is not None
         try:
             res = (
-                self._transfer_hisparse(key, addr, size, put=False)
-                if getattr(self, "_hisparse_host_ranges", ())
+                self._get_hisparse(key, addr, size, host_keys)
+                if host_keys is not None
                 else self.store.batch_get_into_layers(key, addr, size, MmcDirect.COPY_G2L.value)
             )
             failed_codes = [int(value) for value in res if value != 0]
@@ -511,15 +509,19 @@ class MemcacheBackend(Backend):
         key: list[str],
         addr: list[list[int]],
         size: list[list[int]],
+        *,
+        host: bool = False,
     ) -> list[bool] | bool:
+        if host and not (len(key) == len(addr) == len(size)):
+            logger.error("Invalid HiSparse MemCache PUT metadata: expected one address and size per key")
+            return False
         self.ensure_initialized()
         assert self.store is not None
         try:
-            res = (
-                self._transfer_hisparse(key, addr, size, put=True)
-                if getattr(self, "_hisparse_host_ranges", ())
-                else self.store.batch_put_from_layers(key, addr, size, MmcDirect.COPY_L2G.value)
-            )
+            direction = MmcDirect.COPY_H2G if host else MmcDirect.COPY_L2G
+            res = self.store.batch_put_from_layers(key, addr, size, direction.value)
+            if host:
+                res = require_aligned_batch_results("HiSparse Memcache PUT", key, res)
             failed_codes = [int(value) for value in res if value != 0]
             failed_count = len(failed_codes)
             if failed_count:
