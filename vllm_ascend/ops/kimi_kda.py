@@ -27,6 +27,7 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
+from vllm_ascend.attention.gdn_attn_builder import AscendGDNHostMetadataBackend
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
     wait_for_kv_layer_from_connector,
@@ -34,7 +35,6 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
     record_attention_compute_start,
 )
-from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend
 from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDynamicLinearMethod,

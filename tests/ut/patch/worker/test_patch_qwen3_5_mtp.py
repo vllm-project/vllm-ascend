@@ -14,7 +14,8 @@ from vllm_ascend.patch.worker import patch_qwen3_5
     not hasattr(patch_qwen3_5, "_gdn_init_with_packed_weight"),
     reason="The 310P branch intentionally does not install packed GDN weights.",
 )
-def test_standard_gdn_constructor_registers_packed_weight_after_base_init():
+@pytest.mark.parametrize("vllm_config_as_keyword", [False, True])
+def test_standard_gdn_constructor_registers_packed_weight_after_base_init(vllm_config_as_keyword):
     def fake_original_init(layer, *args, **kwargs):
         del args, kwargs
         torch.nn.Module.__init__(layer)
@@ -23,11 +24,21 @@ def test_standard_gdn_constructor_registers_packed_weight_after_base_init():
         layer.conv1d.weight = torch.nn.Parameter(torch.empty(6, 1, 4))
         layer.conv1d.quant_method = SimpleNamespace(process_weights_after_loading=lambda _layer: None)
 
-    with patch.object(patch_qwen3_5, "_GDN_ORIGINAL_INIT", fake_original_init):
+    vllm_config = object()
+    with (
+        patch.object(patch_qwen3_5, "_GDN_ORIGINAL_INIT", fake_original_init),
+        patch.object(patch_qwen3_5, "_uses_gdn_recoverssm", return_value=True) as uses_gdn_recoverssm,
+    ):
         layer = object.__new__(patch_qwen3_5._GDN_PATCH_TARGET)
-        patch_qwen3_5._gdn_init_with_packed_weight(layer)
+        if vllm_config_as_keyword:
+            patch_qwen3_5._gdn_init_with_packed_weight(layer, object(), vllm_config=vllm_config)
+        else:
+            patch_qwen3_5._gdn_init_with_packed_weight(layer, object(), vllm_config)
 
     packed = layer.conv1d.get_parameter("ascend_conv1d_weight")
+    uses_gdn_recoverssm.assert_called_once_with(vllm_config)
+    assert layer.use_gdn_recoverssm
+    assert not hasattr(layer, "vllm_config")
     assert isinstance(packed, torch.nn.Parameter)
     assert packed.shape == (4, 6)
     assert packed.dtype == torch.bfloat16

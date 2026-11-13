@@ -13,10 +13,8 @@ from vllm_ascend.models.qwen4_exp import cpu_length_sync as policy
 @pytest.fixture
 def runner():
     try:
-        from vllm.models.qwen4_exp.amd.qsa import Qwen4ExpQSAMetadataBuilder
-
         from vllm_ascend.models.qwen4_exp.model_state import AscendQwen4ExpModelState
-        from vllm_ascend.models.qwen4_exp.qsa import AscendQSABackend
+        from vllm_ascend.models.qwen4_exp.qsa import AscendQSABackend, AscendQSAMetadataBuilder
         from vllm_ascend.worker.v2.spec_decode.mtp.speculator import AscendMTPSpeculator
     except ModuleNotFoundError as exc:
         if exc.name == "vllm.models.qwen4_exp" or (exc.name or "").startswith("vllm.models.qwen4_exp."):
@@ -25,7 +23,7 @@ def runner():
 
     group = NS(
         backend=AscendQSABackend,
-        get_metadata_builder=lambda _: object.__new__(Qwen4ExpQSAMetadataBuilder),
+        get_metadata_builder=lambda _: object.__new__(AscendQSAMetadataBuilder),
     )
     draft = object.__new__(AscendMTPSpeculator)
     draft.attn_groups = [[group]]
@@ -50,6 +48,14 @@ def test_incomplete_runtime_keeps_exact_lengths():
 def test_supported_model_enables_policy_by_default(runner):
     runner.model_state.initialize_spec_cpu_length_sync(runner)
     assert runner.model_state.can_skip_spec_cpu_length_sync() is True
+
+
+def test_upstream_qsa_builder_remains_supported(runner):
+    from vllm.models.qwen4_exp.amd.qsa import Qwen4ExpQSAMetadataBuilder
+
+    group = runner.attn_groups[0][0]
+    group.get_metadata_builder = lambda _: object.__new__(Qwen4ExpQSAMetadataBuilder)
+    assert policy.can_skip_qwen_cpu_length_sync(runner) is True
 
 
 @pytest.mark.parametrize("multimodal", [False, True])

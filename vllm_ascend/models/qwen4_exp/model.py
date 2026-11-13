@@ -34,6 +34,10 @@ from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
+from vllm_ascend.models.qwen_gdn_recoverssm import (
+    gdn_mamba_state_dtype_from_config,
+    gdn_mamba_state_shape_from_config,
+)
 from vllm_ascend.ops.triton.qwen4_exp.hc import (
     grouped_gemma_rmsnorm,
     hc_combine,
@@ -42,7 +46,7 @@ from vllm_ascend.ops.triton.qwen4_exp.hc import (
     hc_silu,
 )
 
-from .ple import patch_upstream_ple_short_conv
+from .ple import AscendQwen4ExpPLEBackend, patch_upstream_ple_short_conv
 
 # Keep the upstream model and weight loader authoritative. HyperConnection's
 # CUDA glue functions are module globals, so replace them before importing the
@@ -77,6 +81,9 @@ class AscendQwen4ExpPLELayer(upstream_model.Qwen4ExpPLELayer):
     ) -> None:
         super().__init__(*args, **kwargs)
         self.use_sequence_parallel = use_sequence_parallel
+
+    def get_attn_backend(self) -> type[AscendQwen4ExpPLEBackend]:
+        return AscendQwen4ExpPLEBackend
 
     def _sequence_parallel_embeddings(
         self,
@@ -495,10 +502,18 @@ class AscendQwen4ExpForCausalLM(upstream_model.Qwen4ExpForCausalLM):
     pp_intermediate_tensors_are_full_tokens = True
 
     @classmethod
+    def get_gdn_mamba_state_shape_from_config(cls, vllm_config: VllmConfig):
+        return gdn_mamba_state_shape_from_config(vllm_config)
+
+    @classmethod
+    def get_gdn_mamba_state_dtype_from_config(cls, vllm_config: VllmConfig):
+        return gdn_mamba_state_dtype_from_config(vllm_config)
+
+    @classmethod
     def get_mamba_specs_from_config(cls, vllm_config: VllmConfig):
         # vLLM uses these specs to align attention pages. PLE has a private
         # dense bank; only GDN's complete conv+SSM state shares QSA pages.
-        return tuple(spec for spec in super().get_mamba_specs_from_config(vllm_config) if len(spec.shapes) == 2)
+        return tuple(spec for spec in super().get_mamba_specs_from_config(vllm_config) if not spec.tp_replicated)
 
     @staticmethod
     def get_model_state_cls():
@@ -511,6 +526,14 @@ class AscendQwen4ExpForConditionalGeneration(upstream_model.Qwen4ExpForCondition
     """Qwen3.8-Flash-Next multimodal model using Ascend operators."""
 
     pp_intermediate_tensors_are_full_tokens = True
+
+    @classmethod
+    def get_mamba_state_shape_from_config(cls, vllm_config: VllmConfig):
+        return gdn_mamba_state_shape_from_config(vllm_config)
+
+    @classmethod
+    def get_mamba_state_dtype_from_config(cls, vllm_config: VllmConfig):
+        return gdn_mamba_state_dtype_from_config(vllm_config)
 
     @classmethod
     def get_mamba_specs_from_config(cls, vllm_config: VllmConfig):

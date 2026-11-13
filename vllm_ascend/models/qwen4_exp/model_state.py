@@ -21,6 +21,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 from vllm.config import VllmConfig
+from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_pp_group
 from vllm.models.qwen4_exp.amd.model_state import Qwen4ExpModelState
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
@@ -28,6 +29,8 @@ from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
     AscendMambaHybridModelState,
 )
+
+from .input_adapter import Qwen4ExpPreparedInputAdapter
 
 
 class AscendQwen4ExpModelState(Qwen4ExpModelState, AscendMambaHybridModelState):
@@ -80,6 +83,7 @@ class AscendQwen4ExpModelState(Qwen4ExpModelState, AscendMambaHybridModelState):
         finally:
             config.ple_layer_ids = ple_layer_ids
 
+        self.qsa_prepared_input_adapter = Qwen4ExpPreparedInputAdapter(model)
         self.uses_ngram_embedding = bool(ple_layer_ids) and (get_pp_group().is_first_rank)
         if not self.uses_ngram_embedding:
             self.ngram_context_len = 0
@@ -107,6 +111,29 @@ class AscendQwen4ExpModelState(Qwen4ExpModelState, AscendMambaHybridModelState):
             dtype=torch.int32,
             device=self.device,
         )
+
+    def prepare_inputs(self, input_batch: Any, req_states: Any) -> dict[str, Any]:
+        model_inputs = super().prepare_inputs(input_batch, req_states)
+        self.qsa_prepared_input_adapter.prepare_inputs(input_batch)
+        return model_inputs
+
+    def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
+        model_inputs = super().prepare_dummy_inputs(num_reqs, num_tokens)
+        positions = model_inputs.get("positions")
+        if positions is not None:
+            self.qsa_prepared_input_adapter.prepare_positions(positions, num_tokens)
+        return model_inputs
+
+    def prepare_attn(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        metadata = super().prepare_attn(*args, **kwargs)
+        cudagraph_mode = kwargs.get("cudagraph_mode")
+        if cudagraph_mode is None and len(args) > 1:
+            cudagraph_mode = args[1]
+        self.qsa_prepared_input_adapter.prepare_attention_metadata(
+            metadata,
+            full_graph=cudagraph_mode == CUDAGraphMode.FULL,
+        )
+        return metadata
 
 
 __all__ = ["AscendQwen4ExpModelState"]

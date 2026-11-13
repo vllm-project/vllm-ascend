@@ -83,7 +83,7 @@ def _compress_qsa_groups(
     rope_cache: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pool completed groups with the fused QSA compression kernel."""
-    return qsa_compress_groups_with_ratio_fused(
+    result = qsa_compress_groups_with_ratio_fused(
         raw_keys,
         raw_positions,
         compressor_state_cache,
@@ -95,6 +95,8 @@ def _compress_qsa_groups(
         compress_ratio,
         rope_cache,
     )
+    assert result is not None
+    return result
 
 
 class QSAForwardMetadataProtocol(Protocol):
@@ -219,12 +221,11 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
     ) -> torch.Tensor:
         logger.info_once("QSA indexer is using fused RMSNorm + MRoPE.")
         cache = self.rotary_emb._match_cos_sin_cache_dtype(tensor)  # noqa: SLF001
-        safe_positions = positions.clamp(0, cache.shape[0] - 1).contiguous()
-        cos_sin = cache[safe_positions]
         return torch.ops.vllm.triton_qsa_rmsnorm_mrope(
             tensor=tensor,
             weight=norm.weight,
-            cos_sin=cos_sin,
+            cos_sin=cache,
+            positions=positions,
             eps=norm.variance_epsilon,
             mrope_section=list(self.rotary_emb.mrope_section),
             rope_dim=self.rotary_emb.rotary_dim,
@@ -236,13 +237,18 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         first_positions: torch.Tensor,
     ) -> torch.Tensor:
         """Normalize and rotate compressed Indexer keys."""
+        original_pooled = pooled
+        original_positions = first_positions
         if getattr(self.rotary_emb, "mrope_section", None):
             first_positions = first_positions.transpose(0, 1)
         else:
             first_positions = first_positions[:, 0]
         pooled = pooled.reshape(-1, 1, self.index_head_dim)
         if not self._fused_norm_rope_eligible(pooled, first_positions):
-            raise ValueError("QSA compressed-key fused norm+RoPE ABI is not satisfied")
+            return super().normalize_compressed_keys(
+                original_pooled,
+                original_positions,
+            )
         return self._fused_norm_rope(
             pooled,
             self.k_layernorm,
@@ -305,7 +311,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         )
         q = q_raw.reshape(-1, self.index_n_heads, self.index_head_dim)
         if not self._fused_norm_rope_eligible(q, positions):
-            raise ValueError("QSA query fused norm+RoPE ABI is not satisfied")
+            return super().project_qk(hidden_states, positions)
         q = self._fused_norm_rope(q, self.q_layernorm, positions)
         return q, token_k.reshape(-1, 1, self.index_head_dim)
 
@@ -325,24 +331,47 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             position_rows = qsa_cache.canonical_qsa_rope_positions(positions)[:num_tokens].to(
                 device=raw_key_cache.device
             )
-        pooled, first_positions = _compress_qsa_groups(
-            token_k[:num_tokens],
-            position_rows,
-            raw_key_cache,
-            raw_metadata.block_table,
-            raw_metadata.token_to_req,
-            raw_metadata.query_start_loc,
-            raw_metadata.logical_positions,
-            compressed_metadata.slot_mapping,
-            self.compress_ratio,
-            rope_position_cache,
-        )
-        normalized = self.normalize_compressed_keys(pooled, first_positions)
-        _store_qsa_cache_rows(
-            self.compressed_key_cache.kv_cache,
-            compressed_metadata.slot_mapping,
-            normalized,
-        )
+        if self._fused_norm_rope_eligible(token_k, positions):
+            rotary_cache = self.rotary_emb._match_cos_sin_cache_dtype(token_k)  # noqa: SLF001
+            qsa_compress_groups_with_ratio_fused(
+                token_k[:num_tokens],
+                position_rows,
+                raw_key_cache,
+                raw_metadata.block_table,
+                raw_metadata.token_to_req,
+                raw_metadata.query_start_loc,
+                raw_metadata.logical_positions,
+                compressed_metadata.slot_mapping,
+                self.compress_ratio,
+                rope_position_cache,
+                norm_weight=self.k_layernorm.weight,
+                rotary_cache=rotary_cache,
+                compressed_cache=self.compressed_key_cache.kv_cache,
+                norm_eps=self.k_layernorm.variance_epsilon,
+            )
+        else:
+            # Graph warmup can use padded geometry outside the fused ABI. Keep
+            # the pre-fusion path available instead of rejecting graph capture.
+            pooled, first_positions = _compress_qsa_groups(
+                token_k[:num_tokens],
+                position_rows,
+                raw_key_cache,
+                raw_metadata.block_table,
+                raw_metadata.token_to_req,
+                raw_metadata.query_start_loc,
+                raw_metadata.logical_positions,
+                compressed_metadata.slot_mapping,
+                self.compress_ratio,
+                rope_position_cache,
+            )
+            normalized = self.normalize_compressed_keys(pooled, first_positions)
+            _store_qsa_cache_rows(
+                self.compressed_key_cache.kv_cache,
+                compressed_metadata.slot_mapping,
+                normalized,
+            )
+        # Keep ring writes after the fused launch: other rows can still read
+        # the previous ring contents while producing compressed groups.
         _store_qsa_cache_rows(raw_key_cache, raw_metadata.slot_mapping, token_k[:num_tokens])
         if rope_position_cache is not None:
             _store_qsa_cache_rows(
@@ -372,6 +401,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             # Host counts are prepared with this batch's QSA metadata.
             num_actual_requests=getattr(metadata, "qsa_num_live_requests", None),
             num_actual_tokens=getattr(metadata, "qsa_num_live_tokens", metadata.num_actual_tokens),
+            prepared_metadata=getattr(metadata, "qsa_lightning_v2_metadata", None),
         )
 
 
@@ -446,6 +476,7 @@ class AscendQSAImpl:
                 logical_positions[:num_tokens],
                 seq_lens,
                 output[:num_tokens],
+                prepared_metadata=getattr(attn_metadata, "qsa_gbsa_metadata", None),
             )
         return dispatch_qsa_attention(
             query[:num_tokens],
@@ -598,33 +629,39 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         qkv: torch.Tensor,
         positions: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        # The Ascend fused MRoPE path gathers a temporary rotary-cache tensor.
-        # That temporary is not replay-safe in the MTP FULL graph: after the
-        # graph reuses its memory, the source QKV remains finite while the
-        # fused result can contain NaNs in Q/K. The draft model has only one
-        # QSA layer, so keep the target-model fusion and use the graph-safe
-        # decomposition for MTP.
+        # Preserve the MTP fallback until draft FULL-graph replay is validated
+        # separately. Removing the gathered temporary alone does not establish
+        # draft-model state parity.
         # ForwardContext has no draft-model flag. The layer name is fixed when
         # the target or MTP model is built and remains stable during graph replay.
         if self.layer_name.startswith("mtp."):
             return super()._project_qkv_gate(qkv, positions)
         if not self._main_fused_norm_rope_eligible(qkv, positions):
-            raise ValueError("QSA main-attention fused norm+RoPE ABI is not satisfied")
+            # Graph warmup can use padded projection geometry that is outside
+            # the Ascend fused kernel ABI. Keep the portable upstream
+            # decomposition as the compatibility path instead of failing
+            # service initialization.
+            return super()._project_qkv_gate(qkv, positions)
 
-        # Preserve valid scheduler positions while mapping padded profiling rows
-        # to a safe cache entry, matching the QSA indexer path above.
-        cache = self.rotary_emb.cos_sin_cache
-        safe_positions = positions.clamp(0, cache.shape[0] - 1).contiguous()
-        cos_sin = cache[safe_positions]
-        if cos_sin.device != qkv.device:
-            cos_sin = cos_sin.to(qkv.device)
-        if cos_sin.dtype != qkv.dtype:
-            cos_sin = cos_sin.to(qkv.dtype)
+        # MRV2 can prepare graph-stable rotary rows outside the forward pass.
+        # Other paths gather from the full cache inside the fused kernel.
+        prepared = getattr(self, "_qsa_prepared_cos_sin", None)
+        expected_shape = (*positions.shape, self.rotary_emb.cos_sin_cache.shape[-1])
+        cache = self.rotary_emb._match_cos_sin_cache_dtype(qkv)  # noqa: SLF001
+        rope_positions = positions
+        q_weight = self.q_norm.weight
+        k_weight = self.k_norm.weight
+        if prepared is not None and tuple(prepared.shape) == expected_shape:
+            cache = prepared.to(device=qkv.device, dtype=qkv.dtype)
+            rope_positions = None
+            q_weight = 1.0 + q_weight
+            k_weight = 1.0 + k_weight
         return torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
             qkv=qkv,
-            q_weight=1.0 + self.q_norm.weight,
-            k_weight=1.0 + self.k_norm.weight,
-            cos_sin=cos_sin,
+            q_weight=q_weight,
+            k_weight=k_weight,
+            cos_sin=cache,
+            positions=rope_positions,
             num_q_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_dim,

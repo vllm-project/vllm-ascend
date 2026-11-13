@@ -32,6 +32,7 @@ def _prepare_qsa_gbsa_rows_kernel(
     GROUP_BLOCK: tl.constexpr,
     KV_HEADS: tl.constexpr,
     TABLE_BLOCK: tl.constexpr,
+    WRITE_ROW_METADATA: tl.constexpr,
 ):
     row = tl.program_id(0)
     columns = tl.arange(0, GROUP_BLOCK)
@@ -69,16 +70,17 @@ def _prepare_qsa_gbsa_rows_kernel(
             tl.store(packed_indices + (head * rows + row) * OUTPUT_GROUPS + GROUPS, extra)
         tl.store(counts + head * rows + row, tail_slot + has_tail.to(tl.int32))
     tl.store(visible_lengths + row, visible)
-    tl.store(cu_query + row, row.to(tl.int64))
-    if row == 0:
-        tl.store(cu_query + rows, rows)
-    page_columns = tl.arange(0, TABLE_BLOCK)
-    stored_page = tl.load(
-        table + request * table_row_stride + page_columns * table_column_stride,
-        page_columns < table_columns,
-        other=-1,
-    )
-    tl.store(row_table + row * table_columns + page_columns, stored_page, page_columns < table_columns)
+    if WRITE_ROW_METADATA:
+        tl.store(cu_query + row, row.to(tl.int64))
+        if row == 0:
+            tl.store(cu_query + rows, rows)
+        page_columns = tl.arange(0, TABLE_BLOCK)
+        stored_page = tl.load(
+            table + request * table_row_stride + page_columns * table_column_stride,
+            page_columns < table_columns,
+            other=-1,
+        )
+        tl.store(row_table + row * table_columns + page_columns, stored_page, page_columns < table_columns)
 
 
 def prepare_qsa_gbsa_inputs(
@@ -88,6 +90,8 @@ def prepare_qsa_gbsa_inputs(
     token_to_req: torch.Tensor,
     block_table: torch.Tensor,
     num_kv_heads: int,
+    *,
+    write_row_metadata: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Produce the same integer tensors as the original GBSA torch pipeline.
 
@@ -95,6 +99,7 @@ def prepare_qsa_gbsa_inputs(
     remain explicit (residual_block_mode=0), including the 512-entry limit.
     Every output element is written before use. No device-to-host reads or
     process-global tensor cache are introduced; inputs can change every call.
+    Union callers can omit unused row metadata; the last two outputs are then empty.
     """
     rows = compact_indices.shape[0]
     groups = compact_indices.shape[1] - 3
@@ -103,8 +108,9 @@ def prepare_qsa_gbsa_inputs(
     sparse_idx = torch.empty((num_kv_heads, rows, output_groups), dtype=torch.int32, device=compact_indices.device)
     sparse_count = torch.empty((num_kv_heads, rows), dtype=torch.int32, device=compact_indices.device)
     visible = torch.empty((rows,), dtype=torch.int32, device=compact_indices.device)
-    cu_query = torch.empty((rows + 1,), dtype=torch.int64, device=compact_indices.device)
-    row_table = torch.empty((rows, columns), dtype=block_table.dtype, device=block_table.device)
+    metadata_rows = rows if write_row_metadata else 0
+    cu_query = torch.empty((rows + 1 if write_row_metadata else 0,), dtype=torch.int64, device=compact_indices.device)
+    row_table = torch.empty((metadata_rows, columns), dtype=block_table.dtype, device=block_table.device)
     if rows == 0:
         cu_query.zero_()
         return sparse_idx, sparse_count, visible, cu_query, row_table
@@ -135,6 +141,7 @@ def prepare_qsa_gbsa_inputs(
         GROUP_BLOCK=group_block,
         KV_HEADS=num_kv_heads,
         TABLE_BLOCK=triton.next_power_of_2(columns),
+        WRITE_ROW_METADATA=write_row_metadata,
         num_warps=1,
     )
     return sparse_idx, sparse_count, visible, cu_query, row_table
