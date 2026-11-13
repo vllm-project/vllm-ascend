@@ -1,0 +1,9 @@
+pr: 21832
+entries:
+  - category: performance
+    text: >-
+      Fused Qwen3.5 MoE attention communication with adjacent BF16 matrix
+      multiplications during sequence-parallel prefill.
+    model: qwen3.5-moe
+    hardware: [A2, A3, A5]
+
