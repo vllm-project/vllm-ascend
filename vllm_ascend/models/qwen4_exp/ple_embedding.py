@@ -4,7 +4,7 @@
 import torch
 import torch.distributed as dist
 from vllm.config import get_current_vllm_config
-from vllm.distributed import get_engram_dp_group, get_etp_group, get_tp_group
+from vllm.distributed import get_engram_dp_group
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import logger
 from vllm.models.qwen4_exp.common.ngram_embedding import Qwen4ExpPLEEmbedding, Qwen4ExpPLEPinnedHostEmbedding
@@ -25,8 +25,6 @@ class AscendPLEHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
     def __init__(self, *args, **kwargs):
         self._host_table: HostUvaBuffer | SharedUvaBuffer | None = None
         self._shared_group = None
-        if get_etp_group().world_size != get_tp_group().world_size:
-            raise ValueError("PLE host lookup requires ETP=TP")
         config = get_current_vllm_config().engram_config
         if config is not None and config.dp_shared_memory:
             group = get_engram_dp_group()
