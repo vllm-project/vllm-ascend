@@ -78,7 +78,7 @@ def test_fused_retains_checkpoint_width_and_zero_length_rows(runtime, indices, l
     q = torch.randn(1, count, 1, 128, dtype=torch.bfloat16)
     a, b = torch.randn(count, 1), torch.randn(count, 1)
     state = torch.zeros(24, 1, 128, 128)
-    accepted = None if accepted is None else torch.tensor(accepted, dtype=torch.int64)
+    accepted = None if accepted is None else torch.tensor(accepted, dtype=torch.int32)
     result = ns._run_recurrent_gdn(
         q,
         q,
@@ -103,7 +103,8 @@ def test_fused_retains_checkpoint_width_and_zero_length_rows(runtime, indices, l
     assert kw["scale"] == 128**-0.5
     assert kw["A_log"].dtype == kw["dt_bias"].dtype == torch.float32
     if accepted is not None:
-        torch.testing.assert_close(kw["num_accepted_tokens"], accepted.int())
+        assert kw["num_accepted_tokens"].dtype == torch.int32
+        assert kw["num_accepted_tokens"].data_ptr() == accepted.data_ptr()
     ns.DeviceOperator.fused_gdn_gating.assert_not_called()
     ns.l2norm_fwd.assert_not_called()
     assert result.shape == q.shape
