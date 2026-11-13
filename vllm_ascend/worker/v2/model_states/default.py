@@ -38,7 +38,10 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import get_prebound_copy_sfa_slots
-from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import CopySfaRequestStates
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import (
+    CopySfaRequestStates,
+    CopySfaTopkSlotAllocator,
+)
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     get_sparse_kv_offload_manager,
     update_sparse_kv_offload_metadata,
@@ -93,6 +96,23 @@ class AscendModelState(DefaultModelState):
         self._offload_draft_attn_groups: list[list[AttentionGroup]] = []
         self._offload_draft_layer_names: set[str] = set()
         sparse_cfg = get_ascend_config().sparse_kv_offload_config
+        self._selective_request_ids: dict[str, int] | None = {} if sparse_cfg.selective_offload else None
+        self._selective_cache_ids: dict[str, int] | None = {} if sparse_cfg.selective_offload else None
+        self._selective_data_versions: dict[str, int] = {}
+        self._selective_write_frontiers: dict[str, int] = {}
+        self._selective_native_experiment = False
+        # Dummy metadata uses 32-bit scheduler hashes; keep real instances disjoint.
+        self._selective_next_request_id = 1 << 32
+        self._selective_tails = None
+        self._selective_tail_rows = None
+        if sparse_cfg.selective_offload and vllm_config.cache_config.block_size == 128:
+            capacity = vllm_config.scheduler_config.max_num_seqs
+            self._selective_tails = CopySfaTopkSlotAllocator(
+                min(capacity, vllm_config.scheduler_config.max_num_batched_tokens)
+            )
+            self._selective_tail_rows = CpuGpuBuffer(
+                capacity, 2, dtype=torch.int64, device=device, pin_memory=is_pin_memory_available()
+            )
         if sparse_cfg.enabled:
             pin_memory = is_pin_memory_available()
             self._offload_req_ids = CpuGpuBuffer(
@@ -333,10 +353,42 @@ class AscendModelState(DefaultModelState):
         ):
             yield
 
+    def add_request(self, req_index: int, new_req_data) -> None:
+        if (self._selective_native_experiment and self._selective_request_ids is not None
+                and self._selective_next_request_id >= 1 << 63):
+            raise OverflowError("Selective KV request instance IDs exhausted")
+        super().add_request(req_index, new_req_data)
+        if self._selective_native_experiment and self._selective_request_ids is not None:
+            self._selective_request_ids[new_req_data.req_id] = self._selective_next_request_id
+            assert self._selective_cache_ids is not None
+            self._selective_cache_ids[new_req_data.req_id] = self._selective_next_request_id
+            self._selective_data_versions[new_req_data.req_id] = 0
+            self._selective_write_frontiers[new_req_data.req_id] = new_req_data.num_computed_tokens
+            self._selective_next_request_id += 1
+
     def remove_request(self, req_id: str) -> None:
         super().remove_request(req_id)
+        if self._selective_native_experiment and self._selective_request_ids is not None:
+            self._selective_request_ids.pop(req_id, None)
+            assert self._selective_cache_ids is not None
+            self._selective_cache_ids.pop(req_id, None)
+            self._selective_data_versions.pop(req_id, None)
+            self._selective_write_frontiers.pop(req_id, None)
         if self._offload_request_states is not None:
             self._offload_request_states.remove_request(req_id)
+        if self._selective_tails is not None:
+            self._selective_tails.release(req_id)
+
+    def invalidate_selective_requests(self, req_ids: Collection[str]) -> None:
+        if self._selective_cache_ids is None:
+            return
+        affected = sorted(req_id for req_id in set(req_ids) if req_id in self._selective_cache_ids)
+        if self._selective_next_request_id + len(affected) > 1 << 63:
+            raise OverflowError("Selective KV cache identity exhausted")
+        for req_id in affected:
+            self._selective_cache_ids[req_id] = self._selective_next_request_id
+            self._selective_data_versions[req_id] += 1
+            self._selective_next_request_id += 1
 
     def _get_engram_device_inputs(self, input_batch: AscendInputBatch) -> dict[str, torch.Tensor]:
         """Device request coordinates for upstream NgramHashState."""
@@ -466,6 +518,12 @@ class AscendModelState(DefaultModelState):
         offload_token_to_req = getattr(self, "_offload_token_to_req", None)
         if offload_req_ids is not None:
             assert offload_token_to_req is not None
+            request_instance_ids = None
+            if (self._selective_native_experiment and self._selective_cache_ids is not None
+                    and not (input_batch.is_dummy or for_capture)):
+                request_instance_ids = [
+                    self._selective_cache_ids[req_id] for req_id in input_batch.req_ids[:num_actual_reqs]
+                ]
             update_sparse_kv_offload_metadata(
                 input_batch.num_tokens,
                 input_batch.num_reqs,
@@ -475,7 +533,20 @@ class AscendModelState(DefaultModelState):
                 input_batch.query_start_loc_np,
                 offload_req_ids,
                 offload_token_to_req,
+                request_instance_ids=request_instance_ids,
             )
+        tail_rows = None
+        tail_buffer = getattr(self, "_selective_tail_rows", None)
+        if tail_buffer is not None and num_actual_tokens == num_actual_reqs:
+            assert self._selective_tails is not None
+            tail_buffer.np[:num_reqs].fill(-1)
+            if not (input_batch.is_dummy or for_capture):
+                for row, req_id in enumerate(input_batch.req_ids[:num_actual_reqs]):
+                    tail_buffer.np[row] = self._selective_tails.tail_row(
+                        req_id, int(input_batch.num_computed_tokens_np[row]), self.vllm_config.cache_config.block_size
+                    )
+            tail_buffer.copy_to_gpu(num_reqs)
+            tail_rows = tail_buffer.gpu[:num_reqs]
         pool_slots = getattr(self, "_offload_pool_slots", None)
         pool_active = getattr(self, "_offload_pool_active", None)
         request_states = getattr(self, "_offload_request_states", None)
@@ -554,6 +625,7 @@ class AscendModelState(DefaultModelState):
             full_graph_mode=cudagraph_mode == CUDAGraphMode.FULL,
             model_specific_attn_metadata=model_specific_attn_metadata,
             req_ids_tensor=offload_req_ids.gpu[:num_reqs] if offload_req_ids is not None else None,
+            selective_tail_rows=tail_rows,
             token_to_req=offload_token_to_req.gpu[:num_input_tokens] if offload_token_to_req is not None else None,
             offload_dummy=getattr(input_batch, "is_dummy", False),
             req_topk_buffer_slots=pool_slots.cpu[:num_reqs] if pool_slots is not None else None,

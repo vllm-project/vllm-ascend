@@ -131,6 +131,7 @@ def _make_sparse_kv_ops():
 
 def _make_plan_manager():
     manager = SparseKVOffloadManager.__new__(SparseKVOffloadManager)
+    manager.sparse_kv_offload_config = SimpleNamespace(selective_offload=False)
     manager.use_fused_overlap = True
     manager.tp_rank = 0
     manager.topk = 4
@@ -420,6 +421,32 @@ def test_capture_external_plan_and_current_kv_use_separate_side_streams():
     current_stream.wait_stream.assert_called_once_with(manager.current_kv_save_stream)
     assert manager.current_kv_by_layer[0][0].numel() == 1
     assert manager.current_kv_by_layer[0][1].numel() == 1
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+def test_selective_capture_joins_host_writeback_on_tp0(rank):
+    manager = _make_plan_manager()
+    manager.sparse_kv_offload_config.selective_offload = True
+    manager.use_fused_overlap = False
+    manager.tp_rank = rank
+    manager.current_kv_save_stream = MagicMock()
+    manager._offload_new_kv_on_current_stream = MagicMock()
+    current = MagicMock()
+    k, v = torch.empty(1), torch.empty(1)
+    with (
+        patch.object(manager_module.torch_npu.npu, "current_stream", return_value=current),
+        patch.object(manager_module.torch_npu.npu, "stream", side_effect=lambda _: nullcontext()),
+    ):
+        manager.offload_new_kv("layer.0", torch.tensor([0]), None, None, None, None, k, v, capturing=True)
+        manager.wait_for_current_kv_writeback(capturing=True)
+    assert manager.current_kv_by_layer[0][0] is k
+    assert manager.current_kv_by_layer[0][1] is v
+    if rank == 0:
+        manager.current_kv_save_stream.wait_event.assert_called_once_with(current.record_event.return_value)
+        current.wait_stream.assert_called_once_with(manager.current_kv_save_stream)
+    else:
+        current.record_event.assert_not_called()
+        current.wait_stream.assert_not_called()
 
 
 def test_capture_without_fused_overlap_stays_on_current_stream():

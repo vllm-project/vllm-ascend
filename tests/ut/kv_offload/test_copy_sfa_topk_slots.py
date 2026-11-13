@@ -62,6 +62,36 @@ def test_copy_sfa_slot_allocator_exhausts_capacity():
         allocator.bind("req-b")
 
 
+def test_copy_sfa_tail_rows_follow_request_and_rebuild_after_rollback():
+    allocator = CopySfaTopkSlotAllocator(2)
+    assert allocator.tail_row("a", 2305, 128) == (0, 1)
+    assert allocator.tail_row("b", 140, 128) == (1, 12)
+    assert allocator.tail_row("b", 141, 128) == (1, 12)
+    assert allocator.tail_row("a", 2431, 128) == (0, 1)
+    assert allocator.tail_row("a", 2432, 128) == (0, 0)
+    assert allocator.tail_row("a", 2310, 128) == (0, 6)
+    assert allocator.tail_row("a", 2307, 128) == (0, 3)
+    allocator.release("b")
+    assert allocator.tail_row("c", 131, 128) == (1, 3)
+
+
+def test_copy_sfa_tail_release_forgets_prefix_for_reused_request_id():
+    allocator = CopySfaTopkSlotAllocator(1)
+    assert allocator.bind("a") == 0
+    assert allocator.tail_row("a", 2305, 128) == (0, 1)
+    assert allocator.release("a") == 0
+    assert allocator.tail_row("a", 2431, 128) == (0, 127)
+
+
+def test_copy_sfa_failed_tail_admission_does_not_publish_prefix():
+    allocator = CopySfaTopkSlotAllocator(1)
+    allocator.bind("a")
+    with pytest.raises(RuntimeError, match="exhausted"):
+        allocator.tail_row("b", 129, 128)
+    allocator.release("a")
+    assert allocator.tail_row("b", 140, 128) == (0, 12)
+
+
 def _prepare(states, req_ids, lengths=None, *, live=None, prebound=None, dummy=False, capacity=4, histories=()):
     slots = np.zeros(capacity, dtype=np.int32)
     active = np.zeros(capacity, dtype=np.bool_)

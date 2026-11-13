@@ -162,6 +162,70 @@ starting from `kv_port`.
 
 Note that users might encounter an error like "Sparse KV offload offload.initialize failed.". This is mainly because the contiguous host memory required by memfabric is not enough to allocate. Please refer to [memfabric-prerequisite-checks](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/kv_cache_pool_ascend_store.html#step-1-prerequisite-checks) for preparing the host memory. Or you can consider to use lower DP size to reduce the required host memory.
 
+### Selective offload for full/shared SFA layers
+
+Enable `sparse_kv_offload_config` on Decode as above. Models
+with full/shared `indexer_types` automatically select this path.
+Shared layers store their main KV in host memory. Full layers and the indexer
+keep their KV on the device. Use `SfaRemoteD2HConnector` for P/D transfer.
+Layers with compatible block geometry share block IDs across the host and
+device allocations, so each allocation is sized for one block per token range.
+
+When a full layer produces its TopK indices, a separate stream prefetches the
+missing historical KV rows for the shared layers in its group. Each shared
+layer waits for its own prefetch before attention and loads the current
+token's KV after that layer writes it.
+
+This mode uses Model Runner V2 and supports one token per
+request in a Decode batch. Set `--max-num-seqs` to the concurrency limit.
+Each batch row has its own hot slots and the row is invalidated when its
+request changes. For example, to capture one- and two-request Decode graphs:
+
+```bash
+--max-num-seqs 2 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2]}'
+```
+
+#### Precomputed TopK LIM and SDMA staging
+
+The experimental native cache manager accepts the full layer's TopK and
+manages each shared layer's hot slots. Precomputed TopK management and Host
+callbacks are built into the standard vLLM-Ascend extension. Build and install
+it for the target device with the CANN environment loaded, following
+[Building and Testing](../../developer_guide/contribution/index.md#building-and-testing).
+The backend calls `torch.ops._C_ascend.npu_precomputed_topk_manage`.
+
+The current kernel supports `TopK <= hot capacity <= 2048`. One planning
+invocation handles a full layer's shared followers, assigning each
+layer/request pair to an independent vector-core owner. Cache state and
+hit/miss decisions remain separate for each shared layer. The owner retains
+cached GM reads for TopK and cache state, and publishes indices, cache updates
+and copy descriptors through batched DMA. Slot assignment within each row
+preserves TopK order, including repeated selections. Select
+`memfabric_transfer_protocol=sdma` in the P/D connector configuration on both nodes.
+
+The complete shared-layer KV pool is allocated by MemFabric. TP0 gathers
+missing rows into a small TP-shared Host buffer. Each rank registers its
+mapping with `aclrtHostRegisterV2` using `ACL_HOST_REG_PINNED`, then reads
+the shared buffer directly through SDMA H2D into its local device staging
+buffer. A device scatter installs the rows in the layer's hot slots.
+Buffer addresses, registration, and callback arguments remain alive for
+graph replay. A callback queued after both K/V H2D copies acknowledges
+completion. TP0 waits for all ranks' acknowledgements before overwriting
+the shared buffer.
+
+New KV stays in the device tail until a block fills. At the shared-group
+boundary, TP0 gathers the completed suffix on the device, copies it to
+pinned Host staging through SDMA D2H, and commits it to the MemFabric pool
+from a Host callback. Decode joins the writeback stream and synchronizes
+TP ranks at the end of the forward pass. Rollback restores historical KV
+through the same shared gather and SDMA H2D path.
+
+The additional fixed device staging and descriptor buffers are deducted
+before automatic KV block planning. Shared Host staging scales with the
+captured batch capacity and TopK. This path has been exercised on A3 with a
+reduced-layer dummy-weight model. Full-model accuracy and performance,
+A5 execution, and standard image integration still need validation.
+
 ## 4. Start the P/D Proxy
 
 Start Prefill and Decode with the configurations above. After both nodes are

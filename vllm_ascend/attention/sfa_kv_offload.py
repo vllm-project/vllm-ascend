@@ -32,6 +32,7 @@ from vllm.forward_context import (
     is_forward_context_available,
 )
 from vllm.logger import logger
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.utils import CpuGpuBuffer
@@ -97,6 +98,7 @@ class AscendSFAOffloadMetadata(AscendSFAMetadata):
 
     # Fused Copy-SFA inputs are contiguous NPU tensors. No exact CPU length mirror is
     # required, including after speculative-token rejection.
+    selective_tail_rows: torch.Tensor | None = None
     fused_copy_sfa_enabled: bool = False
     copy_sfa_query_ends: torch.Tensor | None = None
     copy_sfa_seq_lens: torch.Tensor | None = None
@@ -302,6 +304,7 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         metadata.num_prefills = num_prefills
         metadata.num_decode_tokens = num_decode_tokens
         metadata.req_ids_tensor = common_attn_metadata.req_ids_tensor
+        metadata.selective_tail_rows = common_attn_metadata.selective_tail_rows
         metadata.token_to_req = common_attn_metadata.token_to_req
         metadata.fused_copy_sfa_enabled = (
             self.use_fused_copy_sfa
@@ -860,12 +863,14 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         slots: torch.Tensor,
         attn_metadata: AscendSFAMetadata,
     ):
+        offload_cfg = get_ascend_config().sparse_kv_offload_config
+        if offload_cfg.selective_offload and not offload_cfg.is_host_layer(self._offload_layer_name()):
+            return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
         attn_metadata = cast(AscendSFAOffloadMetadata, attn_metadata)
         if self._is_decode_only(attn_metadata):
             k_nope, k_pe = self._compute_kv_only(kv_no_split, cos, sin)
             manager = get_sparse_kv_offload_manager()
             layer_name = self._offload_layer_name()
-            k_cache_cpu, v_cache_cpu = self._cpu_cache_pair(manager, layer_name)
             if attn_metadata.fused_copy_sfa_enabled:
                 layer_id = manager._get_offload_layer_id(layer_name)
                 device_slots = attn_metadata.copy_sfa_device_slots
@@ -876,6 +881,10 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
                 ):
                     rows = cache_tensor.view(-1, cache_tensor.shape[-1])
                     rows.index_copy_(0, device_slots[: value.shape[0]], value.reshape(value.shape[0], -1))
+            if attn_metadata.selective_tail_rows is not None:
+                manager.write_selective_tail(layer_name, slots, attn_metadata.selective_tail_rows, k_nope, k_pe)
+                return k_pe, k_nope
+            k_cache_cpu, v_cache_cpu = self._cpu_cache_pair(manager, layer_name)
             manager.offload_new_kv(
                 layer_name=layer_name,
                 slot_mapping=slots,
@@ -1567,6 +1576,96 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         manager.wait_for_current_kv_writeback(bool(_EXTRA_CTX.capturing))
         return attn_output
 
+    def _prefetch_selective_followers(self, topk_indices, metadata) -> None:
+        if not metadata.num_decodes or metadata.num_decode_tokens != metadata.num_decodes or metadata.num_prefills:
+            return
+        manager = get_sparse_kv_offload_manager()
+        followers = manager.selective_followers.get(extract_layer_index(self._offload_layer_name()))
+        if not followers:
+            return
+        context = get_forward_context()
+        ready_layers = getattr(context, "_selective_prefetched_layers", None)
+        if ready_layers is None:
+            ready_layers = context._selective_prefetched_layers = set()
+        # The indexer's temporary output can be released before the copy stream reads it.
+        logical = topk_indices.reshape(-1, manager.topk)
+        prefetch_topk = manager.selective_prefetch_topk[: logical.shape[0]]
+        prefetch_topk.copy_(logical)
+        stream = manager.selective_prefetch_stream
+        stream.wait_stream(torch_npu.npu.current_stream())
+        with torch_npu.npu.stream(stream):
+            layers = [
+                (manager._get_offload_layer_id(name), context.attn_metadata[name], context.attn_metadata[name].seq_lens)
+                for name in followers
+            ]
+            manager.prepare_selective_kv(layers, prefetch_topk)
+            ready_layers.update(layer_id for layer_id, _, _ in layers)
+
+    def _execute_selective_host_attention(
+        self,
+        query: torch.Tensor,
+        query_rope: torch.Tensor,
+        topk_indices: torch.Tensor,
+        metadata: AscendSFAOffloadMetadata,
+        seq_lengths: torch.Tensor,
+        query_lengths: torch.Tensor,
+    ) -> torch.Tensor:
+        if not metadata.num_decodes or metadata.num_decode_tokens != metadata.num_decodes or metadata.num_prefills:
+            raise RuntimeError("Selective Host KV attention requires one token per decode request and no prefill")
+        manager = get_sparse_kv_offload_manager()
+        layer_id = manager._get_offload_layer_id(self._offload_layer_name())
+        rows = query.shape[0]
+        ready_layers: set[int] = (
+            getattr(get_forward_context(), "_selective_prefetched_layers", set())
+            if is_forward_context_available()
+            else set()
+        )
+        if layer_id in ready_layers:
+            torch_npu.npu.current_stream().wait_event(manager.selective_prefetch_ready[layer_id])
+            ready_layers.remove(layer_id)
+        else:
+            manager.prepare_selective_kv([(layer_id, metadata, seq_lengths)], topk_indices)
+        block_table = manager.selective_hot_block_table[:rows]
+        context = get_forward_context()
+        tables = getattr(context, "_selective_tail_block_tables", None)
+        if tables is None:
+            tables = context._selective_tail_block_tables = {}
+        assert metadata.selective_tail_rows is not None
+        key = (id(metadata.selective_tail_rows), rows)
+        if key not in tables:
+            tail_blocks = (
+                metadata.selective_tail_rows[:rows, :1].clamp_min(0)
+                * (manager.selective_row_stride // manager.block_size)
+                + manager.topk_buffer_size // manager.block_size
+            ).to(torch.int32)
+            tables[key] = torch.cat((block_table, tail_blocks), dim=-1)
+        block_table = tables[key]
+        kv_lengths = manager.selective_tail_len[:rows]
+
+        hot_shape = (-1, manager.block_size, 1)
+        k_hot = manager.topk_buffers_k[layer_id].view(*hot_shape, self.kv_lora_rank)
+        v_hot = manager.topk_buffers_v[layer_id].view(*hot_shape, self.qk_rope_head_dim)
+        output = torch_npu.npu_sparse_flash_attention(
+            query=query.contiguous(),
+            key=k_hot,
+            value=k_hot,
+            sparse_indices=manager.selective_physical[layer_id, :rows],
+            scale_value=self.scale,
+            sparse_block_size=1,
+            block_table=block_table,
+            actual_seq_lengths_query=query_lengths[:rows],
+            actual_seq_lengths_kv=kv_lengths,
+            query_rope=query_rope.contiguous(),
+            key_rope=v_hot,
+            layout_query="TND",
+            layout_kv="PA_BSND",
+            sparse_mode=0,
+            attention_mode=2,
+            return_softmax_lse=False,
+        )
+        manager.flush_selective_tail_group(self._offload_layer_name(), self._in_graph_runtime())
+        return output[0]
+
     def _execute_sparse_flash_attention_process(
         self,
         ql_nope,
@@ -1578,6 +1677,28 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         actual_seq_lengths_key,
         block_table=None,
     ):
+        offload_cfg = get_ascend_config().sparse_kv_offload_config
+        if offload_cfg.selective_offload:
+            if not offload_cfg.is_host_layer(self._offload_layer_name()):
+                self._prefetch_selective_followers(topk_indices, attn_metadata)
+                return super()._execute_sparse_flash_attention_process(
+                    ql_nope,
+                    q_pe,
+                    kv_cache,
+                    topk_indices,
+                    attn_metadata,
+                    actual_seq_lengths_query,
+                    actual_seq_lengths_key,
+                    block_table=block_table,
+                )
+            return self._execute_selective_host_attention(
+                ql_nope,
+                q_pe,
+                topk_indices,
+                attn_metadata,
+                actual_seq_lengths_key,
+                actual_seq_lengths_query,
+            )
         num_decodes = int(getattr(attn_metadata, "num_decodes", 0) or 0)
         num_decode_tokens = int(getattr(attn_metadata, "num_decode_tokens", 0) or 0)
         num_prefills = int(getattr(attn_metadata, "num_prefills", 0) or 0)

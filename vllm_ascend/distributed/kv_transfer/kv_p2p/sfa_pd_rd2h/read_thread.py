@@ -58,6 +58,7 @@ class ConsumerReadState:
     indexer_scale_tensors: list[Any | None]
     dest_blocks_by_req: dict[str, tuple[list[int], list[int]]]
     get_offload_layer_id: Callable[[str], int]
+    full_layer_names: tuple[str, ...] = ()
     copy_sfa_tail_by_req: dict[str, CopySfaTailDest] = field(default_factory=dict)
     topk_k_bases: list[int] = field(default_factory=list)
     topk_v_bases: list[int] = field(default_factory=list)
@@ -513,8 +514,9 @@ class MembPullReadThread(threading.Thread):
         if pool_idx is None:
             logger.warning("MembPull _do_read: layer %s not in main names, skip", layer_name)
             return None
-        offload_id = state.get_offload_layer_id(layer_name)
-        if pool_idx != offload_id:
+        full_layer = layer_name in state.full_layer_names
+        offload_id = pool_idx if full_layer else state.get_offload_layer_id(layer_name)
+        if not full_layer and pool_idx != offload_id:
             logger.debug(
                 "MembPull _do_read: layer-order mismatch for %s -- pull _main_names "
                 "idx=%d != resident offload_id=%d. Using offload_id.",
@@ -543,8 +545,8 @@ class MembPullReadThread(threading.Thread):
         p_has_indexer = bool(p_meta.get("has_indexer", len(p_base_addrs) > main_tensor_count))
 
         try:
-            k_cpu_ptr, v_cpu_ptr = state.main_gva_bases[offload_id]
-            d_k_len, d_v_len = state.main_block_lens[offload_id]
+            k_cpu_ptr, v_cpu_ptr = state.main_gva_bases[pool_idx]
+            d_k_len, d_v_len = state.main_block_lens[pool_idx]
         except IndexError as error:
             raise RuntimeError(f"MembPull shared CPU pool metadata is missing for {layer_name}") from error
         p_k_len = p_block_len[0] * p_block_size_scale[0]
@@ -616,6 +618,7 @@ class MembPullReadThread(threading.Thread):
             "layer_name": layer_name,
             "pool_idx": pool_idx,
             "offload_id": offload_id,
+            "full_layer": full_layer,
             "p_k_base": p_base_addrs[0],
             "p_v_base": p_base_addrs[1],
             "p_k_len": p_block_len[0] * p_block_size_scale[0],
@@ -798,7 +801,11 @@ class MembPullReadThread(threading.Thread):
         layer_name = layer["layer_name"]
 
         dest = self._wait_for_dest_blocks(ext_req_id, layer_name)
-        all_d_main_ids, all_d_indexer_ids = dest
+        all_d_main_ids, all_d_indexer_ids = dest[:2]
+        if layer.get("full_layer"):
+            if len(dest) != 3:
+                raise RuntimeError(f"MembPull full destination blocks are missing for req {ext_req_id}")
+            all_d_main_ids = dest[2]
         # Only the group's first contributor (group_member_idx == 0) pulls main; the rest
         # skip it entirely. P broadcasts the full p_main_block_ids to every contributor, so
         # resolve/validate the main destination range only for the one that actually pulls
@@ -853,15 +860,19 @@ class MembPullReadThread(threading.Thread):
         n_main = 0
         n_indexer = 0
 
-        # Main MLA is replicated across P ranks and already split across D TP; only the
-        # group's first contributor pulls it, so it is neither duplicated nor fine-split.
-        pull_main = layer["k_cpu_ptr"] is not None and layer["v_cpu_ptr"] is not None and group_member_idx == 0
+        # The selective Host pool is registered by rank 0. Full KV is local to each D rank.
+        pull_main = (
+            layer["k_cpu_ptr"] is not None
+            and layer["v_cpu_ptr"] is not None
+            and group_member_idx == 0
+            and (not state.full_layer_names or layer.get("full_layer") or self.tp_rank == 0)
+        )
         if pull_main and len(p_main_block_ids) != len(d_main_ids):
             raise RuntimeError(
                 f"MembPull main block count mismatch for req {ext_req_id}: "
                 f"P={len(p_main_block_ids)}, D={len(d_main_ids)}"
             )
-        if pull_main:
+        if pull_main and not state.full_layer_names:
             owned_start, owned_end = _tp_block_range(
                 len(d_main_ids),
                 self.tp_rank,
@@ -951,24 +962,25 @@ class MembPullReadThread(threading.Thread):
                 local_chunks.append(cl)
                 length_chunks.append(coalesced_lengths)
 
-        self._append_copy_sfa_tail_descriptors(
-            layer,
-            ext_req_id,
-            p_main_block_ids_for_tail,
-            main_start_block,
-            peer_chunks,
-            local_chunks,
-            length_chunks,
-        )
-        self._append_copy_sfa_dense_descriptors(
-            layer,
-            ext_req_id,
-            p_main_block_ids_for_tail,
-            main_start_block,
-            peer_chunks,
-            local_chunks,
-            length_chunks,
-        )
+        if not layer.get("full_layer"):
+            self._append_copy_sfa_tail_descriptors(
+                layer,
+                ext_req_id,
+                p_main_block_ids_for_tail,
+                main_start_block,
+                peer_chunks,
+                local_chunks,
+                length_chunks,
+            )
+            self._append_copy_sfa_dense_descriptors(
+                layer,
+                ext_req_id,
+                p_main_block_ids_for_tail,
+                main_start_block,
+                peer_chunks,
+                local_chunks,
+                length_chunks,
+            )
 
         if not peer_chunks:
             logger.debug(
@@ -1081,7 +1093,11 @@ class MembPullReadThread(threading.Thread):
                     group_member_idx == 0
                     and layer["k_cpu_ptr"] is not None
                     and layer["v_cpu_ptr"] is not None
-                    and owned_main_end > owned_main_start
+                    and (
+                        (owned_main_end > owned_main_start)
+                        if not self._state.full_layer_names
+                        else bool(p_main_block_ids) and (layer.get("full_layer") or self.tp_rank == 0)
+                    )
                 )
                 owns_requested_indexer = (
                     layer["indexer"] is not None and read_info is not None and bool(read_info["d_indexer_ids"])

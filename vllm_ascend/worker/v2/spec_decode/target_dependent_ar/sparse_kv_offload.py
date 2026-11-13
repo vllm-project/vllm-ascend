@@ -64,6 +64,12 @@ class SparseKVOffloadMetadata:
         req_ids = input_batch.req_ids[:num_reqs]
         if getattr(input_batch, "is_dummy", False):
             req_ids = [f"offload-dummy-{row}" for row in range(num_reqs)]
+        instance_ids = (getattr(model_state, "_selective_cache_ids", None)
+                        if getattr(model_state, "_selective_native_experiment", False) else None)
+        if instance_ids is not None and not getattr(input_batch, "is_dummy", False):
+            instance_ids = [instance_ids[req_id] for req_id in req_ids]
+        else:
+            instance_ids = None
         update_sparse_kv_offload_metadata(
             num_tokens,
             num_reqs,
@@ -73,6 +79,7 @@ class SparseKVOffloadMetadata:
             query_start_loc_np,
             req_ids_buffer,
             token_to_req_buffer,
+            request_instance_ids=instance_ids,
         )
         pool_slots = model_state._offload_pool_slots
         pool_active = model_state._offload_pool_active

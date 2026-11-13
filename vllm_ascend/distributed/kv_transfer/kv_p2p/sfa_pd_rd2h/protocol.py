@@ -67,6 +67,26 @@ def infer_sfa_component_group_ids(kv_cache_config: Any) -> tuple[int, int]:
     return main_group_id, indexer_group_id
 
 
+def infer_selective_sfa_group_ids(kv_cache_config: Any) -> tuple[int, int, int]:
+    """Return the shared Host, full device, and Indexer device groups."""
+    groups: dict[str, set[int]] = {"shared Host": set(), "full device": set(), "Indexer": set()}
+    for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+        members = getattr(group.kv_cache_spec, "kv_cache_specs", None)
+        for name in group.layer_names:
+            spec = members[name] if members is not None else group.kv_cache_spec
+            if "indexer" in name.lower():
+                role = "Indexer"
+            elif getattr(spec, "store_on_host", False):
+                role = "shared Host"
+            else:
+                role = "full device"
+            groups[role].add(group_id)
+    for role, ids in groups.items():
+        if len(ids) != 1:
+            raise ValueError(f"Selective SFA PD requires one {role} group, got {sorted(ids)}")
+    return next(iter(groups["shared Host"])), next(iter(groups["full device"])), next(iter(groups["Indexer"]))
+
+
 @dataclass
 class LayerMetadata:
     tensor_group_idx: list[int]
@@ -156,15 +176,16 @@ class SfaPDProducerMetadata(KVConnectorMetadata):
 class SfaPDConsumerReqMeta:
     """D-side destinations owned by vLLM's normal KV block manager.
 
-    Main MLA block ids index the CPU cache owned by
-    :class:`SparseKVOffloadManager`; indexer block ids index the rank-local
-    HBM cache.  Keeping the two components explicit avoids depending on a
-    model-runner tuple layout.
+    Shared MLA block ids index the CPU cache owned by
+    :class:`SparseKVOffloadManager`; full MLA and Indexer block ids index
+    rank-local HBM caches. Keeping the components explicit avoids depending
+    on a model-runner tuple layout.
     """
 
     req_id: str
     main_block_ids: list[int]
     indexer_block_ids: list[int]
+    full_block_ids: list[int] | None = None
     # Early-bound fused_copy_sfa top-k row. The pull thread writes the prefill tail into
     # this row's circular slots so decode does not H2D the same tokens again,
     # or (dense) the whole prompt into the row's hot region so short requests
@@ -193,12 +214,15 @@ class CopySfaTailDest:
 class SfaPDConsumerMetadata(KVConnectorMetadata):
     def __init__(self) -> None:
         self.requests: list[SfaPDConsumerReqMeta] = []
+        # None preserves polling for consumers outside selective offload.
+        self.pending_recv_ids: frozenset[str] | None = None
 
     def add_request(
         self,
         request_id: str,
         main_block_ids: list[int],
         indexer_block_ids: list[int],
+        full_block_ids: list[int] | None = None,
         pool_slot: int | None = None,
         tail_tokens: int = 0,
         tail_block_index: int = 0,
@@ -213,6 +237,7 @@ class SfaPDConsumerMetadata(KVConnectorMetadata):
                 req_id=request_id,
                 main_block_ids=list(main_block_ids),
                 indexer_block_ids=list(indexer_block_ids),
+                full_block_ids=list(full_block_ids) if full_block_ids is not None else None,
                 pool_slot=pool_slot,
                 tail_tokens=tail_tokens,
                 tail_block_index=tail_block_index,
