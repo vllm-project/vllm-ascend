@@ -1224,13 +1224,15 @@ For A2 and A3, make sure Mooncake is importable in both serving containers befor
 
     **Service Verification:**
 
-    On the proxy host, replace `<IMAGE_URL>` with a URL accessible from Prefill and `<TEXT_PROMPT>` with the corresponding prompt. Check `usage.prompt_tokens` against the 10K input target. For local image files, mount the dataset at the same container path on both hosts and set `--allowed-local-media-path` to that directory in both engine commands.
+    Send a 10K sample through the proxy. Replace `<IMAGE_URL>` with an image URL accessible to Prefill and Decode, and replace `<TEXT_PROMPT>` with the corresponding text. For local image files, mount the dataset at the same container path on both hosts and set `--allowed-local-media-path` to that directory in both engine commands.
 
     ```bash
     curl --fail "http://127.0.0.1:25570/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -d '{"model":"qwen38-flash-next-a2-pd","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"<IMAGE_URL>"}},{"type":"text","text":"<TEXT_PROMPT>"}]}],"max_tokens":1024,"temperature":0}'
     ```
+
+    Expect HTTP 200 and an answer addressing the image and text. Check `usage.prompt_tokens` against the 10K target and confirm there are no image-processing, KV-transfer, or out-of-memory errors.
 
     **Key parameters:**
 
@@ -1372,13 +1374,15 @@ For A2 and A3, make sure Mooncake is importable in both serving containers befor
 
     **Service Verification:**
 
-    Replace `<IMAGE_URL>` with a URL accessible from Prefill and `<TEXT_PROMPT>` with the corresponding prompt. Check `usage.prompt_tokens` against the 10K input target. For local image files, mount the dataset in the serving container and set `--allowed-local-media-path` to the mounted directory in both engine commands.
+    Send a 10K sample through the proxy. Replace `<IMAGE_URL>` with an image URL accessible to Prefill and Decode, and replace `<TEXT_PROMPT>` with the corresponding text. For local image files, mount the dataset in the serving container and set `--allowed-local-media-path` to the mounted directory in both engine commands.
 
     ```bash
     curl --fail "http://127.0.0.1:25570/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -d '{"model":"qwen38-flash-next-a3-pd","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"<IMAGE_URL>"}},{"type":"text","text":"<TEXT_PROMPT>"}]}],"max_tokens":1024,"temperature":0}'
     ```
+
+    Expect HTTP 200 and an answer addressing the image and text. Check `usage.prompt_tokens` against the 10K target and confirm there are no image-processing, KV-transfer, or out-of-memory errors.
 
     **Key parameters:**
 
