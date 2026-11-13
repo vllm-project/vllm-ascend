@@ -133,8 +133,19 @@ def test_decode_rows_follow_metadata_not_token_count(runtime):
 def test_missing_request_rows_fails_before_state_mutation(runtime):
     q = torch.zeros(1, 2, 1, 128)
     with pytest.raises(ValueError, match="checkpoint row"):
-        runtime["_run_recurrent_gdn"](q, q, q, q, q, q, q, q, torch.tensor([0, 1, 1]), torch.tensor([7]))
-    runtime["recurrent_gated_delta_rule"].assert_not_called()
+        runtime._run_recurrent_gdn(
+            q,
+            q,
+            q,
+            q,
+            a=torch.zeros(2, 1),
+            b=torch.zeros(2, 1),
+            A_log=torch.zeros(1),
+            dt_bias=torch.zeros(1),
+            actual_seq_lengths=torch.tensor([0, 1, 1], dtype=torch.int32),
+            state_indices=torch.tensor([7], dtype=torch.int32),
+        )
+    runtime.recurrent_gated_delta_rule.assert_not_called()
 
 
 def test_legacy_keeps_external_preprocessing(runtime):
