@@ -23,3 +23,10 @@ msgstr "# 配置指南"
 
 msgid "This section provides a detailed configuration guide of vLLM Ascend."
 msgstr "本节提供 vLLM Ascend 的详细配置指南。"
+
+msgid ""
+"See [NPU Device Selection](device_selection.md) for `--device-ids`, its\n"
+"interaction with `ASCEND_RT_VISIBLE_DEVICES`, and DP, PD, and Ray examples."
+msgstr ""
+"关于 `--device-ids`、其与 `ASCEND_RT_VISIBLE_DEVICES` 的交互，以及 DP、PD 和 Ray 示例，请参见 "
+"[NPU 设备选择](device_selection.md)。"
