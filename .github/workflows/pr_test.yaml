@@ -456,7 +456,7 @@ jobs:
 
   select-tests:
     needs:
-      - pre-commit
+      # - pre-commit
       - recommend-tests
     # select-tests is the single producer of test_groups / base_sha / has_tests.
     # It runs only when a run-enabling label (ready-precise / ready-all /
@@ -685,7 +685,7 @@ jobs:
 
   run-selected-tests:
     needs:
-      - pre-commit
+      #- pre-commit
       - cpu-ut
       - select-tests
       - prepare-csrc-cache
