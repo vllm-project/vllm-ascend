@@ -25,6 +25,7 @@
 
 ## Constraints
 
+- The current supported candidate input contract requires `0 <= local_idx < 2**20` for valid token IDs, for both BF16 and FP32 scores. `local_idx` is the token index within a rank before local-to-global mapping, not its position in the K-candidate array. Negative IDs remain invalid-candidate sentinels. Callers must guarantee this bound; the wrapper does not perform a runtime range validation. This local-ID requirement is separate from the backend's global model-length bound below.
 - DCP/stripe sizes are positive; all ranks use identical collective tile boundaries. The owning backend requires complete replicated indexer heads and `max_model_len <= 2**24` for exact FP32 ID comparison.
 - K2048 has fused preparation/merge. Other supported K values retain native stable sorting. Fused preparation uses one inline stable radix algorithm for BF16 and FP32, with 16 and 32 score-key bits respectively. The public wrapper rejects other score dtypes before allocation or launch; the kernel receives `SCORE_BITS` as a compile-time parameter. BF16 values widen exactly to FP32 for transport; FP32 scores retain all their bits.
 - Owner-prefix merge requires `presorted=True`, `owner_sharded=True`, `K_local=topk=2048`, and a valid local rank. Other calls use full selection.
@@ -43,13 +44,13 @@ The radix key orders scores descending and local IDs ascending. The local-to-glo
 
 Each least-significant-digit pass extracts ID bits first, followed by the encoded score bits. A native FP32 value sort orders `digit * BLOCK + position`; the position tag makes the pass stable. With K2048, 11 position bits leave 13 digit bits within FP32's 24-bit significand. The resulting permutation gathers both scores and IDs before the next pass.
 
-The existing 25-bit radix range uses a shorter ID width when it saves one pass: BF16 takes three passes below `2**23` and four otherwise; FP32 takes four below `2**20` and five otherwise. IDs outside the radix range retain the existing pair-comparison path. These bounds do not relax the exact-ID constraint above.
+Local IDs use a fixed 20-bit field under the input contract above. The logical key is `[descending score key | ascending local ID]`: 36 bits for BF16 and 52 bits for FP32. With K2048, the shared compile-time radix loop therefore takes three passes for BF16 or four for FP32. No per-row maximum-ID reduction, ID-width selection or large-ID comparison fallback is needed. `SCORE_BITS` is supplied by the wrapper, so dtype selection adds no per-row branch.
 
 The wrapper keeps grid selection and routing outside the kernel. Fusion requires K2048, at least 75% as many rows as vector cores, and enough downstream merge levels to amortize local sorting. Other workloads keep separate sorting and packing. Runtime `num_rows` does not specialize the fused kernel; score width, strides, topology and block size do. This change adds no new warmup entry or routing policy.
 
 ## Test Cases
 
-Actual K2048 deployment shapes include T48/DCP16 and T128/DCP8. Shared tests also cover generic K, partial tiles, non-power-of-two DCP, ties, near-ULP scores, invalid owners, strided input, exact score bits, large mapped IDs and changing-input graph replay.
+Actual K2048 deployment shapes include T48/DCP16 and T128/DCP8. Shared tests also cover generic K, partial tiles, non-power-of-two DCP, ties, near-ULP scores, invalid owners, strided input, exact score bits, the local-ID limit `2**20 - 1`, large mapped global IDs and changing-input graph replay.
 
 ```bash
 pytest -q tests/ut/attention/test_sharded_indexer.py

@@ -4,6 +4,7 @@
 import pytest
 import torch
 import torch_npu  # noqa: F401
+
 from tests.e2e.nightly.single_node.ops.singlecard_ops.triton.dcp_test_utils import local_to_global
 from vllm_ascend.ops.triton.sharded_indexer import pack_local_candidates
 
@@ -20,23 +21,22 @@ def test_pack_rejects_unsupported_score_dtype(dtype, rows):
 @pytest.mark.parametrize("rows", [48, 127, 144, 152, 161])
 @pytest.mark.parametrize("column_stride", [1, 2])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.parametrize("id_case", ["short_max", "short_boundary", "2**24", "full_max", "fallback"])
+@pytest.mark.parametrize("id_case", ["zero", "digit_max", "digit_boundary", "id_max_minus_one", "id_max"])
 def test_sorted_pack_exact_order_and_payload(rows, column_stride, dtype, id_case):
     torch.npu.set_device(0)
     world, rank, interleave, k = 8, 7, 768, 2048
     generator = torch.Generator().manual_seed(20878)
     ids = torch.arange(k - 1, -1, -1, dtype=torch.int32).repeat(rows, 1).view(rows, 1, k)
     scores = torch.randint(-2, 3, ids.shape, generator=generator).to(dtype)
-    short_bits = 23 if dtype == torch.bfloat16 else 20
-    large_id = {
-        "short_max": (1 << short_bits) - 1,
-        "short_boundary": 1 << short_bits,
-        "2**24": 1 << 24,
-        "full_max": (1 << 25) - 2,
-        "fallback": 1 << 26,
+    boundary_id = {
+        "zero": 0,
+        "digit_max": (1 << 13) - 1,
+        "digit_boundary": 1 << 13,
+        "id_max_minus_one": (1 << 20) - 2,
+        "id_max": (1 << 20) - 1,
     }[id_case]
-    # The high ID ties with low IDs, exposing truncated radix ID digits.
-    ids[..., -1] = large_id
+    # Same-score IDs exercise the radix digit boundary and supported ID limit.
+    ids[..., -1] = boundary_id
     scores[..., -1] = 1.0
     ids[0] = -1
     scores[..., :7] = torch.tensor([torch.nan, torch.inf, -torch.inf, 0.0, -0.0, 1.0, -1.0])

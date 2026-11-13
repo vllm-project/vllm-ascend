@@ -165,12 +165,8 @@ def _pack_sorted_candidates(
     FP32_SIGN_MASK: tl.constexpr = -0x80000000
     BLOCK: tl.constexpr = 1 << LOG_BLOCK
     DIGIT_BITS: tl.constexpr = FP32_SIGNIFICAND_BITS - LOG_BLOCK
-    # Retain the existing radix range; larger IDs use pair comparisons.
-    MAX_ID_BITS: tl.constexpr = 25
-    # Fill one fewer native-sort pass when the IDs fit its remaining bits.
-    SHORT_ID_BITS: tl.constexpr = (
-        (MAX_ID_BITS + SCORE_BITS + DIGIT_BITS - 1) // DIGIT_BITS - 1
-    ) * DIGIT_BITS - SCORE_BITS
+    # Caller guarantees valid local token IDs fit in 20 bits.
+    ID_BITS: tl.constexpr = 20
     candidate_offsets = tl.arange(0, BLOCK)
     packed_offsets = tl.arange(0, 2 * BLOCK)
     # Flat, loop-carried rows avoid the larger live set of a row/column tile.
@@ -184,41 +180,30 @@ def _pack_sorted_candidates(
         # local keys preserves global-ID ties without rounding mapped IDs.
         local_id_keys = tl.where(valid, local_ids.to(tl.float32), 0.0)
         candidate_scores = tl.where(valid, candidate_scores, -float("inf"))
-        max_local_id = tl.max(local_id_keys, 0)
-        if max_local_id < (1 << MAX_ID_BITS):
-            # Compile short/full ID widths from one radix body for both dtypes.
-            for ID_BITS in tl.static_range(SHORT_ID_BITS, MAX_ID_BITS + 1, MAX_ID_BITS - SHORT_ID_BITS):
-                if (max_local_id < (1 << SHORT_ID_BITS)) == (ID_BITS == SHORT_ID_BITS):
-                    # The position tag makes each native value sort stable;
-                    # digit + tag fits exactly in FP32's 24 significant bits.
-                    for bit_offset in tl.static_range(0, ID_BITS + SCORE_BITS, DIGIT_BITS):
-                        score_bits = candidate_scores.to(tl.int32, bitcast=True)
-                        # +/-0 compare equal; preserve the original payload.
-                        score_bits = tl.where((score_bits & FP32_MAGNITUDE_MASK) == 0, 0, score_bits)
-                        # Flip the sign bit for positive scores and invert the
-                        # ascending encoding to sort scores in descending order.
-                        descending_score_key = tl.where(score_bits < 0, score_bits, ~(score_bits ^ FP32_SIGN_MASK)) >> (
-                            FP32_STORAGE_BITS - SCORE_BITS
-                        )
-                        if bit_offset >= ID_BITS:
-                            digit = descending_score_key >> (bit_offset - ID_BITS)
-                        elif bit_offset + DIGIT_BITS <= ID_BITS:
-                            digit = local_id_keys.to(tl.int32) >> bit_offset
-                        else:
-                            digit = (local_id_keys.to(tl.int32) >> bit_offset) | (
-                                descending_score_key << (ID_BITS - bit_offset)
-                            )
-                        digit &= (1 << min(DIGIT_BITS, ID_BITS + SCORE_BITS - bit_offset)) - 1
-                        stable_digit_key = digit.to(tl.float32) * BLOCK + candidate_offsets.to(tl.float32)
-                        sorted_digit_keys = _sort(stable_digit_key, descending=False)
-                        permutation = (sorted_digit_keys - tl.floor(sorted_digit_keys * (1.0 / BLOCK)) * BLOCK).to(
-                            tl.int32
-                        )
-                        candidate_scores = tl.gather(candidate_scores, permutation, 0)
-                        local_id_keys = tl.gather(local_id_keys, permutation, 0)
-        else:
-            # Keep high ID bits rather than truncating them in the radix key.
-            candidate_scores, local_id_keys = _sort_candidate_pairs(candidate_scores, local_id_keys, LOG_BLOCK)
+        # LSD radix order: [descending score key | ascending local ID].
+        # Each pass adds the current position to make equal digits stable
+        # and recover the permutation; digit + position fits in 24 bits.
+        for bit_offset in tl.static_range(0, ID_BITS + SCORE_BITS, DIGIT_BITS):
+            score_bits = candidate_scores.to(tl.int32, bitcast=True)
+            # +/-0 compare equal; preserve the original payload.
+            score_bits = tl.where((score_bits & FP32_MAGNITUDE_MASK) == 0, 0, score_bits)
+            # Flip the sign bit for positive scores and invert the
+            # ascending encoding to sort scores in descending order.
+            descending_score_key = tl.where(score_bits < 0, score_bits, ~(score_bits ^ FP32_SIGN_MASK)) >> (
+                FP32_STORAGE_BITS - SCORE_BITS
+            )
+            if bit_offset >= ID_BITS:
+                digit = descending_score_key >> (bit_offset - ID_BITS)
+            elif bit_offset + DIGIT_BITS <= ID_BITS:
+                digit = local_id_keys.to(tl.int32) >> bit_offset
+            else:
+                digit = (local_id_keys.to(tl.int32) >> bit_offset) | (descending_score_key << (ID_BITS - bit_offset))
+            digit &= (1 << min(DIGIT_BITS, ID_BITS + SCORE_BITS - bit_offset)) - 1
+            stable_digit_key = digit.to(tl.float32) * BLOCK + candidate_offsets.to(tl.float32)
+            sorted_digit_keys = _sort(stable_digit_key, descending=False)
+            permutation = (sorted_digit_keys - tl.floor(sorted_digit_keys * (1.0 / BLOCK)) * BLOCK).to(tl.int32)
+            candidate_scores = tl.gather(candidate_scores, permutation, 0)
+            local_id_keys = tl.gather(local_id_keys, permutation, 0)
         sorted_local_ids = tl.where(tl.abs(candidate_scores) < float("inf"), local_id_keys, 0).to(tl.int32)
         global_ids = sorted_local_ids + (sorted_local_ids // INTERLEAVE * (WORLD_SIZE - 1) + RANK) * INTERLEAVE
         output_ids = tl.where(tl.abs(candidate_scores) < float("inf"), global_ids, -1)
@@ -491,6 +476,10 @@ def pack_local_candidates(
     """Pack local candidates as global INT32 IDs and FP32 score-bit pairs.
 
     Scores must be BF16 or FP32; indices and scores have shape [rows, 1, topk].
+    The current supported input contract requires valid local token IDs in
+    [0, 2**20); negative IDs remain invalid-candidate sentinels. This bound
+    applies to token IDs before global mapping, not candidate-array positions.
+    Callers must ensure this bound; it is not validated by the wrapper.
     Sorting orders scores descending, then IDs ascending. ``fuse_sort`` permits
     fused sorting for workloads that meet the occupancy and merge-work gates.
     """
