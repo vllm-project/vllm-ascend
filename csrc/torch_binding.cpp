@@ -34,6 +34,10 @@
 #include "moe/add_rms_norm_bias/add_rms_norm_bias_torch_adpt.h"
 #include "moe/rms_norm_cast/rms_norm_cast_torch_adpt.h"
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
+#include "attention/kvtc_prepare/kvtc_prepare_torch_adpt.h"
+#include "attention/kvtc_prepare_rope/kvtc_prepare_rope_torch_adpt.h"
+#include "attention/kvtc_restore/kvtc_restore_torch_adpt.h"
+#include "attention/kvtc_restore_rope/kvtc_restore_rope_torch_adpt.h"
 #include "mla_preprocess/mla_preprocess_torch_adpt.h"
 #endif
 #include "mc2/dispatch_ffn_combine/dispatch_ffn_combine_torch_adpt.h"
@@ -3247,6 +3251,26 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                     int max_output_size, Tensor! out, Tensor! expert_token_nums, Tensor? x_active_mask=None, float swiglu_limit=1000000.0, int world_size=0) -> (Tensor out, Tensor expert_token_nums)"
     );
     ops.impl("dispatch_ffn_combine", torch::kPrivateUse1, &vllm_ascend::dispatch_ffn_combine);
+
+#ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
+    ops.def("kvtc_prepare(Tensor[] caches, Tensor block_ids) -> Tensor");
+    ops.impl("kvtc_prepare", torch::kPrivateUse1, &vllm_ascend::kvtc_prepare);
+
+    ops.def(
+        "kvtc_prepare_rope(Tensor[] caches, Tensor block_ids, "
+        "Tensor token_starts, Tensor inv_cos_sin_cache) -> Tensor");
+    ops.impl("kvtc_prepare_rope", torch::kPrivateUse1, &vllm_ascend::kvtc_prepare_rope);
+
+    ops.def(
+        "kvtc_restore(Tensor reconstructed, Tensor dst_block_ids, "
+        "Tensor(a!)[] caches) -> Tensor");
+    ops.impl("kvtc_restore", torch::kPrivateUse1, &vllm_ascend::kvtc_restore);
+
+    ops.def(
+        "kvtc_restore_rope(Tensor reconstructed, Tensor dst_block_ids, "
+        "Tensor token_starts, Tensor cos_sin_cache, Tensor(a!)[] caches) -> Tensor");
+    ops.impl("kvtc_restore_rope", torch::kPrivateUse1, &vllm_ascend::kvtc_restore_rope);
+#endif
 
     ops.def(
         "npu_add_rms_norm_bias(Tensor x1, "

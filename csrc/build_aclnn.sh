@@ -96,6 +96,10 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
     setup_catlass_dependency
 
     CUSTOM_OPS_ARRAY=(
+        "kvtc_prepare"
+        "kvtc_prepare_rope"
+        "kvtc_restore"
+        "kvtc_restore_rope"
         "chunk_gated_delta_rule_fwd_h_vllm"
         "scatter_nd_update_sk"
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
