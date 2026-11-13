@@ -34,6 +34,20 @@ from vllm_ascend.ops.triton_ple import (
 )
 
 
+def _get_npu_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
+    """Return the NPU UVA view used by Qwen4Exp's host-resident Engram table."""
+    import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401
+
+    if not cpu_tensor.is_pinned():
+        raise RuntimeError("Qwen4Exp Engram CPU offload requires pinned host memory")
+    view = torch.ops._C_ascend.get_npu_view_from_cpu_tensor(cpu_tensor)
+    if view is None:
+        raise RuntimeError(
+            "Qwen4Exp Engram CPU offload requires NPU UVA; set PYTORCH_NPU_ALLOC_CONF=pinned_mem_register:True"
+        )
+    return view
+
+
 def _ple_conv_ascend(*args: Any, mode: Literal["decode", "spec", "prefill"], **kwargs: Any) -> None:
     if mode == "prefill":
         ple_conv_prefill(*args, **kwargs)
@@ -328,6 +342,7 @@ def patch_upstream_ple_short_conv() -> None:
     """Install Ascend PLE runtime adaptations on the upstream classes."""
     from vllm.models.qwen4_exp.amd import ple_layer as upstream_ple_layer
     from vllm.models.qwen4_exp.amd.ple_layer import Qwen4ExpPLELayer
+    from vllm.models.qwen4_exp.common import ngram_embedding as upstream_ngram_embedding
     from vllm.models.qwen4_exp.common.ngram_embedding import (
         Qwen4ExpPLEEmbeddingMethod,
         Qwen4ExpPLEUnquantizedEmbeddingMethod,
@@ -340,6 +355,10 @@ def patch_upstream_ple_short_conv() -> None:
     # The AMD PLE class binds this function at module import time.  Replace
     # only that model-local binding; other platforms keep the upstream kernel.
     upstream_ple_layer.ple_conv = _ple_conv_ascend
+    # The upstream Engram class also binds the platform-neutral UVA helper at
+    # import time. Keep the NPU-specific dispatch local to Qwen4Exp instead of
+    # patching vLLM's global CUDA/XPU helper.
+    upstream_ngram_embedding.get_accelerator_view_from_cpu_tensor = _get_npu_view_from_cpu_tensor
 
     original_attr = "_ascend_original_short_conv"
     if not hasattr(Qwen4ExpPLELayer, original_attr):
