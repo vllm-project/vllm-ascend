@@ -325,19 +325,17 @@ class NPUModelRunner(GPUModelRunner):
         still own their single-stage SP padding are unaffected.
         """
         parallel_config = self.vllm_config.parallel_config
-        architecture = self.model_config.architecture
+        pp_size = getattr(parallel_config, "pipeline_parallel_size", 1)
+        architecture = getattr(self.model_config, "architecture", "")
         speculative_method = getattr(self.speculative_config, "method", None)
         qwen4_exp_mtp = architecture in {
             "Qwen4ExpForCausalLM",
             "Qwen4ExpForConditionalGeneration",
         } and speculative_method in {"mtp", "qwen3_5_mtp"}
-        if parallel_config.pipeline_parallel_size == 1 and qwen4_exp_mtp:
+        if pp_size == 1 and qwen4_exp_mtp:
             return True
 
-        return (
-            parallel_config.pipeline_parallel_size > 1
-            and enable_sp(self.vllm_config)
-        )
+        return pp_size > 1 and enable_sp(self.vllm_config)
 
     def _install_sp_dp_token_padding(self) -> None:
         """Keep DP metadata consistent with runner-level SP token padding.

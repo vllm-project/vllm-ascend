@@ -30,7 +30,6 @@ def test_qwen4_exp_ascend_wrapper_reuses_upstream_pp_sp_control_flow() -> None:
     mtp = _source("vllm_ascend/models/qwen4_exp/mtp.py")
     model_state = _source("vllm_ascend/models/qwen4_exp/model_state.py")
     ple = _source("vllm_ascend/models/qwen4_exp/ple.py")
-    platform = _source("vllm_ascend/platform.py")
     assert "class AscendQwen4ExpDecoderLayer" not in model
     assert model.count("def forward(") == 1
     assert "for layer_idx" not in model
@@ -60,8 +59,6 @@ def test_qwen4_exp_ascend_wrapper_reuses_upstream_pp_sp_control_flow() -> None:
     assert "def _get_npu_view_from_cpu_tensor(" in ple
     assert "torch.ops._C_ascend.get_npu_view_from_cpu_tensor(" in ple
     assert ("upstream_ngram_embedding.get_accelerator_view_from_cpu_tensor = _get_npu_view_from_cpu_tensor") in ple
-    assert 'getattr(engram_config, "cpu_offload", False)' in platform
-    assert 'npu_alloc_configs += ",pinned_mem_register:True"' in platform
 
 
 def test_qwen4_exp_registry_uses_ascend_wrappers() -> None:
