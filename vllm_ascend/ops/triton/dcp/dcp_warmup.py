@@ -73,7 +73,7 @@ def _token_representatives(max_tokens, heads, local_heads, head_dim, vector_core
     needed. Include integer-width boundaries for large configured capacities.
     """
     ranks = heads // local_heads
-    rank_min_rows = triton.cdiv(4 * vector_cores, ranks)
+    rank_min_rows = max(triton.cdiv(2 * vector_cores, ranks), ranks)
     cuts = {
         triton.cdiv(rank_min_rows, local_heads),
         1,
