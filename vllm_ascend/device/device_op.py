@@ -1273,6 +1273,111 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         )
 
     @staticmethod
+    def npu_mm_all_reduce_base(
+        x1: torch.Tensor,
+        x2: torch.Tensor,
+        hcom: str,
+        *,
+        reduce_op: str = "sum",
+        bias: torch.Tensor | None = None,
+        antiquant_scale: torch.Tensor | None = None,
+        antiquant_offset: torch.Tensor | None = None,
+        x3: torch.Tensor | None = None,
+        dequant_scale: torch.Tensor | None = None,
+        pertoken_scale: torch.Tensor | None = None,
+        comm_quant_scale_1: torch.Tensor | None = None,
+        comm_quant_scale_2: torch.Tensor | None = None,
+        antiquant_group_size: int = 0,
+        comm_turn: int = 0,
+        comm_mode: str | None = None,
+    ):
+        return torch_npu.npu_mm_all_reduce_base(
+            x1,
+            x2,
+            hcom,
+            reduce_op=reduce_op,
+            bias=bias,
+            antiquant_scale=antiquant_scale,
+            antiquant_offset=antiquant_offset,
+            x3=x3,
+            dequant_scale=dequant_scale,
+            pertoken_scale=pertoken_scale,
+            comm_quant_scale_1=comm_quant_scale_1,
+            comm_quant_scale_2=comm_quant_scale_2,
+            antiquant_group_size=antiquant_group_size,
+            comm_turn=comm_turn,
+            comm_mode=comm_mode,
+        )
+
+    @staticmethod
+    def npu_quant_mm_reduce_scatter(
+        x1: torch.Tensor,
+        x2: torch.Tensor,
+        hcom: str,
+        world_size: int,
+        *,
+        reduce_op: str = "sum",
+        bias: torch.Tensor | None = None,
+        x1_scale: torch.Tensor | None = None,
+        x2_scale: torch.Tensor | None = None,
+        group_sizes: list[int] | None = None,
+        x1_scale_dtype: torch.dtype | None = None,
+        x2_scale_dtype: torch.dtype | None = None,
+        # y_dtype takes a numeric ACL dtype code, not a torch.dtype.
+        y_dtype: int | None = None,
+        comm_mode: str | None = None,
+    ):
+        return torch_npu.npu_quant_mm_reduce_scatter(
+            x1,
+            x2,
+            hcom,
+            world_size,
+            reduce_op=reduce_op,
+            bias=bias,
+            x1_scale=x1_scale,
+            x2_scale=x2_scale,
+            group_sizes=group_sizes,
+            x1_scale_dtype=x1_scale_dtype,
+            x2_scale_dtype=x2_scale_dtype,
+            y_dtype=y_dtype,
+            comm_mode=comm_mode,
+        )
+
+    @staticmethod
+    def npu_all_gather_quant_mm(
+        x1: torch.Tensor,
+        x2: torch.Tensor,
+        hcom: str,
+        world_size: int,
+        *,
+        bias: torch.Tensor | None = None,
+        x1_scale: torch.Tensor | None = None,
+        x2_scale: torch.Tensor | None = None,
+        group_sizes: list[int] | None = None,
+        x1_scale_dtype: torch.dtype | None = None,
+        x2_scale_dtype: torch.dtype | None = None,
+        # y_dtype takes a numeric ACL dtype code, not a torch.dtype.
+        y_dtype: int | None = None,
+        gather_output: bool = False,
+        comm_mode: str | None = None,
+    ):
+        return torch_npu.npu_all_gather_quant_mm(
+            x1,
+            x2,
+            hcom,
+            world_size,
+            bias=bias,
+            x1_scale=x1_scale,
+            x2_scale=x2_scale,
+            group_sizes=group_sizes,
+            x1_scale_dtype=x1_scale_dtype,
+            x2_scale_dtype=x2_scale_dtype,
+            y_dtype=y_dtype,
+            gather_output=gather_output,
+            comm_mode=comm_mode,
+        )
+
+    @staticmethod
     def npu_dynamic_quant(
         hidden_states: torch.Tensor,
         dynamic_scale: torch.Tensor | None = None,
