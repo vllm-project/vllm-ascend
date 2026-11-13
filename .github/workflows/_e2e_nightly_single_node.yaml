@@ -68,6 +68,11 @@ on:
         type: string
         default: ''
         description: PR commit SHA for PR-triggered checkout
+      download_path:
+        required: false
+        type: string
+        default: ''
+        description: File or directory in the test container to upload as a GitHub artifact
       testcase_timeout:
         required: false
         default: 120
@@ -513,4 +518,27 @@ jobs:
           path: /vllm-workspace/vllm-ascend/benchmark_results/${{ steps.bench_ts.outputs.effective_name }}.json
           if-no-files-found: warn
           retention-days: 90
+          compression-level: 0
+
+      - name: Collect requested path
+        if: ${{ always() && inputs.download_path != '' }}
+        id: collect_download
+        continue-on-error: true
+        env:
+          DOWNLOAD_PATH: ${{ inputs.download_path }}
+          ARTIFACT_LABEL: ${{ inputs.vllm_ascend_branch || '' }}-${{ inputs.name || inputs.config_file_path || inputs.tests }}
+        run: |
+          python3 /vllm-workspace/vllm-ascend/.github/workflows/scripts/collect_download.py "$DOWNLOAD_PATH" /tmp/download-artifact.tar.gz
+          safe_label=$(printf '%s' "$ARTIFACT_LABEL" | tr -c 'A-Za-z0-9_.-' '-' | cut -c1-100)
+          echo "name=nightly-download-${safe_label}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload requested path
+        if: ${{ always() && steps.collect_download.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.collect_download.outputs.name }}
+          path: /tmp/download-artifact.tar.gz
+          if-no-files-found: error
+          retention-days: 7
           compression-level: 0
