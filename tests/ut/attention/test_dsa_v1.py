@@ -2995,4 +2995,3 @@ def test_dspark_indices_write_caller_output():
     assert indices is indices_output
     assert indices[:, 0].tolist() == [[0, 1, 2, 3, 4, 5, -1, -1]] * 3
     assert lengths.flatten().tolist() == [6] * 3
-    
