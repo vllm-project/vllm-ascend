@@ -66,6 +66,114 @@ def _pack_qsa_group_indices_kernel(
 
 
 @triton.jit
+def _pack_qsa_group_indices_and_store_kv_kernel(
+    block_indices_ptr,
+    query_positions_ptr,
+    sequence_lengths_ptr,
+    token_to_req_ptr,
+    output_ptr,
+    key_ptr,
+    value_ptr,
+    key_cache_ptr,
+    value_cache_ptr,
+    slots_ptr,
+    stride_blocks_row,
+    stride_blocks_column,
+    stride_output_row,
+    stride_output_column,
+    stride_key_row,
+    stride_key_dim,
+    stride_value_row,
+    stride_value_dim,
+    stride_key_cache_block,
+    stride_key_cache_token,
+    stride_key_cache_dim,
+    stride_value_cache_block,
+    stride_value_cache_token,
+    stride_value_cache_dim,
+    rows,
+    num_requests,
+    num_blocks,
+    PAGE_SIZE: tl.constexpr,
+    BLOCK_TOPK: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    OUTPUT_WIDTH: tl.constexpr,
+    KV_WIDTH: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+) -> None:
+    row = tl.program_id(0)
+    columns = tl.arange(0, BLOCK_SIZE)
+    query_position = tl.load(query_positions_ptr + row)
+    request = tl.load(token_to_req_ptr + row)
+    safe_request = tl.minimum(tl.maximum(request, 0), num_requests - 1)
+    sequence_length = tl.load(
+        sequence_lengths_ptr + safe_request,
+        mask=(request >= 0) & (request < num_requests),
+        other=0,
+    )
+    complete_groups = tl.minimum(
+        tl.minimum(
+            (query_position + 1) // COMPRESS_RATIO,
+            sequence_length // COMPRESS_RATIO,
+        ),
+        BLOCK_TOPK,
+    )
+    complete_groups = tl.maximum(complete_groups, 0).to(tl.int32)
+    is_group = columns < BLOCK_TOPK
+    safe_group_column = tl.minimum(columns, BLOCK_TOPK - 1)
+    group = tl.load(
+        block_indices_ptr + row * stride_blocks_row + safe_group_column * stride_blocks_column,
+        mask=(columns < OUTPUT_WIDTH) & is_group & (columns < complete_groups),
+        other=-1,
+    )
+    tail_offset = columns - BLOCK_TOPK
+    tail_start = ((query_position + 1) // COMPRESS_RATIO) * COMPRESS_RATIO
+    tail_count = tl.minimum((query_position + 1) - tail_start, COMPRESS_RATIO - 1)
+    valid_tail_count = tl.maximum(tl.minimum(tail_count, sequence_length - tail_start), 0).to(tl.int32)
+    tail = tail_start.to(tl.int32) + tail_offset
+    valid_tail = (~is_group) & (tail_offset >= 0) & (tail_offset < valid_tail_count)
+    packed = tl.where(is_group, group, tl.where(valid_tail, tail, -1))
+    tl.store(
+        output_ptr + row * stride_output_row + columns * stride_output_column,
+        packed,
+        mask=columns < OUTPUT_WIDTH,
+    )
+
+    slot = tl.load(slots_ptr + row)
+    cache_capacity = num_blocks * PAGE_SIZE
+    valid_slot = (slot >= 0) & (slot < cache_capacity)
+    safe_slot = tl.minimum(tl.maximum(slot, 0), cache_capacity - 1).to(tl.int64)
+    block = safe_slot // PAGE_SIZE
+    token = safe_slot % PAGE_SIZE
+    key_values = tl.load(
+        key_ptr + row * stride_key_row + columns * stride_key_dim,
+        mask=columns < KV_WIDTH,
+        other=0,
+    )
+    value_values = tl.load(
+        value_ptr + row * stride_value_row + columns * stride_value_dim,
+        mask=columns < KV_WIDTH,
+        other=0,
+    )
+    tl.store(
+        key_cache_ptr
+        + block * stride_key_cache_block
+        + token * stride_key_cache_token
+        + columns * stride_key_cache_dim,
+        key_values,
+        mask=valid_slot & (columns < KV_WIDTH),
+    )
+    tl.store(
+        value_cache_ptr
+        + block * stride_value_cache_block
+        + token * stride_value_cache_token
+        + columns * stride_value_cache_dim,
+        value_values,
+        mask=valid_slot & (columns < KV_WIDTH),
+    )
+
+
+@triton.jit
 def _store_qsa_rows_kernel(
     cache_ptr,
     slots_ptr,
@@ -246,6 +354,12 @@ def pack_qsa_group_indices_npu(
     compress_ratio: int,
     token_topk: int,
     out: torch.Tensor | None = None,
+    *,
+    key: torch.Tensor | None = None,
+    value: torch.Tensor | None = None,
+    key_cache: torch.Tensor | None = None,
+    value_cache: torch.Tensor | None = None,
+    slot_mapping: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Pack LI-v2 groups and the open-group tail into one fixed buffer."""
     if block_indices.device.type != "npu" or not HAS_TRITON:
@@ -267,6 +381,62 @@ def pack_qsa_group_indices_npu(
     elif out.shape != (block_indices.shape[0], output_width):
         raise ValueError("QSA compact selection output has an invalid shape")
     if not block_indices.shape[0]:
+        return out
+    fused_kv = all(t is not None for t in (key, value, key_cache, value_cache, slot_mapping))
+    if fused_kv:
+        assert key is not None and value is not None
+        assert key_cache is not None and value_cache is not None and slot_mapping is not None
+        if key.ndim == 3:
+            if key.shape[1] != 1 or value.shape[1] != 1:
+                raise ValueError("QSA fused K/V rows require one local KV head")
+            key = key[:, 0]
+            value = value[:, 0]
+        if key.ndim != 2 or value.shape != key.shape:
+            raise ValueError("QSA fused K/V rows must have matching two-dimensional shapes")
+        if key_cache.ndim != 4 or value_cache.shape != key_cache.shape or key_cache.shape[2] != 1:
+            raise ValueError("QSA fused K/V caches must have matching singleton-head layouts")
+        if key.shape[1] != key_cache.shape[3] or key.dtype != key_cache.dtype or value.dtype != value_cache.dtype:
+            raise ValueError("QSA fused K/V rows do not match their cache layout")
+        slots = slot_mapping.reshape(-1)
+        if min(key.shape[0], value.shape[0], slots.shape[0]) < block_indices.shape[0]:
+            raise ValueError("QSA fused K/V inputs do not cover all selected rows")
+        block_size = triton.next_power_of_2(max(output_width, key.shape[1]))
+        _pack_qsa_group_indices_and_store_kv_kernel[(block_indices.shape[0],)](
+            block_indices,
+            query_positions,
+            sequence_lengths,
+            token_to_req,
+            out,
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slots,
+            block_indices.stride(0),
+            block_indices.stride(1),
+            out.stride(0),
+            out.stride(1),
+            key.stride(0),
+            key.stride(1),
+            value.stride(0),
+            value.stride(1),
+            key_cache.stride(0),
+            key_cache.stride(1),
+            key_cache.stride(3),
+            value_cache.stride(0),
+            value_cache.stride(1),
+            value_cache.stride(3),
+            block_indices.shape[0],
+            sequence_lengths.shape[0],
+            key_cache.shape[0],
+            PAGE_SIZE=key_cache.shape[1],
+            BLOCK_TOPK=block_topk,
+            COMPRESS_RATIO=compress_ratio,
+            OUTPUT_WIDTH=output_width,
+            KV_WIDTH=key.shape[1],
+            BLOCK_SIZE=block_size,
+            num_warps=4,
+        )
         return out
     _pack_qsa_group_indices_kernel[(block_indices.shape[0],)](
         block_indices,
@@ -327,6 +497,177 @@ def qsa_store_cache_rows(
         PAGE_SIZE=cache.shape[1],
         WIDTH=cache.shape[3],
         BLOCK_D=triton.next_power_of_2(cache.shape[3]),
+        num_warps=4,
+    )
+
+
+@triton.jit
+def _store_qsa_key_position_rows_kernel(
+    key_cache_ptr,
+    position_cache_ptr,
+    slots_ptr,
+    key_rows_ptr,
+    position_rows_ptr,
+    stride_key_cache_block,
+    stride_key_cache_token,
+    stride_key_cache_dim,
+    stride_position_cache_block,
+    stride_position_cache_token,
+    stride_position_cache_dim,
+    stride_key_rows_row,
+    stride_key_rows_dim,
+    stride_position_rows_row,
+    stride_position_rows_dim,
+    num_rows,
+    num_blocks,
+    PAGE_SIZE: tl.constexpr,
+    KEY_WIDTH: tl.constexpr,
+    POSITION_WIDTH: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+) -> None:
+    row = tl.program_id(0)
+    dims = tl.arange(0, BLOCK_D)
+    slot = tl.load(slots_ptr + row)
+    cache_capacity = num_blocks * PAGE_SIZE
+    valid = (row < num_rows) & (slot >= 0) & (slot < cache_capacity)
+    safe_slot = tl.minimum(tl.maximum(slot, 0), cache_capacity - 1).to(tl.int64)
+    block = safe_slot // PAGE_SIZE
+    token = safe_slot % PAGE_SIZE
+    key_values = tl.load(
+        key_rows_ptr + row * stride_key_rows_row + dims * stride_key_rows_dim,
+        mask=valid & (dims < KEY_WIDTH),
+        other=0,
+    )
+    position_values = tl.load(
+        position_rows_ptr + row * stride_position_rows_row + dims * stride_position_rows_dim,
+        mask=valid & (dims < POSITION_WIDTH),
+        other=0,
+    )
+    tl.store(
+        key_cache_ptr + block * stride_key_cache_block + token * stride_key_cache_token + dims * stride_key_cache_dim,
+        key_values,
+        mask=valid & (dims < KEY_WIDTH),
+    )
+    tl.store(
+        position_cache_ptr
+        + block * stride_position_cache_block
+        + token * stride_position_cache_token
+        + dims * stride_position_cache_dim,
+        position_values,
+        mask=valid & (dims < POSITION_WIDTH),
+    )
+
+
+def qsa_store_key_position_rows(
+    key_cache: torch.Tensor,
+    position_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    key_rows: torch.Tensor,
+    position_rows: torch.Tensor,
+) -> None:
+    """Store raw QSA keys and their MRoPE positions in one launch."""
+    if key_cache.device.type != "npu" or not HAS_TRITON:
+        raise RuntimeError("QSA NPU cache stores require Triton")
+    if key_cache.ndim != 4 or key_cache.shape[2] != 1:
+        raise ValueError("QSA key cache must be [pages, page_size, 1, width]")
+    if position_cache.ndim != 4 or position_cache.shape[:3] != key_cache.shape[:3]:
+        raise ValueError("QSA position cache must match the key cache layout")
+    if position_cache.shape[3] != 3:
+        raise ValueError("QSA position cache width must be three")
+    if not all(key_cache.shape) or not all(position_cache.shape):
+        raise ValueError("QSA cache dimensions must be nonzero")
+    if key_rows.ndim == 3:
+        if key_rows.shape[1] != 1:
+            raise ValueError("QSA key rows must have one head")
+        key_rows = key_rows[:, 0]
+    if position_rows.ndim == 3:
+        if position_rows.shape[1] != 1:
+            raise ValueError("QSA position rows must have one head")
+        position_rows = position_rows[:, 0]
+    if key_rows.ndim != 2 or key_rows.shape[1] != key_cache.shape[3]:
+        raise ValueError("QSA key rows have an incompatible width")
+    if position_rows.ndim != 2 or position_rows.shape[1] != position_cache.shape[3]:
+        raise ValueError("QSA position rows have an incompatible width")
+    if key_rows.dtype != key_cache.dtype or position_rows.dtype != position_cache.dtype:
+        raise ValueError("QSA cache rows must match their cache dtypes")
+
+    slot_mapping = slot_mapping.reshape(-1)
+    num_updates = min(slot_mapping.shape[0], key_rows.shape[0], position_rows.shape[0])
+    if not num_updates:
+        return
+    _store_qsa_key_position_rows_kernel[(num_updates,)](
+        key_cache,
+        position_cache,
+        slot_mapping[:num_updates],
+        key_rows[:num_updates],
+        position_rows[:num_updates],
+        key_cache.stride(0),
+        key_cache.stride(1),
+        key_cache.stride(3),
+        position_cache.stride(0),
+        position_cache.stride(1),
+        position_cache.stride(3),
+        key_rows.stride(0),
+        key_rows.stride(1),
+        position_rows.stride(0),
+        position_rows.stride(1),
+        num_updates,
+        key_cache.shape[0],
+        PAGE_SIZE=key_cache.shape[1],
+        KEY_WIDTH=key_cache.shape[3],
+        POSITION_WIDTH=position_cache.shape[3],
+        BLOCK_D=triton.next_power_of_2(max(key_cache.shape[3], position_cache.shape[3])),
+        num_warps=4,
+    )
+
+
+def qsa_store_kv_rows(
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    key_rows: torch.Tensor,
+    value_rows: torch.Tensor,
+) -> None:
+    """Store main QSA key and value rows in one launch."""
+    if key_rows.ndim == 3:
+        if key_rows.shape[1] != 1 or value_rows.shape[1] != 1:
+            raise ValueError("QSA combined K/V store requires one local KV head")
+        key_rows = key_rows[:, 0]
+        value_rows = value_rows[:, 0]
+    if key_cache.ndim != 4 or key_cache.shape[2] != 1:
+        raise ValueError("QSA combined K/V cache requires a singleton-head layout")
+    if value_cache.shape != key_cache.shape or value_rows.shape != key_rows.shape:
+        raise ValueError("QSA combined K/V key and value shapes must match")
+    if key_rows.ndim != 2 or key_rows.shape[1] != key_cache.shape[3]:
+        raise ValueError("QSA combined K/V rows have an incompatible width")
+    if key_rows.dtype != key_cache.dtype or value_rows.dtype != value_cache.dtype:
+        raise ValueError("QSA combined K/V rows must match their cache dtypes")
+    slots = slot_mapping.reshape(-1)
+    num_updates = min(slots.shape[0], key_rows.shape[0], value_rows.shape[0])
+    if num_updates == 0:
+        return
+    _store_qsa_key_position_rows_kernel[(num_updates,)](
+        key_cache,
+        value_cache,
+        slots[:num_updates],
+        key_rows[:num_updates],
+        value_rows[:num_updates],
+        key_cache.stride(0),
+        key_cache.stride(1),
+        key_cache.stride(3),
+        value_cache.stride(0),
+        value_cache.stride(1),
+        value_cache.stride(3),
+        key_rows.stride(0),
+        key_rows.stride(1),
+        value_rows.stride(0),
+        value_rows.stride(1),
+        num_updates,
+        key_cache.shape[0],
+        PAGE_SIZE=key_cache.shape[1],
+        KEY_WIDTH=key_cache.shape[3],
+        POSITION_WIDTH=value_cache.shape[3],
+        BLOCK_D=triton.next_power_of_2(key_cache.shape[3]),
         num_warps=4,
     )
 
@@ -435,5 +776,7 @@ def qsa_compress_groups_with_ratio(
 __all__ = [
     "pack_qsa_group_indices_npu",
     "qsa_compress_groups_with_ratio",
+    "qsa_store_key_position_rows",
+    "qsa_store_kv_rows",
     "qsa_store_cache_rows",
 ]
