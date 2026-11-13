@@ -7,6 +7,7 @@ are mocked. Kernel accuracy and actual Cube/Vector overlap require Ascend NPU.
 
 import ast
 import unittest
+from contextlib import nullcontext
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
@@ -33,6 +34,7 @@ class TestSharedActivationOverlap(unittest.TestCase):
         self.order.attach_mock(self.stream.record_event, "record_event")
         self.order.attach_mock(self.stream.wait_event, "wait_event")
         self.namespace: dict[str, Any] = {
+            "super_kernel_scope": lambda *args, **kwargs: nullcontext(),
             "torch": SimpleNamespace(
                 float32="fp32",
                 float16="fp16",
@@ -123,6 +125,7 @@ class TestSharedActivationOverlap(unittest.TestCase):
             self.order.attach_mock(getattr(quant, name), name)
         self.order.attach_mock(self.namespace["_unified_apply_activation"], "activation")
         executor = self.namespace[backend]()
+        executor._enable_mlp_super_kernel_scopes = False
         executor.token_dispatcher = dispatcher
         executor.moe_config = object()
         executor._apply_mlp = Mock(side_effect=lambda mlp: self.namespace["apply_moe_mlp"](mlp, quant))
