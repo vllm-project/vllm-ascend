@@ -28,6 +28,7 @@ from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.spec_decode import utils as spec_utils
 from vllm.v1.worker.gpu.spec_decode.eagle import utils as eagle_utils
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
+from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import speculator as target_speculator_module
 
 from vllm_ascend.attention.mla_v1 import AscendMLADecodeMetadata, AscendMLAMetadata
 from vllm_ascend.platform import _validate_eplb_config
@@ -351,25 +352,68 @@ def test_pcp_draft_metadata_preserves_other_attention_paths():
 
 @pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL])
 @pytest.mark.parametrize("query_ends", [[2, 4, 6, 8], [2]])
-def test_non_pcp_draft_prefill_normalizes_main_target_graph_padding(mode, query_ends):
+def test_non_pcp_propose_handles_target_graph_padding(mode, query_ends):
     speculator = object.__new__(AscendMTPSpeculator)
     speculator.pcp_manager = None
     speculator.draft_attn_layer_names = {"mtp"}
+    speculator.dp_size = 1
+    speculator.dp_rank = 0
+    speculator.max_num_reqs = 4
+    speculator.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=32), parallel_config=object())
+    speculator.can_reuse_target_attn_metadata = True
+    speculator.input_buffers = object()
+    speculator.last_token_indices = torch.zeros(4, dtype=torch.int64)
+    speculator.current_draft_step = torch.tensor(0)
+    speculator.hidden_states = torch.zeros(8, 1)
+    speculator.draft_tokens = torch.zeros(4, 1, dtype=torch.int64)
+    speculator.prefill_cudagraph_manager = MagicMock()
+    batch = SimpleNamespace(
+        num_reqs=1,
+        num_tokens=2,
+        num_tokens_after_padding=8,
+        num_scheduled_tokens=torch.tensor([2]),
+        seq_lens_cpu_upper_bound=torch.tensor([2]),
+        idx_mapping=torch.tensor([0]),
+        decode_graph_eligible=True,
+    )
     target = _mla_pcp_decode_metadata(2, query_ends)
     other = SimpleNamespace()
     target_metadata = {"mtp": target, "target_only": other}
+    speculator.model_state = SimpleNamespace(attn_metadata=target_metadata)
     slots = {"mtp": target.slot_mapping}
+    batch_desc = SimpleNamespace(cg_mode=mode, num_tokens=8)
 
-    with patch.object(speculator_module.TargetDependentARSpeculator, "_prefill") as parent:
-        speculator._prefill(1, 8, target_metadata, slots, None, mode)
+    with (
+        patch.object(speculator_module, "build_attn_metadata_wrapper", return_value=nullcontext()),
+        patch.object(speculator_module, "torch_gather_wrapper", return_value=nullcontext()),
+        patch.object(speculator, "_lmhead_pad_size_context", return_value=nullcontext()),
+        patch.object(speculator, "_copy_request_inputs"),
+        patch.object(speculator, "_prepare_eplb_forward"),
+        patch.object(speculator, "on_prefill_begin"),
+        patch.object(speculator, "on_prefill_end"),
+        patch.object(target_speculator_module, "prepare_prefill_inputs"),
+        patch.object(target_speculator_module, "dispatch_cg_and_sync_dp", return_value=(batch_desc, None)),
+        patch.object(speculator_module.TargetDependentARSpeculator, "_prefill") as parent,
+    ):
+        speculator.propose(batch, target_metadata, slots, torch.zeros(8, 1), *[None] * 7, num_speculative_tokens=1)
 
-    passed_metadata = parent.call_args.args[2]
-    draft = passed_metadata["mtp"]
-    expected = query_ends if mode == CUDAGraphMode.FULL else [2] * len(query_ends)
-    assert draft.decode.actual_seq_lengths_q == expected
-    assert set(passed_metadata) == {"mtp"}
-    assert target.decode.actual_seq_lengths_q == query_ends
+    assert speculator.model_state.attn_metadata is target_metadata
     assert target_metadata == {"mtp": target, "target_only": other}
+    assert target.decode.actual_seq_lengths_q == query_ends
+
+    replay = speculator.prefill_cudagraph_manager.run_fullgraph
+    if mode == CUDAGraphMode.FULL:
+        replay.assert_called_once_with(batch_desc)
+        parent.assert_not_called()
+        return
+
+    replay.assert_not_called()
+    parent.assert_called_once()
+    passed_metadata = parent.call_args.args[2]
+    assert set(passed_metadata) == {"mtp"}
+    draft = passed_metadata["mtp"]
+    expected = [2] * len(query_ends)
+    assert draft.decode.actual_seq_lengths_q == expected
     assert draft.slot_mapping is target.slot_mapping
     assert draft.decode.seq_lens_list is target.decode.seq_lens_list
     assert parent.call_args.args[0:2] == (1, 8)
@@ -422,7 +466,7 @@ def test_propose_renegotiates_pcp_draft_dp_sync(pcp_enabled, mismatch, dummy_run
     assert parent.call_args.args[11] is (None if pcp_enabled else dp_sync)
     assert speculator.input_batch is input_batch
     passed_metadata = parent.call_args.args[1]["mtp"]
-    assert passed_metadata.decode.actual_seq_lengths_q == ([4, 4] if pcp_enabled else [4, 8])
+    assert passed_metadata.decode.actual_seq_lengths_q == [4, 4]
     assert attn_metadata["mtp"].decode.actual_seq_lengths_q == [4, 8]
 
 

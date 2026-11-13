@@ -284,7 +284,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             and sync_state.uniform_token_count is not None
         ):
             sync_state = replace(sync_state, uniform_token_count=None)
-        if self.pcp_manager is not None:
+        if attn_metadata is not None:
             attn_metadata = self._get_draft_prefill_metadata(attn_metadata)
         # wrap build_attn_metadata to use Ascend attention metadata building.
         # so we can call super().propose() directly.
@@ -517,12 +517,6 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             attn_metadata = {
                 name: metadata for name, metadata in attn_metadata.items() if name in self.draft_attn_layer_names
             }
-
-        # Target FULL graphs can pad requests in both v0.33.0 and main.
-        # Eager/PW MLA slices queries to real decode rows; its cumulative query
-        # lengths must exclude target padding too. Keep FULL graph metadata.
-        if attn_metadata is not None and cudagraph_runtime_mode != CUDAGraphMode.FULL:
-            attn_metadata = self._get_draft_prefill_metadata(attn_metadata)
 
         with self._lmhead_pad_size_context(capture_num_reqs=num_reqs):
             # vLLM main forwards `skip_sample` so the drafter KV stays in sync
