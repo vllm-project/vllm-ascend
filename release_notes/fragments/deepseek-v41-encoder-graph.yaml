@@ -1,0 +1,3 @@
+entries:
+  - category: feature
+    text: Added DeepSeek-V4.1 vision encoder ACL graph support via cudagraph_mm_encoder.
