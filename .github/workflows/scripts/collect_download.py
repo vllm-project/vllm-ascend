@@ -20,6 +20,17 @@ PROTECTED_ROOTS = (
     Path("/tmp/kubeconfig"),
 )
 TEST_REPOSITORY = Path("/vllm-workspace/vllm-ascend")
+# This exact Kimi-K3 bundle contains optional, phase-dependent diagnostics.
+# Community /nightly uses the upstream workflow but checks out this PR script;
+# therefore optional collection cannot depend on a new workflow CLI flag.
+KIMI_OPTIONAL_LOG_PATHS = (
+    "log_archives",
+    "outputs",
+    "rescore",
+    "benchmark_results",
+    "/tmp/test-logs",
+    "/tmp/aop-bisect-diagnostics",
+)
 
 
 def validate_path(raw_path: str, *, require_exists: bool = True) -> Path:
@@ -148,10 +159,12 @@ def main() -> None:
         return
     if args.node not in paths:
         parser.error(f"--download does not specify {args.node}")
+    kimi_bundle = paths == {"node0": list(KIMI_OPTIONAL_LOG_PATHS)}
+    skip_missing = args.skip_missing or kimi_bundle
     sources = []
     for raw_path in paths[args.node]:
         path = validate_path(raw_path, require_exists=False)
-        if args.skip_missing and not path.exists() and not path.is_symlink():
+        if skip_missing and not path.exists() and not path.is_symlink():
             print(f"Skipping missing optional path: {path}")
             continue
         sources.append(validate_path(raw_path, require_exists=not args.check_only))

@@ -77,3 +77,29 @@ def test_cli_skips_missing_optional_path(tmp_path):
     )
     assert result.returncode != 0
     assert "no requested paths exist" in result.stderr
+
+
+def test_upstream_invocation_collects_kimi_bundle(tmp_path, monkeypatch):
+    monkeypatch.setattr(collector, "TEST_REPOSITORY", tmp_path)
+    original_validate = collector.validate_path
+
+    def isolated_validate(raw, **kwargs):
+        if raw.startswith("/tmp/"):
+            raw = str(tmp_path / Path(raw).name)
+        return original_validate(raw, **kwargs)
+
+    monkeypatch.setattr(collector, "validate_path", isolated_validate)
+    output = tmp_path / "outputs"
+    output.mkdir()
+    (output / "round-01.txt").write_text("response")
+    destination = tmp_path / "download.tar.gz"
+    request = json.dumps([{"node0": path} for path in collector.KIMI_OPTIONAL_LOG_PATHS])
+    # Match the upstream reusable workflow: no --skip-missing option.
+    monkeypatch.setattr(sys, "argv", [str(_SCRIPT), request, str(destination)])
+    collector.main()
+    with tarfile.open(destination) as archive:
+        assert archive.getnames() == ["round-01.txt"]
+    (output / "round-01.txt").unlink()
+    output.rmdir()
+    with pytest.raises(SystemExit):
+        collector.main()
