@@ -1,0 +1,6 @@
+pr: 21847
+entries:
+  - category: feature
+    text: DeepSeek V4.1 attention layers can now hand finished KV to the AscendStore pool and the Mooncake V2 layerwise push connector from one composite boundary, overlapping both transfers with the following layers' compute.
+  - category: bugfix
+    text: AscendMultiConnector now drains every child connector's finish_forward and wait_for_save before surfacing the first failure, and the MooncakeLayerwiseConnector factory name is taken over from upstream vLLM so plugin startup keeps working after vllm#62504 lands.
