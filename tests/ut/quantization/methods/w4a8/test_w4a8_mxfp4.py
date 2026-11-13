@@ -10,7 +10,6 @@ from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDynamicFusedMoEMethod,
     AscendW4A8MXFPDynamicLinearMethod,
 )
-from vllm_ascend.weight_switch import WeightSwitchConfig
 
 
 class TestAscendW4A8MXFP4LinearMethod(TestBase):
@@ -76,32 +75,6 @@ class TestAscendW4A8MXFP4LinearMethod(TestBase):
         self.assertEqual(layer.weight.shape, weight_shape)
         self.assertEqual(layer.weight_scale.shape, scale_shape)
         self.assertEqual(layer._mxfp4_original_shapes, recorded)
-
-    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
-    def test_pcp_retains_transposed_nd_and_reloads_without_cast_back(self, mock_npu):
-        mock_npu.npu_format_cast.side_effect = lambda weight, *args, **kwargs: weight.clone()
-        layer = self._make_linear_layer()
-        layer.input_size = 512
-        layer.input_size_per_partition = 256
-        layer.output_size = layer.output_size_per_partition = 128
-        layer._weight_switch_config = WeightSwitchConfig(group=object(), world_size=2, rank=0)
-        original = layer.weight.detach().clone()
-        self.scheme.process_weights_after_loading(layer)
-        state = self.scheme.enable_weight_switch(layer, layer._weight_switch_config)
-        cache = state.gather_parts["weight"].gather_input
-        pointer = cache.data_ptr()
-        torch.testing.assert_close(cache, original.T.contiguous())
-        self.assertNotEqual(pointer, layer.weight.data_ptr())
-        self.scheme.restore_weights_for_rl_loading(layer)
-        mock_npu.npu_format_cast.assert_called_once()
-        new_weight = torch.randint(0, 255, layer.weight.shape, dtype=torch.uint8)
-        layer.weight.data.copy_(new_weight)
-        self.scheme.process_weights_after_loading(layer)
-        self.scheme.refresh_weight_switch_gather_inputs(layer, state)
-        self.assertEqual(cache.data_ptr(), pointer)
-        torch.testing.assert_close(cache, new_weight.T.contiguous())
-        self.assertEqual(mock_npu.npu_format_cast.call_count, 2)
-        self.assertTrue(all(call.args[1] == 29 for call in mock_npu.npu_format_cast.call_args_list))
 
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.torch_npu")
     def test_restore_after_process_returns_original_shape(self, mock_npu):

@@ -137,7 +137,6 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
                 "weight": tuple(layer.weight.data.shape),
                 "weight_scale": tuple(layer.weight_scale.data.shape),
             }
-        self.retain_weight_switch_nd_weight(layer, layer.weight.data.transpose(-1, -2))
         layer.weight.data = torch_npu.npu_format_cast(
             layer.weight.data,
             ACL_FORMAT_FRACTAL_NZ,
@@ -157,12 +156,8 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
         """
         if not getattr(layer, "_mxfp4_transformed", False):
             return
-        nd_weight = self.get_weight_switch_nd_weight(layer)
-        if nd_weight is not None:
-            layer.weight.data = nd_weight.transpose(-1, -2).contiguous()
-        else:
-            layer.weight.data = layer.weight.data.transpose(-1, -2)
-            layer.weight.data = torch_npu.npu_format_cast(layer.weight.data, 2)
+        layer.weight.data = layer.weight.data.transpose(-1, -2)
+        layer.weight.data = torch_npu.npu_format_cast(layer.weight.data, 2)
         orig_scale_shape = layer._mxfp4_original_shapes["weight_scale"]
         layer.weight_scale.data = layer.weight_scale.data.transpose(-3, -2).reshape(orig_scale_shape)
         layer._mxfp4_transformed = False

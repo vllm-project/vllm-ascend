@@ -21,6 +21,7 @@ from typing import Any, ClassVar, Literal
 
 import torch
 
+_NPU_FORMAT_ND = 2
 _NPU_FORMAT_FRACTAL_NZ = 29
 
 
@@ -390,9 +391,6 @@ class WeightSwitchMixin:
             )
 
         setattr(layer, size_attr, local_width)
-        # Quantization post-processing retains the ND communication input
-        # before replacing the compute weight with an NZ tensor.
-        layer._weight_switch_config = config
         return original_width, local_width
 
     def prepare_layer_for_parallel_weight_load(
@@ -430,63 +428,17 @@ class WeightSwitchMixin:
 
     @staticmethod
     def _prepare_weight_switch_gather_input(tensor: torch.Tensor, dim: int) -> torch.Tensor:
-        """Arrange an ND source for communication; never cast an NZ weight back."""
-        if tensor.device.type == "npu":
+        """Prepare a reusable communication layout without changing compute weights."""
+        gather_input = tensor if dim == 0 else torch.movedim(tensor, dim, 0).contiguous()
+        if gather_input.device.type == "npu":
             # Keep CPU-only loading/tests independent of the NPU runtime.
             import torch_npu
 
-            if torch_npu.get_npu_format(tensor) == _NPU_FORMAT_FRACTAL_NZ:
-                raise RuntimeError("Retain the ND weight-switch input before converting the compute weight to NZ.")
-        return tensor.contiguous() if dim == 0 else torch.movedim(tensor, dim, 0).contiguous()
-
-    def retain_weight_switch_nd_weight(self, layer: torch.nn.Module, weight: torch.Tensor) -> None:
-        """Keep the final ND layout before NZ conversion, only for opted-in layers."""
-        config = getattr(layer, "_weight_switch_config", None)
-        if not isinstance(config, WeightSwitchConfig):
-            return
-        state = getattr(layer, "_weight_switch_state", None)
-        if state is not None and state.handles:
-            raise RuntimeError("Cannot refresh weight gather inputs while an all-gather is pending.")
-        gather_specs, _, _ = self._get_weight_switch_specs(layer, config)
-        spec = next(spec for spec in gather_specs if spec.attr_name == "weight")
-        gather_input = self._prepare_weight_switch_gather_input(weight.detach(), spec.gather_dim % weight.dim())
-        cached = getattr(layer, "_weight_switch_nd_weight", None)
-        if cached is None:
-            # Holding the original ND storage is sufficient: NZ conversion
-            # creates the separate compute tensor.
-            layer._weight_switch_nd_weight = gather_input
-        else:
-            if (
-                cached.shape != gather_input.shape
-                or cached.dtype != gather_input.dtype
-                or cached.device != gather_input.device
-            ):
-                raise RuntimeError("Reloaded weight 'weight' changed layout; recreate the weight-switch state.")
-            if cached.data_ptr() != gather_input.data_ptr():
-                cached.copy_(gather_input)
-
-    def get_weight_switch_nd_weight(self, layer: torch.nn.Module) -> torch.Tensor | None:
-        """Return the retained weight in compute order for checkpoint reloads."""
-        cached = getattr(layer, "_weight_switch_nd_weight", None)
-        if cached is None:
-            return None
-        state = getattr(layer, "_weight_switch_state", None)
-        if state is not None and state.handles:
-            raise RuntimeError("Cannot reload weights while an all-gather is pending.")
-        gather_specs, _, _ = self._get_weight_switch_specs(layer, layer._weight_switch_config)
-        spec = next(spec for spec in gather_specs if spec.attr_name == "weight")
-        return torch.movedim(cached, 0, spec.gather_dim % cached.dim())
-
-    def _weight_switch_gather_input(
-        self, layer: torch.nn.Module, attr_name: str, tensor: torch.Tensor, dim: int
-    ) -> torch.Tensor:
-        cached = getattr(layer, "_weight_switch_nd_weight", None) if attr_name == "weight" else None
-        if cached is None:
-            return self._prepare_weight_switch_gather_input(tensor, dim)
-        expected_shape = (tensor.shape[dim], *tensor.shape[:dim], *tensor.shape[dim + 1 :])
-        if cached.shape != expected_shape or cached.dtype != tensor.dtype or cached.device != tensor.device:
-            raise RuntimeError(f"Reloaded weight {attr_name!r} changed layout; recreate the weight-switch state.")
-        return cached
+            if torch_npu.get_npu_format(gather_input) == _NPU_FORMAT_FRACTAL_NZ:
+                gather_input = torch_npu.npu_format_cast(
+                    gather_input, _NPU_FORMAT_ND, customize_dtype=gather_input.dtype
+                )
+        return gather_input
 
     def refresh_weight_switch_gather_inputs(self, layer: torch.nn.Module, state: WeightSwitchState) -> None:
         """Refresh communication copies after reloading weights, keeping cache addresses stable."""
@@ -502,10 +454,10 @@ class WeightSwitchMixin:
                 raise RuntimeError(f"Reloaded weight {attr_name!r} changed layout; recreate the weight-switch state.")
             dim = part.spec.gather_dim % tensor.dim()
             was_alias = part.gather_input.data_ptr() == part.local_tensor.data_ptr()
-            gather_input = self._weight_switch_gather_input(layer, attr_name, tensor, dim)
+            gather_input = self._prepare_weight_switch_gather_input(tensor, dim)
             if was_alias:
                 part.gather_input = gather_input
-            elif part.gather_input.data_ptr() != gather_input.data_ptr():
+            else:
                 part.gather_input.copy_(gather_input)
             part.local_tensor = tensor
 
@@ -529,7 +481,6 @@ class WeightSwitchMixin:
             )
 
         state = WeightSwitchState()
-        layer._weight_switch_config = config
 
         for gather_spec in gather_specs:
             tensor = getattr(layer, gather_spec.attr_name, None)
@@ -552,7 +503,7 @@ class WeightSwitchMixin:
             full_shape_list = list(local_tensor.shape)
             full_shape_list[dim] *= config.world_size
             full_shape = tuple(full_shape_list)
-            gather_input = self._weight_switch_gather_input(layer, gather_spec.attr_name, local_tensor, dim)
+            gather_input = self._prepare_weight_switch_gather_input(local_tensor, dim)
             gather_shape = (full_shape[dim], *full_shape[:dim], *full_shape[dim + 1 :])
             pool_key = (
                 pool_key_prefix,
@@ -604,7 +555,6 @@ class WeightSwitchMixin:
                 full_tensor=local_tensor.repeat(*repeats),
             )
 
-        layer._weight_switch_state = state
         return state
 
     def all_gather_weight(

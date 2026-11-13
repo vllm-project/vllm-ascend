@@ -106,7 +106,6 @@ class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
-        nd_weight = layer.weight.data if hasattr(layer, "_weight_switch_config") else None
         keep_nd_weight = _should_keep_nd_for_compatibility_weight(layer.weight.data)
         skip_weight_nz_conversion = getattr(layer, "skip_weight_nz_conversion", False)
         # must use fp32 to avoid accuracy degradation in dsv4.
@@ -131,10 +130,6 @@ class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
             layer.weight.data = (
                 layer.weight.data.view(layer.n_local_groups, layer.o_lora_rank, -1).transpose(2, 1).contiguous()
             )
-            if nd_weight is not None:
-                nd_weight = nd_weight.view(layer.n_local_groups, layer.o_lora_rank, -1).transpose(2, 1).contiguous()
-        if nd_weight is not None:
-            self.retain_weight_switch_nd_weight(layer, nd_weight)
 
     def apply(
         self,
