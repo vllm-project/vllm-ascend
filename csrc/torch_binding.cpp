@@ -56,7 +56,7 @@
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "attention/k2q_csr/k2q_csr_torch_adpt.h"
 #ifdef VLLM_ASCEND_ENABLE_HISPARSE_RESOLVER
-#include "hisparse/hisparse_resolver_torch_adpt.h"
+#include "attention/hi_sparse_resolve_residency/hi_sparse_resolve_residency_torch_adpt.h"
 #endif
 #include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
 #include "moe/situ_mx_quant/situ_mx_quant_torch_adpt.h"
