@@ -623,6 +623,37 @@ class TestTokenDispatcherWithMC2(TestBase):
                 self.assertEqual(kwargs["comm_quant_mode"], expected)
                 self.assertIs(kwargs["expand_x"], hidden_states)
 
+    def test_w4a8_mxfp_combine_defaults_and_explicit_overrides(self):
+        self.dispatcher.dynamic_mx_quant_scale_alg = 1
+        self.dispatcher.moe_expert_num = 8
+        hidden_states = torch.randn(2, 128, dtype=torch.bfloat16)
+        for scale_alg, forced_mode, comm_mode, expected in (
+            (1, 0, None, 4),
+            (0, 0, None, 4),
+            (1, 4, None, 4),
+            (1, 0, 4, 4),
+            (1, 4, 2, 4),
+            (0, 0, 0, 0),
+            (1, 0, 0, 0),
+            (0, 0, 2, 2),
+        ):
+            with self.subTest(scale_alg=scale_alg, forced_mode=forced_mode, comm_mode=comm_mode):
+                self.dispatcher.dynamic_mx_quant_scale_alg = scale_alg
+                self.mock_ascend_config.combine_quant_mode = forced_mode
+                metadata = MoEMC2CombineMetadata(
+                    topk_ids=torch.zeros(2, 1, dtype=torch.int32),
+                    topk_weights=torch.ones(2, 1),
+                    expert_map=torch.arange(8),
+                    ep_recv_counts=torch.ones(8, dtype=torch.int32),
+                    tp_recv_counts=torch.ones(1, dtype=torch.int32),
+                    assist_info_for_combine=torch.arange(2),
+                    expand_scales=None,
+                    quant=MoEQuantParams(quant_type=QuantType.W4A8MXFP, comm_quant_mode=comm_mode),
+                )
+                kwargs = self.dispatcher.get_combine_mc_kwargs(hidden_states, metadata)
+                self.assertEqual(kwargs["comm_quant_mode"], expected)
+                self.assertIs(kwargs["expand_x"], hidden_states)
+
 
 @pytest.mark.parametrize("prequantized", [False, True])
 def test_allgather_mxfp8_ceil_quantization(prequantized):

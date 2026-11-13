@@ -294,7 +294,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         # NOTE: quant_mode differs by quant features:
         # - additional_config.combine_quant_mode, when non-zero, forces quant_mode
         #   to that value regardless of quant_type
-        # - A5 MXFP communication uses quant_mode=4 only for W8A8MXFP currently.
+        # - A5 MXFP communication uses quant_mode=4 for MXFP experts.
         combine_quant_mode = get_ascend_config().combine_quant_mode
         if combine_quant_mode:
             quant_mode = combine_quant_mode
@@ -304,6 +304,8 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             # The down projection already produces BF16. Avoid an additional
             # lossy communication quantizer for models using ceil MX scales.
             quant_mode = 0 if self.dynamic_mx_quant_scale_alg == DynamicMXQuantScaleAlg.CEIL else 4
+        elif quant_type == QuantType.W4A8MXFP:
+            quant_mode = 4
         else:
             quant_mode = 0
         kwargs_mc2 = {
