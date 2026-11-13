@@ -208,7 +208,7 @@ def test_factory_partition_decode_ownership(pcp_size, stack_dcp, kpool, query_le
     # Independent token-level expectations in decodes-first local row order.
     expected_by_rank = []
     for rank in range(pcp_size):
-        tokens = []
+        tokens: list[int] = []
         decode_ordinal = 0
         for req_idx in sorted(range(len(counts)), key=lambda i: (prefilling[i], i)):
             count = counts[req_idx]
@@ -728,7 +728,7 @@ def test_attention_context_collects_global_pcp_data(dcp_world_size, is_prefillin
         dtype=torch.int64,
     ).view(len(block_tables), slot_mapping_capacity)
     gather_block_tables = MagicMock(return_value=block_tables)
-    num_blocks = np.arange(16, dtype=np.int32).reshape(2, 8)
+    num_blocks: np.ndarray = np.arange(16, dtype=np.int32).reshape(2, 8)
     manager._global_batch = input_batch
     manager._local_batch = SimpleNamespace(
         num_reqs=3,
