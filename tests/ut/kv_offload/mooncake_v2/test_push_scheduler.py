@@ -47,6 +47,7 @@ def workers():
             block_shapes=[[(16, 8)]],
             block_size_scales=[[1]],
             indexer_replication_sizes=[0],
+            dcp_sharded=[True],
             local_ip=f"10.0.0.{pp + 1}",
             handshake_port=8000 + pcp * 2 + tp,
         )

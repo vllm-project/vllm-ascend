@@ -45,6 +45,7 @@ from vllm_ascend.ascend_config import (
     RejectionSamplerConfig,
     RlConfig,
     SchedulerConfig,
+    SharedEngramConfig,
     ShortRequestFirstConfig,
     SparseKVOffloadConfig,
     clear_ascend_config,
@@ -55,6 +56,37 @@ from vllm_ascend.ascend_config import (
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.utils import clear_enable_sp, enable_sp, shared_expert_dp_enabled
+
+
+def test_shared_engram_requires_v2_runner():
+    config = AscendConfig(
+        shared_engram={"backend": "a3", "endpoint": "127.0.0.1:29500"},
+        sparse_kv_offload_config=SparseKVOffloadConfig(),
+    )
+    vc = SimpleNamespace(use_v2_model_runner=False, engram_config=SimpleNamespace(cpu_offload=True))
+    try:
+        config.derive_and_validate(vc)
+    except ValueError as exc:
+        assert "Model Runner V2" in str(exc)
+    else:
+        raise AssertionError("V1 must reject shared Engram")
+
+
+def test_shared_engram_config_schema():
+    import pytest
+    from pydantic import TypeAdapter
+
+    config = SharedEngramConfig(backend="a3", endpoint="owner:29500")
+    assert config.backend == "a3" and config.endpoint == "owner:29500"
+    for values in (
+        {"endpoint": "owner:29500"},
+        {"backend": "a3"},
+        {"backend": "a2", "endpoint": "owner:29500"},
+        {"backend": "a3", "endpoint": "owner:0"},
+        {"backend": "a3", "endpoint": "owner:29500", "unexpected": True},
+    ):
+        with pytest.raises(ValueError):
+            TypeAdapter(SharedEngramConfig).validate_python(values)
 
 
 def VllmConfig(*args: Any, **kwargs: Any) -> _VllmConfig:

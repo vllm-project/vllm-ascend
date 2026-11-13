@@ -116,6 +116,7 @@ configuration rather than the runner input or sampling interface.
 | [kda/kda.py](kda/kda.py) | KDA computation |
 | [kda/l2norm.py](kda/l2norm.py) | KDA computation |
 | [kda/output_writeback.py](kda/output_writeback.py) | KDA computation |
+| [kimi_pixel_norm.py](kimi_pixel_norm.py) | Kimi image pixel lookup normalization; see [operator documentation](docs/kimi_pixel_norm.md). |
 | [kda/recoverssm.py](kda/recoverssm.py) | Model state recovery |
 | [kda/solve_tril.py](kda/solve_tril.py) | KDA computation |
 | [kda/utils.py](kda/utils.py) | KDA computation |

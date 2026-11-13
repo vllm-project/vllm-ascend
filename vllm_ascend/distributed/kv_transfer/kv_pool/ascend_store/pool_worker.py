@@ -409,6 +409,7 @@ class BaseKVPoolWorker(ABC):
         speculative_config = getattr(vllm_config, "speculative_config", None)
         use_eagle_fn = getattr(speculative_config, "use_eagle", None)
         use_eagle = bool(use_eagle_fn()) if callable(use_eagle_fn) else False
+        retention_interval = self.kv_cache_config.prefix_cache_retention_interval
         return AscendStoreCoordinator(
             self.kv_cache_config.kv_cache_groups,
             scheduler_block_size=self.cache_transfer_granularity,
@@ -416,7 +417,7 @@ class BaseKVPoolWorker(ABC):
             group_block_sizes=self.grouped_block_size,
             group_cache_families=self.kv_cache_group_families,
             use_eagle=use_eagle,
-            retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
+            retention_interval=retention_interval,
         )
 
     def _infer_group_uses_align_state(self) -> list[bool]:
@@ -1562,10 +1563,11 @@ class KVPoolWorker(BaseKVPoolWorker):
             request.current_event = current_event
             requests.append(request)
 
-        if not requests:
-            return
-
-        self._previous_save_batch = send_thread.add_save_batch(requests)
+        if requests:
+            self._previous_save_batch = send_thread.add_save_batch(requests)
+        # Complete queued PUTs before the next prefill chunk can reuse SWA slots.
+        send_thread.request_queue.join()
+        send_thread.raise_if_failed()
 
     def _make_sub_key_str(self, base_key: str, effective_rank: int) -> str:
         """Rewrite ``@head_or_tp_rank:<local>`` in serialized ``base_key`` to ``<effective_rank>``.

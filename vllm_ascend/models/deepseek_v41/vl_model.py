@@ -24,6 +24,7 @@ from vllm.models.deepseek_v41.common.mm_preprocess import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
+from .engram.shared_pool import rollback_shared_engram
 from .model import AscendDeepseekV41LLMForCausalLM
 from .vision import DeepseekV41Aligner, DeepseekV41ViT
 
@@ -91,14 +92,23 @@ class AscendDeepseekV41ForCausalLM(
                 self.vision.to(dtype=model_config.dtype)
                 self.aligner.to(dtype=model_config.dtype)
 
-        with self._mark_language_model(vllm_config):
-            self.language_model = self.language_model_cls(
-                vllm_config=vllm_config,
-                prefix=maybe_prefix(prefix, "language_model"),
-            )
-        self.requires_uncompiled_fallback = self.language_model.requires_uncompiled_fallback
-        self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
-        self.moe_comm_methods = self.language_model.moe_comm_methods
+        try:
+            with self._mark_language_model(vllm_config):
+                self.language_model = self.language_model_cls(
+                    vllm_config=vllm_config,
+                    prefix=maybe_prefix(prefix, "language_model"),
+                )
+            self.requires_uncompiled_fallback = self.language_model.requires_uncompiled_fallback
+            self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
+            self.moe_comm_methods = self.language_model.moe_comm_methods
+
+        except BaseException:
+            language_model = getattr(self, "language_model", None)
+            if language_model is not None:
+                for module in reversed(list(language_model.modules())):
+                    if getattr(module, "_shared_pool_client", None) is not None:
+                        rollback_shared_engram(module.close_host_offload)
+            raise
 
     def _parse_and_validate_image_input(self, **kwargs: object) -> dict | None:
         patches = kwargs.pop("patches", None)

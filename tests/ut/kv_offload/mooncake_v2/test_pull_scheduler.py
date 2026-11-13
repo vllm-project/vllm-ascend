@@ -109,6 +109,7 @@ def test_sending_thread_merges_tp_private_and_pp_common_metadata() -> None:
     pp_metadata = decoded.metadata_by_pp_rank[0]
     assert pp_metadata.layer_names == first.layer_names
     assert pp_metadata.block_shapes == first.block_shapes
+    assert pp_metadata.dcp_sharded == first.dcp_sharded
     tp_metadata = pp_metadata.metadata_by_pcp_rank[0].metadata_by_tp_rank
     assert tp_metadata[0].kv_caches_base_addr == [[1000]]
     assert tp_metadata[1].kv_caches_base_addr == [[2000]]
@@ -267,6 +268,10 @@ def test_sending_thread_rejects_incomplete_or_inconsistent_workers() -> None:
 
     with pytest.raises(ValueError, match="incomplete TP ranks"):
         make_sending_thread({0: metadata}, tp_size=2)
+
+    mismatched_layout = replace(metadata, dcp_sharded=[False], te_rpc_port=9001)
+    with pytest.raises(ValueError, match="mismatch in.*dcp_sharded"):
+        make_sending_thread({0: metadata, 1: mismatched_layout}, tp_size=2)
 
     mismatched = replace(metadata, block_lens=[[256]], te_rpc_port=9001)
     with pytest.raises(ValueError, match="mismatch in.*block_lens"):
