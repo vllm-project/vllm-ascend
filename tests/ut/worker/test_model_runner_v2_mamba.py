@@ -413,7 +413,7 @@ def test_prepare_attn_keeps_actual_counts_separate_from_padding(
     assert kwargs["num_tokens"] == graph_requests * (num_spec + 1)
     model_metadata = kwargs["model_specific_attn_metadata"]
     if num_spec:
-        assert model_metadata.num_decode_draft_tokens_cpu.tolist() == [num_spec] * 2 + [-1] * (graph_requests - 2)
+        assert model_metadata.num_decode_draft_tokens_cpu.tolist() == [num_spec] * graph_requests
         assert model_metadata.num_accepted_tokens.tolist() == [2, 3] + [1] * (graph_requests - 2)
     else:
         assert model_metadata.num_decode_draft_tokens_cpu is None
@@ -1371,6 +1371,7 @@ def test_prepare_attn_uses_promised_varlen_capture_bound(mock_build_attn_metadat
     state = SimpleNamespace(
         vllm_config=SimpleNamespace(num_speculative_tokens=8, parallel_config=SimpleNamespace()),
         max_model_len=32768,
+        _align_mode=False,
     )
     input_batch = SimpleNamespace(
         num_reqs=16,

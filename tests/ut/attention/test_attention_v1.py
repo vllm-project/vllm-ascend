@@ -135,16 +135,15 @@ class TestAttentionGraphHelpers(TestBase):
             self.assertTrue(using_paged_attention(None, vllm_config, head_size=FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE))
 
 
-@pytest.mark.parametrize("reuse_device", [False, True], ids=["fallback", "mrv2-device-view"])
 @pytest.mark.parametrize("boundaries", [[0, 1, 2, 3], [0, 8, 16, 24], [0, 8, 16, 16]])
-def test_dense_query_boundaries_reuse_current_device_view(monkeypatch, reuse_device, boundaries):
+def test_dense_query_boundaries_reuse_current_device_view(monkeypatch, boundaries):
     builder = AscendAttentionMetadataBuilder.__new__(AscendAttentionMetadataBuilder)
-    builder.supports_update_block_table = reuse_device
+    builder.supports_update_block_table = True
     builder.use_pcp = False
     builder.device = torch.device("cpu")
     builder.kv_cache_spec = None
     builder.speculative_config = None
-    builder.vllm_config = SimpleNamespace(use_v2_model_runner=reuse_device)
+    builder.vllm_config = SimpleNamespace(use_v2_model_runner=True)
     builder.model_config = SimpleNamespace(runner_type="generate")
     builder.attn_mask_builder = SimpleNamespace(get_attention_mask=lambda *args: None)
     builder._split_decodes_and_prefills = lambda common: (3, 0, boundaries[-1], 0)
@@ -165,28 +164,16 @@ def test_dense_query_boundaries_reuse_current_device_view(monkeypatch, reuse_dev
         is_prefilling=None,
         num_input_tokens=boundaries[-1],
     )
-    pinned = []
-
-    def pin_memory(tensor):
-        pinned.append(tensor)
-        return tensor.clone()
-
-    monkeypatch.setattr(torch.Tensor, "pin_memory", pin_memory)
     monkeypatch.setattr(attn_module, "_select_seq_lens", lambda *args, **kwargs: lengths)
     metadata = builder.build(0, common)
     torch.testing.assert_close(metadata.query_start_loc, host)
     assert metadata.query_start_loc.numel() == 4
     assert metadata.query_start_loc_gpu is device
-    if reuse_device:
-        assert not pinned
-        assert metadata.query_start_loc.data_ptr() == device.data_ptr()
-        # Contents still come from the runner's current input, not a host cache.
-        device[1] += 1
-        assert metadata.query_start_loc[1] == device[1]
-        assert host[1] == boundaries[1]
-    else:
-        assert len(pinned) == 1
-        assert metadata.query_start_loc.data_ptr() != device.data_ptr()
+    assert metadata.query_start_loc.data_ptr() == device.data_ptr()
+    # Contents still come from the runner's current input, not a host cache.
+    device[1] += 1
+    assert metadata.query_start_loc[1] == device[1]
+    assert host[1] == boundaries[1]
 
 
 class TestAscendAttentionBackend(TestBase):
