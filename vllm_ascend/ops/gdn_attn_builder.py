@@ -1266,7 +1266,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 "spec_sequence_indices",
                 "non_spec_sequence_indices",
             ):
-                setattr(template, name, getattr(attn_metadata, name).clone())
+                layout_source = getattr(attn_metadata, name)
+                setattr(template, name, None if layout_source is None else layout_source.clone())
             self._decode_layout_metadata = template
         return self._finalize_metadata(attn_metadata)
 
