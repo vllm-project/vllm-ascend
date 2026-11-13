@@ -91,7 +91,7 @@ from vllm.utils.math_utils import cdiv
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.ops.kda_parallel import KDARowParallelLinear, get_kda_state_shape
+from vllm_ascend.ops.head_parallel import HeadParallelRowLinear, get_head_sharded_state_shape
 from vllm_ascend.ops.kimi_kda import (
     AscendKimiK3DeltaAttention as AscendKimiK3DeltaAttentionBase,
 )
@@ -799,7 +799,7 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
             return False
         o_proj = self.self_attn.o_proj
         # PCP KDA owns combined TP/PCP head shards and its own reductions.
-        if isinstance(o_proj, KDARowParallelLinear):
+        if isinstance(o_proj, HeadParallelRowLinear):
             return False
         if KimiOProjMMReduceScatterOp.unsupported_reason(o_proj) is not None:
             return False
@@ -1322,7 +1322,7 @@ class AscendKimiLinearForCausalLM(UpstreamKimiLinearForCausalLM, KimiMixtureOfEx
 
     @classmethod
     def get_mamba_state_shape_from_config(cls, vllm_config):
-        return get_kda_state_shape(vllm_config, super().get_mamba_state_shape_from_config)
+        return get_head_sharded_state_shape(vllm_config, super().get_mamba_state_shape_from_config)
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
@@ -1422,7 +1422,7 @@ class AscendKimiK3ForConditionalGeneration(UpstreamKimiK3ForConditionalGeneratio
 
     @classmethod
     def get_mamba_state_shape_from_config(cls, vllm_config):
-        return get_kda_state_shape(vllm_config, super().get_mamba_state_shape_from_config)
+        return get_head_sharded_state_shape(vllm_config, super().get_mamba_state_shape_from_config)
 
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)

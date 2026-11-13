@@ -147,19 +147,19 @@ def shard_gdn_heads_over_pcp(layer: nn.Module, parallel_config) -> None:
     """Configure the Qwen4Exp GDN layer before checkpoint weights are loaded."""
     from vllm.model_executor.layers.mamba.mamba_mixer2 import mamba_v2_sharded_weight_loader
 
-    from vllm_ascend.ops.kda_parallel import (
-        KDAColumnParallelLinear,
-        KDAMergedColumnParallelLinear,
-        KDARowParallelLinear,
-        get_kda_parallel_rank,
-        get_kda_parallel_size,
+    from vllm_ascend.ops.head_parallel import (
+        HeadParallelColumnLinear,
+        HeadParallelMergedColumnLinear,
+        HeadParallelRowLinear,
+        get_head_parallel_rank,
+        get_head_parallel_size,
     )
 
-    layer.tp_size = get_kda_parallel_size(parallel_config)
-    layer.tp_rank = get_kda_parallel_rank()
+    layer.tp_size = get_head_parallel_size(parallel_config)
+    layer.tp_rank = get_head_parallel_rank()
     prefix = layer.prefix
     qkv_sizes = [layer.key_dim, layer.key_dim, layer.value_dim]
-    layer.conv1d = KDAColumnParallelLinear(
+    layer.conv1d = HeadParallelColumnLinear(
         layer.conv_kernel_size, sum(qkv_sizes), bias=False, prefix=f"{prefix}.conv1d"
     )
     layer.conv1d.weight.data = layer.conv1d.weight.data.unsqueeze(1)
@@ -167,14 +167,14 @@ def shard_gdn_heads_over_pcp(layer: nn.Module, parallel_config) -> None:
         [(size, 0, False) for size in qkv_sizes], layer.tp_size, layer.tp_rank
     )
     initialize_packed_conv_weight(layer)
-    layer.in_proj_qkvz = KDAMergedColumnParallelLinear(
+    layer.in_proj_qkvz = HeadParallelMergedColumnLinear(
         layer.hidden_size,
         [*qkv_sizes, layer.value_dim],
         bias=False,
         quant_config=layer.quant_config,
         prefix=f"{prefix}.in_proj_qkvz",
     )
-    layer.in_proj_ba = KDAMergedColumnParallelLinear(
+    layer.in_proj_ba = HeadParallelMergedColumnLinear(
         layer.hidden_size,
         [layer.num_v_heads] * 2,
         bias=False,
@@ -187,7 +187,7 @@ def shard_gdn_heads_over_pcp(layer: nn.Module, parallel_config) -> None:
         param = nn.Parameter(getattr(layer, name).new_empty(local_heads))
         param.weight_loader = loader
         setattr(layer, name, param)
-    layer.out_proj = KDARowParallelLinear(
+    layer.out_proj = HeadParallelRowLinear(
         layer.value_dim,
         layer.hidden_size,
         bias=False,
