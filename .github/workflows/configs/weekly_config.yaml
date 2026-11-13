@@ -306,6 +306,10 @@ a3:
         os: linux-aarch64-a3-800t-16
         config_file_path: DS-V4-Flash-W8A8-A3-Mooncake.yaml
         config_base_path: tests/SIT/cases/features/kv_pool
+      - name: Qwen3.6-35B-A3B-w8a8-FullAndPiecewise
+        os: linux-aarch64-a3-800t-16
+        config_file_path: Qwen3.6-35B-A3B-w8a8-FullAndPiecewise.yaml
+        config_base_path: tests/SIT/cases/models/configs/Qwen
 310p:
   single_node:
     test_config:
