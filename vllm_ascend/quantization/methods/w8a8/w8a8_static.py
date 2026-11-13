@@ -146,6 +146,7 @@ class AscendW8A8LinearMethod(AscendLinearScheme):
         ).to(layer.aclnn_input_scale.dtype)
 
         layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
+        self.retain_weight_switch_nd_weight(layer, layer.weight.data)
         layer.weight.data = maybe_trans_nz(layer.weight.data)
         layer.weight_scale.data = torch.flatten(layer.weight_scale.data)
         layer.weight_offset.data = torch.flatten(layer.weight_offset.data)

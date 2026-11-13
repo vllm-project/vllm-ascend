@@ -252,6 +252,7 @@ class AscendFp8BlockLinearMethod(AscendLinearScheme):
             # Decided locally rather than on the scheme: the attention backend
             # splits this layer and disposes of it, so apply() is never reached
             # and nothing about this layer should speak for any other.
+            self.retain_weight_switch_nd_weight(layer, resolved)
             layer.weight = torch.nn.Parameter(maybe_trans_nz(resolved), requires_grad=False)
             return
 
@@ -267,6 +268,7 @@ class AscendFp8BlockLinearMethod(AscendLinearScheme):
             self.mxfp8_method = None
 
         if self.mxfp8_method is None:
+            self.retain_weight_switch_nd_weight(layer, resolved)
             layer.weight = torch.nn.Parameter(maybe_trans_nz(resolved), requires_grad=False)
             return
 

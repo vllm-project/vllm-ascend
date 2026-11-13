@@ -284,6 +284,7 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             transposed_weight = transposed_weight.unsqueeze(0)
             target_scale = target_scale.unsqueeze(0)
 
+        self.retain_weight_switch_nd_weight(layer, transposed_weight)
         if not hasattr(layer, "_mxfp8_weight_buf"):
             # First call: allocate the persistent transformed buffers.
             layer._mxfp8_weight_buf = transposed_weight
@@ -335,7 +336,16 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         orig_shapes = layer._mxfp8_original_shapes
         orig_scale_shape = orig_shapes["weight_scale"]
 
-        if getattr(layer, "_mxfp8_gmm_nz_layout", False):
+        nd_weight = self.get_weight_switch_nd_weight(layer)
+        if nd_weight is not None:
+            scale = layer.weight_scale.data
+            if getattr(layer, "_mxfp8_gmm_nz_layout", False):
+                nd_weight = nd_weight.squeeze(0)
+                scale = scale.squeeze(0)
+            layer.weight.data = nd_weight.transpose(0, 1).contiguous()
+            layer.weight_scale.data = scale.transpose(0, 1).reshape(orig_scale_shape).contiguous()
+            layer._mxfp8_gmm_nz_layout = False
+        elif getattr(layer, "_mxfp8_gmm_nz_layout", False):
             restored_weight = torch_npu.npu_format_cast(layer.weight.data, 2, customize_dtype=torch.float8_e4m3fn)
             target_weight = restored_weight.squeeze(0).transpose(0, 1).contiguous()
             layer.weight.data = target_weight

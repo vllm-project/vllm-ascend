@@ -18,6 +18,7 @@ from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
     AscendW8A8MXFP8DynamicLinearMethod,
 )
 from vllm_ascend.quantization.prepared_linear_input import PreparedLinearInput
+from vllm_ascend.weight_switch import WeightSwitchConfig
 
 
 class TestAscendW8A8MXFP8LinearMethod(TestBase):
@@ -87,6 +88,35 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         self.assertEqual(layer.weight.shape, original_weight_shape)
         self.assertEqual(layer.weight_scale.shape, original_scale_shape)
         self.assertFalse(layer._mxfp8_transformed)
+
+    @patch("vllm_ascend.utils._should_trans_nz", return_value=True)
+    @patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt, **kwargs: weight.clone())
+    def test_pcp_retains_nd_before_cast_and_refreshes_it_on_reload(self, mock_cast, mock_should_trans_nz):
+        layer = nn.Module()
+        layer.input_size = 512
+        layer.input_size_per_partition = 256
+        layer.output_size = layer.output_size_per_partition = 128
+        layer._weight_switch_config = WeightSwitchConfig(group=object(), world_size=2, rank=0)
+        original = torch.randn(128, 256).to(torch.float8_e4m3fn)
+        layer.weight = nn.Parameter(original.clone(), requires_grad=False)
+        layer.weight_scale = nn.Parameter(torch.ones(128, 8, dtype=torch.uint8), requires_grad=False)
+        self.scheme.process_weights_after_loading(layer)
+        state = self.scheme.enable_weight_switch(layer, layer._weight_switch_config)
+        cache = state.gather_parts["weight"].gather_input
+        self.assertEqual(cache.data_ptr(), mock_cast.call_args.args[0].data_ptr())
+        self.assertNotEqual(cache.data_ptr(), layer.weight.data_ptr())
+        torch.testing.assert_close(cache.float(), original.T.float())
+        pointer = cache.data_ptr()
+        for _ in range(2):
+            self.scheme.restore_weights_for_rl_loading(layer)
+            new_weight = torch.randn(128, 256).to(torch.float8_e4m3fn)
+            layer.weight.data.copy_(new_weight)
+            self.scheme.process_weights_after_loading(layer)
+            self.scheme.refresh_weight_switch_gather_inputs(layer, state)
+            self.assertEqual(cache.data_ptr(), pointer)
+            torch.testing.assert_close(cache.float(), new_weight.T.float())
+        mock_cast.assert_called_once()
+        self.assertEqual(mock_cast.call_args.args[1], 29)
 
     @patch("vllm_ascend.utils._should_trans_nz", return_value=True)
     @patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt, **kwargs: weight.clone())
