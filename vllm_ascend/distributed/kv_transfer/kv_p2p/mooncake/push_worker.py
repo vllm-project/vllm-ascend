@@ -200,12 +200,6 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
     """Coordinate P layer batches and D completion accounting."""
 
     def __init__(self, vllm_config, engine_id, kv_cache_config) -> None:
-        parallel = vllm_config.parallel_config
-        if parallel.decode_context_parallel_size > 1:
-            if parallel.prefill_context_parallel_size != 1:
-                raise ValueError("Mooncake Push DCP currently requires PCP=1")
-            if parallel.tensor_parallel_size % parallel.decode_context_parallel_size:
-                raise ValueError("Mooncake Push DCP size must divide TP size")
         super().__init__(vllm_config, engine_id, kv_cache_config)
         self._stop_event = threading.Event()
         self._result_queue: queue.SimpleQueue = queue.SimpleQueue()
@@ -341,10 +335,6 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             sock.close(linger=0)
         if metadata.engine_id != params["consumer_engine_id"]:
             raise ValueError("Push requires matching D engine metadata")
-        if metadata.dcp_size < 1 or metadata.tp_size % metadata.dcp_size:
-            raise ValueError("Push DCP size must be positive and divide D TP size")
-        if (self.dcp_size > 1 or metadata.dcp_size > 1) and (self.pcp_size != 1 or metadata.pcp_size != 1):
-            raise ValueError("Push DCP requires P/D PCP=1")
         if metadata.use_kv_pp:
             raise ValueError("Push does not support KVPP yet")
         return metadata
@@ -424,18 +414,19 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         if self.dcp_size == remote.dcp_size == 1:
             return 1, 1
         spec = self.kv_cache_specs[self.layer_name_to_spec_index[layer_name]]
-        if is_circular_kv_cache_spec(spec) or isinstance(spec, (SlidingWindowSpec, SlidingWindowMLASpec)):
+        pp = remote.metadata_by_pp_rank[rank[0]]
+        index = pp.layer_names.index(layer_name)
+        local_size = self.dcp_size if spec.dcp_sharded else 1
+        remote_size = remote.dcp_size if pp.dcp_sharded[index] else 1
+        if is_circular_kv_cache_spec(spec):
             return 1, 1
         if isinstance(spec, AscendSFAIndexerCacheSpec):
-            pp = remote.metadata_by_pp_rank[rank[0]]
-            index = pp.layer_names.index(layer_name)
-            return (
-                1 if spec.sfa_dcp_replicated_indexer_size > 1 else self.dcp_size,
-                1 if pp.indexer_replication_sizes[index] > 1 else remote.dcp_size,
-            )
-        if isinstance(spec, MLAAttentionSpec):
-            return self.dcp_size, remote.dcp_size
-        raise ValueError(f"Push DCP does not support cache spec {type(spec).__name__}")
+            # Packed indexer pages already contain all DCP sequence pieces.
+            if spec.sfa_dcp_replicated_indexer_size > 1:
+                local_size = 1
+            if pp.indexer_replication_sizes[index] > 1:
+                remote_size = 1
+        return local_size, remote_size
 
     def _get_transfer_partition(
         self, layer_name: str, remote: MooncakeTransferMetadataGroups, rank: WorkerRank
@@ -449,7 +440,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         worker = pp.metadata_by_pcp_rank[rank[1]].metadata_by_tp_rank[rank[2]]
         if remote_index not in worker.layer_indices:
             return None
-        local_dcp_size, _ = self._get_layer_dcp_sizes(layer_name, remote, rank)
+        local_dcp_size, remote_dcp_size = self._get_layer_dcp_sizes(layer_name, remote, rank)
         spec = self.kv_cache_specs[self.layer_name_to_spec_index[layer_name]]
         local_rank = self.tp_rank
         remote_rank = rank[2]
@@ -480,6 +471,8 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             return (0, 0, 1) if local_group == owner else None
         if not isinstance(spec, (FullAttentionSpec, SlidingWindowSpec)):
             raise ValueError(f"Unsupported Push cache spec: {type(spec).__name__}")
+        if local_dcp_size > 1 or remote_dcp_size > 1:
+            raise ValueError(f"Push DCP does not support cache spec {type(spec).__name__}")
         if self.pcp_rank != rank[1] % self.pcp_size:
             return None
         local_heads = self.transfer_metadata.block_shapes[local_index][0][0]
@@ -553,8 +546,11 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             local_dcp_size, remote_dcp_size = self._get_layer_dcp_sizes(
                 layer_name, remote, tuple(params["consumer_rank"])
             )
-            local_dcp_rank = self.tp_rank % local_dcp_size
-            remote_dcp_rank = params["consumer_rank"][2] % remote_dcp_size
+            local_dcp_rank = self.dcp_rank if local_dcp_size > 1 else 0
+            # Pull uses the same TP-major/PCP-minor ordering: DCP=PCP
+            # shards within each TP rank; DCP=TP*PCP spans all workers.
+            remote_rank = params["consumer_rank"][2] * remote.pcp_size + params["consumer_rank"][1]
+            remote_dcp_rank = remote_rank % remote_dcp_size
             local_interleave = self.transfer_metadata.cp_kv_cache_interleave_size
             remote_interleave = pp.cp_kv_cache_interleave_size
             for side, size, interleave, page_size in (

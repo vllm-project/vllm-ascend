@@ -3,7 +3,6 @@
 
 import ctypes
 from dataclasses import replace
-from types import SimpleNamespace
 from unittest.mock import Mock
 
 import msgspec
@@ -18,8 +17,8 @@ from .test_push_sending import drive, multi_cache_remote, remote_metadata, targe
 worker = test_push_sending.worker
 
 
-def configure(worker, monkeypatch, dcp=2, tp=2, interleave=4, local_scale=1, remote_scale=1):
-    spec = Mock(spec=push_worker.MLAAttentionSpec, sliding_window=None, is_circular=False)
+def configure(worker, monkeypatch, dcp=2, tp=2, interleave=4, local_scale=1, remote_scale=1, pcp=1):
+    spec = Mock(spec=push_worker.MLAAttentionSpec, dcp_sharded=True, sliding_window=None, is_circular=False)
     worker.kv_cache_specs = [spec]
     local = worker.transfer_metadata
     local.layer_block_sizes[:] = [4 * local_scale]
@@ -27,7 +26,7 @@ def configure(worker, monkeypatch, dcp=2, tp=2, interleave=4, local_scale=1, rem
     local.block_shapes[:] = [[(1, 4, 1)]]
     local.block_lens[:] = [[4]]
     local.block_strides[:] = [[4]]
-    remote = replace(remote_metadata(tp_size=tp, heads=1), dcp_size=dcp)
+    remote = replace(remote_metadata(tp_size=tp, heads=1, pcp_size=pcp), dcp_size=dcp)
     pp = replace(remote.metadata_by_pp_rank[0], cp_kv_cache_interleave_size=interleave)
     remote.metadata_by_pp_rank[0] = pp
     pp.layer_block_sizes[:] = [4 * remote_scale]
@@ -39,13 +38,17 @@ def configure(worker, monkeypatch, dcp=2, tp=2, interleave=4, local_scale=1, rem
     return remote
 
 
-def metadata(computed, end, prompt=29, prefix=0, remote_blocks=(10, 11, 12, 13), tp=2):
+def metadata(computed, end, prompt=29, prefix=0, remote_blocks=(10, 11, 12, 13), tp=2, pcp=1):
     target = target_params()
     target.update(
         remote_num_computed_tokens=prefix,
         remote_num_external_tokens=prompt - prefix,
         remote_block_ids=[list(remote_blocks)],
-        remote_worker_addresses=[(0, 0, rank, f"tcp://127.0.0.1:{9001 + rank}") for rank in range(tp)],
+        remote_worker_addresses=[
+            (0, pcp_rank, tp_rank, f"tcp://127.0.0.1:{9001 + pcp_rank * tp + tp_rank}")
+            for pcp_rank in range(pcp)
+            for tp_rank in range(tp)
+        ],
     )
     meta = MooncakeConnectorMetadata()
     meta.add_new_push_send_req("p-request", (list(range(1, 10)),), prompt, computed, end - computed, target)
@@ -65,6 +68,7 @@ def test_chunked_write_matches_token_oracle(
         worker.kv_cache_specs = [
             Mock(
                 spec=push_worker.AscendSFAIndexerCacheSpec,
+                dcp_sharded=True,
                 sliding_window=None,
                 is_circular=False,
                 sfa_dcp_replicated_indexer_size=1,
@@ -157,6 +161,19 @@ def test_short_destination_table_fails_without_writing(worker, monkeypatch):
     assert all("block tables" in call.args[1] for call in worker._send_done.call_args_list)
 
 
+@pytest.mark.parametrize("p_tp,d_tp", [(3, 2), (2, 3)])
+def test_mamba_dcp_rejects_noninteger_tp_ratio_before_write(worker, monkeypatch, p_tp, d_tp):
+    remote = configure(worker, monkeypatch, dcp=d_tp, tp=d_tp)
+    remote.metadata_by_pp_rank[0].dcp_sharded[:] = [False]
+    worker.tp_size = worker.dcp_size = p_tp
+    worker.kv_cache_specs = [Mock(spec=push_worker.MambaSpec, dcp_sharded=False, tp_replicated=False)]
+    worker.start_load_kv(metadata(0, 8, prompt=8, tp=d_tp))
+    worker.wait_for_save()
+    worker.engine.batch_transfer_sync_write.assert_not_called()
+    assert worker._send_done.call_count == d_tp
+    assert all("integer ratio" in call.args[1] for call in worker._send_done.call_args_list)
+
+
 @pytest.mark.parametrize("kind", ["swa", "circular", "replicated_indexer", "sharded_indexer"])
 def test_effective_dcp_depends_on_cache_layout(worker, monkeypatch, kind):
     remote = configure(worker, monkeypatch)
@@ -166,12 +183,72 @@ def test_effective_dcp_depends_on_cache_layout(worker, monkeypatch, kind):
         "replicated_indexer": push_worker.AscendSFAIndexerCacheSpec,
         "sharded_indexer": push_worker.AscendSFAIndexerCacheSpec,
     }[kind]
-    worker.kv_cache_specs = [Mock(spec=spec_type, is_circular=kind == "circular", sfa_dcp_replicated_indexer_size=1)]
+    worker.kv_cache_specs = [
+        Mock(
+            spec=spec_type, dcp_sharded=kind != "swa", is_circular=kind == "circular", sfa_dcp_replicated_indexer_size=1
+        )
+    ]
+    remote.metadata_by_pp_rank[0].dcp_sharded[:] = [kind != "swa"]
     remote.metadata_by_pp_rank[0].indexer_replication_sizes[:] = [2 if kind == "replicated_indexer" else 1]
     assert worker._get_layer_dcp_sizes("model.layers.0.attn", remote, (0, 0, 0)) == (
         1,
         2 if kind == "sharded_indexer" else 1,
     )
+
+
+@pytest.mark.parametrize("p_sharded,d_sharded", [(False, False), (False, True), (True, False), (True, True)])
+@pytest.mark.parametrize("p_dcp,d_dcp", [(1, 4), (2, 4), (4, 2)])
+def test_dcp_sharding_flags_are_independent(worker, monkeypatch, p_sharded, d_sharded, p_dcp, d_dcp):
+    remote = configure(worker, monkeypatch, dcp=d_dcp, tp=4)
+    worker.dcp_size = p_dcp
+    worker.kv_cache_specs[0].dcp_sharded = p_sharded
+    remote.metadata_by_pp_rank[0].dcp_sharded[:] = [d_sharded]
+    assert worker._get_layer_dcp_sizes("model.layers.0.attn", remote, (0, 0, 0)) == (
+        p_dcp if p_sharded else 1,
+        d_dcp if d_sharded else 1,
+    )
+
+
+@pytest.mark.parametrize("worker", ["dspark"], indirect=True)
+def test_dcp_flags_follow_layer_names_across_peers(worker):
+    worker.dcp_size = 2
+    sharded, _, unsharded = worker.transfer_metadata.layer_names
+    worker.kv_cache_specs = [
+        Mock(spec=push_worker.MLAAttentionSpec, dcp_sharded=flag, is_circular=False) for flag in (True, False)
+    ]
+    worker.layer_name_to_spec_index[unsharded] = 1
+    remote = replace(multi_cache_remote(worker), dcp_size=4)
+    pp = remote.metadata_by_pp_rank[0]
+    # Remote layer order and layout need not match the local spec order.
+    remote.metadata_by_pp_rank[0] = replace(
+        pp, layer_names=[unsharded, pp.layer_names[1], sharded], dcp_sharded=[True, True, False]
+    )
+    assert worker._get_layer_dcp_sizes(sharded, remote, (0, 0, 0)) == (2, 1)
+    assert worker._get_layer_dcp_sizes(unsharded, remote, (0, 0, 0)) == (1, 4)
+
+
+@pytest.mark.parametrize("p_sharded,d_sharded", [(False, False), (False, True), (True, False), (True, True)])
+def test_full_attention_with_dcp_requires_unsharded_layout(worker, monkeypatch, p_sharded, d_sharded):
+    remote = configure(worker, monkeypatch, dcp=4, tp=4)
+    worker.tp_size = 4
+    worker.dcp_size = 2
+    worker.kv_cache_specs = [
+        Mock(spec=push_worker.FullAttentionSpec, dcp_sharded=p_sharded, sliding_window=None, is_circular=False)
+    ]
+    pp = remote.metadata_by_pp_rank[0]
+    pp.dcp_sharded[:] = [d_sharded]
+    worker.transfer_metadata.block_shapes[:] = [[(2, 4, 1)]]
+    pp.block_shapes[:] = [[(2, 4, 1)]]
+    if p_sharded or d_sharded:
+        with pytest.raises(ValueError, match="Push DCP does not support"):
+            worker._get_transfer_partition("model.layers.0.attn", remote, (0, 0, 0))
+    else:
+        for p_rank in range(4):
+            worker.tp_rank = p_rank
+            for d_rank in range(4):
+                assert worker._get_transfer_partition("model.layers.0.attn", remote, (0, 0, d_rank)) == (
+                    (0, 0, 2) if p_rank == d_rank else None
+                )
 
 
 def test_dcp_keeps_layer_event_snapshot(worker, monkeypatch):
@@ -196,7 +273,9 @@ def test_dcp_keeps_layer_event_snapshot(worker, monkeypatch):
 @pytest.mark.parametrize("p_dcp", [1, 2, 4])
 def test_dcp_draft_waits_for_its_own_hook(worker, monkeypatch, p_dcp):
     worker.dcp_size = worker.tp_size = p_dcp
-    worker.kv_cache_specs = [Mock(spec=push_worker.MLAAttentionSpec, sliding_window=None, is_circular=False)]
+    worker.kv_cache_specs = [
+        Mock(spec=push_worker.MLAAttentionSpec, dcp_sharded=True, sliding_window=None, is_circular=False)
+    ]
     remote = replace(multi_cache_remote(worker), dcp_size=2, tp_size=2)
     pp = remote.metadata_by_pp_rank[0]
     pp.metadata_by_pcp_rank[0].metadata_by_tp_rank[1] = replace(pp.metadata_by_pcp_rank[0].metadata_by_tp_rank[0])
@@ -218,40 +297,24 @@ def test_dcp_draft_waits_for_its_own_hook(worker, monkeypatch, p_dcp):
     assert all(call.args[1] is None for call in worker._send_done.call_args_list)
 
 
-@pytest.mark.parametrize("pcp,tp", [(2, 4), (1, 3)])
-def test_unsupported_consumer_topology_rejected(pcp, tp):
-    config = SimpleNamespace(
-        parallel_config=SimpleNamespace(
-            decode_context_parallel_size=2, prefill_context_parallel_size=pcp, tensor_parallel_size=tp
-        ),
-        kv_transfer_config=SimpleNamespace(is_kv_producer=False),
-    )
-    with pytest.raises(ValueError, match="PCP=1|divide TP"):
-        push_worker.MooncakePushConnectorWorker(config, "d", None)
-
-
 @pytest.mark.parametrize(
-    "dcp,tp,pcp,local_pcp,valid",
+    "dcp,tp,pcp",
     [
-        (1, 1, 1, 1, True),
-        (2, 4, 1, 1, True),
-        (4, 4, 1, 1, True),
-        (2, 3, 1, 1, False),
-        (2, 4, 2, 1, False),
-        (2, 4, 1, 2, False),
+        (1, 1, 1),
+        (2, 4, 1),
+        (4, 4, 1),
+        (1, 4, 2),
+        (2, 4, 2),
+        (8, 4, 2),
     ],
 )
-@pytest.mark.parametrize("p_dcp", [1, 2])
-def test_metadata_handshake_validates_dcp(worker, monkeypatch, dcp, tp, pcp, local_pcp, valid, p_dcp):
+@pytest.mark.parametrize("p_dcp,p_tp,p_pcp", [(1, 1, 1), (2, 2, 1), (1, 4, 2), (2, 4, 2), (8, 4, 2)])
+def test_metadata_handshake_accepts_pcp_dcp(worker, monkeypatch, dcp, tp, pcp, p_dcp, p_tp, p_pcp):
     remote = replace(remote_metadata(tp_size=tp, pcp_size=pcp), dcp_size=dcp)
-    worker.pcp_size = local_pcp
-    worker.dcp_size = worker.tp_size = p_dcp
+    worker.pcp_size = p_pcp
+    worker.dcp_size, worker.tp_size = p_dcp, p_tp
     monkeypatch.setattr(push_worker, "make_zmq_socket", Mock(return_value=Mock()))
     monkeypatch.setattr(push_worker, "ensure_zmq_send", Mock())
     monkeypatch.setattr(push_worker, "ensure_zmq_recv", Mock(return_value=msgspec.msgpack.encode(remote)))
     params = dict(scheduler_address="tcp://127.0.0.1:9000", consumer_engine_id="d")
-    if valid:
-        assert push_worker.MooncakePushConnectorWorker._get_remote_metadata(worker, params) == remote
-    else:
-        with pytest.raises(ValueError, match="DCP"):
-            push_worker.MooncakePushConnectorWorker._get_remote_metadata(worker, params)
+    assert push_worker.MooncakePushConnectorWorker._get_remote_metadata(worker, params) == remote
