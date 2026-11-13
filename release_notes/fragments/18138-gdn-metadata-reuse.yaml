@@ -1,0 +1,4 @@
+﻿pr: 18138
+entries:
+  - category: performance
+    text: Reuse attention metadata across compatible hybrid cache groups on Ascend Model Runner V2, cutting per-step host work and host-to-device copies during decode.

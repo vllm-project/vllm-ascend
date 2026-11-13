@@ -40,6 +40,7 @@ from vllm.v1.worker.mamba_utils import (
 )
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend.ops.triton.mamba.aligned_indices import compute_aligned_state_indices
 from vllm_ascend.utils import model_uses_kimi_kda, model_uses_kpool_indexer
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
@@ -51,6 +52,29 @@ if TYPE_CHECKING:
 # Copy block size used by the upstream fused mamba kernels.
 _COPY_BLOCK_SIZE = 1024
 _PREPROCESS_BLOCK_SIZE = 256
+
+
+def _compute_aligned_state_indices(
+    ctx: MambaSpecDecodeGPUContext, seq_lens: torch.Tensor, num_reqs: int, table_cols: int
+) -> torch.Tensor:
+    """Reuse upstream's pointer table and output storage with an NPU gather."""
+    assert ctx.is_initialized and seq_lens.device.type == "npu"
+    assert ctx.aligned_state_indices is not None
+    assert 0 <= num_reqs <= min(seq_lens.shape[0], ctx.aligned_state_indices.shape[1])
+    if num_reqs == 0:
+        return ctx.aligned_state_indices[:, :0]
+    output = ctx.aligned_state_indices
+    # Newer upstream contexts separate batch-order index tables from copy tables.
+    pointers = getattr(ctx, "aligned_index_block_table_ptrs", ctx.block_table_ptrs)
+    return compute_aligned_state_indices(
+        pointers,
+        seq_lens,
+        output,
+        num_reqs,
+        ctx.block_table_stride_req,
+        table_cols,
+        ctx.block_size,
+    )
 
 
 @dataclass
@@ -94,6 +118,16 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         self._layerwise_mamba_copy: _LayerwiseMambaCopyState | None = None
         self._layer_state_ranges: dict[str, tuple[int, int]] | None = None
         self._pending_bulk_copy: tuple[MambaSpecDecodeGPUContext, int, torch.Tensor] | None = None
+
+    def _get_aligned_state_index_views(self, indices: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        # The gather refreshes values in fixed storage. Reuse only row views;
+        # a request-count, stride or backing-storage change rebuilds them.
+        key = (indices.data_ptr(), indices.shape, indices.stride(), indices.dtype, indices.device)
+        cached = getattr(self, "_aligned_state_index_views", None)
+        if cached is None or cached[0] != key:
+            cached = (key, indices.unbind(0))
+            self._aligned_state_index_views = cached
+        return cached[1]
 
     def _get_layer_state_ranges(self, kv_cache_config: KVCacheConfig) -> dict[str, tuple[int, int]]:
         """Map every mamba layer name to its (start, end) range in the
@@ -495,6 +529,22 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
                 if np.all(padded_query_lens == expected_query_len):
                     num_decode_draft_tokens_np[input_batch.num_reqs :] = padded_query_lens - 1
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
+
+        if self._align_mode:
+            mamba_group_ids, _ = self._get_mamba_group_info(kv_cache_config)
+            aligned_builders = [
+                (group_idx, builder)
+                for group_idx, group_id in enumerate(mamba_group_ids)
+                for group in attn_groups[group_id]
+                if hasattr(builder := group.get_metadata_builder(0), "mamba_aligned_state_indices")
+            ]
+            if aligned_builders:
+                ctx = self._ensure_align_ctx(kv_cache_config, mamba_group_ids, block_tables)
+                table_cols = block_tables[mamba_group_ids[0]].shape[1]
+                indices = _compute_aligned_state_indices(ctx, input_batch.seq_lens, num_reqs, table_cols)
+                index_views = self._get_aligned_state_index_views(indices)
+                for group_idx, builder in aligned_builders:
+                    builder.mamba_aligned_state_indices = index_views[group_idx]
 
         model_specific_metadata = MambaHybridAttnMetadata(
             is_prefilling=is_prefilling,
