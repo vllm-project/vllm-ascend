@@ -1,5 +1,4 @@
-# Local draft: move to fragments/<PR number>.yaml and fill pr when opening a PR.
-pr: null
+pr: 21835
 entries:
   - category: feature
     text: >-
