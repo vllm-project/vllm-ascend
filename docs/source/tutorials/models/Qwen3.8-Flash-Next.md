@@ -36,7 +36,7 @@ The examples use ModelScope model IDs with `VLLM_USE_MODELSCOPE=True`. Both PD r
 
 ## 4 Installation
 
-### 4.1 Docker Image Installation {: #41-docker-image-installation }
+### 4.1 Docker Image Installation
 
 Refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image) for the complete installation guide.
 
