@@ -706,13 +706,13 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             return self.build_fia_params_dcp(num_reqs_padded, draft_attn_metadata, is_draft_model_prefill)
         block_table = next(iter(draft_attn_metadata.values())).block_tables
         if is_draft_model_prefill:
-            fia_params = []
+            prefill_fia_params: list[dict[str, Any]] = []
             for layer_name, metadata in draft_attn_metadata.items():
                 is_mla = isinstance(metadata, AscendMLAMetadata)
                 prefill_metadata = metadata.decode if is_mla else metadata
                 assert prefill_metadata is not None
 
-                fia_params.append(
+                prefill_fia_params.append(
                     {
                         "layer_name": layer_name,
                         "actual_seq_lengths": prefill_metadata.actual_seq_lengths_q,
@@ -722,7 +722,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
                         "block_table": prefill_metadata.block_table if is_mla else metadata.block_tables,
                     }
                 )
-            return fia_params
+            return prefill_fia_params
         assert self.input_batch is not None
         num_reqs = self.input_batch.num_reqs
         query_start_loc = list(range(1, num_reqs_padded + 1))
