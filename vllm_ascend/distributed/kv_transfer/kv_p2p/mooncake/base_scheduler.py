@@ -78,8 +78,10 @@ class MooncakeBaseConnectorScheduler:
         # [kv_port, kv_port + dp_size * pp_size * pcp_size * tp_size).
         # Keep one scheduler control port per DP rank immediately after that
         # range so it cannot collide with a worker handshake socket.
+        # Dense engines reset their compute DP rank to zero; the serving
+        # index still identifies each independent replica.
         self.side_channel_port = (
-            self.kv_transfer_config.kv_port + self.max_device_id + vllm_config.parallel_config.data_parallel_rank
+            self.kv_transfer_config.kv_port + self.max_device_id + vllm_config.parallel_config.data_parallel_index
         )
 
         self.kv_cache_groups = kv_cache_config.kv_cache_groups
