@@ -114,8 +114,8 @@ def _can_skip_padding_tokens_in_moe(vllm_config: VllmConfig) -> bool:
     return (
         envs.VLLM_MOE_SKIP_PADDING
         and use_v2_model_runner(vllm_config)
-        # Skip MoE GEMMs for padding tokens by assigning them to a non-local expert.
-        # With DP = PCP = 1, this requires EP and TP > 1.
+        # Skip the MoE GEMMs of padding tokens by assigning these tokens to a no-local expert
+        # Thus, it requires EP and TP > 1.
         and parallel.enable_expert_parallel
         and parallel.tensor_parallel_size > 1
         # At layer initialization, choose fixed `padding_token_expert_id` for each rank,
@@ -126,9 +126,10 @@ def _can_skip_padding_tokens_in_moe(vllm_config: VllmConfig) -> bool:
         and not parallel.enable_eplb
         # Force routing bypasses padding filtering in the expert selector.
         and not ascend_config.enable_force_eplb
-        # DeepSeek V4.1 currently requires PP = DCP = 1.
+        # PP/PCP > 1 is currently unsupported in `deepseek_v41`.
         and parallel.pipeline_parallel_size == parallel.decode_context_parallel_size == 1
-        # With DP or PCP, MoE gathers rows across ranks while is_padding is rank-local.
+        # PCP/DP > 1: each rank have all tokens across DP/PCP ranks in MoE,
+        # but it only has local `is_padding`.
         and parallel.data_parallel_size == parallel.prefill_context_parallel_size == 1
         # Check the low-token regime too: a model that switches to MC2 on decode is ineligible.
         and select_moe_comm_method(0, vllm_config) == MoECommType.ALLGATHER
