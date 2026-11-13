@@ -24,16 +24,22 @@ def use_v2_spawn_workers(monkeypatch):
 
 @pytest.mark.parametrize("model_name", ["Qwen/Qwen3-1.7B"])
 @pytest.mark.parametrize("enforce_eager", [True, False])
-@pytest.mark.parametrize("speculative", [False, True])
+@pytest.mark.parametrize("speculative", [None, "ngram_gpu", "draft_model"])
 def test_thinking_budget_mixed_generation(monkeypatch, model_name, enforce_eager, speculative):
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     spec = None
-    if speculative:
+    if speculative == "ngram_gpu":
         spec = {
             "method": "ngram_gpu",
             "num_speculative_tokens": 3,
             "prompt_lookup_min": 2,
             "prompt_lookup_max": 5,
+        }
+    elif speculative == "draft_model":
+        spec = {
+            "method": "draft_model",
+            "model": "Qwen/Qwen3-0.6B",
+            "num_speculative_tokens": 3,
         }
     with VllmRunner(
         model_name,
@@ -137,7 +143,8 @@ def test_plain_model_unlimited_budget_preserves_output(enforce_eager):
 
 
 @pytest.mark.parametrize("enforce_eager,speculative", [(True, False), (False, False), (True, True), (False, True)])
-def test_thinking_budget_preemption_matches_unconstrained_cache(monkeypatch, enforce_eager, speculative):
+@pytest.mark.parametrize("temperature", [0.0, 0.6])
+def test_thinking_budget_preemption_matches_unconstrained_cache(monkeypatch, enforce_eager, speculative, temperature):
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     outputs = []
     for blocks in [128, 6]:
@@ -171,7 +178,8 @@ def test_thinking_budget_preemption_matches_unconstrained_cache(monkeypatch, enf
             budgets = [0, 8, 16, 32]
             params = [
                 SamplingParams(
-                    temperature=0,
+                    temperature=temperature,
+                    seed=42,
                     max_tokens=128,
                     ignore_eos=True,
                     thinking_token_budget=b,
@@ -196,6 +204,7 @@ def test_thinking_budget_preemption_matches_unconstrained_cache(monkeypatch, enf
                         "eager": enforce_eager,
                         "speculative": speculative,
                         "kv_blocks": blocks,
+                        "temperature": temperature,
                         "preemptions": preemptions,
                         "outputs": [list(r.outputs[0].token_ids) for r in results],
                     }
