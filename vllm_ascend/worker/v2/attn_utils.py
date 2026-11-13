@@ -423,6 +423,102 @@ def _get_parallel_config_for_attn_metadata(attn_groups: list[list[AttentionGroup
     return vllm_config.parallel_config if vllm_config is not None else None
 
 
+def _prepare_qsa_step_metadata(
+    attn_metadata: dict[str, Any],
+    qsa_main_builders: list[tuple[list[str], Any]],
+    num_actual_reqs: int,
+    num_actual_tokens: int,
+) -> None:
+    """Prepare cross-layer QSA metadata once while inputs are being built."""
+    from vllm_ascend.ops.triton.qwen4_exp.gbsa import (
+        prepare_qsa_gbsa_shared,
+        prepare_qsa_lengths,
+    )
+
+    prepared_metadata_ids: set[int] = set()
+    for layer_names, builder in qsa_main_builders:
+        if not layer_names:
+            continue
+        layer = builder.vllm_config.compilation_config.static_forward_context.get(layer_names[0])
+        if layer is None or not hasattr(layer, "indexer"):
+            continue
+        main_metadata = attn_metadata.get(layer_names[0])
+        compressed_metadata = attn_metadata.get(layer.indexer.compressed_key_cache.prefix)
+        if main_metadata is None or compressed_metadata is None:
+            continue
+        if id(main_metadata) in prepared_metadata_ids:
+            continue
+        if getattr(main_metadata, "qsa_request_plan", None) is not None:
+            continue
+
+        requests = min(
+            num_actual_reqs,
+            int(getattr(compressed_metadata, "qsa_num_live_requests", num_actual_reqs)),
+        )
+        rows = min(
+            num_actual_tokens,
+            int(getattr(compressed_metadata, "qsa_num_live_tokens", num_actual_tokens)),
+        )
+        device = compressed_metadata.seq_lens.device
+        max_requests = builder.vllm_config.scheduler_config.max_num_seqs
+        max_tokens = builder.vllm_config.scheduler_config.max_num_batched_tokens
+        index_heads = int(layer.indexer.index_n_heads)
+        table_columns = int(main_metadata.block_table.shape[1])
+        signature = (device, max_requests, max_tokens, index_heads, table_columns, main_metadata.block_table.dtype)
+        buffer_cache = getattr(builder, "_qsa_prepared_buffers", None)
+        if buffer_cache is None:
+            buffer_cache = {}
+            builder._qsa_prepared_buffers = buffer_cache
+        buffers = buffer_cache.get(signature)
+        if buffers is None:
+            score_weight = math.ldexp(
+                round(math.ldexp(1.0 / math.sqrt(int(layer.indexer.index_head_dim)), 11)),
+                -11,
+            )
+            buffers = {
+                "compressed_lengths": torch.empty(max_requests, dtype=torch.int32, device=device),
+                "residual_lengths": torch.empty(max_requests, dtype=torch.int32, device=device),
+                "score_weights": torch.full(
+                    (max_tokens, index_heads),
+                    score_weight,
+                    dtype=torch.float32,
+                    device=device,
+                ),
+                "visible_lengths": torch.empty(max_tokens, dtype=torch.int32, device=device),
+                "cu_query": torch.arange(max_tokens + 1, dtype=torch.int64, device=device),
+                "row_block_table": torch.empty(
+                    (max_tokens, table_columns),
+                    dtype=main_metadata.block_table.dtype,
+                    device=device,
+                ),
+            }
+            buffer_cache[signature] = buffers
+
+        prepare_qsa_lengths(
+            compressed_metadata.seq_lens,
+            buffers["compressed_lengths"],
+            buffers["residual_lengths"],
+            requests,
+            int(layer.indexer.compress_ratio),
+        )
+        prepare_qsa_gbsa_shared(
+            compressed_metadata.logical_positions,
+            compressed_metadata.seq_lens,
+            compressed_metadata.token_to_req,
+            main_metadata.block_table,
+            buffers["visible_lengths"],
+            buffers["row_block_table"],
+            rows,
+        )
+        compressed_metadata.qsa_compressed_lengths = buffers["compressed_lengths"]
+        compressed_metadata.qsa_residual_lengths = buffers["residual_lengths"]
+        compressed_metadata.qsa_score_weights = buffers["score_weights"]
+        main_metadata.qsa_gbsa_visible_lengths = buffers["visible_lengths"]
+        main_metadata.qsa_gbsa_cu_query = buffers["cu_query"]
+        main_metadata.qsa_gbsa_row_block_table = buffers["row_block_table"]
+        prepared_metadata_ids.add(id(main_metadata))
+
+
 def build_attn_metadata(
     *,
     attn_groups: list[list[AttentionGroup]],
@@ -515,6 +611,7 @@ def build_attn_metadata(
         positions = torch.zeros(num_input_tokens, dtype=torch.int64, device=query_start_loc_gpu.device)
 
     attn_metadata: dict[str, Any] = {}
+    qsa_main_builders: list[tuple[list[str], Any]] = []
     # Share request-level DSA metadata across cache groups in one execution.
     common_ratio_to_sas_metadata: dict[Any, Any] = {}
     common_v41_batch_metadata: dict[str, Any] = {}
@@ -602,6 +699,8 @@ def build_attn_metadata(
 
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
+            if getattr(attn_metadata_builder, "prepares_qsa_step_metadata", False):
+                qsa_main_builders.append((attn_group.layer_names, attn_metadata_builder))
             is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)
             is_v41_builder = isinstance(attn_metadata_builder, AscendDSAV41MetadataBuilder)
             is_sfa_builder = isinstance(attn_metadata_builder, AscendSFAMetadataBuilder)
@@ -681,6 +780,13 @@ def build_attn_metadata(
                     common_ratio_to_sas_metadata = attn_metadata_builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
                 for layer_name in variant_names:
                     attn_metadata[layer_name] = metadata
+    if qsa_main_builders:
+        _prepare_qsa_step_metadata(
+            attn_metadata,
+            qsa_main_builders,
+            num_actual_reqs,
+            num_actual_tokens,
+        )
     return attn_metadata
 
 

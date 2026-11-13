@@ -56,6 +56,7 @@ def split_qkv_rmsnorm_mrope_kernel(
     half_rope_dim: tl.constexpr,
     IS_PARTIAL_ROPE: tl.constexpr,
     gate_size: tl.constexpr,
+    weight_offset: tl.constexpr,
 ):
     block_idx = tl.program_id(0)
 
@@ -71,6 +72,10 @@ def split_qkv_rmsnorm_mrope_kernel(
 
     q_rmsnorm_weight = tl.load(q_weight_ptr + tl.arange(0, head_size))
     k_rmsnorm_weight = tl.load(k_weight_ptr + tl.arange(0, head_size))
+    if weight_offset != 0.0:
+        weight_dtype = q_weight_ptr.dtype.element_ty
+        q_rmsnorm_weight = (q_rmsnorm_weight.to(tl.float32) + weight_offset).to(weight_dtype)
+        k_rmsnorm_weight = (k_rmsnorm_weight.to(tl.float32) + weight_offset).to(weight_dtype)
 
     if has_bias:
         q_bias = tl.load(q_bias_ptr + tl.arange(0, head_size))
@@ -294,6 +299,7 @@ def triton_split_qkv_rmsnorm_mrope(
     q_bias: torch.Tensor | None = None,
     k_bias: torch.Tensor | None = None,
     has_gate: bool = False,
+    weight_offset: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     core_num = get_vectorcore_num()
 
@@ -361,6 +367,7 @@ def triton_split_qkv_rmsnorm_mrope(
         rope_dim // 2,
         IS_PARTIAL_ROPE,
         gate_size,
+        weight_offset,
     )
 
     return q_output, k_output, v_output, gate_output
@@ -381,6 +388,7 @@ def triton_split_qkv_rmsnorm_mrope_fake(
     q_bias: torch.Tensor | None = None,
     k_bias: torch.Tensor | None = None,
     has_gate: bool = False,
+    weight_offset: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     num_tokens = qkv.shape[0]
     q_size = num_q_heads * head_size
