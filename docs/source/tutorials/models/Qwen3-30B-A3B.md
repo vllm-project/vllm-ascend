@@ -246,7 +246,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
         --tensor-parallel-size 4 \
         --enable-expert-parallel \
         --quantization ascend \
-        --distributed_executor_backend "mp" \
+        --distributed-executor-backend "mp" \
         --no-enable-prefix-caching \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
         --additional-config '{"weight_nz_mode": 2}' \
@@ -536,7 +536,7 @@ vllm serve your_model_path \
     --max-num-batched-tokens 16384 \
     --tensor-parallel-size 4 \
     --enable-expert-parallel \
-    --distributed_executor_backend "mp" \
+    --distributed-executor-backend "mp" \
     --no-enable-prefix-caching \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
@@ -569,7 +569,7 @@ vllm serve your_model_path \
     --max-model-len 37364 \
     --max-num-batched-tokens 16384 \
     --tensor-parallel-size 1 \
-    --distributed_executor_backend "mp" \
+    --distributed-executor-backend "mp" \
     --no-enable-prefix-caching \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
@@ -603,7 +603,7 @@ vllm serve your_model_path \
     --max-num-batched-tokens 16384 \
     --tensor-parallel-size 4 \
     --enable-expert-parallel \
-    --distributed_executor_backend "mp" \
+    --distributed-executor-backend "mp" \
     --no-enable-prefix-caching \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
