@@ -407,4 +407,3 @@ def test_installing_ple_patch_routes_uva_through_ascend() -> None:
     finally:
         upstream_ngram_embedding.is_uva_available = original_is_uva_available
         upstream_ngram_embedding.get_accelerator_view_from_cpu_tensor = original_get_view
-
