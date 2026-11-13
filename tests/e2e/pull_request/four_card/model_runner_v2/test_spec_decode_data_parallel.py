@@ -21,12 +21,18 @@ from contextlib import ExitStack, contextmanager
 from unittest.mock import patch
 
 import pytest
+from transformers import AutoTokenizer
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.common.kv_pool.config import MemcacheKVPoolConfig
 from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMemcacheManager
 from tests.e2e.conftest import DPVllmRunner, wait_until_npu_memory_free
-from tests.e2e.pull_request.kv_pool_watch import run_pool_ab, run_pool_hit_sequence
+from tests.e2e.pull_request.kv_pool_watch import (
+    POOL_SECRET,
+    build_pool_accuracy_prompt,
+    run_pool_ab,
+    run_pool_hit_sequence,
+)
 
 DEEPSEEK_V4_DSPARK_MODEL = os.environ.get(
     "DEEPSEEK_V4_DSPARK_MODEL_PATH",
@@ -139,6 +145,9 @@ def _leg(use_pool: bool, case_name: str):
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_deepseek_v4_dspark_spec_decoding_dp4_full_graph() -> None:
+    tokenizer = AutoTokenizer.from_pretrained(DEEPSEEK_V4_DSPARK_MODEL, trust_remote_code=True)
+    prompt_ids = build_pool_accuracy_prompt(tokenizer, POOL_PROMPT_TOKENS, POOL_MAX_MODEL_LEN)
+
     def _accuracy(runner) -> None:
         outputs = runner.generate_greedy(PROMPTS, max_tokens=32)
         assert len(outputs) == len(PROMPTS)
@@ -149,9 +158,11 @@ def test_deepseek_v4_dspark_spec_decoding_dp4_full_graph() -> None:
             runner,
             block_size=128,
             prompt_tokens=POOL_PROMPT_TOKENS,
+            prompt_ids=prompt_ids,
             replicas=DATA_PARALLEL_SIZE,
             lcm_block_size=POOL_LCM_BLOCK_SIZE,
             check_output=False,  # DSpark cold/hit outputs differ deterministically, so H3 is off
+            answer_secret=POOL_SECRET,
             tag="dsv4-dp2-memcache",
         )
 
@@ -160,5 +171,6 @@ def test_deepseek_v4_dspark_spec_decoding_dp4_full_graph() -> None:
         build_leg=_leg,
         accuracy=_accuracy,
         hit=_hit,
+        prompt_ids=prompt_ids,
         token_identity=False,
     )

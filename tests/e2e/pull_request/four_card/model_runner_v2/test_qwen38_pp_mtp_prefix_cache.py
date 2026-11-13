@@ -10,12 +10,18 @@ from unittest.mock import patch
 
 import pytest
 import torch
+from transformers import AutoTokenizer
 from vllm import SamplingParams
 
 from tests.e2e.common.kv_pool.config import MemcacheKVPoolConfig
 from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMemcacheManager
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
-from tests.e2e.pull_request.kv_pool_watch import run_pool_ab, run_pool_hit_sequence
+from tests.e2e.pull_request.kv_pool_watch import (
+    POOL_SECRET,
+    build_pool_accuracy_prompt,
+    run_pool_ab,
+    run_pool_hit_sequence,
+)
 
 MODEL = os.environ.get("QWEN38_DENSE_MODEL", "Qwen/Qwen3.8-27B")
 NUM_REQUESTS = 8
@@ -162,6 +168,8 @@ def _leg(use_pool: bool, case_name: str):
 @wait_until_npu_memory_free()
 def test_qwen38_pp_mtp_prefix_cache():
     state: dict[str, int] = {}
+    tokenizer = AutoTokenizer.from_pretrained(MODEL, trust_remote_code=True)
+    prompt_ids = build_pool_accuracy_prompt(tokenizer, POOL_PROMPT_TOKENS, POOL_MAX_MODEL_LEN)
 
     def _accuracy(runner) -> None:
         block_sizes = runner.model.collective_rpc("install_align_probe")
@@ -206,8 +214,10 @@ def test_qwen38_pp_mtp_prefix_cache():
             runner,
             block_size=state["block_size"],
             prompt_tokens=POOL_PROMPT_TOKENS,
+            prompt_ids=prompt_ids,
             lcm_block_size=POOL_LCM_BLOCK_SIZE,
             reset_local_cache=True,
+            answer_secret=POOL_SECRET,
             tag="qwen38-pp2-mtp-memcache",
         )
 
@@ -216,5 +226,6 @@ def test_qwen38_pp_mtp_prefix_cache():
         build_leg=_leg,
         accuracy=_accuracy,
         hit=_hit,
+        prompt_ids=prompt_ids,
         perf_reset_local=True,  # the pooled leg also keeps a local cache
     )

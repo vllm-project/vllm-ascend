@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
@@ -175,29 +176,73 @@ def build_pool_prompts(prompt_tokens: int) -> tuple[list[int], list[int]]:
     return _build(0), _build(POOL_PROMPT_TOKEN_SPAN // 2)
 
 
+POOL_SECRET = "7391"
+POOL_ANSWER_RE = re.compile(r"answer\s*:\s*\$?\s*(-?\d+)")
+
+
+def build_pool_accuracy_prompt(
+    tokenizer: Any,
+    target_tokens: int,
+    max_model_len: int,
+    secret: str = POOL_SECRET,
+) -> list[int]:
+    """Long natural-language prompt; the fact sits in the cached prefix."""
+    padding = "This paragraph is padding for a long context test. "
+    fact = f"The secret number is {secret}. "
+    question = "\nQuestion: What is the secret number? answer:$ANSWER"
+    unit = len(tokenizer.encode(padding, add_special_tokens=False))
+    repeats = max(1, target_tokens // (2 * unit))
+    while True:
+        text = padding * repeats + fact + padding * repeats + question
+        ids = tokenizer.encode(text, add_special_tokens=False)
+        missing = target_tokens - len(ids)
+        if missing <= 0:
+            break
+        repeats += max(1, missing // (2 * unit))
+    assert len(ids) >= target_tokens, f"prompt {len(ids)} < target {target_tokens}"
+    if len(ids) > max_model_len - 32:
+        raise AssertionError(f"prompt {len(ids)} exceeds max_model_len-32={max_model_len - 32}")
+    return ids
+
+
+def extract_pool_answer(text: str) -> str:
+    match = POOL_ANSWER_RE.search(text)
+    if match is not None:
+        return match.group(1)
+    fallback = re.search(r"-?\d+", text)
+    assert fallback is not None, f"no answer in output: {text!r}"
+    return fallback.group(0)
+
+
 def run_pool_hit_sequence(
     runner: Any,
     *,
     block_size: int,
     prompt_tokens: int,
+    prompt_ids: list[int] | None = None,
     replicas: int = 1,
     max_tokens: int = POOL_MAX_TOKENS,
     lcm_block_size: int | None = None,
     expected_hit_tokens: int | None = None,
     reset_local_cache: bool = False,
     check_output: bool = True,
+    answer_secret: str | None = None,
     tolerance: float = 0.9,
     tag: str = "",
 ) -> dict[str, Any]:
     """Run R1 cold write -> R2/R3 hit -> R4 disjoint miss.
 
-    ``replicas`` scales with DP size. ``lcm_block_size`` / ``expected_hit_tokens``
-    enable exact hit-token checks. ``reset_local_cache`` is for hybrid cases.
-    ``check_output=False`` skips H3 (DSpark and dummy-weight cases).
+    ``prompt_ids`` supplies a measured long natural-language prompt;
+    ``answer_secret`` asserts the cold and hit answers. ``replicas`` scales with
+    DP size. ``lcm_block_size`` / ``expected_hit_tokens`` enable exact hit-token
+    checks. ``reset_local_cache`` is for hybrid cases. ``check_output=False``
+    skips H3 (DSpark and dummy-weight cases).
     """
-    prompt_a, prompt_b = build_pool_prompts(prompt_tokens)
+    prompt_a = prompt_ids if prompt_ids is not None else build_pool_prompts(prompt_tokens)[0]
+    prompt_b = build_pool_prompts(prompt_tokens)[1]
+    effective_tokens = len(prompt_a)
     if expected_hit_tokens is None:
-        expected_hits = expected_hit_token_count(prompt_tokens, block_size, lcm_block_size)
+        expected_hits = expected_hit_token_count(effective_tokens, block_size, lcm_block_size)
     else:
         # Measured override for models whose hash granularity equals lcm.
         expected_hits = expected_hit_tokens
@@ -214,10 +259,10 @@ def run_pool_hit_sequence(
             ) from exc
         model.reset_prefix_cache(reset_connector=False)
 
-    def _generate(ids: list[int]) -> list[list[int]]:
+    def _generate(ids: list[int]) -> tuple[list[list[int]], list[str]]:
         _reset_local()
         outputs = runner.generate_greedy([ids] * replicas, max_tokens)
-        return [list(token_ids) for token_ids, _ in outputs]
+        return [list(token_ids) for token_ids, _ in outputs], [text for _, text in outputs]
 
     def _assert_outputs(cold: list[list[int]], hit: list[list[int]], round_tag: str) -> None:
         assert len(hit) == len(cold), f"[{tag} {round_tag}] replica count changed: {len(hit)} != {len(cold)}"
@@ -232,29 +277,36 @@ def run_pool_hit_sequence(
         return assert_hit_ratio(
             before,
             after,
-            prompt_tokens=prompt_tokens,
+            prompt_tokens=effective_tokens,
             block_size=block_size,
             tolerance=tolerance,
             tag=round_full_tag,
         )
 
     # R1: cold start writes the pool; writes are visible when generate() returns.
-    cold = _generate(prompt_a)
+    cold, cold_texts = _generate(prompt_a)
     snap1 = snapshot_metrics(runner)
 
     # R2: first hit
-    hit_1 = _generate(prompt_a)
+    hit_1, hit_1_texts = _generate(prompt_a)
     snap2 = snapshot_metrics(runner)
     ratio_r2 = _assert_hit(snap1, snap2, "R2")
     if check_output:
         _assert_outputs(cold, hit_1, "R2")
 
     # R3: repeated hit must not decay
-    hit_2 = _generate(prompt_a)
+    hit_2, hit_2_texts = _generate(prompt_a)
     snap3 = snapshot_metrics(runner)
     ratio_r3 = _assert_hit(snap2, snap3, "R3")
     if check_output:
         _assert_outputs(cold, hit_2, "R3")
+
+    if answer_secret is not None:
+        for round_tag, texts in (("R1", cold_texts), ("R2", hit_1_texts), ("R3", hit_2_texts)):
+            answers = [extract_pool_answer(text) for text in texts]
+            assert all(answer == answer_secret for answer in answers), (
+                f"[{tag} {round_tag}] answer mismatch: {answers} != {answer_secret!r}"
+            )
 
     # R4: disjoint prompt must not hit.
     _generate(prompt_b)
@@ -271,12 +323,15 @@ def run_pool_hit_sequence(
         # A/B comparison: R1 cold outputs and R3 hit-round outputs
         "cold_outputs": cold,
         "hit_outputs": hit_2,
+        "cold_texts": cold_texts,
+        "hit_texts": hit_2_texts,
     }
     metric_label = "hit_tokens" if lcm_block_size else "delta ratios"
     print(
         f"[kv_pool] {tag} {metric_label} R2={ratio_r2:.4f} R3={ratio_r3:.4f} "
         f"expected_hits={expected_hits} replicas={replicas} "
         f"expected_hits_total={expected_hits * replicas} "
+        f"prompt_tokens={effective_tokens} "
         f"load_keys_total={snap4.load_keys:.0f}",
         flush=True,
     )
@@ -405,9 +460,14 @@ def _collect_perf(
     return _percentile(ttft, 0.50), _percentile(ttft, 0.95), produced / wall, mean, minimum, maximum
 
 
-def _control_hit_outputs(runner: Any, prompt_tokens: int, max_tokens: int) -> list[list[int]]:
+def _control_hit_outputs(
+    runner: Any,
+    prompt_tokens: int,
+    max_tokens: int,
+    prompt_ids: list[int] | None = None,
+) -> list[list[int]]:
     """B leg: cold write + one local-hit round; no local hit is CONTROL_DEFECT."""
-    prompt, _ = build_pool_prompts(prompt_tokens)
+    prompt = prompt_ids if prompt_ids is not None else build_pool_prompts(prompt_tokens)[0]
     runner.generate_greedy([prompt], max_tokens)
     before = _prefix_cache_hits(runner)
     outputs = [list(ids) for ids, _ in runner.generate_greedy([prompt], max_tokens)]
@@ -445,6 +505,7 @@ def run_pool_ab(
     hit: Callable[[Any], dict[str, Any]] | None = None,
     *,
     prompt_tokens: int = POOL_PROMPT_TOKENS,
+    prompt_ids: list[int] | None = None,
     max_tokens: int = POOL_MAX_TOKENS,
     token_identity: bool = True,
     perf_reset_local: bool = False,
@@ -472,7 +533,7 @@ def run_pool_ab(
                     outputs = summary.get("hit_outputs", [])
                     hits = float(summary.get("r3", 0.0))
                 else:
-                    outputs = _control_hit_outputs(runner, prompt_tokens, max_tokens)
+                    outputs = _control_hit_outputs(runner, prompt_tokens, max_tokens, prompt_ids)
                     # B leg records local-hit output, not pool hits.
                     hits = 0.0
                 p50, p95, throughput, ttft_mean, ttft_min, ttft_max = _collect_perf(

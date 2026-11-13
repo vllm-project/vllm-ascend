@@ -24,6 +24,7 @@ from contextlib import ExitStack, contextmanager
 from unittest.mock import patch
 
 import pytest
+from transformers import AutoTokenizer
 from vllm import SamplingParams
 from vllm.utils.network_utils import get_open_port
 from vllm.v1.metrics.reader import Counter, Vector
@@ -31,7 +32,12 @@ from vllm.v1.metrics.reader import Counter, Vector
 from tests.e2e.common.kv_pool.config import MemcacheKVPoolConfig
 from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMemcacheManager
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
-from tests.e2e.pull_request.kv_pool_watch import run_pool_ab, run_pool_hit_sequence
+from tests.e2e.pull_request.kv_pool_watch import (
+    POOL_SECRET,
+    build_pool_accuracy_prompt,
+    run_pool_ab,
+    run_pool_hit_sequence,
+)
 from tests.e2e.pull_request.one_card.model_runner_v2.utils import calculate_acceptance_per_pos
 from tests.e2e.pull_request.utils import PROMPTS_SHORT
 
@@ -111,6 +117,8 @@ def _run_test(
 ) -> None:
     sampling_params = SamplingParams(max_tokens=MAX_TOKENS, temperature=0.0, seed=0)
     case_name = f"dsv4_cp_{model.split('/')[-1]}"
+    tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
+    prompt_ids = build_pool_accuracy_prompt(tokenizer, POOL_PROMPT_TOKENS, POOL_MAX_MODEL_LEN)
 
     @contextmanager
     def _leg(use_pool: bool, leg_case_name: str):
@@ -184,11 +192,13 @@ def _run_test(
             runner,
             block_size=128,
             prompt_tokens=POOL_PROMPT_TOKENS,
+            prompt_ids=prompt_ids,
             lcm_block_size=POOL_LCM_BLOCK_SIZE,
+            answer_secret=POOL_SECRET,
             tag=f"dsv4-cp-{model.split('/')[-1]}",
         )
 
-    run_pool_ab(case_name=case_name, build_leg=_leg, accuracy=_accuracy, hit=_hit)
+    run_pool_ab(case_name=case_name, build_leg=_leg, accuracy=_accuracy, hit=_hit, prompt_ids=prompt_ids)
 
 
 @pytest.mark.e2e_model(MTP_MODEL)

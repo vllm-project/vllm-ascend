@@ -21,18 +21,22 @@ from contextlib import ExitStack, contextmanager
 from unittest.mock import patch
 
 import pytest
+from transformers import AutoTokenizer
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.common.kv_pool.config import MooncakeKVPoolConfig
 from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMooncakeManager
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
-from tests.e2e.pull_request.kv_pool_watch import run_pool_ab, run_pool_hit_sequence
+from tests.e2e.pull_request.kv_pool_watch import (
+    POOL_SECRET,
+    build_pool_accuracy_prompt,
+    run_pool_ab,
+    run_pool_hit_sequence,
+)
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-# Temporary RoCE fallback: the CI runner does not support fabric-mem
-# (32 TiB VA reservation / share-handle export).
-# TODO: switch back to ASCEND_ENABLE_USE_FABRIC_MEM=1 once the runner supports it.
+# P1 runner uses the RoCE path; fabric-mem is unavailable on this runner.
 os.environ["ASCEND_ENABLE_USE_FABRIC_MEM"] = "0"
 os.environ["HCCL_INTRA_ROCE_ENABLE"] = "1"
 
@@ -61,7 +65,7 @@ def _build_mooncake_pool_config() -> MooncakeKVPoolConfig:
         config={
             "metadata_server": "P2PHANDSHAKE",
             "protocol": "ascend",
-            "global_segment_size": "2GB",  # was "5GB"; fabric mem mounts after HBM reservation
+            "global_segment_size": "2GB",  # Not final; tune after measurement.
             "local_buffer_size": "5GB",
             "preferred_segment": False,
             "prefer_alloc_in_same_node": True,
@@ -81,7 +85,7 @@ def _leg(use_pool: bool, case_name: str):
         kwargs = dict(
             max_model_len=POOL_MAX_MODEL_LEN,
             max_num_seqs=16,
-            max_num_batched_tokens=POOL_PROMPT_TOKENS,
+            max_num_batched_tokens=POOL_MAX_MODEL_LEN,
             dtype="auto",
             tensor_parallel_size=4,
             enable_expert_parallel=True,
@@ -124,6 +128,8 @@ def test_deepseek_v4_w4a8_tp4_basic_greedy():
         [19923, 14, 1026, 2329, 344, 680, 2852, 95, 305, 342],
         [3085, 344, 270, 5281, 294, 1988, 33, 3955, 361, 582, 3085, 344],
     ]
+    tokenizer = AutoTokenizer.from_pretrained(POOL_MODEL, trust_remote_code=True)
+    prompt_ids = build_pool_accuracy_prompt(tokenizer, POOL_PROMPT_TOKENS, POOL_MAX_MODEL_LEN)
 
     def _accuracy(runner) -> None:
         outputs = runner.generate_greedy(example_prompts, max_tokens)
@@ -138,11 +144,19 @@ def test_deepseek_v4_w4a8_tp4_basic_greedy():
             runner,
             block_size=128,
             prompt_tokens=POOL_PROMPT_TOKENS,
+            prompt_ids=prompt_ids,
             lcm_block_size=POOL_LCM_BLOCK_SIZE,
+            answer_secret=POOL_SECRET,
             tag="dsv4-tp4-layerwise",
         )
 
-    run_pool_ab(case_name=CASE_NAME, build_leg=_leg, accuracy=_accuracy, hit=_hit)
+    run_pool_ab(
+        case_name=CASE_NAME,
+        build_leg=_leg,
+        accuracy=_accuracy,
+        hit=_hit,
+        prompt_ids=prompt_ids,
+    )
 
 
 @pytest.mark.e2e_model("gdydems/DeepSeek-V4-Flash-w4a8-mtp")
