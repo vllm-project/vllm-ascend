@@ -7,7 +7,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from vllm_ascend.ops import gdn
+from vllm_ascend.attention import gdn
 
 
 @pytest.fixture

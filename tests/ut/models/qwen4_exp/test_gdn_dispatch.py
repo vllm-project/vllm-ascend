@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from vllm_ascend.models.qwen4_exp import model
-from vllm_ascend.ops import gdn
+from vllm_ascend.attention import gdn
 
 
 @pytest.mark.parametrize("sequence_parallel", [False, True])
