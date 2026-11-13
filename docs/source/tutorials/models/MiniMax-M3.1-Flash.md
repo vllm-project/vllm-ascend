@@ -221,7 +221,8 @@ the optional, matched `cann_ops_nn_custom` UnionSparseGen and
 `cann_ops_transformer_custom` GBSA exact-mask extensions are installed. The
 supported geometry is 128-token pages, head dimension 128, one local KV head,
 and up to 16 local query heads. Other hardware, unsupported geometry, or missing
-extensions retain native Q-gather-KV attention.
+extensions retain native attention. Native prefill uses KV-gather-Q when its
+SplitKv operator is available and otherwise falls back to GBSA Q-gather-KV.
 
 Union uses the existing `--kv-cache-dtype` and `--kv-cache-dtype-skip-layers`
 settings: `auto` keeps the model dtype, while `fp8`/`fp8_e4m3` uses E4M3 KV and

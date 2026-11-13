@@ -34,7 +34,7 @@ def load_union_extensions():
             if any(not callable(getattr(module, name, None)) for name in names):
                 raise AttributeError("Union operator API missing")
     except (ImportError, AttributeError, OSError, RuntimeError) as exc:
-        logger.warning_once("MiniMax-M3 Union extensions unavailable; using native Q-gather-KV: %s", exc)
+        logger.warning_once("MiniMax-M3 Union extensions unavailable; using native attention: %s", exc)
         return None
     return nn_ops, attention_ops
 
