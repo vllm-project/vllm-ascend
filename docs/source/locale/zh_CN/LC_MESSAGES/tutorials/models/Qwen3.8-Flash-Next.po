@@ -33,8 +33,8 @@ msgstr "### 3.1 模型权重"
 msgid "## 4 Installation"
 msgstr "## 4 安装"
 
-msgid "### 4.1 Docker Image Installation"
-msgstr "### 4.1 Docker 镜像安装"
+msgid "### 4.1 Docker Image Installation {: #41-docker-image-installation }"
+msgstr "### 4.1 Docker 镜像安装 {: #41-docker-image-installation }"
 
 msgid "### 4.2 Source Code Installation"
 msgstr "### 4.2 源码安装"
@@ -496,8 +496,8 @@ msgid ""
 "[Section 6](#6-functional-verification) to verify generation."
 msgstr "响应中应列出已配置的模型名称。启动后，请使用[第 6 节](#6-functional-verification)验证生成。"
 
-msgid "### 5.2 Basic PD Separation Deployment"
-msgstr "### 5.2 基础 PD 分离部署"
+msgid "### 5.2 Basic PD Separation Deployment {: #52-basic-pd-separation-deployment }"
+msgstr "### 5.2 基础 PD 分离部署 {: #52-basic-pd-separation-deployment }"
 
 msgid ""
 "Prepare the runtime from Section 4 and follow the [Mooncake installation "
