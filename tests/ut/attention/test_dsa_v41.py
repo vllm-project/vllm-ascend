@@ -11,6 +11,7 @@ import torch
 from vllm_ascend.attention import dsa_v41
 from vllm_ascend.attention.context_parallel import dsa_v41_cp
 from vllm_ascend.attention.dsa_v41 import AscendDSAV41Impl, DeepseekV41PreparedIndexer
+from vllm_ascend.attention.dsa_v41_indexer_shard import IndexerRowPartition
 from vllm_ascend.models.deepseek_v41 import mixed_quant_attention as a5_indexer
 
 TOKENS, TOPK = 4, 512
@@ -251,6 +252,102 @@ def test_index_selection_publishes_shared_output(monkeypatch, empty_cache):
     assert shared.topk_indices.shape == (TOKENS, TOPK)
     assert torch.all(shared.topk_indices == (-1 if empty_cache else 3))
     assert out is not None and out.shape == (TOKENS, TOPK)
+
+
+def test_sharded_candidate_source_gathers_topk_and_keeps_only_local_candidates(monkeypatch):
+    prefix = "model.layers.20.attn"
+    partition = IndexerRowPartition((2, 2), 1)
+    local = SimpleNamespace(indexer_valid_rows=torch.tensor(1), compress_ratio=1)
+    metadata = SimpleNamespace(
+        swa=SimpleNamespace(num_actual_tokens=4),
+        indexer=SimpleNamespace(cache=SimpleNamespace(indexer_partition=partition, local_indexer=local)),
+    )
+    shared = SimpleNamespace(
+        topk_indices=torch.full((4, TOPK), -1, dtype=torch.int32),
+        topk_lengths=torch.zeros((4, 1), dtype=torch.int32),
+        candidates=torch.full((4, 1, 2), -1, dtype=torch.int32),
+        candidate_lengths=torch.zeros((4, 1), dtype=torch.int32),
+    )
+
+    def select_projected(query, weights, positions, source_cache, metadata, **kwargs):
+        assert query.shape[0] == 2
+        assert positions.tolist() == [2, 3]
+        assert metadata is local
+        kwargs["indices_output"].fill_(7)
+        kwargs["topk_lengths"].fill_(1)
+        kwargs["candidate_lengths"].fill_(2)
+        return kwargs["indices_output"], torch.full((2, 1, 2), 5, dtype=torch.int32)
+
+    def all_gather(payload, dim):
+        assert dim == 0 and payload.shape == (2, TOPK + 1)
+        return torch.cat((torch.ones_like(payload), payload))
+
+    monkeypatch.setattr(
+        dsa_v41,
+        "get_forward_context",
+        lambda: SimpleNamespace(no_compile_layers={prefix: SimpleNamespace(kv_cache=[None])}),
+    )
+    monkeypatch.setattr(dsa_v41, "get_tp_group", lambda: SimpleNamespace(all_gather=all_gather))
+    attn = SimpleNamespace(shared_state=shared, indexer=SimpleNamespace(select_projected=select_projected))
+    impl = _impl(
+        SimpleNamespace(
+            has_long_context=True, is_index_source=True, is_candidate_source=True, uses_candidate_filter=False
+        )
+    )
+    impl.index_k_source_prefix = prefix
+    result = impl._select_sparse_indices(
+        attn,
+        torch.arange(4),
+        metadata,
+        prepared_indexer=DeepseekV41PreparedIndexer(query=torch.zeros(2, 1, 8), weights=torch.zeros(2, 1)),
+    )
+
+    assert result[:, 0].tolist() == [1, 1, 7, -1]
+    assert shared.topk_lengths.flatten().tolist() == [1, 1, 1, 0]
+    assert shared.candidates[:, 0, 0].tolist() == [-1, -1, 5, -1]
+    assert shared.candidate_lengths.flatten().tolist() == [0, 0, 2, 0]
+    assert shared.candidate_partition is partition
+
+
+def test_full_decode_indexer_updates_captured_metadata_storage(monkeypatch):
+    builder = object.__new__(dsa_v41.AscendDSAV41IndexerMetadataBuilder)
+    builder._supports_device_ops = True
+    builder._seq_lens = torch.zeros(8, dtype=torch.int32)
+    builder._indexer_shard_lengths = None
+    builder.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(tensor_parallel_size=8, decode_context_parallel_size=1),
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=TOPK)),
+        lora_config=None,
+    )
+    monkeypatch.setattr(dsa_v41, "get_tp_group", lambda: SimpleNamespace(world_size=8, rank_in_group=7))
+
+    def build(seq_lens, actual_tokens):
+        builder.common_v41_batch_metadata = {}
+        metadata = dsa_v41.AscendDSAV41Metadata(
+            block_table=torch.zeros((4, 1), dtype=torch.int32),
+            query_start_loc=torch.tensor([0, 6, 12, 18, 24], dtype=torch.int32),
+            seq_lens=torch.tensor(seq_lens, dtype=torch.int32),
+            slot_mapping=torch.empty(0),
+            compress_ratio=2,
+            storage_block_size=64,
+            is_compressor_state=False,
+            num_reqs=4,
+            num_actual_tokens=actual_tokens,
+            num_input_tokens=24,
+            max_query_len=6,
+        )
+        builder._build_indexer_partition(metadata, full_graph=True)
+        return metadata
+
+    captured = build([6, 6, 6, 6], 24)
+    replay = build([131, 259, 0, 0], 12)
+
+    assert captured.indexer_partition == replay.indexer_partition
+    for name in ("query_start_loc", "cache_seq_lens", "cmp_residual", "indexer_valid_rows"):
+        assert getattr(captured.local_indexer, name).data_ptr() == getattr(replay.local_indexer, name).data_ptr()
+    assert replay.local_indexer.query_start_loc.tolist() == [0, 0, 0, 0, 3]
+    assert replay.local_indexer.cache_seq_lens.tolist() == [0, 0, 0, 0]
+    assert replay.local_indexer.indexer_valid_rows.item() == 0
 
 
 @pytest.mark.parametrize("ratio", [1, 2])
