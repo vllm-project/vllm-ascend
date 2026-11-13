@@ -361,7 +361,9 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
             cos_views[layer_name], sin_views[layer_name] = views
         return cos_views, sin_views
 
-    def _build_empty_local_metadata(self, common: AscendCommonAttentionMetadata) -> AscendDSAV41Metadata:
+    def _build_empty_local_metadata(
+        self, common: AscendCommonAttentionMetadata, *, full_graph: bool = False
+    ) -> AscendDSAV41Metadata:
         # Clear controls retained by captured graphs, including local C2 pooling.
         self._device_metadata_tasks = ()
         self._smla_metadata.zero_()
@@ -558,7 +560,7 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
             global_metadata = self._build_global_metadata(common_prefix_len, global_common, fast_build, global_kwargs)
 
         if needs_global_metadata and local_common.num_actual_tokens == 0:
-            local_metadata = self._build_empty_local_metadata(local_common)
+            local_metadata = self._build_empty_local_metadata(local_common, full_graph=full_graph_mode)
         else:
             local_kwargs = dict(kwargs)
             local_kwargs.update(
@@ -629,6 +631,16 @@ class AscendDSAV41PCPIndexerMetadataBuilder(
     AscendDSAV41IndexerMetadataBuilder,
 ):
     _global_metadata_builder_cls = AscendDSAV41IndexerMetadataBuilder
+
+    def _build_empty_local_metadata(
+        self, common: AscendCommonAttentionMetadata, *, full_graph: bool = False
+    ) -> AscendDSAV41Metadata:
+        req = super()._build_empty_local_metadata(common, full_graph=full_graph)
+        if full_graph:
+            # This PCP rank can be empty on replay after capturing with
+            # queries. Refresh the TP shard's persistent padding mask too.
+            self._build_indexer_partition(req, full_graph=True)
+        return req
 
 
 class AscendDSAV41PCPFoldedIndexMetadataBuilder(
