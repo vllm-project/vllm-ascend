@@ -78,7 +78,7 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
 # ===== Install FLA and flash_attn_npu =====
 ARG FLA_VERSION="26.9.1"
 ARG FLASH_ATTN_NPU_VERSION="0.5.0"
-ARG MOONCAKE_VERSION="0.3.14rc3"
+ARG MOONCAKE_VERSION="0.3.14"
 RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     source /usr/local/Ascend/cann/set_env.sh && \

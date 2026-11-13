@@ -110,7 +110,7 @@ RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
         "${FLA_PACKAGE}===${FLA_VERSION}" && \
     # Install mooncake-transfer-engine-npu from the Ascend nightly mirror
     PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" \
-    python3 -m pip install "mooncake-transfer-engine-npu===0.3.14rc3" && \
+    python3 -m pip install "mooncake-transfer-engine-npu===0.3.14" && \
     python3 -m pip cache purge
 
 # Append `libascend_hal.so` path (devlib) to LD_LIBRARY_PATH
