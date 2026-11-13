@@ -1,0 +1,4 @@
+pr: 21373
+entries:
+  - category: feature
+    text: Added static-kernel preparation during graph warmup and SuperKernel optimization for Breakable ACLGraph.

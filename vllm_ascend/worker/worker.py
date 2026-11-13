@@ -47,7 +47,7 @@ from vllm.distributed.kv_transfer import (
     has_kv_transfer_group,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandshakeMetadata
-from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group
+from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group, get_world_group
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.model_loader.weight_checksum import compute_tensor_digests, zero_weights
@@ -119,6 +119,7 @@ from vllm_ascend.utils import (
     register_device_print,
     setup_ascend_local_comm_res,
 )
+from vllm_ascend.worker.static_kernel import initialize_static_kernel_runtime, release_static_kernels
 
 
 def get_kv_cache_groups(
@@ -225,6 +226,7 @@ class NPUWorker(WorkerBase):
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
         self.use_v2_model_runner = self.vllm_config.use_v2_model_runner
+        self._static_kernel_runtime_initialized = False
         self._kvpp_cache_allocation_plan: KVPPPhysicalCachePlan | None = None
         self._pp_send_work: list[Handle] = []
 
@@ -452,6 +454,11 @@ class NPUWorker(WorkerBase):
             shutdown_fn = getattr(model_runner, "shutdown", None)
             if callable(shutdown_fn):
                 shutdown_fn()
+        if self._static_kernel_runtime_initialized:
+            if torch.distributed.is_initialized():
+                torch.distributed.barrier(group=get_world_group().cpu_group)
+            release_static_kernels()
+            self._static_kernel_runtime_initialized = False
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
@@ -569,6 +576,18 @@ class NPUWorker(WorkerBase):
         # in ray scenario. see https://github.com/vllm-project/vllm/pull/26845
         # for more details
         self.device = self._init_device()
+        compilation = get_ascend_config().ascend_compilation_config
+        static_kernel_preparation = "disabled"
+        if compilation.enable_static_kernel:
+            static_kernel_preparation = (
+                "enabled through model compilation" if compilation.enable_npugraph_ex else "enabled during graph warmup"
+            )
+        logger.info_once(
+            "Static kernel preparation is %s. SuperKernel is %s.",
+            static_kernel_preparation,
+            "enabled" if compilation.enable_super_kernel else "disabled",
+            scope="global",
+        )
         # FLA import-time capability queries must run on the selected worker
         # device, and registration must finish before any model is constructed.
         # TODO: Drop this separate call when supported vLLM FLA or Triton Ascend
@@ -589,6 +608,9 @@ class NPUWorker(WorkerBase):
             from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
             self.model_runner = NPUModelRunner(self.vllm_config, self.device)
+            if compilation.enable_static_kernel and not compilation.enable_npugraph_ex:
+                initialize_static_kernel_runtime(self.vllm_config, capture=True)
+                self._static_kernel_runtime_initialized = True
 
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.

@@ -264,6 +264,8 @@ def test_gather_dummy_batch_bypasses_flashmla(uses_flashmla):
 
 def test_capture_model_uses_ascend_context_and_encoder_update_stream():
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.cudagraph_manager = SimpleNamespace()
+    runner.speculator = None
     manager = SimpleNamespace(update_stream=None)
     runner.model_state = SimpleNamespace(
         supports_mm_inputs=True,
@@ -2003,6 +2005,7 @@ def test_init_kv_zero_meta_excludes_only_registered_topk_components():
 
 def test_shutdown_releases_c8_views_and_unwraps_zeroer():
     _, _, _, runner, _ = _c8_packet(ratio=1)
+    runner.ascend_config = SimpleNamespace(ascend_compilation_config=SimpleNamespace(enable_static_kernel=False))
     entries = runner._c8_mxfp_v_scale_caches
     wrapper_entries = list(entries)
     delegate = MagicMock()
@@ -2018,6 +2021,7 @@ def test_shutdown_releases_c8_views_and_unwraps_zeroer():
 
 def test_shutdown_releases_shared_engram_after_parent_cleanup():
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.ascend_config = SimpleNamespace(ascend_compilation_config=SimpleNamespace(enable_static_kernel=False))
     embedding = MagicMock()
     embedding._shared_pool_client = object()
     runner.model = MagicMock()
@@ -2031,6 +2035,7 @@ def test_shutdown_releases_shared_engram_after_parent_cleanup():
 
 def test_shutdown_keeps_shared_engram_if_parent_cleanup_fails():
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.ascend_config = SimpleNamespace(ascend_compilation_config=SimpleNamespace(enable_static_kernel=False))
     embedding = MagicMock()
     embedding._shared_pool_client = object()
     runner.model = MagicMock()
@@ -2043,6 +2048,7 @@ def test_shutdown_keeps_shared_engram_if_parent_cleanup_fails():
 
 def test_shutdown_retries_failed_engram_and_closes_other_clients():
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.ascend_config = SimpleNamespace(ascend_compilation_config=SimpleNamespace(enable_static_kernel=False))
     failing, other = MagicMock(), MagicMock()
     failing._shared_pool_client = other._shared_pool_client = object()
     failing.close_host_offload.side_effect = [RuntimeError("failed"), None]
@@ -2058,6 +2064,7 @@ def test_shutdown_retries_failed_engram_and_closes_other_clients():
 
 def test_shutdown_retains_engram_when_parent_fails_after_deleting_model():
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.ascend_config = SimpleNamespace(ascend_compilation_config=SimpleNamespace(enable_static_kernel=False))
     embedding = MagicMock()
     embedding._shared_pool_client = object()
     runner.model = MagicMock()

@@ -133,6 +133,12 @@ class TestFLALazyImports(unittest.TestCase):
         namespace = {
             "register_ascend_fla_customop": lambda: events.append("register"),
             "init_workspace_manager": Mock(),
+            "get_ascend_config": lambda: SimpleNamespace(
+                ascend_compilation_config=SimpleNamespace(
+                    enable_static_kernel=False, enable_super_kernel=False, enable_npugraph_ex=False
+                )
+            ),
+            "logger": Mock(),
         }
         init_device = _load_function("vllm_ascend/worker/worker.py", "init_device", namespace)
         worker = SimpleNamespace(

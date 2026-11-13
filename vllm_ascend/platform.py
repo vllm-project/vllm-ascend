@@ -1466,6 +1466,16 @@ def _setup_compile_backend(
     # Get custom compile backend for graph fusion
     compilation_config.oot_compiler = compile_backend
     compilation_config.use_inductor = False
+    if envs_vllm.VLLM_USE_BREAKABLE_CUDAGRAPH:
+        compilation_config.mode = CompilationMode.NONE
+        compilation_config.splitting_ops = []
+        additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
+        if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
+            if additional_config["ascend_compilation_config"]["enable_static_kernel"]:
+                logger.warning("Static kernel preparation disabled because graph execution is disabled.")
+            additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
+            additional_config["ascend_compilation_config"]["enable_super_kernel"] = False
+        return
     if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
         compilation_config.mode = CompilationMode.NONE
         additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False

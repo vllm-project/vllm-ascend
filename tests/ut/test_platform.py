@@ -1175,6 +1175,39 @@ class TestNPUPlatform(TestBase):
                     vllm_config.update_sizes_for_sequence_parallelism.assert_not_called()
                     self.assertEqual(compilation_config.cudagraph_capture_sizes, [1, 2, 4, 8])
 
+    def test_setup_compile_backend_selects_static_kernel_entry(self):
+        cases = [
+            (True, CUDAGraphMode.FULL_DECODE_ONLY, CompilationMode.NONE, False, True),
+            (True, CUDAGraphMode.PIECEWISE, CompilationMode.NONE, False, True),
+            (True, CUDAGraphMode.NONE, CompilationMode.NONE, False, False),
+            (False, CUDAGraphMode.FULL_DECODE_ONLY, CompilationMode.VLLM_COMPILE, True, True),
+        ]
+        for breakable, graph_mode, expected_mode, expected_ex, expected_static in cases:
+            with self.subTest(breakable=breakable, graph_mode=graph_mode):
+                config = self.mock_vllm_config()
+                config.compilation_config.mode = CompilationMode.VLLM_COMPILE
+                config.compilation_config.cudagraph_mode = graph_mode
+                config.model_config.enforce_eager = False
+                config.additional_config = {
+                    "ascend_compilation_config": {
+                        "enable_npugraph_ex": True,
+                        "enable_static_kernel": True,
+                        "enable_super_kernel": True,
+                    }
+                }
+
+                with (
+                    patch("vllm.envs.VLLM_USE_BREAKABLE_CUDAGRAPH", breakable),
+                    patch("vllm_ascend.platform.enable_sp", return_value=False),
+                ):
+                    _setup_compile_backend(config, compile_backend="test_backend")
+
+                resolved = config.additional_config["ascend_compilation_config"]
+                self.assertEqual(config.compilation_config.mode, expected_mode)
+                self.assertEqual(resolved["enable_npugraph_ex"], expected_ex)
+                self.assertEqual(resolved["enable_static_kernel"], expected_static)
+                self.assertEqual(resolved["enable_super_kernel"], expected_static)
+
     def test_get_device_capability(self):
         self.assertIsNone(self.platform.get_device_capability(device_id=0))
 

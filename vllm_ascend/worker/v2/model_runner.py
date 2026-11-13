@@ -26,6 +26,7 @@ from typing import Any
 import numpy as np
 import torch
 from vllm.compilation import breakable_cudagraph
+from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
@@ -118,7 +119,7 @@ from vllm_ascend.utils import (
 )
 from vllm_ascend.worker.device_metadata import TargetDeviceMetadata
 from vllm_ascend.worker.utils import disable_compilation
-from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
+from vllm_ascend.worker.v2.aclgraph_utils import AscendGraphManagerMixin, ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_state,
     skip_ring_state_update,
@@ -572,6 +573,11 @@ class NPUModelRunner(GPUModelRunner):
             if model is not None
             else []
         )
+        config = self.ascend_config.ascend_compilation_config
+        if config.enable_static_kernel and not config.enable_npugraph_ex:
+            torch.npu.synchronize()
+            breakable_cudagraph.BreakableCUDAGraphWrapper.clear_all_graphs()
+            CUDAGraphWrapper.clear_all_graphs()
         # Drop C8 packet views before the parent collects tensors and
         # empties the allocator cache.
         entries = getattr(self, "_c8_mxfp_v_scale_caches", None)
@@ -629,6 +635,14 @@ class NPUModelRunner(GPUModelRunner):
     @torch.inference_mode()
     def capture_model(self, *, profile_only: bool = False) -> int:
         """Capture decoder and multimodal encoder graphs on Ascend."""
+        managers = [self.cudagraph_manager]
+        if self.speculator is not None:
+            managers.extend(
+                value for value in vars(self.speculator).values() if isinstance(value, AscendGraphManagerMixin)
+            )
+        for manager in managers:
+            if isinstance(manager, AscendGraphManagerMixin):
+                manager.static_kernel_warmup_enabled = not profile_only
         if hasattr(self, "model_state") and self.model_state.supports_mm_inputs:
             encoder_runner = getattr(self.model_state, "encoder_runner", None)
             encoder_manager = getattr(encoder_runner, "cudagraph_manager", None)
