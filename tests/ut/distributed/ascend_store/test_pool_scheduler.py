@@ -386,6 +386,39 @@ class TestKVPoolScheduler(unittest.TestCase):
                 self.assertEqual("r1" in scheduler.load_specs, expected > 0)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_retention_interval_uses_shared_resolver(self, mock_client_cls):
+        config = self._make_config()
+        config.cache_config.prefix_cache_retention_interval = 8192
+        groups = [
+            KVCacheGroupSpec(
+                ["layer.0"], FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+            )
+        ]
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.resolve_deepseek_v4_retention",
+            return_value=8192,
+        ) as resolver:
+            scheduler = KVPoolScheduler(config, use_layerwise=False, kv_cache_config=MagicMock(kv_cache_groups=groups))
+        self.assertEqual(scheduler.retention_interval, 8192)
+        resolver.assert_called_once_with(config.cache_config, groups)
+
+    def test_build_cache_coordinator_forwards_retention(self):
+        scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
+        scheduler.kv_cache_config = SimpleNamespace(kv_cache_groups=[object()])
+        scheduler.use_hybrid = True
+        scheduler.cache_transfer_granularity = 128
+        scheduler.hash_block_size = 128
+        scheduler.grouped_block_size = [128]
+        scheduler.kv_cache_group_families = ["default"]
+        scheduler.use_eagle = False
+        scheduler.retention_interval = 8192
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.AscendStoreCoordinator"
+        ) as coordinator_cls:
+            scheduler._build_cache_coordinator()
+        self.assertEqual(coordinator_cls.call_args.kwargs["retention_interval"], 8192)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_retention_interval_does_not_skip_external_lookup(self, mock_client_cls):
         """A retained checkpoint can be reused before two retention intervals."""
         for use_eagle in (False, True):

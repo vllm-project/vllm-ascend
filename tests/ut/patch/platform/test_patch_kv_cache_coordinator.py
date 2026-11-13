@@ -153,6 +153,58 @@ def test_explicit_eagle_group_marker_takes_precedence(monkeypatch):
     assert coordinator.eagle_group_ids == {1}
 
 
+def _retention_coordinator(monkeypatch, *, resolved):
+    # The coordinator takes whatever the shared gated resolver returns.
+    monkeypatch.setattr(mod, "BlockPool", _FakeBlockPool)
+    monkeypatch.setattr(mod, "get_manager_for_kv_cache_spec", _fake_manager_factory)
+    monkeypatch.setattr(mod, "resolve_deepseek_v4_retention", lambda source, groups: resolved)
+    kv_cache_config = _hybrid_config()
+    kv_cache_config.kv_transfer_config = None
+    kv_cache_config.prefix_cache_retention_interval = 4096
+    return AscendHybridKVCacheCoordinator(
+        kv_cache_config=kv_cache_config,
+        max_model_len=4096,
+        use_eagle=False,
+        enable_caching=True,
+        enable_kv_cache_events=False,
+        dcp_world_size=1,
+        pcp_world_size=1,
+        hash_block_size=HASH_BLOCK_SIZE,
+        scheduler_block_size=HASH_BLOCK_SIZE,
+    )
+
+
+def test_retention_honored_for_deepseek_v4(monkeypatch):
+    # Gate on (DeepSeek-V4/V4.1): the resolved value reaches the coordinator.
+    coordinator = _retention_coordinator(monkeypatch, resolved=4096)
+    assert coordinator.retention_interval == 4096
+
+
+def test_retention_forced_none_for_non_deepseek_v4(monkeypatch):
+    # Gate off: other models keep the dense (None) default.
+    coordinator = _retention_coordinator(monkeypatch, resolved=None)
+    assert coordinator.retention_interval is None
+
+
+def test_resolve_deepseek_v4_retention_gate():
+    source = SimpleNamespace(prefix_cache_retention_interval=8192)
+
+    def group(model_version):
+        return SimpleNamespace(kv_cache_spec=SimpleNamespace(model_version=model_version))
+
+    # Gate on (DeepSeek-V4/V4.1): the configured value is returned.
+    assert mod.resolve_deepseek_v4_retention(source, [group("deepseek_v4")]) == 8192
+    assert mod.resolve_deepseek_v4_retention(source, [group("deepseek_v41")]) == 8192
+    # A nested UniformTypeKVCacheSpecs-style group is detected too.
+    nested = SimpleNamespace(
+        kv_cache_spec=SimpleNamespace(kv_cache_specs={"l": SimpleNamespace(model_version="deepseek_v41")})
+    )
+    assert mod.resolve_deepseek_v4_retention(source, [nested]) == 8192
+    # Gate off: other models and empty groups keep the dense (None) default.
+    assert mod.resolve_deepseek_v4_retention(source, [group("qwen3_next")]) is None
+    assert mod.resolve_deepseek_v4_retention(source, []) is None
+
+
 # ---------------------------------------------------------------------------
 # Fix ② role detection: kv_transfer_config (attached by the kv-cache-utils
 # builder) -> coordinator

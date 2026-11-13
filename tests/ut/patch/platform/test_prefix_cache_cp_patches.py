@@ -40,7 +40,6 @@ from vllm_ascend.core.kv_cache_interface import (
 )
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
-    _is_deepseek_v4_kv_cache_spec,
     get_kv_cache_coordinator,
 )
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
@@ -50,6 +49,7 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     group_and_unify_kv_cache_specs,
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
+from vllm_ascend.utils import is_deepseek_v4_kv_cache_spec as _is_deepseek_v4_kv_cache_spec
 
 
 def test_packed_cache_reuses_global_capacity_and_records_recycled_state_pages():
