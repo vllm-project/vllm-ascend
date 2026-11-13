@@ -128,8 +128,8 @@ _A3_560T_LABEL_MAP = {
 # 560T machines used by accuracy runs, and a full-suite run must not move them.
 _A3_OPS_PARTITION = "a3-2-ops"
 _OPS_TEST_PREFIX = "tests/e2e/pull_request/two_card/ops/"
-# Per-file budget used to split the packed operator groups. The files share
-# one pytest process, so this is well below the generic 600s default.
+# Used only if the operator partition is given more than one group. The
+# configured count is 1, so these files are not split by estimated time.
 _OPS_ESTIMATED_SECONDS = 45.0
 
 # Populated by _load_runner_mapping(). Ordered list of
