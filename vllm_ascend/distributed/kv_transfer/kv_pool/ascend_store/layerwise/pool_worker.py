@@ -1934,9 +1934,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 self._process_save_for_layer_batch(
                     group_requests.get(group_id, requests), local_layer, group_id, layer_idx_in_group
                 )
-        # Protect the previous partial before allocating the next snapshot.
-        self._data_plane.prepare_load_gvas(requests)
-        self._data_plane.alloc_save_gvas(requests)
+        self._data_plane.prepare_gvas(requests)
         self._build_shared_save_data()
         for local_layer in range(num_local):
             for group_id, layer_idx_in_group in self._groups_for_layerwise_transfer(local_layer):

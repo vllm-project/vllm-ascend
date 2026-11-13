@@ -32,12 +32,13 @@ class LayerwiseDataPlane(ABC):
         """
 
     @abstractmethod
-    def prepare_load_gvas(self, requests: list[ReqMeta]) -> None:
-        """Prepare load transfer targets once the save loop is planned."""
+    def prepare_gvas(self, requests: list[ReqMeta]) -> None:
+        """Prepare the step's GVA transfer targets once the save loop is planned.
 
-    @abstractmethod
-    def alloc_save_gvas(self, requests: list[ReqMeta]) -> None:
-        """Allocate save transfer targets once the save loop is planned."""
+        One window with a fixed internal order: load targets are prepared
+        before save targets are allocated, so a trailing partial block's data
+        address is read before its key is repointed at a fresh snapshot.
+        """
 
     @abstractmethod
     def finish_current_load_sessions(self) -> None:
