@@ -522,6 +522,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             raise RuntimeError("Expected spec_state_indices_tensor for Ascend GDN speculative conv1d path.")
         if attn_metadata.num_accepted_tokens is None:
             raise RuntimeError("Expected num_accepted_tokens for Ascend GDN speculative conv1d path.")
+        if attn_metadata.num_accepted_tokens.dtype != torch.int32:
+            raise RuntimeError("Ascend recurrent GDN requires INT32 num_accepted_tokens metadata.")
 
         num_sequences = attn_metadata.num_spec_decodes
         actual_seq_lengths_buffer = None
@@ -773,6 +775,10 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 spec_sequence_masks = self.spec_sequence_masks[:num_reqs]
 
         batch = _split_gdn_batch(m, spec_sequence_masks_cpu, num_spec_decodes)
+        # The recurrent GDN ABI consumes INT32 accepted-token counts. Normalize
+        # once while building step metadata instead of casting in every layer.
+        if num_accepted_tokens is not None and num_accepted_tokens.dtype != torch.int32:
+            num_accepted_tokens = num_accepted_tokens.to(torch.int32)
         (
             num_decodes,
             num_prefills,

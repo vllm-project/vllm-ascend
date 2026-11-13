@@ -293,7 +293,7 @@ def _run_recurrent_gdn(
                 query_start_loc,
                 flat_indices,
             ),
-            num_accepted_tokens=(num_accepted_tokens.to(torch.int32) if num_accepted_tokens is not None else None),
+            num_accepted_tokens=num_accepted_tokens,
         ).unsqueeze(0)
 
     return _call_fused_recurrent_gdn(
@@ -339,7 +339,7 @@ def _call_fused_recurrent_gdn(
         raise ValueError("GDN state indices must provide one checkpoint row per metadata request")
     state_indices = state_indices[:num_sequences].to(torch.int32)
     if num_accepted_tokens is not None:
-        num_accepted_tokens = num_accepted_tokens[:num_sequences].to(torch.int32)
+        num_accepted_tokens = num_accepted_tokens[:num_sequences]
     return recurrent_gated_delta_rule(
         query.squeeze(0),
         key.squeeze(0),

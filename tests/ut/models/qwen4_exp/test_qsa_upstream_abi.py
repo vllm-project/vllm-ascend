@@ -1,11 +1,47 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import torch
 
 from vllm_ascend.models.qwen4_exp import qsa
+
+
+def test_indexer_projection_runs_on_auxiliary_stream(monkeypatch) -> None:
+    main_stream = Mock()
+    aux_stream = Mock()
+    ready = Mock()
+    main_stream.record_event.return_value = ready
+    monkeypatch.setattr(qsa.torch.npu, "current_stream", lambda: main_stream)
+    monkeypatch.setattr(qsa, "_qsa_indexer_stream", lambda: aux_stream)
+    monkeypatch.setattr(qsa, "npu_stream_switch", lambda stream: nullcontext())
+
+    query = Mock()
+    token_k = Mock()
+    indexer = Mock()
+    metadata = SimpleNamespace(num_actual_tokens=2)
+    indexer._metadata.return_value = (metadata, metadata)
+    indexer.project_qk.return_value = (query, token_k)
+    layer = qsa.AscendQwen4ExpQSAAttention.__new__(qsa.AscendQwen4ExpQSAAttention)
+    torch.nn.Module.__init__(layer)
+    layer.indexer = indexer
+    hidden_states = MagicMock()
+    positions = MagicMock()
+
+    actual = layer._start_indexer_projection(hidden_states, positions)
+
+    assert actual == (query, token_k)
+    hidden_states.record_stream.assert_called_once_with(aux_stream)
+    positions.record_stream.assert_called_once_with(aux_stream)
+    aux_stream.wait_event.assert_called_once_with(ready)
+    indexer.project_qk.assert_called_once_with(
+        hidden_states[:2],
+        positions[..., :2],
+    )
+    query.record_stream.assert_called_once_with(main_stream)
+    token_k.record_stream.assert_called_once_with(main_stream)
 
 
 def test_main_uses_ascend_projection_and_draft_uses_upstream(monkeypatch) -> None:
