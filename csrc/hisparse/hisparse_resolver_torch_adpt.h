@@ -14,8 +14,7 @@
 #include <vector>
 #include <utility>
 
-extern "C" void launch_hisparse_resolve_residency(void**, uint64_t*, int, void*);
-extern "C" uint64_t hisparse_resolver_scratch_capacity();
+#include "../attention/hi_sparse_resolve_residency/op_kernel/resolver_scratch.h"
 
 namespace vllm_ascend::hisparse {
 at::Tensor tensor_or_undefined(const std::optional<at::Tensor>& tensor) {
@@ -28,14 +27,15 @@ inline int64_t resolver_hash_size(int64_t hot, int64_t union_rows) {
     int64_t hash_size = 1;
     while (hash_size <= union_rows) hash_size <<= 1;
     const uint64_t tiles = (hot + 31) / 32;
-    const uint64_t budget = hisparse_resolver_scratch_capacity();
+    const uint64_t budget = kResolverUbBytes;
     const uint64_t fixed_words = hot + 2 * tiles + 64;
-    const uint64_t minimum_bytes = (2 * (union_rows + 1) + fixed_words + 15) / 16 * 64 + 512;
+    const uint64_t minimum_bytes =
+        resolver_scratch_words(hot, union_rows + 1) * sizeof(int32_t) + kResolverDescriptorBytes;
     TORCH_CHECK(minimum_bytes <= budget,
                 "HiSparse hot_size=", hot, ", max_union_rows=", union_rows,
                 " needs at least ", minimum_bytes, " UB bytes; the compiled target allows ", budget,
                 ". Lower device_buffer_size or speculative tokens.");
-    const uint64_t available_words = (budget - 512) / 64 * 16;
+    const uint64_t available_words = (budget - kResolverDescriptorBytes) / 64 * 16;
     return std::min(hash_size, int64_t((available_words - fixed_words) / 2));
 }
 
@@ -95,7 +95,6 @@ void resolve_residency(
         tensor_or_undefined(valid_rows)};
     c10_npu::NPUGuard guard(logical.device());
     auto npu_stream = c10_npu::getCurrentNPUStream();
-    std::array<void*, 19> pointers{};
     std::vector<at::Tensor> owners;
     owners.reserve(tensors.size());
     for (size_t i = 0; i < tensors.size(); ++i) {
@@ -154,7 +153,6 @@ void resolve_residency(
         // must keep every storage unavailable for reuse until this stream's
         // work completes, including when graph capture is active.
         c10_npu::NPUCachingAllocator::recordStream(tensor.storage().data_ptr(), npu_stream);
-        pointers[i] = tensor.numel() ? tensor.data_ptr() : nullptr;
     }
     TORCH_CHECK(bool(swap_host) == bool(swap_device) && bool(swap_host) == bool(swap_counts),
                 "All compact HiSparse swap outputs are required together");
@@ -162,27 +160,25 @@ void resolve_residency(
                 "HiSparse hot block table is too narrow");
     TORCH_CHECK(hot_table.size(0) >= (states ? states->numel() : dgi.size(0)),
                 "HiSparse hot block table does not cover request slots");
-    std::array<uint64_t, 25> sizes = {
-        uint64_t(rows), uint64_t(topk), uint64_t(hot), uint64_t(host_rows), uint64_t(logical.stride(0)),
-        uint64_t(states ? states->numel() : 0), uint64_t(dgi.size(0)),
-        uint64_t(source ? source->size(0) : 0), uint64_t(source ? source->size(1) : 0),
-        uint64_t(source ? source->stride(0) : 0), uint64_t(source_block_size),
-        uint64_t(resident ? resident->size(0) : 0), uint64_t(resident ? resident->size(1) : 0),
-        uint64_t(resident ? resident->stride(0) : 0), uint64_t(resident_block_size), uint64_t(resident_null_block),
-        uint64_t(hot_block_size), uint64_t(hot_table.stride(0)),
-        uint64_t(attention ? attention->stride(0) : topk), uint64_t(attention_block_stride),
-        uint64_t(counts ? counts->stride(0) : 1), uint64_t(union_rows), uint64_t(hash_size),
-        uint64_t(attention_capacity), uint64_t(miss_mask && miss_mask->element_size() == 1)};
-    auto stream = npu_stream.stream();
-    at_npu::native::OpCommand command;
-    command.Name("HiSparseUnionResolve");
-    command.SetCustomHandler([pointers, sizes, stream, owners = std::move(owners)]() mutable -> int {
-        // Release queued tensor owners after submission, not on queue-slot reuse.
-        auto submission_owners = std::move(owners);
-        launch_hisparse_resolve_residency(pointers.data(), sizes.data(), int(sizes[0]), stream);
-        return 0;
-    });
-    command.Run();
+    std::array<int64_t, 25> geometry = {
+        int64_t(rows), int64_t(topk), int64_t(hot), int64_t(host_rows), int64_t(logical.stride(0)),
+        int64_t(states ? states->numel() : 0), int64_t(dgi.size(0)),
+        int64_t(source ? source->size(0) : 0), int64_t(source ? source->size(1) : 0),
+        int64_t(source ? source->stride(0) : 0), int64_t(source_block_size),
+        int64_t(resident ? resident->size(0) : 0), int64_t(resident ? resident->size(1) : 0),
+        int64_t(resident ? resident->stride(0) : 0), int64_t(resident_block_size), int64_t(resident_null_block),
+        int64_t(hot_block_size), int64_t(hot_table.stride(0)),
+        int64_t(attention ? attention->stride(0) : topk), int64_t(attention_block_stride),
+        int64_t(counts ? counts->stride(0) : 1), int64_t(union_rows), int64_t(hash_size),
+        int64_t(attention_capacity), int64_t(miss_mask && miss_mask->element_size() == 1)};
+    at::IntArrayRef geometry_ref(geometry);
+    // Generated ACLNN takes inputs, attributes, then caller-owned outputs.
+    // Keep storage owners through queue submission as on the direct path.
+    EXEC_NPU_CMD_RETAINED(
+        aclnnHiSparseResolveResidency, owners,
+        tensors[0], tensors[1], tensors[2], tensors[3], tensors[4], tensors[5], tensors[18],
+        geometry_ref, tensors[6], tensors[7], tensors[8], tensors[9], tensors[10],
+        tensors[11], tensors[12], tensors[13], tensors[14], tensors[15], tensors[16], tensors[17]);
 }
 
 // The operator mutates caller-owned tensors and returns no new tensors.

@@ -702,7 +702,7 @@ typedef int (*InitHugeMemThreadLocal)(void *, bool);
 typedef void (*UnInitHugeMemThreadLocal)(void *, bool);
 typedef void (*ReleaseHugeMem)(void *, bool);
 
-#define EXEC_NPU_CMD(aclnn_api, ...)                                          \
+#define EXEC_NPU_CMD_RETAINED(aclnn_api, owners, ...)                         \
   do {                                                                        \
     static const auto getWorkspaceSizeFuncAddr =                              \
         GetOpApiFuncAddr(#aclnn_api "GetWorkspaceSize");                      \
@@ -744,7 +744,9 @@ typedef void (*ReleaseHugeMem)(void *, bool);
       workspace_addr = const_cast<void *>(workspace_tensor.storage().data()); \
     }                                                                         \
     auto acl_call = [converted_params, workspace_addr, workspace_size,        \
-                     acl_stream, executor]() -> int {                         \
+                     acl_stream, executor, retained = std::move(owners)]() mutable -> int {\
+      auto submission_owners = std::move(retained);                           \
+      (void)submission_owners;                                                \
       typedef int (*OpApiFunc)(void *, uint64_t, aclOpExecutor *,             \
                                const aclrtStream);                            \
       OpApiFunc opApiFunc = reinterpret_cast<OpApiFunc>(opApiFuncAddr);       \
@@ -768,5 +770,8 @@ typedef void (*ReleaseHugeMem)(void *, bool);
       unInitMemFunc(nullptr, false);                                          \
     }                                                                         \
   } while (false)
+
+#define EXEC_NPU_CMD(aclnn_api, ...) \
+  EXEC_NPU_CMD_RETAINED(aclnn_api, nullptr, __VA_ARGS__)
 
 #endif

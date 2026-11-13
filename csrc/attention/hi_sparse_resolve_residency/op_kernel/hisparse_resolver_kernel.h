@@ -2,9 +2,12 @@
 // Request-union algorithm adapted from vLLM PR #59235 (Apache-2.0).
 // SIMT implementation: one AIV per contiguous request group; one launch.
 // Descriptor and scratch are invocation-owned. All mutable inputs are re-read.
+#pragma once
+
 #include "kernel_operator.h"
 #include "simt_api/asc_simt.h"
 #include <cstdint>
+#include "resolver_scratch.h"
 
 namespace {
 constexpr int kThreads = 512;
@@ -12,17 +15,6 @@ constexpr int kWarps = kThreads / 32;
 constexpr int kTotal = kWarps;
 constexpr int kError = kWarps + 2;
 static_assert(kError < 64, "Prefix/error scratch exceeds reservation");
-// The build specifies the target's usable UB budget, including descriptors.
-#ifndef HISPARSE_RESOLVER_UB_BYTES
-#error "Build with the target's HISPARSE_RESOLVER_UB_BYTES budget"
-#endif
-constexpr uint64_t kScratchBudgetBytes = HISPARSE_RESOLVER_UB_BYTES;
-static_assert(kScratchBudgetBytes > 512, "Resolver UB budget must cover descriptors");
-
-inline uint64_t scratch_ints(uint64_t hot, uint64_t hash_size) {
-    const uint64_t tiles = (hot + 31) / 32;
-    return (2 * hash_size + hot + 2 * tiles + 64 + 15) / 16 * 16;
-}
 constexpr int kHit = int(0x80000000U);
 constexpr int kMiss = 0x40000000;
 constexpr int kSlotMask = 0xFFFF;
@@ -539,67 +531,3 @@ __simt_vf__ __launch_bounds__(kThreads) inline void resolve_vf(
     }
 }
 }  // namespace
-
-template<bool kQualified>
-__global__ __vector__ void hisparse_resolve_residency(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6, uint64_t a7, uint64_t a8, uint64_t a9, uint64_t a10, uint64_t a11, uint64_t a12, uint64_t a13, uint64_t a14, uint64_t a15, uint64_t a16, uint64_t a17, uint64_t a18, uint64_t a32, uint64_t a33, uint64_t a34, uint64_t a35, uint64_t a36, uint64_t a37, uint64_t a38, uint64_t a39, uint64_t a40, uint64_t a41, uint64_t a42, uint64_t a43, uint64_t a44, uint64_t a45, uint64_t a46, uint64_t a47, uint64_t a48, uint64_t a49, uint64_t a50, uint64_t a51, uint64_t a52, uint64_t a53, uint64_t a54, uint64_t a55, uint64_t a56) {
-    extern __ubuf__ int32_t local_scratch[];
-    const uint64_t words = (2 * a54 + a34 + 2 * ((a34 + 31) / 32) + 64 + 15) / 16 * 16;
-    auto descriptor = (__ubuf__ uint64_t*)(local_scratch + words);
-    descriptor[0] = a0;
-    descriptor[1] = a1;
-    descriptor[2] = a2;
-    descriptor[3] = a3;
-    descriptor[4] = a4;
-    descriptor[5] = a5;
-    descriptor[6] = a6;
-    descriptor[7] = a7;
-    descriptor[8] = a8;
-    descriptor[9] = a9;
-    descriptor[10] = a10;
-    descriptor[11] = a11;
-    descriptor[12] = a12;
-    descriptor[13] = a13;
-    descriptor[14] = a14;
-    descriptor[15] = a15;
-    descriptor[16] = a16;
-    descriptor[17] = a17;
-    descriptor[18] = a18;
-    descriptor[32] = a32;
-    descriptor[33] = a33;
-    descriptor[34] = a34;
-    descriptor[35] = a35;
-    descriptor[36] = a36;
-    descriptor[37] = a37;
-    descriptor[38] = a38;
-    descriptor[39] = a39;
-    descriptor[40] = a40;
-    descriptor[41] = a41;
-    descriptor[42] = a42;
-    descriptor[43] = a43;
-    descriptor[44] = a44;
-    descriptor[45] = a45;
-    descriptor[46] = a46;
-    descriptor[47] = a47;
-    descriptor[48] = a48;
-    descriptor[49] = a49;
-    descriptor[50] = a50;
-    descriptor[51] = a51;
-    descriptor[52] = a52;
-    descriptor[53] = a53;
-    descriptor[54] = a54;
-    descriptor[55] = a55;
-    descriptor[56] = a56;
-    asc_vf_call<resolve_vf<kQualified>>(dim3(kThreads), descriptor, local_scratch, int(AscendC::GetBlockIdx()));
-}
-
-extern "C" uint64_t hisparse_resolver_scratch_capacity() {
-    return kScratchBudgetBytes;
-}
-
-extern "C" void launch_hisparse_resolve_residency(void** pointers, uint64_t* geometry, int rows, void* stream) {
-    if (geometry[1] == 2048 && geometry[2] == 10240 && geometry[10] == 128 && geometry[14] == 128 && geometry[16] == 128 && geometry[22] == 16384) {
-    hisparse_resolve_residency<true><<<rows, scratch_ints(geometry[2], geometry[22]) * sizeof(int32_t) + 512, stream>>>(uint64_t(reinterpret_cast<uintptr_t>(pointers[0])), uint64_t(reinterpret_cast<uintptr_t>(pointers[1])), uint64_t(reinterpret_cast<uintptr_t>(pointers[2])), uint64_t(reinterpret_cast<uintptr_t>(pointers[3])), uint64_t(reinterpret_cast<uintptr_t>(pointers[4])), uint64_t(reinterpret_cast<uintptr_t>(pointers[5])), uint64_t(reinterpret_cast<uintptr_t>(pointers[6])), uint64_t(reinterpret_cast<uintptr_t>(pointers[7])), uint64_t(reinterpret_cast<uintptr_t>(pointers[8])), uint64_t(reinterpret_cast<uintptr_t>(pointers[9])), uint64_t(reinterpret_cast<uintptr_t>(pointers[10])), uint64_t(reinterpret_cast<uintptr_t>(pointers[11])), uint64_t(reinterpret_cast<uintptr_t>(pointers[12])), uint64_t(reinterpret_cast<uintptr_t>(pointers[13])), uint64_t(reinterpret_cast<uintptr_t>(pointers[14])), uint64_t(reinterpret_cast<uintptr_t>(pointers[15])), uint64_t(reinterpret_cast<uintptr_t>(pointers[16])), uint64_t(reinterpret_cast<uintptr_t>(pointers[17])), uint64_t(reinterpret_cast<uintptr_t>(pointers[18])), geometry[0], geometry[1], geometry[2], geometry[3], geometry[4], geometry[5], geometry[6], geometry[7], geometry[8], geometry[9], geometry[10], geometry[11], geometry[12], geometry[13], geometry[14], geometry[15], geometry[16], geometry[17], geometry[18], geometry[19], geometry[20], geometry[21], geometry[22], geometry[23], geometry[24]);
-    } else {
-    hisparse_resolve_residency<false><<<rows, scratch_ints(geometry[2], geometry[22]) * sizeof(int32_t) + 512, stream>>>(uint64_t(reinterpret_cast<uintptr_t>(pointers[0])), uint64_t(reinterpret_cast<uintptr_t>(pointers[1])), uint64_t(reinterpret_cast<uintptr_t>(pointers[2])), uint64_t(reinterpret_cast<uintptr_t>(pointers[3])), uint64_t(reinterpret_cast<uintptr_t>(pointers[4])), uint64_t(reinterpret_cast<uintptr_t>(pointers[5])), uint64_t(reinterpret_cast<uintptr_t>(pointers[6])), uint64_t(reinterpret_cast<uintptr_t>(pointers[7])), uint64_t(reinterpret_cast<uintptr_t>(pointers[8])), uint64_t(reinterpret_cast<uintptr_t>(pointers[9])), uint64_t(reinterpret_cast<uintptr_t>(pointers[10])), uint64_t(reinterpret_cast<uintptr_t>(pointers[11])), uint64_t(reinterpret_cast<uintptr_t>(pointers[12])), uint64_t(reinterpret_cast<uintptr_t>(pointers[13])), uint64_t(reinterpret_cast<uintptr_t>(pointers[14])), uint64_t(reinterpret_cast<uintptr_t>(pointers[15])), uint64_t(reinterpret_cast<uintptr_t>(pointers[16])), uint64_t(reinterpret_cast<uintptr_t>(pointers[17])), uint64_t(reinterpret_cast<uintptr_t>(pointers[18])), geometry[0], geometry[1], geometry[2], geometry[3], geometry[4], geometry[5], geometry[6], geometry[7], geometry[8], geometry[9], geometry[10], geometry[11], geometry[12], geometry[13], geometry[14], geometry[15], geometry[16], geometry[17], geometry[18], geometry[19], geometry[20], geometry[21], geometry[22], geometry[23], geometry[24]);
-    }
-}

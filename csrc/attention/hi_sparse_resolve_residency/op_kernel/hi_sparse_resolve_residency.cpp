@@ -1,0 +1,66 @@
+// SPDX-License-Identifier: Apache-2.0
+#include "hisparse_resolver_kernel.h"
+
+using vllm_ascend::hisparse::ResolverTilingData;
+
+extern "C" __global__ __aicore__ void hi_sparse_resolve_residency(
+    GM_ADDR logical,
+    GM_ADDR requests,
+    GM_ADDR states,
+    GM_ADDR source,
+    GM_ADDR resident,
+    GM_ADDR hot_table,
+    GM_ADDR valid_rows,
+    GM_ADDR tags,
+    GM_ADDR lru,
+    GM_ADDR physical,
+    GM_ADDR attention,
+    GM_ADDR resolved,
+    GM_ADDR counts,
+    GM_ADDR swap_host,
+    GM_ADDR swap_device,
+    GM_ADDR swap_counts,
+    GM_ADDR miss_mask,
+    GM_ADDR stats,
+    GM_ADDR errors,
+    GM_ADDR workspace, GM_ADDR tiling) {
+    REGISTER_TILING_DEFAULT(ResolverTilingData);
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
+    GET_TILING_DATA(tilingData, tiling);
+    (void)workspace;
+
+    // Reserve the SIMT shared region in the compiled kernel. ACLNN does not
+    // supply the dynamic UB size carried by the direct launch configuration.
+    using vllm_ascend::hisparse::kResolverDescriptorBytes;
+    using vllm_ascend::hisparse::kResolverUbBytes;
+    __ubuf__ int32_t scratch[kResolverUbBytes / sizeof(int32_t)];
+    const auto* geometry = tilingData.geometry;
+    auto descriptor = (__ubuf__ uint64_t*)(scratch + (tilingData.ubBytes - kResolverDescriptorBytes) / sizeof(int32_t));
+    descriptor[0] = reinterpret_cast<uintptr_t>(logical);
+    descriptor[1] = reinterpret_cast<uintptr_t>(requests);
+    descriptor[2] = reinterpret_cast<uintptr_t>(states);
+    descriptor[3] = reinterpret_cast<uintptr_t>(source);
+    descriptor[4] = reinterpret_cast<uintptr_t>(resident);
+    descriptor[5] = reinterpret_cast<uintptr_t>(hot_table);
+    descriptor[6] = reinterpret_cast<uintptr_t>(tags);
+    descriptor[7] = reinterpret_cast<uintptr_t>(lru);
+    descriptor[8] = reinterpret_cast<uintptr_t>(physical);
+    descriptor[9] = reinterpret_cast<uintptr_t>(attention);
+    descriptor[10] = reinterpret_cast<uintptr_t>(resolved);
+    descriptor[11] = reinterpret_cast<uintptr_t>(counts);
+    descriptor[12] = reinterpret_cast<uintptr_t>(swap_host);
+    descriptor[13] = reinterpret_cast<uintptr_t>(swap_device);
+    descriptor[14] = reinterpret_cast<uintptr_t>(swap_counts);
+    descriptor[15] = reinterpret_cast<uintptr_t>(miss_mask);
+    descriptor[16] = reinterpret_cast<uintptr_t>(stats);
+    descriptor[17] = reinterpret_cast<uintptr_t>(errors);
+    descriptor[18] = reinterpret_cast<uintptr_t>(valid_rows);
+    for (int i = 0; i < 25; ++i) descriptor[32 + i] = geometry[i];
+    const int block = AscendC::GetBlockIdx();
+    if (geometry[1] == 2048 && geometry[2] == 10240 && geometry[10] == 128 &&
+        geometry[14] == 128 && geometry[16] == 128 && geometry[22] == 16384) {
+        asc_vf_call<resolve_vf<true>>(dim3(kThreads), descriptor, scratch, block);
+    } else {
+        asc_vf_call<resolve_vf<false>>(dim3(kThreads), descriptor, scratch, block);
+    }
+}
