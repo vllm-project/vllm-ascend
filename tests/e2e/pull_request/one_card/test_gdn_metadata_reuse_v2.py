@@ -211,8 +211,12 @@ def test_gdn_shared_metadata_aclgraph_reads_updated_group_states():
         scheduler_config=SimpleNamespace(max_num_seqs=16, max_num_batched_tokens=1024),
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1),
         speculative_config=SimpleNamespace(
-            num_speculative_tokens=3, parallel_drafting=False, enable_adaptive_verification=False
+            num_speculative_tokens=3,
+            parallel_drafting=False,
+            enable_adaptive_verification=False,
+            use_eagle_block_drop=lambda: False,
         ),
+        num_hash_lookahead_tokens=0,
     )
     builders = [AscendGDNAttentionMetadataBuilder(spec, [f"layer{i}"], config, torch.device("npu")) for i in range(24)]
     table = torch.arange(graph_reqs * (width + 2), dtype=torch.int32, device="npu").view(graph_reqs, width + 2)
