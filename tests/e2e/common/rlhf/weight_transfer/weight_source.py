@@ -25,7 +25,6 @@ import hashlib
 import json
 import math
 import os
-import re
 import shutil
 import struct
 import tempfile
@@ -36,6 +35,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import regex as re
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 from vllm.distributed.weight_transfer.base import ParamMeta, WeightSource
