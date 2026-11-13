@@ -300,12 +300,10 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             quant_mode = combine_quant_mode
         elif comm_quant_mode is not None:
             quant_mode = comm_quant_mode
-        elif quant_type == QuantType.W8A8MXFP:
+        elif quant_type in (QuantType.W8A8MXFP, QuantType.W4A8MXFP):
             # The down projection already produces BF16. Avoid an additional
             # lossy communication quantizer for models using ceil MX scales.
             quant_mode = 0 if self.dynamic_mx_quant_scale_alg == DynamicMXQuantScaleAlg.CEIL else 4
-        elif quant_type == QuantType.W4A8MXFP:
-            quant_mode = 4
         else:
             quant_mode = 0
         kwargs_mc2 = {
