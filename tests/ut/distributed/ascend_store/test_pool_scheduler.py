@@ -199,12 +199,43 @@ def make_config(kv_role="kv_producer", extra_config=None, block_size=16):
     config.parallel_config.world_size = 1
     config.cache_config.block_size = block_size
     config.cache_config.hash_block_size = block_size
+    config.cache_config.prefix_cache_retention_interval = None
     config.model_config.model = "org/llama-7b"
     config.model_config.use_mla = False
     config.model_config.hf_text_config = MagicMock(spec=[])
     config.model_config.get_total_num_kv_heads.return_value = 1
     config.model_config.get_num_layers.return_value = 2
     return config
+
+
+@pytest.mark.parametrize("retention_interval", [None, 0, 4096])
+@pytest.mark.parametrize("is_deepseek_v4", [False, True])
+def test_scheduler_retention_matches_hbm_policy(monkeypatch, retention_interval, is_deepseek_v4):
+    from vllm_ascend.patch.platform import patch_kv_cache_coordinator as cache_coordinator
+
+    monkeypatch.setattr(cache_coordinator, "_is_deepseek_v4_kv_cache_config", lambda config: is_deepseek_v4)
+    config = make_config()
+    config.cache_config.prefix_cache_retention_interval = retention_interval
+    groups = [
+        KVCacheGroupSpec(
+            ["layer.0"], FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+        )
+    ]
+    scheduler = KVPoolScheduler(config, use_layerwise=False, kv_cache_config=SimpleNamespace(kv_cache_groups=groups))
+    expected = retention_interval if is_deepseek_v4 else None
+    assert scheduler.retention_interval == expected
+    with patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.AscendStoreCoordinator"
+    ) as coordinator_cls:
+        scheduler.use_hybrid = True
+        scheduler._build_cache_coordinator()
+    assert coordinator_cls.call_args.kwargs["retention_interval"] == expected
+
+
+def test_scheduler_without_kv_cache_config_keeps_dense_retention():
+    config = make_config()
+    config.cache_config.prefix_cache_retention_interval = 0
+    assert KVPoolScheduler(config, use_layerwise=False).retention_interval is None
 
 
 @pytest.mark.parametrize("num_speculative_blocks", [None, 0, 3])

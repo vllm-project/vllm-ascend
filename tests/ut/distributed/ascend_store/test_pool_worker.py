@@ -22,6 +22,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 import numpy as np
+import pytest
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 
@@ -47,6 +48,30 @@ def start_patch(test: unittest.TestCase, *args, **kwargs):
     mocked = patcher.start()
     test.addCleanup(patcher.stop)
     return mocked
+
+
+@pytest.mark.parametrize("retention_interval", [None, 0, 4096])
+@pytest.mark.parametrize("is_deepseek_v4", [False, True])
+def test_worker_retention_matches_hbm_policy(monkeypatch, retention_interval, is_deepseek_v4):
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_worker
+    from vllm_ascend.patch.platform import patch_kv_cache_coordinator as cache_coordinator
+
+    monkeypatch.setattr(cache_coordinator, "_is_deepseek_v4_kv_cache_config", lambda config: is_deepseek_v4)
+    worker = pool_worker.KVPoolWorker.__new__(pool_worker.KVPoolWorker)
+    worker.kv_cache_config = SimpleNamespace(kv_cache_groups=[object()])
+    worker.use_hybrid = True
+    worker.cache_transfer_granularity = 16
+    worker.hash_block_size = 16
+    worker.grouped_block_size = [16]
+    worker.kv_cache_group_families = ["full"]
+    config = SimpleNamespace(
+        speculative_config=None,
+        cache_config=SimpleNamespace(prefix_cache_retention_interval=retention_interval),
+    )
+    with patch.object(pool_worker, "AscendStoreCoordinator") as coordinator_cls:
+        result = worker._build_cache_coordinator(config)
+    assert result is coordinator_cls.return_value
+    assert coordinator_cls.call_args.kwargs["retention_interval"] == (retention_interval if is_deepseek_v4 else None)
 
 
 def make_worker(
