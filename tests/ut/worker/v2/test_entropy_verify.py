@@ -122,6 +122,19 @@ def test_invalid_entropy_parameters_fail_before_launch(inputs, launches, thresho
         mock.assert_not_called()
 
 
+@pytest.mark.parametrize("skip_masked_vocab_blocks", [False, True])
+def test_masked_vocab_hint_preserves_npu_resample(monkeypatch, inputs, launches, skip_masked_vocab_blocks):
+    set_config(monkeypatch)
+    sampled, num_sampled = utils.rejection_sample(**inputs, skip_masked_vocab_blocks=skip_masked_vocab_blocks)
+    launches["_compute_block_stats_kernel"].assert_called_once()
+    launches["_probabilistic_rejection_kernel"].assert_called_once()
+    launches["resample"].assert_called_once()
+    args = launches["resample"].call_args.args
+    assert args[0] is sampled
+    assert args[1] is num_sampled
+    assert args[2] is inputs["target_logits"]
+
+
 def test_disabled_entropy_preserves_upstream_block(monkeypatch, inputs, launches):
     set_config(monkeypatch)
     utils.rejection_sample(**inputs, use_block_verification=True)

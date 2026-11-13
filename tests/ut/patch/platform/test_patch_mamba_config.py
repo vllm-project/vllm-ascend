@@ -85,6 +85,7 @@ def _config(
     speculative_method=None,
 ):
     return SimpleNamespace(
+        use_flashinfer_replayssm=False,
         scheduler_config=SimpleNamespace(
             disable_hybrid_kv_cache_manager=disable_hybrid,
         ),

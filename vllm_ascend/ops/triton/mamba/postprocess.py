@@ -95,6 +95,9 @@ def postprocess_mamba_fused_kernel(
     # PRECOMPUTED_NEW_COMPUTED: when True, num_computed_tokens_ptr already holds
     # the post-step new_num_computed value (V2 supplies the advanced count).
     PRECOMPUTED_NEW_COMPUTED: tl.constexpr = False,
+    # #55688 delegates ReplaySSM temporal migration to its ring materializer.
+    # Convolution snapshots and accepted-count normalization remain generic.
+    SKIP_TEMPORAL_STATE_COPY: tl.constexpr = False,
     # TEMPORAL_TILES: when > 1, the temporal copy body is partitioned across
     # TEMPORAL_TILES CTAs along the u64 inner range. Callers must launch a
     # 3D grid (num_reqs, total_states, TEMPORAL_TILES). Default 1 preserves
@@ -221,6 +224,10 @@ def postprocess_mamba_fused_kernel(
 
     if src_block_idx == dest_block_idx and accept_token_bias == 0:
         return
+
+    if SKIP_TEMPORAL_STATE_COPY:
+        if conv_width == 0:
+            return
 
     offsets = tl.arange(0, COPY_BLOCK_SIZE)
     if CONV_STATE_DIM_FIRST and is_conv_state:

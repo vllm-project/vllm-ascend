@@ -18,7 +18,7 @@ from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
-from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAMetadata
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
 from vllm_ascend.distributed.eplb.tensor_ops import make_allgather_mask
 from vllm_ascend.utils import vllm_version_is
@@ -171,7 +171,9 @@ def test_generate_draft_updates_attn_metadata():
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
     attn_metadata = {"layer.0": MagicMock()}
     speculator._update_decode_attn_metadata = MagicMock()
-    with patch.object(TargetDependentARSpeculator, "_generate_draft") as parent_generate:
+    with patch.object(
+        TargetDependentARSpeculator, "_generate_draft" if vllm_version_is("0.33.0") else "_decode"
+    ) as parent_generate:
         # main always passes the per-batch step count; there is no fallback to
         # the configured count.
         speculator._generate_draft(2, 4, attn_metadata, None, None, num_speculative_steps=3)
@@ -187,7 +189,7 @@ def test_generate_draft_skips_update_without_attn_metadata():
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
     speculator.num_speculative_steps = 3
     speculator._update_decode_attn_metadata = MagicMock()
-    with patch.object(TargetDependentARSpeculator, "_generate_draft"):
+    with patch.object(TargetDependentARSpeculator, "_generate_draft" if vllm_version_is("0.33.0") else "_decode"):
         speculator._generate_draft(2, 4, None, None, None)
     speculator._update_decode_attn_metadata.assert_not_called()
 
@@ -248,6 +250,36 @@ def test_prefill_filters_target_only_metadata():
     # vLLM main added `skip_sample` and forwards it to the upstream _prefill.
     expected_args.append(False)
     parent_prefill.assert_called_once_with(*expected_args)
+
+
+@pytest.mark.parametrize("is_v033", [False, True], ids=["main", "v0.33.0"])
+@pytest.mark.parametrize("runtime_mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL])
+def test_prefill_mla_query_lengths_exclude_target_padding(is_v033, runtime_mode):
+    """Eager/PW drafts must not reuse query lengths for padded target rows."""
+    speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
+    speculator.draft_attn_layer_names = {"draft"}
+    speculator._lmhead_pad_size_context = MagicMock(side_effect=lambda **kwargs: nullcontext())
+    metadata = AscendMLAMetadata.__new__(AscendMLAMetadata)
+    metadata.num_decode_tokens = 2
+    metadata.decode = SimpleNamespace(actual_seq_lengths_q=[2, 4, 6, 8], seq_lens_list=[10, 0, 0, 0])
+    slot_mappings = {"draft": object()}
+    metadata.slot_mapping = slot_mappings["draft"]
+    module = "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator"
+    with (
+        patch(module + ".vllm_version_is", return_value=is_v033),
+        patch.object(TargetDependentARSpeculator, "_prefill") as parent_prefill,
+    ):
+        speculator._prefill(1, 8, {"draft": metadata}, slot_mappings, None, runtime_mode)
+
+    parent_prefill.assert_called_once()
+    forwarded = parent_prefill.call_args.args[2]["draft"]
+    expected = [2, 4, 6, 8] if runtime_mode == CUDAGraphMode.FULL else [2, 2, 2, 2]
+    assert forwarded.decode.actual_seq_lengths_q == expected
+    assert metadata.decode.actual_seq_lengths_q == [2, 4, 6, 8]
+    assert (forwarded is metadata) == (runtime_mode == CUDAGraphMode.FULL)
+    assert forwarded.decode.seq_lens_list is metadata.decode.seq_lens_list
+    assert forwarded.slot_mapping is metadata.slot_mapping
+    assert parent_prefill.call_args.args[3] is slot_mappings
 
 
 @pytest.mark.parametrize("skip_sample", [False, True])
@@ -831,9 +863,11 @@ def test_generate_draft_capture_uses_request_rows(num_reqs, num_tokens):
         assert speculator._lmhead_pad_size == num_reqs
 
     module = "vllm_ascend.worker.v2.spec_decode."
+    # #60989 renamed the native single-step draft entry point on main.
+    parent_method = "_generate_draft" if vllm_version_is("0.33.0") else "_decode"
     with (
         patch(module + "lmhead_tp_utils.lmhead_tp_enable", return_value=True),
-        patch.object(TargetDependentARSpeculator, "_generate_draft", side_effect=parent) as generate,
+        patch.object(TargetDependentARSpeculator, parent_method, side_effect=parent) as generate,
     ):
         speculator._generate_draft(num_reqs, num_tokens, None, None, None)
     expected = [num_reqs, num_tokens, None, None, None, CUDAGraphMode.NONE]

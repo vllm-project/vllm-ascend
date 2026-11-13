@@ -762,14 +762,6 @@ class BalanceScheduler(Scheduler):
         # len(self.running).
         assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs) <= len(self.running)
 
-        # Get the longest common prefix among all requests in the running queue.
-        # This can be potentially used for cascade attention.
-        num_common_prefix_blocks = [0] * len(self.kv_cache_config.kv_cache_groups)
-        with record_function_or_nullcontext("schedule: get_num_common_prefix_blocks"):
-            if self.running:
-                any_request_id = self.running[0].request_id
-                num_common_prefix_blocks = self.kv_cache_manager.get_num_common_prefix_blocks(any_request_id)
-
         # Construct the scheduler output.
         if self.use_v2_model_runner:
             scheduled_new_reqs.extend(scheduled_resumed_reqs)
@@ -839,7 +831,6 @@ class BalanceScheduler(Scheduler):
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
-            num_common_prefix_blocks=num_common_prefix_blocks,
             preempted_req_ids={req.request_id for req in preempted_reqs},
             # finished_req_ids is an existing state in the scheduler,
             # instead of being newly scheduled in this step.

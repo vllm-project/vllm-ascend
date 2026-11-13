@@ -346,6 +346,9 @@ def rejection_sample(
     posterior_threshold: float = 0.95,
     posterior_alpha: float = 0.4,
     draft_logits_num_shards: int = 1,
+    # vLLM #65100 hints that masked vocab blocks may be skipped. The NPU
+    # resampler keeps its full residual scan, which preserves the same result.
+    skip_masked_vocab_blocks: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # Upstream passes logits after applying sampling parameters. Resolve the
     # worker configuration here to keep its sampler and chunking flow unchanged.

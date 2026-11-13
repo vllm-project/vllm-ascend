@@ -14,6 +14,7 @@ from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
 from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
+from vllm_ascend.utils import vllm_version_is
 
 
 def make_attention(impl):
@@ -22,6 +23,7 @@ def make_attention(impl):
     nn.Module.__init__(inner)
     set_default_quant_scales(inner, register_buffer=True)
     inner.impl = impl
+    inner.act_dtype = torch.bfloat16
     inner.num_heads = 2
     inner.kv_lora_rank = 4
     inner.qk_nope_head_dim = 2
@@ -70,14 +72,18 @@ def test_impl_post_load_called_once(is_sfa, act_dtype):
         # SFA disposes this projection; upstream dense packing must be bypassed.
         impl.process_weights_after_loading.side_effect = lambda _: setattr(inner.kv_b_proj, "weight", None)
 
-    inner.process_weights_after_loading(act_dtype)
+    inner.act_dtype = act_dtype
+    if vllm_version_is("0.33.0"):
+        inner.process_weights_after_loading(act_dtype)
+    else:
+        inner.process_weights_after_loading()
 
     impl.process_weights_after_loading.assert_called_once_with(act_dtype)
     if is_sfa:
         upstream.assert_not_called()
         assert inner.kv_b_proj.weight is None
     else:
-        upstream.assert_called_once_with(act_dtype)
+        upstream.assert_called_once_with(*([act_dtype] if vllm_version_is("0.33.0") else []))
         assert inner.W_UV.shape == (2, 4, 4)
         assert inner.W_UK_T.shape == (2, 2, 4)
 
@@ -113,7 +119,7 @@ def test_mlapo_post_load_does_not_reprocess_released_weights(is_kv_consumer):
     ):
         inner.process_weights_after_loading(torch.bfloat16)
 
-    upstream.assert_called_once_with(torch.bfloat16)
+    upstream.assert_called_once_with(*([torch.bfloat16] if vllm_version_is("0.33.0") else []))
     impl.process_weights_after_loading.assert_called_once_with(torch.bfloat16)
     assert (impl.fused_qkv_a_proj.weight is None) == is_kv_consumer
     assert (impl.q_proj.weight is None) == is_kv_consumer
