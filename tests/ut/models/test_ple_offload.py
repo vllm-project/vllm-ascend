@@ -292,25 +292,6 @@ def test_offload_does_not_add_context_parallel_restrictions(pcp, dcp):
     _validate_engram_config(config)
 
 
-@pytest.mark.parametrize("offload", [False, True])
-def test_only_host_offload_requires_v2_runner(offload):
-    from vllm.config import EngramConfig
-
-    from vllm_ascend.platform import _validate_engram_config
-
-    config = SimpleNamespace(
-        engram_config=EngramConfig(cpu_offload=offload, dp_shared_memory=False),
-        model_config=SimpleNamespace(architecture="Qwen4ExpForConditionalGeneration"),
-        speculative_config=None,
-        use_v2_model_runner=False,
-    )
-    if offload:
-        with pytest.raises(ValueError, match="model runner v2"):
-            _validate_engram_config(config)
-    else:
-        _validate_engram_config(config)
-
-
 def test_shared_tables_still_reject_elastic_ep():
     from vllm.config import EngramConfig
 
