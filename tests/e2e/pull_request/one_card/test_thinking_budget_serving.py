@@ -20,7 +20,7 @@ KV_CACHE_BYTES = 2 * 1024**3
 
 
 @pytest.mark.parametrize("enforce_eager", [True, False])
-@pytest.mark.parametrize("speculative", [False, True])
+@pytest.mark.parametrize("speculative", [None, "ngram_gpu", "draft_model"])
 def test_thinking_budget_serving(enforce_eager, speculative, tmp_path):
     response_index = itertools.count()
     port = get_open_port()
@@ -45,19 +45,12 @@ def test_thinking_budget_serving(enforce_eager, speculative, tmp_path):
     if enforce_eager:
         args.append("--enforce-eager")
     if speculative:
-        args.extend(
-            [
-                "--speculative-config",
-                json.dumps(
-                    {
-                        "method": "ngram_gpu",
-                        "num_speculative_tokens": 3,
-                        "prompt_lookup_min": 2,
-                        "prompt_lookup_max": 5,
-                    }
-                ),
-            ]
-        )
+        spec = {"method": speculative, "num_speculative_tokens": 3}
+        if speculative == "ngram_gpu":
+            spec.update(prompt_lookup_min=2, prompt_lookup_max=5)
+        else:
+            spec["model"] = "Qwen/Qwen3-0.6B"
+        args.extend(["--speculative-config", json.dumps(spec)])
     tokenizer = get_tokenizer(MODEL)
     start_id = tokenizer.encode("<think>", add_special_tokens=False)[0]
     end_id = tokenizer.encode("</think>", add_special_tokens=False)[0]

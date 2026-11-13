@@ -104,6 +104,13 @@ For n-gram speculative decoding, add:
 --speculative-config '{"method":"ngram_gpu","num_speculative_tokens":3,"prompt_lookup_min":2,"prompt_lookup_max":5}'
 ```
 
+For a compatible draft model with the same tokenizer, configure the draft
+model explicitly. For example, with the Qwen3-1.7B target above:
+
+```bash
+--speculative-config '{"method":"draft_model","model":"Qwen/Qwen3-0.6B","num_speculative_tokens":3}'
+```
+
 Verify the draft and accepted-token counters: enabling a speculative method
 does not prove that a particular prompt actually exercises rejection sampling.
 Other speculative methods require their own compatible model/configuration
@@ -116,14 +123,20 @@ speculation with `min_p` or `logit_bias` is rejected during request validation.
 ```bash
 python -m pytest -sv tests/ut/worker/v2/test_thinking_budget.py \
     tests/ut/worker/v2/test_thinking_budget_validation.py
-python -m pytest -sv tests/e2e/pull_request/one_card/test_thinking_budget.py
+python -m pytest -sv tests/e2e/pull_request/one_card/test_thinking_budget.py \
+    tests/e2e/pull_request/one_card/test_thinking_budget_addressing.py
 python -m pytest -sv tests/e2e/pull_request/one_card/test_thinking_budget_generation.py
 python -m pytest -sv tests/e2e/pull_request/one_card/test_thinking_budget_serving.py
 ```
 
-The host tests check V2 lifecycle and sampler contracts with device storage
-mocked. NPU tests exercise the upstream budget state with Ascend kernels,
+V2 request lifecycle coverage targets `AscendRequestState` and upstream
+`ThinkingBudgetState` in `tests/ut/worker/v2/`; the removed V1 input batch is
+not required. The host tests check lifecycle and sampler contracts with device
+storage mocked. NPU tests exercise the upstream budget state with Ascend kernels,
 including rejected drafts, mixed budgets, slot reuse, and resumed end prefixes.
+Rejection tests exercise absent, tensor, and cached draft logits with standard,
+entropy, and block verification. Large-address tests require at least 8 GiB of
+free NPU memory plus headroom and cover cold and incremental history scans.
 Model tests cover Qwen3-1.7B and ordinary-model regression with
 Qwen2.5-0.5B-Instruct. The constrained-cache test asserts that scheduler
 preemption actually occurs and compares output against an unconstrained run.
