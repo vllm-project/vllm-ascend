@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib.util
+import json
+import subprocess
+import sys
 import tarfile
 from pathlib import Path
 
@@ -51,3 +54,26 @@ def test_missing_path_and_symlink_rejected(tmp_path):
     link.symlink_to(target)
     with pytest.raises(ValueError):
         collector.validate_path(str(link))
+
+
+def test_cli_skips_missing_optional_path(tmp_path):
+    existing = tmp_path / "logs"
+    existing.mkdir()
+    (existing / "result.txt").write_text("result")
+    missing = tmp_path / "missing"
+    destination = tmp_path / "artifact.tar.gz"
+    request = json.dumps([{"node0": str(existing)}, {"node0": str(missing)}])
+    command = [sys.executable, str(_SCRIPT), request, str(destination)]
+    assert subprocess.run(command, capture_output=True).returncode != 0
+    result = subprocess.run(command + ["--skip-missing"], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert "Skipping missing optional path" in result.stdout
+    with tarfile.open(destination) as archive:
+        assert archive.getnames() == ["result.txt"]
+    result = subprocess.run(
+        [sys.executable, str(_SCRIPT), str(missing), str(destination), "--skip-missing"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "no requested paths exist" in result.stderr

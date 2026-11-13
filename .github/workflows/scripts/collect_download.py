@@ -130,6 +130,7 @@ def main() -> None:
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--path-for-node", action="store_true")
     parser.add_argument("--check-only", action="store_true")
+    parser.add_argument("--skip-missing", action="store_true", help="Skip absent optional log paths")
     args = parser.parse_args()
     paths = parse_request(args.request)
     if args.node_count is not None:
@@ -147,7 +148,15 @@ def main() -> None:
         return
     if args.node not in paths:
         parser.error(f"--download does not specify {args.node}")
-    sources = [validate_path(path, require_exists=not args.check_only) for path in paths[args.node]]
+    sources = []
+    for raw_path in paths[args.node]:
+        path = validate_path(raw_path, require_exists=False)
+        if args.skip_missing and not path.exists() and not path.is_symlink():
+            print(f"Skipping missing optional path: {path}")
+            continue
+        sources.append(validate_path(raw_path, require_exists=not args.check_only))
+    if not sources:
+        parser.error("no requested paths exist")
     if not args.check_only:
         if args.destination is None:
             parser.error("destination is required unless --check-only is used")
