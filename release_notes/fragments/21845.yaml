@@ -1,0 +1,4 @@
+pr: 21845
+entries:
+  - category: bugfix
+    text: MC2 profiling now reports when startup fails because HCCL_BUFFSIZE is too small for the MC2 dispatch window, instead of leaving an opaque vector-core-exception traceback.
