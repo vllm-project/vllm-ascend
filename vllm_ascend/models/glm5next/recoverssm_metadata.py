@@ -157,8 +157,12 @@ class AscendKDARecoverSSMMetadataBuilder(KimiK3KDAMetadataBuilder):
             or batch_size > min(self.spec_state_indices_tensor.shape[0], self.decode_cudagraph_max_bs)
         ):
             return
-        # TODO: Fuse staging with an Ascend Triton kernel; upstream currently requires CUDA tensors.
         count = metadata.num_spec_decodes
+        if not 0 <= count <= batch_size:
+            raise ValueError(
+                f"Invalid RecoverSSM speculative metadata: num_spec_decodes={count} is outside batch_size={batch_size}"
+            )
+        # TODO: Fuse staging with an Ascend Triton kernel; upstream currently requires CUDA tensors.
         states = self.spec_state_indices_tensor[:batch_size]
         starts = self.spec_query_start_loc[: batch_size + 1]
         accepted = self.num_accepted_tokens[:batch_size]

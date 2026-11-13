@@ -1,0 +1,4 @@
+pr: 21506
+entries:
+  - category: bugfix
+    text: Invalid RecoverSSM speculative metadata now reports the decode count and request batch size before graph staging.
