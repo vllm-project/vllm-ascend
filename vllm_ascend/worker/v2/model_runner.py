@@ -994,6 +994,12 @@ class NPUModelRunner(GPUModelRunner):
             # prompt_lens is only used in R-SWA case.
             prompt_lens = self.req_states.prompt_len.gpu[idx_mapping]
 
+        # vLLM v0.30.0's BatchReqState predates #58542. Gather the same CPU
+        # request caps here, using the final batch order on every PP stage.
+        max_seq_len_np = None
+        if self.use_pp and batch_req_state.has_prefill:
+            max_seq_len_np = self.req_states.max_seq_len[idx_mapping_np]
+
         input_batch = AscendInputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -1017,6 +1023,7 @@ class NPUModelRunner(GPUModelRunner):
             num_computed_prefill_tokens_np=batch_req_state.num_computed_prefill_tokens_np,
             is_prefilling_np=batch_req_state.is_prefilling_np,
             has_prefill=batch_req_state.has_prefill,
+            max_seq_len_np=max_seq_len_np,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
             is_padding=self.input_buffers.is_padding[:num_tokens_after_padding],
