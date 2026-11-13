@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 import torch
+import vllm.envs as envs_vllm
 from flash_attn_npu_3 import flash_attn_with_kvcache, get_scheduler_metadata  # type: ignore[import-not-found]
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.logger import logger
@@ -53,6 +54,8 @@ class AscendFlashAttentionBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "",
     ) -> tuple[int, ...]:
+        if envs_vllm.VLLM_KV_CACHE_LAYOUT in ("LBHNC", "HND"):
+            return (2, num_blocks, num_kv_heads, block_size, head_size)
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
@@ -256,6 +259,7 @@ class AscendFlashAttentionImpl(AttentionImpl[AscendFlashAttentionMetadata]):
         **kwargs,
     ):
         logger.info_once("Using Ascend FA3 attention backend.", scope="process")
+        self.use_bnsd_kv_cache = envs_vllm.VLLM_KV_CACHE_LAYOUT in ("LBHNC", "HND")
         self.num_heads = num_heads
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
         self.head_size = head_size
@@ -297,6 +301,7 @@ class AscendFlashAttentionImpl(AttentionImpl[AscendFlashAttentionMetadata]):
             key_cache=kv_cache[0],
             value_cache=kv_cache[1],
             slot_mapping=slot_mapping,
+            use_bnsd=self.use_bnsd_kv_cache,
         )
         notify_kv_cache_written(layer.layer_name)
 
@@ -336,11 +341,17 @@ class AscendFlashAttentionImpl(AttentionImpl[AscendFlashAttentionMetadata]):
             self.logits_soft_cap,
             self.sliding_window,
         )
+        # The A3 ABI reads logical [page, token, head, dim] views and detects
+        # physical BNBD from their strides, preserving HND transfer ownership.
+        k_cache, v_cache = kv_cache[0], kv_cache[1]
+        if self.use_bnsd_kv_cache:
+            k_cache = k_cache.transpose(1, 2)
+            v_cache = v_cache.transpose(1, 2)
         with attention_transfer_window():
             result = flash_attn_with_kvcache(
                 query,
-                kv_cache[0],
-                kv_cache[1],
+                k_cache,
+                v_cache,
                 cache_seqlens=attn_metadata.seq_lens,
                 page_table=attn_metadata.block_tables,
                 cu_seqlens_q=attn_metadata.query_start_loc,

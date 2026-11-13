@@ -1,0 +1,4 @@
+pr: 21850
+entries:
+  - category: bugfix
+    text: Enabled the optional A2/A3 FA3 backend for eligible local GLM DFlash2 draft layers under distributed target topologies, with HND KV cache writes and zero-copy FA3 read views for Mooncake transfers.
