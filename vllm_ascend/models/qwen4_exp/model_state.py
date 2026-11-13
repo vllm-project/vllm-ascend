@@ -162,5 +162,4 @@ class AscendQwen4ExpModelState(Qwen4ExpModelState, AscendMambaHybridModelState):
         """Keep the D2H producer and consumer on the same stable decision."""
         return getattr(self, "_skip_spec_cpu_length_sync", False) is True
 
-
 __all__ = ["AscendQwen4ExpModelState"]
