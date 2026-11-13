@@ -165,12 +165,6 @@ def test_mixed_non_spec_splits_conv_per_slice(initial_state) -> None:
     def chunk_gated_delta_rule(**kwargs):
         return kwargs["v"].clone(), kwargs["initial_state"].clone()
 
-    # Shape [1, num_tokens, num_heads].
-    gating = (
-        torch.zeros(1, 3, 1),
-        torch.ones(1, 3, 1),
-    )
-
     with (
         override_forward_context(forward_context),
         patch(
