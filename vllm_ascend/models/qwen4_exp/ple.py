@@ -347,9 +347,9 @@ def _patch_legacy_prefill(ple_layer_cls: type[Any]) -> None:
 
 def patch_upstream_ple_short_conv() -> None:
     """Install Ascend PLE runtime adaptations on the upstream classes."""
-    from vllm.models.qwen4_exp.common import ngram_embedding as upstream_ngram_embedding
     from vllm.models.qwen4_exp.amd import ple_layer as upstream_ple_layer
     from vllm.models.qwen4_exp.amd.ple_layer import Qwen4ExpPLELayer
+    from vllm.models.qwen4_exp.common import ngram_embedding as upstream_ngram_embedding
     from vllm.models.qwen4_exp.common.ngram_embedding import (
         Qwen4ExpPLEEmbeddingMethod,
         Qwen4ExpPLEUnquantizedEmbeddingMethod,
