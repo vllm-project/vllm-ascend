@@ -237,3 +237,38 @@ def gather_resident_rows_kernel(
     mask = valid[:, None] & (byte[None, :] < ROW_BYTES)
     payload = tl.load(source + src_offset[:, None] + byte[None, :], mask=mask, other=0)
     tl.store(destination + dst_offset[:, None] + byte[None, :], payload, mask=mask)
+
+
+@triton.jit
+def _invalidate_recycled_groups(
+    tables,
+    blocks,
+    state_indices,
+    STATES: tl.constexpr,
+    HOT: tl.constexpr,
+    BLOCK_COUNT: tl.constexpr,
+    PAGE_ROWS: tl.constexpr,
+    ITERATIONS: tl.constexpr,
+    TILE: tl.constexpr,
+):
+    table = tl.load(tables + tl.program_id(0)).to(tl.pointer_type(tl.int32))
+    state = tl.load(state_indices + tl.program_id(1))
+    slot = tl.program_id(2) * TILE + tl.arange(0, TILE)
+    valid = (state >= 0) & (state < STATES) & (slot < HOT)
+    value = tl.load(table + state * HOT + slot, mask=valid, other=-1)
+    valid = valid & (value >= 0)
+    page = tl.maximum(value, 0) // PAGE_ROWS
+    first = tl.load(blocks)
+    last = tl.load(blocks + BLOCK_COUNT - 1)
+    valid = valid & (page >= first) & (page <= last)
+    low = tl.full((TILE,), 0, tl.int32)
+    high = tl.full((TILE,), BLOCK_COUNT, tl.int32)
+    for _ in tl.static_range(ITERATIONS):
+        active = valid & (low < high)
+        middle = low + (high - low) // 2
+        key = tl.load(blocks + middle, mask=active, other=0)
+        advance = active & (key < page)
+        high = tl.where(active & ~advance, middle, high)
+        low = tl.where(advance, middle + 1, low)
+    key = tl.load(blocks + low, mask=valid & (low < BLOCK_COUNT), other=0)
+    tl.store(table + state * HOT + slot, -1, mask=valid & (low < BLOCK_COUNT) & (key == page))

@@ -7,9 +7,10 @@ import operator
 import torch
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.logger import logger
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import triton
 from vllm.utils.torch_utils import async_tensor_h2d
 
+from vllm_ascend.ops.triton.hisparse import _invalidate_recycled_groups
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 _BLOCK_BUCKET = 8
@@ -26,41 +27,6 @@ def _normalize_blocks(block_ids, block_size):
     if not blocks or blocks[0] < 0 or blocks[-1] * block_size + block_size - 1 > _INT32_MAX:
         return None
     return blocks
-
-
-@triton.jit
-def _invalidate_recycled_groups(
-    tables,
-    blocks,
-    state_indices,
-    STATES: tl.constexpr,
-    HOT: tl.constexpr,
-    BLOCK_COUNT: tl.constexpr,
-    PAGE_ROWS: tl.constexpr,
-    ITERATIONS: tl.constexpr,
-    TILE: tl.constexpr,
-):
-    table = tl.load(tables + tl.program_id(0)).to(tl.pointer_type(tl.int32))
-    state = tl.load(state_indices + tl.program_id(1))
-    slot = tl.program_id(2) * TILE + tl.arange(0, TILE)
-    valid = (state >= 0) & (state < STATES) & (slot < HOT)
-    value = tl.load(table + state * HOT + slot, mask=valid, other=-1)
-    valid = valid & (value >= 0)
-    page = tl.maximum(value, 0) // PAGE_ROWS
-    first = tl.load(blocks)
-    last = tl.load(blocks + BLOCK_COUNT - 1)
-    valid = valid & (page >= first) & (page <= last)
-    low = tl.full((TILE,), 0, tl.int32)
-    high = tl.full((TILE,), BLOCK_COUNT, tl.int32)
-    for _ in tl.static_range(ITERATIONS):
-        active = valid & (low < high)
-        middle = low + (high - low) // 2
-        key = tl.load(blocks + middle, mask=active, other=0)
-        advance = active & (key < page)
-        high = tl.where(active & ~advance, middle, high)
-        low = tl.where(advance, middle + 1, low)
-    key = tl.load(blocks + low, mask=valid & (low < BLOCK_COUNT), other=0)
-    tl.store(table + state * HOT + slot, -1, mask=valid & (low < BLOCK_COUNT) & (key == page))
 
 
 class RecycledGroupInvalidator:

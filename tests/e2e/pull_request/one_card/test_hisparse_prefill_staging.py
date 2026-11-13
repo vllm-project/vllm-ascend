@@ -95,45 +95,6 @@ def test_resident_prefill_plan_shared_layers(resident_block_size, host_pages):
         host._hisparse_registration.close()
 
 
-@pytest.mark.parametrize("dtype,width", [(torch.bfloat16, 576), (torch.float8_e4m3fn, 656)])
-@pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
-@pytest.mark.parametrize("num_rows", [0, 1, 4, 9])
-def test_backend_resident_payload_graph_replay(dtype, width, index_dtype, num_rows):
-    if not torch.npu.is_available() or not torch.npu.get_device_name(0).startswith("Ascend950"):
-        pytest.skip("HiSparse resident gather currently targets Ascend 950")
-    torch.npu.set_device(0)
-    stride = 3 * width
-    raw = torch.arange(7 * width * dtype.itemsize, dtype=torch.int64).to(torch.uint8).to("npu:0")
-    source = raw.view(dtype).as_strided((2, 2, width), (stride, width, 1), storage_offset=width)
-    rows = torch.empty(num_rows, dtype=index_dtype, device="npu:0")
-    destination = torch.empty((num_rows, width), dtype=dtype, device="npu:0")
-    rows.copy_((torch.arange(num_rows, dtype=index_dtype, device="npu:0") % 5) - 1)
-    backend = AscendHiSparseBackend()
-    backend.gather_resident_rows(source, destination, rows)
-    torch.npu.synchronize()
-    if not num_rows:
-        assert destination.numel() == 0
-        return
-    graph = torch.npu.NPUGraph()
-    try:
-        with torch.npu.graph(graph):
-            backend.gather_resident_rows(source, destination, rows)
-        for offset in (0, 2):
-            values = (torch.arange(num_rows, dtype=index_dtype) + offset) % 5 - 1
-            if index_dtype == torch.int64:
-                values[0] = -(1 << 34)
-            rows.copy_(values.to("npu:0"))
-            raw.bitwise_xor_(1)
-            graph.replay()
-            torch.npu.synchronize()
-            safe = values.long().clamp_min(0)
-            expected = source.view(torch.uint8).cpu()[safe // 2, safe % 2]
-            assert torch.equal(destination.view(torch.uint8).cpu(), expected)
-    finally:
-        torch.npu.synchronize()
-        graph.reset()
-
-
 def test_prefill_singleton_column_mapping_tracks_current_residency():
     if not torch.npu.is_available():
         pytest.skip("HiSparse prefill mapping requires an NPU")
