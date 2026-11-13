@@ -19,7 +19,7 @@ That MTP decoder is model-specific and is **not** implemented in vLLM. This tuto
 +-----------------------------+          +------------------------------------+
 ```
 
-Because MTP is bypassed, decoding falls back to plain autoregressive generation. Accuracy is preserved (see [Chapter 7](#7-accuracy-evaluation)). In the default `PIECEWISE` graph mode single-request latency is higher than the native implementation; enabling `FULL_DECODE_ONLY` (see [Section 9.2](#92-tuning-guidelines)) brings it below the native path. Throughput scales through continuous batching (see [Chapter 8](#8-performance-evaluation)).
+Because MTP is bypassed, decoding falls back to plain autoregressive generation. Accuracy is preserved (see [Chapter 7](#7-accuracy-evaluation)). In the stock `PIECEWISE` graph mode single-request latency is slightly higher than the native implementation; enabling `FULL_DECODE_ONLY` (accuracy-neutral, recommended as default, see [Section 9.2](#92-tuning-guidelines)) brings it below the native path on A2/v0.18 (on newer stacks the default graph already fuses decode, so the gain is smaller). Throughput scales through continuous batching (see [Chapter 8](#8-performance-evaluation)).
 
 The two processes can share one NPU (single-card deployment; about 22 GB of HBM in total) or use separate NPUs for lower latency and higher throughput. The measurements in this tutorial were taken on Atlas 800 A2 (64GB x 8) with vLLM Ascend v0.18.0rc1. The commands below use the version placeholder configured by the documentation build system; re-verify the numbers after upgrading to a later release.
 
@@ -133,7 +133,7 @@ After splitting, `/models/split/locate_qwen2_model` contains a plain `Qwen2ForCa
 
 ### 5.2 Start the language model server
 
-The LM server only hosts the text model. `--enable-prompt-embeds` is required; `--max-model-len` only needs to cover visual tokens (about 1.5k at 512 px) plus the output (about 16 tokens). Add `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` to capture the whole decode step; it cuts TPOT from about 32 ms to about 10 ms (see [Section 9.2](#92-tuning-guidelines)).
+The LM server only hosts the text model. `--enable-prompt-embeds` is required; `--max-model-len` only needs to cover visual tokens (the default `max-size 768` produces more than 512 px, so keep the 8192 default) plus the output (about 16 tokens). Add `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` to capture the whole decode step; it cuts TPOT from about 32 ms to about 10 ms (see [Section 9.2](#92-tuning-guidelines)). `FULL_DECODE_ONLY` is accuracy-neutral, so it is part of the default configuration.
 
 ```bash
 # Use ASCEND_RT_VISIBLE_DEVICES=0 instead when the client shares this NPU.
@@ -156,7 +156,15 @@ Startup takes about 90–100 s on A2 because ACLGraph compilation is included. W
 
 ### 5.3 Run the vision tower client
 
-The client builds the prompt, replaces the image placeholder tokens with the projected vision features, and sends the resulting embeddings through `prompt_embeds`. Each request carries about 1.3 MB of BF16 embeddings at 512 px.
+The client builds the prompt, replaces the image placeholder tokens with the projected vision features, and sends the resulting embeddings through `prompt_embeds`. Each request carries a few MB of BF16 embeddings (more at 768 px than at 512 px).
+
+!!! tip "Default = accuracy-lossless configuration"
+
+    The defaults below keep accuracy within ~1 pp of the native MTP path:
+    `max-size 768` for the client and `sdpa` (or the bit-identical `sdpa_nomask` fast path)
+    for the vision tower. `max-size 512` (throughput mode, see [Section 9.1](#91-recommended-configurations))
+    and `npu_fa` (see [Section 9.3](#93-model-specific-optimizations)) are **optional and accuracy-lossy**;
+    do not use them as the default.
 
 ```python
 import io, pybase64, torch, torch.nn as nn
@@ -167,6 +175,7 @@ from transformers import AutoModel, AutoProcessor
 
 MODEL = "/models/LocateAnything-3B"
 SPLIT = "/models/split"
+MAX_SIZE = 768  # default: accuracy-lossless. 512 = throughput mode (lower accuracy), 384 unusable.
 client = OpenAI(api_key="EMPTY", base_url="http://localhost:33333/v1")
 
 processor = AutoProcessor.from_pretrained(MODEL, trust_remote_code=True)
@@ -185,7 +194,7 @@ embed_tokens.load_state_dict(load_file(f"{SPLIT}/qwen2_embed_tokens.safetensors"
 embed_tokens = embed_tokens.to("npu").eval()
 
 def build_embeds(image: Image.Image, phrase: str) -> str:
-    image.thumbnail((512, 512), Image.Resampling.LANCZOS)
+    image.thumbnail((MAX_SIZE, MAX_SIZE), Image.Resampling.LANCZOS)
     prompt = f"Locate a single instance that matches the following description: {phrase}."
     messages = [{"role": "user", "content": [
         {"type": "image", "image": image},
@@ -246,7 +255,7 @@ Send the 10 images from the model repository demo and check that each response c
 grep -c "<box>" outputs.txt
 ```
 
-Expected output for a 512 px input on A2:
+Expected output for a 768 px input on A2:
 
 ```text
 <box><123><456><789><901></box>
@@ -256,13 +265,23 @@ Expected output for a 512 px input on A2:
 
 Because a bounding-box prompt has a single reference answer, IoU against the ground-truth box is used instead of a text benchmark. On the 10-image demo set (`ground_single` prompt, `temperature=0`):
 
-| Configuration | IoU mean | IoU min |
-| ------------- | -------- | ------- |
-| `max-size 512` | **96.3%** | 92.7% |
-| `max-size 768` | 95.9% | 92.3% |
-| `max-size 384` | 87.2% | 8.6% |
+| Configuration | Default? | IoU mean | IoU min |
+| ------------- | -------- | -------- | ------- |
+| `max-size 768` | **Yes (accuracy-lossless)** | 95.9% | 92.3% |
+| `max-size 512` | No (throughput mode, lossy) | **96.3%**¹ | 92.7% |
+| `max-size 384` | No (unusable) | 87.2% | 8.6% |
+
+¹ The 10-image set is tiny and the difference between 512 and 768 is within run-to-run noise (±1.5 pp). On the full RefCOCOg set the ordering reverses: **768 is the accuracy-safe default and 512 is ~1.6 pp worse** (see the warning below). Do not pick 512 as the default based on the 10-image number.
 
 The pure autoregressive path is at least as accurate as the native MTP path (94.4% on the same set), because the rule-based MTP decoder occasionally stops early and produces a worse box on some samples.
+
+!!! warning "Full-benchmark accuracy (why 768 is the default)"
+
+    The 10-image demo set is a regression guard, not a benchmark. On the full RefCOCOg test split (5023 samples), `max-size 512` is 2.5–3.9 pp behind native (F1@0.5 85.88% vs 88.39% at temperature 0.7); `max-size 768` narrows the gap to 0.97/1.67/1.09 pp (F1@0.5 / Mean F1 / Mean IoU) at about 43% lower c8/c32 throughput. **Use `max-size 768` as the default; `512` is an optional throughput mode that trades accuracy.**
+
+!!! note "Same-500-case native check (A3, vllm-ascend 0.30)"
+
+    On a fixed 500-case RefCOCOg subset (same images/prompts as the native run), greedy `max-size 768` stays within 1 pp of native Ascend-SACT on all three metrics (IoU −0.19 pp, F1@0.5 −0.80 pp, Mean F1 −0.40 pp). Single-pass `temperature=0.7` sampling can drift to −1.78 pp Mean F1; add output validation/retry (K=3 medoid) if you sample, which brings it back to within 1 pp. Greedy (the default here) does not need that.
 
 !!! note
 
@@ -273,6 +292,10 @@ The pure autoregressive path is at least as accurate as the native MTP path (94.
 ### 8.1 Default configuration (PIECEWISE, two NPUs)
 
 Measured on one Atlas 800 A2 node (910B3, 64GB), `max-size 512`, 10 demo images, 100 requests, 0 errors.
+
+!!! note
+
+    This chapter uses `max-size 512` **only as a throughput illustration**. The accuracy-lossless default is `max-size 768` (about 43% lower c8/c32 throughput, within ~1 pp of native on full RefCOCOg); use 512 only when you accept the accuracy trade-off. `FULL_DECODE_ONLY` (Section 8.2) is accuracy-neutral and belongs in the default.
 
 Single request, with the two stages broken down:
 
@@ -323,26 +346,36 @@ at concurrency 1 / 8 / 32, so `FULL_DECODE_ONLY` adds about +110% / +33% / +5% o
 preprocessing change. Do **not** combine `FULL_DECODE_ONLY` with `ngram` speculative decoding:
 the combination regresses to 1.01 / 6.69 / 11.97 img/s.
 
+!!! note "Newer stacks already fuse decode"
+
+    On a re-validation with vllm-ascend 0.30 on Atlas A3 (Ascend910_9362), the **default** graph already
+    reaches TPOT ≈ 7.7 ms, so `FULL_DECODE_ONLY` adds ~0 (serial 500-case: 4.66 → 4.71 img/s; conc8: 9.48 → 9.47).
+    It remains the recommended default because it is accuracy-neutral, but do not expect the +33% shown above
+    on that stack. The real ceiling there is the client vision lock (~9.5 img/s per process), not the LM.
+
 Stability: 2000+ requests across concurrency 1–64 (including a 1000-request run at concurrency 32)
 and `max-size` 384/448/512/768/1024/native completed with 0 errors; server HBM stayed at
-19.07–19.16 GB over 187 samples (no leak). Accuracy at those sizes was 87.3/94.3/96.3/95.9/95.9/95.5%,
-again confirming that 512 is the sweet spot and 384 is not usable.
+19.07–19.16 GB over 187 samples (no leak). Accuracy on the 10-image set at those sizes was
+87.3/94.3/96.3/95.9/95.9/95.5%; the 512-vs-768 difference is within noise on 10 images, but on the
+full RefCOCOg set 768 is the accuracy-safe default and 512 is an optional throughput mode. 384 is unusable.
 
 ## 9 Performance Tuning
 
 ### 9.1 Recommended Configurations
 
+**Accuracy-lossless settings are the default.** The two lossy knobs are `max-size 512` (throughput mode) and the `npu_fa` vision backend; both are opt-in only.
+
 | Scenario | NPUs | Key settings | Main consideration |
 | -------- | ---- | ------------ | ------------------ |
-| Low concurrency, lowest latency | 1–2 | `FULL_DECODE_ONLY`, `--max-num-seqs 8`, `max-size 512` | Single-stream about 311 ms with the client fast path; decode is no longer the bottleneck |
-| Online serving, medium concurrency | 1–2 | `FULL_DECODE_ONLY`, `--max-num-seqs 32`, `max-size 512` | 10–13 img/s per process; 2 processes on one NPU reach about 16.7 img/s |
-| Offline high throughput | 1–5 | `--max-num-seqs 32–64`, 2–4 client processes | 4 processes on one NPU reach about 25.3 img/s, but need guided decoding or output validation |
+| **Default (accuracy-lossless)** | 1–2 | `FULL_DECODE_ONLY`, `--max-num-seqs 32`, `max-size 768`, lossless vision path (`sdpa` or `sdpa_nomask`) | About 288 ms e2e; accuracy within ~1 pp of native on full RefCOCOg; 7.5–7.9 img/s per process |
+| Throughput mode (optional, lossy) | 1–2 | Same as default with `max-size 512` | 13–14 img/s per process / about 240 ms e2e, but ~2.5–3.9 pp lower accuracy; accept the trade-off explicitly |
+| Offline high throughput | 1–5 | `--max-num-seqs 32–64`, 2–4 client processes | 2 processes on one NPU ~16.7 img/s (768); 4 processes ~25.3 img/s (512) but need guided decoding or output validation |
 
 ### 9.2 Tuning Guidelines
 
 Tune in this order; each step was measured on the configuration above.
 
-1. **Input resolution (`max-size` in the client).** This is the dominant knob because it changes the number of vision tokens. Going from 768 to 512 gives +9% throughput at concurrency 8 and +38% at concurrency 32, with slightly better IoU. Do not go below 512 on this model: at 384 the IoU collapses to 87.2%.
+1. **Input resolution (`max-size` in the client).** This is the dominant knob because it changes the number of vision tokens. Going from 768 to 512 gives +9% throughput at concurrency 8 and +38% at concurrency 32, but on the full RefCOCOg 5023 benchmark it costs 1.6 pp F1@0.5 and 1.7 pp Mean IoU (512 is 2.5–3.9 pp behind native; 768 is within ~1 pp). Use 768 as the default (accuracy-lossless) and 512 only as an optional throughput mode. Do not go below 512: at 384 the IoU collapses to 87.2%.
 2. **Client concurrency.** End-to-end throughput saturates around concurrency 8–32 per client process. Beyond that, queueing grows faster than throughput.
 3. **Number of client processes.** The vision stage is serialized per process, and the image processor holds the GIL. With the default graph a single process caps at about 7–9 img/s; with `FULL_DECODE_ONLY` and preprocessing moved outside the vision lock it reaches about 10–13 img/s. Multiple processes can share one NPU: 2 processes reach about 16.7 img/s, 3 about 21.9, 4 about 25.3. However, at 3–4 processes we observed occasional malformed boxes (5/400 at 4 processes), so 2 processes per NPU is the safe default; for 3–4 add guided decoding or output validation/retry (Section 9.3). Multiple NPUs still scale nearly linearly.
 4. **Server knobs.** `--max-num-seqs` beyond 32 does not help (21.06 req/s at 32 vs 22.62 at 64). Keep the default prefix cache: disabling it costs about 10%. `--max-num-batched-tokens` 4096 showed no gain over the default 2048.
@@ -350,6 +383,7 @@ Tune in this order; each step was measured on the configuration above.
 
 ### 9.3 Model-Specific Optimizations
 
+- **Classify every knob as lossless or lossy before enabling it.** Lossless (safe as default): vision `sdpa_nomask` (bit-identical to upstream, ~+20% on 500 cases), moving preprocessing outside the vision lock (bit-identical), Ref-prefix prompt (`<ref>{phrase}</ref>`, IoU change < 0.1 pp), and `FULL_DECODE_ONLY`. Lossy (opt-in only, never default): `max-size 512` (−1.6 pp IoU on full RefCOCOg) / `384` (unusable), and the `npu_fa` vision backend (−0.5 pp IoU and rare malformed boxes; pair with output validation/retry or guided decoding).
 - **The vision tower must be serialized inside a client process.** Running MoonViT concurrently on one NPU produces silently wrong boxes (IoU drops from 96% to 82.7%, with some samples at 0.0) rather than raising an error. Guard `extract_feature` with a lock, or use one process per NPU.
 - **Do not batch images through the vision tower on Ascend.** Batching 8 images into one `extract_feature` call is about 5x slower per image than running them one by one (516 ms/img vs 104 ms/img), and processor-level batching with variable shapes returns the wrong number of feature tokens. Feed one image per call.
 - **The image processor has no fast implementation.** `AutoProcessor(..., use_fast=True)` falls back to the slow path, so preprocessing costs about 35 ms per image at concurrency 1 and about 140 ms under GIL contention at concurrency 32. That is the practical ceiling of a single client process. Moving the processor build outside the vision lock (so CPU preprocessing overlaps the serialized NPU encode) raises concurrency-32 throughput by about 11% (11.05 → 12.26 img/s) with no accuracy change.
