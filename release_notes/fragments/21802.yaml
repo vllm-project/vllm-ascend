@@ -1,4 +1,4 @@
-pr: 0
+pr: 21802
 entries:
   - category: performance
     text: Preserve shared and routed expert overlap when SuperKernel and shared-expert multistream overlap are enabled by separating MoE fusion scopes.
