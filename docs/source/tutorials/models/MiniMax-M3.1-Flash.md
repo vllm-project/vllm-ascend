@@ -216,6 +216,21 @@ For text-only deployment, `--limit-mm-per-prompt` can be omitted. For multimodal
 
 ### 5.1 Single-Node Online Deployment
 
+On 950DT products, MiniMax-M3 sparse attention automatically uses Union when
+the optional, matched `cann_ops_nn_custom` UnionSparseGen and
+`cann_ops_transformer_custom` GBSA exact-mask extensions are installed. The
+supported geometry is 128-token pages, head dimension 128, one local KV head,
+and up to 16 local query heads. Other hardware, unsupported geometry, or missing
+extensions retain native Q-gather-KV attention.
+
+Union uses the existing `--kv-cache-dtype` and `--kv-cache-dtype-skip-layers`
+settings: `auto` keeps the model dtype, while `fp8`/`fp8_e4m3` uses E4M3 KV and
+casts Q through the native FP8 helper. No routing policy or separate quantization
+switch is needed. Groups contain up to eight adjacent queries within each
+request; the exact mask preserves each query's selected KV blocks and causality.
+The optional extensions must provide matching UnionSparseGen and GBSA exact-mask
+kernels; package names alone do not establish binary compatibility.
+
 Single-node deployment runs Prefill and Decode on the same host. The A3 example uses W8A8 weights on all 16 NPUs, and the 950DT products example uses W8A8-MXFP8 weights on all eight NPUs. Both use [DSpark speculative decoding](../../user_guide/feature_guide/speculative_decoding.md#speculating-using-dspark), which generates draft tokens and verifies them with the target model.
 
 === "A3 series (W8A8)"
