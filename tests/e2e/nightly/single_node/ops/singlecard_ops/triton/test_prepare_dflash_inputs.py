@@ -130,6 +130,22 @@ ACCURACY_CASES = [
         "parallel_drafting_token_id": 777,
     },
     {
+        # A 256-token manager block can back two 128-token attention blocks.
+        # Context and query slots cover the null block and the next valid block.
+        "name": "null_manager_block_spans_two_kernel_blocks",
+        "req_lens": [255],
+        "position_starts": [0],
+        "idx_mapping": [0],
+        "null_blocks": [(0, 0)],
+        "max_num_reqs": 2,
+        "max_num_tokens": 512,
+        "max_model_len": 512,
+        "block_size": 256,
+        "num_query_per_req": 5,
+        "num_speculative_steps": 4,
+        "parallel_drafting_token_id": 778,
+    },
+    {
         "name": "dcp_rank0_interleave1_null_block",
         "req_lens": [17, 9],
         "position_starts": [6, 30],
