@@ -9,7 +9,14 @@ import pytest
 import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.v1.hisparse.layout import get_hisparse_kv_cache_groups
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor, SparseCacheRole, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    KVCacheLayout,
+    KVCacheTensor,
+    SparseCacheRole,
+    UniformTypeKVCacheSpecs,
+)
+from vllm.v1.worker.utils import allocate_kv_cache
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import AscendStoreConnector
@@ -18,17 +25,21 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_b
     MmcDirect,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
-from vllm_ascend.hisparse.binding import _allocate_aligned_slab, _bind_indexer_views
+from vllm_ascend.hisparse.backend import AscendHiSparseBackend
+from vllm_ascend.hisparse.binding import align_hisparse_slab_views, reserve_hisparse_slab_alignment
+
+SLAB_ALIGNMENT = 2 * 1024 * 1024
 
 
 def aligned_tensor(size: int) -> torch.Tensor:
-    backing = torch.empty(size + 2 * 1024 * 1024, dtype=torch.int8)
-    offset = -backing.data_ptr() % (2 * 1024 * 1024)
+    backing = torch.empty(size + SLAB_ALIGNMENT, dtype=torch.int8)
+    offset = -backing.data_ptr() % SLAB_ALIGNMENT
     return backing[offset : offset + size]
 
 
+@pytest.mark.parametrize("misalignment", [0, 1, SLAB_ALIGNMENT - 1])
 @pytest.mark.parametrize("indexer_c8", [False, True])
-def test_hisparse_groups_register_with_independent_host_blocks(indexer_c8: bool) -> None:
+def test_hisparse_groups_register_with_independent_host_blocks(indexer_c8: bool, misalignment: int) -> None:
     block_size = 128
     num_device_blocks = 4
     num_host_blocks = 5
@@ -61,27 +72,53 @@ def test_hisparse_groups_register_with_independent_host_blocks(indexer_c8: bool)
     )
     groups = get_hisparse_kv_cache_groups(config, {source_name: source_spec, indexer_name: indexer_spec})
     assert groups is not None
-    cache_config = KVCacheConfig(num_device_blocks, [], groups, hisparse_host_num_blocks=num_host_blocks)
-
+    resident_name = groups[2].layer_names[0]
+    hot_name = groups[3].layer_names[0]
+    indexer_stride = 17408 if indexer_c8 else 98304
+    indexer_offset = 128 if indexer_c8 else 32768
+    size = num_device_blocks * indexer_stride
+    host_tensor = KVCacheTensor(
+        size=num_host_blocks * 32768, layers=[source_name], layer_stride=0, block_stride=32768, host_resident=True
+    )
+    device_tensors = [
+        KVCacheTensor(size, [indexer_name], indexer_spec.page_size_bytes, indexer_stride, offset=indexer_offset),
+        KVCacheTensor(size, [resident_name], 0, indexer_stride),
+        KVCacheTensor(size, [hot_name], 0, indexer_stride),
+    ]
+    cache_config = KVCacheConfig(
+        num_device_blocks, [host_tensor, *device_tensors], groups, hisparse_host_num_blocks=num_host_blocks
+    )
     source = aligned_tensor(num_host_blocks * 32768).view(torch.bfloat16).view(num_host_blocks, 128, 1, 128)
-    if indexer_c8:
-        size = num_device_blocks * 17408
-        alignment = 2 * 1024 * 1024
-        # Force a non-aligned allocation even on hosts whose allocator happens
-        # to return a huge-page-aligned address for this test.
-        unaligned = aligned_tensor(size + alignment)[1:]
-        with patch("vllm_ascend.hisparse.binding.torch.zeros", return_value=unaligned):
-            raw = _allocate_aligned_slab(size, torch.device("cpu"))
-        assert raw.data_ptr() % alignment == 0
-        assert raw.storage_offset() == 0
-        assert raw.untyped_storage().nbytes() == size
-        indexer = torch.as_strided(raw.view(torch.float8_e4m3fn), (4, 1, 128, 132), (17408, 16896, 132, 1))
-    else:
-        raw = aligned_tensor(num_device_blocks * 3 * 32768)
-        indexer = raw.view(torch.bfloat16).view(4, 3, 128, 128)[:, 0].view(4, 1, 128, 128)
-    caches = {source_name: source, indexer_name: indexer}
+    padded_size = size + SLAB_ALIGNMENT - 1
+    backing = aligned_tensor(padded_size + misalignment)
+    storage = backing.untyped_storage()
+    begin = backing.storage_offset() + misalignment
+    owner = torch.empty(0, dtype=torch.int8).set_(storage[begin : begin + padded_size], 0, (padded_size,), (1,))
+    assert owner.data_ptr() % SLAB_ALIGNMENT == misalignment
     context = {source_name: SimpleNamespace(), indexer_name: SimpleNamespace()}
-    _bind_indexer_views(caches, {indexer_name: indexer_spec}, context)
+    with (
+        reserve_hisparse_slab_alignment(cache_config),
+        patch("vllm.v1.worker.utils.torch.zeros", return_value=owner) as allocate,
+    ):
+        assert [tensor.size for tensor in cache_config.kv_cache_tensors] == [host_tensor.size, *([padded_size] * 3)]
+        device_config = replace(cache_config, kv_cache_tensors=cache_config.kv_cache_tensors[1:])
+        caches = allocate_kv_cache(device_config, torch.device("cpu"), KVCacheLayout.BLHNC)
+        caches[source_name] = source
+        AscendHiSparseBackend().prepare_kv_cache_views(cache_config, caches, context)
+        allocate.assert_called_once_with(padded_size, dtype=torch.int8, device=torch.device("cpu"))
+    raw = caches[resident_name]
+    assert raw.data_ptr() == owner.data_ptr() + (-owner.data_ptr() % SLAB_ALIGNMENT)
+    assert raw.storage_offset() == 0
+    assert raw.untyped_storage().nbytes() == raw.numel() == size
+    assert caches[source_name] is source
+    for view in (caches[hot_name], *caches[indexer_name]):
+        assert view.untyped_storage().data_ptr() == raw.data_ptr()
+    assert caches[indexer_name][0].data_ptr() == raw.data_ptr() + indexer_offset
+    assert [tensor.size for tensor in cache_config.kv_cache_tensors] == [host_tensor.size, *([size] * 3)]
+    # The storage is an alias of the Core allocation, with no copy.
+    raw[0] = 37
+    assert owner[-owner.data_ptr() % SLAB_ALIGNMENT].item() == 37
+    del caches[hot_name]
 
     worker = KVPoolWorker.__new__(KVPoolWorker)
     worker.use_recoverssm = False
@@ -118,7 +155,7 @@ def test_hisparse_groups_register_with_independent_host_blocks(indexer_c8: bool)
     assert lengths[ptrs.index(source.data_ptr())] == num_host_blocks * 32768
     assert worker._hisparse_host_resident_groups == frozenset({0})
     if indexer_c8:
-        assert lengths[ptrs.index(raw.data_ptr())] == (num_device_blocks - 1) * 17408 + 16896
+        assert lengths[ptrs.index(raw.data_ptr())] == indexer_offset + (num_device_blocks - 1) * 17408 + 16896
     worker.kv_cache_config.kv_cache_tensors = [
         KVCacheTensor(size=5 * 32768, layers=[source_name], layer_stride=0, block_stride=32768, host_resident=True),
         KVCacheTensor(
@@ -143,6 +180,19 @@ def test_hisparse_groups_register_with_independent_host_blocks(indexer_c8: bool)
         else replacement
     )
     assert worker._hisparse_layout_id() != layout_id
+
+
+def test_hisparse_alignment_is_scoped_to_the_padded_allocation():
+    tensor = KVCacheTensor(128, ["cache"], 0, 128)
+    config = KVCacheConfig(1, [tensor], [])
+    original = torch.zeros(128, dtype=torch.int8)
+    caches = {"cache": original}
+    align_hisparse_slab_views(config, caches)
+    assert caches["cache"] is original
+    with pytest.raises(ValueError, match="reserved alignment padding"), reserve_hisparse_slab_alignment(config):
+        align_hisparse_slab_views(config, caches)
+    align_hisparse_slab_views(config, caches)
+    assert caches["cache"] is original
 
 
 def test_memcache_splits_host_and_device_batches_without_reordering(caplog) -> None:
