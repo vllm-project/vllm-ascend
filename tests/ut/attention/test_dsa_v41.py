@@ -158,41 +158,61 @@ def _attn(selected):
 
 
 def test_compressed_kv_source_cache_update_covers_full_batch(monkeypatch):
-    hidden_states = torch.zeros(TOKENS, 8)
+    head_dim = 8
+    compress_ratio = 2
+    hidden_states = torch.arange(TOKENS * head_dim, dtype=torch.float32).view(TOKENS, head_dim)
     positions = torch.arange(TOKENS)
+    swa_cache = torch.zeros_like(hidden_states)
+    long_kv_cache = torch.zeros_like(hidden_states)
+    compressed_slots = torch.tensor([2, 0])
+    cache_metadata = SimpleNamespace(slot_mapping=compressed_slots)
+    cos, sin = torch.ones(TOKENS, 4), torch.zeros(TOKENS, 4)
     metadata = SimpleNamespace(
         positions=positions,
-        swa=object(),
-        rope=lambda layer_name, num_tokens: (
-            torch.zeros(num_tokens, 4),
-            torch.zeros(num_tokens, 4),
+        swa=SimpleNamespace(num_actual_tokens=TOKENS, slot_mapping=positions),
+        rope=lambda layer_name, num_tokens: (cos[:num_tokens], sin[:num_tokens]),
+        compressor=SimpleNamespace(
+            cache=cache_metadata,
+            state=SimpleNamespace(
+                c2_metadata_group_id=None,
+                c2_source_cos=cos[: len(compressed_slots)],
+                c2_source_sin=sin[: len(compressed_slots)],
+            ),
         ),
+        indexer=SimpleNamespace(cache=cache_metadata),
     )
-    attn = SimpleNamespace(rotary_emb=SimpleNamespace(layername="rope"))
-    impl = _impl(SimpleNamespace(is_kv_source=True, compress_ratio=2))
-    calls: list[tuple[str, int] | tuple[str, int, list[int]]] = []
 
-    def project_kv(attn, states, cos, sin):
-        calls.append(("project_kv", states.shape[0]))
-        return states
+    def pool_projected(kv, score, state, **kwargs):
+        torch.testing.assert_close(kv, hidden_states)
+        return kv.view(-1, compress_ratio, head_dim).mean(dim=1)
 
-    def write_swa_cache(attn, swa_metadata, kv):
-        calls.append(("write_swa", kv.shape[0]))
+    identity = torch.nn.Identity()
+    attn = SimpleNamespace(
+        head_dim=head_dim,
+        rotary_emb=SimpleNamespace(layername="rope"),
+        wq_a=identity,
+        q_norm=identity,
+        wq_b=identity,
+        wkv=identity,
+        kv_norm=identity,
+        dsa_attn=SimpleNamespace(swa_cache_layer=SimpleNamespace(kv_cache=[swa_cache])),
+        long_kv_cache=SimpleNamespace(kv_cache=[long_kv_cache]),
+        compressor=SimpleNamespace(wkv=identity, wgate=torch.zeros_like, pool_projected=pool_projected),
+        indexer=SimpleNamespace(update_keys=lambda *args: None),
+    )
+    impl = _impl(
+        SimpleNamespace(is_kv_source=True, has_long_context=True, is_index_source=False, compress_ratio=compress_ratio)
+    )
+    impl.multistream_dsv4_dsa_overlap = False
+    monkeypatch.setattr(AscendDSAV41Impl, "_apply_rotary", staticmethod(lambda *args: None))
+    monkeypatch.setattr(dsa_v41, "scatter_cache_sk", lambda cache, slots, value: cache.index_copy_(0, slots, value))
 
-    def write_compressed_source(attn, states, source_positions, cos, sin, source_metadata):
-        calls.append(("write_compressed", states.shape[0], source_positions.tolist()))
+    impl._prepare_inputs_and_caches(attn, hidden_states, metadata, {})
 
-    monkeypatch.setattr(impl, "_project_kv", project_kv)
-    monkeypatch.setattr(AscendDSAV41Impl, "_write_swa_cache", staticmethod(write_swa_cache))
-    monkeypatch.setattr(impl, "_write_compressed_source", write_compressed_source)
-
-    impl._update_caches(attn, hidden_states, metadata)
-
-    assert calls == [
-        ("project_kv", TOKENS),
-        ("write_swa", TOKENS),
-        ("write_compressed", TOKENS, positions.tolist()),
-    ]
+    torch.testing.assert_close(swa_cache, hidden_states)
+    expected_long_kv = torch.zeros_like(long_kv_cache)
+    expected_long_kv[compressed_slots] = (hidden_states[::2] + hidden_states[1::2]) / compress_ratio
+    torch.testing.assert_close(long_kv_cache, expected_long_kv)
 
 
 @pytest.mark.parametrize("empty_cache", [True, False])
