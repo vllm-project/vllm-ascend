@@ -25,6 +25,8 @@ class AscendPLEHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
     def __init__(self, *args, **kwargs):
         self._host_table: HostUvaBuffer | SharedUvaBuffer | None = None
         self._shared_group = None
+        if get_etp_group().world_size != get_tp_group().world_size:
+            raise ValueError("PLE host lookup requires ETP=TP")
         config = get_current_vllm_config().engram_config
         if config is not None and config.dp_shared_memory:
             group = get_engram_dp_group()
@@ -34,8 +36,6 @@ class AscendPLEHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
                         "PLE dp_shared_memory requested but DP replicas span multiple nodes; "
                         "falling back to private host tables."
                     )
-                elif get_etp_group().world_size != get_tp_group().world_size:
-                    raise ValueError("PLE shared tables require ETP=TP")
                 else:
                     self._shared_group = group
             else:
@@ -123,8 +123,6 @@ class AscendPLEHostEmbedding(Qwen4ExpPLEPinnedHostEmbedding):
     def forward(self, ngram_ids: torch.Tensor) -> torch.Tensor:
         if self._host_table is None or self.weight is None:
             raise RuntimeError("PLE host table has been closed")
-        if self.etp_data_parallel_size != 1:
-            raise ValueError("PLE host lookup requires ETP=TP")
         output = torch.empty((*ngram_ids.shape, self.embedding_dim), dtype=torch.bfloat16, device=ngram_ids.device)
         ple_lookup.lookup(
             self._host_table.ptrs,
