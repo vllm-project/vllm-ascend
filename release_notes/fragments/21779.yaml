@@ -1,0 +1,6 @@
+pr: 21779
+entries:
+  - category: bugfix
+    text: Fixed Kimi K3 latent routed down/up projections bypassing the single-group GMM path during eager MXFP8 execution.
+    model: kimi-k3
+    hardware: [A5]
