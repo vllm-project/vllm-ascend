@@ -16,6 +16,12 @@ from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import (
 class AscendLiLiCorrSpeculator(LiLiCorrSpeculator, AscendDFlash2Speculator):
     """Keep upstream LiLiCorr scoring and reuse Ascend DFlash2 runtime guards."""
 
+    # DFlash2's candidate top-k merge is lmhead-TP aligned, but LiLiCorr's
+    # candidate-lattice scoring has no group-uniform row basis — the same
+    # standard-TP requirement load_draft_model enforces below. Reject at
+    # construction, before candidate sampling, with the unified message.
+    _lmhead_tp_sample_draft_supported = False
+
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         # DFlash2 supports ACL graphs, but LiLiCorr's scoring path still
         # requires eager execution. Keep this restriction local to LiLiCorr.

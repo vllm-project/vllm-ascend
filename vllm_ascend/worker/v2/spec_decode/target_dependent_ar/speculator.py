@@ -271,6 +271,18 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         """
         self.input_batch = input_batch
         self._eplb_dummy_run = dummy_run
+        # lmhead TP: stash the round's DP-agreed request count for the
+        # per-step draft-head capacity publish. The draft syncs below are
+        # request-scaled (the bootstrap reuses the target's
+        # (k+1)-rows-per-request verify sync, the continuations rebuild on
+        # a one-row basis), so the request count — not the raw synced
+        # token max — is the tightest group-uniform capacity for the
+        # one-row-per-request draft head in every phase. Replicated drafts
+        # sync global tokens instead; leave the stash unset so their
+        # publish keeps the raw-sync behavior.
+        self._lmhead_tp_uniform_num_reqs = (
+            None if self.pcp_manager is not None or dp_sync_state is None else getattr(dp_sync_state, "num_reqs", None)
+        )
         # PCP can change the draft prefill token layout and uniform decode
         # shape. Negotiate its DP agreement instead of reusing the target's.
         sync_state = None if self.pcp_manager is not None else dp_sync_state
@@ -291,10 +303,6 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         with (
             build_attn_metadata_wrapper(),
             torch_gather_wrapper(),
-            self._lmhead_pad_size_context(
-                sync_state,
-                capture_num_reqs=input_batch.num_reqs if self.dp_size == 1 else None,
-            ),
         ):
             return super().propose(
                 input_batch,
@@ -383,6 +391,12 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         # dummy runs to cause out-of-bounds indexing during capture.
         self.last_token_indices.zero_()
         self.idx_mapping.zero_()
+        # Capture invokes the phase entries directly (no propose round),
+        # so a request-count stash left over from the last dummy run would
+        # be stale against the capture buckets; clear it so the in-capture
+        # capacity publish falls back to the raw synced max / static
+        # bound, exactly as before.
+        self._lmhead_tp_uniform_num_reqs = None
 
         # Capture the prefill routine (model forward + compute_logits +
         # sample).
@@ -442,16 +456,15 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         then apply Ascend-specific attention-metadata updates required by the
         FIA operator."""
         # vLLM #60335 added `num_speculative_steps` on main.
-        with self._lmhead_pad_size_context(capture_num_reqs=num_reqs):
-            super()._generate_draft(
-                num_reqs,
-                num_tokens_padded,
-                attn_metadata,
-                slot_mappings,
-                num_tokens_across_dp,
-                cudagraph_runtime_mode,
-                num_speculative_steps,
-            )
+        super()._generate_draft(
+            num_reqs,
+            num_tokens_padded,
+            attn_metadata,
+            slot_mappings,
+            num_tokens_across_dp,
+            cudagraph_runtime_mode,
+            num_speculative_steps,
+        )
         if attn_metadata is not None:
             self._update_decode_attn_metadata(attn_metadata, 1, num_reqs)
 
@@ -504,19 +517,18 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
                 name: metadata for name, metadata in attn_metadata.items() if name in self.draft_attn_layer_names
             }
 
-        with self._lmhead_pad_size_context(capture_num_reqs=num_reqs):
-            # vLLM main forwards `skip_sample` so the drafter KV stays in sync
-            # without sampling when num_speculative_tokens == 0.
-            super()._prefill(
-                num_reqs,
-                num_tokens,
-                attn_metadata,
-                slot_mappings,
-                num_tokens_across_dp,
-                cudagraph_runtime_mode,
-                mm_inputs,
-                skip_sample,
-            )
+        # vLLM main forwards `skip_sample` so the drafter KV stays in sync
+        # without sampling when num_speculative_tokens == 0.
+        super()._prefill(
+            num_reqs,
+            num_tokens,
+            attn_metadata,
+            slot_mappings,
+            num_tokens_across_dp,
+            cudagraph_runtime_mode,
+            mm_inputs,
+            skip_sample,
+        )
 
     def _build_attn_metadata(
         self,

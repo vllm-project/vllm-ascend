@@ -356,10 +356,7 @@ class NPUModelRunner(GPUModelRunner):
                 "prompt logprobs and fixed-token prompt scoring are not supported with lmhead TP."
             )
 
-        state = self.execute_model_state
-        self._lmhead_pad_size = self._get_lmhead_pad_size(state) if state is not None and lmhead_tp_enable() else None
         output = super().sample_tokens(grammar_output)
-        self._lmhead_pad_size = None
         # Close the per-step msprobe dump cycle on the normal last-PP-rank
         # path (v1 parity: v1 finalizes at the end of sample_tokens).
         self._finalize_dump_data()
@@ -720,14 +717,23 @@ class NPUModelRunner(GPUModelRunner):
         if not dummy_run and not is_profile:
             self._maybe_send_draft_kv(scheduler_output)
         self.model_state.kvpp_is_dummy_run = False
+        self._publish_lmhead_tp_step_capacity()
         if dummy_run and lmhead_tp_enable() and not is_profile and self.is_last_pp_rank:
-            # Idle ranks join the same LMHead collective size as active ranks.
+            # lmhead TP: idle DP ranks never call sample(), so they must join
+            # the target LM-head collectives here at the group-agreed capacity
+            # (V1: ``need_dummy_logits``). The parent's dummy forward already
+            # ran the draft LM-head collectives exactly once, so only the
+            # target side is joined -- joining the draft again would
+            # double-count it and hang HCCL. The capacity is the dynamic
+            # DP-synced value captured by the parent forward (cached on the
+            # lm_head), falling back to the static group-agreed bound.
             if self.execute_model_state is None:
                 raise RuntimeError(
                     "lmhead TP dummy join expects execute_model_state published by the upstream dummy execute_model."
                 )
+            capacity = self._lmhead_tp_step_capacity()
             dummy_indices = torch.zeros(
-                self._get_lmhead_pad_size(self.execute_model_state),
+                capacity,
                 dtype=torch.int64,
                 device=self.device,
             )
@@ -1148,24 +1154,64 @@ class NPUModelRunner(GPUModelRunner):
         ``max_num_reqs * decode_query_len``); drift desyncs and hangs."""
         return lmhead_tp_max_num_logits(self.max_num_reqs, self.decode_query_len)
 
-    def _get_lmhead_pad_size(self, execute_model_state) -> int:
-        pad_size = self._lmhead_tp_max_num_logits()
-        if self.dcp_size == 1 and execute_model_state is not None:
-            # vLLM #60754 renamed the stored DP-sync state on main.
-            dp_sync = execute_model_state.dp_sync if vllm_version_is("0.31.0") else execute_model_state.dp_sync_state
-            if dp_sync is not None:
-                pad_size = min(pad_size, int(dp_sync.num_tokens_across_dp.max().item()))
-        return pad_size
+    def _lmhead_tp_step_capacity(self) -> int:
+        """Group-agreed lmhead-TP capacity for this step.
+
+        The target side resolves the capacity from the DP sync in
+        ``_publish_lmhead_tp_step_capacity`` (called at the end of every
+        ``execute_model``) and stores it on the runner
+        (``_lmhead_tp_step_capacity_value``), so ``sample()``, the idle-rank
+        dummy join, and the lm-head forward all read the same per-step value.
+        Before the first sync (or when no DP sync ran) it falls back to the
+        static ``max_num_reqs * decode_query_len`` bound, which is derived
+        purely from global config so all ranks agree.
+        """
+        value = getattr(self, "_lmhead_tp_step_capacity_value", None)
+        return value if value is not None else self._lmhead_tp_max_num_logits()
+
+    def _publish_lmhead_tp_step_capacity(self) -> None:
+        """Publish the per-step target lmhead-TP capacity from the DP sync.
+
+        ``execute_model`` calls this after ``super().execute_model`` returns.
+        When ``execute_model_state.dp_sync_state`` holds a fresh DP-synced
+        request count (``DPSyncState.num_reqs``, identical on every DP rank;
+        includes request padding in FULL graph), the target capacity is
+        ``num_reqs * decode_query_len`` and replaces any previous value. When no
+        fresh DP sync is available this step (e.g. an idle dummy run that did
+        not re-sync), the previously published value is kept so a busy rank's
+        value is inherited; only when nothing was ever published is the static
+        ``max_num_reqs * decode_query_len`` bound used as a fallback.
+
+        The field is read by name (``dp_sync_state``) matching upstream's
+        ``ExecuteModelState``; a name drift here silently disables the target
+        dynamic capacity (the regression test constructs the real NamedTuple
+        to lock the wiring).
+        """
+        if not lmhead_tp_enable():
+            return
+        state = self.execute_model_state
+        dp_sync = getattr(state, "dp_sync_state", None) if state is not None else None
+        num_reqs = None
+        if dp_sync is not None:
+            num_reqs = getattr(dp_sync, "num_reqs", None)
+        if num_reqs is not None:
+            self._lmhead_tp_step_capacity_value = num_reqs * self.decode_query_len
+        elif getattr(self, "_lmhead_tp_step_capacity_value", None) is None:
+            # No DP sync and no value published yet: use the static bound.
+            self._lmhead_tp_step_capacity_value = self.max_num_reqs * self.decode_query_len
+        # Otherwise keep the previously published dynamic value.
 
     def sample(self, hidden_states, input_batch, grammar_output):
         """Override GPUModelRunner.sample for lmhead TP: every rank must feed
-        compute_logits the same row count — pad up to ``_lmhead_tp_max_num_logits()``
-        and trim back; prompt_logprobs stays unsupported (same as V1)."""
+        compute_logits the same row count — pad up to the group-agreed capacity
+        (DP-synced per-step value, falling back to the static
+        ``max_num_reqs * decode_query_len`` bound) and trim back;
+        prompt_logprobs stays unsupported (same as V1)."""
         if not lmhead_tp_enable():
             return super().sample(hidden_states, input_batch, grammar_output)
 
         num_logits = input_batch.logits_indices.shape[0]
-        capacity = getattr(self, "_lmhead_pad_size", None) or self._lmhead_tp_max_num_logits()
+        capacity = self._lmhead_tp_step_capacity()
         # V1-style index pad: pad a private copy of the indices (input_batch keeps
         # the real ones; the V2 sampler gathers penalties by them) so one gather
         # feeds compute_logits the capacity rows; zero entries gather row 0.
