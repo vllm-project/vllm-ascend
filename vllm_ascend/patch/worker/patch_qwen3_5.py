@@ -20,6 +20,7 @@
 from functools import wraps
 
 import torch
+from vllm.config import VllmConfig
 from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention as _GDNBaseCls
@@ -33,12 +34,20 @@ except ImportError:
     IntermediateTensors = None
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_reduce_scatter
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention, initialize_packed_conv_weight
 from vllm_ascend.ops.gdn_checkpoint import initialize_gdn_checkpoints
+from vllm_ascend.ops.qwen3_5_sp import (
+    Qwen35GdnInProjAllGatherMatmulOp,
+    Qwen35OProjMMReduceScatterOp,
+    log_disabled_fusion,
+)
 
 _GDN_PATCH_TARGET = _GDNBaseCls
 _GDN_ORIGINAL_INIT = _GDN_PATCH_TARGET.__init__
+_QWEN3_5_LAYER_ORIGINAL_INIT = Qwen3_5DecoderLayer.__init__
 
 
 def _uses_multimodal_rope(attention: Qwen3NextAttention) -> bool:
@@ -109,20 +118,31 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
         positions: torch.Tensor = None,
         **kwargs: object,
     ):
+        use_sp = self.use_attn_reduce_scatter_for_moe
+        full_num_tokens = positions.shape[-1]
+
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        if self.layer_type == "linear_attention":
+        attention_is_sharded = False
+        if use_sp:
+            if self.gdn_in_proj_ag_mm_op is not None:
+                hidden_states = self.gdn_in_proj_ag_mm_op(hidden_states)
+                attention_is_sharded = True
+            else:
+                hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+
+        if self.layer_type == "linear_attention" and not attention_is_sharded:
             hidden_states = self.linear_attn(hidden_states=hidden_states)
-        elif self.layer_type == "full_attention":
+        elif self.layer_type == "full_attention" and not attention_is_sharded:
             hidden_states = self.self_attn(
                 hidden_states=hidden_states,
                 positions=positions,
             )
-        else:
+        elif not attention_is_sharded:
             raise ValueError("Invalid layer_type")
 
         if self.layer_scale:
@@ -131,9 +151,15 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
             else:
                 hidden_states = hidden_states * (self.attn_layer_scale.to(hidden_states.dtype) + 1)
 
+        if use_sp and not self.fuse_o_proj_mm_reduce_scatter:
+            hidden_states = sp_reduce_scatter(hidden_states)
+
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        hidden_states = self.mlp(hidden_states)
+        if use_sp:
+            hidden_states = self.mlp(hidden_states, already_sequence_parallel=True)
+        else:
+            hidden_states = self.mlp(hidden_states)
 
         if self.layer_scale:
             if len(hidden_states.shape) == 2:
@@ -145,6 +171,40 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
                 hidden_states = hidden_states * (self.ffn_layer_scale.to(hidden_states.dtype) + 1)
 
         return hidden_states, residual
+
+
+def _qwen3_5_decoder_layer_init_with_sp_fusion(
+    self,
+    vllm_config: VllmConfig,
+    layer_type: str,
+    prefix: str = "",
+) -> None:
+    _QWEN3_5_LAYER_ORIGINAL_INIT(self, vllm_config, layer_type, prefix=prefix)
+    self.fuse_o_proj_mm_reduce_scatter = False
+    self.gdn_in_proj_ag_mm_op = None
+
+    if not self.use_attn_reduce_scatter_for_moe:
+        return
+    if not get_current_hardware_profile().supports(HardwareCapability.GRAPH_MM_REDUCE_SCATTER_FUSION):
+        return
+    if get_ascend_config().weight_nz_mode == 2 or vllm_config.lora_config is not None:
+        return
+
+    projection = self.linear_attn.out_proj if layer_type == "linear_attention" else self.self_attn.o_proj
+    reason = Qwen35OProjMMReduceScatterOp.unsupported_reason(projection)
+    if reason is not None:
+        log_disabled_fusion(self.layer_idx, "output MM+ReduceScatter", reason)
+        return
+    projection.custom_op = Qwen35OProjMMReduceScatterOp(projection)
+    self.fuse_o_proj_mm_reduce_scatter = True
+
+    if layer_type != "linear_attention":
+        return
+    reason = Qwen35GdnInProjAllGatherMatmulOp.unsupported_reason(self.linear_attn)
+    if reason is not None:
+        log_disabled_fusion(self.layer_idx, "GDN AllGather+MM", reason)
+        return
+    self.gdn_in_proj_ag_mm_op = Qwen35GdnInProjAllGatherMatmulOp(self.linear_attn)
 
 
 if Qwen3_5MultiTokenPredictor is not None:
@@ -204,6 +264,8 @@ if Qwen3_5MultiTokenPredictor is not None:
 
 
 Qwen3NextAttention.forward = AscendQwen3NextAttention.forward
+Qwen3_5DecoderLayer.__init__ = _qwen3_5_decoder_layer_init_with_sp_fusion
+Qwen3_5DecoderLayer.forward = AscendQwen3_5DecoderLayer.forward
 _GDN_PATCH_TARGET._split_ba_for_tp = AscendGatedDeltaNetAttention._split_ba_for_tp
 _GDN_PATCH_TARGET.get_state_shape = AscendGatedDeltaNetAttention.get_state_shape
 _GDN_PATCH_TARGET.get_attn_backend = AscendGatedDeltaNetAttention.get_attn_backend
