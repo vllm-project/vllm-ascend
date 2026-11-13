@@ -423,7 +423,7 @@ Install AISBench on the first host, which is the node with
 `LWS_WORKER_INDEX=0`:
 
 ```bash
-export AIS_BENCH_TAG="v3.1-20261013-master"
+export AIS_BENCH_TAG="v3.1-20261113-master"
 export AIS_BENCH_URL="https://github.com/AISBench/benchmark.git"
 export BENCHMARK_HOME=/vllm-workspace/vllm-ascend/benchmark
 
@@ -506,7 +506,7 @@ python3 -m pip install -r requirements-dev.txt
 Install AISBench on node 0:
 
 ```bash
-export AIS_BENCH_TAG="v3.1-20261013-master"
+export AIS_BENCH_TAG="v3.1-20261113-master"
 export AIS_BENCH_URL="https://github.com/AISBench/benchmark.git"
 export BENCHMARK_HOME=/vllm-workspace/vllm-ascend/benchmark
 
