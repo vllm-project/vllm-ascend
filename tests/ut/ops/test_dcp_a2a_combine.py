@@ -67,10 +67,17 @@ def test_rank_tiled_bounded_work_dispatch(monkeypatch, device_type, ranks, dim, 
     monkeypatch.setattr(dcp_a2a.triton, "next_power_of_2", power_of_two, raising=False)
     monkeypatch.setattr(dcp_a2a.triton, "cdiv", lambda a, b: (a + b - 1) // b, raising=False)
     monkeypatch.setattr(dcp_a2a, "is_950", lambda: device_type == AscendDeviceType.A5)
+    monkeypatch.setattr(dcp_a2a, "get_ascend_device_type", lambda: device_type)
+    monkeypatch.setattr(dcp_a2a, "_A3_STATIC_KEYS", frozenset())
     monkeypatch.setattr(dcp_a2a, "init_device_properties_triton", lambda: None)
     monkeypatch.setattr(dcp_a2a, "get_vectorcore_num", lambda: 48)
-    tiled, scalar, batched = Mock(), Mock(), Mock()
-    for name, launch in [("rank_tiled", tiled), ("", scalar), ("batched", batched)]:
+    tiled, static, scalar, batched = Mock(), Mock(), Mock(), Mock()
+    for name, launch in [
+        ("rank_tiled", tiled),
+        ("rank_tiled_static", static),
+        ("", scalar),
+        ("batched", batched),
+    ]:
         suffix = "_" + name if name else ""
         kernel = Mock()
         kernel.__getitem__ = Mock(return_value=launch)
@@ -93,8 +100,47 @@ def test_rank_tiled_bounded_work_dispatch(monkeypatch, device_type, ranks, dim, 
     expected_tiled = eligible and device_type == AscendDeviceType.A5
     expected_batched = not expected_tiled and dim <= 512 and tokens * heads >= 4 * 48 and stride == 1
     assert tiled.call_count == int(expected_tiled)
+    assert static.call_count == 0
     assert batched.call_count == int(expected_batched)
-    assert tiled.call_count + scalar.call_count + batched.call_count == 1
+    assert tiled.call_count + static.call_count + scalar.call_count + batched.call_count == 1
     if expected_tiled:
         assert tiled.call_args.kwargs["BLOCK_R"] * tiled.call_args.kwargs["BLOCK_D"] <= 8192
         assert tiled.call_args.kwargs["BLOCK_D"] <= 512
+
+
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
+@pytest.mark.parametrize("warmed", [False, True])
+def test_a3_static_bucket_dispatch(monkeypatch, device_type, warmed):
+    power_of_two = lambda n: 1 << (n - 1).bit_length()
+    monkeypatch.setattr(dcp_a2a.triton, "next_power_of_2", power_of_two, raising=False)
+    monkeypatch.setattr(dcp_a2a.triton, "cdiv", lambda a, b: (a + b - 1) // b, raising=False)
+    monkeypatch.setattr(dcp_a2a, "is_950", lambda: device_type == AscendDeviceType.A5)
+    monkeypatch.setattr(dcp_a2a, "get_ascend_device_type", lambda: device_type)
+    monkeypatch.setattr(dcp_a2a, "init_device_properties_triton", lambda: None)
+    monkeypatch.setattr(dcp_a2a, "get_vectorcore_num", lambda: 48)
+    keys = frozenset({(4, 16, 512, 16)}) if warmed else frozenset()
+    monkeypatch.setattr(dcp_a2a, "_A3_STATIC_KEYS", keys)
+    tiled, static, scalar, batched = Mock(), Mock(), Mock(), Mock()
+    for name, launch in [
+        ("rank_tiled", tiled),
+        ("rank_tiled_static", static),
+        ("", scalar),
+        ("batched", batched),
+    ]:
+        suffix = "_" + name if name else ""
+        kernel = Mock()
+        kernel.__getitem__ = Mock(return_value=launch)
+        monkeypatch.setattr(dcp_a2a, f"_fused_dcp_lse_combine{suffix}_kernel", kernel)
+    with FakeTensorMode():
+        recv = torch.empty(16, 4, 16, 516, dtype=torch.bfloat16, device="npu:0")
+        local = torch.empty_strided((16, 4, 512), (4 * 512, 512, 1), dtype=torch.bfloat16, device="npu:0")
+        lse = torch.empty(16, 4, 1, dtype=torch.float32, device="npu:0")
+        dcp_a2a.fused_dcp_lse_combine(recv, 512, 1, local_output=local, local_lse=lse)
+    # Only A3 uses the static twin, and only for a warmed bucket key.
+    expected_static = warmed and device_type == AscendDeviceType.A3
+    assert static.call_count == int(expected_static)
+    assert tiled.call_count + static.call_count + scalar.call_count + batched.call_count == 1
+    if expected_static:
+        assert static.call_args.kwargs["NUM_TOKENS"] == 16
+        assert static.call_args.kwargs["NUM_HEADS"] == 4
+        assert static.call_args.kwargs["BLOCK_D"] == 512

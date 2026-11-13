@@ -48,4 +48,9 @@ pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_a2a.
 pytest -sv tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dcp_a2a.py
 ```
 
-Eligible BF16 head-scatter shapes with a contiguous local contribution may use the rank-tiled kernel ahead of the batched path. Its parallel FP32 reduction can round differently from the scalar kernel. The rank tile uses one 16x512 BF16 tile per job, so the FP32 temporaries stay at 32 KiB. It requires a compile-time rank-row stride to vectorize; with runtime head/token counts A3 lowered it to scalar-rate transfers and ran far slower than the scalar kernel, so it is limited to A5 DCP16 with head dims 512 and 1024, where it measured 2-4x faster than the scalar and batched paths (including T64/T256).
+Eligible BF16 head-scatter shapes with a contiguous local contribution may use the rank-tiled kernel ahead of the batched path. Its parallel FP32 reduction can round differently from the scalar kernel. The rank tile uses one 16x512 BF16 tile per job, so the FP32 temporaries stay at 32 KiB. It requires a compile-time rank-row stride to vectorize; with runtime head/token counts A3 lowered it to scalar-rate transfers and ran far slower than the scalar kernel.
+
+Device routing:
+
+- **A5**: the dynamic kernel is used for DCP16 with head dims 512 and 1024, where it measured 2-4x faster than the scalar and batched paths (including T64/T256).
+- **A3**: the dynamic kernel is never selected. Instead, warmup compiles a static twin (`NUM_HEADS`/`NUM_TOKENS` constexpr) for the decode buckets `[1,2,4,8,16,32,48,64,96,128,192]` from the merged DCP decode budget, and the dispatcher uses it only when the exact `(heads, tokens, head_dim, dcp)` key was warmed. Decode batches are padded to these ACLGraph sizes, so normal serving stays on the static kernel; prefill token counts and any unwarmed key fall back to the scalar/batched path instead of compiling inside a request. A3 DCP16 measured 1.9-2.4x faster than scalar/batched at D512 and 1.27x at D1024.
