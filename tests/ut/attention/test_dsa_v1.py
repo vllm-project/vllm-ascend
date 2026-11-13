@@ -1495,14 +1495,17 @@ def test_a5_o_proj_without_otp_preserves_group_order(use_fp8):
     reduce_scatter.assert_not_called()
 
 
-def test_a5_bf16_o_proj_uses_transpose_batchmatmul():
+def test_grouped_bf16_o_proj_uses_transpose_batchmatmul():
+    """With several local groups the bf16 o_proj keeps the transpose kernel;
+    the single-group small-batch case is covered by the plain-matmul tests."""
     impl = _make_impl()
+    impl.n_local_groups = 2
     impl.support_fp8_attention = True
-    impl.wo_a = SimpleNamespace(weight=torch.randn(1, 2, 2), weight_scale=None)
+    impl.wo_a = SimpleNamespace(weight=torch.randn(2, 2, 2), weight_scale=None)
     impl.wo_b = lambda x: x
-    o_proj_input = torch.randn(4, 1, 2)
-    output = torch.empty(4, 2)
-    projected = torch.randn(4, 1, 2)
+    o_proj_input = torch.randn(4, 2, 2)
+    output = torch.empty(4, 4)
+    projected = torch.randn(4, 2, 2)
 
     with (
         patch("vllm_ascend.attention.dsa_v1.oproj_tp_enable", return_value=False),
