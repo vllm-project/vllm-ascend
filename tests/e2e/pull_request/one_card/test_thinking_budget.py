@@ -11,6 +11,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.worker.gpu.sample.logits_processor.interface import LogitsContext
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.thinking_budget import ThinkingBudgetState
+from vllm.v1.worker.gpu.spec_decode import rejection_sampler as upstream_rejection_sampler
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
 from vllm.v1.worker.gpu.states import RequestState
 
@@ -336,10 +337,13 @@ def test_v2_preempted_multi_token_end_continues_after_slot_reuse(progress):
 
 @pytest.mark.parametrize("temperature", [0.0, 0.6])
 @pytest.mark.parametrize("budget", [0, 2, 4, None])
-@pytest.mark.parametrize("entropy_verify", [False, True])
-def test_v2_rejection_sampler_budget_boundary_and_plain_neighbor(monkeypatch, temperature, budget, entropy_verify):
+@pytest.mark.parametrize("verification", ["standard", "entropy", "block"])
+@pytest.mark.parametrize("draft_logits_mode", ["none", "tensor", "cache"])
+def test_v2_rejection_sampler_budget_boundary_and_plain_neighbor(
+    monkeypatch, temperature, budget, verification, draft_logits_mode
+):
     # Direct sampler tests have no engine to initialize Ascend configuration.
-    config = RejectionSamplerConfig(enable_entropy_verify=entropy_verify)
+    config = RejectionSamplerConfig(enable_entropy_verify=verification == "entropy")
     monkeypatch.setattr(
         rejection_sampler_utils, "get_ascend_config", lambda: SimpleNamespace(rejection_sampler_config=config)
     )
@@ -362,7 +366,7 @@ def test_v2_rejection_sampler_budget_boundary_and_plain_neighbor(monkeypatch, te
     rejection.sampler = sampler
     rejection.num_speculative_steps = 3
     rejection.synthetic_conditional_rates = None
-    rejection.use_block_verification = False
+    rejection.use_block_verification = verification == "block"
     rejection.fly_window_size = 0
     rejection.fly_entropy_threshold = 0.3
     rejection.fly_entropy_top_k = 3
@@ -373,9 +377,23 @@ def test_v2_rejection_sampler_budget_boundary_and_plain_neighbor(monkeypatch, te
     inputs = torch.full((8,), 10, dtype=torch.int32, device=DEVICE)
     logits = torch.full((8, VOCAB_SIZE), -torch.inf, device=DEVICE)
     logits[:, 10] = 0
+    draft_logits = None
+    if draft_logits_mode != "none":
+        values = torch.full((4, 3, VOCAB_SIZE), -torch.inf, device=DEVICE)
+        values[:, :, 10] = 0
+        values[:, :, END] = 0
+        if draft_logits_mode == "tensor":
+            draft_logits = values
+        else:
+            cache_type = getattr(upstream_rejection_sampler, "DraftLogitsCache", None)
+            if cache_type is None:
+                pytest.skip("This upstream release does not use DraftLogitsCache")
+            assert cache_type is not None
+            draft_logits = cache_type(4, 3, VOCAB_SIZE, dtype=torch.float32, fill=-torch.inf, device=DEVICE)
+            draft_logits.values.copy_(values)
     _, sampled, counts = rejection._verify(
         logits,
-        None,
+        draft_logits,
         inputs,
         local + 2,
         torch.tensor([0, 4, 8], dtype=torch.int32, device=DEVICE),
