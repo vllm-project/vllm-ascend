@@ -14,6 +14,112 @@ from vllm.v1.hisparse.runtime import HiSparseCacheHandle
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
 from vllm_ascend.hisparse.pcp import PCPHiSparseConnector, prepare_pcp_metadata
+from vllm_ascend.patch.worker.patch_hisparse import install_pcp_cache_layout
+
+install_pcp_cache_layout()
+
+
+def test_cache_layout_install_is_idempotent():
+    prepare = HiSparseCacheHandle._prepare_for_batch
+    mirror = HiSparseConnectorWorker._enqueue_host_mirror
+    install_pcp_cache_layout()
+    assert HiSparseCacheHandle._prepare_for_batch is prepare
+    assert HiSparseConnectorWorker._enqueue_host_mirror is mirror
+
+
+@pytest.mark.parametrize("initial_capacity", [4, 32])
+def test_pcp_host_staging_is_sized_before_capture(monkeypatch, initial_capacity):
+    from vllm_ascend.patch.worker import patch_hisparse
+
+    cache = handle()
+    cache.num_write_tokens = 6
+    staging = NS(slots=torch.empty(initial_capacity, dtype=torch.int64))
+    original = staging.slots
+    worker = NS(
+        vllm_config=NS(
+            scheduler_config=NS(max_num_batched_tokens=8, max_num_seqs=2),
+            parallel_config=NS(prefill_context_parallel_size=2),
+            num_lookahead_tokens=3,
+        ),
+        _slot_mapping_staging=staging,
+        cache_handles=[cache],
+    )
+    allocate = torch.empty
+    allocations = []
+
+    def pinned_empty(size, **kwargs):
+        allocations.append((size, kwargs.copy()))
+        kwargs.pop("pin_memory")
+        return allocate(size, **kwargs)
+
+    monkeypatch.setattr(patch_hisparse.torch, "empty", pinned_empty)
+    patch_hisparse.prepare_pcp_mirror_staging(worker)
+    assert staging.slots.numel() >= 24
+    assert cache.num_write_tokens == 0
+    assert cache.write_req_id_per_token is None
+    assert cache.write_has_prefill is False
+    if initial_capacity < 24:
+        assert allocations == [(24, {"dtype": torch.int64, "pin_memory": True})]
+    else:
+        assert staging.slots is original and not allocations
+
+
+def test_forward_clear_removes_gathered_write_metadata():
+    cache = handle()
+    cache._prepare_for_batch(gathered_metadata()[0])
+    worker = NS(cache_handles=[cache], _per_layer_mirrored={0}, _submitted_mirror_layers={0})
+    HiSparseConnectorWorker._clear_forward_mirror_state(worker)
+    assert not worker._per_layer_mirrored and not worker._submitted_mirror_layers
+    assert cache.num_actual_tokens == cache.num_write_tokens == 0
+    assert cache.req_id_per_token is cache.write_req_id_per_token is None
+    assert not cache.write_has_prefill
+
+
+def test_zero_local_queries_still_allow_target_mirror_defer():
+    from vllm_ascend.hisparse.host_mirror import _DirectMirrorSources
+
+    worker = NS(
+        resident_caches=[object()],
+        host_caches=[object()],
+        cache_handles=[NS(num_actual_tokens=0, num_write_tokens=6)],
+        _dma_submitted=False,
+        _per_layer_mirrored=set(),
+        _submitted_mirror_layers=set(),
+        _draft_layers=set(),
+    )
+    assert _DirectMirrorSources(worker, (0,)).can_defer(worker)
+
+
+def test_pcp_connector_keeps_target_host_mirror_overlap(monkeypatch):
+    from vllm.distributed import parallel_state
+    from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import HiSparseConnector
+
+    from vllm_ascend.hisparse import host_mirror
+    from vllm_ascend.hisparse.backend import AscendHiSparseBackend
+
+    worker = HiSparseConnectorWorker.__new__(HiSparseConnectorWorker)
+    worker._initialized = True
+    worker.backend = AscendHiSparseBackend.__new__(AscendHiSparseBackend)
+    worker.shared_host_region = None
+    worker.is_host_writer = True
+    worker.hot_backing = NS(device=torch.device("npu:0"))
+    core = HiSparseConnector.__new__(HiSparseConnector)
+    core.connector_worker = worker
+    connector = PCPHiSparseConnector.__new__(PCPHiSparseConnector)
+    connector.kv_connector = core
+    runner = NS(
+        kv_connector=connector, speculator=object(), output_copy_stream=NS(stream_id=1, device_index=0, device_type=20)
+    )
+    compute = NS(device=worker.hot_backing.device)
+    output = NS(device=worker.hot_backing.device)
+    sources = object()
+    monkeypatch.setattr(host_mirror._DirectMirrorSources, "bind", lambda *a: sources)
+    monkeypatch.setattr(host_mirror.torch, "Stream", lambda **kwargs: output)
+    monkeypatch.setattr(host_mirror.torch.accelerator, "current_stream", lambda: compute)
+    monkeypatch.setattr(parallel_state, "get_tensor_model_parallel_rank", lambda: 0)
+    adapted = host_mirror.overlap_target_host_mirror(runner)
+    assert isinstance(adapted, host_mirror.HostMirrorConnector)
+    assert adapted._connector is connector and adapted._sources is sources
 
 
 @dataclass
