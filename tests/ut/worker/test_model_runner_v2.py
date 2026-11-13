@@ -86,6 +86,44 @@ def _make_runner(need_timing: bool = True):
 
 
 @pytest.mark.parametrize(
+    ("architecture", "speculative_method", "pp_size", "sp_enabled", "expected"),
+    [
+        ("Qwen4ExpForCausalLM", "qwen3_5_mtp", 1, True, True),
+        ("Qwen4ExpForConditionalGeneration", "mtp", 1, True, True),
+        ("Qwen4ExpForCausalLM", "ngram", 1, True, False),
+        ("OtherForCausalLM", "qwen3_5_mtp", 1, True, False),
+        ("OtherForCausalLM", None, 2, True, True),
+        ("Qwen4ExpForCausalLM", "qwen3_5_mtp", 1, False, True),
+        ("OtherForCausalLM", None, 2, False, False),
+    ],
+)
+def test_requires_runner_dp_token_padding(
+    monkeypatch,
+    architecture,
+    speculative_method,
+    pp_size,
+    sp_enabled,
+    expected,
+):
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size)
+    )
+    runner.model_config = SimpleNamespace(architecture=architecture)
+    runner.speculative_config = (
+        None
+        if speculative_method is None
+        else SimpleNamespace(method=speculative_method)
+    )
+    monkeypatch.setattr(
+        "vllm_ascend.worker.v2.model_runner.enable_sp",
+        lambda _config: sp_enabled,
+    )
+
+    assert runner._requires_runner_dp_token_padding() is expected
+
+
+@pytest.mark.parametrize(
     ("dummy", "profile", "fail"),
     [
         (False, False, False),

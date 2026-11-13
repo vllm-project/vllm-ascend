@@ -1,26 +1,22 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-#
 # Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 """Ascend wrappers for the upstream Qwen4Exp model implementation."""
 
+import torch
 from vllm.config import VllmConfig
+from vllm.distributed import get_pp_group
+from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
 from vllm.model_executor.models.qwen3_vl import Qwen3VLDummyInputsBuilder
-from vllm.models.qwen4_exp.amd import (
-    hyperconnection as upstream_hc,
-)
+from vllm.models.qwen4_exp.amd import hyperconnection as upstream_hc
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.sequence import IntermediateTensors
 
+from vllm_ascend.models.common.ops.sequence_parallel import (
+    sp_all_gather,
+    sp_reduce_scatter,
+    sp_shard,
+)
 from vllm_ascend.models.qwen3_5_vl import (
     AscendQwen3_5VLProcessor,
     _AscendProcessorMixin,
@@ -45,16 +41,35 @@ upstream_hc.hc_combine_norm = hc_combine_norm
 upstream_hc.hc_gate_mix = hc_gate_mix
 upstream_hc.hc_silu = hc_silu
 
-# PLE's depthwise F.conv1d otherwise lowers to ACLop Conv2D when torch-npu
-# internal formats are enabled. Scope the graph-safe option override to the
-# upstream PLE custom op instead of changing it globally for the worker.
+# Scope the graph-safe internal-format override to the upstream PLE custom op.
 patch_upstream_ple_short_conv()
 
 from vllm.models.qwen4_exp.amd import model as upstream_model  # noqa: E402
+from vllm.models.qwen4_exp.amd import ple_layer as upstream_ple  # noqa: E402
 
 from .qsa import AscendQwen4ExpQSAAttention  # noqa: E402
 
+# vLLM owns Qwen4Exp PP, HC and SP control flow. Bind only the device-specific
+# collectives and operators used by that upstream implementation.
+upstream_model.sp_all_gather = sp_all_gather
+upstream_model.sp_reduce_scatter = sp_reduce_scatter
+upstream_model.sp_shard = sp_shard
+upstream_ple.sp_all_gather = sp_all_gather
+upstream_ple.sp_shard = sp_shard
 upstream_model.Qwen4ExpQSAAttention = AscendQwen4ExpQSAAttention
+
+
+class AscendQwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock):
+    """Keep Ascend MoE outputs local to the existing SP token shard."""
+
+    def __init__(self, vllm_config: VllmConfig, prefix: str = "", **_: object) -> None:
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        config = vllm_config.model_config.hf_text_config
+        self.n_shared_experts = int(config.shared_expert_intermediate_size > 0)
+
+
+# The upstream decoder resolves this module global when constructing its MoE.
+upstream_model.Qwen4ExpSparseMoeBlock = AscendQwen4ExpSparseMoeBlock
 
 
 class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
@@ -62,14 +77,41 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__(vllm_config=vllm_config, prefix=prefix)
-        # With max_num_seqs=1 the PLE query-start buffer has a static length of
-        # two. Marking that length dynamic makes TorchDynamo reject the static
-        # specialization used by PLE during FULL_DECODE_ONLY graph capture.
         dynamic_arg_dims = getattr(self, "_dynamic_arg_dims", None)
         if dynamic_arg_dims is not None:
             self._dynamic_arg_dims = {
                 name: dims for name, dims in dynamic_arg_dims.items() if name != "query_start_loc"
             }
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs: object,
+    ) -> torch.Tensor | IntermediateTensors:
+        """Adapt the upstream PP boundary to Ascend's full-token transport."""
+        pp_group = get_pp_group()
+        if not pp_group.is_first_rank and self.use_hc_sequence_parallel and intermediate_tensors is not None:
+            hidden_states = intermediate_tensors["hidden_states"]
+            if hidden_states.shape[0] == positions.shape[-1]:
+                intermediate_tensors = IntermediateTensors(
+                    {**intermediate_tensors.tensors, "hidden_states": sp_shard(hidden_states)}
+                )
+
+        output = super().forward(
+            input_ids,
+            positions,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+            **kwargs,
+        )
+        if not pp_group.is_last_rank and self.use_hc_sequence_parallel:
+            assert isinstance(output, IntermediateTensors)
+            hidden_states = sp_all_gather(output["hidden_states"])
+            output = IntermediateTensors({**output.tensors, "hidden_states": hidden_states[: positions.shape[-1]]})
+        return output
 
 
 # Qwen4ExpForCausalLM resolves this module global when it creates the backbone.
@@ -79,10 +121,12 @@ upstream_model.Qwen4ExpModel = AscendQwen4ExpModel
 class AscendQwen4ExpForCausalLM(upstream_model.Qwen4ExpForCausalLM):
     """Qwen3.8-Flash-Next text model using Ascend platform operators."""
 
+    pp_intermediate_tensors_are_full_tokens = True
+
     @classmethod
     def get_mamba_specs_from_config(cls, vllm_config: VllmConfig):
-        # vLLM uses these specs to align attention pages. PLE has a private
-        # dense bank; only GDN's complete conv+SSM state shares QSA pages.
+        # PLE has a private dense bank; only GDN's complete conv+SSM state
+        # shares QSA pages.
         return tuple(spec for spec in super().get_mamba_specs_from_config(vllm_config) if len(spec.shapes) == 2)
 
     @staticmethod
@@ -106,6 +150,8 @@ class AscendQwen4ExpProcessingInfo(_AscendProcessorMixin, upstream_model.Qwen4Ex
 class AscendQwen4ExpForConditionalGeneration(_AscendVLPreprocessMixin, upstream_model.Qwen4ExpForConditionalGeneration):
     """Qwen3.8-Flash-Next multimodal model using Ascend operators."""
 
+    pp_intermediate_tensors_are_full_tokens = True
+
     @classmethod
     def get_mamba_specs_from_config(cls, vllm_config: VllmConfig):
         return AscendQwen4ExpForCausalLM.get_mamba_specs_from_config(vllm_config)
@@ -121,4 +167,5 @@ __all__ = [
     "AscendQwen4ExpForCausalLM",
     "AscendQwen4ExpForConditionalGeneration",
     "AscendQwen4ExpModel",
+    "AscendQwen4ExpSparseMoeBlock",
 ]

@@ -23,6 +23,8 @@ from vllm.distributed import get_pp_group
 from vllm.models.qwen4_exp.amd import mtp as upstream_mtp
 from vllm.sequence import IntermediateTensors
 
+from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_shard
+
 # Import the target wrapper first so the upstream decoder resolves Ascend QSA
 # and HyperConnection components before the MTP module is initialized.
 from . import model as _model  # noqa: F401
@@ -108,10 +110,11 @@ class AscendQwen4ExpMultiTokenPredictor(upstream_mtp.Qwen4ExpMultiTokenPredictor
         if positions.ndim > 1:
             positions = positions[0]
 
-        # Ascend PP loads the local MTP drafter on the last target stage. It is
-        # therefore the first logical draft stage even though the global PP
-        # coordinator reports that it is not the first target stage.
-        if get_pp_group().is_first_rank or intermediate_tensors is None:
+        # The V2 speculator builds the complete local drafter on the last
+        # target PP rank. Follow the upstream Qwen4Exp contract: the absence
+        # of transported intermediates identifies that local drafter entry,
+        # independently of the global target-model PP rank.
+        if intermediate_tensors is None:
             assert hidden_states is not None
             if inputs_embeds is None:
                 assert input_ids is not None
@@ -132,6 +135,12 @@ class AscendQwen4ExpMultiTokenPredictor(upstream_mtp.Qwen4ExpMultiTokenPredictor
 
         current_step_idx = spec_step_idx % self.num_mtp_layers
         layer = self.layers[current_step_idx]
+        # The local MTP drafter is constructed with PP=1 even when the target
+        # model runs with PP>1. Depending on the runner path, its target hidden
+        # state is either full-token or already SP-local. Shard only the former;
+        # global PP rank is not a valid indicator for this local model.
+        if layer.use_sequence_parallel and hidden_states.shape[0] == positions.shape[-1]:
+            hidden_states = sp_shard(hidden_states)
         hidden_states, block_output, injection = layer(
             hidden_states=hidden_states,
             prev_block_output=None,
@@ -148,6 +157,11 @@ class AscendQwen4ExpMultiTokenPredictor(upstream_mtp.Qwen4ExpMultiTokenPredictor
         multi_hidden, sample_hidden_states, _ = self.hyper_connection_mixer.combine_and_mix(
             hidden_states, block_output, injection
         )
+        if layer.use_sequence_parallel:
+            full_num_tokens = positions.shape[-1]
+            multi_hidden_size = multi_hidden.shape[-1]
+            gathered_hidden = sp_all_gather(torch.cat((multi_hidden, sample_hidden_states), dim=-1))[:full_num_tokens]
+            multi_hidden, sample_hidden_states = gathered_hidden.split((multi_hidden_size, hidden_size), dim=-1)
         return sample_hidden_states, multi_hidden
 
 

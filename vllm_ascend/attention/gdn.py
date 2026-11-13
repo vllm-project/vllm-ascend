@@ -38,7 +38,10 @@ from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # typ
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
-from vllm_ascend.attention.gdn_attn_builder import AscendGDNFusedAttentionBackend
+from vllm_ascend.attention.gdn_attn_builder import (
+    AscendGDNFusedAttentionBackend,
+    GDNSpecCausalConv1dMetadata,
+)
 from vllm_ascend.attention.gdn_recoverssm_metadata import AscendGDNRecoverSSMAttentionBackend
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
@@ -152,6 +155,7 @@ def _flatten_recurrent_state_indices(
     state_indices: torch.Tensor,
     total_tokens: int,
     query_start_loc: torch.Tensor | None = None,
+    flat_indices: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Reduce state indices to exactly one entry per recurrent token.
 
@@ -174,6 +178,8 @@ def _flatten_recurrent_state_indices(
         return state_indices.reshape(-1).contiguous()
     if query_start_loc is None:
         raise ValueError("query_start_loc is required to flatten non-uniform speculative state indices")
+    if flat_indices is not None:
+        return state_indices.reshape(-1)[flat_indices]
     # Variable-length speculative sequences: map each token to its
     # (sequence, slot) pair on device. The output length is host-known
     # (total_tokens), so this path stays sync-free, unlike masked_select or
@@ -185,7 +191,31 @@ def _flatten_recurrent_state_indices(
     token_ids = torch.arange(total_tokens, device=state_indices.device, dtype=qsl.dtype)
     seq_ids = torch.searchsorted(bounds, token_ids, right=True).clamp_(max=num_seqs - 1)
     slot_ids = (token_ids - starts[seq_ids]).clamp_(min=0, max=num_slots - 1)
-    return state_indices[seq_ids, slot_ids].contiguous()
+    return state_indices.reshape(-1)[seq_ids * num_slots + slot_ids]
+
+
+def _get_recurrent_state_flat_indices(
+    metadata: GDNSpecCausalConv1dMetadata,
+    state_indices: torch.Tensor,
+    total_tokens: int,
+    query_start_loc: torch.Tensor,
+) -> torch.Tensor | None:
+    """Build the layer-independent token-to-state mapping once per step."""
+    if state_indices.ndim != 2 or total_tokens == state_indices.numel():
+        return None
+    cached = getattr(metadata, "recurrent_state_flat_indices", None)
+    if cached is not None and cached.numel() == total_tokens:
+        return cached
+    num_seqs, num_slots = state_indices.shape
+    qsl = query_start_loc[: num_seqs + 1]
+    lens = (qsl[1:] - qsl[:-1]).clamp(min=0, max=num_slots)
+    bounds = lens.cumsum(0)
+    starts = bounds - lens
+    token_ids = torch.arange(total_tokens, device=state_indices.device, dtype=qsl.dtype)
+    seq_ids = torch.searchsorted(bounds, token_ids, right=True).clamp(max=num_seqs - 1)
+    flat_indices = seq_ids * num_slots + (token_ids - starts[seq_ids]).clamp(min=0, max=num_slots - 1)
+    metadata.recurrent_state_flat_indices = flat_indices
+    return flat_indices
 
 
 # The fla_npu AscendC recurrent GDN kernel silently returns without writing
@@ -808,9 +838,15 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                         scale=key_spec.shape[-1] ** -0.5,
                         actual_seq_lengths=actual_seq_lengths,
                         ssm_state_indices=_flatten_recurrent_state_indices(
+                        spec_state_indices_tensor,
+                        query_spec.shape[1],
+                        spec_causal_conv1d_meta.query_start_loc,
+                        _get_recurrent_state_flat_indices(
+                            spec_causal_conv1d_meta,
                             spec_state_indices_tensor,
                             query_spec.shape[1],
                             spec_causal_conv1d_meta.query_start_loc,
+                        ),
                         ),
                         num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens.to(torch.int32),
                     ).unsqueeze(0)
