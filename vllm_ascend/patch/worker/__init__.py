@@ -72,7 +72,6 @@ import vllm_ascend.patch.worker.patch_model_runner  # noqa
 import vllm_ascend.patch.worker.patch_eagle_speculator  # noqa
 import vllm_ascend.patch.worker.patch_dflash_speculator  # noqa
 import vllm_ascend.patch.worker.patch_dspark  # noqa
-import vllm_ascend.patch.worker.patch_draft_lm_head_quantization  # noqa
 
 # Remove this block and patch_adaptive_verification.py when vLLM 0.33.0 support ends.
 if vllm_version_is("0.33.0"):
