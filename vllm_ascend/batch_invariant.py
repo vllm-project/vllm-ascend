@@ -43,8 +43,33 @@ try:
     import batch_invariant_ops  # type: ignore[import-not-found] # noqa
 
     HAS_ASCENDC_BATCH_INVARIANT = True
+    # Workspace query of the batch-invariant FIA kernel. Resolved together with the
+    # package so that builds without it (older batch_invariant_ops) keep working.
+    _BI_FIA_MAX_WORKSPACE = getattr(
+        batch_invariant_ops,
+        "_npu_fused_infer_attention_score_batch_invariant_get_max_workspace",
+        None,
+    )
 except ImportError:
     HAS_ASCENDC_BATCH_INVARIANT = False
+    _BI_FIA_MAX_WORKSPACE = None
+
+
+def _missing_bi_fia_workspace_query(*args, **kwargs):
+    """Stand-in for the BI FIA workspace query on older batch_invariant_ops builds.
+
+    Binding it keeps initialization working, because the query is only reached from graph
+    capture, and makes a captured FIA fail loudly instead of silently sizing the workspace
+    with the non-batch-invariant query.
+    """
+    raise RuntimeError(
+        "Batch-invariant FIA graph capture requires "
+        "_npu_fused_infer_attention_score_batch_invariant_get_max_workspace, which is not "
+        "available in the installed batch_invariant_ops package. Upgrade batch_invariant_ops, "
+        "or keep FIA out of the graph: eager or pure PIECEWISE decoding alone is not enough, "
+        "because multimodal encoder attention is captured by cudagraph_mm_encoder, which is "
+        "independent of cudagraph_mode, so set cudagraph_mm_encoder=False as well."
+    )
 
 
 def add_rms_norm(
@@ -148,6 +173,13 @@ def enable_batch_invariant_mode():
         # so we need to patch it directly.
         torch_npu.npu_fused_infer_attention_score = (
             torch.ops.batch_invariant_ops.npu_fused_infer_attention_score_batch_invariant
+        )
+        # full_graph_fia() sizes the FIA workspace with this query and then registers the task
+        # for the batch-invariant kernel above, so both must come from the same kernel. The
+        # non-BI query under-reports and capture fails with EZ1010 (A3 on CANN 9.2.0:
+        # 235,274,240 B vs 820,904,960 B required; Ascend 950: 203,456,512 B vs 487,327,744 B).
+        torch_npu._npu_fused_infer_attention_score_get_max_workspace = (
+            _BI_FIA_MAX_WORKSPACE if _BI_FIA_MAX_WORKSPACE is not None else _missing_bi_fia_workspace_query
         )
         # torch.sum can't be replaced by dispatch logic, so we patch it directly.
         torch.sum = reduce_sum
