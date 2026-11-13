@@ -10,6 +10,7 @@ import pytest
 
 from tests.ut.kv_offload.mooncake_v2 import test_push_sending
 from tests.ut.kv_offload.mooncake_v2.test_push_sending import drive, multi_cache_remote, remote_metadata, target_params
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import push_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import MooncakeConnectorMetadata
 
@@ -57,7 +58,7 @@ def metadata(computed, end, prompt=29, prefix=0, remote_blocks=(10, 11, 12, 13),
 @pytest.mark.parametrize("dcp,tp", [(2, 2), (2, 4), (4, 4)])
 @pytest.mark.parametrize("interleave,local_scale,remote_scale", [(4, 1, 1), (4, 2, 4), (8, 4, 2)])
 @pytest.mark.parametrize("prefix", [0, 8])
-@pytest.mark.parametrize("cache_kind", ["mla", "sharded_indexer", "replicated_indexer"])
+@pytest.mark.parametrize("cache_kind", ["mla", "sharded_indexer"])
 def test_chunked_write_matches_token_oracle(
     worker, monkeypatch, dcp, tp, interleave, local_scale, remote_scale, prefix, cache_kind
 ):
@@ -66,16 +67,12 @@ def test_chunked_write_matches_token_oracle(
     if cache_kind != "mla":
         worker.kv_cache_specs = [
             Mock(
-                spec=push_worker.AscendSFAIndexerCacheSpec,
+                spec=AscendSFAIndexerCacheSpec,
                 dcp_sharded=True,
                 sliding_window=None,
                 is_circular=False,
-                sfa_dcp_replicated_indexer_size=1,
             )
         ]
-        if cache_kind == "replicated_indexer":
-            remote.metadata_by_pp_rank[0].indexer_replication_sizes[:] = [dcp]
-            effective_dcp = 1
     source = (ctypes.c_ubyte * 256)(*([255] * 256))
     targets = [(ctypes.c_ubyte * 256)(*([255] * 256)) for _ in range(tp)]
     for token in range(32):
@@ -173,22 +170,16 @@ def test_mamba_dcp_rejects_noninteger_tp_ratio_before_write(worker, monkeypatch,
     assert all("integer ratio" in call.args[1] for call in worker._send_done.call_args_list)
 
 
-@pytest.mark.parametrize("kind", ["swa", "circular", "replicated_indexer", "sharded_indexer"])
+@pytest.mark.parametrize("kind", ["swa", "circular", "sharded_indexer"])
 def test_effective_dcp_depends_on_cache_layout(worker, monkeypatch, kind):
     remote = configure(worker, monkeypatch)
     spec_type = {
         "swa": push_worker.SlidingWindowMLASpec,
         "circular": push_worker.MLAAttentionSpec,
-        "replicated_indexer": push_worker.AscendSFAIndexerCacheSpec,
-        "sharded_indexer": push_worker.AscendSFAIndexerCacheSpec,
+        "sharded_indexer": AscendSFAIndexerCacheSpec,
     }[kind]
-    worker.kv_cache_specs = [
-        Mock(
-            spec=spec_type, dcp_sharded=kind != "swa", is_circular=kind == "circular", sfa_dcp_replicated_indexer_size=1
-        )
-    ]
+    worker.kv_cache_specs = [Mock(spec=spec_type, dcp_sharded=kind != "swa", is_circular=kind == "circular")]
     remote.metadata_by_pp_rank[0].dcp_sharded[:] = [kind != "swa"]
-    remote.metadata_by_pp_rank[0].indexer_replication_sizes[:] = [2 if kind == "replicated_indexer" else 1]
     assert worker._get_layer_dcp_sizes("model.layers.0.attn", remote, (0, 0, 0)) == (
         1,
         2 if kind == "sharded_indexer" else 1,

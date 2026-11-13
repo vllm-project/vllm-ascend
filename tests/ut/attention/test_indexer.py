@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import sys
 from dataclasses import replace
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -33,9 +34,8 @@ def _make_builder(
     dcp_size: int = 1,
     num_speculative_tokens: int | None = None,
     physical_block_size: int = 128,
-    sharded_dcp: bool = False,
     max_model_len: int = 512,
-    interleave: int = 128,
+    interleave: int = 2,
 ) -> AscendSFAIndexerMetadataBuilder:
     kv_cache_spec = FullAttentionSpec(
         block_size=physical_block_size,
@@ -69,7 +69,6 @@ def _make_builder(
             "vllm_ascend.attention.indexer.select_common_block_size",
             return_value=_KERNEL_BLOCK_SIZE,
         ),
-        patch("vllm_ascend.attention.indexer.enable_sfa_dcp_sharded_indexer", return_value=sharded_dcp),
         patch(
             "vllm_ascend.attention.indexer.get_dcp_group",
             return_value=SimpleNamespace(ranks=[0, 4, 1, 5, 2, 6, 3, 7] if dcp_size == 8 else list(range(dcp_size))),
@@ -108,6 +107,40 @@ def _make_common_metadata() -> SimpleNamespace:
 
     metadata.replace = replace
     return metadata
+
+
+@pytest.fixture
+def mock_dcp_metadata(monkeypatch):
+    """Run metadata builders on CPU with explicit DCP ownership and kernel stubs."""
+
+    def local_length(length, world, rank, interleave):
+        return sum(position // interleave % world == rank for position in range(int(length)))
+
+    def key_lengths(seq_lens, out, world, rank, interleave):
+        out.copy_(torch.tensor([local_length(n, world, rank, interleave) for n in seq_lens], dtype=out.dtype))
+
+    def lengths(seq_lens, query_ends, out, visible, world, rank, interleave):
+        key_lengths(seq_lens, out, world, rank, interleave)
+        start = 0
+        for seq_len, end in zip(seq_lens.tolist(), query_ends.tolist()):
+            visible[start:end, 0] = torch.tensor(
+                [local_length(n, world, rank, interleave) for n in range(seq_len - (end - start) + 1, seq_len + 1)],
+                dtype=visible.dtype,
+            )
+            start = end
+
+    ops: Any = ModuleType("vllm_ascend.ops.triton.sharded_indexer")
+    ops.build_local_key_lengths = Mock(side_effect=key_lengths)
+    ops.build_local_lengths = Mock(side_effect=lengths)
+    monkeypatch.setitem(sys.modules, ops.__name__, ops)
+
+    def configure(world, rank=0):
+        monkeypatch.setattr(
+            "vllm_ascend.attention.indexer.get_dcp_group",
+            lambda: SimpleNamespace(world_size=world, rank_in_group=rank),
+        )
+
+    return configure
 
 
 def test_sfa_indexer_backend_contract():
@@ -237,7 +270,8 @@ def test_sfa_indexer_metadata_builder_emits_full_slot_mapping_under_pcp(mock_cos
 @pytest.mark.parametrize("capture", [False, True])
 @patch("vllm_ascend.attention.indexer.get_ascend_config")
 @patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
-def test_sfa_indexer_native_dcp_decode_boundary(mock_cos_sin, mock_get_ascend_config, capture):
+def test_sfa_indexer_native_dcp_decode_boundary(mock_cos_sin, mock_get_ascend_config, capture, mock_dcp_metadata):
+    mock_dcp_metadata(8)
     mock_get_ascend_config.return_value.c8_reshape_optim_enabled = False
     mock_cos_sin.return_value = (torch.zeros(2, 1, 1, 8), torch.zeros(2, 1, 1, 8))
     common = _make_common_metadata()
@@ -255,14 +289,16 @@ def test_sfa_indexer_native_dcp_decode_boundary(mock_cos_sin, mock_get_ascend_co
 @patch("vllm_ascend.attention.indexer.get_ascend_config")
 @patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
 def test_sfa_indexer_metadata_builder_preserves_pcp_decode_boundary(
-    mock_cos_sin, mock_get_ascend_config, pcp_size, dcp_size, expected_decode_tokens
+    mock_cos_sin, mock_get_ascend_config, pcp_size, dcp_size, expected_decode_tokens, mock_dcp_metadata
 ):
+    mock_dcp_metadata(dcp_size)
     mock_cos_sin.return_value = (torch.zeros(4, 1, 1, 8), torch.zeros(4, 1, 1, 8))
     common = _make_common_metadata()
     common.query_start_loc = torch.tensor([0, 1, 4], dtype=torch.int32)
     common.query_start_loc_cpu = common.query_start_loc.clone()
     common.max_query_len = 3
     common.is_prefilling = torch.tensor([False, True])
+    common.slot_mapping = torch.arange(pcp_size * common.num_input_tokens)
 
     common.pcp_context = _make_decode_pcp_context()
 
@@ -270,6 +306,9 @@ def test_sfa_indexer_metadata_builder_preserves_pcp_decode_boundary(
 
     # Preserve the boundary for PCP gathering and native DCP fused stores.
     assert metadata.num_decode_tokens == expected_decode_tokens
+    if pcp_size == 2 and dcp_size == 2:
+        # The replicated decode appears once, followed by both PCP prefill slices.
+        torch.testing.assert_close(metadata.cache_scatter_indices[:, 1], torch.tensor([0, 1, 2, 3, 5, 6, 7]))
 
 
 @pytest.mark.parametrize("pcp_size,dcp_size", [(2, 2), (1, 8)])
@@ -283,7 +322,9 @@ def test_sfa_indexer_metadata_builder_preserves_rescheduled_prefill_boundary(
     dcp_size,
     pd_decode_recompute,
     expected_decode_tokens,
+    mock_dcp_metadata,
 ):
+    mock_dcp_metadata(dcp_size)
     mock_cos_sin.return_value = (torch.zeros(2, 1, 1, 8), torch.zeros(2, 1, 1, 8))
     common = _make_common_metadata()
     common.num_actual_tokens = 2
@@ -307,30 +348,35 @@ def test_sfa_indexer_metadata_builder_preserves_rescheduled_prefill_boundary(
 
 @patch("vllm_ascend.attention.indexer.get_ascend_config")
 @patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
-def test_sfa_indexer_metadata_builder_owns_replicated_dcp_addresses(
+def test_sfa_indexer_metadata_builder_preserves_owner_local_dcp_addresses(
     mock_cos_sin,
     mock_get_ascend_config,
+    mock_dcp_metadata,
 ):
+    mock_dcp_metadata(2)
     mock_cos_sin.return_value = (torch.zeros(5, 1, 1, 8), torch.zeros(5, 1, 1, 8))
     common = _make_common_metadata()
+    common.slot_mapping = torch.tensor([127, -1, 256, 257, -1])
 
     metadata = _make_builder(dcp_size=2).build(0, common)
 
     torch.testing.assert_close(
         metadata.block_table,
-        torch.tensor([[0, 1, 2, 3], [4, 5, 6, 7]], dtype=torch.int32),
+        common.block_table_tensor[:2],
     )
     torch.testing.assert_close(
         metadata.slot_mapping,
-        torch.tensor([0, 1, 512, 513], dtype=torch.int32),
+        torch.tensor([127, -1, 256, 257]),
     )
     torch.testing.assert_close(
         metadata.cache_scatter_indices,
-        torch.tensor([[0, 0], [0, 1], [4, 0], [4, 1]], dtype=torch.int32),
+        torch.tensor([[0, 127], [-1, 127], [2, 0], [2, 1]]),
     )
-    # The builder derives the replicated view without changing the local view
-    # consumed by the SFA cache backend.
-    torch.testing.assert_close(common.slot_mapping, torch.tensor([1, 2, 3, 4, 5]))
+    # DCP consumes the framework's owner-local addresses without replication.
+    assert metadata.slot_mapping.data_ptr() == common.slot_mapping.data_ptr()
+    assert metadata.block_table.data_ptr() == common.block_table_tensor.data_ptr()
+    torch.testing.assert_close(metadata.actual_seq_lengths_key, torch.tensor([3, 4], dtype=torch.int32))
+    torch.testing.assert_close(common.slot_mapping, torch.tensor([127, -1, 256, 257, -1]))
     torch.testing.assert_close(common.block_table_tensor, torch.arange(6).view(3, 2))
 
 
@@ -339,7 +385,9 @@ def test_sfa_indexer_metadata_builder_owns_replicated_dcp_addresses(
 def test_sfa_indexer_draft_metadata_owns_per_step_dcp_buffers(
     mock_cos_sin,
     mock_get_ascend_config,
+    mock_dcp_metadata,
 ):
+    mock_dcp_metadata(2)
     mock_cos_sin.return_value = (
         torch.zeros(5, 1, 1, 8),
         torch.zeros(5, 1, 1, 8),
@@ -351,18 +399,26 @@ def test_sfa_indexer_draft_metadata_owns_per_step_dcp_buffers(
     step_one_slots = step_one.slot_mapping.clone()
     step_one_blocks = step_one.block_table.clone()
     step_one_indices = step_one.cache_scatter_indices.clone()
+    step_one_lengths = step_one.actual_seq_lengths_key.clone()
     # The proposer owns one persistent slot tensor per logical draft step;
     # its address is also the key for every derived metadata buffer.
-    common.slot_mapping = common.slot_mapping.clone()
+    common.slot_mapping = torch.tensor([129, 130, -1, 258, -1])
     common.positions = torch.tensor([2, 3, 2, 3, 9])
+    common.seq_lens = torch.tensor([9, 10, 11])
     step_two = builder.build_for_drafting(common, 2)
 
     assert step_one.slot_mapping.data_ptr() != step_two.slot_mapping.data_ptr()
-    assert step_one.block_table.data_ptr() != step_two.block_table.data_ptr()
+    # Drafts share the unchanged owner-local block table; derived write and
+    # local-length buffers remain private to each persistent draft slot tensor.
+    assert step_one.block_table.data_ptr() == step_two.block_table.data_ptr()
     assert step_one.cache_scatter_indices.data_ptr() != step_two.cache_scatter_indices.data_ptr()
+    assert step_one.actual_seq_lengths_key.data_ptr() != step_two.actual_seq_lengths_key.data_ptr()
     torch.testing.assert_close(step_one.slot_mapping, step_one_slots)
     torch.testing.assert_close(step_one.block_table, step_one_blocks)
     torch.testing.assert_close(step_one.cache_scatter_indices, step_one_indices)
+    torch.testing.assert_close(step_one.actual_seq_lengths_key, step_one_lengths)
+    torch.testing.assert_close(step_two.actual_seq_lengths_key, torch.tensor([5, 6], dtype=torch.int32))
+    torch.testing.assert_close(step_two.cache_scatter_indices, torch.tensor([[1, 1], [1, 2], [-1, 127], [2, 2]]))
 
 
 @patch("vllm_ascend.attention.indexer.get_ascend_config")
@@ -397,7 +453,9 @@ def test_sfa_indexer_metadata_builder_builds_pcp_dcp_slots(
     mock_cos_sin,
     mock_get_ascend_config,
     for_cudagraph_capture,
+    mock_dcp_metadata,
 ):
+    mock_dcp_metadata(2)
     mock_cos_sin.return_value = (torch.zeros(5, 1, 1, 8), torch.zeros(5, 1, 1, 8))
     common = _make_common_metadata()
     global_batch = SimpleNamespace(
@@ -412,25 +470,35 @@ def test_sfa_indexer_metadata_builder_builds_pcp_dcp_slots(
     pcp_context = SimpleNamespace(
         global_batch=global_batch,
         global_block_tables=(torch.tensor([[10, 11]], dtype=torch.int32),),
+        global_block_table_num_blocks=torch.tensor([[2]], dtype=torch.int32),
         padded_gather_idx=torch.tensor([2, 0, 1, 0], dtype=torch.int64),
         gathered_kv_write_mask=torch.tensor([True, True, True, False]),
     )
 
-    builder = _make_builder(pcp_size=2, dcp_size=2)
+    builder = _make_builder(pcp_size=2, dcp_size=2, interleave=128)
+    common.block_table_tensor = torch.tensor([[10, 11], [10, 11]], dtype=torch.int32)
     common.pcp_context = pcp_context
     common.pcp_cache_group_idx = 0
+    # Common metadata already contains the gathered PCP rows with non-owner
+    # and padded writes masked out. The indexer must preserve their order.
+    common.slot_mapping = torch.tensor([1280, -1, 1408, -1, -1, 1281, -1, -1], dtype=torch.int32)
     if for_cudagraph_capture:
         metadata = builder.build_for_cudagraph_capture(common)
     else:
         metadata = builder.build(0, common)
 
-    torch.testing.assert_close(
-        metadata.block_table,
-        torch.tensor([[0, 1, 2, 3], [4, 5, 6, 7]], dtype=torch.int32),
-    )
+    torch.testing.assert_close(metadata.kv_gather_block_ids, torch.tensor([10, 11], dtype=torch.int32))
+    torch.testing.assert_close(metadata.block_table, torch.tensor([[0, 2, 1, 3]] * 2, dtype=torch.int32))
     torch.testing.assert_close(
         metadata.slot_mapping,
-        torch.tensor([2816, 2560, 2688, -1], dtype=torch.int32),
+        torch.tensor([1280, -1, 1408, -1, -1, 1281, -1, -1], dtype=torch.int32),
+    )
+    assert metadata.slot_mapping is common.slot_mapping
+    torch.testing.assert_close(
+        metadata.cache_scatter_indices,
+        torch.tensor(
+            [[10, 0], [-1, 127], [11, 0], [-1, 127], [-1, 127], [10, 1], [-1, 127], [-1, 127]], dtype=torch.int32
+        ),
     )
 
 
@@ -620,17 +688,16 @@ def test_replicated_pcp_draft_invalidates_captured_padding_when_live_prefix_shri
 
 @pytest.mark.parametrize("c4", [False, True])
 @pytest.mark.parametrize("c8", [False, True])
-@pytest.mark.parametrize("replicas", [1, 4])
-def test_indexer_owner_reports_data_scale_and_replication(monkeypatch, c4, c8, replicas):
+@pytest.mark.parametrize("dcp_size", [1, 4])
+@pytest.mark.parametrize("dcp_sharded", [False, True])
+def test_indexer_owner_reports_data_scale_and_dcp_sharding(monkeypatch, c4, c8, dcp_size, dcp_sharded):
     config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=128, cache_dtype="auto"),
         model_config=SimpleNamespace(dtype=torch.bfloat16),
-        parallel_config=SimpleNamespace(decode_context_parallel_size=replicas),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_size),
         compilation_config=SimpleNamespace(static_forward_context={}),
     )
     monkeypatch.setattr(indexer_module, "get_current_vllm_config", lambda: config)
-    monkeypatch.setattr(indexer_module, "enable_sfa_dcp_replicated_indexer", lambda _: replicas > 1)
-    monkeypatch.setattr(indexer_module, "enable_sfa_dcp_sharded_indexer", lambda _: False)
     backend = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
     torch.nn.Module.__init__(backend)
     backend.head_dim = 128
@@ -644,15 +711,16 @@ def test_indexer_owner_reports_data_scale_and_replication(monkeypatch, c4, c8, r
         dtype=torch.uint8,
         cache_role=SparseCacheRole.INDEXER,
         is_draft=True,
+        dcp_sharded=dcp_sharded,
     )
     spec = backend._build_cache_spec(source, config)
     assert backend.customize_spec(spec) is spec
     assert isinstance(spec, AscendSFAIndexerCacheSpec)
     assert spec.cache_role is source.cache_role and spec.is_draft
-    assert spec.sfa_dcp_replicated_indexer_size == replicas
+    assert spec.dcp_sharded is dcp_sharded
     assert spec.scale_dim == (4 if c4 else 1 if c8 else 0)
     assert spec.head_size == (64 if c4 else 128)
-    assert spec.page_size_bytes == replicas * 128 * (68 if c4 else 130 if c8 else 256)
+    assert spec.page_size_bytes == 128 * (68 if c4 else 130 if c8 else 256)
 
     prefix = "model.layers.0.self_attn.indexer.k_cache"
     old_owner = SimpleNamespace(head_dim=132, prefix=prefix, kv_cache=torch.empty(0), cache_config=config.cache_config)
@@ -750,7 +818,6 @@ def test_sharded_pcp_prefill_uses_global_history_and_local_query_rows(
     builder = _make_builder(
         pcp_size=2,
         dcp_size=world,
-        sharded_dcp=True,
         physical_block_size=768,
         max_model_len=1536 * world,
         interleave=768,

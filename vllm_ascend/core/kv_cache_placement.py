@@ -79,7 +79,7 @@ def build_kvpp_buffer_sizes(
     for name, spec in logical_spec.items():
         sizes = []
         if isinstance(spec, AscendSFAIndexerCacheSpec):
-            elements = spec.sfa_dcp_replicated_indexer_size * spec.block_size * spec.num_kv_heads
+            elements = spec.block_size * spec.num_kv_heads
             sizes.append(elements * spec.head_size * get_dtype_size(spec.dtype))
             if spec.scale_dim:
                 sizes.append(elements * spec.scale_dim * get_dtype_size(spec.scale_dtype))

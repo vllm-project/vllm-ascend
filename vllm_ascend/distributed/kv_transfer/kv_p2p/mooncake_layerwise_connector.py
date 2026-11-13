@@ -1463,7 +1463,7 @@ class MooncakeLayerwiseConnectorWorker:
                 if group_block_size_scale != block_size_scale:
                     raise NotImplementedError(
                         "Mooncake layerwise connector does not support KV cache components "
-                        "with different block size scales in one group, including DCP replicated indexer cache."
+                        "with different block size scales in one group."
                     )
                 block_shape = single_kv_cache.shape[block_start_rank:]
                 single_layer_meta.tensor_group_idx.append(layer_kv_group_id)

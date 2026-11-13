@@ -98,7 +98,7 @@ def allocate_shared_indexer_cache(
     regions: dict[str, tuple[int, int, int]] = {}
     capacity = 0
     for name, spec in specs.items():
-        rows = num_blocks * spec.sfa_dcp_replicated_indexer_size * spec.block_size * spec.num_kv_heads
+        rows = num_blocks * spec.block_size * spec.num_kv_heads
         data_bytes = rows * spec.head_size * get_dtype_size(spec.dtype)
         scale_bytes = rows * spec.scale_dim * get_dtype_size(spec.scale_dtype)
         scale_alignment = get_dtype_size(spec.scale_dtype)

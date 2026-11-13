@@ -35,9 +35,6 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
     block_lens: list[list[int]]
     block_shapes: list[list[tuple[int, ...]]]
     block_size_scales: list[list[int]]
-    # Per layer: 0 for non-indexer caches, 1 for unreplicated indexers,
-    # >1 for replicated indexers. Distinct from kernel blocks per scheduler page.
-    indexer_replication_sizes: list[int]
     dcp_sharded: list[bool]
     local_ip: str = ""
     handshake_port: int = 0
@@ -46,10 +43,6 @@ class MooncakeTransferMetadata(KVConnectorHandshakeMetadata):
         if self.cp_kv_cache_interleave_size <= 0:
             raise ValueError("Mooncake CP interleave size must be positive.")
         num_layers = len(self.layer_names)
-        if len(self.indexer_replication_sizes) != num_layers or any(
-            size < 0 for size in self.indexer_replication_sizes
-        ):
-            raise ValueError("Invalid per-layer indexer replication sizes.")
         per_layer_fields: tuple[tuple[str, Sequence[object]], ...] = (
             ("layer_block_sizes", self.layer_block_sizes),
             ("group_indices", self.group_indices),
@@ -121,7 +114,6 @@ class MooncakePPTransferMetadata:
     block_size_scales: list[list[int]]
     dcp_sharded: list[bool]
     metadata_by_pcp_rank: dict[int, MooncakePCPTransferMetadata]
-    indexer_replication_sizes: list[int]
 
 
 @dataclass(frozen=True)

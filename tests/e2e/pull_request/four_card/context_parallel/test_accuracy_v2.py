@@ -326,7 +326,7 @@ DSV3_2_SFA_PCP_CASE = InferenceCase(
 )
 
 DSV3_2_SFA_PCP_DCP_CASE = AccuracyCase(
-    name="dsv3_2_sfa_pcp_dcp_mtp5_replicated_indexer_mrv2_tp2_pcp2_dcp4",
+    name="dsv3_2_sfa_pcp_dcp_mtp5_sharded_indexer_mrv2_tp2_pcp2_dcp4",
     model=DSV3_2_MODEL,
     prompts=ACCURACY_PROMPTS,
     expected_outputs=DSV3_2_SFA_DCP_GOLDENS,
@@ -350,9 +350,7 @@ DSV3_2_SFA_PCP_DCP_CASE = AccuracyCase(
             "cudagraph_mode": "FULL_DECODE_ONLY",
             "cudagraph_capture_sizes": [6, 12, 18, 24],
         },
-        "additional_config": {
-            "enable_sparse_li_c8": False,
-        },
+        "attention_config": {"indexer_kv_dtype": "int8"},
         "speculative_config": {"method": "mtp", "num_speculative_tokens": 5},
     },
 )
