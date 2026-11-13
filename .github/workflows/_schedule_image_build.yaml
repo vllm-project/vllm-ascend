@@ -65,7 +65,7 @@ on:
         required: false
         type: string
         default: '910b'
-      dockerfile_ref:
+      PR_ref:
         description: "Optional git ref the whole source tree is built from (e.g. refs/pull/<n>/head). When set, the build checks out this ref ('pre-merge') instead of the branch, but branch_ref still decides the published tag. /presmoke always passes the triggering PR so the image contains the code and Dockerfiles under review. Default '' builds vllm_ascend_branch."
         required: false
         type: string
@@ -120,12 +120,12 @@ jobs:
         submodules: recursive
         fetch-depth: 0
         persist-credentials: false
-        # dockerfile_ref (e.g. refs/pull/<n>/head for /presmoke) makes the whole
+        # PR_ref (e.g. refs/pull/<n>/head for /presmoke) makes the whole
         # source tree come from that ref, not just the Dockerfile, so the image is
         # a full 'pre-merge' build of the ref under review. The branch (branch_ref)
         # still decides the published tag. Empty on tag pushes and PR events, so the
         # default event ref is used.
-        ref: ${{ inputs.dockerfile_ref || inputs.branch_ref }}
+        ref: ${{ inputs.PR_ref || inputs.branch_ref }}
 
     - name: Compute cache tag
       id: cache-tag
