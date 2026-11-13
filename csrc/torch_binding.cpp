@@ -57,7 +57,6 @@
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "attention/k2q_csr/k2q_csr_torch_adpt.h"
 #include "attention/msa_index_score/msa_index_score_torch_adpt.h"
-#include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
 #include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
 #include "moe/situ_mx_quant/situ_mx_quant_torch_adpt.h"
 #include "moe/grouped_matmul_situ_quant/grouped_matmul_situ_quant_torch_adpt.h"
@@ -3440,22 +3439,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "kda_layout_swap12(Tensor x, *, Tensor? dependency=None) -> Tensor"
     );
     ops.impl("kda_layout_swap12", torch::kPrivateUse1, &vllm_ascend::kda_layout_swap12);
-
-    ops.def(
-        "npu_sparse_attention_score("
-        "Tensor query, Tensor key, Tensor value, Tensor select_idx, "
-        "Tensor block_table, *, "
-        "Tensor? select_num_idx=None, "
-        "Tensor? q_dequant_scale=None, Tensor? k_dequant_scale=None, "
-        "Tensor? v_dequant_scale=None, "
-        "Tensor? actual_seq_lengths=None, Tensor? actual_seq_lengths_kv=None, "
-        "str q_input_layout=\"TND\", str kv_input_layout=\"BNSD\", "
-        "int num_key_value_heads=1, float scale_value=1.0, "
-        "int block_size=128, int top_k=16, int inner_precise=0, "
-        "ScalarType? attention_out_dtype=None) -> Tensor"
-    );
-    ops.impl("npu_sparse_attention_score", torch::kPrivateUse1,
-             &vllm_ascend::npu_sparse_attention_score);
 
     ops.def(
         "npu_msa_index_score("
