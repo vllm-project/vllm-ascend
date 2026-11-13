@@ -2,6 +2,7 @@
 import os
 import threading
 import time
+from collections.abc import Iterator
 from enum import Enum
 from typing import Any
 
@@ -60,6 +61,104 @@ def _validate_device_ub_qos() -> None:
         raise ValueError(
             f"Invalid MF_DEVICE_UB_QOS value {qos}: QoS must be an integer in [{QOS_VALUE_MIN}, {QOS_VALUE_MAX}]."
         )
+
+
+DRIVER_VERSION_INFO_PATH = "/usr/local/Ascend/driver/version.info"
+ASCEND_STORE_CONNECTOR_NAME = "AscendStoreConnector"
+MEMCACHE_BACKEND_NAME = "memcache"
+DEFAULT_ASCEND_STORE_BACKEND = "mooncake"
+
+
+def precheck_driver_version(version_info_path: str = DRIVER_VERSION_INFO_PATH) -> str | None:
+    """Verify the NPU driver version file is readable before heavy startup work.
+
+    memfabric(hybm) reads the 'Innerversion' entry of the driver version.info
+    file during store init and refuses to initialize device shared memory when
+    the file is missing or empty. Failing that check after model weights are
+    loaded wastes tens of minutes on large deployments, so verify it up front.
+
+    Returns the parsed Innerversion value, or None when the file has content
+    but no parsable Innerversion entry (the authoritative version check still
+    happens inside memfabric during store init).
+    """
+    try:
+        with open(version_info_path, encoding="utf-8") as version_file:
+            content = version_file.read()
+    except OSError as error:
+        raise RuntimeError(
+            f"AscendStoreConnector(memcache) precheck failed: cannot read driver version file "
+            f"{version_info_path} ({error}). If running inside a container, mount the host driver "
+            f"directory: -v /usr/local/Ascend/driver:/usr/local/Ascend/driver"
+        ) from error
+    if not content.strip():
+        raise RuntimeError(
+            f"AscendStoreConnector(memcache) precheck failed: driver version file {version_info_path} "
+            f"is empty. memfabric(hybm) requires the 'Innerversion' entry to initialize device shared "
+            f"memory. If running inside a container, mount the host driver file: "
+            f"-v {version_info_path}:{version_info_path}"
+        )
+
+    innerversion = None
+    for line in content.splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key.strip().lower() == "innerversion":
+            innerversion = value.strip()
+            break
+    if innerversion:
+        logger.info("AscendStoreConnector(memcache): driver Innerversion=%s (precheck ok)", innerversion)
+    else:
+        logger.warning(
+            "AscendStoreConnector(memcache): no 'Innerversion' entry found in %s; "
+            "memfabric will re-check the driver version during store init.",
+            version_info_path,
+        )
+    return innerversion
+
+
+def _iter_kv_connector_configs(kv_transfer_config: Any) -> Iterator[tuple[str, Any]]:
+    """Yield (connector name, extra config) pairs from a KVTransferConfig.
+
+    Covers the top-level connector and, for MultiConnector deployments, the
+    sub-connectors listed in its kv_connector_extra_config['connectors'].
+    """
+    if kv_transfer_config is None:
+        return
+    top_name = getattr(kv_transfer_config, "kv_connector", None)
+    top_extra = getattr(kv_transfer_config, "kv_connector_extra_config", None)
+    if top_name:
+        yield top_name, top_extra
+    if not isinstance(top_extra, dict):
+        return
+    for sub_config in top_extra.get("connectors", []):
+        if isinstance(sub_config, dict) and sub_config.get("kv_connector"):
+            yield sub_config["kv_connector"], sub_config.get("kv_connector_extra_config")
+
+
+def should_precheck_memcache_backend(vllm_config: Any) -> bool:
+    """Whether the deployment uses AscendStoreConnector with the memcache backend.
+
+    The backend default ('mooncake') mirrors AscendStoreConnector's own
+    extra-config handling, so a memcache deployment is only detected when it
+    is configured explicitly.
+    """
+    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+    for name, extra_config in _iter_kv_connector_configs(kv_transfer_config):
+        if name != ASCEND_STORE_CONNECTOR_NAME:
+            continue
+        backend = extra_config.get("backend", DEFAULT_ASCEND_STORE_BACKEND) if isinstance(extra_config, dict) else None
+        if isinstance(backend, str) and backend.lower() == MEMCACHE_BACKEND_NAME:
+            return True
+    return False
+
+
+def precheck_memcache_driver_version(vllm_config: Any) -> None:
+    """Run the driver version precheck for memcache-backed KV pool deployments.
+
+    No-op unless AscendStoreConnector(backend='memcache') is configured.
+    """
+    if not should_precheck_memcache_backend(vllm_config):
+        return
+    precheck_driver_version()
 
 
 class MmcDirect(Enum):
@@ -247,7 +346,12 @@ class MemcacheBackend(Backend):
             logger.error("Store initialization failed. error=%s. Check memcache setup and dependencies.", exc)
             raise
 
-        assert res == 0
+        if res != 0:
+            raise RuntimeError(
+                f"AscendStoreConnector(memcache) store initialization failed with return code {res}. "
+                f"Check the memfabric(hybm) logs for the root cause; common issues are an incompatible "
+                f"NPU driver version or an unreadable {DRIVER_VERSION_INFO_PATH} file."
+            )
         time.sleep(MEMCACHE_THREAD_START_WAIT_S)
         return store
 
