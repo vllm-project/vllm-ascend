@@ -38,6 +38,7 @@ from vllm_ascend.models.qwen_gdn_recoverssm import (
     gdn_mamba_state_dtype_from_config,
     gdn_mamba_state_shape_from_config,
 )
+from vllm_ascend.attention.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.ops.triton.qwen4_exp.hc import (
     grouped_gemma_rmsnorm,
     hc_combine,
@@ -210,6 +211,10 @@ class AscendQwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock):
         self.n_shared_experts = int(config.shared_expert_intermediate_size > 0)
 
 
+class AscendQwenGatedDeltaNetAttention(AscendGatedDeltaNetAttention, upstream_model.QwenGatedDeltaNetAttention):
+    """Keep Qwen projections while using Ascend GDN execution and metadata."""
+
+
 class AscendQwen4ExpDecoderLayer(upstream_model.Qwen4ExpDecoderLayer):
     """Qwen4Exp decoder layer whose MoE owns the local SP region."""
 
@@ -243,7 +248,7 @@ class AscendQwen4ExpDecoderLayer(upstream_model.Qwen4ExpDecoderLayer):
             )
 
         if layer_type == "linear_attention":
-            self.linear_attn = upstream_model.QwenGatedDeltaNetAttention(
+            self.linear_attn = AscendQwenGatedDeltaNetAttention(
                 config,
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.linear_attn",
