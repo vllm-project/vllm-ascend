@@ -1308,13 +1308,13 @@ def _allocate_kv_cache(
     # Hybrid groups share one backing; descriptors carry per-layer offsets.
     hybrid_backing: torch.Tensor | None = None
     step_backing: torch.Tensor | None = None
-    # Match the paired planner's model scope. Generic DeepSeek/GLM SFA groups
+    # Match the packed planner's model scope. Generic DeepSeek/GLM SFA groups
     # also contain MLA and indexer specs, but retain independent allocations.
-    # K3.1 PP ranks with only recurrent or draft layers still use paired backing.
+    # K3.1 PP ranks with only recurrent or draft layers still share one backing.
     hf_config = getattr(getattr(vllm_config, "model_config", None), "hf_config", None)
-    is_paired_sfa = getattr(hf_config, "model_type", None) == "kimi_k31"
-    packed_sfa = is_paired_sfa and is_packed_sfa_groups(kv_cache_config.kv_cache_groups)
-    if (use_hybrid_layout or is_paired_sfa) and not is_dsv4_model:
+    is_kimi_k31 = getattr(hf_config, "model_type", None) == "kimi_k31"
+    packed_sfa = is_kimi_k31 and is_packed_sfa_groups(kv_cache_config.kv_cache_groups)
+    if (use_hybrid_layout or is_kimi_k31) and not is_dsv4_model:
         hybrid_backing = _allocate_int8_cache_tensor(kv_cache_config.kv_cache_tensors[0].size, alignment, device)
 
     layerwise_reuse = get_layerwise_reuse_config(vllm_config.kv_transfer_config) is not None

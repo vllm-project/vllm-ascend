@@ -41,7 +41,7 @@ from vllm_ascend.models.glm5next.cache_config import (
 )
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
 from vllm_ascend.models.kimi_k3.cache_config import _get_kimi_k3_dspark_mixed_kv_cache_groups
-from vllm_ascend.models.kimi_k3.paired_sfa_cache import paired_sfa_cache_groups, paired_sfa_pool_bytes
+from vllm_ascend.models.kimi_k3.packed_sfa_cache import packed_sfa_cache_groups, packed_sfa_row_bytes
 from vllm_ascend.models.qwen4_exp.cache_config import (
     get_qwen4_exp_pool_bytes_per_block,
 )
@@ -63,7 +63,7 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         the Kimi-K3 DSpark mixed grouping, then vLLM's generic grouping.
         """
         if vllm_config.model_config.hf_config.model_type == "kimi_k31":
-            return paired_sfa_cache_groups(vllm_config, kv_cache_spec)
+            return packed_sfa_cache_groups(vllm_config, kv_cache_spec)
         if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
             # vLLM's generic grouping promotes local-attention specs before it
             # groups, so the Ascend layouts must see the same promoted specs.
@@ -99,7 +99,7 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         packed, the DSV4.1, and the GLM-Next layouts all violate.
         """
         if vllm_config.model_config.hf_config.model_type == "kimi_k31":
-            return paired_sfa_pool_bytes(kv_cache_groups)
+            return packed_sfa_row_bytes(kv_cache_groups)
         if is_deepseek_v41_cache(kv_cache_groups):
             return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
         if _get_glm5_next_cache_layout(kv_cache_groups) is not None:

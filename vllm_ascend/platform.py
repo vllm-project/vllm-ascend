@@ -455,9 +455,9 @@ class NPUPlatform(Platform):
 
     @classmethod
     def _align_hybrid_block_size(cls, vllm_config: VllmConfig, backend_cls) -> None:
-        from vllm_ascend.models.kimi_k3.packed_sfa_cache import uses_block_outermost_sfa
+        from vllm_ascend.models.kimi_k3.packed_sfa_cache import configure_packed_sfa_layout
 
-        if uses_block_outermost_sfa(vllm_config):
+        if configure_packed_sfa_layout(vllm_config):
             from vllm.model_executor.layers.mamba.abstract import get_mamba_prefill_checkpoint_alignment
 
             # A packed row covers MLA, indexer and every actual draft spec.
@@ -484,25 +484,6 @@ class NPUPlatform(Platform):
             return
 
         super()._align_hybrid_block_size(vllm_config, backend_cls)
-
-        if vllm_config.model_config.use_mla and vllm_config.model_config.hf_config.model_type == "kimi_k31":
-            from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim, get_tq_fused_slot_bytes
-            from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
-
-            # Keep the upstream token/checkpoint block sizes. K3.1's packed
-            # main page includes RoPE and scale bytes that the generic MLA
-            # page calculation above does not account for.
-            # Recurrent states overlay this page; the indexer and draft keep
-            # their independently sized physical regions.
-            cache_config = vllm_config.cache_config
-            text_config = vllm_config.model_config.hf_text_config
-            if cache_config.cache_dtype in ("int8", "fp8"):
-                token_bytes = get_sfa_qsfa_packed_head_dim(text_config.kv_lora_rank, text_config.qk_rope_head_dim)
-            elif cache_config.cache_dtype == TURBOQUANT_CACHE_DTYPE:
-                token_bytes = get_tq_fused_slot_bytes(text_config.kv_lora_rank, text_config.qk_rope_head_dim)
-            else:
-                return
-            cache_config.mamba_page_size_padded = cache_config.block_size * token_bytes
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:

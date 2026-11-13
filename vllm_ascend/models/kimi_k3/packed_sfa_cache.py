@@ -8,7 +8,6 @@ There is no dependency on a particular draft model or draft layer count.
 """
 
 import math
-from collections import Counter
 from dataclasses import replace
 
 import torch
@@ -28,23 +27,25 @@ from vllm_ascend.models.kimi_k3.cache_config import make_kimi_cache_groups
 from vllm_ascend.utils import vllm_version_is
 
 if vllm_version_is("0.32.0"):
-    from vllm.v1.core.kv_cache_utils import _approximate_gcd
+    from vllm.v1.core.kv_cache_utils import may_override_num_blocks
 else:
-    from vllm.v1.core.kv_cache_planning import _approximate_gcd
+    from vllm.v1.core.kv_cache_planning import may_override_num_blocks
 
 # All three Ascend MLA/indexer backends consume 128-token kernel pages.
 KIMI_KERNEL_BLOCK_SIZE = 128
 
 
-def uses_block_outermost_sfa(config) -> bool:
+def configure_packed_sfa_layout(config) -> bool:
+    """Select K3.1's packed layout before specs and engine layout resolution."""
     if getattr(config.model_config.hf_config, "model_type", None) != "kimi_k31":
         return False
-    # Platform block-size alignment runs before the engine resolves layout.
-    # Honor an explicit selection without calling the resolved-only getter.
     layout = config.cache_config.kv_cache_layout
     if layout is None:
-        layout = envs_vllm.VLLM_KV_CACHE_LAYOUT
-    return layout in ("BLNHC", "BLHNC", "BHLNC")
+        layout = envs_vllm.VLLM_KV_CACHE_LAYOUT or "BLNHC"
+    if layout not in ("BLNHC", "BLHNC", "BHLNC"):
+        raise ValueError("Kimi K3.1 requires a block-outermost KV cache layout (BLNHC or BLHNC).")
+    config.cache_config.kv_cache_layout = layout
+    return True
 
 
 def _attention_specs(groups):
@@ -91,6 +92,9 @@ def packed_sfa_row_bytes(groups) -> int:
 
 def packed_sfa_cache_groups(config, specs):
     """Specialize upstream mixed-page packing for Kimi's full + KDA roles."""
+    configure_packed_sfa_layout(config)
+    if not config.use_v2_model_runner:
+        raise ValueError("Kimi K3.1 packed KV cache requires Model Runner V2.")
     if config.scheduler_config.disable_hybrid_kv_cache_manager:
         raise ValueError("Block-outermost Kimi cache requires the hybrid KV cache manager.")
     parallel = config.parallel_config
@@ -127,25 +131,14 @@ def packed_sfa_cache_groups(config, specs):
         raise ValueError("Unexpected cache role in block-outermost Kimi layout.")
     if len(set(recurrent.values())) > 1:
         raise ValueError("Kimi recurrent layers must share state geometry.")
-    # Match upstream's balanced repeating-pattern floor. For an unbalanced
-    # history bucket (e.g. 24 MLA + 24 indexer + 3 draft), raw state capacity
-    # alone determines the recurrent group count. With no draft the 24/24
-    # pattern also limits each recurrent group to 24 layers.
-    counts = Counter(s.page_size_bytes for s in full.values())
-    balanced = len(set(counts.values())) == 1
-    pattern_width = len(recurrent) or 1
-    if balanced and len(counts) > 1 and recurrent:
-        repeats = next(iter(counts.values()))
-        pattern_width = _approximate_gcd([repeats, len(recurrent)], lower_bound=repeats)
+    # Every recurrent group can use the whole history row, regardless of
+    # draft presence or repeating page-size patterns.
     anchor = sum(s.page_size_bytes for s in full.values())
-    if recurrent:
-        state_bytes = next(iter(recurrent.values())).page_size_bytes
-        if anchor < state_bytes:
-            raise ValueError("The packed history row must cover one recurrent checkpoint; increase --block-size.")
-        group_size = min(pattern_width, anchor // state_bytes)
-    else:
-        group_size = 1
-    groups = make_kimi_cache_groups(full, recurrent, recurrent_group_size=group_size, uniform_recurrent=False)
+    state_bytes = next(iter(recurrent.values())).page_size_bytes
+    if anchor < state_bytes:
+        raise ValueError("The packed history row must cover one recurrent checkpoint; increase --block-size.")
+    max_group_size = anchor // state_bytes
+    groups = make_kimi_cache_groups(full, recurrent, recurrent_group_size=max_group_size, uniform_recurrent=False)
     if groups is None:
         raise ValueError("Packed history layers must share full-attention semantics.")
     groups[0] = replace(
@@ -156,7 +149,7 @@ def packed_sfa_cache_groups(config, specs):
     return groups
 
 
-def packed_sfa_cache_config(config, groups, available_memory, override_blocks):
+def packed_sfa_cache_config(config, groups, available_memory, override_blocks=may_override_num_blocks):
     row_bytes = packed_sfa_row_bytes(groups)
     num_blocks = override_blocks(config, available_memory // row_bytes)
     tensors = []
@@ -189,6 +182,11 @@ def packed_sfa_cache_config(config, groups, available_memory, override_blocks):
         kv_cache_groups=groups,
         prefix_cache_retention_interval=config.cache_config.prefix_cache_retention_interval,
     )
+
+
+def packed_sfa_max_memory(config, groups):
+    blocks = sum(cdiv(g.kv_cache_spec.max_memory_usage_bytes(config), g.kv_cache_spec.page_size_bytes) for g in groups)
+    return blocks * packed_sfa_row_bytes(groups)
 
 
 def packed_sfa_cache_views(raw, spec, num_blocks, row_bytes, mla_dims=None, fused_mla=False):

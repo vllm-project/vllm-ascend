@@ -5,10 +5,12 @@ physical row per scheduler block. Recurrent groups overlay the entire row,
 using disjoint block IDs. A draft model is optional. Layer counts, page sizes,
 dtypes and state shapes come from the actual KV cache specs.
 
-This path is selected explicitly with the existing `VLLM_KV_CACHE_LAYOUT`
-override (`BLNHC` or `BLHNC`). It targets Model Runner V2, packed SFA main
-cache, one latent KV head, PCP=1 and DCP=1. Other layouts retain the existing
-paired-page planner. Unsupported context-parallel packing fails during planning.
+Kimi K3.1 defaults to `BLNHC`. The existing `VLLM_KV_CACHE_LAYOUT` override
+can select another block-outermost layout such as `BLHNC`. The old layer-outermost
+paired-page implementation has been removed; explicit `LBNHC` selections fail
+during configuration. This implementation targets Model Runner V2, packed SFA
+main cache, one latent KV head, PCP=1 and DCP=1. Unsupported context-parallel
+packing fails during planning.
 
 ## Ownership and storage
 
@@ -32,9 +34,10 @@ one layer; packing changes where checkpoints fit, without reducing their data.
 
 The history payload is the sum of every actual history spec's `page_size_bytes`.
 Each recurrent group must fit inside that payload before stride padding. The
-balanced MLA/indexer pattern retains the upstream grouping floor; unbalanced
-draft counts use the raw byte capacity. Groups are balanced with the existing
-Kimi grouping helper. There is no special branch for three or five draft layers.
+maximum group size is the history payload divided by one raw recurrent state
+page size, rounded down, regardless of draft presence or page-size patterns.
+Groups are balanced with the existing Kimi grouping helper. There is no
+special branch for three or five draft layers.
 
 Let `B` be the configured manager block size and `K=128` the kernel block size.
 For history spec `s`, its kernel page has `Q[s] = page_size_bytes[s] / (B/K)`

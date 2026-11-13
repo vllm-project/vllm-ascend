@@ -1,5 +1,5 @@
 pr: 21849
 entries:
   - category: feature
-    text: Added opt-in block-outermost KV cache packing for Kimi K3.1 using actual MLA, indexer, draft and recurrent cache specs. Draft models are optional.
+    text: Replaced Kimi K3.1 paired KV cache storage with spec-driven block-outermost packing, defaulting to BLNHC. Draft models are optional; layer-outermost layouts and context parallel packing are unsupported.
     model: kimi-k3.1

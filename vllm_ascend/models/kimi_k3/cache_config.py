@@ -36,11 +36,11 @@ def make_kimi_cache_groups(
 
     Callers validate roles and geometry, and supply specs in layer order with
     target attention first for scheduler conversion. The recurrent slot budget
-    is explicit: K3 uses target plus draft pages, whereas K3.1 overlays only
-    target MLA pages, excluding both indexer and draft storage.
+    is explicit: K3 uses target plus draft pages, whereas K3.1 derives the
+    recurrent group capacity from the entire packed history row.
 
     K3 retains per-layer recurrent specs for its shared-tuple allocation;
-    K3.1 keeps native merged Mamba specs for its paired-page allocation.
+    K3.1 keeps native merged Mamba specs for its packed-row allocation.
     """
     full_history = UniformTypeKVCacheSpecs.from_specs(full_history_specs)
     if full_history is None:

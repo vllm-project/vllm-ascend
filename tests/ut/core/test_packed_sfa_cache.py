@@ -3,6 +3,7 @@
 
 from dataclasses import dataclass
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -11,13 +12,15 @@ from vllm.v1.kv_cache_interface import MambaSpec
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.models.kimi_k3 import packed_sfa_cache
 from vllm_ascend.models.kimi_k3.packed_sfa_cache import (
+    configure_packed_sfa_layout,
     map_packed_sfa_metadata,
     packed_sfa_cache_config,
     packed_sfa_cache_groups,
     packed_sfa_cache_views,
+    packed_sfa_max_memory,
     packed_sfa_row_bytes,
-    uses_block_outermost_sfa,
 )
+from vllm_ascend.patch.platform import patch_kv_cache_utils
 
 
 def make_packed_specs(block_size=10752, draft_layers=5, speculative_steps=3, state_heads=96):
@@ -57,12 +60,18 @@ def make_packed_specs(block_size=10752, draft_layers=5, speculative_steps=3, sta
 
 def packed_config():
     return SimpleNamespace(
+        use_v2_model_runner=True,
         model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="kimi_k31"), max_model_len=1048576),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1, prefill_context_parallel_size=1),
         scheduler_config=SimpleNamespace(
             disable_hybrid_kv_cache_manager=False, max_num_seqs=4, max_num_batched_tokens=256
         ),
-        cache_config=SimpleNamespace(prefix_cache_retention_interval=None, kv_cache_layout=None),
+        cache_config=SimpleNamespace(
+            prefix_cache_retention_interval=None,
+            kv_cache_layout=None,
+            num_gpu_blocks_override=None,
+            mamba_cache_mode="align",
+        ),
         compilation_config=SimpleNamespace(cudagraph_capture_sizes=[]),
         speculative_config=None,
     )
@@ -70,13 +79,54 @@ def packed_config():
 
 @pytest.mark.parametrize(
     "resolved,override,expected",
-    [(None, None, False), (None, "BLNHC", True), ("LBNHC", "BLNHC", False), ("BLHNC", None, True)],
+    [(None, None, "BLNHC"), (None, "BLHNC", "BLHNC"), ("BLNHC", "LBNHC", "BLNHC"), ("BLHNC", None, "BLHNC")],
 )
 def test_layout_selection_before_engine_resolution(monkeypatch, resolved, override, expected):
     config = packed_config()
     config.cache_config.kv_cache_layout = resolved
     monkeypatch.setattr(packed_sfa_cache.envs_vllm, "VLLM_KV_CACHE_LAYOUT", override)
-    assert uses_block_outermost_sfa(config) == expected
+    assert configure_packed_sfa_layout(config)
+    assert config.cache_config.kv_cache_layout == expected
+
+
+@pytest.mark.parametrize("resolved,override", [("LBNHC", "BLNHC"), (None, "LBNHC")])
+def test_layer_outermost_layout_is_rejected(monkeypatch, resolved, override):
+    config = packed_config()
+    config.cache_config.kv_cache_layout = resolved
+    monkeypatch.setattr(packed_sfa_cache.envs_vllm, "VLLM_KV_CACHE_LAYOUT", override)
+    with pytest.raises(ValueError, match="requires a block-outermost"):
+        configure_packed_sfa_layout(config)
+
+
+@pytest.mark.parametrize("model_type", ["kimi_k3", "deepseek_v32", "glm_moe_dsa"])
+def test_other_models_keep_their_layout(monkeypatch, model_type):
+    config = packed_config()
+    config.model_config.hf_config.model_type = model_type
+    monkeypatch.setattr(packed_sfa_cache.envs_vllm, "VLLM_KV_CACHE_LAYOUT", "LBNHC")
+    assert not configure_packed_sfa_layout(config)
+    assert config.cache_config.kv_cache_layout is None
+
+
+def test_model_runner_v1_is_rejected():
+    config = packed_config()
+    config.use_v2_model_runner = False
+    with pytest.raises(ValueError, match="requires Model Runner V2"):
+        packed_sfa_cache_groups(config, make_packed_specs())
+
+
+@pytest.mark.parametrize("model_type", ["kimi_k31", "kimi_k3", "deepseek_v32", "glm_moe_dsa"])
+def test_packed_planner_selection_uses_outer_model_type(monkeypatch, model_type):
+    config, specs = packed_config(), make_packed_specs()
+    config.model_config.hf_config.model_type = model_type
+    packed, upstream = Mock(return_value=[]), Mock(return_value=[])
+    monkeypatch.setattr(patch_kv_cache_utils, "packed_sfa_cache_groups", packed)
+    monkeypatch.setattr(patch_kv_cache_utils, "_orig_get_kv_cache_groups", upstream)
+    monkeypatch.setattr(patch_kv_cache_utils, "get_qwen4_exp_kv_cache_groups", lambda *_: None)
+    result = patch_kv_cache_utils._get_ascend_kv_cache_groups(config, specs)
+    selected, other = (packed, upstream) if model_type == "kimi_k31" else (upstream, packed)
+    assert result is selected.return_value
+    selected.assert_called_once_with(config, specs)
+    other.assert_not_called()
 
 
 @pytest.mark.parametrize("draft_layers", [0, 3, 5])
@@ -105,6 +155,7 @@ def test_a5_capacity_regression_with_five_draft_layers():
     assert [len(g.layer_names) for g in groups[1:]] == [35, 34]
     assert packed_sfa_row_bytes(groups) == 266010624
     assert (98 + 10 + 1) * packed_sfa_row_bytes(groups) == 28995158016
+    assert packed_sfa_max_memory(packed_config(), groups) == (98 + 10) * packed_sfa_row_bytes(groups)
 
 
 def test_no_draft_and_no_speculation():
@@ -114,24 +165,21 @@ def test_no_draft_and_no_speculation():
     assert (128 + 6 + 1) * packed_sfa_row_bytes(groups) == 20948336640
 
 
+def test_no_draft_groups_use_whole_row_capacity():
+    specs = make_packed_specs(12288, 0, 0)
+    groups = packed_sfa_cache_groups(packed_config(), specs)
+    assert len(groups[0].layer_names) == 48
+    assert [len(g.layer_names) for g in groups[1:]] == [35, 34]
+    assert all(g.kv_cache_spec.page_size_padded is None for g in groups[1:])
+    payload = 12288 * 24 * (656 + 132)
+    assert all(len(g.layer_names) * g.kv_cache_spec.page_size_bytes <= payload for g in groups[1:])
+
+
 def test_three_layer_mla_draft_capacity():
     groups = packed_sfa_cache_groups(packed_config(), make_packed_specs(11776, 3, 3))
     assert [len(g.layer_names) for g in groups[1:]] == [35, 34]
     assert packed_sfa_row_bytes(groups) == 266010624
     assert (90 + 10 + 1) * packed_sfa_row_bytes(groups) == 26867073024
-
-
-def test_pattern_floor_uses_actual_counts_and_upstream_repeat_selection():
-    specs = {
-        name: spec
-        for name, spec in make_packed_specs(65536, 0).items()
-        if isinstance(spec, MambaSpec) or name.startswith(("model.layers.0.", "model.layers.1."))
-    }
-    groups = packed_sfa_cache_groups(packed_config(), specs)
-    # Upstream's approximate GCD selects three repeats for counts [2, 69]:
-    # ties in total padding prefer the larger repeat size.
-    assert len(groups[1:]) == 23
-    assert {len(group.layer_names) for group in groups[1:]} == {3}
 
 
 @dataclass
