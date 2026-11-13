@@ -126,7 +126,20 @@ jobs:
       id: get_base_image_tag
       run: |
         DOCKERFILE="${{ inputs.dockerfile || 'Dockerfile' }}"
-        BASE_IMAGE_TAG=$(grep -m1 '^FROM' "$DOCKERFILE" | awk -F: '{print $NF}')
+        BASE_REF=$(grep -m1 '^FROM' "$DOCKERFILE")
+        # The base image may be indirected through an ARG declared before FROM
+        # (e.g. Dockerfile.a5.ubx uses ${CANN_BASE_IMAGE}). Resolve the ARG
+        # default so the cache key tracks the real base image and is invalidated
+        # when that default changes.
+        if [[ "$BASE_REF" =~ \$\{([A-Za-z_][A-Za-z0-9_]*)\} ]]; then
+          BASE_ARG="${BASH_REMATCH[1]}"
+          BASE_REF=$(grep -m1 "^ARG ${BASE_ARG}=" "$DOCKERFILE")
+          if [ -z "$BASE_REF" ]; then
+            echo "::error::Could not resolve \${${BASE_ARG}} referenced by FROM in ${DOCKERFILE}"
+            exit 1
+          fi
+        fi
+        BASE_IMAGE_TAG=$(echo "$BASE_REF" | awk -F: '{print $NF}' | tr -d '"')
         echo "BASE_IMAGE_TAG=$BASE_IMAGE_TAG" >> "$GITHUB_OUTPUT"
 
     - name: Get csrc hash

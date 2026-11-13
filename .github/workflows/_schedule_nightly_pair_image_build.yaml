@@ -31,7 +31,7 @@ on:
       target:
         required: true
         type: string
-        description: "Nightly target / chip: 'a2', 'a3', '310p' or 'a5'"
+        description: "Nightly target / chip: 'a2', 'a3', '310p', 'a5' or 'a5-ubx'"
       os:
         required: true
         type: string
