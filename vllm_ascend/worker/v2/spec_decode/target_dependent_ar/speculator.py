@@ -42,7 +42,7 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_config import draft_config_context, get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.context_parallel.attention_cp import build_dcp_fia_params
-from vllm_ascend.attention.context_parallel.common_cp import CPKVScope, use_history_current_split_decode
+from vllm_ascend.attention.context_parallel.common_cp import CPKVScope
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAMetadata
@@ -705,11 +705,13 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
     ) -> list[dict[str, Any]]:
         """Build all draft steps' FIA parameters for a single graph update."""
         if self.use_dcp:
-            if self.attn_architecture == "MLA":
-                if num_tokens is None:
-                    raise ValueError("num_tokens is required for MLA with DCP")
-                return self.build_mla_dcp_fia_params(num_tokens, draft_attn_metadatas, is_draft_model_prefill)
-            return self.build_fia_params_dcp(num_reqs_padded, draft_attn_metadatas[0], is_draft_model_prefill)
+            if is_draft_model_prefill:
+                return self.build_fia_params_dcp(
+                    num_reqs_padded, draft_attn_metadatas[0], True, num_tokens=num_tokens
+                )
+            return self.build_fia_params_dcp(
+                num_reqs_padded, draft_attn_metadatas[0], False, num_tokens=num_tokens
+            )
         draft_attn_metadata = draft_attn_metadatas[0]
         block_table = next(iter(draft_attn_metadata.values())).block_tables
         if is_draft_model_prefill:
@@ -742,47 +744,46 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
                 )
         return fia_params
 
-    def build_mla_dcp_fia_params(
-        self,
-        num_tokens: int,
-        draft_attn_metadatas: list[dict[str, Any]],
-        is_draft_model_prefill: bool,
-    ) -> list[dict[str, Any]]:
-        """Build MLA DCP parameters for each captured draft step and layer."""
-        from vllm_ascend.attention.context_parallel.mla_cp import MLADCPParamProvider
+    def get_dcp_param_provider_factory(self, num_tokens: int | None):
+        if self.attn_architecture == "MLA":
+            if num_tokens is None:
+                raise ValueError("num_tokens is required for MLA with DCP")
+            from vllm_ascend.attention.context_parallel.mla_cp import MLADCPParamProvider
 
-        fia_params = []
-        for per_step_metadata in draft_attn_metadatas:
-            for layer_name, metadata in per_step_metadata.items():
-                if metadata.decode is None or metadata.external_flashmla is not None:
-                    continue
-                use_split = use_history_current_split_decode(
-                    metadata,
-                    is_draft_model=True,
-                    is_draft_model_prefill=is_draft_model_prefill,
-                )
-                kinds = (CPKVScope.HISTORY, CPKVScope.CURRENT) if use_split else (CPKVScope.FULL,)
-                for kind in kinds:
-                    provider = MLADCPParamProvider(layer_name, kind, num_tokens)
-                    fia_params.append({"layer_name": provider.layer_name, **provider.resolve({layer_name: metadata})})
-        return fia_params
+            def create_provider(layer_name, kind):
+                return MLADCPParamProvider(layer_name, kind, num_tokens)
+        else:
+            from vllm_ascend.attention.context_parallel.attention_cp import DCPFIAParamProvider
+
+            assert self.dcp_manager is not None
+
+            def create_provider(layer_name, kind):
+                return DCPFIAParamProvider(layer_name, self.dcp_manager.dcp_world_rank, kind)
+
+        return create_provider
 
     def build_fia_params_dcp(
         self,
         num_reqs_padded: int,
         draft_attn_metadata: dict[str, Any],
         is_draft_model_prefill: bool,
+        *,
+        num_tokens: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Build all GQA DCP draft steps' history/current or cache parameters."""
+        """Build DCP draft attention parameters for prefill or decode."""
         assert self.dcp_manager is not None
         if is_draft_model_prefill:
+            provider_factory = self.get_dcp_param_provider_factory(num_tokens)
             return [
                 params
                 for layer_name, metadata in draft_attn_metadata.items()
+                if self.attn_architecture != "MLA"
+                or (metadata.decode is not None and metadata.external_flashmla is None)
                 for params in build_dcp_fia_params(
                     layer_name,
                     metadata,
                     self.dcp_manager.dcp_world_rank,
+                    provider_factory=provider_factory,
                     is_draft_model=True,
                     is_draft_model_prefill=True,
                 )
@@ -806,14 +807,24 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             ).tolist()
             for layer_name in self.draft_attn_layer_names:
                 metadata = draft_attn_metadata[layer_name]
-                fia_params.append(
-                    {
+                if self.attn_architecture == "MLA":
+                    if metadata.decode is None or metadata.external_flashmla is not None:
+                        continue
+                    if num_tokens is None:
+                        raise ValueError("num_tokens is required for MLA with DCP")
+                    mla_kv_lens = local_kv_lens + [0] * max(0, num_tokens - len(local_kv_lens))
+                    params = {
+                        "layer_name": (layer_name, CPKVScope.FULL),
+                        "actual_seq_kvlen": mla_kv_lens,
+                    }
+                else:
+                    params = {
                         "layer_name": (layer_name, CPKVScope.FULL),
                         "actual_seq_lengths": query_start_loc,
                         "actual_seq_lengths_kv": local_kv_lens,
                         "block_table": metadata.decode.block_tables,
                     }
-                )
+                fia_params.append(params)
         return fia_params
 
     def _calc_next_seq_lens_cpu(self, seq_lens_cpu, num_reqs, num_reqs_padded, step):
