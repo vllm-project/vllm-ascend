@@ -4,6 +4,7 @@
 import pytest
 import torch
 import torch_npu  # noqa: F401
+import triton
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
@@ -60,6 +61,53 @@ def test_compressor_matches_torch(ratio, packed):
     torch.testing.assert_close(actual_state.cpu(), expected_state, rtol=2**-10, atol=2**-16)
     # Projection and pooling must not change pages owned by another request.
     torch.testing.assert_close(actual_state[[2, 4, 5]].cpu(), state[[2, 4, 5]], rtol=0, atol=0)
+
+
+@torch.inference_mode()
+def test_projected_runtime_shapes_reuse_kernels(monkeypatch):
+    """Changing request extents or cache capacity must not compile new kernels."""
+    compiled = []
+
+    def record_compile(*, fn, **kwargs):
+        if fn.name in ("_pool_kernel", "_cache_update_kernel"):
+            compiled.append(fn.name)
+
+    monkeypatch.setattr(triton.knobs.runtime, "jit_cache_hook", record_compile)
+    for requests, length, pages in [(1, 6, 3), (2, 8, 5), (8, 129, 17)]:
+        width = 512
+        kv = torch.randn(requests * length, width)
+        scores = torch.randn_like(kv)
+        state = torch.randn(pages, STATE_RING_ROWS, 2 * width)
+        metadata = torch.tensor(
+            [
+                [1] * requests,
+                [length] * requests,
+                [0] * requests,
+                [r * length for r in range(requests)],
+                list(range(1, requests + 1)),
+            ],
+            dtype=torch.int32,
+        )
+        expected, expected_state = _projected_reference(kv, scores, state, metadata, None, None)
+        ring = state.npu()
+        out = torch.empty_like(kv, dtype=torch.bfloat16, device="npu")
+        compressor_from_projected(
+            kv.npu(),
+            scores.npu(),
+            ring,
+            metadata.npu(),
+            out,
+            max_query_len=length,
+            num_cores=64,
+            prev_rows=None,
+            prev_row_indices=None,
+        )
+        torch.testing.assert_close(out.cpu(), expected, rtol=2**-6, atol=2**-6)
+        torch.testing.assert_close(ring.cpu(), expected_state, rtol=0, atol=0)
+        if requests == 1:
+            compiled.clear()  # The first shape warms both kernels.
+        else:
+            assert not compiled, f"Runtime extents triggered recompilation: {compiled}"
 
 
 def _projected_reference(kv, scores, state, metadata, prev_rows, prev_indices):
