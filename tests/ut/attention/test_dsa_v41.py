@@ -170,7 +170,7 @@ def test_compressed_kv_source_cache_update_covers_full_batch(monkeypatch):
     )
     attn = SimpleNamespace(rotary_emb=SimpleNamespace(layername="rope"))
     impl = _impl(SimpleNamespace(is_kv_source=True, compress_ratio=2))
-    calls = []
+    calls: list[tuple[str, int] | tuple[str, int, list[int]]] = []
 
     def project_kv(attn, states, cos, sin):
         calls.append(("project_kv", states.shape[0]))
