@@ -353,6 +353,7 @@ def test_pcp_draft_metadata_preserves_other_attention_paths():
 @pytest.mark.parametrize("dummy_run", [False, True])
 def test_propose_renegotiates_pcp_draft_dp_sync(pcp_enabled, mismatch, dummy_run) -> None:
     speculator = object.__new__(AscendMTPSpeculator)
+    speculator.enable_adaptive_verification = False
     speculator.dp_size = 2
     speculator.pcp_manager = object() if pcp_enabled else None
     input_batch = object()
