@@ -143,6 +143,7 @@ def test_kimi_disabling_mlapo_refreshes_projection_nz_management():
         impl.support_fp8_attention = True
         scheme = AscendW8A8MXFP8DynamicLinearMethod.__new__(AscendW8A8MXFP8DynamicLinearMethod)
         scheme.group_size = 32
+        scheme.o_lora_rank = None
         projections = []
         for output_size, input_size in ((128, 256), (192, 64)):
             layer = nn.Module()

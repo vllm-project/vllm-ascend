@@ -304,6 +304,7 @@ def test_mxfp8_mla_fused_preprocess_owns_nz_conversion(
 ):
     scheme = AscendW8A8MXFP8DynamicLinearMethod.__new__(AscendW8A8MXFP8DynamicLinearMethod)
     scheme.group_size = 32
+    scheme.o_lora_rank = None
     projections = []
     for output_size, input_size in ((128, 256), (192, 64)):
         layer = torch.nn.Module()

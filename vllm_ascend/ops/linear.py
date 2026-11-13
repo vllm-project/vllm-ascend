@@ -42,7 +42,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayoutPolicy, get_current_hardware_profile
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
-from vllm_ascend.utils import maybe_trans_nz
+from vllm_ascend.utils import maybe_trans_nz, reshape_wo_a_to_3d
 from vllm_ascend.weight_switch import WeightSwitchGatherSpec, WeightSwitchMixin
 
 
@@ -126,9 +126,7 @@ class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
         # [n_local_groups, hidden_size, o_lora_rank]. Reshape it here so it
         # applies to load-format=dummy too, where weight_loader never runs.
         if _should_reshape_wo_a_to_3d(layer.prefix, layer.weight.data.dtype) and layer.weight.data.ndim == 2:
-            layer.weight.data = (
-                layer.weight.data.view(layer.n_local_groups, layer.o_lora_rank, -1).transpose(2, 1).contiguous()
-            )
+            layer.weight.data = reshape_wo_a_to_3d(layer.weight.data, layer.o_lora_rank)
 
     def apply(
         self,
@@ -498,15 +496,7 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
                 start_idx = self.tp_rank * shard_size
                 if loaded_weight.shape[0] != shard_size:
                     loaded_weight = loaded_weight.narrow(0, start_idx, shard_size)
-                loaded_weight = (
-                    loaded_weight.view(
-                        self.n_local_groups,
-                        self.o_lora_rank,
-                        -1,
-                    )
-                    .transpose(2, 1)
-                    .contiguous()
-                )
+                loaded_weight = reshape_wo_a_to_3d(loaded_weight, self.o_lora_rank)
 
                 if loaded_weight.shape != self.weight.shape:
                     raise ValueError(
