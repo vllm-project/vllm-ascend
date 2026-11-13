@@ -54,7 +54,9 @@ def test_qwen4_exp_ascend_wrapper_reuses_upstream_pp_sp_control_flow() -> None:
     assert "torch.cat((multi_hidden, sample_hidden_states), dim=-1)" in mtp
     assert not (ROOT / "vllm_ascend/patch/platform/patch_qwen4_exp_pp.py").exists()
     assert "class AscendQwen4ExpModelState" in model_state
-    assert "ple_layer_ids = []" not in model_state
+    assert "ple_layer_ids = config.ple_layer_ids" in model_state
+    assert "config.ple_layer_ids = []" in model_state
+    assert "config.ple_layer_ids = ple_layer_ids" in model_state
     assert "if intermediate_tensors is None:" in mtp
     assert "def _get_npu_view_from_cpu_tensor(" in ple
     assert "torch.ops._C_ascend.get_npu_view_from_cpu_tensor(" in ple

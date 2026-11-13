@@ -126,7 +126,7 @@ def test_head_sharded_gdn_projects_global_tokens_and_returns_local_rows():
         out.copy_(qkv.view_as(out) + 1)
 
     with (
-        patch("vllm_ascend.ops.gdn.get_forward_context", return_value=SimpleNamespace(attn_metadata=metadata)),
+        patch("vllm_ascend.attention.gdn.get_forward_context", return_value=SimpleNamespace(attn_metadata=metadata)),
         patch.object(torch.ops.vllm, "qwen_gdn_attention_core", side_effect=core),
     ):
         result = model(local_hidden, output)

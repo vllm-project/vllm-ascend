@@ -23,6 +23,11 @@ def test_main_falls_back_when_fused_projection_abi_is_not_satisfied(monkeypatch)
         "_project_qkv_gate",
         upstream_projection,
     )
+    monkeypatch.setattr(
+        qsa,
+        "get_forward_context",
+        lambda: SimpleNamespace(is_draft_model=False),
+    )
     layer = qsa.AscendQwen4ExpQSAAttention.__new__(qsa.AscendQwen4ExpQSAAttention)
     torch.nn.Module.__init__(layer)
     layer.layer_name = "model.layers.0.self_attn.attn"
@@ -142,7 +147,8 @@ def test_text_only_indexer_uses_fused_rope_without_mrope_sections(monkeypatch) -
     assert fused.call_count == 2
     for call in fused.call_args_list:
         assert call.kwargs["mrope_section"] == []
-        torch.testing.assert_close(call.kwargs["cos_sin"], cache[positions])
+        torch.testing.assert_close(call.kwargs["cos_sin"], cache)
+        torch.testing.assert_close(call.kwargs["positions"], positions)
 
 
 @pytest.mark.parametrize("pcp", [False, True])
