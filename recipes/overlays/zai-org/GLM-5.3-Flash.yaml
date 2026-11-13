@@ -3,6 +3,7 @@
 meta:
   hardware:
     ascend_950pr_8x: verified
+    ascend_910b: verified
 hardware_overrides:
   npu:
     extra_args:
@@ -26,6 +27,12 @@ hardware_notes:
   ascend_950pr_8x:
     title: vLLM Ascend A5 image required
     body: Single-node TP8 on 8×950PR. Pin quay.io/ascend/vllm-ascend:nightly-main-a5 and overlay vLLM#53906 / vllm-ascend#15127. Do not pass --quantization ascend. --block-size 512 is required (kpool indexer). EP is not available on this interconnect.
+  ascend_910b:
+    title: W8A8 prefill/decode disaggregation on Atlas 800I A2 (910B4)
+    body: Validated on 4 nodes x 8 NPU (32x Ascend 910B4, 64 GB HBM each), prefill pool 2 nodes at DP2 x TP1 x PCP8 and decode pool 2 nodes at DP8 x TP2
+    link:
+      label: vLLM Ascend GLM-5.3-Flash tutorial
+      href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/GLM5.3-Flash.html
 strategy_hardware:
   single_node_tep:
     npu: unsupported
@@ -41,6 +48,16 @@ strategy_hardware:
     npu: unsupported
   pd_cluster:
     npu: unsupported
+    ascend_910b: supported
+features:
+  spec_decoding:
+    modes:
+      mtp:
+        hardware_overrides:
+          ascend_910b:
+            args:
+              - '--speculative-config'
+              - '{"method": "deepseek_mtp", "num_speculative_tokens": 3, "enforce_eager": false}'
 variants:
   default:
     hardware_overrides:
@@ -48,3 +65,100 @@ variants:
         docker_image: quay.io/ascend/vllm-ascend:nightly-main-a5
         install:
           pip: false
+  ascend_w8a8:
+    model_id: Eco-Tech/GLM-5.3-Flash-w8a8
+    label: W8A8 (A2 PD)
+    precision: int8
+    vram_minimum_gb: 386
+    supported_hardware:
+      - ascend_910b
+    tp:
+      ascend_910b: 2
+    default_modes:
+      spec_decoding: mtp
+    min_vllm_version: '0.32.0'
+    extra_args:
+      - '--quantization'
+      - ascend
+      - '--enable-expert-parallel'
+      - '--max-model-len'
+      - '1048576'
+      - '--max-num-seqs'
+      - '40'
+      - '--max-num-batched-tokens'
+      - '240'
+      - '--gpu-memory-utilization'
+      - '0.9'
+      - '--safetensors-load-strategy'
+      - prefetch
+      - '--kv-cache-dtype'
+      - int8
+      - '--attention-config'
+      - '{"indexer_kv_dtype": "int8"}'
+      - '--enable-prefix-caching'
+      - '--compilation-config'
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - '--additional-config'
+      - '{"enable_shared_expert_dp": true, "recompute_scheduler_enable": true, "enable_flashcomm1": false, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false, "enable_super_kernel": false}}'
+    extra_env:
+      VLLM_USE_MODELSCOPE: 'True'
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True,pin_memory_expandable_segments:True
+      HCCL_BUFFSIZE: '1024'
+      HCCL_OP_EXPANSION_MODE: AIV
+      HCCL_INTRA_ROCE_ENABLE: '1'
+      TASK_QUEUE_ENABLE: '1'
+      OMP_NUM_THREADS: '1'
+    hardware_overrides:
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1
+        install:
+          pip: false
+presets:
+  ascend_a2_w8a8_pd:
+    label: A2 W8A8 PD (2P + 2D)
+    hardware: ascend_910b
+    strategy: pd_cluster
+    variants: [ascend_w8a8]
+    workload: Prefill/decode disaggregation, 1M context
+    roles:
+      prefill:
+        nodes: 2
+        parallelism: dep
+        args:
+          - '--enforce-eager'
+          - '--max-num-seqs'
+          - '32'
+          - '--max-num-batched-tokens'
+          - '8192'
+          - '--prefill-context-parallel-size'
+          - '8'
+        json_args:
+          --kv-transfer-config:
+            kv_connector: MooncakeConnectorV2
+            kv_connector_extra_config:
+              use_ascend_direct: true
+              prefill:
+                dp_size: 2
+                tp_size: 1
+              decode:
+                dp_size: 8
+                tp_size: 2
+      decode:
+        nodes: 2
+        parallelism: dep
+        args:
+          - '--max-num-seqs'
+          - '40'
+          - '--max-num-batched-tokens'
+          - '240'
+        json_args:
+          --kv-transfer-config:
+            kv_connector: MooncakeConnectorV2
+            kv_connector_extra_config:
+              use_ascend_direct: true
+              prefill:
+                dp_size: 2
+                tp_size: 1
+              decode:
+                dp_size: 8
+                tp_size: 2
