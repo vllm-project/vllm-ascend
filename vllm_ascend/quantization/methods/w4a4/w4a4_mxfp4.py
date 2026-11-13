@@ -30,6 +30,7 @@ from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
+from vllm_ascend.quantization.nz import fp4_packed_nz
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, COMPRESSED_TENSORS_METHOD, dispose_tensor
 
 from ..base import (
@@ -77,6 +78,7 @@ class AscendW4A4MXFP4DynamicLinearMethod(AscendLinearScheme):
     weights are stored in packed FP4-compatible format with per-group scales.
     """
 
+    quant_type: QuantType = QuantType.W4A4MXFP
     model_dtype = None
     weight_switch_gather_specs = (
         WeightSwitchGatherSpec("weight"),
@@ -290,6 +292,8 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
             # MegaMoe consumes the non-transposed per-expert weight/scale lists
             # built in process_weights_after_loading (the non-mega path uses the
             # transposed single tensors below).
+            shared_fusion = getattr(layer, "ascend_megamoe_shared_fusion", None)
+            shared = shared_fusion.weights if shared_fusion is not None else None
             return MoEWeights(
                 w1=layer.cann_mega_moe_w13_weight_list,
                 w2=layer.cann_mega_moe_w2_weight_list,
@@ -297,6 +301,10 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
                 w2_scale=layer.cann_mega_moe_w2_weight_scale_list,
                 w1_scale_bias=None,
                 w2_scale_bias=None,
+                shared_w1=shared.w1 if shared else None,
+                shared_w2=shared.w2 if shared else None,
+                shared_w1_scale=shared.w1_scale if shared else None,
+                shared_w2_scale=shared.w2_scale if shared else None,
             )
         else:
             return MoEWeights(
@@ -346,13 +354,7 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
             ]
 
             layer.cann_mega_moe_w2_weight_list = [
-                torch_npu.npu_format_cast(
-                    weight.clone(),
-                    ACL_FORMAT_FRACTAL_NZ,
-                    customize_dtype=torch.float8_e4m3fn,
-                    input_dtype=torch_npu.float4_e2m1fn_x2,
-                )
-                for weight in layer.w2_weight.data
+                fp4_packed_nz().cast(weight.clone()) for weight in layer.w2_weight.data
             ]
             # Checkpoint E8M0 scales are stored as bytes; CANN requires their semantic dtype.
             layer.cann_mega_moe_w13_weight_scale_list = [

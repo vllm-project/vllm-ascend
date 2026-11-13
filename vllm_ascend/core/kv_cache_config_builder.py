@@ -14,7 +14,6 @@ Core-resolved ``num_blocks``.
 from collections import defaultdict
 
 from vllm.config import VllmConfig
-from vllm.logger import logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.core.kv_cache_planning import (
     DefaultKVCacheConfigBuilder,
@@ -22,10 +21,8 @@ from vllm.v1.core.kv_cache_planning import (
     unify_hybrid_kv_cache_specs,
 )
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
     KVCacheGroupSpec,
     KVCacheSpec,
-    MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
@@ -43,14 +40,13 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_pool_bytes_per_block,
 )
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
+from vllm_ascend.models.kimi_k3.cache_config import _get_kimi_k3_dspark_mixed_kv_cache_groups
+from vllm_ascend.models.kimi_k3.paired_sfa_cache import paired_sfa_cache_groups, paired_sfa_pool_bytes
 from vllm_ascend.models.qwen4_exp.cache_config import (
     get_qwen4_exp_pool_bytes_per_block,
 )
 from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.quantization.methods.kv_cache.turboquant import cache as tq_cache
-
-_KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
-_KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
 
 
 class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
@@ -63,9 +59,11 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
     ) -> list[KVCacheGroupSpec]:
         """Group layers, preferring the Ascend layout when one applies.
 
-        Precedence: GLM-Next, then DSV4.1 / mixed-page-size shared slots, then
+        Precedence: Kimi-K3.1, GLM-Next, then DSV4.1 / mixed-page-size shared slots, then
         the Kimi-K3 DSpark mixed grouping, then vLLM's generic grouping.
         """
+        if vllm_config.model_config.hf_config.model_type == "kimi_k31":
+            return paired_sfa_cache_groups(vllm_config, kv_cache_spec)
         if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
             # vLLM's generic grouping promotes local-attention specs before it
             # groups, so the Ascend layouts must see the same promoted specs.
@@ -100,6 +98,8 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         single device backing size, which the DSV4 shared-tuple, the TurboQuant
         packed, the DSV4.1, and the GLM-Next layouts all violate.
         """
+        if vllm_config.model_config.hf_config.model_type == "kimi_k31":
+            return paired_sfa_pool_bytes(kv_cache_groups)
         if is_deepseek_v41_cache(kv_cache_groups):
             return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
         if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
@@ -117,99 +117,6 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
 def _page_sizes(spec: UniformTypeKVCacheSpecs) -> set[int]:
     """Distinct page sizes across a group's cache specs."""
     return {s.page_size_bytes for s in spec.kv_cache_specs.values()}
-
-
-def _get_kimi_k3_dspark_mixed_kv_cache_groups(
-    kv_cache_spec: dict[str, KVCacheSpec],
-) -> list[KVCacheGroupSpec] | None:
-    """Build topology-independent Kimi K3 DSpark scheduler groups.
-
-    Target and causal draft attention layers require the same full-sequence
-    block ownership. Putting them in one UniformType group lets them share one
-    scheduler block table while preserving a separate physical page per layer.
-    Recurrent layers are split into the fewest balanced groups whose size does
-    not exceed the attention group. This minimizes scheduler groups while
-    keeping the recurrent groups balanced.
-
-    Block and page sizes are resolved by the runtime and intentionally not
-    fixed here: TP8 and TP16 produce different sizes but the same ownership
-    relation. An unrecognized or incompatible signature falls back to vLLM's
-    generic hybrid grouping.
-    """
-    target_attention_specs = {
-        name: spec
-        for name, spec in kv_cache_spec.items()
-        if name.startswith(_KIMI_K3_TARGET_LAYER_PREFIX) and isinstance(spec, FullAttentionSpec)
-    }
-    draft_attention_specs = {
-        name: spec
-        for name, spec in kv_cache_spec.items()
-        if name.startswith(_KIMI_K3_DRAFT_LAYER_PREFIX) and isinstance(spec, FullAttentionSpec)
-    }
-    mamba_specs = {
-        name: spec
-        for name, spec in kv_cache_spec.items()
-        if name.startswith(_KIMI_K3_TARGET_LAYER_PREFIX) and isinstance(spec, MambaSpec)
-    }
-
-    matched_layer_count = len(target_attention_specs) + len(draft_attention_specs) + len(mamba_specs)
-    if (
-        not target_attention_specs
-        or not draft_attention_specs
-        or not mamba_specs
-        or matched_layer_count != len(kv_cache_spec)
-    ):
-        return None
-
-    attention_specs = [*target_attention_specs.values(), *draft_attention_specs.values()]
-    all_specs = [*attention_specs, *mamba_specs.values()]
-    # Only attention layers share a scheduler block table. Mamba keeps its
-    # own groups and may use max_model_len as block_size when cache_mode=none.
-    if (
-        len({spec.block_size for spec in attention_specs}) != 1
-        or len({spec.page_size_bytes for spec in all_specs}) != 1
-    ):
-        return None
-
-    first_mamba_spec = next(iter(mamba_specs.values()))
-    if any(spec != first_mamba_spec for spec in mamba_specs.values()):
-        return None
-
-    # Insert target attention first. generate_scheduler_kv_cache_config unwraps a
-    # UniformType group to its first spec, and this representative is registered
-    # with the FullAttentionManager needed by both target and draft attention.
-    mixed_attention_specs = {**target_attention_specs, **draft_attention_specs}
-    mixed_attention_spec = UniformTypeKVCacheSpecs.from_specs(mixed_attention_specs)
-    if mixed_attention_spec is None:
-        return None
-
-    groups = [
-        KVCacheGroupSpec(
-            layer_names=list(mixed_attention_specs),
-            kv_cache_spec=mixed_attention_spec,
-        )
-    ]
-    mamba_layer_names = list(mamba_specs)
-    mamba_group_count = cdiv(len(mamba_layer_names), len(mixed_attention_specs))
-    for group_idx in range(mamba_group_count):
-        layer_names = mamba_layer_names[group_idx::mamba_group_count]
-        group_specs = {name: mamba_specs[name] for name in layer_names}
-        uniform_mamba_spec = UniformTypeKVCacheSpecs.from_specs(group_specs)
-        assert uniform_mamba_spec is not None
-        groups.append(
-            KVCacheGroupSpec(
-                layer_names=layer_names,
-                kv_cache_spec=uniform_mamba_spec,
-            )
-        )
-
-    logger.info(
-        "Using Kimi K3 DSpark mixed KV grouping: %d target + %d draft attention layers, followed by Mamba groups %s",
-        len(target_attention_specs),
-        len(draft_attention_specs),
-        [len(group.layer_names) for group in groups[1:]],
-    )
-    return groups
 
 
 def group_and_unify_kv_cache_specs(

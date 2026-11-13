@@ -3,6 +3,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
+from contextlib import contextmanager
 from typing import Any, cast
 
 import torch
@@ -22,6 +23,19 @@ from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSampl
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     disable_profiling_chunk_for_draft,
 )
+
+
+# TODO: Remove this helper and build_draft_attn_metadatas once tiling
+# eliminates replay-time metadata rebuilding. The rebuild currently needs
+# this count because it cannot access the effective num_reqs from upstream propose().
+@contextmanager
+def draft_metadata_request_count(speculator: Any, num_reqs: int):
+    previous = getattr(speculator, "_draft_metadata_num_reqs", None)
+    speculator._draft_metadata_num_reqs = num_reqs
+    try:
+        yield
+    finally:
+        speculator._draft_metadata_num_reqs = previous
 
 
 def prepare_dflash_inputs_factory(
@@ -126,7 +140,7 @@ def prepare_dflash_inputs_factory(
 
 
 class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
-    if not vllm_version_is("0.32.0"):
+    if not vllm_version_is("0.33.0"):
 
         def supports_batch_sharded_draft_logits(self) -> bool:
             # NPU draft-logits kernels index the cache by request state.
@@ -146,6 +160,11 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         return model
 
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
+        assert self.input_batch is not None
+        num_reqs = getattr(self, "_draft_metadata_num_reqs", None)
+        if num_reqs is None:
+            num_reqs = self.input_batch.num_reqs
+        assert 0 <= num_reqs <= num_reqs_padded, "draft requests exceed graph capacity"
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
         with build_attn_metadata_wrapper():
             # vLLM main (#56181) replaced _build_draft_attn_metadata with
@@ -156,7 +175,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
                 num_reqs=num_reqs_padded,
             )
             attn_metadata = self._build_uniform_attn_metadata(
-                num_reqs=self.input_batch.num_reqs,
+                num_reqs=num_reqs,
                 batch_desc=batch_desc,
                 num_query_per_req=self.num_query_per_req,
                 seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
@@ -268,7 +287,13 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
             # TODO: Remove this guard once main2main includes upstream vLLM
             # #54856 (facd9a74a1), which resets the profiling DP counts.
             sync_state = None
-        with build_attn_metadata_wrapper():
+        # Upstream trims DP dummy draft requests before selecting its graph,
+        # while input_batch still describes the padded target batch. Replay
+        # metadata must use the same count without mutating the target batch.
+        num_draft_reqs = input_batch.num_reqs
+        if dummy_run and sync_state is not None:
+            num_draft_reqs = min(num_draft_reqs, sync_state.num_reqs)
+        with draft_metadata_request_count(self, num_draft_reqs), build_attn_metadata_wrapper():
             return super().propose(
                 input_batch,
                 attn_metadata,

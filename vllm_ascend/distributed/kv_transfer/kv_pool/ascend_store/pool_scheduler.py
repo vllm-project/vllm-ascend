@@ -2,16 +2,17 @@ import math
 from abc import ABC, abstractmethod
 from typing import Any
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.logger import logger
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
+    RSWASpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import KVConnectorOutput
@@ -87,8 +88,7 @@ class BaseKVPoolScheduler(ABC):
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get("load_async", False)
         kv_event_config = vllm_config.kv_events_config
         self.enable_kv_events = bool(kv_event_config and kv_event_config.enable_kv_cache_events)
-        retention_interval = getattr(envs, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
-        self.retention_interval = retention_interval if isinstance(retention_interval, int) else None
+        self.retention_interval = vllm_config.cache_config.prefix_cache_retention_interval
         self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "save_decode_cache", False
         )
@@ -103,6 +103,21 @@ class BaseKVPoolScheduler(ABC):
         self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
         self.cacheable_group_ids = infer_cacheable_group_ids(kv_cache_groups)
+        self.swa_group_ids = {
+            group_id
+            for group_id in self.cacheable_group_ids
+            if kv_cache_groups is not None
+            and (
+                isinstance(kv_cache_groups[group_id].kv_cache_spec, (SlidingWindowSpec, RSWASpec))
+                or (
+                    isinstance(kv_cache_groups[group_id].kv_cache_spec, UniformTypeKVCacheSpecs)
+                    and any(
+                        isinstance(spec, (SlidingWindowSpec, RSWASpec))
+                        for spec in kv_cache_groups[group_id].kv_cache_spec.kv_cache_specs.values()
+                    )
+                )
+            )
+        }
         cacheable_block_sizes = [self.original_block_size[i] for i in self.cacheable_group_ids]
         self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
         requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
@@ -131,6 +146,7 @@ class BaseKVPoolScheduler(ABC):
         self._async_loading_req_ids: set[str] = set()
 
         self._block_pool: BlockPool | None = None
+        self._kv_cache_manager: KVCacheManager | None = None
 
         use_mla = getattr(vllm_config.model_config, "use_mla", False)
         tp_mismatch_info = infer_tp_mismatch_info(
@@ -545,6 +561,7 @@ class BaseKVPoolScheduler(ABC):
             raise ValueError(f"Request {req_id} is not in _unfinished_requests, but it is scheduled to be cached")
         if new_block_ids is not None:
             request_tracker.update(new_block_ids, request.num_computed_tokens)
+        self._sync_swa_block_ids(request_tracker)
         load_spec = self._running_load_spec(request_tracker, num_current_tokens)
         # save_decode_cache is intentionally narrower than
         # consumer_is_to_put: a consumer keeps skipping prefill writes and is
@@ -557,6 +574,16 @@ class BaseKVPoolScheduler(ABC):
             request.prompt_token_ids,
             skip_save,
         )
+
+    def _sync_swa_block_ids(self, tracker: RequestTracker) -> None:
+        """Use the current request table rather than retained SWA block IDs."""
+        if not self.swa_group_ids:
+            return
+        assert self._kv_cache_manager is not None
+        current_ids = self._kv_cache_manager.get_block_ids(tracker.req_id)
+        for group_id in self.swa_group_ids:
+            if group_id < len(current_ids) and group_id < len(tracker.allocated_block_ids_by_group):
+                tracker.allocated_block_ids_by_group[group_id][:] = current_ids[group_id]
 
     def _process_async_load_request(
         self,
@@ -723,6 +750,9 @@ class BaseKVPoolScheduler(ABC):
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         self._block_pool = gpu_block_pool
 
+    def bind_kv_cache_manager(self, kv_cache_manager: KVCacheManager) -> None:
+        self._kv_cache_manager = kv_cache_manager
+
     def reset_store(self) -> bool:
         """Drain the send queue and ``remove_all`` when no in-flight blocks are held."""
         stale_ids = bool(self._async_loading_req_ids)
@@ -788,9 +818,8 @@ class KVPoolScheduler(BaseKVPoolScheduler):
         return super().reset_store()
 
     def retain_blocks_for_save(self, req_meta: ReqMeta) -> None:
-        """Keep non-null Mamba blocks alive until their bulk save completes."""
-        if self.use_hybrid:
-            self._in_flight_save_blocks.retain(req_meta, self.num_speculative_blocks_by_group, self._block_pool)
+        """Keep Mamba source blocks alive until bulk save completes."""
+        self._in_flight_save_blocks.retain(req_meta, self.num_speculative_blocks_by_group, self._block_pool)
 
     def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> int | None:
         prompt_token_len = len(request.prompt_token_ids)

@@ -237,16 +237,12 @@ def test_index_selection_publishes_shared_output(monkeypatch, empty_cache):
 
     out = impl._select_sparse_indices(
         attn,
-        torch.zeros(TOKENS, 8),
-        torch.zeros(TOKENS, 8),
         torch.arange(TOKENS),
-        None,
-        None,
         SimpleNamespace(
             swa=SimpleNamespace(num_actual_tokens=TOKENS),
             indexer=SimpleNamespace(cache=object()),
         ),
-        DeepseekV41PreparedIndexer(
+        prepared_indexer=DeepseekV41PreparedIndexer(
             query=torch.zeros(TOKENS, 1, 8),
             weights=torch.zeros(TOKENS, 1),
         ),
@@ -299,7 +295,7 @@ def test_compressor_input_ready_before_query_quantization(monkeypatch, ratio, c2
 
         wkv = staticmethod(project_kv)
         wgate = staticmethod(lambda value: torch.zeros_like(value[:, :8]))
-        pool_projected = staticmethod(lambda *args: latent)
+        pool_projected = staticmethod(lambda *args, **kwargs: latent)
 
     attn = SimpleNamespace(
         compressor=Compressor(),
@@ -309,7 +305,7 @@ def test_compressor_input_ready_before_query_quantization(monkeypatch, ratio, c2
         nope_head_dim=4,
     )
     impl = _impl(SimpleNamespace(compress_ratio=ratio))
-    impl._write_compressed_source(attn, hidden_states, positions, cos, sin, metadata, prepared_indexer=object())
+    impl._compress_and_write_caches(attn, hidden_states, cos, sin, metadata, metadata, prepared_indexer=object())
 
     assert calls.count("query_quantization") == calls.count("wkv") == 1
     assert calls.index("query_quantization") < calls.index("wkv")
@@ -318,6 +314,52 @@ def test_compressor_input_ready_before_query_quantization(monkeypatch, ratio, c2
     assert metadata_waits == (
         [(dsa_v41.DeviceMetadataStage.COMPRESSOR, c2_group)] if ratio == 2 and c2_group is not None else []
     )
+
+
+@pytest.mark.parametrize("num_tokens", [0, 3, 4])
+@pytest.mark.parametrize("padding", [0, 2])
+@pytest.mark.parametrize("packed", [False, True])
+def test_compressed_cache_writes_align_rope_and_slots_to_latent(monkeypatch, num_tokens, padding, packed):
+    input_tokens = num_tokens + padding
+    latent = torch.zeros(num_tokens, 8, dtype=torch.bfloat16)
+    cos = torch.arange(input_tokens * 4).reshape(input_tokens, 1, 1, 4).float()
+    sin = -cos
+    rows = torch.arange(input_tokens, dtype=torch.int32)
+    slots = rows if packed else torch.stack((rows // 128, rows % 128), dim=-1)
+    cache = SimpleNamespace(slot_mapping=slots, flat_slot_mapping=rows)
+    metadata = SimpleNamespace(indexer=SimpleNamespace(cache=cache), compressor=SimpleNamespace(cache=cache))
+    calls = []
+
+    def check_rope(stage, value, actual_cos, actual_sin):
+        calls.append(stage)
+        assert value.shape[0] == actual_cos.shape[0] == actual_sin.shape[0] == num_tokens
+        torch.testing.assert_close(actual_cos, cos[:num_tokens])
+        torch.testing.assert_close(actual_sin, sin[:num_tokens])
+
+    def index_keys(value, actual_slots, actual_cos, actual_sin):
+        check_rope("index", value, actual_cos, actual_sin)
+        torch.testing.assert_close(actual_slots, slots[:num_tokens])
+
+    def store(cache, actual_slots, value, **kwargs):
+        calls.append("store")
+        assert value.shape[0] == actual_slots.shape[0] == num_tokens
+        torch.testing.assert_close(actual_slots, (rows if packed else slots)[:num_tokens])
+
+    attn = SimpleNamespace(
+        indexer=SimpleNamespace(update_keys=index_keys),
+        long_kv_cache=SimpleNamespace(kv_cache=[object()]),
+        head_dim=8,
+        packed_cache_ops=SimpleNamespace(write_attention_cache=store) if packed else None,
+    )
+    monkeypatch.setattr(dsa_v41, "scatter_cache_sk", store)
+    monkeypatch.setattr(
+        AscendDSAV41Impl,
+        "_apply_rotary",
+        lambda attn, value, actual_cos, actual_sin: check_rope("rotary", value, actual_cos, actual_sin),
+    )
+    impl = AscendDSAV41Impl.__new__(AscendDSAV41Impl)
+    impl._write_compressed_caches(attn, latent, cos, sin, metadata)
+    assert calls == ["index", "rotary", "store"]
 
 
 def test_a5_indexer_uses_prequantized_query(monkeypatch):

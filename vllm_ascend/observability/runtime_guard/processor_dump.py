@@ -130,14 +130,14 @@ class RuntimeGuardDumpMixin:
         self._kv_dump_jobs.clear()
         self._refund_dropped_dump_arms(jobs)
 
-    def end_of_wave_sync(self, *, allow_manual_dump: bool = True) -> None:
+    def end_of_wave_sync(self, *, has_scheduled_tokens: bool = True) -> None:
         """End-of-wave: drain async merged bus, then deferred D2H + manual dump.
 
         Async last-PP TP path: wave-head only submitted the due broadcast;
         collectives finish here (ideally already done during forward). Sync /
         file paths have nothing inflight — drain is a no-op. Non-last PP
         returns immediately (same gate as ``sync_for_step``).
-        ``allow_manual_dump``: False on dummy / no-sample (do not burn manual_dump).
+        ``has_scheduled_tokens``: False on dummy / no-sample (do not burn manual_dump).
         """
         if not should_run_wave_sync_on_rank():
             return
@@ -155,7 +155,7 @@ class RuntimeGuardDumpMixin:
         self._deferred_kv_dump_jobs.clear()
         if deferred and should_dump_kv_on_rank():
             self._run_kv_dumps(deferred)
-        self._maybe_fire_manual_local(allow_manual_dump=allow_manual_dump)
+        self._maybe_fire_manual_local(has_scheduled_tokens=has_scheduled_tokens)
 
     def _claim_dump_jobs_to_deferred_via_tp(self) -> None:
         """File/PP>1: move pending auto jobs through TP bus into deferred D2H.
