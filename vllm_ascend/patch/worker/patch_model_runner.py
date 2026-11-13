@@ -49,6 +49,7 @@ def initialize_kv_cache(
     max_num_blocks_per_group = []
     slot_mapping_enabled = []
     dcp_sharded = []
+    sliding_window_reach = []
     for kv_cache_group in kv_cache_config.kv_cache_groups:
         spec = kv_cache_group.kv_cache_spec
         block_sizes.append(spec.block_size)
@@ -56,6 +57,11 @@ def initialize_kv_cache(
         slot_mapping_enabled.append(layer_spec.uses_slot_mapping)
         # vLLM main lets each cache type report whether it is DCP-sharded;
         dcp_sharded.append(spec.dcp_sharded)
+        # Mirror upstream gpu/model_runner.py: how far below a request's first
+        # scheduled position attention may still read (0 disables masking).
+        sliding_window_reach.append(
+            layer_spec.num_retained_tokens if isinstance(layer_spec, upstream.SlidingWindowSpec) else 0
+        )
         # Let each cache type account for CP. Attention KV is DCP-sharded,
         # while Mamba/GDN recurrent state is replicated across DCP ranks.
         max_num_blocks = spec.max_num_blocks_per_req(self.vllm_config, block_table_max_model_len)
@@ -107,6 +113,7 @@ def initialize_kv_cache(
 
     block_tables_kwargs = {}
     block_tables_kwargs["dcp_sharded"] = dcp_sharded
+    block_tables_kwargs["sliding_window_reach"] = sliding_window_reach
     self.block_tables = upstream.BlockTables(
         block_sizes=block_sizes,
         max_num_reqs=self.max_num_reqs,

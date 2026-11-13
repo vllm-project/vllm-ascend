@@ -46,12 +46,18 @@ class AscendBlockTables(BlockTables):
         cp_interleave: int = 1,
         slot_mapping_enabled: list[bool] | None = None,
         dcp_sharded: list[bool] | None = None,
+        sliding_window_reach: list[int] | None = None,
     ):
         # vLLM #57169 keeps public block tables at KV-cache-manager
         # granularity. Kernel-specific expansion is handled by AttentionGroup.
-        super_kwargs: dict[str, list[bool]] = {}
+        super_kwargs: dict[str, list] = {}
         if dcp_sharded is not None:
             super_kwargs["dcp_sharded"] = dcp_sharded
+        # Forward the per-group sliding-window reach the same way: it enables
+        # upstream's MASK_SLIDING_WINDOW logic in gather_block_tables, which
+        # nulls KV blocks the sliding-window manager already freed.
+        if sliding_window_reach is not None:
+            super_kwargs["sliding_window_reach"] = sliding_window_reach
         super().__init__(
             block_sizes,
             max_num_reqs,
