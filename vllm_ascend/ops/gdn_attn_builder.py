@@ -297,9 +297,9 @@ def _build_non_spec_chunked_prefill_metadata(
         parallel = builder.vllm_config.parallel_config
         head_shards = parallel.tensor_parallel_size
         if head_sharded_pcp:
-            from vllm_ascend.ops.kda_parallel import get_kda_parallel_size
+            from vllm_ascend.ops.head_parallel import get_head_parallel_size
 
-            head_shards = get_kda_parallel_size(parallel)
+            head_shards = get_head_parallel_size(parallel)
         hf_text_config = getattr(builder.vllm_config.model_config, "hf_text_config", None)
         linear_attn_config = getattr(hf_text_config, "linear_attn_config", None)
         if isinstance(linear_attn_config, dict) and linear_attn_config.get("num_heads") is not None:
