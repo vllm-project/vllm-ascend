@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from collections.abc import Iterable
 from typing import Any, ClassVar, Literal
 
@@ -580,11 +581,47 @@ class Glm5NextModel(nn.Module):
             topk_indices_buffer = None
 
         if get_pp_group().is_first_rank:
-            self.embed_tokens = VocabParallelEmbedding(
-                config.vocab_size,
-                config.hidden_size,
-                prefix=f"{prefix}.embed_tokens",
-            )
+            if os.getenv("VLLM_ASCEND_GLM_REPLICATED_EMBED", "0") == "1":
+                # Replicate the input embedding table instead of sharding it
+                # over TP. The gather itself only reads the N requested rows and
+                # does not care how wide the table is (104 us at chunk 15232),
+                # but VocabParallelEmbedding additionally has to zero every row
+                # whose token id falls outside this rank's shard and all-reduce
+                # the result: 594 us of MaskedFill plus ~1.75 ms of AllReduce
+                # per lookup (a 119 MiB bf16 activation means 178 MiB/rank of
+                # ring traffic, at the ~107 GB/s measured on this machine).
+                #
+                # There are four lookups per forward: the main model plus the
+                # three MTP draft steps, which share THIS module because
+                # llm_base_proposer deletes the draft model's own table and
+                # points it here ("Sharing target model embedding weights with
+                # the draft model"). Replicating once therefore removes all four
+                # masks and all-reduces, about 9.4 ms per chunk-15232 forward.
+                #
+                # Cost: 154880 x 4096 bf16 is 1210 MiB per rank instead of
+                # 302.5 MiB, i.e. +907 MiB at TP4. Correctness is unaffected --
+                # a table lookup is exact, so the result is bit-identical, and
+                # the generic loader path (getattr(param, "weight_loader",
+                # default_weight_loader) below) copies the full checkpoint
+                # tensor without sharding it.
+                #
+                # lm_head stays vocab-parallel (ParallelLMHead further down):
+                # that one is a GEMM, where splitting the work does pay off.
+                from vllm.logger import init_logger
+
+                _tp = vllm_config.parallel_config.tensor_parallel_size
+                init_logger(__name__).warning(
+                    "GLM input embedding replicated (vocab parallelism off): "
+                    "+%d MiB per rank, no per-lookup mask or all-reduce.",
+                    config.vocab_size * config.hidden_size * 2 // 2**20 * (_tp - 1) // _tp,
+                )
+                self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
+            else:
+                self.embed_tokens = VocabParallelEmbedding(
+                    config.vocab_size,
+                    config.hidden_size,
+                    prefix=f"{prefix}.embed_tokens",
+                )
         else:
             self.embed_tokens = PPMissingLayer()
 
