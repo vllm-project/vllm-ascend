@@ -53,12 +53,26 @@ class TestKVPoolWorkerConstruction(unittest.TestCase):
 
         config, cache = MagicMock(), MagicMock()
         with (
+            patch.object(LayerwiseKVPoolWorker, "enable_kv_events", False, create=True),
             patch.object(BaseKVPoolWorker, "__init__", autospec=True, return_value=None) as initialize,
             patch.object(LayerwiseKVPoolWorker, "_init_layerwise_config") as configure,
         ):
             worker = LayerwiseKVPoolWorker(config, True, cache)
             initialize.assert_called_once_with(worker, config, True, cache)
             configure.assert_called_once_with()
+
+    def test_layerwise_confirmed_events_bypass_replicated_quorum(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import BaseKVPoolWorker
+
+        worker = LayerwiseKVPoolWorker.__new__(LayerwiseKVPoolWorker)
+        event = MagicMock()
+        worker._layerwise_cpu_events = MagicMock()
+        worker._layerwise_cpu_events.drain.return_value = [event]
+        with patch.object(BaseKVPoolWorker, "take_kv_events", return_value=([], [])):
+            replicated, sharded = worker.take_kv_events()
+        self.assertEqual(replicated, [])
+        self.assertEqual(sharded, [event])
 
 
 def _mock_events(num_workers=1):
@@ -865,6 +879,8 @@ def _scheduler_connector(backend="mooncake", use_layerwise=False):
     scheduler._loading_req_ids = set()
     scheduler.reset_store.return_value = True
     connector.connector_scheduler = scheduler
+    connector._pending_replicated = {}
+    connector._ready_sharded = []
     connector._kv_cache_events = MagicMock()
     return connector
 

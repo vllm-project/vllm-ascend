@@ -43,6 +43,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cach
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVTransferThread,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cpu_events import LayerwiseCpuEvents
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
     KVCacheStoreKeyLayerRecvingThread,
     KVCacheStoreKeyLayerSendingThread,
@@ -122,6 +123,11 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self._dspark_prefix_keys: DSparkPrefixKeys | None = None
         self.dspark_prefix_cache: DSparkPrefixCache | None = None
         self._init_layerwise_config()
+        self._layerwise_cpu_events = (
+            LayerwiseCpuEvents(self)
+            if self.enable_kv_events and self.backend_name == "memcache" and self.tp_rank == 0 and self.pcp_rank == 0
+            else None
+        )
 
     def _init_kv_transfer_config(self, vllm_config, extra_config, use_layerwise, kv_cache_config) -> None:
         backend_name = extra_config.get("backend", "mooncake").lower()
@@ -646,7 +652,17 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 logger.error("AscendStore lease cleanup returned %s; backend TTL will reclaim leases", result)
         if self.use_block_key_layerwise:
             self._release_layerwise_requests_terminal(finished_req_ids | meta.preempted_req_ids)
-        return super().get_finished(finished_req_ids, meta)
+        result = super().get_finished(finished_req_ids, meta)
+        if self._layerwise_cpu_events is not None:
+            self._layerwise_cpu_events.observe(meta.requests, finished_req_ids)
+        return result
+
+    def take_kv_events(self):
+        replicated, sharded = super().take_kv_events()
+        if self._layerwise_cpu_events is not None:
+            # The owner confirms every required rank before publishing.
+            sharded.extend(self._layerwise_cpu_events.drain())
+        return replicated, sharded
 
     def _build_lookup_keys(
         self,

@@ -994,6 +994,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 len(keys),
                 keys[:3],
             )
+            prepared_indices: list[int] = []
+            prepared_keys: list[str] = []
+            prepared_addrs: list[list[int]] = []
+            prepared_sizes: list[list[int]] = []
             for index, start in enumerate(starts):
                 addr, size, _ = self._prepare_value(
                     start,
@@ -1002,8 +1006,30 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     kv_cache_group_id=group_id,
                     block_id=key_block_ids[index],
                 )
-                addrs.append(addr)
-                sizes.append(size)
+                if not addr or not size:
+                    pp_rank = (
+                        self.token_database.metadata[group_id].pp_rank
+                        if group_id < len(self.token_database.metadata)
+                        else "unknown"
+                    )
+                    logger.warning(
+                        "Skipping KV pool key without local descriptors: request=%s group=%d pp_rank=%s key=%s",
+                        req_id,
+                        group_id,
+                        pp_rank,
+                        keys[index],
+                    )
+                    continue
+                prepared_indices.append(index)
+                prepared_keys.append(keys[index])
+                prepared_addrs.append(addr)
+                prepared_sizes.append(size)
+
+            keys = prepared_keys
+            addrs = prepared_addrs
+            sizes = prepared_sizes
+            if not keys:
+                continue
 
             logical_key_count = len(keys)
             if self.kv_role == "kv_consumer":
@@ -1045,9 +1071,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
                         all(put_result[start : start + physical_keys_per_logical])
                         for start in range(0, len(put_result), physical_keys_per_logical)
                     ]
-                    if len(logical_success) == len(missing_indices):
+                    if len(logical_success) == len(prepared_indices):
                         stored_ranges = [
-                            selected_ranges[missing_indices[index]]
+                            selected_ranges[missing_indices[prepared_indices[index]]]
                             for index, succeeded in enumerate(logical_success)
                             if succeeded
                         ]
@@ -1057,7 +1083,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             elif put_result is False:
                 logger.error("KV store backend failed to put request %s", req_id)
                 return False
-            stored_ranges = [selected_ranges[index] for index in missing_indices]
+            stored_ranges = [selected_ranges[missing_indices[index]] for index in prepared_indices]
             self._record_cpu_store_events(req_meta, group_id, token_len, stored_ranges)
         return True
 
