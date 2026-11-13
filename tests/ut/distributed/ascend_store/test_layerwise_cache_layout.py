@@ -699,7 +699,7 @@ def test_mixed_indexers_share_max_capacity_without_changing_reuse_order(c8_first
     assert specs[indexers[0]] is (c8 if c8_first else bf16)
 
 
-def _make_generic_indexer_descriptors(replication=1, quantized=True):
+def _make_generic_indexer_descriptors(quantized=True):
     main = _make_full_attention_spec()
     indexer = AscendSFAIndexerCacheSpec(
         block_size=2,
@@ -709,7 +709,6 @@ def _make_generic_indexer_descriptors(replication=1, quantized=True):
         scale_dim=1 if quantized else 0,
         scale_dtype=torch.float16,
         cache_sparse_li_c8=quantized,
-        sfa_dcp_replicated_indexer_size=replication,
     )
     names = [f"model.layers.{i}.self_attn.attn" for i in range(5)]
     indexer_names = [f"model.layers.{i}.self_attn.indexer.k_cache" for i in (1, 3)]
@@ -749,16 +748,15 @@ def _make_generic_indexer_descriptors(replication=1, quantized=True):
     )
 
 
-@pytest.mark.parametrize("replication", [1, 2])
 @pytest.mark.parametrize("quantized", [False, True])
-def test_reuse_rebuilds_generic_indexer_descriptors_with_physical_capacity(replication, quantized):
-    config, spec, names = _make_generic_indexer_descriptors(replication, quantized)
+def test_reuse_rebuilds_generic_indexer_descriptors_with_physical_capacity(quantized):
+    config, spec, names = _make_generic_indexer_descriptors(quantized)
     original = config.kv_cache_tensors[-1]
-    # Stored rows include scale bytes and all replicated indexer regions.
-    content_bytes = replication * (130 if quantized else 256)
+    # Stored rows include the local key and scale bytes.
+    content_bytes = 130 if quantized else 256
     assert spec.state_content_size_bytes == content_bytes
     assert original.block_stride == spec.block_size * content_bytes
-    assert spec.page_size_bytes == spec.block_size * replication * (130 if quantized else 256)
+    assert spec.page_size_bytes == spec.block_size * (130 if quantized else 256)
 
     apply_layerwise_kv_cache_plan(config, _make_vllm_config(5, 1))
 
@@ -772,7 +770,7 @@ def test_reuse_rebuilds_generic_indexer_descriptors_with_physical_capacity(repli
 
 @pytest.mark.parametrize("reuse_disabled", [True, False])
 def test_generic_indexer_descriptors_unchanged_without_reuse(reuse_disabled):
-    config, spec, _ = _make_generic_indexer_descriptors(replication=2)
+    config, spec, _ = _make_generic_indexer_descriptors()
     original = config.kv_cache_tensors
     vllm_config = _make_vllm_config(5, 5)
     if reuse_disabled:
@@ -781,8 +779,9 @@ def test_generic_indexer_descriptors_unchanged_without_reuse(reuse_disabled):
     apply_layerwise_kv_cache_plan(config, vllm_config)
 
     assert config.kv_cache_tensors is original
-    assert spec.state_content_size_bytes == 2 * 130
-    assert original[-1].block_stride == 2 * 2 * 130
+    assert spec.state_content_size_bytes == 130
+    assert original[-1].block_stride == spec.block_size * 130
+    assert original[-1].size == config.num_blocks * len(original[-1].layers) * spec.page_size_bytes
 
 
 def test_reuse_rejects_unknown_indexer_stride():

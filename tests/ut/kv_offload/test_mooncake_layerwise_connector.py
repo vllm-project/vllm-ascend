@@ -1801,7 +1801,7 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
         self.assertEqual(worker.index_to_name[1], [main_1])
         self.assertEqual(worker.total_layers, 2)
 
-    def test_register_kv_caches_rejects_dcp_replicated_indexer_scale(self):
+    def test_register_kv_caches_rejects_mixed_block_size_scales(self):
         main_name = "model.layers.0.self_attn.attn"
         indexer_name = "model.layers.0.self_attn.indexer.k_cache"
         group = MagicMock()
@@ -1826,7 +1826,7 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
             patch(
                 "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.global_te.register_buffer"
             ) as register_buffer,
-            self.assertRaisesRegex(NotImplementedError, "DCP replicated indexer cache"),
+            self.assertRaisesRegex(NotImplementedError, "different block size scales"),
         ):
             worker.register_kv_caches(
                 {

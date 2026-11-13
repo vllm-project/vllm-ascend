@@ -379,12 +379,6 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         remote_size = remote_dcp_size if remote_metadata.dcp_sharded[remote_layer_index] else 1
         if is_circular_kv_cache_spec(spec):
             return 1, 1
-        if isinstance(spec, AscendSFAIndexerCacheSpec):
-            # Packed indexer pages already contain all DCP sequence pieces.
-            if spec.sfa_dcp_replicated_indexer_size > 1:
-                local_size = 1
-            if remote_metadata.indexer_replication_sizes[remote_layer_index] > 1:
-                remote_size = 1
         return local_size, remote_size
 
     def _get_mamba_remote_tp_rank_groups(
@@ -646,7 +640,6 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                         remote_metadata.layer_block_sizes[remote_layer_index],
                         remote_metadata.block_size_scales[remote_layer_index][0],
                         remote_metadata.cp_kv_cache_interleave_size,
-                        remote_metadata.indexer_replication_sizes[remote_layer_index],
                     ),
                 )
                 transfer_block_ids = request_block_ids_by_spec.get(cache_key)
@@ -684,7 +677,6 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                         selection_index,
                         remote_metadata.cp_kv_cache_interleave_size,
                         local_dcp_size,
-                        remote_metadata.indexer_replication_sizes[remote_layer_index],
                     )
                     request_block_ids_by_spec[cache_key] = transfer_block_ids
 
@@ -734,20 +726,12 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
         selection_index: int,
         remote_interleave_size: int,
         local_dcp_size: int | None = None,
-        remote_indexer_replication_size: int = 1,
     ) -> list[tuple[int, list[int], list[int]]]:
         """Pair remote TP ranks with local and remote kernel block IDs."""
         if local_dcp_size is None:
             local_dcp_size = self.dcp_size if spec.dcp_sharded else 1
         local_dcp_rank = self.dcp_rank if local_dcp_size > 1 else 0
-        is_replicated_sfa_indexer = isinstance(spec, AscendSFAIndexerCacheSpec) and (
-            spec.sfa_dcp_replicated_indexer_size > 1 or remote_indexer_replication_size > 1
-        )
-        is_dcp_transfer = (
-            (local_dcp_size > 1 or remote_dcp_size > 1)
-            and isinstance(spec, FullAttentionSpec)
-            and not is_replicated_sfa_indexer
-        )
+        is_dcp_transfer = (local_dcp_size > 1 or remote_dcp_size > 1) and isinstance(spec, FullAttentionSpec)
         if is_circular_kv_cache_spec(spec):
             if len(local_group_block_ids) != 1 or len(remote_group_block_ids) != 1:
                 raise ValueError(

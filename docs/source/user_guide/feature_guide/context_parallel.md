@@ -33,6 +33,22 @@ PCP support is experimental. The following table shows the basic backend support
 
 ### Decode Context Parallel
 
+For SFA models using LightningIndexer, DCP shards both the main attention KV
+and the indexer K/scale cache by the same token ownership rule. Each rank selects
+local candidates and exchanges their IDs and scores for distributed TopK; the
+indexer no longer stores a full history on every DCP rank.
+
+This path requires a compatible C8 indexer configuration, selected with
+`--attention-config '{"indexer_kv_dtype":"int8"}'` or `"fp8"` according to the
+hardware and model quantization configuration. Non-quantized and MXFP4 indexers
+are not supported with DCP. DCP=1 retains the ordinary indexer path. GLM KPool
+indexers use a separate implementation and are outside this LightningIndexer
+change.
+
+Both PD endpoints must use the updated sharded cache layout and transfer
+metadata; mixing a legacy replicated-indexer endpoint with this layout is not
+supported.
+
 DCP supports eager and graph execution, prefix caching, chunked prefill, speculative decoding, P/D disaggregation, and stacking with PCP on the model and hardware combinations documented by vLLM Ascend. The following table shows whether each feature can be combined with DCP across devices and attention backends:
 
 | Device | Attention Backend | Chunked Prefill + DCP | Prefix Caching + DCP | Graph Mode + DCP | P/D Disaggregation + DCP | Speculative Decoding + DCP | PCP + DCP |

@@ -412,22 +412,22 @@ def test_compute_full_attention_blocks_skips_remote_prefix_and_balances_replica(
 
 
 @pytest.mark.parametrize(
-    ("remote_block_size", "remote_scale", "expected_remote_blocks"),
+    ("remote_block_size", "remote_scale", "expected_transfers"),
     [
-        (32, 2, [42, 43, 44, 45]),
-        (64, 4, [82, 83, 84, 85]),
+        (32, 2, [(1, [21], [40]), (0, [22], [42])]),
+        (64, 4, [(0, [21], [82]), (1, [22], [80])]),
     ],
 )
-def test_compute_sfa_indexer_blocks_uses_virtual_block_size_for_prefix(
+def test_compute_sfa_indexer_blocks_maps_prefix_to_local_and_remote_shards(
     remote_block_size: int,
     remote_scale: int,
-    expected_remote_blocks: list[int],
+    expected_transfers: list[tuple[int, list[int], list[int]]],
 ) -> None:
     thread = make_thread(dcp_size=2)
 
     result = thread._compute_group_block_ids(
         request_id="request",
-        remote_tp_rank_groups=[[0]],
+        remote_tp_rank_groups=[list(range(remote_scale))],
         remote_dcp_size=remote_scale,
         spec_index=0,
         local_block_size=32,
@@ -440,12 +440,14 @@ def test_compute_sfa_indexer_blocks_uses_virtual_block_size_for_prefix(
         num_computed_tokens=32,
         local_block_size_scale=2,
         remote_block_size_scale=remote_scale,
-        spec=make_sfa_indexer_spec(replication_size=2),
+        spec=make_sfa_indexer_spec(),
         selection_index=0,
         remote_interleave_size=remote_block_size,
     )
 
-    assert result == [(0, [20, 21, 22, 23], expected_remote_blocks)]
+    # Rank 0 owns global kernel starts 32 and 64 after the prefix hit.
+    # Their owner-local offsets are 16 and 32, independent of remote pages.
+    assert result == expected_transfers
 
 
 def test_compute_non_replicated_sfa_indexer_uses_dcp_sequence_shards() -> None:
@@ -471,7 +473,7 @@ def test_compute_non_replicated_sfa_indexer_uses_dcp_sequence_shards() -> None:
         num_computed_tokens=0,
         local_block_size_scale=1,
         remote_block_size_scale=1,
-        spec=make_sfa_indexer_spec(replication_size=1),
+        spec=make_sfa_indexer_spec(),
         selection_index=0,
         remote_interleave_size=16,
     )
@@ -499,9 +501,8 @@ def test_dcp8_sharded_indexer_pd_uses_interleave_not_kernel_multiplier(rank, com
         num_computed_tokens=computed,
         local_block_size_scale=12,
         remote_block_size_scale=12,
-        spec=make_sfa_indexer_spec(block_size=1536, replication_size=1),
+        spec=make_sfa_indexer_spec(block_size=1536),
         selection_index=0,
-        remote_indexer_replication_size=1,
         remote_interleave_size=1536,
     )
     tokens = [t for t in range(computed, 12288, 128) if (t // 768) % 8 == rank]
@@ -514,96 +515,15 @@ def test_dcp8_sharded_indexer_pd_uses_interleave_not_kernel_multiplier(rank, com
 
 
 def test_explicit_sharded_handshake_does_not_confuse_12_kernel_blocks_with_replicas():
-    thread = make_thread(tp_size=8, tp_rank=3, dcp_size=8, dcp_rank=3)
-    remote = replace(make_pp_metadata(block_size_scales=[[12]]), indexer_replication_sizes=[1])
+    thread = make_thread(tp_size=8, tp_rank=3, dcp_size=8, dcp_rank=3, block_size_scales=[[12]])
+    remote = make_pp_metadata(block_size_scales=[[12]], dcp_sharded=[True])
     get_groups = MagicMock(return_value=[[0]])
     thread._get_attention_remote_tp_rank_groups = get_groups
     thread._get_layer_remote_tp_rank_groups(
-        0, 0, make_sfa_indexer_spec(replication_size=1), remote, remote_pcp_size=1, remote_tp_size=8, remote_dcp_size=1
+        0, 0, make_sfa_indexer_spec(), remote, remote_pcp_size=1, remote_tp_size=8, remote_dcp_size=1
     )
     assert get_groups.call_args.kwargs["local_dcp_size"] == 8
     assert get_groups.call_args.kwargs["remote_dcp_size"] == 1
-
-
-@pytest.mark.parametrize(
-    (
-        "local_dcp_size",
-        "remote_dcp_size",
-        "local_replication_size",
-        "remote_replication_size",
-        "expected_local_dcp_size",
-        "expected_remote_dcp_size",
-    ),
-    [
-        (8, 8, 1, 1, 8, 8),
-        (8, 8, 8, 8, 1, 1),
-        (1, 8, 1, 8, 1, 1),
-    ],
-)
-def test_sfa_indexer_topology_uses_dcp_only_when_neither_side_replicates(
-    local_dcp_size: int,
-    remote_dcp_size: int,
-    local_replication_size: int,
-    remote_replication_size: int,
-    expected_local_dcp_size: int,
-    expected_remote_dcp_size: int,
-) -> None:
-    thread = make_thread(
-        tp_size=4,
-        pcp_size=2,
-        dcp_size=local_dcp_size,
-        block_size_scales=[[local_replication_size]],
-    )
-    remote = replace(
-        make_pp_metadata(block_size_scales=[[remote_replication_size]]),
-        indexer_replication_sizes=[remote_replication_size],
-    )
-    get_remote_groups = MagicMock(return_value=[list(range(8))])
-    thread._get_attention_remote_tp_rank_groups = get_remote_groups  # type: ignore[method-assign]
-
-    assert thread._get_layer_remote_tp_rank_groups(
-        0,
-        0,
-        make_sfa_indexer_spec(replication_size=local_replication_size),
-        remote,
-        remote_pcp_size=2,
-        remote_tp_size=4,
-        remote_dcp_size=remote_dcp_size,
-    ) == [list(range(8))]
-    get_remote_groups.assert_called_once_with(
-        remote_tp_size=4,
-        remote_pcp_size=2,
-        local_dcp_size=expected_local_dcp_size,
-        remote_dcp_size=expected_remote_dcp_size,
-        total_num_kv_heads=1,
-    )
-
-
-def test_transfer_bucket_accepts_sfa_indexer_virtual_block_sizes() -> None:
-    spec = make_sfa_indexer_spec(replication_size=2)
-    thread = make_thread(
-        dcp_size=2,
-        kv_cache_specs=[spec],
-        layer_block_sizes=[32],
-        block_size_scales=[[2]],
-    )
-    remote = replace(
-        make_pp_metadata(layer_block_sizes=[64], block_size_scales=[[4]]),
-        indexer_replication_sizes=[4],
-    )
-
-    buckets, request_ids = thread._build_transfer_block_buckets(
-        remote_metadata=remote,
-        layer_pairs=[(0, 0)],
-        tp_rank_groups_by_layer={(0, 0): [[0]]},
-        remote_pcp_size=1,
-        remote_dcp_size=4,
-        requests={"request": make_req_meta()},
-        transfer_block_ids_by_spec={},
-    )
-
-    assert buckets[(0, 0)][0][(0, 0)] == [("request", [20, 21, 22, 23], [80, 81, 82, 83])]
-    assert request_ids == {(0, 0): {"request"}}
 
 
 def test_unsharded_fa_uses_tp_transfer_with_global_dcp() -> None:

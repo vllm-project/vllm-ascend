@@ -74,7 +74,7 @@ from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
     dispose_layer,
     enable_pcp_o_proj_weight_sharding,
-    enable_sfa_dcp_replicated_indexer,
+    enable_sfa_dcp_sharded_indexer,
     enable_sp,
     is_mtp_layer,
     is_rl_weight_update_enabled,
@@ -381,7 +381,7 @@ class AscendSFABackend(AttentionBackend):
 
             return AscendSFAKVOffloadMetadataBuilder
         vllm_config = get_current_vllm_config()
-        if enable_sfa_dcp_replicated_indexer(vllm_config):
+        if enable_sfa_dcp_sharded_indexer(vllm_config):
             from vllm_ascend.attention.context_parallel.sfa_cp import (
                 AscendSFADCPMetadataBuilder,
                 AscendSFAPCPDCPMetadataBuilder,
@@ -412,7 +412,7 @@ class AscendSFABackend(AttentionBackend):
             from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl
 
             return AscendSFAKVOffloadImpl
-        if enable_sfa_dcp_replicated_indexer(get_current_vllm_config()):
+        if enable_sfa_dcp_sharded_indexer(get_current_vllm_config()):
             from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl
 
             return AscendSFADCPImpl

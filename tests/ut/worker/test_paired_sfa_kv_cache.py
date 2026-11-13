@@ -66,7 +66,6 @@ def make_paired_cache(config, scale_dtype, with_draft=True, local_layers=None, d
             scale_dim=1,
             scale_dtype=scale_dtype,
             cache_sparse_li_c8=True,
-            sfa_dcp_replicated_indexer_size=dcp_size,
         )
     for layer in range(3):
         specs[f"model.layers.{layer}.linear_attn"] = MambaSpec(
@@ -219,7 +218,7 @@ def test_paired_indexer_and_mamba_writes_stay_in_their_pages(vllm_config, scale_
     backing = first.as_strided((backing_size,), (1,), first.storage_offset())
     backing.fill_(42)
     before = backing.clone()
-    kernel_parts = BLOCK_SIZE // kernel_block_size * dcp_size
+    kernel_parts = BLOCK_SIZE // kernel_block_size
 
     k_cache[kernel_parts : 2 * kernel_parts].fill_(1)
     scale_cache[kernel_parts : 2 * kernel_parts].fill_(2)

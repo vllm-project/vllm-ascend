@@ -2381,7 +2381,6 @@ def test_sfa_indexer_allocates_and_reshapes_scale_views(
         dtype=dtype,
         scale_dim=scale_dim,
         scale_dtype=scale_dtype,
-        sfa_dcp_replicated_indexer_size=dcp_size,
     )
     num_blocks = 2
     kv_cache_config = KVCacheConfig(
@@ -2442,7 +2441,7 @@ def test_sfa_indexer_allocates_and_reshapes_scale_views(
     parts = caches[layer_name]
     indexer_k = parts[0]
     assert indexer_k.shape == (
-        num_blocks * kernel_parts * dcp_size,
+        num_blocks * kernel_parts,
         spec.block_size // kernel_parts,
         spec.num_kv_heads,
         spec.head_size,
@@ -2452,7 +2451,7 @@ def test_sfa_indexer_allocates_and_reshapes_scale_views(
     if scale_dim:
         indexer_scale = parts[1]
         assert indexer_scale.shape == (
-            num_blocks * kernel_parts * dcp_size,
+            num_blocks * kernel_parts,
             spec.block_size // kernel_parts,
             spec.num_kv_heads,
             spec.scale_dim,
@@ -2461,13 +2460,13 @@ def test_sfa_indexer_allocates_and_reshapes_scale_views(
     if hybrid_backing:
         assert indexer_k.data_ptr() == raw[layer_name].data_ptr()
         if scale_dim:
-            key_page_bytes = raw_k.numel() // (num_blocks * kernel_parts * dcp_size)
+            key_page_bytes = raw_k.numel() // (num_blocks * kernel_parts)
             assert parts[1].data_ptr() == raw[layer_name].data_ptr() + key_page_bytes
             assert parts[1].dtype == scale_dtype
-            row_bytes = spec.page_size_bytes // (spec.block_size * dcp_size)
-            main = raw[layer_name].view(num_blocks, spec.block_size * dcp_size, 1, row_bytes)
+            row_bytes = spec.page_size_bytes // spec.block_size
+            main = raw[layer_name].view(num_blocks, spec.block_size, 1, row_bytes)
             main_spec = AscendMLAAttentionSpec(
-                block_size=spec.block_size * dcp_size, num_kv_heads=1, head_size=row_bytes, dtype=torch.int8
+                block_size=spec.block_size, num_kv_heads=1, head_size=row_bytes, dtype=torch.int8
             )
             zeroer = AscendV2KVBlockZeroer(
                 torch.device("cpu"),
@@ -2529,7 +2528,6 @@ def test_sfa_indexer_li_c4_allocates_and_reshapes_scale_views(monkeypatch):
         scale_dtype=torch.float8_e8m0fnu,
         cache_sparse_li_c4=True,
         cache_sparse_li_c8=False,
-        sfa_dcp_replicated_indexer_size=1,
     )
     num_blocks = 2
     kv_cache_config = KVCacheConfig(

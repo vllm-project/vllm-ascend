@@ -531,8 +531,7 @@ class NPUModelRunner(GPUModelRunner):
             and (
                 self.model_config.architecture == "DeepseekV41ForCausalLM"
                 or (
-                    self.model_config.architecture == "KimiK31ForConditionalGeneration"
-                    and enable_sfa_dcp_sharded_indexer(self.vllm_config)
+                    enable_sfa_dcp_sharded_indexer(self.vllm_config)
                     and self.vllm_config.attention_config.indexer_kv_dtype == "fp8"
                 )
             )

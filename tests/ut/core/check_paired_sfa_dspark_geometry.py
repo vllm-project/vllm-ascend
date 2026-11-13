@@ -108,7 +108,6 @@ def main():
 
     with (
         patch.object(attn_utils, "get_layers_from_vllm_config", return_value=layers),
-        patch.object(attn_utils, "enable_sfa_dcp_replicated_indexer", return_value=False),
         patch.object(attn_utils, "enable_sfa", return_value=True),
         patch.object(attn_utils, "get_ascend_config", return_value=ascend_config),
     ):

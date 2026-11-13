@@ -522,7 +522,6 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
         block_lens_per_layer: list[list[int]] = []
         block_shapes_per_layer: list[list[tuple[int, ...]]] = []
         block_size_scales_per_layer: list[list[int]] = []
-        indexer_replication_sizes: list[int] = []
         configured_layer_names: set[str] = set()
 
         for tensor_config in self.kv_cache_config.kv_cache_tensors:
@@ -589,23 +588,13 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
                         block_size_scales.append(tensor_num_blocks // self.num_blocks)
 
                 layer_names.append(layer_name)
-                layer_block_size = spec.block_size
-                if isinstance(spec, AscendSFAIndexerCacheSpec):
-                    # A replicated SFA indexer stores one physical kernel block
-                    # per DCP rank behind each scheduler block. Publish their
-                    # aggregate token span; replication size 1 deliberately
-                    # remains an ordinary DCP-sharded FA block.
-                    layer_block_size *= spec.sfa_dcp_replicated_indexer_size
-                layer_block_sizes.append(layer_block_size)
+                layer_block_sizes.append(spec.block_size)
                 group_indices.append(self.layer_name_to_group_index[layer_name])
                 kv_caches_base_addr.append(base_addrs)
                 block_strides_per_layer.append(block_strides)
                 block_lens_per_layer.append(block_lens)
                 block_shapes_per_layer.append(block_shapes)
                 block_size_scales_per_layer.append(block_size_scales)
-                indexer_replication_sizes.append(
-                    spec.sfa_dcp_replicated_indexer_size if isinstance(spec, AscendSFAIndexerCacheSpec) else 0
-                )
 
         unexpected_layers = kv_caches.keys() - configured_layer_names
         if unexpected_layers:
@@ -629,7 +618,6 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
             block_lens=block_lens_per_layer,
             block_shapes=block_shapes_per_layer,
             block_size_scales=block_size_scales_per_layer,
-            indexer_replication_sizes=indexer_replication_sizes,
             dcp_sharded=[self.kv_cache_specs[self.layer_name_to_spec_index[name]].dcp_sharded for name in layer_names],
             local_ip=self.side_channel_host,
             handshake_port=self.handshake_port,

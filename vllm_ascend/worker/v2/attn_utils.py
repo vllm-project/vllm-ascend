@@ -1343,7 +1343,6 @@ def _allocate_kv_cache(
 
             k_tensor_size = (
                 num_blocks
-                * example_spec.sfa_dcp_replicated_indexer_size
                 * example_spec.block_size
                 * example_spec.num_kv_heads
                 * example_spec.head_size
@@ -1352,7 +1351,6 @@ def _allocate_kv_cache(
             if example_spec.scale_dim:
                 scale_tensor_size = (
                     num_blocks
-                    * example_spec.sfa_dcp_replicated_indexer_size
                     * example_spec.block_size
                     * example_spec.num_kv_heads
                     * example_spec.scale_dim
@@ -1806,7 +1804,7 @@ def _reshape_kv_cache_v2(
 
                 assert group_spec.block_size % kernel_block_size == 0
                 kv_cache_shape = group.backend.get_kv_cache_shape(
-                    num_kernel_blocks * group_spec.sfa_dcp_replicated_indexer_size,
+                    num_kernel_blocks,
                     kernel_block_size,
                     group_spec.num_kv_heads,
                     group_spec.head_size,
@@ -1814,7 +1812,7 @@ def _reshape_kv_cache_v2(
 
                 if group_spec.scale_dim:
                     indexer_scale_cache_shape = group.backend.get_kv_cache_shape(
-                        num_kernel_blocks * group_spec.sfa_dcp_replicated_indexer_size,
+                        num_kernel_blocks,
                         kernel_block_size,
                         group_spec.num_kv_heads,
                         group_spec.scale_dim,
@@ -1827,9 +1825,7 @@ def _reshape_kv_cache_v2(
                         # Keep each kernel block's K and scales in the same page.
                         # Global K/scale planes disagree with overlaying attention
                         # groups about where a scheduler block begins and ends.
-                        kernel_page_bytes = group_spec.page_size_bytes // (
-                            group_spec.sfa_dcp_replicated_indexer_size * (group_spec.block_size // kernel_block_size)
-                        )
+                        kernel_page_bytes = group_spec.page_size_bytes // (group_spec.block_size // kernel_block_size)
                         indexer_k_cache = make_page_strided_cache_view(
                             raw_cache, kv_cache_shape, group_spec.dtype, kernel_page_bytes
                         )

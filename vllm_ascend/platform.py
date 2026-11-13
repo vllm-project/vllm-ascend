@@ -58,7 +58,7 @@ from vllm_ascend.utils import (
     get_dsv4_compress_ratio,
     bootstrap_custom_op_env,
     check_kv_extra_config,
-    enable_sfa_dcp_replicated_indexer,
+    enable_sfa_dcp_sharded_indexer,
     is_moe_model,
     model_uses_kpool_indexer,
     model_uses_sfa_sparse,
@@ -2126,14 +2126,14 @@ def _validate_parallel_config(vllm_config: VllmConfig) -> None:
     ):
         return
 
-    sfa_dcp_replicated_indexer = enable_sfa_dcp_replicated_indexer(vllm_config)
-    if sfa_dcp_replicated_indexer:
+    sfa_dcp_sharded_indexer = enable_sfa_dcp_sharded_indexer(vllm_config)
+    if sfa_dcp_sharded_indexer:
         pcp_size = parallel_config.prefill_context_parallel_size
         full_dcp_size = parallel_config.tensor_parallel_size * pcp_size
         supported_dcp_sizes = {pcp_size, full_dcp_size}
         if parallel_config.decode_context_parallel_size not in supported_dcp_sizes:
             raise AssertionError(
-                "DCP for SFA with replicated indexer is only supported when "
+                "DCP for SFA with sharded indexer is only supported when "
                 f"dcp_size({parallel_config.decode_context_parallel_size}) "
                 f"is pcp_size({pcp_size}) or tp_size({parallel_config.tensor_parallel_size}) "
                 f"* pcp_size({pcp_size}) ({full_dcp_size})."

@@ -1,7 +1,7 @@
 """SFA-specific CP cache and address helpers.
 
-These helpers encode SFA cache transport and the replicated indexer-cache
-layout without depending on the attention implementation or metadata builders.
+These helpers encode SFA cache transport and temporary full-context attention
+views without depending on the attention implementation or metadata builders.
 """
 
 from typing import Any
@@ -92,7 +92,7 @@ def build_sfa_dcp_replicated_block_table(
     dcp_size: int,
     blocks_per_physical_block: int,
 ) -> torch.Tensor:
-    """Expand a local SFA block table into replicated-indexer addresses."""
+    """Expand a local SFA block table into full-context attention addresses."""
     local_col_idx = (
         replicated_col_idx // (dcp_size * blocks_per_physical_block) * blocks_per_physical_block
         + replicated_col_idx % blocks_per_physical_block

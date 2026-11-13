@@ -54,19 +54,18 @@ def _create_builder(spec, config, indexer):
             "vllm_ascend.attention.context_parallel.sfa_cp.get_dcp_group",
             return_value=SimpleNamespace(ranks=list(range(8))),
         ),
-        patch("vllm_ascend.attention.indexer.enable_sfa_dcp_replicated_indexer", return_value=True),
-        patch("vllm_ascend.attention.indexer.enable_sfa_dcp_sharded_indexer", return_value=False),
+        patch("vllm_ascend.attention.indexer.enable_sfa_dcp_sharded_indexer", return_value=True),
     ):
         group.create_metadata_builders(config, torch.device("cpu"), kernel_block_size=128)
     return group.get_metadata_builder()
 
 
-@pytest.mark.parametrize("indexer", [False, True])
 @pytest.mark.parametrize("physical_size", [128, 768, 1536])
 @pytest.mark.parametrize("max_len", [135807, 135808, 135809, 135811, 140000])
-def test_dcp_factory_preserves_complete_physical_pages(indexer, physical_size, max_len):
+def test_dcp_factory_preserves_complete_physical_pages(physical_size, max_len):
     config = _config(max_len, physical_size)
-    spec_cls = AscendSFAIndexerCacheSpec if indexer else AscendMLAAttentionSpec
+    indexer = False
+    spec_cls = AscendMLAAttentionSpec
     spec = spec_cls(block_size=physical_size, num_kv_heads=1, head_size=128, dtype=torch.uint8)
     builder = _create_builder(spec, config, indexer)
     physical_cols = spec.max_num_blocks_per_req(config, max_len)
@@ -108,6 +107,17 @@ def test_dcp_factory_preserves_complete_physical_pages(indexer, physical_size, m
                 assert slot == page * physical_size + last % physical_size
 
 
+@pytest.mark.parametrize("physical_size", [128, 768, 1536])
+def test_indexer_builder_uses_owner_local_metadata_without_replica_buffers(physical_size):
+    config = _config(140000, physical_size)
+    spec = AscendSFAIndexerCacheSpec(block_size=physical_size, num_kv_heads=1, head_size=128, dtype=torch.uint8)
+    builder = _create_builder(spec, config, True)
+    assert builder.use_sharded_dcp
+    assert builder.kernel_block_size == 128
+    assert not hasattr(builder, "replicated_col_idx_buf")
+    assert not hasattr(builder, "_dcp_block_table_buffers")
+
+
 @pytest.mark.parametrize("spec_cls", [AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec])
 def test_kernel_spec_copy_keeps_manager_size_without_mutating_original(spec_cls):
     spec = spec_cls(block_size=768, num_kv_heads=1, head_size=128, dtype=torch.uint8)
@@ -119,7 +129,7 @@ def test_kernel_spec_copy_keeps_manager_size_without_mutating_original(spec_cls)
     assert kernel_spec.copy_with_new_block_size(128).block_table_block_size == 768
 
 
-def test_report_boundary_and_replicated_indexer_addresses():
+def test_report_boundary_and_attention_prefill_view_addresses():
     config = _config(140000, 768)
     spec = AscendMLAAttentionSpec(block_size=768, num_kv_heads=1, head_size=128, dtype=torch.uint8)
     builder = _create_builder(spec, config, False)

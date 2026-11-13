@@ -80,7 +80,6 @@ def _validate_indexer_spec(spec: AscendSFAIndexerCacheSpec) -> None:
             and spec.num_kv_heads == 1
             and spec.head_size == 128
             and spec.block_size == 128
-            and spec.sfa_dcp_replicated_indexer_size == 1
         ):
             raise ValueError("HiSparse indexer C8 requires E4M3FN K128 with one FP32 scale per token, block128.")
     elif spec.scale_dim:

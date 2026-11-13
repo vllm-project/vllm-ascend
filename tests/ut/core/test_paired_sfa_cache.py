@@ -252,8 +252,4 @@ def test_a3_int8_fp16_pages_preserve_tp16_recurrent_ownership():
     plan = paired_sfa_cache_config(config, groups, 115900539)
     assert plan.num_blocks == 8
     assert {tensor.size for tensor in plan.kv_cache_tensors} == {115900416}
-    assert all(
-        spec.sfa_dcp_replicated_indexer_size == 1
-        for spec in specs.values()
-        if isinstance(spec, AscendSFAIndexerCacheSpec)
-    )
+    assert all(spec.page_size_bytes == 99840 for spec in specs.values() if isinstance(spec, AscendSFAIndexerCacheSpec))

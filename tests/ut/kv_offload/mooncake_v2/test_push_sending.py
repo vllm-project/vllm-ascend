@@ -58,7 +58,6 @@ def descriptor():
         block_lens=[[32]],
         block_shapes=[[(2, 4, 2)]],
         block_size_scales=[[1]],
-        indexer_replication_sizes=[0],
         dcp_sharded=[True],
     )
 
@@ -85,7 +84,6 @@ def remote_metadata(pcp_size=1, tp_size=1, heads=2):
                 block_lens=[[heads * 16]],
                 block_shapes=[[(heads, 4, 2)]],
                 block_size_scales=[[1]],
-                indexer_replication_sizes=[0],
                 dcp_sharded=[True],
                 metadata_by_pcp_rank={
                     pcp: MooncakePCPTransferMetadata(
@@ -190,7 +188,6 @@ def worker(monkeypatch, request):
                 block_lens=[[32], [32], [32]],
                 block_shapes=[[(2, 4, 2)]] * 3,
                 block_size_scales=[[1], [1], [1]],
-                indexer_replication_sizes=[0, 0, 0],
                 dcp_sharded=[True] * 3,
             )
         self.kv_cache_specs = [spec]
@@ -759,7 +756,6 @@ def multi_cache_remote(worker):
         block_lens=[[32], [32], [32]],
         block_shapes=[[(2, 4, 2)]] * 3,
         block_size_scales=[[1], [1], [1]],
-        indexer_replication_sizes=[0, 0, 0],
         dcp_sharded=[True] * 3,
         metadata_by_pcp_rank={
             0: MooncakePCPTransferMetadata(

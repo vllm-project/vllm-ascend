@@ -319,14 +319,13 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
     indexer retains its own physical cache region, separate from the MLA cache.
     """
 
-    # Indexer keys and their scales are replicated across TP ranks.
+    # One indexer KV head; DCP shards its tokens while other TP ranks replicate it.
     max_tp_shards: int | None = 1
     scale_dim: int = 0
     scale_dtype: torch.dtype = torch.int8
     cache_sparse_li_c8: bool = False
     cache_sparse_li_c4: bool = False
     cache_dtype_str: str | None = None
-    sfa_dcp_replicated_indexer_size: int = 1
 
     block_table_block_size: int | None = None
 
@@ -339,11 +338,9 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
     @property
     def state_content_size_bytes(self) -> int:
         # The V2 layout planner derives strides from stored row bytes. Include
-        # replicated K/scale regions so its descriptors cover the full page;
+        # K/scale regions so its descriptors cover the full page;
         # the indexer reshape still exposes component-major K/scale views.
-        return self.sfa_dcp_replicated_indexer_size * (
-            self.head_size * get_dtype_size(self.dtype) + self.scale_dim * get_dtype_size(self.scale_dtype)
-        )
+        return self.head_size * get_dtype_size(self.dtype) + self.scale_dim * get_dtype_size(self.scale_dtype)
 
     @property
     def page_size_bytes(self) -> int:
@@ -363,18 +360,15 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
         scale_dtype_set = set(spec.scale_dtype for spec in specs)
         cache_sparse_li_c8_set = set(spec.cache_sparse_li_c8 for spec in specs)
         cache_sparse_li_c4_set = set(spec.cache_sparse_li_c4 for spec in specs)
-        sfa_dcp_replicated_indexer_size_set = set(spec.sfa_dcp_replicated_indexer_size for spec in specs)
         assert len({spec.dcp_sharded for spec in specs}) == 1
         assert (
             len(scale_dim_set) == 1
             and len(scale_dtype_set) == 1
             and len(cache_sparse_li_c8_set) == 1
             and len(cache_sparse_li_c4_set) == 1
-            and len(sfa_dcp_replicated_indexer_size_set) == 1
         ), (
             "All SFA indexer cache layers in the same KV cache group must use "
-            "the same dtype, scale layout, quantization method, LI quant flags "
-            "and DCP replication size."
+            "the same dtype, scale layout, quantization method and LI quant flags."
         )
         # Preserve Core's role, padding and stride alignment, and reuse its
         # standard-field validation before restoring the Ascend-only fields.
@@ -384,7 +378,6 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
             scale_dtype=scale_dtype_set.pop(),
             cache_sparse_li_c8=cache_sparse_li_c8_set.pop(),
             cache_sparse_li_c4=cache_sparse_li_c4_set.pop(),
-            sfa_dcp_replicated_indexer_size=sfa_dcp_replicated_indexer_size_set.pop(),
         )
 
 

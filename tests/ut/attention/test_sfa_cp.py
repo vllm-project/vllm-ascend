@@ -512,7 +512,7 @@ def test_sfa_backend_selects_dcp_subclass_and_layout_specific_builder(pcp_size, 
     with (
         patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config", return_value=config),
         patch("vllm_ascend.attention.sfa_v1.get_ascend_config") as ascend_config,
-        patch("vllm_ascend.attention.sfa_v1.enable_sfa_dcp_replicated_indexer", return_value=dcp_enabled),
+        patch("vllm_ascend.attention.sfa_v1.enable_sfa_dcp_sharded_indexer", return_value=dcp_enabled),
     ):
         ascend_config.return_value.sparse_kv_offload_config.enabled = False
         assert AscendSFABackend.get_impl_cls() is (AscendSFADCPImpl if dcp_enabled else AscendSFAImpl)
@@ -1630,7 +1630,10 @@ def test_sfa_dcp_builds_replicated_block_table_view() -> None:
     "is_consumer,is_producer,recompute", [(True, False, True), (True, False, False), (False, True, True)]
 )
 @pytest.mark.parametrize("query_lens", [[1, 1], [3, 3], [3, 5]])
-def test_sfa_dcp_split_uses_builder_config_without_current_context(is_consumer, is_producer, recompute, query_lens):
+@pytest.mark.parametrize("sharded_indexer", [False, True])
+def test_sfa_dcp_split_uses_builder_config_without_current_context(
+    is_consumer, is_producer, recompute, query_lens, sharded_indexer
+):
     builder = _make_builder()
     builder.use_dcp = True
     builder.decode_threshold = 3
@@ -1643,6 +1646,8 @@ def test_sfa_dcp_split_uses_builder_config_without_current_context(is_consumer, 
         ),
     )
     builder.dcp_local_seq_lens_buf = torch.empty(2, dtype=torch.int32)
+    if not sharded_indexer:
+        builder.vllm_config.model_config.hf_text_config.compress_ratios = [1, 4]
     slots = torch.arange(sum(query_lens), dtype=torch.int64)
     blocks = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
     common = SimpleNamespace(
@@ -1679,7 +1684,13 @@ def test_sfa_dcp_split_uses_builder_config_without_current_context(is_consumer, 
     assert result.num_decodes == num_decodes
     assert result.num_prefills == 2 - num_decodes
     assert result.num_decode_tokens == sum(query_lens[:num_decodes])
-    assert gather.call_count == int(result.num_prefills > 0)
+    needs_gather = result.num_prefills > 0 and not sharded_indexer
+    assert gather.call_count == int(needs_gather)
+    if needs_gather:
+        assert result.dcp_context.kv_gather_block_table is blocks
+    else:
+        assert result.dcp_context.kv_gather_block_ids is None
+        assert result.dcp_context.kv_gather_block_table is None
     assert common.slot_mapping is slots
     assert common.block_table_tensor is blocks
 
@@ -2270,7 +2281,7 @@ def _make_initialized_sfa_impl(pcp_size, dcp_size, physical_pcp_size=None):
         patch("vllm_ascend.attention.context_parallel.common_cp.get_tp_group", return_value=tp_group),
         patch("vllm_ascend.attention.context_parallel.common_cp.get_dcp_group", return_value=dcp_group),
         patch("vllm_ascend.attention.context_parallel.sfa_cp.get_pcp_group", return_value=pcp_group),
-        patch("vllm_ascend.attention.sfa_v1.enable_sfa_dcp_replicated_indexer", return_value=dcp_size > 1),
+        patch("vllm_ascend.attention.sfa_v1.enable_sfa_dcp_sharded_indexer", return_value=dcp_size > 1),
         patch.object(
             _PCPOProjLinearMethod, "prepare_layer_for_parallel_weight_load", return_value=WeightSwitchLoadState(4, 2)
         ) as prepare,
