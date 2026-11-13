@@ -100,9 +100,12 @@ class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
             )
             return None
 
-        if vllm_config.model_config.use_mla:
-            # MLA has no separate head dimension, so HND versus NHD does not
-            # affect its transfer layout.
+        speculative_config = vllm_config.speculative_config
+        draft_model_config = speculative_config.draft_model_config if speculative_config is not None else None
+        if vllm_config.model_config.use_mla and (draft_model_config is None or draft_model_config.use_mla):
+            # MLA has no separate head dimension. A non-MLA draft still needs
+            # physical HND caches, even when the target uses MLA: multi-head
+            # NHD cannot be transferred as contiguous HND head shards.
             return None
 
         logger.info_once("MooncakeConnector is setting the KV cache layout to HND for direct D2D transfer.")
