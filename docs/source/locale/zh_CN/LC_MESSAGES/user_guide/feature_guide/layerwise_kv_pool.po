@@ -240,10 +240,9 @@ msgstr ""
 
 msgid ""
 "Basic full attention (`attention_v1`) and all context-parallel (CP) variants\n"
-"(`mla_cp`, `sfa_cp`, `attention_cp`) do **not** yet integrate the layerwise\n"
+"(`mla_cp`, `sfa_cp`) do **not** yet integrate the layerwise\n"
 "wait/save calls. Layerwise + CP is future work."
-msgstr ""
-"基本的全注意力（`attention_v1`）和所有上下文并行（CP）变体（`mla_cp`、`sfa_cp`、`attention_cp`）**尚未**集成逐层等待/保存调用。逐层+CP是未来的工作。"
+msgstr "基本的全注意力（`attention_v1`）和所有上下文并行（CP）变体（`mla_cp`、`sfa_cp`）**尚未**集成逐层等待/保存调用。逐层+CP是未来的工作。"
 
 msgid "## Limitations"
 msgstr "## 限制"

@@ -127,13 +127,23 @@ def test_load_draft_model_calls_remove_d2t():
     draft_model = MagicMock()
     target_attn_layer_names = {"layer.0"}
     speculator._maybe_remove_d2t = MagicMock()
+    target_config = SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=2))
+    speculator.vllm_config = target_config
+    speculator.draft_vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=1))
+
+    def load_with_draft_topology(*args):
+        assert speculator.vllm_config.parallel_config.decode_context_parallel_size == 1
+        return draft_model
+
     with patch.object(
-        TargetDependentARSpeculator, "load_draft_model", return_value=draft_model
+        TargetDependentARSpeculator, "load_draft_model", side_effect=load_with_draft_topology
     ) as parent_load_draft_model:
         result = speculator.load_draft_model(target_model, target_attn_layer_names)
     parent_load_draft_model.assert_called_once_with(target_model, target_attn_layer_names)
     speculator._maybe_remove_d2t.assert_called_once_with(draft_model)
     assert result is draft_model
+    assert speculator.vllm_config is target_config
+    assert target_config.parallel_config.decode_context_parallel_size == 2
 
 
 def test_init_cudagraph_manager_enforce_eager():
@@ -539,7 +549,8 @@ def test_set_attn_detects_architecture():
     ]
     for backend, expected in cases:
         speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
-        speculator.vllm_config = object()
+        speculator.vllm_config = SimpleNamespace()
+        speculator.draft_vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=1))
         speculator.attn_groups = object()
         speculator.speculative_config = SimpleNamespace(  # type: ignore[assignment]
             moe_backend=None, attention_backend=None, kv_cache_dtype=None
@@ -652,6 +663,7 @@ def test_init_dcp_disabled():
     speculator._init_dcp()
 
     assert speculator.use_dcp is False
+    assert speculator.dcp_size == 1
     assert speculator.dcp_manager is None
 
 
@@ -675,6 +687,7 @@ def test_init_dcp_enabled():
         speculator._init_dcp()
 
     assert speculator.use_dcp is True
+    assert speculator.dcp_size == 2
     assert speculator.dcp_manager is dcp_manager_cls.return_value
     dcp_manager_cls.assert_called_once_with(
         dcp_world_size=2,

@@ -370,7 +370,7 @@ def test_graph_replay_updates_full_graph_params():
     )
 
 
-@pytest.mark.parametrize("use_dcp,architecture", [(False, "GQA"), (True, "GQA"), (True, "MLA")])
+@pytest.mark.parametrize("use_dcp,architecture", [(False, "GQA"), (True, "MLA")])
 @pytest.mark.parametrize("is_prefill", [False, True])
 def test_updatable_graph_replay_reuses_shared_source(use_dcp, architecture, is_prefill):
     """Build every draft step from the first metadata with one shared-source update."""

@@ -246,6 +246,29 @@ def test_mtp_draft_config_keeps_target_pcp_topology(eplb_worker_config):
     assert draft_config.parallel_config.enable_eplb
 
 
+@pytest.mark.parametrize("draft_uses_mla", [False, True])
+def test_draft_config_uses_its_own_dcp_topology(eplb_worker_config, draft_uses_mla):
+    target_config = replace(
+        eplb_worker_config,
+        parallel_config=replace(eplb_worker_config.parallel_config, decode_context_parallel_size=8),
+    )
+    speculator = object.__new__(AscendMTPSpeculator)
+    speculator.vllm_config = target_config
+    speculator.speculative_config = target_config.speculative_config
+    speculator.draft_model_config = SimpleNamespace(use_mla=draft_uses_mla, is_moe=True)
+    speculator.draft_vllm_config = speculator._create_draft_vllm_config()
+
+    expected_dcp = 8 if draft_uses_mla else 1
+    assert speculator.draft_vllm_config.parallel_config.decode_context_parallel_size == expected_dcp
+    assert speculator.attn_vllm_config.parallel_config.decode_context_parallel_size == expected_dcp
+    assert target_config.parallel_config.decode_context_parallel_size == 8
+    if not draft_uses_mla:
+        speculator._init_dcp()
+        assert speculator.dcp_size == 1
+        assert not speculator.use_dcp
+        assert speculator.dcp_manager is None
+
+
 @pytest.mark.parametrize("phase", ["prefill", "decode"])
 def test_mtp_eplb_draft_reaches_inherited_loader(eplb_worker_config, validate_eplb_on_cpu, phase):
     eplb_worker_config = replace(
@@ -273,6 +296,7 @@ def test_mtp_eplb_draft_reaches_inherited_loader(eplb_worker_config, validate_ep
         pytest.raises(RuntimeError, match="reached model construction"),
     ):
         speculator.load_draft_model(torch.nn.Module(), set())
+    assert speculator.vllm_config is eplb_worker_config
     loading_config = get_model.call_args.kwargs["vllm_config"]
     assert loading_config.parallel_config.enable_eplb
     assert loading_config.parallel_config.enable_expert_parallel
@@ -557,6 +581,8 @@ def test_disable_profiling_chunk_for_draft_rejects_invalid_boolean():
 def test_eagle_inherited_loader_keeps_upstream_construction_tag(eplb_worker_config):
     speculator = object.__new__(AscendEagleSpeculator)
     speculator.vllm_config = eplb_worker_config
+    speculator.draft_model_config = eplb_worker_config.speculative_config.draft_model_config
+    speculator.draft_vllm_config = speculator._create_draft_vllm_config()
     original_tag = backends.model_tag
     seen = []
 
@@ -573,5 +599,6 @@ def test_eagle_inherited_loader_keeps_upstream_construction_tag(eplb_worker_conf
         pytest.raises(RuntimeError, match="observed actual inherited EAGLE loader"),
     ):
         speculator.load_draft_model(torch.nn.Module(), set())
+    assert speculator.vllm_config is eplb_worker_config
     assert seen == ["eagle_head"]
     assert backends.model_tag == original_tag
