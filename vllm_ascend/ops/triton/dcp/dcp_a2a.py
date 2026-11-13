@@ -531,6 +531,7 @@ def _launch_fused_dcp_lse_combine(
         and 8 <= dcp_size <= 16
         and head_dim >= 512
         and scatter_dim == 1
+        and not return_lse  # the rank tile does not write the LSE lane
         and total_rows >= min_rows
         and local_output is not None
         and local_lse is not None
