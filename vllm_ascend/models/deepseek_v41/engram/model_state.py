@@ -127,6 +127,8 @@ class EngramModelState(AscendModelState):
         # Engram owns its lookup buffers and events. Keep their retirement
         # beside the input preparation instead of exposing them to the runner.
         try:
+            if self.decoder_replay_state is not None:
+                self.decoder_replay_state.wait_for_metadata()
             self._engram_inputs = None
             self.model.retire_engram_lookups(reset_events=failed)
         finally:
