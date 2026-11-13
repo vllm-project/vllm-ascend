@@ -40,8 +40,8 @@ class TestReplayVisibleLengthsReuse:
         # Query positions are [3, 4, 5] and [3, 4]; replay starts at 3.
         torch.testing.assert_close(results[0], torch.tensor([[1], [2], [3], [1], [2]], dtype=torch.int32))
 
-    @pytest.mark.parametrize("changed", ["floor", "seq_lens", "query_start_loc", "window"])
-    def test_different_inputs_not_shared(self, monkeypatch, changed):
+    @pytest.mark.parametrize("changed", ["floor", "seq_lens", "query_start_loc"])
+    def test_different_request_contexts_use_separate_caches(self, monkeypatch, changed):
         build = Mock(wraps=dsa_v41.build_replay_swa_visible_lens)
         monkeypatch.setattr(dsa_v41, "build_replay_swa_visible_lens", build)
         seq_lens = torch.tensor([6, 5])
@@ -49,9 +49,9 @@ class TestReplayVisibleLengthsReuse:
         replay_start = torch.zeros(2, dtype=torch.int64)
         batch_cache: dict[str, object] = {}
         first = _prepare(_builder(batch_cache), seq_lens, query_start_loc, replay_start)
-        window_size = 4
-        expected = [4, 4, 4, 4, 4]
         if changed == "floor":
+            # Decoder replay gives the first SWA layer its own batch dictionary
+            # because it uses the encoder replay floor instead of the decoder's.
             replay_start = torch.tensor([3, 3])
             expected = [1, 2, 3, 1, 2]
         elif changed == "seq_lens":
@@ -60,14 +60,29 @@ class TestReplayVisibleLengthsReuse:
         elif changed == "query_start_loc":
             query_start_loc = torch.tensor([0, 2, 5])
             expected = [4, 4, 3, 4, 4]
-        else:
-            window_size = 2
-            expected = [2, 2, 2, 2, 2]
-        second = _prepare(_builder(batch_cache, window_size), seq_lens, query_start_loc, replay_start)
+        separate_cache: dict[str, object] = {}
+        results = [_prepare(_builder(separate_cache), seq_lens, query_start_loc, replay_start) for _ in range(20)]
+        second = results[0]
         assert build.call_count == 2
         assert first is not second
+        assert all(result is second for result in results)
         torch.testing.assert_close(first, torch.full((5, 1), 4, dtype=torch.int32))
         torch.testing.assert_close(second, torch.tensor(expected, dtype=torch.int32).unsqueeze(1))
+
+    def test_different_windows_not_shared(self, monkeypatch):
+        build = Mock(wraps=dsa_v41.build_replay_swa_visible_lens)
+        monkeypatch.setattr(dsa_v41, "build_replay_swa_visible_lens", build)
+        seq_lens = torch.tensor([6, 5])
+        query_start_loc = torch.tensor([0, 3, 5])
+        replay_start = torch.zeros(2, dtype=torch.int64)
+        batch_cache: dict[str, object] = {}
+        first = _prepare(_builder(batch_cache, 4), seq_lens, query_start_loc, replay_start)
+        second = _prepare(_builder(batch_cache, 2), seq_lens, query_start_loc, replay_start)
+        assert _prepare(_builder(batch_cache, 4), seq_lens, query_start_loc, replay_start) is first
+        assert _prepare(_builder(batch_cache, 2), seq_lens, query_start_loc, replay_start) is second
+        assert build.call_count == 2
+        torch.testing.assert_close(first, torch.full((5, 1), 4, dtype=torch.int32))
+        torch.testing.assert_close(second, torch.full((5, 1), 2, dtype=torch.int32))
 
     def test_new_batch_recomputes_updated_buffers(self, monkeypatch):
         build = Mock(wraps=dsa_v41.build_replay_swa_visible_lens)

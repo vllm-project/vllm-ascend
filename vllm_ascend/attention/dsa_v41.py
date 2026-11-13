@@ -1313,28 +1313,20 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         replay_start = getattr(common, "replay_start", None)
         replay_visible_lens = None
         if replay_start is not None and req.cache_kind == "swa":
-            replay_inputs = (
-                common.query_start_loc[: req.num_reqs + 1],
-                req.seq_lens[: req.num_reqs],
-                replay_start[: req.num_reqs],
-            )
-            # SWA groups share request coordinates, but may have different
-            # replay floors. Reuse only identical input views within this
-            # build; tensor contents stay unchanged while groups are built.
-            replay_cache_key = (
-                window_size,
-                req.num_actual_tokens,
-                tuple((t.data_ptr(), t.shape, t.stride(), t.dtype, t.device) for t in replay_inputs),
-            )
-            replay_cache = self.common_v41_batch_metadata.setdefault("replay-swa-visible-lens", {})
-            cached_replay = replay_cache.get(replay_cache_key)
-            if cached_replay is None:
-                replay_visible_lens = build_replay_swa_visible_lens(window_size, *replay_inputs, req.num_actual_tokens)
-                # Keep the inputs alive so another group's allocation cannot
-                # reuse an address already present in this batch's keys.
-                replay_cache[replay_cache_key] = (replay_inputs, replay_visible_lens)
-            else:
-                replay_visible_lens = cached_replay[1]
+            # Like a5-causal-swa above, the batch dictionary fixes request
+            # coordinates and token counts. Replay floors are shared too;
+            # the first SWA layer with a different floor uses its own dictionary.
+            cache_key = f"replay-swa-visible-lens:w{window_size}"
+            replay_visible_lens = self.common_v41_batch_metadata.get(cache_key)
+            if replay_visible_lens is None:
+                replay_visible_lens = build_replay_swa_visible_lens(
+                    window_size,
+                    common.query_start_loc[: req.num_reqs + 1],
+                    req.seq_lens[: req.num_reqs],
+                    replay_start[: req.num_reqs],
+                    req.num_actual_tokens,
+                )
+                self.common_v41_batch_metadata[cache_key] = replay_visible_lens
         # In band mode this tensor is the per-token visible length; the sparse
         # path above is its other producer, and that one pairs it with an index
         # list. The operator's mask mode is therefore the band in both cases.
