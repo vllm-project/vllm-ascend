@@ -26,28 +26,13 @@ def prepare_pcp_query_metadata(metadata, states, valid_rows, local_states, world
     metadata.hisparse_write_has_prefill = metadata.pcp_has_global_prefill
 
 
-def prepare_pcp_metadata(metadata, local_batch, global_batch, gather_indices, write_mask):
-    """Queries use local (possibly duplicate) request rows; writes use global rows."""
+def prepare_pcp_metadata(metadata, global_batch, gather_indices, write_mask):
+    """Map gathered KV writes to canonical requests; query layout comes from the builder."""
     rows = torch.bucketize(gather_indices.contiguous(), global_batch.query_start_loc[1:].contiguous(), right=True).to(
         torch.int32
     )
     rows.masked_fill_(~write_mask, -1)
-    states = getattr(metadata, "hisparse_request_state_indices", None)
-    if states is None:
-        metadata.hisparse_request_state_indices = local_batch.idx_mapping.to(
-            device=gather_indices.device, dtype=torch.int32
-        )
-    else:
-        states[: local_batch.idx_mapping.numel()].copy_(local_batch.idx_mapping)
-    metadata.hisparse_num_write_tokens = gather_indices.numel()
     metadata.hisparse_write_req_id_per_token = rows
-    metadata.hisparse_write_has_prefill = bool(global_batch.is_prefilling_np.any())
-    # Scatter must cover gathered KV, including padding slots masked to -1.
-    valid_rows = getattr(metadata, "hisparse_num_valid_write_rows", None)
-    if valid_rows is None:
-        valid_rows = torch.empty((1,), dtype=torch.int32, device=gather_indices.device)
-        metadata.hisparse_num_valid_write_rows = valid_rows
-    valid_rows.fill_(gather_indices.numel())
 
 
 class PCPHiSparseConnector(ActiveKVConnector):
@@ -141,7 +126,7 @@ class PCPHiSparseConnector(ActiveKVConnector):
             if id(metadata) in seen:
                 continue
             seen.add(id(metadata))
-            prepare_pcp_metadata(metadata, input_batch, global_batch, indices, mask)
+            prepare_pcp_metadata(metadata, global_batch, indices, mask)
         # Core's canonical state table has max_num_seqs entries. PCP dual chunks
         # may repeat a request locally, so they must never be supplied here.
         # num_tokens also controls the Resident slot snapshot used by row DMA.

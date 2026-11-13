@@ -351,6 +351,7 @@ def test_c8_prolog_keeps_parent_outputs_and_hisparse_destination(rows, capture, 
     impl.c8_cache_dtype = torch.float8_e4m3fn
     impl.q_lora_rank, impl.kv_lora_rank, impl.qk_rope_head_dim = 2048, 512, 64
     impl.local_num_heads, impl.has_indexer = 8, True
+    impl.pcp_enabled = False
     impl.is_kv_consumer, impl.rl_weight_update_enabled = False, False
     impl.sfa_qsfa_tile_size = block
 
