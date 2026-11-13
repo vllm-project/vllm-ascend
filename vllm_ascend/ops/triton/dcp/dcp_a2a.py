@@ -8,12 +8,14 @@ from vllm.distributed.parallel_state import GroupCoordinator, _groups
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
+from vllm_ascend.device.device_config import is_950
 from vllm_ascend.ops.triton.dcp.dcp_a2a_batched import (
     MAX_UNROLLED_COMBINE_ELEMENTS,
     _encode_lse_fields,
     _fused_dcp_lse_combine_batched_kernel,
     _pack_dcp_output_lse_batched_kernel,
 )
+from vllm_ascend.ops.triton.dcp.dcp_a2a_rank_tiled import _fused_dcp_lse_combine_rank_tiled_kernel
 from vllm_ascend.ops.triton.dcp.dcp_jit import _launch_kernel
 from vllm_ascend.ops.triton.dcp.sfa_dcp_exchange import can_exchange, exchange
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
@@ -450,6 +452,49 @@ def _launch_fused_dcp_lse_combine(
     lse_pack_dim = _lse_pack_dim(recv.dtype)
     total_rows = num_tokens * num_heads
     grid_size = total_rows if total_rows < vector_cores else vector_cores
+    # Wide rank tile: one program folds all ranks for a 512-wide feature tile.
+    # A 16x512 BF16 tile holds the FP32 temporaries in 32 KiB and measured
+    # 2-4x faster than narrower tiles and than the scalar/batched paths on A5
+    # (DCP16, head dims 512 and 1024). The [rank, feature] load only vectorizes
+    # when the rank-row stride is compile-time constant; with runtime head/token
+    # counts A3 lowers it to scalar-rate transfers (up to 15x slower than its
+    # scalar kernel), so this stays A5-only. It runs before the batched path
+    # because DCP16 rows still won at T64/T256.
+    rank_tile = triton.next_power_of_2(dcp_size)
+    feature_tile = min(512, triton.next_power_of_2(head_dim), 8192 // rank_tile)
+    tiles_per_head = triton.cdiv(head_dim, max(feature_tile, 1))
+    min_rows = triton.cdiv(4 * vector_cores, max(dcp_size, 1))
+    rank_tiled = (
+        is_950()
+        and recv.dtype == torch.bfloat16
+        and dcp_size == 16
+        and head_dim >= 512
+        and dcp_size >= 2 * tiles_per_head
+        and scatter_dim == 1
+        and total_rows >= min_rows
+        and local_output is not None
+        and local_output.stride(-1) == 1
+    )
+    if rank_tiled:
+        assert local_lse is not None
+        tiled_grid = min(total_rows * tiles_per_head, vector_cores)
+        launch(
+            _fused_dcp_lse_combine_rank_tiled_kernel,
+            (tiled_grid,),
+            recv,
+            output,
+            local_output,
+            local_lse,
+            *local_output.stride(),
+            *local_lse.stride()[:2],
+            num_heads=num_heads,
+            num_tokens=num_tokens,
+            DCP_SIZE=dcp_size,
+            HEAD_DIM=head_dim,
+            BLOCK_R=rank_tile,
+            BLOCK_D=feature_tile,
+        )
+        return
     # Stream ranks so the live output accumulator is independent of DCP size.
     # Four rows per core amortize the wider row tile; small workloads keep the
     # scalar path. No chip model, token/head list or DCP whitelist is required.
