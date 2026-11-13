@@ -122,16 +122,11 @@ strategy_min_gpus:
 strategy_overrides:
   pd_cluster:
     prefill:
-      nodes: 2
-      parallelism: dep
-      tp: 1
-      vllm_args:
-        - '--prefill-context-parallel-size'
-        - '8'
+      tp:
+        ascend_910b: 1
     decode:
-      nodes: 2
-      parallelism: dep
-      tp: 2
+      tp:
+        ascend_910b: 2
 features:
   reasoning:
     hardware_overrides:
@@ -154,7 +149,7 @@ guide_sections:
   ascend: |-
     ### Huawei Atlas 800I A2 (Ascend 910B) w8a8 (vLLM Ascend)
 
-    Verified with `quay.io/ascend/vllm-ascend:v0.32.0rc1` on Atlas 800I A2 (Ascend 910B), as a prefill/decode PD cluster; full per-role runbook below (pools and topology per strategy_overrides.pd_cluster).
+    Verified with `quay.io/ascend/vllm-ascend:v0.32.0rc1` on Atlas 800I A2 (Ascend 910B), as a prefill/decode PD cluster (measured pools: 2 prefill + 2 decode nodes); full per-role runbook below.
 
     Served W8A8 checkpoint: [Eco-Tech/GLM-5.3-Flash-w8a8](https://modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8).
 
