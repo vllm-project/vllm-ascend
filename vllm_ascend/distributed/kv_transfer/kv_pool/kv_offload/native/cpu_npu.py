@@ -329,7 +329,7 @@ class NPUOffloadingWorker(OffloadingWorker):
         blocks_per_chunk: int,
         num_cpu_blocks: int,
         mmap_region: SharedOffloadRegion | None = None,
-        pin_shared_mmap: bool = True,
+        pin_shared_mmap: bool = False,
         worker_slot_only: bool = False,
     ) -> None:
         self._mmap_region = mmap_region
@@ -410,6 +410,8 @@ class NPUOffloadingWorker(OffloadingWorker):
                 handler = getattr(self, handler_name, None)
                 if handler is not None:
                     handler.shutdown()
+            # Failed sync/unregister must skip mmap cleanup: native registrations
+            # still need the mapping, retained by the process-scoped owner.
             self._unpin_shared_region()
             if mmap_region is not None:
                 mmap_region.cleanup()
@@ -521,6 +523,8 @@ class NPUOffloadingWorker(OffloadingWorker):
             try:
                 self._load_handler.shutdown()
             finally:
+                # Failed sync/unregister intentionally skips cleanup below.
+                # The registration owner keeps the mmap alive for retry or exit.
                 self._unpin_shared_region()
                 # Drop all mmap-backed tensor views before closing the mapping.
                 if self._mmap_region is not None:

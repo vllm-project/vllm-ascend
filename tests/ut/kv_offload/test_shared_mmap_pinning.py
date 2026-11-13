@@ -156,7 +156,8 @@ def test_shutdown_retains_mapping_until_unpin_can_succeed(pin_ops, failure):
 
 
 @pytest.mark.parametrize("handler_failure", [False, True])
-def test_worker_constructor_and_shutdown_release_in_order(monkeypatch, pin_ops, handler_failure):
+@pytest.mark.parametrize("pin_shared_mmap", [None, False, True])
+def test_worker_constructor_and_shutdown_release_in_order(monkeypatch, pin_ops, handler_failure, pin_shared_mmap):
     events = []
     region = SimpleNamespace(
         base_tensor=torch.empty(8, dtype=torch.int8),
@@ -179,21 +180,25 @@ def test_worker_constructor_and_shutdown_release_in_order(monkeypatch, pin_ops, 
         group_data_refs=[],
     )
     kwargs: dict[str, Any] = dict(kv_caches=kv_caches, blocks_per_chunk=2, num_cpu_blocks=2, mmap_region=region)
+    if pin_shared_mmap is not None:
+        kwargs["pin_shared_mmap"] = pin_shared_mmap
+    pin_events = ["pin"] if pin_shared_mmap else []
+    unpin_events = ["sync", "unpin"] if pin_shared_mmap else []
     if handler_failure:
         with pytest.raises(RuntimeError, match="load handler failed"):
             cpu_npu_mod.NPUOffloadingWorker(**kwargs)
-        assert events == ["pin", "handler", "sync", "unpin", "cleanup"]
+        assert events == pin_events + ["handler"] + unpin_events + ["cleanup"]
     else:
         worker = cpu_npu_mod.NPUOffloadingWorker(**kwargs)
         worker.shutdown()
-        assert events == ["pin", "handler", "handler", "sync", "unpin", "cleanup"]
+        assert events == pin_events + ["handler", "handler"] + unpin_events + ["cleanup"]
 
 
 @pytest.mark.parametrize("replicated", [False, True])
 @pytest.mark.parametrize(
     "extra,pin_enabled",
     [
-        ({}, True),
+        ({}, False),
         ({"pin_shared_mmap": False}, False),
         ({"pin_shared_mmap": True}, True),
         ({"pin_shared_mmap": "false"}, False),
@@ -334,6 +339,7 @@ def test_failed_constructor_keeps_registered_mapping_alive(monkeypatch, pin_ops,
                 blocks_per_chunk=2,
                 num_cpu_blocks=3,
                 mmap_region=region,
+                pin_shared_mmap=True,
                 worker_slot_only=True,
             )
         except RuntimeError as error:
@@ -436,6 +442,7 @@ def test_failed_worker_process_unlinks_only_creator_files(monkeypatch, pin_ops, 
                 blocks_per_chunk=2,
                 num_cpu_blocks=8,
                 mmap_region=region,
+                pin_shared_mmap=True,
                 worker_slot_only=True,
             )
         except RuntimeError as error:

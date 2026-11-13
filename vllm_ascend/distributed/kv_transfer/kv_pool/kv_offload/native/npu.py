@@ -164,7 +164,7 @@ class NPUTieringOffloadingSpec(_NPUWorkerMixin, _TieringOffloadingSpec):
         # Match the scheduler's rank-based layout, regardless of device selection.
         rank = 0 if self.replicated_layout else self.config.parallel.rank
 
-        pin_shared_mmap = self.extra_config.get("pin_shared_mmap", True)
+        pin_shared_mmap = self.extra_config.get("pin_shared_mmap", False)
         if isinstance(pin_shared_mmap, str):
             pin_shared_mmap = pin_shared_mmap.lower() not in ("0", "false", "no")
         else:
