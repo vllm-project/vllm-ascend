@@ -1,0 +1,4 @@
+pr: 21850
+entries:
+  - category: bugfix
+    text: Mooncake now requests HND KV cache layout for non-MLA speculative drafts paired with MLA target models, preserving safe multi-head cache registration with HND-capable attention backends.
