@@ -9,27 +9,9 @@ from vllm_ascend.models.qwen4_exp import qsa
 from vllm_ascend.utils import vllm_version_is
 
 
-def test_main_uses_ascend_projection_and_draft_uses_upstream(monkeypatch) -> None:
-    assert "_project_qkv_gate" in qsa.AscendQwen4ExpQSAAttention.__dict__
-    assert "_main_fused_norm_rope_eligible" in qsa.AscendQwen4ExpQSAAttention.__dict__
-
-    upstream_projection = Mock(return_value=("q", "k", "v", "gate"))
-    monkeypatch.setattr(
-        qsa.upstream_qsa.Qwen4ExpQSAAttention,
-        "_project_qkv_gate",
-        upstream_projection,
-    )
-    monkeypatch.setattr(
-        qsa,
-        "get_forward_context",
-        lambda: SimpleNamespace(is_draft_model=True),
-    )
-    layer = qsa.AscendQwen4ExpQSAAttention.__new__(qsa.AscendQwen4ExpQSAAttention)
-    qkv = torch.empty((2, 8))
-    positions = torch.arange(2)
-
-    assert layer._project_qkv_gate(qkv, positions) == ("q", "k", "v", "gate")
-    upstream_projection.assert_called_once_with(qkv, positions)
+def test_main_and_draft_qkv_projection_use_upstream_path() -> None:
+    assert "_project_qkv_gate" not in qsa.AscendQwen4ExpQSAAttention.__dict__
+    assert qsa.AscendQwen4ExpQSAAttention._project_qkv_gate is qsa.upstream_qsa.Qwen4ExpQSAAttention._project_qkv_gate
 
 
 def test_main_falls_back_when_fused_projection_abi_is_not_satisfied(monkeypatch) -> None:
