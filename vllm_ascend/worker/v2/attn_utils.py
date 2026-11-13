@@ -707,6 +707,10 @@ def build_attn_metadata(
                         common_attn_metadata=variant_common,
                         **attn_metadata_extra_kwargs,
                     )
+                if isinstance(attn_metadata_builder, QSAMetadataBuilder):
+                    # Trim graph padding using CPU scheduling data before native LI V2.
+                    metadata.qsa_num_live_requests = num_actual_reqs
+                    metadata.qsa_num_live_tokens = int(variant_common.query_start_loc_cpu[num_actual_reqs])
                 if is_dsa_builder:
                     # Preserve sharing even if a builder replaces one of the
                     # dictionaries while constructing its metadata.
