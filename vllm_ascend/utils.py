@@ -1171,7 +1171,7 @@ def has_rope(vllm_config: VllmConfig):
 
 
 @contextmanager
-def super_kernel_scope(scope: str, enabled: bool):
+def super_kernel_scope(scope: str | None, enabled: bool):
     if not enabled:
         yield
         return

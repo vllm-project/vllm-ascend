@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.layer import MoERunner
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import _moe_forward_shared, _unpack
 from vllm.utils.torch_utils import direct_register_custom_op
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import PreparedSharedExpertInput, RoutedMoEMilestones
@@ -41,6 +42,7 @@ from vllm_ascend.ops.fused_moe.shared_experts import (
     SharedExpertParallelMode,
     SubmittedSharedExpertGateUp,
 )
+from vllm_ascend.utils import super_kernel_scope
 
 
 def _ascend_moe_forward_shared_sp_fake(
@@ -109,6 +111,11 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             routed_input_transform,
             routed_output_transform,
             routed_scaling_factor,
+        )
+        ascend_config = get_ascend_config()
+        self._enable_moe_super_kernel_scopes = (
+            ascend_config.ascend_compilation_config.enable_super_kernel
+            and ascend_config.multistream_overlap_shared_expert
         )
         self._gate = gate
         self.hidden_size = moe_config.hidden_dim
@@ -266,7 +273,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         fused_output = self.apply_routed_output_transform(fused_output)
 
         if shared_output is not None:
-            result = torch._foreach_add([shared_output], [fused_output])[0]
+            with super_kernel_scope("moe_combine", enabled=self._enable_moe_super_kernel_scopes):
+                result = torch._foreach_add([shared_output], [fused_output])[0]
         else:
             result = fused_output
 
@@ -514,7 +522,9 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 prepared_shared_input,
                 shared_input_ready,
             )
-            router_logits = self._apply_router_linear(router_input)
+            # Separate router Cube work from the routed MIX SK.
+            with super_kernel_scope("moe_router", enabled=self._enable_moe_super_kernel_scopes):
+                router_logits = self._apply_router_linear(router_input)
             router_output_ready = maybe_record_event()
         else:
             shared_input_ready = maybe_record_event()
@@ -545,7 +555,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         shared_experts_input: torch.Tensor | None,
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        with self._sequence_parallel_context():
+        # Isolate routed work from shared-expert and surrounding model scopes.
+        # Shared submissions enter their own scope after switching streams.
+        with (
+            super_kernel_scope("moe_routed", enabled=self._enable_moe_super_kernel_scopes),
+            self._sequence_parallel_context(),
+        ):
             shared_hidden_states = shared_experts_input if shared_experts_input is not None else hidden_states
             if self.ascend_shared_experts is None:
                 if self.is_internal_router:
