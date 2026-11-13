@@ -73,6 +73,9 @@ class PendingTensor:
 
     def wait(self) -> torch.Tensor:
         self.work.wait()
+        consumer = torch.npu.current_stream()
+        self.source.record_stream(consumer)
+        self.tensor.record_stream(consumer)
         return self.tensor
 
 
@@ -219,6 +222,9 @@ class KDAProjectionTP:
         g_hidden = g_input.wait() if g_input is not None else owner
         main.wait_event(forget_ready)
         gate = layer.g_proj(g_hidden)[0]
+        # CCU does not consume AIVs: start the return before beta Cube and
+        # input-quant Vector. AIV keeps the existing post-quant launch below.
+        pending_gate = self.exchange_gate(gate) if not self.gate_uses_aiv else None
         q_hidden = g_hidden if q_input is g_input else q_input.wait() if q_input is not None else owner
         input_ready = main.record_event()
         q_hidden.record_stream(aux_stream)
@@ -228,9 +234,9 @@ class KDAProjectionTP:
             beta = layer.b_proj(q_hidden)[0]
             beta_ready = aux_stream.record_event()
         quantized = layer._quantize_fused_qkv(q_hidden, for_finegrained_tp=True)
-        # This launch records a main-stream event after DynamicQuant, so G
-        # communication cannot contend with that quantization on AIVs.
-        pending_gate = self.exchange_gate(gate)
+        if pending_gate is None:
+            # The producer event follows DynamicQuant in AIV mode.
+            pending_gate = self.exchange_gate(gate)
         main.wait_event(beta_ready)
         beta.record_stream(main)
         forget.record_stream(main)
@@ -275,10 +281,42 @@ class KDAProjectionTP:
         )
 
 
+def _restore_owner_chunks(outputs: list[PendingTensor], rows: int) -> torch.Tensor:
+    first = outputs[0].wait()
+    total = sum(pending.tensor.shape[0] for pending in outputs)
+    result = first.new_empty((total, *first.shape[1:]))
+    offset = 0
+    for index, pending in enumerate(outputs):
+        chunk = first if index == 0 else pending.wait()
+        result[offset : offset + chunk.shape[0]].copy_(chunk)
+        offset += chunk.shape[0]
+    return result[:rows]
+
+
+class ChunkedEmbeddingTP:
+    """CCU token-ID AG and embedding RS pipelined over two owner chunks."""
+
+    def __init__(self, group):
+        self.group = group
+        self.communication = TPCommunication()
+
+    def forward(self, layer, owner):
+        chunks = owner.tensor_split(2) if owner.shape[0] > 1 else (owner,)
+        gathered = [self.communication.gather(chunk.contiguous(), self.group) for chunk in chunks]
+        outputs = []
+        for pending in gathered:
+            partial = layer._lookup_partition(pending.wait())
+            outputs.append(self.communication.scatter(partial, self.group))
+        # Copy chunk0 while the final CCU RS is still pending. All ranks
+        # submit AG0, AG1, RS0, RS1, including padded and idle owners.
+        return _restore_owner_chunks(outputs, owner.shape[0])
+
+
 class ChunkedMLPTP:
     def __init__(self, group):
         self.group = group
         self.communication = TPCommunication()
+        self.uses_aiv = uses_aiv_communication(group)
 
     def forward(self, layer, hidden):
         rows = hidden.shape[0]
@@ -295,7 +333,9 @@ class ChunkedMLPTP:
             partial = down.quant_method.apply(down, down_input, bias=bias)
             outputs.append(self.communication.scatter(partial, self.group))
         # AG0, AG1, RS0, RS1 are launched in the same order on every rank.
-        return torch.cat([pending.wait() for pending in outputs], dim=0)[:rows]
+        if self.uses_aiv:
+            return torch.cat([pending.wait() for pending in outputs], dim=0)[:rows]
+        return _restore_owner_chunks(outputs, rows)
 
 
 class ChunkedLMHeadTP:

@@ -23,10 +23,11 @@ import torch
 import torch.distributed as dist
 from torch import nn
 from torch.nn.parameter import Parameter
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import get_current_vllm_config
 from vllm.distributed import divide
 from vllm.distributed.parallel_state import get_pcp_group, get_tp_group
-from vllm.forward_context import is_forward_context_available
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -41,13 +42,14 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     pad_vocab_size,
 )
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.distributed.parallel_state import (
     GroupCoordinator,
     get_embed_tp_group,
     get_lmhead_tp_group,
 )
-from vllm_ascend.ops.finegrained_tp import ChunkedLMHeadTP
+from vllm_ascend.ops.finegrained_tp import ChunkedEmbeddingTP, ChunkedLMHeadTP, uses_aiv_communication
 from vllm_ascend.utils import (
     embedding_tp_enable,
     enable_pcp_embedding_lmhead_weight_sharding,
@@ -265,6 +267,19 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         )
 
         self.update_param_tp_status()
+        self._kimi_embedding_pipeline = None
+        self.prefix = prefix
+        if self.parallel_mode is VocabParallelMode.FINE_GRAINED and self.token_exchange_group is not None:
+            config = get_current_vllm_config()
+            text_config = getattr(getattr(config, "model_config", None), "hf_text_config", None)
+            if getattr(text_config, "model_type", None) == "kimi_linear" and not uses_aiv_communication(
+                self.token_exchange_group
+            ):
+                self._kimi_embedding_pipeline = ChunkedEmbeddingTP(self.token_exchange_group)
+                context = config.compilation_config.static_forward_context
+                if prefix in context:
+                    raise ValueError(f"Duplicate layer name: {prefix}")
+                context[prefix] = self
 
     def set_embedding_num_tokens_padded(self, num_tokens_padded: int) -> None:
         """Publish the padded batch length for lookup outside model forward."""
@@ -300,9 +315,38 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         return input_, ~vocab_mask
 
     def forward(self, input_):
+        if self._kimi_embedding_pipeline is not None:
+            if not is_forward_context_available():
+                # MM embedding preparation runs outside the compiled forward.
+                return self._forward_chunked_embedding(input_)
+            output = torch.empty((input_.shape[0], self.embedding_dim), dtype=self.params_dtype, device=input_.device)
+            torch.ops.vllm.kimi_embedding_finegrained_forward(input_, output, self.prefix)
+            return output
         if self.token_exchange_group is not None:
             return self._forward_with_token_exchange(input_)
         return self._forward_standard(input_)
+
+    def _forward_chunked_embedding(self, input_):
+        capacity = self.embedding_tp_capacity
+        assert capacity is not None and self._kimi_embedding_pipeline is not None
+        rows = input_.shape[0]
+        if rows > capacity:
+            raise ValueError(f"embedding exchange span {capacity} must cover {rows} tokens.")
+        owner = torch.nn.functional.pad(input_, (0, capacity - rows))
+        return self._kimi_embedding_pipeline.forward(self, owner)[:rows]
+
+    def _lookup_partition(self, input_):
+        masked_input, input_mask = self._mask_input_for_vocab_range(
+            input_,
+            self.shard_indices.org_vocab_start_index,
+            self.shard_indices.org_vocab_end_index,
+            self.shard_indices.num_org_vocab_padding,
+            self.shard_indices.added_vocab_start_index,
+            self.shard_indices.added_vocab_end_index,
+        )
+        output = self.quant_method.embedding(self, masked_input.long())
+        output.masked_fill_(input_mask.unsqueeze(-1), 0)
+        return output
 
     def _forward_with_token_exchange(self, input_):
         """Exchange token rows before lookup and restore local token rows.
@@ -366,16 +410,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
 
         # Out-of-vocabulary rows are masked below. The DP exchange padding and
         # PCP rank-local padding both use token ID 0, which is a valid token.
-        masked_input, input_mask = self._mask_input_for_vocab_range(
-            all_gather_output,
-            self.shard_indices.org_vocab_start_index,
-            self.shard_indices.org_vocab_end_index,
-            self.shard_indices.num_org_vocab_padding,
-            self.shard_indices.added_vocab_start_index,
-            self.shard_indices.added_vocab_end_index,
-        )
-        output_parallel = self.quant_method.embedding(self, masked_input.long())
-        output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
+        output_parallel = self._lookup_partition(all_gather_output)
         reduce_scatter_output = exchange_group.reduce_scatter(output_parallel, dim=0)
 
         # Preserve the caller's row count. In MM preparation this removes
@@ -416,6 +451,24 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         # rank. Sum the vocabulary-shard contributions without scattering the
         # token dimension; the first decoder layer expects the complete sequence.
         return torch.ops.vllm.all_reduce(output_parallel, reduce_group.unique_name)
+
+
+@eager_break_during_capture
+def kimi_embedding_finegrained_forward(input_: torch.Tensor, output: torch.Tensor, layer_name: str) -> None:
+    layer = get_forward_context().no_compile_layers[layer_name]
+    output.copy_(layer._forward_chunked_embedding(input_))
+
+
+def kimi_embedding_finegrained_forward_fake(input_: torch.Tensor, output: torch.Tensor, layer_name: str) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="kimi_embedding_finegrained_forward",
+    op_func=kimi_embedding_finegrained_forward,
+    mutates_args=["output"],
+    fake_impl=kimi_embedding_finegrained_forward_fake,
+)
 
 
 class AscendParallelLMHead(ParallelLMHead):

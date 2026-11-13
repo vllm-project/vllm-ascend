@@ -760,18 +760,22 @@ def test_kda_g_precedes_quant_and_aiv_exchanges_join_before_vector(monkeypatch, 
     assert trace.index("aux.wait:input_ready") < trace.index("beta-cube") < trace.index("aux.record:beta_ready")
     assert trace.index("G-cube") < trace.index("beta-cube")
     assert trace.index("G-cube") < trace.index("quant-vector")
-    assert trace.index("quant-vector") < trace.index("exchange-G:True") < trace.index("QKV-cube")
     if aiv:
+        assert trace.index("quant-vector") < trace.index("exchange-G:True") < trace.index("QKV-cube")
         assert trace.index("wait-G") < trace.index("pack-vector")
         assert trace.index("exchange-QKV:False") < trace.index("wait-QKV") < trace.index("zeros-vector")
     else:
+        assert trace.index("G-cube") < trace.index("exchange-G:True") < trace.index("beta-cube")
+        assert trace.index("exchange-G:True") < trace.index("quant-vector")
         assert trace.index("exchange-QKV:True") < trace.index("zeros-vector") < trace.index("wait-QKV")
         assert trace.index("core-vector") < trace.index("wait-G")
     assert trace.count("wait-G") == trace.count("wait-QKV") == 1
     assert qkv.shape == (2, 12) and beta.shape == (1, 2, 2) and forget.shape == (1, 2, 2, 2)
 
 
-def test_pending_kda_projection_restores_owner_heads_once():
+def test_pending_kda_projection_restores_owner_heads_once(monkeypatch):
+    monkeypatch.setattr(torch.Tensor, "record_stream", lambda tensor, stream: None)
+    monkeypatch.setattr(torch.npu, "current_stream", lambda: None)
     receive = torch.tensor(
         [
             [[10, 11, 20, 21, 30, 31, 40], [110, 111, 120, 121, 130, 131, 140]],
