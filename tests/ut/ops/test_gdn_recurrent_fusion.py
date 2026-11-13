@@ -195,8 +195,11 @@ def test_forward_routes_raw_gate_rows_and_merges_outputs(runtime, mode):
     non_states = torch.arange(nd + npref, dtype=torch.int32) + 10
     meta = SimpleNamespace(
         num_prefills=npref,
+        num_prefill_tokens=len(non_ids) - nd,
         num_decodes=nd,
         num_decode_tokens=nd,
+        num_spec_decodes=1 if spec else 0,
+        num_spec_decode_tokens=len(spec_ids),
         num_actual_tokens=count,
         spec_sequence_masks=torch.tensor([True]) if spec else None,
         spec_token_indx=torch.tensor(spec_ids, dtype=torch.int64),

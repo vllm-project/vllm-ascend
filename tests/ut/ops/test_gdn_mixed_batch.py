@@ -177,7 +177,9 @@ def test_mixed_non_spec_splits_conv_per_slice(initial_state) -> None:
         ),
         patch(
             "vllm_ascend.attention.gdn.DeviceOperator.fused_gdn_gating",
-            return_value=gating,
+            side_effect=lambda A, a, b, bias: (
+                torch.zeros_like(a).unsqueeze(0), torch.ones_like(b).unsqueeze(0)
+            ),
         ),
         patch("vllm_ascend.attention.gdn.l2norm_fwd", side_effect=lambda x: x),
         patch.object(AscendGatedDeltaNetAttention, "_probe_fused_chunk", return_value=True),
@@ -370,7 +372,6 @@ def test_decode_forward_does_not_reconcat_qkv(speculative, adaptive, recover):
         ),
         patch("vllm_ascend.attention.gdn.l2norm_fwd", side_effect=lambda x: x),
         patch("vllm_ascend.attention.gdn.causal_conv1d_update", side_effect=lambda x, *a, **k: x.clone()) as conv,
-        patch("vllm_ascend.attention.gdn.causal_conv1d_update_varlen", side_effect=lambda x, *a, **k: x.clone()),
         patch("vllm_ascend.attention.gdn.recurrent_gated_delta_rule", side_effect=recurrent) as native,
         patch("vllm_ascend.attention.gdn.fused_recurrent_gated_delta_rule", side_effect=upstream_recurrent) as upstream,
         patch("vllm_ascend.attention.gdn.gdn_recoverssm_verify", side_effect=verify) as recovery,
@@ -379,8 +380,8 @@ def test_decode_forward_does_not_reconcat_qkv(speculative, adaptive, recover):
         AscendGatedDeltaNetAttention._forward_core(layer, packed, torch.zeros(4, 1), torch.zeros(4, 1), output)
     torch.testing.assert_close(output, packed[:, 4:].reshape(4, 1, 2))
     assert recovery.call_count == int(speculative and recover)
-    assert native.call_count == int(not speculative or (not recover and not adaptive))
-    assert upstream.call_count == int(speculative and adaptive and not recover)
+    assert native.call_count == int(not (speculative and recover))
+    assert upstream.call_count == 0
     if speculative:
         torch.testing.assert_close(
             conv.call_args.kwargs["num_accepted_tokens"],
