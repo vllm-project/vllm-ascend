@@ -147,6 +147,8 @@ class TestRlConfig(TestBase):
 
 
 class TestQuantizedAllReduceConfig(TestBase):
+    """Validate communication settings without initializing the upstream runtime."""
+
     def test_defaults(self):
         for is_a5, expected_dtype in ((False, "int8"), (True, "mxfp8")):
             with self.subTest(is_a5=is_a5), patch("vllm_ascend.ascend_config.is_950", return_value=is_a5):
@@ -187,8 +189,7 @@ class TestQuantizedAllReduceConfig(TestBase):
 
     def test_mxfp8_requires_a5(self):
         config = QuantizedAllReduceConfig(enable=True, quant_dtype="mxfp8")
-        vllm_config = VllmConfig()
-        vllm_config.parallel_config.tensor_parallel_size = 2
+        vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(tensor_parallel_size=2))
         with (
             patch("vllm_ascend.ascend_config.is_950", return_value=False),
             self.assertRaisesRegex(ValueError, "requires Atlas A5"),
@@ -235,7 +236,7 @@ class TestQuantizedAllReduceConfig(TestBase):
 
     def test_mxfp8_tp_validation(self):
         config = QuantizedAllReduceConfig(enable=True, quant_dtype="mxfp8")
-        vllm_config = VllmConfig()
+        vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(tensor_parallel_size=1))
         with patch("vllm_ascend.ascend_config.is_950", return_value=True):
             for tp_size in (1, 2, 4, 8):
                 vllm_config.parallel_config.tensor_parallel_size = tp_size
@@ -246,8 +247,7 @@ class TestQuantizedAllReduceConfig(TestBase):
 
     def test_rejects_tp_above_common_limit(self):
         config = QuantizedAllReduceConfig(enable=True, quant_dtype="int8")
-        vllm_config = VllmConfig()
-        vllm_config.parallel_config.tensor_parallel_size = 16
+        vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(tensor_parallel_size=16))
         with self.assertRaisesRegex(ValueError, "tensor_parallel_size <= 8"):
             config._validate_preconditions(vllm_config)
 
@@ -256,8 +256,7 @@ class TestQuantizedAllReduceConfig(TestBase):
             config = QuantizedAllReduceConfig(enable=True)
             self.assertEqual(config.quant_dtype, "mxfp8")
             for tp_size in (1, 2, 4, 8):
-                vllm_config = VllmConfig()
-                vllm_config.parallel_config.tensor_parallel_size = tp_size
+                vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(tensor_parallel_size=tp_size))
                 config._validate_preconditions(vllm_config)
             vllm_config.parallel_config.tensor_parallel_size = 3
             with self.assertRaisesRegex(ValueError, "TP=2/4/8"):
@@ -267,8 +266,7 @@ class TestQuantizedAllReduceConfig(TestBase):
         for is_a5 in (False, True):
             with self.subTest(is_a5=is_a5), patch("vllm_ascend.ascend_config.is_950", return_value=is_a5):
                 config = QuantizedAllReduceConfig()
-                vllm_config = VllmConfig()
-                vllm_config.parallel_config.tensor_parallel_size = 16
+                vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(tensor_parallel_size=16))
                 config._validate_preconditions(vllm_config)
 
 
