@@ -105,6 +105,55 @@ jobs:
         if: steps.auth.outputs.authorized == 'false'
         run: exit 1
 
+      - name: Check that the pull request can still be tested
+        id: eligible
+        env:
+          PR_STATE: ${{ github.event.client_payload.pull_request.state }}
+          PR_MERGED: ${{ github.event.client_payload.pull_request.merged }}
+          PR_BASE: ${{ github.event.client_payload.pull_request.base.ref }}
+        run: |
+          # pr_test only listens on open pull requests whose base is main, *-dev
+          # or releases/v*. Re-adding the label anywhere else emits a labeled
+          # event that matches nothing, which is indistinguishable from a silent
+          # failure, so refuse up front and say why.
+          if [ "$PR_MERGED" = "true" ]; then
+            echo "::error::Pull request has already been merged."
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            echo "reason=this pull request has already been merged" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$PR_STATE" != "open" ]; then
+            echo "::error::Pull request is not open (state: $PR_STATE)."
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            echo "reason=this pull request is no longer open (state: $PR_STATE)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case "$PR_BASE" in
+            main|*-dev|releases/v*)
+              echo "eligible=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::Base branch '$PR_BASE' is not covered by pr_test.yaml."
+              echo "eligible=false" >> "$GITHUB_OUTPUT"
+              echo "reason=its base branch ($PR_BASE) is not covered by the E2E workflow, which only runs for main, *-dev and releases/v*" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: Post not-testable comment
+        if: steps.eligible.outputs.eligible == 'false'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: run command skipped because ${{ steps.eligible.outputs.reason }}, so re-adding the label would not start any E2E run.
+          reactions: confused
+
+      - name: Fail if the pull request cannot be tested
+        if: steps.eligible.outputs.eligible == 'false'
+        run: exit 1
+
       - name: Check for a run already in flight on this commit
         id: inflight
         env:
