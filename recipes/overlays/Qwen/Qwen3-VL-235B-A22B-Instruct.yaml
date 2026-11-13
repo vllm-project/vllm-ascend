@@ -8,7 +8,7 @@ variants:
   ascend_w8a8_quarot_a3:
     model_id: Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot
     precision: int8
-    label: W8A8 QuaRot (Atlas 800 A3)
+    label: W8A8 (Ascend)
     vram_minimum_gb: 282
     supported_hardware:
       - ascend_910c
@@ -53,6 +53,10 @@ variants:
       VLLM_ASCEND_ENABLE_FLASHCOMM1: '1'
       VLLM_ASCEND_ENABLE_FUSED_MC2: '1'
       VLLM_ASCEND_BALANCE_SCHEDULING: '1'
+    install:
+      pip: false
+      docker:
+        command: docker pull quay.io/ascend/vllm-ascend:v0.23.0.post1-a3
     hardware_overrides:
       ascend_910c:
         docker_image: quay.io/ascend/vllm-ascend:v0.23.0.post1-a3
@@ -61,7 +65,7 @@ variants:
   ascend_w8a8_mxfp8_a5:
     model_id: Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-mxfp8
     precision: mxfp8
-    label: W8A8 MXFP8
+    label: W8A8 MXFP8 (Ascend)
     vram_minimum_gb: 282
     supported_hardware:
       - ascend_950dt
@@ -103,6 +107,10 @@ variants:
       OMP_NUM_THREADS: '100'
       TASK_QUEUE_ENABLE: '1'
       VLLM_ASCEND_ENABLE_FLASHCOMM1: '1'
+    install:
+      pip: false
+      docker:
+        command: docker pull quay.io/ascend/vllm-ascend:v0.23.0.post1-a5
     hardware_overrides:
       ascend_950dt:
         docker_image: quay.io/ascend/vllm-ascend:v0.23.0.post1-a5
