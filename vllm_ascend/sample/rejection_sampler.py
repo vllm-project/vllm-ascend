@@ -151,6 +151,7 @@ class AscendRejectionSampler(RejectionSampler):
         # [num_tokens + batch_size, vocab_size]
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
+        invalid_drafts: torch.Tensor | None = None,
     ) -> SamplerOutput:
         """
         Args:
@@ -169,6 +170,8 @@ class AscendRejectionSampler(RejectionSampler):
             sampling_metadata (vllm.v1.sample.metadata.SamplingMetadata):
                 Additional metadata needed for sampling, such as temperature,
                 top-k/top-p parameters, or other relevant information.
+            invalid_drafts: Optional mask for draft positions that were not
+                covered by a real grammar bitmask row.
         Returns:
             SamplerOutput:
                 Contains the final output token IDs and their logprobs if
@@ -221,8 +224,14 @@ class AscendRejectionSampler(RejectionSampler):
         # `apply_sampling_constraints` function.
         target_logits = apply_sampling_constraints(target_logits, metadata.cu_num_draft_tokens, sampling_metadata)
 
+        # Keep the original draft IDs for request state and only mask the copy
+        # consumed by rejection verification.
+        verify_draft_token_ids = metadata.draft_token_ids
+        if invalid_drafts is not None:
+            verify_draft_token_ids = metadata.draft_token_ids.masked_fill(invalid_drafts, PLACEHOLDER_TOKEN_ID)
+
         output_token_ids = rejection_sample(
-            metadata.draft_token_ids,
+            verify_draft_token_ids,
             metadata.num_draft_tokens,
             metadata.max_spec_len,
             metadata.cu_num_draft_tokens,
