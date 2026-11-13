@@ -587,8 +587,9 @@ class NPUModelRunner(GPUModelRunner):
                 fill_mxfp_v_scale_cache(layer.v_cache_scale, value_scale_cache)
 
     def shutdown(self) -> None:
-        if self.expert_offload_manager is not None:
-            self.expert_offload_manager.unsubscribe_graph_streams()
+        expert_offload_manager = getattr(self, "expert_offload_manager", None)
+        if expert_offload_manager is not None:
+            expert_offload_manager.unsubscribe_graph_streams()
             self.expert_offload_manager = None
 
         model = getattr(self, "model", None)
