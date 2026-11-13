@@ -217,13 +217,9 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "kda_gate_cumsum_vllm"
         "kda_layout_swap12"
         "k2q_csr"
+        "hi_sparse_resolve_residency"
     )
 
-    toolkit_dir="${ASCEND_HOME_PATH:-${ASCEND_TOOLKIT_HOME:-/usr/local/Ascend/cann}}"
-    if [[ -f "${toolkit_dir}/asc/include/simt_api/asc_simt.h" ||
-          -f "${toolkit_dir}/$(uname -m)-linux/asc/include/simt_api/asc_simt.h" ]]; then
-        CUSTOM_OPS_ARRAY+=("hi_sparse_resolve_residency")
-    fi
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend950"
 else

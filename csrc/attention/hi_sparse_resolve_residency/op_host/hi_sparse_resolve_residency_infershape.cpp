@@ -9,15 +9,15 @@ constexpr size_t kLogical = 0;
 constexpr size_t kTags = 0;
 constexpr size_t kLru = 1;
 constexpr size_t kPhysical = 2;
-constexpr size_t kAttention = 3;
-constexpr size_t kResolved = 4;
-constexpr size_t kCounts = 5;
-constexpr size_t kSwapHost = 6;
-constexpr size_t kSwapDevice = 7;
-constexpr size_t kSwapCounts = 8;
-constexpr size_t kMissMask = 9;
-constexpr size_t kStats = 10;
-constexpr size_t kErrors = 11;
+constexpr size_t kResolved = 3;
+constexpr size_t kErrors = 4;
+constexpr size_t kAttention = 5;
+constexpr size_t kCounts = 6;
+constexpr size_t kSwapHost = 7;
+constexpr size_t kSwapDevice = 8;
+constexpr size_t kSwapCounts = 9;
+constexpr size_t kMissMask = 10;
+constexpr size_t kStats = 11;
 
 void set_output_shape(gert::InferShapeContext* context, size_t idx, const gert::Shape& shape) {
     auto* output = context->GetOutputShape(idx);
