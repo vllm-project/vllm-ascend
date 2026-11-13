@@ -1,0 +1,5 @@
+pr: 21849
+entries:
+  - category: feature
+    text: Added opt-in block-outermost KV cache packing for Kimi K3.1 using actual MLA, indexer, draft and recurrent cache specs. Draft models are optional.
+    model: kimi-k3.1
