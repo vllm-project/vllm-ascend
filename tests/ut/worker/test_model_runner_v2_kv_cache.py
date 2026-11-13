@@ -25,6 +25,7 @@ def test_initialize_preserves_connector_containers_and_flattens_runner_cache(is_
     runner.vocab_size = 16
     runner.max_model_len = 128
     runner.cache_config.kv_sharing_fast_prefill = False
+    runner.cache_config.enable_prefix_caching = True
     runner.jit_warmup_registry.activate.side_effect = nullcontext
     config = KVCacheConfig(num_blocks=3, kv_cache_tensors=[], kv_cache_groups=[])
     registration_order = []
@@ -32,6 +33,10 @@ def test_initialize_preserves_connector_containers_and_flattens_runner_cache(is_
 
     def register_connector(*_args):
         registration_order.append("connector")
+
+    def register_checkpoint(*_args):
+        registration_order.append("checkpoint")
+        return {0: [single]}
 
     with (
         patch.object(upstream, "init_attn_backend", return_value=([], MagicMock(), [])),
@@ -45,6 +50,9 @@ def test_initialize_preserves_connector_containers_and_flattens_runner_cache(is_
         patch.object(upstream, "check_attention_cp_compatibility"),
         patch.object(upstream, "init_kv_cache", return_value=caches),
         patch.object(upstream, "get_kv_connector", side_effect=register_connector) as connector,
+        patch.object(
+            patch_model_runner, "compressor_checkpoint_page_views", side_effect=register_checkpoint
+        ) as page_views,
     ):
         upstream.GPUModelRunner.initialize_kv_cache(runner, config, is_profiling=is_profiling)
 
@@ -52,10 +60,14 @@ def test_initialize_preserves_connector_containers_and_flattens_runner_cache(is_
     runner._register_sparse_kv_caches.assert_called_once_with(caches)
     if is_profiling:
         assert registration_order == ["offload"]
+        assert runner._compressor_checkpoint_pages == {}
+        page_views.assert_not_called()
         connector.assert_not_called()
         assert runner.kv_connector is upstream.NO_OP_KV_CONNECTOR
     else:
-        assert registration_order == ["offload", "connector"]
+        assert registration_order == ["offload", "checkpoint", "connector"]
+        assert runner._compressor_checkpoint_pages == {0: [single]}
+        page_views.assert_called_once()
         assert connector.call_args.args[1] is caches
         assert type(caches["attention"]) is tuple
         assert type(caches["mamba"]) is list

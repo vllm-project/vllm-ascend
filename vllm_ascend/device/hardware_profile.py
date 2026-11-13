@@ -161,6 +161,9 @@ class HardwareCapability(Enum):
     # Honor MLAPO enablement on any pipeline role; other profiles limit it to decode consumers.
     UNRESTRICTED_MLAPO = auto()
 
+    # Opt-in CYCLE compressor tail snapshots with MRV2 eager execution.
+    DSV4_COMPRESSOR_TAIL_CHECKPOINT = auto()
+
 
 class AttentionBackendFamily(Enum):
     """Attention backend implementation families selected by the platform."""
@@ -272,6 +275,7 @@ _STANDARD_CAPABILITIES = frozenset(
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
+    HardwareCapability.DSV4_COMPRESSOR_TAIL_CHECKPOINT,
     HardwareCapability.MC2_FULLMESH_V2_COMM,
     HardwareCapability.RMS_NORM_CAST,
 }

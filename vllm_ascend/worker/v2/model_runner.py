@@ -27,6 +27,7 @@ import torch
 from vllm.compilation import breakable_cudagraph
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
+from vllm.distributed import get_tp_group
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
@@ -102,6 +103,7 @@ from vllm_ascend.utils import (
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
 )
+from vllm_ascend.worker.compressor_checkpoint import copy_compressor_tail_pages
 from vllm_ascend.worker.device_metadata import TargetDeviceMetadata
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
@@ -596,6 +598,14 @@ class NPUModelRunner(GPUModelRunner):
             layer = self.compilation_config.static_forward_context[layer_name]
             layer.impl.bind_copy_sfa_kv_cache(manager, layer_name)
 
+    def update_requests(self, scheduler_output: SchedulerOutput) -> None:
+        # Upstream updates block tables and zeroes new pages here. Restore
+        # after that initialization, before input preparation and forward.
+        super().update_requests(scheduler_output)
+        restores = getattr(scheduler_output, "compressor_restores", ())
+        if restores:
+            copy_compressor_tail_pages(restores, self._compressor_checkpoint_pages)
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -666,6 +676,22 @@ class NPUModelRunner(GPUModelRunner):
             )
             self.model.compute_logits(self.execute_model_state.hidden_states[dummy_indices])
         self.kvpp.complete_forward()
+
+        if not dummy_run and not is_profile:
+            saves = getattr(scheduler_output, "compressor_saves", ())
+            restores = getattr(scheduler_output, "compressor_restores", ())
+            if saves:
+                copy_compressor_tail_pages(saves, self._compressor_checkpoint_pages)
+            if saves or restores:
+                # Native DBO children enqueue compressor writes on the parent
+                # compute stream and are joined before super() returns. Fence
+                # the copies on that stream, then every TP rank, before MRV2
+                # sample_tokens can acknowledge this step. Other steps retain
+                # upstream async completion and incur no checkpoint fence.
+                done = torch.npu.Event()
+                done.record(torch.npu.current_stream())
+                done.synchronize()
+                get_tp_group().barrier()
 
         if dump_forward:
             if dummy_run:

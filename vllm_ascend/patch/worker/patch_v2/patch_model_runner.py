@@ -8,6 +8,7 @@ from vllm.v1.worker.gpu import model_runner as upstream
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp as _dispatch_cg_and_sync_dp
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
+from vllm_ascend.worker.compressor_checkpoint import compressor_checkpoint_page_views
 from vllm_ascend.worker.utils import copy_kv_cache_blocks_inplace
 
 
@@ -195,6 +196,13 @@ def initialize_kv_cache(
     register_sparse_kv_caches = getattr(self, "_register_sparse_kv_caches", None)
     if register_sparse_kv_caches is not None:
         register_sparse_kv_caches(kv_caches_dict)
+    # Retain named, full-page views before MRV2 flattens caches into tensors.
+    # Profiling owns temporary caches that must be released after its forward.
+    self._compressor_checkpoint_pages = (
+        compressor_checkpoint_page_views(self.kv_cache_config, kv_caches_dict)
+        if not is_profiling and self.cache_config.enable_prefix_caching
+        else {}
+    )
     self.kv_caches = [
         tensor
         for cache in kv_caches_dict.values()
