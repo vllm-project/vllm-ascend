@@ -5,7 +5,6 @@ import json
 import weakref
 from collections.abc import Callable
 from contextlib import nullcontext
-from dataclasses import dataclass
 from types import SimpleNamespace
 
 import pytest
@@ -118,16 +117,10 @@ def _add_dynamo_hook(hooks, owner):
     return handle.id
 
 
-def test_fallback_reset_restores_ascend_globals_and_only_removes_new_dynamo_hooks(rfork_helpers):
+def test_fallback_reset_restores_rope_caches_and_only_removes_new_dynamo_hooks(rfork_helpers):
     class HookOwner(Module):
         def bytecode_hook(self, *args, **kwargs):
             pass
-
-    adaptor = rfork_helpers.adaptor_module.VllmEplbAdaptor
-    baseline_layer = object()
-    baseline_registry = [baseline_layer]
-    adaptor._registered_moe_layers = baseline_registry
-    rfork_helpers.routed_experts_module.AscendRoutedExperts.moe_counter = 17
 
     baseline_caches = (object(), object(), object())
     (
@@ -141,9 +134,6 @@ def test_fallback_reset_restores_ascend_globals_and_only_removes_new_dynamo_hook
     vllm_config = SimpleNamespace(compilation_config=SimpleNamespace())
     snapshot = rfork_helpers.loader._snapshot_process_global_model_state(vllm_config)
 
-    baseline_registry.append(object())
-    adaptor._registered_moe_layers = [object()]
-    rfork_helpers.routed_experts_module.AscendRoutedExperts.moe_counter = 999
     dirty_caches = (object(), object(), object())
     (
         rfork_helpers.rotary_module._cos_sin_cache,
@@ -157,9 +147,6 @@ def test_fallback_reset_restores_ascend_globals_and_only_removes_new_dynamo_hook
 
     rfork_helpers.loader._reset_process_global_model_state(vllm_config, snapshot=snapshot)
 
-    assert adaptor._registered_moe_layers is baseline_registry
-    assert adaptor._registered_moe_layers == [baseline_layer]
-    assert rfork_helpers.routed_experts_module.AscendRoutedExperts.moe_counter == 17
     assert (
         rfork_helpers.rotary_module._cos_sin_cache,
         rfork_helpers.rotary_module._cos_cache,
@@ -168,42 +155,6 @@ def test_fallback_reset_restores_ascend_globals_and_only_removes_new_dynamo_hook
     assert baseline_hook_id in rfork_helpers.dynamo_hooks
     assert rfork_helpers.dynamo_hooks[baseline_hook_id].__self__ is baseline_owner
     assert discarded_hook_id not in rfork_helpers.dynamo_hooks
-
-
-@pytest.fixture
-def checkpoint_loader(monkeypatch, rfork_helpers):
-    @dataclass
-    class CheckpointSource:
-        model_or_path: str
-        revision: str | None
-        subfolder: str | None = None
-        prefix: str = ""
-        fall_back_to_pt: bool = True
-        allow_patterns_overrides: list[str] | None = None
-
-    calls = []
-    folders: dict[str, str] = {}
-    selections: dict[str, tuple[list[str], bool]] = {}
-    configs = []
-
-    class DefaultModelLoader:
-        Source = CheckpointSource
-
-        def __init__(self, load_config):
-            configs.append(load_config)
-
-        def _prepare_weights(self, *args):
-            calls.append(args)
-            return folders.get(args[0], "unused"), *selections[args[0]], "model.safetensors.index.json"
-
-    _stub(monkeypatch, "vllm.model_executor.model_loader.default_loader", DefaultModelLoader=DefaultModelLoader)
-    return SimpleNamespace(
-        Source=CheckpointSource,
-        calls=calls,
-        folders=folders,
-        selections=selections,
-        configs=configs,
-    )
 
 
 def test_checkpoint_names_follow_selected_sources_and_prefixes(rfork_helpers, checkpoint_loader, tmp_path):
@@ -259,6 +210,26 @@ def test_checkpoint_names_use_index_without_opening_shards(rfork_helpers, checkp
     )
 
     assert names == set(weight_map)
+
+
+@pytest.mark.parametrize(
+    "index_text",
+    ["{", "[]", "{}", '{"weight_map": null}', '{"weight_map": ["a.weight"]}', '{"weight_map": "a.weight"}'],
+)
+def test_checkpoint_names_reject_malformed_index_as_fallback_error(
+    rfork_helpers, checkpoint_loader, tmp_path, index_text
+):
+    (tmp_path / "model.safetensors.index.json").write_text(index_text, encoding="utf-8")
+    checkpoint_loader.folders["model"] = str(tmp_path)
+    checkpoint_loader.selections["model"] = ([str(tmp_path / "shard-a.safetensors")], True)
+
+    with pytest.raises(ValueError) as error:
+        rfork_helpers.loader._get_checkpoint_weight_names(
+            Module(),
+            SimpleNamespace(model="model", revision=None),
+            SimpleNamespace(load_format="rfork", model_loader_extra_config={}),
+        )
+    assert isinstance(error.value, rfork_helpers.loader.RFORK_FALLBACK_EXCEPTIONS)
 
 
 @pytest.mark.parametrize("processed_layout", [False, True])
@@ -340,11 +311,6 @@ def test_model_state_preparation_precedes_registration_and_guards_fallback(
     monkeypatch.setattr(module, "_load_with_default_loader", default_load)
     monkeypatch.setattr(
         torch, "npu", SimpleNamespace(synchronize=lambda: None, empty_cache=lambda: None), raising=False
-    )
-    monkeypatch.setattr(
-        module,
-        "get_ascend_config",
-        lambda: SimpleNamespace(eplb_config=SimpleNamespace(dynamic_eplb=False, expert_map_record_path=None)),
     )
     model_config = SimpleNamespace(dtype=torch.float32)
     vllm_config = SimpleNamespace(device_config=SimpleNamespace(device="cpu"), model_config=model_config)

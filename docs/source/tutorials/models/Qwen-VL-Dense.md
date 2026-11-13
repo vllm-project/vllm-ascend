@@ -261,7 +261,7 @@ Run docker container to start the vLLM server on single-NPU:
     # Ensure the model path matches the directory recorded during download
     vllm serve Qwen/Qwen3-VL-8B-Instruct \
     --dtype float16 \
-    --max_model_len 16384 \
+    --max-model-len 16384 \
     --host 0.0.0.0 \
     --port $2 \
     --dtype bfloat16 \
@@ -291,7 +291,7 @@ Run docker container to start the vLLM server on single-NPU:
 
 Key Parameter Descriptions:
 
-- Add the `--max_model_len` option to avoid the ValueError that occurs when the Qwen3-VL-8B-Instruct model's max-seq-len (256000) exceeds the maximum number of tokens that can be stored in KV cache. This will differ with different NPU series based on the on-chip memory size. Please modify the value according to a suitable value for your NPU series.
+- Add the `--max-model-len` option to avoid the ValueError that occurs when the Qwen3-VL-8B-Instruct model's max-seq-len (256000) exceeds the maximum number of tokens that can be stored in KV cache. This will differ with different NPU series based on the on-chip memory size. Please modify the value according to a suitable value for your NPU series.
 
 If your service starts successfully, you can see the info shown below:
 

@@ -20,6 +20,7 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    max_decode_query_len,
 )
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -1005,18 +1006,19 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
 
     @classmethod
     def get_cudagraph_support(
-        cls,
+        cls: type["AscendSFAIndexerMetadataBuilder"],
         vllm_config: VllmConfig,
         kv_cache_spec: AttentionSpec,
     ) -> AttentionCGSupport:
-        speculative_config = vllm_config.speculative_config
-        if (
-            speculative_config is not None
-            and speculative_config.method == "dspark"
-            and getattr(speculative_config, "enable_adaptive_verification", False)
-        ):
-            return AttentionCGSupport.ALWAYS
         return AttentionCGSupport.UNIFORM_BATCH
+
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls: type["AscendSFAIndexerMetadataBuilder"],
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+    ) -> int | None:
+        return max_decode_query_len(vllm_config)
 
     def _ensure_replicated_view_buffers(
         self,

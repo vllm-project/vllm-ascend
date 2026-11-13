@@ -95,6 +95,7 @@ from vllm_ascend.ops.kda_parallel import KDARowParallelLinear, get_kda_state_sha
 from vllm_ascend.ops.kimi_kda import (
     AscendKimiK3DeltaAttention as AscendKimiK3DeltaAttentionBase,
 )
+from vllm_ascend.ops.kimi_pixel_norm import build_kimi_pixel_norm
 from vllm_ascend.ops.linear_op import KimiOProjMMReduceScatterOp
 from vllm_ascend.quantization.configs.modelslim_config import AscendModelSlimConfig
 from vllm_ascend.quantization.methods.base import PreparedLinearInput
@@ -1451,6 +1452,10 @@ class AscendKimiK3ForConditionalGeneration(UpstreamKimiK3ForConditionalGeneratio
                     device=self.device,
                     dtype=model_config.dtype,
                 )
+
+            input_norm = build_kimi_pixel_norm(model_config, self.vision_tower)
+            if input_norm is not None:
+                self.vision_tower.patch_embed.input_norm = input_norm
 
             self.mm_projector = AscendKimiK3MultiModalProjector(
                 self.config.vision_config,

@@ -21,10 +21,10 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
-import torch_npu
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.quantization.nz import fp4_nz_for_dtype
 from vllm_ascend.quantization.quant_type import QuantType
 
 EPLB_EXPERT_WEIGHT_NAMES = {
@@ -84,16 +84,7 @@ _W4A8MXFP_NZ_WEIGHT_NAMES = {"w13_weight_list", "w2_weight_list"}
 def _new_w4a8_mxfp_nz_buffer(expert_tensor: torch.Tensor) -> torch.Tensor:
     """Create an offset-0 NZ receive buffer matching an MXFP expert."""
     buffer_tensor = torch.empty(expert_tensor.shape, dtype=expert_tensor.dtype, device=expert_tensor.device)
-    input_dtype = (
-        torch.float4_e2m1fn_x2 if expert_tensor.dtype == torch.float4_e2m1fn_x2 else torch_npu.float4_e2m1fn_x2
-    )
-    torch_npu.npu_format_cast_(
-        buffer_tensor,
-        29,
-        customize_dtype=torch.float8_e4m3fn,
-        input_dtype=input_dtype,
-    )
-    return buffer_tensor
+    return fp4_nz_for_dtype(expert_tensor.dtype).cast_(buffer_tensor)
 
 
 class VllmEplbAdaptor:
