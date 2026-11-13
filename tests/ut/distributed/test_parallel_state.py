@@ -201,9 +201,9 @@ def test_kvpp_group_stays_inside_pipeline_stage(monkeypatch, size, pcp_size):
     assert parallel_state._KVPP is None
 
 
-@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize("shared,pcp", [(False, 2), (True, 2), (True, 1)])
 @pytest.mark.parametrize("shard_size", [1, 4])
-def test_engram_dp_pcp_group_reuses_upstream_node_partition(monkeypatch, shared, shard_size):
+def test_engram_dp_pcp_group_reuses_upstream_node_partition(monkeypatch, shared, pcp, shard_size):
     from vllm_ascend.distributed import parallel_state
 
     for name in ("_KVPP", "_MC2", "_P_TP", "_OTP", "_LMTP", "_EMBED_TP", "_MLP_TP", "_DYNAMIC_EPLB"):
@@ -235,8 +235,8 @@ def test_engram_dp_pcp_group_reuses_upstream_node_partition(monkeypatch, shared,
     topology = SimpleNamespace(
         tensor_parallel_size=2,
         pipeline_parallel_size=1,
-        data_parallel_size=2,
-        prefill_context_parallel_size=2,
+        data_parallel_size=4 // pcp,
+        prefill_context_parallel_size=pcp,
     )
     engram = SimpleNamespace(dp_shared_memory=shared)
     parallel_state.init_ascend_model_parallel(topology, engram)

@@ -137,9 +137,10 @@ def test_host_uva_aligns_registration_and_frees_original_allocation(monkeypatch,
         assert lib.registered is lib.unregistered is lib.freed is None
         assert lib.free_count == lib.unregister_count == 0
     else:
-        assert lib.unregistered == lib.registered
+        assert lib.unregistered == (None if failure == "register" else lib.registered)
         assert lib.freed == lib.original
-        assert lib.free_count == lib.unregister_count == 1
+        assert lib.free_count == 1
+        assert lib.unregister_count == int(failure != "register")
 
 
 def test_shared_memory_needs_a_local_dp_peer(monkeypatch):
