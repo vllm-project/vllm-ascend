@@ -236,7 +236,13 @@ class DeepseekV41MoE(nn.Module):
             self.gate.tid2eid = None
             self.gate.e_score_correction_bias = nn.Parameter(torch.empty(config.n_routed_experts, dtype=torch.float32))
 
-        self.experts = FusedMoEFactory(
+        experts_factory = FusedMoEFactory
+        if get_ascend_config().deepgemm_mega_moe:
+            # Worker-only dependency; keep the normal model path unchanged.
+            from vllm_ascend.ops.fused_moe.deepgemm_v41_module import create_deepgemm_v41_moe
+
+            experts_factory = create_deepgemm_v41_moe
+        self.experts = experts_factory(
             shared_experts=self.shared_experts,
             gate=self.gate,
             num_experts=config.n_routed_experts,
@@ -293,7 +299,8 @@ class DeepseekV41MoE(nn.Module):
         else:
             # router_logits: (num_tokens, n_experts)
             router_input = hidden_states.float() if hidden_states_fp32 is None else hidden_states_fp32
-            router_logits = F.linear(router_input, self.gate.weight)
+            router_weight = getattr(self.gate, "weight_fp32", self.gate.weight)
+            router_logits = F.linear(router_input, router_weight)
             fused_moe_out = self.experts(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
