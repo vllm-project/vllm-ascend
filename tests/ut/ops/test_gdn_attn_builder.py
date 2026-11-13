@@ -528,6 +528,42 @@ def test_host_builder_exposes_host_descriptors_without_device_chunks(has_pcp_con
     assert attn_metadata.chunk_offsets is None
 
 
+@pytest.mark.parametrize("creates_checkpoint", [False, True])
+def test_host_builder_materializes_device_chunks_for_checkpoint_enabled_prefill(monkeypatch, creates_checkpoint):
+    _patch_missing_runtime_cdiv(monkeypatch)
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=0,
+        builder_cls=AscendGDNHostMetadataBuilder,
+    )
+    builder._ascend_gdn_checkpoints = True
+    checkpoint = (
+        SimpleNamespace(checkpoint_offsets=torch.tensor([64]), state_indices=torch.tensor([NULL_BLOCK_ID]))
+        if creates_checkpoint
+        else None
+    )
+    builder.checkpoint_builder = SimpleNamespace(build=Mock(return_value=checkpoint))
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[130], query_lens=[130]),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    metadata = builder.build(0, common, num_actual_reqs=1)
+    chunk = metadata.non_spec_prefill_metadata.chunk
+    for field in (
+        "chunk_indices_chunk64",
+        "chunk_offsets_chunk64",
+        "chunk_indices_large_block",
+        "block_indices_cumsum",
+    ):
+        assert getattr(chunk, field) is not None
+    assert metadata.checkpoint is checkpoint
+    if checkpoint is not None:
+        assert checkpoint.checkpoint_offsets.tolist() == [0]
+    builder.checkpoint_builder.build.assert_called_once_with(common, [0])
+
+
 def test_sequence_index_buffers_cover_spec_decode_when_cudagraph_disabled():
     builder = _make_builder(
         device=torch.device("cpu"),
@@ -1936,3 +1972,111 @@ def test_adaptive_fused_descriptors_keep_prepared_conv_indices():
     assert spec.spec_causal_conv1d.cache_indices.data_ptr() == prepared_conv_indices.data_ptr()
     assert spec.spec_causal_conv1d.query_start_loc is metadata.spec_query_start_loc
     assert spec.spec_causal_conv1d.num_accepted_tokens.tolist() == [9, 1]
+
+
+@pytest.mark.parametrize("creates_checkpoint", [False, True])
+def test_forward_core_uses_checkpoint_recurrence_for_cold_and_cache_hit_prefills(monkeypatch, creates_checkpoint):
+    from vllm_ascend.ops import gdn_checkpoint
+
+    builder = _make_builder(device=torch.device("cpu"), num_heads=1, num_speculative_tokens=0)
+    common = create_common_attn_metadata(BatchSpec(seq_lens=[4], query_lens=[4]), 16, torch.device("cpu"))
+    metadata = builder.build(0, common, num_actual_reqs=1)
+    metadata.checkpoint = SimpleNamespace(checkpoint_offsets=torch.tensor([0])) if creates_checkpoint else None
+    qkv = torch.randn(4, 384, dtype=torch.bfloat16)
+    q = torch.randn(1, 4, 1, 128, dtype=torch.bfloat16)
+    initial = torch.zeros(1, 1, 128, 128)
+    expected_output = torch.ones_like(q)
+    expected_state = torch.ones_like(initial)
+    exporter = Mock()
+    layer = SimpleNamespace(
+        prefix="gdn",
+        _ascend_internal_checkpoint_enabled=True,
+        _exports_checkpoints=True,
+        head_k_dim=128,
+        head_v_dim=128,
+        num_k_heads=1,
+        num_v_heads=1,
+        tp_size=1,
+        activation=True,
+        conv1d=SimpleNamespace(bias=None),
+        kv_cache=(torch.empty(2, 3, 384), torch.zeros(2, 1, 128, 128, dtype=torch.bfloat16)),
+        _ascend_checkpoint_workspace=torch.empty_like(initial),
+        _checkpoint_exporter=exporter,
+        A_log=torch.empty(1),
+        dt_bias=torch.empty(1),
+    )
+    monkeypatch.setattr(ascend_gdn, "get_forward_context", lambda: SimpleNamespace(attn_metadata={"gdn": metadata}))
+    monkeypatch.setattr(ascend_gdn, "get_pcp_group", lambda: SimpleNamespace(world_size=1))
+    for name in (
+        "ensure_gdn_checkpoint_workspace",
+        "wait_for_kv_layer_from_connector",
+        "record_attention_compute_start",
+        "maybe_save_kv_layer_to_connector",
+    ):
+        monkeypatch.setattr(ascend_gdn, name, Mock())
+    monkeypatch.setattr(ascend_gdn, "_get_packed_conv_weights", lambda _: torch.empty(4, 384))
+    monkeypatch.setattr(ascend_gdn, "causal_conv1d_fn", lambda x, *args, **kwargs: x.clone())
+    monkeypatch.setattr(ascend_gdn, "_split_head_first_conv_output", lambda *args: (q, q, q))
+    monkeypatch.setattr(
+        ascend_gdn.DeviceOperator, "fused_gdn_gating", lambda *args: (torch.zeros(1, 4, 1), torch.ones(1, 4, 1))
+    )
+    monkeypatch.setattr(ascend_gdn, "gather_ssm_states", lambda *args: initial)
+    scatter = Mock()
+    monkeypatch.setattr(ascend_gdn, "scatter_ssm_states_", scatter)
+    backend = Mock(return_value=(expected_output, expected_state))
+    monkeypatch.setattr(gdn_checkpoint, "chunk_gated_delta_rule_checkpoint", backend)
+    alternative = Mock(side_effect=AssertionError("checkpoint-enabled prefill selected another recurrence"))
+    monkeypatch.setattr(ascend_gdn, "chunk_gated_delta_rule", alternative)
+    monkeypatch.setattr(ascend_gdn, "_get_fla_gdn_prefill_op", alternative)
+    output = torch.empty(4, 1, 128, dtype=torch.bfloat16)
+
+    AscendGatedDeltaNetAttention._forward_core(layer, qkv, torch.empty(4, 1), torch.empty(4, 1), output)
+
+    backend.assert_called_once()
+    assert backend.call_args.args[6] is metadata.prefill_query_start_loc
+    assert backend.call_args.kwargs["checkpoint_state_dtype"] == torch.bfloat16
+    assert (backend.call_args.args[8] is None) == (not creates_checkpoint)
+    assert exporter.export.call_count == int(creates_checkpoint)
+    if creates_checkpoint:
+        raw = exporter.export.call_args.kwargs["raw_qkv"]
+        assert raw.data_ptr() == qkv.data_ptr()
+        torch.testing.assert_close(raw, qkv)
+    scatter.assert_called_once()
+    alternative.assert_not_called()
+    torch.testing.assert_close(output, expected_output.squeeze(0))
+
+
+@pytest.mark.parametrize("speculative", [False, True])
+def test_checkpoint_rows_match_non_spec_prefill_inputs(speculative):
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=3 if speculative else 0,
+    )
+    builder._ascend_gdn_checkpoints = True
+    builder.checkpoint_builder = SimpleNamespace(build=Mock(return_value=None))
+    lengths = [1, 4, 130] if speculative else [1, 130]
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=lengths, query_lens=lengths),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    if speculative:
+        metadata = builder.build(
+            0,
+            common,
+            torch.ones(3, dtype=torch.int32),
+            torch.tensor([-1, 3, -1], dtype=torch.int32),
+            num_actual_reqs=3,
+        )
+    else:
+        metadata = builder.build(0, common, num_actual_reqs=2)
+    # With speculative requests, ordinary one-token rows also execute through
+    # the non-spec prefill branch and must retain their planner row.
+    expected_rows = [0, 2] if speculative else [1]
+    expected_starts = [0, 1, 131] if speculative else [0, 130]
+    builder.checkpoint_builder.build.assert_called_once_with(common, expected_rows)
+    assert metadata.num_decodes == (0 if speculative else 1)
+    assert metadata.num_prefills == len(expected_rows)
+    assert metadata.prefill_state_indices.numel() == len(expected_rows)
+    assert metadata.prefill_query_start_loc.tolist() == expected_starts

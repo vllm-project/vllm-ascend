@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import typing
 from collections.abc import Callable, Iterable
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from functools import partial
 from typing import Any
@@ -96,6 +96,7 @@ from .engram.embedding import (
 )
 from .engram.layer import AscendEngram
 from .engram.parallel import gather_engram_hashes, resolve_dp_shared_memory
+from .engram.shared_pool import rollback_shared_engram
 from .indexer import DeepseekV41Indexer
 
 
@@ -1050,77 +1051,94 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             bool(vllm_config.engram_config and vllm_config.engram_config.dp_shared_memory)
         )
         self.engram_layout = EngramLayout.from_config(config) if self.has_engram else None
-        if self.engram_layout is not None:
-            # Head buckets use TP x DP x PCP when sharded, or TP alone when host
-            # storage is shared across local DP x PCP replicas.
-            # Fail on an unreadable checkpoint before the first table exists:
-            # the allocation below is per-rank 24-51 GiB, and discovering a
-            # missing index/key during weight iteration would mean paying for
-            # it first.  `dummy` reads no checkpoint at all.
-            if vllm_config.load_config.load_format != "dummy":
-                preflight_engram_checkpoint(
-                    self.engram_weight_root, config.engram_layer_ids, AscendParallelEngramEmbedding
-                )
-            native_mxfp8 = get_current_hardware_profile().supports(HardwareCapability.ENGRAM_MXFP8)
-            for slot, (layer_id, rows) in enumerate(zip(config.engram_layer_ids, config.engram_num_embeddings)):
-                head_sizes = tuple(size for order in self.engram_layout.primes[slot] for size in order)
-                storage_dtype = torch.bfloat16 if vllm_config.quant_config is None else torch.int8
-                if vllm_config.load_config.load_format != "dummy":
-                    storage_dtype = engram_storage_dtype(self.engram_weight_root, layer_id)
-                    if storage_dtype == torch.float8_e4m3fn and not native_mxfp8:
-                        storage_dtype = torch.int8
-                elif native_mxfp8 and vllm_config.quant_config is not None:
-                    storage_dtype = torch.float8_e4m3fn
-                embed = AscendParallelEngramEmbedding(
-                    rows,
-                    config.engram_head_dim,
-                    head_sizes,
-                    slot,
-                    storage_dtype=storage_dtype,
-                    cpu_offload=cpu_offload,
-                    dp_shared_memory=self.engram_dp_shared_memory,
-                )
-                embed.bind_checkpoint(self.engram_weight_root, f"layers.{layer_id}.engram.embed.weight")
-                self.layers[layer_id].engram.embed_tokens = embed
-        self.engram_hash = None
-        self._engram_input_buffers = None
-        # ExternalEvent pairs for FULL graph capture. V1 keys by the forward
-        # context's batch descriptor; V2 preparation runs outside any forward
-        # context, so it keys by the padded token count (the FULL graph bucket).
-        self._engram_graph_events = {}
-        self._engram_prepare_stream = None
-        self._engram_capture_stream = None
-        self._engram_capture_events = None
-        self._engram_overlap_enabled = get_ascend_config().multistream_engram_overlap
-        self._engram_max_tokens = max(
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            vllm_config.compilation_config.max_cudagraph_capture_size or 0,
-        )
-        rotation_path = get_rotation_path(vllm_config)
-        self.engram_rotated = rotation_path is not None
-        engram_rotation = torch.eye(32, device=self.device)
-        if self.has_engram:
-            if self.engram_rotated and vllm_config.load_config.load_format != "dummy":
-                with torch.device("cpu"):
-                    engram_rotation = load_engram_rotation_block(self.engram_root, config.hidden_size, rotation_path)
-                engram_rotation = engram_rotation.to(device=self.device)
-            # Upstream owns the n-gram history; the adapter only hands it the
-            # Ascend SWA slot metadata (see engram/hash_state.py).
-            swa_cache_layer = self.layers[config.engram_layer_ids[0]].self_attn.dsa_attn.swa_cache_layer
-            self.engram_hash = create_engram_hash_state(vllm_config, config, swa_cache_layer)
-        self.register_buffer("engram_rotation", engram_rotation, persistent=False)
+        shared_config = get_ascend_config().shared_engram
+        shared_pool_endpoint = shared_config.endpoint if shared_config is not None else None
+        shared_pool_identity = None
+        if shared_pool_endpoint:
+            from .engram.shared_pool import checkpoint_identity
 
-        self.decoder_replay_start = self.end_layer
-        self.decoder_replay_layers = make_decoder_replay(self, vllm_config)
-        self.decoder_replay_layer_name: str | None = None
-        if self.decoder_replay_layers is not None:
-            self.decoder_replay_layer_name = f"{prefix}.decoder_replay" if prefix else "decoder_replay"
-            static_forward_context = vllm_config.compilation_config.static_forward_context
-            if self.decoder_replay_layer_name in static_forward_context:
-                raise ValueError(f"Duplicate decoder replay layer name: {self.decoder_replay_layer_name}")
-            # Custom ops resolve the mutable per-forward replay state through
-            # ForwardContext, following the same pattern as Ascend DSA ops.
-            static_forward_context[self.decoder_replay_layer_name] = self.decoder_replay_layers
+            shared_pool_identity = checkpoint_identity(self.engram_weight_root)
+        with ExitStack() as rollback:
+            if self.engram_layout is not None:
+                # Head buckets use TP x DP x PCP when sharded, or TP alone when host
+                # storage is shared across local DP x PCP replicas.
+                # Fail on an unreadable checkpoint before the first table exists:
+                # the allocation below is per-rank 24-51 GiB, and discovering a
+                # missing index/key during weight iteration would mean paying for
+                # it first.  `dummy` reads no checkpoint at all.
+                if vllm_config.load_config.load_format != "dummy":
+                    preflight_engram_checkpoint(
+                        self.engram_weight_root, config.engram_layer_ids, AscendParallelEngramEmbedding
+                    )
+                native_mxfp8 = get_current_hardware_profile().supports(HardwareCapability.ENGRAM_MXFP8)
+                for slot, (layer_id, rows) in enumerate(zip(config.engram_layer_ids, config.engram_num_embeddings)):
+                    head_sizes = tuple(size for order in self.engram_layout.primes[slot] for size in order)
+                    storage_dtype = torch.bfloat16 if vllm_config.quant_config is None else torch.int8
+                    if vllm_config.load_config.load_format != "dummy":
+                        storage_dtype = engram_storage_dtype(self.engram_weight_root, layer_id)
+                        if storage_dtype == torch.float8_e4m3fn and not native_mxfp8:
+                            storage_dtype = torch.int8
+                    elif native_mxfp8 and vllm_config.quant_config is not None:
+                        storage_dtype = torch.float8_e4m3fn
+                    embed = AscendParallelEngramEmbedding(
+                        rows,
+                        config.engram_head_dim,
+                        head_sizes,
+                        slot,
+                        storage_dtype=storage_dtype,
+                        cpu_offload=cpu_offload,
+                        dp_shared_memory=self.engram_dp_shared_memory,
+                        shared_pool_endpoint=shared_pool_endpoint,
+                        shared_pool_identity=shared_pool_identity,
+                        shared_pool_key=f"layers.{layer_id}.engram.embed" if shared_pool_endpoint else None,
+                    )
+                    if shared_pool_endpoint:
+                        rollback.callback(rollback_shared_engram, embed.close_host_offload)
+                    embed.bind_checkpoint(self.engram_weight_root, f"layers.{layer_id}.engram.embed.weight")
+                    self.layers[layer_id].engram.embed_tokens = embed
+            self.engram_hash = None
+            self._engram_input_buffers = None
+            # ExternalEvent pairs for FULL graph capture. V1 keys by the forward
+            # context's batch descriptor; V2 preparation runs outside any forward
+            # context, so it keys by the padded token count (the FULL graph bucket).
+            self._engram_graph_events = {}
+            self._engram_prepare_stream = None
+            self._engram_capture_stream = None
+            self._engram_capture_events = None
+            self._engram_overlap_enabled = get_ascend_config().multistream_engram_overlap
+            self._engram_max_tokens = max(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                vllm_config.compilation_config.max_cudagraph_capture_size or 0,
+            )
+            rotation_path = get_rotation_path(vllm_config)
+            self.engram_rotated = rotation_path is not None
+            engram_rotation = torch.eye(32, device=self.device)
+            if self.has_engram:
+                if self.engram_rotated and vllm_config.load_config.load_format != "dummy":
+                    with torch.device("cpu"):
+                        engram_rotation = load_engram_rotation_block(
+                            self.engram_root, config.hidden_size, rotation_path
+                        )
+                    engram_rotation = engram_rotation.to(device=self.device)
+                # Upstream owns the n-gram history; the adapter only hands it the
+                # Ascend SWA slot metadata (see engram/hash_state.py).
+                swa_cache_layer = self.layers[config.engram_layer_ids[0]].self_attn.dsa_attn.swa_cache_layer
+                self.engram_hash = create_engram_hash_state(vllm_config, config, swa_cache_layer)
+            self.register_buffer("engram_rotation", engram_rotation, persistent=False)
+
+            self.decoder_replay_start = self.end_layer
+            self.decoder_replay_layers = make_decoder_replay(self, vllm_config)
+            self.decoder_replay_layer_name: str | None = None
+            if self.decoder_replay_layers is not None:
+                self.decoder_replay_layer_name = f"{prefix}.decoder_replay" if prefix else "decoder_replay"
+                static_forward_context = vllm_config.compilation_config.static_forward_context
+                if self.decoder_replay_layer_name in static_forward_context:
+                    raise ValueError(f"Duplicate decoder replay layer name: {self.decoder_replay_layer_name}")
+                # Custom ops resolve the mutable per-forward replay state through
+                # ForwardContext, following the same pattern as Ascend DSA ops.
+                static_forward_context[self.decoder_replay_layer_name] = self.decoder_replay_layers
+
+            rollback.pop_all()
 
     def _make_empty_intermediate_tensors(self, batch_size, dtype, device):
         return IntermediateTensors(
@@ -1693,24 +1711,30 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         self.requires_uncompiled_fallback = DeviceOperator.get_dsv41_packed_cache_ops() is not None
 
         self.model = self.model_cls(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
-        if get_pp_group().is_last_rank:
-            self.lm_head = ParallelLMHead(
-                config.vocab_size,
-                config.hidden_size,
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
-        else:
-            self.lm_head = PPMissingLayer()
-        self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
-        # Set MoE hyperparameters
-        self.num_moe_layers = self.config.num_hidden_layers
-        self.set_moe_parameters()
-        from vllm_ascend.ascend_forward_context import MoECommType
-        from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
+        with ExitStack() as rollback:
+            for module in self.model.modules():
+                if getattr(module, "_shared_pool_client", None) is not None:
+                    rollback.callback(rollback_shared_engram, module.close_host_offload)
+            if get_pp_group().is_last_rank:
+                self.lm_head = ParallelLMHead(
+                    config.vocab_size,
+                    config.hidden_size,
+                    quant_config=quant_config,
+                    prefix=maybe_prefix(prefix, "lm_head"),
+                )
+            else:
+                self.lm_head = PPMissingLayer()
+            self.logits_processor = LogitsProcessor(config.vocab_size)
+            self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
+            # Set MoE hyperparameters
+            self.num_moe_layers = self.config.num_hidden_layers
+            self.set_moe_parameters()
+            from vllm_ascend.ascend_forward_context import MoECommType
+            from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
 
-        self.moe_comm_methods = {kind: get_moe_comm_method(kind) for kind in MoECommType}
+            self.moe_comm_methods = {kind: get_moe_comm_method(kind) for kind in MoECommType}
+
+            rollback.pop_all()
 
     requires_raw_input_tokens = True
     _DEFERRED_WEIGHT_MARKERS: tuple[str, ...] = ()

@@ -1,0 +1,4 @@
+pr: 21191
+entries:
+  - category: performance
+    text: Reused existing device query boundaries in the shared attention metadata builder to remove a redundant host-to-device copy, including during merged MTP draft decode graph capture.
