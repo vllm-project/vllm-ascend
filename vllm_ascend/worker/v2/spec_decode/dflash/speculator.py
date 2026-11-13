@@ -21,6 +21,8 @@ from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
+
+
 # TODO: Remove this helper and build_draft_attn_metadatas once tiling
 # eliminates replay-time metadata rebuilding. The rebuild currently needs
 # this count because it cannot access the effective num_reqs from upstream propose().
