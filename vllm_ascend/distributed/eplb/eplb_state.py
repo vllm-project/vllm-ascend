@@ -26,10 +26,12 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from vllm_ascend.device.hardware_profile import MoECommPolicy, get_current_hardware_profile
 from vllm_ascend.distributed.eplb.eplb_communicator import AscendHixlEplbCommunicator, _HixlSession
+from vllm_ascend.distributed.eplb.placement import write_placement_snapshot
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
 from vllm_ascend.distributed.eplb.tensor_ops import (
     build_expert_replica_routing_table,
@@ -284,6 +286,8 @@ class AscendEplbState(_eplb_state.EplbState):
         self._suspended = False
         self._close_error: Exception | None = None
         self._hixl_session: _HixlSession | None = None
+        self._placement_export: tuple[str, int] | None = None
+        self._placement_models: dict[str, dict[str, str | None]] = {}
         # vLLM main renamed ``EplbState.cuda_device_index`` to ``device_index``
         # (and passes it to EplbModelState on add_model), so keep both lanes
         # pointing at the attribute upstream actually reads.
@@ -314,10 +318,46 @@ class AscendEplbState(_eplb_state.EplbState):
         # refresh_model_routing_tables needs the previous placement to notice.
         # Seeding here rather than on first use also covers the first commit,
         # which already carries the new mapping by the time the tables refresh.
-        model_state = self.model_states[model_config.compute_hash()]
+        model_key = model_config.compute_hash()
+        model_state = self.model_states[model_key]
         model_state._allgather_physical_map = model_state.physical_to_logical_map.clone()
         if self.uses_custom_load_stats:
-            self._initialize_load_stats_state(self.model_states[model_config.compute_hash()])
+            self._initialize_load_stats_state(model_state)
+        if getattr(self, "_placement_export", None) is not None:
+            self._placement_models[model_key] = {"model": model_config.model, "revision": model_config.revision}
+            model_state._export_eplb_placement_after_commit = self._export_committed_placement
+
+    def enable_placement_export(self, path: str) -> None:
+        if self.model_states:
+            raise RuntimeError("MRV2 placement export must be configured before registering EPLB models.")
+        if not torch.distributed.is_initialized():
+            raise RuntimeError("MRV2 placement export requires initialized distributed worker groups.")
+        ep_group = get_ep_group()
+        if ep_group.world_size != torch.distributed.get_world_size():
+            raise ValueError("MRV2 placement export requires a single EP group covering all worker ranks.")
+        if ep_group.rank_in_group == 0:
+            self._placement_export = (path, ep_group.world_size)
+
+    def _export_committed_placement(self) -> None:
+        export = self._placement_export
+        if export is None or any(state.rebalanced for state in self.model_states.values()):
+            return
+        path, ep_size = export
+        # Read the active maps on the stream that committed the last layer.
+        with gpu_sync_allowed():
+            models = {
+                key: {
+                    **self._placement_models[key],
+                    "num_logical_experts": state.model.num_logical_experts,
+                    "num_redundant_experts": state.model.num_physical_experts - state.model.num_logical_experts,
+                    "physical_to_logical_map": state.physical_to_logical_map.cpu().tolist(),
+                }
+                for key, state in self.model_states.items()
+            }
+        try:
+            write_placement_snapshot(path, {"version": 1, "ep_size": ep_size, "models": models})
+        except OSError:
+            logger.exception("Could not export committed MRV2 EPLB placement to %s", path)
 
     def _propagate_shared_tensors(self, model, num_unpadded_tokens_tensors) -> None:
         super()._propagate_shared_tensors(model, num_unpadded_tokens_tensors)

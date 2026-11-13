@@ -47,6 +47,7 @@ class AscendEPLBController(EPLBController):
         super().__init__(parallel_config, device)
         ascend_eplb_config = ascend_eplb_config or EplbConfig()
         self.load_collection_phase = ascend_eplb_config.load_collection_phase
+        self.placement_export_path = ascend_eplb_config.mrv2_placement_export_path
         # The communicator choice needs one binding class on every EPLB rank,
         # so reach a group consensus before the policy or state is built.
         stair_config = (
@@ -65,6 +66,8 @@ class AscendEPLBController(EPLBController):
         self._has_registered_models = False
         if self.parallel_config.enable_eplb:
             self.state = AscendEplbState(self.parallel_config, self.device, self.eplb_policy)
+            if self.placement_export_path is not None:
+                self.state.enable_placement_export(self.placement_export_path)
 
     def set_batch_phase(self, batch_has_prefill: bool) -> None:
         self._load_collection_phase_matched = is_eplb_load_collection_phase_matched(

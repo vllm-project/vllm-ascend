@@ -854,6 +854,7 @@ def test_async_workspace_refreshes_layer_and_clears_target_after_last(monkeypatc
         model=SimpleNamespace(num_moe_layers=4),
         model_name="model",
         _last_committed_mean_ratios=np.full(4, np.nan),
+        _export_eplb_placement_after_commit=lambda: call_order.append("export"),
     )
     refresh = MagicMock(side_effect=lambda *_args: call_order.append("refresh"))
     monkeypatch.setattr(patch_eplb, "refresh_model_routing_tables", refresh)
@@ -875,7 +876,7 @@ def test_async_workspace_refreshes_layer_and_clears_target_after_last(monkeypatc
     refresh.assert_called_once_with(model_state, layer_idx)
     assert model_state._last_committed_mean_ratios[layer_idx] == 1.2
     log_info.assert_not_called()
-    assert call_order == ["move", "refresh", "ack"]
+    assert call_order == ["move", "refresh", "ack"] + (["export"] if is_last_layer else [])
     assert hasattr(model_state.communicator, patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR) == (not is_last_layer)
 
 
