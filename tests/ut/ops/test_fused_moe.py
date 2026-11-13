@@ -678,9 +678,9 @@ def test_routing_replay_disabled_keeps_ascend_routing_unchanged(monkeypatch):
 
 @pytest.mark.parametrize("hidden_dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("input_dtype", [torch.int32, torch.int64])
-@pytest.mark.parametrize("mask_padding", [False, True])
+@pytest.mark.parametrize("padding_token_expert_id", [None, 2])
 def test_hash_router_preserves_fp32_weights_and_explicit_input_ids(
-    monkeypatch, hidden_dtype, input_dtype, mask_padding
+    monkeypatch, hidden_dtype, input_dtype, padding_token_expert_id
 ):
     input_ids = torch.tensor([-1, 22], dtype=input_dtype)
     gathered_input_ids = torch.tensor([22, -1], dtype=torch.int64)
@@ -715,11 +715,8 @@ def test_hash_router_preserves_fp32_weights_and_explicit_input_ids(
 
     routed_experts = _build_routing_replay_experts(router, None)
     routed_experts.n_shared_experts = 0
-    routed_experts.padding_expert_id = 2
-    context = SimpleNamespace(
-        is_padding=torch.tensor([False, True, True, True]),
-        additional_kwargs={} if mask_padding else {"skip_moe_padding_filter": True},
-    )
+    routed_experts.padding_token_expert_id = padding_token_expert_id
+    context = SimpleNamespace(is_padding=torch.tensor([False, True, True, True]))
     monkeypatch.setattr(routed_experts_module, "get_forward_context", lambda: context)
     monkeypatch.setattr(routed_experts_module, "get_moe_num_logical_experts", lambda *args, **kwargs: 4)
     monkeypatch.setattr(routed_experts_module, "get_ascend_config", lambda: SimpleNamespace(enable_force_eplb=False))
@@ -732,7 +729,7 @@ def test_hash_router_preserves_fp32_weights_and_explicit_input_ids(
 
     assert weights is topk_weights
     assert weights.dtype == torch.float32
-    if mask_padding:
+    if padding_token_expert_id is not None:
         torch.testing.assert_close(ids, torch.tensor([[0, 0], [2, 2]], dtype=torch.int32))
     else:
         assert ids is topk_ids

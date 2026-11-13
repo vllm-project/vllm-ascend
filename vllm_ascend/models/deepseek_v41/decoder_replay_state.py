@@ -459,8 +459,6 @@ class DecoderReplayState:
                 context.additional_kwargs["eplb_heat_collection_status"] = outer.additional_kwargs.get(
                     "eplb_heat_collection_status", False
                 )
-                if outer.additional_kwargs.get("skip_moe_padding_filter", False):
-                    context.additional_kwargs["skip_moe_padding_filter"] = True
                 replay_mask = context.additional_kwargs.get("mc2_mask")
                 if replay_mask is not None:
                     replay_mask[self.num_actual_tokens :].fill_(False)

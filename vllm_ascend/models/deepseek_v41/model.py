@@ -107,25 +107,29 @@ def _engram_enabled_for_runtime(config, vllm_config) -> bool:
     return engram_enabled(config) and vllm_config.engram_config is not None
 
 
-def _can_skip_moe_padding(vllm_config: VllmConfig) -> bool:
+def _can_skip_padding_tokens_in_moe(vllm_config: VllmConfig) -> bool:
     """Filter padding in AllGather routing with disjoint expert ranges."""
     parallel = vllm_config.parallel_config
-    speculative = vllm_config.speculative_config
     ascend_config = get_ascend_config()
     return (
         envs.VLLM_MOE_SKIP_PADDING
         and use_v2_model_runner(vllm_config)
-        # With DP=PCP=1, EP and TP>1 provide an out-of-range expert on every rank.
+        # Skip MoE GEMMs for padding tokens by assigning them to a non-local expert.
+        # With DP = PCP = 1, this requires EP and TP > 1.
         and parallel.enable_expert_parallel
         and parallel.tensor_parallel_size > 1
-        and parallel.data_parallel_size == parallel.prefill_context_parallel_size == 1
-        and parallel.pipeline_parallel_size == parallel.decode_context_parallel_size == 1
-        and not parallel.use_ubatching
+        # At layer initialization, choose fixed `padding_token_expert_id` for each rank,
+        # based on the expert placement in "linear" strategy.
         and parallel.expert_placement_strategy == "linear"
-        and not parallel.enable_eplb
         and not ascend_config.mix_placement
+        # EPLB can move experts between ranks and make the fixed `padding_token_expert_id` stale.
+        and not parallel.enable_eplb
+        # Force routing bypasses padding filtering in the expert selector.
         and not ascend_config.enable_force_eplb
-        and (speculative is None or not speculative.enable_adaptive_verification)
+        # DeepSeek V4.1 currently requires PP = DCP = 1.
+        and parallel.pipeline_parallel_size == parallel.decode_context_parallel_size == 1
+        # With DP or PCP, MoE gathers rows across ranks while is_padding is rank-local.
+        and parallel.data_parallel_size == parallel.prefill_context_parallel_size == 1
         # Check the low-token regime too: a model that switches to MC2 on decode is ineligible.
         and select_moe_comm_method(0, vllm_config) == MoECommType.ALLGATHER
     )
@@ -1042,12 +1046,13 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         self.make_empty_intermediate_tensors = self._make_empty_intermediate_tensors
         self.use_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
         topology = build_layer_plan(self.config)
-        self.skip_moe_padding = _can_skip_moe_padding(vllm_config)
-        if self.skip_moe_padding:
+        self.skip_padding_tokens_in_moe = _can_skip_padding_tokens_in_moe(vllm_config)
+        if self.skip_padding_tokens_in_moe:
             for layer in self.layers[self.start_layer : self.end_layer]:
                 moe = layer.mlp
-                # InitRouting excludes IDs outside this rank's linear expert range.
-                moe.experts.routed_experts.padding_expert_id = moe.n_local_physical_experts if moe.ep_rank == 0 else 0
+                moe.experts.routed_experts.padding_token_expert_id = (
+                    moe.n_local_physical_experts if moe.ep_rank == 0 else 0
+                )
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         candidate_buffer = torch.full(
             (max_tokens, 1, topology.candidate_topk_blocks),
@@ -1629,7 +1634,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         lookups = {layer_idx: lookup[:full_num_tokens] for layer_idx, lookup in lookups.items()}
         if use_sequence_parallel:
             # The AllGather padding filter needs global row order after routing.
-            if not self.skip_moe_padding and envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
+            if not self.skip_padding_tokens_in_moe and envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
                 forward_context = get_forward_context()
                 forward_context.is_padding = sp_padding_mask(
                     forward_context.is_padding,
@@ -1816,10 +1821,6 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         return EngramModelState
 
     @property
-    def skip_moe_padding(self) -> bool:
-        return self.model.skip_moe_padding
-
-    @property
     def supports_engram_graph_producer(self) -> bool:
         return self.model.can_capture_engram_producer()
 
@@ -1837,20 +1838,18 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         engram_mask_ready_event=None,
         engram_query_start_loc=None,
         engram_valid_token_count=None,
-        is_pure_eager_prefill: bool = False,
     ):
-        if self.skip_moe_padding:
+        if self.model.skip_padding_tokens_in_moe and self.model.use_sequence_parallel:
             context = get_forward_context()
-            if is_pure_eager_prefill:
-                context.additional_kwargs["skip_moe_padding_filter"] = True
-            elif self.model.use_sequence_parallel:
-                # The runner's mask has the logical input length. SP may add
-                # trailing rows that survive AllGather. Align once for all layers.
-                padding = context.is_padding
-                assert padding is not None
-                sp_pad = (-padding.shape[0]) % get_tensor_model_parallel_world_size()
-                if sp_pad:
-                    context.is_padding = F.pad(padding, (0, sp_pad), value=True)
+            padding = context.is_padding
+            assert padding is not None
+            rows = padding.shape[0]
+            sp_pad = (-rows) % get_tensor_model_parallel_world_size()
+            if sp_pad:
+                # Mark the rows added by SP as padding in the existing mask buffer.
+                aligned_padding = padding.as_strided((rows + sp_pad,), (1,))
+                aligned_padding[rows:].fill_(True)
+                context.is_padding = aligned_padding
         if engram_query_start_loc is not None:
             with self.model.captured_engram_inputs(
                 input_ids, positions, lookback_token_ids, engram_query_start_loc, engram_valid_token_count

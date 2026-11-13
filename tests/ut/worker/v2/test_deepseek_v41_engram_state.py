@@ -17,7 +17,6 @@ from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 
 class EngramModel(torch.nn.Module):
-    skip_moe_padding = False
     token_lookback_depth = 3
 
     def __init__(self):
