@@ -186,14 +186,19 @@ __simt_vf__ __launch_bounds__(kThreads) inline void resolve_vf(
         const int page0 = resident[int64_t(state) * d[45]];
         // The ordinary cold case returns to the old path without a page scan.
         if (host0 <= 0 || (page0 >= 0 && page0 != int(d[47]))) {
-            int missing = 0;
+            bool missing = false;
             for (int col = tid; col < int(d[40]); col += kThreads) {
                 const int host_page = source[int64_t(request) * d[41] + col];
                 const int page = col < int(d[44]) ? resident[int64_t(state) * d[45] + col] : int(d[47]);
-                missing += host_page > 0 && (page < 0 || page > 0xFFFFFF || page == int(d[47]));
+                missing |= host_page > 0 && (page < 0 || page > 0xFFFFFF || page == int(d[47]));
             }
-            prefix(missing, scratch, tid);
-            const bool all_resident = scratch[kTotal] == 0;
+            const int lane = tid & 31;
+            const uint32_t warp_missing = asc_ballot(int(missing));
+            if (lane == 0) scratch[tid >> 5] = warp_missing != 0;
+            asc_syncthreads();
+            // Each warp reads the same flags, so the branch is uniform
+            // without publishing a second reduction through shared memory.
+            const bool all_resident = asc_ballot(int(lane < kWarps && scratch[lane] != 0)) == 0;
             if (compact && tid == 0) scratch[kError] = 0;
             // Every lane must finish reading the proof before fallback code
             // can repurpose this AIV's scratch for hash keys.
