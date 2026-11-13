@@ -1,0 +1,6 @@
+pr: 21838
+entries:
+  - category: dependency
+    text: Kimi K3.1 INT8 KV attention on Atlas A3 now uses the ops-transformer KvQuantSparseFlashAttentionV2 operator through cann_ops_transformer. Install a matching operator package and Torch extension with A3 NoPE, native query-head, and softmax max/sum support.
+    model: kimi-k3.1
+    hardware: [A3]
