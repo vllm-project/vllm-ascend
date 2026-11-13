@@ -23,9 +23,73 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
     AscendTargetDependentARSpeculator,
+    _align_mtp_draft_position_cache,
     gather,
     torch_gather_wrapper,
 )
+
+
+def test_align_mtp_draft_position_cache_for_long_context():
+    target_rope_parameters = {
+        "rope_type": "yarn",
+        "factor": 4.0,
+        "original_max_position_embeddings": 262144,
+    }
+    target_model_config = SimpleNamespace(
+        hf_text_config=SimpleNamespace(rope_parameters=target_rope_parameters),
+        max_model_len=1010000,
+    )
+    draft_text_config = SimpleNamespace(
+        rope_parameters={"rope_type": "default"},
+        max_position_embeddings=262144,
+    )
+    draft_model_config = SimpleNamespace(hf_text_config=draft_text_config, max_model_len=262144)
+
+    _align_mtp_draft_position_cache(target_model_config, draft_model_config)
+
+    assert draft_text_config.rope_parameters == {"rope_type": "default"}
+    assert draft_text_config.rope_parameters is not target_rope_parameters
+    assert draft_text_config.max_position_embeddings == 1010000
+    assert draft_model_config.max_model_len == 1010000
+
+
+def test_align_mtp_draft_position_cache_preserves_unsafe_rope():
+    target_model_config = SimpleNamespace(max_model_len=1010000)
+    rope_parameters = {
+        "rope_type": "yarn",
+        "factor": 4.0,
+        "original_max_position_embeddings": 262144,
+    }
+    draft_text_config = SimpleNamespace(
+        rope_parameters=rope_parameters,
+        max_position_embeddings=262144,
+    )
+    draft_model_config = SimpleNamespace(hf_text_config=draft_text_config, max_model_len=262144)
+
+    _align_mtp_draft_position_cache(target_model_config, draft_model_config)
+
+    assert draft_text_config.rope_parameters is rope_parameters
+    assert draft_text_config.max_position_embeddings == 262144
+    assert draft_model_config.max_model_len == 262144
+
+
+def test_align_mtp_draft_position_cache_does_not_shrink_cache():
+    target_model_config = SimpleNamespace(
+        hf_text_config=SimpleNamespace(rope_parameters=None),
+        max_model_len=1010000,
+    )
+    original_rope_parameters = {"rope_type": "default"}
+    draft_text_config = SimpleNamespace(
+        rope_parameters=original_rope_parameters,
+        max_position_embeddings=1048576,
+    )
+    draft_model_config = SimpleNamespace(hf_text_config=draft_text_config, max_model_len=1048576)
+
+    _align_mtp_draft_position_cache(target_model_config, draft_model_config)
+
+    assert draft_text_config.rope_parameters is original_rope_parameters
+    assert draft_text_config.max_position_embeddings == 1048576
+    assert draft_model_config.max_model_len == 1048576
 
 
 def test_calc_next_seq_lens_cpu():

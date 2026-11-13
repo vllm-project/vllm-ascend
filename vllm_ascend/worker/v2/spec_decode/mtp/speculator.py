@@ -17,13 +17,24 @@
 # AscendMTPSpeculator layers the shared Ascend draft loop
 # (AscendTargetDependentARSpeculator) on upstream MTPSpeculator. All MLA-specific
 # handling lives in the base, gated by is_mla.
+from vllm.config import VllmConfig
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
-from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import AscendTargetDependentARSpeculator
+from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
+    AscendTargetDependentARSpeculator,
+    _align_mtp_draft_position_cache,
+)
 
 
 class AscendMTPSpeculator(AscendTargetDependentARSpeculator, MTPSpeculator):
     """Ascend MTP speculator (MLA draft). All MLA handling is in the base
     (AscendTargetDependentARSpeculator)"""
 
-    pass
+    def _create_draft_vllm_config(self) -> VllmConfig:
+        # MTP consumes positions from the target model. Dict-style HF overrides
+        # are target-only in vLLM, so a long-context target can otherwise leave
+        # the draft with the checkpoint's shorter RoPE cache and graph replay
+        # will index that cache out of bounds. Align before constructing the
+        # runtime draft config so every downstream consumer sees the fix.
+        _align_mtp_draft_position_cache(self.vllm_config.model_config, self.draft_model_config)
+        return super()._create_draft_vllm_config()

@@ -1,0 +1,7 @@
+pr: 21292
+entries:
+  - category: bugfix
+    text: >-
+      Fixed MTP speculative decoding crashes for long-context models using
+      overridden RoPE scaling by aligning the draft model's RoPE configuration
+      and positional cache length with the target model.
