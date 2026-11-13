@@ -4,7 +4,7 @@
 
 test_cases:
   - name: "Qwen3.6-35B-A3B-w8a8-FullAndPiecewise"
-    model: "Eco-Tech/Qwen3.6-35B-A3B-w8a8"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8"
     envs:
       VLLM_SERVER_DEV_MODE: "1"
       VLLM_USE_V2_MODEL_RUNNER: "1"
