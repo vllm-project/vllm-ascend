@@ -595,7 +595,10 @@ def test_glm_kpool_pcp_builds_mamba_metadata_from_global_requests(recover, for_c
         global_block_tables=("global_table",),
         global_slot_mappings="global_slots",
     )
-    pcp_manager = SimpleNamespace(build_attention_context=MagicMock(return_value=pcp_context))
+    pcp_manager = SimpleNamespace(
+        is_target_attn_groups=MagicMock(return_value=True),
+        build_attention_context=MagicMock(return_value=pcp_context),
+    )
     state = SimpleNamespace(
         pcp_manager=pcp_manager,
         vllm_config=SimpleNamespace(model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_kpool=4))),
@@ -621,6 +624,7 @@ def test_glm_kpool_pcp_builds_mamba_metadata_from_global_requests(recover, for_c
             for_capture=for_capture,
         )
 
+    pcp_manager.is_target_attn_groups.assert_called_once_with(attn_groups)
     assert metadata == {"sfa": local_metadata["sfa"], "linear_attn": mamba_metadata}
     assert mamba_metadata.pcp_context is pcp_context
     if recover:
