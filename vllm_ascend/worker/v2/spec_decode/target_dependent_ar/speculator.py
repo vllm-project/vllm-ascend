@@ -712,14 +712,16 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
                 prefill_metadata = metadata.decode if is_mla else metadata
                 assert prefill_metadata is not None
 
-                fia_params.append({
-                    "layer_name": layer_name,
-                    "actual_seq_lengths": prefill_metadata.actual_seq_lengths_q,
-                    "actual_seq_lengths_kv": prefill_metadata.seq_lens_list,
-                    "actual_seq_qlen": prefill_metadata.actual_seq_lengths_q,
-                    "actual_seq_kvlen": prefill_metadata.seq_lens_list,
-                    "block_table": prefill_metadata.block_table if is_mla else metadata.block_tables,
-                })
+                fia_params.append(
+                    {
+                        "layer_name": layer_name,
+                        "actual_seq_lengths": prefill_metadata.actual_seq_lengths_q,
+                        "actual_seq_lengths_kv": prefill_metadata.seq_lens_list,
+                        "actual_seq_qlen": prefill_metadata.actual_seq_lengths_q,
+                        "actual_seq_kvlen": prefill_metadata.seq_lens_list,
+                        "block_table": prefill_metadata.block_table if is_mla else metadata.block_tables,
+                    }
+                )
             return fia_params
         assert self.input_batch is not None
         num_reqs = self.input_batch.num_reqs
