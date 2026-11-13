@@ -67,10 +67,10 @@ class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
             if parallel.decode_context_parallel_size != 1:
                 raise NotImplementedError("Qwen4Exp PCP requires DCP=1")
 
-            from vllm_ascend.ops.kda_parallel import get_kda_parallel_size
+            from vllm_ascend.ops.head_parallel import get_head_parallel_size
 
             text_config = vllm_config.model_config.hf_text_config
-            head_shards = get_kda_parallel_size(parallel)
+            head_shards = get_head_parallel_size(parallel)
             if text_config.linear_num_key_heads % head_shards or text_config.linear_num_value_heads % head_shards:
                 raise ValueError("Qwen4Exp GDN key and value heads must be divisible by TP * PCP")
         super().__init__(vllm_config=vllm_config, prefix=prefix)
@@ -116,9 +116,9 @@ class AscendQwen4ExpForCausalLM(upstream_model.Qwen4ExpForCausalLM):
         upstream_shape = super().get_gdn_mamba_state_shape_from_config
         if vllm_config.parallel_config.prefill_context_parallel_size == 1:
             return upstream_shape(vllm_config)
-        from vllm_ascend.ops.kda_parallel import get_kda_state_shape
+        from vllm_ascend.ops.head_parallel import get_head_sharded_state_shape
 
-        return get_kda_state_shape(vllm_config, upstream_shape)
+        return get_head_sharded_state_shape(vllm_config, upstream_shape)
 
     @classmethod
     def get_mamba_specs_from_config(cls, vllm_config: VllmConfig):

@@ -9,15 +9,15 @@ import pytest
 import torch
 
 from vllm_ascend.models.kimi_k3 import kimi_k3
-from vllm_ascend.ops import kda_parallel, kda_pcp
-from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention
+from vllm_ascend.ops import head_parallel, kda_pcp
+from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention, KimiKDAInputParallelLinear
 
 
 @contextmanager
 def parallel_groups(tp, pcp):
     with (
-        patch.object(kda_parallel, "get_tp_group", return_value=tp),
-        patch.object(kda_parallel, "get_pcp_group", return_value=pcp),
+        patch.object(head_parallel, "get_tp_group", return_value=tp),
+        patch.object(head_parallel, "get_pcp_group", return_value=pcp),
         patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=tp.rank_in_group),
         patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=tp.world_size),
     ):
@@ -64,8 +64,8 @@ def test_kda_projections_cover_global_heads_once(tp, pcp):
         tp_group = SimpleNamespace(world_size=tp, rank_in_group=tp_rank, all_reduce=lambda x: x)
         pcp_group = SimpleNamespace(world_size=pcp, rank_in_group=pcp_rank, all_reduce=lambda x: x)
         with parallel_groups(tp_group, pcp_group):
-            projection = kda_parallel.KDAInputParallelLinear(hidden, [width] * 4 + [4, 16], size, bias=False)
-            out = kda_parallel.KDARowParallelLinear(width, hidden, bias=False)
+            projection = KimiKDAInputParallelLinear(hidden, [width] * 4 + [4, 16], size, bias=False)
+            out = head_parallel.HeadParallelRowLinear(width, hidden, bias=False)
         for sid, weight in enumerate(weights):
             projection.weight.weight_loader(projection.weight, weight, sid)
         expected = torch.cat(
@@ -89,7 +89,7 @@ def test_kda_input_projection_preserves_upstream_padding_and_replication(loader,
     if padding:
         output_sizes.append(padding * 4)
     with parallel_groups(tp, pcp):
-        projection = kda_parallel.KDAInputParallelLinear(8, output_sizes, 4, padding_size=padding, bias=False)
+        projection = KimiKDAInputParallelLinear(8, output_sizes, 4, padding_size=padding, bias=False)
     projection.weight.data.fill_(9)
     weight = torch.arange(32).float().view(4, 8)
     getattr(projection, loader)(projection.weight, weight, 4)
@@ -115,7 +115,7 @@ def test_kda_pcp_reduction_is_required_when_tp_reduction_is_deferred(reduce_resu
     tp = SimpleNamespace(world_size=4, rank_in_group=0, all_reduce=reduce_tp)
     pcp = SimpleNamespace(world_size=2, rank_in_group=0, all_reduce=reduce_pcp)
     with parallel_groups(tp, pcp):
-        projection = kda_parallel.KDARowParallelLinear(64, 8, bias=False, reduce_results=reduce_results)
+        projection = head_parallel.HeadParallelRowLinear(64, 8, bias=False, reduce_results=reduce_results)
     projection.weight.data.fill_(1)
     output = projection(torch.ones(3, 8))[0]
     torch.testing.assert_close(output, torch.full((3, 8), 64.0 if reduce_results else 16.0))
@@ -126,7 +126,7 @@ def test_pcp_kda_output_projection_does_not_enter_tp_only_fusion(monkeypatch):
     tp = SimpleNamespace(world_size=4, rank_in_group=0)
     pcp = SimpleNamespace(world_size=2, rank_in_group=0)
     with parallel_groups(tp, pcp):
-        projection = kda_parallel.KDARowParallelLinear(64, 8, bias=False)
+        projection = head_parallel.HeadParallelRowLinear(64, 8, bias=False)
     layer = kimi_k3.AscendKimiDecoderLayer.__new__(kimi_k3.AscendKimiDecoderLayer)
     torch.nn.Module.__init__(layer)
     layer.use_sequence_parallel = True
