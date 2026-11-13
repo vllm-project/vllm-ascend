@@ -121,6 +121,9 @@ CompressorForwardOutput = tuple[torch.Tensor, torch.Tensor]
 CompressorOverlapOutput = tuple[CompressorForwardOutput, torch.npu.Event]
 
 _COMPRESSOR_METADATA_CACHE_KEY = "dsv4_compressor_metadata_cache"
+# Single-group o_proj dispatches batches up to this many tokens to the plain
+# 2D matmul; past it npu_transpose_batchmatmul wins again (compute-bound).
+_WO_A_SMALL_M_LIMIT = 128
 
 
 def get_or_compute_compressor_metadata(
