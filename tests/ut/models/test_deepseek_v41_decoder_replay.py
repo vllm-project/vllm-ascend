@@ -8,7 +8,9 @@ import pytest
 import torch
 from vllm.config import CUDAGraphMode
 
+from vllm_ascend.attention.dsa_v41_indexer_shard import IndexerRowPartition
 from vllm_ascend.models.deepseek_v41 import decoder_replay_layers as replay_mod
+from vllm_ascend.models.deepseek_v41 import model as model_mod
 from vllm_ascend.models.deepseek_v41.model import DeepseekV41Model
 
 
@@ -76,6 +78,23 @@ def test_packed_replay_compacts_sparse_lengths_with_indices(monkeypatch):
     replay(torch.arange(6), None, torch.arange(6))
     for buffer, offset in zip(buffers, (0, 10, 20, 30)):
         assert buffer[:2].tolist() == [offset + 4, offset + 5]
+
+
+def test_replay_redistributes_only_retained_candidate_rows(monkeypatch):
+    candidates = torch.tensor([[-1, -1], [-1, -1], [8, -1], [9, 10]], dtype=torch.int32).unsqueeze(1)
+    lengths = torch.tensor([[0], [0], [1], [2]], dtype=torch.int32)
+    shared = model_mod.DeepseekV41SharedAttentionState(None, candidates, lengths)
+    shared.candidate_partition = IndexerRowPartition((2, 2), 1)
+    contributions = iter([torch.tensor([[[4, 0]], [[0, 0]]]), torch.tensor([[1], [0]])])
+    monkeypatch.setattr(
+        model_mod, "get_tp_group", lambda: SimpleNamespace(all_reduce=lambda values: values + next(contributions))
+    )
+
+    shared.compact_candidates(torch.tensor([1, 3]), num_padded_rows=3)
+
+    assert candidates[:3].squeeze(1).tolist() == [[3, -1], [9, 10], [-1, -1]]
+    assert lengths[:3].flatten().tolist() == [1, 2, 0]
+    assert shared.candidate_partition is None
 
 
 def test_cut_layer_trim_writes_full_batch_before_replay():

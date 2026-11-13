@@ -26,12 +26,14 @@ class AscendDecoderReplayLayers:
         row_buffers: list[torch.Tensor],
         write_batch_kv: Callable[..., None] | None = None,
         first_swa_prefix: str | None = None,
+        compact_candidates: Callable[[torch.Tensor, int | None], None] | None = None,
     ) -> None:
         self.window = window
         self.run_layers = run_layers
         self.row_buffers = row_buffers
         self.write_batch_kv = write_batch_kv
         self.first_swa_prefix = first_swa_prefix
+        self.compact_candidates = compact_candidates
         self.rows: torch.Tensor | None = None
         self.context_factory: Callable[[], AbstractContextManager[None]] | None = None
         self.num_actual_rows = 0
@@ -59,6 +61,8 @@ class AscendDecoderReplayLayers:
                 buffer[: rows.numel()].copy_(buffer.index_select(0, rows))
                 if self.num_padded_rows is not None:
                     buffer[rows.numel() : self.num_padded_rows].zero_()
+            if self.compact_candidates is not None:
+                self.compact_candidates(rows, self.num_padded_rows)
             replay_states: list[torch.Tensor | None] = []
             for index, state in enumerate(states):
                 if state is None:
@@ -196,8 +200,13 @@ def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> Ascend
         )
         if not cut_writes_index_outputs:
             row_buffers.append(model.topk_indices_buffer)
+        compact_candidates = None
         if not cut_writes_candidate_outputs:
-            row_buffers.extend((model.candidate_indices_buffer, model.candidate_lengths_buffer))
+            shared_state = getattr(model, "shared_attention_state", None)
+            if shared_state is None or parallel.tensor_parallel_size < 2:
+                row_buffers.extend((model.candidate_indices_buffer, model.candidate_lengths_buffer))
+            else:
+                compact_candidates = shared_state.compact_candidates
         if not cut_writes_index_outputs:
             row_buffers.append(model.topk_lengths_buffer)
         write_batch_kv = model.layers[cut].write_kv if trim_cut_layer else None
@@ -214,6 +223,7 @@ def make_decoder_replay(model: "DeepseekV41Model", config: VllmConfig) -> Ascend
             row_buffers,
             write_batch_kv=write_batch_kv,
             first_swa_prefix=first_swa_prefix,
+            compact_candidates=compact_candidates,
         )
         replay.sequence_parallel = model.use_sequence_parallel
         return replay
