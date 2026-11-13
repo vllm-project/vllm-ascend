@@ -132,6 +132,8 @@ def qsa_select_paged_tokens_lightning(
         out[:, :packed_width],
     )
     return out
+
+
 # BF16 spacing at the old weight 1/sqrt(128) is 2**-11.
 _LI_V2_WEIGHT_FRACTION_BITS = 11
 
