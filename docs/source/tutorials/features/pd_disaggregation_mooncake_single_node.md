@@ -8,6 +8,10 @@ Using the Qwen2.5-VL-7B-Instruct model as an example, use vLLM-Ascend {{vllm_asc
 
 For P/D transfer priority settings, see [QoS Configuration](pd_disaggregation_mooncake_multi_node.md#qos-configuration).
 
+For disjoint P/D device assignments and the interaction between
+`ASCEND_RT_VISIBLE_DEVICES` and `--device-ids`, see
+[NPU Device Selection](../../user_guide/configuration/device_selection.md#prefill-decode-disaggregation).
+
 ## Verify Communication Environment
 
 ### Verification Process
