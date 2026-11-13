@@ -2,17 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GLM-5.3-Flash KDA layer with separate convolutions and a bounded safe gate."""
 
+import os
+
 import torch
 import torch.distributed as dist
+import torch_npu
 from torch import nn
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed import divide
+from vllm.distributed import divide, get_tp_group
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_utils import (
@@ -30,6 +35,7 @@ from vllm_ascend.attention.utils import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.distributed.parallel_state import get_otp_group
+from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_reduce_scatter
 from vllm_ascend.models.glm5next.config import Glm5NextConfig
 from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
 from vllm_ascend.models.glm5next.ops.kda import KDA_MAX_RECURRENT_TOKENS, chunk_kda, recurrent_kda
@@ -252,6 +258,18 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             quant_config=self.quant_config,
             prefix=f"{prefix}.o_proj",
         )
+        # Fused o_proj MatMul+ReduceScatter state. The decoder layer arms this
+        # via maybe_enable_kda_oproj_mm_rs; unarmed keeps the stock path.
+        self._oproj_mm_rs_hcom: str | None = None
+        self._oproj_mm_rs_world_size = 0
+        self._oproj_mm_rs_min_tokens = 0
+        # Fused in_proj AllGather+MatMul state, armed independently of the
+        # o_proj fusion via maybe_enable_kda_inproj_ag_mm. Once armed the
+        # decoder layer stops issuing sp_all_gather and hands this layer its
+        # own token shard instead of the full sequence.
+        self._inproj_ag_mm_hcom: str | None = None
+        self._inproj_ag_mm_world_size = 0
+        self._inproj_ag_mm_min_tokens = 0
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -281,9 +299,16 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
-        num_tokens = hidden_states.size(0)
-        # One merged GEMM for q, k, v, b, f_a, g_a (replaces 6 separate GEMMs).
-        projected = self.in_proj_qkvbfg_a(hidden_states)[0]
+        if self._inproj_ag_mm_hcom is not None:
+            # Armed: the decoder layer skipped its sp_all_gather, so
+            # hidden_states is this rank's token shard and the full token
+            # count has to come from positions rather than from dim 0.
+            num_tokens = positions.shape[0]
+            projected = self._inproj_ag_mm_apply(hidden_states, num_tokens)
+        else:
+            num_tokens = hidden_states.size(0)
+            # One merged GEMM for q, k, v, b, f_a, g_a (replaces 6 GEMMs).
+            projected = self.in_proj_qkvbfg_a(hidden_states)[0]
         qkv, beta_raw, f_a, g_a = projected.split(
             [
                 3 * self.local_projection_size,
@@ -323,8 +348,135 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         core_attn_out = core_attn_out.reshape(core_attn_out.size(1), -1)
         return self._finalize_o_proj(core_attn_out)
 
+    def _inproj_ag_mm_can_fuse(
+        self,
+        shard: torch.Tensor,
+        weight: torch.Tensor,
+        num_tokens: int,
+    ) -> bool:
+        """Per-batch gate for the in_proj AllGather+MatMul fusion.
+
+        Mirrors _oproj_mm_rs_can_fuse. num_tokens is the full sequence length
+        and is TP-identical, so every rank takes the same branch; the fused
+        kernel's fixed cost is what the lower bound guards against.
+        """
+        if not _is_prefill_only_batch():
+            return False
+        world_size = self._inproj_ag_mm_world_size
+        if shard.ndim != 2 or weight.ndim != 2:
+            return False
+        if shard.dtype != torch.bfloat16 or weight.dtype != torch.bfloat16:
+            return False
+        if shard.shape[1] != weight.shape[1]:
+            return False
+        if not _INPROJ_AG_MM_MIN_K <= shard.shape[1] < _INPROJ_AG_MM_MAX_K:
+            return False
+        if not (weight.is_contiguous() or weight.t().is_contiguous()):
+            return False
+        shard_rows = shard.shape[0]
+        if shard_rows == 0 or weight.shape[0] == 0 or num_tokens == 0:
+            return False
+        # The gathered result must cover every real token; otherwise slicing
+        # the GEMM output back to num_tokens would silently drop rows.
+        if num_tokens > shard_rows * world_size:
+            return False
+        if num_tokens < self._inproj_ag_mm_min_tokens:
+            return False
+        return shard_rows * world_size * shard.shape[1] * shard.element_size() < _INPROJ_AG_MM_MAX_COMM_BYTES
+
+    def _inproj_ag_mm_apply(self, shard: torch.Tensor, num_tokens: int) -> torch.Tensor:
+        """AllGather this rank's shard into the merged in_proj GEMM.
+
+        The unfused fallback reproduces exactly what the decoder layer used to
+        do before this layer was armed: gather, slice to the real token count,
+        then run the stock merged projection.
+        """
+        weight = self.in_proj_qkvbfg_a.weight
+        if not self._inproj_ag_mm_can_fuse(shard, weight, num_tokens):
+            return self.in_proj_qkvbfg_a(sp_all_gather(shard)[:num_tokens])[0]
+        output, _ = torch_npu.npu_all_gather_base_mm(
+            shard.contiguous(),
+            weight.t(),
+            self._inproj_ag_mm_hcom,
+            self._inproj_ag_mm_world_size,
+            # Nothing in this layer consumes the gathered hidden states, so
+            # the kernel is told not to materialise them.
+            gather_output=False,
+            # comm_mode intentionally not passed, as in _oproj_mm_rs_apply:
+            # the accepted values differ per platform and the kernel's own
+            # default is the right one.
+        )
+        # AllGather covers the TP-padded row count; drop the padding rows.
+        return output[:num_tokens]
+
+    def _oproj_mm_rs_can_fuse(self, attn_output: torch.Tensor, weight: torch.Tensor) -> bool:
+        """Per-batch gate, branching only on TP-consistent metadata.
+
+        Decode, spec-verify and mixed batches stay on the unfused pair: the win
+        is a prefill-sized GEMM hiding the collective, and a one-token GEMM
+        hides nothing.
+        """
+        if not _is_prefill_only_batch():
+            return False
+        if attn_output.ndim != 2 or weight.ndim != 2:
+            return False
+        if attn_output.dtype != torch.bfloat16 or weight.dtype != torch.bfloat16:
+            return False
+        if attn_output.shape[1] != weight.shape[1]:
+            return False
+        if not _OPROJ_MM_RS_MIN_K <= attn_output.shape[1] < _OPROJ_MM_RS_MAX_K:
+            return False
+        if not (weight.is_contiguous() or weight.t().is_contiguous()):
+            return False
+        num_tokens = attn_output.shape[0]
+        if num_tokens == 0 or weight.shape[0] == 0:
+            return False
+        # Median us/call on TP4: fused ~= 82 + 0.0603*N, the unfused
+        # MatMul + reduce_scatter pair ~= 86 + 0.0863*N, so fusion wins across
+        # every prefill chunk actually measured (1420/4352/15232 tokens, -21%
+        # to -28%). The floor still dominates far below that: at 4 tokens the
+        # unfused pair costs 27.8 us against the fused kernel's ~82 us
+        # intercept, and that regime is unmeasured, so keep a lower bound.
+        # num_tokens is the full gathered chunk and is TP-identical, so every
+        # rank takes the same branch.
+        if num_tokens < self._oproj_mm_rs_min_tokens:
+            return False
+        padded = num_tokens + (-num_tokens) % self._oproj_mm_rs_world_size
+        return padded * weight.shape[0] * weight.element_size() < _OPROJ_MM_RS_MAX_COMM_BYTES
+
+    def _oproj_mm_rs_apply(self, attn_output: torch.Tensor) -> torch.Tensor:
+        """Return this rank's reduce-scattered o_proj shard.
+
+        Both branches return the same token shard the decoder layer's
+        sp_reduce_scatter produced before, zero padding rows included, so the
+        caller may skip its own collective unconditionally.
+        """
+        weight = self.o_proj.weight
+        if not self._oproj_mm_rs_can_fuse(attn_output, weight):
+            return sp_reduce_scatter(self.o_proj(attn_output)[0])
+        world_size = self._oproj_mm_rs_world_size
+        # sp_reduce_scatter zero-pads the GEMM result up to the TP multiple.
+        # The projection is bias-free, so padding the input rows instead yields
+        # the same zero rows out of the fused kernel.
+        sp_pad = (-attn_output.shape[0]) % world_size
+        if sp_pad:
+            attn_output = torch.nn.functional.pad(attn_output, (0, 0, 0, sp_pad))
+        output, _ = torch_npu.npu_quant_mm_reduce_scatter(
+            attn_output.contiguous(),
+            weight.t(),
+            self._oproj_mm_rs_hcom,
+            world_size,
+            reduce_op="sum",
+            # comm_mode intentionally not passed: Atlas A3/A2 only accepts
+            # "aiv" while Ascend 950DT only accepts "ai_cpu"/"ccu". Omitting it
+            # lets the kernel pick the right per-platform default.
+        )
+        return output
+
     def _finalize_o_proj(self, attn_output: torch.Tensor) -> torch.Tensor:
         if not oproj_tp_enable():
+            if self._oproj_mm_rs_hcom is not None:
+                return self._oproj_mm_rs_apply(attn_output)
             return self.o_proj(attn_output)[0]
         group = get_otp_group()
         tp_size = group.world_size
@@ -580,3 +732,251 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         else:
             core_attn_out[0, : output.shape[1]].copy_(output[0])
         maybe_save_kv_layer_to_connector("", [])
+
+
+# --- KDA o_proj MatMul+ReduceScatter fusion -------------------------------
+# Folds the decoder layer's sp_reduce_scatter into the o_proj GEMM via
+# torch_npu.npu_quant_mm_reduce_scatter, so the collective pipelines behind the
+# GEMM instead of starting only after it retires. Modelled on
+# vllm_ascend/ops/linear_op.py KimiOProjMMReduceScatterOp.
+_OPROJ_MM_RS_ENV = "VLLM_ASCEND_GLM_KDA_OPROJ_MM_RS"
+_OPROJ_MM_RS_WORLD_SIZES = (2, 4, 8)
+_OPROJ_MM_RS_MIN_K = 256
+_OPROJ_MM_RS_MAX_K = 65535
+_OPROJ_MM_RS_MAX_COMM_BYTES = 16 * 256 * 1024 * 1024
+_OPROJ_MM_RS_TRUTHY = ("1", "true", "yes", "on")
+_OPROJ_MM_RS_MIN_TOKENS_ENV = "VLLM_ASCEND_GLM_KDA_OPROJ_MM_RS_MIN_TOKENS"
+_OPROJ_MM_RS_MIN_TOKENS_DEFAULT = 1024
+_oproj_mm_rs_announced = False
+
+# --- KDA in_proj AllGather+MatMul fusion ----------------------------------
+# Folds the decoder layer's sp_all_gather into the merged in_proj GEMM via
+# torch_npu.npu_all_gather_base_mm, so the collective pipelines behind the
+# GEMM instead of fully retiring before it starts. Unlike the o_proj fusion
+# this does not reassociate any sum: AllGather moves whole rows along M and
+# the K-axis reduction is untouched.
+_INPROJ_AG_MM_ENV = "VLLM_ASCEND_GLM_KDA_INPROJ_AG_MM"
+_INPROJ_AG_MM_MIN_TOKENS_ENV = "VLLM_ASCEND_GLM_KDA_INPROJ_AG_MM_MIN_TOKENS"
+# Measured on Atlas A3, TP4, 34 KDA layers, medians over 544-2720 calls per
+# point (prof_p_11061929 unfused vs prof_p_11062136 fused, identical chunk mix):
+#
+#     chunk    unfused AG+MM        fused      delta/layer
+#     15232    454.1 + 2791.7       3071.9       -173.9 us
+#      4352    158.4 +  842.4       1024.0        + 23.2 us
+#      1420     78.8 +  347.6        583.9        +157.5 us
+#
+# Least-squares over those three points:
+#     fused   = 283.3 + 0.1823 * N us
+#     unfused = 124.3 + 0.2047 * N us   =>  break-even at N ~= 7100
+#
+# The fused kernel's fixed cost (283 us) is 3.5x the o_proj side's (82 us)
+# because MC2 splits the GEMM into world_size sub-GEMMs of shard_rows each:
+# at chunk 1420 that is four M=355 GEMMs in place of one M=1420 GEMM, well
+# below the cube's efficient M. The o_proj fusion does not pay this because
+# its GEMM keeps the full M and only the reduce_scatter is chunked. Hence a
+# much higher default here than the o_proj side's 1024.
+_INPROJ_AG_MM_MIN_TOKENS_DEFAULT = 1024
+_INPROJ_AG_MM_WORLD_SIZES = (2, 4, 8)
+_INPROJ_AG_MM_MIN_K = 256
+_INPROJ_AG_MM_MAX_K = 65535
+_INPROJ_AG_MM_MAX_COMM_BYTES = 16 * 256 * 1024 * 1024
+_inproj_ag_mm_announced = False
+
+logger = init_logger(__name__)
+
+
+def glm_kda_oproj_mm_rs_enabled() -> bool:
+    """Read the fusion switch; unset keeps the stock GEMM + reduce_scatter."""
+    return os.getenv(_OPROJ_MM_RS_ENV, "0").strip().lower() in _OPROJ_MM_RS_TRUTHY
+
+
+def _is_prefill_only_batch() -> bool:
+    """True for a batch that is pure prefill, on every TP rank alike.
+
+    Both comm-matmul fusions share this predicate: their win is a
+    prefill-sized GEMM hiding a collective, and a one-token decode GEMM hides
+    nothing while still paying the fused kernel's fixed cost.
+    """
+    metadata = get_forward_context().attn_metadata
+    if isinstance(metadata, dict):
+        metadata = next(
+            (m for m in metadata.values() if hasattr(m, "num_prefills") and hasattr(m, "num_decodes")),
+            None,
+        )
+    return not (
+        metadata is None
+        or getattr(metadata, "num_prefills", 0) == 0
+        or getattr(metadata, "num_decodes", 0) != 0
+        or getattr(metadata, "num_spec_decodes", 0) != 0
+    )
+
+
+def _min_tokens_from_env(env_name: str, default: int) -> int:
+    """Read a token lower bound; 0 disables the threshold entirely.
+
+    Both fusions measured faster at every prefill chunk from 1420 tokens up,
+    so the defaults only guard the unmeasured short-prefill regime where the
+    fused kernel's fixed cost cannot be amortised. A malformed value falls
+    back to the default rather than failing model build.
+    """
+    raw = os.getenv(env_name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        logger.warning("%s=%r is not an integer; using %d.", env_name, raw, default)
+        return default
+    if value < 0:
+        logger.warning("%s=%d is negative; using %d.", env_name, value, default)
+        return default
+    return value
+
+
+def _oproj_mm_rs_min_tokens() -> int:
+    return _min_tokens_from_env(_OPROJ_MM_RS_MIN_TOKENS_ENV, _OPROJ_MM_RS_MIN_TOKENS_DEFAULT)
+
+
+def _inproj_ag_mm_min_tokens() -> int:
+    return _min_tokens_from_env(_INPROJ_AG_MM_MIN_TOKENS_ENV, _INPROJ_AG_MM_MIN_TOKENS_DEFAULT)
+
+
+def _oproj_mm_rs_unsupported_reason(attn: nn.Module) -> str | None:
+    """Static reasons this o_proj cannot use npu_quant_mm_reduce_scatter.
+
+    The fused kernel needs a bias-free unquantized BF16 projection on a 2/4/8
+    rank TP group with a local K inside its supported range; a nonzero bias is
+    explicitly unsupported by the current interface.
+    """
+    layer = attn.o_proj
+    if not callable(getattr(torch_npu, "npu_quant_mm_reduce_scatter", None)):
+        return "torch_npu.npu_quant_mm_reduce_scatter is unavailable"
+    if not isinstance(layer.quant_method, UnquantizedLinearMethod):
+        return "the fused kernel needs an unquantized o_proj"
+    weight = getattr(layer, "weight", None)
+    if weight is None or weight.dtype != torch.bfloat16:
+        return "the fused kernel needs BF16 o_proj weights"
+    if weight.ndim != 2 or weight.shape[0] == 0:
+        return "the fused kernel needs nonempty 2D o_proj weights"
+    if layer.bias is not None:
+        return "the fused kernel does not support a nonzero bias"
+    if not _OPROJ_MM_RS_MIN_K <= weight.shape[1] < _OPROJ_MM_RS_MAX_K:
+        return f"local K {weight.shape[1]} is outside [256, 65535)"
+    world_size = get_tp_group().world_size
+    if world_size not in _OPROJ_MM_RS_WORLD_SIZES:
+        return f"TP size {world_size} is not 2, 4 or 8"
+    return None
+
+
+def maybe_enable_kda_oproj_mm_rs(attn: nn.Module) -> bool:
+    """Arm the fused o_proj path for one KDA layer.
+
+    Returns True when the caller must stop issuing its own sp_reduce_scatter,
+    because _finalize_o_proj now returns the reduce-scattered token shard.
+    """
+    global _oproj_mm_rs_announced
+    if not isinstance(attn, Glm5NextLinearAttention):
+        return False
+    if not glm_kda_oproj_mm_rs_enabled():
+        return False
+    reason = _oproj_mm_rs_unsupported_reason(attn)
+    if reason is not None:
+        if not _oproj_mm_rs_announced:
+            _oproj_mm_rs_announced = True
+            logger.warning("GLM KDA o_proj MM+ReduceScatter disabled: %s.", reason)
+        return False
+    tp_group = get_tp_group()
+    try:
+        backend = tp_group.device_group._get_backend(torch.device("npu"))
+        hcom = backend.get_hccl_comm_name(tp_group.rank_in_group)
+    except Exception as exc:  # noqa: BLE001 - never fail model build over HCCL
+        if not _oproj_mm_rs_announced:
+            _oproj_mm_rs_announced = True
+            logger.warning("GLM KDA o_proj MM+ReduceScatter disabled: no HCCL handle (%s).", exc)
+        return False
+    min_tokens = _oproj_mm_rs_min_tokens()
+    attn._oproj_mm_rs_hcom = hcom
+    attn._oproj_mm_rs_world_size = tp_group.world_size
+    attn._oproj_mm_rs_min_tokens = min_tokens
+    if not _oproj_mm_rs_announced:
+        _oproj_mm_rs_announced = True
+        # warning, not info: the deployment's log config drops info from the
+        # worker log files, which once made an armed fusion look inactive.
+        logger.warning(
+            "GLM KDA o_proj MM+ReduceScatter enabled (world_size=%d, min_tokens=%d).",
+            tp_group.world_size,
+            min_tokens,
+        )
+    return True
+
+
+def glm_kda_inproj_ag_mm_enabled() -> bool:
+    """Read the in_proj fusion switch; unset keeps sp_all_gather + GEMM."""
+    return os.getenv(_INPROJ_AG_MM_ENV, "0").strip().lower() in _OPROJ_MM_RS_TRUTHY
+
+
+def _inproj_ag_mm_unsupported_reason(attn: nn.Module) -> str | None:
+    """Static reasons this in_proj cannot use npu_all_gather_base_mm.
+
+    The fused kernel needs a bias-free unquantized BF16 projection on a 2/4/8
+    rank TP group with K inside its supported range; the current interface
+    explicitly rejects a nonzero bias.
+    """
+    layer = attn.in_proj_qkvbfg_a
+    if not callable(getattr(torch_npu, "npu_all_gather_base_mm", None)):
+        return "torch_npu.npu_all_gather_base_mm is unavailable"
+    if not isinstance(layer.quant_method, UnquantizedLinearMethod):
+        return "the fused kernel needs an unquantized in_proj"
+    weight = getattr(layer, "weight", None)
+    if weight is None or weight.dtype != torch.bfloat16:
+        return "the fused kernel needs BF16 in_proj weights"
+    if weight.ndim != 2 or weight.shape[0] == 0:
+        return "the fused kernel needs nonempty 2D in_proj weights"
+    if layer.bias is not None:
+        return "the fused kernel does not support a nonzero bias"
+    if not _INPROJ_AG_MM_MIN_K <= weight.shape[1] < _INPROJ_AG_MM_MAX_K:
+        return f"K {weight.shape[1]} is outside [256, 65535)"
+    world_size = get_tp_group().world_size
+    if world_size not in _INPROJ_AG_MM_WORLD_SIZES:
+        return f"TP size {world_size} is not 2, 4 or 8"
+    return None
+
+
+def maybe_enable_kda_inproj_ag_mm(attn: nn.Module) -> bool:
+    """Arm the fused in_proj path for one KDA layer.
+
+    Returns True when the caller must stop issuing its own sp_all_gather and
+    pass this layer the SP token shard, because forward now gathers itself.
+    """
+    global _inproj_ag_mm_announced
+    if not isinstance(attn, Glm5NextLinearAttention):
+        return False
+    if not glm_kda_inproj_ag_mm_enabled():
+        return False
+    reason = _inproj_ag_mm_unsupported_reason(attn)
+    if reason is not None:
+        if not _inproj_ag_mm_announced:
+            _inproj_ag_mm_announced = True
+            logger.warning("GLM KDA in_proj AllGather+MatMul disabled: %s.", reason)
+        return False
+    tp_group = get_tp_group()
+    try:
+        backend = tp_group.device_group._get_backend(torch.device("npu"))
+        hcom = backend.get_hccl_comm_name(tp_group.rank_in_group)
+    except Exception as exc:  # noqa: BLE001 - never fail model build over HCCL
+        if not _inproj_ag_mm_announced:
+            _inproj_ag_mm_announced = True
+            logger.warning("GLM KDA in_proj AllGather+MatMul disabled: no HCCL handle (%s).", exc)
+        return False
+    min_tokens = _inproj_ag_mm_min_tokens()
+    attn._inproj_ag_mm_hcom = hcom
+    attn._inproj_ag_mm_world_size = tp_group.world_size
+    attn._inproj_ag_mm_min_tokens = min_tokens
+    if not _inproj_ag_mm_announced:
+        _inproj_ag_mm_announced = True
+        logger.warning(
+            "GLM KDA in_proj AllGather+MatMul enabled (world_size=%d, min_tokens=%d).",
+            tp_group.world_size,
+            min_tokens,
+        )
+    return True
