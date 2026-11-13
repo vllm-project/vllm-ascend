@@ -11,7 +11,6 @@
     "CCACHE_MAXSIZE": "10G",
     "CMAKE_CXX_COMPILER_LAUNCHER": "ccache",
     "CMAKE_C_COMPILER_LAUNCHER": "ccache",
-    "HOST_GITCONFIG": "${localEnv:USERPROFILE}/.gitconfig",
     "PIP_BUILD_SYSTEM_CHECK": "0",
     "TORCH_DEVICE_BACKEND_AUTOLOAD": "0",
     "SOC_VERSION": "ascend910b1"
@@ -53,9 +52,7 @@
   },
   "mounts": [
     "source=vllm-ascend-pip-cache,target=/root/.cache/pip,type=volume",
-    "source=vllm-ascend-ccache,target=/root/.cache/ccache,type=volume",
-    "source=${localEnv:USERPROFILE}/.ssh,target=/root/.ssh,type=bind,consistency=cached,readonly"
+    "source=vllm-ascend-ccache,target=/root/.cache/ccache,type=volume"
   ],
-  "postCreateCommand": "apt-get update && apt-get install -y ccache dos2unix gcc g++ cmake make && ccache --set-config=max_size=10G && find /workspace/vllm-ascend -name '*.sh' -exec dos2unix {} \\; && pip3 install --root-user-action=ignore --extra-index-url https://download.pytorch.org/whl/cpu --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi -r requirements-dev.txt && pip3 install --root-user-action=ignore torch==2.10.0 torchvision setuptools-scm pybind11 cmake --index-url https://download.pytorch.org/whl/cpu && pip3 install --root-user-action=ignore vllm --extra-index-url https://download.pytorch.org/whl/cpu && pip3 install --root-user-action=ignore --no-build-isolation -e . && pip3 install --root-user-action=ignore coverage && echo 'import sys;from unittest.mock import Mock;sys.modules[\"vllm.cumem_allocator\"]=Mock();sys.modules[\"vllm.device_allocator.cumem\"]=Mock()' > /tmp/mock_cumem.py && sed -i '1i import sys;from unittest.mock import Mock;sys.modules[\"vllm.cumem_allocator\"]=Mock();sys.modules[\"vllm.device_allocator.cumem\"]=Mock()' tests/ut/conftest.py",
-  "postStartCommand": "if [ -f \"$HOST_GITCONFIG\" ]; then cp \"$HOST_GITCONFIG\" /root/.gitconfig; fi"
+  "postCreateCommand": "apt-get update && apt-get install -y ccache dos2unix gcc g++ cmake make && ccache --set-config=max_size=10G && find /workspace/vllm-ascend -name '*.sh' -exec dos2unix {} \\; && pip3 install --root-user-action=ignore --extra-index-url https://download.pytorch.org/whl/cpu --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi -r requirements-dev.txt && pip3 install --root-user-action=ignore torch==2.10.0 torchvision==0.25.0 setuptools-scm pybind11 cmake --index-url https://download.pytorch.org/whl/cpu && pip3 install --root-user-action=ignore vllm --extra-index-url https://download.pytorch.org/whl/cpu && pip3 install --root-user-action=ignore --no-build-isolation -e . && pip3 install --root-user-action=ignore coverage && SITE_PACKAGES=\"$(python3 -c 'import site;print(site.getsitepackages()[0])')\" && echo aW1wb3J0IHN5cwpmcm9tIHVuaXR0ZXN0Lm1vY2sgaW1wb3J0IE1vY2sKc3lzLm1vZHVsZXMuc2V0ZGVmYXVsdCgidmxsbS5jdW1lbV9hbGxvY2F0b3IiLCBNb2NrKCkpCnN5cy5tb2R1bGVzLnNldGRlZmF1bHQoInZsbG0uZGV2aWNlX2FsbG9jYXRvci5jdW1lbSIsIE1vY2soKSkK | base64 -d > \"$SITE_PACKAGES/sitecustomize.py\""
 }
