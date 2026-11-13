@@ -90,6 +90,7 @@ def _validate_fused_copy_sfa_config(vllm_config: VllmConfig, cfg: SparseKVOffloa
             f"tail slots when topk_buffer_size is a multiple of {COPY_SFA_TAIL_TOKENS}"
         )
 
+
 @dataclass
 class AscendSFAOffloadMetadata(AscendSFAMetadata):
     """SFA metadata extended with fused Copy-SFA and LIM inputs."""
@@ -873,7 +874,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         )
         return (resident_k, resident_v)
 
-    def _sfa_preprocess_prolog_v3(
+    def _sfa_preprocess_prolog_v3(  # type: ignore[override]
         self,
         hidden_states: torch.Tensor,
         kv_cache: tuple[torch.Tensor, ...],
@@ -888,7 +889,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         torch.Tensor,
         torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None,
     ]:
-        if self._is_decode_only(attn_metadata):
+        if attn_metadata is not None and self._is_decode_only(attn_metadata):
             kv_cache = self._get_current_layer_resident_cache_tensors()
             slot_mapping = attn_metadata.copy_sfa_device_slots
         return super()._sfa_preprocess_prolog_v3(
@@ -900,7 +901,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             attn_metadata=attn_metadata,
         )
 
-    def _sfa_preprocess_mlapo(
+    def _sfa_preprocess_mlapo(  # type: ignore[override]
         self,
         hidden_states: torch.Tensor,
         kv_cache: tuple[torch.Tensor, ...],
@@ -916,7 +917,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         torch.Tensor,
         torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None,
     ]:
-        if self._is_decode_only(attn_metadata):
+        if attn_metadata is not None and self._is_decode_only(attn_metadata):
             kv_cache = self._get_current_layer_resident_cache_tensors()
             slot_mapping = attn_metadata.copy_sfa_device_slots
         return super()._sfa_preprocess_mlapo(

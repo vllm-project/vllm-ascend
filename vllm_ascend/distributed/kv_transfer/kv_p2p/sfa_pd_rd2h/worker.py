@@ -433,7 +433,9 @@ class SFAPDRD2HConsumerWorker:
                 # Request-owned Copy-SFA rows stay reserved until every delayed
                 # D2H batch referencing them has retired; only then may cleanup
                 # run and the scheduler get its finished_sending acknowledgement.
-                d2h_owned = {req_id for req_id in ready_to_cleanup if req_id in getattr(self, "copy_sfa_slots_by_req", {})}
+                d2h_owned = {
+                    req_id for req_id in ready_to_cleanup if req_id in getattr(self, "copy_sfa_slots_by_req", {})
+                }
                 if not hasattr(self, "_d2h_pending_release_req_ids"):
                     self._d2h_pending_release_req_ids = set()
                 self._d2h_pending_release_req_ids.update(d2h_owned)

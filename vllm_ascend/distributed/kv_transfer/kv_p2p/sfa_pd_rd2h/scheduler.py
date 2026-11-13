@@ -546,11 +546,7 @@ class SFAPDRD2HScheduler:
             offload_enabled = get_ascend_config().sparse_kv_offload_config.enabled
         except RuntimeError:
             offload_enabled = False
-        if (
-offload_enabled
-            and allocator is not None
-            and binding is not None
-        ):
+        if offload_enabled and allocator is not None and binding is not None:
             # Terminal requests keep both their vLLM blocks and the
             # request-owned Copy-SFA row until every worker has retired any
             # D2H batch that can still reference the row. Entries are

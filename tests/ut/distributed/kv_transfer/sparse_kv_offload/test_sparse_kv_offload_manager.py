@@ -4,7 +4,6 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import torch
-
 from torch import Tensor
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
@@ -483,6 +482,7 @@ class TestHostKVRegistration(unittest.TestCase):
                 manager._bind_copy_sfa_bases.assert_called_once()
                 manager._init_fused_overlap_planner.assert_not_called()
 
+
 class TestDelayedD2HPlanner(unittest.TestCase):
     @staticmethod
     def _manager(max_num_reqs: int = 4) -> SparseKVOffloadManager:
@@ -500,7 +500,7 @@ class TestDelayedD2HPlanner(unittest.TestCase):
         return manager
 
     def _manager_with_execution_state(self, tp_size: int = 1, tp_rank: int = 0):
-        calls = []
+        calls: list[tuple[str, ...]] = []
 
         class FakeEvent:
             def __init__(self, name):

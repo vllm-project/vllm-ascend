@@ -605,8 +605,10 @@ class NPUModelRunner(GPUModelRunner):
     # ===== Sparse KV offload delayed D2H hooks =====
 
     def _sparse_kv_offload_d2h_enabled(self) -> bool:
+        # getattr guards: legacy unit fixtures build the runner via __new__
+        # without __init__'s attribute defaults.
         return (
-            self.sparse_kv_offload_manager is not None
+            getattr(self, "sparse_kv_offload_manager", None) is not None
             and getattr(self.model_state, "_offload_pool_generations", None) is not None
         )
 
@@ -626,12 +628,16 @@ class NPUModelRunner(GPUModelRunner):
                 "preemption resets num_computed_tokens and releases KV blocks "
                 f"without rebuilding resident tails (requests: {preempted})"
             )
-        return self.sparse_kv_offload_manager.retire_d2h()
+        manager = self.sparse_kv_offload_manager
+        assert manager is not None
+        return manager.retire_d2h()
 
     def _sparse_kv_offload_d2h_record_source_ready(self) -> bool:
         if not self._sparse_kv_offload_d2h_enabled():
             return False
-        return self.sparse_kv_offload_manager.record_d2h_source_ready()
+        manager = self.sparse_kv_offload_manager
+        assert manager is not None
+        return manager.record_d2h_source_ready()
 
     def _register_sparse_kv_caches(self, kv_caches: dict[str, Any]) -> None:
         """Bind host pools before the V2 KV connector registers its destinations."""

@@ -1178,6 +1178,7 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
     elif vllm_config.parallel_config.enable_eplb:
         raise ValueError("Upstream EPLB is only supported by Model Runner V2 on Ascend.")
 
+
 def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
     """Validate Ascend-specific options.
 

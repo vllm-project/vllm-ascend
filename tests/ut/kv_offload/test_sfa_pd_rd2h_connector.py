@@ -1584,6 +1584,7 @@ def test_consumer_scheduler_binds_copy_sfa_tail_at_alloc():
     assert req_meta.kv_tokens == 10367
 
     from unittest.mock import patch as _patch
+
     _cfg = SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=True))
     with _patch("vllm_ascend.ascend_config.get_ascend_config", return_value=_cfg):
         finished, _ = scheduler.request_finished_all_groups(request, ([1, 2], [3]))
@@ -1591,9 +1592,7 @@ def test_consumer_scheduler_binds_copy_sfa_tail_at_alloc():
     # retires the batches referencing it (finished_sending handshake).
     assert finished
     assert scheduler._copy_sfa_slot_allocator.get("req-tail") == 0
-    scheduler.update_connector_output(
-        SimpleNamespace(finished_sending=["req-tail"], finished_recving=[])
-    )
+    scheduler.update_connector_output(SimpleNamespace(finished_sending=["req-tail"], finished_recving=[]))
     assert scheduler._copy_sfa_slot_allocator.get("req-tail") is None
 
 

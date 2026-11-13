@@ -60,6 +60,23 @@ D2H_PLAN_TARGET_PREFIX_ROW = 4
 D2H_PLAN_FIELD_COUNT = 5
 D2H_SOURCE_EVENT_COUNT = 2
 D2H_COPY_CHUNK_SIZE = 64
+
+
+def _d2h_pinned(*shape: int, dtype: torch.dtype) -> torch.Tensor:
+    """Allocate host storage pinned when this process can actually pin it.
+
+    UT runners import torch_npu with its ``PrivateUse1HooksInterface``
+    unregistered, where ``pin_memory=True`` raises even though a tiny probe
+    allocation may succeed (the failure is size-dependent in that state).
+    Fall back to an unpinned tensor per allocation instead of probing.
+    """
+    try:
+        return torch.zeros(*shape, dtype=dtype, device="cpu", pin_memory=True)
+    except Exception:
+        logger.debug("delayed D2H host staging allocated unpinned", exc_info=True)
+        return torch.zeros(*shape, dtype=dtype, device="cpu", pin_memory=False)
+
+
 FSA_SELECTION_MEMBERSHIP_MAP_INT16_COUNT = 16376
 FSA_SELECTION_MEMBERSHIP_ALIGNMENT_INT16_COUNT = 16
 FSA_SELECTION_MEMBERSHIP_CONTROL_INT16_COUNT = 8
@@ -464,7 +481,6 @@ class SparseKVOffloadManager:
     so we can schedule longer max_model_len or larger decode batch size.
     No more scheduling logic: we reuse the original block_table/slot_mapping.
     """
-
 
     def __init__(
         self,
@@ -1494,7 +1510,6 @@ class SparseKVOffloadManager:
         if self.use_fused_overlap and capturing and self.tp_rank == 0:
             torch_npu.npu.current_stream().wait_stream(self.current_kv_save_stream)
 
-
     # ===== Delayed batch D2H (merged 2026-10-22) =====
     @staticmethod
     def _infer_host_kv_cache_group_id(kv_cache_config: KVCacheConfig) -> int:
@@ -1521,7 +1536,7 @@ class SparseKVOffloadManager:
 
     def _allocate_d2h_planner_state(self) -> None:
         """Allocate the dormant CPU control state for delayed D2H."""
-        capacity = (self.max_num_reqs + 2)
+        capacity = self.max_num_reqs + 2
         self.d2h_capacity = capacity
         self.d2h_owner_generations_cpu = np.full(
             capacity,
@@ -1529,12 +1544,7 @@ class SparseKVOffloadManager:
             dtype=np.int64,
         )
         self.d2h_stable_prefixes_cpu = np.zeros(capacity, dtype=np.int64)
-        self.d2h_plan_host = torch.zeros(
-            (D2H_PLAN_FIELD_COUNT, capacity),
-            dtype=torch.int64,
-            device="cpu",
-            pin_memory=True,
-        )
+        self.d2h_plan_host = _d2h_pinned(D2H_PLAN_FIELD_COUNT, capacity, dtype=torch.int64)
         self.d2h_inflight_active_host = self.d2h_plan_host[D2H_PLAN_ACTIVE_ROW]
         self.d2h_inflight_generations_host = self.d2h_plan_host[D2H_PLAN_GENERATION_ROW]
         self.d2h_inflight_source_slots_host = self.d2h_plan_host[D2H_PLAN_SOURCE_SLOT_ROW]
@@ -1546,18 +1556,8 @@ class SparseKVOffloadManager:
         self.d2h_inflight_source_slots_cpu = self.d2h_inflight_source_slots_host.numpy()
         self.d2h_inflight_destination_slots_cpu = self.d2h_inflight_destination_slots_host.numpy()
         self.d2h_inflight_target_prefixes_cpu = self.d2h_inflight_target_prefixes_host.numpy()
-        self.d2h_compact_source_slots_host = torch.empty(
-            capacity,
-            dtype=torch.int64,
-            device="cpu",
-            pin_memory=True,
-        )
-        self.d2h_compact_destination_slots_host = torch.empty(
-            capacity,
-            dtype=torch.int64,
-            device="cpu",
-            pin_memory=True,
-        )
+        self.d2h_compact_source_slots_host = _d2h_pinned(capacity, dtype=torch.int64)
+        self.d2h_compact_destination_slots_host = _d2h_pinned(capacity, dtype=torch.int64)
         self.d2h_compact_source_slots_cpu = self.d2h_compact_source_slots_host.numpy()
         self.d2h_compact_destination_slots_cpu = self.d2h_compact_destination_slots_host.numpy()
         self.d2h_inflight_active_count = 0
@@ -1864,8 +1864,7 @@ class SparseKVOffloadManager:
         owners = np.asarray(generations, dtype=np.int64)
         prefixes = np.asarray(stable_prefixes, dtype=np.int64)
         if slots.ndim != 1 or owners.shape != slots.shape or prefixes.shape != slots.shape:
-            raise ValueError(
-                "delayed D2H slot/generation/stable-prefix vectors must be 1-D and equal")
+            raise ValueError("delayed D2H slot/generation/stable-prefix vectors must be 1-D and equal")
         if np.any((slots < 0) | (slots >= self.d2h_capacity)):
             raise ValueError("delayed D2H pool slot is outside the configured capacity")
         if np.unique(slots).size != slots.size:
@@ -2098,7 +2097,6 @@ class SparseKVOffloadManager:
             f"source_over_48_bits={source_over_48_bits}, "
             f"destination_over_48_bits={destination_over_48_bits}"
         )
-
 
 
 _SPARSE_KV_OFFLOAD_MANAGER: SparseKVOffloadManager | None = None
