@@ -497,6 +497,10 @@ setup(
     packages=find_packages(exclude=("docs", "examples", "tests*", "csrc")),
     package_data={
         "vllm_ascend.observability.ms_metrics": ["config/*.yaml"],
+        "vllm_ascend.distributed.kv_transfer.utils.envcheck": [
+            "rules.json",
+            "artifacts/*",
+        ],
     },
     python_requires=">=3.10",
     install_requires=get_requirements(),
