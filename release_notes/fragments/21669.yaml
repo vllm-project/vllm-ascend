@@ -1,6 +1,6 @@
 pr: 21669
 entries:
   - category: feature
-    text: Added opt-in experimental MiniMax-M3.1-Flash index-key cache sharding across TP2 or TP4 ranks for BF16 KV caches. Configure enable_minimax_m3_indexer_dcp in additional_config; PD deployments require matching TP and MooncakeConnectorV2 on both roles.
+    text: Added opt-in experimental MiniMax-M3.1-Flash index-key cache sharding with compact-page decode scoring, MAX reduce-scatter, and shard-aware fused cache writes for BF16 KV caches on TP2/TP4. Configure enable_minimax_m3_indexer_dcp in additional_config; PD deployments require matching TP and MooncakeConnectorV2 on both roles.
     model: MiniMax-M3.1-Flash
     hardware: [A3]

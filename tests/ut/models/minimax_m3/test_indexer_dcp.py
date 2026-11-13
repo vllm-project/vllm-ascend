@@ -10,6 +10,11 @@ import torch
 from vllm_ascend.core.kv_cache_interface import AscendMiniMaxM3IndexerDCPSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker import MooncakePullRecvingThread
 from vllm_ascend.models.minimax_m3.msa_m3 import AscendMiniMaxM3IndexerBackend, AscendMiniMaxM3IndexerCache
+from vllm_ascend.models.minimax_m3.ops.indexer_dcp import (
+    index_shard_scores,
+    plan_prefill_index_gather,
+    reduce_scatter_index_scores,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -114,3 +119,51 @@ def test_rejects_missing_cann_index_score():
         pytest.raises(ValueError, match="CANN MsaIndexScore"),
     ):
         AscendMiniMaxM3IndexerCache(head_dim=128, prefix="indexer")
+
+
+def test_prefill_gather_excludes_stale_pages_and_reconstructs_valid_entries():
+    table = torch.tensor([[7, 2, 999, -1], [2, 444, 555, 666], [888, 777, 666, 555]], dtype=torch.int32)
+    lengths = torch.tensor([129, 1, 0])
+    pages, mapped = plan_prefill_index_gather(table, lengths, 128)
+    assert pages.tolist() == [0, 2, 7]
+    assert mapped.tolist() == [[2, 1, 0, 0], [1, 0, 0, 0], [0, 0, 0, 0]]
+    assert torch.equal(pages[mapped[0, :2].long()], table[0, :2])
+    assert pages[mapped[1, 0]] == table[1, 0]
+
+
+def test_prefill_gather_empty_batch_retains_only_null_page():
+    pages, mapped = plan_prefill_index_gather(torch.empty(0, 4, dtype=torch.int32), torch.empty(0), 128)
+    assert pages.tolist() == [0]
+    assert mapped.shape == (0, 4)
+
+
+@pytest.mark.parametrize("query_len", [0, 2])
+def test_compact_scores_reject_nonuniform_batch(query_len):
+    with pytest.raises(ValueError, match="uniform"):
+        index_shard_scores(
+            torch.empty(3, 4, 128, dtype=torch.bfloat16),
+            torch.empty(2, 32, 128, dtype=torch.bfloat16),
+            torch.zeros(3, 2, dtype=torch.int32),
+            torch.ones(3, dtype=torch.int32),
+            query_len,
+            4,
+            0,
+        )
+
+
+def test_compact_scores_empty_batch_does_not_launch_a_kernel():
+    scores = index_shard_scores(
+        torch.empty(0, 4, 128, dtype=torch.bfloat16),
+        torch.empty(2, 32, 128, dtype=torch.bfloat16),
+        torch.empty(0, 7, dtype=torch.int32),
+        torch.empty(0, dtype=torch.int32),
+        1,
+        4,
+        0,
+    )
+    assert scores.shape == (4, 0, 16)
+
+
+def test_reduce_scatter_rejects_uneven_head_ownership():
+    with pytest.raises(ValueError, match="divide evenly"):
+        reduce_scatter_index_scores(torch.empty(3, 2, 16), SimpleNamespace(world_size=4))

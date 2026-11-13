@@ -9,10 +9,14 @@ exact global block scores; summing local maxima would be incorrect.
 from __future__ import annotations
 
 import torch
+import torch.distributed as dist
 from vllm.triton_utils import tl, triton
 
 INDEX_BLOCK_SIZE = tl.constexpr(128)
 INDEX_HEAD_DIM = tl.constexpr(128)
+SCORE_ALIGNMENT = 16
+MAX_QUERY_TILE_ROWS = 32
+SCORE_FILL_VALUE = -3.4028234663852886e38
 
 
 @triton.jit
@@ -72,33 +76,148 @@ def gather_index_shards(cache: torch.Tensor, tp_group, pages: torch.Tensor | Non
     return gathered.view(blocks, size, local_tokens, dim).transpose(1, 2).reshape(blocks, 128, dim).contiguous()
 
 
-def index_shard_scores_cann(
+def plan_prefill_index_gather(
+    block_table_cpu: torch.Tensor, seq_lens_cpu: torch.Tensor, block_size: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Exclude stale/padded columns; the caller builds this CPU plan once per batch."""
+    columns = torch.arange(block_table_cpu.shape[1])
+    valid = (columns[None, :] * block_size < seq_lens_cpu[:, None]) & (block_table_cpu >= 0)
+    # Retain a safe page for empty rows and invalid entries. Unused columns
+    # must not cause a gather of stale physical pages from an earlier batch.
+    pages = torch.unique(torch.cat((block_table_cpu.new_zeros(1), block_table_cpu[valid])), sorted=True)
+    remapped = torch.zeros_like(block_table_cpu)
+    remapped[valid] = torch.searchsorted(pages, block_table_cpu[valid]).to(remapped.dtype)
+    return pages, remapped
+
+
+@triton.jit
+def _score_index_shard(
+    Query,
+    Cache,
+    BlockTable,
+    SeqLens,
+    Scores,
+    QUERY_STRIDE_T: tl.constexpr,
+    QUERY_STRIDE_H: tl.constexpr,
+    QUERY_STRIDE_D: tl.constexpr,
+    CACHE_STRIDE_P: tl.constexpr,
+    CACHE_STRIDE_T: tl.constexpr,
+    CACHE_STRIDE_D: tl.constexpr,
+    TABLE_STRIDE: tl.constexpr,
+    TABLE_WIDTH: tl.constexpr,
+    NUM_TOKENS: tl.constexpr,
+    NUM_HEADS: tl.constexpr,
+    QUERY_LEN: tl.constexpr,
+    SCORE_WIDTH: tl.constexpr,
+    SIZE: tl.constexpr,
+    RANK: tl.constexpr,
+    QUERY_TILE: tl.constexpr,
+    CAUSAL: tl.constexpr,
+    FILL: tl.constexpr,
+):
+    # Combine SIZE compact pages into one 128-key Cube tile. Query heads
+    # share the same page table and can occupy rows of the same matrix.
+    request = tl.program_id(0)
+    query_row = tl.program_id(1) * QUERY_TILE + tl.arange(0, QUERY_TILE)
+    query_offset = query_row // NUM_HEADS
+    head = query_row % NUM_HEADS
+    token = request * QUERY_LEN + query_offset
+    block_start = tl.program_id(2) * SIZE
+    columns = block_start + tl.arange(0, SIZE)
+    output = Scores + (head[:, None] * NUM_TOKENS + token[:, None]) * SCORE_WIDTH + columns[None, :]
+    output_mask = (query_offset[:, None] < QUERY_LEN) & (columns[None, :] < SCORE_WIDTH)
+    length = tl.load(SeqLens + request)
+    # Graph padding and table-capacity tails must still initialize scores, but
+    # do not need key/query loads or a Cube operation.
+    if block_start * INDEX_BLOCK_SIZE + RANK >= length:
+        tl.store(output, FILL, output_mask)
+        return
+    dim = tl.arange(0, INDEX_HEAD_DIM)
+    query = tl.load(
+        Query + token[:, None] * QUERY_STRIDE_T + head[:, None] * QUERY_STRIDE_H + dim[None, :] * QUERY_STRIDE_D,
+        query_offset[:, None] < QUERY_LEN,
+        other=0,
+    )
+
+    local_tokens: tl.constexpr = INDEX_BLOCK_SIZE // SIZE
+    lane = tl.arange(0, INDEX_BLOCK_SIZE)
+    block = block_start + lane // local_tokens
+    local_offset = lane % local_tokens
+    page = tl.load(BlockTable + request * TABLE_STRIDE + block, block < TABLE_WIDTH, other=0).to(tl.int64)
+    key_position = block * INDEX_BLOCK_SIZE + local_offset * SIZE + RANK
+    valid_key = (block < TABLE_WIDTH) & (page >= 0) & (key_position < length)
+    key = tl.load(
+        Cache + page[:, None] * CACHE_STRIDE_P + local_offset[:, None] * CACHE_STRIDE_T + dim[None, :] * CACHE_STRIDE_D,
+        valid_key[:, None],
+        other=0,
+    )
+    products = tl.dot(query, tl.trans(key))
+    visible = valid_key[None, :]
+    if CAUSAL:
+        frontier = length - QUERY_LEN + query_offset + 1
+        visible = visible & (key_position[None, :] < frontier[:, None])
+    products = tl.where(visible, products, FILL)
+    maxima = tl.max(tl.reshape(products, (QUERY_TILE, SIZE, local_tokens)), axis=2)
+    tl.store(output, maxima, output_mask)
+
+
+def index_shard_scores(
     query: torch.Tensor,
     cache: torch.Tensor,
     block_table: torch.Tensor,
-    cu_seqlens_q: torch.Tensor,
     seq_lens: torch.Tensor,
-    start_loc: torch.Tensor,
-    causal_mask: torch.Tensor,
+    query_len: int,
     size: int,
     rank: int,
+    *,
+    causal: bool = True,
 ) -> torch.Tensor:
-    """Use CANN's Cube score kernel with one layer of temporary local keys.
-
-    Repeating each owned key fills the fixed 128-token CANN page. Shifting
-    the causal frontier by rank makes key group j visible precisely when
-    the original interleaved position size * j + rank becomes visible.
-    No other rank's index keys are materialized or communicated here.
-    """
-    from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import _minimax_m3_index_score
-
-    expanded_cache = cache.repeat_interleave(size, dim=1)
-    return _minimax_m3_index_score(
+    """Score compact pages directly; decode metadata requires uniform query lengths."""
+    if size not in (2, 4) or not 0 <= rank < size:
+        raise ValueError("M3 index scores require TP2/TP4 and a valid shard rank")
+    if query.dtype != torch.bfloat16 or cache.dtype != torch.bfloat16:
+        raise ValueError("M3 compact index scores require BF16 queries and keys")
+    if cache.shape[1:] != (128 // size, 128) or query.shape[-1] != 128:
+        raise ValueError("M3 compact index scores require 128-wide keys and compact 128-token pages")
+    if query_len <= 0 or query.shape[0] != seq_lens.numel() * query_len:
+        raise ValueError("M3 compact index scores require uniform decode query lengths")
+    if block_table.shape[0] != seq_lens.numel():
+        raise ValueError("M3 compact index scores require one block table per sequence")
+    width = triton.cdiv(block_table.shape[1], SCORE_ALIGNMENT) * SCORE_ALIGNMENT
+    scores = torch.empty((query.shape[1], query.shape[0], width), dtype=torch.float32, device=query.device)
+    if scores.numel() == 0:
+        return scores
+    query_tile = max(16, triton.next_power_of_2(min(query_len * query.shape[1], MAX_QUERY_TILE_ROWS)))
+    _score_index_shard[
+        (seq_lens.numel(), triton.cdiv(query_len * query.shape[1], query_tile), triton.cdiv(width, size))
+    ](
         query,
-        expanded_cache,
+        cache,
         block_table,
-        cu_seqlens_q,
-        (seq_lens - rank).clamp_min(0),
-        start_loc,
-        causal_mask,
+        seq_lens,
+        scores,
+        *query.stride(),
+        *cache.stride(),
+        block_table.stride(0),
+        block_table.shape[1],
+        query.shape[0],
+        query.shape[1],
+        query_len,
+        width,
+        size,
+        rank,
+        query_tile,
+        causal,
+        SCORE_FILL_VALUE,
     )
+    return scores
+
+
+def reduce_scatter_index_scores(scores: torch.Tensor, tp_group) -> torch.Tensor:
+    """Reduce block maxima directly to the TP rank that consumes each head."""
+    if scores.shape[0] % tp_group.world_size:
+        raise ValueError("Index heads must divide evenly across the TP group")
+    local_heads = scores.shape[0] // tp_group.world_size
+    output = torch.empty((local_heads, *scores.shape[1:]), dtype=scores.dtype, device=scores.device)
+    dist.reduce_scatter_tensor(output, scores.contiguous(), op=dist.ReduceOp.MAX, group=tp_group.device_group)
+    return output

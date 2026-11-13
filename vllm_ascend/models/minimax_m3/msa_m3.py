@@ -10,7 +10,6 @@ from importlib.util import find_spec
 from typing import Any, ClassVar
 
 import torch
-import torch.distributed as dist
 from torch import nn
 from torch.nn.parameter import Parameter
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config, get_current_vllm_config_or_none
@@ -414,8 +413,9 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
             prefill_end = num_decodes + active_prefills
             prefill_query_lens_cpu = qsl_cpu[num_decodes + 1 : prefill_end + 1] - qsl_cpu[num_decodes:prefill_end]
             prefill_context_lens = self.context_len_buffer[num_decodes:prefill_end]
+            prefill_seq_lens_cpu = seq_lens[num_decodes:prefill_end].detach().cpu()
             prefill_context_lens.copy_(
-                (seq_lens[num_decodes:prefill_end].detach().cpu() - prefill_query_lens_cpu).to(
+                (prefill_seq_lens_cpu - prefill_query_lens_cpu).to(
                     device=self.context_len_buffer.device,
                     dtype=torch.int32,
                     non_blocking=True,
@@ -440,11 +440,15 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
             )
             gather_pages = gather_block_table = None
             if self.shard_index_cache:
+                from vllm_ascend.models.minimax_m3.ops.indexer_dcp import plan_prefill_index_gather
+
                 # Prefill is eager. Plan the compact gather once per batch and
                 # reuse it in every layer, rather than gathering unused pages
                 # from the entire allocated cache at each attention layer.
-                prefill_table_cpu = block_table[num_decodes:prefill_end].detach().cpu().clamp_min(0)
-                pages_cpu, inverse_cpu = torch.unique(prefill_table_cpu, sorted=True, return_inverse=True)
+                prefill_table_cpu = block_table[num_decodes:prefill_end].detach().cpu()
+                pages_cpu, inverse_cpu = plan_prefill_index_gather(
+                    prefill_table_cpu, prefill_seq_lens_cpu, self.block_size
+                )
                 gather_pages = pages_cpu.to(device=self.context_len_buffer.device, dtype=torch.int64)
                 gather_block_table = inverse_cpu.to(device=self.context_len_buffer.device, dtype=torch.int32)
             prefill_metadata = AscendMiniMaxM3IndexerPrefillMetadata(
@@ -573,26 +577,25 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
             assert d is not None
             decode_iq = iq[:num_decode_tokens]
             if self.index_cache.context_parallel_size > 1:
-                from vllm_ascend.models.minimax_m3.ops.indexer_dcp import index_shard_scores_cann
+                from vllm_ascend.models.minimax_m3.ops.indexer_dcp import (
+                    index_shard_scores,
+                    reduce_scatter_index_scores,
+                )
 
                 group = get_tp_group()
                 full_query = group.all_gather(decode_iq.contiguous(), dim=1)
                 local_cache = kv[0] if isinstance(kv, tuple) else kv
-                scores = index_shard_scores_cann(
+                scores = index_shard_scores(
                     full_query,
                     local_cache,
                     d.block_table,
-                    d.cu_seqlens_q,
                     d.seq_lens,
-                    d.start_loc,
-                    index_md.causal_mask,
+                    d.decode_query_len,
                     group.world_size,
                     group.rank_in_group,
+                    causal=index_md.causal_mask is not None,
                 )
-                dist.all_reduce(scores, op=dist.ReduceOp.MAX, group=group.device_group)
-                local_scores = scores.narrow(
-                    0, group.rank_in_group * self.num_index_heads, self.num_index_heads
-                ).contiguous()
+                local_scores = reduce_scatter_index_scores(scores, group)
                 decode_topk, decode_select_num_idx = index_decode_topk_fused(
                     local_scores,
                     d.seq_lens - d.decode_query_len,

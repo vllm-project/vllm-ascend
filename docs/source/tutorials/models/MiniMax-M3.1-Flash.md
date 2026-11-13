@@ -33,17 +33,34 @@ This model-specific mode requires CANN MsaIndexScore, 128-token blocks, and
 the index keys on each rank; local block scores are combined with a MAX
 reduction before the normal TopK selection. With BF16 caches, the 60-layer
 main-model cache payload falls from 45 KiB to 33.75 KiB per cached token per
-rank. Decode uses the existing CANN score operator with a temporary
-128-token page made from repeated local keys and a rank-adjusted causal
-frontier. Weights, graph workspaces, this temporary buffer, and speculative
-model caches are separate.
+rank. Decode uses a Triton Cube kernel that reads compact pages directly,
+without expanding the allocated index cache. A MAX reduce-scatter sends each
+head's final scores only to its owning TP rank. The fused Norm/RoPE/cache
+writer applies the same interleaved ownership rule as the separate scatter.
+Weights, graph workspaces, score buffers, and speculative model caches are
+separate. The compact kernel and HCCL MAX reduce-scatter graph path require
+hardware validation on the selected CANN/torch_npu stack before deployment.
 
 For PD deployments, enable this option on both Prefill and Decode, use the
 same TP size on both roles, and select `MooncakeConnectorV2`. Prefill gathers
-only the index pages referenced by its current batch and uses the existing
+only the index pages referenced within the current sequence lengths and uses the existing
 prefill attention operator. PP layer partitioning can differ between roles.
 A producer without indexer sharding cannot send raw index pages to a sharded
 consumer. This mode does not configure the hosts' NPU interconnect.
+
+Before deployment, run the one-card compact-score/fused-write tests and the
+four-card HCCL/graph tests on the matching software stack:
+
+```bash
+pytest -q tests/e2e/pull_request/one_card/test_minimax_m3_indexer_dcp.py
+pytest -q tests/e2e/pull_request/four_card/test_minimax_m3_indexer_dcp.py
+torchrun --standalone --nproc-per-node=4 benchmarks/benchmark_minimax_m3_indexer_dcp.py --graph
+```
+
+The benchmark compares one indexer layer with replicated keys, expanded DCP,
+and compact DCP. It checks numerical scores before reporting latency and
+temporary memory; graph-capture memory is reported separately. These operator
+measurements do not establish serving throughput or end-to-end PD performance.
 
 ## 3 Prerequisites
 

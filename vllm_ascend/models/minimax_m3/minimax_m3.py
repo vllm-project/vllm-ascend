@@ -44,6 +44,7 @@ from vllm.distributed import (
     get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_world_size,
+    get_tp_group,
 )
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import logger
@@ -533,6 +534,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         index_cache = self.indexer.index_cache.kv_cache
         if isinstance(index_cache, (tuple, list)):
             index_cache = index_cache[0]
+        index_context_size = self.indexer.index_cache.context_parallel_size
+        index_context_rank = get_tp_group().rank_in_group if index_context_size > 1 else 0
         query, index_query = minimax_qknorm_rope_cache(
             qkv,
             self.rotary_emb.cos_sin_cache,
@@ -552,6 +555,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             self.num_idx_heads,
             self.q_norm.variance_epsilon,
             index_packed=index_qk,
+            index_context_parallel_size=index_context_size,
+            index_context_parallel_rank=index_context_rank,
         )
         topk_idx = self.indexer(index_query)
         self.impl.forward(self, query, self.kv_cache, topk_idx, attn_output)
