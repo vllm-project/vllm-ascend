@@ -124,6 +124,13 @@ class _FakePrefixManager:
 
 
 class TestAscendStoreCoordinator(unittest.TestCase):
+    def test_group_geometry_must_be_explicit(self):
+        groups = [KVCacheGroupSpec(["attention"], _full_spec(32))]
+        with self.assertRaises(TypeError):
+            AscendStoreCoordinator(groups, 32, 16)
+        with self.assertRaises(TypeError):
+            AscendStoreCoordinator(groups, 32, 16, group_block_sizes=[32])
+
     def test_partial_hash_hit_uses_existing_coordinator(self):
         """Hit arbitration changes alignment, not the physical cache page."""
         groups = [
@@ -135,7 +142,14 @@ class TestAscendStoreCoordinator(unittest.TestCase):
         hashes = _hashes(4)
         for partial, expected in ((False, 32), (True, 48)):
             with self.subTest(partial=partial):
-                coord = AscendStoreCoordinator(groups, 32, 16, enable_partial_hash_hits=partial)
+                coord = AscendStoreCoordinator(
+                    groups,
+                    32,
+                    16,
+                    group_block_sizes=[32, 32],
+                    group_cache_families=["default", "default"],
+                    enable_partial_hash_hits=partial,
+                )
                 exists = {(group, hashes[index]) for group in (0, 1) for index in (1, 2)}
                 _, hit = coord.find_longest_cache_hit(hashes, 64, ExternalCachedBlockPool(16, exists))
                 self.assertEqual(hit, expected)
@@ -150,7 +164,14 @@ class TestAscendStoreCoordinator(unittest.TestCase):
                 ["state"], MambaSpec(block_size=32, shapes=((1, 1),), dtypes=(torch.float32,), mamba_cache_mode="align")
             ),
         ]
-        coord = AscendStoreCoordinator(groups, 32, 16, enable_partial_hash_hits=True)
+        coord = AscendStoreCoordinator(
+            groups,
+            32,
+            16,
+            group_block_sizes=[32, 32],
+            group_cache_families=["default", "default"],
+            enable_partial_hash_hits=True,
+        )
         hashes = _hashes(4)
         exists = {(0, hashes[1]), (1, hashes[1]), (0, hashes[2])}
         _, hit = coord.find_longest_cache_hit(hashes, 64, ExternalCachedBlockPool(16, exists))

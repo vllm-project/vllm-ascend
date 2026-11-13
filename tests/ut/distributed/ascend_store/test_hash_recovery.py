@@ -46,7 +46,12 @@ def test_same_group_hits_as_upstream(seed, eagle):
         (coordinator, coordinator.AscendStoreCoordinator),
         (upstream, upstream.MooncakeStoreCoordinator),
     ]:
-        coord = cls(groups(), 16, 4, use_eagle=eagle, enable_partial_hash_hits=True)
+        geometry = (
+            {"group_block_sizes": [16, 16], "group_cache_families": ["default", "default"]}
+            if cls is coordinator.AscendStoreCoordinator
+            else {}
+        )
+        coord = cls(groups(), 16, 4, use_eagle=eagle, enable_partial_hash_hits=True, **geometry)
         pool = module.ExternalCachedBlockPool(4, exists)
         results.append([coord.find_longest_cache_hit(hashes, end, pool)[1] for end in range(4, 129, 4)])
     assert results[0] == results[1]
@@ -75,7 +80,14 @@ def bare_worker(coord, db, store):
 
 @pytest.mark.parametrize("seed", [0, 42, 1024])
 def test_boundary_save_lookup_and_physical_page_replay(seed):
-    coord = coordinator.AscendStoreCoordinator(groups(), 16, 4, enable_partial_hash_hits=True)
+    coord = coordinator.AscendStoreCoordinator(
+        groups(),
+        16,
+        4,
+        group_block_sizes=[16, 16],
+        group_cache_families=["default", "default"],
+        enable_partial_hash_hits=True,
+    )
     rng = torch.Generator().manual_seed(seed)
     sources = [torch.randn(4, 16, 1, generator=rng), torch.randn(4, 2, generator=rng)]
     db = metadata.ChunkedTokenDatabase(
@@ -124,7 +136,14 @@ def test_boundary_save_lookup_and_physical_page_replay(seed):
 def test_core_boundary_offload_is_not_positional_recurrent_table():
     scheduler = object.__new__(KVPoolScheduler)
     scheduler.enable_partial_hash_hits = True
-    scheduler.cache_coordinator = coordinator.AscendStoreCoordinator(groups(), 16, 4, enable_partial_hash_hits=True)
+    scheduler.cache_coordinator = coordinator.AscendStoreCoordinator(
+        groups(),
+        16,
+        4,
+        group_block_sizes=[16, 16],
+        group_cache_families=["default", "default"],
+        enable_partial_hash_hits=True,
+    )
     scheduler.can_put = True
     scheduler._request_trackers = {"r": SimpleNamespace(prefill_end_tokens=12, num_prompt_tokens=12, token_len=12)}
     scheduler._unfinished_requests = {"r": (SimpleNamespace(block_hashes=[b"a", b"b", b"c"]), None)}

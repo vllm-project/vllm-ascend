@@ -123,16 +123,12 @@ class AscendStoreCoordinator:
         kv_cache_groups: list[KVCacheGroupSpec],
         scheduler_block_size: int,
         hash_block_size: int,
-        group_block_sizes: list[int] | None = None,
-        group_cache_families: list[str] | None = None,
+        group_block_sizes: list[int],
+        group_cache_families: list[str],
         use_eagle: bool = False,
         retention_interval: int | None = None,
         enable_partial_hash_hits: bool = False,
     ) -> None:
-        if group_block_sizes is None:
-            group_block_sizes = [_unwrap_spec(group.kv_cache_spec).block_size for group in kv_cache_groups]
-        if group_cache_families is None:
-            group_cache_families = ["default"] * len(kv_cache_groups)
         assert len(kv_cache_groups) == len(group_block_sizes)
         assert len(kv_cache_groups) == len(group_cache_families)
         assert scheduler_block_size % hash_block_size == 0, (
@@ -171,17 +167,6 @@ class AscendStoreCoordinator:
         # Do not keep the coordinator alive through its cache while GC is frozen.
         self._cached_reachable_masks = lru_cache(maxsize=_REACHABLE_MASK_CACHE_SIZE)(
             partial(type(self)._reachable_masks, proxy(self))
-        )
-
-    @classmethod
-    def from_geometry(cls, geometry):
-        return cls(
-            list(geometry.groups),
-            geometry.scheduler_block_size,
-            geometry.hash_block_size,
-            use_eagle=geometry.use_eagle,
-            retention_interval=geometry.retention_interval,
-            enable_partial_hash_hits=geometry.partial_hits,
         )
 
     def align_lookup_length(self, length: int) -> int:

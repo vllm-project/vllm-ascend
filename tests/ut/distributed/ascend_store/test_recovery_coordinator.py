@@ -54,6 +54,8 @@ def _make_coord(
         groups,
         scheduler_block_size=scheduler_block_size,
         hash_block_size=hash_block_size,
+        group_block_sizes=block_sizes,
+        group_cache_families=["default"] * len(groups),
         use_eagle=use_eagle,
         retention_interval=retention_interval,
         enable_partial_hash_hits=enable_partial_hash_hits,
