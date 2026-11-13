@@ -11,7 +11,7 @@ import pytest
 import torch
 
 
-def _load_adapter():
+def _load_adapter(*, load_wrapper: bool = False):
     source = Path(__file__).resolve().parents[4] / "vllm_ascend/models/qwen4_exp/input_adapter.py"
     module = ast.parse(source.read_text())
     module.body = [node for node in module.body if not isinstance(node, (ast.Import, ast.ImportFrom))]
@@ -42,6 +42,8 @@ def _load_adapter():
         "lightning_indexer_v2_metadata": lightning_metadata,
     }
     exec(compile(module, str(source), "exec"), namespace)
+    if load_wrapper:
+        return namespace["_Qwen4ExpPreparedRotaryEmbedding"], calls
     return namespace["Qwen4ExpPreparedInputAdapter"], calls
 
 
@@ -77,6 +79,55 @@ class _TwoLayerModel:
 
     def modules(self):
         return iter(self.layers)
+
+
+class _RotaryDelegate(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cos_sin_cache = torch.zeros((16, 4))
+        self.head_size = 4
+        self.rotary_dim = 4
+        self.is_neox_style = True
+        self.mrope_interleaved = True
+        self.mrope_section = [1, 1, 0]
+        self.calls = 0
+
+    def forward(self, positions, query, key=None, offsets=None):
+        del positions, query, key, offsets
+        self.calls += 1
+        return "fallback-q", "fallback-k"
+
+
+def test_rotary_wrapper_consumes_prepared_rows_without_replacing_upstream_projection(monkeypatch):
+    wrapper_cls, _ = _load_adapter(load_wrapper=True)
+    delegate = _RotaryDelegate()
+    wrapper = wrapper_cls(delegate)
+    positions = torch.arange(2)
+    query = torch.zeros((2, 4))
+    key = torch.zeros((2, 4))
+    wrapper.set_prepared_cos_sin(torch.zeros((2, 4)))
+    monkeypatch.setattr(wrapper, "_can_use_prepared", lambda *args: True)
+    monkeypatch.setattr(wrapper, "_forward_prepared", lambda positions, query, key: (query + 1, key + 2))
+
+    query_out, key_out = wrapper(positions, query, key)
+
+    torch.testing.assert_close(query_out, query + 1)
+    torch.testing.assert_close(key_out, key + 2)
+    assert delegate.calls == 0
+
+
+def test_rotary_wrapper_preserves_delegate_fallback(monkeypatch):
+    wrapper_cls, _ = _load_adapter(load_wrapper=True)
+    delegate = _RotaryDelegate()
+    wrapper = wrapper_cls(delegate)
+    monkeypatch.setattr(wrapper, "_can_use_prepared", lambda *args: False)
+
+    assert wrapper(
+        torch.arange(2),
+        torch.zeros((2, 4)),
+        torch.zeros((2, 4)),
+    ) == ("fallback-q", "fallback-k")
+    assert delegate.calls == 1
 
 
 @pytest.mark.parametrize("tokens", [1, 2, 7])

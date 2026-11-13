@@ -34,22 +34,132 @@ def _tensor_storage_signature(tensor: torch.Tensor) -> tuple[object, ...]:
     )
 
 
+class _Qwen4ExpPreparedRotaryEmbedding(torch.nn.Module):
+    """Consume prepared RoPE rows without replacing upstream QKV projection."""
+
+    def __init__(self, delegate: torch.nn.Module) -> None:
+        super().__init__()
+        self.delegate = delegate
+        self._prepared_cos_sin: torch.Tensor | None = None
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            delegate = super().__getattr__("delegate")
+            return getattr(delegate, name)
+
+    def set_prepared_cos_sin(self, cos_sin: torch.Tensor) -> None:
+        self._prepared_cos_sin = cos_sin
+
+    def _can_use_prepared(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        offsets: torch.Tensor | None,
+    ) -> bool:
+        from vllm.triton_utils import HAS_TRITON
+
+        prepared = self._prepared_cos_sin
+        if not HAS_TRITON or prepared is None or key is None or offsets is not None:
+            return False
+        if positions.ndim not in (1, 2):
+            return False
+        if positions.ndim == 2 and (
+            not getattr(self.delegate, "mrope_interleaved", False)
+            or getattr(self.delegate, "mrope_section", None) is None
+        ):
+            return False
+        expected_shape = (*positions.shape, self.delegate.cos_sin_cache.shape[-1])
+        num_tokens = positions.shape[-1]
+        return bool(
+            tuple(prepared.shape) == expected_shape
+            and prepared.device == query.device
+            and prepared.dtype == query.dtype
+            and key.device == query.device
+            and key.dtype == query.dtype
+            and query.shape[0] == num_tokens
+            and key.shape[0] == num_tokens
+        )
+
+    def _forward_prepared(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        prepared = self._prepared_cos_sin
+        if prepared is None:
+            raise RuntimeError("Qwen4Exp prepared RoPE rows are unavailable")
+        cos, sin = prepared.chunk(2, dim=-1)
+        query_shape = query.shape
+        key_shape = key.shape
+        if positions.ndim == 2:
+            from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
+
+            query, key = triton_mrope(
+                query,
+                key,
+                cos.contiguous(),
+                sin.contiguous(),
+                self.delegate.mrope_section,
+                self.delegate.head_size,
+                self.delegate.rotary_dim,
+                self.delegate.mrope_interleaved,
+                self.delegate.is_neox_style,
+            )
+        else:
+            from vllm_ascend.ops.triton.rope import rope_forward_triton
+
+            num_tokens = positions.shape[0]
+            query, key = rope_forward_triton(
+                query.view(num_tokens, -1, self.delegate.head_size),
+                key.view(num_tokens, -1, self.delegate.head_size),
+                cos=cos,
+                sin=sin,
+                rope_dim=self.delegate.rotary_dim,
+                is_neox_style=self.delegate.is_neox_style,
+            )
+        return query.reshape(query_shape), key.reshape(key_shape)
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if self._can_use_prepared(positions, query, key, offsets):
+            if key is None:
+                raise RuntimeError("Qwen4Exp prepared RoPE requires a key tensor")
+            return self._forward_prepared(positions, query, key)
+        if offsets is None:
+            return self.delegate(positions, query, key)
+        return self.delegate(positions, query, key, offsets)
+
+
 class Qwen4ExpPreparedInputAdapter:
     """Prepare model-specific replay inputs without changing public MRV2."""
 
     def __init__(self, model: torch.nn.Module) -> None:
         self._layers = tuple(
-            module
-            for module in model.modules()
-            if module.__class__.__name__ == "AscendQwen4ExpQSAAttention"
+            module for module in model.modules() if module.__class__.__name__ == "AscendQwen4ExpQSAAttention"
         )
         self._rope_buffers: dict[tuple[int, tuple[int, ...], torch.dtype, torch.device], torch.Tensor] = {}
-        self._metadata_buffers: dict[
-            tuple[object, ...], torch.Tensor
-        ] = {}
+        self._metadata_buffers: dict[tuple[object, ...], torch.Tensor] = {}
         self._prepare_gbsa_enabled = os.getenv("VLLM_ASCEND_QWEN4_PREPARE_GBSA", "1") != "0"
         self._prepare_lightning_enabled = os.getenv("VLLM_ASCEND_QWEN4_PREPARE_LIGHTNING", "1") != "0"
         self._prepare_rope_enabled = os.getenv("VLLM_ASCEND_QWEN4_PREPARE_ROPE", "1") != "0"
+        if self._prepare_rope_enabled:
+            for layer in self._layers:
+                rotary = layer.rotary_emb
+                if (
+                    not layer.layer_name.startswith("mtp.")
+                    and isinstance(rotary, torch.nn.Module)
+                    and not isinstance(rotary, _Qwen4ExpPreparedRotaryEmbedding)
+                ):
+                    layer.rotary_emb = _Qwen4ExpPreparedRotaryEmbedding(rotary)
 
     def prepare_inputs(self, input_batch: Any) -> None:
         """Gather QSA MRoPE rows into graph-stable buffers before forward."""
@@ -81,7 +191,10 @@ class Qwen4ExpPreparedInputAdapter:
             )
             prepared = prepared_by_cache.get(cache_key)
             if prepared is not None:
-                layer._qsa_prepared_cos_sin = prepared
+                if isinstance(layer.rotary_emb, _Qwen4ExpPreparedRotaryEmbedding):
+                    layer.rotary_emb.set_prepared_cos_sin(prepared)
+                else:
+                    layer._qsa_prepared_cos_sin = prepared
                 continue
             safe_positions = positions.clamp(0, cache.shape[0] - 1).contiguous()
             gathered = cache[safe_positions]
@@ -96,7 +209,10 @@ class Qwen4ExpPreparedInputAdapter:
                 buffer = torch.empty_like(gathered)
                 self._rope_buffers[key] = buffer
             buffer.copy_(gathered)
-            layer._qsa_prepared_cos_sin = buffer
+            if isinstance(layer.rotary_emb, _Qwen4ExpPreparedRotaryEmbedding):
+                layer.rotary_emb.set_prepared_cos_sin(buffer)
+            else:
+                layer._qsa_prepared_cos_sin = buffer
             prepared_by_cache[cache_key] = buffer
 
     def prepare_attention_metadata(
