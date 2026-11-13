@@ -115,7 +115,7 @@ def _leg(use_pool: bool, case_name: str):
                 "cudagraph_mode": "FULL_DECODE_ONLY",
                 "cudagraph_capture_sizes": [6, 12],
             },
-            additional_config={"enable_dsa_cp": False, "enable_fused_mc2": 0},
+            additional_config={"enable_fused_mc2": 0},
         )
         if use_pool:
             pool = stack.enter_context(SingleNodeMemcacheManager(_build_memcache_pool_config(), case_name))
