@@ -24,6 +24,8 @@ from vllm.v1.outputs import LogprobsTensors
 from vllm_ascend.ops.triton.sample.fill_logprob_token_idx import _fill_logprob_token_ids_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
+_MAX_TOPK_BLOCK = 8192
+
 
 @triton.jit
 def _topk_log_softmax_kernel(
@@ -35,7 +37,7 @@ def _topk_log_softmax_kernel(
     topk,
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
-    PADDED_TOPK: tl.constexpr,
+    TOPK_BLOCK_SIZE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     row_ptr = logits_ptr + req_idx * logits_stride
@@ -56,14 +58,15 @@ def _topk_log_softmax_kernel(
         se += tl.sum(e)
     lse = tl.log(se)
 
-    k_offset = tl.arange(0, PADDED_TOPK)
-    k_mask = k_offset < topk
-    topk_ids = tl.load(topk_ids_ptr + req_idx * topk_ids_stride + k_offset, mask=k_mask, other=0)
+    for j in range(0, topk, TOPK_BLOCK_SIZE):
+        k_offset = j + tl.arange(0, TOPK_BLOCK_SIZE)
+        k_mask = k_offset < topk
+        topk_ids = tl.load(topk_ids_ptr + req_idx * topk_ids_stride + k_offset, mask=k_mask, other=0)
 
-    logits = tl.load(row_ptr + topk_ids, mask=k_mask)
-    logits = logits.to(tl.float32)
-    o = logits - lse - max_val
-    tl.store(output_ptr + req_idx * topk + k_offset, o, mask=k_mask)
+        logits = tl.load(row_ptr + topk_ids, mask=k_mask)
+        logits = logits.to(tl.float32)
+        o = logits - lse - max_val
+        tl.store(output_ptr + req_idx * topk + k_offset, o, mask=k_mask)
 
 
 def compute_token_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor:
@@ -80,7 +83,7 @@ def compute_token_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> tor
         num_logprobs,
         vocab_size,
         BLOCK_SIZE=12944,
-        PADDED_TOPK=max(triton.next_power_of_2(num_logprobs), 2),
+        TOPK_BLOCK_SIZE=min(max(triton.next_power_of_2(num_logprobs), 2), _MAX_TOPK_BLOCK),
         multibuffer=False,
     )
     return logprobs

@@ -68,7 +68,7 @@ These small vocabularies are targeted contract regressions, not a claim of full-
 
 Ranks are integer counts: require exact equality (`rtol=0, atol=0`) against `(logits >= selected_logits).sum(-1)` on the same input values, independent of the input floating-point dtype. The committed wrapper tests use fp32 logits; their separate logprob comparison uses `rtol=1e-4, atol=1e-4`. This does not claim cross-dtype rank equality after logits have been rounded differently.
 
-The file-level hardware guard skips unsupported products, including 310P. The unified file contains 38 cases: five rank cases and 33 custom-score, metadata and binding cases.
+The file-level hardware guard skips unsupported products, including 310P. The unified file contains 50 cases: five rank cases, 33 custom-score, metadata and binding cases, and 12 large-candidate cases.
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_compute_topk_scores.py

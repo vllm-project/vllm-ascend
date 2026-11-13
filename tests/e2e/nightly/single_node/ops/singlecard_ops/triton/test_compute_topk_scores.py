@@ -181,3 +181,43 @@ def test_custom_duplicate_candidates():
     expected_ids = torch.tensor([[3, 2, 2, 0]], device="npu")
     torch.testing.assert_close(result.logprob_token_ids, expected_ids)
     torch.testing.assert_close(result.logprobs, logits.log_softmax(-1).gather(1, expected_ids))
+
+
+@pytest.mark.parametrize("num_logprobs", [8192, 32768, 152064])
+@pytest.mark.parametrize("custom", [False, True])
+@pytest.mark.parametrize("logits_mode", [False, True])
+def test_large_token_scores(num_logprobs, custom, logits_mode):
+    """Large candidates stream across blocks through the actual sampler binding."""
+    init_device_properties_triton()
+    importlib.import_module("vllm_ascend.patch.worker.patch_triton")
+    score_fn = importlib.import_module("vllm.v1.worker.gpu.sample.sampler").compute_topk_scores
+    assert score_fn is compute_topk_scores
+    torch.manual_seed(42)
+    logits = torch.randn(2, 152064, device="npu", dtype=torch.float32)
+    sampled = torch.tensor([11, 12], device="npu", dtype=torch.int64)
+    state = SimpleNamespace(
+        num_token_ids=SimpleNamespace(gpu=torch.tensor([0, 3], device="npu", dtype=torch.int32)),
+        token_ids=SimpleNamespace(gpu=torch.tensor([[0, 0, 0], [5, 6, 7]], device="npu", dtype=torch.int32)),
+    )
+    mapping = torch.tensor([1, 0], device="npu", dtype=torch.int32)
+    result = score_fn(
+        logits,
+        num_logprobs,
+        sampled,
+        logprob_token_ids_state=state if custom else None,
+        expanded_idx_mapping=mapping if custom else None,
+        max_per_req_token_ids=3 if custom else 0,
+        logits_mode=logits_mode,
+    )
+    expected_ids = torch.cat((sampled[:, None], logits.topk(num_logprobs, dim=-1).indices), dim=1)
+    valid = torch.ones_like(expected_ids, dtype=torch.bool)
+    if custom:
+        expected_ids[0, 1:] = 0
+        expected_ids[0, 1:4] = state.token_ids.gpu[1].to(torch.int64)
+        valid[0, 4:] = False
+    scores = logits if logits_mode else logits.log_softmax(-1)
+    expected_scores = scores.gather(-1, expected_ids).masked_fill(~valid, -float("inf"))
+    torch.testing.assert_close(result.logprob_token_ids, expected_ids, rtol=0, atol=0)
+    torch.testing.assert_close(result.logprobs, expected_scores, rtol=1e-4, atol=1e-4)
+    expected_ranks = (logits >= logits.gather(1, sampled[:, None])).sum(-1)
+    torch.testing.assert_close(result.selected_token_ranks, expected_ranks, rtol=0, atol=0)
