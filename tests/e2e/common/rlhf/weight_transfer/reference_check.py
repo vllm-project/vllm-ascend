@@ -21,7 +21,7 @@ from tests.e2e.common.rlhf.weight_transfer.weight_source import (
 UPDATE_ROUNDS = 2
 
 
-FULL_DECODE_ONLY_CONFIG = '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1]}'
+FULL_DECODE_ONLY_CONFIG = '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 
 
 def _common_serve_args(
@@ -43,7 +43,7 @@ def _common_serve_args(
         "--dtype",
         "bfloat16",
         "--compilation-config",
-        case.compilation_config,
+        FULL_DECODE_ONLY_CONFIG,
         # Each NPU IPC trainer rank shares a chip with a rollout worker: the co-located
         # trainer only gets the HBM it needs once the rollout engine sleeps, so
         # the lane releases the engine with a level-2 sleep before every

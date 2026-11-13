@@ -28,7 +28,6 @@ class WeightUpdateModelCase:
     extra_server_args: tuple[str, ...] = ()
     extra_param_builder: Callable[[Any], list[tuple[str, tuple[int, ...], Any]]] | None = None
     image_prompt: bool = False
-    compilation_config: str = '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1]}'
     # One representative model covers both backends and packing modes.
     full_transfer_matrix: bool = False
     skip_reason: str | None = None
@@ -127,20 +126,7 @@ DEEPSEEK_V4_VISION_CASE = WeightUpdateModelCase(
     expert_intermediate_size=2048,
     extra_param_builder=deepseek_v4_vision_params,
     image_prompt=True,
-    extra_server_args=(
-        "--tokenizer-mode",
-        "deepseek_v4",
-        "--block-size",
-        "32",
-        "--limit-mm-per-prompt",
-        '{"image": 1}',
-        "--max-num-seqs",
-        "1",
-        "--max-num-batched-tokens",
-        "1024",
-        "--kv-cache-memory-bytes",
-        str(128 * 2**20),
-    ),
+    extra_server_args=("--tokenizer-mode", "deepseek_v4"),
 )
 
 
