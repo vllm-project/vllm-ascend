@@ -81,7 +81,28 @@ _KNOWN_ZH = [
     ("403 确定性拒绝", "403 Forbidden"),
     ("锚点不存在", "anchor not found"),
     ("跨文档文件缺失", "cross-doc file missing"),
+    # full-width punctuation left over from translated messages
+    ("（", "("),
+    ("）", ")"),
+    ("：", ": "),
 ]
+
+# h3 sub-category names from upstream script rules (Chinese) mapped to English.
+H3_EN = {
+    "链接可达性": "Link reachability",
+    "同页锚点": "Same-page anchor",
+    "非良性重定向": "Unhealthy redirect",
+    "跨文档链接": "Cross-document link",
+    "链接协议与写法": "Link protocol and format",
+    "图表引用风格统一": "Consistent figure/table citation style",
+    "引用表述统一": "Consistent citation wording",
+    "引用文档时链接要放到书名号内": "Links inside quotation marks for cited docs",
+    "网页类链接操作描述统一": "Consistent web-link operation description",
+    "对外链接使用 https": "Use https for external links",
+    "正文不建议直接甩出完整链接": "Avoid bare full URLs in body text",
+    "命令行URL不应配置成超链接": "Command-line URLs should not be hyperlinks",
+    "锚文本描述性": "Descriptive anchor text",
+}
 
 
 def h2_en(h2):
@@ -91,6 +112,11 @@ def h2_en(h2):
 def grade_en(grade):
     g = str(grade or "")
     return GRADE_EN.get(g, g)
+
+
+def h3_en(h3):
+    h = str(h3 or "")
+    return H3_EN.get(h, h)
 
 
 def translate_known_zh(text):
@@ -152,7 +178,7 @@ def also_hit_note(p):
         if not isinstance(h, dict):
             continue
         h2 = h2_en(h.get("h2", ""))
-        h3 = h.get("h3", "")
+        h3 = h3_en(h.get("h3", ""))
         rule = f"{h2} {h3}".strip()
         letter, code, _ = parse_sev(h.get("severity"))
         tag = f"{letter}-{code}" if code else letter
