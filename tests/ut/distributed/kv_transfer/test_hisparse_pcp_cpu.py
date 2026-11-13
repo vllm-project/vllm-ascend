@@ -110,8 +110,8 @@ def test_pcp_connector_keeps_target_host_mirror_overlap(monkeypatch):
     runner = NS(
         kv_connector=connector, speculator=object(), output_copy_stream=NS(stream_id=1, device_index=0, device_type=20)
     )
-    compute = NS(device=worker.hot_backing.device)
-    output = NS(device=worker.hot_backing.device)
+    compute = NS(device=worker.hot_backing.device, stream_id=0)
+    output = NS(device=worker.hot_backing.device, stream_id=1)
     sources = object()
     monkeypatch.setattr(host_mirror._DirectMirrorSources, "bind", lambda *a: sources)
     monkeypatch.setattr(host_mirror.torch, "Stream", lambda **kwargs: output)
