@@ -53,7 +53,7 @@ jobs:
       command: ${{ steps.resolve.outputs.command }}
       presmoke_image: ${{ steps.resolve.outputs.presmoke_image }}
       pr_number: ${{ steps.resolve.outputs.pr_number }}
-      PR_ref: ${{ steps.resolve.outputs.PR_ref }}
+      source_ref: ${{ steps.resolve.outputs.source_ref }}
       download_path: ${{ steps.resolve.outputs.download_path }}
       blocked: ${{ steps.block_window.outputs.blocked }}
       vllm_ref: ${{ steps.resolve.outputs.vllm_ref }}
@@ -467,11 +467,11 @@ jobs:
           # ref, so the code, Dockerfiles and dependency versions under test are the
           # ones being reviewed. The branch still decides the published tag, so the
           # tag names stay identical to the standard nightly images.
-          PR_REF=""
+          SOURCE_REF=""
           if [ "$COMMAND" = "presmoke" ]; then
-            PR_REF="refs/pull/$PR_NUMBER/head"
+            SOURCE_REF="refs/pull/$PR_NUMBER/head"
           fi
-          echo "PR_ref=$PR_REF" >> "$GITHUB_OUTPUT"
+          echo "source_ref=$SOURCE_REF" >> "$GITHUB_OUTPUT"
 
           # The /presmoke command takes chip names directly, with no inference
           # from test names: /presmoke all builds every chip, /presmoke a2 a3
@@ -567,7 +567,7 @@ jobs:
           # makes the build full-scale (ubuntu+openEuler on amd64+arm64), keeps
           # the images in the isolated '-presmoke' CI repositories (never
           # atlas_inference) and skips the quay.io and cn-north-4 syncs.
-          # PR_ref makes both layers build from the triggering PR head
+          # source_ref makes both layers build from the triggering PR head
           # ('pre-merge'), so the code and Dockerfiles under review are the ones
           # built.
           CHIPS='[]'
@@ -586,25 +586,25 @@ jobs:
             echo "::error::No chip selected for /presmoke"
             exit 1
           fi
-          # Only forward PR_ref when set: gh would turn an empty -f value
+          # Only forward source_ref when set: gh would turn an empty -f value
           # into 'true', which is not a valid ref.
-          PR_REF='${{ needs.authorize.outputs.PR_ref }}'
-          PR_REF_ARGS=()
-          if [ -n "$PR_REF" ]; then
-            PR_REF_ARGS=(-f "PR_ref=$PR_REF")
+          SOURCE_REF='${{ needs.authorize.outputs.source_ref }}'
+          SOURCE_REF_ARGS=()
+          if [ -n "$SOURCE_REF" ]; then
+            SOURCE_REF_ARGS=(-f "source_ref=$SOURCE_REF")
           fi
           gh workflow run schedule_nightly_image_build_with_base.yaml \
             --repo "$REPO" \
             --ref main \
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
-            "${PR_REF_ARGS[@]}" \
+            "${SOURCE_REF_ARGS[@]}" \
             -f chips="$CHIPS" \
             -f isolated_build='true'
           sleep 8
           PRESMOKE_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_image_build_with_base.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
           echo "presmoke_run_id=$PRESMOKE_RUN_ID" >> "$GITHUB_OUTPUT"
-          echo "Dispatched presmoke image build for chips=$CHIPS, branch='${{ needs.authorize.outputs.branch }}', PR_ref='${{ needs.authorize.outputs.PR_ref }}'"
+          echo "Dispatched presmoke image build for chips=$CHIPS, branch='${{ needs.authorize.outputs.branch }}', source_ref='${{ needs.authorize.outputs.source_ref }}'"
 
   dispatch-a2:
     name: Trigger Nightly-A2
