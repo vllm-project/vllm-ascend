@@ -1406,6 +1406,8 @@ def test_prepare_attn_uses_promised_varlen_capture_bound(mock_build_attn_metadat
     assert mock_build_attn_metadata.call_args.kwargs["max_query_len"] == 9
 
 
+@pytest.mark.parametrize("drafts", [None, [0, 3, 0, 2]])
+@pytest.mark.parametrize("for_capture", [False, True])
 def test_prepare_attn_zero_drafts_and_align_groups(monkeypatch, drafts, for_capture):
     build = MagicMock(return_value={})
     monkeypatch.setattr(mamba_hybrid_module, "build_attn_metadata", build)
