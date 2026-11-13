@@ -97,6 +97,77 @@ variants:
     hardware_overrides:
       ascend_950dt:
         docker_image: quay.io/ascend/vllm-ascend:v0.23.0-950DT
+  ascend_w8a8_a3:
+    model_id: Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp
+    precision: int8
+    label: W8A8 (Ascend A3)
+    vram_minimum_gb: 477
+    supported_hardware:
+      - ascend_910c
+    tp: 16
+    min_vllm_version: 0.30.0
+    default_modes:
+      spec_decoding: qwen3_5_mtp
+    extra_args:
+      - '--distributed-executor-backend'
+      - mp
+      - '--data-parallel-size'
+      - '1'
+      - '--enable-expert-parallel'
+      - '--seed'
+      - '1024'
+      - '--quantization'
+      - ascend
+      - '--max-num-seqs'
+      - '128'
+      - '--max-model-len'
+      - '133000'
+      - '--max-num-batched-tokens'
+      - '16384'
+      - '--trust-remote-code'
+      - '--gpu-memory-utilization'
+      - '0.90'
+      - '--enable-prefix-caching'
+      - '--compilation-config'
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - '--additional-config'
+      - '{"enable_cpu_binding": true, "enable_fused_mc2": 1, "enable_flashcomm1": true}'
+    extra_env:
+      VLLM_USE_MODELSCOPE: 'True'
+      HCCL_BUFFSIZE: '1024'
+      HCCL_OP_EXPANSION_MODE: AIV
+      VLLM_USE_V2_MODEL_RUNNER: '0'
+    hardware_overrides:
+      ascend_910c:
+        docker_image: quay.io/ascend/vllm-ascend:v0.30.0-a3
+        docker_serve_command: "vllm serve"
+        install:
+          pip: false
+features:
+  spec_decoding:
+    modes:
+      qwen3_5_mtp:
+        hardware_overrides:
+          ascend_910c:
+            args:
+              - '--speculative-config'
+              - '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}'
+presets:
+  ascend_a3_w8a8_tp16:
+    label: A3 W8A8 TP16
+    hardware: ascend_910c
+    strategy: single_node_tp
+    variants:
+      - ascend_w8a8_a3
+    default: true
+    select:
+      frontend: python
+      features:
+        spec_decoding: qwen3_5_mtp
+        tool_calling: false
+        reasoning: false
+        encoder_parallel: false
 meta:
   hardware:
     ascend_950dt: verified
+    ascend_910c: verified
