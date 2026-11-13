@@ -162,6 +162,8 @@ def _register_dcp_warmup(worker: NPUWorker) -> None:
                 max_tokens=max_tokens,
                 from_stats=from_stats,
                 mla=mla,
+                # Graph padding makes these the token counts the combine sees.
+                decode_buckets=getattr(config.compilation_config, "cudagraph_capture_sizes", None),
             )
 
 
