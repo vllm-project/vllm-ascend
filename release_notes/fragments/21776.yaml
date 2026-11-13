@@ -1,4 +1,4 @@
-pr: 21775
+pr: 21776
 entries:
   - category: feature
     text: Added BF16 PLE host offload with DP shared memory for Qwen4Exp, storing PLE embedding tables in CANN-registered host memory with NPU gathering via UVA, saving ~12 GiB of device memory per card. Opt-in via `--engram-config`; cross-node fallback to private tables when topology is unsatisfied.
