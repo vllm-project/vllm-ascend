@@ -61,6 +61,7 @@ steps when it is missing).
 
 import math
 import os
+import shutil
 import tempfile
 import time
 from contextlib import ExitStack, contextmanager
@@ -181,9 +182,13 @@ def _mooncake_supports_ssd_prefetch() -> bool:
     """
     try:
         from mooncake.store import ExistOptions  # type: ignore[import-not-found]  # noqa: F401
-    except ImportError:
+
+        return hasattr(ExistOptions(), "prefetch_to_memory")
+    except (ImportError, TypeError, AttributeError):
+        # A missing module, a constructor that requires arguments in this
+        # Mooncake version, or a renamed option set all mean the build does
+        # not expose the SSD prefetch.
         return False
-    return hasattr(ExistOptions(), "prefetch_to_memory")
 
 
 def _mooncake_pool_config(tier_ssd: bool, case_name: str) -> MooncakeKVPoolConfig:
@@ -316,9 +321,14 @@ def _leg(
                 # engine, which then fails its hugepage-reserve path on A2.
                 os.environ.pop("ASCEND_ENABLE_USE_FABRIC_MEM", None)
                 stack.enter_context(patch.dict(os.environ, {"HCCL_INTRA_ROCE_ENABLE": "1"}))
-                pool = stack.enter_context(
-                    SingleNodeMooncakeManager(_mooncake_pool_config(tier_ssd, case_name), case_name)
-                )
+                mooncake_config = _mooncake_pool_config(tier_ssd, case_name)
+                ssd_root = mooncake_config.config.get("ssd_offload_path")
+                if ssd_root:
+                    # The tier-3 offload directory can hold gigabytes of KV
+                    # blocks; remove it when the leg exits so repeated CI runs
+                    # do not leak disk space.
+                    stack.callback(shutil.rmtree, ssd_root, ignore_errors=True)
+                pool = stack.enter_context(SingleNodeMooncakeManager(mooncake_config, case_name))
             else:
                 pool = stack.enter_context(SingleNodeMemcacheManager(_memcache_pool_config(tier_ssd), case_name))
             stack.enter_context(patch.dict(os.environ, pool.server_envs))
