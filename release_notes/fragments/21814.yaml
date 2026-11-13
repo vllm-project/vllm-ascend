@@ -1,0 +1,7 @@
+pr: 21814
+entries:
+  - category: performance
+    text: >-
+      Avoided Z packing before output gated RMSNorm for supported Ascend GDN
+      inference layouts using a GDN-only kernel. Shared normalization operators
+      and unsupported GDN configurations retain their existing execution paths.
