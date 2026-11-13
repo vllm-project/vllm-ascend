@@ -1,0 +1,68 @@
+{
+  "name": "vLLM Ascend A5 (Ascend 950 Dev Container)",
+  "image": "quay.io/ascend/cann:9.1.0-950-ubuntu22.04-py3.12",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace/vllm-ascend,type=bind,consistency=cached",
+  "workspaceFolder": "/workspace/vllm-ascend",
+  "containerEnv": {
+    "PYTHONUNBUFFERED": "1",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "SOC_VERSION": "ascend950dt_9582",
+    "COMPILE_CUSTOM_KERNELS": "1",
+    "CCACHE_DIR": "/root/.cache/ccache",
+    "CCACHE_MAXSIZE": "10G",
+    "CMAKE_CXX_COMPILER_LAUNCHER": "ccache",
+    "CMAKE_C_COMPILER_LAUNCHER": "ccache",
+    "TORCH_DEVICE_BACKEND_AUTOLOAD": "0",
+    "TASK_QUEUE_ENABLE": "1",
+    "OMP_NUM_THREADS": "1",
+    "VLLM_BATCH_INVARIANT": "1",
+    "CARGO_BUILD_JOBS": "16",
+    "MAX_JOBS": "16"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff",
+        "eamodio.gitlens",
+        "editorconfig.editorconfig",
+        "streetsidesoftware.code-spell-checker",
+        "tamasfe.even-better-toml",
+        "redhat.vscode-yaml"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/bin/python3",
+        "python.linting.enabled": true,
+        "python.linting.pylintEnabled": false,
+        "python.linting.flake8Enabled": false,
+        "python.formatting.provider": "none",
+        "[python]": {
+          "editor.formatOnSave": true,
+          "editor.defaultFormatter": "charliermarsh.ruff",
+          "editor.codeActionsOnSave": {
+            "source.fixAll": "explicit",
+            "source.organizeImports": "explicit"
+          }
+        },
+        "editor.formatOnSave": true,
+        "files.eol": "\n",
+        "files.trimTrailingWhitespace": true,
+        "files.insertFinalNewline": true,
+        "ruff.lint.enable": true,
+        "ruff.format.enable": true
+      }
+    }
+  },
+  "forwardPorts": [
+    8000,
+    8080
+  ],
+  "mounts": [
+    "source=vllm-ascend-a5-pip-cache,target=/root/.cache/pip,type=volume",
+    "source=vllm-ascend-a5-ccache,target=/root/.cache/ccache,type=volume",
+    "source=${localEnv:USERPROFILE}/.ssh,target=/root/.ssh,type=bind,consistency=cached,readonly"
+  ],
+  "postCreateCommand": "apt-get update && apt-get install -y ccache dos2unix clang-15 && update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20 && update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20 && ccache --set-config=max_size=10G && find /workspace/vllm-ascend -name '*.sh' -exec dos2unix {} \\; && echo 'source /usr/local/Ascend/ascend-toolkit/set_env.sh' >> /root/.bashrc && echo 'source /usr/local/Ascend/nnal/atb/set_env.sh' >> /root/.bashrc && echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib' >> /root/.bashrc && pip3 install --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi --extra-index-url https://download.pytorch.org/whl/cpu -r requirements-dev.txt && pip3 install --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi --extra-index-url https://download.pytorch.org/whl/cpu -e . && pip3 uninstall -y triton triton-ascend && pip3 install triton-ascend==3.2.2 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi && pip3 install coverage",
+  "postStartCommand": "if [ -f ${localEnv:USERPROFILE}/.gitconfig ]; then cp ${localEnv:USERPROFILE}/.gitconfig /root/.gitconfig; fi"
+}
