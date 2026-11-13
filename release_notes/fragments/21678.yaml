@@ -1,0 +1,8 @@
+pr: 21678
+entries:
+  - category: performance
+    text: >-
+      Folded Q/K L2 normalization into the FLA NPU GDN prefill kernel and removed
+      redundant copies and recurrent-state transposes from the prefill path,
+      reducing kernel launches and device memory traffic on A2 and A3.
+    hardware: [A2, A3]
