@@ -157,6 +157,44 @@ def _attn(selected):
     return SimpleNamespace(shared_state=shared, indexer=indexer), shared
 
 
+def test_compressed_kv_source_cache_update_covers_full_batch(monkeypatch):
+    hidden_states = torch.zeros(TOKENS, 8)
+    positions = torch.arange(TOKENS)
+    metadata = SimpleNamespace(
+        positions=positions,
+        swa=object(),
+        rope=lambda layer_name, num_tokens: (
+            torch.zeros(num_tokens, 4),
+            torch.zeros(num_tokens, 4),
+        ),
+    )
+    attn = SimpleNamespace(rotary_emb=SimpleNamespace(layername="rope"))
+    impl = _impl(SimpleNamespace(is_kv_source=True, compress_ratio=2))
+    calls = []
+
+    def project_kv(attn, states, cos, sin):
+        calls.append(("project_kv", states.shape[0]))
+        return states
+
+    def write_swa_cache(attn, swa_metadata, kv):
+        calls.append(("write_swa", kv.shape[0]))
+
+    def write_compressed_source(attn, states, source_positions, cos, sin, source_metadata):
+        calls.append(("write_compressed", states.shape[0], source_positions.tolist()))
+
+    monkeypatch.setattr(impl, "_project_kv", project_kv)
+    monkeypatch.setattr(AscendDSAV41Impl, "_write_swa_cache", staticmethod(write_swa_cache))
+    monkeypatch.setattr(impl, "_write_compressed_source", write_compressed_source)
+
+    impl._update_caches(attn, hidden_states, metadata)
+
+    assert calls == [
+        ("project_kv", TOKENS),
+        ("write_swa", TOKENS),
+        ("write_compressed", TOKENS, positions.tolist()),
+    ]
+
+
 @pytest.mark.parametrize("empty_cache", [True, False])
 def test_index_selection_publishes_shared_output(monkeypatch, empty_cache):
     prefix = "model.layers.2.attn"
