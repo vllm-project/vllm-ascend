@@ -6,9 +6,9 @@ class GlobalTE:
         self.transfer_engine = None
         self._initialization_attempted = False
         self.is_register_buffer: bool = False
-        # Keep registration order and location hints across sleep/wake cycles.
+        # Keep registration order across sleep/wake cycles.
         # False entries remain known, but must be registered again before use.
-        self.registered_buffers: dict[tuple[int, int, str | None], bool] = {}
+        self.registered_buffers: dict[tuple[int, int], bool] = {}
         self.transfer_engine_lock = threading.Lock()
         self.register_buffer_lock = threading.Lock()
 
@@ -51,37 +51,23 @@ class GlobalTE:
         self,
         ptrs: list[int],
         sizes: list[int],
-        locations: list[str | None] | None = None,
     ):
         with self.register_buffer_lock:
             assert self.transfer_engine is not None, "Transfer engine must be initialized"
-            if locations is not None and len(locations) != len(ptrs):
-                raise ValueError("Transfer buffer locations must match pointer count.")
             # Register each buffer at most once, so lazily allocated buffers
             # (e.g. the NPU staging window) can register after the initial
             # kv_caches registration instead of being silently skipped.
-            for idx, (ptr, size) in enumerate(zip(ptrs, sizes)):
-                location = locations[idx] if locations is not None else None
-                key = (int(ptr), int(size), location)
+            for ptr, size in zip(ptrs, sizes):
+                key = (int(ptr), int(size))
                 if self.registered_buffers.get(key, False):
                     continue
                 self._register_memory(*key)
                 self.registered_buffers[key] = True
                 self.is_register_buffer = True
 
-    def _register_memory(self, ptr: int, size: int, location: str | None):
+    def _register_memory(self, ptr: int, size: int):
         assert self.transfer_engine is not None, "Transfer engine must be initialized"
-        if location is not None:
-            register_with_location = getattr(self.transfer_engine, "register_memory_with_location", None)
-            if not callable(register_with_location):
-                raise RuntimeError(
-                    "Mooncake CPU memory registration requires "
-                    "TransferEngine.register_memory_with_location. "
-                    "Install a Mooncake build with Ascend location-aware registration support."
-                )
-            ret_value = register_with_location(ptr, size, location)
-        else:
-            ret_value = self.transfer_engine.register_memory(ptr, size)
+        ret_value = self.transfer_engine.register_memory(ptr, size)
         if ret_value != 0:
             raise RuntimeError(f"Mooncake memory registration failed for ptr={ptr:#x}, ret_value={ret_value}")
 

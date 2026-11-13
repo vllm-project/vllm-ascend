@@ -31,22 +31,38 @@ class MooncakeSFAHostKV:
 
     def __init__(self, manager: Any, kv_caches: dict[str, Any]) -> None:
         self.manager = manager
-        views = manager.get_copy_sfa_cache_views()
-        self.rank = views.tp_rank
-        self.size = views.tp_size
-        self.main_group_id = views.main_group_id
+        if not manager.use_fused_copy_sfa:
+            raise ValueError("Mooncake V2 SFA requires LIM + Copy-SFA")
+        names = getattr(manager, "offload_layer_names", ())
+        components = [
+            getattr(manager, name, ()) for name in ("k_caches_cpu", "v_caches_cpu", "topk_buffers_k", "topk_buffers_v")
+        ]
+        if not names or any(len(values) != len(names) for values in components):
+            raise RuntimeError("Mooncake V2 SFA requires registered Host and hot KV")
+        layer_ids = [manager._get_offload_layer_id(name) for name in names]
+        if layer_ids != list(range(len(names))):
+            raise ValueError("Mooncake V2 SFA layer names and cache indices must match")
+        main_groups = {
+            group_id
+            for group_id, group in enumerate(manager.kv_cache_config.kv_cache_groups)
+            if set(group.layer_names) & set(names)
+        }
+        if len(main_groups) != 1:
+            raise ValueError("Mooncake V2 SFA requires one main KV cache group")
+        self.main_group_id = main_groups.pop()
+        self.rank = manager.tp_rank
+        self.size = manager.tp_group.world_size
         # Reuse transfer identity/range validation without allocating a DSA pool
         # or creating a process-global allocation registry.
         self.registry = MooncakeKVRegistry()
         self.transfer_caches = dict(kv_caches)
         self.hot_caches = {}
-        self.block_size = views.block_size
-        self.hot_tokens = views.hot_tokens
-        for layer in views.layers:
-            name = layer.layer_name
+        self.block_size = manager.kv_cache_config.kv_cache_groups[self.main_group_id].kv_cache_spec.block_size
+        self.hot_tokens = manager.topk_buffer_size
+        for name, layer_id in zip(names, layer_ids):
             if len(kv_caches[name]) != OFFLOAD_KV_CACHE_TUPLE_LEN:
                 raise ValueError(f"Mooncake V2 SFA layer {name!r} must expose the SFA six-component cache")
-            pair = layer.host_kv
+            pair = (manager.k_caches_cpu[layer_id], manager.v_caches_cpu[layer_id])
             for tensor in pair:
                 if tensor.device.type != "cpu" or tensor.dtype != torch.bfloat16 or not tensor.is_contiguous():
                     raise ValueError("Mooncake V2 SFA Host KV must be contiguous BF16 CPU views")
@@ -56,7 +72,7 @@ class MooncakeSFAHostKV:
             # Keep main-component wire identity unchanged; hot/tail READs use
             # separate rank-private destinations, not extra wire components.
             self.transfer_caches[name] = pair
-            hot_pair = layer.hot_kv
+            hot_pair = (manager.topk_buffers_k[layer_id], manager.topk_buffers_v[layer_id])
             for host, hot in zip(pair, hot_pair):
                 if hot.dtype != host.dtype or not hot.is_contiguous() or hot.ndim != 4:
                     raise ValueError("Mooncake V2 SFA hot KV must be contiguous BF16 row buffers")

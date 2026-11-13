@@ -3,7 +3,6 @@
 
 import ctypes
 from contextlib import nullcontext
-from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -15,13 +14,13 @@ from vllm.v1.request import RequestStatus
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import MooncakeBaseConnectorWorker
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import (
+    MooncakePullConnector,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.heartbeat import MooncakeHeartbeatThread
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.adapter import (
     MooncakeSFAHostKV,
     MooncakeSFAPDState,
-)
-from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.connector import (
-    MooncakeSFAConnector,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.metadata import (
     MooncakeSFAConnectorMetadata,
@@ -89,11 +88,11 @@ def make_manager(*, rank=0, size=2, blocks=4, k_dim=4):
         topk_buffer_size=2048,
         v_caches_cpu=[v],
         kv_cache_config=kv_config,
-        _get_offload_layer_id=lambda name: 0,
+        layer_name_to_offload_id={MAIN: 0},
+        _get_offload_layer_id=lambda name: manager.layer_name_to_offload_id[name],
         copy_sfa_kv=MagicMock(),
         use_fused_copy_sfa=True,
     )
-    manager.get_copy_sfa_cache_views = lambda: manager_module.SparseKVOffloadManager.get_copy_sfa_cache_views(manager)
     return manager, caches
 
 
@@ -122,43 +121,41 @@ def test_projection_uses_manager_views_excludes_scratch_and_uses_an_isolated_bor
 
 
 @pytest.mark.parametrize("rank", [0, 1])
-def test_public_cache_views_borrow_exact_registered_storage_without_allocating(monkeypatch, rank):
+def test_adapter_borrows_exact_registered_storage_without_allocating(monkeypatch, rank):
     manager, caches = make_manager(rank=rank)
     if rank:
         caches[MAIN] = (*caches[MAIN][:2], torch.empty(0), torch.empty(0), *caches[MAIN][4:])
     monkeypatch.setattr(torch, "empty", MagicMock(side_effect=AssertionError("unexpected allocation")))
-    views = manager.get_copy_sfa_cache_views()
-    assert (views.main_group_id, views.block_size, views.hot_tokens, views.tp_rank, views.tp_size) == (
-        1,
-        128,
-        2048,
-        rank,
-        2,
-    )
-    layer = views.layers[0]
-    assert layer.layer_name == MAIN
-    assert layer.host_kv[0] is manager.k_caches_cpu[0]
-    assert layer.host_kv[1] is manager.v_caches_cpu[0]
-    assert layer.hot_kv[0] is manager.topk_buffers_k[0]
-    assert layer.hot_kv[1] is manager.topk_buffers_v[0]
-    with pytest.raises(FrozenInstanceError):
-        views.main_group_id = 0
-    # The adapter consumes only the exported layout, not manager internals.
-    public_manager = SimpleNamespace(get_copy_sfa_cache_views=lambda: views, copy_sfa_kv=manager.copy_sfa_kv)
-    host = MooncakeSFAHostKV(public_manager, caches)
-    assert host.transfer_caches[MAIN][0] is layer.host_kv[0]
-    assert host.hot_caches[MAIN][0] is layer.hot_kv[0]
+    host = MooncakeSFAHostKV(manager, caches)
+    assert (host.main_group_id, host.block_size, host.hot_tokens, host.rank, host.size) == (1, 128, 2048, rank, 2)
+    assert host.transfer_caches[MAIN][0] is manager.k_caches_cpu[0]
+    assert host.transfer_caches[MAIN][1] is manager.v_caches_cpu[0]
+    assert host.hot_caches[MAIN][0] is manager.topk_buffers_k[0]
+    assert host.hot_caches[MAIN][1] is manager.topk_buffers_v[0]
 
 
-def test_cache_view_export_rejects_unregistered_or_ambiguous_main_groups():
+def test_adapter_rejects_unregistered_or_ambiguous_main_groups():
     manager = manager_module.SparseKVOffloadManager.__new__(manager_module.SparseKVOffloadManager)
     manager.use_fused_copy_sfa = True
     with pytest.raises(RuntimeError, match="registered Host and hot KV"):
-        manager.get_copy_sfa_cache_views()
-    fixture, _ = make_manager()
+        MooncakeSFAHostKV(manager, {})
+    fixture, caches = make_manager()
     fixture.kv_cache_config.kv_cache_groups.append(fixture.kv_cache_config.kv_cache_groups[1])
     with pytest.raises(ValueError, match="one main KV cache group"):
-        fixture.get_copy_sfa_cache_views()
+        MooncakeSFAHostKV(fixture, caches)
+
+
+@pytest.mark.parametrize("invalid", ["backend", "incomplete", "layer-index"])
+def test_adapter_preserves_manager_registration_checks(invalid):
+    manager, caches = make_manager()
+    if invalid == "backend":
+        manager.use_fused_copy_sfa = False
+    elif invalid == "incomplete":
+        manager.topk_buffers_v = []
+    else:
+        manager.layer_name_to_offload_id[MAIN] = 1
+    with pytest.raises((ValueError, RuntimeError)):
+        MooncakeSFAHostKV(manager, caches)
 
 
 def test_v2_registration_publishes_only_persistent_components(monkeypatch):
@@ -376,7 +373,7 @@ def test_early_mrv2_metadata_preparation_is_idempotent_with_late_start_load():
     worker.kv_transfer_config = SimpleNamespace(is_kv_consumer=True)
     meta = MooncakeSFAConnectorMetadata()
     meta.copy_sfa_slots = {"hit": 0}
-    facade = MooncakeSFAConnector.__new__(MooncakeSFAConnector)
+    facade = MooncakePullConnector.__new__(MooncakePullConnector)
     facade.connector_worker = worker
     facade.prepare_sparse_kv_offload(meta)
     assert facade.get_copy_sfa_slot_bindings() == {"hit": 0}

@@ -1,20 +1,18 @@
 # Mooncake V2 with SFA KV offload
 
 On a supported Atlas A3 sparse-attention deployment, the decode node can use
-`MooncakeSFAConnector` with ModelRunner V2 while sharing the existing
+`MooncakeConnectorV2` with ModelRunner V2 while sharing the existing
 `SparseKVOffloadManager` and LIM + Copy-SFA attention backend.
 
 The implementation lives in `kv_p2p/mooncake_sfa/` and inherits the common
 Mooncake Pull connector, scheduler, worker and receiving-thread lifecycle.
 Host cache projection, row reservations, staging and first-decode handoff
 belong to the specialization. The common `kv_p2p/mooncake/` package exposes
-protected extension points and does not import the SFA specialization.
-
-Existing `MooncakeConnectorV2` configurations remain supported. An outer
-compatibility entry selects the SFA scheduler and worker when sparse KV
-offload is enabled, and the ordinary Mooncake implementations otherwise.
-`MooncakePullConnector` remains the explicit ordinary Pull entry. Selection
-happens before components are constructed or background threads start.
+protected extension points. Its Pull facade selects the SFA scheduler and
+worker through lazy imports when sparse KV offload is enabled, and the ordinary
+Mooncake implementations otherwise. `MooncakeConnectorV2` is the configuration
+entry; the existing `MooncakePullConnector` alias resolves to the same class.
+Selection happens before components are constructed or background threads start.
 
 Use ModelRunner V2 on both nodes:
 
@@ -27,7 +25,7 @@ device-resident KV. On the decode node, use the following configuration in
 addition to the deployment's model, tensor parallel and serving options:
 
 ```bash
---kv-transfer-config '{"kv_connector":"MooncakeSFAConnector","kv_role":"kv_consumer","kv_port":27300}' \
+--kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":27300}' \
 --additional-config '{"sparse_kv_offload_config":{"enabled":true,"topk_buffer_size":2048,"dram_size_per_dp_GB":16,"use_fused_overlap":false}}'
 ```
 
@@ -45,13 +43,13 @@ components. SFA device placeholders are not PD payload. Main blocks are
 partitioned across decode TP ranks into one shared Host pool; the indexer
 remains device-resident and replicated as configured.
 
-After manager cache registration, `get_copy_sfa_cache_views()` exports immutable
-layout metadata referencing the same Host and hot/tail tensors, including the
-restored Host aliases on non-owner TP ranks. The adapter obtains this snapshot
-once during connector registration. This interface allocates no KV storage,
-performs no device copy or synchronization, and leaves the existing PD addresses,
-transfer ranges, partitioning and staging execution unchanged. The manager owns
-the borrowed tensors for the worker lifetime; callers must not resize them.
+After manager cache registration, the adapter directly borrows the manager's
+existing Host and hot/tail tensors once during connector registration, including
+the restored Host aliases on non-owner TP ranks. It validates LIM + Copy-SFA,
+complete registration, the main KV group and layer-name/index correspondence.
+This allocates no KV storage and performs no device copy or synchronization.
+The manager owns the borrowed tensors for the worker lifetime; callers must
+not resize them.
 
 The D worker also registers its existing rank-private HBM hot/tail buffers.
 For each request, V2 appends direct producer-to-HBM READs: a short prefix is
@@ -105,8 +103,7 @@ offload. It selects LIM + Copy-SFA; `use_fused_overlap=true` is rejected for thi
 V2 combination. SFA offload uses native preprocessing; this path retains
 the existing hot-buffer memory and direct HBM hot/tail PD reads.
 
-Configure this combination directly as `MooncakeSFAConnector`, or retain the
-compatible `MooncakeConnectorV2` plus sparse offload configuration. Wrapping it in
+Configure this combination as `MooncakeConnectorV2` plus sparse offload. Wrapping it in
 `MultiConnector` is rejected until sparse slot and first-decode hooks are
 forwarded. DSpark's remote prompt/draft-KV protocol is also rejected for this
 combination. Decode consumers require `kv_load_failure_policy="fail"` (the

@@ -198,8 +198,8 @@ def test_plan_rejects_overlaps_and_preserves_disjoint_batch_order(overlap):
     plan = reader._prepare_dsa_pd_mooncake_bank_plan(
         transfers, targets, reader._dsa_pd_mooncake_staging_tensor, ALIGNMENT, banks
     )
-    assert [batch.bank_index for batch in plan.batches] == [0, 1, 0]
-    assert [copy.destination for batch in plan.batches for copy in batch.copies] == destinations
+    assert [batch.bank_index for batch in plan] == [0, 1, 0]
+    assert [copy.destination for batch in plan for copy in batch.copies] == destinations
 
 
 def test_all_coalesced_target_bounds_are_checked_before_first_staged_read():

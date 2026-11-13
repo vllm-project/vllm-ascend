@@ -29,7 +29,9 @@ _STAGING_DRAIN_RETRY_INTERVAL_SECONDS = 10
 
 
 class MooncakeSFAPullRecvingThread(MooncakePullRecvingThread):
-    def __init__(self, *args, staging_reader, **kwargs) -> None:
+    def __init__(self, *args, staging_reader: MooncakeSFAStagingReader, **kwargs) -> None:
+        if staging_reader is None:
+            raise ValueError("Mooncake SFA receiving requires a staging reader")
         super().__init__(*args, **kwargs)
         self.staging_reader = staging_reader
         self._sfa_host_kv = staging_reader.host_kv
@@ -42,8 +44,6 @@ class MooncakeSFAPullRecvingThread(MooncakePullRecvingThread):
         return metadata
 
     def _wait_for_pending_landing(self) -> None:
-        if self.staging_reader is None:
-            return
         while True:
             try:
                 self.staging_reader.drain_pending_landing()
@@ -196,19 +196,16 @@ class MooncakeSFAPullRecvingThread(MooncakePullRecvingThread):
         request_ids: list[str],
         transfer_targets: list[Any] | None,
     ) -> int:
-        if self.staging_reader is None:
-            return self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
-        else:
-            # Success includes landing and event drain, before completion can
-            # release the producer's blocks or make Host KV visible to decode.
-            return self.staging_reader.batch_transfer_sync_read(
-                session_id,
-                src_list,
-                dst_list,
-                length_list,
-                ",".join(request_ids),
-                **({"transfer_targets": transfer_targets} if transfer_targets is not None else {}),
-            )
+        # Success includes landing and event drain, before completion can
+        # release the producer's blocks or make Host KV visible to decode.
+        return self.staging_reader.batch_transfer_sync_read(
+            session_id,
+            src_list,
+            dst_list,
+            length_list,
+            ",".join(request_ids),
+            **({"transfer_targets": transfer_targets} if transfer_targets is not None else {}),
+        )
 
 
 class MooncakeSFAConnectorWorker(MooncakePullConnectorWorker):

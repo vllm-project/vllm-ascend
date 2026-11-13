@@ -29,7 +29,7 @@ def config(dsa=None):
     )
 
 
-@pytest.fixture(autouse=True, params=["MooncakeConnectorV2", "MooncakeSFAConnector"])
+@pytest.fixture(autouse=True, params=["MooncakeConnectorV2", "MooncakePullConnector"])
 def v2_a3(monkeypatch, request):
     factory = config
 

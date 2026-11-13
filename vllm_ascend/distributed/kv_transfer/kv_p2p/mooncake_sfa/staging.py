@@ -61,11 +61,6 @@ class _DSAPDMooncakeBankBatch(NamedTuple):
 
 
 @dataclass(frozen=True)
-class _DSAPDMooncakeStagingPlan:
-    batches: tuple[_DSAPDMooncakeBankBatch, ...]
-
-
-@dataclass(frozen=True)
 class _DSAPDMooncakeBankBatchResult:
     return_code: int
     read_secs: float
@@ -215,7 +210,7 @@ class MooncakeSFAStagingReader:
         staging: torch.Tensor,
         staging_chunk_bytes: int,
         banks: tuple[_DSAPDMooncakeStagingBank, ...],
-    ) -> _DSAPDMooncakeStagingPlan:
+    ) -> tuple[_DSAPDMooncakeBankBatch, ...]:
         """Split Host ranges, merge copies, and reject conflicting destinations."""
         staging_ptr = int(staging.data_ptr())
         staging_alignment = 2 * 1024 * 1024
@@ -287,7 +282,7 @@ class MooncakeSFAStagingReader:
             if start < previous_end:
                 raise ValueError("Overlapping Mooncake Host destination ranges are not supported.")
             previous_end = end
-        return _DSAPDMooncakeStagingPlan(tuple(batches))
+        return tuple(batches)
 
     def _execute_dsa_pd_mooncake_bank_batch(
         self,
@@ -414,7 +409,7 @@ class MooncakeSFAStagingReader:
     def _execute_dsa_pd_mooncake_bank_workers(
         self,
         session_id: str,
-        plan: _DSAPDMooncakeStagingPlan,
+        plan: tuple[_DSAPDMooncakeBankBatch, ...],
         banks: tuple[_DSAPDMooncakeStagingBank, ...],
         staging: torch.Tensor,
         remote_request_id: str,
@@ -429,7 +424,7 @@ class MooncakeSFAStagingReader:
         every exit, leaving final stream/event draining to the coordinator.
         """
         bank_batches: list[list[_DSAPDMooncakeBankBatch]] = [[] for _ in banks]
-        for batch in plan.batches:
+        for batch in plan:
             bank_batches[batch.bank_index].append(batch)
         stopped = threading.Event()
         completed = {}
@@ -648,7 +643,7 @@ class MooncakeSFAStagingReader:
             else:
                 # Keep the synchronous control and device-wide probe on the caller.
                 def serial_batches() -> Iterator[tuple[_DSAPDMooncakeBankBatch, _DSAPDMooncakeBankBatchResult]]:
-                    for batch in plan.batches:
+                    for batch in plan:
                         yield (
                             batch,
                             self._execute_dsa_pd_mooncake_bank_batch(

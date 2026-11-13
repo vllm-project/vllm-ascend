@@ -3,16 +3,19 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.connector import MooncakeSFAConnector
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import MooncakePullConnector
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.metadata import MooncakeSFAConnectorMetadata
-from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.worker import MooncakeSFAConnectorWorker
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.worker import (
+    MooncakeSFAConnectorWorker,
+    MooncakeSFAPullRecvingThread,
+)
 
 from .mooncake_sfa_helpers import make_thread
 from .mooncake_v2.helpers import make_pp_metadata
 
 
 def test_sfa_facade_forwards_sparse_preparation_to_its_worker() -> None:
-    connector = MooncakeSFAConnector.__new__(MooncakeSFAConnector)
+    connector = MooncakePullConnector.__new__(MooncakePullConnector)
     worker = MagicMock(spec=MooncakeSFAConnectorWorker)
     connector.connector_worker = worker
     metadata = MooncakeSFAConnectorMetadata()
@@ -20,6 +23,11 @@ def test_sfa_facade_forwards_sparse_preparation_to_its_worker() -> None:
     assert prepare is not None
     prepare(metadata)
     worker.prepare_sparse_kv_offload.assert_called_once_with(metadata)
+
+
+def test_sfa_receiver_rejects_missing_reader_before_starting() -> None:
+    with pytest.raises(ValueError, match="requires a staging reader"):
+        MooncakeSFAPullRecvingThread(staging_reader=None)
 
 
 @pytest.mark.parametrize("result", [0, -1])

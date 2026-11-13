@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Legacy configuration dispatch and local metadata survive SFA isolation."""
+"""Unified Pull dispatch and local metadata preserve the SFA contract."""
 
 import ast
 from multiprocessing import Pipe
@@ -11,25 +11,28 @@ import pytest
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import connector as ordinary
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import MooncakeConnectorMetadata
-from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa import compat
-from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa import connector as sparse
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa import scheduler as sparse_scheduler
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa import worker as sparse_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_sfa.metadata import MooncakeSFAConnectorMetadata
 
 
-@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("enabled", [None, False, True])
 @pytest.mark.parametrize("component", ["worker", "scheduler"])
-def test_legacy_entry_selects_exactly_one_implementation_before_initialization(monkeypatch, enabled, component):
+def test_unified_entry_selects_exactly_one_implementation_before_initialization(monkeypatch, enabled, component):
     monkeypatch.setattr(
-        compat,
+        ordinary,
         "init_ascend_config",
-        lambda _config: SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=enabled)),
+        lambda _config: SimpleNamespace(
+            sparse_kv_offload_config=None if enabled is None else SimpleNamespace(enabled=enabled)
+        ),
     )
     suffix = "Worker" if component == "worker" else "Scheduler"
     original = MagicMock()
     specialized = MagicMock()
     monkeypatch.setattr(ordinary, "MooncakePullConnector" + suffix, original)
+    sparse = sparse_worker if component == "worker" else sparse_scheduler
     monkeypatch.setattr(sparse, "MooncakeSFAConnector" + suffix, specialized)
-    facade = compat.MooncakeConnector.__new__(compat.MooncakeConnector)
+    facade = ordinary.MooncakeConnector.__new__(ordinary.MooncakeConnector)
     facade.engine_id = "engine"
     config, caches = object(), object()
     selected = getattr(facade, "_create_" + component)(config, caches)
@@ -70,10 +73,27 @@ def test_sparse_local_metadata_roundtrips_without_extending_the_wire_handshake()
     assert not hasattr(MooncakeConnectorMetadata(), "copy_sfa_slots")
 
 
-def test_generic_mooncake_does_not_import_its_offload_specialization():
+def test_only_pull_factories_lazily_import_offload_components():
     package = Path(ordinary.__file__).parent
     for source in package.glob("*.py"):
-        for node in ast.walk(ast.parse(source.read_text())):
-            if isinstance(node, ast.ImportFrom):
-                assert "mooncake_sfa" not in (node.module or ""), source.name
-                assert "sparse_kv_offload" not in (node.module or ""), source.name
+        tree = ast.parse(source.read_text())
+        parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            assert "sparse_kv_offload" not in (node.module or ""), source.name
+            if "mooncake_sfa" in (node.module or ""):
+                assert source.name == "connector.py"
+                ancestor = parents[node]
+                while not isinstance(ancestor, ast.FunctionDef):
+                    assert ancestor in parents, "SFA imports must remain inside factories"
+                    ancestor = parents[ancestor]
+                assert ancestor.name in {"_create_scheduler", "_create_worker"}
+
+
+def test_ordinary_pull_has_no_sparse_state_or_preparation():
+    facade = ordinary.MooncakePullConnector.__new__(ordinary.MooncakePullConnector)
+    facade.connector_worker = SimpleNamespace()
+    assert facade.get_copy_sfa_pd_state() is None
+    assert facade.get_copy_sfa_slot_bindings() == {}
+    facade.prepare_sparse_kv_offload(object())

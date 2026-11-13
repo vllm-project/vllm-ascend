@@ -1835,13 +1835,13 @@ class SparseKVOffloadConfig:
             and getattr(kv_transfer_config, "kv_connector", None) == "MultiConnector"
             and (
                 kv_transfer_config.has_connector("MooncakeConnectorV2")
-                or kv_transfer_config.has_connector("MooncakeSFAConnector")
+                or kv_transfer_config.has_connector("MooncakePullConnector")
             )
         ):
             raise ValueError("Mooncake SFA KV offload currently requires a direct connector, not MultiConnector")
         if kv_transfer_config is not None and getattr(kv_transfer_config, "kv_connector", None) in (
             "MooncakeConnectorV2",
-            "MooncakeSFAConnector",
+            "MooncakePullConnector",
         ):
             if not vllm_config.use_v2_model_runner:
                 raise ValueError("Mooncake SFA KV offload requires ModelRunner V2")

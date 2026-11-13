@@ -28,7 +28,7 @@ def test_mooncake_connector_aliases_pull_connector() -> None:
     assert MooncakeConnector is MooncakePullConnector
 
 
-@pytest.mark.parametrize("connector_cls", [MooncakeBaseConnector, MooncakePullConnector, MooncakePushConnector])
+@pytest.mark.parametrize("connector_cls", [MooncakeBaseConnector, MooncakePushConnector])
 def test_non_pull_facade_skips_sparse_preparation_hook(connector_cls) -> None:
     connector = connector_cls.__new__(connector_cls)
     connector.connector_worker = connector_module.MooncakePushConnectorWorker.__new__(
@@ -125,6 +125,9 @@ def test_connector_selects_implementation_by_role(connector_cls, prefix) -> None
 
     with (
         patch.object(MooncakeBaseConnector, "__init__", initialize_base),
+        patch.object(
+            connector_module, "init_ascend_config", return_value=SimpleNamespace(sparse_kv_offload_config=None)
+        ),
         patch.object(
             connector_module,
             f"{prefix}ConnectorScheduler",

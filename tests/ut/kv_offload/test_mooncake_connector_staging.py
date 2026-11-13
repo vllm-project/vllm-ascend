@@ -249,9 +249,7 @@ class TestMooncakeSFAStagingReaderStaging(unittest.TestCase):
         def copies(transfers):
             targets = {dst: (host, dst - base) for dst, _, _ in transfers}
             plan = self.thread._prepare_dsa_pd_mooncake_bank_plan(transfers, targets, staging, chunk, banks)
-            return [
-                (copy.destination, copy.length, copy.staging_offset) for batch in plan.batches for copy in batch.copies
-            ]
+            return [(copy.destination, copy.length, copy.staging_offset) for batch in plan for copy in batch.copies]
 
         # Split one original range into READ slots, merging only its landing.
         self.assertEqual(
