@@ -18,6 +18,7 @@ from vllm_ascend.expert_offload.expert_offload_manager import (
     LayerOffloadBinding,
     MXFPExpertAdapter,
 )
+from vllm_ascend.quantization.nz import fp4_packed_nz, fp4_semantic_nz, mxfp8_nz
 from vllm_ascend.quantization.quant_type import QuantType
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -53,7 +54,9 @@ def load_hook_class():
 
 
 @pytest.fixture
-def expert_factory(load_hook_class):
+def expert_factory(load_hook_class, monkeypatch):
+    monkeypatch.setattr("vllm_ascend.quantization.nz.torch_npu.npu_format_cast", lambda tensor, *args, **kwargs: tensor)
+
     def make(kind="mxfp4", *, experts=6, layer_name="model.layers.0.mlp.experts"):
         is_fp8 = kind == "mxfp8"
         filename, class_name = (
@@ -75,12 +78,15 @@ def expert_factory(load_hook_class):
                 "get_current_vllm_config": lambda: None,
                 "use_cann_megamoe": lambda _: False,
                 "ACL_FORMAT_FRACTAL_NZ": 29,
+                "fp4_packed_nz": fp4_packed_nz,
+                "fp4_semantic_nz": fp4_semantic_nz,
+                "mxfp8_nz": mxfp8_nz,
                 "maybe_trans_nz_with_scale": lambda weight, scale, **k: (
                     weight.transpose(1, 2).contiguous(),
                     scale.transpose(1, 2).contiguous(),
                 ),
             },
-            helpers={"_process_batched_weights"},
+            helpers={"_process_batched_weights", "_is_situ", "_w13_cast_spec"},
         )()
         scheme.group_size = 32
         scheme.quant_type = QuantType.W8A8MXFP if is_fp8 else QuantType.W4A8MXFP

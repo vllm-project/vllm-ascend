@@ -53,7 +53,7 @@ def make_runner(load_hook_class, *, manager=None, has_prefill=False):
     class Parent:
         def load_model(self, load_dummy_weights=False, *args, **kwargs):
             events.append(("parent_load", load_dummy_weights, args, kwargs))
-            self.model = object()
+            self.model = torch.nn.Module()
             self.model_memory_usage = 1000
 
         def execute_model(self, scheduler_output, **kwargs):
