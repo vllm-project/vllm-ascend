@@ -51,9 +51,7 @@ GPU_MEMORY_UTILIZATION = 0.45
 INFERENCE_DEVICE_INDEX = int(os.environ.get("VLLM_RL_TEST_DEVICE_INDEX", "0"))
 
 
-def _ipc_trainer_peer(
-    local_rank: int, case: WeightUpdateModelCase, packed: bool, server_url: str, rendezvous: str, source_factory
-):
+def _ipc_trainer_peer(local_rank: int, case: WeightUpdateModelCase, packed: bool, server_url: str, rendezvous: str):
     from vllm.distributed.weight_transfer.clients import HTTPVLLMWeightSyncClient
     from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
 
@@ -62,7 +60,7 @@ def _ipc_trainer_peer(
     rank = local_rank + 1  # Rank 0 runs in the parent; spawn supplies peer-local ranks.
     device_index = INFERENCE_DEVICE_INDEX + rank
     torch.npu.set_device(device_index)
-    source = source_factory(case, torch.device("npu", device_index))
+    source = FixedRandomWeightSource(case, torch.device("npu", device_index))
     dist.init_process_group(
         "gloo",
         init_method=rendezvous,
@@ -92,20 +90,12 @@ def _ipc_trainer_peer(
         dist.destroy_process_group()
 
 
-def run_npu_ipc_weight_transfer_transaction(
-    case: WeightUpdateModelCase, packed: bool, *, source_factory=FixedRandomWeightSource
-):
-    """Run the shared TP2 protocol, optionally using a model-specific generator.
-
-    The factory must be spawn-picklable and implement the FixedRandomWeightSource
-    metadata/iteration/startup-checkpoint contract. Existing cases keep their
-    original generator and behavior.
-    """
+def run_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool):
     if INFERENCE_DEVICE_INDEX < 0 or torch.npu.device_count() < INFERENCE_DEVICE_INDEX + INFERENCE_WORLD_SIZE:
         pytest.skip("NPU IPC weight transfer e2e test requires 2 consecutive NPUs for TP=2.")
 
     torch.npu.set_device(INFERENCE_DEVICE_INDEX)
-    source = source_factory(case, torch.device("npu", INFERENCE_DEVICE_INDEX))
+    source = FixedRandomWeightSource(case, torch.device("npu", INFERENCE_DEVICE_INDEX))
     os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
     env_dict = {
         "VLLM_SERVER_DEV_MODE": "1",
@@ -132,7 +122,7 @@ def run_npu_ipc_weight_transfer_transaction(
         rendezvous = f"tcp://127.0.0.1:{get_open_port()}"
         peer = mp.spawn(
             _ipc_trainer_peer,
-            args=(case, packed, server.url_root, rendezvous, source_factory),
+            args=(case, packed, server.url_root, rendezvous),
             nprocs=TRAINER_WORLD_SIZE - 1,
             join=False,
         )

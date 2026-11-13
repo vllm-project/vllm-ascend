@@ -23,6 +23,8 @@ class WeightUpdateModelCase:
     checkpoint_name_map: Callable[[str], str] | None = None
     expert_intermediate_size: int | None = None
     extra_server_args: tuple[str, ...] = ()
+    # None preserves the existing single-file startup checkpoint.
+    checkpoint_shard_size_bytes: int | None = None
     # One representative model covers both backends and packing modes.
     full_transfer_matrix: bool = False
     skip_reason: str | None = None
@@ -78,6 +80,58 @@ QWEN35_CASE = WeightUpdateModelCase(
 QWEN_CASES = (QWEN35_CASE,)
 
 
+QWEN38_CASE = WeightUpdateModelCase(
+    id="qwen3.8-flash-next-4layers-small-ple-mrope-head128",
+    model="/mnt/weight/Qwen3.8-Flash-Next",
+    hf_overrides={
+        "architectures": ["Qwen4ExpForConditionalGeneration"],
+        "language_model_only": False,
+        "text_config": {
+            "num_hidden_layers": 4,
+            # Overrides run after config normalization; use the runtime QSA name.
+            "layer_types": ["linear_attention"] * 3 + ["indexed_attention"],
+            "ple_layer_ids": [2],
+            "ngram_vocab_size_base": 4096,
+            "head_dim": 128,
+            "partial_rotary_factor": 0.5,
+            "rope_parameters": {
+                "rope_type": "default",
+                "rope_theta": 10000000,
+                "mrope_interleaved": True,
+                "mrope_section": [11, 11, 10],
+                "partial_rotary_factor": 0.5,
+            },
+            "mtp_num_hidden_layers": 0,
+            "mtp": {
+                "hybrid": True,
+                "layer_types": [],
+                "mtp_use_hidden_state_from_layer": None,
+                "num_hidden_layers": 0,
+                "rope_theta": 10000000,
+            },
+        },
+    },
+    # Enumerate the text model on meta while retaining the conditional-generation
+    # architecture/MRoPE in both inference servers.
+    meta_config_attribute="text_config",
+    checkpoint_model_prefix="model.language_model.",
+    checkpoint_shard_size_bytes=2 * 2**30,
+    extra_server_args=(
+        "--max-num-seqs",
+        "4",
+        "--limit-mm-per-prompt",
+        '{"image":0,"video":0}',
+        "--engram-config",
+        '{"cpu_offload":false}',
+        "--kv-cache-memory-bytes",
+        str(4 * 2**30),
+    ),
+)
+
+
+QWEN38_CASES = (QWEN38_CASE,)
+
+
 DEEPSEEK_V4_CASE = WeightUpdateModelCase(
     id="deepseek-v4-flash-bf16-derived-gate",
     model="kylesayrs/DeepSeek-V4-Flash-bf16",
@@ -128,7 +182,7 @@ PACKED_LANE_SKIP_REASON = (
 )
 
 
-MODEL_CASES = (*QWEN_CASES, *DEEPSEEK_CASES, *GLM_CASES)
+MODEL_CASES = (*QWEN_CASES, *QWEN38_CASES, *DEEPSEEK_CASES, *GLM_CASES)
 
 
 def pytest_model_cases(backend: str, *, model_cases: tuple[WeightUpdateModelCase, ...] = MODEL_CASES) -> list[Any]:
