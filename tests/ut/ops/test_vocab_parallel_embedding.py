@@ -594,6 +594,7 @@ class TestAscendLogitsProcessor(unittest.TestCase):
         self.mock_quant_method.apply = MagicMock(return_value=torch.randn(2, self.vocab_size))
         self.mock_all_to_all_single = MagicMock(side_effect=lambda out, inp, **kwargs: out.copy_(inp))
         self.patches = [
+            patch("vllm_ascend.ops.vocab_parallel_embedding.get_tp_group", return_value=self.mock_pcp_group),
             patch("vllm_ascend.ops.vocab_parallel_embedding.get_lmhead_tp_group", return_value=self.mock_group),
             patch("vllm_ascend.ops.vocab_parallel_embedding.lmhead_tp_enable", return_value=True),
             patch(
