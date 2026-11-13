@@ -227,7 +227,6 @@ jobs:
           fi
 
           BRANCH="main"
-          BRANCH_EXPLICIT="false"
           VLLM_REF=""
           TEST_CASES=""
           AOP_ENABLED="false"
@@ -273,7 +272,6 @@ jobs:
 
             if [ "$NEXT_IS_BRANCH" = "1" ]; then
               BRANCH="$WORD"
-              BRANCH_EXPLICIT="true"
               NEXT_IS_BRANCH=0
             elif [ "$NEXT_IS_DOWNLOAD" = "1" ]; then
               DOWNLOAD_PATH="$WORD"
@@ -465,17 +463,43 @@ jobs:
           echo "vllm_ascend_ref=$PR_SHA" >> "$GITHUB_OUTPUT"
           echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
 
-          # /presmoke without an explicit --branch builds the isolated image from the
-          # Dockerfile submitted in the PR, so the CANN and dependency versions under
-          # test are the ones being reviewed. The Dockerfile is taken from the PR head
-          # ref ('pre-merge') and overlaid on the branch that is built, which keeps the
-          # branch and therefore the published tag (nightly-main-presmoke[-<chip>])
-          # unchanged. An explicit --branch wins and uses that branch's Dockerfile.
+          # /presmoke pre-merges the PR: both image layers are built from the PR head
+          # ref, so the code, Dockerfiles and dependency versions under test are the
+          # ones being reviewed. The branch still decides the published tag, so the
+          # tag names stay identical to the standard nightly images.
           DOCKERFILE_REF=""
-          if [ "$COMMAND" = "presmoke" ] && [ "$BRANCH_EXPLICIT" != "true" ]; then
+          if [ "$COMMAND" = "presmoke" ]; then
             DOCKERFILE_REF="refs/pull/$PR_NUMBER/head"
           fi
           echo "dockerfile_ref=$DOCKERFILE_REF" >> "$GITHUB_OUTPUT"
+
+          # The /presmoke command takes chip names directly, with no inference
+          # from test names: /presmoke all builds every chip, /presmoke a2 a3
+          # builds only those. Only a2/a3/310p/a5 are valid.
+          if [ "$COMMAND" = "presmoke" ]; then
+            CHIP_LIST=""
+            if [ "$TEST_CASES" = "all" ]; then
+              CHIP_LIST="a2 a3 310p a5"
+            else
+              for CHIP in $(echo "$TEST_CASES" | tr ',' ' '); do
+                case "$CHIP" in
+                  a2|a3|310p|a5)
+                    CHIP_LIST="$CHIP_LIST $CHIP"
+                    ;;
+                  *)
+                    gh api "repos/${{ github.event.client_payload.github.payload.repository.full_name }}/issues/${{ github.event.client_payload.github.payload.issue.number }}/comments" \
+                      -f body="[Bot]: \`/presmoke\` accepts chip names only: a2, a3, 310p, a5 (or \`all\`). Got: \`$CHIP\`." \
+                      --silent
+                    exit 1
+                    ;;
+                esac
+              done
+            fi
+            for CHIP in $CHIP_LIST; do
+              echo "dispatch_${CHIP}=true" >> "$GITHUB_OUTPUT"
+            done
+            exit 0
+          fi
 
           if [ "$TEST_CASES" = "all" ]; then
             if [ "$IS_A3_560T" = "true" ]; then
@@ -538,19 +562,19 @@ jobs:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
-          # The selected test names decide which chips to build: /presmoke builds the
-          # images the matching tests would consume. The a3-560t tests run on the a3
-          # image, so both flags map to the a3 chip. build_type=release keeps the
-          # images in the CI repositories (never atlas_inference) and skip_sync keeps
-          # them out of quay.io; the -presmoke repo/tag suffix isolates them from the
-          # standard nightly images. dockerfile_ref carries the Dockerfile of the
-          # triggering PR (empty when an explicit --branch was given) so the isolated
-          # image is built with the versions under review.
+          # The /presmoke command lists the chips to build directly; the resolved
+          # dispatch_<chip> outputs are the single source of truth. isolated_build
+          # makes the build full-scale (ubuntu+openEuler on amd64+arm64), keeps
+          # the images in the isolated '-presmoke' CI repositories (never
+          # atlas_inference) and skips the quay.io and cn-north-4 syncs.
+          # dockerfile_ref makes both layers build from the triggering PR head
+          # ('pre-merge'), so the code and Dockerfiles under review are the ones
+          # built.
           CHIPS='[]'
           for CHIP in a2 a3 310p a5; do
             case "$CHIP" in
               a2) SELECTED='${{ needs.authorize.outputs.dispatch_a2 }}' ;;
-              a3) SELECTED='${{ (needs.authorize.outputs.dispatch_a3 == 'true' || needs.authorize.outputs.dispatch_a3_560t == 'true') && 'true' || 'false' }}' ;;
+              a3) SELECTED='${{ needs.authorize.outputs.dispatch_a3 }}' ;;
               310p) SELECTED='${{ needs.authorize.outputs.dispatch_310p }}' ;;
               a5) SELECTED='${{ needs.authorize.outputs.dispatch_a5 }}' ;;
             esac
@@ -558,6 +582,10 @@ jobs:
               CHIPS=$(jq -c --arg chip "$CHIP" '. + [$chip]' <<< "$CHIPS")
             fi
           done
+          if [ "$CHIPS" = '[]' ]; then
+            echo "::error::No chip selected for /presmoke"
+            exit 1
+          fi
           # Only forward dockerfile_ref when set: gh would turn an empty -f value
           # into 'true', which is not a valid ref.
           DOCKERFILE_REF='${{ needs.authorize.outputs.dockerfile_ref }}'
@@ -571,10 +599,7 @@ jobs:
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             "${DOCKERFILE_REF_ARGS[@]}" \
             -f chips="$CHIPS" \
-            -f build_type='release' \
-            -f image_repo_suffix='-presmoke' \
-            -f tag_suffix='-presmoke' \
-            -f skip_sync='true'
+            -f isolated_build='true'
           sleep 8
           PRESMOKE_RUN_ID=$(gh api "repos/$REPO/actions/workflows/schedule_nightly_image_build_with_base.yaml/runs?per_page=1" \
             --jq '.workflow_runs[0].id')
@@ -617,7 +642,6 @@ jobs:
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
             -f skip_build_image='true' \
-            -f image_tag_suffix='${{ needs.authorize.outputs.presmoke_image == 'true' && '-presmoke' || '' }}' \
             -f image_repo_suffix='${{ needs.authorize.outputs.presmoke_image == 'true' && '-presmoke' || '' }}' \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
@@ -667,7 +691,6 @@ jobs:
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
             -f skip_build_image='true' \
-            -f image_tag_suffix='${{ needs.authorize.outputs.presmoke_image == 'true' && '-presmoke' || '' }}' \
             -f image_repo_suffix='${{ needs.authorize.outputs.presmoke_image == 'true' && '-presmoke' || '' }}' \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
@@ -717,7 +740,6 @@ jobs:
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
             -f skip_build_image='true' \
-            -f image_tag_suffix='${{ needs.authorize.outputs.presmoke_image == 'true' && '-presmoke' || '' }}' \
             -f image_repo_suffix='${{ needs.authorize.outputs.presmoke_image == 'true' && '-presmoke' || '' }}' \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
@@ -767,7 +789,6 @@ jobs:
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
             -f skip_build_image='true' \
-            -f image_tag_suffix='${{ needs.authorize.outputs.presmoke_image == 'true' && '-presmoke' || '' }}' \
             -f image_repo_suffix='${{ needs.authorize.outputs.presmoke_image == 'true' && '-presmoke' || '' }}' \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
@@ -817,7 +838,6 @@ jobs:
             -f request_id='${{ needs.authorize.outputs.pr_number }}' \
             -f download_path="$DOWNLOAD_PATH" \
             -f skip_build_image='true' \
-            -f image_tag_suffix='${{ needs.authorize.outputs.presmoke_image == 'true' && '-presmoke' || '' }}' \
             -f image_repo_suffix='${{ needs.authorize.outputs.presmoke_image == 'true' && '-presmoke' || '' }}' \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
