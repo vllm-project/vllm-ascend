@@ -1,0 +1,161 @@
+# Source: https://github.com/vllm-project/vllm/blob/2b635e9014c3914b3e881e02ee88b4ddc4d6989d/recipes/models/deepseek-ai/DeepSeek-V4.1-Flash.yaml
+# Extracted with vllm-project/recipes@afa74b7acb2a1ce7372115807e9fe45f2b168171.
+meta:
+  hardware:
+    ascend_910b: verified
+hardware_notes:
+  ascend_910b:
+    title: W4A8 prefill/decode disaggregation on Atlas 800I A2 (910B4)
+    body: Validated on 2 nodes x 8 NPU (16x Ascend 910B4, 64 GB HBM each), 1 prefill node at DP2 x TP1 x PCP4 and 1 decode node at DP8 x TP1, MooncakeHybridConnector KV transfer, DSpark 5-token drafting. The tutorial's A2 tab pins the community values decode draft enforce_eager true and enable_fused_mc2 1; the validated deployment used false and 2 on the same v0.32.0rc line.
+    link:
+      label: vLLM Ascend DeepSeek-V4.1-Flash tutorial
+      href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/DeepSeek-V4.1-Flash.html
+strategy_hardware:
+  single_node_tp:
+    npu: unsupported
+  single_node_tep:
+    npu: unsupported
+  single_node_dep:
+    npu: unsupported
+  multi_node_tp:
+    npu: unsupported
+  multi_node_tep:
+    npu: unsupported
+  multi_node_dep:
+    npu: unsupported
+  pd_cluster:
+    npu: unsupported
+    ascend_910b: supported
+features:
+  spec_decoding:
+    # Base has no modes for this feature (args-only, like its amd override);
+    # replace args per hardware instead of declaring a mode.
+    hardware_overrides:
+      ascend_910b:
+        args:
+          - '--speculative-config'
+          - '{"method": "dspark", "num_speculative_tokens": 5, "enforce_eager": false}'
+variants:
+  ascend_w4a8:
+    model_id: Eco-Tech/DeepSeek-V4.1-Flash-1017-w4a8
+    label: W4A8 (A2 PD)
+    precision: int4
+    vram_minimum_gb: 529
+    supported_hardware:
+      - ascend_910b
+    tp:
+      ascend_910b: 1
+    min_vllm_version: '0.32.0'
+    extra_args:
+      - '--trust-remote-code'
+      - '--quantization'
+      - ascend
+      - '--enable-expert-parallel'
+      - '--max-model-len'
+      - '1048576'
+      - '--max-num-seqs'
+      - '72'
+      - '--max-num-batched-tokens'
+      - '512'
+      - '--gpu-memory-utilization'
+      - '0.97'
+      - '--block-size'
+      - '128'
+      - '--async-scheduling'
+      - '--no-enable-prefix-caching'
+      - '--no-swa-bounded-replay'
+      - '--kv-cache-memory-bytes'
+      - '4600000000'
+      - '--safetensors-load-strategy'
+      - lazy
+      - '--compilation-config'
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - '--engram-config'
+      - '{"cpu_offload": true, "dp_shared_memory": true}'
+      - '--additional-config'
+      - '{"ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "enable_cpu_binding": true, "enable_flashcomm1": false, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}'
+    extra_env:
+      VLLM_USE_MODELSCOPE: 'True'
+      VLLM_USE_V2_MODEL_RUNNER: '1'
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+      HCCL_BUFFSIZE: '1024'
+      HCCL_OP_EXPANSION_MODE: AIV
+      HCCL_CONNECT_TIMEOUT: '1200'
+      TASK_QUEUE_ENABLE: '1'
+      OMP_NUM_THREADS: '1'
+    hardware_overrides:
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1
+        install:
+          pip: false
+presets:
+  ascend_a2_w4a8_pd:
+    label: A2 W4A8 PD (1P + 1D)
+    hardware: ascend_910b
+    strategy: pd_cluster
+    variants: [ascend_w4a8]
+    workload: Prefill/decode disaggregation, 1M context
+    select:
+      features:
+        spec_decoding: true
+    roles:
+      prefill:
+        nodes: 1
+        parallelism: dep
+        # Decode-owned flags from the variant contract do not apply to the
+        # prefill pool (collected prefill command omits them).
+        remove_args:
+          - '--async-scheduling'
+          - '--kv-cache-memory-bytes'
+          - '--compilation-config'
+          - '--no-enable-prefix-caching'
+          - '--no-swa-bounded-replay'
+        args:
+          - '--data-parallel-size'
+          - '2'
+          - '--data-parallel-size-local'
+          - '2'
+          - '--enforce-eager'
+          - '--prefill-context-parallel-size'
+          - '4'
+          - '--max-num-seqs'
+          - '16'
+          - '--max-num-batched-tokens'
+          - '4096'
+          - '--enable-prefix-caching'
+          - '--swa-bounded-replay'
+          - '--additional-config'
+          - '{"enable_cpu_binding": true, "enable_fused_mc2": 2, "enable_flashcomm1": false, "enable_shared_expert_dp": true}'
+        json_args:
+          --kv-transfer-config:
+            kv_connector: MooncakeHybridConnector
+            kv_role: kv_producer
+            kv_connector_extra_config:
+              prefill:
+                dp_size: 2
+                tp_size: 1
+              decode:
+                dp_size: 8
+                tp_size: 1
+      decode:
+        nodes: 1
+        parallelism: dep
+        # Core's GB200 PD lane emits --max-num-seqs 32 in
+        # strategy_overrides.pd_cluster.decode (applied after variant
+        # args, last-wins); the validated A2 decode concurrency is 72.
+        args:
+          - '--max-num-seqs'
+          - '72'
+        env:
+          HCCL_BUFFSIZE: '1800'
+        json_args:
+          --kv-transfer-config:
+            kv_connector: MooncakeHybridConnector
+            kv_role: kv_consumer
+            kv_connector_extra_config:
+              prefill:
+                dp_size: 2
+                tp_size: 1
+              decode:
+                dp_size: 8
+                tp_size: 1
