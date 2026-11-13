@@ -40,9 +40,6 @@ def test_qwen4_exp_ascend_wrapper_owns_sequence_parallel_moe_region() -> None:
     assert "already_sequence_parallel=self.use_sequence_parallel" in model
     assert "block_input = sp_all_gather(block_input)" in model
     assert "attn_out = sp_reduce_scatter(attn_out)" in model
-    assert "gathered_ple = sp_all_gather(" in model
-    assert "torch.cat((gated_output, conv_input), dim=-1)" in model
-    assert "gated_output.add_(conv_output)" in model
     assert "ple_output_is_full_tokens = self.use_sequence_parallel" in model
     assert "injection = sp_shard(injection)" in model
     assert "local_ngram_ids = sp_shard(ngram_ids)" in model

@@ -34,7 +34,9 @@ def _store_ple_conv_output(
             mask=c_mask,
             other=0.0,
         )
-        ple_output = (residual + conv_output).to(residual_ptr.dtype.element_ty)
+        # Force a real downcast after FP32 addition so BF16 arithmetic lowering
+        # cannot discard the materialized residual rounding of the torch path.
+        ple_output = (residual.to(tl.float32) + conv_output.to(tl.float32)).to(residual_ptr.dtype.element_ty)
         outer_residual = tl.load(
             outer_residual_ptr + output_t * C + c_offs,
             mask=c_mask,

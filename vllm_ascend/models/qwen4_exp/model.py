@@ -170,16 +170,12 @@ class AscendQwen4ExpPLELayer(upstream_model.Qwen4ExpPLELayer):
             self.norm_key.eps,
         )
 
-        # PLE short-conv and the immediately following attention both need a
-        # full-token view. Gather the token-local residual branch and conv
-        # input together so the decoder can reuse the same full-token result
-        # instead of launching a second all-gather before attention.
-        gated_output.add_(hidden_states)
-        gated_output_size = gated_output.shape[-1]
-        gathered_ple = sp_all_gather(torch.cat((gated_output, conv_input), dim=-1))[: input_ids.shape[0]]
-        gated_output, conv_input = gathered_ple.split((gated_output_size, conv_input.shape[-1]), dim=-1)
-        # split() leaves a packed row stride, but short-conv kernels read dense rows.
-        conv_input = conv_input.contiguous()
+        # Short convolution updates full-token request state. Keep both
+        # residual additions local and in the upstream order: first add the
+        # convolution to the gated value, then add the outer hidden state.
+        # Reassociating these BF16 additions changes the rounding boundaries.
+        full_num_tokens = input_ids.shape[0]
+        conv_input = sp_all_gather(conv_input)[:full_num_tokens].contiguous()
         conv_output = torch.zeros_like(conv_input)
         torch.ops.vllm.qwen4_exp_ple_short_conv(
             conv_input,
@@ -187,8 +183,11 @@ class AscendQwen4ExpPLELayer(upstream_model.Qwen4ExpPLELayer):
             torch.zeros_like(conv_input),
             self.prefix,
         )
-        gated_output.add_(conv_output)
-        return gated_output
+        gated_output.add_(sp_shard(conv_output))
+        gated_output.add_(hidden_states)
+        # The next attention consumes full-token input, so preserve the PLE
+        # output contract while gathering the same total width as before.
+        return sp_all_gather(gated_output)[:full_num_tokens]
 
 
 class AscendQwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock):
