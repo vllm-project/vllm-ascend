@@ -256,7 +256,7 @@ def test_tiering_worker_matches_v027_shared_region_contract(
         "blocks_per_chunk": 2,
         "num_cpu_blocks": 10,
         "mmap_region": captured["region"],
-        "pin_shared_mmap": True,
+        "pin_shared_mmap": False,
         "worker_slot_only": not replicated_layout,
     }
 

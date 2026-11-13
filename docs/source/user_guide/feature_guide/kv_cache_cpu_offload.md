@@ -88,7 +88,7 @@ kv_transfer_config = KVTransferConfig(
 - `cpu_bytes_to_use`: Total bytes reserved for the CPU tier across all workers. This is required by the vLLM offloading specs.
 - `blocks_per_chunk`: Number of NPU KV-cache blocks in one offloaded chunk. It must be greater than zero. Alternatively, `block_size` can specify the chunk size in tokens when all KV-cache groups use the same block size; the two options are mutually exclusive.
 - `spec_name`: Use the upstream names `"CPUOffloadingSpec"` for CPU-only offload or `"TieringOffloadingSpec"` for multi-tier offload. vLLM Ascend transparently maps them to the NPU implementations.
-- `pin_shared_mmap`: Boolean, defaults to `true`. Applies to `TieringOffloadingSpec`; set to `false` to disable registration of its shared CPU mapping as pinned host memory.
+- `pin_shared_mmap`: Boolean, defaults to `false`. Applies to `TieringOffloadingSpec`; set to `true` to register its shared CPU mapping as pinned host memory.
 - `secondary_tiers`: Optional list of vLLM tiering backends used by `TieringOffloadingSpec`. Each entry is a dict; common keys:
     - `type`: Backend type. Use `"fs"` for filesystem storage.
     - `root_dir`: Directory the tier writes block files into.
@@ -96,13 +96,10 @@ kv_transfer_config = KVTransferConfig(
 
 ### Pinning the shared CPU tier
 
-`pin_shared_mmap` defaults to `true` for `TieringOffloadingSpec`. On supported
-Ascend runtimes, it registers the existing shared CPU mapping as page-locked
-host memory for direct batched NPU transfers.
-
-To disable registration, set `pin_shared_mmap` to `false` in
-`kv_connector_extra_config`, for example when comparing pinned and pageable
-offload performance:
+`pin_shared_mmap` defaults to `false` for `TieringOffloadingSpec`. To enable
+registration on supported Ascend runtimes, set `pin_shared_mmap` to `true` in
+`kv_connector_extra_config`. This registers the existing shared CPU mapping as
+page-locked host memory for direct batched NPU transfers:
 
 ```json
 {
@@ -112,7 +109,7 @@ offload performance:
         "spec_name": "TieringOffloadingSpec",
         "cpu_bytes_to_use": 8589934592,
         "blocks_per_chunk": 8,
-        "pin_shared_mmap": false,
+        "pin_shared_mmap": true,
         "secondary_tiers": [
             {"type": "fs", "root_dir": "/tmp/vllm_kv_offload"}
         ]
@@ -129,6 +126,12 @@ If the Ascend extension lacks the required host-registration/batched-copy APIs,
 or registration fails, the worker rolls back completed registrations and falls
 back to pageable mmap with a warning. Startup logs report the registered bytes
 and range count when registration succeeds.
+
+Larger shared CPU regions require more pages to be populated (pre-faulted),
+so increasing `cpu_bytes_to_use` increases startup population time. On
+supported vLLM versions, segmented mappings and disjoint MLA population shards
+reduce this cost. Population is required even when `pin_shared_mmap` is
+`false`; benchmark startup time separately from KV-transfer bandwidth.
 
 `CPUOffloadingSpec` uses PyTorch's pinned tensor allocator and does not use this
 option.
