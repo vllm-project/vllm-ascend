@@ -492,6 +492,89 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
         return topk_weights, topk_ids
 
+    def _select_experts_reusing_saved_routes(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        enable_force_load_balance: bool,
+        input_ids: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run Router selection only for rows without a resume checkpoint."""
+        token_cut_state = getattr(_EXTRA_CTX, "moe_token_cut_state", None)
+        comm_method = _EXTRA_CTX.moe_comm_method
+        dispatcher = getattr(comm_method, "token_dispatcher", None)
+        if (
+            token_cut_state is None
+            or dispatcher is None
+            or not hasattr(dispatcher, "ep_rank_id")
+            or not hasattr(dispatcher, "ep_world_size")
+        ):
+            return self._select_experts(
+                hidden_states,
+                router_logits,
+                enable_force_load_balance,
+                input_ids,
+            )
+        partition = token_cut_state.saved_routing_partition(
+            hidden_states.shape[0],
+            hidden_states.device,
+            rank_id=dispatcher.ep_rank_id,
+            rank_num=dispatcher.ep_world_size,
+        )
+        if partition is None:
+            return self._select_experts(
+                hidden_states,
+                router_logits,
+                enable_force_load_balance,
+                input_ids,
+            )
+        fresh_rows, saved_rows, saved_ids, saved_weights = partition
+        if fresh_rows.numel() > 0:
+            fresh_input_ids = input_ids
+            if input_ids is not None and input_ids.shape[0] == hidden_states.shape[0]:
+                fresh_input_ids = input_ids.index_select(
+                    0, fresh_rows.to(device=input_ids.device)
+                )
+            fresh_weights, fresh_ids = self._select_experts(
+                hidden_states.index_select(0, fresh_rows),
+                router_logits.index_select(0, fresh_rows),
+                enable_force_load_balance,
+                fresh_input_ids,
+            )
+            topk_ids = fresh_ids.new_empty(
+                (hidden_states.shape[0], *fresh_ids.shape[1:])
+            )
+            topk_weights = fresh_weights.new_empty(
+                (hidden_states.shape[0], *fresh_weights.shape[1:])
+            )
+            topk_ids.index_copy_(0, fresh_rows, fresh_ids)
+            topk_weights.index_copy_(0, fresh_rows, fresh_weights)
+        else:
+            topk_ids = saved_ids.new_empty(
+                (hidden_states.shape[0], *saved_ids.shape[1:])
+            )
+            topk_weights = saved_weights.new_empty(
+                (hidden_states.shape[0], *saved_weights.shape[1:])
+            )
+        if topk_ids.shape[1:] != saved_ids.shape[1:]:
+            raise RuntimeError("saved MoE route shape changed while request was parked")
+        if topk_weights.shape[1:] != saved_weights.shape[1:]:
+            raise RuntimeError("saved MoE route-weight shape changed while request was parked")
+        topk_ids.index_copy_(
+            0,
+            saved_rows,
+            saved_ids.to(dtype=topk_ids.dtype, device=topk_ids.device),
+        )
+        topk_weights.index_copy_(
+            0,
+            saved_rows,
+            saved_weights.to(
+                dtype=topk_weights.dtype,
+                device=topk_weights.device,
+            ),
+        )
+        return topk_weights, topk_ids
+
     def forward_impl(
         self,
         *,
@@ -527,7 +610,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         pertoken_scale = prepare_output.pertoken_scale
         if self.router is None:
             raise RuntimeError("AscendRoutedExperts requires a router for expert selection.")
-        topk_weights, topk_ids = self._select_experts(
+        topk_weights, topk_ids = self._select_experts_reusing_saved_routes(
             hidden_states=hidden_states,
             router_logits=router_logits,
             enable_force_load_balance=enable_force_load_balance,

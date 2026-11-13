@@ -188,6 +188,10 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "sparse_attention_score"
         "k2q_csr"
         "msa_index_score"
+        "attn_metadata_update"
+        "combine_and_dispatch_rebatch"
+        "rebatch_and_update"
+        "moe_token_cut"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910_93"

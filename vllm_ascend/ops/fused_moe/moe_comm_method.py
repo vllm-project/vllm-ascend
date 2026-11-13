@@ -29,8 +29,9 @@ from vllm_ascend.ops.fused_moe import moe_utils
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEFusedExpertsInput
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput, build_mlp_compute_input
 from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
-from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import build_token_dispatch_input
+from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import MoETokenDispatchInput, build_token_dispatch_input
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
+from vllm_ascend.ops.fused_moe.moe_token_cut import restore_compacted_rows
 from vllm_ascend.ops.fused_moe.prepare_finalize import (
     PrepareAndFinalize,
     PrepareAndFinalizeWithAll2All,
@@ -136,6 +137,30 @@ class MoECommMethod(ABC):
         token_dispatch_input = build_token_dispatch_input(
             fused_experts_input=fused_experts_input,
         )
+        token_cut_state = getattr(_EXTRA_CTX, "moe_token_cut_state", None)
+        if (
+            token_cut_state is not None
+            and isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
+        ):
+            token_dispatch_input = token_cut_state.apply_saved_routing(
+                token_dispatch_input,
+                rank_id=self.token_dispatcher.ep_rank_id,
+                rank_num=self.token_dispatcher.ep_world_size,
+            )
+        token_cut_output = self._run_token_cut_shadow(token_dispatch_input)
+        apply_token_cut = (
+            token_cut_output is not None
+            and token_cut_state is not None
+            and token_cut_state.config.mode == "apply"
+            and (token_cut_state.apply_compaction_this_forward or token_cut_state.native_combined)
+        )
+        if apply_token_cut:
+            if self.token_dispatcher.global_bs != 0:
+                raise RuntimeError(
+                    "MoE token-cut apply mode requires MC2 uniform mode with "
+                    "x_active_mask support"
+                )
+            token_dispatch_input = token_cut_output.dispatch_input
         token_dispatch_output = self.token_dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 
         mlp_compute_input = build_mlp_compute_input(
@@ -151,6 +176,12 @@ class MoECommMethod(ABC):
             hidden_states=mlp_output,
             combine_metadata=token_dispatch_output.combine_metadata,
         )
+        if apply_token_cut and getattr(token_cut_state, "model_graph_frame", None) is None:
+            routed_out = restore_compacted_rows(
+                routed_out,
+                token_cut_output.cut_idx,
+                token_cut_output.prefix_index,
+            )
 
         return FusedExpertsResult(
             routed_out=routed_out,
@@ -159,6 +190,25 @@ class MoECommMethod(ABC):
             before_combine_evt=before_combine_evt,
             group_list_type=token_dispatch_output.group_list_type,
             expert_tokens=token_dispatch_output.group_list,
+        )
+
+    def _run_token_cut_shadow(self, token_dispatch_input: MoETokenDispatchInput):
+        token_cut_state = getattr(_EXTRA_CTX, "moe_token_cut_state", None)
+        if token_cut_state is None:
+            return None
+        if not isinstance(self.token_dispatcher, TokenDispatcherWithMC2):
+            if token_cut_state.config.mode == "apply" and getattr(token_cut_state, "_restored_request_ids", ()):
+                raise RuntimeError("MoE token-cut apply mode requires the regular MC2 communication path")
+            # Prefill can select AllToAll. No token-cut collective is entered
+            # on that globally selected path; local checkpoints remain parked.
+            return None
+        return token_cut_state.run_shadow(
+            token_dispatch_input,
+            group_ep=self.token_dispatcher.moe_all_to_all_group_name,
+            rank_id=self.token_dispatcher.ep_rank_id,
+            rank_num=self.token_dispatcher.ep_world_size,
+            expert_num=self.moe_config.num_experts,
+            process_group=get_mc2_group().device_group,
         )
 
     def _apply_mlp(self, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
@@ -454,6 +504,12 @@ class FusedMC2CommImpl(MoECommMethod):
         )
 
         expert_tokens = None
+        token_cut_output = self._run_token_cut_shadow(
+            build_token_dispatch_input(fused_experts_input=fused_experts_input)
+        )
+        token_cut_state = getattr(_EXTRA_CTX, "moe_token_cut_state", None)
+        if token_cut_output is not None and token_cut_state.config.mode == "apply":
+            raise RuntimeError("MoE token-cut apply mode is not supported by fused MC2")
         if get_ascend_config().enable_fused_mc2 == 1:
             if _EXTRA_CTX.use_mega_moe:
                 out, expert_tokens = self._apply_cann_mega_moe(
