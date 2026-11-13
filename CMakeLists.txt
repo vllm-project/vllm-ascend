@@ -227,20 +227,20 @@ endif()
 
 target_link_options(vllm_ascend_C PRIVATE "-Wl,-rpath,$ORIGIN:$ORIGIN/lib:$ORIGIN/_cann_ops_custom/vendors/custom_transformer/op_api/lib")
 
-if(EXISTS "${ASCEND_HOME_PATH}/include/hixl/hixl.h")
-  find_library(ENGRAM_HIXL_LIBRARY cann_hixl PATHS ${ASCEND_HOME_PATH}/lib64)
-  if(ENGRAM_HIXL_LIBRARY)
-    add_library(engram_hixl SHARED csrc/engram_hixl/native.cpp)
-    target_include_directories(engram_hixl PRIVATE ${ASCEND_HOME_PATH}/include)
-    target_link_directories(engram_hixl PRIVATE ${ASCEND_HOME_PATH}/lib64)
-    target_link_libraries(engram_hixl PRIVATE ${ENGRAM_HIXL_LIBRARY} ascendcl)
-    add_dependencies(vllm_ascend_C engram_hixl)
-    install(TARGETS engram_hixl DESTINATION ${VLLM_ASCEND_INSTALL_PATH})
-  endif()
-endif()
-
 if(SOC_VERSION MATCHES "ascend310p.*|ascend950")
   install(TARGETS vllm_ascend_C DESTINATION ${VLLM_ASCEND_INSTALL_PATH})
 else()
   install(TARGETS vllm_ascend_C vllm_ascend_kernels DESTINATION ${VLLM_ASCEND_INSTALL_PATH})
+endif()
+
+# Expose the Torch adapter when the A5 toolkit can build the ACLNN SIMT kernel.
+if(SOC_VERSION MATCHES "ascend950")
+  find_path(HISPARSE_SIMT_INCLUDE_DIR simt_api/asc_simt.h
+    PATHS
+      ${ASCEND_HOME_PATH}/asc/include
+      ${ASCEND_HOME_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/asc/include
+    NO_DEFAULT_PATH)
+  if(HISPARSE_SIMT_INCLUDE_DIR)
+    target_compile_definitions(vllm_ascend_C PRIVATE VLLM_ASCEND_ENABLE_HISPARSE_RESOLVER)
+  endif()
 endif()
