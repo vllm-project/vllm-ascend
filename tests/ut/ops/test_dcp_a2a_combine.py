@@ -68,7 +68,7 @@ def test_rank_tiled_bounded_work_dispatch(monkeypatch, device_type, ranks, dim, 
     monkeypatch.setattr(dcp_a2a.triton, "cdiv", lambda a, b: (a + b - 1) // b, raising=False)
     monkeypatch.setattr(dcp_a2a, "is_950", lambda: device_type == AscendDeviceType.A5)
     monkeypatch.setattr(dcp_a2a, "get_ascend_device_type", lambda: device_type)
-    monkeypatch.setattr(dcp_a2a, "_A3_STATIC_KEYS", frozenset())
+    monkeypatch.setattr(dcp_a2a, "_A3_STATIC_SIGNATURES", frozenset())
     monkeypatch.setattr(dcp_a2a, "init_device_properties_triton", lambda: None)
     monkeypatch.setattr(dcp_a2a, "get_vectorcore_num", lambda: 48)
     tiled, static, scalar, batched = Mock(), Mock(), Mock(), Mock()
@@ -109,8 +109,11 @@ def test_rank_tiled_bounded_work_dispatch(monkeypatch, device_type, ranks, dim, 
 
 
 @pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
-@pytest.mark.parametrize("warmed", [False, True])
-def test_a3_static_bucket_dispatch(monkeypatch, device_type, warmed):
+@pytest.mark.parametrize(
+    "warmed,ranks,tokens",
+    [(False, 16, 16), (True, 16, 16), (True, 8, 16), (True, 16, 13), (True, 16, 191), (True, 16, 2)],
+)
+def test_a3_static_bucket_dispatch(monkeypatch, device_type, warmed, ranks, tokens):
     power_of_two = lambda n: 1 << (n - 1).bit_length()
     monkeypatch.setattr(dcp_a2a.triton, "next_power_of_2", power_of_two, raising=False)
     monkeypatch.setattr(dcp_a2a.triton, "cdiv", lambda a, b: (a + b - 1) // b, raising=False)
@@ -118,8 +121,12 @@ def test_a3_static_bucket_dispatch(monkeypatch, device_type, warmed):
     monkeypatch.setattr(dcp_a2a, "get_ascend_device_type", lambda: device_type)
     monkeypatch.setattr(dcp_a2a, "init_device_properties_triton", lambda: None)
     monkeypatch.setattr(dcp_a2a, "get_vectorcore_num", lambda: 48)
-    keys = frozenset({(4, 16, 512, 16)}) if warmed else frozenset()
-    monkeypatch.setattr(dcp_a2a, "_A3_STATIC_KEYS", keys)
+    monkeypatch.setattr(dcp_a2a, "_A3_WARMING", False)
+    monkeypatch.setattr(dcp_a2a, "_UNWARMED_LOGGED", set())
+    # The warmed key includes the local strides, which participate in the
+    # Triton cache key.
+    full_key = (4, tokens, 512, ranks, 4 * 512, 512, 1, 4, 1)
+    monkeypatch.setattr(dcp_a2a, "_A3_STATIC_SIGNATURES", frozenset({full_key}) if warmed else frozenset())
     tiled, static, scalar, batched = Mock(), Mock(), Mock(), Mock()
     for name, launch in [
         ("rank_tiled", tiled),
@@ -132,15 +139,32 @@ def test_a3_static_bucket_dispatch(monkeypatch, device_type, warmed):
         kernel.__getitem__ = Mock(return_value=launch)
         monkeypatch.setattr(dcp_a2a, f"_fused_dcp_lse_combine{suffix}_kernel", kernel)
     with FakeTensorMode():
-        recv = torch.empty(16, 4, 16, 516, dtype=torch.bfloat16, device="npu:0")
-        local = torch.empty_strided((16, 4, 512), (4 * 512, 512, 1), dtype=torch.bfloat16, device="npu:0")
-        lse = torch.empty(16, 4, 1, dtype=torch.float32, device="npu:0")
+        recv = torch.empty(ranks, 4, tokens, 516, dtype=torch.bfloat16, device="npu:0")
+        local = torch.empty_strided((tokens, 4, 512), (4 * 512, 512, 1), dtype=torch.bfloat16, device="npu:0")
+        lse = torch.empty(tokens, 4, 1, dtype=torch.float32, device="npu:0")
         dcp_a2a.fused_dcp_lse_combine(recv, 512, 1, local_output=local, local_lse=lse)
-    # Only A3 uses the static twin, and only for a warmed bucket key.
-    expected_static = warmed and device_type == AscendDeviceType.A3
+    # A3 uses the static twin only for a warmed signature; A5 keeps the
+    # dynamic kernel; A2 keeps the scalar path.
+    expected_static = warmed and device_type == AscendDeviceType.A3 and tokens * 4 >= 12
+    expected_dynamic = device_type == AscendDeviceType.A5 and tokens * 4 >= 12 and 8 <= ranks <= 16
     assert static.call_count == int(expected_static)
+    assert tiled.call_count == int(expected_dynamic)
     assert tiled.call_count + static.call_count + scalar.call_count + batched.call_count == 1
     if expected_static:
-        assert static.call_args.kwargs["NUM_TOKENS"] == 16
+        assert static.call_args.kwargs["NUM_TOKENS"] == tokens
         assert static.call_args.kwargs["NUM_HEADS"] == 4
         assert static.call_args.kwargs["BLOCK_D"] == 512
+
+
+def test_a3_static_warmup_accumulates(monkeypatch):
+    monkeypatch.setattr(dcp_a2a, "_A3_STATIC_SIGNATURES", frozenset())
+    monkeypatch.setattr(dcp_a2a, "_A3_RECORDED", set())
+    first = (4, 16, 512, 16, 2048, 512, 1, 4, 1)
+    second = (4, 32, 512, 16, 2048, 512, 1, 4, 1)
+    dcp_a2a.begin_a3_static_warmup({(4, 16, 512, 16)})
+    dcp_a2a._A3_RECORDED.add(first)
+    dcp_a2a.end_a3_static_warmup()
+    dcp_a2a.begin_a3_static_warmup({(4, 32, 512, 16)})
+    dcp_a2a._A3_RECORDED.add(second)
+    dcp_a2a.end_a3_static_warmup()
+    assert frozenset({first, second}) == dcp_a2a._A3_STATIC_SIGNATURES
