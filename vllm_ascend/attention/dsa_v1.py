@@ -2220,6 +2220,27 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 perm_x2=(0, 1, 2),
                 perm_y=(1, 0, 2),
             )
+        if (
+            self.n_local_groups == 1
+            and not _has_weight_scale(self.wo_a)
+            and o_proj_input.shape[0] <= _WO_A_SMALL_M_LIMIT
+        ):
+            # Single local group (TP >= o_groups): the grouped transpose matmul
+            # degenerates to a plain linear, but npu_transpose_batchmatmul pays
+            # a ~2x fixed kernel cost at small batch sizes (M << N), where its
+            # kernel selection dominates. Run the plain 2D matmul on the same
+            # 3D ND weight — it is [1, K, N] contiguous, so view(K, N) is free.
+            # Batches above _WO_A_SMALL_M_LIMIT keep the original kernel: in
+            # the compute-bound regime the transpose kernel wins again
+            # (measured ~10% at prefill-sized M).
+            # The weight_scale check keeps quantized wo_a (layout owned by the
+            # quantization path) on the original transpose path when fp8
+            # attention is not applicable.
+            num_tokens, group_hidden = o_proj_input.shape[0], o_proj_input.shape[2]
+            return torch.matmul(
+                o_proj_input.view(num_tokens, group_hidden),
+                self.wo_a.weight.view(group_hidden, -1),
+            ).unsqueeze(1)
         return torch_npu.npu_transpose_batchmatmul(
             o_proj_input,
             self.wo_a.weight,
