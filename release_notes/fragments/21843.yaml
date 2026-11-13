@@ -1,0 +1,5 @@
+pr: 21843
+entries:
+  - category: config
+    text: Allow hierarchical MC2 communication on Ascend A5 when explicitly selected.
+    hardware: [A5]
