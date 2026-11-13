@@ -724,14 +724,11 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
             if mlp_compute_input.activation == MoEActivation.SWIGLUSTEP:
                 # Mode 3 clamps gate after SiLU, matching SwigluStepAndMul
                 # without alpha/bias or interleaving.
-                # vLLM list type 1 and operator group_mode 0 both mean token counts.
                 activation_kwargs = dict(
-                    group_index=cumsum_group_list(mlp_compute_input.group_list, mlp_compute_input.group_list_type, 1),
-                    group_mode=0,
                     swiglu_mode=3,
-                    # Step3p5 may omit the limit from MoE config. Fall back to
-                    # 7.0 when it is missing, None or zero; otherwise use its value.
-                    clamp_limit=getattr(mlp_compute_input, "swiglu_limit", 0.0) or 7.0,
+                    # Step3p5 may leave the limit at its default zero; use 7.0
+                    # in that case while honoring a configured nonzero limit.
+                    clamp_limit=mlp_compute_input.swiglu_limit or 7.0,
                 )
             else:
                 # Mode 2 applies the non-interleaved SwiGLU-OAI activation:
@@ -744,6 +741,9 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 )
             hidden_states, out_scale = torch_npu.npu_swiglu_mx_quant(
                 hidden_states,
+                # vLLM list type 1 and operator group_mode 0 both mean token counts.
+                group_index=cumsum_group_list(mlp_compute_input.group_list, mlp_compute_input.group_list_type, 1),
+                group_mode=0,
                 activate_left=True,
                 dst_type=self.act_quant_type,
                 scale_alg=self._dynamic_mx_quant_scale_alg,
