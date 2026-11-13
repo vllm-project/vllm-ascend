@@ -194,6 +194,7 @@ def qsa_select_paged_tokens_lightning_v2(
     *,
     num_actual_requests: int | None = None,
     num_actual_tokens: int | None = None,
+    prepared_metadata: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Select QSA groups with native request-batched LightningIndexerV2.
 
@@ -264,14 +265,16 @@ def qsa_select_paged_tokens_lightning_v2(
         cmp_ratio=compress_ratio,
     )
     block_topk = token_topk // compress_ratio
-    metadata = lightning_indexer_v2_metadata(
-        query.shape[1],
-        1,
-        _HEAD_DIM,
-        block_topk,
-        batch_size=requests,
-        **common,
-    )
+    metadata = prepared_metadata
+    if metadata is None:
+        metadata = lightning_indexer_v2_metadata(
+            query.shape[1],
+            1,
+            _HEAD_DIM,
+            block_topk,
+            batch_size=requests,
+            **common,
+        )
     # Promote the old BF16-representable uniform weight to FP32. Keep its
     # effective value while removing zero-head padding supported by native V2.
     score_weight = math.ldexp(
