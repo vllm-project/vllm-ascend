@@ -68,7 +68,8 @@ def test_activation_quantization_reuses_cached_scale_algorithm(scale_alg):
 
 
 @pytest.mark.parametrize("scale_alg", [0, 1])
-def test_mlp_dispatch_preserves_fallback_and_gmm2_scales(scale_alg):
+@pytest.mark.parametrize("group_list_type", [0, 1])
+def test_mlp_dispatch_preserves_fallback_and_gmm2_scales(scale_alg, group_list_type):
     method = make_method(scale_alg)
     packed = torch.randn(4, 128, dtype=torch.bfloat16)
     quantized = torch.zeros(4, 64, dtype=torch.float8_e4m3fn)
@@ -83,6 +84,8 @@ def test_mlp_dispatch_preserves_fallback_and_gmm2_scales(scale_alg):
         swiglu_limit=5.0,
         swiglu_alpha=1.5,
         swiglu_beta=0.5,
+        group_list=torch.tensor([1, 1, 4] if group_list_type == 0 else [1, 0, 3], dtype=torch.int64),
+        group_list_type=group_list_type,
     )
     with (
         patch.object(module, "get_dynamic_mx_quant_scale_alg", side_effect=AssertionError("unexpected scale lookup")),
@@ -94,8 +97,12 @@ def test_mlp_dispatch_preserves_fallback_and_gmm2_scales(scale_alg):
     method.apply_gmm1.assert_called_once_with(inputs)
     method.apply_gmm2.assert_called_once_with(inputs, quantized, scales)
     if scale_alg == 1:
+        group_index = fused.call_args.kwargs["group_index"]
+        torch.testing.assert_close(group_index, torch.tensor([1, 0, 3], dtype=torch.int64))
         fused.assert_called_once_with(
             packed,
+            group_index=group_index,
+            group_mode=0,
             activate_left=True,
             swiglu_mode=2,
             clamp_limit=5.0,
@@ -114,7 +121,8 @@ def test_mlp_dispatch_preserves_fallback_and_gmm2_scales(scale_alg):
 
 @pytest.mark.parametrize("scale_alg", [0, 1])
 @pytest.mark.parametrize("group_list_type", [0, 1])
-def test_swiglustep_mlp_dispatch(scale_alg, group_list_type):
+@pytest.mark.parametrize("swiglu_limit,expected_limit", [(0.0, 7.0), (None, 7.0), (5.0, 5.0)])
+def test_swiglustep_mlp_dispatch(scale_alg, group_list_type, swiglu_limit, expected_limit):
     method = make_method(scale_alg)
     packed = torch.randn(4, 128, dtype=torch.bfloat16)
     quantized = torch.zeros(4, 64, dtype=torch.float8_e4m3fn)
@@ -128,6 +136,7 @@ def test_swiglustep_mlp_dispatch(scale_alg, group_list_type):
         lora_context=None,
         group_list=torch.tensor([1, 1, 4] if group_list_type == 0 else [1, 0, 3], dtype=torch.int64),
         group_list_type=group_list_type,
+        swiglu_limit=swiglu_limit,
     )
     with (
         patch.object(module.torch_npu, "npu_swiglu_mx_quant", return_value=(quantized, scales), create=True) as fused,
@@ -143,7 +152,7 @@ def test_swiglustep_mlp_dispatch(scale_alg, group_list_type):
         group_mode=0,
         activate_left=True,
         swiglu_mode=3,
-        clamp_limit=7.0,
+        clamp_limit=expected_limit,
         dst_type=torch.float8_e4m3fn,
         scale_alg=scale_alg,
     )
