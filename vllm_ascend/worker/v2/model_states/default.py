@@ -37,11 +37,13 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     get_sparse_kv_offload_manager,
     update_sparse_kv_offload_metadata,
 )
+from vllm_ascend.worker.metadata_async import finish_metadata
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata, ring_state_update_skipped
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.device_metadata import TargetDeviceMetadata
+    from vllm_ascend.worker.metadata_async import AsyncTargetDeviceMetadata
     from vllm_ascend.worker.v2.kvpp import KVPPRuntime
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext, AscendPCPManager
 
@@ -53,12 +55,11 @@ class AscendModelState(DefaultModelState):
     pcp_context: "AscendPCPAttentionContext | None" = None
     kvpp_runtime: "KVPPRuntime | None" = None
     kvpp_is_dummy_run: bool = False
-    device_metadata: "TargetDeviceMetadata | None" = None
+    device_metadata: "TargetDeviceMetadata | AsyncTargetDeviceMetadata | None" = None
 
     def finish_execution(self, *, failed: bool) -> None:
         """Join auxiliary metadata work even if input preparation failed."""
-        if self.device_metadata is not None:
-            self.device_metadata.finish()
+        finish_metadata(self.device_metadata, failed=failed)
 
     def __init__(self, vllm_config, model, encoder_cache, device):
         super().__init__(vllm_config, model, encoder_cache, device)
