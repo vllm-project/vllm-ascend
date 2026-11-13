@@ -91,19 +91,24 @@ class _OrderedCollectives:
 
 class TestMxfp8PipelineRuntime(unittest.TestCase):
     def test_chunk_ranges_preserve_rank_splits_and_cover_uneven_tail(self):
-        self.assertEqual(mx._chunk_ranges(72, 8, 4), [(0, 24), (24, 40), (40, 56), (56, 72)])
-        for rows, size, chunks in ((71, 8, 4), (16, 8, 4), (0, 2, 2), (16, 2, 0)):
-            with self.subTest(rows=rows, size=size, chunks=chunks), self.assertRaises(ValueError):
-                mx._chunk_ranges(rows, size, chunks)
+        for rows, size, expected in (
+            (72, 8, [(0, 40), (40, 72)]),
+            (64, 8, [(0, 32), (32, 64)]),
+            (16, 8, [(0, 8), (8, 16)]),
+        ):
+            with self.subTest(rows=rows, size=size):
+                self.assertEqual(mx._chunk_ranges(rows, size), expected)
+        for rows, size in ((71, 8), (8, 8), (0, 2)):
+            with self.subTest(rows=rows, size=size), self.assertRaises(ValueError):
+                mx._chunk_ranges(rows, size)
 
     def test_multirank_uneven_chunks_repeated_calls_and_noncontiguous_inputs(self):
         for world_size in (2, 4, 8):
-            for chunks in (2, 4):
-                for noncontiguous in (False, True):
-                    with self.subTest(tp=world_size, chunks=chunks, noncontiguous=noncontiguous):
-                        self._run_ranks(world_size, chunks, noncontiguous)
+            for noncontiguous in (False, True):
+                with self.subTest(tp=world_size, noncontiguous=noncontiguous):
+                    self._run_ranks(world_size, noncontiguous)
 
-    def _run_ranks(self, world_size, chunks, noncontiguous):
+    def _run_ranks(self, world_size, noncontiguous):
         rows, hidden = world_size * 9, 128
         engine = _OrderedCollectives(world_size)
         fixtures = []
@@ -131,7 +136,7 @@ class TestMxfp8PipelineRuntime(unittest.TestCase):
             return _decode(values, scales).to(torch.bfloat16)
 
         wrappers = [
-            _make(world_size=world_size, pipeline_chunks=chunks, quantize=quantize, dequantize=dequantize)
+            _make(world_size=world_size, enable_pipeline=True, quantize=quantize, dequantize=dequantize)
             for _ in range(world_size)
         ]
 
@@ -180,14 +185,11 @@ class TestMxfp8PipelineRuntime(unittest.TestCase):
             futures = [pool.submit(worker, rank) for rank in range(world_size)]
             for future in futures:
                 future.result(timeout=30)
-        self.assertEqual(engine.completed, 3 * 2 * chunks)
+        self.assertEqual(engine.completed, 12)
         for events in engine.events:
             self.assertEqual(events[:3], [("a2a", 0), ("a2a", 1), ("wait", 0)])
-        expected_order = ["a2a", "a2a"]
-        for _ in range(chunks - 2):
-            expected_order.extend(("gather", "a2a"))
-        expected_order.extend(("gather", "gather"))
-        self.assertEqual([engine.calls[index][0][0] for index in range(2 * chunks)], expected_order)
+        expected_order = ["a2a", "a2a", "gather", "gather"]
+        self.assertEqual([engine.calls[index][0][0] for index in range(4)], expected_order)
 
 
 if __name__ == "__main__":
