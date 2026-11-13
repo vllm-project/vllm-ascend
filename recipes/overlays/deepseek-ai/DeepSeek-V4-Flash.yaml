@@ -100,7 +100,7 @@ hardware_notes:
       href: '#huawei-ascend-950pr-8x'
   ascend_910c:
     title: vLLM Ascend A3 image required
-    body: Single-node DP2+TP8 on all 16 NPUs using the W8A8 quantized checkpoint from Eco-Tech. TP8 shards the 284B weights to 35.5 GB per NPU (within the 64 GB limit). Pin quay.io/ascend/vllm-ascend:v0.23.0-a3 — the NVIDIA pip wheel cannot run here. Set HCCL_BUFFSIZE=2560 before launch. The A3 path uses ModelScope to download the W8A8 weights (pip install modelscope). Multi-node PD separation is also available; see the vllm-ascend tutorial.
+    body: Single-node DP2+TP8 on all 16 NPUs using the W8A8 quantized checkpoint from Eco-Tech. TP8 shards the 284B weights to 35.5 GB per NPU (within the 64 GB limit). Pin quay.io/ascend/vllm-ascend:v0.23.0-a3 — the NVIDIA pip wheel cannot run here. Set HCCL_BUFFSIZE=2560 before launch. The A3 path uses ModelScope to download the W8A8 weights (pip install modelscope). Generated PD commands are currently unavailable for this recipe on A3. For manual PD deployment, follow the linked vllm-ascend tutorial with its matching checkpoint, image, and topology.
     link:
       label: Ascend 910C A3 reference
       href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/DeepSeek-V4-Flash.html
@@ -112,8 +112,9 @@ strategy_hardware:
   multi_node_dep:
     npu: unsupported
   pd_cluster:
+    # The generic PD path cannot keep Ascend device masks and local DP
+    # consistent across shared and dedicated nodes. Do not expose it on A3.
     npu: unsupported
-    ascend_910c: supported
 strategy_overrides:
   single_node_dep:
     hardware_overrides:
@@ -144,6 +145,28 @@ strategy_overrides:
           - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
           - '--additional-config'
           - '{"enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "enable_shared_expert_dp": true}'
+      # DEP does not read variant.tp. Keep the A3 topology and memory settings
+      # after the generic DEP and NPU layers, which otherwise select DP4 on
+      # four devices and replace the W8A8 variant's A3 settings with A5 values.
+      ascend_910c:
+        extra_env:
+          HCCL_BUFFSIZE: '2560'
+          ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+        extra_args:
+          - '--tensor-parallel-size'
+          - '8'
+          - '--data-parallel-size'
+          - '2'
+          - '--block-size'
+          - '128'
+          - '--max-num-seqs'
+          - '32'
+          - '--max-num-batched-tokens'
+          - '10240'
+          - '--gpu-memory-utilization'
+          - '0.90'
+          - '--additional-config'
+          - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true}'
 features:
   spec_decoding:
     modes:
