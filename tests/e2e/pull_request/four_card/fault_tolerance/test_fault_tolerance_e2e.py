@@ -144,10 +144,15 @@ def _install_fault_injection(monkeypatch, tmp_path, rank: int, step: int) -> Non
 # ---------------------------------------------------------------------------
 
 
-def _ft_server_args(extra_args: list[str] | None = None) -> list[str]:
+def _ft_server_args(
+    extra_args: list[str] | None = None,
+    additional_config: dict[str, Any] | None = None,
+) -> list[str]:
     # Quantized path end to end: --quantization ascend (W8A8); no --dtype,
     # the checkpoint's own config decides. MODEL_NAME must point at a W8A8
     # checkpoint (e.g. vllm-ascend/Qwen3-30B-A3B-W8A8).
+    ascend_config = {"ft_communication_abort_timeout": FT_COMMUNICATION_ABORT_TIMEOUT_S}
+    ascend_config.update(additional_config or {})
     return [
         "--quantization",
         "ascend",
@@ -162,7 +167,7 @@ def _ft_server_args(extra_args: list[str] | None = None) -> list[str]:
         "--fault-tolerance-config",
         '{"engine_recovery_timeout_sec": 120}',
         "--additional-config",
-        f'{{"ft_communication_abort_timeout": {FT_COMMUNICATION_ABORT_TIMEOUT_S}}}',
+        json.dumps(ascend_config),
         *(extra_args or []),
     ]
 
@@ -244,11 +249,14 @@ class FTServerManager:
         self.servers.clear()
 
 
-def _ft_manager(extra_args: list[str] | None = None) -> FTServerManager:
+def _ft_manager(
+    extra_args: list[str] | None = None,
+    additional_config: dict[str, Any] | None = None,
+) -> FTServerManager:
     return FTServerManager(
         MODEL_NAME,
         DP_SIZE,
-        base_server_args=_ft_server_args(extra_args),
+        base_server_args=_ft_server_args(extra_args, additional_config),
         tp_size=1,
     )
 
@@ -444,6 +452,12 @@ def has_npu_scale_down_capability() -> bool:
     try:
         import torch_npu
 
+        from vllm_ascend.device.device_config import get_ascend_device_type
+        from vllm_ascend.device.hardware import AscendDeviceType
+
+        # A2 only selects MC2 at EP>=16 with <=24 experts/device; DP=4 never does.
+        if get_ascend_device_type() == AscendDeviceType.A2:
+            return False
         return hasattr(torch_npu, "npu_moe_distribute_dispatch_v2")
     except Exception:
         return False
@@ -534,6 +548,9 @@ def test_scale_down_removes_dead_rank_and_recovers():
     """
     victim_rank = DP_SIZE - 1
     extra_args = [
+        # All reachable batches must fit MC2; 512 is the per-TP-rank MC2 limit.
+        "--max-num-batched-tokens",
+        "512",
         "--compilation-config",
         json.dumps(
             {
@@ -545,7 +562,7 @@ def test_scale_down_removes_dead_rank_and_recovers():
         "--eplb-config.num_redundant_experts",
         str(NUM_REDUNDANT_EXPERTS),
     ]
-    with _ft_manager(extra_args) as servers:
+    with _ft_manager(extra_args, additional_config={"enable_prefill_mc2": True}) as servers:
         assert len(servers) == DP_SIZE
         servers_by_rank = {r: _server_for_rank(servers, r) for r in range(DP_SIZE)}
         victim = servers_by_rank[victim_rank]

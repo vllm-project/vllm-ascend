@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch_npu
+from vllm.config import LoadConfig, ModelConfig
 from vllm.distributed.eplb.eplb_state import EplbModelState, _commit_eplb_maps
 from vllm.distributed.parallel_state import (
     get_dp_group,
@@ -15,6 +16,7 @@ from vllm.distributed.parallel_state import (
 from vllm.distributed.utils import set_gloo_backend_timeout
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
+from vllm.model_executor.model_loader.utils import get_draft_load_config
 from vllm.model_executor.models.interfaces import get_mixture_of_experts_model
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
@@ -27,6 +29,11 @@ from vllm.v1.worker.sentinel.gpu_worker_sentinel import (
 )
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import (
+    MoECommType,
+    get_mc2_tokens_capacity,
+    select_moe_comm_method,
+)
 from vllm_ascend.distributed.eplb.eplb_state import refresh_model_routing_tables
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.worker.sentinel.eplb_redistribute import (
@@ -92,6 +99,12 @@ class WorkerSentinel(GPUWorkerSentinel):
     """
 
     def __init__(self, worker: "Worker", device: torch.device):
+        # Upstream's platform-independent guards; MoE drafts are supported here,
+        # so its draft check is intentionally omitted.
+        if worker.parallel_config.prefill_context_parallel_size > 1:
+            raise ValueError("[FT] fault tolerance on Ascend NPU does not support PCP yet.")
+        if not worker.vllm_config.use_v2_model_runner:
+            raise ValueError("[FT] fault tolerance on Ascend NPU requires the v2 model runner.")
         global _sentinel
         self.device = device
         self.worker = worker
@@ -125,6 +138,8 @@ class WorkerSentinel(GPUWorkerSentinel):
         eplb_model_state = self._eplb_model_state()
         num_local_experts = eplb_model_state.physical_to_logical_map.shape[1] // get_ep_group().world_size
         get_ep_all2all_manager().set_num_local_physical_experts(num_local_experts)
+        # The MC2 capacity exists only now; surface a config scale_down will reject.
+        self._warn_if_scale_down_exceeds_mc2_capacity()
 
     def scale_down(self, ft_request: FaultToleranceRequest):
         """Scale down over the surviving DP ranks, reusing the upstream flow.
@@ -168,10 +183,47 @@ class WorkerSentinel(GPUWorkerSentinel):
             raise ValueError(
                 "[FT] scale_down (elastic_info) is mutually exclusive with mc2 hierarchy comm (comm_alg='hierarchy')."
             )
+        self._validate_mc2_only_execution()
         if not hasattr(torch_npu, "npu_moe_distribute_dispatch_v2"):
             raise ValueError(
                 "[FT] scale_down requires npu_moe_distribute_dispatch_v2 "
                 "(aclnn V3+); please upgrade the CANN/torch_npu version."
+            )
+
+    def _warn_if_scale_down_exceeds_mc2_capacity(self) -> None:
+        """Warn post-load if a reachable batch would leave the MC2-only path."""
+        capacity = get_mc2_tokens_capacity()
+        if capacity is None:
+            return
+        max_tokens = self._max_reachable_num_tokens()
+        if select_moe_comm_method(max_tokens, self.worker.vllm_config) is not MoECommType.MC2:
+            logger.warning(
+                "[FT] scale_down requires every reachable batch on MC2, but a %d-token batch "
+                "does not (MC2 capacity: %d); scale_down will be rejected at recovery time.",
+                max_tokens,
+                capacity,
+            )
+
+    def _max_reachable_num_tokens(self) -> int:
+        """Largest batch in tokens: max_num_batched_tokens or the largest graph capture size."""
+        capture_sizes = self.worker.vllm_config.compilation_config.cudagraph_capture_sizes or [0]
+        return max(self.worker.vllm_config.scheduler_config.max_num_batched_tokens, max(capture_sizes))
+
+    def _validate_mc2_only_execution(self) -> None:
+        """Require MC2 for every batch the scheduler can produce.
+
+        Dead ranks stay in the device EP group; only MC2 excludes them via
+        elastic_info, so AllToAll/AllGather would target the stopped rank.
+        """
+        capacity = get_mc2_tokens_capacity()
+        if capacity is None:
+            raise ValueError("[FT] scale_down requires the MC2 token capacity to be initialized.")
+        max_tokens = self._max_reachable_num_tokens()
+        if select_moe_comm_method(max_tokens, self.worker.vllm_config) is not MoECommType.MC2:
+            raise ValueError(
+                f"[FT] scale_down requires MC2 for every reachable batch, but a "
+                f"{max_tokens}-token batch does not (MC2 capacity: {capacity}); "
+                f"lower --max-num-batched-tokens."
             )
 
     def _redistribute_experts(self, dead_ep_ranks: set[int]) -> None:
@@ -190,9 +242,10 @@ class WorkerSentinel(GPUWorkerSentinel):
         are never shared across models.
         """
         model_runner = self.worker.model_runner
+        vllm_config = self.worker.vllm_config
 
-        models: list[tuple[torch.nn.Module, EplbModelState, str]] = [
-            (model_runner.model, self._eplb_model_state(), self.worker.vllm_config.model_config.model)
+        models: list[tuple[torch.nn.Module, EplbModelState, ModelConfig, LoadConfig]] = [
+            (model_runner.model, self._eplb_model_state(), vllm_config.model_config, vllm_config.load_config)
         ]
         drafter = self._resolve_drafter()
         if drafter is not None:
@@ -207,20 +260,18 @@ class WorkerSentinel(GPUWorkerSentinel):
                 )
             models.append(drafter)
 
-        for model, model_state, model_path in models:
-            self._redistribute_model(model, model_state, model_path, dead_ep_ranks)
+        for model, model_state, model_config, load_config in models:
+            self._redistribute_model(model, model_state, model_config, load_config, dead_ep_ranks)
 
     def _redistribute_model(
         self,
         model: torch.nn.Module,
         model_state: EplbModelState,
-        model_path: str,
+        model_config: ModelConfig,
+        load_config: LoadConfig,
         dead_ep_ranks: set[int],
     ) -> None:
-        """Redistribute one model and reload through its checkpoint namespace.
-
-        ``model`` owns the checkpoint name mapper and may wrap ``model_state.model``.
-        """
+        """Redistribute one model and reload through its own checkpoint config."""
         p2l = model_state.physical_to_logical_map
         num_logical = model_state.logical_replica_count.shape[1]
         num_local_experts = p2l.shape[1] // get_ep_group().world_size
@@ -238,11 +289,11 @@ class WorkerSentinel(GPUWorkerSentinel):
         # Keep the model-side expert map: slot ownership is unchanged, and the
         # map is physical-id indexed, so p2l (logical ids) must not be written into it.
         if reassignments:
-            reload_experts_from_disk(model, model_path, reassignments)
+            reload_experts_from_disk(model, model_config, load_config, reassignments)
         refresh_model_routing_tables(model_state)
         self._densify_routing_tables(model_state)
 
-    def _resolve_drafter(self) -> tuple[torch.nn.Module, EplbModelState, str] | None:
+    def _resolve_drafter(self) -> tuple[torch.nn.Module, EplbModelState, ModelConfig, LoadConfig] | None:
         """Resolve a drafter's EPLB state and checkpoint, rejecting unregistered MoE."""
         model_runner = self.worker.model_runner
         drafter = getattr(getattr(model_runner, "speculator", None), "model", None)
@@ -255,7 +306,12 @@ class WorkerSentinel(GPUWorkerSentinel):
                 speculative_config = self.worker.vllm_config.speculative_config
                 if speculative_config is None or speculative_config.draft_model_config is None:
                     raise ValueError("[FT] scale_down requires draft_model_config for an EPLB-registered drafter.")
-                return drafter, model_state, speculative_config.draft_model_config.model
+                return (
+                    drafter,
+                    model_state,
+                    speculative_config.draft_model_config,
+                    get_draft_load_config(self.worker.vllm_config),
+                )
 
         raise ValueError(
             "[FT] scale_down requires the MoE drafter to be registered with EPLB; "

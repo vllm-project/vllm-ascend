@@ -8,20 +8,17 @@ densified rank space and reloads the reassigned experts' weights from the
 checkpoint into each rank's local slots.
 """
 
-import glob
-import os
 from collections.abc import Callable, Set
 from concurrent.futures import ThreadPoolExecutor
+from copy import copy
 from functools import partial
 
 import torch
 from safetensors import safe_open
-from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
+from vllm.config import LoadConfig, ModelConfig
 from vllm.distributed import get_ep_group
 from vllm.logger import logger
-from vllm.model_executor.model_loader.weight_utils import (
-    filter_duplicate_safetensors_files,
-)
+from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 
 from vllm_ascend.worker.sentinel.eplb_quant_schemes import (
     _WANTED_SUFFIXES,
@@ -42,6 +39,10 @@ _RELOAD_CHUNK_SIZE = 32
 
 # Threads assembling one chunk; bounded because worker processes share host memory bandwidth.
 _GATHER_MAX_WORKERS = 8
+
+# Only source resolution changes here: Ascend loads from auto/safetensors, other
+# formats fall back to "auto"; the reload itself still requires safetensors.
+_DISK_LOAD_FORMATS = frozenset({"auto", "safetensors"})
 
 
 def build_orig_to_dense_rank_table(ep_world_size: int, dead_ranks: set[int]) -> torch.Tensor:
@@ -214,27 +215,36 @@ def _resolve_expert_tensor(
     return (key, suffix) if key is not None else None
 
 
-def _collect_safetensors_shards(model_path: str, model: torch.nn.Module) -> list[str]:
-    """Collect the safetensors shards the model loads from the local checkpoint directory."""
-    if not os.path.isdir(model_path):
+def _disk_prepare_load_config(load_config: LoadConfig) -> LoadConfig:
+    """LoadConfig for resolving where the checkpoint lives; the reload stays safetensors-only."""
+    if load_config.load_format in _DISK_LOAD_FORMATS:
+        return load_config
+    fallback = copy(load_config)
+    fallback.load_format = "auto"
+    fallback.model_loader_extra_config = {}
+    return fallback
+
+
+def _collect_safetensors_shards(
+    model_config: ModelConfig,
+    load_config: LoadConfig,
+    model: torch.nn.Module,
+) -> list[str]:
+    """Safetensors shards the normal loader would find (repo IDs via cache/download)."""
+    loader = DefaultModelLoader(_disk_prepare_load_config(load_config))
+    _, shards, use_safetensors, _ = loader._prepare_weights(
+        model_name_or_path=model_config.model,
+        subfolder=None,
+        revision=model_config.revision,
+        fall_back_to_pt=getattr(model, "fall_back_to_pt_during_load", True),
+        allow_patterns_overrides=getattr(model, "allow_patterns_overrides", None),
+    )
+    if not use_safetensors:
         raise RuntimeError(
-            f"[FT] scale_down expert reload reads a local checkpoint only, but '{model_path}' is not a directory."
+            f"[FT] scale_down expert reload requires a safetensors checkpoint, but "
+            f"'{model_config.model}' does not resolve to one."
         )
-    # A model may narrow the patterns it loads; honour that over our default.
-    allow_patterns = getattr(model, "allow_patterns_overrides", None) or ["*.safetensors"]
-    shards: list[str] = []
-    for pattern in allow_patterns:
-        shards += glob.glob(os.path.join(model_path, pattern))
-        if shards:
-            break
-    # An override may select non-safetensors files; the header walk has
-    # nothing to read there.
-    shards = [shard for shard in shards if shard.endswith(".safetensors")]
-    if len(shards) > 1:
-        # Sharded and consolidated safetensors can coexist; the index file
-        # selects the set the model loads (the filter no-ops without one).
-        shards = filter_duplicate_safetensors_files(shards, model_path, SAFE_WEIGHTS_INDEX_NAME)
-    return sorted(shards)
+    return sorted(shard for shard in shards if shard.endswith(".safetensors"))
 
 
 def _collect_matching_weights(
@@ -265,7 +275,8 @@ def _collect_matching_weights(
 
 def reload_experts_from_disk(
     model: torch.nn.Module,
-    model_path: str,
+    model_config: ModelConfig,
+    load_config: LoadConfig,
     reassignments: set[tuple[int, int]],
 ) -> int:
     """Reload reassigned (moe_layer_idx, logical_expert_id) weights from disk.
@@ -276,10 +287,8 @@ def reload_experts_from_disk(
     the slot from ``eplb_state.logical_to_physical_map`` after
     ``_commit_eplb_maps``.
 
-    ``model_path`` is the checkpoint directory ``model`` was loaded from, which
-    for a drafter can differ from the target's (a separate draft checkpoint).
-    Layer names, placement maps, shards, and checkpoint name normalization
-    come from ``model``.
+    ``model_config``/``load_config`` locate the checkpoint like the normal
+    loader; a drafter passes its own draft config.
     """
     if not reassignments:
         return 0
@@ -317,9 +326,11 @@ def reload_experts_from_disk(
     matched: set[tuple[int, int]] = set()
 
     logger.info("[FT] Reloading %d reassigned (layer, expert) pair(s) on this rank from disk.", len(local_slots))
-    shards = _collect_safetensors_shards(model_path, model)
+    shards = _collect_safetensors_shards(model_config, load_config, model)
     if not shards:
-        raise RuntimeError(f"[FT] scale_down expert reload requires a safetensors checkpoint; {model_path} has none.")
+        raise RuntimeError(
+            f"[FT] scale_down expert reload requires a safetensors checkpoint; '{model_config.model}' has none."
+        )
     _collect_matching_weights(shards, name_mapper, wanted, _WANTED_SUFFIXES, expert_weights, matched)
     # A pair with no checkpoint weight would silently keep its slot's previous occupant, so fail.
     unmatched = [layer_expert for layer_expert in local_slots if layer_expert not in matched]
