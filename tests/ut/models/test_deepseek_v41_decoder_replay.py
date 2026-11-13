@@ -186,6 +186,10 @@ def test_untrimmed_replica_enters_decoder_context_without_gathering():
 
 @pytest.fixture(params=[False, True], ids=["non_sp", "sp"])
 def compiled_replay_model(monkeypatch, request):
+    # Dynamo initializes accelerator stream state before tracing. This fixture
+    # uses only CPU tensors, even when the suite registers a mock NPU backend.
+    monkeypatch.setattr(torch.accelerator, "is_available", lambda: False)
+
     class Layer(torch.nn.Module):
         engram = None
 
