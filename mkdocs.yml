@@ -165,6 +165,10 @@ extra:
   # leading "v" and are used across tutorials.
   vllm_version: v0.30.0
   vllm_ascend_version: v0.30.0
+  # Version used by the preview banner's "latest stable release" link. On
+  # this release branch it equals vllm_ascend_version; the preview banner
+  # itself never renders on release builds (is_release is always true here).
+  stable_vllm_ascend_version: v0.30.0
   # PyPI versions omit the leading "v" and are used by installation commands/tests.
   release_vllm_ascend_version: 0.30.0
   release_vllm_version: 0.30.0
