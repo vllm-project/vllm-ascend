@@ -1,0 +1,9 @@
+pr: 21032
+entries:
+  - category: performance
+    text: >-
+      Added opt-in DeepSeek V4.1 shared/routed Add and FFN HcPost fusion on A3,
+      with hidden-size-aware Triton tiles and native fallback for already
+      combined MegaMoE outputs and unsupported inputs.
+    model: deepseek-v4.1-flash
+    hardware: [A3]
