@@ -181,6 +181,55 @@ def _hc_gate_mix_kernel(
     )
 
 
+_HC_GATE_MIX_BLOCK_SIZE = 512
+_HC_GATE_MIX_ROWS_PER_BLOCK = 8
+_HC_GATE_MIX_ROW_BLOCK_MIN_ROWS = 1024
+
+
+@triton.jit
+def _hc_gate_mix_row_block_kernel(
+    x_ptr,
+    gate_ptr,
+    output_ptr,
+    rows,
+    stride_x_row,
+    stride_gate_row,
+    stride_output_row,
+    GROUP_DIM: tl.constexpr,
+    HC_COUNT: tl.constexpr,
+    ROWS_PER_BLOCK: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    EVEN_ROWS: tl.constexpr,
+    EVEN_BLOCK: tl.constexpr,
+) -> None:
+    row_block = tl.program_id(0)
+    tile = tl.program_id(1)
+    row_offsets = row_block * ROWS_PER_BLOCK + tl.arange(0, ROWS_PER_BLOCK)
+    inner_offsets = tile * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    row_mask = row_offsets < rows
+    inner_mask = inner_offsets < GROUP_DIM
+    accumulator = tl.zeros([ROWS_PER_BLOCK, BLOCK_SIZE], dtype=tl.float32)
+    for stream in tl.static_range(HC_COUNT):
+        column_offsets = stream * GROUP_DIM + inner_offsets
+        x_offsets = row_offsets[:, None] * stride_x_row + column_offsets[None, :]
+        gate_offsets = row_offsets[:, None] * stride_gate_row + column_offsets[None, :]
+        if EVEN_ROWS and EVEN_BLOCK:
+            gates = tl.load(gate_ptr + gate_offsets)
+            values = tl.load(x_ptr + x_offsets)
+        else:
+            mask = row_mask[:, None] & inner_mask[None, :]
+            gates = tl.load(gate_ptr + gate_offsets, mask=mask, other=0.0)
+            values = tl.load(x_ptr + x_offsets, mask=mask, other=0.0)
+        accumulator += tl.sigmoid(gates.to(tl.float32)) * values.to(tl.float32)
+    accumulator /= HC_COUNT
+    output_offsets = row_offsets[:, None] * stride_output_row + inner_offsets[None, :]
+    if EVEN_ROWS and EVEN_BLOCK:
+        tl.store(output_ptr + output_offsets, accumulator)
+    else:
+        mask = row_mask[:, None] & inner_mask[None, :]
+        tl.store(output_ptr + output_offsets, accumulator, mask=mask)
+
+
 def _hc_gate_mix(
     x: torch.Tensor,
     gate: torch.Tensor,
@@ -197,8 +246,29 @@ def _hc_gate_mix(
     dim = int(dim)
     group_dim = dim // hc_count
     output = x.new_empty((rows, group_dim))
-    block_size = 512
-    if rows:
+    block_size = _HC_GATE_MIX_BLOCK_SIZE
+    if rows >= _HC_GATE_MIX_ROW_BLOCK_MIN_ROWS:
+        _hc_gate_mix_row_block_kernel[
+            (
+                triton.cdiv(rows, _HC_GATE_MIX_ROWS_PER_BLOCK),
+                triton.cdiv(group_dim, block_size),
+            )
+        ](
+            x,
+            gate,
+            output,
+            rows,
+            x.stride(0),
+            gate.stride(0),
+            output.stride(0),
+            GROUP_DIM=group_dim,
+            HC_COUNT=hc_count,
+            ROWS_PER_BLOCK=_HC_GATE_MIX_ROWS_PER_BLOCK,
+            BLOCK_SIZE=block_size,
+            EVEN_ROWS=rows % _HC_GATE_MIX_ROWS_PER_BLOCK == 0,
+            EVEN_BLOCK=group_dim % block_size == 0,
+        )
+    elif rows:
         _hc_gate_mix_kernel[(rows, triton.cdiv(group_dim, block_size))](
             x,
             gate,
