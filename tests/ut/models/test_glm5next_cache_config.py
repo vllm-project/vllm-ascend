@@ -15,6 +15,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
+    SlidingWindowSpec,
 )
 
 from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec, AscendMLAAttentionSpec
@@ -298,6 +299,36 @@ def test_missing_paired_cache_is_rejected():
     del specs["model.layers.3.indexer.tail_cache"]
     with pytest.raises(ValueError, match="requires"):
         get_glm5_next_kv_cache_groups(make_config(), specs)
+
+
+def test_sliding_window_draft_caches_use_independent_physical_tensors():
+    config = make_config()
+    specs = make_specs()
+    draft_names = []
+    for layer_idx in range(10, 14):
+        name = f"model.layers.{layer_idx}.self_attn.attn"
+        draft_names.append(name)
+        specs[name] = SlidingWindowSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.bfloat16,
+            sliding_window=16,
+        )
+
+    groups = get_glm5_next_kv_cache_groups(config, specs)
+    layout = _get_glm5_next_cache_layout(groups)
+    assert layout is not None
+    assert layout.draft_groups
+    assert {name for group in layout.draft_groups for name in group.layer_names} == set(draft_names)
+
+    budget = 1024 * 1024
+    plan = get_glm5_next_kv_cache_config(config, groups, budget)
+    assert plan.num_blocks * get_glm5_next_pool_bytes_per_block(groups) == sum(
+        tensor.size for tensor in plan.kv_cache_tensors
+    )
+    tensor_layers = {tuple(get_kv_cache_tensor_layers(tensor)) for tensor in plan.kv_cache_tensors}
+    assert all((name,) in tensor_layers for name in draft_names)
 
 
 def test_misaligned_logical_block_is_rejected():

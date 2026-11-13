@@ -64,6 +64,8 @@ def test_qsfa_dcp_tail_eager_and_graph(batch, local_len):
     values = base[:, None].expand(batch, cols).clone()
     values[:, 0] += 16
     values[:, -1] += 4
+    # Match the cache's storage rounding in the reference (e.g. FP8 rounds 19 to 20).
+    values = values.to(dtype).float()
     key_nope = values[:, :, None, None, None].expand(batch, cols, page_size, 1, nope).contiguous().to(dtype)
     key_rope = torch.zeros(batch, cols, page_size, 1, rope, dtype=torch.bfloat16)
     scales = torch.ones(batch, cols, page_size, 1, 4, dtype=torch.float32)

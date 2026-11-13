@@ -17,10 +17,13 @@ MLA = "vllm_ascend/attention/mla_v1.py"
 def load(path, name, scope, owner=None):
     nodes = ast.parse((ROOT / path).read_text(encoding="utf-8")).body
     for node in nodes:
-        if isinstance(node, ast.Assign) and any(
-            isinstance(target, ast.Name) and target.id == "PROLOG_V3_SUPPORTED_INPUT_SIZES" for target in node.targets
-        ):
-            scope["PROLOG_V3_SUPPORTED_INPUT_SIZES"] = ast.literal_eval(node.value)
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id in (
+                    "PROLOG_V3_SUPPORTED_INPUT_SIZES",
+                    "PROLOG_V3_MAX_BLOCK_SIZE",
+                ):
+                    scope[target.id] = ast.literal_eval(node.value)
     if owner:
         nodes = next(n for n in nodes if isinstance(n, ast.ClassDef) and n.name == owner).body
     node = next(n for n in nodes if isinstance(n, ast.FunctionDef) and n.name == name)
@@ -341,7 +344,8 @@ def test_prolog_tile_size_is_independent_of_writer_pages(page_size, use_flashmla
     torch.testing.assert_close(passed["cache_index"], slots)
 
 
-def test_flashmla_writer_workspace_preserves_addresses_and_rejects_overflow():
+@pytest.mark.parametrize("page_size", [128, 1536])
+def test_flashmla_writer_workspace_preserves_addresses_and_rejects_overflow(page_size):
     scope = {"torch": torch, "cdiv": lambda x, y: (x + y - 1) // y}
     impl = SimpleNamespace(
         use_flashmla=True,
@@ -353,13 +357,14 @@ def test_flashmla_writer_workspace_preserves_addresses_and_rejects_overflow():
         qk_rope_head_dim=64,
         vllm_config=SimpleNamespace(
             scheduler_config=SimpleNamespace(max_num_batched_tokens=160),
-            cache_config=SimpleNamespace(block_size=128),
+            cache_config=SimpleNamespace(block_size=page_size),
         ),
     )
     for name in ("_prepare_flashmla_writer_buffers", "_prolog_v3_writer_workspace"):
         setattr(impl, name, MethodType(load(MLA, name, scope, "AscendMLAImpl"), impl))
     impl._prepare_flashmla_writer_buffers()
     buffers = impl._flashmla_writer_buffers
+    assert buffers[0].shape[1] == min(page_size, 1024)
     impl._prepare_flashmla_writer_buffers()
     assert impl._flashmla_writer_buffers is buffers
     cache, _ = fused_cache()

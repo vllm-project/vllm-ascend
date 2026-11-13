@@ -274,6 +274,16 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         # PCP can change the draft prefill token layout and uniform decode
         # shape. Negotiate its DP agreement instead of reusing the target's.
         sync_state = None if self.pcp_manager is not None else dp_sync_state
+        # TODO: Remove this workaround once the supported vLLM version preserves
+        # uniform query lengths when rebuilding idle DP dummy batches:
+        # https://github.com/vllm-project/vllm/pull/64878.
+        if (
+            dummy_run
+            and self.enable_adaptive_verification
+            and sync_state is not None
+            and sync_state.uniform_token_count is not None
+        ):
+            sync_state = replace(sync_state, uniform_token_count=None)
         if self.pcp_manager is not None:
             attn_metadata = self._get_pcp_draft_prefill_metadata(attn_metadata)
         # wrap build_attn_metadata to use Ascend attention metadata building.
