@@ -44,12 +44,11 @@ class TestMxfp8AllReduce(unittest.TestCase):
             patch.object(mx.dist, "get_world_size", return_value=2),
             patch.object(torch_npu, "npu_dynamic_mx_quant", None, create=True),
             patch.object(torch_npu, "npu_anti_mx_quant", None, create=True),
-            patch.object(torch.ops.npu, "npu_anti_mx_quant", None, create=True),
             self.assertRaisesRegex(RuntimeError, "requires npu_dynamic_mx_quant and npu_anti_mx_quant"),
         ):
             mx.Mxfp8AllReduce(MagicMock(), min_numel=1)
 
-    def test_registered_anti_quant_entry_is_supported(self):
+    def test_requires_public_anti_quant_entry_even_when_raw_op_is_registered(self):
         registered_op = MagicMock()
         with (
             patch.object(mx, "get_ascend_device_type", return_value=AscendDeviceType.A5),
@@ -57,9 +56,9 @@ class TestMxfp8AllReduce(unittest.TestCase):
             patch.object(torch_npu, "npu_dynamic_mx_quant", MagicMock(), create=True),
             patch.object(torch_npu, "npu_anti_mx_quant", None, create=True),
             patch.object(torch.ops.npu, "npu_anti_mx_quant", registered_op, create=True),
+            self.assertRaisesRegex(RuntimeError, "requires npu_dynamic_mx_quant and npu_anti_mx_quant"),
         ):
-            wrapper = mx.Mxfp8AllReduce(MagicMock(), min_numel=1)
-        self.assertIs(wrapper.dequantize_op, registered_op)
+            mx.Mxfp8AllReduce(MagicMock(), min_numel=1)
 
     def test_fallbacks_use_only_ordinary_all_reduce(self):
         cases = (

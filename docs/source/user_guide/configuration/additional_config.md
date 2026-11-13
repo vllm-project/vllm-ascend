@@ -398,7 +398,7 @@ BF16 activation -> dynamic MXFP8 E4M3FN + E8M0 scales
   -> BF16 AllGather -> BF16 result with the original shape
 ```
 
-No `ops-transformer`, native QuantAllReduce or dedicated HCCL group is required. The installed `torch_npu`/CANN must expose `npu_dynamic_mx_quant` and `npu_anti_mx_quant` (through the facade or registered NPU anti-quant operator). Unsupported hardware or missing operators fails at startup for eligible groups. A backend does not switch to the other quantization method automatically.
+No `ops-transformer`, native QuantAllReduce or dedicated HCCL group is required. The installed `torch_npu`/CANN must expose callable `torch_npu.npu_dynamic_mx_quant` and `torch_npu.npu_anti_mx_quant` interfaces. Unsupported hardware or missing operators fails at startup for eligible groups. A backend does not switch to the other quantization method automatically.
 
 The MXFP8 wrapper is created for all parallel groups. It requires group size 2/4/8, BF16 input with at least two dimensions, `numel >= min_numel`, a last dimension divisible by 64, and a flattened row count divisible by the group size. Calls outside these tensor/group conditions use ordinary all-reduce. TP=1 bypasses communication; configuring other TP sizes for MXFP8 raises an error. The threshold counts original BF16 elements, just as for INT8.
 

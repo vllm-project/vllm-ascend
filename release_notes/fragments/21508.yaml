@@ -11,6 +11,7 @@ entries:
       Added MXFP8 AllToAll/AllGather with BF16 staging as the default
       quantized all-reduce backend on Atlas A5. Atlas A2 defaults to INT8;
       quantized_all_reduce_config.quant_dtype can override the hardware default.
+      MXFP8 requires the public torch_npu MX quantization and dequantization APIs.
     hardware: [A5]
   - category: feature
     text: >-
