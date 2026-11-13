@@ -287,7 +287,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
     - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,32]}'` enables decode ACLGraph replay and explicitly limits capture sizes to the two batch sizes used by the Atlas 300I DUO example.
     - `--no-enable-prefix-caching` is the default recommendation for this Atlas 300I DUO example to reduce memory pressure.
     - `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
-    - To enable MTP speculative decoding, use --speculative_config '{"method": "mtp", "num_speculative_tokens": 1}'. We recommend setting num_speculative_tokens to 1.
+    - To enable MTP speculative decoding, use `--speculative-config '{"method": "mtp", "num_speculative_tokens": 1}'`. We recommend setting `num_speculative_tokens` to 1.
 
 !!! note
 
