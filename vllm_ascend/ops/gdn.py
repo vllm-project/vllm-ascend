@@ -816,11 +816,13 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 # while decode and other prefill routes keep the processed beta.
                 # beta = sigmoid(b); dt_bias belongs only to the decay gate
                 # g = -exp(A_log) * softplus(a + dt_bias), computed above.
-                beta_fla = b.unsqueeze(0)
-                if spec_sequence_masks is not None:
-                    beta_fla = beta_fla.index_select(1, non_spec_token_indx)
-                if split_non_spec:
-                    beta_fla = beta_fla[:, num_decode_tokens:]
+                beta_fla = beta_non_spec
+                if get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL_CHUNK32):
+                    beta_fla = b.unsqueeze(0)
+                    if spec_sequence_masks is not None:
+                        beta_fla = beta_fla.index_select(1, non_spec_token_indx)
+                    if split_non_spec:
+                        beta_fla = beta_fla[:, num_decode_tokens:]
                 (core_attn_out_non_spec, last_recurrent_state) = DeviceOperator.fla_gdn_prefill(
                     q=query_non_spec,
                     k=key_non_spec,

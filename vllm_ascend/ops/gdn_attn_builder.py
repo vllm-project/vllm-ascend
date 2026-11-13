@@ -32,6 +32,7 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_indices,
     prepare_chunk_offsets,
@@ -315,13 +316,15 @@ def _build_non_spec_chunked_prefill_metadata(
 
     # Use the same index builder as chunk64, with the compacted sequence IDs
     # passed to the A5 kernel. Every GDN layer reuses this metadata instance.
-    chunk_cu_seqlens_cpu = cu_seqlens_cpu if cu_seqlens_kern is None else cu_seqlens_cpu.new_tensor(cu_seqlens_kern)
-    if chunk_cu_seqlens_cpu.numel() > 1:
-        chunk_indices_chunk32 = prepare_chunk_indices(chunk_cu_seqlens_cpu, _GDN_CHUNK32_SIZE)
-        chunk_indices_chunk32_host = tuple(chunk_indices_chunk32.to(torch.int64).reshape(-1).tolist())
-    else:
-        # With no nonempty sequences, prepare_chunk_indices would call torch.cat([]).
-        chunk_indices_chunk32_host = ()
+    chunk_indices_chunk32_host = None
+    if get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL_CHUNK32):
+        chunk_cu_seqlens_cpu = cu_seqlens_cpu if cu_seqlens_kern is None else cu_seqlens_cpu.new_tensor(cu_seqlens_kern)
+        if chunk_cu_seqlens_cpu.numel() > 1:
+            chunk_indices_chunk32 = prepare_chunk_indices(chunk_cu_seqlens_cpu, _GDN_CHUNK32_SIZE)
+            chunk_indices_chunk32_host = tuple(chunk_indices_chunk32.to(torch.int64).reshape(-1).tolist())
+        else:
+            # With no nonempty sequences, prepare_chunk_indices would call torch.cat([]).
+            chunk_indices_chunk32_host = ()
 
     if build_device_metadata:
         device_chunk_metadata = {

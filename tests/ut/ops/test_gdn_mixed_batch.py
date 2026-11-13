@@ -10,6 +10,8 @@ from torch import nn
 from vllm.forward_context import ForwardContext, override_forward_context
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.ops.gdn import (
     AscendGatedDeltaNetAttention,
     _pack_conv_weights,
@@ -25,7 +27,7 @@ from vllm_ascend.ops.gdn_attn_builder import (
 
 
 @pytest.mark.parametrize("batch_kind", ["prefill", "mixed", "spec"])
-@pytest.mark.parametrize("backend", ["a5", "missing_fla", "other_device", "fp16"])
+@pytest.mark.parametrize("backend", ["a5", "a2", "a3", "missing_fla", "other_device", "fp16"])
 def test_chunk32_raw_beta_routing(batch_kind, backend):
     """Only A5 chunk32 prefill consumes raw b; dt_bias belongs to g."""
     layer = _make_layer()
@@ -85,14 +87,17 @@ def test_chunk32_raw_beta_routing(batch_kind, backend):
         attn_metadata={layer.prefix: metadata},
         slot_mapping={},
     )
+    device_type = {
+        "a2": AscendDeviceType.A2,
+        "a3": AscendDeviceType.A3,
+        "other_device": AscendDeviceType._310P,
+    }.get(backend, AscendDeviceType.A5)
     with ExitStack() as stack:
         stack.enter_context(override_forward_context(context))
         mocks = {}
         replacements = {
             "get_pcp_group": {"return_value": SimpleNamespace(world_size=1)},
-            "get_current_hardware_profile": {
-                "return_value": SimpleNamespace(supports=lambda _: backend != "other_device")
-            },
+            "get_current_hardware_profile": {"return_value": get_hardware_profile(device_type)},
             "_get_fla_gdn_prefill_op": {"return_value": None if backend == "missing_fla" else Mock()},
             "DeviceOperator.fused_gdn_gating": {"side_effect": gating},
             "DeviceOperator.fla_gdn_prefill": {"side_effect": prefill},
@@ -112,13 +117,13 @@ def test_chunk32_raw_beta_routing(batch_kind, backend):
             mocks[name] = stack.enter_context(patch(f"vllm_ascend.ops.gdn.{name}", **kwargs))
         AscendGatedDeltaNetAttention._forward_core(layer, packed, b, a, output)
 
-    use_fla = backend == "a5"
+    use_fla = backend in ("a5", "a2", "a3")
     selected = "DeviceOperator.fla_gdn_prefill" if use_fla else "chunk_gated_delta_rule"
     unused = "chunk_gated_delta_rule" if use_fla else "DeviceOperator.fla_gdn_prefill"
     mocks[selected].assert_called_once()
     mocks[unused].assert_not_called()
     call = mocks[selected].call_args.kwargs
-    beta = b[:total] if use_fla else expected_beta
+    beta = b[:total] if backend == "a5" else expected_beta
     torch.testing.assert_close(call["beta"], beta[prefill_tokens].unsqueeze(0))
     torch.testing.assert_close(call["g"], expected_g[prefill_tokens].unsqueeze(0))
     if decode_tokens is None:

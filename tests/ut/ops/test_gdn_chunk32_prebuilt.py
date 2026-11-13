@@ -17,11 +17,13 @@
 
 from types import SimpleNamespace
 from unittest import TestCase, main
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import torch
 import vllm  # noqa: F401 - Initialize vLLM before Ascend adaptors.
 
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.ops.gdn_attn_builder import _build_non_spec_chunked_prefill_metadata
 
 
@@ -31,6 +33,36 @@ class NoIterationTuple(tuple):
 
 
 class TestChunk32Prebuilt(TestCase):
+    def setUp(self):
+        profile_patch = patch(
+            "vllm_ascend.ops.gdn_attn_builder.get_current_hardware_profile",
+            return_value=get_hardware_profile(AscendDeviceType.A5),
+        )
+        profile_patch.start()
+        self.addCleanup(profile_patch.stop)
+
+    def test_non_a5_preserves_chunk64_without_building_chunk32(self):
+        from vllm_ascend.ops import gdn_attn_builder
+
+        original = gdn_attn_builder.prepare_chunk_indices
+
+        def reject_chunk32(cu, chunk_size):
+            self.assertNotEqual(chunk_size, 32)
+            return original(cu, chunk_size)
+
+        for device_type in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType._310P):
+            with (
+                self.subTest(device_type=device_type),
+                patch(
+                    "vllm_ascend.ops.gdn_attn_builder.get_current_hardware_profile",
+                    return_value=get_hardware_profile(device_type),
+                ),
+                patch("vllm_ascend.ops.gdn_attn_builder.prepare_chunk_indices", side_effect=reject_chunk32),
+            ):
+                metadata = self.build([0, 64, 128])
+                self.assertIsNone(metadata.chunk_indices_chunk32_host)
+                self.assertEqual(metadata.chunk_indices_chunk64_host, (0, 0, 1, 0))
+
     def build(self, cu):
         return _build_non_spec_chunked_prefill_metadata(
             SimpleNamespace(),
