@@ -1365,6 +1365,27 @@ class NPUModelRunner(GPUModelRunner):
         ):
             return True
 
+        if (
+            spec is not None
+            and self.speculator is not None
+            and spec.method == "dflash"
+            and self.model_config.architecture == "KimiK31ForConditionalGeneration"
+            and spec.draft_model_config is not None
+            and "DFlash2DraftModel" in (spec.draft_model_config.architectures or [])
+        ):
+            # K3.1's KDA layers and SFA indexer read device lengths or the CPU
+            # upper bound only, and DFlash draft metadata is built from the
+            # upper bound by design. Keep unverified paths on exact host counts.
+            parallel_config = self.parallel_config
+            return (
+                parallel_config.pipeline_parallel_size == 1
+                and parallel_config.prefill_context_parallel_size == 1
+                and parallel_config.decode_context_parallel_size == 1
+                and self.vllm_config.kv_transfer_config is None
+                and not self.ascend_config.sparse_kv_offload_config.enabled
+                and not spec.enable_adaptive_verification
+            )
+
         if spec is None or self.speculator is None or spec.method != "dspark" or spec.draft_model_config is None:
             return False
 
