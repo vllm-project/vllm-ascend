@@ -142,33 +142,6 @@ def _sort_candidate_pairs(scores, ids, LOG_BLOCK: tl.constexpr, FIRST_STAGE: tl.
     return scores, ids
 
 
-@triton.jit
-def _radix_sort_candidate_pairs(
-    scores, ids, col, LOG_BLOCK: tl.constexpr, ID_BITS: tl.constexpr, SCORE_BITS: tl.constexpr
-):
-    # A digit plus a unique current-position tag fits exactly in FP32. The tag
-    # makes each value-only native sort stable, independent of its tie policy.
-    DIGIT_BITS: tl.constexpr = 24 - LOG_BLOCK
-    for start in tl.static_range(0, ID_BITS + SCORE_BITS, DIGIT_BITS):
-        raw = scores.to(tl.int32, bitcast=True)
-        # +/-0 compare equal; keep the original score bits in the payload.
-        raw = tl.where((raw & 2147483647) == 0, 0, raw)
-        word = tl.where(raw < 0, raw, ~(raw ^ (-2147483648))) >> (32 - SCORE_BITS)
-        if start >= ID_BITS:
-            digit = word >> (start - ID_BITS)
-        elif start + DIGIT_BITS <= ID_BITS:
-            digit = ids.to(tl.int32) >> start
-        else:
-            digit = (ids.to(tl.int32) >> start) | (word << (ID_BITS - start))
-        digit &= (1 << min(DIGIT_BITS, ID_BITS + SCORE_BITS - start)) - 1
-        key = digit.to(tl.float32) * (1 << LOG_BLOCK) + col.to(tl.float32)
-        order = _sort(key, descending=False)
-        lookup = (order - tl.floor(order * (1.0 / (1 << LOG_BLOCK))) * (1 << LOG_BLOCK)).to(tl.int32)
-        scores = tl.gather(scores, lookup, 0)
-        ids = tl.gather(ids, lookup, 0)
-    return scores, ids
-
-
 @triton.jit(do_not_specialize=["ROWS"])
 def _pack_sorted_candidates(
     indices,
@@ -185,6 +158,13 @@ def _pack_sorted_candidates(
     LOG_BLOCK: tl.constexpr,
 ):
     BLOCK: tl.constexpr = 1 << LOG_BLOCK
+    SCORE_BITS: tl.constexpr = 16 if scores.dtype.element_ty == tl.bfloat16 else 32
+    DIGIT_BITS: tl.constexpr = 24 - LOG_BLOCK
+    MAX_ID_BITS: tl.constexpr = 25
+    # Fill one fewer native-sort pass when the IDs fit its remaining bits.
+    SHORT_ID_BITS: tl.constexpr = (
+        (MAX_ID_BITS + SCORE_BITS + DIGIT_BITS - 1) // DIGIT_BITS - 1
+    ) * DIGIT_BITS - SCORE_BITS
     col = tl.arange(0, BLOCK)
     lanes = tl.arange(0, 2 * BLOCK)
     # Flat, loop-carried rows avoid the larger live set of a row/column tile.
@@ -196,28 +176,33 @@ def _pack_sorted_candidates(
         # local keys preserves global-ID ties without rounding mapped IDs.
         keys = tl.where(valid, local.to(tl.float32), 0.0)
         score = tl.where(valid, score, -float("inf"))
-        if scores.dtype.element_ty == tl.bfloat16:
-            SCORE_BITS: tl.constexpr = 16
-            DIGIT_BITS: tl.constexpr = 24 - LOG_BLOCK
-            # Include the exact 2**24 boundary ID. An on-device range check
-            # saves one pass where possible, without imposing a support limit.
-            ID_BITS: tl.constexpr = 25
-            SHORT_BITS: tl.constexpr = (
-                (ID_BITS + SCORE_BITS + DIGIT_BITS - 1) // DIGIT_BITS - 1
-            ) * DIGIT_BITS - SCORE_BITS
-            if tl.max(keys, 0) < (1 << SHORT_BITS):
-                score, keys = _radix_sort_candidate_pairs(score, keys, col, LOG_BLOCK, SHORT_BITS, SCORE_BITS)
-            else:
-                score, keys = _radix_sort_candidate_pairs(score, keys, col, LOG_BLOCK, ID_BITS, SCORE_BITS)
+        max_key = tl.max(keys, 0)
+        if max_key < (1 << MAX_ID_BITS):
+            # Compile short/full ID widths from one radix body for both dtypes.
+            for ID_BITS in tl.static_range(SHORT_ID_BITS, MAX_ID_BITS + 1, MAX_ID_BITS - SHORT_ID_BITS):
+                if (max_key < (1 << SHORT_ID_BITS)) == (ID_BITS == SHORT_ID_BITS):
+                    # The position tag makes each native value sort stable;
+                    # digit + tag fits exactly in FP32's 24 significant bits.
+                    for start in tl.static_range(0, ID_BITS + SCORE_BITS, DIGIT_BITS):
+                        raw = score.to(tl.int32, bitcast=True)
+                        # +/-0 compare equal; preserve the original payload.
+                        raw = tl.where((raw & 2147483647) == 0, 0, raw)
+                        word = tl.where(raw < 0, raw, ~(raw ^ (-2147483648))) >> (32 - SCORE_BITS)
+                        if start >= ID_BITS:
+                            digit = word >> (start - ID_BITS)
+                        elif start + DIGIT_BITS <= ID_BITS:
+                            digit = keys.to(tl.int32) >> start
+                        else:
+                            digit = (keys.to(tl.int32) >> start) | (word << (ID_BITS - start))
+                        digit &= (1 << min(DIGIT_BITS, ID_BITS + SCORE_BITS - start)) - 1
+                        key = digit.to(tl.float32) * BLOCK + col.to(tl.float32)
+                        order = _sort(key, descending=False)
+                        lookup = (order - tl.floor(order * (1.0 / BLOCK)) * BLOCK).to(tl.int32)
+                        score = tl.gather(score, lookup, 0)
+                        keys = tl.gather(keys, lookup, 0)
         else:
-            # Keep all FP32 score bits. K=2048 needs five stable radix passes
-            # instead of 66 compare/exchange steps. Larger IDs retain the
-            # original comparison path rather than losing high ID bits.
-            FP32_ID_BITS: tl.constexpr = 25
-            if tl.max(keys, 0) < (1 << FP32_ID_BITS):
-                score, keys = _radix_sort_candidate_pairs(score, keys, col, LOG_BLOCK, FP32_ID_BITS, 32)
-            else:
-                score, keys = _sort_candidate_pairs(score, keys, LOG_BLOCK)
+            # Keep high ID bits rather than truncating them in the radix key.
+            score, keys = _sort_candidate_pairs(score, keys, LOG_BLOCK)
         ordered = tl.where(tl.abs(score) < float("inf"), keys, 0).to(tl.int32)
         mapped = ordered + (ordered // INTERLEAVE * (WORLD - 1) + RANK) * INTERLEAVE
         ids = tl.where(tl.abs(score) < float("inf"), mapped, -1)
