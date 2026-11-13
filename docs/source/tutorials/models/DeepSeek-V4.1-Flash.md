@@ -381,6 +381,14 @@ vLLM Ascend revision.
         communication optimizations
         used by this configuration. `enable_cpu_binding` pins worker processes to
         CPUs, while `enable_npugraph_ex` enables the enhanced ACL Graph path.
+    - `HCCL_BUFFSIZE=1024` is sufficient with `enable_fused_mc2` (MegaMoE).
+        Plain MC2, selected when `enable_fused_mc2` is off, sizes its dispatch
+        window from the expert/topk configuration as well as the token count.
+        With some models the profiling dummy needs more than 1 GiB and engine
+        startup fails with an opaque `vector core exception` (error 507035).
+        Raise `HCCL_BUFFSIZE` (for example, 2048) for plain MC2, and set
+        `ASCEND_LAUNCH_BLOCKING=1` to surface the kernel assert with the
+        required size.
 
 ### 5.2 1P1D PD Disaggregated Deployment
 

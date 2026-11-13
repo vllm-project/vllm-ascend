@@ -30,7 +30,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
-from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+from vllm_ascend.worker.v2.model_runner import NPUModelRunner, _mc2_profile_hint
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.utils import C8KVBlockZeroer
 
@@ -2631,3 +2631,51 @@ def test_sample_tokens_refreshes_lmhead_padding_each_step(monkeypatch, lmhead_tp
             assert runner._lmhead_pad_size is None
 
     assert observed == ([4, 8, None] if lmhead_tp else [None, None, None])
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "NPU function error: AclrtSynchronizeStreamWithTimeout(stream), error code is 507035",
+        "An error occurred in the kernel task, retCode=0x31, [vector core exception]",
+        "Failed to submit kernel task: fftsplus aivector error",
+        "Assertion 'realWinSize >= minWinSize' failed. HCCL_BUFFSIZE_EP is too SMALL",
+    ],
+)
+def test_mc2_profile_hint_recognizes_device_failure(message):
+    hint = _mc2_profile_hint(message, 512)
+    assert hint is not None
+    assert "HCCL_BUFFSIZE" in hint
+    assert "512-token" in hint
+
+
+def test_mc2_profile_hint_ignores_unrelated_errors():
+    assert _mc2_profile_hint("CUDA out of memory", 512) is None
+
+
+def test_mc2_profile_hint_reports_configured_buffsize(monkeypatch):
+    monkeypatch.setenv("HCCL_BUFFSIZE", "1024")
+    hint = _mc2_profile_hint("error code is 507035", 192)
+    assert hint is not None
+    assert "HCCL_BUFFSIZE=1024 MiB" in hint
+
+
+def test_profile_run_explains_mc2_hccl_buffsize_failure(monkeypatch):
+    runner = _make_runner()
+    runner.max_num_tokens = 4096
+    runner._get_pcp_profile_num_tokens = Mock(return_value=4096)
+    runner.get_model = Mock(return_value=object())
+    device_error = RuntimeError("NPU function error: error code is 507035")
+    runner._dummy_run = Mock(side_effect=device_error)
+
+    module = "vllm_ascend.worker.v2.model_runner."
+    monkeypatch.setattr(module + "get_mc2_tokens_capacity", lambda: 512)
+    monkeypatch.setattr(module + "select_moe_comm_method", lambda *args, **kwargs: MoECommType.MC2)
+    monkeypatch.setattr(module + "override_mrv2_in_profile_run", lambda _value: nullcontext())
+    monkeypatch.setattr(module + "disable_compilation", lambda _model: nullcontext())
+
+    with pytest.raises(RuntimeError, match="HCCL_BUFFSIZE") as exc_info:
+        runner.profile_run()
+
+    assert exc_info.value.__cause__ is device_error
+    runner._dummy_run.assert_called_once()

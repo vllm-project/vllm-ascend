@@ -19,6 +19,7 @@
 
 import inspect
 import logging
+import os
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
 from typing import Any
@@ -139,6 +140,37 @@ from vllm_ascend.worker.v2.utils import (
     prepare_v41_source_rope,
     torch_cuda_wrapper,
 )
+
+# Device error signatures emitted when the MC2 dispatch window assertion fails.
+_MC2_PROFILE_FAILURE_MARKERS = (
+    "507035",
+    "vector core exception",
+    "fftsplus aivector error",
+    "HCCL_BUFFSIZE_EP is too SMALL",
+    "realWinSize >= minWinSize",
+)
+
+
+def _mc2_profile_hint(message: str, mc2_tokens_capacity: int) -> str | None:
+    """Return an actionable hint for an MC2 profiling-dummy failure.
+
+    The MC2 dispatch kernel asserts on the device when its HCCL window is
+    smaller than the window the dummy needs. Only a later ``vector core
+    exception`` surfaces, blamed on an unrelated operator, so the profiling
+    path explains the likely cause instead of leaving an opaque device error.
+    """
+    if not any(marker in message for marker in _MC2_PROFILE_FAILURE_MARKERS):
+        return None
+    hccl_buffsize = os.environ.get("HCCL_BUFFSIZE", "<unset>")
+    return (
+        "The MC2 HCCL-buffer-reserving dummy run failed with a device-side "
+        "'vector core exception' (error code 507035). This usually means "
+        f"HCCL_BUFFSIZE is too small: the {mc2_tokens_capacity}-token dummy "
+        "needs a larger MC2 dispatch window than the configured "
+        f"HCCL_BUFFSIZE={hccl_buffsize} MiB provides. Raise HCCL_BUFFSIZE "
+        "(for example, 2048) and retry. Set ASCEND_LAUNCH_BLOCKING=1 to "
+        "surface the kernel assert that prints the required size."
+    )
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -800,13 +832,19 @@ class NPUModelRunner(GPUModelRunner):
             ):
                 # Use a call-scoped bypass because skip_compiled would require runner-specific ForwardContext plumbing.
                 with disable_compilation(self.get_model()):
-                    self._dummy_run(
-                        mc2_tokens_capacity,
-                        skip_attn=True,
-                        skip_eplb=True,
-                        is_profile=True,
-                        **profile_kwargs,
-                    )
+                    try:
+                        self._dummy_run(
+                            mc2_tokens_capacity,
+                            skip_attn=True,
+                            skip_eplb=True,
+                            is_profile=True,
+                            **profile_kwargs,
+                        )
+                    except RuntimeError as exc:
+                        hint = _mc2_profile_hint(str(exc), mc2_tokens_capacity)
+                        if hint is None:
+                            raise
+                        raise RuntimeError(hint) from exc
             self.max_num_tokens = profile_tokens
             try:
                 super().profile_run(**profile_kwargs)
