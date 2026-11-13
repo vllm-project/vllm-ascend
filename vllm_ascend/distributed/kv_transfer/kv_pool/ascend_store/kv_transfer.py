@@ -840,6 +840,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 chunk_mask=group_store_mask,
             )
             for start, end, key, block_hash, block_id in iterator:
+                # SWA may have freed an older block before this asynchronous
+                # save runs. Its slot is then the null block (id 0), whose
+                # address must never be published under the old key.
+                if block_id <= 0:
+                    continue
                 starts.append(start)
                 ends.append(end)
                 keys.append(key)

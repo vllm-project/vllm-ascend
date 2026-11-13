@@ -130,6 +130,9 @@ def enable_batch_invariant_mode():
         HAS_ASCENDC_BATCH_INVARIANT,
     )
 
+    # patch npu_add_rms_norm to ensure batch invariance.
+    torch_npu.npu_add_rms_norm = add_rms_norm
+
     # Register operators only implemented in triton.
     if HAS_TRITON:
         _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, "NPU")
@@ -146,8 +149,6 @@ def enable_batch_invariant_mode():
         torch_npu.npu_fused_infer_attention_score = (
             torch.ops.batch_invariant_ops.npu_fused_infer_attention_score_batch_invariant
         )
-        # patch npu_add_rms_norm to ensure batch invariant.
-        torch_npu.npu_add_rms_norm = add_rms_norm
         # torch.sum can't be replaced by dispatch logic, so we patch it directly.
         torch.sum = reduce_sum
         # Tensor.sum uses the same batch-invariant reduce_sum implementation.
