@@ -21,7 +21,7 @@ kv_pool:
       ock.mmc.log_level: info
       ock.mmc.local_service.world_size: 256
       ock.mmc.local_service.protocol: device_sdma
-      ock.mmc.local_service.dram.size: 0GB
+      ock.mmc.local_service.dram.size: 10GB
 
 config:
   - node_index: 0
