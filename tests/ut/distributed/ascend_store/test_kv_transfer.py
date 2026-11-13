@@ -723,6 +723,37 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         self.assertEqual(events[0].block_size, 16)
         store.exists.assert_called_once()
 
+    def test_missing_descriptors_publish_only_prepared_successful_grains(self):
+        for put_result in (None, [True, False]):
+            with self.subTest(put_result=put_result):
+                thread, store = self._make_thread([0, 0, 0], enable_kv_event=True)
+                request = ReqMeta(
+                    req_id="descriptor-filter",
+                    token_len_chunk=48,
+                    block_ids=[0, 1, 2],
+                    block_hashes=[b"h0", b"h1", b"h2"],
+                    token_ids=list(range(48)),
+                    original_block_size=16,
+                )
+                thread.add_stored_request(request)
+                thread.request_queue.put(request)
+                original_put = store.put
+
+                def put(keys, addrs, sizes, original_put=original_put, put_result=put_result):
+                    original_put(keys, addrs, sizes)
+                    return put_result
+
+                store.put = put
+                with patch.object(
+                    thread, "_prepare_value", side_effect=[([], [], None), ([1], [16], None), ([2], [16], None)]
+                ):
+                    thread._handle_request(request)
+                self.assertEqual(len(store.put_calls[0][0]), 2)
+                expected = [b"h1", b"h2"] if put_result is None else [b"h1"]
+                self.assertEqual(
+                    [e.block_hashes for e in thread.get_kv_events()], [[maybe_convert_block_hash(h)] for h in expected]
+                )
+
     def test_handle_request_with_kv_event(self):
         t, store = self._make_thread([0], enable_kv_event=True)
         req = ReqMeta(
