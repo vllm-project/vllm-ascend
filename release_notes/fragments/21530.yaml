@@ -1,0 +1,9 @@
+pr: 21530
+entries:
+  - category: bugfix
+    text: >-
+      Qwen4Exp QSA cache stores now support multiple local KV heads per rank,
+      enabling TP1 pipeline-parallel deployments to serve requests without a
+      cache-shape failure.
+    model: qwen3.8-flash-next
+    hardware: [A3]
