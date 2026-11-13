@@ -93,7 +93,7 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-## Install Mooncake {: #install-mooncake }
+## Install Mooncake
 
 Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI. Installation and Compilation Guide: <https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries>.
 First, we need to obtain the Mooncake project. Refer to the following command:

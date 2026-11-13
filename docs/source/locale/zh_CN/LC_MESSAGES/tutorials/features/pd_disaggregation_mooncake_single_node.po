@@ -71,8 +71,8 @@ msgstr "## 使用 Docker 运行"
 msgid "Start a Docker container."
 msgstr "启动 Docker 容器。"
 
-msgid "## Install Mooncake {: #install-mooncake }"
-msgstr "## 安装 Mooncake {: #install-mooncake }"
+msgid "## Install Mooncake"
+msgstr "## 安装 Mooncake"
 
 msgid ""
 "Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI. Installation and Compilation Guide: <https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries>.\n"

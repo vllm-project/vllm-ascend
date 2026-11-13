@@ -1082,7 +1082,7 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
 
 The 10K target is the processed input length, including text and image tokens. Keep the input plus requested output within the model length configured for your deployment.
 
-For A2 and A3, make sure Mooncake is importable in both serving containers before running the environment setup. If needed, follow the [Mooncake installation guide](../features/pd_disaggregation_mooncake_single_node.md#install-mooncake).
+For A2 and A3, make sure Mooncake is importable in both serving containers before running the environment setup. If needed, follow the [Mooncake installation guide](../features/pd_disaggregation_mooncake_single_node.md).
 
 === "A2 series"
 
