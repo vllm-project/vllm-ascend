@@ -117,7 +117,6 @@ class AscendHiSparseBackend(HiSparseBackend):
         self._failed_dma_batches: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
 
     def check_available(self) -> None:
-        from vllm_ascend.hisparse.binding import install_aligned_device_allocation
         from vllm_ascend.hisparse.cache_ops import _load_resolver
         from vllm_ascend.hisparse.host_pool import install
         from vllm_ascend.utils import bootstrap_custom_op_env
@@ -136,7 +135,6 @@ class AscendHiSparseBackend(HiSparseBackend):
                 raise RuntimeError("Ascend HiSparse requires the Ascend swap_blocks_batch operator.")
         _load_resolver()
         _install_worker_dma_hooks()
-        install_aligned_device_allocation()
 
     def pin_tensor(self, tensor: torch.Tensor) -> None:
         from vllm_ascend.hisparse.host_pool import MappedHostTensor

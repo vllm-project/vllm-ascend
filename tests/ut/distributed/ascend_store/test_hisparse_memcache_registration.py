@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 
@@ -8,7 +9,7 @@ import pytest
 import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.v1.hisparse.layout import get_hisparse_kv_cache_groups
-from vllm.v1.kv_cache_interface import KVCacheConfig, SparseCacheRole
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor, SparseCacheRole, UniformTypeKVCacheSpecs
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import AscendStoreConnector
@@ -113,42 +114,79 @@ def test_hisparse_groups_register_with_independent_host_blocks(indexer_c8: bool)
     assert worker.group_block_stride[1] == ([17408, 17408] if indexer_c8 else [98304])
     assert all(worker.group_block_len[index] == [] for index in range(2, len(groups)))
     worker.m_store.register_buffer.assert_called_once()
+    ptrs, lengths = worker.m_store.register_buffer.call_args.args
+    assert lengths[ptrs.index(source.data_ptr())] == num_host_blocks * 32768
+    assert worker._hisparse_host_resident_groups == frozenset({0})
     if indexer_c8:
-        ptrs, lengths = worker.m_store.register_buffer.call_args.args
         assert lengths[ptrs.index(raw.data_ptr())] == (num_device_blocks - 1) * 17408 + 16896
+    worker.kv_cache_config.kv_cache_tensors = [
+        KVCacheTensor(size=5 * 32768, layers=[source_name], layer_stride=0, block_stride=32768, host_resident=True),
+        KVCacheTensor(
+            size=raw.numel(),
+            layers=[indexer_name],
+            layer_stride=0,
+            block_stride=17408 if indexer_c8 else 98304,
+        ),
+    ]
+    layout_id = worker._hisparse_layout_id()
+    worker.kv_cache_config.num_blocks += 1
+    worker.kv_cache_config.hisparse_host_num_blocks += 1
+    assert worker._hisparse_layout_id() == layout_id
+    worker.kv_cache_config.kv_cache_tensors[1].block_stride += 512
+    assert worker._hisparse_layout_id() != layout_id
+    worker.kv_cache_config.kv_cache_tensors[1].block_stride -= 512
+    spec = groups[1].kv_cache_spec
+    replacement = replace(indexer_spec, block_size=64)
+    groups[1].kv_cache_spec = (
+        replace(spec, block_size=64, kv_cache_specs={indexer_name: replacement})
+        if isinstance(spec, UniformTypeKVCacheSpecs)
+        else replacement
+    )
+    assert worker._hisparse_layout_id() != layout_id
 
 
-def test_memcache_splits_host_and_device_batches_without_reordering() -> None:
+def test_memcache_splits_host_and_device_batches_without_reordering(caplog) -> None:
     backend = MemcacheBackend.__new__(MemcacheBackend)
     backend.store = Mock()
     backend._store_initialized = True
     backend._lazy_init = False
     backend._pending_buffers = None
-    backend.set_hisparse_host_ranges([(1000, 2000)])
-    backend.store.batch_put_from_layers.side_effect = [[0, -7], [0]]
     backend.store.batch_get_into_layers.side_effect = [[0, -7], [0]]
 
     keys = ["host", "device1", "device2"]
-    addresses = [[1100], [3000], [4000]]
+    addresses = [[1100], [1100], [4000]]
     sizes = [[100], [100], [100]]
-    assert backend.put(keys, addresses, sizes) == [True, True, False]
-    assert backend.get(keys, addresses, sizes) == [0, 0, -7]
-    assert backend.store.batch_put_from_layers.call_args_list == [
-        call(["device1", "device2"], [[3000], [4000]], [[100], [100]], MmcDirect.COPY_L2G.value),
-        call(["host"], [[1100]], [[100]], MmcDirect.COPY_H2G.value),
-    ]
+    backend.store.batch_put_from_layers.return_value = [0]
+    assert backend.put(keys[:1], addresses[:1], sizes[:1], host=True) == [True]
+    backend.store.batch_put_from_layers.assert_called_once_with(["host"], [[1100]], [[100]], MmcDirect.COPY_H2G.value)
+    assert backend.get(keys, addresses, sizes, host_keys=[True, False, False]) == [0, 0, -7]
     assert backend.store.batch_get_into_layers.call_args_list == [
-        call(["device1", "device2"], [[3000], [4000]], [[100], [100]], MmcDirect.COPY_G2L.value),
+        call(["device1", "device2"], [[1100], [4000]], [[100], [100]], MmcDirect.COPY_G2L.value),
         call(["host"], [[1100]], [[100]], MmcDirect.COPY_G2H.value),
     ]
-    with pytest.raises(ValueError, match="exceeds its registered host range"):
-        backend._transfer_hisparse(["bad"], [[1950]], [[100]], put=True)
-    with pytest.raises(ValueError, match="exceeds its registered host range"):
-        backend._transfer_hisparse(["bad"], [[950]], [[100]], put=False)
-    with pytest.raises(ValueError, match="cannot combine host and device"):
-        backend._transfer_hisparse(["mixed"], [[1100, 3000]], [[100, 100]], put=False)
-    with pytest.raises(ValueError, match="matching key, address and size counts"):
-        backend._transfer_hisparse(["missing"], [], [], put=True)
+    assert backend.get(keys, addresses, sizes, host_keys=[True]) is None
+    assert backend.put(keys, addresses[:1], sizes, host=True) is False
+    assert "Invalid HiSparse MemCache GET metadata" in caplog.text
+    assert "Invalid HiSparse MemCache PUT metadata" in caplog.text
+
+
+def test_memcache_bounds_each_hisparse_host_get_lease() -> None:
+    backend = MemcacheBackend.__new__(MemcacheBackend)
+    backend.store = Mock()
+    backend._store_initialized = True
+    backend._lazy_init = False
+    backend.store.batch_get_into_layers.side_effect = [[0], [-3106], [0]]
+    key_size = 130 * 1024 * 1024
+
+    assert backend.get(["one", "two", "three"], [[1], [2], [3]], [[key_size]] * 3, host_keys=[True] * 3) == [
+        0,
+        -3106,
+        0,
+    ]
+    assert backend.store.batch_get_into_layers.call_args_list == [
+        call([key], [[index]], [[key_size]], MmcDirect.COPY_G2H.value)
+        for index, key in enumerate(("one", "two", "three"), 1)
+    ]
 
 
 @pytest.mark.parametrize(
