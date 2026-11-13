@@ -252,10 +252,8 @@ def test_prefill_filters_target_only_metadata():
     parent_prefill.assert_called_once_with(*expected_args)
 
 
-@pytest.mark.parametrize("is_v033", [False, True], ids=["main", "v0.33.0"])
 @pytest.mark.parametrize("runtime_mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL])
-def test_prefill_mla_query_lengths_exclude_target_padding(is_v033, runtime_mode):
-    """Eager/PW drafts must not reuse query lengths for padded target rows."""
+def test_prefill_preserves_mla_query_lengths_from_caller(runtime_mode):
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
     speculator.draft_attn_layer_names = {"draft"}
     speculator._lmhead_pad_size_context = MagicMock(side_effect=lambda **kwargs: nullcontext())
@@ -264,21 +262,13 @@ def test_prefill_mla_query_lengths_exclude_target_padding(is_v033, runtime_mode)
     metadata.decode = SimpleNamespace(actual_seq_lengths_q=[2, 4, 6, 8], seq_lens_list=[10, 0, 0, 0])
     slot_mappings = {"draft": object()}
     metadata.slot_mapping = slot_mappings["draft"]
-    module = "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator"
-    with (
-        patch(module + ".vllm_version_is", return_value=is_v033),
-        patch.object(TargetDependentARSpeculator, "_prefill") as parent_prefill,
-    ):
+    with patch.object(TargetDependentARSpeculator, "_prefill") as parent_prefill:
         speculator._prefill(1, 8, {"draft": metadata}, slot_mappings, None, runtime_mode)
 
     parent_prefill.assert_called_once()
     forwarded = parent_prefill.call_args.args[2]["draft"]
-    expected = [2, 4, 6, 8] if runtime_mode == CUDAGraphMode.FULL else [2, 2, 2, 2]
-    assert forwarded.decode.actual_seq_lengths_q == expected
+    assert forwarded is metadata
     assert metadata.decode.actual_seq_lengths_q == [2, 4, 6, 8]
-    assert (forwarded is metadata) == (runtime_mode == CUDAGraphMode.FULL)
-    assert forwarded.decode.seq_lens_list is metadata.decode.seq_lens_list
-    assert forwarded.slot_mapping is metadata.slot_mapping
     assert parent_prefill.call_args.args[3] is slot_mappings
 
 
@@ -669,7 +659,8 @@ def test_propose_accepts_main_dp_sync_state_and_num_speculative_tokens(adaptive,
     speculator.pcp_manager = None
     speculator.enable_adaptive_verification = adaptive
     input_batch = object()
-    args = [object() for _ in range(10)]
+    attn_metadata = {"draft": object()}
+    args = [object() for _ in range(9)]
     sync_kwargs = dict(
         num_tokens_across_dp=torch.tensor([8, 8]),
         uniform_token_count=sync_uniform,
@@ -693,9 +684,10 @@ def test_propose_accepts_main_dp_sync_state_and_num_speculative_tokens(adaptive,
         patch.object(TargetDependentARSpeculator, "propose", return_value=expected) as parent_propose,
     ):
         result = speculator.propose(
-            input_batch, *args, dp_sync_state=dp_sync, dummy_run=dummy, num_speculative_tokens=2
+            input_batch, attn_metadata, *args, dp_sync_state=dp_sync, dummy_run=dummy, num_speculative_tokens=2
         )
     assert result is expected
+    assert parent_propose.call_args.args[1] == attn_metadata
     forwarded = parent_propose.call_args.args[11]
     assert (forwarded is dp_sync) is (not clear_uniform)
     assert forwarded.uniform_token_count == (None if clear_uniform else sync_uniform)
