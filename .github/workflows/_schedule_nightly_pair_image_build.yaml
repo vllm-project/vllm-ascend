@@ -83,7 +83,7 @@ on:
         type: boolean
         default: false
         description: "If true, build an isolated (/presmoke) pair instead of the standard nightly one. Both layers are derived from this single flag: they are published to the '-presmoke' repositories with the standard tags unchanged, never pushed to atlas_inference and never synced to quay.io. Default false keeps the standard repositories and tags."
-      PR_ref:
+      source_ref:
         required: false
         type: string
         default: ''
@@ -108,7 +108,7 @@ jobs:
       should_push: ${{ inputs.should_push }}
       schedule_tag_pattern: 'main'
       branch_ref: ${{ inputs.vllm_ascend_branch || 'main' }}
-      PR_ref: ${{ inputs.PR_ref }}
+      source_ref: ${{ inputs.source_ref }}
       swr_registry: ${{ inputs.swr_registry }}
       # An isolated build publishes the runtime image to its own '-presmoke' repo
       # while keeping the standard tag.
@@ -133,7 +133,7 @@ jobs:
       should_push: ${{ inputs.should_push }}
       soc: ${{ inputs.soc }}
       isolated_build: ${{ inputs.isolated_build }}
-      PR_ref: ${{ inputs.PR_ref }}
+      source_ref: ${{ inputs.source_ref }}
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
