@@ -38,6 +38,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadataBuilder,
     AscendDSAReqMetadata,
     OProjBufferPool,
+    _WO_A_SMALL_M_LIMIT,
     build_compressor_metadata_out,
     build_vision_bidirectional_swa_indices,
 )
@@ -1513,6 +1514,85 @@ def test_a5_bf16_o_proj_uses_transpose_batchmatmul():
     batched.assert_called_once()
     quant.assert_not_called()
     torch.testing.assert_close(output, projected.reshape(4, -1))
+
+
+def test_single_group_small_batch_wo_a_uses_plain_matmul():
+    """TP >= o_groups with an unquantized bf16 wo_a and a decode-sized batch:
+    the o_proj low-rank projection runs the plain 2D matmul on the same 3D ND
+    weight instead of npu_transpose_batchmatmul."""
+    impl = _make_impl()
+    impl.n_local_groups = 1
+    impl.support_fp8_attention = False
+    weight = torch.randn(1, 4, 2)  # [1, group_hidden, o_lora_local], ND
+    impl.wo_a = SimpleNamespace(weight=weight, weight_scale=None)
+    impl.wo_b = lambda x: x
+    o_proj_input = torch.randn(5, 1, 4)
+    output = torch.empty(5, 2)
+
+    with (
+        patch("vllm_ascend.attention.dsa_v1.oproj_tp_enable", return_value=False),
+        patch("vllm_ascend.attention.dsa_v1.torch_npu.npu_transpose_batchmatmul") as batched,
+    ):
+        impl._forward_o_proj(o_proj_input, output)
+
+    batched.assert_not_called()
+    expected = torch.matmul(o_proj_input.view(5, 4), weight.view(4, 2))
+    torch.testing.assert_close(output, expected)
+
+
+def test_single_group_wo_a_matmul_at_small_m_limit_boundary():
+    """num_tokens == _WO_A_SMALL_M_LIMIT still dispatches to the plain matmul;
+    one token above it falls back to npu_transpose_batchmatmul."""
+    impl = _make_impl()
+    impl.n_local_groups = 1
+    impl.support_fp8_attention = False
+    weight = torch.randn(1, 4, 2)
+    impl.wo_a = SimpleNamespace(weight=weight, weight_scale=None)
+    impl.wo_b = lambda x: x
+    projected = torch.randn(_WO_A_SMALL_M_LIMIT + 1, 1, 2)
+
+    with (
+        patch("vllm_ascend.attention.dsa_v1.oproj_tp_enable", return_value=False),
+        patch(
+            "vllm_ascend.attention.dsa_v1.torch_npu.npu_transpose_batchmatmul",
+            return_value=projected,
+        ) as batched,
+    ):
+        o_proj_input = torch.randn(_WO_A_SMALL_M_LIMIT, 1, 4)
+        output = torch.empty(_WO_A_SMALL_M_LIMIT, 2)
+        impl._forward_o_proj(o_proj_input, output)
+        batched.assert_not_called()
+
+        o_proj_input = torch.randn(_WO_A_SMALL_M_LIMIT + 1, 1, 4)
+        output = torch.empty(_WO_A_SMALL_M_LIMIT + 1, 2)
+        impl._forward_o_proj(o_proj_input, output)
+        batched.assert_called_once()
+
+    expected = projected.reshape(_WO_A_SMALL_M_LIMIT + 1, -1)
+    torch.testing.assert_close(output, expected)
+
+
+def test_quantized_wo_a_single_group_keeps_transpose_batchmatmul():
+    """Quantized wo_a (weight_scale present) with a single local group and fp8
+    attention disabled must stay on the transpose path — never run the plain
+    matmul on the 3D quantized weight."""
+    impl = _make_impl()
+    impl.n_local_groups = 1
+    impl.support_fp8_attention = False
+    impl.wo_a = SimpleNamespace(weight=torch.randn(1, 4, 2), weight_scale=torch.zeros(1))
+    impl.wo_b = lambda x: x
+    o_proj_input = torch.randn(5, 1, 4)
+    output = torch.empty(5, 2)
+    projected = torch.randn(5, 1, 2)
+
+    with (
+        patch("vllm_ascend.attention.dsa_v1.oproj_tp_enable", return_value=False),
+        patch("vllm_ascend.attention.dsa_v1.torch_npu.npu_transpose_batchmatmul", return_value=projected) as batched,
+    ):
+        impl._forward_o_proj(o_proj_input, output)
+
+    batched.assert_called_once()
+    torch.testing.assert_close(output, projected.reshape(5, -1))
 
 
 def test_a5_bf16_keeps_multistream_overlap_enabled():
