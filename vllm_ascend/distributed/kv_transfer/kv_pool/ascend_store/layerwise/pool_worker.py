@@ -959,18 +959,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             save_end_block = self._layerwise_save_full_end(request, group_id, block_size, partial_block_index)
             # External hits already have full keys. A previous-step hit may
             # instead use snapshots, which still need promotion to full keys.
-            if (
-                request.load_spec is not None
-                and request.load_spec.can_load
-                and not request.load_spec.layerwise_previous_step
-            ):
-                pool_hit_tokens = (
-                    request.load_spec.kvpool_store_skip_tokens
-                    if request.load_spec.kvpool_store_skip_tokens is not None
-                    else request.load_spec.kvpool_cached_tokens
-                )
-                hit_full_blocks = pool_hit_tokens // block_size
-                save_start_block = max(save_start_block, hit_full_blocks)
+            if request.load_spec is not None and not request.load_spec.layerwise_previous_step:
+                save_start_block = request.load_spec.clamp_save_start(save_start_block, block_size)
             if partial_block_index is None:
                 partial_block_index = request.partial_block_index
             num_allocated_blocks = (
@@ -1127,18 +1117,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 save_end_block = self._layerwise_save_full_end(
                     request, group_id, effective_block_size, partial_block_index
                 )
-                if (
-                    request.load_spec is not None
-                    and request.load_spec.can_load
-                    and not request.load_spec.layerwise_previous_step
-                ):
-                    pool_hit_tokens = (
-                        request.load_spec.kvpool_store_skip_tokens
-                        if request.load_spec.kvpool_store_skip_tokens is not None
-                        else request.load_spec.kvpool_cached_tokens
-                    )
-                    hit_full_blocks = pool_hit_tokens // effective_block_size
-                    save_start_block = max(save_start_block, hit_full_blocks)
+                if request.load_spec is not None and not request.load_spec.layerwise_previous_step:
+                    save_start_block = request.load_spec.clamp_save_start(save_start_block, effective_block_size)
                 group_store_mask = (
                     request.store_masks[group_id]
                     if request.store_masks is not None and group_id < len(request.store_masks)
@@ -1406,8 +1386,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             if request.load_spec is None or not request.load_spec.can_load:
                 continue
             cached_tokens = request.load_spec.kvpool_cached_tokens
-            if not getattr(self, "use_eagle", False) and request.load_spec.kvpool_store_skip_tokens is not None:
-                cached_tokens = request.load_spec.kvpool_store_skip_tokens
+            if not getattr(self, "use_eagle", False):
+                cached_tokens = request.load_spec.pool_hit_tokens
             if (
                 getattr(self, "use_eagle", False)
                 and request.load_spec.kvpool_cached_tokens == request.target_token_len - 1
@@ -1599,8 +1579,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             if request.load_spec is None or not request.load_spec.can_load:
                 continue
             cached_tokens = request.load_spec.kvpool_cached_tokens
-            if not getattr(self, "use_eagle", False) and request.load_spec.kvpool_store_skip_tokens is not None:
-                cached_tokens = request.load_spec.kvpool_store_skip_tokens
+            if not getattr(self, "use_eagle", False):
+                cached_tokens = request.load_spec.pool_hit_tokens
             if (
                 getattr(self, "use_eagle", False)
                 and request.load_spec.kvpool_cached_tokens == request.target_token_len - 1
