@@ -19,6 +19,7 @@ from vllm_ascend.ops.triton.dcp.dcp_a2a_batched import (
     _fused_dcp_lse_combine_batched_kernel,
     _pack_dcp_output_lse_batched_kernel,
 )
+from vllm_ascend.ops.triton.dcp.dcp_a2a_rank_tiled import _fused_dcp_lse_combine_rank_tiled_kernel
 from vllm_ascend.ops.triton.dcp.dcp_jit import DcpJitKernel
 from vllm_ascend.ops.triton.dcp.sfa_dcp_exchange import (
     _FULL_PACK_VECTOR_ELEMENTS,
@@ -37,6 +38,7 @@ _DCP_KERNELS = (
     DcpJitKernel(_pack_dcp_output_lse_kernel),
     DcpJitKernel(_pack_dcp_output_lse_batched_kernel),
     DcpJitKernel(_fused_dcp_lse_combine_kernel),
+    DcpJitKernel(_fused_dcp_lse_combine_rank_tiled_kernel, ("num_heads", "num_tokens")),
     DcpJitKernel(_fused_dcp_lse_combine_batched_kernel),
     DcpJitKernel(_pack_t1_peer),
     DcpJitKernel(_pack_token_peer, ("tokens",)),
@@ -62,7 +64,10 @@ def _token_representatives(max_tokens, heads, local_heads, head_dim, vector_core
     pointer-alignment keys. No capture-size list or Cartesian stride product is
     needed. Include integer-width boundaries for large configured capacities.
     """
+    ranks = heads // local_heads
+    rank_min_rows = triton.cdiv(4 * vector_cores, ranks)
     cuts = {
+        triton.cdiv(rank_min_rows, local_heads),
         1,
         2,
         128,

@@ -1,6 +1,6 @@
 # fused_dcp_lse_combine
 
-> Source: `vllm_ascend/ops/triton/dcp/dcp_a2a.py` and `dcp_a2a_batched.py`.
+> Source: `vllm_ascend/ops/triton/dcp/dcp_a2a.py`, `dcp_a2a_batched.py`, and `dcp_a2a_rank_tiled.py`.
 
 ## Description
 
@@ -47,3 +47,5 @@ The single-card nightly test compares the result against an independent FP32 sof
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_dcp_a2a.py
 pytest -sv tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dcp_a2a.py
 ```
+
+Eligible BF16 head-scatter shapes with a contiguous local contribution may use the rank-tiled kernel ahead of the batched path. Its parallel FP32 reduction can round differently from the scalar kernel. The rank tile uses one 16x512 BF16 tile per job, so the FP32 temporaries stay at 32 KiB. It requires a compile-time rank-row stride to vectorize; with runtime head/token counts A3 lowered it to scalar-rate transfers and ran far slower than the scalar kernel, so it is limited to A5 DCP16 with head dims 512 and 1024, where it measured 2-4x faster than the scalar and batched paths (including T64/T256).
