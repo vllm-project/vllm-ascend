@@ -39,6 +39,7 @@ config:
     dp_size_local: 1
     dp_rank_start: 0
     tp_size: 16
+    is_headless: true
     dp_address: "${NODE_0_IP}"
   - node_index: 2
     port_start: 7200
