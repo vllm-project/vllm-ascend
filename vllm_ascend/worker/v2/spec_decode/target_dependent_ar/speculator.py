@@ -229,6 +229,9 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
 
     def on_prefill_begin(self, num_reqs: int) -> None:
         super().on_prefill_begin(num_reqs)
+        hisparse_pcp = getattr(self, "hisparse_pcp_connector", None)
+        if hisparse_pcp is not None:
+            hisparse_pcp.prepare_draft_prefill()
         source_mask = getattr(self, "_eplb_source_is_padding", None)
         if source_mask is not None:
             source_mask.fill_(True)
@@ -238,6 +241,9 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
 
     def on_multi_step_decode_begin(self, num_reqs: int) -> None:
         super().on_multi_step_decode_begin(num_reqs)
+        hisparse_pcp = getattr(self, "hisparse_pcp_connector", None)
+        if hisparse_pcp is not None:
+            hisparse_pcp.prepare_draft_decode(self.idx_mapping, num_reqs)
         source_mask = getattr(self, "_eplb_source_is_padding", None)
         if source_mask is not None:
             source_mask.fill_(True)

@@ -97,6 +97,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     init_sparse_kv_offload_manager,
 )
 from vllm_ascend.hisparse.host_mirror import HostMirrorConnector, overlap_target_host_mirror
+from vllm_ascend.hisparse.pcp import adapt_pcp_hisparse_connector
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
 from vllm_ascend.observability.runtime_guard.hooks import (
     runtime_guard_sample_tokens,
@@ -554,6 +555,7 @@ class NPUModelRunner(GPUModelRunner):
 
         self._fill_c8_mxfp_v_scale_caches()
         if self.vllm_config.attention_config.hisparse_config is not None:
+            self.kv_connector = adapt_pcp_hisparse_connector(self)
             self.kv_connector = overlap_target_host_mirror(self)
 
     def _fill_c8_mxfp_v_scale_caches(self) -> None:

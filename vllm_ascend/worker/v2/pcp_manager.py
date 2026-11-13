@@ -65,6 +65,8 @@ class AscendPCPAttentionContext:
     local_token_indices: torch.Tensor | None = None
     # Padded tensor width consumed by each rank's model forward.
     local_num_tokens: int | None = None
+    # Local request order, including dual-chunk duplicates and graph padding.
+    local_request_state_indices: torch.Tensor | None = None
 
 
 class AscendPCPManager(PCPManager):
@@ -717,6 +719,7 @@ class AscendPCPManager(PCPManager):
         update_cos_sin(input_batch.positions)
         return AscendPCPAttentionContext(
             global_batch=global_batch,
+            local_request_state_indices=input_batch.idx_mapping,
             local_num_tokens=input_batch.num_tokens_after_padding,
             global_block_tables=self._block_tables.get_dummy_block_tables(num_reqs),
             global_slot_mappings=self._global_batch_slot_mappings[:, :num_tokens].fill_(-1),
@@ -742,6 +745,7 @@ class AscendPCPManager(PCPManager):
             restore_start = self.pcp_rank * num_tokens
             return AscendPCPAttentionContext(
                 global_batch=input_batch,
+                local_request_state_indices=input_batch.idx_mapping,
                 local_num_tokens=num_tokens,
                 local_to_global_req_indices=tuple(range(input_batch.num_reqs)),
                 global_block_tables=block_tables,
@@ -774,6 +778,7 @@ class AscendPCPManager(PCPManager):
             )
         return AscendPCPAttentionContext(
             global_batch=global_batch,
+            local_request_state_indices=local_batch.idx_mapping,
             local_num_tokens=local_batch.num_tokens_after_padding,
             local_to_global_req_indices=local_to_global_req_indices,
             local_token_indices=self._local_gather_idx[: local_batch.num_tokens],
