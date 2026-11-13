@@ -35,10 +35,12 @@ class GvaDataPlane(LayerwiseDataPlane):
         """GVA opens no pool-side sessions before the save loop."""
         return {}
 
-    def prepare_load_gvas(self, requests: list[ReqMeta]) -> None:
+    def prepare_gvas(self, requests: list[ReqMeta]) -> None:
+        # Protect the previous partial before allocating the next snapshot:
+        # load preparation queries the pool-registered GVA of the previous
+        # step's snapshot, so it must complete before save allocation
+        # repoints the partial key at a fresh one.
         self._worker._prepare_load_gvas(requests)
-
-    def alloc_save_gvas(self, requests: list[ReqMeta]) -> None:
         self._worker._alloc_gvas_for_save(requests)
 
     def finish_current_load_sessions(self) -> None:
