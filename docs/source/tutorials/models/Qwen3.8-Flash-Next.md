@@ -1458,7 +1458,7 @@ For A2 and A3, make sure Mooncake is importable in both serving containers befor
         --enable-prefix-caching \
         --async-scheduling \
         --enable-expert-parallel \
-        --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --additional-config '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false},"enable_fused_mc2":0}' \
         --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}' \
@@ -1500,7 +1500,7 @@ For A2 and A3, make sure Mooncake is importable in both serving containers befor
     - Prefill partitions the layers across two pipeline stages with `VLLM_PP_LAYER_PARTITION=25,23`. Keep `pp_size=2` and `pp_layer_partition="25,23"` in both Mooncake configurations consistent with this partition.
     - Decode uses TP2 × DP2 behind one API endpoint on port `8248`; the proxy routes to that endpoint rather than separate DP-rank APIs.
     - Both roles enable prefix caching. Prefill disables graph capture and sets MTP `enforce_eager=true`. Decode uses `FULL_DECODE_ONLY`, sets MTP `enforce_eager=false`, enables static kernels, and disables super kernels.
-    - Both roles enable Engram CPU offload with `dp_shared_memory=false`, use `HCCL_BUFFSIZE=512`, and set `VLLM_ENGINE_READY_TIMEOUT_S=4800` to allow sufficient engine initialization time. Provide sufficient host memory for the checkpoint and the decode DP replicas.
+    - Both roles enable Engram CPU offload. Decode enables DP shared memory for its two replicas. Both roles use `HCCL_BUFFSIZE=512` and set `VLLM_ENGINE_READY_TIMEOUT_S=4800`. Provide sufficient host memory and container shared memory for the deployment.
     - `VLLM_ASCEND_PLE_BACKEND` only applies to runtimes that implement it; an unknown-variable warning means it has no effect.
 
 ### 5.4 Long-Context PD Separation Deployment
