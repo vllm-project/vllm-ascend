@@ -1580,6 +1580,18 @@
 #       Remove once upstream exposes a backend hook for KV cache
 #       allocation/binding.
 #
+#   5. `vllm.v1.worker.gpu.model_runner.init_kv_cache`
+#    Why:
+#       MRV2 needs to keep allocator tensors for runner bookkeeping while
+#       exposing per-component views to Ascend attention and state kernels.
+#    How:
+#       Use upstream placement and allocation when all backends provide
+#       component layouts. Register the shared state layout on Mamba1/2.
+#    Related RFC:
+#       https://github.com/vllm-project/vllm-ascend/issues/21053
+#    Future Plan:
+#       Remove the wrapper when upstream exposes a runtime-view binding hook.
+#
 # ** 23. File: worker/patch_block_table.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.block_table.BlockTables`

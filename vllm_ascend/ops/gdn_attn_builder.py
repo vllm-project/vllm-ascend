@@ -32,6 +32,7 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
+from vllm_ascend.attention.cache_components import describe_mamba_cache_components
 from vllm_ascend.device.hardware_profile import get_current_hardware_profile
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_indices,
@@ -1078,6 +1079,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
 
 
 class AscendGDNAttentionBackend(GDNAttentionBackend):
+    describe_cache_components = staticmethod(describe_mamba_cache_components)
+
     @classmethod
     def supports_device_cpu_query_lens_mismatch(cls) -> bool:
         # Decode kernels consume device boundaries; CPU lengths only size

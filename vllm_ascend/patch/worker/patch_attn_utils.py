@@ -1,12 +1,15 @@
-from functools import cache
+from functools import cache, wraps
 
 import torch
 import vllm
 import vllm.v1.worker.utils as v1_worker_utils
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, AttentionInterface
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
+from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionBackend
+from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionBackend
 from vllm.v1.worker.gpu import model_runner as gpu_model_runner_v2
 
+from vllm_ascend.attention.cache_components import describe_mamba_cache_components
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.patch.worker.patch_bind_kv_cache import (
     bind_kv_cache,
@@ -20,6 +23,8 @@ from vllm_ascend.worker.v2.attn_utils import (
     allocate_kv_cache_main,
     get_kv_cache_spec,
 )
+
+from vllm_ascend.worker.v2.cache_binding import init_component_kv_cache
 
 
 def _get_ascend_sfa_indexer_backend(_self):
@@ -104,3 +109,31 @@ v1_worker_utils.bind_kv_cache = bind_kv_cache
 v1_worker_utils.bind_kv_cache_to_layers = bind_kv_cache_to_layers
 
 vllm.v1.worker.gpu.model_runner.get_kv_cache_spec = get_kv_cache_spec
+
+
+# Register the same state-page ABI for the upstream Mamba backends on Ascend.
+Mamba1AttentionBackend.describe_cache_components = staticmethod(describe_mamba_cache_components)
+Mamba2AttentionBackend.describe_cache_components = staticmethod(describe_mamba_cache_components)
+
+
+_original_init_kv_cache = gpu_model_runner_v2.init_kv_cache
+
+
+@wraps(_original_init_kv_cache)
+def _init_kv_cache_with_components(
+    forward_context,
+    kv_cache_config,
+    device,
+    kernel_block_sizes,
+    vllm_config,
+    kv_cache_allocation_context=None,
+    **kwargs,
+):
+    args = (forward_context, kv_cache_config, device, kernel_block_sizes, vllm_config)
+    caches = init_component_kv_cache(*args, kv_cache_allocation_context=kv_cache_allocation_context)
+    if caches is not None:
+        return caches
+    return _original_init_kv_cache(*args, kv_cache_allocation_context=kv_cache_allocation_context, **kwargs)
+
+
+gpu_model_runner_v2.init_kv_cache = _init_kv_cache_with_components

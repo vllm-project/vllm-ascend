@@ -22,7 +22,7 @@ from typing import Any
 import torch
 import torch_npu
 import vllm.envs as envs_vllm
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
@@ -40,10 +40,11 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
 )
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec, FullAttentionSpec, KVQuantMode
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
+from vllm_ascend.attention.cache_components import CacheComponent
 from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
     is_pcp_decode_sharding_enabled,
@@ -122,6 +123,35 @@ class AscendAttentionBackend(AttentionBackend):
         if envs_vllm.VLLM_KV_CACHE_LAYOUT in ("LBHNC", "HND"):
             return (2, num_blocks, num_kv_heads, block_size, head_size)
         return (2, num_blocks, block_size, num_kv_heads, head_size)
+
+    @classmethod
+    def describe_cache_components(cls, spec, blocks, kernel_size, page_stride):
+        if (
+            cls is not AscendAttentionBackend
+            or type(spec) is not FullAttentionSpec
+            or spec.kv_quant_mode != KVQuantMode.NONE
+            or spec.dtype not in (torch.float16, torch.bfloat16)
+            or spec.head_size_v != spec.head_size
+            or kernel_size <= 0
+            or spec.block_size % kernel_size
+        ):
+            return None
+        config = get_current_vllm_config_or_none()
+        if config is not None and using_paged_attention(None, config, spec.head_size):
+            return None
+        slots = spec.block_size // kernel_size
+        if page_stride != spec.page_size_bytes or page_stride % slots:
+            return None
+        slot_stride = page_stride // slots
+        count = blocks * slots
+        shape = cls.get_kv_cache_shape(count, kernel_size, spec.num_kv_heads, spec.head_size)[2:]
+        component_bytes = spec.num_kv_heads * kernel_size * spec.head_size * spec.dtype.itemsize
+        if 2 * component_bytes > slot_stride:
+            return None
+        return tuple(
+            CacheComponent.paged(count, shape, spec.dtype, offset, slot_stride)
+            for offset in (0, component_bytes)
+        )
 
     @staticmethod
     def swap_blocks(
