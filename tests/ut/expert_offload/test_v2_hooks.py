@@ -93,7 +93,7 @@ def make_runner(load_hook_class, *, manager=None, has_prefill=False):
     )
     runner = runner_class()
     runner.expert_offload_manager = manager
-    runner._uses_flashmla = False
+    runner._target_uses_flashmla = False
     runner.vllm_config = SimpleNamespace(kv_transfer_config=None, model_config=object())
     runner.device = "cpu"
     runner.compilation_config = SimpleNamespace(cudagraph_mode=0)
