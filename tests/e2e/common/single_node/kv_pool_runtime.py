@@ -191,6 +191,7 @@ class SingleNodeMooncakeManager(SingleNodeKVPoolManager):
             str(MOONCAKE_EVICTION_RATIO),
             "--default_kv_lease_ttl",
             str(MOONCAKE_DEFAULT_KV_LEASE_TTL),
+            *self.mooncake_config.master_extra_args,
         ]
         inherited_library_path = os.environ.get("LD_LIBRARY_PATH", "")
         library_paths = [*MOONCAKE_LIBRARY_PATHS]
