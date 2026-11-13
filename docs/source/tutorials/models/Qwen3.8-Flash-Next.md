@@ -553,7 +553,7 @@ curl --fail "http://127.0.0.1:8088/v1/models"
 
 The response should list the configured model name. After startup, use [Section 6](#6-functional-verification) to verify generation.
 
-### 5.2 Basic PD Separation Deployment {: #52-basic-pd-separation-deployment }
+### 5.2 Basic PD Separation Deployment
 
 Prepare the runtime from Section 4 and follow the [Mooncake installation guide](../features/pd_disaggregation_mooncake_single_node.md#install-mooncake). Run P/D commands in separate terminals, then start the proxy after their APIs are ready.
 
