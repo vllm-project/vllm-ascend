@@ -33,10 +33,16 @@ This model-specific mode requires CANN MsaIndexScore, 128-token blocks, and
 the index keys on each rank; local block scores are combined with a MAX
 reduction before the normal TopK selection. With BF16 caches, the 60-layer
 main-model cache payload falls from 45 KiB to 33.75 KiB per cached token per
-rank. Decode uses a Triton Cube kernel that reads compact pages directly,
-without expanding the allocated index cache. A MAX reduce-scatter sends each
+rank. Decode uses BF16 GEMM against the compact index pool, followed by a fused
+page lookup, causal mask, and block MAX. FP32 intermediate matrices are bounded
+to 128 query/head rows; no expanded KV pool is created. Computing extra dot
+products for unreferenced pages trades arithmetic for contiguous reads and
+Cube utilization; the lookup mask excludes those values. A MAX reduce-scatter sends each
 head's final scores only to its owning TP rank. The fused Norm/RoPE/cache
 writer applies the same interleaved ownership rule as the separate scatter.
+Block maxima stay in FP16 storage and communication, preserving the BF16 CANN
+path's intermediate precision. The existing TopK preparation widens them to
+FP32 before applying forced-block priorities, without a separate cast launch.
 Weights, graph workspaces, score buffers, and speculative model caches are
 separate. The compact kernel and HCCL MAX reduce-scatter graph path require
 hardware validation on the selected CANN/torch_npu stack before deployment.

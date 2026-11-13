@@ -15,8 +15,9 @@ from vllm.triton_utils import tl, triton
 INDEX_BLOCK_SIZE = tl.constexpr(128)
 INDEX_HEAD_DIM = tl.constexpr(128)
 SCORE_ALIGNMENT = 16
-MAX_QUERY_TILE_ROWS = 32
-SCORE_FILL_VALUE = -3.4028234663852886e38
+MAX_GEMM_QUERY_ROWS = 128
+GATHER_BLOCKS_PER_TILE = 16
+SCORE_FILL_VALUE = tl.constexpr(float("-inf"))
 
 
 @triton.jit
@@ -90,75 +91,49 @@ def plan_prefill_index_gather(
     return pages, remapped
 
 
-@triton.jit
-def _score_index_shard(
-    Query,
-    Cache,
-    BlockTable,
-    SeqLens,
+@triton.jit(do_not_specialize=["row_start"])
+def _gather_index_shard_scores(
+    Raw,
+    Table,
+    Lengths,
     Scores,
-    QUERY_STRIDE_T: tl.constexpr,
-    QUERY_STRIDE_H: tl.constexpr,
-    QUERY_STRIDE_D: tl.constexpr,
-    CACHE_STRIDE_P: tl.constexpr,
-    CACHE_STRIDE_T: tl.constexpr,
-    CACHE_STRIDE_D: tl.constexpr,
+    row_start,
+    RAW_STRIDE: tl.constexpr,
     TABLE_STRIDE: tl.constexpr,
     TABLE_WIDTH: tl.constexpr,
-    NUM_TOKENS: tl.constexpr,
-    NUM_HEADS: tl.constexpr,
+    TOKENS: tl.constexpr,
+    HEADS: tl.constexpr,
     QUERY_LEN: tl.constexpr,
-    SCORE_WIDTH: tl.constexpr,
+    WIDTH: tl.constexpr,
     SIZE: tl.constexpr,
     RANK: tl.constexpr,
-    QUERY_TILE: tl.constexpr,
+    BLOCK_TILES: tl.constexpr,
+    TILE: tl.constexpr,
     CAUSAL: tl.constexpr,
-    FILL: tl.constexpr,
 ):
-    # Combine SIZE compact pages into one 128-key Cube tile. Query heads
-    # share the same page table and can occupy rows of the same matrix.
-    request = tl.program_id(0)
-    query_row = tl.program_id(1) * QUERY_TILE + tl.arange(0, QUERY_TILE)
-    query_offset = query_row // NUM_HEADS
-    head = query_row % NUM_HEADS
-    token = request * QUERY_LEN + query_offset
-    block_start = tl.program_id(2) * SIZE
-    columns = block_start + tl.arange(0, SIZE)
-    output = Scores + (head[:, None] * NUM_TOKENS + token[:, None]) * SCORE_WIDTH + columns[None, :]
-    output_mask = (query_offset[:, None] < QUERY_LEN) & (columns[None, :] < SCORE_WIDTH)
-    length = tl.load(SeqLens + request)
-    # Graph padding and table-capacity tails must still initialize scores, but
-    # do not need key/query loads or a Cube operation.
-    if block_start * INDEX_BLOCK_SIZE + RANK >= length:
-        tl.store(output, FILL, output_mask)
-        return
-    dim = tl.arange(0, INDEX_HEAD_DIM)
-    query = tl.load(
-        Query + token[:, None] * QUERY_STRIDE_T + head[:, None] * QUERY_STRIDE_H + dim[None, :] * QUERY_STRIDE_D,
-        query_offset[:, None] < QUERY_LEN,
-        other=0,
-    )
-
-    local_tokens: tl.constexpr = INDEX_BLOCK_SIZE // SIZE
-    lane = tl.arange(0, INDEX_BLOCK_SIZE)
-    block = block_start + lane // local_tokens
-    local_offset = lane % local_tokens
-    page = tl.load(BlockTable + request * TABLE_STRIDE + block, block < TABLE_WIDTH, other=0).to(tl.int64)
-    key_position = block * INDEX_BLOCK_SIZE + local_offset * SIZE + RANK
-    valid_key = (block < TABLE_WIDTH) & (page >= 0) & (key_position < length)
-    key = tl.load(
-        Cache + page[:, None] * CACHE_STRIDE_P + local_offset[:, None] * CACHE_STRIDE_T + dim[None, :] * CACHE_STRIDE_D,
-        valid_key[:, None],
-        other=0,
-    )
-    products = tl.dot(query, tl.trans(key))
-    visible = valid_key[None, :]
+    # GEMM rows flatten (token, head). Select only this request's physical
+    # pages, then mask interleaved positions before taking the block maximum.
+    program = tl.program_id(0)
+    row = program // BLOCK_TILES
+    absolute_row = row_start + row
+    token = absolute_row // HEADS
+    head = absolute_row % HEADS
+    request = token // QUERY_LEN
+    columns = program % BLOCK_TILES * TILE + tl.arange(0, TILE)
+    lane = tl.arange(0, INDEX_BLOCK_SIZE // SIZE)
+    page = tl.load(Table + request * TABLE_STRIDE + columns, columns < TABLE_WIDTH, other=-1).to(tl.int64)
+    length = tl.load(Lengths + request)
+    position = columns[:, None] * INDEX_BLOCK_SIZE + lane[None, :] * SIZE + RANK
+    valid = (columns[:, None] < TABLE_WIDTH) & (page[:, None] >= 0) & (position < length)
     if CAUSAL:
-        frontier = length - QUERY_LEN + query_offset + 1
-        visible = visible & (key_position[None, :] < frontier[:, None])
-    products = tl.where(visible, products, FILL)
-    maxima = tl.max(tl.reshape(products, (QUERY_TILE, SIZE, local_tokens)), axis=2)
-    tl.store(output, maxima, output_mask)
+        valid = valid & (position < length - QUERY_LEN + token % QUERY_LEN + 1)
+    dots = tl.load(
+        Raw + row * RAW_STRIDE + page[:, None] * (INDEX_BLOCK_SIZE // SIZE) + lane[None, :],
+        valid,
+        other=SCORE_FILL_VALUE,
+    )
+    maxima = tl.max(dots, axis=1)
+    tl.store(Scores + (head * TOKENS + token) * WIDTH + columns, maxima, columns < WIDTH)
 
 
 def index_shard_scores(
@@ -172,7 +147,13 @@ def index_shard_scores(
     *,
     causal: bool = True,
 ) -> torch.Tensor:
-    """Score compact pages directly; decode metadata requires uniform query lengths."""
+    """Score the compact pool with GEMM, then gather each request's block maxima.
+
+    FP32 GEMM tiles are bounded to MAX_GEMM_QUERY_ROWS; keys are never expanded
+    to logical 128-token pages. Dense storage is a view; padded/strided storage
+    may need a compact copy. FP16 score storage matches CANN's BF16 QK precision
+    and stays FP16 through ReduceScatter and into the FP32 TopK preparation.
+    """
     if size not in (2, 4) or not 0 <= rank < size:
         raise ValueError("M3 index scores require TP2/TP4 and a valid shard rank")
     if query.dtype != torch.bfloat16 or cache.dtype != torch.bfloat16:
@@ -184,32 +165,38 @@ def index_shard_scores(
     if block_table.shape[0] != seq_lens.numel():
         raise ValueError("M3 compact index scores require one block table per sequence")
     width = triton.cdiv(block_table.shape[1], SCORE_ALIGNMENT) * SCORE_ALIGNMENT
-    scores = torch.empty((query.shape[1], query.shape[0], width), dtype=torch.float32, device=query.device)
+    scores = torch.empty((query.shape[1], query.shape[0], width), dtype=torch.float16, device=query.device)
     if scores.numel() == 0:
         return scores
-    query_tile = max(16, triton.next_power_of_2(min(query_len * query.shape[1], MAX_QUERY_TILE_ROWS)))
-    _score_index_shard[
-        (seq_lens.numel(), triton.cdiv(query_len * query.shape[1], query_tile), triton.cdiv(width, size))
-    ](
-        query,
-        cache,
-        block_table,
-        seq_lens,
-        scores,
-        *query.stride(),
-        *cache.stride(),
-        block_table.stride(0),
-        block_table.shape[1],
-        query.shape[0],
-        query.shape[1],
-        query_len,
-        width,
-        size,
-        rank,
-        query_tile,
-        causal,
-        SCORE_FILL_VALUE,
-    )
+    queries = query.reshape(-1, 128).contiguous()
+    keys = cache.reshape(-1, 128).contiguous()
+    block_tiles = triton.cdiv(width, GATHER_BLOCKS_PER_TILE)
+    # Reuse keys across token/head rows to fill Cube tiles. Unreferenced pages
+    # cost extra arithmetic, but are excluded by the gather's validity mask.
+    for start in range(0, queries.shape[0], MAX_GEMM_QUERY_ROWS):
+        stop = min(start + MAX_GEMM_QUERY_ROWS, queries.shape[0])
+        raw = torch.mm(queries[start:stop], keys.T, out_dtype=torch.float32)
+        _gather_index_shard_scores[((stop - start) * block_tiles,)](
+            raw,
+            block_table,
+            seq_lens,
+            scores,
+            start,
+            raw.stride(0),
+            block_table.stride(0),
+            block_table.shape[1],
+            query.shape[0],
+            query.shape[1],
+            query_len,
+            width,
+            size,
+            rank,
+            block_tiles,
+            GATHER_BLOCKS_PER_TILE,
+            causal,
+        )
+        # Avoid retaining two large GEMM outputs when the next tile allocates.
+        del raw
     return scores
 
 

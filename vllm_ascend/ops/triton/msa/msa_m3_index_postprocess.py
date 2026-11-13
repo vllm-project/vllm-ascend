@@ -54,7 +54,7 @@ def _ascendc_decode_score_prepare_kernel(
         score_ptr + head * stride_sh + query * stride_sq + cols * stride_sk,
         mask=valid,
         other=float("-inf"),
-    )
+    ).to(tl.float32)
     if INIT_BLOCKS > 0:
         scores = tl.where(valid & (cols < INIT_BLOCKS), 1.0e30, scores)
     if LOCAL_BLOCKS > 0:
@@ -166,12 +166,13 @@ def index_decode_topk_fused(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return int32 block IDs and valid counts for AscendC decode.
 
-    ``score`` is a workspace: contiguous, sufficiently wide storage is prepared
-    in place. Clone it first if the original scores are needed by the caller.
+    ``score`` is a workspace: contiguous, sufficiently wide FP32 storage is
+    prepared in place. FP16 inputs are widened into the FP32 preparation buffer
+    before forcing candidate priorities. Clone FP32 inputs to preserve them.
     ``sort_indices`` orders the selected IDs, without changing the TopK set.
     """
-    if score.ndim != 3 or score.dtype != torch.float32:
-        raise ValueError("Expected a [heads, query_tokens, score_width] float32 tensor")
+    if score.ndim != 3 or score.dtype not in (torch.float16, torch.float32):
+        raise ValueError("Expected a [heads, query_tokens, score_width] float16/float32 tensor")
     if context_lens.ndim != 1 or context_lens.dtype not in (torch.int32, torch.int64):
         raise ValueError("Expected one int32/int64 context length per request")
     if score.device != context_lens.device:
@@ -199,10 +200,10 @@ def index_decode_topk_fused(
     )
     prepared = (
         score
-        if score.is_contiguous() and prepared_width == width
+        if score.dtype == torch.float32 and score.is_contiguous() and prepared_width == width
         else torch.empty(
             (heads, tokens, prepared_width),
-            dtype=score.dtype,
+            dtype=torch.float32,
             device=score.device,
         )
     )

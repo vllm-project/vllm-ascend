@@ -6,7 +6,7 @@ Example (four free NPUs; matching vLLM/CANN dependencies required)::
     torchrun --standalone --nproc-per-node=4 \
         benchmarks/benchmark_minimax_m3_indexer_dcp.py --graph
 
-This measures one indexer layer, including query/score collectives. It does
+This measures one indexer layer's score stage, including query/score collectives. It does
 not measure model serving, PD transfer or weight-memory savings. Temporary
 peak bytes exclude the already allocated input and reference caches.
 """
@@ -29,8 +29,8 @@ def measure(run, iterations, graph_mode):
     for _ in range(5):
         run()
     torch.npu.synchronize()
-    capture_allocated = torch.npu.memory_allocated()
-    capture_reserved = torch.npu.memory_reserved()
+    capture_before = torch.npu.memory_allocated()
+    torch.npu.reset_peak_memory_stats()
     graph = None
     if graph_mode:
         graph = torch.npu.NPUGraph()
@@ -39,9 +39,10 @@ def measure(run, iterations, graph_mode):
         replay = graph.replay
     else:
         replay = run
-    capture_allocated = torch.npu.memory_allocated() - capture_allocated
-    capture_reserved = torch.npu.memory_reserved() - capture_reserved
-    # Report transient eager allocations separately from graph-reserved memory.
+    capture_live = torch.npu.memory_allocated() - capture_before
+    capture_peak = torch.npu.max_memory_allocated() - capture_before if graph_mode else 0
+    # Allocator-reserved deltas can be negative when old cached pools are freed;
+    # report allocated peaks instead of interpreting cache eviction as savings.
     torch.npu.synchronize()
     dist.barrier()
     before = torch.npu.memory_allocated()
@@ -53,16 +54,17 @@ def measure(run, iterations, graph_mode):
     end.record()
     end.synchronize()
     values = torch.tensor(
-        [start.elapsed_time(end) / iterations, torch.npu.max_memory_allocated() - before],
+        [start.elapsed_time(end) / iterations, torch.npu.max_memory_allocated() - before, capture_peak, capture_live],
         device="npu",
         dtype=torch.float32,
     )
     dist.all_reduce(values, op=dist.ReduceOp.MAX)
-    result = {"ms": values[0].item(), "temporary_peak_bytes": int(values[1].item())}
-    capture_bytes = torch.tensor([capture_allocated, capture_reserved], device="npu", dtype=torch.int64)
-    dist.all_reduce(capture_bytes, op=dist.ReduceOp.MAX)
-    result["capture_allocated_bytes"] = int(capture_bytes[0].item())
-    result["capture_reserved_bytes_delta"] = int(capture_bytes[1].item())
+    result = {
+        "ms": values[0].item(),
+        "temporary_peak_bytes": int(values[1].item()),
+        "capture_peak_bytes": int(values[2].item()),
+        "capture_live_bytes": int(values[3].item()),
+    }
     if graph is not None:
         del output, graph
     return result
@@ -110,7 +112,9 @@ def run_case(batch, args, rank, size):
     expected = baseline()
     # Never emit a speedup for a kernel that fails the numerical gate.
     torch.testing.assert_close(expanded(), expected, rtol=0, atol=0)
-    torch.testing.assert_close(compact(), expected, rtol=0, atol=0)
+    expected_compact = expected.masked_fill(expected == torch.finfo(torch.float32).min, float("-inf"))
+    torch.testing.assert_close(compact().float(), expected_compact, rtol=0, atol=0)
+    del expected_compact
     del expected
     results = {
         name: measure(run, args.iterations, args.graph)

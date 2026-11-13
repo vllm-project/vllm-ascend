@@ -48,8 +48,9 @@ def _worker(rank, size, rendezvous, capture):
             mask = torch.triu(torch.ones(2048, 2048, dtype=torch.int8, device="npu"), diagonal=1)
             expected = _minimax_m3_index_score(query, full, table, cu, lengths, (lengths - query_len) // 128, mask)
             expected = expected[rank * local_heads : (rank + 1) * local_heads]
+            expected = expected.masked_fill(expected == torch.finfo(torch.float32).min, float("-inf"))
             actual = run_case()
-            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            torch.testing.assert_close(actual.float(), expected, rtol=0, atol=0)
             if capture:
                 run_case()
                 torch.npu.synchronize()
@@ -58,7 +59,7 @@ def _worker(rank, size, rendezvous, capture):
                     replayed = run_case()
                 graph.replay()
                 torch.npu.synchronize()
-                torch.testing.assert_close(replayed, expected, rtol=0, atol=0)
+                torch.testing.assert_close(replayed.float(), expected, rtol=0, atol=0)
                 del graph
     finally:
         dist.destroy_process_group()
