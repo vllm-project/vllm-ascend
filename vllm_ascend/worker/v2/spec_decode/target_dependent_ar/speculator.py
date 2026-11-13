@@ -803,12 +803,9 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
                 if self.attn_architecture == "MLA":
                     if metadata.decode is None or metadata.external_flashmla is not None:
                         continue
-                    if num_tokens is None:
-                        raise ValueError("num_tokens is required for MLA with DCP")
-                    mla_kv_lens = local_kv_lens + [0] * max(0, num_tokens - len(local_kv_lens))
                     params = {
                         "layer_name": (layer_name, CPKVScope.FULL),
-                        "actual_seq_kvlen": mla_kv_lens,
+                        "actual_seq_kvlen": local_kv_lens,
                     }
                 else:
                     params = {
