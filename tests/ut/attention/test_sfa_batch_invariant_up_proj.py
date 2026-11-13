@@ -75,6 +75,21 @@ def test_a_row_is_unaffected_by_the_packed_batch(monkeypatch):
     assert torch.equal(packed[:solo_tokens], solo)
 
 
+def test_empty_token_dim_returns_empty_without_calling_the_op(monkeypatch):
+    """An empty input must not reach the fused op; it has no empty-input semantics."""
+
+    def _forbid_empty_launch(*args, **kwargs):
+        raise AssertionError("the fused op must not be called with an empty input")
+
+    monkeypatch.setattr(sfa_v1.torch_npu, "npu_transpose_batchmatmul", _forbid_empty_launch)
+
+    x, w = _make_inputs(0)
+    out = sfa_v1._transpose_batchmatmul_on_grid(x, w)
+
+    assert out.shape == (0, x.shape[1], w.shape[-1])
+    assert out.dtype == x.dtype
+
+
 def test_method_uses_the_fused_grid_not_the_bmm_fallback(monkeypatch):
     """The projection must stay on the fused op for bf16, whatever the token count."""
     fake = _RecordingTBMM()

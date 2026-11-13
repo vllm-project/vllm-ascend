@@ -360,11 +360,15 @@ def _transpose_batchmatmul_on_grid(
     A launch carries at most ``chunk`` tokens, so the token dim never crosses the
     operator limit and never depends on the batch composition: the same row gets
     the same kernel and the same tiling whether it is served alone or packed with
-    other requests.
+    other requests.  An empty token dim returns an empty result without calling
+    the operator, which is not defined for an empty input.
     """
     assert 0 < chunk <= TRANSPOSE_BMM_MAX_SUPPORTED_DIM, chunk
     perm = {"perm_x1": (1, 0, 2), "perm_x2": (0, 1, 2), "perm_y": (1, 0, 2)}
     num_tokens = x.shape[0]
+    if num_tokens == 0:
+        # Nothing to project; the fused op is not defined for an empty input.
+        return x.new_empty(0, x.shape[1], w.shape[-1])
     if num_tokens <= chunk:
         return torch_npu.npu_transpose_batchmatmul(x, w, **perm)
     return torch.cat(
