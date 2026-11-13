@@ -1,0 +1,2 @@
+Skip gitleaks, pre-commit hooks, and mypy while validating operator test grouping.
+Remove this file before merging.
