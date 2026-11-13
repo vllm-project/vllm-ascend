@@ -365,7 +365,7 @@ def test_non_pcp_draft_prefill_normalizes_main_target_graph_padding(mode, query_
 
     passed_metadata = parent.call_args.args[2]
     draft = passed_metadata["mtp"]
-    expected = query_ends if vllm_version_is("0.33.0") or mode == CUDAGraphMode.FULL else [2] * len(query_ends)
+    expected = query_ends if mode == CUDAGraphMode.FULL else [2] * len(query_ends)
     assert draft.decode.actual_seq_lengths_q == expected
     assert set(passed_metadata) == {"mtp"}
     assert target.decode.actual_seq_lengths_q == query_ends
