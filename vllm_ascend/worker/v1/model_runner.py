@@ -508,6 +508,23 @@ class NPUModelRunner(GPUModelRunner):
                 pin_memory=self.pin_memory,
             )
 
+        # Keep the accepted-token counts consumed by the next forward in a
+        # buffer separate from the snapshot being copied back to the CPU.
+        # This lets async hybrid/Mamba decode prepare the next step without
+        # first waiting for the previous step's D2H snapshot.
+        self._async_num_accepted_tokens: torch.Tensor | None = None
+        self._deferred_num_accepted_tokens_sync: tuple[int, bool] | None = None
+        if (
+            self.use_async_scheduling
+            and self.num_spec_tokens
+            and self.cache_config.mamba_cache_mode == "align"
+        ):
+            self._async_num_accepted_tokens = torch.ones(
+                self.max_num_reqs,
+                dtype=self.num_accepted_tokens.gpu.dtype,
+                device=self.device,
+            )
+
         try:
             self.dcp_size = get_dcp_group().world_size
             self.dcp_rank = get_dcp_group().rank_in_group
@@ -1098,6 +1115,26 @@ class NPUModelRunner(GPUModelRunner):
             accepted[:num_reqs].fill(1)
         self.input_batch.num_accepted_tokens_cpu[:num_reqs] = accepted[:num_reqs]
 
+    def _finish_deferred_num_accepted_tokens_sync(self) -> None:
+        """Publish the previous step's accepted counts only when CPU needs them.
+
+        Async spec decode already computes the current-row accepted counts on
+        device from ``valid_sampled_token_count_gpu``. The D2H snapshot is
+        needed later by Mamba align preprocessing, not by the early GPU input
+        preparation. Delaying this wait allows that preparation to overlap
+        the previous step's sampling and snapshot copy.
+        """
+        pending = self._deferred_num_accepted_tokens_sync
+        if pending is None:
+            return
+
+        num_reqs, has_prev_mapping = pending
+        assert self.num_accepted_tokens_event is not None
+        self.num_accepted_tokens_event.synchronize()
+        self._sync_num_accepted_tokens(num_reqs, has_prev_mapping)
+        self.num_accepted_tokens.np[num_reqs:].fill(1)
+        self._deferred_num_accepted_tokens_sync = None
+
     def _pad_query_start_loc_for_fia(
         self,
         query_start_loc: torch.Tensor,
@@ -1594,9 +1631,27 @@ class NPUModelRunner(GPUModelRunner):
         self.discard_request_mask.np[:num_reqs] = discard_requests_mask
         self.discard_request_mask.copy_to_gpu(num_reqs)
 
-        # Sync num_accepted_tokens from CPU (set by
-        # _update_states_after_model_execute for hybrid models).
-        if self.num_accepted_tokens_event is not None:
+        # Update num_computed_tokens on GPU. In async spec decode,
+        # CPU values are optimistic (all drafts accepted). The kernel
+        # corrects on GPU using the previous step's
+        # valid_sampled_token_count_gpu. Otherwise, just copy from CPU.
+        valid_sampled_token_count_gpu = self.valid_sampled_token_count_gpu
+        async_accepted_tokens = self._async_num_accepted_tokens
+        defer_accepted_tokens_sync = (
+            self.num_accepted_tokens_event is not None
+            and self.use_async_spec_decode
+            and valid_sampled_token_count_gpu is not None
+            and bool(prev_req_id_to_index)
+            and async_accepted_tokens is not None
+            and self.cache_config.mamba_cache_mode == "align"
+        )
+        if defer_accepted_tokens_sync:
+            async_accepted_tokens.fill_(1)
+            self._deferred_num_accepted_tokens_sync = (
+                num_reqs,
+                bool(prev_req_id_to_index),
+            )
+        elif self.num_accepted_tokens_event is not None:
             self.num_accepted_tokens_event.synchronize()
             self._sync_num_accepted_tokens(
                 num_reqs, has_prev_mapping=bool(prev_req_id_to_index)
@@ -1607,11 +1662,11 @@ class NPUModelRunner(GPUModelRunner):
             self.num_accepted_tokens.np.fill(1)
             self.num_accepted_tokens.gpu.fill_(1)
 
-        # Update num_computed_tokens on GPU. In async spec decode,
-        # CPU values are optimistic (all drafts accepted). The kernel
-        # corrects on GPU using the previous step's
-        # valid_sampled_token_count_gpu. Otherwise, just copy from CPU.
-        valid_sampled_token_count_gpu = self.valid_sampled_token_count_gpu
+        accepted_tokens_gpu = (
+            async_accepted_tokens
+            if defer_accepted_tokens_sync
+            else self.num_accepted_tokens.gpu
+        )
         if self.use_async_spec_decode:
             computed_token_tensor_cpu = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].to(
                 device=self.device, non_blocking=True
@@ -1626,7 +1681,7 @@ class NPUModelRunner(GPUModelRunner):
             self.prev_num_draft_tokens.copy_to_gpu()
             update_num_computed_tokens_for_batch_change(
                 self.num_computed_tokens,
-                self.num_accepted_tokens.gpu[:num_reqs],
+                accepted_tokens_gpu[:num_reqs],
                 self.prev_positions.gpu[:num_reqs],
                 valid_sampled_token_count_gpu,
                 self.prev_num_draft_tokens.gpu,
@@ -2535,6 +2590,7 @@ class NPUModelRunner(GPUModelRunner):
 
                 # postprocess_mamba runs later in _update_states_after_model_execute.
                 if self.cache_config.mamba_cache_mode == "align":
+                    self._finish_deferred_num_accepted_tokens_sync()
                     # preprocess_mamba reads req_state.num_computed_tokens (CPU)
                     # to decide copy operations, so we must apply deferred
                     # corrections before it runs.
@@ -2561,7 +2617,14 @@ class NPUModelRunner(GPUModelRunner):
                     self.num_accepted_tokens.np[:num_reqs] = (
                         self.input_batch.num_accepted_tokens_cpu[:num_reqs]
                     )
-                    self.num_accepted_tokens.copy_to_gpu(num_reqs)
+                    accepted_tokens_for_forward = self._async_num_accepted_tokens
+                    if accepted_tokens_for_forward is None:
+                        self.num_accepted_tokens.copy_to_gpu(num_reqs)
+                    else:
+                        accepted_tokens_for_forward[:num_reqs].copy_(
+                            self.num_accepted_tokens.cpu[:num_reqs],
+                            non_blocking=True,
+                        )
 
                     if mamba_bufs.postprocess_align is not None:
                         mamba_utils.stage_postprocess_inputs_to_gpu(
@@ -4074,8 +4137,13 @@ class NPUModelRunner(GPUModelRunner):
                 assert ubid is None, "UBatching not supported with GDN yet"
                 extra_attn_metadata_args["num_actual_reqs"] = num_reqs
                 if use_spec_decode:
+                    accepted_tokens_for_forward = self._async_num_accepted_tokens
+                    if accepted_tokens_for_forward is None:
+                        accepted_tokens_for_forward = self.num_accepted_tokens.gpu
                     extra_attn_metadata_args.update(
-                        num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs_padded],
+                        num_accepted_tokens=accepted_tokens_for_forward[
+                            :num_reqs_padded
+                        ],
                         num_decode_draft_tokens_cpu=self.num_decode_draft_tokens.cpu[:num_reqs_padded],
                     )
 
