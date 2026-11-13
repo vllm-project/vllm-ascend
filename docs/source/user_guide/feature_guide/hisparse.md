@@ -70,7 +70,7 @@ Model Runner V2 C8 command above:
 ```
 
 Use the direct `HiSparseConnector` with private per-rank Host pools. This path
-requires the Core HiSparse query/write-layout interface. PCP gathers packed C8
+installs an Ascend query/write-layout adapter; no Core source patch is required. PCP gathers packed C8
 KV rows before Resident writes and Host mirroring; sparse attention still uses
 local query rows. No additional custom kernel is needed.
 

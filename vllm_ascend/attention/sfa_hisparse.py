@@ -24,6 +24,9 @@ from vllm_ascend.attention.sfa_v1 import (
     AscendSFAMetadataBuilder,
     needs_pcp_kv_gather,
 )
+from vllm_ascend.hisparse import cache_ops
+from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
+from vllm_ascend.hisparse.pcp import prepare_pcp_query_metadata
 
 # Bound the temporary D2D packing workspace independently of prefill length.
 _ATTENTION_CHUNK_ROWS = 32
@@ -140,8 +143,6 @@ class AscendHiSparseMetadataBuilder(AscendSFAMetadataBuilder):
             metadata.num_input_tokens,
         )
         if pcp_context is not None:
-            from vllm_ascend.hisparse.pcp import prepare_pcp_query_metadata
-
             if draft_index not in self._pcp_query_buffers:
                 self._pcp_query_buffers[draft_index] = (
                     torch.empty(self._pcp_request_capacity, dtype=torch.int32, device=self.device),
@@ -198,8 +199,6 @@ class AscendHiSparseImpl(AscendSFAImpl):
                 raise ValueError("Ascend HiSparse requires a model sparse-index group")
             builder = SparseMLAIndexGroupBuilder(self.topk_indices_buffer)
         if self.enable_sparse_sfa_c8:
-            from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
-
             row_width = C8_ROW_BYTES
         else:
             row_width = self.kv_lora_rank + self.qk_rope_head_dim
@@ -284,8 +283,6 @@ class AscendHiSparseImpl(AscendSFAImpl):
         return current_workspace_manager().get_persistent_resource(("ascend_hisparse_c8_lengths",), allocate)
 
     def _pcp_prolog_workspace(self):
-        from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
-
         def allocate():
             device = self.index_group.logical_topk_indices.device
             return (
@@ -358,8 +355,6 @@ class AscendHiSparseImpl(AscendSFAImpl):
         return result
 
     def _sync_pcp_kv_cache(self, kv_cache, attn_metadata):
-        from vllm_ascend.hisparse.cache_ops import scatter_packed_kv
-
         scratch, _ = self._pcp_prolog_workspace()
         rows = attn_metadata.num_input_tokens
         packed = scratch.view(torch.int8).view(-1, scratch.shape[-1])[:rows]
@@ -369,7 +364,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
         cache = self.hisparse_cache
         destination, mapping, count = cache.write_target(gathered.shape[0], gathered.shape[0])
         payload = gathered[:count].view(torch.uint8)
-        scatter_packed_kv(
+        cache_ops.scatter_packed_kv(
             payload,
             payload[:, :0],
             destination.view(torch.uint8),
@@ -393,8 +388,6 @@ class AscendHiSparseImpl(AscendSFAImpl):
         return super().forward(layer_name, hidden_states, kv_cache, attn_metadata, output)
 
     def _exec_kv_local(self, kv_no_split, cos, sin, kv_cache, slots, attn_metadata):
-        from vllm_ascend.hisparse.cache_ops import scatter_packed_kv
-
         assert self.kv_a_layernorm is not None
         if self.enable_sparse_sfa_c8:
             from vllm_ascend.hisparse.c8 import pack_c8_components
@@ -407,7 +400,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
             packed = packed[:count]
             # Reuse the existing byte-capable scatter; no fused C8 kernel or
             # payload conversion is needed for the baseline data path.
-            scatter_packed_kv(
+            cache_ops.scatter_packed_kv(
                 packed,
                 packed[:, :0],
                 destination.view(torch.uint8),
@@ -437,7 +430,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
         cache = self.hisparse_cache
         destination, mapping, num_rows = cache.write_target(values.shape[0], slots.numel())
         num_valid_rows = attn_metadata.query_start_loc[-1:]
-        scatter_packed_kv(latent[:num_rows], rope[:num_rows], destination, mapping, num_valid_rows)
+        cache_ops.scatter_packed_kv(latent[:num_rows], rope[:num_rows], destination, mapping, num_valid_rows)
         # The common connector mirrors resident rows after this write. Draft
         # rows are deferred until the next step, and FULL graphs are mirrored
         # by finish_forward after replay.

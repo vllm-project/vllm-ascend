@@ -63,6 +63,7 @@ import vllm_ascend.patch.worker.patch_use_v2_model_runner  # noqa
 import vllm_ascend.patch.worker.patch_fused_moe  # noqa
 
 import vllm_ascend.patch.worker.patch_uva  # noqa
+import vllm_ascend.patch.worker.patch_hisparse  # noqa
 import vllm_ascend.patch.worker.patch_input_batch  # noqa
 import vllm_ascend.patch.worker.patch_model_state  # noqa
 import vllm_ascend.patch.worker.patch_block_table  # noqa

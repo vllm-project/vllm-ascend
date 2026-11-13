@@ -27,6 +27,15 @@
 # ----------------------------------------------------------------------------------
 
 # What's Patched and how it works:
+# * worker/patch_hisparse.py (MRV2 PCP connector initialization):
+#   Target: Core HiSparseCacheHandle query/write methods and connector mirroring.
+#   Why: PCP queries are local, but Resident/Host writes use gathered KV rows.
+#   How: Install only for direct HiSparse + PCP; carry separate write metadata,
+#        grow pinned slot staging before capture, preserve Core DMA/fences.
+#   Related PR: No upstream HiSparse PCP query/write-layout hook is available.
+#        Ascend foundation #20926 is a prerequisite; #19109 is superseded.
+#   Future plan: Remove when upstream supports separate query/write layouts.
+# --------------------------------
 # --------------------------------
 # * vllm_ascend/hisparse/host_pool.py (HiSparse backend initialization):
 #   Target: vllm.v1.hisparse.runtime.allocate_pinned_host_pool.

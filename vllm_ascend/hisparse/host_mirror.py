@@ -118,7 +118,7 @@ class _DirectMirrorSources:
             and tuple(
                 index
                 for index, cache in enumerate(worker.cache_handles)
-                if cache.num_actual_tokens and index not in worker._draft_layers
+                if getattr(cache, "num_write_tokens", cache.num_actual_tokens) and index not in worker._draft_layers
             )
             == self._targets
         )
@@ -242,9 +242,13 @@ def overlap_target_host_mirror(runner):
     from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
     from vllm_ascend.hisparse.backend import AscendHiSparseBackend
+    from vllm_ascend.hisparse.pcp import PCPHiSparseConnector
 
     connector = runner.kv_connector
-    if type(connector) is not ActiveKVConnector or type(connector.kv_connector) is not HiSparseConnector:
+    if (
+        type(connector) not in (ActiveKVConnector, PCPHiSparseConnector)
+        or type(connector.kv_connector) is not HiSparseConnector
+    ):
         return connector
     worker = connector.kv_connector.connector_worker
     if (
