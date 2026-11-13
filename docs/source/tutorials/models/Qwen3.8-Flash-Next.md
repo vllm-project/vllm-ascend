@@ -46,6 +46,8 @@ Select the image for your target hardware.
 
     Run Docker on the host. `IMAGE` selects the image; `NAME` is the container name used by `docker exec`. Image versions follow the documentation release; replace the version template when copying raw Markdown.
 
+    The image tag template follows the documentation build. For the recommended vLLM-Ascend 0.32 RC runtime, select the matching 0.32 RC image tag for your hardware if the rendered tag is from another release. This also applies to the pooling images in Section 4.3.
+
 === "A2 series"
 
     ```bash
@@ -1080,6 +1082,8 @@ For 950DT products, basic PD, the image-and-text 10K case, and the long-context 
 
 The 10K target is the processed input length, including text and image tokens. Keep the input plus requested output within the model length configured for your deployment.
 
+For A2 and A3, make sure Mooncake is importable in both serving containers before running the environment setup. If needed, follow the [Mooncake installation guide](../features/pd_disaggregation_mooncake_single_node.md).
+
 === "A2 series"
 
     This W4A8 example uses two eight-device A2 series hosts. Prefill uses TP4 × PP2 × DP1 (EP4) on the Prefill host, and Decode uses TP2 × DP4 (EP8) on the Decode host. Each host uses devices 0–7. The proxy runs on the Prefill host and routes to one Prefill API and four Decode APIs, one per DP rank.
@@ -1220,13 +1224,15 @@ The 10K target is the processed input length, including text and image tokens. K
 
     **Service Verification:**
 
-    On the proxy host, replace `<IMAGE_URL>` with a URL accessible from Prefill and `<TEXT_PROMPT>` with the corresponding prompt. Check `usage.prompt_tokens` against the 10K input target. If the benchmark uses local image files, configure `--allowed-local-media-path` with the mounted dataset directory.
+    Send a 10K sample through the proxy. Replace `<IMAGE_URL>` with an image URL accessible to Prefill and Decode, and replace `<TEXT_PROMPT>` with the corresponding text. For local image files, mount the dataset at the same container path on both hosts and set `--allowed-local-media-path` to that directory in both engine commands.
 
     ```bash
     curl --fail "http://127.0.0.1:25570/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -d '{"model":"qwen38-flash-next-a2-pd","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"<IMAGE_URL>"}},{"type":"text","text":"<TEXT_PROMPT>"}]}],"max_tokens":1024,"temperature":0}'
     ```
+
+    Expect HTTP 200 and an answer addressing the image and text. Check `usage.prompt_tokens` against the 10K target and confirm there are no image-processing, KV-transfer, or out-of-memory errors.
 
     **Key parameters:**
 
@@ -1368,13 +1374,15 @@ The 10K target is the processed input length, including text and image tokens. K
 
     **Service Verification:**
 
-    Replace `<IMAGE_URL>` with a URL accessible from Prefill and `<TEXT_PROMPT>` with the corresponding prompt. Check `usage.prompt_tokens` against the 10K input target. If the benchmark uses local image files, configure `--allowed-local-media-path` with the mounted dataset directory.
+    Send a 10K sample through the proxy. Replace `<IMAGE_URL>` with an image URL accessible to Prefill and Decode, and replace `<TEXT_PROMPT>` with the corresponding text. For local image files, mount the dataset in the serving container and set `--allowed-local-media-path` to the mounted directory in both engine commands.
 
     ```bash
     curl --fail "http://127.0.0.1:25570/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -d '{"model":"qwen38-flash-next-a3-pd","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"<IMAGE_URL>"}},{"type":"text","text":"<TEXT_PROMPT>"}]}],"max_tokens":1024,"temperature":0}'
     ```
+
+    Expect HTTP 200 and an answer addressing the image and text. Check `usage.prompt_tokens` against the 10K target and confirm there are no image-processing, KV-transfer, or out-of-memory errors.
 
     **Key parameters:**
 
@@ -1454,7 +1462,7 @@ The 10K target is the processed input length, including text and image tokens. K
         --enable-prefix-caching \
         --async-scheduling \
         --enable-expert-parallel \
-        --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --additional-config '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true,"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false},"enable_fused_mc2":0}' \
         --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}' \
@@ -1496,7 +1504,7 @@ The 10K target is the processed input length, including text and image tokens. K
     - Prefill partitions the layers across two pipeline stages with `VLLM_PP_LAYER_PARTITION=25,23`. Keep `pp_size=2` and `pp_layer_partition="25,23"` in both Mooncake configurations consistent with this partition.
     - Decode uses TP2 × DP2 behind one API endpoint on port `8248`; the proxy routes to that endpoint rather than separate DP-rank APIs.
     - Both roles enable prefix caching. Prefill disables graph capture and sets MTP `enforce_eager=true`. Decode uses `FULL_DECODE_ONLY`, sets MTP `enforce_eager=false`, enables static kernels, and disables super kernels.
-    - Both roles enable Engram CPU offload with `dp_shared_memory=false`, use `HCCL_BUFFSIZE=512`, and set `VLLM_ENGINE_READY_TIMEOUT_S=4800` to allow sufficient engine initialization time. Provide sufficient host memory for the checkpoint and the decode DP replicas.
+    - Both roles enable Engram CPU offload. Decode enables DP shared memory for its two replicas. Both roles use `HCCL_BUFFSIZE=512` and set `VLLM_ENGINE_READY_TIMEOUT_S=4800`. Provide sufficient host memory and container shared memory for the deployment.
     - `VLLM_ASCEND_PLE_BACKEND` only applies to runtimes that implement it; an unknown-variable warning means it has no effect.
 
 ### 5.4 Long-Context PD Separation Deployment
@@ -1508,6 +1516,8 @@ This section extends the model context for PD separation on A2 series, A3 series
     The checkpoint's native context window is 256K (262144 tokens). This long-context case requires all three settings on **both Prefill and Decode**: the complete YaRN `--hf-overrides` shown below, with `factor=4.0` and `original_max_position_embeddings=262144`; `export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`; and `--max-model-len 1010000`. Keep the YaRN configuration and maximum model length identical on both roles; none of these three settings can be omitted.
 
     Each request must satisfy `input token count + maximum output token count <= max-model-len`. With this configuration, the total must not exceed 1,010,000 tokens.
+
+    The runtime must also size the Qwen4Exp MTP draft's position cache for the configured context length. The 0.32 RC branch applies the Qwen4Exp-specific fix in [PR #21347](https://github.com/vllm-project/vllm-ascend/pull/21347). With main, use a compatible vLLM build with the upstream draft position-cache expansion, such as vLLM v0.33.0, and verify the long-context request on your target image.
 
 On 950DT products, this case reuses ports 8247, 8248, and 8246 from the image-and-text case. Stop that deployment before starting this case.
 
@@ -1938,6 +1948,8 @@ On 950DT products, this case reuses ports 8247, 8248, and 8246 from the image-an
 
 Prepare the container, SSD mapping, configuration directory, and A2 HDK requirement in [Section 4.3](#43-docker-for-three-tier-pd-pooling). Run the following inside the container. A3 HCCS also requires LingQu Computing Network 1.5 or later; see the [MemCache backend guide](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend) for runtime dependencies.
 
+Use the same vLLM-Ascend release and compatible MemCache and MemFabric package versions across the pool. Verify cache reuse and SSD restore on the runtime you deploy.
+
 ```bash
 free -h
 python -m pip show memcache-hybrid memfabric-hybrid
@@ -1985,7 +1997,7 @@ Use the templates shipped inside the selected image: `/usr/local/python3.11.10/l
     done
     ```
 
-    To test with preallocated pages, run the following as root on the host before starting Prefill and Decode. Adjust the node IDs and page count for the available host memory. This example reserves 32 GiB per node, or 256 GiB total. Leave enough memory for MemCache, Engram, and vLLM.
+    To test with preallocated pages, run the following as root on the host before starting Prefill and Decode. Adjust the node IDs and page count for the available host memory. Writing `32` to `nr_hugepages` sets the target total to 32 pages per NUMA node (32 GiB per node, 256 GiB across eight nodes). Check the existing count before changing it and leave enough memory for MemCache, Engram, and vLLM.
 
     ```bash
     for n in 0 1 2 3 4 5 6 7; do
@@ -2194,7 +2206,7 @@ Use the templates shipped inside the selected image: `/usr/local/python3.11.10/l
 
 === "A3 series"
 
-    The 128K/1K multi-prefix pooling example uses 16 devices, eight per role. Prefill uses TP2 × PP2 × DP2 (EP4) on devices 0–7, and Decode uses TP2 × DP4 (EP8) on devices 8–15. Both Mooncake configurations declare this topology.
+    The 128K/1K multi-prefix pooling example uses 16 devices, eight per role. Prefill uses TP2 × PP2 × DP2 (EP4) on devices 0–7, and Decode uses TP2 × DP4 (EP8) on devices 8–15. Both Mooncake configurations declare this topology. Both roles enable Engram CPU offload and DP shared memory.
 
     **Prepare a new pool:**
 
@@ -2318,7 +2330,7 @@ Use the templates shipped inside the selected image: `/usr/local/python3.11.10/l
         --enable-expert-parallel \
         --mamba-cache-mode align \
         --mamba-ssm-cache-dtype bfloat16 \
-        --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
+        --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
         --enforce-eager \
         --additional-config '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}' \
         --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}' \
