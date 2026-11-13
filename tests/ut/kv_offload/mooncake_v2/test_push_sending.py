@@ -13,10 +13,14 @@ from unittest.mock import Mock
 
 import msgspec
 import pytest
+import torch
 from zmq.constants import SocketOption, SocketType
 from zmq.sugar.context import Context
 
+from tests.ut.kvpp_utils import indexer_name, layer_name, make_cache_config, make_kvpp_config, make_kvpp_specs
+from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker, push_worker
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import MooncakeMetadataThread
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import MooncakeBaseConnectorWorker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
@@ -162,6 +166,7 @@ def worker(monkeypatch, request):
             is_kv_producer=True, get_from_extra_config=lambda name, default: default
         )
         self.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
+        self.kvpp_layer_owners = {}
         self.transfer_metadata = descriptor()
         layout = getattr(request, "param", None)
         if layout is not None:
@@ -551,6 +556,106 @@ def test_head_split_copies_correct_bytes(worker, monkeypatch):
     assert destination.raw[16:32] == source.raw[48:64]
     assert destination.raw[32:48] == source.raw[80:96]
     assert destination.raw[48:64] == b"\xff" * 16
+
+
+def test_kvpp_push_writes_every_decode_replica_and_deduplicates_mtp(monkeypatch):
+    target_layers = [layer_name(i) for i in (9, 10, 11, 12)]
+    indexer = indexer_name(11)
+    mtp = layer_name(17)
+    names = [*target_layers, indexer, mtp]
+    all_specs = make_kvpp_specs()
+    specs = {name: all_specs[name] for name in names}
+    cache_config = make_cache_config(specs)
+    p_config = make_kvpp_config(tp=2, pcp=2)
+    d_config = make_kvpp_config(tp=2)
+    d_config.additional_config["enable_kvpp"] = False
+    for config in (p_config, d_config):
+        config.model_config.hf_text_config = SimpleNamespace(model_type="glm_moe_dsa")
+        config.parallel_config.cp_kv_cache_interleave_size = 2
+
+    def initialize(self, config, engine_id, kv_cache_config):
+        self.engine_id, self.vllm_config, self.kv_cache_config = engine_id, config, kv_cache_config
+        self.pp_rank, self.pp_size = 0, 1
+        self.tp_size = config.parallel_config.tensor_parallel_size
+        self.pcp_size = config.parallel_config.prefill_context_parallel_size
+        self.ascend_config = SimpleNamespace(kvpp_config=KVPPConfig.from_vllm_config(config))
+        self.kv_transfer_config = SimpleNamespace(is_kv_producer=engine_id == "p")
+        self.block_size, self.side_channel_host, self.handshake_port = 2, "127.0.0.1", 0
+        self.te_rpc_port = 1
+
+    def make_caches(fill):
+        caches = {}
+        for i, name in enumerate(names):
+            spec = specs[name]
+            rows = (cache_config.num_blocks, spec.block_size, 1)
+            caches[name] = (torch.full((*rows, spec.head_size), fill + i, dtype=spec.dtype),)
+            if name == indexer:
+                caches[name] += (torch.full((*rows, spec.scale_dim), fill + i, dtype=spec.scale_dtype),)
+        return caches
+
+    monkeypatch.setattr(base_worker, "global_te", Mock())
+    monkeypatch.setattr(MooncakeBaseConnectorWorker, "__init__", initialize)
+    monkeypatch.setattr(
+        push_worker,
+        "torch",
+        SimpleNamespace(npu=SimpleNamespace(current_device=lambda: 0, set_device=lambda device: None, Event=Event)),
+    )
+    d_caches = {tp: make_caches(-30) for tp in range(2)}
+    d_metadata = {}
+    for tp, caches in d_caches.items():
+        d = MooncakeBaseConnectorWorker(d_config, "d", cache_config)
+        d.pcp_rank, d.tp_rank = 0, tp
+        d.te_rpc_port = 9001 + tp
+        d.register_kv_caches(caches)
+        d_metadata[tp] = d.transfer_metadata
+    thread = MooncakeMetadataThread("127.0.0.1", 9000, "d", d_metadata, 2, 1, 1, 1, False, threading.Event())
+    remote = msgspec.msgpack.decode(thread.encoded_metadata, type=MooncakeTransferMetadataGroups)
+
+    target = destination_message()
+    target.update(block_ids=[[2]], num_external_tokens=2)
+    params = target_params(target)
+    params["remote_worker_addresses"] = [(0, 0, tp, f"tcp://127.0.0.1:{9001 + tp}") for tp in d_caches]
+    meta = MooncakeConnectorMetadata()
+    meta.add_new_push_send_req("p-request", ([1],), 2, 0, 2, params)
+    writes = []
+    producers = {}
+    for pcp in range(2):
+        for tp in range(2):
+            p = push_worker.MooncakePushConnectorWorker(p_config, "p", cache_config)
+            p.pcp_rank, p.tp_rank = pcp, tp
+            caches = make_caches(10 * (pcp * 2 + tp))
+            producers[pcp, tp] = caches
+
+            def copy(session, src, dst, lengths):
+                for src_addr, dst_addr, size in zip(src, dst, lengths, strict=True):
+                    writes.append(dst_addr)
+                    ctypes.memmove(dst_addr, src_addr, size)
+                return 0
+
+            p.engine = SimpleNamespace(batch_transfer_sync_write=copy)
+            p._get_remote_metadata = Mock(return_value=remote)
+            p._send_done = Mock(return_value=True)
+            try:
+                p.register_kv_caches(caches)
+                p.start_load_kv(meta)
+                for name in (*target_layers, mtp):
+                    p.save_kv_layer(name)
+                p.wait_for_save()
+                assert p._send_done.call_count == len(d_caches)
+                assert all(call.args[1] is None for call in p._send_done.call_args_list)
+            finally:
+                p.shutdown()
+
+    # Target ownership uses PCP-major ranks; replicated MTP keeps TP-major routing.
+    source_rank = dict(zip(target_layers, ((0, 0), (0, 1), (1, 0), (1, 1)), strict=True))
+    source_rank[indexer] = source_rank[target_layers[2]]
+    for tp, caches in d_caches.items():
+        source_rank[mtp] = (tp, 0)
+        for name, tensors in caches.items():
+            source = producers[source_rank[name]][name]
+            for dst, src in zip(tensors, source, strict=True):
+                assert torch.equal(dst[2], src[1]), (tp, name)
+                assert writes.count(dst[2].data_ptr()) == 1, (tp, name)
 
 
 def test_mamba_final_chunk_merges_pcp_conv_projections_and_state(worker, monkeypatch):

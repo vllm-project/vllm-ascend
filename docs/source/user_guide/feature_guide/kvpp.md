@@ -44,7 +44,7 @@ The following table lists individual feature combinations with KVPP. It does not
 | Speculative decoding | ✅ Supported | Fixed-K speculative decoding, including MTP, DSpark, and Eagle3, when the selected method is supported by the model and attention backend. Draft-model caches remain independently allocated and must not share target KV caches; Dynamic-K speculative decoding is not supported. |
 | PCP | ✅ Supported | Caches are shared across PCP × TP ranks. |
 | DCP | ❌ Not supported | Cannot currently be combined with KVPP. |
-| P/D disaggregation | ✅ Supported | Uses `MooncakeConnectorV2` (Experimental); enable KVPP only on the prefill node. |
+| P/D disaggregation | ✅ Supported | Uses `MooncakeConnectorV2` or `MooncakePushConnector` (Experimental). Enable KVPP only on the prefill node. |
 | KV pooling | ✅ Supported | Memcache with `AscendStoreConnector`, `kv_producer` or `kv_both`, and whole-block loading. |
 | Mooncake layerwise KV pooling | 🟠 Experimental | `AscendStoreConnector` with `backend="mooncake"`, `use_layerwise=true`, and `load_async=false`. GLM-5.2 validation pending. |
 
@@ -102,9 +102,9 @@ For PP, add `enable_kvpp` to the existing PP launch configuration.
 
 ### PD Disaggregation
 
-KVPP supports P/D disaggregation through `MooncakeConnectorV2` (**Experimental**).
+KVPP supports P/D disaggregation through `MooncakeConnectorV2` and `MooncakePushConnector` (**Experimental**).
 
-Use `MooncakeConnectorV2` with `kv_producer` on the prefill node and `kv_consumer` on the decode node. Enable KVPP only on the prefill node.
+Use the same connector on both nodes with `kv_producer` on the prefill node and `kv_consumer` on the decode node. Enable KVPP only on the prefill node. For Push, use the [layerwise Push proxy](../../developer_guide/Design_Documents/disaggregated_prefill.md#mooncake-v2-layerwise-push-connector).
 
 ```bash
 # Prefill node: include {"enable_kvpp": true} in --additional-config.
