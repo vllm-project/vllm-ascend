@@ -14,7 +14,7 @@ from time import perf_counter
 import torch
 import torch_npu  # noqa: F401
 
-from vllm_ascend.ops.triton.v2.mamba.graph_state import GDNGraphStateUpdater
+from vllm_ascend.ops.triton.mamba.graph_state import GDNGraphStateUpdater
 
 
 def main():
