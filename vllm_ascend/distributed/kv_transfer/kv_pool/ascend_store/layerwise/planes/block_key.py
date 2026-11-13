@@ -96,13 +96,8 @@ class BlockKeyDataPlane(LayerwiseDataPlane):
 
         start_block = request.save_start_token // worker.block_size
         end_block = request.save_end_token // worker.block_size
-        if request.load_spec is not None and request.load_spec.can_load:
-            pool_hit_tokens = (
-                request.load_spec.kvpool_store_skip_tokens
-                if request.load_spec.kvpool_store_skip_tokens is not None
-                else request.load_spec.kvpool_cached_tokens
-            )
-            start_block = max(start_block, pool_hit_tokens // worker.block_size)
+        if request.load_spec is not None:
+            start_block = request.load_spec.clamp_save_start(start_block, worker.block_size)
         group_block_hashes = get_block_hashes(request.block_hashes, worker.block_size, worker.hash_block_size)
         request.save_key_block_offset = start_block
         request.save_block_keys = [None] * max(0, end_block - start_block)
@@ -160,8 +155,8 @@ class BlockKeyDataPlane(LayerwiseDataPlane):
         load_spec = request.load_spec
         if load_spec is not None and load_spec.can_load:
             cached_tokens = load_spec.kvpool_cached_tokens
-            if not worker.use_eagle and load_spec.kvpool_store_skip_tokens is not None:
-                cached_tokens = load_spec.kvpool_store_skip_tokens
+            if not worker.use_eagle:
+                cached_tokens = load_spec.pool_hit_tokens
             start_block = load_spec.vllm_cached_tokens // worker.block_size
             cached_full_blocks = cached_tokens // worker.block_size
             group_block_hashes = get_block_hashes(request.block_hashes, worker.block_size, worker.hash_block_size)
@@ -235,12 +230,8 @@ class BlockKeyDataPlane(LayerwiseDataPlane):
             cached_tokens = request.save_start_token
             if request.load_spec is not None and request.load_spec.can_load:
                 cached_tokens = request.load_spec.kvpool_cached_tokens
-                if (
-                    not worker.use_eagle
-                    and len(worker.cacheable_group_ids) == worker.num_kv_cache_groups
-                    and request.load_spec.kvpool_store_skip_tokens is not None
-                ):
-                    cached_tokens = request.load_spec.kvpool_store_skip_tokens
+                if not worker.use_eagle and len(worker.cacheable_group_ids) == worker.num_kv_cache_groups:
+                    cached_tokens = request.load_spec.pool_hit_tokens
             load_masks = worker._compute_reachable_load_masks(request, cached_tokens)
             for group in worker.cacheable_group_ids:
                 # Skip private rings before deriving token hashes: their physical
@@ -287,11 +278,8 @@ class BlockKeyDataPlane(LayerwiseDataPlane):
 
                 start = request.save_start_token // block_size
                 end = min(request.save_end_token // block_size, len(hashes), len(ids))
-                if request.load_spec is not None and request.load_spec.can_load:
-                    pool_hit = request.load_spec.kvpool_store_skip_tokens
-                    if pool_hit is None:
-                        pool_hit = request.load_spec.kvpool_cached_tokens
-                    start = max(start, pool_hit // block_size)
+                if request.load_spec is not None:
+                    start = request.load_spec.clamp_save_start(start, block_size)
                 view.save_end_token = end * block_size
                 view.save_key_block_offset = start
                 view.save_block_keys = [None] * max(0, end - start)
