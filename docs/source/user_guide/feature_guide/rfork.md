@@ -517,15 +517,18 @@ No. RFork intentionally reads exactly `numel * element_size` bytes for each tens
 
 For MTP drafts using `AscendDeepSeekMTP` and DeepSeek V4/V4.1 DSpark drafts, RFork prepares checkpoint-dependent
 state before registering tensors: head ownership and module aliases for `AscendDeepSeekMTP`, and embedding and head
-ownership for DSpark. It reads the names in the selected safetensors headers using the default loader's source,
-revision, and file-selection rules. Uncached remote checkpoints may be downloaded during this preparation. If the
-metadata cannot be read, including checkpoints selected in PT/bin format, RFork uses the default loader and does not
-publish that model as a seed. This adaptation stays within the RFork loader. For `AscendDeepSeekMTP`, it reuses the
-model's head-ownership helper. For DSpark, it reuses the model's checkpoint-name mapping together with the
-embedding/head naming rule from its `load_weights`. It currently covers only these drafts. Other draft
-implementations, such as `Glm5NextMTP` and other DSpark drafts, also derive head ownership from checkpoint weights,
-and RFork does not run their normal `load_weights` before registration; qualify `source=transfer` and output accuracy
-on the target model and hardware before relying on draft weight reuse.
+ownership for DSpark. It selects checkpoint files with the default loader's source, revision, and file-selection
+rules, then reads the weight names from the default loader's safetensors index. If that index is missing, it uses
+another `*.safetensors.index.json` in the same folder, such as `quant_model_weights.safetensors.index.json` in
+quantized checkpoints, only when it is the only distinct index that references exactly the selected shard files;
+otherwise it reads the selected safetensors headers. Uncached remote checkpoints may be downloaded during this
+preparation. If the metadata cannot be read, including checkpoints selected in PT/bin format, RFork uses the default
+loader and does not publish that model as a seed. This adaptation stays within the RFork loader. For
+`AscendDeepSeekMTP`, it reuses the model's head-ownership helper. For DSpark, it reuses the model's checkpoint-name
+mapping together with the embedding/head naming rule from its `load_weights`. It currently covers only these drafts.
+Other draft implementations, such as `Glm5NextMTP` and other DSpark drafts, also derive head ownership from
+checkpoint weights, and RFork does not run their normal `load_weights` before registration; qualify `source=transfer`
+and output accuracy on the target model and hardware before relying on draft weight reuse.
 
 ### When does a draft model report `shared_target`? { #when-does-a-draft-model-report-shared_target }
 
