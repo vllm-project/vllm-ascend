@@ -66,7 +66,7 @@ on:
         required: false
         default: false
         type: boolean
-      dockerfile_ref:
+      PR_ref:
         description: "Optional git ref the whole source tree is built from (e.g. refs/pull/<n>/head). /presmoke passes the triggering PR so both layers are built from the code and Dockerfiles under review ('pre-merge'), while vllm_ascend_branch still decides the branch and the published tag. Empty builds vllm_ascend_branch."
         required: false
         default: ''
@@ -123,7 +123,7 @@ jobs:
       suffix: ${{ matrix.suffix }}
       vllm_ascend_branch: ${{ inputs.vllm_ascend_branch || 'main' }}
       base_image_branch: ${{ inputs.vllm_ascend_branch || 'main' }}
-      dockerfile_ref: ${{ inputs.dockerfile_ref }}
+      PR_ref: ${{ inputs.PR_ref }}
       # The standard nightly pipeline builds both architectures for every OS,
       # keeping the fixed runner mapping (and therefore the build cache).
       isolated_build: ${{ inputs.isolated_build }}
