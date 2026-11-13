@@ -120,13 +120,15 @@ def test_moe_padding_zero_counts_graph_replay(allow_internal_format, monkeypatch
         )
         return output, counts
 
-    def backbone(*args, **kwargs):
-        return run_moe(x, ids, probs, context.is_padding)
+    class Backbone:
+        use_sequence_parallel = True
+        skip_padding_tokens_in_moe = True
+
+        def __call__(self, *args, **kwargs):
+            return run_moe(x, ids, probs, context.is_padding)
 
     context = SimpleNamespace(is_padding=runner.prepare_padding_mask(0, graph_tokens))
-    backbone.use_sequence_parallel = True
-    backbone.skip_padding_tokens_in_moe = True
-    model = SimpleNamespace(model=backbone)
+    model = SimpleNamespace(model=Backbone())
     monkeypatch.setattr(model_module, "get_forward_context", lambda: context)
     monkeypatch.setattr(model_module, "get_tensor_model_parallel_world_size", lambda: 8)
 
