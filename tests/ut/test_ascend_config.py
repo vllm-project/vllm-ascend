@@ -1729,14 +1729,19 @@ class TestUpstreamConfigCompatibility(TestBase):
         return_value=get_hardware_profile(AscendDeviceType.A5),
     )
     def test_mc2_hierarchy_comm_accepts_a5(self, _mock_profile):
-        config = AscendConfig(
-            sparse_kv_offload_config=SimpleNamespace(enabled=False),
-            mc2_comm_alg="hierarchy",
-            enable_fused_mc2=0,
-        )
         vllm_config = SimpleNamespace(model_config=SimpleNamespace(get_num_experts=lambda: 512))
 
-        config._validate_mc2_comm_alg(vllm_config)
+        for use_legacy_flag in (False, True):
+            with self.subTest(use_legacy_flag=use_legacy_flag):
+                config = AscendConfig(
+                    sparse_kv_offload_config=SimpleNamespace(enabled=False),
+                    mc2_comm_alg="" if use_legacy_flag else "hierarchy",
+                    enable_mc2_hierarchy_comm=use_legacy_flag,
+                    enable_fused_mc2=0,
+                )
+
+                config._validate_mc2_comm_alg(vllm_config)
+                self.assertEqual(config.get_mc2_comm_alg(), "hierarchy")
 
     @patch(
         "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
