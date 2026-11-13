@@ -60,6 +60,9 @@ jobs:
       cpu_ut_versions: ${{ steps.vllm.outputs.cpu_ut_versions }}
       src: ${{ steps.filter.outputs.src }}
       ci_pipeline: ${{ steps.filter.outputs.ci_pipeline }}
+      # Set when .github/SKIP_PRE_COMMIT is present. Downstream jobs then skip
+      # lint, CPU UT, and the full suite, and only schedule two_card/ops.
+      skip_extra: ${{ steps.skip_extra.outputs.enabled }}
     steps:
       - name: Validate PR title prefix
         run: |
@@ -93,6 +96,16 @@ jobs:
         with:
           # Gitleaks needs the base branch ref and history to scan the PR commits.
           fetch-depth: 0
+
+      - name: Record grouping-only skip
+        id: skip_extra
+        run: |
+          if [ -f .github/SKIP_PRE_COMMIT ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::SKIP_PRE_COMMIT is present. Lint, CPU UT, and the full suite stay off. Only two_card/ops grouping runs."
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Prepare CI metadata
         id: vllm
@@ -305,7 +318,7 @@ jobs:
     # run the release tag (see the pre-commit ref resolution).
     name: cpu-ut (vllm@${{ matrix.vllm }})
     needs: pre-commit
-    if: ${{ needs.pre-commit.result == 'success' }}
+    if: ${{ needs.pre-commit.result == 'success' && needs.pre-commit.outputs.skip_extra != 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -329,6 +342,7 @@ jobs:
     if: >-
       ${{
         needs.pre-commit.result == 'success' &&
+        needs.pre-commit.outputs.skip_extra != 'true' &&
         contains(github.event.pull_request.labels.*.name, 'ready-precise')
       }}
     runs-on: linux-amd64-cpu-4-hk
@@ -490,9 +504,9 @@ jobs:
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
-      has_tests: ${{ steps.scope-rec.outputs.has_tests || steps.scope-all.outputs.has_tests || steps.noop.outputs.has_tests }}
-      test_groups: ${{ steps.scope-rec.outputs.test_groups || steps.scope-all.outputs.test_groups || steps.noop.outputs.test_groups }}
-      matched_modules: ${{ steps.scope-rec.outputs.matched_modules || steps.scope-all.outputs.matched_modules || steps.noop.outputs.matched_modules }}
+      has_tests: ${{ steps.scope-ops.outputs.has_tests || steps.scope-rec.outputs.has_tests || steps.scope-all.outputs.has_tests || steps.noop.outputs.has_tests }}
+      test_groups: ${{ steps.scope-ops.outputs.test_groups || steps.scope-rec.outputs.test_groups || steps.scope-all.outputs.test_groups || steps.noop.outputs.test_groups }}
+      matched_modules: ${{ steps.scope-ops.outputs.matched_modules || steps.scope-rec.outputs.matched_modules || steps.scope-all.outputs.matched_modules || steps.noop.outputs.matched_modules }}
       csrc_cache_target_ids: ${{ steps.cache-targets.outputs.target_ids }}
       base_sha: ${{ steps.source-snapshot.outputs.base_sha }}
       # source reports which path produced the tests: "recommended", "all", or "none".
@@ -559,7 +573,10 @@ jobs:
           COVERAGE_PATHS: ${{ needs.recommend-tests.outputs.coverage_paths }}
         run: |
           set -euo pipefail
-          if [ "${HAS_MAIN2MAIN}" = "true" ]; then
+          if [ -f .github/SKIP_PRE_COMMIT ]; then
+            # Temporary path for validating operator grouping only.
+            MODE="ops"
+          elif [ "${HAS_MAIN2MAIN}" = "true" ]; then
             # The main2main label requests the full suite on both the verified
             # vLLM main commit and the release tag, so the coverage-based
             # recommendation cannot be used: select the whole suite instead.
@@ -587,6 +604,17 @@ jobs:
           fi
           echo "mode=${MODE}" >> "$GITHUB_OUTPUT"
           echo "Selection mode: ${MODE} (src=${SRC:-unknown} ci_pipeline=${CI_PIPELINE:-unknown})"
+
+      - name: Select operator grouping tests
+        id: scope-ops
+        if: steps.decide.outputs.mode == 'ops'
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          pip install regex
+          python3 .github/workflows/scripts/select_tests.py \
+            --explicit-e2e-tests tests/e2e/pull_request/two_card/ops \
+            --skip-cpu-ut \
+            --skip-a5
 
       - name: Select tests from coverage recommendations
         id: scope-rec
@@ -650,7 +678,7 @@ jobs:
       - name: Add upstream test cache target
         id: cache-targets
         env:
-          SELECTED_TARGET_IDS: ${{ steps.scope-rec.outputs.csrc_cache_target_ids || steps.scope-all.outputs.csrc_cache_target_ids || steps.noop.outputs.csrc_cache_target_ids }}
+          SELECTED_TARGET_IDS: ${{ steps.scope-ops.outputs.csrc_cache_target_ids || steps.scope-rec.outputs.csrc_cache_target_ids || steps.scope-all.outputs.csrc_cache_target_ids || steps.noop.outputs.csrc_cache_target_ids }}
         run: |
           python3 - <<'PY'
           import json
@@ -701,7 +729,7 @@ jobs:
       ${{
         !cancelled() &&
         needs.pre-commit.result == 'success' &&
-        needs.cpu-ut.result == 'success' &&
+        (needs.cpu-ut.result == 'success' || (needs.pre-commit.outputs.skip_extra == 'true' && needs.cpu-ut.result == 'skipped')) &&
         needs.select-tests.result == 'success' &&
         needs.prepare-csrc-cache.result == 'success' &&
         (
@@ -744,6 +772,7 @@ jobs:
         needs.cpu-ut.result == 'success' &&
         needs.select-tests.result == 'success' &&
         needs.prepare-csrc-cache.result == 'success' &&
+        needs.pre-commit.outputs.skip_extra != 'true' &&
         contains(github.event.pull_request.labels.*.name, 'ready-precise') &&
         needs.select-tests.outputs.has_tests == 'true'
       }}
@@ -830,7 +859,7 @@ jobs:
             exit 1
           fi
 
-          if [ "${CPU_UT_RESULT}" != "success" ]; then
+          if [ "${CPU_UT_RESULT}" != "success" ] && [ "${{ needs.pre-commit.outputs.skip_extra }}" != "true" ]; then
             echo "::error::cpu-ut did not succeed (result: ${CPU_UT_RESULT})."
             echo "::error::Open the failed 'cpu-ut' job above, fix the failing test(s) and push again."
             exit 1
