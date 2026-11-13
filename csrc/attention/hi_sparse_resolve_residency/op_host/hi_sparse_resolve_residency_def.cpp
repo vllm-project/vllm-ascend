@@ -44,7 +44,21 @@ public:
             .DataType({ge::DT_INT64, ge::DT_INT64, ge::DT_INT64}).Format(formats).UnknownShapeFormat(formats);
         Output("errors").ParamType(REQUIRED)
             .DataType({ge::DT_INT32, ge::DT_INT32, ge::DT_INT32}).Format(formats).UnknownShapeFormat(formats);
-        Attr("geometry").AttrType(REQUIRED).ListInt();
+        Attr("hostRows").AttrType(REQUIRED).Int();
+        Attr("hotBlockSize").AttrType(REQUIRED).Int();
+        Attr("sourceBlockSize").AttrType(REQUIRED).Int();
+        Attr("residentBlockSize").AttrType(REQUIRED).Int();
+        Attr("residentNullBlock").AttrType(REQUIRED).Int();
+        Attr("attentionBlockStride").AttrType(REQUIRED).Int();
+        Attr("maxUnionRows").AttrType(REQUIRED).Int();
+        Attr("attentionCapacity").AttrType(REQUIRED).Int();
+        Attr("logicalStride").AttrType(REQUIRED).Int();
+        Attr("sourceStride").AttrType(REQUIRED).Int();
+        Attr("residentStride").AttrType(REQUIRED).Int();
+        Attr("hotTableStride").AttrType(REQUIRED).Int();
+        Attr("attentionStride").AttrType(REQUIRED).Int();
+        Attr("countsStride").AttrType(REQUIRED).Int();
+        Attr("byteMissMask").AttrType(REQUIRED).Int();
         OpAICoreConfig config;
         config.DynamicCompileStaticFlag(true)
             .DynamicShapeSupportFlag(true)

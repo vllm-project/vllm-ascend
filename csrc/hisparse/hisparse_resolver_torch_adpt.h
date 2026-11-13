@@ -7,7 +7,6 @@
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #include <torch_npu/csrc/core/npu/NPUGuard.h>
 #include <array>
-#include <algorithm>
 #include <optional>
 
 #include "../attention/hi_sparse_resolve_residency/op_kernel/resolver_scratch.h"
@@ -17,22 +16,14 @@ at::Tensor tensor_or_undefined(const std::optional<at::Tensor>& tensor) {
     return tensor.value_or(at::Tensor());
 }
 
-inline int64_t resolver_hash_size(int64_t hot, int64_t union_rows) {
+inline void validate_resolver_scratch(int64_t hot, int64_t union_rows) {
     TORCH_CHECK(union_rows > 0 && union_rows <= hot && hot <= 32768,
                 "HiSparse union must fit the hot cache and int16 LRU slots");
-    int64_t hash_size = 1;
-    while (hash_size <= union_rows) hash_size <<= 1;
-    const uint64_t tiles = (hot + 31) / 32;
-    const uint64_t budget = kResolverUbBytes;
-    const uint64_t fixed_words = hot + 2 * tiles + 64;
-    const uint64_t minimum_bytes =
-        resolver_scratch_words(hot, union_rows + 1) * sizeof(int32_t) + kResolverDescriptorBytes;
-    TORCH_CHECK(minimum_bytes <= budget,
+    const uint64_t minimum_bytes = resolver_scratch_bytes(hot, union_rows + 1);
+    TORCH_CHECK(minimum_bytes <= kResolverUbBytes,
                 "HiSparse hot_size=", hot, ", max_union_rows=", union_rows,
-                " needs at least ", minimum_bytes, " UB bytes; the compiled target allows ", budget,
+                " needs at least ", minimum_bytes, " UB bytes; the compiled target allows ", kResolverUbBytes,
                 ". Lower device_buffer_size or speculative tokens.");
-    const uint64_t available_words = (budget - kResolverDescriptorBytes) / 64 * 16;
-    return std::min(hash_size, int64_t((available_words - fixed_words) / 2));
 }
 
 void resolve_residency(
@@ -79,7 +70,7 @@ void resolve_residency(
     TORCH_CHECK(!source || source->dim() == 2, "HiSparse source table must be a matrix");
     TORCH_CHECK(!resident || resident->dim() == 2, "HiSparse resident table must be a matrix");
     TORCH_CHECK(lru.sizes() == dgi.sizes(), "HiSparse LRU/tag geometry mismatch");
-    const int64_t hash_size = resolver_hash_size(hot, union_rows);
+    validate_resolver_scratch(hot, union_rows);
 
     const std::array<at::Tensor, 19> tensors = {
         logical, tensor_or_undefined(requests), tensor_or_undefined(states),
@@ -147,23 +138,21 @@ void resolve_residency(
                 "HiSparse hot block table is too narrow");
     TORCH_CHECK(hot_table.size(0) >= (states ? states->numel() : dgi.size(0)),
                 "HiSparse hot block table does not cover request slots");
-    std::array<int64_t, 25> geometry = {
-        int64_t(rows), int64_t(topk), int64_t(hot), int64_t(host_rows), int64_t(logical.stride(0)),
-        int64_t(states ? states->numel() : 0), int64_t(dgi.size(0)),
-        int64_t(source ? source->size(0) : 0), int64_t(source ? source->size(1) : 0),
-        int64_t(source ? source->stride(0) : 0), int64_t(source_block_size),
-        int64_t(resident ? resident->size(0) : 0), int64_t(resident ? resident->size(1) : 0),
-        int64_t(resident ? resident->stride(0) : 0), int64_t(resident_block_size), int64_t(resident_null_block),
-        int64_t(hot_block_size), int64_t(hot_table.stride(0)),
-        int64_t(attention ? attention->stride(0) : topk), int64_t(attention_block_stride),
-        int64_t(counts ? counts->stride(0) : 1), int64_t(union_rows), int64_t(hash_size),
-        int64_t(attention_capacity), int64_t(miss_mask && miss_mask->element_size() == 1)};
-    at::IntArrayRef geometry_ref(geometry);
+    const int64_t logical_stride = logical.stride(0);
+    const int64_t source_stride = source ? source->stride(0) : 0;
+    const int64_t resident_stride = resident ? resident->stride(0) : 0;
+    const int64_t hot_table_stride = hot_table.stride(0);
+    const int64_t attention_stride = attention ? attention->stride(0) : topk;
+    const int64_t counts_stride = counts ? counts->stride(0) : 1;
+    const int64_t byte_miss_mask = miss_mask && miss_mask->element_size() == 1;
     // Generated ACLNN takes inputs, attributes, then caller-owned outputs.
     EXEC_NPU_CMD(
         aclnnHiSparseResolveResidency,
         tensors[0], tensors[1], tensors[2], tensors[3], tensors[4], tensors[5], tensors[18],
-        geometry_ref, tensors[6], tensors[7], tensors[8], tensors[9], tensors[10],
+        host_rows, hot_block_size, source_block_size, resident_block_size, resident_null_block,
+        attention_block_stride, union_rows, attention_capacity, logical_stride, source_stride,
+        resident_stride, hot_table_stride, attention_stride, counts_stride, byte_miss_mask,
+        tensors[6], tensors[7], tensors[8], tensors[9], tensors[10],
         tensors[11], tensors[12], tensors[13], tensors[14], tensors[15], tensors[16], tensors[17]);
 }
 

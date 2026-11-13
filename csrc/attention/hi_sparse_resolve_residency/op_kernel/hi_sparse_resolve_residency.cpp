@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+#include "hi_sparse_resolve_residency_tiling_data.h"
 #include "hisparse_resolver_kernel.h"
 
 using vllm_ascend::hisparse::ResolverTilingData;
@@ -34,7 +35,6 @@ extern "C" __global__ __aicore__ void hi_sparse_resolve_residency(
     using vllm_ascend::hisparse::kResolverDescriptorBytes;
     using vllm_ascend::hisparse::kResolverUbBytes;
     __ubuf__ int32_t scratch[kResolverUbBytes / sizeof(int32_t)];
-    const auto* geometry = tilingData.geometry;
     auto descriptor = (__ubuf__ uint64_t*)(scratch + (tilingData.ubBytes - kResolverDescriptorBytes) / sizeof(int32_t));
     descriptor[0] = reinterpret_cast<uintptr_t>(logical);
     descriptor[1] = reinterpret_cast<uintptr_t>(requests);
@@ -55,10 +55,35 @@ extern "C" __global__ __aicore__ void hi_sparse_resolve_residency(
     descriptor[16] = reinterpret_cast<uintptr_t>(stats);
     descriptor[17] = reinterpret_cast<uintptr_t>(errors);
     descriptor[18] = reinterpret_cast<uintptr_t>(valid_rows);
-    for (int i = 0; i < 25; ++i) descriptor[32 + i] = geometry[i];
+    // Preserve the descriptor layout consumed by the SIMT vector function.
+    descriptor[32] = tilingData.rows;
+    descriptor[33] = tilingData.topk;
+    descriptor[34] = tilingData.hotSlots;
+    descriptor[35] = tilingData.hostRows;
+    descriptor[36] = tilingData.logicalStride;
+    descriptor[37] = tilingData.stateIndexCount;
+    descriptor[38] = tilingData.tagRows;
+    descriptor[39] = tilingData.sourceRows;
+    descriptor[40] = tilingData.sourceColumns;
+    descriptor[41] = tilingData.sourceStride;
+    descriptor[42] = tilingData.sourceBlockSize;
+    descriptor[43] = tilingData.residentRows;
+    descriptor[44] = tilingData.residentColumns;
+    descriptor[45] = tilingData.residentStride;
+    descriptor[46] = tilingData.residentBlockSize;
+    descriptor[47] = tilingData.residentNullBlock;
+    descriptor[48] = tilingData.hotBlockSize;
+    descriptor[49] = tilingData.hotTableStride;
+    descriptor[50] = tilingData.attentionStride;
+    descriptor[51] = tilingData.attentionBlockStride;
+    descriptor[52] = tilingData.countsStride;
+    descriptor[53] = tilingData.maxUnionRows;
+    descriptor[54] = tilingData.hashSize;
+    descriptor[55] = tilingData.attentionCapacity;
+    descriptor[56] = tilingData.byteMissMask;
     const int block = AscendC::GetBlockIdx();
-    if (geometry[1] == 2048 && geometry[2] == 10240 && geometry[10] == 128 &&
-        geometry[14] == 128 && geometry[16] == 128 && geometry[22] == 16384) {
+    if (tilingData.topk == 2048 && tilingData.hotSlots == 10240 && tilingData.sourceBlockSize == 128 &&
+        tilingData.residentBlockSize == 128 && tilingData.hotBlockSize == 128 && tilingData.hashSize == 16384) {
         asc_vf_call<resolve_vf<true>>(dim3(kThreads), descriptor, scratch, block);
     } else {
         asc_vf_call<resolve_vf<false>>(dim3(kThreads), descriptor, scratch, block);

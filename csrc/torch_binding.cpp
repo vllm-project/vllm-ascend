@@ -2864,7 +2864,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("hisparse_resolve_residency", torch::kMeta, &vllm_ascend::hisparse::resolve_residency_meta);
     ops.def("hisparse_resolver_validate_scratch(int hot, int union_rows) -> ()",
             [](int64_t hot, int64_t union_rows) {
-                vllm_ascend::hisparse::resolver_hash_size(hot, union_rows);
+                vllm_ascend::hisparse::validate_resolver_scratch(hot, union_rows);
             });
 #endif
     ops.def("get_npu_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor?");
