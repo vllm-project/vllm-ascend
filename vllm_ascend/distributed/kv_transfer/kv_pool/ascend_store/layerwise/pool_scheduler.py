@@ -208,7 +208,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             hbm_hit_tokens=num_computed_tokens,
         )
 
-    def _scan_contiguous_group_hits(
+    def _query_contiguous_group_hits(
         self,
         request: "Request",
         token_len: int,
@@ -275,7 +275,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         skip_tokens = 0 if self.layerwise_offload else num_computed_tokens
         hits_per_group = [
             hit_tokens
-            for hit_tokens, _, _ in self._scan_contiguous_group_hits(
+            for hit_tokens, _, _ in self._query_contiguous_group_hits(
                 request, token_len, self.grouped_block_size, skip_tokens
             )
         ]
@@ -307,7 +307,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         # keeps no per-group local-prefix state: scan the first group only,
         # with nothing to skip.
         del num_computed_tokens
-        results = self._scan_contiguous_group_hits(request, token_len, [self._block_size], 0)
+        results = self._query_contiguous_group_hits(request, token_len, [self._block_size], 0)
         if not results:
             return 0
         hit_tokens, num_hit_blocks, num_probed_blocks = results[0]
