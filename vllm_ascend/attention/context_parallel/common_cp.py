@@ -42,8 +42,7 @@ def is_pcp_decode_sharding_enabled(vllm_config) -> bool:
         # TODO: Adapt PCP decode request sharding for GLM-5.3-Flash, including
         # recurrent-state ownership and request ordering across PCP ranks.
         return False
-    parallel_config = vllm_config.parallel_config
-    return parallel_config.prefill_context_parallel_size > 1 and parallel_config.decode_context_parallel_size == 1
+    return vllm_config.parallel_config.pcp_shard_decode_requests
 
 
 def get_pcp_num_replicated_tokens(num_decode_tokens: int, is_decode_sharded: bool) -> int:
