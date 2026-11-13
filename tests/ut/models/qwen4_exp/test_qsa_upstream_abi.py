@@ -130,3 +130,37 @@ def test_fused_prepare_zeros_gate_without_runtime_metadata(monkeypatch) -> None:
 
     assert not output.any()
     assert not gate.any()
+
+
+def test_indexer_forward_keeps_prolog_and_selection_equivalent() -> None:
+    indexer = qsa.AscendQSAIndexer.__new__(qsa.AscendQSAIndexer)
+    torch.nn.Module.__init__(indexer)
+    indexer.skip_topk = False
+    raw_metadata = SimpleNamespace(num_actual_tokens=2)
+    compressed_metadata = SimpleNamespace()
+    indexer._metadata = Mock(return_value=(raw_metadata, compressed_metadata))
+
+    query = torch.ones((2, 1, 4))
+    token_k = torch.full((2, 1, 4), 2.0)
+    indexer.project_qk = Mock(return_value=(query, token_k))
+    indexer._update_and_compress = Mock()
+    selected = torch.zeros((2, 3), dtype=torch.int32)
+    indexer._select = Mock(return_value=selected)
+
+    hidden_states = torch.zeros((4, 8))
+    positions = torch.arange(4)
+    out = torch.empty((2, 3), dtype=torch.int32)
+    result = indexer(hidden_states, positions, out)
+
+    assert result is selected
+    indexer.project_qk.assert_called_once()
+    projected_hidden, projected_positions = indexer.project_qk.call_args.args
+    assert projected_hidden.shape[0] == 2
+    assert projected_positions.shape[-1] == 2
+    indexer._update_and_compress.assert_called_once_with(
+        token_k,
+        projected_positions,
+        raw_metadata,
+        compressed_metadata,
+    )
+    indexer._select.assert_called_once_with(query, compressed_metadata, out)
