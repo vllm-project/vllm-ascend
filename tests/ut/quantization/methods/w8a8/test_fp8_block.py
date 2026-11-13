@@ -100,7 +100,7 @@ class TestResolveBlockScales(TestBase):
 
 
 class TestAscendFp8BlockLinearMethod(TestBase):
-    def build_scheme(self, is_950=False, block_size=(128, 128)):
+    def build_scheme(self, is_950=True, block_size=(128, 128)):
         with (
             patch(f"{MODULE}.get_current_vllm_config", return_value=create_mock_vllm_config()),
             patch(f"{MODULE}.is_950", return_value=is_950),
@@ -110,6 +110,18 @@ class TestAscendFp8BlockLinearMethod(TestBase):
             mock_mxfp8.return_value.group_size = MX_GROUP_SIZE
             scheme = AscendFp8BlockLinearMethod(block_size)
         return scheme
+
+    def test_rejects_native_fp8_before_weight_allocation_off_950(self):
+        with (
+            patch(f"{MODULE}.is_950", return_value=False),
+            patch(f"{MODULE}.get_current_vllm_config") as get_config,
+            patch(f"{MODULE}.torch.empty") as empty,
+            self.assertRaisesRegex(NotImplementedError, "require Ascend 950"),
+        ):
+            AscendFp8BlockLinearMethod((128, 128))
+
+        get_config.assert_not_called()
+        empty.assert_not_called()
 
     @staticmethod
     def _get_weight_switch_specs(scheme, input_sharded):
@@ -157,19 +169,6 @@ class TestAscendFp8BlockLinearMethod(TestBase):
             (output_gather, output_repeat),
         )
 
-    def test_weight_switch_specs_cover_dense_fallback(self):
-        scheme = self.build_scheme(is_950=False)
-
-        self.assertTrue(scheme.supports_weight_switch)
-        self.assertEqual(
-            self._get_weight_switch_specs(scheme, input_sharded=True),
-            ((WeightSwitchGatherSpec("weight", gather_dim=1),), ()),
-        )
-        self.assertEqual(
-            self._get_weight_switch_specs(scheme, input_sharded=False),
-            ((WeightSwitchGatherSpec("weight"),), ()),
-        )
-
     def test_pergroup_param_declares_block_scale_and_loader_hints(self):
         scheme = self.build_scheme(block_size=(128, 64))
         params = scheme.get_pergroup_param(512, 256, torch.bfloat16)
@@ -194,18 +193,6 @@ class TestAscendFp8BlockLinearMethod(TestBase):
         layer.weight = nn.Parameter(weight, requires_grad=False)
         layer.weight_scale_inv = nn.Parameter(scale_inv, requires_grad=False)
         return layer, weight, scale_inv
-
-    def test_resolves_to_model_dtype_off_950(self):
-        scheme = self.build_scheme(is_950=False, block_size=(4, 32))
-        layer, weight, scale_inv = self._make_layer()
-
-        with patch(f"{MODULE}.maybe_trans_nz", side_effect=lambda tensor: tensor):
-            scheme.process_weights_after_loading(layer)
-
-        self.assertEqual(layer.weight.dtype, torch.bfloat16)
-        self.assertFalse(hasattr(layer, "weight_scale_inv"))
-        expected = reference_resolve(weight, scale_inv, 4, 32, torch.bfloat16)
-        self.assertTrue(torch.equal(layer.weight.data, expected))
 
     def test_requantizes_to_mxfp8_on_950(self):
         scheme = self.build_scheme(is_950=True, block_size=(4, 32))
@@ -279,7 +266,7 @@ class TestAscendFp8BlockLinearMethod(TestBase):
         self.assertEqual(layer.weight.dtype, torch.bfloat16)
 
     def test_apply_uses_unquantized_gemm_when_resolved_to_bf16(self):
-        scheme = self.build_scheme(is_950=False)
+        scheme = self.build_scheme(is_950=True)
         scheme.mxfp8_method = None
         layer = nn.Module()
         layer.weight = nn.Parameter(torch.randn(4, 8), requires_grad=False)
@@ -300,7 +287,7 @@ class TestAscendFp8BlockLinearMethod(TestBase):
 
 
 class TestAscendFp8BlockFusedMoEMethod(TestBase):
-    def build_scheme(self, is_950=False, block_size=(4, 32)):
+    def build_scheme(self, is_950=True, block_size=(4, 32)):
         with (
             patch(f"{MODULE}.get_current_vllm_config", return_value=create_mock_vllm_config()),
             patch(f"{MODULE}.is_950", return_value=is_950),
@@ -310,6 +297,18 @@ class TestAscendFp8BlockFusedMoEMethod(TestBase):
             mock_mxfp8.return_value.group_size = MX_GROUP_SIZE
             scheme = AscendFp8BlockFusedMoEMethod(block_size, MagicMock())
         return scheme
+
+    def test_rejects_native_fp8_before_weight_allocation_off_950(self):
+        with (
+            patch(f"{MODULE}.is_950", return_value=False),
+            patch(f"{MODULE}.get_current_vllm_config") as get_config,
+            patch(f"{MODULE}.torch.empty") as empty,
+            self.assertRaisesRegex(NotImplementedError, "require Ascend 950"),
+        ):
+            AscendFp8BlockFusedMoEMethod((128, 128), MagicMock())
+
+        get_config.assert_not_called()
+        empty.assert_not_called()
 
     def test_weights_are_fp8_and_scales_are_block_shaped(self):
         scheme = self.build_scheme(block_size=(128, 128))
@@ -344,24 +343,6 @@ class TestAscendFp8BlockFusedMoEMethod(TestBase):
         )
         return layer
 
-    def test_resolves_every_expert_off_950(self):
-        scheme = self.build_scheme(is_950=False)
-        layer = self._make_moe_layer(intermediate=32)
-        original_w13 = layer.w13_weight.data.clone()
-        original_scale = layer.w13_weight_scale_inv.data.clone()
-        scheme._bf16_method = MagicMock()
-
-        scheme.process_weights_after_loading(layer)
-
-        self.assertEqual(layer.w13_weight.dtype, torch.bfloat16)
-        self.assertEqual(layer.w2_weight.dtype, torch.bfloat16)
-        self.assertFalse(hasattr(layer, "w13_weight_scale_inv"))
-        self.assertFalse(hasattr(layer, "w2_weight_scale_inv"))
-        scheme._bf16_method.process_weights_after_loading.assert_called_once_with(layer)
-
-        expected = reference_resolve(original_w13[0], original_scale[0], 4, 32, torch.bfloat16)
-        self.assertTrue(torch.equal(layer.w13_weight.data[0], expected))
-
     def test_requantizes_every_expert_on_950(self):
         scheme = self.build_scheme(is_950=True)
         # Both weights need an even group count so the operator's split layout
@@ -389,7 +370,8 @@ class TestAscendFp8BlockFusedMoEMethod(TestBase):
         scheme.mxfp8_method.process_weights_after_loading.assert_called_once_with(layer)
 
     def test_apply_delegates_to_the_active_method(self):
-        scheme = self.build_scheme(is_950=False)
+        scheme = self.build_scheme(is_950=True)
+        scheme.mxfp8_method = None
         scheme._bf16_method = MagicMock()
         scheme._bf16_method.apply.return_value = "bf16"
         layer = nn.Module()
@@ -465,3 +447,4 @@ class TestFp8WeightShapeValidation(TestBase):
         layer.output_sizes = [512, 768]
         with self.assertRaisesRegex(ValueError, "output_partition_size"):
             self.linear.validate_weight_shapes(layer, 256, 1280, 256, [128, 192])
+
