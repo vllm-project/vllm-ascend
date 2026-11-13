@@ -8,17 +8,46 @@ from vllm.distributed.parallel_state import GroupCoordinator, _groups
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from vllm_ascend.device.device_config import is_950
+from vllm_ascend.device.device_config import AscendDeviceType, get_ascend_device_type, is_950
 from vllm_ascend.ops.triton.dcp.dcp_a2a_batched import (
     MAX_UNROLLED_COMBINE_ELEMENTS,
     _encode_lse_fields,
     _fused_dcp_lse_combine_batched_kernel,
     _pack_dcp_output_lse_batched_kernel,
 )
-from vllm_ascend.ops.triton.dcp.dcp_a2a_rank_tiled import _fused_dcp_lse_combine_rank_tiled_kernel
+from vllm_ascend.ops.triton.dcp.dcp_a2a_rank_tiled import (
+    _fused_dcp_lse_combine_rank_tiled_kernel,
+    _fused_dcp_lse_combine_rank_tiled_static_kernel,
+)
 from vllm_ascend.ops.triton.dcp.dcp_jit import _launch_kernel
 from vllm_ascend.ops.triton.dcp.sfa_dcp_exchange import can_exchange, exchange
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
+
+# Decode token buckets follow the merged DCP decode budget (#16350). In
+# FULL_DECODE_ONLY serving the scheduler pads a decode batch to its ACLGraph
+# size, so the combine only sees these bucket values. A precompiled static
+# kernel per bucket keeps the rank-row stride constant without compiling
+# inside a request.
+A3_DECODE_TOKEN_BUCKETS = (1, 2, 4, 8, 16, 32, 48, 64, 96, 128, 192)
+
+# (num_heads, num_tokens, head_dim, dcp_size) combinations warmed by
+# dcp_warmup. Empty until warmup runs, so tests and unwarmed configurations
+# fall back to the scalar/batched kernels instead of compiling at request time.
+_A3_STATIC_KEYS: frozenset[tuple[int, int, int, int]] = frozenset()
+
+
+def register_a3_static_keys(keys, *, replace: bool = False) -> None:
+    """Record warmed (heads, tokens, head_dim, dcp) static-kernel keys.
+
+    Warmup pre-registers candidates so the dispatcher selects them while
+    recording, then replaces the set with the combinations that were actually
+    registered. Runtime never extends it.
+    """
+    global _A3_STATIC_KEYS
+    if replace:
+        _A3_STATIC_KEYS = frozenset(keys)
+    else:
+        _A3_STATIC_KEYS = _A3_STATIC_KEYS | frozenset(keys)
 
 
 @triton.jit
@@ -464,6 +493,39 @@ def _launch_fused_dcp_lse_combine(
     feature_tile = min(512, triton.next_power_of_2(head_dim), 8192 // rank_tile)
     tiles_per_head = triton.cdiv(head_dim, max(feature_tile, 1))
     min_rows = triton.cdiv(4 * vector_cores, max(dcp_size, 1))
+    # A3 decode: only warmed (heads, tokens, head_dim, dcp) buckets use the
+    # static twin. Everything else, including prefill token counts, keeps the
+    # scalar/batched path so a request never triggers a compile.
+    a3_static = (
+        get_ascend_device_type() == AscendDeviceType.A3
+        and (num_heads, num_tokens, head_dim, dcp_size) in _A3_STATIC_KEYS
+        and recv.dtype == torch.bfloat16
+        and dcp_size == 16
+        and head_dim >= 512
+        and scatter_dim == 1
+        and total_rows >= min_rows
+        and local_output is not None
+        and local_output.stride(-1) == 1
+    )
+    if a3_static:
+        assert local_lse is not None
+        launch(
+            _fused_dcp_lse_combine_rank_tiled_static_kernel,
+            (min(total_rows * tiles_per_head, vector_cores),),
+            recv,
+            output,
+            local_output,
+            local_lse,
+            *local_output.stride(),
+            *local_lse.stride()[:2],
+            NUM_HEADS=num_heads,
+            NUM_TOKENS=num_tokens,
+            DCP_SIZE=dcp_size,
+            HEAD_DIM=head_dim,
+            BLOCK_R=rank_tile,
+            BLOCK_D=feature_tile,
+        )
+        return
     rank_tiled = (
         is_950()
         and recv.dtype == torch.bfloat16
