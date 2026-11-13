@@ -10,7 +10,7 @@ Layerwise transfers retain their existing implementation and physical-page gate.
 
 | Existing Ascend owner | Responsibility |
 | --- | --- |
-| `metadata.PoolCacheGeometry` | Shares Core-resolved hash size, hit alignment, physical group sizes, scheduler size, retention and EAGLE policy between scheduler and worker. Does not change Core's plan. |
+| `metadata.PoolCacheGeometry` | Shares Core-resolved hash size and hit alignment, DCP-adjusted group block sizes, pool transfer alignment, retention and EAGLE policy between scheduler and worker. Does not change Core's plan. |
 | `coordinator.AscendStoreCoordinator` | Intersects group recoverability through Core's registered cache managers. Saving uses retention; lookup considers all externally available recovery points. |
 | `pool_scheduler.KVPoolScheduler` | Accepts Core's final local/external hit arbitration and constructs load/save metadata. A stronger local partial tail is not replaced by a shorter external hit. |
 | Scheduler `_prepare_boundary_saves` | Consumes `SchedulerOutput.kv_connector_block_state`: current block tables and exact recurrent `boundary_state_offloads`, never an append-only positional mirror. |
@@ -18,7 +18,39 @@ Layerwise transfers retain their existing implementation and physical-page gate.
 | `in_flight_save_blocks.InFlightSaveBlockTracker` | Owns source-block references per save job. Releases only after all ranks acknowledge, deduplicating rank identities and handling out-of-order completion. Reset refuses outstanding saves. |
 | `pool_worker.KVPoolWorker` | Performs lookup and physical-page replay through existing backends and threads. Ordinary and boundary values share the group/rank-isolated key namespace and physical payload protocol. |
 | `kv_transfer` | Waits for device events, writes boundary values before ordinary pages, and acknowledges successful, failed or cancelled jobs. Failed saves never advance saved offsets. |
-| Ascend device adaptation | Owns NPU registration, real stride/segment descriptors and device events. A Store child sharing native MooncakeConnectorV2 borrows its engine without a second staging engine. Native P2P is unchanged. |
+| Ascend device adaptation | Owns NPU registration, real stride/segment descriptors and device events. Mooncake setup and engine selection use the existing backend paths; hash recovery does not install a direct-only Store adapter or change native MooncakeConnectorV2. |
+
+## Geometry and configuration
+
+`resolve_pool_cache_geometry` reads `KVCacheConfig.hash_block_size` and
+`cache_hit_alignment_tokens`. When either field is unresolved, it calls Core's
+`resolve_kv_cache_block_sizes` and `resolve_cache_hit_alignment_tokens` on a
+normalized copy of the cache plan. It never treats the requested PMU as a
+physical page size or writes a new plan into Core.
+
+The geometry keeps three distinct quantities:
+
+- `block_sizes`: each group's token span, resolved through Core's
+  `resolve_dcp_kv_block_size`.
+- `transfer_granularity`: the LCM of the prefix-cacheable groups' block sizes.
+  This is a common pool alignment, not an allocation size in bytes.
+- `core_hit_alignment`: the boundary Core permits for cache hits. When it is
+  smaller than the pool transfer alignment, the geometry advertises partial
+  hash-hit capability. Layerwise operations retain their existing transfer gates.
+
+The current geometry field named `scheduler_block_size` also stores the pool
+transfer alignment. It is not a preserved copy of Core's scheduler size: for
+multiple groups, Core takes the LCM across all groups, whereas the pool alignment
+only includes prefix-cacheable groups. These values can differ when an excluded
+group introduces an additional alignment requirement.
+
+`discard_partial_chunks` is an existing connector extra setting, defaulting to
+`true`. It controls incomplete ordinary save chunks; it does not disable
+hash-boundary checkpoint saves or sub-page hit lookup. Non-layerwise hash recovery
+rejects an explicit value other than `true`. Users do not need to set this option
+to enable PMU recovery. There is no `pool_prefix_mode`,
+`npu_shared_engine_direct_only`, or `npu_store_setup_lock` implementation, and no
+special migration-error check for these old keys.
 
 ## Hash hits versus physical replay
 
