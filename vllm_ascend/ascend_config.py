@@ -450,6 +450,20 @@ class QuantizedAllReduceConfig:
 
 
 @config
+class SharedEngramConfig:
+    model_config = ConfigDict(extra="forbid")
+    backend: Literal["a3"]
+    endpoint: str
+
+    @model_validator(mode="after")
+    def validate_endpoint(self):
+        host, separator, port = self.endpoint.rpartition(":")
+        if not separator or not host or not port.isdigit() or not 0 < int(port) < 65536:
+            raise ValueError("shared Engram endpoint must be host:port")
+        return self
+
+
+@config
 class AscendConfig:
     """Configuration Object for additional_config from vllm.configs.
 
@@ -617,6 +631,7 @@ class AscendConfig:
 
     # ---- user-input switches: bool/int/list/str, auto type validation ----
     enable_cpu_binding: bool = True
+    shared_engram: SharedEngramConfig | None = None
     multistream_dsv4_dsa_overlap: bool = True
     # Prepare Engram hashes, lookups and DP/TP exchanges on an auxiliary stream;
     # FULL graphs wait on descriptor-specific external events at consumers.
@@ -698,6 +713,9 @@ class AscendConfig:
     kvpp_config: KVPPConfig = dataclasses.field(default_factory=KVPPConfig, kw_only=True)
 
     # ---- derived fields: sentinel default, after-validator overwrites ----
+    # This switches the prefill recurrence; keep opt-in until cold/cache-hit
+    # numerical equivalence and performance are qualified on supported NPUs.
+    gdn_internal_prefill_checkpoints: bool = False
     enable_shared_expert_dp: bool = False
     enable_sp_by_pass: bool = False
     enable_sparse_sfa_turboquant: bool = False
@@ -756,8 +774,16 @@ class AscendConfig:
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
         engram_config = getattr(vc, "engram_config", None)
+        if self.shared_engram is not None:
+            if not vc.use_v2_model_runner:
+                raise ValueError("shared_engram requires Model Runner V2")
+            if not engram_config or not engram_config.cpu_offload:
+                raise ValueError("shared_engram requires Engram cpu_offload")
+            if vc.load_config.load_format == "dummy" or vc.model_config.enable_sleep_mode:
+                raise ValueError("Shared host Engram does not support dummy loading or sleep mode")
         if (
             engram_config is not None
+            and getattr(engram_config, "cpu_offload", False)
             and not engram_config.dp_shared_memory
             and vc.use_v2_model_runner
             and (vc.parallel_config.data_parallel_size > 1 or vc.parallel_config.prefill_context_parallel_size > 1)

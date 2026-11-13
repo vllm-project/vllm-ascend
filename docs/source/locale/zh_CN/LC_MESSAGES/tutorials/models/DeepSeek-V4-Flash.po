@@ -181,11 +181,6 @@ msgstr "## 9 性能调优"
 msgid "### 9.1 Recommended Configurations"
 msgstr "### 9.1 推荐配置"
 
-msgid ""
-"> For complete startup commands and parameter descriptions, please refer to "
-"the deployment examples in [Chapter 5](#5-online-service-deployment)."
-msgstr "> 完整的启动命令和参数说明请参考[第5章](#5-online-service-deployment)中的部署示例。"
-
 msgid "### 9.2 Tuning Guidelines"
 msgstr "### 9.2 调优指南"
 
@@ -1763,3 +1758,24 @@ msgstr ""
 "或三级池化场景名称并不会选择后端，也不能证明 SSD offload 已启用。请选择并准备一个后端，然后复制下方该后端完整的 P/D 脚本。这些脚本使用"
 " P token 预算 8192、启用 P/D 前缀缓存，以及 D draft 5 / max-num-seqs 42 / GMU 0.95，与第 "
 "5.2 节的标准一致。"
+
+msgid ""
+"For complete startup commands and parameter descriptions, please refer to "
+"the deployment examples in [Chapter 5](#5-online-service-deployment)."
+msgstr "完整的启动命令和参数说明请参考[第5章](#5-online-service-deployment)中的部署示例。"
+
+msgid "#### Table 1: Detailed Node Configuration"
+msgstr "#### 表1：详细节点配置"
+
+msgid ""
+"| Scenario | Configuration | NPUs | TP | DP | Max Num Seqs | Max Num Batched"
+" Tokens | Max Model Len | PCP |"
+msgstr "| 场景 | 配置 | NPU数量 | TP | DP | 最大序列数 | 最大批处理Token数 | 最大模型长度 | PCP |"
+
+msgid ""
+"> **Note**: **The configurations in the table and the following notes apply "
+"only to A3.** Except for the differences listed in the table, all settings "
+"remain identical between the short-sequence and long-context configurations."
+" The long-context configuration is provided for reference."
+msgstr ""
+"> **说明**：**表中的配置及以下说明仅适用于A3。** 除表中列出的差异外，短序列配置与长上下文配置的所有设置均相同。长上下文配置仅供参考。"
