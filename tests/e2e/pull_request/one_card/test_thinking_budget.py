@@ -452,3 +452,38 @@ def test_v2_sampler_eos_removal_and_budgeted_slot_reuse(temperature):
     requests.apply_staged_writes()
     sampler.apply_staged_writes()
     assert sample() == [END, END]
+
+
+@pytest.mark.parametrize("verification_rows", [1, 4])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_v2_mixed_budget_preserves_unlimited_logits_bitwise(verification_rows, reverse):
+    requests = _make_req_states([1, START, 10], prompt_len=2)
+    requests.add_request("unlimited", 2, [1, START, 10], 3, 32)
+    requests.apply_staged_writes()
+    state = ThinkingBudgetState(requests, MockReasoningConfig())
+    for name, budget in [("req", 0), ("unlimited", None)]:
+        state.add_request(requests.req_id_to_index[name], SamplingParams(thinking_token_budget=budget))
+    state.apply_staged_writes()
+    names = ["req", "unlimited"]
+    if reverse:
+        names.reverse()
+    slots = np.array([requests.req_id_to_index[name] for name in names], dtype=np.int32)
+    mapping = torch.tensor(slots, dtype=torch.int32, device=DEVICE)
+    rows = len(names) * verification_rows
+    ctx = LogitsContext(
+        idx_mapping=mapping,
+        idx_mapping_np=slots,
+        expanded_idx_mapping=mapping.repeat_interleave(verification_rows),
+        expanded_local_pos=torch.arange(verification_rows, dtype=torch.int32, device=DEVICE).repeat(len(names)),
+        input_ids=torch.full((rows,), 10, dtype=torch.int32, device=DEVICE),
+        pos=torch.zeros(rows, dtype=torch.int32, device=DEVICE),
+        seq_lens_upper_bound_np=np.full(len(names), 3, dtype=np.int32),
+    )
+    generator = torch.Generator().manual_seed(42)
+    logits = torch.randn(rows, VOCAB_SIZE, generator=generator).to(DEVICE)
+    before = logits.clone()
+    state.apply(logits, ctx)
+    first = names.index("unlimited") * verification_rows
+    assert torch.equal(logits[first : first + verification_rows], before[first : first + verification_rows])
+    forced_row = names.index("req") * verification_rows
+    assert logits[forced_row].argmax().item() == END

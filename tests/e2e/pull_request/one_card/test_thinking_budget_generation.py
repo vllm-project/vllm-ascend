@@ -14,6 +14,9 @@ from tests.e2e.conftest import VllmRunner
 BUDGETS = [None, -1, 0, 1, 2, 3, 4, 16, 64, 128]
 MAX_OUTPUT_TOKENS = 512
 KV_CACHE_BYTES = 2 * 1024**3
+PREEMPTION_PROMPT_TOKENS = 120
+PREEMPTION_OUTPUT_TOKENS = 128
+NATURAL_PREEMPTION_OUTPUT_TOKENS = 384
 
 
 @pytest.fixture(autouse=True)
@@ -142,27 +145,35 @@ def test_plain_model_unlimited_budget_preserves_output(enforce_eager):
                 runner.model.generate([prompt], SamplingParams(thinking_token_budget=budget, max_tokens=32))
 
 
-@pytest.mark.parametrize("enforce_eager,speculative", [(True, False), (False, False), (True, True), (False, True)])
+@pytest.mark.parametrize("enforce_eager", [True, False])
+@pytest.mark.parametrize("speculative", [None, "ngram_gpu", "draft_model"])
 @pytest.mark.parametrize("temperature", [0.0, 0.6])
-def test_thinking_budget_preemption_matches_unconstrained_cache(monkeypatch, enforce_eager, speculative, temperature):
+@pytest.mark.parametrize("constrain_tokens", [True, False], ids=["constrained", "natural"])
+def test_thinking_budget_preemption_preserves_budget_and_answer(
+    monkeypatch, enforce_eager, speculative, temperature, constrain_tokens
+):
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     outputs = []
     for blocks in [128, 6]:
         with VllmRunner(
             "Qwen/Qwen3-1.7B",
             num_gpu_blocks_override=blocks,
-            max_model_len=256,
+            max_model_len=256 if constrain_tokens else 512,
             max_num_seqs=4,
             max_num_batched_tokens=256,
             disable_log_stats=False,
             enable_prefix_caching=False,
             enforce_eager=enforce_eager,
-            speculative_config={
-                "method": "ngram_gpu",
-                "num_speculative_tokens": 3,
-                "prompt_lookup_min": 2,
-                "prompt_lookup_max": 5,
-            }
+            speculative_config=(
+                {"method": "draft_model", "model": "Qwen/Qwen3-0.6B", "num_speculative_tokens": 3}
+                if speculative == "draft_model"
+                else {
+                    "method": "ngram_gpu",
+                    "num_speculative_tokens": 3,
+                    "prompt_lookup_min": 2,
+                    "prompt_lookup_max": 5,
+                }
+            )
             if speculative
             else None,
             reasoning_config={
@@ -174,27 +185,65 @@ def test_thinking_budget_preemption_matches_unconstrained_cache(monkeypatch, enf
             tokenizer = runner.model.get_tokenizer()
             start = tokenizer.encode("<think>", add_special_tokens=False)
             filler = tokenizer.encode("Think carefully about basic arithmetic. ", add_special_tokens=False)
-            prompt = (filler * 120)[: 120 - len(start)] + start
+            prompt = (filler * PREEMPTION_PROMPT_TOKENS)[: PREEMPTION_PROMPT_TOKENS - len(start)] + start
+            if not constrain_tokens:
+                chat = tokenizer.apply_chat_template(
+                    [{"role": "user", "content": "What is 2 + 3? Give the final answer as a number."}],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=True,
+                ).rstrip()
+                if not chat.endswith("<think>"):
+                    chat += "\n<think>"
+                chat_ids = tokenizer.encode(chat, add_special_tokens=False)
+                assert len(chat_ids) < PREEMPTION_PROMPT_TOKENS
+                prompt = (filler * PREEMPTION_PROMPT_TOKENS)[: PREEMPTION_PROMPT_TOKENS - len(chat_ids)] + chat_ids
             budgets = [0, 8, 16, 32]
             params = [
                 SamplingParams(
                     temperature=temperature,
                     seed=42,
-                    max_tokens=128,
-                    ignore_eos=True,
+                    max_tokens=PREEMPTION_OUTPUT_TOKENS if constrain_tokens else NATURAL_PREEMPTION_OUTPUT_TOKENS,
+                    ignore_eos=constrain_tokens,
                     thinking_token_budget=b,
                     # Restrict ordinary tokens to isolate scheduler state from
                     # BF16 near ties. The budget must restore its masked end
                     # marker, including during speculative verification.
-                    allowed_token_ids=[10],
+                    allowed_token_ids=[10] if constrain_tokens else None,
                 )
                 for b in budgets
             ]
             results = runner.model.generate([{"prompt_token_ids": prompt}] * 4, params)
             end = tokenizer.encode("</think>", add_special_tokens=False)[0]
             for budget, result in zip(budgets, results):
-                expected = [10] * budget + [end] + [10] * (127 - budget)
-                assert list(result.outputs[0].token_ids) == expected
+                ids = list(result.outputs[0].token_ids)
+                print(
+                    json.dumps(
+                        {
+                            "preemption_request": True,
+                            "kv_blocks": blocks,
+                            "budget": budget,
+                            "eager": enforce_eager,
+                            "speculative": speculative,
+                            "temperature": temperature,
+                            "constrain_tokens": constrain_tokens,
+                            "token_ids": ids,
+                            "thinking_tokens": ids.index(end) if end in ids else len(ids),
+                            "finish_reason": result.outputs[0].finish_reason,
+                            "text": result.outputs[0].text,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+                if constrain_tokens:
+                    expected = [10] * budget + [end] + [10] * (PREEMPTION_OUTPUT_TOKENS - 1 - budget)
+                    assert ids == expected
+                else:
+                    assert end in ids
+                    boundary = ids.index(end)
+                    assert boundary <= budget
+                    assert "5" in tokenizer.decode(ids[boundary + 1 :], skip_special_tokens=True)
+                    assert result.outputs[0].finish_reason == "stop", result.outputs[0].text
             metrics = runner.model.get_metrics()
             preemptions = sum(metric.value for metric in metrics if metric.name == "vllm:num_preemptions")
             print(
@@ -204,6 +253,8 @@ def test_thinking_budget_preemption_matches_unconstrained_cache(monkeypatch, enf
                         "eager": enforce_eager,
                         "speculative": speculative,
                         "kv_blocks": blocks,
+                        "constrain_tokens": constrain_tokens,
+                        "budgets": budgets,
                         "temperature": temperature,
                         "preemptions": preemptions,
                         "outputs": [list(r.outputs[0].token_ids) for r in results],
@@ -215,4 +266,16 @@ def test_thinking_budget_preemption_matches_unconstrained_cache(monkeypatch, enf
             else:
                 assert preemptions == 0, metrics
             outputs.append([list(result.outputs[0].token_ids) for result in results])
-    assert outputs[0] == outputs[1]
+    if constrain_tokens:
+        assert outputs[0] == outputs[1]
+    print(
+        json.dumps(
+            {
+                "preemption_outputs_equal": outputs[0] == outputs[1],
+                "eager": enforce_eager,
+                "speculative": speculative,
+                "temperature": temperature,
+                "constrain_tokens": constrain_tokens,
+            }
+        )
+    )

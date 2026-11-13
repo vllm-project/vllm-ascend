@@ -28,8 +28,10 @@ reasoning end, the answer is unaffected by the budget.
 
 The budget counts token IDs after the reasoning start marker, including any
 reasoning already present at the end of the prompt. The forced end sequence is
-additional output. To audit a run, save prompt and output token IDs and locate
-the marker boundaries; retokenizing displayed text can give a different count.
+additional output. Tokens already supplied in the prompt cannot be removed;
+if they exhaust the budget, the next generated step begins the forced end
+sequence. To audit a run, save prompt and output token IDs and locate the marker
+boundaries; retokenizing displayed text can give a different count.
 
 ## Offline generation
 
@@ -138,8 +140,12 @@ Rejection tests exercise absent, tensor, and cached draft logits with standard,
 entropy, and block verification. Large-address tests require at least 8 GiB of
 free NPU memory plus headroom and cover cold and incremental history scans.
 Model tests cover Qwen3-1.7B and ordinary-model regression with
-Qwen2.5-0.5B-Instruct. The constrained-cache test asserts that scheduler
-preemption actually occurs and compares output against an unconstrained run.
+Qwen2.5-0.5B-Instruct. The constrained-cache tests assert that scheduler preemption actually occurs
+with no speculation, n-gram speculation, and a draft model. Restricted-token
+cases compare exact output against an unconstrained run; unrestricted cases
+check the reasoning budget and final answer while recording token differences.
+Mixed-batch kernel tests also verify that unlimited requests retain their
+logits bit-for-bit in both single-token and speculative verification rows.
 
 For reproducible results record both source commits, model revision, CANN,
 driver, torch/torch_npu and Triton versions, device type, commands, seeds,
@@ -148,3 +154,8 @@ Compare baseline and changed code on the same device with identical prompts
 and output limits. Report TTFT, TPOT, throughput, and output lengths for
 disabled, nonbinding, and binding budgets. A shortened reasoning response
 alone is not evidence of faster sampling.
+
+A fixed seed alone does not guarantee bitwise-identical concurrent outputs under
+default scheduling; see upstream [reproducibility](https://docs.vllm.ai/en/latest/usage/reproducibility/).
+Keep per-request output differences in the report and check budget enforcement
+and isolation of unlimited requests separately.
