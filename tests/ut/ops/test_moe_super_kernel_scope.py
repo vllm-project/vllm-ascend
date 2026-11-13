@@ -6,6 +6,7 @@ import unittest
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace as NS
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -27,8 +28,8 @@ def load_function(path, name, namespace, cls=None):
 class ScopeTest(unittest.TestCase):
     def setUp(self):
         self.stream = "main"
-        self.stacks = {"main": [], "shared": []}
-        self.calls = []
+        self.stacks: dict[str, list[str | None]] = {"main": [], "shared": []}
+        self.calls: list[tuple[str, str, str | None]] = []
 
         def begin(name):
             self.calls.append(("begin", self.stream, name))
@@ -38,7 +39,7 @@ class ScopeTest(unittest.TestCase):
             self.calls.append(("end", self.stream, name))
             self.assertEqual(self.stacks[self.stream].pop(), name)
 
-        self.ns = {
+        self.ns: dict[str, Any] = {
             "contextmanager": contextmanager,
             "torch": NS(npu=NS(super_kernel_scope_begin=begin, super_kernel_scope_end=end)),
         }
@@ -83,7 +84,7 @@ class ScopeTest(unittest.TestCase):
                         except ValueError:
                             self.assertTrue(fail)
                         self.assertEqual(self.stacks["main"], ["moe_shared"])
-                    expected = [("begin", "main", "moe_shared")]
+                    expected: list[tuple[str, str, str | None]] = [("begin", "main", "moe_shared")]
                     if enabled:
                         expected += [("begin", "main", None), ("end", "main", None)]
                     expected += [("end", "main", "moe_shared")]
@@ -188,7 +189,7 @@ class ScopeTest(unittest.TestCase):
         )
         for enabled in (False, True):
             for fail in (False, True):
-                order = []
+                order: list[str] = []
 
                 def event(*, order=order):
                     self.assertEqual(self.stacks["main"], ["moe_routed"])

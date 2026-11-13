@@ -17,7 +17,8 @@ class PhaseScopeTest(unittest.TestCase):
         for enabled in (False, True):
             for fused in (False, True):
                 for failure in (None, "gmm1", "gmm2"):
-                    stack, calls = [], []
+                    stack: list[str] = []
+                    calls: list[str] = []
 
                     @contextmanager
                     def scope(name, enabled=True, *, stack=stack):
