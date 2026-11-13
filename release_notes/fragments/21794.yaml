@@ -1,0 +1,5 @@
+pr: 21794
+entries:
+  - category: feature
+    text: Qwen4Exp HC inference uses the AscendC TextGatedResidual operator and requires the matching custom operator package and Torch extension wheel.
+    hardware: [A3]
