@@ -143,7 +143,11 @@ def can_fuse_dspark_context_kv(kv, layers, slot_mappings, rope) -> bool:
             or cache.shape[3] != kv.shape[2]
             or cache.dtype != kv.dtype
             or cache.stride(3) != 1
+            or cache.stride(1) < kv.shape[2]
+            or cache.stride(0) < cache.shape[1] * cache.stride(1)
             or cache_layer.block_size != cache.shape[1]
+            # AscendRMSNorm adds a checkpoint bias after npu_rms_norm when loaded.
+            or getattr(attn.kv_norm, "bias_loaded", False)
             or attn.kv_norm.weight.ndim != 1
             or attn.kv_norm.weight.shape[0] != kv.shape[2]
             or attn.kv_norm.weight.stride(0) != 1
@@ -158,7 +162,11 @@ def can_fuse_dspark_context_kv(kv, layers, slot_mappings, rope) -> bool:
         name = attn.rotary_emb.layername
         cos, sin = rope
         if (
-            cos[name].shape[0] < kv.shape[0]
+            cos[name].ndim != 4
+            or sin[name].ndim != 4
+            or cos[name].shape[1:3] != (1, 1)
+            or sin[name].shape[1:3] != (1, 1)
+            or cos[name].shape[0] < kv.shape[0]
             or sin[name].shape[0] < kv.shape[0]
             or cos[name].shape[-1] != attn.rope_head_dim
             or sin[name].shape[-1] != attn.rope_head_dim
