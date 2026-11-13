@@ -151,7 +151,7 @@ def test_missing_request_rows_fails_before_state_mutation(runtime):
 def test_legacy_keeps_external_preprocessing(runtime):
     ns = runtime
     ns._supports_recurrent_gdn_fusion = lambda: False
-    q = torch.zeros(1, 3, 1, 128)
+    q = torch.zeros(1, 3, 3, 128)[:, :, :1, :]
     a = torch.tensor([[1.0], [2.0], [3.0]])
     table = torch.tensor([[10, 11], [20, 21]], dtype=torch.int32)
     ns._run_recurrent_gdn(
@@ -169,6 +169,7 @@ def test_legacy_keeps_external_preprocessing(runtime):
         query_start_loc=torch.tensor([0, 2, 3]),
     )
     assert ns.l2norm_fwd.call_count == 2
+    assert all(arg.is_contiguous() for arg in ns.recurrent_gated_delta_rule.call_args.args[:3])
     ns.DeviceOperator.fused_gdn_gating.assert_called_once()
     kw = ns.recurrent_gated_delta_rule.call_args.kwargs
     assert "use_gate_in_kernel" not in kw
