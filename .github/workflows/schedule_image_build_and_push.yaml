@@ -69,10 +69,12 @@ jobs:
             {name: "A3 Ubuntu",      dockerfile: "Dockerfile.a3",            suffix: "a3",            soc: "a3"},
             {name: "310P Ubuntu",    dockerfile: "Dockerfile.310p",          suffix: "310p",          soc: "310p"},
             {name: "A5 Ubuntu",      dockerfile: "Dockerfile.a5",            suffix: "a5",            soc: "950"},
+            {name: "A5 UBX Ubuntu",  dockerfile: "Dockerfile.a5.ubx",        suffix: "a5-ubx",        soc: "950"},
             {name: "A2 openeuler",   dockerfile: "Dockerfile.openEuler",     suffix: "openeuler",     soc: "910b"},
             {name: "A3 openEuler",   dockerfile: "Dockerfile.a3.openEuler",  suffix: "a3-openeuler",  soc: "a3"},
             {name: "310P openEuler", dockerfile: "Dockerfile.310p.openEuler",suffix: "310p-openeuler",soc: "310p"},
-            {name: "A5 openEuler",   dockerfile: "Dockerfile.a5.openEuler",  suffix: "a5-openeuler",  soc: "950"}
+            {name: "A5 openEuler",   dockerfile: "Dockerfile.a5.openEuler",  suffix: "a5-openeuler",  soc: "950"},
+            {name: "A5 UBX openEuler", dockerfile: "Dockerfile.a5.ubx.openEuler", suffix: "a5-ubx-openeuler", soc: "950"}
           ]')
           echo "build_meta=$MATRIX" >> "$GITHUB_OUTPUT"
 
@@ -82,7 +84,7 @@ jobs:
     if: ${{ !(github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'image-build')) }}
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 10
       matrix:
         build_meta: ${{ fromJSON(needs.setup-matrix.outputs.build_meta) }}
     uses: ./.github/workflows/_schedule_image_build.yaml
