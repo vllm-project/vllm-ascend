@@ -80,7 +80,7 @@ test_cases:
         dataset_path: vllm-ascend/gpqa
         request_conf: vllm_api_general_chat
         dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
-        max_out_len: 32768
+        max_out_len: 65536
         batch_size: 32
         baseline: 85.1
         threshold: 5
