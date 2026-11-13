@@ -81,6 +81,17 @@ class EngramModelState(AscendModelState):
     _engram_graph_inputs: dict[str, torch.Tensor] | None = None
     _engram_inputs: dict[str, Any] | None = None
 
+    def prepare_inputs(self, input_batch: AscendInputBatch, req_states) -> dict[str, Any]:
+        inputs = super().prepare_inputs(input_batch, req_states)
+        if (
+            self.model.skip_moe_padding
+            and self._cg_mode == CUDAGraphMode.NONE
+            and input_batch.has_prefill
+            and input_batch.is_prefilling_np.all()
+        ):
+            inputs["is_pure_eager_prefill"] = True
+        return inputs
+
     def _initialize_decoder_replay(self) -> None:
         # Engram uses the model-specific replay state instead of preparing
         # a second replay batch in AscendModelState.

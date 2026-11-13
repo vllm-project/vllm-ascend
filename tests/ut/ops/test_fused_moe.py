@@ -678,7 +678,10 @@ def test_routing_replay_disabled_keeps_ascend_routing_unchanged(monkeypatch):
 
 @pytest.mark.parametrize("hidden_dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("input_dtype", [torch.int32, torch.int64])
-def test_hash_router_preserves_fp32_weights_and_explicit_input_ids(monkeypatch, hidden_dtype, input_dtype):
+@pytest.mark.parametrize("mask_padding", [False, True])
+def test_hash_router_preserves_fp32_weights_and_explicit_input_ids(
+    monkeypatch, hidden_dtype, input_dtype, mask_padding
+):
     input_ids = torch.tensor([-1, 22], dtype=input_dtype)
     gathered_input_ids = torch.tensor([22, -1], dtype=torch.int64)
     hidden_states = torch.randn(2, 4, dtype=hidden_dtype)
@@ -712,6 +715,12 @@ def test_hash_router_preserves_fp32_weights_and_explicit_input_ids(monkeypatch, 
 
     routed_experts = _build_routing_replay_experts(router, None)
     routed_experts.n_shared_experts = 0
+    routed_experts.padding_expert_id = 2
+    context = SimpleNamespace(
+        is_padding=torch.tensor([False, True, True, True]),
+        additional_kwargs={} if mask_padding else {"skip_moe_padding_filter": True},
+    )
+    monkeypatch.setattr(routed_experts_module, "get_forward_context", lambda: context)
     monkeypatch.setattr(routed_experts_module, "get_moe_num_logical_experts", lambda *args, **kwargs: 4)
     monkeypatch.setattr(routed_experts_module, "get_ascend_config", lambda: SimpleNamespace(enable_force_eplb=False))
     weights, ids = routed_experts._select_experts(
@@ -723,7 +732,10 @@ def test_hash_router_preserves_fp32_weights_and_explicit_input_ids(monkeypatch, 
 
     assert weights is topk_weights
     assert weights.dtype == torch.float32
-    assert ids is topk_ids
+    if mask_padding:
+        torch.testing.assert_close(ids, torch.tensor([[0, 0], [2, 2]], dtype=torch.int32))
+    else:
+        assert ids is topk_ids
     # The upstream router normalizes padding after gathering token IDs.
     torch.testing.assert_close(hash_op.call_args.kwargs["input_ids"], torch.tensor([22, 0], dtype=torch.int64))
     prepare_finalize.all_gather_input_ids.assert_called_once()

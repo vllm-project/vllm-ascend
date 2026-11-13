@@ -62,6 +62,7 @@ def runtime(monkeypatch):
 def make_model():
     model = object.__new__(model_mod.DeepseekV41Model)
     torch.nn.Module.__init__(model)
+    model.skip_moe_padding = False
     model.has_engram, model.engram_dp_shared_memory = True, True
     model._engram_overlap_enabled = True
     model._engram_input_buffers, model._engram_prepare_stream = None, None
