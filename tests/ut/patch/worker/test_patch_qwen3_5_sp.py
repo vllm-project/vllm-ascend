@@ -482,6 +482,9 @@ class TestDenseSpFusedColumnOp:
         monkeypatch.setattr(patch_qwen3_5, "get_tp_group", lambda: _make_fake_tp_group(2))
         monkeypatch.setattr(patch_qwen3_5, "DeviceOperator", _FakeDeviceOperator)
         monkeypatch.setattr(patch_qwen3_5, "_DENSE_SP_FUSED_DTYPES", (torch.float64,))
+        # Tests use 3-6 row tensors; the shard threshold (x.shape[0] * world_size)
+        # must be lowered so the structural guard passes for these small inputs.
+        monkeypatch.setattr(patch_qwen3_5, "_DENSE_SP_FUSED_MIN_TOKENS", 2)
 
     def test_fuses_all_gather_into_gemm(self, monkeypatch):
         gen = torch.Generator().manual_seed(0)
@@ -542,6 +545,7 @@ class TestDenseSpFusedRowOp:
         monkeypatch.setattr(linear_op, "get_tp_group", lambda: fake_group)
         monkeypatch.setattr(patch_qwen3_5, "DeviceOperator", _FakeDeviceOperator)
         monkeypatch.setattr(patch_qwen3_5, "_DENSE_SP_FUSED_DTYPES", (torch.float64,))
+        monkeypatch.setattr(patch_qwen3_5, "_DENSE_SP_FUSED_MIN_TOKENS", 2)
         monkeypatch.setattr(patch_qwen3_5, "sp_reduce_scatter", lambda x: x[: x.shape[0] // 2])
 
     def test_zero_pads_then_fuses(self, monkeypatch):
@@ -726,6 +730,7 @@ class TestFusedDecoderFlow:
         monkeypatch.setattr(linear_op, "get_tp_group", lambda: fake_group)
         monkeypatch.setattr(patch_qwen3_5, "DeviceOperator", _FakeDeviceOperator)
         monkeypatch.setattr(patch_qwen3_5, "_DENSE_SP_FUSED_DTYPES", (torch.float64,))
+        monkeypatch.setattr(patch_qwen3_5, "_DENSE_SP_FUSED_MIN_TOKENS", 2)
 
     def _fused_column(self, out_features: int, in_features: int) -> "_CallableProjection":
         proj = _make_column_proj(torch.randn(out_features, in_features, dtype=torch.float64))
