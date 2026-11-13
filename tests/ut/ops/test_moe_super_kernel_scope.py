@@ -65,6 +65,31 @@ class ScopeTest(unittest.TestCase):
         self.assertEqual(self.stream, stream)
         self.assertEqual(self.stacks[stream], [name] if enabled else [])
 
+    def test_none_scope_is_forwarded_and_outer_scope_restored(self):
+        # None is the torch_npu exclusion sentinel, not a disabled context.
+        # This tests wrapper forwarding/cleanup; device fusion needs hardware.
+        for enabled in (False, True):
+            for fail in (False, True):
+                with self.subTest(enabled=enabled, fail=fail):
+                    self.calls.clear()
+                    with self.ns["super_kernel_scope"]("moe_shared", True):
+                        try:
+                            with self.ns["super_kernel_scope"](None, enabled):
+                                self.assertEqual(
+                                    self.stacks["main"], ["moe_shared", None] if enabled else ["moe_shared"]
+                                )
+                                if fail:
+                                    raise ValueError("quant failed")
+                        except ValueError:
+                            self.assertTrue(fail)
+                        self.assertEqual(self.stacks["main"], ["moe_shared"])
+                    expected = [("begin", "main", "moe_shared")]
+                    if enabled:
+                        expected += [("begin", "main", None), ("end", "main", None)]
+                    expected += [("end", "main", "moe_shared")]
+                    self.assertEqual(self.calls, expected)
+                    self.assertEqual(self.stacks, {"main": [], "shared": []})
+
     def test_routed_scope_and_cleanup(self):
         fn = load_function("vllm_ascend/ops/fused_moe/fused_moe.py", "_forward_impl", self.ns, "AscendMoERunner")
         for enabled in (False, True):

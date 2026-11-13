@@ -1172,6 +1172,13 @@ def has_rope(vllm_config: VllmConfig):
 
 @contextmanager
 def super_kernel_scope(scope: str | None, enabled: bool):
+    """Mark a fusion region, or exclude its operations when ``scope`` is None.
+
+    torch_npu's scope operators accept an optional string (``str?`` in their
+    dispatcher schemas). An enabled None scope is an exclusion marker, not a
+    no-op: it must reach both operators even inside an active named scope.
+    Only ``enabled=False`` bypasses the markers and leaves outer scopes intact.
+    """
     if not enabled:
         yield
         return
