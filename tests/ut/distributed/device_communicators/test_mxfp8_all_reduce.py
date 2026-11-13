@@ -6,6 +6,7 @@ import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -94,7 +95,7 @@ class TestMxfp8AllReduce(unittest.TestCase):
 
     def test_pipeline_selection_threshold_rows_and_graph_capture(self):
         source = torch.ones(8, 128, dtype=torch.bfloat16)
-        cases = (
+        cases: tuple[tuple[dict[str, Any], bool, str | None], ...] = (
             ({}, False, "disabled"),
             ({"enable_pipeline": False}, False, "disabled"),
             ({"enable_pipeline": True, "pipeline_min_numel": 1025}, False, "below_pipeline_threshold"),
@@ -185,17 +186,20 @@ class TestMxfp8AllReduce(unittest.TestCase):
         decoded = [_decode(values.view(torch.float8_e4m3fn), scales) for values, scales in zip(raw_values, raw_scales)]
         expected = torch.stack(decoded).sum(0).to(torch.bfloat16).reshape(2, size, hidden)
         state = threading.local()
-        exchange_slots = [None] * size
-        gather_slots = [None] * size
+        exchange_slots: list[tuple[torch.Tensor, torch.Tensor] | None] = [None] * size
+        gather_slots: list[tuple[torch.Tensor, torch.Tensor] | None] = [None] * size
 
         def complete_exchange():
-            sends = [send.clone() for _, send in exchange_slots]
-            for owner, (received, _) in enumerate(exchange_slots):
+            # The barrier action runs after every rank has filled its slot.
+            slots = cast(list[tuple[torch.Tensor, torch.Tensor]], exchange_slots)
+            sends = [send.clone() for _, send in slots]
+            for owner, (received, _) in enumerate(slots):
                 received.copy_(torch.cat([send.chunk(size, dim=0)[owner] for send in sends]))
 
         def complete_gather():
-            result = torch.cat([partial.clone() for _, partial in gather_slots])
-            for output, _ in gather_slots:
+            slots = cast(list[tuple[torch.Tensor, torch.Tensor]], gather_slots)
+            result = torch.cat([partial.clone() for _, partial in slots])
+            for output, _ in slots:
                 output.copy_(result)
 
         exchange_barrier = threading.Barrier(size, action=complete_exchange, timeout=20)
@@ -256,7 +260,7 @@ class TestQuantizedBackendSelection(unittest.TestCase):
             comm.unique_name = unique_name
             comm.world_size = 2
 
-        cases = (
+        cases: tuple[tuple[bool, dict[str, Any], str], ...] = (
             (False, {}, "int8"),
             (True, {}, "mxfp8"),
             (False, {"quant_dtype": "int8"}, "int8"),
