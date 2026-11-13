@@ -9,7 +9,7 @@ metadata and payload size, including for mixed prefill/decode batches.
 
 import logging
 from collections import deque
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import torch
 import torch.distributed as dist
@@ -74,8 +74,8 @@ class Mxfp8AllReduce:
         if device_type != AscendDeviceType.A5:
             raise RuntimeError("MXFP8 AllToAll quantized all-reduce requires Atlas A5.")
         self.supported = self.world_size in _SUPPORTED_WORLD_SIZES
-        self.quantize_op = getattr(torch_npu, "npu_dynamic_mx_quant", None)
-        self.dequantize_op = getattr(torch_npu, "npu_anti_mx_quant", None)
+        self.quantize_op: Any = getattr(torch_npu, "npu_dynamic_mx_quant", None)
+        self.dequantize_op: Any = getattr(torch_npu, "npu_anti_mx_quant", None)
         if self.supported and (not callable(self.quantize_op) or not callable(self.dequantize_op)):
             raise RuntimeError(
                 "MXFP8 AllToAll quantized all-reduce requires npu_dynamic_mx_quant and npu_anti_mx_quant. "
@@ -202,7 +202,7 @@ class Mxfp8AllReduce:
         flat = input_.reshape(rows, hidden)
         output = torch.empty_like(input_, memory_format=torch.contiguous_format)
         flat_output = output.view(rows, hidden)
-        pending = deque()
+        pending: deque[_Exchange] = deque()
         # Submit both AllToAll calls before waiting, in the same order on all ranks.
         for start, end in _chunk_ranges(rows, self.world_size):
             send, scale_dtype = self._pack(flat[start:end])

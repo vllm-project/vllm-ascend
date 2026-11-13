@@ -43,7 +43,7 @@ class _OrderedCollectives:
         self.local = threading.local()
         self.calls = {}
         self.sequences = [0] * world_size
-        self.events = [[] for _ in range(world_size)]
+        self.events: list[list[tuple[str, int]]] = [[] for _ in range(world_size)]
         self.completed = 0
         self.error = None
 
