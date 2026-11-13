@@ -21,18 +21,13 @@ on:
         description: 'The tag subfix to use'
         required: true
         type: string
-      tag_suffix:
-        description: "Extra suffix appended to the published image tag only, after 'suffix', including the leading dash (e.g. '-presmoke' → nightly-main-310p-presmoke). Cache tags and artifact names keep using 'suffix', so isolated builds still reuse the warm build cache. When set, the build also publishes a chip-qualified alias tag (nightly-main-presmoke-a2 / -a3 / -a5 / -310p) so a single chip can be referenced unambiguously. Default '' leaves the tag unchanged."
-        required: false
-        type: string
-        default: ''
       should_push:
         description: 'Whether to push the image'
         required: false
         type: boolean
         default: False
-      skip_sync:
-        description: 'If true, do not dispatch the quay.io sync after pushing. Used by presmoke builds, whose images are for issue localization only and must not be mirrored to quay.io.'
+      isolated_build:
+        description: "If true, publish an isolated (/presmoke) runtime image. The tag is unchanged; isolation comes from the caller having pointed swr_repo at the isolated '-presmoke' repository. Only the quay.io sync is skipped. Default false keeps the standard nightly behaviour."
         required: false
         type: boolean
         default: false
@@ -70,13 +65,8 @@ on:
         required: false
         type: string
         default: '910b'
-      target:
-        description: "Nightly target / chip name ('a2', 'a3', '310p' or 'a5'). Only used to build the chip-qualified alias tag of an isolated build, so it is required whenever tag_suffix is set."
-        required: false
-        type: string
-        default: ''
       dockerfile_ref:
-        description: "Optional git ref the Dockerfile is taken from (e.g. refs/pull/<n>/head). When set, the Dockerfile of the build is overwritten with the version from that ref ('pre-merge' Dockerfile of a PR) while branch_ref still provides the rest of the source tree and therefore the image tag. Default '' uses the Dockerfile of the checked-out ref."
+        description: "Optional git ref the whole source tree is built from (e.g. refs/pull/<n>/head). When set, the build checks out this ref ('pre-merge') instead of the branch, but branch_ref still decides the published tag. /presmoke always passes the triggering PR so the image contains the code and Dockerfiles under review. Default '' builds vllm_ascend_branch."
         required: false
         type: string
         default: ''
@@ -130,33 +120,12 @@ jobs:
         submodules: recursive
         fetch-depth: 0
         persist-credentials: false
-        # Empty on tag pushes and PR events, so the default event ref is used.
-        ref: ${{ inputs.branch_ref }}
-
-    - name: Checkout Dockerfile from ref
-      if: ${{ inputs.dockerfile_ref != '' }}
-      uses: actions/checkout@v7
-      with:
-        # An isolated build (e.g. /presmoke over a PR) takes the Dockerfile from
-        # dockerfile_ref and overlays it on the branch checked out above, so the
-        # built image uses the versions under review while the branch, and therefore
-        # the published tag, stay unchanged.
-        ref: ${{ inputs.dockerfile_ref }}
-        path: .pr-dockerfile
-        sparse-checkout: ${{ inputs.dockerfile || 'Dockerfile' }}
-        sparse-checkout-cone-mode: false
-        fetch-depth: 1
-        persist-credentials: false
-
-    - name: Overlay Dockerfile from ref
-      if: ${{ inputs.dockerfile_ref != '' }}
-      run: |
-        set -euo pipefail
-        DOCKERFILE="${{ inputs.dockerfile || 'Dockerfile' }}"
-        cp ".pr-dockerfile/$DOCKERFILE" "$DOCKERFILE"
-        rm -rf .pr-dockerfile
-        # Record the effective base image so the log shows which version is built.
-        grep -m1 '^FROM' "$DOCKERFILE"
+        # dockerfile_ref (e.g. refs/pull/<n>/head for /presmoke) makes the whole
+        # source tree come from that ref, not just the Dockerfile, so the image is
+        # a full 'pre-merge' build of the ref under review. The branch (branch_ref)
+        # still decides the published tag. Empty on tag pushes and PR events, so the
+        # default event ref is used.
+        ref: ${{ inputs.dockerfile_ref || inputs.branch_ref }}
 
     - name: Compute cache tag
       id: cache-tag
@@ -327,13 +296,12 @@ jobs:
           # to the tag (e.g. suffix=310p-openeuler → SUFFIX=-310p-openeuler,
           # resulting in tags like main-310p-openeuler).
           # Leave SUFFIX empty when no suffix is provided (plain tags like main).
-          # tag_suffix is appended after the suffix and already carries its own
-          # leading dash (e.g. '-presmoke' → main-310p-presmoke). It only affects
-          # the published tag, not the cache tag or the artifact names.
+          #
+          # An isolated (/presmoke) build keeps exactly the same tag: it is
+          # distinguished only by the repository it is pushed to, which the caller
+          # selects via swr_repo.
           if [ -n "${{ inputs.suffix }}" ]; then
-            echo "SUFFIX=-${{ inputs.suffix }}${{ inputs.tag_suffix }}" >> "$GITHUB_ENV"
-          elif [ -n "${{ inputs.tag_suffix }}" ]; then
-            echo "SUFFIX=${{ inputs.tag_suffix }}" >> "$GITHUB_ENV"
+            echo "SUFFIX=-${{ inputs.suffix }}" >> "$GITHUB_ENV"
           else
             echo "SUFFIX=" >> "$GITHUB_ENV"
           fi
@@ -347,33 +315,6 @@ jobs:
             PATTERN="${PATTERN//\//-}"
           fi
           echo "pattern=${PATTERN}" >> "$GITHUB_OUTPUT"
-
-      - name: Prepare chip alias tag
-        id: alias
-        if: ${{ inputs.tag_suffix != '' }}
-        env:
-          PATTERN: ${{ steps.tag_pattern.outputs.pattern }}
-          SUFFIX: ${{ inputs.suffix }}
-          TAG_SUFFIX: ${{ inputs.tag_suffix }}
-          CHIP: ${{ inputs.target }}
-        run: |
-          set -euo pipefail
-          # Isolated builds (presmoke, i.e. tag_suffix != '') additionally publish a
-          # chip-qualified alias tag: nightly-<pattern>[-openeuler]<tag_suffix>-<chip>,
-          # e.g. nightly-main-presmoke-a2 / nightly-main-presmoke-a3. The chip comes
-          # straight from the caller, and the OS marker from the 'suffix' (the a2
-          # variant carries an empty suffix). The standard tags are left untouched and
-          # this alias is not recorded as a separate build-info report (it points at
-          # the same manifest).
-          if [ -z "$CHIP" ]; then
-            echo "::error::tag_suffix is set but no chip (target) was provided"
-            exit 1
-          fi
-          OS_MARK=""
-          if [[ "$SUFFIX" == *openeuler* ]]; then
-            OS_MARK="-openeuler"
-          fi
-          echo "tag=nightly-${PATTERN}${OS_MARK}${TAG_SUFFIX}-${CHIP}" >> "$GITHUB_OUTPUT"
 
       - name: Docker meta
         id: meta
@@ -420,7 +361,6 @@ jobs:
           # the quay.io repo; the sync tool then mirrors swr.cn-north-12 → quay.io).
           SOURCE_IMAGE: ${{ inputs.swr_temp_repo }}
           TAGS: ${{ steps.meta.outputs.tags }}
-          ALIAS_TAG: ${{ steps.alias.outputs.tag }}
         run: |
           set -euo pipefail
 
@@ -458,23 +398,8 @@ jobs:
             mv "$metadata_file.tmp" "$metadata_file"
           done
 
-          # Isolation builds also publish a chip-qualified alias tag pointing at the
-          # same multi-arch manifest, e.g. nightly-main-presmoke-a2. No metadata file
-          # is written so the build-info collection still reports a single image.
-          if [ -n "${ALIAS_TAG:-}" ]; then
-            echo "Creating chip alias tag $ALIAS_TAG"
-            DIGESTS=""
-            for digest_file in "$DIGEST_DIR"/*; do
-              digest=$(basename "$digest_file")
-              DIGESTS="$DIGESTS $SOURCE_IMAGE@sha256:$digest"
-            done
-
-            # shellcheck disable=SC2086
-            docker buildx imagetools create -t "$ALIAS_TAG" $DIGESTS
-          fi
-
       - name: Dispatch quay.io sync
-        if: ${{ inputs.should_push && !inputs.skip_sync }}
+        if: ${{ inputs.should_push && !inputs.isolated_build }}
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.SYNC_TOOLS_TOKEN }}
