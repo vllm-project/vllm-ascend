@@ -55,4 +55,6 @@ Device routing:
 - **A5**: the dynamic kernel is used for DCP8/DCP16 with head dims 512 and 1024, where it measured 2.1-3.9x faster than the scalar and batched paths on the operator (including T64/T256). On a real 8-rank HCCL run the combine fell from 6.18/7.64/12.33/21.67us to 3.45/4.73/6.90/11.67us at T4/T16/T16-H6/T64, while the all-to-all stayed near 53us.
 - **A3**: the dynamic kernel is never selected. Instead, warmup compiles a static twin (`NUM_HEADS`/`NUM_TOKENS` constexpr) for the engine's ACLGraph capture sizes (falling back to the #16350 decode budget `[1,2,4,8,16,32,48,64,96,128,192]`), and the dispatcher uses it only when the exact `(heads, tokens, head_dim, dcp, local strides, lse strides)` signature was warmed. Decode batches are padded to those graph sizes, so normal serving stays on the static kernel. Prefill token counts and any unwarmed signature fall back to the scalar/batched path with a one-time log instead of compiling inside a request. A3 DCP16 measured 2.0-2.2x faster than scalar/batched at D512 and 1.35x at D1024; DCP8 measured 1.40x at T16.
 
+Requests with `return_lse=True` always keep the scalar kernel because neither rank-tiled kernel writes the LSE lane.
+
 Warmup keys accumulate across target/draft warmup passes; a candidate that produced no launch is never installed, so a missed bucket can only fall back, not compile.

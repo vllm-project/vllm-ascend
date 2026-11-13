@@ -168,3 +168,43 @@ def test_a3_static_warmup_accumulates(monkeypatch):
     dcp_a2a._A3_RECORDED.add(second)
     dcp_a2a.end_a3_static_warmup()
     assert frozenset({first, second}) == dcp_a2a._A3_STATIC_SIGNATURES
+
+
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A3, AscendDeviceType.A5])
+def test_return_lse_keeps_scalar_path(monkeypatch, device_type):
+    power_of_two = lambda n: 1 << (n - 1).bit_length()
+    monkeypatch.setattr(dcp_a2a.triton, "next_power_of_2", power_of_two, raising=False)
+    monkeypatch.setattr(dcp_a2a.triton, "cdiv", lambda a, b: (a + b - 1) // b, raising=False)
+    monkeypatch.setattr(dcp_a2a, "is_950", lambda: device_type == AscendDeviceType.A5)
+    monkeypatch.setattr(dcp_a2a, "get_ascend_device_type", lambda: device_type)
+    monkeypatch.setattr(dcp_a2a, "init_device_properties_triton", lambda: None)
+    monkeypatch.setattr(dcp_a2a, "get_vectorcore_num", lambda: 48)
+    monkeypatch.setattr(dcp_a2a, "_A3_WARMING", False)
+    monkeypatch.setattr(dcp_a2a, "_UNWARMED_LOGGED", set())
+    key = (4, 16, 512, 16, 2048, 512, 1, 4, 1)
+    monkeypatch.setattr(dcp_a2a, "_A3_STATIC_SIGNATURES", frozenset({key}))
+    tiled, static, scalar, batched = Mock(), Mock(), Mock(), Mock()
+    for name, launch in [
+        ("rank_tiled", tiled),
+        ("rank_tiled_static", static),
+        ("", scalar),
+        ("batched", batched),
+    ]:
+        suffix = "_" + name if name else ""
+        kernel = Mock()
+        kernel.__getitem__ = Mock(return_value=launch)
+        monkeypatch.setattr(dcp_a2a, f"_fused_dcp_lse_combine{suffix}_kernel", kernel)
+    with FakeTensorMode():
+        recv = torch.empty(16, 4, 16, 516, dtype=torch.bfloat16, device="npu:0")
+        local = torch.empty_strided((16, 4, 512), (2048, 512, 1), dtype=torch.bfloat16, device="npu:0")
+        lse = torch.empty(16, 4, 1, dtype=torch.float32, device="npu:0")
+        output = torch.empty(16, 4, 513, dtype=torch.bfloat16, device="npu:0")
+
+        def do_launch(kernel, grid, *args, **kwargs):
+            kernel[grid](*args, **kwargs)
+
+        dcp_a2a._launch_fused_dcp_lse_combine(recv, output, 512, 1, True, local, lse, 48, do_launch)
+    # Neither rank-tiled kernel writes the LSE lane, so return_lse keeps the
+    # scalar kernel on every device.
+    assert scalar.call_count == 1
+    assert tiled.call_count + static.call_count + batched.call_count == 0
