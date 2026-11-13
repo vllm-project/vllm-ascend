@@ -306,7 +306,9 @@ def inline_body(p):
         lines += [translate_known_zh(p["issue"]), ""]
     patch = p.get("patch")
     if isinstance(patch, dict) and patch.get("old") is not None:
-        lines += ["Suggested change:", "", f"- `{patch['old']}`", f"+ `{patch.get('new', '')}`", ""]
+        old = patch["old"]
+        new = patch.get("new", "")
+        lines += ["Suggested change:", "", "```diff", f"- {old}", f"+ {new}", "```", ""]
     elif p.get("fix_suggestion"):
         lines += [f"Suggestion: {translate_known_zh(p['fix_suggestion'])}", ""]
     lines += [
