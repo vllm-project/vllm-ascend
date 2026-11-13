@@ -31,6 +31,18 @@ def test_decode_qkv_matches_concat_layout(tokens, strided, dtype):
         actual = _rearrange_decode_qkv(packed, key_dim, value_dim, head_k_dim, head_v_dim)
     for got, want, source in zip(actual, expected, parts):
         torch.testing.assert_close(got, want, rtol=0, atol=0)
-        assert got.is_contiguous()
-        if tokens == 1 and not strided:
+        if strided:
+            assert got.is_contiguous()
+        elif tokens:
             assert got.data_ptr() == source.data_ptr()
+            assert got.untyped_storage().data_ptr() == packed.untyped_storage().data_ptr()
+
+
+def test_decode_qkv_preserves_padded_rows_and_storage_offsets():
+    backing = torch.randn(10, 10240 + 256, dtype=torch.bfloat16)
+    packed = backing[1:9, 128:10368]
+    q, k, v = _rearrange_decode_qkv(packed, 2048, 6144, 128, 128)
+    for got, offset in zip((q, k, v), (0, 2048, 4096)):
+        assert got.untyped_storage().data_ptr() == backing.untyped_storage().data_ptr()
+        assert got.storage_offset() == packed.storage_offset() + offset
+        assert got.stride()[1:] == (10496, 128, 1)
