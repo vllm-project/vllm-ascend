@@ -425,7 +425,7 @@ class AscendKimiMoE(nn.Module):
         latent_quant_config = quant_config if quant_config is not None and quant_config.get_name() == "ascend" else None
         self.routed_output_transform: KimiRoutedOutputTransform | None
         if self.use_latent_moe:
-            self.routed_expert_down_proj = ReplicatedLinear(
+            self.routed_expert_down_proj = AscendKimiK3RoutedLinear(
                 hidden_size,
                 self.moe_hidden_size,
                 bias=False,
@@ -435,7 +435,7 @@ class AscendKimiMoE(nn.Module):
             self.routed_expert_norm = (
                 RMSNorm(self.moe_hidden_size, eps=config.rms_norm_eps) if self.latent_moe_use_norm else None
             )
-            self.routed_expert_up_proj = ReplicatedLinear(
+            self.routed_expert_up_proj = AscendKimiK3RoutedLinear(
                 self.moe_hidden_size,
                 hidden_size,
                 bias=False,
