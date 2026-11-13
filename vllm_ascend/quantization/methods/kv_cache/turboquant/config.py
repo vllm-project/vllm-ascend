@@ -22,11 +22,7 @@ def _validate_turboquant_common(vllm_config) -> None:
 
 
 def _validate_turboquant_sfa(vllm_config) -> None:
-    """Checks for the packed SFA main cache.
-
-    Unlike the compressed-cache path this one supports context parallelism, so
-    the DCP/PCP restriction stays out of here.
-    """
+    """Checks for the packed SFA main cache."""
     additional_config = vllm_config.additional_config or {}
     enable_sparse_sfa_c8 = validate_additional_config_bool(
         additional_config.get("enable_sparse_sfa_c8", False),
@@ -51,6 +47,10 @@ def _validate_turboquant_sfa(vllm_config) -> None:
     rope_head_dim = getattr(hf_text_config, "qk_rope_head_dim", None)
     if rope_head_dim != 64:
         raise ValueError(f"{TURBOQUANT_CACHE_DTYPE} requires qk_rope_head_dim=64, but got {rope_head_dim}")
+
+    parallel = vllm_config.parallel_config
+    if parallel.decode_context_parallel_size != 1 or parallel.prefill_context_parallel_size != 1:
+        raise ValueError(f"{TURBOQUANT_CACHE_DTYPE} does not support context parallelism (DCP/PCP)")
 
 
 def _validate_turboquant_dsa(vllm_config) -> None:
