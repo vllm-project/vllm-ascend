@@ -380,7 +380,10 @@ class AscendW8A8MXFP8DynamicLmHeadMethod(AscendW8A8MXFP8DynamicLinearMethod):
         if weight.dtype not in (torch.float16, torch.bfloat16):
             raise ValueError("Online LM head quantization requires float16 or bfloat16 weights.")
         quantized_weight = torch.empty_like(weight, dtype=torch.float8_e4m3fn)
-        weight_scale = layer.weight_scale.data
+        # The copy's scale buffer is created after the model is already on the
+        # device, and nothing moves it afterwards; rebuild it next to the
+        # quantized weight like the INT8 LM head method does.
+        weight_scale = torch.empty_like(layer.weight_scale, device=weight.device)
         for start in range(0, weight.shape[0], _LM_HEAD_QUANT_CHUNK_ROWS):
             end = min(start + _LM_HEAD_QUANT_CHUNK_ROWS, weight.shape[0])
             quantized_chunk, scale = torch_npu.npu_dynamic_mx_quant(
@@ -394,6 +397,7 @@ class AscendW8A8MXFP8DynamicLmHeadMethod(AscendW8A8MXFP8DynamicLinearMethod):
             # when converting the checkpoint-shaped scales to the matmul layout.
             weight_scale[start:end].copy_(scale.reshape(end - start, -1)[:, : weight_scale.shape[1]])
         layer.weight.data = quantized_weight
+        layer.weight_scale.data = weight_scale
         del weight, quantized_weight
         super().process_weights_after_loading(layer)
 
