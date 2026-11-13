@@ -21,7 +21,6 @@ from vllm_ascend.worker.v2.model_states.default import AscendModelState
         (None, None, None),
         ("env", "VLLM_MOE_SKIP_PADDING", False),
         ("runner", "v2", False),
-        ("parallel", "use_sequence_parallel_moe", False),
         ("parallel", "data_parallel_size", 2),
         ("parallel", "prefill_context_parallel_size", 2),
         ("parallel", "decode_context_parallel_size", 2),
@@ -39,9 +38,10 @@ from vllm_ascend.worker.v2.model_states.default import AscendModelState
         ("communication", "method", MoECommType.ALLTOALL),
     ],
 )
-def test_skip_moe_padding_requires_supported_layout(monkeypatch, section, option, value):
+@pytest.mark.parametrize("sequence_parallel", [False, True])
+def test_skip_moe_padding_requires_supported_layout(monkeypatch, section, option, value, sequence_parallel):
     parallel = SimpleNamespace(
-        use_sequence_parallel_moe=True,
+        use_sequence_parallel_moe=sequence_parallel,
         data_parallel_size=1,
         prefill_context_parallel_size=1,
         decode_context_parallel_size=1,
@@ -94,12 +94,13 @@ def test_only_pure_eager_prefill_bypasses_route_filter(monkeypatch, enabled, mod
 
 @pytest.mark.parametrize("rows", [13, 16])
 @pytest.mark.parametrize("pure_eager_prefill", [False, True])
-def test_forward_preserves_global_padding_layout(monkeypatch, rows, pure_eager_prefill):
+@pytest.mark.parametrize("sequence_parallel", [False, True])
+def test_forward_preserves_global_padding_layout(monkeypatch, rows, pure_eager_prefill, sequence_parallel):
     mask = torch.arange(rows) >= 6
     context = SimpleNamespace(is_padding=mask, additional_kwargs={})
     monkeypatch.setattr(model_module, "get_forward_context", lambda: context)
     monkeypatch.setattr(model_module, "get_tensor_model_parallel_world_size", lambda: 8)
-    model = Mock()
+    model = Mock(use_sequence_parallel=sequence_parallel)
     ids = torch.arange(rows, dtype=torch.int32)
     model_module.AscendDeepseekV41LLMForCausalLM.forward(
         SimpleNamespace(model=model, skip_moe_padding=True),
@@ -107,7 +108,7 @@ def test_forward_preserves_global_padding_layout(monkeypatch, rows, pure_eager_p
         torch.arange(rows),
         is_pure_eager_prefill=pure_eager_prefill,
     )
-    if pure_eager_prefill or rows == 16:
+    if pure_eager_prefill or not sequence_parallel or rows == 16:
         assert context.is_padding is mask
     else:
         torch.testing.assert_close(context.is_padding, torch.arange(16) >= 6)

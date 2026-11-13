@@ -108,14 +108,14 @@ def _engram_enabled_for_runtime(config, vllm_config) -> bool:
 
 
 def _can_skip_moe_padding(vllm_config: VllmConfig) -> bool:
-    """Mask replicated routes only when all ranks use the same SP row layout."""
+    """Filter padding in AllGather routing with disjoint expert ranges."""
     parallel = vllm_config.parallel_config
     speculative = vllm_config.speculative_config
     ascend_config = get_ascend_config()
     return (
         envs.VLLM_MOE_SKIP_PADDING
         and use_v2_model_runner(vllm_config)
-        and parallel.use_sequence_parallel_moe
+        # With DP=PCP=1, EP and TP>1 provide an out-of-range expert on every rank.
         and parallel.enable_expert_parallel
         and parallel.tensor_parallel_size > 1
         and parallel.data_parallel_size == parallel.prefill_context_parallel_size == 1
@@ -1843,7 +1843,7 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
             context = get_forward_context()
             if is_pure_eager_prefill:
                 context.additional_kwargs["skip_moe_padding_filter"] = True
-            else:
+            elif self.model.use_sequence_parallel:
                 # The runner's mask has the logical input length. SP may add
                 # trailing rows that survive AllGather. Align once for all layers.
                 padding = context.is_padding

@@ -364,7 +364,10 @@ def test_compacted_pcp_rank_uses_padded_dp_count(synchronized_dp, monkeypatch, a
 @pytest.mark.parametrize("compact", [False, True])
 @pytest.mark.parametrize("fail", [False, True])
 @pytest.mark.parametrize("sequence_parallel", [False, True])
-def test_replay_context_preserves_layout_masks_and_restores_mc2(state, monkeypatch, compact, fail, sequence_parallel):
+@pytest.mark.parametrize("skip_moe_padding_filter", [False, True])
+def test_replay_context_preserves_layout_masks_and_restores_mc2(
+    state, monkeypatch, compact, fail, sequence_parallel, skip_moe_padding_filter
+):
     original_padding = torch.tensor([False, True, False, True])
     state.layers.sequence_parallel = sequence_parallel
     gather_padding = Mock(side_effect=lambda *args, **kwargs: original_padding.clone())
@@ -376,6 +379,8 @@ def test_replay_context_preserves_layout_masks_and_restores_mc2(state, monkeypat
         is_padding=original_padding[:2] if sequence_parallel else original_padding,
         additional_kwargs={"eplb_heat_collection_status": True},
     )
+    if skip_moe_padding_filter:
+        outer.additional_kwargs["skip_moe_padding_filter"] = True
     state.num_tokens = 4
     state.num_actual_tokens = 2 if compact else 3
     state.dp_tokens = torch.tensor([4, 2])
@@ -410,6 +415,7 @@ def test_replay_context_preserves_layout_masks_and_restores_mc2(state, monkeypat
                 [True, True, False, False, False, False] if compact else [True, False, True, False, False, False]
             )
             assert inner.additional_kwargs["eplb_heat_collection_status"] is True
+            assert inner.additional_kwargs.get("skip_moe_padding_filter", False) is skip_moe_padding_filter
             if fail:
                 raise RuntimeError("decoder failure")
     except RuntimeError:
