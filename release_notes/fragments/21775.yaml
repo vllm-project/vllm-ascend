@@ -1,8 +1,9 @@
-pr: 21720
+pr: 21775
 entries:
   - category: feature
     text: >-
       Enabled in-kernel Q/K normalization, gate transformation and beta sigmoid
       with request-row State indices for recurrent GDN on compatible fla_npu
-      wheels. Older wheel interfaces and existing upstream fallback policies
-      retain external preprocessing.
+      wheels. Older wheel interfaces
+      retain external preprocessing and cached token-to-State mappings.
+
