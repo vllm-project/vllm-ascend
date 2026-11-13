@@ -1422,6 +1422,18 @@
 #    Future Plan:
 #       Remove this patch when Triton-Ascend can compile and efficiently lower
 #       the upstream kernel, or after an equivalent fix lands upstream.
+#
+#   9. `vllm.v1.worker.gpu.sample.sampler.Sampler.apply_sampling_params`
+#    Why:
+#       The supported vLLM baselines always allocate a new FP32 work buffer.
+#    How:
+#       Reuse only the exact FP32 buffer marked writable by the DSV4.1 target
+#       gather for the current MRV2 sampling step. Ordinary and speculative
+#       sampling share this method.
+#    Future Plan:
+#       Remove the wrapper once the supported vLLM versions provide the writable
+#       logits contract from vLLM #65436.
+#
 # ** 22. File: worker/patch_attn_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.attn_utils.get_kv_cache_spec`

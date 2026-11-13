@@ -47,6 +47,9 @@ class MoECommType(Enum):
 
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
 
+FP32_TARGET_LOGITS_GATHER = "ascend_fp32_target_logits_gather"
+WRITABLE_TARGET_LOGITS_PTR = "ascend_writable_target_logits_ptr"
+
 
 _MEGA_MOE_TOKENS_PER_RANK_LIMIT = 16384
 _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT = 512

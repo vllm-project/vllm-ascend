@@ -57,6 +57,7 @@ from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import FP32_TARGET_LOGITS_GATHER, WRITABLE_TARGET_LOGITS_PTR
 from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
 from vllm_ascend.attention.dsa_v41 import (
     DeepseekV41CacheLayer,
@@ -1700,16 +1701,27 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
 
 
 class DeepseekV41LogitsProcessor(AscendLogitsProcessor):
+    _VECTOR_ALIGNMENT_BYTES = 32
+
     def _gather_logits(self, logits: torch.Tensor) -> torch.Tensor | None:
         num_rows, shard_size = logits.shape
-        # A single row already has the desired layout after all-gather.
         # Keep shard and row boundaries 32-byte aligned for vector stores.
-        alignment = 32 // logits.element_size()
-        if not self.use_all_gather or num_rows < 2 or shard_size % alignment or self.org_vocab_size % alignment:
+        alignment = self._VECTOR_ALIGNMENT_BYTES // logits.element_size()
+        if not self.use_all_gather or shard_size % alignment or self.org_vocab_size % alignment:
             return super()._gather_logits(logits)
 
+        if num_rows == 0:
+            return logits.new_empty((0, self.org_vocab_size))
+
+        extras = get_forward_context().additional_kwargs if is_forward_context_available() else {}
+        use_fp32 = extras.get(FP32_TARGET_LOGITS_GATHER) and self.scale == 1.0 and self.soft_cap is None
         gathered = get_tp_group().all_gather(logits, dim=0)
-        return pack_vocab_parallel_logits(gathered, num_rows, self.org_vocab_size)
+        result = pack_vocab_parallel_logits(
+            gathered, num_rows, self.org_vocab_size, out_dtype=torch.float32 if use_fp32 else None
+        )
+        if use_fp32:
+            extras[WRITABLE_TARGET_LOGITS_PTR] = result.data_ptr()
+        return result
 
 
 class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, SupportsPP, SupportsLoRA, SupportsEagle3):
