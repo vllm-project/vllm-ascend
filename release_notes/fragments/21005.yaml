@@ -1,0 +1,4 @@
+pr: 21005
+entries:
+  - category: bugfix
+    text: Fixed MLA draft prefill query lengths when target graphs pad requests, including on vLLM v0.33.0.

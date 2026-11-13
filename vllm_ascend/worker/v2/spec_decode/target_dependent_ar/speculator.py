@@ -518,10 +518,10 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
                 name: metadata for name, metadata in attn_metadata.items() if name in self.draft_attn_layer_names
             }
 
-        # #63406 can introduce request-padded target graphs even without PCP.
+        # Target FULL graphs can pad requests in both v0.33.0 and main.
         # Eager/PW MLA slices queries to real decode rows; its cumulative query
         # lengths must exclude target padding too. Keep FULL graph metadata.
-        if not vllm_version_is("0.33.0") and attn_metadata is not None and cudagraph_runtime_mode != CUDAGraphMode.FULL:
+        if attn_metadata is not None and cudagraph_runtime_mode != CUDAGraphMode.FULL:
             attn_metadata = self._get_draft_prefill_metadata(attn_metadata)
 
         with self._lmhead_pad_size_context(capture_num_reqs=num_reqs):
