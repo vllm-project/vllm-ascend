@@ -996,6 +996,16 @@ vLLM Ascend revision.
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_ENGINE_READY_TIMEOUT_S=36000
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    # A3 supernodes interconnect over HCCS; the NPU RoCE ports are not cabled.
+    # The v0.30.0rc2 HIXL/ADXL transport backend creates a RoCE endpoint for
+    # every NPU card by default and fails at startup with EI0009 "The network
+    # port is down" (vllm-project/vllm-ascend#19881). Pin the HCCS resource:
+    # required for A3 supernode cabling, but do NOT pin on A3 clusters whose
+    # RoCE ports are cabled.
+    # Do NOT set HCCL_INTRA_ROCE_ENABLE=1 on A3 (A2-only; it breaks cross-node
+    # KV transfer at request time).
+    export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["hccs:device"]}'
+    export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
     export HCCL_BUFFSIZE=1024
     export HCCL_OP_EXPANSION_MODE="AIV"
     export ASCEND_RT_VISIBLE_DEVICES=$1
@@ -1084,6 +1094,12 @@ vLLM Ascend revision.
     export VLLM_USE_V2_MODEL_RUNNER=1
     export VLLM_ENGINE_READY_TIMEOUT_S=36000
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    # A3 supernodes interconnect over HCCS; the NPU RoCE ports are not cabled.
+    # Pin the HCCS communication resource (vllm-project/vllm-ascend#19881);
+    # do NOT pin on A3 clusters whose RoCE ports are cabled.
+    # Do NOT set HCCL_INTRA_ROCE_ENABLE=1 on A3.
+    export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["hccs:device"]}'
+    export ASCEND_LOCAL_COMM_RES='{"version":"1.2"}'
     export HCCL_IF_IP="$LOCAL_IP"
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export TP_SOCKET_IFNAME="$NIC_NAME"
@@ -1138,7 +1154,7 @@ vLLM Ascend revision.
             },
             "enable_cpu_binding":true,
             "multistream_overlap_shared_expert":true,
-            "recompute_scheduler_enable":true
+            "scheduler_config":{"recompute_scheduler_enable":true}
         }'
     ```
 
@@ -1318,6 +1334,7 @@ vLLM Ascend revision.
     export VLLM_ENGINE_READY_TIMEOUT_S=36000
     export HCCL_BUFFSIZE=1024
     export HCCL_CONNECT_TIMEOUT=1200
+    # A2 only. Do not enable on A3 supernodes (RoCE ports not cabled; breaks cross-node KV transfer).
     export HCCL_INTRA_ROCE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE="AIV"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -1413,6 +1430,7 @@ vLLM Ascend revision.
     export VLLM_ENGINE_READY_TIMEOUT_S=36000
     export HCCL_BUFFSIZE=1800
     export HCCL_CONNECT_TIMEOUT=1200
+    # A2 only. Do not enable on A3 supernodes (RoCE ports not cabled; breaks cross-node KV transfer).
     export HCCL_INTRA_ROCE_ENABLE=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export ASCEND_RT_VISIBLE_DEVICES=$1
@@ -1466,7 +1484,7 @@ vLLM Ascend revision.
             "enable_cpu_binding":true,
             "enable_flashcomm1":false,
             "multistream_overlap_shared_expert":true,
-            "recompute_scheduler_enable":true
+            "scheduler_config":{"recompute_scheduler_enable":true}
         }'
     ```
 
@@ -2273,7 +2291,7 @@ Select the tab for the target hardware.
             },
             "enable_cpu_binding":true,
             "multistream_overlap_shared_expert":true,
-            "recompute_scheduler_enable":true
+            "scheduler_config":{"recompute_scheduler_enable":true}
         }'
     ```
 
@@ -2423,6 +2441,7 @@ export GLOO_SOCKET_IFNAME="$NIC_NAME"
 export TP_SOCKET_IFNAME="$NIC_NAME"
 export HCCL_SOCKET_IFNAME="$NIC_NAME"
 export VLLM_USE_V2_MODEL_RUNNER=1
+# A2 only. Do not enable on A3 supernodes (RoCE ports not cabled; breaks cross-node KV transfer).
 export HCCL_INTRA_ROCE_ENABLE=1
 export VLLM_ENGINE_READY_TIMEOUT_S=36000
 export HCCL_CONNECT_TIMEOUT=1200
@@ -2536,6 +2555,7 @@ export VLLM_USE_V2_MODEL_RUNNER=1
 export VLLM_ENGINE_READY_TIMEOUT_S=36000
 export HCCL_CONNECT_TIMEOUT=1200
 export HCCL_BUFFSIZE=1800
+# A2 only. Do not enable on A3 supernodes (RoCE ports not cabled; breaks cross-node KV transfer).
 export HCCL_INTRA_ROCE_ENABLE=1
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
 export HCCL_EXEC_TIMEOUT=204
@@ -2614,7 +2634,7 @@ vllm serve "$MODEL_PATH" \
         "enable_cpu_binding":true,
         "enable_flashcomm1":false,
         "multistream_overlap_shared_expert":true,
-        "recompute_scheduler_enable":true
+        "scheduler_config":{"recompute_scheduler_enable":true}
     }'
 ```
 
@@ -2669,6 +2689,7 @@ For Mooncake configuration, and troubleshooting, refer to the [KV Cache Pool gui
     export HCCL_SOCKET_IFNAME="$NIC_NAME"
     export HCCL_BUFFSIZE=1024
     export HCCL_CONNECT_TIMEOUT=1200
+    # A2 only. Do not enable on A3 supernodes (RoCE ports not cabled; breaks cross-node KV transfer).
     export HCCL_INTRA_ROCE_ENABLE=1
     export VLLM_ENGINE_READY_TIMEOUT_S=36000
     export VLLM_USE_V2_MODEL_RUNNER=1
@@ -2864,6 +2885,10 @@ For common environment, installation, and parameter issues, refer to the
 
 - The documented A3 deployments use either one server in colocated mode or two
   servers in 1P1D mode, with an Ascend W4A8 checkpoint and INT8 Engram storage.
+- The Mooncake KV Cache Pool (Section 5.4) is documented for A2. On A3,
+  cross-node put to the pool's host segment currently fails
+  (kvcache-ai/Mooncake#4872; the fix kvcache-ai/Mooncake#4363 is merged but not
+  released yet; tracked in vllm-project/vllm-ascend#19551).
 - The documented A2 deployments use two servers: one Prefill and one Decode
   server in 1P1D mode with an Ascend W4A8 checkpoint, or two servers in
   DP2/TP8/EP16 colocated mode. The A2 two-node colocated configuration has been
