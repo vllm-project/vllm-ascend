@@ -89,6 +89,10 @@ def test_deepseek_v4_vision_dspark_restores_draft_architecture():
 
 
 class _DraftModelConfig(SimpleNamespace):
+    # These fixtures model self-contained DSpark drafts, as declared by the
+    # Kimi/Qwen model classes; None would select the DeepSeek target-config path.
+    speculator_config_class = "vllm.v1.worker.gpu.spec_decode.dspark.config.DSparkSpeculatorConfig"
+
     @property
     def architectures(self):
         return self.model_arch_config.architectures
