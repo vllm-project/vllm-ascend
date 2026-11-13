@@ -106,16 +106,8 @@ def install_pcp_cache_layout() -> None:
 
     if getattr(HiSparseCacheHandle, "_ascend_pcp_layout_installed", False):
         return
-    original_init = HiSparseCacheHandle.__init__
     original_prepare = HiSparseCacheHandle._prepare_for_batch
     original_clear = HiSparseConnectorWorker._clear_forward_mirror_state
-
-    @wraps(original_init)
-    def init(self, runtime):
-        original_init(self, runtime)
-        self.num_write_tokens = 0
-        self.write_req_id_per_token = None
-        self.write_has_prefill = False
 
     @wraps(original_prepare)
     def prepare(self, attn_metadata: Any | None) -> None:
@@ -139,7 +131,6 @@ def install_pcp_cache_layout() -> None:
             cache.write_req_id_per_token = None
             cache.write_has_prefill = False
 
-    HiSparseCacheHandle.__init__ = init
     HiSparseCacheHandle._prepare_for_batch = prepare
     HiSparseCacheHandle.write_target = write_target
     HiSparseCacheHandle.finish_kv_update = finish_kv_update
