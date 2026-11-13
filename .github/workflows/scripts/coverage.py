@@ -56,8 +56,13 @@ for p in ut_files:
     else:
         cpu_ut_files.add(p)
 
-# Need estimated_times: E2E + NPU UT (file-level)
-need_et_files = e2e_files | npu_ut_files
+# Operator files share one runner and one pytest process, so they are not
+# load-balanced and do not need per-file estimated_times.
+_OPS_ET_PREFIX = "tests/e2e/pull_request/two_card/ops/"
+ops_files = {p for p in e2e_files if p.replace("\\", "/").startswith(_OPS_ET_PREFIX)}
+
+# Need estimated_times: E2E + NPU UT (file-level), except the packed operator set.
+need_et_files = (e2e_files | npu_ut_files) - ops_files
 existing_et_keys = set(_et.keys())
 missing_et = sorted(need_et_files - existing_et_keys)
 # CPU UT should NOT have estimated_times
@@ -106,9 +111,11 @@ for key, val in sorted(_part.items()):
     if "-" not in key:
         part_errors.append(f"Key {key!r}: missing '-' separator")
         continue
-    parts = key.rsplit("-", 1)
-    if not parts[1].isdigit():
-        part_errors.append(f"Key {key!r}: num_npus '{parts[1]}' is not a number")
+    # "{chip}-{num_npus}" or "{chip}-{num_npus}-{suffix}", e.g. a3-2-ops.
+    # The card count is the single numeric segment; a suffix names the bucket.
+    npu_segments = [seg for seg in key.split("-") if seg.isdigit()]
+    if len(npu_segments) != 1:
+        part_errors.append(f"Key {key!r}: num_npus must be the single numeric segment, got {key.split('-')!r}")
         continue
     if key == "cpu-0":
         # CPU is the default fallback runner, always valid
@@ -160,8 +167,10 @@ else:
     print("    ✓ None — all referenced paths exist")
 
 print("\n[2] estimated_times coverage (file-level):")
-print(f"    E2E: {len([p for p in e2e_files if p in existing_et_keys])}/{len(e2e_files)} covered")
+e2e_need = e2e_files - ops_files
+print(f"    E2E: {len([p for p in e2e_need if p in existing_et_keys])}/{len(e2e_need)} covered")
 print(f"    NPU UT: {len([p for p in npu_ut_files if p in existing_et_keys])}/{len(npu_ut_files)} covered")
+print(f"    Operator tests (one runner, no estimate): {len(ops_files)} exempt")
 print(f"    CPU UT (should be 0): {len(cpu_ut_leaked)} leaked")
 if missing_et:
     for p in missing_et:
