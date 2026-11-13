@@ -30,6 +30,7 @@ from vllm_ascend.attention.context_parallel.dsa_cp import (
     AscendDSAPCPMetadataBuilder,
 )
 from vllm_ascend.attention.dsa_v1 import (
+    _WO_A_SMALL_M_LIMIT,
     DSA_METADATA_BUFFER_SIZE,
     AscendDSABackend,
     AscendDSAImpl,
@@ -38,7 +39,6 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadataBuilder,
     AscendDSAReqMetadata,
     OProjBufferPool,
-    _WO_A_SMALL_M_LIMIT,
     build_compressor_metadata_out,
     build_vision_bidirectional_swa_indices,
 )
