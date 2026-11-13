@@ -108,13 +108,20 @@ def build_packed_cache_slot_mapping(
     if compress_ratio not in (1, 2):
         raise ValueError("compress_ratio must be 1 or 2")
     if num_tokens:
-        # Fixed tile on purpose. BLOCK_SIZE is a `tl.constexpr`, so a value
-        # derived from `num_tokens` compiles a second specialization and swaps
-        # between them as the batch crosses the threshold: one extra JIT compile
-        # on the request path plus a permanent second binary. 64 measured as
-        # fast as 16 and clearly better than the old 256, which collapsed a
-        # decode step onto a single AIV core (grid=(1,)).
-        block_size = 64
+        # A fixed block size on purpose. BLOCK_SIZE is a `tl.constexpr`, so a
+        # value derived from `num_tokens` compiles a second specialization and
+        # swaps between them as the batch crosses the threshold: one extra JIT
+        # compile on the request path plus a permanent second binary.
+        #
+        # 8 is picked for the decode end of the range. The flat grid saturates
+        # the vector cores only once cdiv(num_tokens, BLOCK_SIZE) reaches the
+        # core count, i.e. at 320 tokens for block size 8, 640 for 16 and 2560
+        # for 64, so below that a wider block just leaves cores idle: a 256-token
+        # decode ran on 4 of 40 cores with block size 64. Measured over 1..256
+        # tokens, block size 8 is 1.76x-3.61x faster than 64. At 64k tokens it
+        # is 4% slower than the widest block size, which is inside a prefill
+        # step.
+        block_size = 8
         page_is_pow2 = page_size > 0 and (page_size & (page_size - 1)) == 0
         log2_page = page_size.bit_length() - 1 if page_is_pow2 else -1
         _build_packed_cache_slot_mapping_kernel[(triton.cdiv(num_tokens, block_size),)](
