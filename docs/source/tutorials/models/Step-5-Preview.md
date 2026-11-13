@@ -170,7 +170,7 @@ vllm serve ${WEIGHT_PATH} \
     --data-parallel-rpc-port 13389 \
     --enable-expert-parallel \
     --gpu-memory-utilization 0.96 \
-    --distributed_executor_backend "mp" \
+    --distributed-executor-backend "mp" \
     --api-server-count=1 \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --safetensors-load-strategy 'prefetch' \
@@ -212,7 +212,7 @@ vllm serve ${WEIGHT_PATH} \
     --data-parallel-rpc-port 13389 \
     --enable-expert-parallel \
     --gpu-memory-utilization 0.96 \
-    --distributed_executor_backend "mp" \
+    --distributed-executor-backend "mp" \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --safetensors-load-strategy 'prefetch' \
     --additional-config '{"enable_shared_expert_dp": true, "multistream_overlap_shared_expert": true}' \

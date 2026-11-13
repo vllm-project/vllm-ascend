@@ -450,6 +450,20 @@ class QuantizedAllReduceConfig:
 
 
 @config
+class SharedEngramConfig:
+    model_config = ConfigDict(extra="forbid")
+    backend: Literal["a3"]
+    endpoint: str
+
+    @model_validator(mode="after")
+    def validate_endpoint(self):
+        host, separator, port = self.endpoint.rpartition(":")
+        if not separator or not host or not port.isdigit() or not 0 < int(port) < 65536:
+            raise ValueError("shared Engram endpoint must be host:port")
+        return self
+
+
+@config
 class AscendConfig:
     """Configuration Object for additional_config from vllm.configs.
 
@@ -621,6 +635,7 @@ class AscendConfig:
     # 100 bypasses calibration and selects pure Union when available.
     minimax_m3_union_d8_threshold_pct: float = 100
     minimax_m3_union_policy_path: str | None = None
+    shared_engram: SharedEngramConfig | None = None
     multistream_dsv4_dsa_overlap: bool = True
     # Prepare Engram hashes, lookups and DP/TP exchanges on an auxiliary stream;
     # FULL graphs wait on descriptor-specific external events at consumers.
@@ -769,6 +784,13 @@ class AscendConfig:
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
         engram_config = getattr(vc, "engram_config", None)
+        if self.shared_engram is not None:
+            if not vc.use_v2_model_runner:
+                raise ValueError("shared_engram requires Model Runner V2")
+            if not engram_config or not engram_config.cpu_offload:
+                raise ValueError("shared_engram requires Engram cpu_offload")
+            if vc.load_config.load_format == "dummy" or vc.model_config.enable_sleep_mode:
+                raise ValueError("Shared host Engram does not support dummy loading or sleep mode")
         if (
             engram_config is not None
             and getattr(engram_config, "cpu_offload", False)
