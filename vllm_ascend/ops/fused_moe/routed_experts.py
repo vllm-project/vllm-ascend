@@ -16,6 +16,7 @@
 #
 from collections.abc import Iterable
 from copy import copy
+from functools import partial
 from types import SimpleNamespace
 
 import torch
@@ -50,6 +51,9 @@ from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAll
 from vllm_ascend.quantization.nz import NzCastSpec
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
+
+# Smaller shards lose more to route packing than they save in TopK/communication.
+MIN_PCP_TOKENS_FOR_LOCAL_TOPK = 1024
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -646,6 +650,14 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             router_logits=router_logits,
             input_ids=input_ids,
         )
+        return self._postprocess_experts(topk_weights, topk_ids, enable_force_load_balance)
+
+    def _postprocess_experts(
+        self,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        enable_force_load_balance: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.log2phy is not None:
             topk_ids = self.log2phy[topk_ids]
 
@@ -687,6 +699,22 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
         return topk_weights, topk_ids
 
+    def _can_select_experts_before_gather(self, moe_comm_method) -> bool:
+        """Require an adapted communication path and token-independent routing."""
+        return (
+            isinstance(moe_comm_method, AllGatherCommImpl)
+            and self.moe_config.pcp_size > 1
+            and not self.moe_config.is_sequence_parallel
+            and getattr(self.router, "supports_local_routing", False)
+        )
+
+    def _should_select_experts_before_gather(self, moe_comm_method) -> bool:
+        # A performance policy, separate from routing correctness/capability.
+        return (
+            self._can_select_experts_before_gather(moe_comm_method)
+            and _EXTRA_CTX.max_tokens_across_pcp >= MIN_PCP_TOKENS_FOR_LOCAL_TOPK
+        )
+
     def forward_impl(
         self,
         *,
@@ -712,26 +740,36 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             sync_lora_context(self.quant_method, lora_context)
 
         num_source_tokens = hidden_states.shape[0]
-        prepare_output = moe_comm_method.prepare(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            # The SP model wrapper already shards and gathers the MoE sequence.
-            replace_allreduce=self.moe_config.is_sequence_parallel,
-            quant_type=self.quant_type,
-        )
-        hidden_states = prepare_output.hidden_states
-        router_logits = prepare_output.router_logits
-        mc2_mask = prepare_output.mc2_mask
-        padded_hidden_states_shape = prepare_output.padded_hidden_states_shape
-        pertoken_scale = prepare_output.pertoken_scale
-        if self.router is None:
-            raise RuntimeError("AscendRoutedExperts requires a router for expert selection.")
-        topk_weights, topk_ids = self._select_experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            enable_force_load_balance=enable_force_load_balance,
-            input_ids=input_ids,
-        )
+        if self._should_select_experts_before_gather(moe_comm_method):
+            hidden_states, topk_weights, topk_ids = moe_comm_method.prepare_finalize.prepare_with_local_topk(
+                hidden_states,
+                router_logits,
+                partial(self.router.select_experts_locally, input_ids=input_ids),
+            )
+            topk_weights, topk_ids = self.router.finalize_local_routing(topk_weights, topk_ids)
+            topk_weights, topk_ids = self._postprocess_experts(topk_weights, topk_ids, enable_force_load_balance)
+            mc2_mask = padded_hidden_states_shape = pertoken_scale = None
+        else:
+            prepare_output = moe_comm_method.prepare(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                # The SP model wrapper already shards and gathers the MoE sequence.
+                replace_allreduce=self.moe_config.is_sequence_parallel,
+                quant_type=self.quant_type,
+            )
+            hidden_states = prepare_output.hidden_states
+            router_logits = prepare_output.router_logits
+            mc2_mask = prepare_output.mc2_mask
+            padded_hidden_states_shape = prepare_output.padded_hidden_states_shape
+            pertoken_scale = prepare_output.pertoken_scale
+            if self.router is None:
+                raise RuntimeError("AscendRoutedExperts requires a router for expert selection.")
+            topk_weights, topk_ids = self._select_experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                enable_force_load_balance=enable_force_load_balance,
+                input_ids=input_ids,
+            )
         self.ascend_pertoken_scale = pertoken_scale
         self.ascend_mc2_mask = mc2_mask
         try:

@@ -119,6 +119,12 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
         self.bias_vl = bias_vl
         self.image_sentinel_lo = image_sentinel_lo
 
+    @property
+    def supports_local_routing(self) -> bool:
+        # Hash/vision routes currently align input_ids inside _compute_routing
+        # using global communication. They need a separate local-id adapter.
+        return self.tid2eid is None and self.bias_vl is None
+
     def is_fused_supported(
         self,
         hidden_states: torch.Tensor,
