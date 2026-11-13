@@ -295,7 +295,8 @@ class FixedRandomWeightSource(WeightSource):
         required_bytes = sum(math.prod(meta.shape) * meta.dtype.itemsize for meta in self.metadata)
         if shutil.disk_usage(target).free < required_bytes + shard_limit:
             raise OSError("Insufficient space for the generated reference checkpoint and shard headroom")
-        state, weight_map = {}, {}
+        state: dict[str, torch.Tensor] = {}
+        weight_map: dict[str, str] = {}
         total_bytes = shard_bytes = shard_index = 0
 
         def flush() -> None:
