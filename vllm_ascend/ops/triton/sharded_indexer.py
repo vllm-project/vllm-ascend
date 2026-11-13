@@ -194,7 +194,7 @@ def _pack_sorted_candidates(
         valid = (local.to(tl.float32) >= 0) & (tl.abs(score) < float("inf"))
         # This rank's local-to-global map is strictly increasing. Sorting
         # local keys preserves global-ID ties without rounding mapped IDs.
-        keys = tl.where(valid, local.to(tl.float32), 0.0 if scores.dtype.element_ty == tl.bfloat16 else float("inf"))
+        keys = tl.where(valid, local.to(tl.float32), 0.0)
         score = tl.where(valid, score, -float("inf"))
         if scores.dtype.element_ty == tl.bfloat16:
             SCORE_BITS: tl.constexpr = 16
@@ -210,7 +210,14 @@ def _pack_sorted_candidates(
             else:
                 score, keys = _radix_sort_candidate_pairs(score, keys, col, LOG_BLOCK, ID_BITS, SCORE_BITS)
         else:
-            score, keys = _sort_candidate_pairs(score, keys, LOG_BLOCK)
+            # Keep all FP32 score bits. K=2048 needs five stable radix passes
+            # instead of 66 compare/exchange steps. Larger IDs retain the
+            # original comparison path rather than losing high ID bits.
+            FP32_ID_BITS: tl.constexpr = 25
+            if tl.max(keys, 0) < (1 << FP32_ID_BITS):
+                score, keys = _radix_sort_candidate_pairs(score, keys, col, LOG_BLOCK, FP32_ID_BITS, 32)
+            else:
+                score, keys = _sort_candidate_pairs(score, keys, LOG_BLOCK)
         ordered = tl.where(tl.abs(score) < float("inf"), keys, 0).to(tl.int32)
         mapped = ordered + (ordered // INTERLEAVE * (WORLD - 1) + RANK) * INTERLEAVE
         ids = tl.where(tl.abs(score) < float("inf"), mapped, -1)
