@@ -19,10 +19,9 @@ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm_ascend.ops.triton.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
+from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
-from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
-    disable_profiling_chunk_for_draft,
-)
+from vllm_ascend.worker.v2.spec_decode.pcp_utils import disable_profiling_chunk_for_draft
 
 
 # TODO: Remove this helper and build_draft_attn_metadatas once tiling
@@ -280,6 +279,11 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
     ) -> torch.Tensor:
         self.input_batch = input_batch
         sync_state = dp_sync_state
+        if self.pcp_manager is not None:
+            # The target's DP sync describes PCP-local requests. The replicated
+            # draft consumes the restored global batch and must negotiate its
+            # own capacity, including on idle/profile steps.
+            sync_state = None
         if dummy_run and skip_attn_for_dummy_run:
             # Profiling runs the draft with its own query token count, which
             # can differ from the target batch. Let forward_context coordinate
@@ -294,7 +298,7 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         if dummy_run and sync_state is not None:
             num_draft_reqs = min(num_draft_reqs, sync_state.num_reqs)
         with draft_metadata_request_count(self, num_draft_reqs), build_attn_metadata_wrapper():
-            return super().propose(
+            draft_tokens = super().propose(
                 input_batch,
                 attn_metadata,
                 slot_mappings,
@@ -313,6 +317,12 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
                 is_profile=is_profile,
                 num_speculative_tokens=num_speculative_tokens,
             )
+        # vLLM 0.33.0 needs this call; newer runners synchronize after
+        # propose(). Never communicate during dummy runs.
+        if vllm_version_is("0.33.0") and self.pcp_manager is not None and not dummy_run:
+            assert isinstance(self.pcp_manager, AscendPCPManager)
+            self.pcp_manager.sync_drafts(draft_tokens, input_batch.idx_mapping, self.draft_logits)
+        return draft_tokens
 
 
 def prepare_dflash_inputs(
