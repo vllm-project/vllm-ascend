@@ -76,8 +76,6 @@ class Mxfp8AllReduce:
         self.supported = self.world_size in _SUPPORTED_WORLD_SIZES
         self.quantize_op = getattr(torch_npu, "npu_dynamic_mx_quant", None)
         self.dequantize_op = getattr(torch_npu, "npu_anti_mx_quant", None)
-        if not callable(self.dequantize_op):
-            self.dequantize_op = getattr(torch.ops.npu, "npu_anti_mx_quant", None)
         if self.supported and (not callable(self.quantize_op) or not callable(self.dequantize_op)):
             raise RuntimeError(
                 "MXFP8 AllToAll quantized all-reduce requires npu_dynamic_mx_quant and npu_anti_mx_quant. "
