@@ -47,6 +47,7 @@ def worker(request):
         "_local_kernel_ids_for_shard",
         "_get_group_pulls_metadata",
         "_get_hybrid_remote_rank_group_pulls",
+        "_get_remote_endpoint_info_by_port",
         "_get_remote_host_info_by_port",
     }
     cls.body = [node for node in cls.body if getattr(node, "name", None) in names]
@@ -54,7 +55,12 @@ def worker(request):
         node
         for node in tree.body
         if getattr(node, "name", None)
-        in {"GroupPull", "transfer_groups_need_independent_block_ids", "is_dcp_replicated_attention_group"}
+        in {
+            "GroupPull",
+            "get_mooncake_handshake_logical_rank",
+            "transfer_groups_need_independent_block_ids",
+            "is_dcp_replicated_attention_group",
+        }
     ]
     scope: dict[str, Any] = {
         "dataclass": dataclass,
@@ -78,6 +84,8 @@ def worker(request):
     w.tp_size = w._prefill_tp_size = 2
     w._prefill_pp_size = 1
     w.side_channel_port = 4000
+    w.pp_rank = w.tp_rank = w.pcp_rank = 0
+    w.pcp_size = 1
     w.spec = {
         "kv_cache_spec_type": request.param,
         "dcp_sharded": False,
