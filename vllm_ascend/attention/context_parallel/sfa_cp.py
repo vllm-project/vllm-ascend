@@ -27,6 +27,7 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
 )
 from vllm_ascend.attention.context_parallel.sharded_indexer import use_local_topk_output
 from vllm_ascend.attention.sfa_v1 import (
+    SMLA_DEFAULT_SINK_VALUE,
     AscendSFAImpl,
     AscendSFAMetadata,
     AscendSFAMetadataBuilder,
@@ -41,10 +42,28 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.utils import (
+    enable_kpool_dcp,
     enable_sfa_dcp_force_tmajor_restore,
     enable_sfa_dcp_sharded_indexer,
     is_pd_decode_recompute_scheduler_enabled,
 )
+
+
+def _add_nope_dcp_sink(output, softmax_max, softmax_sum):
+    """Include the ordinary A5 NoPE sink in exactly one DCP partial result.
+
+    The sink has a logit but no value. SFA returns [KV heads, T, Q groups]
+    max/sum and [T, Q heads, D] normalized output, including empty shards.
+    """
+    valid = softmax_sum > 0
+    old_max = softmax_max.masked_fill(~valid, -torch.inf)
+    new_max = old_max.clamp_min(SMLA_DEFAULT_SINK_VALUE)
+    scaled_sum = torch.where(valid, softmax_sum * torch.exp(old_max - new_max), 0.0)
+    new_sum = scaled_sum + torch.exp(SMLA_DEFAULT_SINK_VALUE - new_max)
+    weight = (scaled_sum / new_sum).permute(1, 0, 2).reshape(output.shape[0], output.shape[1], 1)
+    # Some operators return unspecified output for an empty candidate list.
+    output = torch.where(weight > 0, output.float() * weight, 0.0).to(output.dtype)
+    return output, new_max, new_sum
 
 
 class DCPGatherContext(NamedTuple):
@@ -317,14 +336,20 @@ class AscendSFADCPMetadataBuilder(
         full_dcp_block_table = common_attn_metadata.block_table_tensor
         num_reqs = common_attn_metadata.num_reqs
         dcp_block_table = self._get_dcp_local_block_table(full_dcp_block_table, num_reqs)
-        block_table_replicated_view = self._build_block_table_replicated_view(
-            dcp_block_table,
-            common_attn_metadata.seq_lens,
-        )
-        slot_mapping_replicated_view = self._build_slot_mapping_replicated_view(
-            common_attn_metadata,
-            block_table_replicated_view,
-        )
+        if enable_kpool_dcp(self.vllm_config):
+            # Pool compression owns its independent local cache metadata.
+            # Main MLA writes and reads the original DCP-owned token slots.
+            block_table_replicated_view = dcp_block_table
+            slot_mapping_replicated_view = dcp_slot_mapping
+        else:
+            block_table_replicated_view = self._build_block_table_replicated_view(
+                dcp_block_table,
+                common_attn_metadata.seq_lens,
+            )
+            slot_mapping_replicated_view = self._build_slot_mapping_replicated_view(
+                common_attn_metadata,
+                block_table_replicated_view,
+            )
 
         common_attn_metadata.slot_mapping = slot_mapping_replicated_view
         common_attn_metadata.block_table_tensor = block_table_replicated_view
@@ -355,8 +380,10 @@ class AscendSFADCPMetadataBuilder(
         )
         kv_gather_block_ids = None
         kv_gather_block_table = None
-        if (num_prefills > 0 or metadata.pcp_has_global_prefill) and not enable_sfa_dcp_sharded_indexer(
-            self.vllm_config
+        if (
+            (num_prefills > 0 or metadata.pcp_has_global_prefill)
+            and not enable_sfa_dcp_sharded_indexer(self.vllm_config)
+            and not enable_kpool_dcp(self.vllm_config)
         ):
             kv_gather_block_ids, kv_gather_block_table = self._build_compact_kv_gather_metadata(
                 dcp_block_table,
@@ -554,15 +581,18 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
     """DCP execution, inheriting the shared ordinary and PCP preprocessing."""
 
     can_return_lse_for_decode: bool = True
+    _kpool_dcp: bool = False
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         # Legacy MLAPO has no DCP cache writer; K3.1 PROLOG_V3 uses local owned slots.
         self.enable_mlapo = False
-        self._sharded_indexer = enable_sfa_dcp_sharded_indexer(self.vllm_config)
+        kpool_dcp = enable_kpool_dcp(self.vllm_config)
+        self._kpool_dcp = kpool_dcp
+        self._sharded_indexer = enable_sfa_dcp_sharded_indexer(self.vllm_config) or kpool_dcp
         # Shared Top-K buffers carry the same coordinates on every layer.
         self._local_topk = use_local_topk_output(
-            self._sharded_indexer,
+            self._sharded_indexer and not kpool_dcp,
             get_pcp_group().world_size,
             False,  # Legacy TP-based DSA-CP was removed from main.
             turboquant=self.enable_sparse_sfa_turboquant,
@@ -581,6 +611,10 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
                 break
         if self._dcp_index_topk <= 0:
             raise RuntimeError("index_topk must be set in the model config for DCP SFA.")
+        if kpool_dcp:
+            # Completed pools select index_topk tokens; an incomplete pool
+            # contributes up to pool_size - 1 extra causal tail tokens.
+            self._dcp_index_topk += self.vllm_config.model_config.hf_text_config.index_kpool - 1
 
     def _fused_preprocess_type(self) -> PreprocessType | None:
         # K3.1 without PCP writes owner-masked DCP slots directly through PROLOG_V3.
@@ -995,6 +1029,11 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             return_lse=True,
             **packed_query_kwargs,
         )
+        if self._kpool_dcp and attn_metadata.smla_metadata is not None and self.dcp_group.rank_in_group == 0:
+            # A5 BF16 ordinarily uses SparseFlashMla with a fixed sink. The
+            # generic local SFA operator has no sink input; count it once before
+            # the existing stable max/sum merge. Quantized/A3 paths have none.
+            sfa_output, softmax_max, softmax_sum = _add_nope_dcp_sink(sfa_output, softmax_max, softmax_sum)
         sfa_output, softmax_max, softmax_sum = self._mask_nope_dcp_padding(
             sfa_output, actual_seq_lengths_query, softmax_max, softmax_sum
         )

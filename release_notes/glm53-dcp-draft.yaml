@@ -1,0 +1,11 @@
+# Local draft: move to fragments/<PR number>.yaml and fill pr when opening a PR.
+pr: null
+entries:
+  - category: feature
+    text: >-
+      Added GLM-5.3-Flash decode context parallel execution for A3/A5, with
+      sharded MLA and pooled indexer caches and candidate-only exchange.
+      The path retains MTP, graph replay and RecoverSSM state handling and
+      requires PCP=1 on each DCP worker.
+    model: GLM-5.3-Flash
+    hardware: [A3, A5]

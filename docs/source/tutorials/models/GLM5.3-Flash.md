@@ -2138,6 +2138,74 @@ The msmodeling tool (MindStudio-Modeling) tunes serving and benchmark parameters
 using measured results and knowledge-base guidance. For the complete walkthrough,
 refer to [Optix-for-PD-disaggregation](https://gitcode.com/Ascend/msmodeling/blob/master/docs/en/quick_start/optix_agent_pd_disaggregation.md).
 
+### 9.4 Decode Context Parallelism on A3/A5
+
+GLM-5.3-Flash can distribute both its MLA token cache and compressed KPool
+cache across a DCP group inside TP. Each rank scores its local complete pools,
+exchanges only candidates, and expands the global selection into token indices.
+The recurrent KDA state and the small compressor tail retain their existing
+TP/request layouts. DCP does not reduce model-weight or recurrent-state memory.
+
+For a TP8 engine, add the following to the corresponding A3 or A5 serving
+command above:
+
+```shell
+--tensor-parallel-size 8 \
+--decode-context-parallel-size 2 \
+--prefill-context-parallel-size 1 \
+--block-size 128 \
+--cp-kv-cache-interleave-size 128
+```
+
+DCP must divide TP; sizes 2, 4 and 8 have dedicated operator tests. The token
+interleave must be divisible by `index_kpool` and divide the cache block size.
+The platform currently normalizes sparse-attention interleave to the cache
+block size in colocated serving. For PD/KV-pool serving, set both values
+explicitly and equally. PCP and DCP cannot both exceed one on the same GLM
+worker. A separate PCP Prefill engine can feed a PCP1 DCP Decode engine using
+the connector's supported topology and matching cache formats.
+
+The implementation preserves the following acceleration paths:
+
+| Configuration | DCP behavior |
+| --- | --- |
+| Chunked prefill and mixed batches | Score only locally owned complete pools; never gather the indexer history. |
+| `FULL_DECODE_ONLY` and draft graphs | Visibility and causal tails read device lengths/positions on every replay. |
+| MTP and shared Top-K | Shared buffers contain global token IDs; every layer still updates its pool and rollback ring. |
+| RecoverSSM (`use_replayssm`) | Retains TP-sharded KDA heads and request-owned rollback state; existing PP and prefix-cache constraints still apply. |
+| Prefix caching | MLA and KPool share scheduler IDs; compressor rings remain non-cacheable request state. |
+| FlashComm1 and EP | Keep the existing TP/EP layout; indexer query rows must be restored before candidate exchange. |
+| A3 cache formats | BF16 indexer; ordinary BF16 or INT8 main KV paths. |
+| A5 cache formats | BF16 or FP8 indexer; ordinary BF16 or FP8 main KV paths. |
+
+Use the hardware-specific quantization settings from the serving examples.
+The DCP scorer preserves GLM's weighted-query formula, which differs from
+Kimi's QLI scoring. A5 BF16 attention also retains the ordinary path's fixed
+sink, counted once across the DCP group.
+
+Validation before deployment must include the operator and four-card model
+tests below on the intended software stack. CPU unit tests do not validate
+Triton compilation, CANN numerical behavior or HCCL graph replay. The synthetic
+model test covers MTP, FlashComm1, prefix reuse and RecoverSSM; real-weight
+accuracy, C8 configurations, PD transfers and performance require separate
+hardware runs. Compare DCP1 and DCP2/4/8 at the same TP size, recording TTFT,
+TPOT, throughput, peak memory and speculative acceptance on short/long prompts
+and mixed batches. No speedup or accuracy result is implied by this section.
+
+```shell
+python -m pytest --noconftest tests/ut/models/test_glm5next_dcp_cpu.py
+python -m pytest --noconftest \
+  tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_glm5_next_dcp_indexer.py
+torchrun --standalone --nproc-per-node=4 -m pytest --noconftest \
+  tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_glm5_next_dcp_indexer.py
+python -m pytest tests/e2e/pull_request/four_card/test_glm5_3_flash.py -k dcp
+```
+
+The multicard operator test also runs on A5; repeat with two and eight ranks.
+For PD validation, transfer a prefix across pool and cache-block boundaries,
+then check warm-prefix reuse, accepted/rejected MTP tokens, and Decode
+preemption/recomputation against a colocated run using the same weights.
+
 ## 10 FAQ
 
 For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md); this chapter only covers model-specific issues.

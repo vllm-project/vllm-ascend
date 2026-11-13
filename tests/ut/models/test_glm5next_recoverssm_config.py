@@ -71,7 +71,7 @@ def test_initialization_requires_speculative_decoding():
         ("cache_config", "enable_prefix_caching", True, "Mamba cache mode align"),
         ("parallel_config", "pipeline_parallel_size", 2, "PP=1"),
         ("parallel_config", "prefill_context_parallel_size", 2, "requires a KV producer"),
-        ("parallel_config", "decode_context_parallel_size", 2, "DCP=1"),
+        ("parallel_config", "decode_context_parallel_size", 2, "must divide tensor_parallel_size"),
     ],
 )
 def test_initialization_rejects_unsupported_execution(section, field, value, message):
@@ -80,6 +80,18 @@ def test_initialization_rejects_unsupported_execution(section, field, value, mes
     with pytest.raises(ValueError, match=message):
         validate_glm_recoverssm(config)
     assert not config.cache_config.use_kda_recoverssm
+
+
+@pytest.mark.parametrize("dcp", [2, 4, 8])
+@pytest.mark.parametrize("prefix_caching", [False, True])
+def test_dcp_keeps_tp_recoverssm_state(dcp, prefix_caching):
+    config = make_config()
+    config.parallel_config.tensor_parallel_size = 8
+    config.parallel_config.decode_context_parallel_size = dcp
+    config.cache_config.enable_prefix_caching = prefix_caching
+    config.cache_config.mamba_cache_mode = "align" if prefix_caching else "none"
+    assert patch_replayssm_config.validate_mamba_cached_kernel(config) is config
+    assert config.cache_config.use_kda_recoverssm
 
 
 @pytest.mark.parametrize("connector", ["MooncakeConnectorV2", "MooncakePullConnector"])

@@ -15,6 +15,7 @@ from torch import nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import (
+    get_dcp_group,
     get_pcp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -40,6 +41,7 @@ from vllm_ascend.core.kv_cache_interface import (
 )
 from vllm_ascend.device.hardware_profile import AttentionBackendFamily, HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.utils import all_gather_async
+from vllm_ascend.models.glm5next.dcp import validate_kpool_dcp
 
 GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE = 128
 
@@ -786,8 +788,10 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
                 f"GLM-Next KPool indexing supports NoPE queries only, got qk_rope_head_dim={qk_rope_head_dim}."
             )
         parallel_config = vllm_indexer.vllm_config.parallel_config
-        if parallel_config.decode_context_parallel_size > 1:
-            raise NotImplementedError("GLM-Next KPool indexing does not support DCP.")
+        validate_kpool_dcp(vllm_indexer.vllm_config)
+        self._use_dcp = parallel_config.decode_context_parallel_size > 1
+        self._dcp_interleave = parallel_config.cp_kv_cache_interleave_size if self._use_dcp else 1
+        self._max_model_len = vllm_indexer.vllm_config.model_config.max_model_len if self._use_dcp else 0
 
         if get_current_hardware_profile().attention_backend_family is AttentionBackendFamily.COMPATIBILITY:
             raise NotImplementedError("KPool sparse attention requires Ascend A2, A3 or A5.")
@@ -1109,6 +1113,27 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
                 return output[:, :output_width].unsqueeze(1)
             return torch.full((num_tokens, 1, output_width), -1, dtype=torch.int32, device=hidden_states.device)
         assert q_values is not None and weights is not None
+        if getattr(self, "_use_dcp", False):
+            from vllm_ascend.ops.triton.glm5_next_dcp_indexer import glm5_next_dcp_indexer
+
+            if quantized:
+                # Match the FP8 query quantization used by the ordinary CANN
+                # path; dequantization feeds the existing weighted-Q formula.
+                q_quant, q_scale = torch_npu.npu_dynamic_quant(q_values, dst_type=torch.float8_e4m3fn)
+                q_values = q_quant.float() * q_scale.unsqueeze(-1)
+            return glm5_next_dcp_indexer(
+                q_values,
+                indexer_cache,
+                weights.to(torch.bfloat16),
+                indexer_metadata,
+                get_dcp_group(),
+                topk=self.topk_tokens,
+                pool_size=self.index_kpool,
+                interleave=self._dcp_interleave,
+                max_model_len=self._max_model_len,
+                output_buffer=self.topk_indices_buffer,
+                scale_cache=indexer_scale_cache,
+            )
         # Under TP row sharding the scorer and packer address the rank's
         # slice only; every sliced row still scores its full visible key
         # history, so the packed indices are bitwise-equal to the

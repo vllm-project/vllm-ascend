@@ -34,8 +34,12 @@ def validate_glm_recoverssm(vllm_config: VllmConfig) -> None:
     parallel = vllm_config.parallel_config
     if parallel.pipeline_parallel_size != 1:
         raise ValueError("GLM RecoverSSM currently requires PP=1")
-    if parallel.decode_context_parallel_size != 1:
-        raise ValueError("GLM RecoverSSM currently requires DCP=1")
+    # DCP shards MLA/keypool token history, while KDA/RecoverSSM keep their
+    # existing TP head shards and request-owned rollback state.
+    if parallel.decode_context_parallel_size > 1:
+        from vllm_ascend.models.glm5next.dcp import validate_kpool_dcp
+
+        validate_kpool_dcp(vllm_config, check_cache_layout=False)
     transfer = vllm_config.kv_transfer_config
     if parallel.prefill_context_parallel_size > 1:
         if parallel.tensor_parallel_size != 1:

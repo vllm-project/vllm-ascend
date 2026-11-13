@@ -106,6 +106,7 @@ configuration rather than the runner input or sampling interface.
 | [fold_indexer_cache.py](fold_indexer_cache.py) | Model/attention primitive or shared utility |
 | [fused_gdn_gating.py](fused_gdn_gating.py) | Model/attention primitive or shared utility |
 | [glm5_next_cann_keypool.py](glm5_next_cann_keypool.py) | Model/attention primitive or shared utility |
+| [glm5_next_dcp_indexer.py](glm5_next_dcp_indexer.py) | [GLM DCP pool scoring and candidate exchange](docs/glm5_next_dcp_indexer.md) |
 | [glm5_next_kpool_tail_compress.py](glm5_next_kpool_tail_compress.py) | Model/attention primitive or shared utility |
 | [glm5_next_lightning_indexer.py](glm5_next_lightning_indexer.py) | Model/attention primitive or shared utility |
 | [kda/chunk_delta_h.py](kda/chunk_delta_h.py) | KDA computation |

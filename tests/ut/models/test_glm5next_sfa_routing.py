@@ -53,7 +53,7 @@ def test_kpool_without_sparse_main_attention_is_not_sfa(has_index_topk, has_comp
     assert not enable_sfa(vllm_config)
 
 
-@pytest.mark.parametrize("mode", ["310p", "dcp", "pcp_dcp"])
+@pytest.mark.parametrize("mode", ["310p", "pcp_dcp"])
 def test_kpool_unsupported_routes_fail_explicitly(monkeypatch, mode):
     monkeypatch.setattr(
         backend_module,
@@ -72,7 +72,7 @@ def test_kpool_unsupported_routes_fail_explicitly(monkeypatch, mode):
             )
         )
     )
-    with pytest.raises(NotImplementedError, match="requires Ascend|does not support DCP"):
+    with pytest.raises(NotImplementedError, match="requires Ascend|requires PCP=1"):
         Glm5NextKPoolIndexerBackend(source, qk_rope_head_dim=0)
 
 

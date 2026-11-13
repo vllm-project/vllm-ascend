@@ -244,6 +244,14 @@ def enable_sfa_dcp_replicated_indexer(vllm_config: VllmConfig | None = None) -> 
     return model_uses_sfa_sparse(vllm_config.model_config) and parallel_config.decode_context_parallel_size > 1
 
 
+def enable_kpool_dcp(vllm_config: VllmConfig) -> bool:
+    """GLM pools and main MLA keys share DCP token ownership."""
+    return (
+        model_uses_kpool_indexer(getattr(vllm_config, "model_config", None))
+        and vllm_config.parallel_config.decode_context_parallel_size > 1
+    )
+
+
 def enable_sfa_dcp_sharded_indexer(vllm_config: VllmConfig | None = None) -> bool:
     """Kimi's uncompressed indexer uses the same token owners as MLA."""
     if vllm_config is None:
