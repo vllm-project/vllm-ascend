@@ -281,7 +281,7 @@ def _run_recurrent_gdn(
         return recurrent_gated_delta_rule(
             query.squeeze(0),
             key.squeeze(0),
-            value.squeeze(0),
+            value.squeeze(0).contiguous(),
             state,
             g=g.squeeze(0),
             beta=beta.squeeze(0),
@@ -379,17 +379,18 @@ def _rearrange_decode_qkv(
     head_k_dim: int,
     head_v_dim: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Expose contiguous token-major Q/K/V without an intermediate concat.
+    """Expose token-major Q/K/V views into the convolution output.
 
-    Multi-token split views can have gaps between rows, so each component
-    still needs its own contiguous buffer. Single-token views need no copy.
+    The fused native ABI preserves token/head strides and storage offsets.
+    Legacy backends materialize their inputs in _run_recurrent_gdn instead.
     """
-    num_tokens = mixed_qkv.shape[0]
     query, key, value = mixed_qkv.split((key_dim, key_dim, value_dim), dim=-1)
+    if mixed_qkv.stride(-1) != 1:
+        query, key, value = (part.contiguous() for part in (query, key, value))
     return (
-        query.contiguous().view(1, num_tokens, key_dim // head_k_dim, head_k_dim),
-        key.contiguous().view(1, num_tokens, key_dim // head_k_dim, head_k_dim),
-        value.contiguous().view(1, num_tokens, value_dim // head_v_dim, head_v_dim),
+        query.unflatten(-1, (key_dim // head_k_dim, head_k_dim)).unsqueeze(0),
+        key.unflatten(-1, (key_dim // head_k_dim, head_k_dim)).unsqueeze(0),
+        value.unflatten(-1, (value_dim // head_v_dim, head_v_dim)).unsqueeze(0),
     )
 
 
@@ -614,9 +615,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         # Part 3: Output Projection
         # ============================================================
         z_shape_og = z.shape
-        # Reshape input data into 2D tensor
-        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
-        z = z.reshape(-1, z.shape[-1])
+        # Preserve Z's token/head strides; flattening a QKVZ slice copies it.
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")

@@ -8,4 +8,6 @@ entries:
       retain external preprocessing and cached token-to-State mappings.
       Qwen4Exp decoder layers now retain upstream Qwen projections while using
       the Ascend GDN execution path and attention metadata backend.
+      The fused path preserves convolution Q/K/V views, and gated normalization
+      reads strided token/head Z views without an intermediate packing copy.
 

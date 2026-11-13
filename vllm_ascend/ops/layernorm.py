@@ -146,7 +146,10 @@ class LayerNormFn(torch.autograd.Function):
             x = x.contiguous()
         if z is not None:
             assert z.shape == x_shape_og
-            z = z.reshape(-1, z.shape[-1])
+            # A token/head/feature view can have padding between tokens.
+            # The NPU kernel addresses these rows directly without packing Z.
+            if z.ndim != 3 or z.stride(-1) != 1:
+                z = z.reshape(-1, z.shape[-1])
             if z.stride(-1) != 1:
                 z = z.contiguous()
         weight = weight.contiguous()
