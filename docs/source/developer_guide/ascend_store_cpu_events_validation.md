@@ -32,9 +32,11 @@ These results establish actual external KV reuse, beyond an index-only hit.
 The request took approximately 0.56 seconds; this is functional evidence, not a
 performance benchmark. This deployment used blockwise transfer; earlier layerwise
 hardware evidence used prefill PCP4 with decode DP4 and also reused 4096 tokens.
-The optional Memcache 1.3.0 parser workaround was loaded in MetaService;
-see `tools/memcache_event_compat/README.md`. Evidence from the running release
-checkout is not an end-to-end test of the rebased main-branch PR commit.
+Hardware validation also used an external Memcache key-parser fix maintained
+separately in [ganglv/memcache](https://gitcode.com/ganglv/memcache)
+(commit `4a40a872`). That implementation is outside this PR. Evidence from the
+running release checkout is not an end-to-end test of the rebased main-branch
+PR commit.
 
 ## Reproduction
 
@@ -63,10 +65,8 @@ python -m pytest -q --confcutdir=tests/ut/distributed/ascend_store \
   tests/ut/distributed/ascend_store/test_layerwise_cpu_events.py \
   tests/ut/distributed/ascend_store/test_kv_transfer.py \
   tests/ut/distributed/ascend_store/test_ascend_store_connector.py
-bash tools/memcache_event_compat/build.sh
 ```
 
-The native parser assertions and all 9 Python RTLD_LOCAL regression cases passed.
 Ruff checks and formatting of changed Python files passed.
 
 `timeout 240 bash format.sh ci` exited 124 while installing the Ruff pre-commit
