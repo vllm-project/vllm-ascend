@@ -1,77 +1,120 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Sampled layer/selector-head routes, frozen before graph capture."""
+"""Request-local, device-side routing of aligned eight-query sparse groups."""
 
-import json
-import math
-from collections.abc import Mapping
-from functools import lru_cache
-from pathlib import Path
-from types import MappingProxyType
+import torch
+from vllm.triton_utils import tl, triton
 
-import regex as re
+_UNION_SIZE = 8
+_MERGE_TILE = 1024
 
 
-@lru_cache(maxsize=8)
-def _load_policy(path: str, num_selector_heads: int) -> Mapping[str, float]:
-    policy = json.loads(Path(path).read_bytes())
-    if (
-        not isinstance(policy, dict)
-        or policy.get("valid") is not True
-        or policy.get("routing") != "frozen-layer-selector-head"
-        or policy.get("per_token_dynamic") is not False
-        or policy.get("selector_modified") is not False
-    ):
-        raise ValueError("Union policy must contain sampled, frozen layer/selector-head D8 values")
-    decisions = policy.get("decisions")
-    if not isinstance(decisions, dict) or not decisions:
-        raise ValueError("Union policy decisions must be nonempty")
-    values = {}
-    layers = set()
-    for key, row in decisions.items():
-        match = re.fullmatch(r"(0|[1-9]\d*):(0|[1-9]\d*)", key)
-        d8 = row.get("D8") if isinstance(row, dict) else None
-        if (
-            match is None
-            or int(match[2]) >= num_selector_heads
-            or isinstance(d8, bool)
-            or not isinstance(d8, (int, float))
-            or not math.isfinite(d8)
-            or not 0 <= d8 <= 1
-        ):
-            raise ValueError(f"Invalid Union calibration entry: {key}")
-        layers.add(int(match[1]))
-        values[key] = float(d8)
-    if set(values) != {f"{layer}:{head}" for layer in layers for head in range(num_selector_heads)}:
-        raise ValueError("Union policy must cover every selector head of each sampled sparse layer")
-    # One immutable snapshot per worker/topology. Forward never reads this file
-    # or computes D8; old precomputed 'path' fields are deliberately ignored.
-    return MappingProxyType(values)
+@triton.jit
+def _route_union_groups(
+    UnionCount,
+    Indices,
+    Counts,
+    CuQuery,
+    RoutedUnionCount,
+    NativeIndices,
+    NativeCounts,
+    TokenRoute,
+    BATCH: tl.constexpr,
+    TOKENS: tl.constexpr,
+    TOPK: tl.constexpr,
+    WIDTH: tl.constexpr,
+    THRESHOLD: tl.constexpr,
+    GROUP_SIZE: tl.constexpr,
+):
+    group = tl.program_id(0)
+    # UnionSparseGen packs ceil(query_len / 8) groups per request. Locate
+    # this group's request on device; groups must never cross requests.
+    base = 0
+    start = 0
+    stop = 0
+    for request in range(BATCH):
+        q_start = tl.load(CuQuery + request).to(tl.int32)
+        q_end = tl.load(CuQuery + request + 1).to(tl.int32)
+        groups = (q_end - q_start + GROUP_SIZE - 1) // GROUP_SIZE
+        owns_group = (group >= base) & (group < base + groups)
+        start = tl.where(owns_group, q_start + (group - base) * GROUP_SIZE, start)
+        stop = tl.where(owns_group, q_end, stop)
+        base += groups
+    rows = start + tl.arange(0, GROUP_SIZE)
+    valid = (rows < stop) & (rows < TOKENS)
+    query_count = tl.minimum(GROUP_SIZE, stop - start)
+    union_count = tl.load(UnionCount + group)
+    # D8 = |union(selected blocks)| / (8 * topk_blocks). A final short
+    # group uses its actual query count, so decode is not biased by padding.
+    use_union = union_count * 100 <= query_count * TOPK * THRESHOLD
+    tl.store(RoutedUnionCount + group, tl.where(use_union, union_count, 0))
+    counts = tl.load(Counts + rows, mask=valid, other=0)
+    tl.store(NativeCounts + rows, tl.where(use_union, 0, counts), mask=valid)
+    tl.store(TokenRoute + rows, use_union, mask=valid)
+    slots = tl.arange(0, WIDTH)
+    offsets = rows[:, None] * TOPK + slots[None, :]
+    indices = tl.load(Indices + offsets, mask=valid[:, None] & (slots[None, :] < TOPK), other=-1)
+    native = tl.where(use_union | (slots[None, :] >= counts[:, None]), -1, indices)
+    tl.store(NativeIndices + offsets, native, mask=valid[:, None] & (slots[None, :] < TOPK))
 
 
-def use_union_for_layer(
-    threshold_pct: float,
-    policy_path: str | None,
-    layer_name: str,
-    tp_rank: int,
-    tp_size: int,
-    num_selector_heads: int,
-) -> bool:
-    if threshold_pct == 100:
-        return True
-    if not math.isfinite(threshold_pct) or not 0 <= threshold_pct <= 100:
-        raise ValueError("minimax_m3_union_d8_threshold_pct must be in [0, 100]")
-    if not policy_path:
-        raise ValueError("A D8 threshold below 100 requires minimax_m3_union_policy_path")
-    if num_selector_heads <= 0 or tp_size < num_selector_heads or tp_size % num_selector_heads:
-        raise ValueError("Union policy requires one local selector head, possibly replicated across TP ranks")
-    if not 0 <= tp_rank < tp_size:
-        raise ValueError("Invalid Union policy TP rank")
-    match = re.search(r"(?:^|\.)layers\.(\d+)(?:\.|$)", layer_name)
-    if match is None:
-        raise ValueError(f"Unrecognized MiniMax-M3 sparse layer: {layer_name}")
-    selector_head = tp_rank // (tp_size // num_selector_heads)
-    key = f"{int(match[1])}:{selector_head}"
-    values = _load_policy(policy_path, num_selector_heads)
-    if key not in values:
-        raise ValueError(f"Union policy is missing sparse layer/selector head {key}")
-    return values[key] * 100 <= threshold_pct
+@triton.jit
+def _merge_union_groups(
+    Union,
+    Native,
+    TokenRoute,
+    Counts,
+    Output,
+    ELEMENTS: tl.constexpr,
+    ROW_SIZE: tl.constexpr,
+    TILE: tl.constexpr,
+):
+    offsets = tl.program_id(0) * TILE + tl.arange(0, TILE)
+    valid = offsets < ELEMENTS
+    row = offsets // ROW_SIZE
+    use_union = tl.load(TokenRoute + row, mask=valid, other=0) != 0
+    nonempty = tl.load(Counts + row, mask=valid, other=0) > 0
+    union = tl.load(Union + offsets, mask=valid & use_union & nonempty, other=0)
+    native = tl.load(Native + offsets, mask=valid & (~use_union) & nonempty, other=0)
+    tl.store(Output + offsets, tl.where(use_union, union, native), mask=valid)
+
+
+def route_union_groups(union_count, indices, counts, cu_seqlens_q, threshold_pct):
+    """Partition real selections; unassigned branches receive empty groups.
+
+    Both attention entry points launch, but each receives only its assigned
+    edges. All selection-dependent values stay on device, including replay.
+    """
+    routed_union_count = torch.empty_like(union_count)
+    native_indices = torch.empty_like(indices)
+    native_counts = torch.empty_like(counts)
+    token_route = torch.empty(indices.shape[1], dtype=torch.bool, device=indices.device)
+    _route_union_groups[(union_count.numel(),)](
+        union_count,
+        indices,
+        counts,
+        cu_seqlens_q,
+        routed_union_count,
+        native_indices,
+        native_counts,
+        token_route,
+        BATCH=cu_seqlens_q.numel() - 1,
+        TOKENS=indices.shape[1],
+        TOPK=indices.shape[2],
+        WIDTH=triton.next_power_of_2(indices.shape[2]),
+        THRESHOLD=threshold_pct,
+        GROUP_SIZE=_UNION_SIZE,
+    )
+    return routed_union_count, native_indices, native_counts, token_route
+
+
+def merge_union_groups(union, native, token_route, counts, output):
+    _merge_union_groups[(triton.cdiv(output.numel(), _MERGE_TILE),)](
+        union,
+        native,
+        token_route,
+        counts,
+        output,
+        ELEMENTS=output.numel(),
+        ROW_SIZE=output.shape[1] * output.shape[2],
+        TILE=_MERGE_TILE,
+    )

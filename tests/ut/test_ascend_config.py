@@ -65,17 +65,13 @@ def test_union_d8_threshold_range(threshold):
         AscendConfig(sparse_kv_offload_config=None, minimax_m3_union_d8_threshold_pct=threshold)
 
 
-def test_union_d8_threshold_requires_calibration():
-    with pytest.raises(ValueError, match="minimax_m3_union_policy_path"):
-        AscendConfig(sparse_kv_offload_config=None, minimax_m3_union_d8_threshold_pct=50)
-    assert AscendConfig(sparse_kv_offload_config=None).minimax_m3_union_d8_threshold_pct == 100
+@pytest.mark.parametrize("threshold", [0, 50, 100])
+def test_union_runtime_d8_threshold_needs_no_calibration(threshold):
     assert (
         AscendConfig(
-            sparse_kv_offload_config=None,
-            minimax_m3_union_d8_threshold_pct=50,
-            minimax_m3_union_policy_path="policy.json",
+            sparse_kv_offload_config=None, minimax_m3_union_d8_threshold_pct=threshold
         ).minimax_m3_union_d8_threshold_pct
-        == 50
+        == threshold
     )
 
 

@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import inspect
-import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,7 +61,6 @@ from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     minimax_m3_sparse_attn_decode as minimax_m3_sparse_attn_decode_npu,
 )
-from vllm_ascend.models.minimax_m3.union_policy import use_union_for_layer
 from vllm_ascend.ops.triton.msa import msa_m3_index_postprocess
 from vllm_ascend.ops.triton.msa.msa_m3_index_postprocess import FP32_INDEX_SENTINEL
 from vllm_ascend.utils import AscendDeviceType
@@ -665,28 +663,6 @@ def test_union_default_and_missing_extensions_fallback(monkeypatch, cache_dtype)
     assert builder.reuse_decode_gbsa_metadata
 
 
-def test_sampled_union_policy_is_frozen_and_100_bypasses_file(tmp_path):
-    policy = tmp_path / "policy.json"
-    data = dict(
-        valid=True,
-        routing="frozen-layer-selector-head",
-        per_token_dynamic=False,
-        selector_modified=False,
-        decisions={"3:0": {"D8": 0.5, "path": "q-gather-kv"}, "3:1": {"D8": 0.51, "path": "union"}},
-    )
-    policy.write_text(json.dumps(data))
-    args = (str(policy), "model.layers.3.self_attn.attn")
-    assert use_union_for_layer(50, *args, 0, 4, 2)
-    assert use_union_for_layer(50, *args, 1, 4, 2)  # Replicated selector head 0.
-    assert not use_union_for_layer(50, *args, 2, 4, 2)
-    assert use_union_for_layer(51, *args, 2, 4, 2)
-    policy.unlink()
-    assert use_union_for_layer(50, *args, 0, 4, 2)  # Startup snapshot retained.
-    assert use_union_for_layer(100, "missing.json", "unused", 0, 0, 0)
-    with pytest.raises(ValueError, match="requires minimax"):
-        use_union_for_layer(50, None, "model.layers.3.attn", 0, 2, 2)
-
-
 @pytest.mark.parametrize("failure", [ImportError, OSError, RuntimeError, AttributeError])
 def test_missing_union_packages_do_not_abort_model_startup(monkeypatch, failure):
     union_module.load_union_extensions.cache_clear()
@@ -721,7 +697,8 @@ def test_union_default_keeps_native_for_other_hardware_or_geometry(
 
 
 @pytest.mark.parametrize("kv_dtype", [torch.bfloat16, torch.float16, torch.float8_e4m3fn])
-def test_union_dispatches_mixed_batch_without_native_attention(monkeypatch, kv_dtype):
+@pytest.mark.parametrize("threshold", [100, 50])
+def test_union_dispatches_mixed_batch_with_optional_runtime_routing(monkeypatch, kv_dtype, threshold):
     monkeypatch.setattr(
         msa_m3_module, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A5)
     )
@@ -735,8 +712,27 @@ def test_union_dispatches_mixed_batch_without_native_attention(monkeypatch, kv_d
     monkeypatch.setattr(msa_m3_module, "load_union_extensions", loader)
     monkeypatch.setattr(union_module, "load_union_extensions", loader)
     cache_dtype = "fp8_e4m3" if kv_dtype == torch.float8_e4m3fn else str(kv_dtype).removeprefix("torch.")
-    impl = AscendMiniMaxM3SparseImpl(16, 128, 0.5, 1, cache_dtype, topk_blocks=16, sparse_block_size=128)
+    impl = AscendMiniMaxM3SparseImpl(
+        16,
+        128,
+        0.5,
+        1,
+        cache_dtype,
+        topk_blocks=16,
+        sparse_block_size=128,
+        union_d8_threshold_pct=threshold,
+    )
     loader.assert_called_once()
+    route = MagicMock(side_effect=lambda uc, idx, counts, cu, pct: (uc, idx, counts, None))
+    merge = MagicMock(side_effect=lambda u, n, route, counts, out: out.copy_(u))
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm_ascend.models.minimax_m3.union_policy",
+        SimpleNamespace(route_union_groups=route, merge_union_groups=merge),
+    )
+    routed_prefill, routed_decode = MagicMock(), MagicMock()
+    monkeypatch.setattr(union_module, "minimax_m3_sparse_attn", routed_prefill)
+    monkeypatch.setattr(union_module, "minimax_m3_sparse_attn_decode", routed_decode)
     decode = AscendMiniMaxM3SparseDecodeMetadata(
         seq_lens=torch.tensor([129], dtype=torch.int32),
         block_table=torch.tensor([[0, 1]], dtype=torch.int32),
@@ -793,6 +789,16 @@ def test_union_dispatches_mixed_batch_without_native_attention(monkeypatch, kv_d
     assert dec_args[2] is selections[0] and pre_args[2] is selections[1]
     assert union.call_args_list[0].kwargs["select_num_idx"] is selections[2]
     assert impl._dequant_scale is None
+    expected_calls = int(threshold < 100)
+    assert route.call_count == merge.call_count == 2 * expected_calls
+    assert routed_prefill.call_count == routed_decode.call_count == expected_calls
+    assert union.call_args_list[0].kwargs["d8_threshold_pct"] == threshold
+    assert union.call_args_list[0].kwargs["decode_query_len"] == 1
+    assert union.call_args_list[1].kwargs["total_kv_blocks"] == 3
+    if threshold < 100:
+        assert routed_decode.call_args.kwargs["indices_are_sorted"]
+        assert "gbsa_metadata_cache" not in routed_decode.call_args.kwargs
+        assert routed_prefill.call_args.kwargs["total_kv_blocks"] == 3
     for call in attention_ops.generic_block_sparse_attention.call_args_list:
         assert call.args[0].dtype == kv_dtype
         assert call.kwargs["quant_mode"] == (5 if kv_dtype == torch.float8_e4m3fn else 0)
@@ -1488,9 +1494,6 @@ def test_sparse_attention_uses_split_indexer_projection_when_quant_types_differ(
     threshold_pct,
     monkeypatch,
 ) -> None:
-    policy = MagicMock(return_value=False)
-    monkeypatch.setattr("vllm_ascend.models.minimax_m3.minimax_m3.use_union_for_layer", policy)
-    monkeypatch.setattr("vllm_ascend.models.minimax_m3.minimax_m3.get_tensor_model_parallel_rank", lambda: 0)
     mock_qkv_linear.return_value = SimpleNamespace(name="split_qkv")
     mock_fused_qkv_linear.return_value = SimpleNamespace(name="fused_qkv")
     mock_row_linear.return_value = SimpleNamespace(name="o_proj")
@@ -1505,7 +1508,6 @@ def test_sparse_attention_uses_split_indexer_projection_when_quant_types_differ(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=32),
         additional_config={
             "minimax_m3_union_d8_threshold_pct": threshold_pct,
-            "minimax_m3_union_policy_path": "policy.json",
         },
     )
     mock_kv_dtype.return_value = torch.bfloat16
@@ -1543,8 +1545,7 @@ def test_sparse_attention_uses_split_indexer_projection_when_quant_types_differ(
     )
 
     assert layer._use_fused_qkv_indexer is False
-    assert mock_sparse_impl.call_args.kwargs["union_enabled"] == (threshold_pct == 100)
-    assert policy.call_count == (threshold_pct != 100)
+    assert mock_sparse_impl.call_args.kwargs["union_d8_threshold_pct"] == threshold_pct
     assert layer.qkv_proj.name == "split_qkv"
     assert layer.indexer_proj is split_indexer_proj
     assert layer.indexer is runtime_indexer

@@ -870,8 +870,8 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
         }
         hardware_profile = get_current_hardware_profile()
         context = vllm_config.compilation_config.static_forward_context
-        # Use the resolved worker routes, including calibration and optional-op
-        # fallback. Mixed policy groups still prepare native decode schedules.
+        # Use the resolved optional-op fallback. Runtime policy builds native
+        # schedules from its masked selections inside attention.
         self.use_union = any(context[name].impl.use_union for name in layer_names)
         native_layers = [context[name] for name in layer_names if not context[name].impl.use_union]
         self.reuse_decode_gbsa_metadata = bool(native_layers) and hardware_profile.supports(
@@ -1079,7 +1079,7 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
         *,
         topk_blocks: int,
         sparse_block_size: int,
-        union_enabled: bool = True,
+        union_d8_threshold_pct: float = 100,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -1089,9 +1089,9 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
         self.topk_blocks = topk_blocks
         self.block_size = sparse_block_size
         self._dequant_scale: torch.Tensor | None = None
+        self.union_d8_threshold_pct = union_d8_threshold_pct
         self.use_union = (
-            union_enabled
-            and _use_union_attention(kv_cache_dtype, num_heads, self.num_kv_heads, head_size, sparse_block_size)
+            _use_union_attention(kv_cache_dtype, num_heads, self.num_kv_heads, head_size, sparse_block_size)
             and load_union_extensions() is not None
         )
         if self.use_union:
@@ -1157,6 +1157,8 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
                     self.scale,
                     out[:num_decode_tokens],
                     select_num_idx=decode_select_num_idx,
+                    d8_threshold_pct=self.union_d8_threshold_pct,
+                    decode_query_len=d.decode_query_len,
                 )
             else:
                 minimax_m3_sparse_attn_decode(
@@ -1195,6 +1197,8 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
                     p.max_seq_len,
                     self.scale,
                     out[num_decode_tokens:],
+                    d8_threshold_pct=self.union_d8_threshold_pct,
+                    total_kv_blocks=p.total_kv_blocks,
                 )
             else:
                 minimax_m3_sparse_attn(

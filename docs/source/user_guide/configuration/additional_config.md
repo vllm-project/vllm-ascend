@@ -51,8 +51,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `dump_config`                       | dict | `None`  | Inline msprobe dump configuration. vLLM-Ascend will materialize it to a temporary JSON file and pass that file to the debugger. |
 | `dump_config_path`                  | str  | `None`  | Configuration file path for msprobe dump (compatible legacy option).                                      |
 | `enable_shared_expert_dp`           | bool | `False` | Replicate shared-expert weights across TP ranks and run the shared expert with data parallelism. This option is independent of upstream MoE sequence parallelism; either feature or both can be enabled. It improves performance but consumes more memory. |
-| `minimax_m3_union_d8_threshold_pct`  | float | `100` | MiniMax-M3 sampled D8 threshold in percent, in `[0, 100]`. `100` bypasses policy loading and uses pure Union where supported. |
-| `minimax_m3_union_policy_path`       | str | `None` | Frozen layer/selector-head calibration JSON, required when the D8 threshold is below `100`. See [MiniMax-M3 Union routing](#minimax-m3-union-routing). |
+| `minimax_m3_union_d8_threshold_pct`  | float | `100` | MiniMax-M3 runtime D8 threshold in percent, in `[0, 100]`. `100` bypasses routing and uses pure Union where supported. See [MiniMax-M3 Union routing](#minimax-m3-union-routing). |
 | `enable_force_eplb`                 | bool | `False` | Force a deterministic round-robin expert routing to measure the EPLB performance ceiling. **Analysis and profiling only — never enable in production.** It replaces the real MoE router output, so model results and accuracy are invalid. Cannot be combined with `eplb_config.dynamic_eplb`. |
 | `multistream_overlap_shared_expert` | bool | `False` | Whether to enable multi-stream shared expert. This option only takes effect on MoE models with shared experts. |
 | `enable_cpu_binding`                | bool | `True`  | Enables Ascend-native CPU binding on ARM servers. Set to `False` to disable. See [CPU Binding](../feature_guide/cpu_binding.md). |
@@ -347,42 +346,31 @@ KV caches. If the separately installed UnionSparseGen and GBSA exactMask
 extensions cannot be loaded, it uses native Q-gather-KV instead.
 
 The default `minimax_m3_union_d8_threshold_pct=100` uses pure Union without
-loading a policy or calculating D8. To use a sampled policy, set a threshold
-below `100` and provide `minimax_m3_union_policy_path` on every worker:
+D8 routing, a native branch launch, or an output merge. To select a path from
+current requests' actual sparse blocks, configure a threshold below `100`:
 
 ```json
 {
-  "minimax_m3_union_d8_threshold_pct": 50,
-  "minimax_m3_union_policy_path": "/path/to/calibration.json"
+  "minimax_m3_union_d8_threshold_pct": 50
 }
 ```
 
-The calibration file uses the existing frozen layer/selector-head format:
+Each sparse layer and its local selector head routes each request's aligned
+eight-query group independently. `D8` is the number of distinct selected blocks
+in that group divided by `8 * topk_blocks`. A request's final short group uses
+its actual query count instead of eight. If `100 * D8` exceeds the threshold,
+the group uses native attention (Q-gather-KV for prefill); otherwise it uses
+Union. Equality selects Union. The selector and its top-k are unchanged.
+This metric is unrelated to text repetition or prefix-cache hits.
 
-```json
-{
-  "valid": true,
-  "routing": "frozen-layer-selector-head",
-  "per_token_dynamic": false,
-  "selector_modified": false,
-  "decisions": {
-    "3:0": {"D8": 0.49},
-    "3:1": {"D8": 0.52}
-  }
-}
-```
-
-Include every sparse layer and all its global selector heads. `D8` is the
-sampled mean of the union of eight aligned queries' selected block sets divided
-by `8 * topk_blocks`, expressed as a fraction in `[0, 1]`. It is unrelated to
-text repetition or prefix-cache hits. Use the same frozen calibration file on
-every worker. Existing `path` entries are ignored: at startup, each layer/head
-uses Q-gather-KV if `100 * D8` exceeds the configured threshold, and Union
-otherwise. Replicated TP ranks use the same global selector-head entry.
-
-These routes remain fixed during prefill, decode and graph replay. Inference
-does not sample selections, recalculate D8, or switch per token. A threshold
-tuned on one calibration dataset need not be optimal on other workloads.
+Routing uses the current UnionSparseGen counts on device, including during
+graph replay. No calibration file, offline sampling, or device-to-host scalar
+read is required. The two attention entry points receive disjoint selections:
+Union groups have zero native edges, and native groups have zero Union counts.
+Both entry points still launch, and Union preprocessing, routing and output
+merging add overhead. A lower threshold does not guarantee a performance gain;
+validate it on the target workload. Native decode schedules are rebuilt from
+the routed counts instead of reusing a layer-independent schedule.
 
 ## GDN internal prefill checkpoints
 

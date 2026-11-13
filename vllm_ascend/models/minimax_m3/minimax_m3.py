@@ -43,7 +43,6 @@ from vllm.config import (
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
-    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
 from vllm.forward_context import get_forward_context, is_forward_context_available
@@ -117,7 +116,6 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
     _register_m3_sparse_packed_modules,
     _use_fused_qkv_indexer,
 )
-from vllm_ascend.models.minimax_m3.union_policy import use_union_for_layer
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
@@ -324,16 +322,6 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.attn_backend = AscendMiniMaxM3SparseBackend
         additional_config = getattr(vllm_config, "additional_config", {})
         threshold_pct = additional_config.get("minimax_m3_union_d8_threshold_pct", 100)
-        union_enabled = True
-        if threshold_pct != 100:
-            union_enabled = use_union_for_layer(
-                threshold_pct,
-                additional_config.get("minimax_m3_union_policy_path"),
-                self.layer_name,
-                get_tensor_model_parallel_rank(),
-                tp_size,
-                self.total_idx_heads,
-            )
         self.impl = AscendMiniMaxM3SparseImpl(
             self.num_heads,
             self.head_dim,
@@ -342,7 +330,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             kv_cache_dtype=self.kv_cache_dtype,
             topk_blocks=sparse_cfg["sparse_topk_blocks"],
             sparse_block_size=sparse_cfg["sparse_block_size"],
-            union_enabled=union_enabled,
+            union_d8_threshold_pct=threshold_pct,
         )
         self.topk_blocks = sparse_cfg["sparse_topk_blocks"]
         self.sparse_block_size = sparse_cfg["sparse_block_size"]

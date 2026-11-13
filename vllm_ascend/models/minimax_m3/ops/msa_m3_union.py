@@ -11,6 +11,8 @@ from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     _sort_valid_gbsa_prefix,
     _split_main_kv_cache,
     _to_fp8_e4m3,
+    minimax_m3_sparse_attn,
+    minimax_m3_sparse_attn_decode,
 )
 
 UNION_SIZE = 8
@@ -56,6 +58,9 @@ def minimax_m3_sparse_attn_union(
     output: torch.Tensor,
     *,
     select_num_idx: torch.Tensor | None = None,
+    d8_threshold_pct: float = 100,
+    total_kv_blocks: int = -1,
+    decode_query_len: int = 0,
 ) -> None:
     """Union eight adjacent queries while preserving their exact selected KV sets.
 
@@ -116,6 +121,48 @@ def minimax_m3_sparse_attn_union(
         num_union_groups,
         max_kv_blocks,
     )
+    if d8_threshold_pct < 100:
+        # Imported only for opt-in runtime routing. The default pure Union
+        # path has no routing kernel, native launch, or output merge.
+        from vllm_ascend.models.minimax_m3.union_policy import route_union_groups
+
+        union_count, native_indices, native_counts, token_route = route_union_groups(
+            union_count, indices, counts, cu_seqlens_q, d8_threshold_pct
+        )
+        native_output = torch.empty_like(output)
+        if decode_query_len:
+            # Routed counts change with actual selections; do not reuse the
+            # native layer-independent decode schedule for this mixed path.
+            minimax_m3_sparse_attn_decode(
+                q,
+                kv_cache,
+                native_indices,
+                block_table,
+                seq_lens,
+                1,
+                sm_scale,
+                native_output,
+                decode_query_len,
+                select_num_idx=native_counts,
+                cu_seqlens_q=cu_seqlens_q.to(torch.int64),
+                indices_are_sorted=True,
+            )
+        else:
+            minimax_m3_sparse_attn(
+                q,
+                kv_cache,
+                native_indices,
+                block_table,
+                cu_seqlens_q,
+                seq_lens,
+                seq_lens,
+                max_query_len,
+                1,
+                sm_scale,
+                native_output,
+                total_kv_blocks=total_kv_blocks,
+                max_kv_blocks=max_kv_blocks,
+            )
     # Union mask mode requires precision 0, including FP8; the native
     # non-Union FP8 path's precision 1 is a different operator contract.
     common = dict(
@@ -159,4 +206,9 @@ def minimax_m3_sparse_attn_union(
         attention_out_dtype=output.dtype,
         **common,
     )
-    output.copy_(result)
+    if d8_threshold_pct < 100:
+        from vllm_ascend.models.minimax_m3.union_policy import merge_union_groups
+
+        merge_union_groups(result, native_output, token_route, counts, output)
+    else:
+        output.copy_(result)
