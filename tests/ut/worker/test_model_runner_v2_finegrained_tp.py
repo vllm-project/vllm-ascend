@@ -548,9 +548,7 @@ def test_publish_reads_real_execute_model_state_field(_lmhead_tp_enable):
         eager=True,
         num_reqs=5,
     )
-    state = ExecuteModelState._make(
-        [None] * len(ExecuteModelState._fields)
-    )._replace(dp_sync_state=sync)
+    state = ExecuteModelState._make([None] * len(ExecuteModelState._fields))._replace(dp_sync_state=sync)
     assert "dp_sync_state" in ExecuteModelState._fields  # wiring precondition
     runner.execute_model_state = state
     runner._publish_lmhead_tp_step_capacity()
