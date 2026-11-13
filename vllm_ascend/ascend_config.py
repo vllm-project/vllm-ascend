@@ -591,7 +591,8 @@ class AscendConfig:
                 "enabled": false,
                 "topk_buffer_size": -1,
                 "dram_size_per_dp_GB": 110,
-                "keep_device_kv_cache": false
+                "keep_device_kv_cache": false,
+                "store_port_base": 8500
             }
         }
 
@@ -1777,6 +1778,10 @@ class SparseKVOffloadConfig:
     topk_buffer_size: int = -1
     dram_size_per_dp_GB: int = 110
     keep_device_kv_cache: bool = False
+    # Base TCP port of the MemFabric shared offload store. The data parallel
+    # group ``i`` binds ``store_port_base + i``. Independent services that share
+    # a network namespace must use distinct bases.
+    store_port_base: int = 8500
     topk: int = dataclasses.field(default=0, init=False)
     use_fused_overlap: bool = False
 
@@ -1791,6 +1796,8 @@ class SparseKVOffloadConfig:
             raise ValueError("sparse_kv_offload_config.topk_buffer_size must be -1 or positive")
         if self.dram_size_per_dp_GB <= 0:
             raise ValueError("sparse_kv_offload_config.dram_size_per_dp_GB must be positive")
+        if not 1 <= self.store_port_base <= 65535:
+            raise ValueError("sparse_kv_offload_config.store_port_base must be a valid TCP port")
         return self
 
     @classmethod

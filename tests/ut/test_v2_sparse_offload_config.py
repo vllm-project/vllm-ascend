@@ -164,3 +164,25 @@ def test_overlap_does_not_apply_copy_sfa_kernel_limits(v2):
     )
     assert not config.use_fused_copy_sfa
     _validate_fused_copy_sfa_config(vllm_config, config)
+
+
+def test_store_port_base_defaults_to_the_historical_value():
+    config = SparseKVOffloadConfig.from_additional_config(make_config(False, 0), {"enabled": True})
+
+    assert config.store_port_base == 8500
+
+
+def test_store_port_base_can_be_overridden():
+    config = SparseKVOffloadConfig.from_additional_config(
+        make_config(False, 0), {"enabled": True, "store_port_base": 9500}
+    )
+
+    assert config.store_port_base == 9500
+
+
+@pytest.mark.parametrize("store_port_base", [0, -1, 65536])
+def test_store_port_base_out_of_range_is_rejected(store_port_base):
+    with pytest.raises(ValueError, match="store_port_base"):
+        SparseKVOffloadConfig.from_additional_config(
+            make_config(False, 0), {"enabled": True, "store_port_base": store_port_base}
+        )
