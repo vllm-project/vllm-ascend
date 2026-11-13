@@ -452,7 +452,32 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
                 device=raw_key_cache.device
             )
         if not self._fused_norm_rope_eligible(token_k, positions):
-            raise ValueError("QSA compressed-key fused norm+RoPE ABI is not satisfied")
+            pooled, first_positions = _compress_qsa_groups(
+                token_k[:num_tokens],
+                position_rows,
+                raw_key_cache,
+                raw_metadata.block_table,
+                raw_metadata.token_to_req,
+                raw_metadata.query_start_loc,
+                raw_metadata.logical_positions,
+                compressed_metadata.slot_mapping,
+                self.compress_ratio,
+                rope_position_cache,
+            )
+            normalized = self.normalize_compressed_keys(pooled, first_positions)
+            _store_qsa_cache_rows(
+                self.compressed_key_cache.kv_cache,
+                compressed_metadata.slot_mapping,
+                normalized,
+            )
+            _store_qsa_cache_rows(raw_key_cache, raw_metadata.slot_mapping, token_k[:num_tokens])
+            if rope_position_cache is not None:
+                _store_qsa_cache_rows(
+                    rope_position_cache,
+                    raw_metadata.slot_mapping,
+                    position_rows,
+                )
+            return
         rotary_cache = self.rotary_emb._match_cos_sin_cache_dtype(token_k)  # noqa: SLF001
         qsa_compress_groups_with_ratio_fused(
             token_k[:num_tokens],
