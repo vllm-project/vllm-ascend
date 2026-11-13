@@ -55,9 +55,9 @@ _GDN_ORIGINAL_INIT = _GDN_PATCH_TARGET.__init__
 # torch_npu builds; see the tp_size >= 16 TODO in ascend_forward_context.py).
 DENSE_SP_FUSED_TP_SIZES = (2, 4, 8)
 _DENSE_SP_FUSED_DTYPES = (torch.bfloat16, torch.float16)
-# Minimum token count for fusion: prefill and mixed batches have large
-# ``x.shape[0]``; pure decode batches (concurrency ~8, 1 token/seq) stay
-# below this threshold and fall back to the unfused GEMM + collective path.
+# Minimum total token count for fusion: prefill and mixed batches have large
+# token counts; pure decode batches (concurrency ~8, 1 token/seq) stay below
+# this threshold and fall back to the unfused GEMM + collective path.
 _DENSE_SP_FUSED_MIN_TOKENS = 128
 
 
@@ -65,23 +65,28 @@ def _dense_sp_can_fuse(
     x: torch.Tensor,
     weight: torch.Tensor,
     world_size: int,
+    *,
+    is_shard: bool = False,
 ) -> bool:
     """Whether the inputs are eligible for the fused matmul-collective kernel.
 
     The decision is purely structural (shapes / dtypes / TP size / token
     count) so the same path is taken during compile tracing, warmup, ACL
-    graph capture and replay.  The ``x.shape[0] >= _DENSE_SP_FUSED_MIN_TOKENS``
-    threshold directs prefill-sized and mixed batches to the fused kernel
-    while leaving pure decode batches (small ``num_tokens``) on the unfused
-    path, which is faster for small GEMMs.
+    graph capture and replay.  The threshold is applied to the **total**
+    token count: for column-parallel layers ``x`` is the sequence-parallel
+    shard (``is_shard=True``), so ``x.shape[0] * world_size`` recovers the
+    full token count; for row-parallel layers ``x`` is already the full
+    sequence.  This keeps the threshold consistent across projections at
+    every TP size.
     """
+    num_tokens = x.shape[0] * world_size if is_shard else x.shape[0]
     return (
         world_size in DENSE_SP_FUSED_TP_SIZES
         and x.ndim == 2
         and weight.ndim == 2
         and x.dtype in _DENSE_SP_FUSED_DTYPES
         and weight.dtype == x.dtype
-        and x.shape[0] >= _DENSE_SP_FUSED_MIN_TOKENS
+        and num_tokens >= _DENSE_SP_FUSED_MIN_TOKENS
         and x.shape[1] == weight.shape[1]
     )
 
@@ -103,7 +108,7 @@ def _dense_sp_all_gather_mm_impl(
     bias: torch.Tensor | None,
     world_size: int,
 ) -> torch.Tensor:
-    if _dense_sp_can_fuse(x, weight, world_size):
+    if _dense_sp_can_fuse(x, weight, world_size, is_shard=True):
         return DeviceOperator.npu_all_gather_base_mm(
             x.contiguous(),
             weight.t(),
