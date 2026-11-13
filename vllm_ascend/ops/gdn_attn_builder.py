@@ -1347,10 +1347,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         # seq_lens has the same number of rows. Ascend's unpadded() keeps the
         # padded block-table rows, so on vLLM main pass only the real request
         # rows (same rule as build()).
-        if (
-            self.vllm_config.cache_config.mamba_cache_mode != "none"
-            and block_table.shape[0] != m.gdn_seq_lens.shape[0]
-        ):
+        if self.vllm_config.cache_config.mamba_cache_mode != "none" and block_table.shape[0] != m.gdn_seq_lens.shape[0]:
             block_table = block_table[: m.gdn_seq_lens.shape[0]]
         if self.vllm_config.cache_config.mamba_cache_mode == "align":
             aligned = self.mamba_aligned_state_indices
