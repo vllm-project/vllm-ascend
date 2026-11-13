@@ -10,5 +10,5 @@ entries:
   - category: feature
     text: >-
       Added experimental colocated HiSparse and bulk AscendStore prefix reuse
-      with MemCache host_tcp.
+      with MemCache host_tcp and asynchronous loading (load_async=true).
     hardware: [A5]
