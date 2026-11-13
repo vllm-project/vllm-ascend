@@ -28,6 +28,38 @@ SEV_NAME = {"F": "Critical", "S": "Major", "N": "Minor", "H": "Hint"}
 DIM_NAME = {"正确性": "Correctness", "完整性": "Completeness", "易理解": "Understandability"}
 SEV_RE = re.compile(r"(致命|严重|一般|提示)?\s*([FSNH])?\s*[-－]\s*(\d+(?:\.\d+)?)")
 
+# H2 category names (from h2_registry.json) mapped to English for PR comments.
+H2_EN = {
+    # Correctness
+    "单位符号使用错误": "Unit symbol error",
+    "不符合安全合规要求": "Security non-compliance",
+    "标点符号错误": "Punctuation error",
+    "链接错误或失效": "Broken or invalid link",
+    "命令/文件名/路径/参数/示例等错误": "Command/file/path/parameter/example error",
+    "英文拼写错误": "English spelling error",
+    "中文错别字词": "Chinese typo",
+    "与产品实现不一致": "Inconsistency with product implementation",
+    "代码样例无法执行": "Non-executable code sample",
+    "写作不规范": "Non-standard writing",
+    # Completeness
+    "参数相关信息不完整": "Incomplete parameter information",
+    "产品规格/功能特性/兼容性信息不完整": "Incomplete product spec/feature/compatibility info",
+    "场景/背景/辅助信息不完整": "Incomplete scenario/background/auxiliary info",
+    "操作步骤不完整": "Incomplete operation steps",
+    "链接缺失": "Missing links",
+    # Understandability
+    "文档架构/大纲不合理": "Irrational document structure/outline",
+    "文档内容不易理解": "Hard-to-understand content",
+    "示例代码不易理解": "Hard-to-understand sample code",
+    "操作步骤逻辑不清晰": "Unclear operation step logic",
+    "跳转多": "Excessive cross-references",
+    "AI亲和": "Low AI affinity",
+}
+
+
+def h2_en(h2):
+    return H2_EN.get(str(h2 or ""), str(h2 or ""))
+
 
 def parse_sev(severity):
     m = SEV_RE.search(str(severity or ""))
@@ -79,7 +111,7 @@ def also_hit_note(p):
     for h in hits:
         if not isinstance(h, dict):
             continue
-        h2 = h.get("h2", "")
+        h2 = h2_en(h.get("h2", ""))
         h3 = h.get("h3", "")
         rule = f"{h2} {h3}".strip()
         letter, code, _ = parse_sev(h.get("severity"))
@@ -95,7 +127,7 @@ def problem_line(entry, repo, sha, p):
     tag = f"{letter}-{code}" if code else letter
     ln = line_anchor(p.get("line"))
     loc = f"[L{ln}]({blob_link(repo, sha, entry['path'], p.get('line'))})" if ln else "L—"
-    h2 = p.get("h2", "")
+    h2 = h2_en(p.get("h2", ""))
     head = f"- **[{tag}]** {loc} · {h2}"
     parts = [head, fmt_code(p.get("original", ""))]
     if p.get("issue"):
@@ -149,7 +181,7 @@ def render(out_dir, summary, inline_count=0):
     if scores and len(scores) == len(ok_files):
         avg = round(sum(scores) / len(scores), 1)
         grades = {e.get("grade") for e in ok_files}
-        overview += f", average score **{avg}** (grade: {'、'.join(sorted(str(g) for g in grades))})"
+        overview += f", average score **{avg}** (grade: {', '.join(sorted(str(g) for g in grades))})"
     lines += [overview, ""]
 
     # 文件表
@@ -200,7 +232,7 @@ def render(out_dir, summary, inline_count=0):
         lines += ["<details><summary><b>Warnings & not evaluated</b></summary>", "", *warns, "", "</details>", ""]
 
     # 页脚说明
-    dims = "、".join(DIM_NAME.get(d, d) for d in summary.get("dims", []))
+    dims = ", ".join(DIM_NAME.get(d, d) for d in summary.get("dims", []))
     lines += [
         "---",
         f"<sup>Model: {summary.get('model', '—')} | Dimensions: "
@@ -229,7 +261,7 @@ def inline_body(p):
     letter, code, _ = parse_sev(p.get("severity"))
     sev_name = SEV_NAME.get(letter, letter)
     tag = f"{letter}-{code}" if code else letter
-    lines = [f"**[{tag}] {sev_name}** · {p.get('h2', '')}", ""]
+    lines = [f"**[{tag}] {sev_name}** · {h2_en(p.get('h2', ''))}", ""]
     if p.get("issue"):
         lines += [p["issue"], ""]
     patch = p.get("patch")
@@ -291,12 +323,12 @@ def generate(summary_path, out_path):
     inline_path = os.path.join(out_dir, "inline.json")
     with open(inline_path, "w", encoding="utf-8") as f:
         json.dump(inline, f, ensure_ascii=False, indent=2)
-    print(f"[gen_comment] 评论已生成: {out_path}（{len(text)} 字符）；行内评论候选 {len(inline)} 条: {inline_path}")
+    print(f"[gen_comment] comment generated: {out_path} ({len(text)} chars); inline candidates: {len(inline)} -> {inline_path}")
     return out_path
 
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:
-        print("用法: python gen_comment.py <summary.json> <输出comment.md>", file=sys.stderr)
+        print("Usage: python gen_comment.py <summary.json> <output comment.md>", file=sys.stderr)
         sys.exit(2)
     generate(sys.argv[1], sys.argv[2])

@@ -100,19 +100,20 @@ SCHEMA_PROMPT = """\
 2. JSON 字符串值内禁止未转义英文双引号 "（引用术语/原文一律用{quote_rule}）；字符串单行不换行
 3. 每条 original 去掉【】后必须能逐字连续出现在 line 行原文中；line 行为空行时禁止上报（行号错位）
 4. issue 中引用的错误词必须能在 original 中找到
+5. issue 与 fix_suggestion 必须使用 {issue_lang} 输出，禁止混入其他语言（即使规则文本为中文，问题描述也必须用 {issue_lang}）
 """
 
 SCRIPT_LINKED_EXTRA_SCHEMA = """
-5. 本检测项为「脚本+LLM 联动」，输入中附有脚本预筛的 candidates[]（每条自带 rule/signal/context/review
+6. 本检测项为「脚本+LLM 联动」，输入中附有脚本预筛的 candidates[]（每条自带 rule/signal/context/review
    复核口径）：逐条结合 context 复核——确认成立者作为一条问题输出（h3 取该 candidate 的 rule 号，
    并加字段 "_script": true、"_script_llm_merged": true，severity 按 candidate.review 口径定级，
    可给 patch/fix_suggestion）；不成立者直接忽略，禁止输出。candidates 之外由你按规则自查出的问题
    正常输出（不加 _script 字段）。
-6. 输入中「脚本已直接判定的问题清单」已由系统记录，禁止重复上报其中任何一条。
+7. 输入中「脚本已直接判定的问题清单」已由系统记录，禁止重复上报其中任何一条。
 """
 
 DEGRADED_EXTRA_SCHEMA = """
-5. 本次运行脚本前置产物不可用，仅执行规则文件中的纯 LLM 语境/语义类规则；
+6. 本次运行脚本前置产物不可用，仅执行规则文件中的纯 LLM 语境/语义类规则；
    依赖脚本数据（可达性、确定性规则命中）的部分一律不报告。
 """
 
