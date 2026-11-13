@@ -13,7 +13,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
     KVConnectorTransferResults,
-    KVConnectorWorkerMetadata,
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
@@ -44,6 +43,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_wor
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import LookupKeyServer
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    AscendStoreKVConnectorWorkerMetadata,
     get_sharded_mamba_group_ids,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
@@ -165,7 +165,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 "as the MoonCakeStoreConnector will be removed in the future."
             )
 
-        self._kv_cache_events: KVConnectorKVEvents | None = None
+        self._kv_cache_events: AscendStoreKVEvents | None = None
 
         self._current_step_has_real_forward = False
         # Handle to the (V2) mamba hybrid model state while its per-layer
@@ -258,7 +258,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         """Ignore P/D handshake metadata because AscendStore handles PP via pool keys."""
         pass
 
-    def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int | None, bool]:
+    def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(request, num_computed_tokens)
 
@@ -463,7 +463,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         cast(KVPoolWorker, self.connector_worker).wait_for_save(self._get_connector_metadata())
 
-    def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str] | None, set[str] | None]:
+    def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
         metadata = self._get_connector_metadata()
@@ -490,7 +490,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         return self.connector_worker.get_block_ids_with_load_errors()
 
-    def get_kv_connector_kv_cache_events(self) -> KVConnectorKVEvents | None:
+    def get_kv_connector_kv_cache_events(self) -> AscendStoreKVEvents | None:
         """
         Get the KV connector kv cache events collected during the last interval.
         """
@@ -528,7 +528,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self._kv_cache_events = None
         return self.connector_scheduler.reset_store()
 
-    def build_connector_worker_meta(self) -> KVConnectorWorkerMetadata | None:
+    def build_connector_worker_meta(self) -> AscendStoreKVConnectorWorkerMetadata | None:
         assert self.connector_worker is not None
         return self.connector_worker.build_connector_worker_meta()
 
