@@ -24,7 +24,8 @@ def test_dspark_context_kv_matches_per_layer_reference(num_tokens, paired_slots)
         (num_blocks, num_layers, block_size, 1, head_dim), -7, device="npu", dtype=torch.bfloat16
     )
     reference_storage = fused_storage.clone()
-    layers, mappings, rope = [], [], ({}, {})
+    layers, mappings = [], []
+    rope: tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]] = ({}, {})
     for layer_idx in range(num_layers):
         weight = torch.randn(head_dim, device="npu", dtype=torch.bfloat16)
         angles = torch.randn(num_tokens, 32, device="npu", dtype=torch.float32)
