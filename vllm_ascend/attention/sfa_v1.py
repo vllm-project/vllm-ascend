@@ -834,6 +834,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.sfa_qsfa_packed_kv_head_dim = 0
         self.sfa_qsfa_k_nope_clip_alpha: torch.Tensor | None = None
         self.sfa_qsfa_kr_cache_dummy: torch.Tensor | None = None
+        self.sfa_qsfa_sinks: dict[tuple[int, torch.device], torch.Tensor] = {}
 
         self.local_num_heads = self.num_heads
         if self.g_proj is not None:

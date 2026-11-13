@@ -203,6 +203,23 @@ If you do not use the Docker images above, you can build from source. Follow the
 
 Kimi K3.1 Pro model configuration, multimodal processing, reasoning parsing, and tool-call parsing are registered by vLLM-Ascend. Use vLLM and vLLM-Ascend source revisions compatible with **vLLM-Ascend 0.30.0**, the version used in this guide.
 
+On Atlas 800I A3, Kimi K3.1 Pro with `--kv-cache-dtype int8` uses the
+`cann_ops_transformer.kv_quant_sparse_flash_attention` Torch extension, backed by
+`KvQuantSparseFlashAttentionV2` and the shared ops-transformer QSFA kernel.
+Install a matching CANN operator package and `cann_ops_transformer` Torch extension
+on every worker. The build must support A3 INT8 per-tile KV, query-head counts
+from 1 through 128, `rope_head_dim=0/64`, and FP32 softmax max/sum outputs for DCP.
+See the [upstream Torch interface](https://gitcode.com/cann/ops-transformer/blob/master/attention/kv_quant_sparse_flash_attention_v2/torch_extension/kv_quant_sparse_flash_attention.py)
+and [shared QSFA source](https://gitcode.com/cann/ops-transformer/tree/master/attention/kv_quant_sparse_flash_attention).
+The adapter supplies negative-infinity sinks to preserve Kimi's attention semantics.
+
+Validate the installed A3 operator, including native heads, empty candidates,
+softmax statistics, and graph replay, before starting the multi-node service:
+
+```bash
+pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/test_qsfa_native_heads.py
+```
+
 ## 5 Online Service Deployment {#5-online-service-deployment}
 
 This section covers basic PD separation, 1M long-context PD separation, and pooled PD separation. Enable `VLLM_USE_V2_MODEL_RUNNER=1` on every node, use `kimi-k3.1-pro` as the served model name, and fill in model paths as described in [Section 3.1](#31-model-weights). The A3 and 950DT Products basic and 1M configurations follow their respective deployment scripts; the A3 pooled reference and 950DT Products pooled configurations are listed in [Section 5.3](#53-pooled-pd).

@@ -2,15 +2,20 @@
 
 ## A3/A5 原生 headnum 接入
 
-A3/A5 量化 SFA 复用现有 `_C_ascend.npu_kv_quant_sparse_flash_attention_vllm`，
+A3 的 Kimi K3.1 INT8 SFA 通过 `cann_ops_transformer.kv_quant_sparse_flash_attention`
+调用上游 `KvQuantSparseFlashAttentionV2`，复用 ops-transformer 的 QSFA 内核。
+需要安装支持 A3 NoPE、原生 query heads 和 max/sum 输出的算子包及 Torch 扩展。
+适配器显式传入负无穷 sinks，避免上游 Torch 封装默认的零 sink 改变 Kimi 的 softmax。
+
+其他量化 SFA 自定义算子路径复用现有 `_C_ascend.npu_kv_quant_sparse_flash_attention_vllm`，
 依赖 [PR #54](https://github.com/hust17yixuan/vllm-ascend-kimi/pull/54) 的
 query group 1..128 支持。12/24/96 heads 直接传入，不再补齐或裁剪输出及 max/sum。
 A3/A5 的量化 DCP 统一保留完整 packed query，由 adaptor 处理连续化，均不做 head padding。
-非量化 SFA 的独立 padding 保持原样，无需外部 QSFA V2 包或新增 Torch 绑定。
+非量化 SFA 的独立 padding 保持原样。
 
-更新并编译包含 #54 的自定义算子后，运行 `test_qsfa_native_heads.py`，
+安装匹配的 A3 ops-transformer 包或编译包含 #54 的自定义算子后，运行 `test_qsfa_native_heads.py`，
 覆盖原生 heads、RoPE0/64、DCP max/sum 和变输入图重放。
-现有内核仅在返回 LSE 时裁剪尾部 `-1`，因此统一接入始终请求 max/sum；
+Kimi 接入始终请求 max/sum，DCP 使用这些统计量合并各卡输出；
 调用方不需要 LSE 时仍只返回 attention 输出。
 
 ## 产品支持情况
