@@ -186,7 +186,7 @@ jobs:
           # Static checking always uses the branch's verified main commit.
           ref: ${{ steps.vllm.outputs.lint_vllm_ref }}
 
-      - uses: dorny/paths-filter@v4
+      - uses: dorny/paths-filter@v4.0.3
         id: filter
         with:
           # Make negated patterns final so Markdown-only changes do not match src.
