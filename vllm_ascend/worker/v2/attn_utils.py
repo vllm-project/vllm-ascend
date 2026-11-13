@@ -226,7 +226,9 @@ def _align_hybrid_attention_page_sizes(kv_cache_specs: dict[str, KVCacheSpec], m
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     """Build Ascend-specific KV cache specs for v2 worker patching."""
+    from vllm.config.kv_transfer import is_hs_store_cpu
     from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
+    from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionLayer
 
     use_turboquant = vllm_config.cache_config.cache_dtype == TURBOQUANT_CACHE_DTYPE
     kv_cache_spec: dict[str, KVCacheSpec] = {}
@@ -253,7 +255,20 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
 
     c8_cache_dtype = kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
 
+    # hs_store_device=cpu: the KV connector streams the hidden states to
+    # per-request CPU pages (save_hs_batch_tokens), so the cache-only layer
+    # stays out of the NPU KV pool entirely (no spec, no group, no
+    # allocation). Mirrors the kv_sharing skip below: KV cache management
+    # acts as if this layer does not exist.
+    hs_store_cpu = is_hs_store_cpu(vllm_config)
+
     for layer_name, attn_module in attn_layers.items():
+        if hs_store_cpu and isinstance(attn_module, CacheOnlyAttentionLayer):
+            logger.info(
+                "Hidden states stored on CPU pages: skip NPU kv_cache_spec for %s",
+                layer_name,
+            )
+            continue
         if getattr(attn_module, "kv_sharing_target_layer_name", None):
             continue
 

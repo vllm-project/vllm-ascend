@@ -54,11 +54,13 @@ def init_speculator(
     if speculative_config.method == "extract_hidden_states":
         # No Ascend-specific behavior beyond update_stream assignment in
         # NPUModelRunner; reuse upstream ExtractHiddenStatesSpeculator as-is.
+        # req_states feeds the hs_store_device=cpu streaming path (per-request
+        # token ids for the CPU prefix index).
         from vllm.v1.worker.gpu.spec_decode.extract_hidden_states import (
             ExtractHiddenStatesSpeculator,
         )
 
-        return ExtractHiddenStatesSpeculator(vllm_config, device)
+        return ExtractHiddenStatesSpeculator(vllm_config, device, req_states)
     if speculative_config.use_dspark():
         from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
             AscendDSparkSpeculator,
