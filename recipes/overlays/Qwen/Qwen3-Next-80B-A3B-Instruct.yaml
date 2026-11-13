@@ -25,6 +25,10 @@ variants:
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
     extra_env:
       VLLM_USE_MODELSCOPE: 'True'
+    install:
+      pip: false
+      docker:
+        command: docker pull quay.io/ascend/vllm-ascend:v0.23.0.post1-a3
     hardware_overrides:
       ascend_910c:
         docker_image: quay.io/ascend/vllm-ascend:v0.23.0.post1-a3
