@@ -8,6 +8,15 @@ from tests.e2e.nightly.single_node.ops.singlecard_ops.triton.dcp_test_utils impo
 from vllm_ascend.ops.triton.sharded_indexer import pack_local_candidates
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float64, torch.int32])
+@pytest.mark.parametrize("rows", [0, 48])
+def test_pack_rejects_unsupported_score_dtype(dtype, rows):
+    indices = torch.empty((rows, 1, 2048), dtype=torch.int32)
+    scores = torch.empty(indices.shape, dtype=dtype)
+    with pytest.raises(TypeError, match="scores must have dtype torch.bfloat16 or torch.float32"):
+        pack_local_candidates(indices, scores, 8, 7, 768, sort_candidates=True, fuse_sort=True)
+
+
 @pytest.mark.parametrize("rows", [48, 127, 144, 152, 161])
 @pytest.mark.parametrize("column_stride", [1, 2])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])

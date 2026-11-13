@@ -156,9 +156,9 @@ def _pack_sorted_candidates(
     RANK: tl.constexpr,
     INTERLEAVE: tl.constexpr,
     LOG_BLOCK: tl.constexpr,
+    SCORE_BITS: tl.constexpr,
 ):
     BLOCK: tl.constexpr = 1 << LOG_BLOCK
-    SCORE_BITS: tl.constexpr = 16 if scores.dtype.element_ty == tl.bfloat16 else 32
     DIGIT_BITS: tl.constexpr = 24 - LOG_BLOCK
     MAX_ID_BITS: tl.constexpr = 25
     # Fill one fewer native-sort pass when the IDs fit its remaining bits.
@@ -473,6 +473,9 @@ def pack_local_candidates(
     indices, scores, world_size: int, rank: int, interleave: int, *, sort_candidates=False, fuse_sort=False
 ):
     """Transport exact pairs; fuse_sort permits fusion when its work amortizes."""
+    if scores.dtype not in (torch.bfloat16, torch.float32):
+        raise TypeError(f"scores must have dtype torch.bfloat16 or torch.float32, got {scores.dtype}")
+    score_bits = 16 if scores.dtype == torch.bfloat16 else 32
     rows, _, topk = indices.shape
     packed = torch.empty((rows, topk, 2), dtype=torch.int32, device=indices.device)
     if rows:
@@ -500,6 +503,7 @@ def pack_local_candidates(
                     rank,
                     interleave,
                     log_block,
+                    SCORE_BITS=score_bits,
                     multibuffer=False,
                 )
                 return packed
