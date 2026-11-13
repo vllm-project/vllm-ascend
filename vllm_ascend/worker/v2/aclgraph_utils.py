@@ -121,14 +121,16 @@ class ModelAclGraphManager(ModelCudaGraphManager):
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
-        num_tokens = desc.num_tokens
-        assert self.update_stream is not None
-        with set_current_vllm_config(self.vllm_config):
-            attn_backend = _get_graph_update_backend(self.model_runner.attn_groups)
-        attn_metadata = self.model_runner.model_state.attn_metadata
-
-        metadata = getattr(self.model_runner.model_state, "device_metadata", None)
+        native = getattr(self.model_runner, "sparse_kv_offload_manager", None)
+        native_enabled = getattr(native, "_selective_native_experiment", False)
+        metadata = None
         try:
+            num_tokens = desc.num_tokens
+            assert self.update_stream is not None
+            with set_current_vllm_config(self.vllm_config):
+                attn_backend = _get_graph_update_backend(self.model_runner.attn_groups)
+            attn_metadata = self.model_runner.model_state.attn_metadata
+            metadata = getattr(self.model_runner.model_state, "device_metadata", None)
             prepare_engram = getattr(self.model_runner.model_state, "prepare_engram", None)
             if prepare_engram is not None:
                 # Match FULL replay's DP padding before lookup consumes it.
@@ -145,14 +147,31 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                     ),
                 ):
                     prepare_engram()
+            if native_enabled:
+                native.check_selective_native_graph_step(desc)
+                graph = self.graphs[desc]
+                anchor = native.topk_buffers_k[0]
+                epoch = native.begin_selective_native_graph(graph, anchor)
             if use_updatable_graph(attn_backend):
-                return self._updatable_graph_replay(desc, attn_metadata)
+                result = self._updatable_graph_replay(desc, attn_metadata)
             else:
                 # This will be removed once the refactoring is fully complete.
-                return self._graph_relay(attn_backend, desc, num_tokens, attn_metadata)
+                result = self._graph_relay(attn_backend, desc, num_tokens, attn_metadata)
+            if native_enabled:
+                native.finish_selective_native_graph(graph, epoch, anchor)
+            return result
+        except BaseException:
+            if native_enabled:
+                native.mark_selective_native_failure()
+            raise
         finally:
             if metadata is not None:
-                metadata.finish_replay()
+                try:
+                    metadata.finish_replay()
+                except BaseException:
+                    if native_enabled:
+                        native.mark_selective_native_failure()
+                    raise
 
     def _graph_relay(self, attn_backend, desc, num_tokens, attn_metadata):
         self.update_stream.wait_stream(torch.npu.current_stream())
@@ -220,26 +239,77 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         """Capture CUDA graphs for model forward pass."""
         metadata = getattr(model_state, "device_metadata", None)
         model = ModelWithContext(model, device_metadata=metadata)
+        native = getattr(self.model_runner, "sparse_kv_offload_manager", None)
         try:
-            with communicator_switch():
-                return super().capture(
-                    model,
-                    model_state,
-                    input_buffers,
-                    intermediate_tensors,
-                    block_tables,
-                    attn_groups,
-                    kv_cache_config,
-                    pcp_manager=pcp_manager,
-                    has_lora=has_lora,
-                    use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
-                    lora_capture_hook=lora_capture_hook,
-                    progress_bar_desc=progress_bar_desc,
+            if getattr(native, "_selective_native_experiment", False):
+                methods = (
+                    "start_selective_native_graphs", "check_selective_native_graph_step",
+                    "check_selective_native_capture_status", "check_selective_native_phase_status",
+                    "begin_selective_native_graph", "finish_selective_native_graph",
+                    "stop_selective_native_graphs", "release_selective_native_graphs",
+                    "mark_selective_native_failure",
                 )
+                if any(not callable(getattr(native, name, None)) for name in methods):
+                    raise RuntimeError("Native selective graph worker contract is incomplete")
+            with communicator_switch():
+                capture_error = None
+                try:
+                    result = super().capture(
+                        model,
+                        model_state,
+                        input_buffers,
+                        intermediate_tensors,
+                        block_tables,
+                        attn_groups,
+                        kv_cache_config,
+                        pcp_manager=pcp_manager,
+                        has_lora=has_lora,
+                        use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
+                        lora_capture_hook=lora_capture_hook,
+                        progress_bar_desc=progress_bar_desc,
+                    )
+                except Exception as error:
+                    capture_error = error
+                if getattr(native, "_selective_native_experiment", False):
+                    native.check_selective_native_capture_status(capture_error)
+                if capture_error is not None:
+                    raise capture_error
+                if getattr(native, "_selective_native_experiment", False):
+                    native.start_selective_native_graphs(self.graphs)
+                return result
+        except BaseException:
+            if getattr(native, "_selective_native_experiment", False):
+                mark_failure = getattr(native, "mark_selective_native_failure", None)
+                if callable(mark_failure):
+                    mark_failure()
+                else:
+                    native._selective_native_failed = True
+            raise
         finally:
             # Input preparation can fail before ModelWithContext.forward runs.
             if metadata is not None:
-                metadata.finish()
+                try:
+                    metadata.finish()
+                except BaseException:
+                    if getattr(native, "_selective_native_experiment", False):
+                        native.mark_selective_native_failure()
+                    raise
+
+    def release_graphs(self) -> None:
+        native = getattr(self.model_runner, "sparse_kv_offload_manager", None)
+        enabled = getattr(native, "_selective_native_experiment", False)
+        if enabled:
+            native.stop_selective_native_graphs()
+        release_error = None
+        try:
+            super().release_graphs()
+        except Exception as error:
+            release_error = error
+        if enabled:
+            native.check_selective_native_phase_status("graph drop", release_error)
+            native.release_selective_native_graphs()
+        elif release_error is not None:
+            raise release_error
 
 
 class ModelWithContext(nn.Module):

@@ -75,19 +75,21 @@ extern "C" __global__ __aicore__ void selective_lim_group_topk(
         const uint64_t hostK = layer[10], hostV = layer[11];
         const uint64_t hotK = layer[12], hotV = layer[13];
         const int columns = static_cast<int>(layer[14]);
+        auto lru = reinterpret_cast<__gm__ int32_t*>(layer[15]);
         auto cache = reinterpret_cast<__gm__ int64_t*>(keys);
         auto cacheLocal = cacheBuf.Get<int64_t>();
         auto selectedLocal = physicalBuf.Get<int32_t>();
         auto addresses = buf.Get<int64_t>();
         auto sizesLocal = cacheBuf.Get<int32_t>();
         GlobalTensor<int64_t> cacheGm, sourceGm, destinationGm, previousGm;
-        GlobalTensor<int32_t> physicalGm, sizeGm;
+        GlobalTensor<int32_t> physicalGm, sizeGm, lruGm;
         cacheGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(keys));
         sourceGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(src));
         destinationGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(dst));
         previousGm.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(previous));
         physicalGm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(indices));
         sizeGm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(sizes));
+        lruGm.SetGlobalBuffer(lru);
         auto blocks = reinterpret_cast<__gm__ int32_t*>(table);
         auto seq = reinterpret_cast<__gm__ int32_t*>(lengths);
         auto req = reinterpret_cast<__gm__ int64_t*>(requests);
@@ -153,8 +155,9 @@ extern "C" __global__ __aicore__ void selective_lim_group_topk(
                 }
             }
             for (int i = 0; i < hot; ++i) {
-                if (resident.GetValue(i) >= 0 && used.GetValue(i) == 0) {
-                    free.SetValue(available++, i);
+                const int slot = keep ? lru[row * hot + i] : i;
+                if (resident.GetValue(slot) >= 0 && used.GetValue(slot) == 0) {
+                    free.SetValue(available++, slot);
                 }
             }
             int next = 0;
@@ -182,11 +185,34 @@ extern "C" __global__ __aicore__ void selective_lim_group_topk(
             }
             cacheLocal.SetValue(hot, -1);
         }
+
+        // Reuse the completed lookup tables for per-slot marks and the next LRU order.
+        // The reverse pass keeps each slot's last TopK touch while preserving duplicates.
+        SyncPipes<HardEvent::S_V>();
+        Duplicate(tokens, 0, hot);
+        SyncPipes<HardEvent::V_S>();
+        int lruWrite = hot - 1;
+        for (int col = width - 1; col >= 0; --col) {
+            const int slot = selectedLocal.GetValue(col);
+            if (slot >= 0 && slot < hot && tokens.GetValue(slot) == 0) {
+                tokens.SetValue(slot, 1);
+                slots.SetValue(lruWrite--, slot);
+            }
+        }
+        if (lruWrite >= 0) {
+            for (int i = hot - 1; i >= 0; --i) {
+                const int slot = keep ? lru[row * hot + i] : i;
+                if (tokens.GetValue(slot) == 0) {
+                    slots.SetValue(lruWrite--, slot);
+                }
+            }
+        }
         SyncPipes<HardEvent::S_MTE3>();
         DataCopyPad(physicalGm[base], selectedLocal, {1, static_cast<uint32_t>(width * sizeof(int32_t)), 0, 0, 0});
         if (!allHits) {
             DataCopyPad(cacheGm[cacheBase], cacheLocal, {1, static_cast<uint32_t>((hot + 1) * sizeof(int64_t)), 0, 0, 0});
         }
+        DataCopyPad(lruGm[row * hot], slots, {1, static_cast<uint32_t>(hot * sizeof(int32_t)), 0, 0, 0});
         SyncPipes<HardEvent::MTE3_S>();
 
         // Lookup is finished, so reuse its hash storage for the four address vectors.

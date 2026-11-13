@@ -1,4 +1,6 @@
+import base64
 import contextlib
+import pickle
 import typing
 import weakref
 from dataclasses import dataclass
@@ -131,6 +133,133 @@ class HostGatherCoordinator:
         group.barrier()
         if rank == 0:
             self.mapping.unlink()
+
+
+_SELECTIVE_NATIVE_TP_QUARANTINE = []
+
+
+class SelectiveNativeTPCoordinator:
+    """Pinned shared plan and single per-group K/V stage for the TP experiment."""
+
+    def __init__(self, group, rank, world, rows, width, layers, block, k_bytes, v_bytes, layer_ids, shared_exchange=False):
+        plan_width = 3 * width + width // block + 2
+        sizes = [
+            (28 + 2 * world) * 8, rows * plan_width * 4, rows * 12 * 8,
+            rows * width * 4, layers * rows * width * 4, (layers + 1) * 8,
+            rows * width * k_bytes, rows * width * v_bytes,
+        ]
+        if shared_exchange:
+            sizes.append((1 + 3 * world) * 8 + world * ((1 << 20) + 8))
+        offsets, total = [], 0
+        for size in sizes:
+            total = (total + 63) // 64 * 64
+            offsets.append(total)
+            total += size
+        total = (total + 63) // 64 * 64
+        self.total_bytes = total
+        self.mapping = None
+        self.owner = None
+        create_error = None
+        if rank == 0:
+            try:
+                self.mapping = shared_memory.SharedMemory(create=True, size=total)
+            except Exception as error:
+                create_error = str(error)
+        try:
+            creation = group.broadcast_object((self.mapping.name, None) if self.mapping is not None else
+                                              (None, create_error) if rank == 0 else None, src=0)
+        except BaseException:
+            if self.mapping is not None:
+                _SELECTIVE_NATIVE_TP_QUARANTINE.append(self)
+            raise
+        if creation[1] is not None:
+            raise RuntimeError(f"Native selective TP shared mapping creation failed: {creation[1]}")
+        registered = False
+        attempted_registration = False
+        local_error = None
+        try:
+            if rank != 0:
+                self.mapping = shared_memory.SharedMemory(name=creation[0])
+            self.owner = torch.frombuffer(self.mapping.buf, dtype=torch.uint8)
+            if rank == 0:
+                self.owner.zero_()
+            attempted_registration = True
+            torch.ops._C_ascend.register_pinned_host_mmap(self.owner)
+            registered = True
+
+            def view(index, dtype, shape):
+                return self.owner[offsets[index] : offsets[index] + sizes[index]].view(dtype).view(shape)
+
+            self.stage_k = view(6, torch.uint8, (rows, width, k_bytes))
+            self.stage_v = view(7, torch.uint8, (rows, width, v_bytes))
+            self.exchange = view(8, torch.uint8, (sizes[8],)) if shared_exchange else None
+            self.buffers = [view(0, torch.int64, (28 + 2 * world,)),
+                            view(1, torch.int32, (rows, plan_width)),
+                            view(2, torch.int64, (rows, 12)),
+                            view(3, torch.int32, (rows, width)),
+                            view(4, torch.int32, (layers, rows, width)), self.owner,
+                            torch.tensor(layer_ids, dtype=torch.int64), view(5, torch.int64, (layers + 1,))]
+        except Exception as error:
+            local_error = str(error)
+        errors = [None] * world
+        try:
+            torch.distributed.all_gather_object(errors, local_error, group=group.cpu_group)
+        except BaseException:
+            _SELECTIVE_NATIVE_TP_QUARANTINE.append(self)
+            raise
+        if any(error is not None for error in errors):
+            if rank == 0 and self.mapping is not None:
+                try:
+                    self.mapping.unlink()
+                except Exception:
+                    _SELECTIVE_NATIVE_TP_QUARANTINE.append(self)
+                    raise
+            if attempted_registration and not registered:
+                # A failed runtime registration may have partially succeeded.
+                _SELECTIVE_NATIVE_TP_QUARANTINE.append(self)
+            else:
+                try:
+                    if registered:
+                        torch.ops._C_ascend.unregister_pinned_host_mmap(self.owner)
+                    if hasattr(self, "buffers"):
+                        self.buffers.clear()
+                    self.stage_k = self.stage_v = None
+                    self.exchange = None
+                    self.owner = None
+                    if self.mapping is not None:
+                        self.mapping.close()
+                except Exception:
+                    _SELECTIVE_NATIVE_TP_QUARANTINE.append(self)
+            raise RuntimeError(f"Native selective TP shared mapping registration failed: {errors}")
+        self.registration = weakref.finalize(self, torch.ops._C_ascend.unregister_pinned_host_mmap, self.owner)
+        try:
+            group.barrier()
+        except BaseException:
+            _SELECTIVE_NATIVE_TP_QUARANTINE.append(self)
+            raise
+        unlink_error = None
+        if rank == 0:
+            try:
+                self.mapping.unlink()
+            except Exception as error:
+                unlink_error = str(error)
+        errors = [None] * world
+        try:
+            torch.distributed.all_gather_object(errors, unlink_error, group=group.cpu_group)
+        except BaseException:
+            _SELECTIVE_NATIVE_TP_QUARANTINE.append(self)
+            raise
+        if any(error is not None for error in errors):
+            _SELECTIVE_NATIVE_TP_QUARANTINE.append(self)
+            raise RuntimeError(f"Native selective TP shared mapping unlink failed: {errors}")
+
+    def close(self):
+        self.registration()
+        self.buffers.clear()
+        self.stage_k = self.stage_v = None
+        self.exchange = None
+        self.owner = None
+        self.mapping.close()
 
 
 class SelectiveSDMATransfer:
@@ -360,6 +489,7 @@ def get_selective_sdma_device_memory_bytes(
     sizes = getattr(getattr(vllm_config, "compilation_config", None), "cudagraph_capture_sizes", None) or ()
     shared_layers = getattr(sparse_kv_offload_config, "indexer_types", ()).count("shared")
     memory_bytes += shared_layers * SELECTIVE_LIM_LAYER_FIELDS * torch.int64.itemsize * len(sizes)
+    memory_bytes += shared_layers * rows * sparse_kv_offload_config.topk_buffer_size * torch.int32.itemsize
     if get_tensor_model_parallel_rank() == 0:
         block_size = vllm_config.cache_config.block_size
         memory_bytes += SelectiveSDMATransfer.device_memory_bytes(rows, block_size * k_bytes, block_size * v_bytes)
@@ -627,21 +757,27 @@ def update_sparse_kv_offload_metadata(
     query_start_loc: CpuGpuBuffer | torch.Tensor | np.ndarray,
     offload_req_ids_tensor: CpuGpuBuffer,
     offload_token_to_req: CpuGpuBuffer,
+    request_instance_ids: list[int] | None = None,
 ) -> None:
     """Populate per-request identity tensors for the Sparse KV offload LRU.
 
-    Request ids are adler32 hashes of the scheduler request id,
-    rows are reset whenever the occupying request changes.
+    Callers may supply unique request instance IDs; otherwise use the legacy
+    scheduler ID hash. Rows are reset when the occupying request changes.
     """
     offload_req_ids_tensor.np[:num_reqs_padded].fill(0)
     effective_num_reqs = min(num_reqs, len(req_ids))
-    req_id_values = np.asarray(
-        [
-            adler32(req_id.encode("utf-8")) if isinstance(req_id, str) else row + 1
-            for row, req_id in enumerate(req_ids[:effective_num_reqs])
-        ],
-        dtype=np.int64,
-    )
+    if request_instance_ids is not None:
+        if len(request_instance_ids) != effective_num_reqs or any(uid <= 0 for uid in request_instance_ids):
+            raise ValueError("Request instance IDs must contain one positive ID per active request")
+        req_id_values = np.asarray(request_instance_ids, dtype=np.int64)
+    else:
+        req_id_values = np.asarray(
+            [
+                adler32(req_id.encode("utf-8")) if isinstance(req_id, str) else row + 1
+                for row, req_id in enumerate(req_ids[:effective_num_reqs])
+            ],
+            dtype=np.int64,
+        )
     offload_req_ids_tensor.np[:effective_num_reqs] = req_id_values
     offload_req_ids_tensor.copy_to_gpu(num_reqs_padded)
 
@@ -1051,6 +1187,10 @@ class SparseKVOffloadManager:
             self.selective_hot_requests = [
                 torch.full((rows, 1), -1, dtype=torch.int64, device=device) for _ in self.offload_layer_names
             ]
+            self.selective_lru_order = [
+                torch.empty((rows, self.topk_buffer_size), dtype=torch.int32, device=device)
+                for _ in self.offload_layer_names
+            ]
         if self.topk_buffer_size % self.block_size != 0:
             raise ValueError(
                 "Sparse KV offload topk_buffer_size must be divisible by "
@@ -1427,6 +1567,14 @@ class SparseKVOffloadManager:
                 self.copy_sfa_kv(self.copy_sfa_copy_src[:n], self.copy_sfa_copy_dst[:n], lengths, count)
 
     def prepare_selective_kv(self, layers, topk_indices) -> None:
+        if getattr(self, "_selective_native_experiment", False):
+            if self._selective_native_failed:
+                raise RuntimeError("Native selective experiment is quarantined after a graph failure")
+            if torch_npu.npu.is_current_stream_capturing():
+                self._prepare_selective_native_kv(layers, topk_indices)
+                return
+            if getattr(self, "_selective_native_started", False):
+                raise RuntimeError("Native selective experiment cannot mix eager and captured hot-buffer paths")
         topk = topk_indices.reshape(-1, self.topk).to(torch.int64).contiguous()
         rows, width = topk.shape
         if not 0 < width <= self.topk_buffer_size <= 2048:
@@ -1450,7 +1598,8 @@ class SparseKVOffloadManager:
                 self.selective_copy_dst[layer_id, :entries],
                 self.selective_copy_lengths[layer_id, :entries],
             )
-            inputs.append(tensors)
+            lru_order = self.selective_lru_order[layer_id]
+            inputs.append((*tensors, lru_order))
             descriptors.append(
                 [tensor.data_ptr() for tensor in tensors]
                 + [
@@ -1459,7 +1608,7 @@ class SparseKVOffloadManager:
                     self.topk_buffers_k[layer_id].data_ptr(),
                     self.topk_buffers_v[layer_id].data_ptr(),
                     table.shape[1],
-                    0,
+                    lru_order.data_ptr(),
                 ]
             )
         host = torch.tensor(descriptors, dtype=torch.int64, pin_memory=True)
@@ -1486,6 +1635,471 @@ class SparseKVOffloadManager:
                 self.selective_copy_lengths[layer_id, :entries],
             )
             self.selective_prefetch_ready[layer_id].record()
+
+    def enable_selective_native_experiment(self) -> None:
+        """Enable the native group path for an isolated MRV2 integration test."""
+        model_state = getattr(self, "_selective_model_state", None)
+        local_error = None
+        try:
+            if self.topk != self.topk_buffer_size or self.use_fused_copy_sfa:
+                raise RuntimeError("Native selective integration probe requires TopK=hot capacity")
+            if self.max_model_len >= 1 << 31:
+                raise RuntimeError("Native selective integration probe requires int32 token indices")
+            if model_state is not None and (model_state._selective_request_ids or model_state._offload_live_req_ids):
+                raise RuntimeError("Native selective experiment must be enabled before admitting requests")
+            max_rows = self.topk_buffers_k[0].shape[0]
+            device = self.topk_buffers_k[0].device
+            self._selective_native_rows = torch.arange(max_rows, dtype=torch.int64, device=device)
+            self._selective_native_offsets = torch.arange(max_rows * self.topk, dtype=torch.int64, device=device)
+        except Exception as error:
+            local_error = str(error)
+        if self.tp_size > 1:
+            gathered = [None] * self.tp_size
+            torch.distributed.all_gather_object(gathered, local_error, group=self.tp_group.cpu_group)
+            if any(value is not None for value in gathered):
+                raise RuntimeError(f"Native selective TP activation failed: {gathered}")
+        elif local_error is not None:
+            raise RuntimeError(local_error)
+        self._selective_native_experiment = True
+        self._selective_native_groups = {}
+        self._selective_native_graphs = {}
+        self._selective_native_graph_layers = {}
+        self._selective_native_graph_keys = {}
+        self._selective_native_epoch = 0
+        self._selective_native_started = False
+        self._selective_native_failed = False
+        self._selective_native_inflight = False
+        self._selective_native_stopping = False
+        self._selective_native_tp_groups = {}
+        if self.tp_size > 1:
+            try:
+                signature_error = None
+                groups, signature = [], ()
+                try:
+                    groups = [(leader, tuple(names)) for leader, names in sorted(self.selective_followers.items())
+                              if names]
+                    signature = tuple((leader, tuple((extract_layer_index(name), name) for name in names))
+                                      for leader, names in groups)
+                except Exception as error:
+                    signature_error = str(error)
+                use_shared_exchange = getattr(self, "_selective_native_shared_exchange_requested", False)
+                signature = (signature, use_shared_exchange)
+                gathered = [None] * self.tp_size
+                torch.distributed.all_gather_object(gathered, (signature_error, signature), group=self.tp_group.cpu_group)
+                if any(value[0] is not None or value[1] != signature for value in gathered):
+                    raise RuntimeError("Native selective TP group definitions differ across ranks")
+                for leader, names in groups:
+                    layer_ids = tuple(self._get_offload_layer_id(name) for name in names)
+                    if not layer_ids:
+                        continue
+                    stable_ids = [leader, *(extract_layer_index(name) for name in names)]
+                    coordinator = SelectiveNativeTPCoordinator(
+                        self.tp_group, self.tp_rank, self.tp_size, max_rows, self.topk, len(layer_ids),
+                        self.block_size, self.token_size_bytes_k, self.token_size_bytes_v, stable_ids,
+                        shared_exchange=use_shared_exchange and not self._selective_native_tp_groups,
+                    )
+                    self._selective_native_tp_groups[layer_ids] = coordinator
+                    logger.info("Native selective TP group %s shared pinned region: %.2f MiB",
+                                layer_ids, coordinator.total_bytes / (1 << 20))
+                if use_shared_exchange and not self._selective_native_tp_groups:
+                    raise RuntimeError("Native selective TP shared exchange requires a nonempty group")
+                self._selective_tp_exchange_epoch = 0
+            except BaseException:
+                self._selective_native_failed = True
+                raise
+        if model_state is not None:
+            model_state._selective_native_experiment = True
+
+    def _prepare_selective_native_kv(self, layers, topk_indices) -> None:
+        from vllm_ascend.compilation.updatable_graph import _ACTIVE_GRAPH
+
+        graph = _ACTIVE_GRAPH.get()
+        if graph is None:
+            raise RuntimeError("Native selective capture requires an active UpdatableGraph")
+        ops = torch.ops._C_ascend
+        layer_ids = tuple(layer_id for layer_id, _, _ in layers)
+        if not layer_ids:
+            raise RuntimeError("Native selective capture requires at least one shared layer")
+        captured_layers = self._selective_native_graph_layers.setdefault(graph, set())
+        if len(set(layer_ids)) != len(layer_ids) or captured_layers.intersection(layer_ids):
+            raise RuntimeError("Native selective groups overlap within the captured graph")
+        captured_layers.update(layer_ids)
+        topk = topk_indices.reshape(-1, self.topk)
+        rows, width = topk.shape
+        max_rows = self.topk_buffers_k[0].shape[0]
+        if rows <= 0 or rows > max_rows:
+            raise RuntimeError("Native selective capture exceeds hot-buffer rows")
+        device = topk.device
+        state = self._selective_native_groups.get(layer_ids)
+        if state is None:
+            state = [
+                torch.full((max_rows, width), -1, dtype=torch.int32),
+                torch.arange(width, dtype=torch.int32).repeat(max_rows, 1),
+                torch.full((max_rows, len(layer_ids), width), -1, dtype=torch.int32),
+                torch.full((max_rows, 9), -1, dtype=torch.int64),
+                torch.zeros((max_rows, self.max_model_len), dtype=torch.int32),
+                torch.full((max_rows, self.max_model_len), -1, dtype=torch.int32),
+                torch.zeros(max_rows, dtype=torch.int32),
+                torch.zeros((max_rows, 2), dtype=torch.int64),
+            ]
+            self._selective_native_groups[layer_ids] = state
+            state_bytes = sum(tensor.numel() * tensor.element_size() for tensor in state)
+            logger.info("Native selective experimental group %s CPU state: %.2f MiB", layer_ids, state_bytes / (1 << 20))
+
+        def pair(shape, dtype):
+            return torch.empty(shape, dtype=dtype, device=device), torch.empty(shape, dtype=dtype, pin_memory=True)
+
+        topk_d, topk_h = pair((rows, width), torch.int32)
+        topk_d.copy_(torch.where((topk >= 0) & (topk < self.max_model_len), topk, -1).to(torch.int32))
+        meta_d, meta_h = pair((rows, 12), torch.int64)
+        metadata = layers[0][1]
+        seq_lengths = layers[0][2][:rows]
+        if metadata.req_ids_tensor is None or metadata.selective_tail_rows is None:
+            raise RuntimeError("Native selective capture requires request and tail metadata")
+        meta_d.zero_()
+        meta_d[:, 0].copy_(metadata.req_ids_tensor[:rows])
+        meta_d[:, 4].copy_(seq_lengths)
+        meta_d[:, 5:7].copy_(metadata.selective_tail_rows[:rows])
+        meta_d[:, 7].fill_(self.block_size)
+        host_blocks = self.kv_cache_config.num_blocks
+        meta_d[:, 8].fill_(host_blocks)
+        meta_d[:, 9].copy_((seq_lengths - 1).clamp_min(0))
+        meta_d[:, 10].copy_(self._selective_native_rows[:rows])
+        meta_d[:, 11].fill_(self.selective_row_stride)
+        physical_d, physical_h = pair((rows, width), torch.int32)
+        block_d, block_h = pair((rows, width // self.block_size + 1), torch.int32)
+        shared = [topk_d, topk_h, meta_d, meta_h, physical_d, physical_h, block_d, block_h, *state]
+        layer_buffers = []
+        scatter = []
+        coordinator = self._selective_native_tp_groups.get(layer_ids) if self.tp_size > 1 else None
+        if self.tp_size > 1 and coordinator is None:
+            raise RuntimeError("Native selective TP group does not match the registered layer roles")
+        offsets = self._selective_native_offsets[: rows * width]
+        count = self.selective_copy_counts[rows - 1]
+        for layer_id, layer_metadata, _ in layers:
+            pages_d = layer_metadata.block_table[:rows].to(torch.int32).contiguous()
+            pages_h = torch.empty(pages_d.shape, dtype=torch.int32, pin_memory=True)
+            if self.tp_rank == 0:
+                host_k, host_v = self.k_caches_cpu[layer_id], self.v_caches_cpu[layer_id]
+                if host_k.shape[0] != host_blocks or host_v.shape[0] != host_blocks:
+                    raise RuntimeError("Native selective group Host capacity disagrees with the cache plan")
+            else:
+                host_k = torch.empty(0, dtype=torch.bfloat16)
+                host_v = torch.empty(0, dtype=torch.bfloat16)
+            hot_k, hot_v = self.topk_buffers_k[layer_id], self.topk_buffers_v[layer_id]
+            if coordinator is None:
+                stage_k_d, stage_k_h = pair((rows, width, self.token_size_bytes_k), torch.uint8)
+                stage_v_d, stage_v_h = pair((rows, width, self.token_size_bytes_v), torch.uint8)
+            else:
+                stage_k_d = torch.empty((rows, width, self.token_size_bytes_k), dtype=torch.uint8, device=device)
+                stage_v_d = torch.empty((rows, width, self.token_size_bytes_v), dtype=torch.uint8, device=device)
+                stage_k_h, stage_v_h = coordinator.stage_k[:rows], coordinator.stage_v[:rows]
+            dest_d, dest_h = pair((2, rows, width), torch.int64)
+            length_d, length_h = pair((2, rows, width), torch.int32)
+            layer_buffers.extend([
+                pages_d, pages_h, host_k, host_v, hot_k, hot_v, stage_k_h, stage_v_h,
+                stage_k_d, stage_v_d, dest_h, dest_d, length_h, length_d,
+            ])
+            sources = torch.cat((offsets * self.token_size_bytes_k + stage_k_d.data_ptr(),
+                                 offsets * self.token_size_bytes_v + stage_v_d.data_ptr()))
+            scatter.append((layer_id, sources, dest_d, length_d))
+        pinned = [topk_h, meta_h, physical_h, block_h]
+        for offset in range(0, len(layer_buffers), 14):
+            indices = (1, 6, 7, 10, 12) if coordinator is None else (1, 10, 12)
+            pinned.extend(layer_buffers[offset + index] for index in indices)
+        pinned_bytes = sum(tensor.numel() * tensor.element_size() for tensor in pinned)
+        logger.info("Native selective experimental group %s per-graph pinned buffers: %.2f MiB",
+                    layer_ids, pinned_bytes / (1 << 20))
+        device_buffers = [topk_d, meta_d, physical_d, block_d, *(entry[1] for entry in scatter)]
+        for offset in range(0, len(layer_buffers), 14):
+            device_buffers.extend(layer_buffers[offset + index] for index in (8, 9, 11, 13))
+        device_bytes = sum(tensor.numel() * tensor.element_size() for tensor in device_buffers)
+        logger.info("Native selective experimental group %s per-graph named NPU buffers: %.2f MiB",
+                    layer_ids, device_bytes / (1 << 20))
+        if coordinator is None:
+            handle = ops.selective_group_native_create(shared, layer_buffers, len(layer_ids))
+        else:
+            handle = ops.selective_group_tp_native_create(
+                shared, layer_buffers, len(layer_ids), coordinator.buffers, self.tp_rank, self.tp_size
+            )
+        record = self._selective_native_graphs.setdefault(graph, [])
+        record.append(handle)
+        key = (tuple(int(value) for value in coordinator.buffers[6].tolist()) if coordinator is not None else
+               tuple(extract_layer_index(self.offload_layer_names[layer_id]) for layer_id in layer_ids))
+        self._selective_native_graph_keys.setdefault(graph, []).append(key)
+        anchor = self.topk_buffers_k[layer_ids[0]]
+        ops.selective_native_capture(handle, anchor)
+        graph_identity = ops.selective_native_graph_identity(handle)
+        if len(record) > 1 and ops.selective_native_graph_identity(record[0]) != graph_identity:
+            raise RuntimeError("Native selective handles do not belong to the same captured graph")
+        for index, (layer_id, sources, destinations, lengths) in enumerate(scatter):
+            self.selective_physical[layer_id, :rows, 0, :].copy_(physical_d)
+            self.copy_sfa_kv(sources, destinations.flatten(), lengths.flatten(), count)
+            if index == len(scatter) - 1:
+                # The last ready event also joins the completion marker to the main stream.
+                ops.selective_native_scatter_done(handle, anchor)
+            self.selective_prefetch_ready[layer_id].record()
+
+    def _selective_native_ordered_handles(self, graph):
+        handles = self._selective_native_graphs[graph]
+        keys = self._selective_native_graph_keys[graph]
+        if len(handles) != len(keys) or len(set(keys)) != len(keys):
+            raise RuntimeError("Native selective graph group keys are incomplete or duplicated")
+        return [handle for _, handle in sorted(zip(keys, handles))]
+
+    @staticmethod
+    def _selective_native_descriptor_key(desc):
+        fields = ("cg_mode", "num_tokens", "num_reqs", "uniform_token_count", "max_query_len",
+                  "num_active_loras", "num_ubatches")
+        return tuple(str(getattr(desc, field, None)) for field in fields)
+
+    def _selective_native_exchange_storage(self):
+        groups = getattr(self, "_selective_native_tp_groups", {})
+        if not getattr(self, "_selective_native_shared_exchange_requested", False) or not groups:
+            return None
+        return next(iter(groups.values())).exchange
+
+    def mark_selective_native_failure(self) -> None:
+        self._selective_native_failed = True
+        groups = getattr(self, "_selective_native_tp_groups", {})
+        storage = self._selective_native_exchange_storage()
+        flags = [(storage, False)] if storage is not None else []
+        for coordinator in groups.values():
+            buffers = getattr(coordinator, "buffers", ())
+            if buffers:
+                flags.append((buffers[0], True))
+        for flag, is_control in flags:
+            try:
+                if is_control:
+                    flag = flag.view(torch.uint8)
+                torch.ops._C_ascend.selective_tp_exchange_fail_cpu(flag)
+            except Exception:
+                logger.exception("Failed to publish selective TP failure; peer relies on timeout")
+
+    def selective_native_all_gather(self, value, phase):
+        storage = self._selective_native_exchange_storage()
+        if storage is None:
+            gathered = [None] * self.tp_size
+            torch.distributed.all_gather_object(gathered, value, group=self.tp_group.cpu_group)
+            return gathered
+        try:
+            payload = base64.b85encode(pickle.dumps((phase, value), protocol=5)).decode("ascii")
+            self._selective_tp_exchange_epoch += 1
+            encoded = torch.ops._C_ascend.selective_tp_exchange_cpu(
+                storage, self.tp_rank, self.tp_size, self._selective_tp_exchange_epoch, payload
+            )
+            if not encoded:
+                gathered = [None] * self.tp_size
+                torch.distributed.all_gather_object(gathered, (phase, value), group=self.tp_group.cpu_group)
+            else:
+                gathered = [pickle.loads(base64.b85decode(item.encode("ascii"))) for item in encoded]
+            if any(item[0] != phase for item in gathered):
+                raise RuntimeError("Native selective TP exchange phases differ across ranks")
+            result = [item[1] for item in gathered]
+            torch.ops._C_ascend.selective_tp_exchange_confirm_cpu(
+                storage, self.tp_rank, self.tp_size, self._selective_tp_exchange_epoch
+            )
+            return result
+        except Exception:
+            self.mark_selective_native_failure()
+            raise
+
+    def check_selective_native_graph_step(self, desc) -> None:
+        if self.tp_size <= 1:
+            return
+        descriptor = self._selective_native_descriptor_key(desc)
+        gathered = self.selective_native_all_gather(descriptor, "graph descriptor")
+        if any(value != descriptor for value in gathered):
+            self.mark_selective_native_failure()
+            raise RuntimeError("Native selective TP replay descriptors differ across ranks")
+
+    def check_selective_native_capture_status(self, error) -> None:
+        self.check_selective_native_phase_status("graph capture", error)
+
+    def check_selective_native_phase_status(self, phase, error) -> None:
+        if self.tp_size > 1:
+            try:
+                if phase == "connector preemption":
+                    gathered = self.selective_native_all_gather(
+                        str(error) if error is not None else None, phase
+                    )
+                else:
+                    gathered = [None] * self.tp_size
+                    torch.distributed.all_gather_object(
+                        gathered, str(error) if error is not None else None, group=self.tp_group.cpu_group
+                    )
+            except Exception:
+                self.mark_selective_native_failure()
+                raise
+            if any(value is not None for value in gathered):
+                self.mark_selective_native_failure()
+                raise RuntimeError(f"Native selective TP {phase} failed: {gathered}")
+        elif error is not None:
+            self._selective_native_failed = True
+            raise error
+
+    def start_selective_native_graphs(self, graphs) -> None:
+        graph_set = set(graphs.values())
+        error = None
+        signature = []
+        try:
+            if graph_set != set(self._selective_native_graphs):
+                raise RuntimeError("Native selective graph-to-handle binding is incomplete")
+            for desc, graph in graphs.items():
+                if getattr(desc, "num_ubatches", 1) != 1:
+                    raise RuntimeError("Native selective experiment does not support multi-ubatch capture")
+                self._selective_native_ordered_handles(graph)
+                descriptor = self._selective_native_descriptor_key(desc)
+                signature.append((descriptor, tuple(sorted(self._selective_native_graph_keys[graph]))))
+            signature.sort()
+            if len({item[0] for item in signature}) != len(signature):
+                raise RuntimeError("Native selective graph descriptors are ambiguous")
+        except Exception as exc:
+            error = str(exc)
+        if self.tp_size > 1:
+            gathered = [None] * self.tp_size
+            torch.distributed.all_gather_object(gathered, (error, signature), group=self.tp_group.cpu_group)
+            if any(value[0] is not None or value[1] != signature for value in gathered):
+                raise RuntimeError("Native selective TP graph/group bindings differ across ranks")
+        elif error is not None:
+            raise RuntimeError(error)
+        ops = torch.ops._C_ascend
+        self._selective_native_started = True
+        start_error = None
+        try:
+            for graph in graph_set:
+                for handle in self._selective_native_ordered_handles(graph):
+                    ops.selective_native_start(handle)
+        except Exception as error:
+            start_error = error
+        if self.tp_size > 1:
+            gathered = [None] * self.tp_size
+            torch.distributed.all_gather_object(
+                gathered, str(start_error) if start_error is not None else None, group=self.tp_group.cpu_group
+            )
+            if any(value is not None for value in gathered):
+                raise RuntimeError(f"Native selective TP worker startup failed: {gathered}")
+        elif start_error is not None:
+            raise start_error
+        self._selective_native_stopping = False
+
+    def begin_selective_native_graph(self, graph, anchor):
+        if self._selective_native_failed or self._selective_native_inflight or self._selective_native_stopping:
+            raise RuntimeError("Native selective graph is unavailable or already in flight")
+        handles = self._selective_native_ordered_handles(graph)
+        self._selective_native_epoch += 1
+        epoch = self._selective_native_epoch
+        self._selective_native_inflight = True
+        for handle in handles:
+            torch.ops._C_ascend.selective_native_begin(handle, epoch, anchor)
+        return epoch
+
+    def finish_selective_native_graph(self, graph, epoch, anchor) -> None:
+        handles = self._selective_native_ordered_handles(graph)
+        ops = torch.ops._C_ascend
+        for handle in handles:
+            ops.selective_native_record_complete(handle, anchor)
+        for handle in handles:
+            ops.selective_native_retire(handle, epoch)
+        self._selective_native_inflight = False
+
+    def selective_native_cache_ids_for_modified_pages(self, block_ids, active_ids) -> set[int]:
+        if self._selective_native_failed or self._selective_native_inflight:
+            raise RuntimeError("Cannot inspect selective cache while a graph may be in flight")
+        pages = np.asarray(sorted(set(block_ids)), dtype=np.int64)
+        if pages.size == 0 or not active_ids:
+            return set()
+        found = set()
+        for state in self._selective_native_groups.values():
+            resident, identity = state[2].numpy(), state[3].numpy()
+            for row, cache_id in enumerate(identity[:, 0]):
+                if int(cache_id) in active_ids and np.isin(resident[row], pages).any():
+                    found.add(int(cache_id))
+        return found
+
+    def stop_selective_native_graphs(self) -> None:
+        self._selective_native_stopping = True
+        error = "Native selective graph failure requires rank quarantine" if (
+            self._selective_native_failed or self._selective_native_inflight
+        ) else None
+        if self.tp_size > 1:
+            gathered = [None] * self.tp_size
+            try:
+                torch.distributed.all_gather_object(gathered, error, group=self.tp_group.cpu_group)
+            except Exception:
+                self._selective_native_failed = True
+                raise
+            if any(value is not None for value in gathered):
+                self._selective_native_failed = True
+                raise RuntimeError(f"Native selective TP stop preflight failed: {gathered}")
+        elif error is not None:
+            raise RuntimeError(error)
+        stop_error = None
+        try:
+            for handles in self._selective_native_graphs.values():
+                for handle in handles:
+                    torch.ops._C_ascend.selective_native_stop(handle)
+        except Exception as exc:
+            stop_error = str(exc)
+        if self.tp_size > 1:
+            gathered = [None] * self.tp_size
+            try:
+                torch.distributed.all_gather_object(gathered, stop_error, group=self.tp_group.cpu_group)
+            except Exception:
+                self._selective_native_failed = True
+                raise
+            if any(value is not None for value in gathered):
+                self._selective_native_failed = True
+                raise RuntimeError(f"Native selective TP worker stop failed: {gathered}")
+        elif stop_error is not None:
+            self._selective_native_failed = True
+            raise RuntimeError(stop_error)
+
+    def release_selective_native_graphs(self, *, close_tp=False) -> None:
+        ops = torch.ops._C_ascend
+        release_error = None
+        try:
+            for graph, handles in self._selective_native_graphs.items():
+                graph.reset()
+                for handle in handles:
+                    ops.selective_native_release(handle)
+        except Exception as error:
+            release_error = str(error)
+        if self.tp_size > 1:
+            gathered = [None] * self.tp_size
+            try:
+                torch.distributed.all_gather_object(gathered, release_error, group=self.tp_group.cpu_group)
+            except Exception:
+                self._selective_native_failed = True
+                raise
+            if any(value is not None for value in gathered):
+                self._selective_native_failed = True
+                raise RuntimeError(f"Native selective TP graph release failed: {gathered}")
+        elif release_error is not None:
+            self._selective_native_failed = True
+            raise RuntimeError(release_error)
+        self._selective_native_graphs.clear()
+        self._selective_native_graph_layers.clear()
+        self._selective_native_graph_keys.clear()
+        self._selective_native_groups.clear()
+        self._selective_native_started = False
+        if close_tp and self.tp_size > 1:
+            close_error = None
+            try:
+                for coordinator in self._selective_native_tp_groups.values():
+                    coordinator.close()
+            except Exception as error:
+                close_error = str(error)
+            gathered = [None] * self.tp_size
+            try:
+                torch.distributed.all_gather_object(gathered, close_error, group=self.tp_group.cpu_group)
+            except Exception:
+                self._selective_native_failed = True
+                raise
+            if any(value is not None for value in gathered):
+                self._selective_native_failed = True
+                raise RuntimeError(f"Native selective TP coordinator close failed: {gathered}")
+            self._selective_native_tp_groups.clear()
 
     def prefetch_selective_kv(self, rows, sources, destinations, lengths) -> None:
         count = self.selective_copy_counts[rows - 1]

@@ -528,6 +528,8 @@ class NPUModelRunner(GPUModelRunner):
             self.sparse_kv_offload_manager = init_sparse_kv_offload_manager(
                 self.vllm_config, kv_cache_config, sparse_cfg
             )
+            if sparse_cfg.selective_offload:
+                self.sparse_kv_offload_manager._selective_model_state = self.model_state
             self.model_state._offload_live_req_ids = self.req_states.req_id_to_index
             self.model_state._offload_draft_layer_names = (
                 getattr(self.speculator, "draft_attn_layer_names", set[str]()) - resident_draft_names
@@ -645,7 +647,20 @@ class NPUModelRunner(GPUModelRunner):
                 if model is not None
                 else []
             )
-        super().shutdown()
+        native = getattr(self, "sparse_kv_offload_manager", None)
+        native_enabled = getattr(native, "_selective_native_experiment", False)
+        if native_enabled:
+            native.stop_selective_native_graphs()
+        shutdown_error = None
+        try:
+            super().shutdown()
+        except Exception as error:
+            shutdown_error = error
+        if native_enabled:
+            native.check_selective_native_phase_status("runner shutdown", shutdown_error)
+            native.release_selective_native_graphs(close_tp=True)
+        elif shutdown_error is not None:
+            raise shutdown_error
         while self._pending_host_offload:
             self._pending_host_offload[-1].close_host_offload()
             self._pending_host_offload.pop()
@@ -715,6 +730,9 @@ class NPUModelRunner(GPUModelRunner):
         randomize_inputs: bool = False,
     ):
         self._cpp_execution_time_ms = None
+        native = getattr(self, "sparse_kv_offload_manager", None)
+        if getattr(native, "_selective_native_failed", False):
+            raise RuntimeError("Native selective graph failure requires rank quarantine")
         profiling_config = self.ascend_config.scheduler_config.profiling_chunk_config
         execution_start_time = _start_profiling_chunk_timing(
             profiling_config,
@@ -725,8 +743,9 @@ class NPUModelRunner(GPUModelRunner):
         # reuses or zeroes the preempted requests' physical KV cache blocks.
         if has_kv_transfer_group():
             kv_connector_metadata = scheduler_output.kv_connector_metadata
-            assert kv_connector_metadata is not None
-            get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
+            self._handle_selective_preemptions(kv_connector_metadata)
+            if not dummy_run and not is_profile:
+                self._invalidate_selective_pd_loads(kv_connector_metadata)
 
         dump_forward = dummy_run or scheduler_output.total_num_scheduled_tokens > 0
         # Eager PrecisionDebugger is started only for real scheduler steps.
@@ -863,6 +882,176 @@ class NPUModelRunner(GPUModelRunner):
                         **profile_kwargs,
                     )
             super().profile_run(**profile_kwargs)
+
+    @staticmethod
+    def _selective_tp_all_gather(native, value, phase):
+        exchange = getattr(native, "selective_native_all_gather", None)
+        if callable(exchange):
+            return exchange(value, phase)
+        gathered = [None] * native.tp_size
+        torch.distributed.all_gather_object(gathered, value, group=native.tp_group.cpu_group)
+        return gathered
+
+    @staticmethod
+    def _mark_selective_failure(native):
+        mark = getattr(native, "mark_selective_native_failure", None)
+        if callable(mark):
+            mark()
+        else:
+            native._selective_native_failed = True
+
+    def _handle_selective_preemptions(self, metadata) -> None:
+        native = getattr(self, "sparse_kv_offload_manager", None)
+        enabled = getattr(native, "_selective_native_started", False)
+        error = None
+        try:
+            assert metadata is not None
+            get_kv_transfer_group().handle_preemptions(metadata)
+        except Exception as exc:
+            error = exc
+        if enabled:
+            native.check_selective_native_phase_status("connector preemption", error)
+        elif error is not None:
+            raise error
+
+    def _invalidate_selective_pd_loads(self, metadata) -> None:
+        if not getattr(self.model_state, "_selective_native_experiment", False):
+            return
+        native = getattr(self, "sparse_kv_offload_manager", None)
+        started = getattr(native, "_selective_native_started", False)
+        req_ids, parse_error = set(), None
+        try:
+            from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiKVConnectorMetadata
+
+            from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import SfaPDConsumerMetadata
+
+            pending = [metadata]
+            while pending:
+                current = pending.pop()
+                if isinstance(current, MultiKVConnectorMetadata):
+                    pending.extend(current.metadata)
+                elif isinstance(current, SfaPDConsumerMetadata):
+                    req_ids.update(req.req_id for req in current.requests)
+            ordered_ids = tuple(sorted(req_ids))
+        except Exception as error:
+            parse_error = error
+            ordered_ids = ()
+        try:
+            if started and native.tp_size > 1:
+                status = (str(parse_error) if parse_error is not None else None, ordered_ids)
+                gathered = self._selective_tp_all_gather(native, status, "P/D metadata")
+                if any(value[0] is not None or value[1] != status[1] for value in gathered):
+                    raise RuntimeError(f"Native selective TP P/D metadata failed or differs: {gathered}")
+            elif parse_error is not None:
+                raise parse_error
+            invalidate_error = None
+            try:
+                if req_ids:
+                    self.model_state.invalidate_selective_requests(req_ids)
+            except Exception as error:
+                invalidate_error = error
+            if started and native.tp_size > 1 and req_ids:
+                gathered = self._selective_tp_all_gather(
+                    native, str(invalidate_error) if invalidate_error is not None else None, "P/D invalidation"
+                )
+                if any(value is not None for value in gathered):
+                    raise RuntimeError(f"Native selective TP P/D invalidation failed: {gathered}")
+            elif invalidate_error is not None:
+                raise invalidate_error
+        except Exception:
+            if native is not None:
+                self._mark_selective_failure(native)
+            raise
+
+    def update_requests(self, scheduler_output: SchedulerOutput) -> None:
+        native = getattr(self, "sparse_kv_offload_manager", None)
+        try:
+            self._update_requests_with_selective_invalidation(scheduler_output)
+        except Exception:
+            if native is not None and getattr(self.model_state, "_selective_native_experiment", False):
+                self._mark_selective_failure(native)
+            raise
+
+    def _update_requests_with_selective_invalidation(self, scheduler_output: SchedulerOutput) -> None:
+        if getattr(self.model_state, "_selective_native_experiment", False):
+            native = getattr(self, "sparse_kv_offload_manager", None)
+            started = getattr(native, "_selective_native_started", False)
+            prep_error = None
+            cached = frontiers = active = None
+            rolled_back, modified_pages, events = set(), set(), None
+            try:
+                cached = scheduler_output.scheduled_cached_reqs
+                frontiers = self.model_state._selective_write_frontiers
+                rolled_back = {
+                    req_id
+                    for req_id, current in zip(cached.req_ids, cached.num_computed_tokens)
+                    if req_id in frontiers and current < frontiers[req_id]
+                }
+                if started:
+                    modified_pages = set(getattr(scheduler_output, "new_block_ids_to_zero", None) or ())
+                    modified_pages.update(
+                        copy.dst_block_id for copy in (getattr(scheduler_output, "kv_cache_block_copies", None) or ())
+                    )
+                    if modified_pages:
+                        active = self.model_state._selective_cache_ids
+                        if active is None:
+                            raise RuntimeError("Native selective request identities are unavailable")
+                    events = (tuple(sorted(modified_pages)), tuple(sorted(rolled_back)))
+            except Exception as error:
+                prep_error = str(error)
+            if started and native.tp_size > 1:
+                status = (prep_error, events)
+                gathered = self._selective_tp_all_gather(native, status, "page events")
+                if any(value[0] is not None for value in gathered):
+                    raise RuntimeError(f"Native selective TP event preparation failed: {gathered}")
+                if any(value[1] != events for value in gathered):
+                    raise RuntimeError("Native selective TP page or rollback events differ across ranks")
+            elif prep_error is not None:
+                raise RuntimeError(f"Native selective event preparation failed: {prep_error}")
+            if started:
+                if modified_pages:
+                    ids, scan_error = None, None
+                    if native.tp_size == 1 or native.tp_rank == 0:
+                        try:
+                            ids = native.selective_native_cache_ids_for_modified_pages(modified_pages, set(active.values()))
+                        except Exception as error:
+                            scan_error = str(error)
+                    if native.tp_size > 1:
+                        payload = (scan_error, ids) if native.tp_rank == 0 else None
+                        scan_error, ids = native.tp_group.broadcast_object(payload, src=0)
+                    if scan_error is not None:
+                        native._selective_native_failed = True
+                        raise RuntimeError(f"Native selective TP page scan failed: {scan_error}")
+            invalidation_error = None
+            try:
+                if started and modified_pages:
+                    rolled_back.update(req_id for req_id, cache_id in active.items() if cache_id in ids)
+                self.model_state.invalidate_selective_requests(rolled_back)
+            except Exception as error:
+                invalidation_error = error
+            if (getattr(native, "_selective_native_started", False) and native.tp_size > 1
+                    and (modified_pages or rolled_back)):
+                status = (str(invalidation_error) if invalidation_error is not None else None, tuple(sorted(rolled_back)))
+                gathered = self._selective_tp_all_gather(native, status, "page invalidation")
+                if any(value[0] is not None or value[1] != status[1] for value in gathered):
+                    raise RuntimeError(f"Native selective TP invalidation failed or differs: {gathered}")
+            elif invalidation_error is not None:
+                raise invalidation_error
+            # Rewritten suffix is no longer represented by any resident cache entry.
+            for req_id, current in zip(cached.req_ids, cached.num_computed_tokens):
+                if req_id in rolled_back:
+                    frontiers[req_id] = current
+        super().update_requests(scheduler_output)
+        if getattr(self.model_state, "_selective_native_experiment", False):
+            indices = self.req_states.req_id_to_index
+            computed = self.req_states.num_computed_tokens_np
+            frontiers = self.model_state._selective_write_frontiers
+            for req_id, count in scheduler_output.num_scheduled_tokens.items():
+                if req_id in indices and req_id in frontiers:
+                    # The scheduler's optimistic count is an upper bound; tracking
+                    # its end conservatively covers speculative KV writes as well.
+                    end = int(computed[indices[req_id]]) + count
+                    frontiers[req_id] = max(frontiers[req_id], end)
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)

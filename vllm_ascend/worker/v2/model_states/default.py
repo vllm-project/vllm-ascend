@@ -96,6 +96,13 @@ class AscendModelState(DefaultModelState):
         self._offload_draft_attn_groups: list[list[AttentionGroup]] = []
         self._offload_draft_layer_names: set[str] = set()
         sparse_cfg = get_ascend_config().sparse_kv_offload_config
+        self._selective_request_ids: dict[str, int] | None = {} if sparse_cfg.selective_offload else None
+        self._selective_cache_ids: dict[str, int] | None = {} if sparse_cfg.selective_offload else None
+        self._selective_data_versions: dict[str, int] = {}
+        self._selective_write_frontiers: dict[str, int] = {}
+        self._selective_native_experiment = False
+        # Dummy metadata uses 32-bit scheduler hashes; keep real instances disjoint.
+        self._selective_next_request_id = 1 << 32
         self._selective_tails = None
         self._selective_tail_rows = None
         if sparse_cfg.selective_offload and vllm_config.cache_config.block_size == 128:
@@ -346,12 +353,42 @@ class AscendModelState(DefaultModelState):
         ):
             yield
 
+    def add_request(self, req_index: int, new_req_data) -> None:
+        if (self._selective_native_experiment and self._selective_request_ids is not None
+                and self._selective_next_request_id >= 1 << 63):
+            raise OverflowError("Selective KV request instance IDs exhausted")
+        super().add_request(req_index, new_req_data)
+        if self._selective_native_experiment and self._selective_request_ids is not None:
+            self._selective_request_ids[new_req_data.req_id] = self._selective_next_request_id
+            assert self._selective_cache_ids is not None
+            self._selective_cache_ids[new_req_data.req_id] = self._selective_next_request_id
+            self._selective_data_versions[new_req_data.req_id] = 0
+            self._selective_write_frontiers[new_req_data.req_id] = new_req_data.num_computed_tokens
+            self._selective_next_request_id += 1
+
     def remove_request(self, req_id: str) -> None:
         super().remove_request(req_id)
+        if self._selective_native_experiment and self._selective_request_ids is not None:
+            self._selective_request_ids.pop(req_id, None)
+            assert self._selective_cache_ids is not None
+            self._selective_cache_ids.pop(req_id, None)
+            self._selective_data_versions.pop(req_id, None)
+            self._selective_write_frontiers.pop(req_id, None)
         if self._offload_request_states is not None:
             self._offload_request_states.remove_request(req_id)
         if self._selective_tails is not None:
             self._selective_tails.release(req_id)
+
+    def invalidate_selective_requests(self, req_ids: Collection[str]) -> None:
+        if self._selective_cache_ids is None:
+            return
+        affected = sorted(req_id for req_id in set(req_ids) if req_id in self._selective_cache_ids)
+        if self._selective_next_request_id + len(affected) > 1 << 63:
+            raise OverflowError("Selective KV cache identity exhausted")
+        for req_id in affected:
+            self._selective_cache_ids[req_id] = self._selective_next_request_id
+            self._selective_data_versions[req_id] += 1
+            self._selective_next_request_id += 1
 
     def _get_engram_device_inputs(self, input_batch: AscendInputBatch) -> dict[str, torch.Tensor]:
         """Device request coordinates for upstream NgramHashState."""
@@ -481,6 +518,12 @@ class AscendModelState(DefaultModelState):
         offload_token_to_req = getattr(self, "_offload_token_to_req", None)
         if offload_req_ids is not None:
             assert offload_token_to_req is not None
+            request_instance_ids = None
+            if (self._selective_native_experiment and self._selective_cache_ids is not None
+                    and not (input_batch.is_dummy or for_capture)):
+                request_instance_ids = [
+                    self._selective_cache_ids[req_id] for req_id in input_batch.req_ids[:num_actual_reqs]
+                ]
             update_sparse_kv_offload_metadata(
                 input_batch.num_tokens,
                 input_batch.num_reqs,
@@ -490,6 +533,7 @@ class AscendModelState(DefaultModelState):
                 input_batch.query_start_loc_np,
                 offload_req_ids,
                 offload_token_to_req,
+                request_instance_ids=request_instance_ids,
             )
         tail_rows = None
         tail_buffer = getattr(self, "_selective_tail_rows", None)

@@ -179,6 +179,16 @@ def test_dummy_uses_distinct_nonzero_ids_when_live_request_list_is_empty(monkeyp
     assert kwargs["copy_sfa_draft_index"] == 2
 
 
+def test_selective_draft_reuses_target_request_instances():
+    metadata = _metadata()
+    state = _state(pool=False)
+    state._selective_native_experiment = True
+    state._selective_cache_ids = {"live-a": 1 << 32, "live-b": (1 << 32) + 1}
+    kwargs = metadata.build_kwargs(_batch(), state, 2, _descriptor(), np.array([0, 2, 5]), 1)
+    assert kwargs is not None
+    assert kwargs["req_ids_tensor"].tolist() == [1 << 32, (1 << 32) + 1, 0, 0]
+
+
 def test_batch_with_no_live_ids_does_not_reuse_previous_request_identity():
     metadata = _metadata()
     metadata.build_kwargs(_batch(), _state(), 2, _descriptor(), np.array([0, 2, 5]), 0)
