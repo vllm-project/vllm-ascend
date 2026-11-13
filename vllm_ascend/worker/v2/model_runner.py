@@ -451,10 +451,6 @@ class NPUModelRunner(GPUModelRunner):
         kv_cache_config: KVCacheConfig,
         kv_cache_allocation_context: AbstractContextManager | None,
     ) -> None:
-        if isinstance(getattr(kv_cache_config, "hisparse_host_num_blocks", None), int):
-            from vllm_ascend.patch.worker.patch_hisparse_slab import install_hisparse_slab_allocator
-
-            install_hisparse_slab_allocator()
         # Upstream initialize_kv_cache builds the attention metadata builders
         # via init_attn_backend; the DSA builder registers its fused Q-RMS
         # JIT kernel during construction, so hold a registry window open
@@ -518,8 +514,19 @@ class NPUModelRunner(GPUModelRunner):
                 if sparse_cfg.use_fused_copy_sfa
                 else set()
             )
+        slab_alignment = nullcontext()
+        transfer = self.vllm_config.kv_transfer_config
+        if (
+            getattr(kv_cache_config, "hisparse_host_num_blocks", None) is not None
+            and transfer is not None
+            and transfer.has_connector("AscendStoreConnector")
+        ):
+            from vllm_ascend.hisparse.binding import reserve_hisparse_slab_alignment
+
+            slab_alignment = reserve_hisparse_slab_alignment(kv_cache_config)
         with graph_manager_wrapper(self):
-            self._initialize_kv_cache_upstream(kv_cache_config, kv_cache_allocation_context)
+            with slab_alignment:
+                self._initialize_kv_cache_upstream(kv_cache_config, kv_cache_allocation_context)
             self._target_uses_flashmla = self._has_target_flashmla_attention()
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)

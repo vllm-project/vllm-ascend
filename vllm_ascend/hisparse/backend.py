@@ -208,8 +208,9 @@ class AscendHiSparseBackend(HiSparseBackend):
         kv_caches: dict[str, Any],
         forward_context: dict[str, Any],
     ) -> None:
-        from .binding import _bind_indexer_views, get_hisparse_indexer_specs
+        from .binding import _bind_indexer_views, align_hisparse_slab_views, get_hisparse_indexer_specs
 
+        align_hisparse_slab_views(kv_cache_config, kv_caches)
         _bind_indexer_views(kv_caches, get_hisparse_indexer_specs(kv_cache_config), forward_context)
 
     def is_current_stream_capturing(self) -> bool:

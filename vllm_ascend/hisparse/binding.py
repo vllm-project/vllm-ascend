@@ -3,6 +3,9 @@
 """Bind shared-slab views while retaining Core HiSparse allocation."""
 
 import math
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import replace
 from typing import Any
 
@@ -17,14 +20,52 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 
+_SLAB_ALIGNMENT = 2 * 1024 * 1024
+_slab_size: ContextVar[int | None] = ContextVar("hisparse_device_slab_size", default=None)
 
-def _allocate_aligned_slab(size: int, device: torch.device) -> torch.Tensor:
-    alignment = 2 * 1024 * 1024
-    owner = torch.zeros(size + alignment - 1, dtype=torch.int8, device=device)
-    start = owner.storage_offset() + (-owner.data_ptr() % alignment)
-    # Core binds Resident and Hot using absolute offsets from the storage base.
-    storage = owner.untyped_storage()[start : start + size]
-    return torch.empty(0, dtype=torch.int8, device=device).set_(storage, 0, (size,), (1,))
+
+@contextmanager
+def reserve_hisparse_slab_alignment(kv_cache_config: KVCacheConfig) -> Iterator[None]:
+    """Leave room to align the single device allocation made by Core."""
+    (size,) = {tensor.size for tensor in kv_cache_config.kv_cache_tensors if not tensor.host_resident}
+    kv_cache_config.kv_cache_tensors = [
+        tensor if tensor.host_resident else replace(tensor, size=size + _SLAB_ALIGNMENT - 1)
+        for tensor in kv_cache_config.kv_cache_tensors
+    ]
+    token = _slab_size.set(size)
+    try:
+        yield
+    finally:
+        _slab_size.reset(token)
+
+
+def align_hisparse_slab_views(kv_cache_config: KVCacheConfig, kv_caches: dict[str, Any]) -> None:
+    """Rebase Core's device views onto one aligned slice, without allocating or copying KV."""
+    size = _slab_size.get()
+    if size is None:
+        return
+    device_tensors = [tensor for tensor in kv_cache_config.kv_cache_tensors if not tensor.host_resident]
+    first_view = kv_caches[device_tensors[0].layers[0]]
+    owner = first_view.untyped_storage()
+    start = -owner.data_ptr() % _SLAB_ALIGNMENT
+    if owner.nbytes() != size + _SLAB_ALIGNMENT - 1:
+        raise ValueError("HiSparse device slab is missing its reserved alignment padding.")
+
+    # Core binds Resident and Hot using offsets from the storage base. Use
+    # one storage slice for all device views so those offsets still start at 0.
+    aligned_storage = owner[start : start + size]
+    for tensor in device_tensors:
+        for name in tensor.layers:
+            view = kv_caches[name]
+            if view.untyped_storage().data_ptr() != owner.data_ptr():
+                raise ValueError("HiSparse device cache views must share one backing allocation.")
+            if view.ndim == 1 and view.numel() == owner.nbytes():  # Raw Resident and Hot slab.
+                kv_caches[name] = view.new_empty(0).set_(aligned_storage, 0, (size,), (1,))
+            else:
+                kv_caches[name] = view.new_empty(0).set_(
+                    aligned_storage, view.storage_offset(), view.size(), view.stride()
+                )
+        tensor.size = size
 
 
 def align_hisparse_indexer_specs(
