@@ -40,9 +40,11 @@ class TestAscendW4A16MXFP4MoEMethod(TestBase):
             self.assertEqual(result["w13_weight_scale"].dtype, torch.uint8)
             self.assertEqual(result["w2_weight_scale"].dtype, torch.uint8)
 
+    @patch("vllm_ascend.quantization.nz.torch_npu")
     @patch("vllm_ascend.quantization.methods.wna16.w4a16_mxfp4.torch_npu")
-    def test_process_weights_transposes_weights(self, mock_torch_npu):
-        mock_torch_npu.npu_format_cast.side_effect = lambda x, *args, **kwargs: x
+    def test_process_weights_transposes_weights(self, mock_torch_npu, mock_nz_npu):
+        # The BF16 recipe performs the cast in the shared nz module.
+        mock_nz_npu.npu_format_cast.side_effect = lambda x, *args, **kwargs: x
         mock_torch_npu.npu_convert_weight_to_int4pack.side_effect = lambda x: x
 
         layer = nn.Module()

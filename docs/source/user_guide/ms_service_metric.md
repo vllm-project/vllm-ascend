@@ -112,7 +112,7 @@ Example of a custom handler entry:
 Example of a provider built-in entry, which keeps its `metrics` block:
 
 ```yaml
-- symbol: vllm_ascend.worker.v1.model_runner:NPUModelRunner.execute_model
+- symbol: vllm_ascend.worker.v2.model_runner:NPUModelRunner.execute_model
   handler: ms_service_metric.provider_handlers:model_runner_phase_handler
   metrics:
     - name: executor:model_runner_execute_model:duration

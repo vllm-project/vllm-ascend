@@ -41,13 +41,13 @@ from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from typing import Any
 
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorOutput
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 from vllm.v1.worker.gpu.async_utils import AsyncOutput
 
 from vllm_ascend.logger import init_logger_ascend
 from vllm_ascend.observability.runtime_guard.processor import SamplePhaseResult
-from vllm_ascend.utils import vllm_version_is
 
 logger = init_logger_ascend(__name__)
 
@@ -345,12 +345,6 @@ class AscendAsyncOutput(AsyncModelRunnerOutput):
         _safe_check_after_sample(self._runner, output)
         return output
 
-    # vLLM main makes ``get_kv_connector_output`` abstract on
-    # ``AsyncModelRunnerOutput``: it salvages the step's KV output when
-    # ``get_output`` fails. v0.32.0 neither declares nor calls it, so the
-    # release lane needs no override.
-    if not vllm_version_is("0.32.0"):
-        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorOutput
-
-        def get_kv_connector_output(self) -> KVConnectorOutput | None:
-            return self._inner.get_kv_connector_output()
+    # Both supported versions require get_kv_connector_output on async outputs.
+    def get_kv_connector_output(self) -> KVConnectorOutput | None:
+        return self._inner.get_kv_connector_output()

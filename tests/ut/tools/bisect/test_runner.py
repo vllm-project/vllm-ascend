@@ -1,5 +1,7 @@
 from pathlib import Path
+from unittest.mock import Mock
 
+from tools.bisect.build_manager import BuildManager
 from tools.bisect.config import SINGLE_NODE_TEST_PATH, BisectInput, BisectOptions
 from tools.bisect.runner import (
     MultiNodeRunner,
@@ -23,7 +25,8 @@ def test_base_env_includes_case_and_config_base(tmp_path: Path):
         config_base_path="configs",
     )
     opt = BisectOptions(repo_dir=tmp_path)
-    runner = SingleNodeRunner(inp, opt, builder=None)  # type: ignore[arg-type]
+    builder = Mock(spec=BuildManager, test_environment=None)
+    runner = SingleNodeRunner(inp, opt, builder=builder)
 
     env = runner._base_env()
 

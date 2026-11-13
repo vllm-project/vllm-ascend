@@ -11,7 +11,6 @@ from multiprocessing.shared_memory import SharedMemory
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-import numpy as np
 import pytest
 import torch
 from safetensors.torch import save_file
@@ -228,9 +227,6 @@ def test_loader_preserves_checkpoint_shards_across_dp_pcp_tp(tmp_path, monkeypat
     assert len(barriers) == (8 if shared else 0)
 
 
-from vllm_ascend.worker.v1.model_runner import NPUModelRunner
-
-
 @pytest.mark.parametrize(
     "enabled,shared,tp,mode,expected",
     [
@@ -294,6 +290,17 @@ def test_loader_rejects_invalid_rotation_layouts(tmp_path):
     save_file({"global_rotation": rotation}, dense_path)
     with pytest.raises(ValueError, match="requires block-diagonal global rotation"):
         load_engram_rotation_block(str(tmp_path), 64, dense_path)
+
+
+def test_loader_requires_declared_rotation_file(tmp_path):
+    declared_path = tmp_path / "optional" / "quarot.safetensors"
+    with pytest.raises(FileNotFoundError, match="QuaRot global rotation"):
+        load_engram_rotation_block(str(tmp_path), 64, declared_path)
+
+
+def test_loader_uses_identity_when_rotation_is_not_declared(tmp_path):
+    blocks = load_engram_rotation_block(str(tmp_path), 64)
+    torch.testing.assert_close(blocks, torch.eye(32))
 
 
 def test_gate_accepts_distinct_rotation_blocks():
@@ -425,45 +432,6 @@ def test_idle_hashes_have_no_valid_rows(num_tokens):
     assert not keep.any()
 
 
-def _runner(rows, computed, prompt):
-    token_ids = np.full((len(rows), 16), -7, dtype=np.int32)
-    for index, row in enumerate(rows):
-        token_ids[index, : len(row)] = row
-    runner = object.__new__(NPUModelRunner)
-    runner.input_batch = SimpleNamespace(
-        num_reqs=len(rows),
-        token_ids_cpu=token_ids,
-        num_computed_tokens_cpu=np.asarray(computed, dtype=np.int32),
-        num_prompt_tokens=np.asarray(prompt, dtype=np.int32),
-    )
-    lookback = np.empty((len(rows), 3), dtype=np.int32)
-    runner.lookback_token_ids = SimpleNamespace(
-        np=lookback,
-        copy_to_gpu=lambda: torch.from_numpy(lookback.copy()),
-    )
-    runner.is_pooling_model = False
-    return runner
-
-
-@pytest.mark.parametrize(
-    "computed,num_reqs,expected",
-    [
-        (4, None, [13, 12, 11]),
-        (6, None, [-1, -1, 13]),
-        (0, None, [-1, -1, -1]),
-        (4, 0, [-1, -1, -1]),
-        (4, 1, [13, 12, 11]),
-    ],
-)
-def test_v1_lookback_uses_prompt_tokens_once(computed, num_reqs, expected):
-    runner = _runner([[10, 11, 12, 13, -7, -7]], [computed], [4])
-    copy = Mock(wraps=runner.lookback_token_ids.copy_to_gpu)
-    runner.lookback_token_ids.copy_to_gpu = copy
-    kwargs = runner._init_model_kwargs(num_reqs=num_reqs)
-    assert kwargs["lookback_token_ids"][0].tolist() == expected
-    copy.assert_called_once_with()
-
-
 @pytest.mark.parametrize("shared", [False, True])
 @pytest.mark.parametrize("remote_group", ["tp", "edp"])
 def test_engram_rejects_nonlocal_groups_before_allocation(monkeypatch, shared, remote_group):
@@ -543,3 +511,53 @@ def test_native_mxfp8_requires_e8m0_scales_before_allocation(tmp_path):
     )
     with pytest.raises(ValueError, match="requires E8M0 scales"):
         embedding_mod.preflight_engram_checkpoint(tmp_path, [1])
+
+
+@pytest.mark.parametrize("quantized", [False, True])
+def test_embed_gathered_walks_strided_hashes_without_a_copy(monkeypatch, quantized):
+    """Strided per-layer hash slices must reach the lookup uncopied.
+
+    The lookup kernels walk ids with an explicit token stride and only need a
+    unit inner stride, which the per-layer slice of the
+    ``[tokens, layers, columns]`` hash buffer already has -- forcing it through
+    ``contiguous()`` is a dead copy on the preparation hot path.
+    """
+    source = torch.linspace(-12, 12, 36 * 64).reshape(36, 64).bfloat16()
+    codes, scales = npu.quantize_engram_rows(source)
+    table = object.__new__(embedding_mod.AscendParallelEngramEmbedding)
+    torch.nn.Module.__init__(table)
+    table._shared_group = None
+    table._codes_uva = None
+    table._scales_uva = None
+    table.vocab_start_idx, table.vocab_end_idx = 5, 17
+    table.block_size, table.dim = 32, 64
+    table.head_start, table.part_n_hash_cols = 1, 2
+    table.n_hash_cols, table.dp_size, table.tp_size = 2, 1, 1
+    table.weight = torch.nn.Parameter((codes if quantized else source)[5:17], requires_grad=False)
+    table.weight_scale_inv = torch.nn.Parameter(scales[5:17], requires_grad=False) if quantized else None
+
+    hashes = torch.zeros(4, 3, 3, dtype=torch.int64)
+    hashes[:, :, 1:] = torch.randint(5, 17, (4, 3, 2))
+    hashes[1, :, 1:] = DEAD_ID
+    gathered = hashes[:, 1]  # the per-layer slice keeps the outer layer stride
+    assert not gathered.is_contiguous()
+
+    def refuse(unit, *args, **kwargs):
+        raise AssertionError("strided hash slices must reach lookup without a contiguity copy")
+
+    monkeypatch.setattr(torch.Tensor, "contiguous", refuse)
+    out = table.embed_gathered(gathered, 4)
+    monkeypatch.undo()
+
+    if quantized:
+        reference = (codes.float().unflatten(-1, (-1, 32)) * scales.float().unsqueeze(-1)).flatten(-2).bfloat16()
+    else:
+        reference = source
+    columns = gathered[:, table.head_start : table.head_start + table.part_n_hash_cols].long()
+    owned = (columns >= table.vocab_start_idx) & (columns < table.vocab_end_idx)
+    # The lookup gathers rows of the *shard* by local index; mirror that on the
+    # matching slice of the reference table (global id = start + local index).
+    shard = reference[table.vocab_start_idx : table.vocab_end_idx]
+    rows = shard[torch.where(owned, columns - table.vocab_start_idx, 0)]
+    expected = torch.where(owned.unsqueeze(-1), rows, torch.zeros(1, dtype=reference.dtype))
+    torch.testing.assert_close(out, expected, rtol=0, atol=0)
