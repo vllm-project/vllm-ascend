@@ -739,7 +739,18 @@ def write_pcp_ring_rows(
 
 
 def compressor_from_projected(
-    kv, scores, state_cache, metadata, out, *, max_query_len, num_cores, prev_rows, prev_row_indices,norm_w=None, rms_eps=1e-20,
+    kv,
+    scores,
+    state_cache,
+    metadata,
+    out,
+    *,
+    max_query_len,
+    num_cores,
+    prev_rows,
+    prev_row_indices,
+    norm_w=None,
+    rms_eps=1e-20,
 ):
     """Pool C2 into token-aligned BF16 rows; PCP updates the ring after gathering.
 
