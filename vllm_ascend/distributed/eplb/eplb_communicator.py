@@ -24,7 +24,8 @@ from vllm.logger import logger
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.network_utils import get_ip, get_open_port, join_host_port
 
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
+from vllm_ascend.quantization.nz import NzCastSpec
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_internal_npu_format
 
 _HIXL_MEMORY_ALIGNMENT = 2 * 1024 * 1024
 _HIXL_MAX_REGISTERED_REGIONS = 4000
@@ -68,6 +69,42 @@ def _resolve_hixl_module() -> Any:
     return hixl_compat
 
 
+def _view_cast_specs(views: Sequence[Any]) -> list[NzCastSpec | None]:
+    return [getattr(view, "nz_cast_spec", None) for view in views]
+
+
+def _map_buffer_cast_specs(
+    expert_buffer: Sequence[Any],
+    all_expert_weights: Sequence[Sequence[Any]],
+) -> tuple[dict[int, NzCastSpec], list[torch.Tensor]]:
+    """Associate every parameterized receive buffer tensor with its cast.
+
+    The buffers are allocated as ``empty_like`` of one layer's weight views, so
+    a view cast with parameters hands its cast down to the buffer that receives
+    into it. ``add_recv`` is given those exact tensor objects, which is what
+    lets the receive path look the cast up by identity instead of tracking
+    positions. The buffers are kept alive here so an identity cannot be reused
+    by a later allocation.
+    """
+    buffer_specs = _view_cast_specs(expert_buffer)
+    for layer_views in all_expert_weights:
+        layer_specs = _view_cast_specs(layer_views)
+        if layer_specs != buffer_specs:
+            raise ValueError(
+                "Gloo EPLB receives into buffers shared by every layer, so each layer's NZ cast layout has to "
+                f"match theirs, but got {layer_specs} against {buffer_specs}."
+            )
+    specs: dict[int, NzCastSpec] = {}
+    retained: list[torch.Tensor] = []
+    for view, spec in zip(expert_buffer, buffer_specs):
+        if spec is None:
+            continue
+        for tensor in view:
+            specs[id(tensor)] = spec
+            retained.append(tensor)
+    return specs, retained
+
+
 class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
     """Gloo CPU-staging EPLB communicator for async mode on Ascend.
 
@@ -78,10 +115,19 @@ class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
     distributed collectives.
     """
 
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
+    def __init__(
+        self,
+        cpu_group: ProcessGroup,
+        expert_buffer: Sequence[Any] = (),
+        all_expert_weights: Sequence[Sequence[Any]] = (),
+    ) -> None:
+        super().__init__(cpu_group)
+        # The async worker hands its own stream over through set_stream().
         self._stream: torch.Stream | None = None
         self._pinned_staging_buffers: dict[tuple[torch.dtype, tuple[int, ...]], list[torch.Tensor]] = {}
+        # Keyed by the identity of the buffer tensors add_recv() receives, and
+        # holding those buffers so no later allocation can reuse an identity.
+        self._buffer_cast_specs, self._retained_buffers = _map_buffer_cast_specs(expert_buffer, all_expert_weights)
 
     def set_stream(self, stream: torch.Stream | None) -> None:
         self._stream = stream
@@ -145,14 +191,37 @@ class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
 
         with stream if stream is not None else contextlib.nullcontext():
             for dst_tensor, src_tensor in recv_staging:
-                if dst_tensor.device.type == "npu" and torch_npu.get_npu_format(dst_tensor) == ACL_FORMAT_FRACTAL_NZ:
-                    # Ascend950 cannot copy CPU tensors directly into NZ storage.
+                if is_internal_npu_format(dst_tensor):
+                    # Ascend950 cannot copy CPU tensors directly into internal
+                    # storage, so stage on device and convert there. The
+                    # conversion has to reproduce the destination's own cast:
+                    # its format can be a C0 variant that depends on the
+                    # parameters, and copy_ refuses mismatched descriptions.
                     # TODO: Remove this workaround once copy_ supports H2D
                     # copies into NZ storage on Ascend950.
                     src_tensor = torch_npu.npu_format_cast(
-                        src_tensor.to(dst_tensor.device, non_blocking=True), ACL_FORMAT_FRACTAL_NZ
+                        src_tensor.to(dst_tensor.device, non_blocking=True),
+                        ACL_FORMAT_FRACTAL_NZ,
+                        **self._destination_cast_kwargs(dst_tensor),
                     )
                 dst_tensor.copy_(src_tensor, non_blocking=True)
+
+    def _destination_cast_kwargs(self, dst_tensor: torch.Tensor) -> dict[str, Any]:
+        """Return how to rebuild an NZ source for one receive destination."""
+        spec = self._buffer_cast_specs.get(id(dst_tensor))
+        if spec is not None:
+            return spec.cast_kwargs()
+        dst_format = int(torch_npu.get_npu_format(dst_tensor))
+        if dst_format == ACL_FORMAT_FRACTAL_NZ:
+            return {}
+        # Converting without the parameters would land on plain FRACTAL_NZ and
+        # the copy below would fail with a description mismatch. Name the
+        # missing contract instead: the quant method owning this weight has to
+        # hand its cast over on the view it exports to EPLB.
+        raise RuntimeError(
+            f"Gloo EPLB cannot rebuild a receive destination in format {dst_format}: the quant method that "
+            "built it does not report the NZ cast behind its get_eplb_weight_views() entry."
+        )
 
     @property
     def needs_profile_buffer_reservation(self) -> bool:

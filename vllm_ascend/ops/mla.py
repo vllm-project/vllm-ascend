@@ -20,6 +20,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections.abc import Callable
+
 import torch
 from torch import nn
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
@@ -97,11 +99,20 @@ class IndexerWrapper(nn.Module):
     def process_weights_after_loading(self) -> None:
         self.impl.process_weights_after_loading()
 
+    def prepare_pcp_hidden(
+        self, hidden_states: torch.Tensor, indexer_metadata: AttentionMetadata
+    ) -> torch.Tensor | Callable[[], torch.Tensor]:
+        """Let pooled indexers launch key communication before SFA queries."""
+        prepare = getattr(self.impl, "prepare_pcp_hidden", None)
+        if prepare is None:
+            return hidden_states
+        return prepare(hidden_states, indexer_metadata)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-        k_hidden_states: torch.Tensor,
+        k_hidden_states: torch.Tensor | Callable[[], torch.Tensor],
         indexer_metadata: AttentionMetadata,
         compute_topk: bool = True,
     ) -> torch.Tensor | None:

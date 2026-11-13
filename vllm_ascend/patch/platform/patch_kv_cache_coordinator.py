@@ -184,7 +184,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 block_pool=self.block_pool,
                 enable_caching=enable_caching,
                 kv_cache_group_id=i,
-                dcp_world_size=dcp_world_size,
+                dcp_world_size=(
+                    1 if isinstance(_manager_spec(kv_cache_group.kv_cache_spec), MambaSpec) else dcp_world_size
+                ),
                 pcp_world_size=1,
                 max_in_flight_tokens=token_budget,
                 max_model_len=max_model_len,
@@ -212,12 +214,22 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 for g in kv_cache_config.kv_cache_groups
                 if is_prefix_cacheable(g.kv_cache_spec)
             ), "block_size must be divisible by hash_block_size"
-        self.enable_partial_hash_hits = dcp_world_size == 1 and any(
+        self.enable_partial_hash_hits = allow_partial_hash_hits and any(
             isinstance(g.kv_cache_spec, MambaSpec)
             and g.kv_cache_spec.mamba_cache_mode == "align"
-            and g.kv_cache_spec.block_size > hash_block_size
+            and (
+                g.kv_cache_spec.block_size > hash_block_size
+                or (dcp_world_size > 1 and g.kv_cache_spec.block_size == hash_block_size)
+            )
             for g in kv_cache_config.kv_cache_groups
         )
+        if self.enable_partial_hash_hits:
+            self.enable_partial_hash_hits = all(
+                not is_prefix_cacheable(g.kv_cache_spec)
+                or getattr(manager, "block_size", self._get_effective_block_size(g.kv_cache_spec)) == hash_block_size
+                or getattr(manager, "supports_fine_grained_hash_lookup", False)
+                for manager, g in zip(self.single_type_managers, kv_cache_config.kv_cache_groups)
+            )
         self.verify_and_split_kv_cache_groups()
 
         # Align the WRITE-path mask granularity (reachable_block_mask) with the
@@ -264,9 +276,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
 
     def _get_effective_block_size(self, kv_cache_spec: KVCacheSpec) -> int:
         block_size = kv_cache_spec.block_size
-        if isinstance(kv_cache_spec, MambaSpec) and self.enable_caching:
+        if isinstance(kv_cache_spec, MambaSpec):
             return block_size
-        if self.dcp_world_size > 1:
+        if kv_cache_spec.dcp_sharded:
             block_size *= self.dcp_world_size
         return block_size
 
@@ -433,7 +445,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     kv_cache_spec=spec,
                     drop_eagle_block=drop_eagle_block,
                     alignment_tokens=self._cache_hit_alignment_tokens,
-                    dcp_world_size=self.dcp_world_size,
+                    dcp_world_size=self.dcp_world_size if spec.dcp_sharded else 1,
                     pcp_world_size=1,
                 )
                 hit_blocks, _new_hit_length = hit_result

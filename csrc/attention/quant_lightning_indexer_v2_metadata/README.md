@@ -197,6 +197,17 @@
     - layout_k为BSND时，优先通过seqused_k中的元素获取seqlen，seqused_k未传入则通过max_seqlen_k获取seqlen。
     - layout_k为TND时，优先通过seqused_k中的元素获取seqlen，seqused_k未传入则通过cu_seqlens_k中的元素获取seqlen。
 
+## DCP（Decode Context Parallel，解码上下文并行）
+
+A5（Ascend950 / arch35）使用 DCP 时，metadata 算子必须与主算子传入相同参数：
+
+- 输入 `causal_seqlens_kv_global`：INT32、shape `(B,)`，`enable_dcp=true` 时必传；
+- 属性 `enable_dcp`、`cp_world`、`cp_rank`、`cp_kv_cache_interleave_size`；
+- `cmp_ratio` 必须为 1。
+
+metadata 使用与 kernel 相同的 DCP 可见长度公式计算每行组的 `s2End`。A5 的 FD/LD 会把该值作为权威块上界，
+metadata 与 kernel 必须保持一致，否则会漏算可见 KV。
+
 ## 调用说明
 
 | 调用方式  | 样例代码                                                     | 说明                                                         |

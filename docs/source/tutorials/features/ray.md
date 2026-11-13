@@ -103,6 +103,11 @@ Choose one machine as the head node and the others as worker nodes. Before proce
 
 Set the `ASCEND_RT_VISIBLE_DEVICES` environment variable to specify the NPU devices to use. For Ray versions above 2.1, also set the `RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES` variable to avoid device recognition issues.
 
+`--device-ids` does not select devices with the Ray executor; vLLM prints a
+warning and Ray placement groups control resource assignment. See
+[NPU Device Selection](../../user_guide/configuration/device_selection.md#ray)
+for the difference from multiprocessing launches.
+
 Below are the commands for the head and worker nodes:
 
 **Head node**:
