@@ -1787,7 +1787,7 @@ def _reshape_kv_cache_v2(
                         * kv_cache_spec.head_size
                         * get_dtype_size(kv_cache_spec.dtype)
                     )
-                    if expected_page_bytes != region.page_size_bytes:
+                    if expected_page_bytes > region.page_size_bytes:
                         raise ValueError(
                             f"{layer_name} Qwen4 hybrid page mismatch: "
                             f"view={expected_page_bytes}, "
@@ -1810,6 +1810,7 @@ def _reshape_kv_cache_v2(
                             kv_cache_spec.head_size,
                         ),
                         storage_offset=slot_offset + region.offset,
+                        block_stride=region.block_stride if owner.role == QSA_RAW else None,
                     ).transpose(1, 2)
                     continue
                 if owner.role == PLE:
