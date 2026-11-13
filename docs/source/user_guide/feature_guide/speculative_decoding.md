@@ -584,6 +584,14 @@ adaptive-verification restrictions above. Start validation with colocated
 serving and prefix caching disabled; PD, cache offload and prefix-cache reuse
 require separate qualification.
 
+V4.1 adaptive verification on Ascend requires both
+`--prefill-context-parallel-size 1` and `--decode-context-parallel-size 1`.
+CP currently partitions requests using host query boundaries, while adaptive
+verification updates each request's budget on device. Configurations combining
+V4.1 adaptive verification with PCP or DCP greater than 1 are rejected during
+configuration validation. Disable adaptive verification to use an otherwise
+supported CP configuration.
+
 Budget selection, draft allocation and sampling reuse the common adaptive
 verification implementation. The V4.1 backend supplies its graph capability
 and cache metadata; it does not implement a separate adaptive policy.
@@ -593,19 +601,17 @@ graph descriptor. Slot mappings use the common producer's padding contract.
 V4.1 uses device query boundaries for SWA writes, compressed cache lengths,
 indexer/attention metadata, and C2 ring state. FULL graph capture preserves
 the maximum verification width even when its dummy queries have one token.
-Padding rows do not write caches. On A5, replay also moves the sparse SWA
-index window with its visible length, preserving the current query's KV and
-excluding keys below the replay boundary. The graph capability is bounded by both
+Padding rows do not write caches. The graph capability is bounded by both
 `1 + num_speculative_tokens` and the 32-row C2 ring: configurations with more
 than 31 draft tokens are rejected by adaptive initialization. The target model
 uses the checkpoint's zero-based auxiliary layer IDs unchanged and captures
 the residual entering each selected layer in both normal and decoder-replay
 execution. No draft-side layer-ID translation is required.
 
-Run the focused NPU budget-allocation/graph regression:
+Run the focused NPU runner/graph regression:
 
 ```shell
-pytest -q tests/e2e/pull_request/one_card/test_dsv41_adaptive_allocator.py
+pytest -q tests/e2e/pull_request/one_card/test_dsv41_adaptive_graph.py
 ```
 
 Validate each hardware/operator/weight combination before deployment. Measure

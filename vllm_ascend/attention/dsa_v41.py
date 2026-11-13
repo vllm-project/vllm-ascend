@@ -25,6 +25,7 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadata,
     AttentionMetadataBuilder,
+    max_decode_query_len,
 )
 from vllm.v1.kv_cache_interface import CircularBufferSpec
 
@@ -152,24 +153,20 @@ def build_replay_swa_visible_lens(
     Positions are derived the way the operator derives its own, from
     ``seqused_ori_kv - actS1Size + s1``, so the two coordinate systems cannot
     drift. Device-side only: no ``.item()``, no host round trip. The caller
-    supplies the physical token extent. FULL graphs may include a padded tail
-    beyond the last device query boundary; those rows have no visible keys.
+    guarantees ``num_tokens`` is the sum of the query lengths, as
+    :func:`build_dspark_swa_indices` does for the other user of this channel.
     """
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
-    if query_lens.numel() == 0:
-        return torch.zeros((num_tokens, 1), dtype=torch.int32, device=query_start_loc.device)
-    tokens = torch.arange(num_tokens, dtype=query_start_loc.dtype, device=query_start_loc.device)
-    # right=True skips zero-length requests, including graph padding. Unlike
-    # repeat_interleave, this has a fixed output shape when live lengths change.
-    req_ids = torch.searchsorted(query_start_loc[1:].contiguous(), tokens, right=True)
-    req_ids = req_ids.clamp_max(query_lens.shape[0] - 1)
-    token_offsets = tokens - query_start_loc[req_ids]
+    req_ids = torch.repeat_interleave(
+        torch.arange(query_lens.shape[0], device=query_start_loc.device, dtype=torch.long),
+        query_lens,
+        output_size=num_tokens,
+    )
+    token_offsets = torch.arange(num_tokens, device=query_start_loc.device) - query_start_loc[req_ids]
     positions = seq_lens[req_ids] - query_lens[req_ids] + token_offsets
     lower = replay_start[: query_lens.shape[0]].to(positions.dtype)[req_ids]
     start_positions = torch.maximum(positions - int(window_size) + 1, lower).clamp_min(0)
-    visible = (positions - start_positions + 1).clamp_min(0)
-    visible = torch.where(tokens < query_start_loc[-1], visible, 0)
-    return visible.to(torch.int32).unsqueeze(1)
+    return (positions - start_positions + 1).to(torch.int32).unsqueeze(1)
 
 
 @dataclass
@@ -822,21 +819,10 @@ class AscendDSAV41Impl:
 class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]):
     @classmethod
     def get_varlen_cudagraph_max_query_len(cls, vllm_config: VllmConfig, kv_cache_spec) -> int | None:
-        spec = vllm_config.speculative_config
-        if spec is None or spec.method != "dspark" or not spec.enable_adaptive_verification:
-            return None
-        num_drafts = spec.num_speculative_tokens
-        if num_drafts is None:
-            return None
-        parallel = vllm_config.parallel_config
-        # CP partitions requests from host boundaries, which are placeholders
-        # after device-side draft ranking. Do not advertise that combination.
-        if parallel.prefill_context_parallel_size > 1 or parallel.decode_context_parallel_size > 1:
-            return None
         # Every proposed row is written to the C2 ring before rejection. Keep
         # the first accepted row available when the next step rolls back to it.
         # Wider blocks could overwrite that row even if only the anchor survives.
-        return min(1 + num_drafts, STATE_RING_ROWS)
+        return min(max_decode_query_len(vllm_config), STATE_RING_ROWS)
 
     def __init__(
         self,
@@ -902,9 +888,6 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         self._slot_mapping = torch.full((max_tokens,), -1, dtype=torch.int64, device=device)
         self._slot_mapping_2d = torch.full((max_tokens, 2), -1, dtype=torch.int32, device=device)
         self._flat_slot_mapping = torch.full((max_tokens,), -1, dtype=torch.int64, device=device)
-        self._replay_visible_lens = (
-            torch.zeros((max_tokens, 1), dtype=torch.int32, device=device) if self._cache_kind == "swa" else None
-        )
         self._seq_lens = torch.zeros(max_reqs, dtype=torch.int32, device=device)
         self._max_tokens = max_tokens
         self._dspark_swa_indices = None
@@ -1302,29 +1285,6 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             indices_view.copy_(req.ori_sparse_indices)
             lengths_view.copy_(req.ori_topk_length)
             req.ori_sparse_indices, req.ori_topk_length = indices_view, lengths_view
-        if req.ori_topk_length is None and req.ori_sparse_indices is not None and noncausal:
-            req.ori_topk_length = (req.ori_sparse_indices >= 0).sum(dim=-1, dtype=torch.int32)
-
-        # Replay bounds the band length and the sparse window's left edge.
-        replay_start = getattr(common, "replay_start", None)
-        replay_visible_lens = None
-        if replay_start is not None and req.cache_kind == "swa":
-            # Replay floors are group-local even when request coordinates are shared.
-            replay_visible_lens = self.common_v41_smla_metadata.get("swa:replay-visible")
-            if replay_visible_lens is None:
-                assert self._replay_visible_lens is not None
-                replay_visible_lens = self._replay_visible_lens[: req.num_input_tokens]
-                replay_visible_lens.copy_(
-                    build_replay_swa_visible_lens(
-                        window_size,
-                        common.query_start_loc[: req.num_reqs + 1],
-                        req.seq_lens,
-                        replay_start,
-                        req.num_input_tokens,
-                    )
-                )
-                self.common_v41_smla_metadata["swa:replay-visible"] = replay_visible_lens
-            req.ori_topk_length = replay_visible_lens
         if (
             not noncausal
             and req.ori_sparse_indices is None
@@ -1332,18 +1292,49 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             and req.positions is not None
         ):
             cache_key = f"a5-causal-swa:w{window_size}"
-            cached_window = self.common_v41_smla_metadata.get(cache_key)
+            cached_window = self.common_v41_batch_metadata.get(cache_key)
             if cached_window is None:
                 assert self._device_backend is not None
                 cached_window = self._device_backend.build_window_indices(
                     req.positions[: req.num_input_tokens],
                     window_size,
-                    visible_lens=replay_visible_lens,
                     indices_output=self._a5_causal_swa_indices[: req.num_input_tokens],
                     lengths_output=self._a5_causal_swa_lengths[: req.num_input_tokens],
                 )
-                self.common_v41_smla_metadata[cache_key] = cached_window
+                self.common_v41_batch_metadata[cache_key] = cached_window
             req.ori_sparse_indices, req.ori_topk_length = cached_window
+        if req.ori_topk_length is None and req.ori_sparse_indices is not None and noncausal:
+            req.ori_topk_length = (req.ori_sparse_indices >= 0).sum(dim=-1, dtype=torch.int32)
+
+        # SWA bounded replay (vLLM #56227): a prefill admission that hit the
+        # prefix cache recomputes the hit's last window, and only the
+        # sliding-window group is rebuilt by it. That group's window is the one
+        # that can reach below ``replay_start`` into the region it does not hold,
+        # so the floor rides ``ori_topk_length``, the operator's per-token
+        # channel for "how many ori KV entries this query may see". The window's
+        # width stays a scalar (``ori_win_left``) and still bounds it from above,
+        # so this only ever narrows the mask, and only for the requests that are
+        # replaying.
+        #
+        # Only the sliding-window group carries it, because
+        # ``_forward_attention`` reads the mask and this length from
+        # ``metadata.swa`` whichever group's loop ranges it was handed, and those
+        # ranges come from the same band -- so they stay a superset of the window.
+        replay_start = getattr(common, "replay_start", None)
+        replay_visible_lens = None
+        if replay_start is not None and req.cache_kind == "swa":
+            replay_visible_lens = build_replay_swa_visible_lens(
+                window_size,
+                common.query_start_loc[: req.num_reqs + 1],
+                req.seq_lens,
+                replay_start,
+                req.num_actual_tokens,
+            )
+        # In band mode this tensor is the per-token visible length; the sparse
+        # path above is its other producer, and that one pairs it with an index
+        # list. The operator's mask mode is therefore the band in both cases.
+        if replay_visible_lens is not None:
+            req.ori_topk_length = replay_visible_lens
         req.ori_mask_mode = 0 if noncausal else 4
         req.ori_win_left = max(0, window_size - 1)
         req.ori_win_right = 0

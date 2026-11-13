@@ -586,12 +586,11 @@ def test_adaptive_v41_cache_planes_follow_device_boundaries(runtime, monkeypatch
             seq_lens_cpu=torch.tensor([h + n for h, n in zip(histories, host_lengths)] + [0, 0], dtype=torch.int32),
             positions=torch.tensor(positions),
             num_reqs=4,
-            num_actual_tokens=16,
+            num_actual_tokens=live_tokens,
             num_input_tokens=16,
             max_query_len=6,
             max_seq_len=512,
             is_prefilling=torch.zeros(4, dtype=torch.bool),
-            replay_start=torch.tensor([120, 253, 0, 0], dtype=torch.int32),
         )
         metadata = builder.build(0, common, num_actual_reqs=2, full_graph_mode=True)
         assert metadata.max_query_len == 6
@@ -608,14 +607,6 @@ def test_adaptive_v41_cache_planes_follow_device_boundaries(runtime, monkeypatch
                 s // ratio if ratio == 1 or p % 2 == 1 else -1 for s, p in zip(slots[:live_tokens], positions)
             ]
             assert metadata.flat_slot_mapping.tolist() == expected_slots + [-1] * (16 - live_tokens)
-            if plane == "swa_cache":
-                expected_visible = [
-                    p - max(120 if req == 0 else 253, p - 127) + 1
-                    for req, (history, count) in enumerate(zip(histories, lengths))
-                    for p in range(history, history + count)
-                ]
-                assert metadata.ori_topk_length[:, 0].tolist() == expected_visible + [0] * (16 - live_tokens)
-                assert metadata.ori_topk_length.data_ptr() == builder._replay_visible_lens.data_ptr()
             if ratio == 2:
                 assert metadata.cache_seq_lens.tolist() == [(h + n) // 2 for h, n in zip(histories, lengths)] + [0, 0]
                 assert metadata.cmp_residual.tolist() == [(h + n) % 2 for h, n in zip(histories, lengths)] + [0, 0]
@@ -1001,6 +992,7 @@ def test_batch_metadata_reuses_work_and_keeps_group_slots_separate(runtime, monk
 
     def native_metadata(*args, **kwargs):
         lengths = kwargs.get("seqused_ori_kv", kwargs.get("seqused_k"))
+        assert lengths is not None
         return torch.full(
             (dsa_v41.V41_METADATA_BUFFER_SIZE,), int(lengths.sum()) + kwargs["cmp_ratio"], dtype=torch.int32
         )
@@ -1676,3 +1668,23 @@ def test_swa_cache_uses_configured_block_size(block_size, monkeypatch):
 
     assert cache.block_size == block_size
     assert cache.get_kv_cache_spec(None).block_size == block_size
+
+
+@pytest.mark.parametrize("rows", [1, 16])
+def test_c2_launch_bounds_do_not_change_graph_metadata(monkeypatch, rows):
+    """A small physical carrier limits only the compressor, not shared metadata."""
+    from vllm_ascend.ops.triton.compressor import compressor_triton
+
+    launch = Mock(side_effect=lambda *args, **kwargs: args[4])
+    monkeypatch.setattr(compressor_triton, "compressor_from_projected", launch)
+    compressor = SimpleNamespace(
+        state_cache=SimpleNamespace(kv_cache=[torch.empty(1, 32, 1, 16)]),
+        _ring_pooled=torch.empty(rows, 8, dtype=torch.bfloat16),
+        _ring_num_cores=1,
+        norm=lambda x: x,
+    )
+    metadata = SimpleNamespace(max_query_len=6, c2_ring_metadata=torch.empty(5, 1, dtype=torch.int32))
+    kv = torch.empty(rows, 8)
+    DeepseekV41Compressor.pool_projected(compressor, kv, kv, metadata, prev_rows=None, prev_row_indices=None)
+    assert launch.call_args.kwargs["max_query_len"] == min(6, rows)
+    assert metadata.max_query_len == 6

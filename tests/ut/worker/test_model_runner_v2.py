@@ -1009,7 +1009,7 @@ def test_prepare_dummy_attn_without_pcp_uses_upstream(valid_state_slots):
     prepare_ring.assert_called_once_with(runner, dummy.num_reqs)
 
 
-@pytest.mark.parametrize("promised,padded,expected", [(6, 16, 6), (6, 1, 1), (None, 16, 1)])
+@pytest.mark.parametrize("promised,padded,expected", [(6, 16, 6), (6, 1, 6), (None, 16, 1)])
 def test_default_model_state_preserves_varlen_capture_query_bound(monkeypatch, promised, padded, expected):
     from vllm_ascend.worker.v2.model_states import default
 
@@ -1078,6 +1078,7 @@ def test_kvpp_history_ignores_padding_and_dummy_work(monkeypatch, computed, dumm
         query_start_loc_np=np.array([0, 1, 2, 2, 2], dtype=np.int32),
         query_start_loc=torch.tensor([0, 1, 2, 2, 2]),
         num_scheduled_tokens=torch.tensor([1, 1]),
+        max_query_len=None,
         is_prefilling_np=np.array([True, False, False, False]),
         seq_lens=torch.tensor([1, 5]),
         seq_lens_np=np.array([1, 5]),

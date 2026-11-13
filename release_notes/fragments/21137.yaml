@@ -1,5 +1,5 @@
 pr: 21137
 entries:
   - category: feature
-    text: Enabled DeepSeek-V4.1-Flash with the common DSpark adaptive verification implementation through bounded variable-length FULL decode graphs and corrected query-width, replay-window and zero-based auxiliary layer-entry capture. Hardware-specific accuracy and performance qualification is required.
+    text: Enabled DeepSeek-V4.1-Flash with the common DSpark adaptive verification implementation through bounded variable-length FULL decode graphs and corrected query-width and zero-based auxiliary layer-entry capture. Unsupported V4.1 adaptive verification with PCP/DCP is rejected during configuration validation. Hardware-specific accuracy and performance qualification is required.
     model: deepseek-v4.1-flash

@@ -514,10 +514,9 @@ class AscendModelState(DefaultModelState):
         # Varlen graphs capture one-token dummy requests but may replay wider
         # verification rows. Preserve the descriptor's promised bound for C2
         # compressor launch grids and attention/indexer tiling.
-        max_query_len = getattr(input_batch, "max_query_len", None)
+        max_query_len = input_batch.max_query_len
         if max_query_len is None:
             max_query_len = input_batch.num_scheduled_tokens.max().item()
-        max_query_len = min(max_query_len, num_input_tokens)
         pcp_context = (
             self.pcp_manager.build_attention_context(input_batch, block_tables, slot_mappings)
             if self.pcp_manager is not None and self.pcp_manager.is_target_attn_groups(attn_groups)
