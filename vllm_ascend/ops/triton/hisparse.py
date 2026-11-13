@@ -5,7 +5,15 @@
 Residency planning is provided by the native AscendC resolver.
 """
 
+import torch
 from vllm.triton_utils import tl, triton
+
+_INVALID_INDEX = tl.constexpr(-1)
+# Hot table entries hold nonnegative signed int32 Host slots.
+_HOST_SLOT_BITS = tl.constexpr(torch.iinfo(torch.int32).bits - 1)
+_MAX_HOST_SLOT = tl.constexpr(torch.iinfo(torch.int32).max)
+# The largest signed int64 sorts after every valid (state, slot) key.
+_INVALID_SORTED_SLOT_KEY = tl.constexpr(torch.iinfo(torch.int64).max)
 
 
 @triton.jit
@@ -60,7 +68,9 @@ def gather_rows_kernel(
         index = row * TOP_K + col
         dst = tl.load(destination + index)
         if HAS_ATTENTION:
-            value = tl.where((dst >= 0) & ~padding, dst // HOT_BLOCK * ATTENTION_BLOCK + dst % HOT_BLOCK, -1)
+            value = tl.where(
+                (dst >= 0) & ~padding, dst // HOT_BLOCK * ATTENTION_BLOCK + dst % HOT_BLOCK, _INVALID_INDEX
+            )
             tl.store(attention + index, value)
         copy = tl.load(mask_ptr + index) != 0
         if copy & ~padding:
@@ -93,12 +103,12 @@ def invalidate_kernel(
     token = tl.program_id(0)
     offset = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     request = tl.load(requests + token)
-    state = tl.load(states + request, mask=(request >= 0) & (request < REQUESTS), other=-1)
+    state = tl.load(states + request, mask=(request >= 0) & (request < REQUESTS), other=_INVALID_INDEX)
     value = tl.load(written + token)
     valid = (state >= 0) & (state < STATE_ROWS) & (value >= 0) & (offset < REGION)
     ptr = dgi + state.to(tl.int64) * REGION + offset
-    cached = tl.load(ptr, mask=valid, other=-1)
-    tl.store(ptr, -1, mask=valid & (cached == value))
+    cached = tl.load(ptr, mask=valid, other=_INVALID_INDEX)
+    tl.store(ptr, _INVALID_INDEX, mask=valid & (cached == value))
 
 
 @triton.jit(do_not_specialize=["ROWS", "REQUESTS", "STATES"])
@@ -113,15 +123,15 @@ def pack_written_slot_keys(
     TILE: tl.constexpr,
 ):
     row = tl.program_id(0) * TILE + tl.arange(0, TILE)
-    request = tl.load(requests + row, mask=row < ROWS, other=-1)
-    slot = tl.load(written + row, mask=row < ROWS, other=-1)
-    valid = (request >= 0) & (request < REQUESTS) & (slot >= 0) & (slot <= 2147483647)
-    state = tl.load(states + request, mask=valid, other=-1)
+    request = tl.load(requests + row, mask=row < ROWS, other=_INVALID_INDEX)
+    slot = tl.load(written + row, mask=row < ROWS, other=_INVALID_INDEX)
+    valid = (request >= 0) & (request < REQUESTS) & (slot >= 0) & (slot <= _MAX_HOST_SLOT)
+    state = tl.load(states + request, mask=valid, other=_INVALID_INDEX)
     valid = valid & (state >= 0) & (state < STATES)
     # Each key identifies a Host slot within one request state. Slots above
     # int32 cannot match a Hot entry and share the padding sentinel.
-    key = (state.to(tl.int64) << 31) | slot.to(tl.int64)
-    tl.store(keys + row, tl.where(valid, key, 9223372036854775807), mask=row < ROWS)
+    key = (state.to(tl.int64) << _HOST_SLOT_BITS) | slot.to(tl.int64)
+    tl.store(keys + row, tl.where(valid, key, _INVALID_SORTED_SLOT_KEY), mask=row < ROWS)
 
 
 @triton.jit(do_not_specialize=["ROWS"])
@@ -137,22 +147,22 @@ def invalidate_written_slots_sorted(
     state = tl.program_id(1)
     offset = tl.program_id(2) * TILE + tl.arange(0, TILE)
     pointer = table + state.to(tl.int64) * HOT + offset
-    cached = tl.load(pointer, mask=offset < HOT, other=-1)
+    cached = tl.load(pointer, mask=offset < HOT, other=_INVALID_INDEX)
     valid = (offset < HOT) & (cached >= 0)
     if tl.sum(valid.to(tl.int32), 0) > 0:
-        query = (state.to(tl.int64) << 31) | cached.to(tl.int64)
+        query = (state.to(tl.int64) << _HOST_SLOT_BITS) | cached.to(tl.int64)
         low = tl.full((TILE,), 0, tl.int32)
         high = tl.full((TILE,), ROWS, tl.int32)
         for _ in tl.static_range(STEPS):
             active = valid & (low < high)
             mid = low + (high - low) // 2
-            value = tl.load(keys + mid, mask=active, other=9223372036854775807)
+            value = tl.load(keys + mid, mask=active, other=_INVALID_SORTED_SLOT_KEY)
             advance = active & (value < query)
             low = tl.where(advance, mid + 1, low)
             high = tl.where(active & ~advance, mid, high)
         inside = valid & (low < ROWS)
-        key = tl.load(keys + low, mask=inside, other=9223372036854775807)
-        tl.store(pointer, -1, mask=inside & (key == query))
+        key = tl.load(keys + low, mask=inside, other=_INVALID_SORTED_SLOT_KEY)
+        tl.store(pointer, _INVALID_INDEX, mask=inside & (key == query))
 
 
 @triton.jit
@@ -228,7 +238,7 @@ def gather_resident_rows_kernel(
     BLOCK_BYTES: tl.constexpr,
 ):
     row = (tl.program_id(0) * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)).to(tl.int64)
-    src = tl.load(row_ids + row, mask=row < ROWS, other=-1).to(tl.int64)
+    src = tl.load(row_ids + row, mask=row < ROWS, other=_INVALID_INDEX).to(tl.int64)
     src = tl.maximum(src, 0)
     src_offset = src // SOURCE_BLOCK * SOURCE_STRIDE + src % SOURCE_BLOCK * ROW_BYTES
     dst_offset = row // DEST_BLOCK * DEST_STRIDE + row % DEST_BLOCK * ROW_BYTES
@@ -255,7 +265,7 @@ def _invalidate_recycled_groups(
     state = tl.load(state_indices + tl.program_id(1))
     slot = tl.program_id(2) * TILE + tl.arange(0, TILE)
     valid = (state >= 0) & (state < STATES) & (slot < HOT)
-    value = tl.load(table + state * HOT + slot, mask=valid, other=-1)
+    value = tl.load(table + state * HOT + slot, mask=valid, other=_INVALID_INDEX)
     valid = valid & (value >= 0)
     page = tl.maximum(value, 0) // PAGE_ROWS
     first = tl.load(blocks)
@@ -271,4 +281,4 @@ def _invalidate_recycled_groups(
         high = tl.where(active & ~advance, middle, high)
         low = tl.where(advance, middle + 1, low)
     key = tl.load(blocks + low, mask=valid & (low < BLOCK_COUNT), other=0)
-    tl.store(table + state * HOT + slot, -1, mask=valid & (low < BLOCK_COUNT) & (key == page))
+    tl.store(table + state * HOT + slot, _INVALID_INDEX, mask=valid & (low < BLOCK_COUNT) & (key == page))
