@@ -1,0 +1,4 @@
+pr: 21826
+entries:
+  - category: feature
+    text: Add an opt-in fused output projection for DeepSeek V4.1 on A5.
