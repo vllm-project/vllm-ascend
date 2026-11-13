@@ -111,7 +111,16 @@ def test_rank_tiled_bounded_work_dispatch(monkeypatch, device_type, ranks, dim, 
 @pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
 @pytest.mark.parametrize(
     "warmed,ranks,tokens",
-    [(False, 16, 16), (True, 16, 16), (True, 8, 16), (True, 16, 13), (True, 16, 191), (True, 16, 2)],
+    [
+        (False, 16, 16),
+        (True, 16, 16),
+        (True, 8, 16),
+        (True, 8, 4),
+        (True, 16, 4),
+        (True, 16, 13),
+        (True, 16, 191),
+        (True, 16, 2),
+    ],
 )
 def test_a3_static_bucket_dispatch(monkeypatch, device_type, warmed, ranks, tokens):
     power_of_two = lambda n: 1 << (n - 1).bit_length()
@@ -145,8 +154,9 @@ def test_a3_static_bucket_dispatch(monkeypatch, device_type, warmed, ranks, toke
         dcp_a2a.fused_dcp_lse_combine(recv, 512, 1, local_output=local, local_lse=lse)
     # A3 uses the static twin only for a warmed signature; A5 keeps the
     # dynamic kernel; A2 keeps the scalar path.
-    expected_static = warmed and device_type == AscendDeviceType.A3 and tokens * 4 >= 12
-    expected_dynamic = device_type == AscendDeviceType.A5 and tokens * 4 >= 12 and 8 <= ranks <= 16
+    min_rows = max((2 * 48 + ranks - 1) // ranks, ranks)
+    expected_static = warmed and device_type == AscendDeviceType.A3 and tokens * 4 >= min_rows
+    expected_dynamic = device_type == AscendDeviceType.A5 and tokens * 4 >= min_rows and 8 <= ranks <= 16
     assert static.call_count == int(expected_static)
     assert tiled.call_count == int(expected_dynamic)
     assert tiled.call_count + static.call_count + scalar.call_count + batched.call_count == 1

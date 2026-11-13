@@ -518,7 +518,9 @@ def _launch_fused_dcp_lse_combine(
     rank_tile = triton.next_power_of_2(dcp_size)
     feature_tile = min(512, triton.next_power_of_2(head_dim), 8192 // rank_tile)
     tiles_per_head = triton.cdiv(head_dim, max(feature_tile, 1))
-    min_rows = triton.cdiv(4 * vector_cores, max(dcp_size, 1))
+    # At least one row per rank and roughly two rows per core. T4 (16 rows at
+    # DCP8/16) wins on both backends; T2 stays on the scalar path.
+    min_rows = max(triton.cdiv(2 * vector_cores, max(dcp_size, 1)), dcp_size)
     mode = _rank_tiled_mode()
     static_shape = (num_heads, num_tokens, head_dim, dcp_size)
     static_strides = (
