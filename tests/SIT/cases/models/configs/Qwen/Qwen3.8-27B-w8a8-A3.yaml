@@ -22,7 +22,7 @@ test_cases:
       - "--tensor-parallel-size"
       - "2"
       - "--max-model-len"
-      - "131072"
+      - "133120"
       - "--max-num-batched-tokens"
       - "16384"
       - "--max-num-seqs"
