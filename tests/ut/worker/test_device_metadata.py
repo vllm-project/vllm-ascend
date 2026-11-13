@@ -365,7 +365,7 @@ class Executor:
 
 class Builder:
     enabled = False
-    tasks = ()
+    tasks: tuple[DeviceMetadataTask, ...] = ()
 
     @contextmanager
     def defer_device_metadata(self, *, in_graph=False):

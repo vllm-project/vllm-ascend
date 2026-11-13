@@ -964,7 +964,10 @@ class TestPCPBatchLifecycle:
         local_swa.local_num_tokens_after_padding = 2
         local_swa.hidden_restore_idx = torch.tensor([0, 2, 3, 0] if full_graph else [0, 2, 3])
         local_metadata = SimpleNamespace(swa=local_swa)
-        cache = SimpleNamespace(slot_mapping=torch.tensor([[1, 0], [1, 1], [1, 2], [-1, -1]]))
+        cache = SimpleNamespace(
+            slot_mapping=torch.tensor([[1, 0], [1, 1], [1, 2], [-1, -1]]),
+            slot_metadata_group_id=None,
+        )
         global_metadata = SimpleNamespace(
             swa=SimpleNamespace(num_actual_tokens=3, num_input_tokens=4),
             rope=lambda name, count: (cos[:count], sin[:count]),
