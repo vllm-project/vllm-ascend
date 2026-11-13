@@ -558,12 +558,13 @@ def run_pool_ab(
     perf_reset_local: bool = False,
     gate: bool = True,
 ) -> PoolABReport:
-    """Run leg A (pool on, local cache off) then leg B (pool off, local cache on).
+    """Run the control leg B (pool off, local cache on) then leg A (pool on).
 
     Legs run serially in the same pytest process: HCCL/torch.distributed groups
-    are process-wide singletons. The original assertions of both legs always
-    fail the test; ``record`` mode only records the pool-side labels
-    (``POOL_DEFECT`` / ``CONTROL_DEFECT``).
+    are process-wide singletons. The control leg runs first so a broken control
+    group skips the pooled leg instead of spending another engine start. The
+    original assertions of both legs always fail the test; ``record`` mode only
+    records the pool-side labels (``POOL_DEFECT`` / ``CONTROL_DEFECT``).
     """
     mode = os.environ.get("KV_POOL_AB_MODE", "record")
     blocked = _preflight_probe()
@@ -601,10 +602,14 @@ def run_pool_ab(
         except AssertionError as exc:
             return None, str(exc), not accuracy_ok
 
-    a, a_err, a_fatal = _run(True, "a")
-    # Wait until worker processes and NPU memory are reclaimed, then run B.
-    time.sleep(AB_LEG_GAP_SECONDS)
     b, b_err, b_fatal = _run(False, "b")
+    if b_err is None:
+        # Wait until worker processes and NPU memory are reclaimed, then run A.
+        time.sleep(AB_LEG_GAP_SECONDS)
+        a, a_err, a_fatal = _run(True, "a")
+    else:
+        # The control group is invalid; the pooled leg would not be comparable.
+        a, a_err, a_fatal = None, None, False
     empty = LegResult(False, 0.0, [], 0.0, 0.0, 0.0, _env_fingerprint())
     a_result = a or empty
     b_result = b or empty
