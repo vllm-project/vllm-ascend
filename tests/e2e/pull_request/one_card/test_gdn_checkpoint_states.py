@@ -105,7 +105,7 @@ def test_shared_exporter_preserves_ascend_conv_layout_and_mtp_slots():
 @pytest.mark.parametrize("layout", ["head_first", "token_slice"])
 @pytest.mark.parametrize("cache_dtype", [torch.float32, torch.bfloat16, torch.float16])
 def test_checkpoint_prefill_matches_dense_inputs_and_restored_tail(layout, cache_dtype):
-    from vllm_ascend.ops.gdn_attn_builder import _build_non_spec_chunked_prefill_metadata
+    from vllm_ascend.attention.gdn_attn_builder import _build_non_spec_chunked_prefill_metadata
     from vllm_ascend.ops.triton.fla import chunk
 
     torch.manual_seed(23)
