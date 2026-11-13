@@ -434,6 +434,7 @@ class AscendConfig:
             "enable_pcp_embedding_lmhead_weight_sharding": true,
             "draft_window_size": null,
             "mix_placement": false,
+            "enable_mega_kda": false,
             "pa_shape_list": [],
             "mega_moe_max_tokens": 65536,
             "ascend_log_path": "~/ascend/log/vllm_ascend",
@@ -582,6 +583,9 @@ class AscendConfig:
     enable_pcp_embedding_lmhead_weight_sharding: bool = True
     draft_window_size: int | None = None
     mix_placement: bool = False
+    # Opt-in external MegaKDA decode/verify operator for Kimi K3.
+    # Disabled by default so existing models keep their current path.
+    enable_mega_kda: bool = False
     # When non-zero, force the MC2 combine stage's comm quant_mode to this
     # value (e.g. 4 = MXFP float8_e4m3 communication quantization) regardless of the
     # model's quant_type, 0 means disabled (use the model's own quant).
@@ -967,8 +971,28 @@ class AscendConfig:
         self._check_mix_placement()
 
         # sparse KV offload vs packed SFA main cache mutex
+        self._validate_mega_kda(vllm_config)
         self._validate_sparse_packed_kv_offload_compatibility()
         return self
+
+    def _validate_mega_kda(self, vllm_config: VllmConfig) -> None:
+        """Validate the opt-in MegaKDA switch against the model config."""
+        if not self.enable_mega_kda:
+            return
+        hf_config = getattr(vllm_config.model_config, "hf_text_config", None)
+        linear_attn = getattr(hf_config, "linear_attn_config", None)
+        outer_config = getattr(vllm_config.model_config, "hf_config", hf_config)
+        architectures = tuple(getattr(outer_config, "architectures", None) or ())
+        is_kimi = "kimi" in getattr(hf_config, "model_type", "").lower() or any(
+            name in ("KimiLinearForCausalLM", "KimiK3ForCausalLM", "KimiK3ForConditionalGeneration")
+            for name in architectures
+        )
+        if not is_kimi or not isinstance(linear_attn, dict) or "num_heads" not in linear_attn:
+            raise ValueError(
+                "additional_config.enable_mega_kda requires a Kimi K3 model with linear_attn_config.num_heads."
+            )
+        if not linear_attn.get("use_full_rank_gate", False):
+            raise ValueError("additional_config.enable_mega_kda requires linear_attn_config.use_full_rank_gate=true.")
 
     @property
     def uses_packed_sfa_main_cache(self) -> bool:

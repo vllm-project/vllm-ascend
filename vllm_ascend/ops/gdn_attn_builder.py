@@ -32,6 +32,11 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend.ops.kimi_mega_kda import MegaKDAFirstVerifyTracker
+from vllm_ascend.ops.kimi_prefill_fused_kda import (
+    PrefillKDAMetadataContext,
+    create_prefill_kda_metadata_workspace,
+)
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_indices,
     prepare_chunk_offsets,
@@ -128,6 +133,7 @@ class GDNChunkedPrefillMetadata:
     num_decodes: int = 0
     cu_seqlens_kern: tuple[int, ...] | None = None
     keep_meta: torch.Tensor | None = None
+    flash_kda_metadata: PrefillKDAMetadataContext | None = None
 
 
 @dataclass
@@ -473,6 +479,13 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             prefill_seq_offset = max(0, prefill_num_rows - attn_metadata.num_prefills)
             initial_state_mode = initial_state_mode.clone()
             initial_state_mode[prefill_seq_offset:] = True
+        workspace = getattr(self, "_flash_kda_metadata_workspace", None)
+        if workspace is not None:
+            # V2 shares this metadata object across the group's layers and
+            # builds a fresh one for each scheduled forward, including MTP.
+            chunk_metadata.flash_kda_metadata = workspace.new_context(
+                attn_metadata.prefill_query_start_loc, chunk_metadata.keep_meta
+            )
         attn_metadata.non_spec_prefill_metadata = GDNPrefillMetadata(
             causal_conv1d=GDNCausalConv1dMetadata(
                 query_start_loc=attn_metadata.non_spec_query_start_loc,
@@ -1001,11 +1014,169 @@ class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
 
     build_device_chunk_metadata = False
 
+    def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self._flash_kda_metadata_workspace = create_prefill_kda_metadata_workspace(vllm_config, layer_names, device)
+
 
 class AscendGDNHostMetadataBackend(AscendGDNAttentionBackend):
     @staticmethod
     def get_builder_cls() -> type[AscendGDNHostMetadataBuilder]:
         return AscendGDNHostMetadataBuilder
+
+
+class AscendMegaKDAHostMetadataBuilder(AscendGDNHostMetadataBuilder):
+    """Kimi-only Mega metadata; other GDN groups retain their exact builder."""
+
+    def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self._mega_layer_names = tuple(layer_names)
+        self._mega_tracker = None
+        self._mega_first_verify = torch.zeros_like(self.spec_sequence_indices, dtype=torch.int32)
+        self._mega_conv_accepted = torch.empty_like(self.spec_sequence_indices, dtype=torch.int32)
+        self._mega_full_accepted = torch.full_like(self.spec_sequence_indices, self.num_spec + 1, dtype=torch.int32)
+        self._mega_conv_block_ids = torch.empty_like(self.spec_sequence_indices, dtype=torch.int32)
+        self._mega_ssm_block_ids = torch.empty(
+            (self.spec_sequence_indices.numel(), self.num_spec + 1), dtype=torch.int32, device=device
+        )
+
+    def build_for_cudagraph_capture(self, common_attn_metadata, **kwargs):
+        # Capture omits scheduler draft tokens, which would make _plan_mega_kda
+        # select the fallback KDA path and bake it into the graph. Synthesize
+        # the equivalent pure-Verify metadata; replay rewrites every buffer.
+        is_prefilling = getattr(common_attn_metadata, "is_prefilling", None)
+        if (
+            self.num_spec > 0
+            and common_attn_metadata.num_reqs > 0
+            and (is_prefilling is None or not bool(torch.any(is_prefilling)))
+        ):
+            num_reqs = common_attn_metadata.num_reqs
+            device = common_attn_metadata.query_start_loc.device
+            kwargs.setdefault("num_accepted_tokens", torch.ones(num_reqs, dtype=torch.int32, device=device))
+            kwargs.setdefault("num_decode_draft_tokens_cpu", torch.full((num_reqs,), self.num_spec, dtype=torch.int32))
+            kwargs.setdefault("mega_first_verify", torch.zeros(num_reqs, dtype=torch.int32, device=device))
+        return self.build(
+            common_prefix_len=0,
+            common_attn_metadata=common_attn_metadata,
+            **kwargs,
+        )
+
+    def _ensure_mega_tracker(self):
+        # MambaSpec describes page shapes, not capacity. Read the actual bound
+        # state cache after allocation, also for workers without initialize_cache.
+        layers = self.vllm_config.compilation_config.static_forward_context
+        for name in self._mega_layer_names:
+            cache = getattr(layers.get(name), "kv_cache", ())
+            if len(cache) == 2 and cache[0].ndim == 3 and cache[0].shape[0] > 0:
+                num_slots = cache[0].shape[0]
+                if self._mega_tracker is None or self._mega_tracker.context.numel() != num_slots:
+                    self._mega_tracker = MegaKDAFirstVerifyTracker(num_slots, cache[0].device)
+                return True
+        return False
+
+    def build(
+        self,
+        common_prefix_len,
+        common_attn_metadata,
+        num_accepted_tokens=None,
+        num_decode_draft_tokens_cpu=None,
+        fast_build=False,
+        num_actual_reqs=None,
+        mega_first_verify=None,
+    ):
+        metadata = super().build(
+            common_prefix_len,
+            common_attn_metadata,
+            num_accepted_tokens,
+            num_decode_draft_tokens_cpu,
+            fast_build,
+            num_actual_reqs,
+        )
+        m = common_attn_metadata
+        if self.use_full_cuda_graph and self.use_spec_decode:
+            m = _remove_spec_graph_padding_queries(m, num_decode_draft_tokens_cpu)
+        count = m.num_reqs if num_actual_reqs is None else num_actual_reqs
+        m = m.unpadded(m.num_actual_tokens, count)
+        query_lens = torch.diff(m.query_start_loc_cpu)
+        spec_mask_cpu = torch.zeros(count, dtype=torch.bool)
+        if metadata.num_spec_decodes:
+            spec_mask_cpu = num_decode_draft_tokens_cpu[:count] >= 0
+        is_prefilling = m.is_prefilling
+        # Without scheduler phase information the first-round contract cannot
+        # be established safely. Keep the existing KDA implementation.
+        metadata.mega_first_verify = None
+        metadata.mega_conv_accepted_tokens = None
+        metadata.mega_conv_state_block_ids = None
+        metadata.mega_ssm_state_indices = None
+        metadata.mega_has_folded_prefills = True
+        metadata.mega_query_lens = ()
+        if is_prefilling is None or (mega_first_verify is None and not self._ensure_mega_tracker()):
+            return metadata
+        metadata.mega_has_folded_prefills = bool(torch.any(is_prefilling & (query_lens > 0)))
+        metadata.mega_query_lens = tuple(
+            query_lens[(spec_mask_cpu if metadata.num_spec_decodes else ~spec_mask_cpu) & (query_lens > 0)].tolist()
+        )
+        if mega_first_verify is not None:
+            # V2 supplies history keyed by scheduler request index. Unlike
+            # physical blocks, that identity survives align-mode state copies.
+            first = mega_first_verify[:count]
+        else:
+            block_table = mamba_get_block_table_tensor(
+                m.block_table_tensor,
+                m.seq_lens,
+                self.kv_cache_spec,
+                self.vllm_config.cache_config.mamba_cache_mode,
+            )
+            spec_mask = spec_mask_cpu.to(device=m.query_start_loc.device, non_blocking=True)
+            first = self._mega_tracker.update(
+                block_table[:, 0],
+                m.compute_num_computed_tokens(),
+                is_prefilling.to(device=m.query_start_loc.device, non_blocking=True),
+                spec_mask,
+            )
+        if metadata.num_spec_decodes:
+            # Keep addresses stable across FULL graph replays. The base builder
+            # already materialized NULL_BLOCK_ID padding in this state table.
+            graph_batch = metadata.spec_state_indices_tensor.shape[0]
+            first_buffer = self._mega_first_verify[:graph_batch]
+            first_buffer[metadata.num_spec_decodes :].zero_()
+            torch.index_select(
+                first,
+                0,
+                self.spec_sequence_indices[: metadata.num_spec_decodes],
+                out=first_buffer[: metadata.num_spec_decodes],
+            )
+            metadata.mega_first_verify = first_buffer
+            # One preparation per metadata group/step, shared by every KDA
+            # layer. Keep the output address stable across FULL replays.
+            conv_accepted = self._mega_conv_accepted[:graph_batch]
+            torch.where(
+                first_buffer > 0,
+                self._mega_full_accepted[:graph_batch],
+                metadata.num_accepted_tokens[:graph_batch].to(torch.int32),
+                out=conv_accepted,
+            )
+            metadata.mega_conv_accepted_tokens = conv_accepted
+            # The first block-table column is strided. Normalize it once per
+            # step, rather than once in each layer's external-op wrapper.
+            # These are metadata buffers; the actual cache is never copied.
+            states = metadata.spec_state_indices_tensor[:, : self.num_spec + 1]
+            conv_ids = self._mega_conv_block_ids[:graph_batch]
+            conv_ids.copy_(states[:, 0])
+            metadata.mega_conv_state_block_ids = conv_ids
+            if states.dtype == torch.int32 and states.is_contiguous():
+                metadata.mega_ssm_state_indices = states.view(-1)
+            else:
+                ssm_ids = self._mega_ssm_block_ids[:graph_batch]
+                ssm_ids.copy_(states)
+                metadata.mega_ssm_state_indices = ssm_ids.view(-1)
+        return metadata
+
+
+class AscendMegaKDAHostMetadataBackend(AscendGDNHostMetadataBackend):
+    @staticmethod
+    def get_builder_cls() -> type[AscendMegaKDAHostMetadataBuilder]:
+        return AscendMegaKDAHostMetadataBuilder
 
 
 class AscendGDNFusedAttentionBackend(AscendGDNAttentionBackend):

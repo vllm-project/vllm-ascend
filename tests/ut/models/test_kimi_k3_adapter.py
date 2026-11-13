@@ -588,6 +588,7 @@ def test_kimi_model_allocates_attention_residual_after_sp_shard(monkeypatch):
     model = AscendKimiLinearModel.__new__(AscendKimiLinearModel)
     nn.Module.__init__(model)
     model.config = SimpleNamespace(attn_res_block_size=12)
+    model.attn_res_mode = "native"
     model.start_layer = 0
     model.end_layer = 1
     layer = RecordingLayer()
@@ -668,6 +669,7 @@ def test_kimi_model_selects_materialized_or_raw_dspark_aux_stream(monkeypatch):
     model = AscendKimiLinearModel.__new__(AscendKimiLinearModel)
     nn.Module.__init__(model)
     model.config = SimpleNamespace(attn_res_block_size=1)
+    model.attn_res_mode = "native"
     model.start_layer = 0
     model.end_layer = 2
     model.layers = nn.ModuleList([RecordingLayer(0), RecordingLayer(1)])

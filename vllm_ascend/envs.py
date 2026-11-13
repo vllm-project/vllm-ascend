@@ -79,6 +79,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Enable Kimi K3 two-phase transformer/DSL operators when available.
+    # Default: 1. Valid values: 0 (Torch two_phase) or 1 (prefer fused).
+    # This performance switch is not sensitive; native/original ignore it.
+    "VLLM_ASCEND_KIMI_K3_ATTNRES_FUSED_ENABLED": lambda: _strict_binary_env(
+        "VLLM_ASCEND_KIMI_K3_ATTNRES_FUSED_ENABLED", "1"
+    ),
     # Emit per-layer KVPool ranged transfer audit events. Default: 0 (disabled).
     # Valid values: 0 or 1. This configuration is not sensitive.
     "VLLM_ASCEND_KVPOOL_RANGE_DEBUG": lambda: _strict_binary_env("VLLM_ASCEND_KVPOOL_RANGE_DEBUG"),
