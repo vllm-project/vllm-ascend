@@ -53,6 +53,11 @@ on:
         required: false
         default: ''
         type: string
+      download_path:
+        description: 'File or directory in the test container to upload as a GitHub artifact'
+        required: false
+        default: ''
+        type: string
       aop_enabled:
         description: 'Enable AOP hooks (capture / classify / skip-or-process)'
         required: false
@@ -266,7 +271,8 @@ jobs:
         }}
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
-      aop_single_enabled: ${{ inputs.aop_enabled }}
+      download_path: ${{ inputs.download_path || (matrix.test_config.name == 'Kimi-K3-W4A8-E256-A5-GSM8K-First500' && '[{"node0":"log_archives"},{"node0":"outputs"},{"node0":"rescore"},{"node0":"benchmark_results"},{"node0":"/tmp/test-logs"},{"node0":"/tmp/aop-bisect-diagnostics"}]') || '' }}
+      aop_single_enabled: ${{ inputs.aop_enabled || matrix.test_config.name == 'Kimi-K3-W4A8-E256-A5-GSM8K-First500' }}
       bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
       bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
       bisect_fail_confirm_retries: ${{ fromJSON(inputs.bisect_args_json || '{}').fail_confirm_retries || '' }}
