@@ -128,8 +128,11 @@ def packed_broadcast_consumer(
 
     target_packed_tensor_size = buffer_size_bytes
 
-    streams = [torch.npu.Stream() for _ in range(num_buffers)]
-    default_stream = torch.npu.current_stream()
+    # Layerwise reload can retain tensors from earlier chunks and process them
+    # when a later chunk completes the layer. Keep allocation, communication,
+    # and loading on one stream so these cross-chunk dependencies are ordered
+    # and retained packed views are not freed on a different allocation stream.
+    load_stream = torch.npu.current_stream()
     buffer_idx = 0
 
     packing_tensor_meta_data: list[list[tuple[str, list[int], torch.dtype, int]]] = [[] for _ in range(num_buffers)]
@@ -138,10 +141,9 @@ def packed_broadcast_consumer(
 
     done = False
     while not done:
-        # Synchronize the current stream (waits for previous
-        # iteration's load_weights on this buffer to finish)
-        streams[buffer_idx].synchronize()
-        with torch.npu.stream(streams[buffer_idx]):
+        # Finish loading the previous chunk before allocating the next buffer.
+        load_stream.synchronize()
+        with torch.npu.stream(load_stream):
             # Collect parameter metadata for this buffer
             packing_tensor_meta_data[buffer_idx] = []
             packing_tensor_sizes[buffer_idx] = 0
@@ -166,15 +168,13 @@ def packed_broadcast_consumer(
         if len(packing_tensor_meta_data[buffer_idx]) == 0:
             break
 
-        # Broadcast on the default stream.
+        # Broadcast on the same stream used to allocate and load the buffer.
         group.broadcast(packed_tensors[buffer_idx], src=src)
 
-        # Synchronize the default stream so broadcast completes before
-        # load_weights (running on the custom stream) reads the data.
-        default_stream.synchronize()
+        # Finish receiving before invoking the model's weight loader.
+        load_stream.synchronize()
 
-        # Unpack and load weights on the custom stream
-        with torch.npu.stream(streams[buffer_idx]):
+        with torch.npu.stream(load_stream):
             names, shapes, dtypes, tensor_sizes = zip(*packing_tensor_meta_data[buffer_idx])
             post_unpack_func(
                 unpack_tensor(
@@ -189,10 +189,8 @@ def packed_broadcast_consumer(
         # Move to the next buffer
         buffer_idx = (buffer_idx + 1) % num_buffers
 
-    # Wait for all in-flight load_weights (on custom streams) to finish.
-    # Otherwise NPU tensor cleanup at exit may hang.
-    for s in streams:
-        s.synchronize()
+    # Complete loading before layerwise finalization or tensor cleanup.
+    load_stream.synchronize()
 
 
 # ── NPU IPC packed transfer ────────────────────────────────────────────
