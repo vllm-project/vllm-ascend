@@ -110,9 +110,9 @@ def init_ascend_model_parallel(
     # so Ascend can create it with DP x PCP ranks. With PCP == 1, shared PLE
     # tables need a DP group connecting replicas of the same TP shard; create
     # it only if upstream left it unset, otherwise reuse the existing group.
-    if engram_config is not None and (
+    if engram_config is not None and vllm_parallel_state.get_engram_dp_group() is None and (
         global_pcp_size > 1
-        or (engram_config.dp_shared_memory and global_dp_size > 1 and vllm_parallel_state.get_engram_dp_group() is None)
+        or (engram_config.dp_shared_memory and global_dp_size > 1)
     ):
         # PCP > 1 requires the deferred group to be unset; PCP == 1 checks
         # this in the condition above. Upstream owns its getter and teardown.
