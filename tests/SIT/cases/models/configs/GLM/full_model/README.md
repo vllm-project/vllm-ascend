@@ -1,12 +1,12 @@
 # GLM-5.3 Weekly PD coverage
 
-Three full-checkpoint Weekly cases cover A3 W8A8C8, A5 W8A8C8 and A5 W4A4C8.
-Each `ALL-E2E` entry starts one fixed PD deployment and sequentially runs
-Prefill, end-to-end, decode replay and GPQA benchmarks. Separate `ALL-PREFILL`
-and `ALL-DECODE` entries are removed. All 78 layers and real weights are retained;
-nightly, reduced-layer cases and 1M are outside this scope.
+A3 W8A8C8 has three independent tasks using exactly the same full-checkpoint
+PD serving recipe: `ALL-E2E` measures PD and GPQA, `ALL-PREFILL` measures output-1
+requests, and `ALL-DECODE` warms and replays the same prompts. `ALL-COMBINED`
+retains all phases as an explicit comparison reference. A5 W8A8C8 and W4A4C8
+keep their combined cases. All 78 layers and real weights are retained.
 
-## One deployment per hardware and quantization family
+## Fixed deployment within each task
 
 This follows the structure of
 [MiniMax's combined P/PD/decode case](../../MiniMax/MiniMax-M3-w8a8-PP-prefix-PD.yaml):
@@ -98,7 +98,7 @@ Definitions and implementation references:
 
 ## Benchmark and cache sequence
 
-For each performance profile, one service lifecycle runs these steps:
+The A3 combined reference and each A5 performance profile run these steps:
 
 1. Prefill warmup, then reset P prefix cache, then measured Prefill with output 1.
 2. PD warmup, then reset P prefix cache, then measured PD with output 1024.
@@ -109,6 +109,11 @@ For each performance profile, one service lifecycle runs these steps:
 Cache resets use the existing `curl_cmd` benchmark type and the non-headless P API at
 port7100 (`/reset_prefix_cache`); they do not restart the service or
 change compilation settings. HTTP errors fail the benchmark via `curl --fail`.
+A3 additionally checks the JSON `success` field: HTTP200 alone does not prove the
+cache was reset. Its P servers set upstream `VLLM_SERVER_DEV_MODE=1` because
+vLLM0.33 registers this endpoint only in development mode. This enables other
+upstream development endpoints too, so it is limited to the controlled CI service;
+it is not a production serving recommendation.
 A5 keeps P on node0 and uses the local endpoint. A3 puts D on nodes0-1 and
 P on nodes2-3; its resets target `${NODE_2_IP}:7100`, resolved by the config
 loader before execution. Node indices are logical allocation positions, not
@@ -129,8 +134,8 @@ replacement for MiniMax's 99% dataset.
 A3 retains the 16K datasets and measured counts adapted from release rows
 104/124/135, with all client concurrency ceilings reduced to16 (including GPQA).
 Prefill warmup uses32 prompts so it can fill16 client slots. They share
-one serving recipe and therefore are no longer exact reproductions of the three
-separately tuned release deployments.
+one serving recipe across the split tasks and the combined reference; only the
+benchmark selection changes. They do not reproduce separately tuned deployments.
 
 | A3 phase | Measured requests | Concurrency | Request rate | Max output | Explicit warmup requests | TPOT limit |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -164,7 +169,9 @@ dataset and scoring protocol.
 ## Dispatch and validation
 
 ```text
-/weekly GLM-5.3-W8A8C8-A3-ALL-E2E
+/weekly GLM-5.3-W8A8C8-A3-ALL-E2E GLM-5.3-W8A8C8-A3-ALL-PREFILL GLM-5.3-W8A8C8-A3-ALL-DECODE
+# Explicit split-vs-combined comparison reference:
+/weekly GLM-5.3-W8A8C8-A3-ALL-COMBINED
 /weekly GLM-5.3-W8A8C8-A5-ALL-E2E
 /weekly GLM-5.3-W4A4C8-A5-ALL-E2E
 ```
@@ -184,3 +191,28 @@ does not fix those implementation or environment problems. Hardware startup,
 cache resets, cache capacity/hits, KV transfer, performance and GPQA still require
 NPU validation. Record actual commits, image digest, CANN/driver versions and
 raw AISBench results before treating these draft cases as regression coverage.
+
+## A3 split-versus-combined comparison
+
+Run the three isolated tasks and `ALL-COMBINED` at the same Ascend commit and
+vLLM commit, with the same image digest, CANN/driver versions and A3 allocation.
+All four tasks keep D on nodes0-1, P on nodes2-3, concurrency16, Static/Super
+Kernel enabled, and identical server flags, datasets and phase-local warmups.
+The independent tasks still use the full four-node PD deployment: "Prefill only"
+and "Decode only" describe the request workload, not removing the opposite role.
+
+Compare `prefill_perf_16k`, `pd_perf_16k` and `decode_perf_16k` by benchmark name,
+using raw AISBench JSON and detail files, not warmups or per-request throughput.
+Report successful/failed requests, aggregate input throughput for Prefill,
+aggregate output throughput for PD/Decode, TTFT, TPOT, actual concurrency, cache
+hit counters and reset success. Report `(isolated / combined - 1) * 100` for each
+metric. A single pair measures a difference, not statistical equivalence; repeat
+on matched hardware if variation is material. A provisional 5% comparison band
+is diagnostic only and does not create a performance regression baseline.
+
+The November13 run43359196390 completed P28/28, PD160/160, Decode320/320 and
+GPQA91.919%, but all four cache resets returned404. It is useful functional
+evidence, not a clean cache-isolated comparison baseline. Re-run the combined
+reference with the endpoint enabled and verified before drawing a performance
+conclusion. Record effective serving flags and compile/capture times, and do not
+move the tested PR head while jobs are queued or bootstrapping.

@@ -24,7 +24,7 @@ CONFIG_DIR = ROOT / "tests/SIT/cases/models/configs/GLM/full_model"
 class FullModelConfigTests(unittest.TestCase):
     def test_resolved_commands_fit_allocation_and_agree_on_transfer_topology(self):
         paths = sorted(CONFIG_DIR.glob("*.yaml"))
-        self.assertEqual(len(paths), 3)
+        self.assertEqual(len(paths), 6)
         for path in paths:
             with self.subTest(case=path.stem):
                 config = ExternalDPConfigLoader.from_yaml(
@@ -92,7 +92,8 @@ class FullModelConfigTests(unittest.TestCase):
                 benchmarks = {
                     name: bench for name, bench in config["benchmarks"].items() if bench["case_type"] == "performance"
                 }
-                self.assertEqual(len(benchmarks), 24 if a5 else 6)
+                expected_counts = {"E2E": 2, "PREFILL": 2, "DECODE": 2, "COMBINED": 6}
+                self.assertEqual(len(benchmarks), 24 if a5 else expected_counts[path.stem.rsplit("-", 1)[-1]])
                 for name, bench in benchmarks.items():
                     prefill_case = name.startswith("prefill_")
                     self.assertEqual(bench["max_out_len"], 1 if prefill_case else 1024)
@@ -109,7 +110,7 @@ class FullModelConfigTests(unittest.TestCase):
 
     def test_loads_and_cache_boundaries_share_one_deployment(self):
         expected = {"prefill": (16, 28, 0, 1, 32), "pd": (16, 160, 1.8, 1024, 80), "decode": (16, 320, 0, 1024, 320)}
-        path = CONFIG_DIR / "GLM-5.3-W8A8C8-A3-ALL-E2E.yaml"
+        path = CONFIG_DIR / "GLM-5.3-W8A8C8-A3-ALL-COMBINED.yaml"
         benches = yaml.safe_load(path.read_text(encoding="utf-8"))["benchmarks"]
         for mode, (concurrency, requests, rate, output, warmup) in expected.items():
             case = benches[f"{mode}_perf_16k"]
@@ -146,7 +147,7 @@ class FullModelConfigTests(unittest.TestCase):
 
     def test_matrix_entries_resolve_to_correct_hardware(self):
         resolver = ROOT / ".github/workflows/scripts/resolve_nightly_tests.py"
-        for frequency, expected_counts in (("weekly", {"a3": 1, "a5": 2}),):
+        for frequency, expected_counts in (("weekly", {"a3": 4, "a5": 2}),):
             path = ROOT / f".github/workflows/configs/{frequency}_config.yaml"
             matrix = yaml.safe_load(path.read_text(encoding="utf-8"))
             for soc, expected_count in expected_counts.items():
@@ -187,7 +188,8 @@ class FullModelConfigTests(unittest.TestCase):
         for family in ("W8A8C8-A3", "W8A8C8-A5", "W4A4C8-A5"):
             with self.subTest(family=family):
                 paths = sorted(CONFIG_DIR.glob(f"GLM-5.3-{family}-*.yaml"))
-                self.assertEqual(len(paths), 1)
+                paths = [path for path in paths if not path.stem.endswith("COMBINED")]
+                self.assertEqual(len(paths), 3 if family.endswith("A3") else 1)
                 accuracy_cases = []
                 for path in paths:
                     config = ExternalDPConfigLoader.from_yaml(
@@ -245,6 +247,38 @@ class FullModelConfigTests(unittest.TestCase):
                     [batch * query_length for batch in range(1, seqs + 1)],
                 )
                 self.assertEqual(compilation["max_cudagraph_capture_size"], seqs * query_length)
+
+    def test_a3_split_cases_only_change_benchmark_selection(self):
+        def load(suffix):
+            return yaml.safe_load((CONFIG_DIR / f"GLM-5.3-W8A8C8-A3-ALL-{suffix}.yaml").read_text(encoding="utf-8"))
+
+        combined = load("COMBINED")
+        selections = {
+            "E2E": ["pd_perf_16k_warmup", "reset_before_pd_perf_16k", "pd_perf_16k", "reset_before_gpqa", "acc_gpqa"],
+            "PREFILL": ["prefill_perf_16k_warmup", "reset_before_prefill_perf_16k", "prefill_perf_16k"],
+            "DECODE": ["reset_before_decode_perf_16k", "decode_perf_16k_warmup", "decode_perf_16k"],
+        }
+        serving = {key: value for key, value in combined.items() if key not in ("test_name", "benchmarks")}
+        for suffix, names in selections.items():
+            case = load(suffix)
+            self.assertEqual(
+                {key: value for key, value in case.items() if key not in ("test_name", "benchmarks")}, serving
+            )
+            self.assertEqual(list(case["benchmarks"]), names)
+            for name in names:
+                self.assertEqual(case["benchmarks"][name], combined["benchmarks"][name])
+            resolved = ExternalDPConfigLoader.from_yaml(
+                str(CONFIG_DIR / f"GLM-5.3-W8A8C8-A3-ALL-{suffix}.yaml"),
+                cluster_ips=[f"192.0.2.{i + 1}" for i in range(4)],
+            )
+            ranks = RankResolver(resolved).resolve()
+            for rank, command in zip(ranks, build_all_server_commands(resolved, ranks), strict=True):
+                if rank.role == "prefiller":
+                    self.assertEqual(command.env["VLLM_SERVER_DEV_MODE"], "1")
+            for benchmark in resolved.benchmark_cases:
+                if benchmark["case_type"] == "curl_cmd":
+                    self.assertIn("192.0.2.3:7100/reset_prefix_cache", benchmark["cmds"][0])
+                    self.assertIn("json.load(sys.stdin).get('success') is True", benchmark["cmds"][0])
 
     def test_weekly_a5_workflow_and_dispatch_are_connected(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/schedule_weekly_test_a5.yaml").read_text())

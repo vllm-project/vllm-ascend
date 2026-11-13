@@ -84,6 +84,8 @@ env_prefill: &env_prefill
   <<: *env_common
   # DispatchFFNCombine needs 1162 MiB for 8192 tokens per TP rank.
   HCCL_BUFFSIZE: "2560"
+  # Upstream vLLM gates cache reset APIs behind development mode (CI only).
+  VLLM_SERVER_DEV_MODE: "1"
   VLLM_USE_FASTOKENS: "1"
   VLLM_PP_LAYER_PARTITION: "42,36"
 
@@ -324,30 +326,8 @@ templates:
       - "--kv-transfer-config"
       - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"use_ascend_direct": true, "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 1, "pp_layer_partition": "42,36"}, "decode": {"dp_size": 16, "tp_size": 2}}}'
 
-# One fixed deployment; cache resets isolate measured P/PD from prior prompts.
+# Identical serving recipe across the combined and isolated comparisons.
 benchmarks:
-  prefill_perf_16k_warmup:
-    case_type: performance
-    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
-    request_conf: vllm_api_stream_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 32
-    max_out_len: 1
-    batch_size: 16
-    request_rate: 0
-  reset_before_prefill_perf_16k:
-    case_type: curl_cmd
-    cmds:
-    - curl --fail --show-error --silent --max-time 120 -X POST http://${NODE_2_IP}:7100/reset_prefix_cache
-  prefill_perf_16k:
-    case_type: performance
-    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
-    request_conf: vllm_api_stream_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 28
-    max_out_len: 1
-    batch_size: 16
-    request_rate: 0
   pd_perf_16k_warmup:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
@@ -360,7 +340,8 @@ benchmarks:
   reset_before_pd_perf_16k:
     case_type: curl_cmd
     cmds:
-    - curl --fail --show-error --silent --max-time 120 -X POST http://${NODE_2_IP}:7100/reset_prefix_cache
+    - curl --fail --show-error --silent --max-time 120 -X POST http://${NODE_2_IP}:7100/reset_prefix_cache | python3 -c "import json,sys; assert
+      json.load(sys.stdin).get('success') is True, 'prefix cache reset failed'"
   pd_perf_16k:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
@@ -371,33 +352,11 @@ benchmarks:
     batch_size: 16
     request_rate: 1.8
     tpot_threshold: 20
-  reset_before_decode_perf_16k:
-    case_type: curl_cmd
-    cmds:
-    - curl --fail --show-error --silent --max-time 120 -X POST http://${NODE_2_IP}:7100/reset_prefix_cache
-  decode_perf_16k_warmup:
-    case_type: performance
-    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
-    request_conf: vllm_api_stream_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 320
-    max_out_len: 1024
-    batch_size: 16
-    request_rate: 0
-  decode_perf_16k:
-    case_type: performance
-    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8
-    request_conf: vllm_api_stream_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 320
-    max_out_len: 1024
-    batch_size: 16
-    request_rate: 0
-    tpot_threshold: 20
   reset_before_gpqa:
     case_type: curl_cmd
     cmds:
-    - curl --fail --show-error --silent --max-time 120 -X POST http://${NODE_2_IP}:7100/reset_prefix_cache
+    - curl --fail --show-error --silent --max-time 120 -X POST http://${NODE_2_IP}:7100/reset_prefix_cache | python3 -c "import json,sys; assert
+      json.load(sys.stdin).get('success') is True, 'prefix cache reset failed'"
   acc_gpqa:
     case_type: accuracy
     dataset_path: vllm-ascend/gpqa
