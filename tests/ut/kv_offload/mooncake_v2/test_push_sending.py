@@ -583,8 +583,8 @@ def test_kvpp_push_writes_every_decode_replica_and_deduplicates_mtp(monkeypatch)
         self.block_size, self.side_channel_host, self.handshake_port = 2, "127.0.0.1", 0
         self.te_rpc_port = 1
 
-    def make_caches(fill):
-        caches = {}
+    def make_caches(fill: int) -> dict[str, tuple[torch.Tensor, ...]]:
+        caches: dict[str, tuple[torch.Tensor, ...]] = {}
         for i, name in enumerate(names):
             spec = specs[name]
             rows = (cache_config.num_blocks, spec.block_size, 1)
