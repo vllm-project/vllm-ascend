@@ -9,6 +9,7 @@ Core retains residency scheduling, DMA and the Host write completion fence.
 from dataclasses import replace
 
 import torch
+from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import HiSparseConnector
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
@@ -149,13 +150,17 @@ class PCPHiSparseConnector(ActiveKVConnector):
 
 
 def adapt_pcp_hisparse_connector(runner):
+    # Worker patch registration imports the runner; defer this to avoid a cycle.
+    from vllm_ascend.patch.worker.patch_hisparse import install_pcp_cache_layout, prepare_pcp_mirror_staging
+
     connector = runner.kv_connector
     if runner.pcp_manager is None:
         return connector
-    from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import HiSparseConnector
 
     if type(connector) is not ActiveKVConnector or type(connector.kv_connector) is not HiSparseConnector:
         raise ValueError("HiSparse PCP requires the direct HiSparseConnector")
+    install_pcp_cache_layout()
+    prepare_pcp_mirror_staging(connector.kv_connector.connector_worker)
     (host_group_id,) = runner.kv_cache_config.host_group_ids
     adapted = PCPHiSparseConnector(connector, runner.pcp_manager, runner.block_tables, host_group_id)
     if runner.speculator is not None:
