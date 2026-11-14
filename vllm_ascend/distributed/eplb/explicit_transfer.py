@@ -11,6 +11,8 @@ import numpy as np
 import torch
 from vllm.distributed.eplb.rebalance_execute import TransferMetadata
 
+from vllm_ascend.distributed.eplb.expert_copy import copy_expert_tensor_
+
 
 def stage_explicit_layer_transfer(
     old_layer_indices: torch.Tensor,
@@ -122,7 +124,11 @@ def stage_explicit_layer_transfer(
                         is_unchanged[dst_slot] = src_slot == dst_slot
                         if src_slot != dst_slot:
                             for weight, buffer in zip(expert_weights, expert_weight_buffers):
-                                buffer[dst_slot].copy_(weight[src_slot], non_blocking=True)
+                                copy_expert_tensor_(
+                                    buffer[dst_slot],
+                                    weight[src_slot],
+                                    non_blocking=True,
+                                )
                     continue
                 if ep_rank == src_rank:
                     communicator.add_send([weight[src_slot] for weight in expert_weights], dst_rank, expert)
