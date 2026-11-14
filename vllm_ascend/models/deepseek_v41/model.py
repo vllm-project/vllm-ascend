@@ -24,6 +24,7 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    get_tp_group,
 )
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
@@ -52,9 +53,11 @@ from vllm.model_executor.models.utils import PPMissingLayer, is_pp_missing_param
 from vllm.models.deepseek_v41.common.engram import EngramLayout
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import FP32_TARGET_LOGITS_GATHER, WRITABLE_TARGET_LOGITS_PTR
 from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
 from vllm_ascend.attention.dsa_v41 import (
     DeepseekV41CacheLayer,
@@ -71,6 +74,8 @@ from vllm_ascend.models.common.ops.sequence_parallel import (
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
+from vllm_ascend.ops.triton.vocab_parallel_logits import pack_vocab_parallel_logits
+from vllm_ascend.ops.vocab_parallel_embedding import AscendLogitsProcessor
 from vllm_ascend.utils import (
     get_rotation_path,
     normalize_deepseek_v41_config,
@@ -1751,6 +1756,30 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         return hidden_states, pre_mix, *aux
 
 
+class DeepseekV41LogitsProcessor(AscendLogitsProcessor):
+    _VECTOR_ALIGNMENT_BYTES = 32
+
+    def _gather_logits(self, logits: torch.Tensor) -> torch.Tensor | None:
+        num_rows, shard_size = logits.shape
+        # Keep shard and row boundaries 32-byte aligned for vector stores.
+        alignment = self._VECTOR_ALIGNMENT_BYTES // logits.element_size()
+        if not self.use_all_gather or shard_size % alignment or self.org_vocab_size % alignment:
+            return super()._gather_logits(logits)
+
+        if num_rows == 0:
+            return logits.new_empty((0, self.org_vocab_size))
+
+        extras = get_forward_context().additional_kwargs if is_forward_context_available() else {}
+        use_fp32 = extras.get(FP32_TARGET_LOGITS_GATHER) and self.scale == 1.0 and self.soft_cap is None
+        gathered = get_tp_group().all_gather(logits, dim=0)
+        result = pack_vocab_parallel_logits(
+            gathered, num_rows, self.org_vocab_size, out_dtype=torch.float32 if use_fp32 else None
+        )
+        if use_fp32:
+            extras[WRITABLE_TARGET_LOGITS_PTR] = result.data_ptr()
+        return result
+
+
 class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, SupportsPP, SupportsLoRA, SupportsEagle3):
     packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
     model_cls = DeepseekV41Model
@@ -1795,7 +1824,13 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
                 )
             else:
                 self.lm_head = PPMissingLayer()
-            self.logits_processor = LogitsProcessor(config.vocab_size)
+            use_fused_logits_layout = (
+                vllm_config.use_v2_model_runner
+                and HAS_TRITON
+                and get_current_hardware_profile().supports(HardwareCapability.FUSED_TP_LOGITS_LAYOUT)
+            )
+            processor_cls = DeepseekV41LogitsProcessor if use_fused_logits_layout else LogitsProcessor
+            self.logits_processor = processor_cls(config.vocab_size)
             self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
             # Set MoE hyperparameters
             self.num_moe_layers = self.config.num_hidden_layers

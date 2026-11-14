@@ -31,8 +31,10 @@ from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.distributed.utils import get_distributed_timeout_or_none
+from vllm.forward_context import create_forward_context, override_forward_context
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
@@ -57,6 +59,7 @@ from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
+    FP32_TARGET_LOGITS_GATHER,
     MoECommType,
     get_mc2_tokens_capacity,
     override_mrv2_in_profile_run,
@@ -77,6 +80,7 @@ from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
     _start_profiling_chunk_timing,
 )
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     bind_dspark_context_receiver,
     configure_dspark_kv_transfer,
@@ -129,6 +133,7 @@ from vllm_ascend.worker.v2.kv_connector import MambaCopyKVConnector
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.pp_transport import resolve_spec_pp_support
+from vllm_ascend.worker.v2.sample.target_logits import wants_fp32_target_logits
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import (
@@ -153,6 +158,7 @@ class NPUModelRunner(GPUModelRunner):
     kv_connector: KVConnector
     max_num_reqs: int
     max_num_tokens: int
+    _can_fuse_target_logits_cast = False
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
@@ -337,6 +343,14 @@ class NPUModelRunner(GPUModelRunner):
         if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
             self._start_dump_data()
         self.model_state.prompt_logprobs_worker = self.prompt_logprobs_worker
+
+        self._can_fuse_target_logits_cast = (
+            HAS_TRITON
+            and is_deepseek_v41(self.model_config.hf_config)
+            and self.parallel_config.tensor_parallel_size > 1
+            and self.batch_sharder is None
+            and get_current_hardware_profile().supports(HardwareCapability.FUSED_TP_LOGITS_LAYOUT)
+        )
 
     @runtime_guard_sample_tokens
     def sample_tokens(self, grammar_output):
@@ -1162,6 +1176,16 @@ class NPUModelRunner(GPUModelRunner):
         compute_logits the same row count — pad up to ``_lmhead_tp_max_num_logits()``
         and trim back; prompt_logprobs stays unsupported (same as V1)."""
         if not lmhead_tp_enable():
+            if self._can_fuse_target_logits_cast and wants_fp32_target_logits(
+                self.sampler, self.rejection_sampler, input_batch, self.vocab_size
+            ):
+                # The target gather records the buffer that both stock samplers
+                # may process in place during this sample call.
+                context = create_forward_context(
+                    None, self.vllm_config, additional_kwargs={FP32_TARGET_LOGITS_GATHER: True}
+                )
+                with override_forward_context(context):
+                    return super().sample(hidden_states, input_batch, grammar_output)
             return super().sample(hidden_states, input_batch, grammar_output)
 
         num_logits = input_batch.logits_indices.shape[0]
