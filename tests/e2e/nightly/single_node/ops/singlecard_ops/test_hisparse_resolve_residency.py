@@ -92,7 +92,7 @@ def reference(topk, requests, states, source, resident, hot_table, dgi, lru, blo
                 dgi[state, slot] = host
                 misses.append((host, slot))
         if union:
-            lru[state] = torch.tensor(evict[len(misses):] + evict[:len(misses)] + hits, dtype=lru.dtype)
+            lru[state] = torch.tensor(evict[len(misses) :] + evict[: len(misses)] + hits, dtype=lru.dtype)
         for row, col, host in references:
             slot = mapping[host]
             out[row, col] = int(hot_table[request, slot // block]) * block + slot % block
@@ -107,8 +107,20 @@ def reference(topk, requests, states, source, resident, hot_table, dgi, lru, blo
 
 
 def run_resolver(
-    logical_cpu, hot_table_cpu, requests_cpu, states_cpu, source_cpu, resident_cpu, dgi_cpu, lru_cpu,
-    *, block, union_rows, host_rows=64, attention_capacity=0, attention_block_stride=0,
+    logical_cpu,
+    hot_table_cpu,
+    requests_cpu,
+    states_cpu,
+    source_cpu,
+    resident_cpu,
+    dgi_cpu,
+    lru_cpu,
+    *,
+    block,
+    union_rows,
+    host_rows=64,
+    attention_capacity=0,
+    attention_block_stride=0,
 ):
     device = torch.device("npu:0")
     tensors = [t.npu() for t in (logical_cpu, hot_table_cpu, requests_cpu, states_cpu, source_cpu, resident_cpu)]
@@ -132,9 +144,33 @@ def run_resolver(
     if attention_block_stride < block:
         attention_block_stride = block
     resolve(
-        logical, hot_table, requests, states, source, resident, None,
-        dgi, lru, output, resolved, errors, attention, counts, sh, sd, sc, None, stats,
-        host_rows, block, block, block, 0, attention_block_stride, union_rows, attention_capacity,
+        logical,
+        hot_table,
+        requests,
+        states,
+        source,
+        resident,
+        None,
+        dgi,
+        lru,
+        output,
+        resolved,
+        errors,
+        attention,
+        counts,
+        sh,
+        sd,
+        sc,
+        None,
+        stats,
+        host_rows,
+        block,
+        block,
+        block,
+        0,
+        attention_block_stride,
+        union_rows,
+        attention_capacity,
     )
     torch.npu.synchronize()
     return (output, counts, sh, sd, sc, dgi, lru, stats), attention
@@ -179,9 +215,7 @@ def test_resolver_matches_torch_reference_mixed():
         dim=1,
     )
     expected = reference(topk, requests, states, source, resident, hot_table, dgi, lru, block)
-    actual, _ = run_resolver(
-        topk, hot_table, requests, states, source, resident, dgi, lru, block=block, union_rows=16
-    )
+    actual, _ = run_resolver(topk, hot_table, requests, states, source, resident, dgi, lru, block=block, union_rows=16)
     assert_matches_reference(actual, expected)
 
 
@@ -200,8 +234,17 @@ def test_resolver_matches_torch_reference_all_resident(attention_capacity):
     lru = torch.arange(16, dtype=torch.int16)[None, :].expand(2, 16).contiguous()
     expected = reference(logical, requests, states, source, resident, hot_table, dgi, lru, block)
     actual, attention = run_resolver(
-        logical, hot_table, requests, states, source, resident, dgi, lru,
-        block=block, union_rows=16, attention_capacity=attention_capacity,
+        logical,
+        hot_table,
+        requests,
+        states,
+        source,
+        resident,
+        dgi,
+        lru,
+        block=block,
+        union_rows=16,
+        attention_capacity=attention_capacity,
         attention_block_stride=8,
     )
     if attention_capacity:
@@ -227,7 +270,6 @@ def test_resolver_matches_torch_reference_single_warp_scan():
     """One state, a full LRU turn and duplicates; tiles<=32 register scan."""
     block = 16
     rows, topk, hot_size = 4, 32, 512
-    union_size = 192
     torch.manual_seed(SEED)
     logical = torch.randint(0, hot_size, (rows, topk), dtype=torch.int32)
     logical[2, :4] = -1  # padding tokens
@@ -242,13 +284,22 @@ def test_resolver_matches_torch_reference_single_warp_scan():
     # Half of the LRU window already holds part of the upcoming union.
     prefill = torch.unique(logical % hot_size)[: hot_size // 4]
     dgi[0, : len(prefill)] = prefill
-    lru = torch.cat(
-        (torch.arange(hot_size - len(prefill), hot_size), torch.arange(hot_size - len(prefill))), dim=0
-    ).to(torch.int16)[None, :]
+    lru = torch.cat((torch.arange(hot_size - len(prefill), hot_size), torch.arange(hot_size - len(prefill))), dim=0).to(
+        torch.int16
+    )[None, :]
     expected = reference(logical, requests, states, source, resident, hot_table, dgi, lru, block)
     actual, _ = run_resolver(
-        logical, hot_table, requests, states, source, resident, dgi, lru,
-        block=block, union_rows=min(hot_size, rows * topk), host_rows=hot_size * 4,
+        logical,
+        hot_table,
+        requests,
+        states,
+        source,
+        resident,
+        dgi,
+        lru,
+        block=block,
+        union_rows=min(hot_size, rows * topk),
+        host_rows=hot_size * 4,
     )
     assert_matches_reference(actual, expected)
 
@@ -269,7 +320,16 @@ def test_resolver_matches_torch_reference_iterative_scan():
     lru = torch.arange(hot_size, dtype=torch.int16)[None, :]
     expected = reference(logical, requests, states, source, resident, hot_table, dgi, lru, block)
     actual, _ = run_resolver(
-        logical, hot_table, requests, states, source, resident, dgi, lru,
-        block=block, union_rows=union_size, host_rows=hot_size * 4,
+        logical,
+        hot_table,
+        requests,
+        states,
+        source,
+        resident,
+        dgi,
+        lru,
+        block=block,
+        union_rows=union_size,
+        host_rows=hot_size * 4,
     )
     assert_matches_reference(actual, expected)
