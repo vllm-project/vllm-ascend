@@ -1059,7 +1059,16 @@ def enable_sp(vllm_config=None) -> bool:
     if vllm_config is None:
         return False
 
-    return bool(vllm_config.parallel_config.use_sequence_parallel_moe)
+    if bool(vllm_config.parallel_config.use_sequence_parallel_moe):
+        return True
+
+    # Dense-family sequence parallelism: the predicate is owned by the
+    # Qwen3.5 patch (vllm_ascend.patch.worker.patch_qwen3_5). The lazy import
+    # keeps this module free of the patch module's import-time monkey
+    # patches, which the patch file itself guards by hardware capability.
+    from vllm_ascend.patch.worker.patch_qwen3_5 import enable_dense_sp
+
+    return enable_dense_sp(vllm_config)
 
 
 def pad_sequence_parallel_tokens(hidden_states: torch.Tensor) -> torch.Tensor:
