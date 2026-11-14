@@ -155,7 +155,7 @@ In the PD separation scenario, we provide an optimized configuration. You can us
           "kv_parallel_size": "1",
           "kv_port": "20001"
         }' \
-        --additional-config '{"enable_weight_nz_layout":true,"enable_prefill_optimizations":true}'
+        --additional-config '{"weight_nz_mode":1}'
     ```
 
 === "Decoder node"
@@ -218,7 +218,7 @@ In the PD separation scenario, we provide an optimized configuration. You can us
             "kv_parallel_size": "1",
             "kv_port": "20001"
             }' \
-        --additional-config '{"enable_weight_nz_layout":true}'
+        --additional-config '{"weight_nz_mode":1}'
     ```
 
 ### Start Distributed DP Server for prefill-decode disaggregation
@@ -414,7 +414,7 @@ In the PD separation scenario, we provide an optimized configuration.
 4. Take '--additional-config' as follows:
 
     ```shell
-    --additional-config '{"enable_weight_nz_layout":true,"enable_prefill_optimizations":true}'
+    --additional-config '{"weight_nz_mode":1}'
     ```
 
 - **decoder node**
@@ -435,15 +435,14 @@ In the PD separation scenario, we provide an optimized configuration.
 3. Take '--additional-config' as follows:
 
     ```shell
-    --additional-config '{"enable_weight_nz_layout":true}'
+    --additional-config '{"weight_nz_mode":1}'
     ```
 
 ### Parameters Description
 
 1. '--additional-config' Parameter Introduction:
 
-   - **"enable_weight_nz_layout"**: Whether to convert quantized weights to NZ format to accelerate matrix multiplication.
-   - **"enable_prefill_optimizations"**: Whether to enable DeepSeek models' prefill optimizations.
+   - **"weight_nz_mode"**: Use `1` (the default) to enable NZ format for quantized weights.
      <br>
 
 2. Enable MTP
