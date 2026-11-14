@@ -568,8 +568,8 @@ def _iter_ascend_moe_quant_methods(model: Module) -> Iterator[Any]:
         if not isinstance(module, AscendMoERunner):
             continue
 
-        # AscendMoERunner exposes the routed experts' method via private _quant_method.
-        quant_method = getattr(module, "_quant_method", None)
+        # Accept both attribute spellings across baselines.
+        quant_method = getattr(module, "quant_method", None) or getattr(module, "_quant_method", None)
         if quant_method is None or id(quant_method) in seen_quant_methods:
             continue
 
@@ -601,7 +601,11 @@ def _rfork_pre_transfer_weight_processing(model: Module):
 def _rfork_skip_unquantized_moe_post_load_processing(model: Module):
     """Suppress unquantized MoE post-load processing; dense layers still run theirs."""
 
-    from vllm_ascend.ops.fused_moe.routed_experts import AscendUnquantizedFusedMoEMethod
+    try:
+        from vllm_ascend.ops.fused_moe.routed_experts import AscendUnquantizedFusedMoEMethod
+    except ImportError:
+        # Older baselines keep this class in fused_moe.py.
+        from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
 
     restored_methods: list[tuple[Any, object]] = []
     for quant_method in _iter_ascend_moe_quant_methods(model):

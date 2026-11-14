@@ -16,13 +16,13 @@
 
 import math
 import time
-from typing import Any
 
 import torch
 import torch_npu
 from torch.nn import Module
 from vllm.logger import logger
 
+from vllm_ascend.model_loader.weight_state import iter_tensors_in_value as _iter_tensors_in_value
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ
 
 from .netloader_pg import destroy_stateless_process_group, stateless_init_process_group
@@ -32,45 +32,6 @@ _NETLOADER_TRANSFER_ITEMS_ATTR = "_netloader_processed_layout_transfer_items"
 
 def _is_transferable_tensor(tensor: torch.Tensor) -> bool:
     return not tensor.is_meta and tensor.numel() > 0 and tensor.device.type == "npu"
-
-
-def _iter_tensors_in_value(prefix: str, value: Any, visited_object_ids: set[int], scan_objects: bool = False):
-    if isinstance(value, torch.Tensor):
-        yield prefix, value
-        return
-
-    if isinstance(value, (Module, str, bytes)) or callable(value):
-        return
-
-    if isinstance(value, (list, tuple, dict)):
-        value_id = id(value)
-        if value_id in visited_object_ids:
-            return
-        visited_object_ids.add(value_id)
-
-    if isinstance(value, (list, tuple)):
-        for index, item in enumerate(value):
-            yield from _iter_tensors_in_value(f"{prefix}.{index}", item, visited_object_ids, scan_objects)
-        return
-
-    if isinstance(value, dict):
-        for key, item in value.items():
-            yield from _iter_tensors_in_value(f"{prefix}.{key}", item, visited_object_ids, scan_objects)
-        return
-
-    if not scan_objects:
-        return
-
-    value_id = id(value)
-    if value_id in visited_object_ids:
-        return
-    if not hasattr(value, "__dict__"):
-        return
-    visited_object_ids.add(value_id)
-    for attr_name, attr_value in vars(value).items():
-        if attr_name.startswith("_"):
-            continue
-        yield from _iter_tensors_in_value(f"{prefix}.{attr_name}", attr_value, visited_object_ids, scan_objects)
 
 
 def _try_collect_transferable_tensor(
@@ -239,6 +200,22 @@ def validate_transfer_items_numel_against_manifest(
     """
     if not transfer_shape_manifest:
         return True
+
+    # HCCL pairs send/recv positionally: a count or order divergence would
+    # silently mis-route bytes when numels happen to match, so items must
+    # match the donor's registration (manifest key order) exactly or we abort.
+    if len(transfer_items) != len(transfer_shape_manifest):
+        logger.error(
+            "Transfer tensor count mismatch before HCCL: local %d vs manifest %d (donor/client enumeration diverged)",
+            len(transfer_items),
+            len(transfer_shape_manifest),
+        )
+        return False
+    if [name for name, _ in transfer_items] != list(transfer_shape_manifest.keys()):
+        logger.error(
+            "Transfer tensor order mismatch before HCCL: local order does not match manifest (donor registration) order"
+        )
+        return False
 
     for name, tensor in transfer_items:
         manifest_shape = transfer_shape_manifest.get(name)
