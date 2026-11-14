@@ -1,0 +1,37 @@
+name: Dispatch Daily Issue update
+description: Trigger the Issue update workflow for one failed Daily case.
+
+inputs:
+  github-token:
+    description: Token with permission to dispatch workflows.
+    required: true
+  request-id:
+    description: Daily round identity passed by the main workflow.
+    required: true
+  case-name:
+    description: Failed Daily case name.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Dispatch update workflow
+      if: ${{ !cancelled() }}
+      uses: actions/github-script@v9
+      env:
+        REQUEST_ID: ${{ inputs.request-id }}
+        CASE_NAME: ${{ inputs.case-name }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          await github.rest.actions.createWorkflowDispatch({
+            ...context.repo,
+            workflow_id: 'publish_daily_issue.yaml',
+            ref: process.env.GITHUB_REF_NAME,
+            inputs: {
+              request_id: process.env.REQUEST_ID,
+              case_name: process.env.CASE_NAME,
+              run_url: process.env.RUN_URL,
+            },
+          });
