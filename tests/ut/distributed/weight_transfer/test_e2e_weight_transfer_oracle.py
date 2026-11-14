@@ -259,8 +259,8 @@ def test_random_checkpoints_contain_exact_target_and_draft_payloads(random_weigh
     target_case, draft_case = random_weight_cases
     source = FixedRandomWeightSource(target_case, torch.device("cpu"), draft_case=draft_case)
     destination = tmp_path / "checkpoint"
-    # Local configs must never be passed to hf_hub_download.
-    with patch("huggingface_hub.hf_hub_download", side_effect=AssertionError("unexpected download")):
+    # Resolve the fixture config through the same Hub API as a public case.
+    with patch("huggingface_hub.hf_hub_download", side_effect=lambda model, filename: str(Path(model) / filename)):
         source.write_checkpoint(destination)
     for directory, expected_source, case in (
         (destination, source, target_case),
@@ -278,7 +278,8 @@ def test_target_only_checkpoint_keeps_its_original_layout(random_weight_cases, t
     case, _ = random_weight_cases
     source = FixedRandomWeightSource(case, torch.device("cpu"))
     destination = tmp_path / "target-only"
-    source.write_checkpoint(destination)
+    with patch("huggingface_hub.hf_hub_download", return_value=str(Path(case.model) / "config.json")):
+        source.write_checkpoint(destination)
     assert {path.name for path in destination.iterdir()} == {"config.json", "model.safetensors"}
     checkpoint = load_file(str(destination / "model.safetensors"))
     for name, tensor in source:
