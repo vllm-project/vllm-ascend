@@ -490,6 +490,7 @@ class TestMiniMaxM3Modeling(unittest.TestCase):
             patch(f"{module}.MiniMaxM3SparseAttention") as sparse_attention,
             patch(f"{module}.MiniMaxM3MLP") as mlp,
             patch(f"{module}.MiniMaxM3MoE") as moe,
+            patch(f"{module}.GemmaRMSNorm", return_value=nn.Identity()),
         ):
             for layer_id in range(2):
                 layer = MiniMaxM3DecoderLayer(
