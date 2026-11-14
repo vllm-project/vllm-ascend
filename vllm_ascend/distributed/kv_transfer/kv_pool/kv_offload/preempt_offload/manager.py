@@ -28,6 +28,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.meta
     PreemptOffloadMetadata,
     PreemptOffloadWorkerMetadata,
 )
+from vllm_ascend.models.kimi_k3.packed_sfa_cache import is_packed_sfa_groups
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 if TYPE_CHECKING:
@@ -191,6 +192,8 @@ class PreemptOffloadScheduler:
             if get_kv_cache_tensor_layers(t):
                 gpu_kv_cache_tensors.append(t)
         gpu_total_bytes = sum(t.size for t in gpu_kv_cache_tensors)
+        if is_packed_sfa_groups(gpu_config.kv_cache_groups):
+            gpu_total_bytes = max(t.size for t in gpu_kv_cache_tensors)
         num_gpu_blocks = gpu_config.num_blocks
         if cpu_capacity_bytes is None:
             num_cpu_blocks = max(1, int(offload_host_memory_ratio * num_gpu_blocks))

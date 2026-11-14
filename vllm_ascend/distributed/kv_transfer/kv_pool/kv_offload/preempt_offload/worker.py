@@ -16,6 +16,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.meta
     PreemptOffloadMetadata,
     PreemptOffloadWorkerMetadata,
 )
+from vllm_ascend.models.kimi_k3.packed_sfa_cache import is_packed_sfa_groups
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 if TYPE_CHECKING:
@@ -56,6 +57,7 @@ class PreemptOffloadWorker:
         self.device: torch.device | None = None
         self.num_cpu_blocks: int = 0
         self.mamba_conv_cache_bindings: dict[str, MambaConvCacheBinding] = {}
+        self._packed_pool_name: str | None = None
 
         self.load_stream: torch.npu.Stream | None = None
         self.store_stream: torch.npu.Stream | None = None
@@ -90,6 +92,9 @@ class PreemptOffloadWorker:
         assert self.kv_cache_config is not None
         self.num_gpu_blocks = self.kv_cache_config.num_blocks
         self.block_size_scale = {}
+        if is_packed_sfa_groups(self.kv_cache_config.kv_cache_groups):
+            self._register_packed_pool(kv_caches)
+            return
 
         scheduler_gpu_kv_cache_tensors = []
         for t in self.kv_cache_config.kv_cache_tensors:
@@ -222,6 +227,46 @@ class PreemptOffloadWorker:
             self.num_cpu_blocks,
             (self.num_cpu_blocks * total_bytes_per_block) / (1024**3),
         )
+
+    def _register_packed_pool(self, kv_caches) -> None:
+        """Offload one physical row; retain Conv aliases for resume correction."""
+        first = next(iter(kv_caches.values()))
+        if isinstance(first, (tuple, list)):
+            first = first[0]
+        rows = first._ascend_packed_copy_rows
+        self.num_cpu_blocks = (
+            max(1, int(self.offload_host_memory_ratio * self.num_gpu_blocks))
+            if self.cpu_capacity_bytes is None
+            else max(1, self.cpu_capacity_bytes // rows.shape[1])
+        )
+        cpu_rows = torch.zeros((self.num_cpu_blocks, rows.shape[1]), dtype=rows.dtype, pin_memory=True, device="cpu")
+        self._packed_pool_name = "packed_pool"
+        self.gpu_kv_caches = {self._packed_pool_name: rows}
+        self.cpu_kv_caches = {self._packed_pool_name: cpu_rows}
+        self.block_size_scale = {self._packed_pool_name: 1}
+        for group in self.kv_cache_config.kv_cache_groups:
+            spec = group.kv_cache_spec
+            if not isinstance(spec, MambaSpec):
+                continue
+            for name in group.layer_names:
+                for index, tensor in enumerate(kv_caches[name]):
+                    if not self._is_conv_state(spec, index):
+                        continue
+                    key = f"{name}.{index}"
+                    offset = tensor.data_ptr() - rows.data_ptr()
+                    size = tensor.element_size()
+                    shape = tensor.shape[1:]
+                    cpu_conv = cpu_rows.view(tensor.dtype).as_strided(
+                        (self.num_cpu_blocks, *shape), tensor.stride(), storage_offset=offset // size
+                    )
+                    self.gpu_kv_caches[key] = tensor.view(self.num_gpu_blocks, -1)
+                    self.cpu_kv_caches[key] = cpu_conv.view(self.num_cpu_blocks, -1)
+                    self.block_size_scale[key] = 1
+                    self.mamba_conv_cache_bindings[key] = MambaConvCacheBinding(
+                        state_shape=tuple(shape), state_dtype=tensor.dtype
+                    )
+        self.load_stream = torch.npu.Stream()
+        self.store_stream = torch.npu.Stream()
 
     @staticmethod
     def _is_conv_state(spec: MambaSpec, state_idx: int) -> bool:
@@ -357,6 +402,8 @@ class PreemptOffloadWorker:
         with torch.npu.stream(stream):
             for src_block_id, dst_block_id in zip(src_block_ids, dst_block_ids):
                 for name, gpu_tensor in self.gpu_kv_caches.items():
+                    if getattr(self, "_packed_pool_name", None) is not None and name != self._packed_pool_name:
+                        continue
                     cpu_tensor = self.cpu_kv_caches[name]
                     tensor_block_size_scale = self.block_size_scale[name]
                     if is_store:

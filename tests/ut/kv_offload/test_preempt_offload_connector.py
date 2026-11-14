@@ -35,7 +35,11 @@ for _module_name in list(sys.modules):
 for _module_name in _to_remove:
     _saved_modules[_module_name] = sys.modules.pop(_module_name)
 
-from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec  # noqa: E402
+from vllm_ascend.core.kv_cache_interface import (  # noqa: E402
+    AscendIndexerKPoolTailSpec,
+    AscendMLAAttentionSpec,
+    AscendSFAIndexerCacheSpec,
+)
 from vllm_ascend.core.recompute_scheduler import RecomputeScheduler  # noqa: E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload import (  # noqa: E402
     manager as preempt_manager,
@@ -58,9 +62,99 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.work
     MambaConvCacheBinding,
     PreemptOffloadWorker,
 )
+from vllm_ascend.models.kimi_k3.packed_sfa_cache import (  # noqa: E402
+    packed_sfa_cache_config,
+    packed_sfa_cache_groups,
+    packed_sfa_cache_views,
+    packed_sfa_row_bytes,
+)
 
 for _module_name, _module in _saved_modules.items():
     sys.modules[_module_name] = _module
+
+
+@pytest.mark.parametrize("draft_layers", [0, 3, 5])
+def test_preempt_packed_pool_budget_and_conv_restore(draft_layers):
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(num_speculative_tokens=3),
+        cache_config=SimpleNamespace(prefix_cache_retention_interval=None),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1, prefill_context_parallel_size=1),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+    )
+    specs = {
+        "model.layers.0.attn": AscendMLAAttentionSpec(
+            block_size=128, num_kv_heads=1, head_size=8, dtype=torch.int8, cache_sparse_sfa_c8=True
+        ),
+        "model.layers.0.indexer.k_cache": AscendSFAIndexerCacheSpec(
+            block_size=128, num_kv_heads=1, head_size=4, dtype=torch.int8, scale_dim=1, scale_dtype=torch.float32
+        ),
+        "model.layers.1.linear_attn": MambaSpec(
+            block_size=128,
+            shapes=((6, 8), (2, 4)),
+            dtypes=(torch.bfloat16, torch.float32),
+            mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+        ),
+    }
+    specs.update(
+        {
+            f"model.layers.{layer}.attn": AscendMLAAttentionSpec(
+                block_size=128, num_kv_heads=1, head_size=6, dtype=torch.bfloat16, is_draft=True
+            )
+            for layer in range(2, 2 + draft_layers)
+        }
+    )
+    groups = packed_sfa_cache_groups(config, specs)
+    row_bytes = packed_sfa_row_bytes(groups)
+    plan = packed_sfa_cache_config(config, groups, 3 * row_bytes, lambda _, n: n)
+    rows = torch.zeros((3, row_bytes), dtype=torch.int8)
+    caches = {}
+    for desc in plan.kv_cache_tensors:
+        for index, name in enumerate(desc.layers):
+            offset = desc.offset + index * desc.layer_stride
+            raw = rows.view(-1)[offset : 2 * row_bytes + offset + specs[name].page_size_bytes]
+            parts = packed_sfa_cache_views(raw, specs[name], 3, row_bytes, (4, 2) if specs[name].is_draft else None)
+            for part in parts:
+                part._ascend_packed_copy_rows = rows
+            caches[name] = parts
+    worker = PreemptOffloadWorker(config, plan, 2 * row_bytes)
+    module = "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.worker"
+    zeros = torch.zeros
+
+    def unpinned_zeros(*args, **kwargs):
+        kwargs.pop("pin_memory", None)
+        return zeros(*args, **kwargs)
+
+    with (
+        patch(f"{module}.torch.zeros", side_effect=unpinned_zeros),
+        patch(f"{module}.torch.npu.Stream"),
+        patch(f"{module}.torch.npu.synchronize"),
+        patch(f"{module}.torch.npu.stream", side_effect=lambda _: nullcontext()),
+        patch(f"{module}.torch.npu.Event"),
+    ):
+        worker.register_kv_caches(caches)
+        assert worker.num_cpu_blocks == 2
+        cpu_plan = PreemptOffloadScheduler._derive_cpu_config(plan, 2 * row_bytes)
+        assert cpu_plan.num_blocks == 2
+        assert {d.size for d in cpu_plan.kv_cache_tensors} == {2 * row_bytes}
+        assert len({v.untyped_storage().data_ptr() for v in worker.cpu_kv_caches.values()}) == 1
+        rows[1].fill_(7)
+        conv, ssm = caches["model.layers.1.linear_attn"]
+        conv[1].copy_(torch.arange(48).view(6, 8))
+        expected_conv = conv[1].clone()
+        expected_ssm = ssm[1].clone()
+        worker._submit_transfer([1], [1], 1, is_store=True, sync=True)
+        rows[2].zero_()
+        worker._submit_transfer(
+            [1],
+            [2],
+            2,
+            is_store=False,
+            sync=True,
+            mamba_conv_loads=[MambaConvLoadMeta(gpu_block_id=2, cpu_block_id=1, source_offset=3)],
+        )
+        torch.testing.assert_close(conv[2, :3], expected_conv[3:])
+        torch.testing.assert_close(ssm[2], expected_ssm)
+        assert torch.all(rows[0] == 0)
 
 
 def test_preempt_offload_connector_worker_metadata_aggregate():
@@ -247,7 +341,7 @@ def test_preempt_offload_connector_cpu_config_uses_single_layer_tensor_layout():
     gpu_config = SimpleNamespace(
         num_blocks=8,
         kv_cache_tensors=[gpu_tensor],
-        kv_cache_groups=["group"],
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=None)],
     )
 
     with (
@@ -270,7 +364,7 @@ def test_preempt_offload_connector_cpu_config_uses_single_layer_tensor_layout():
         )
 
     assert cpu_config.num_blocks == 4
-    assert cpu_config.kv_cache_groups == ["group"]
+    assert cpu_config.kv_cache_groups == gpu_config.kv_cache_groups
     assert vars(cpu_config.kv_cache_tensors[0]) == {
         "size": 512,
         "layers": ["layer.0"],
@@ -291,7 +385,7 @@ def test_preempt_offload_connector_cpu_config_preserves_layer_stride():
     gpu_config = SimpleNamespace(
         num_blocks=8,
         kv_cache_tensors=[gpu_tensor],
-        kv_cache_groups=["group"],
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=None)],
     )
 
     with (
@@ -334,7 +428,7 @@ def test_preempt_offload_connector_cpu_config_uses_host_memory_ratio():
     gpu_config = SimpleNamespace(
         num_blocks=8,
         kv_cache_tensors=[gpu_tensor],
-        kv_cache_groups=["group"],
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=None)],
     )
 
     with (

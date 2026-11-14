@@ -1102,6 +1102,37 @@ class TestSocketManagement(unittest.TestCase):
 
 
 class TestCoreFunctionality(unittest.TestCase):
+    def test_transfer_packed_rows_with_different_manager_coverage(self):
+        local = torch.full((3, 128), -1, dtype=torch.int8)
+        remote = torch.arange(4 * 192, dtype=torch.int32).remainder(127).to(torch.int8).view(4, 192)
+        before = local.clone()
+        self.thread.kv_group2layeridx = {0: ({"kv_cache_spec_type": "AscendMLAAttentionSpec"}, [0])}
+        self.thread.kv_caches_base_addr["local_engine"][5555] = [[local.data_ptr()]]
+        self.thread.kv_caches_base_addr["remote_engine"][6666] = [[remote.data_ptr()]]
+        self.thread.block_len_per_addr = [[32]]
+        self.thread.block_stride_per_addr = [[32]]
+        self.thread.remote_block_stride_per_addr["remote_engine"][6666] = [[32]]
+        self.thread.block_size_scale = [[2]]
+        self.thread.remote_block_size_scale["remote_engine"][6666] = [[1]]
+        self.thread.packed_row_strides = [[128]]
+        self.thread.remote_packed_row_strides["remote_engine"][6666] = [[192]]
+
+        def copy_bytes(session, destinations, sources, sizes):
+            for destination, source, size in zip(destinations, sources, sizes):
+                ctypes.memmove(destination, source, size)
+            return 0
+
+        self.engine.batch_transfer_sync_read.side_effect = copy_bytes
+        req = dict(self.test_req, local_block_ids=[[2, 3]], remote_block_ids=[[1, 2]])
+        self.thread._transfer_kv_cache_all_groups(req)
+        before[1, :32] = remote[1, :32]
+        before[1, 32:64] = remote[2, :32]
+        torch.testing.assert_close(local, before)
+        _, destinations, sources, sizes = self.engine.batch_transfer_sync_read.call_args.args
+        self.assertEqual(destinations, [local.data_ptr() + 128, local.data_ptr() + 160])
+        self.assertEqual(sources, [remote.data_ptr() + 192, remote.data_ptr() + 384])
+        self.assertEqual(sizes, [32, 32])
+
     def setUp(self):
         self.engine = MagicMock()
         self.ready_event = threading.Event()
@@ -3478,6 +3509,20 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                             self.assertEqual(view.stride(), cache[index].stride())
                             self.assertEqual(view.untyped_storage().data_ptr(), cache.untyped_storage().data_ptr())
                             self.assertEqual(view.is_contiguous(), not block_major)
+
+    def test_register_packed_cache_counts_valid_kernel_pages(self):
+        num_blocks, row_bytes, kernel_pages = 3, 2048, 2
+        backing = torch.empty(num_blocks * row_bytes // 4, dtype=torch.float32)
+        cache = backing.as_strided((34, 16, 1, 2), (32, 2, 2, 1))
+        cache._ascend_packed_kernel_pages = kernel_pages
+        cache._ascend_packed_row_bytes = row_bytes
+        worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig(num_blocks=num_blocks))
+        worker.register_kv_caches({"model.layers.0.self_attn": (cache,)})
+        metadata = worker.xfer_handshake_metadata
+        self.assertEqual(metadata.block_size_scale, [[kernel_pages]])
+        self.assertEqual(metadata.packed_row_strides, [[row_bytes]])
+        self.assertEqual(metadata.block_strides, [[128]])
+        self.assertEqual(metadata.block_lens, [[128]])
 
     def test_missing_parallel_fields_reject_before_backend_creation(self):
         module = sys.modules[MooncakeConnectorWorker.__module__]
