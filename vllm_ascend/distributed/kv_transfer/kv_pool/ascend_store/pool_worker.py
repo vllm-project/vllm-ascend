@@ -342,7 +342,8 @@ class BaseKVPoolWorker(ABC):
 
         model_name = model_config.model.rstrip("/").split("/")[-1]
         if getattr(self.kv_cache_config, "hisparse_host_num_blocks", None) is not None:
-            model_name = f"{model_name}:hisparse-v2:{model_config.dtype}:{self._hisparse_layout_id()}"
+            # Earlier keys may contain draft pages exported before their Host mirror.
+            model_name = f"{model_name}:hisparse-v3:{model_config.dtype}:{self._hisparse_layout_id()}"
         self.metadata: list[KeyMetadata] = []
         for group_id in range(self.num_kv_cache_groups):
             # the mamba kv_heads is not same with the full attention, can't share the cache data
@@ -1416,7 +1417,11 @@ class KVPoolWorker(BaseKVPoolWorker):
         kv_cache_config: KVCacheConfig | None = None,
     ) -> None:
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
+        self._hisparse_host_save_fence: Callable[[], None] | None = None
         self._init_cache_layout()
+
+    def set_hisparse_host_save_fence(self, fence: Callable[[], None]) -> None:
+        self._hisparse_host_save_fence = fence
 
     def set_external_slot_release_waiter(self, waiter: Callable[[int], None]) -> bool:
         return False
@@ -1656,27 +1661,21 @@ class KVPoolWorker(BaseKVPoolWorker):
             )
 
     def wait_for_save(self, connector_metadata: AscendConnectorMetadata) -> None:
-        current_event = None
         assert self.kv_send_thread is not None
         send_thread = self.kv_send_thread
         if not isinstance(send_thread, KVCacheStoreSendingThread):
             raise TypeError(
                 f"Non-layerwise KV save requires KVCacheStoreSendingThread, but got {type(send_thread).__name__}"
             )
-        requests: list[ReqMeta] = []
-
-        for request in connector_metadata.requests:
-            can_save = request.can_save
-            if can_save is None or not can_save:
-                continue
-            if current_event is None:
-                current_event = torch.npu.Event()
-                current_event.record()
-            request.skip_null_blocks_by_group = self.group_uses_align_state
-            request.current_event = current_event
-            requests.append(request)
-
+        requests = [request for request in connector_metadata.requests if request.can_save]
         if requests:
+            if self._hisparse_host_save_fence is not None:
+                self._hisparse_host_save_fence()
+            current_event = torch.npu.Event()
+            current_event.record()
+            for request in requests:
+                request.skip_null_blocks_by_group = self.group_uses_align_state
+                request.current_event = current_event
             self._previous_save_batch = send_thread.add_save_batch(requests)
         # Complete queued PUTs before the next prefill chunk can reuse SWA slots.
         send_thread.request_queue.join()
