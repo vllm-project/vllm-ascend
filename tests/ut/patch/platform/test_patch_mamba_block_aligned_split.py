@@ -166,9 +166,13 @@ def test_producer_decode_fast_path_remains_unsplit():
     assert result == 8
 
 
+@pytest.mark.parametrize("legacy", [False, True], ids=["main-no-drop", "v032"])
 @pytest.mark.parametrize("length,expected", [(384, 384), (768, 384), (1536, 1152), (1537, 1536)])
-def test_producer_materializes_resend_checkpoint_for_aligned_prompt(length, expected):
+def test_producer_materializes_resend_checkpoint_for_aligned_prompt(monkeypatch, legacy, length, expected):
+    monkeypatch.setattr(coordinator_mod, "vllm_version_is", lambda version: legacy and version == "0.32.0")
     scheduler = _scheduler(is_kv_consumer=False, is_kv_producer=True)
+    if not legacy:
+        scheduler.use_eagle_block_drop = False
     request = _request(num_computed_tokens=0, num_prompt_tokens=length, num_tokens=length)
     assert _mamba_block_aligned_split(scheduler, request, num_new_tokens=length) == expected
 

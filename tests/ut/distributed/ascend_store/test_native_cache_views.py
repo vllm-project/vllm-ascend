@@ -11,7 +11,14 @@ import torch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 
-native_connector_module = pytest.importorskip("vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.connector")
+try:
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (  # type: ignore
+        connector as native_connector_module,
+    )
+except ModuleNotFoundError:
+    native_connector_module = pytest.importorskip(
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.connector"
+    )
 if not hasattr(native_connector_module.MooncakeStoreConnector, "_create_worker"):
     pytest.skip("requires vLLM native Store device hooks (#66294)", allow_module_level=True)
 
@@ -19,14 +26,29 @@ if not hasattr(native_connector_module.MooncakeStoreConnector, "_create_worker")
 from vllm.config import CacheConfig, KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import worker as native_worker
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import (
-    MambaStoreLayout,
-    RankLocalStoreLayout,
-    TokenMajorStoreLayout,
-)
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, MLAAttentionSpec
+
+try:
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (  # type: ignore
+        worker as native_worker,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (  # type: ignore
+        KeyMetadata,
+        MambaStoreLayout,
+        RankLocalStoreLayout,
+        TokenMajorStoreLayout,
+    )
+except ModuleNotFoundError:
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (  # type: ignore
+        worker as native_worker,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import (  # type: ignore
+        KeyMetadata,
+        MambaStoreLayout,
+        RankLocalStoreLayout,
+        TokenMajorStoreLayout,
+    )
 
 from tests.ut.distributed.ascend_store.native_glm_fixture import make_glm_connectors
 from vllm_ascend.distributed.kv_transfer import _register_with_class_name_alias
@@ -61,7 +83,7 @@ def make_attention_connector(monkeypatch, tmp_path, *, store_tp_size=2, spec=Non
             world_size=1,
         ),
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
-        cache_config=CacheConfig(block_size=8, prefix_match_unit=4, enable_prefix_caching=True),
+        cache_config=CacheConfig(block_size=8, prefix_match_unit=8, enable_prefix_caching=True),
         compilation_config=SimpleNamespace(static_forward_context={}),
         kv_events_config=None,
         speculative_config=None,
@@ -330,7 +352,6 @@ def test_factory_accepts_packed_attention_with_default_rank_local_store(monkeypa
 
 
 def test_typed_shared_mamba2_pages_preserve_group_replication():
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import KeyMetadata
     from vllm.v1.kv_cache_interface import MambaAttentionBackendEnum, MambaSpec
 
     # Four recurrent heads, head_dim=2, state_size=4, and only two B/C

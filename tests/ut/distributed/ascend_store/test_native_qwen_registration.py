@@ -15,16 +15,18 @@ import torch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 
-native_connector_module = pytest.importorskip("vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.connector")
+try:
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (  # type: ignore
+        connector as native_connector_module,
+    )
+except ModuleNotFoundError:
+    native_connector_module = pytest.importorskip(
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.connector"
+    )
 if not hasattr(native_connector_module.MooncakeStoreConnector, "_create_worker"):
     pytest.skip("requires vLLM native Store device hooks (#66294)", allow_module_level=True)
 
 # isort: split
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import (
-    HeadMajorStoreLayout,
-    KeyMetadata,
-    TokenMajorStoreLayout,
-)
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator, is_conv_state_dim_first
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -33,6 +35,19 @@ from vllm.v1.kv_cache_interface import (
     MambaAttentionBackendEnum,
     MambaSpec,
 )
+
+try:
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (  # type: ignore
+        HeadMajorStoreLayout,
+        KeyMetadata,
+        TokenMajorStoreLayout,
+    )
+except ModuleNotFoundError:
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import (  # type: ignore
+        HeadMajorStoreLayout,
+        KeyMetadata,
+        TokenMajorStoreLayout,
+    )
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.native_worker import AscendNativeStoreWorker
 

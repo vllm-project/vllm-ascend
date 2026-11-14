@@ -258,7 +258,14 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
 
     def get_kv_connector_kv_cache_events(self) -> "KVConnectorKVEvents | None":
         """Collect worker-side KV cache events from all child connectors."""
-        from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.connector import MooncakeStoreKVEvents
+        try:
+            from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.connector import (  # type: ignore
+                MooncakeStoreKVEvents,
+            )
+        except ModuleNotFoundError:
+            from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.connector import (  # type: ignore
+                MooncakeStoreKVEvents,
+            )
 
         combined = None
         for connector in self._connectors:
