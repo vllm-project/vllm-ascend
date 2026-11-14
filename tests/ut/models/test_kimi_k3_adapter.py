@@ -418,6 +418,7 @@ def test_kimi_mixed_kda_gate_weights_use_upstream_packed_loader(monkeypatch):
     model.config = SimpleNamespace(
         is_moe=False,
         is_linear_attn=True,
+        dsa_config=None,
         linear_attn_config={},
         q_lora_rank=None,
         num_hidden_layers=1,

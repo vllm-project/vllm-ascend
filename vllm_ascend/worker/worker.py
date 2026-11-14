@@ -118,9 +118,11 @@ from vllm_ascend.utils import (
     register_ascend_fla_customop,
     register_device_print,
     setup_ascend_local_comm_res,
+    vllm_version_is,
 )
 
 
+# Both supported versions resolve grouping through the platform's builder.
 def get_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
@@ -430,7 +432,10 @@ class NPUWorker(WorkerBase):
 
         assert self.weight_transfer_engine is not None
         self.weight_transfer_engine.finish_weight_update()
-        self.model_runner.reset_lora_state()
+        if vllm_version_is("0.33.0"):
+            self.model_runner.reset_lora_state()
+        else:
+            self.model_runner.on_target_weights_replaced()
         self._weight_update_active = False
 
     def shutdown(self) -> None:
@@ -466,6 +471,13 @@ class NPUWorker(WorkerBase):
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
+
+    def _get_gpu_memory_utilization(self) -> float:
+        utilization = self.cache_config.gpu_memory_utilization
+        # vLLM #56492 defers the default until the KV allocation mode is known.
+        if utilization is None:
+            return self.cache_config.resolved_gpu_memory_utilization
+        return utilization
 
     def _init_device(self):
         # vLLM v0.24.0 (PR #45026) removed automatic per-process device
@@ -538,7 +550,7 @@ class NPUWorker(WorkerBase):
 
         # take current memory snapshot
         self.init_snapshot = MemorySnapshot(device=device)
-        self.requested_memory = self.init_snapshot.total_memory * self.cache_config.gpu_memory_utilization
+        self.requested_memory = self.init_snapshot.total_memory * self._get_gpu_memory_utilization()
         if self.init_snapshot.free_memory < self.requested_memory:
             GiB = lambda b: round(b / GiB_bytes, 2)
             raise ValueError(
@@ -546,7 +558,7 @@ class NPUWorker(WorkerBase):
                 f"({GiB(self.init_snapshot.free_memory)}/"
                 f"{GiB(self.init_snapshot.total_memory)} GiB) on startup "
                 f"is less than desired GPU memory utilization "
-                f"({self.cache_config.gpu_memory_utilization}, "
+                f"({self._get_gpu_memory_utilization()}, "
                 f"{GiB(self.requested_memory)} GiB). Decrease GPU memory "
                 f"utilization or reduce GPU memory used by other processes."
             )
@@ -1038,7 +1050,7 @@ class NPUWorker(WorkerBase):
                 f"({format_gib(self.init_snapshot.free_memory)}/"
                 f"{format_gib(self.init_snapshot.total_memory)} GiB) on startup. "
                 f"Desired GPU memory utilization is "
-                f"({self.cache_config.gpu_memory_utilization}, "
+                f"({self._get_gpu_memory_utilization()}, "
                 f"{format_gib(self.requested_memory)} GiB). "
                 f"Actual usage: {format_gib(self.model_runner.model_memory_usage)} GiB "
                 f"for weights, {format_gib(self.peak_activation_memory)} GiB for peak "
@@ -1449,7 +1461,11 @@ class NPUWorker(WorkerBase):
     @runtime_guard_idle_step
     def execute_dummy_batch(self) -> None:
         self.log_memory_stats()
-        num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
+        num_tokens = (
+            getattr(self.model_runner, "uniform_decode_query_len", 1)
+            if vllm_version_is("0.33.0")
+            else self.model_runner.decode_query_len
+        )
         # Idle DP worker RPCs also need the current config for replay metadata.
         with set_current_vllm_config(self.vllm_config):
             self.model_runner._dummy_run(num_tokens, uniform_decode=True, skip_gdn_state_update=True)

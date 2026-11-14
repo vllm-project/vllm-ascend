@@ -147,8 +147,14 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
                 get_layers_start_end_indices=lambda p: ((0, 3), (3, 7))[p.rank // 2],
                 get_total_num_hidden_layers=lambda: 7,
                 compute_hash=lambda: "model-config",
+                compile_factors=lambda: {"identity": "model-config"},
             ),
-            cache_config=SimpleNamespace(block_size=16, cache_dtype="auto", compute_hash=lambda: "cache-config"),
+            cache_config=SimpleNamespace(
+                block_size=16,
+                cache_dtype="auto",
+                compute_hash=lambda: "cache-config",
+                compile_factors=lambda: {"identity": "cache-config"},
+            ),
             speculative_config=None,
         )
 

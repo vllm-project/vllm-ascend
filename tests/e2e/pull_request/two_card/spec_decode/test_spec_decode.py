@@ -32,6 +32,7 @@ from vllm.inputs import TokensPrompt
 from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner
+from vllm_ascend.utils import vllm_version_is
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -119,7 +120,9 @@ def test_eagle3_sp_acceptance(
         "enforce_eager": True,
         "method": method,
         "num_speculative_tokens": num_speculative_tokens,
-        "disable_padded_drafter_batch": disable_padded_drafter_batch,
+        # Main removed this MRv1 option; both retained parameter identities
+        # exercise native MRv2 padding, not legacy unpadded-drafter coverage.
+        **({"disable_padded_drafter_batch": disable_padded_drafter_batch} if vllm_version_is("0.33.0") else {}),
         "model": spec_model_name,
     }
 

@@ -51,6 +51,7 @@ from vllm_ascend.ops.fused_moe.shared_experts import (
 from vllm_ascend.quantization.methods.base import PreparedLinearInput
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.utils import vllm_version_is
 
 
 def test_prepared_linear_input_import_does_not_cycle_through_moe():
@@ -319,7 +320,6 @@ def test_process_weights_after_loading_splits_lists_for_dynamic_eplb(monkeypatch
 
 def test_update_expert_map_updates_routed_experts_and_manager():
     routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
-    nn.Module.__init__(routed_experts)
     manager = SimpleNamespace(_expert_map=torch.tensor([0, 1, 2, -1], dtype=torch.int32))
     routed_experts.expert_map_manager = manager
     routed_experts.ascend_expert_map = torch.tensor([0, -1, 1], dtype=torch.int32)
@@ -599,6 +599,7 @@ def test_grouped_topk_router_preserves_routing_weight_dtype():
 
 def _build_routing_replay_experts(router, log2phy):
     routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
+    torch.nn.Module.__init__(routed_experts)
     routed_experts.router = router
     routed_experts.moe_config = SimpleNamespace(num_experts=4)
     routed_experts.global_redundant_expert_num = 0
@@ -2106,6 +2107,8 @@ def test_runner_selects_sp_multistream_custom_op(
         routed_input_transform,
         routed_output_transform,
         routed_scaling_factor,
+        divide_shared_output_in_fp16=False,
+        routed_scale_mode=None,
     ):
         nn.Module.__init__(runner)
         runner.layer_name = layer_name
@@ -2116,6 +2119,10 @@ def test_runner_selects_sp_multistream_custom_op(
         runner.routed_input_transform = routed_input_transform
         runner.routed_output_transform = routed_output_transform
         runner.routed_scaling_factor = routed_scaling_factor
+        if routed_scale_mode is not None:
+            runner.routed_scale_mode = routed_scale_mode
+            divide_shared_output_in_fp16 = routed_scale_mode.value == "output_fp16_guard"
+        runner.divide_shared_output_in_fp16 = divide_shared_output_in_fp16
         runner._forward_entry = upstream_forward_entry
 
     monkeypatch.setattr(fused_moe_module.MoERunner, "__init__", init_base_runner)
@@ -3019,7 +3026,15 @@ def test_forward_impl_keeps_full_width_input_for_shared_experts(monkeypatch):
     assert result[1] is routed_out
 
 
-def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None, fused_mc2_comm=None):
+def _stub_moe_runner_init(
+    monkeypatch,
+    *,
+    gate=None,
+    shared_experts=None,
+    fused_mc2_comm=None,
+    divide_shared_output_in_fp16=False,
+    routed_scale_mode=None,
+):
     """Construct AscendMoERunner with a lightweight MoERunner.__init__ stub."""
     moe_config = SimpleNamespace(hidden_dim=4, ep_size=1)
     routed_experts = SimpleNamespace(
@@ -3042,6 +3057,8 @@ def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None, fused_
         routed_input_transform,
         routed_output_transform,
         routed_scaling_factor,
+        divide_shared_output_in_fp16=False,
+        routed_scale_mode=None,
     ):
         nn.Module.__init__(runner)
         runner.layer_name = layer_name
@@ -3053,6 +3070,10 @@ def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None, fused_
         runner.routed_input_transform = routed_input_transform
         runner.routed_output_transform = routed_output_transform
         runner.routed_scaling_factor = routed_scaling_factor
+        if routed_scale_mode is not None:
+            runner.routed_scale_mode = routed_scale_mode
+            divide_shared_output_in_fp16 = routed_scale_mode.value == "output_fp16_guard"
+        runner.divide_shared_output_in_fp16 = divide_shared_output_in_fp16
         runner._forward_entry = object()
 
     monkeypatch.setattr(fused_moe_module.MoERunner, "__init__", init_base_runner)
@@ -3078,7 +3099,26 @@ def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None, fused_
         routed_experts=routed_experts,
         gate=gate,
         shared_experts=shared_experts,
+        divide_shared_output_in_fp16=divide_shared_output_in_fp16,
+        routed_scale_mode=routed_scale_mode,
     )
+
+
+@pytest.mark.parametrize("divide_shared", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("with_shared", [False, True])
+def test_runner_preserves_native_shared_scaling(monkeypatch, divide_shared, dtype, with_shared):
+    runner = _stub_moe_runner_init(monkeypatch, divide_shared_output_in_fp16=divide_shared)
+    runner.routed_scaling_factor = 2.0
+    if not vllm_version_is("0.33.0"):
+        assert runner.divide_shared_output_in_fp16 is divide_shared
+    shared = torch.full((2, 4), 2.0, dtype=dtype) if with_shared else None
+    fused = torch.full((2, 4), 3.0, dtype=dtype)
+    shared, fused = runner._maybe_apply_routed_scale_to_output(shared, fused)
+    divides = (vllm_version_is("0.33.0") or divide_shared) and with_shared and dtype == torch.float16
+    torch.testing.assert_close(fused, torch.full_like(fused, 3.0 if divides else 6.0), rtol=0, atol=0)
+    if shared is not None:
+        torch.testing.assert_close(shared, torch.full_like(shared, 1.0 if divides else 2.0), rtol=0, atol=0)
 
 
 def test_runner_keeps_mega_moe_activation_with_each_layer(monkeypatch):
@@ -3334,3 +3374,26 @@ def test_maybe_all_reduce_graph_replay_preserves_shared_and_routed_outputs(
         assert not any("ascend_moe_forward_complete" in str(node.target) for node in graph.graph.nodes)
     finally:
         library._destroy()
+
+
+@pytest.mark.parametrize("mode_name", ["ROUTER", "OUTPUT", "OUTPUT_FP16_GUARD"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("with_shared", [False, True])
+def test_runner_preserves_native_routed_scale_mode(monkeypatch, mode_name, dtype, with_shared):
+    main = not vllm_version_is("0.33.0")
+    mode = None
+    if main:
+        from vllm.model_executor.layers.fused_moe.config import RoutedScaleMode
+
+        mode = RoutedScaleMode[mode_name]
+    runner = _stub_moe_runner_init(monkeypatch, routed_scale_mode=mode)
+    runner.routed_scaling_factor = 2.0
+    if main:
+        assert runner.routed_scale_mode is mode
+    shared = torch.full((2, 4), 2.0, dtype=dtype) if with_shared else None
+    fused = torch.full((2, 4), 3.0, dtype=dtype)
+    shared, fused = runner._maybe_apply_routed_scale_to_output(shared, fused)
+    divides = (not main or mode_name == "OUTPUT_FP16_GUARD") and with_shared and dtype == torch.float16
+    torch.testing.assert_close(fused, torch.full_like(fused, 3.0 if divides else 6.0), rtol=0, atol=0)
+    if shared is not None:
+        torch.testing.assert_close(shared, torch.full_like(shared, 1.0 if divides else 2.0), rtol=0, atol=0)

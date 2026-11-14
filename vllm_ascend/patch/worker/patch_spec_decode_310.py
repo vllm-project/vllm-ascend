@@ -31,7 +31,7 @@ def _init_speculator_310p(vllm_config, device, req_states=None):
     if (
         speculative_config.method == "mtp"
         and not speculative_config.use_gemma4_mtp()
-        and not speculative_config.use_step3p5_mtp()
+        and not ascend_spec_decode.uses_step3p5_mtp(speculative_config)
     ):
         from vllm_ascend._310p.worker.v2.spec_decode.mtp_speculator import (
             AscendMTPSpeculator310,

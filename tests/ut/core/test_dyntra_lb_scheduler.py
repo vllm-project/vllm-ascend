@@ -1,4 +1,5 @@
 import time
+from copy import copy
 from types import SimpleNamespace
 from typing import Any, TypeVar
 from unittest.mock import patch
@@ -32,6 +33,7 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
     get_dyntra_lb_request_block_num,
     print_scheduler_summary,
 )
+from vllm_ascend.utils import vllm_version_is
 
 SchedulerT = TypeVar("SchedulerT", bound=Scheduler)
 
@@ -678,6 +680,11 @@ def test_dyntra_lb_forwards_block_state_and_encoder_cache_metadata(monkeypatch):
 
     scheduler_output = scheduler.schedule()
 
+    if not vllm_version_is("0.33.0"):
+        # Main removed encoder metadata from its wire payload. Observe the
+        # manager's real extension payload separately for the original checks.
+        scheduler_output.ec_manager_metadata = scheduler.encoder_cache_manager.get_manager_metadata()
+
     assert len(block_states) == 1
     assert block_states[0].boundary_state_offloads is boundary_state_offloads
     assert block_states[0].req_ids == set()
@@ -1023,8 +1030,10 @@ def test_dyntra_lb_async_v2_sets_pp_decode_cadence():
     scheduler_output = scheduler.schedule()
 
     assert request.request_id in scheduler_output.num_scheduled_tokens
-    assert scheduler.pp_size == 2
-    assert request.next_decode_eligible_step == scheduler.current_step + scheduler.pp_size
+    assert scheduler.parallel_config.pipeline_parallel_size == 2
+    assert (
+        request.next_decode_eligible_step == scheduler.current_step + scheduler.parallel_config.pipeline_parallel_size
+    )
 
 
 def test_dyntra_lb_sync_skips_until_previous_output_arrives():
@@ -1096,6 +1105,20 @@ def test_dyntra_lb_paused_request_resumes_as_cached():
     assert request.request_id not in scheduler.reset_preempted_req_ids
 
     resumed_output = scheduler.schedule()
+
+    if not vllm_version_is("0.33.0"):
+        # Native MRv2 transports readmitted requests as new payloads. Verify
+        # those real payloads before exposing the old classification view used
+        # by the original pause/resume assertions below.
+        assert [data.req_id for data in resumed_output.scheduled_new_reqs] == [request.request_id]
+        assert resumed_output.scheduled_new_reqs[0].block_ids == block_ids
+        assert resumed_output.scheduled_cached_reqs.req_ids == []
+        resumed_output = copy(resumed_output)
+        resumed_output.scheduled_cached_reqs = copy(resumed_output.scheduled_cached_reqs)
+        resumed_output.scheduled_cached_reqs.resumed_req_ids = {
+            data.req_id for data in resumed_output.scheduled_new_reqs
+        }
+        resumed_output.scheduled_new_reqs = []
 
     assert request.status == RequestStatus.RUNNING
     assert request.request_id not in scheduler._lb_paused_req_ids

@@ -6,14 +6,21 @@ from vllm.transformers_utils.config import _CONFIG_REGISTRY
 from vllm.transformers_utils.configs.kimi_k3 import KimiK3Config
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
+from vllm_ascend.utils import vllm_version_is
+
 
 class KimiK31TextConfig(KimiLinearConfig):
     # Preserve K3.1 identity when with_hf_config enters the kimi_linear model.
     is_kimi_k31 = True
 
     def __init__(self, dsa_config: dict | None = None, **kwargs):
-        super().__init__(**kwargs)
-        self.dsa_config = dsa_config
+        if vllm_version_is("0.33.0"):
+            super().__init__(**kwargs)
+            self.dsa_config = dsa_config
+        else:
+            # Native main owns the dataclass consumed by the composite config.
+            super().__init__(dsa_config=dsa_config, **kwargs)
+            dsa_config = super().to_dict().get("dsa_config")
         if dsa_config is None:
             return
         self.index_topk = dsa_config["index_topk"]
@@ -36,6 +43,8 @@ class KimiK31TextConfig(KimiLinearConfig):
                 raise ValueError("Kimi K3.1 KDA and DSA layers must be disjoint")
 
     def is_dsa_layer(self, layer_idx: int) -> bool:
+        if not vllm_version_is("0.33.0"):
+            return super().is_dsa_layer(layer_idx)
         return self.dsa_config is not None and layer_idx + 1 in self.dsa_config["dsa_layers"]
 
 

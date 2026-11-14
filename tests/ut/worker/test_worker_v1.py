@@ -913,6 +913,20 @@ class TestNPUWorker(TestBase):
         self.assertIs(worker.model_runner, mm_encoder_runner.return_value)
         report_usage_stats.assert_not_called()
 
+    def test_memory_utilization_resolves_default_and_preserves_explicit_budget(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.cache_config = CacheConfig(gpu_memory_utilization=0.5)
+        self.assertEqual(worker._get_gpu_memory_utilization(), 0.5)
+        worker.cache_config = CacheConfig()
+        expected = worker.cache_config.gpu_memory_utilization
+        if expected is None:
+            worker.cache_config.enable_extensible_kv_cache = False
+            expected = worker.cache_config.DEFAULT_GPU_MEMORY_UTILIZATION
+        self.assertEqual(worker._get_gpu_memory_utilization(), expected)
+        self.assertEqual(2000 * worker._get_gpu_memory_utilization(), 2000 * expected)
+
     def test_profile_start_stop(self):
         """Test profile method start and stop"""
         from vllm_ascend.worker.worker import NPUWorker
@@ -1135,6 +1149,7 @@ class TestNPUWorker(TestBase):
             worker.vllm_config = MagicMock()
             mock_model_runner = MagicMock()
             mock_uniform_decode_query_len = mock_model_runner.uniform_decode_query_len
+            mock_model_runner.decode_query_len = mock_uniform_decode_query_len
             worker.model_runner = mock_model_runner
 
             # Test execute_dummy_batch
@@ -2389,7 +2404,8 @@ class TestNPUWorkerWeightUpdate(TestBase):
         worker = self._make_worker(engine=engine)
         worker._weight_update_active = True
 
-        worker.finish_weight_update()
+        with patch("vllm_ascend.worker.worker.vllm_version_is", return_value=True):
+            worker.finish_weight_update()
 
         engine.finish_weight_update.assert_called_once_with()
         worker.model_runner.reset_lora_state.assert_called_once_with()

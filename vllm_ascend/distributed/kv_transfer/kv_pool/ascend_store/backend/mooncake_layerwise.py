@@ -19,6 +19,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     block_hash_to_str,
     get_block_hashes,
 )
+from vllm_ascend.utils import get_config_hash
 
 if TYPE_CHECKING:
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
@@ -97,11 +98,11 @@ def layerwise_topology_namespace(vllm_config: Any, kv_cache_config: Any = None) 
     identity: tuple[Any, ...] = (
         parallel.tensor_parallel_size,
         partitions,
-        model.compute_hash(),
-        cache.compute_hash(),
+        get_config_hash(model),
+        get_config_hash(cache),
         cache.cache_dtype,
         cache.block_size,
-        speculative.compute_hash() if speculative is not None else None,
+        get_config_hash(speculative) if speculative is not None else None,
     )
     if kvpp_namespace:
         identity += (kvpp_namespace,)

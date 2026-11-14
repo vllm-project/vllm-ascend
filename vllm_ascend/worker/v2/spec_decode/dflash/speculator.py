@@ -135,7 +135,20 @@ def prepare_dflash_inputs_factory(
             kv_cache_block_size=kv_cache_block_size,
         )
 
-    return prepare_with_block_size
+    if vllm_version_is("0.33.0"):
+        return prepare_with_block_size
+
+    def prepare_with_block_stride(*args: Any, **kwargs: Any) -> None:
+        # vLLM #66604 adds manager-block stride after block_size. Ascend's
+        # table already contains expanded kernel-page IDs, so its local slot
+        # kernel keeps using the per-table kernel size restored above.
+        if len(args) > 18:
+            prepare_with_block_size(*args[:18], *args[19:], **kwargs)
+        else:
+            kwargs.pop("block_stride")
+            prepare_with_block_size(*args, **kwargs)
+
+    return prepare_with_block_stride
 
 
 class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):

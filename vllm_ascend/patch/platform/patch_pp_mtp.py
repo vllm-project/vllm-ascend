@@ -344,7 +344,8 @@ def _apply_patch() -> None:
     _patch_model_runner_output()
     # The patch for engine core has been moved to patch_engine_core.py
     _patch_scheduler_update_after_schedule()
-    _patch_scheduler_make_cached_request_data()
+    if vllm_version_is("0.33.0"):
+        _patch_scheduler_make_cached_request_data()
     _patch_scheduler_update_from_output()
     _patch_model_config_validation()
 

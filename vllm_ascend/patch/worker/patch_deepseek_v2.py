@@ -23,6 +23,7 @@ from vllm.model_executor.layers.mla import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.models import deepseek_v2 as deepseek_v2_module
 from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2ForCausalLM,
     DeepSeekV2FusedQkvAProjLinear,
@@ -39,7 +40,7 @@ from vllm.v1.attention.backends.mla.index_group import SparseMLAIndexGroupBuilde
 
 from vllm_ascend.attention.context_parallel.common_cp import use_dcp_q_replicate
 from vllm_ascend.ops.linear import AscendDCPGroupColumnParallelLinear
-from vllm_ascend.utils import is_mtp_layer, should_reuse_topk
+from vllm_ascend.utils import is_mtp_layer, should_reuse_topk, vllm_version_is
 from vllm_ascend.worker.v2 import pp_transport
 from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
@@ -335,17 +336,33 @@ DeepseekV2Model.__init__ = _patched_deepseek_v2_model_init
 
 
 # Reuse upstream slot bookkeeping; Ascend owns capture and TP gathering.
-for _member in (
-    "AUX_HIDDEN_STATE_KEY",
-    "_aux_slot_base_cached",
-    "_aux_upstream_total_cached",
-    "_set_aux_hidden_state_layers",
-    "_cache_aux_pp_layout",
-    "pack_local_aux_hidden_states",
-    "collect_remote_aux_hidden_states",
-):
-    setattr(DeepseekV2Model, _member, getattr(EagleModelMixin, _member))
-DeepseekV2Model.supports_aux_hidden_states_over_pp = True
+if vllm_version_is("0.33.0"):
+    for _member in (
+        "AUX_HIDDEN_STATE_KEY",
+        "_aux_slot_base_cached",
+        "_aux_upstream_total_cached",
+        "_set_aux_hidden_state_layers",
+        "_cache_aux_pp_layout",
+        "pack_local_aux_hidden_states",
+        "collect_remote_aux_hidden_states",
+    ):
+        setattr(DeepseekV2Model, _member, getattr(EagleModelMixin, _member))
+    DeepseekV2Model.supports_aux_hidden_states_over_pp = True
+else:
+
+    class AscendEagleDeepseekV2Model(DeepseekV2Model, EagleModelMixin):
+        """Expose the native decoder identity required by vLLM #66177.
+
+        Inherit the decorated DeepSeek implementation and its Ascend patches;
+        the main mixin supplies local slots, and the runner merges remote ones.
+        Remove this replacement when native DeepSeek inherits EagleModelMixin.
+        """
+
+        supports_aux_hidden_states_over_pp = True
+
+    deepseek_v2_module.DeepseekV2Model = AscendEagleDeepseekV2Model
+    # Native constructors use this cached factory, not the module alias above.
+    DeepseekV2ForCausalLM.model_cls = AscendEagleDeepseekV2Model
 
 
 def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:

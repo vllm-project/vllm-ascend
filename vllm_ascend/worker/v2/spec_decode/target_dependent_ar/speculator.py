@@ -47,7 +47,7 @@ from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAMetadata
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import get_config_hash, vllm_version_is
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
@@ -219,7 +219,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         # Only graph-external phase hooks update draft source validity.
         if self._eplb_source_is_padding is None:
             self._eplb_source_is_padding = torch.ones_like(self.input_buffers.is_padding)
-        model_state = eplb_state.model_states[self.speculative_config.draft_model_config.compute_hash()]
+        model_state = eplb_state.model_states[get_config_hash(self.speculative_config.draft_model_config, cached=True)]
         for layer in model_state.model.moe_layers:
             layer.eplb_state.allgather_source_is_padding = self._eplb_source_is_padding
 
@@ -281,7 +281,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         ):
             sync_state = replace(sync_state, uniform_token_count=None)
         if self.pcp_manager is not None:
-            attn_metadata = self._get_pcp_draft_prefill_metadata(attn_metadata)
+            attn_metadata = self._get_draft_prefill_metadata(attn_metadata)
         # wrap build_attn_metadata to use Ascend attention metadata building.
         # so we can call super().propose() directly.
         with (
@@ -313,10 +313,10 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             )
 
     @staticmethod
-    def _get_pcp_draft_prefill_metadata(attn_metadata: dict[str, Any]) -> dict[str, Any]:
+    def _get_draft_prefill_metadata(attn_metadata: dict[str, Any]) -> dict[str, Any]:
         """Keep eager draft MLA queries within the target's real decode rows.
 
-        FULL target graphs include query offsets for padded PCP requests. The
+        FULL target graphs include query offsets for padded requests. The
         draft prefill runs outside FULL graphs and MLA slices its query to
         num_decode_tokens, so padding requests must have zero query length.
         Copy only the changed metadata: target graph updates still need the
@@ -439,17 +439,31 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         FIA operator."""
         # vLLM #60335 added `num_speculative_steps` on main.
         with self._lmhead_pad_size_context(capture_num_reqs=num_reqs):
-            super()._generate_draft(
-                num_reqs,
-                num_tokens_padded,
-                attn_metadata,
-                slot_mappings,
-                num_tokens_across_dp,
-                cudagraph_runtime_mode,
-                num_speculative_steps,
-            )
+            if vllm_version_is("0.33.0"):
+                super()._generate_draft(
+                    num_reqs,
+                    num_tokens_padded,
+                    attn_metadata,
+                    slot_mappings,
+                    num_tokens_across_dp,
+                    cudagraph_runtime_mode,
+                    num_speculative_steps,
+                )
+            else:
+                super()._decode(
+                    num_reqs,
+                    num_tokens_padded,
+                    attn_metadata,
+                    slot_mappings,
+                    num_tokens_across_dp,
+                    cudagraph_runtime_mode,
+                    num_speculative_steps,
+                )
         if attn_metadata is not None:
             self._update_decode_attn_metadata(attn_metadata, 1, num_reqs)
+
+    # #60989 invokes _decode through the new shared AR loop.
+    _decode = _generate_draft
 
     def _multi_step_decode(
         self,
@@ -499,6 +513,12 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             attn_metadata = {
                 name: metadata for name, metadata in attn_metadata.items() if name in self.draft_attn_layer_names
             }
+
+        # Target FULL graphs can pad requests in both v0.33.0 and main.
+        # Eager/PW MLA slices queries to real decode rows; its cumulative query
+        # lengths must exclude target padding too. Keep FULL graph metadata.
+        if attn_metadata is not None and cudagraph_runtime_mode != CUDAGraphMode.FULL:
+            attn_metadata = self._get_draft_prefill_metadata(attn_metadata)
 
         with self._lmhead_pad_size_context(capture_num_reqs=num_reqs):
             # vLLM main forwards `skip_sample` so the drafter KV stays in sync

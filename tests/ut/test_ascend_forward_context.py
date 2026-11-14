@@ -11,6 +11,7 @@ from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.fixture(autouse=True)
@@ -63,6 +64,8 @@ def _make_vllm_config(
         cudagraph_capture_sizes=cudagraph_capture_sizes or [],
         max_cudagraph_capture_size=max_cudagraph_capture_size,
     )
+    if not vllm_version_is("0.33.0"):
+        compilation_config.decode_cudagraph_capture_request_sizes = None
     kv_transfer_config = (
         SimpleNamespace(kv_connector=kv_connector, kv_role=kv_role)
         if kv_connector is not None or kv_role is not None
@@ -192,6 +195,49 @@ def test_set_mc2_tokens_capacity_prefill_mc2_uses_max_num_batched_tokens(monkeyp
     afc.set_mc2_tokens_capacity(vllm_config, max_num_reqs=16, uniform_decode_query_len=1)
 
     assert afc.get_mc2_tokens_capacity() == 520
+
+
+@pytest.mark.parametrize(
+    "prefill_tokens,decode_sizes,query_lens,token_cap,tp_size,expected",
+    [
+        (16, [1, 2, 3, 4], {4: 1024}, None, 2, 16),
+        (16, [1, 2, 3, 4], {4: 256}, None, 2, 16),
+        (8, [1, 4, 16], {4: 16}, None, 2, 64),
+        (8, [1, 4, 16], {4: 16}, 20, 2, 20),
+        (8, [1, 4, 16], {1: 16, 4: 3}, None, 2, 16),
+        (17, [1, 2], {4: 16}, None, 6, 18),
+        (4096, [1, 2], {4: 16}, None, 2, 1024),
+    ],
+)
+def test_mc2_capacity_excludes_independent_draft_capture_grid(
+    monkeypatch, prefill_tokens, decode_sizes, query_lens, token_cap, tp_size, expected
+):
+    if vllm_version_is("0.33.0"):
+        pytest.skip("Separate target/draft graph grids are a main-only API")
+
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: False)
+    vllm_config = _make_vllm_config(
+        tensor_parallel_size=tp_size,
+        cudagraph_capture_sizes=[4, 8, 12, 16, 1024],
+        max_cudagraph_capture_size=1024,
+        max_num_batched_tokens=8192,
+    )
+    compilation_config = vllm_config.compilation_config
+    compilation_config.decode_cudagraph_capture_request_sizes = decode_sizes
+    compilation_config.max_decode_cudagraph_capture_tokens = token_cap
+    compilation_config.max_prefill_cudagraph_capture_tokens = prefill_tokens
+    vllm_config.get_decode_cudagraph_query_lens = lambda _: query_lens
+    original_sizes = compilation_config.cudagraph_capture_sizes.copy()
+
+    afc.set_mc2_tokens_capacity(vllm_config, max_num_reqs=1024, uniform_decode_query_len=4)
+
+    assert afc.get_mc2_tokens_capacity() == expected
+    assert compilation_config.cudagraph_capture_sizes == original_sizes
+    assert compilation_config.max_cudagraph_capture_size == 1024
+    assert compilation_config.decode_cudagraph_capture_request_sizes == decode_sizes
+    if expected == 16:
+        assert afc._select_fused_or_capacity_moe_comm_method(16, vllm_config, expected) == MoECommType.MC2
+        assert afc._select_fused_or_capacity_moe_comm_method(1024, vllm_config, expected) == MoECommType.ALLTOALL
 
 
 def test_is_decode_only_node_false_without_kv_transfer():

@@ -155,6 +155,7 @@ def test_decode_sharding_does_not_add_a_parallel_config_field():
         speculative_config=SimpleNamespace(method="mtp"),
         compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE),
         cache_config=None,
+        scheduler_config=SimpleNamespace(max_async_kv_loads_per_step=None),
     )
     ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(

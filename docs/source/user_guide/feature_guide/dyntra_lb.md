@@ -40,8 +40,14 @@ DyntraLB cannot be combined with:
 
 - `scheduler_config.enable_balance_scheduling`
 - `scheduler_config.profiling_chunk_config.enabled`
+- vLLM main's `max_async_kv_loads_per_step`
 
 The service rejects these unsupported combinations during startup.
+
+The async KV load limit must also remain unset with recompute, profiling-chunk,
+or balance scheduling. These Ascend schedulers do not yet consume the separate
+async waiting queue used by this upstream option. Schedulers that inherit
+upstream scheduling can use the limit.
 
 ## Configuration
 

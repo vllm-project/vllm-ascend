@@ -30,6 +30,48 @@ def _make_speculator(**attrs):
     return speculator
 
 
+@pytest.mark.parametrize("is_release", [True, False])
+@pytest.mark.parametrize(
+    "mode,expected_mode",
+    [
+        (CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.FULL_DECODE_ONLY),
+        (CUDAGraphMode.NONE, CUDAGraphMode.NONE),
+        (CUDAGraphMode.FULL_AND_PIECEWISE, CUDAGraphMode.FULL_DECODE_ONLY),
+    ],
+)
+def test_init_cudagraph_manager_uses_versioned_query_shapes(is_release, mode, expected_mode):
+    query_shapes = {4: 8}
+    config = SimpleNamespace(get_decode_cudagraph_query_lens=MagicMock(return_value=query_shapes))
+    speculator = _make_speculator(
+        vllm_config=config,
+        device="cpu",
+        num_speculative_steps=3,
+        speculative_config=SimpleNamespace(enforce_eager=False),
+        update_stream=object(),
+        attn_groups=[],
+    )
+
+    with (
+        patch.object(speculator_module, "vllm_version_is", return_value=is_release),
+        patch.object(speculator_module, "AutoRegressiveAclGraphManager") as mock_manager,
+        patch.object(speculator_module, "_get_graph_update_backend") as mock_backend,
+    ):
+        speculator.init_cudagraph_manager(mode)
+
+    expected_shapes = 4 if is_release else query_shapes
+    mock_manager.assert_called_once_with(config, "cpu", expected_mode, expected_shapes)
+    if is_release:
+        config.get_decode_cudagraph_query_lens.assert_not_called()
+    else:
+        config.get_decode_cudagraph_query_lens.assert_called_once_with(4)
+        assert mock_manager.call_args.args[3] is query_shapes
+    assert speculator.cudagraph_manager is mock_manager.return_value
+    assert speculator.cudagraph_manager.speculator is speculator
+    assert speculator.cudagraph_manager.update_stream is speculator.update_stream
+    mock_backend.assert_called_once_with(speculator.attn_groups)
+    assert speculator.attn_backend is mock_backend.return_value
+
+
 def test_build_draft_attn_metadatas_rebuilds_from_current_batch():
     """The replay hook rebuilds the draft metadata from the cached batch
     (DFlash/DSpark pattern) instead of reusing a cached one."""

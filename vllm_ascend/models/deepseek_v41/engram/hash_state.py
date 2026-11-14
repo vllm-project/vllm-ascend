@@ -23,9 +23,13 @@ from vllm.models.deepseek_v41.common.engram import (
     DEAD_ID,
     EngramLayout,
     NgramHashState,
-    _write_hash_cache_kernel,
 )
 from vllm.triton_utils import triton
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.33.0"):
+    from vllm.models.deepseek_v41.common.engram import _write_hash_cache_kernel
 
 
 class AscendEngramSlotCache:
@@ -76,6 +80,15 @@ class AscendNgramHashState(NgramHashState):
     Keep that compiler workaround in this subclass, without changing vLLM.
     """
 
+    if not vllm_version_is("0.33.0"):
+        # Main removed the MRv1 history cache; Ascend callers still share the
+        # slotless and legacy launch adapter while v0.33.0 is supported.
+        use_slot_cache = False
+
+        @property
+        def block_size(self) -> int:
+            return self.swa_cache_module.block_size
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -84,8 +97,8 @@ class AscendNgramHashState(NgramHashState):
         dead_mask: torch.Tensor,
         lookback_token_ids: torch.Tensor,
         lookback_dead_mask: torch.Tensor,
-        slot_mapping: torch.Tensor | None,
-        block_table: torch.Tensor | None,
+        slot_mapping: torch.Tensor | None = None,
+        block_table: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Compute [tokens, layers, hash columns] int32 n-gram hashes.
 

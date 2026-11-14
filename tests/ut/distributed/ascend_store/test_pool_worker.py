@@ -164,6 +164,10 @@ def make_worker(
         config.model_config.get_total_num_hidden_layers.return_value = sum(pp_partition)
         config.model_config.compute_hash.return_value = "test-model-config"
         config.cache_config.compute_hash.return_value = "test-cache-config"
+        # Exercise main's native hash protocol while retaining the release
+        # fixture's mutable identity used by the topology-isolation assertions.
+        config.model_config.compile_factors.side_effect = lambda: {"identity": config.model_config.compute_hash()}
+        config.cache_config.compile_factors.side_effect = lambda: {"identity": config.cache_config.compute_hash()}
         config.cache_config.cache_dtype = "auto"
         config.speculative_config = None
     config.additional_config = {"enable_kvpp": use_kvpp}

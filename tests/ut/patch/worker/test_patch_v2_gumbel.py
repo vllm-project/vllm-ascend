@@ -116,3 +116,40 @@ def test_dspark_sample_logits_dispatch(monkeypatch, probabilistic):
             result,
             logits.argmax(dim=-1) + 10,
         )
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("with_bias", [False, True])
+def test_categorical_sampler_applies_markov_bias_before_cache_and_temperature(monkeypatch, dtype, with_bias):
+    module = importlib.import_module("vllm_ascend.ops.triton.sample.categorical_sample")
+    logits = torch.tensor([[1.25, -2.5, 4.0], [-3.0, 2.25, 0.5]], dtype=dtype)
+    original = logits.clone()
+    bias = torch.tensor([[0.01, 2.0, -6.0], [4.0, -0.1, 1.5]], dtype=dtype) if with_bias else None
+    cache = torch.empty(2, 2, 3, dtype=dtype)
+    sampled = torch.tensor([1, 0])
+    kernel = MagicMock(return_value=sampled)
+    monkeypatch.setattr(module, "_categorical_sample", kernel)
+    result = module.categorical_sample(
+        logits,
+        torch.tensor([1, 0]),
+        torch.tensor([0.5, 1.5]),
+        torch.tensor([3, 7]),
+        torch.tensor([8, 12]),
+        apply_temperature=True,
+        is_drafting=True,
+        logits_cache=cache,
+        bias=bias,
+    )
+    assert result is sampled
+    kernel.assert_called_once()
+    passed_logits = kernel.call_args.args[0]
+    if bias is None:
+        assert passed_logits is logits
+    else:
+        expected = (original.float() + bias.float()).to(dtype)
+        torch.testing.assert_close(passed_logits, expected, rtol=0, atol=0)
+        assert passed_logits is not logits
+    torch.testing.assert_close(logits, original, rtol=0, atol=0)
+    assert kernel.call_args.args[5] is True
+    assert kernel.call_args.args[6] is cache
+    assert kernel.call_args.kwargs["is_drafting"] is True

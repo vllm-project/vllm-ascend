@@ -9,8 +9,9 @@ and the layerwise cross-chunk behaviour are unchanged.
 """
 
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass
+from importlib import import_module
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
@@ -154,13 +155,16 @@ class HCCLWeightTransferEngine(NCCLWeightTransferEngine):
         else:
             update_info = self._last_hccl_update_info.get(self.model, update_info)
 
-        from vllm.model_executor.model_loader.mtp_validation import (
-            disable_mtp_completeness_check,
-        )
+        mtp_check = nullcontext()
+        if vllm_version_is("0.33.0"):
+            # The pinned main tree used by mypy no longer contains this
+            # release-only module. Resolve it only in the release runtime.
+            mtp_validation = import_module("vllm.model_executor.model_loader.mtp_validation")
+            mtp_check = mtp_validation.disable_mtp_completeness_check()
 
         # The worker is handed an explicit NPU device, so bind it before touching
         # any stream: the packed helpers resolve the ambient device.
-        with torch.npu.device(self.device), disable_mtp_completeness_check():
+        with torch.npu.device(self.device), mtp_check:
             metadata = zip(update_info.names, update_info.shapes, update_info.dtype_names)
             if params["packed"]:
                 packed_broadcast_consumer(

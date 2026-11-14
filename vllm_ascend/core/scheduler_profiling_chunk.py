@@ -46,6 +46,8 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.core.profiling_chunk_predictor import ProfilingChunkManager
+from vllm_ascend.core.scheduler_output import make_cached_request_data
+from vllm_ascend.utils import vllm_version_is
 
 
 class ProfilingChunkScheduler(Scheduler):
@@ -1036,14 +1038,6 @@ class ProfilingChunkScheduler(Scheduler):
         # len(self.running).
         assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs) <= len(self.running)
 
-        # Get the longest common prefix among all requests in the running queue.
-        # This can be potentially used for cascade attention.
-        num_common_prefix_blocks = [0] * len(self.kv_cache_config.kv_cache_groups)
-        with record_function_or_nullcontext("schedule: get_num_common_prefix_blocks"):
-            if self.running:
-                any_request_id = self.running[0].request_id
-                num_common_prefix_blocks = self.kv_cache_manager.get_num_common_prefix_blocks(any_request_id)
-
         # Construct the scheduler output.
         scheduled_new_reqs.extend(scheduled_resumed_reqs)
         scheduled_resumed_reqs.clear()
@@ -1058,12 +1052,16 @@ class ProfilingChunkScheduler(Scheduler):
         ]
 
         with record_function_or_nullcontext("schedule: make_cached_request_data"):
-            cached_reqs_data = self._make_cached_request_data(
+            cached_reqs_data, schedule_metadata = make_cached_request_data(
+                self,
                 scheduled_running_reqs,
                 scheduled_resumed_reqs,
                 num_scheduled_tokens,
                 scheduled_spec_decode_tokens,
                 req_to_new_blocks,
+                new_reqs_data,
+                scheduled_encoder_inputs,
+                encoder_compute_budget,
             )
 
         # Mamba "align" boundary states must be handed off with exact block ids;
@@ -1098,9 +1096,11 @@ class ProfilingChunkScheduler(Scheduler):
         if self.dynamic_sd_lookup is not None and len(num_scheduled_tokens) > 0:
             num_spec_tokens_to_schedule = self.dynamic_sd_lookup[len(num_scheduled_tokens)]
 
-        scheduled_encoder_input_stats = None
-        if self.log_stats and self.observability_config.enable_logging_iteration_details:
-            scheduled_encoder_input_stats = self._make_scheduled_encoder_input_stats(scheduled_encoder_inputs)
+        if vllm_version_is("0.33.0"):
+            scheduled_encoder_input_stats = None
+            if self.log_stats and self.observability_config.enable_logging_iteration_details:
+                scheduled_encoder_input_stats = self._make_scheduled_encoder_input_stats(scheduled_encoder_inputs)
+            schedule_metadata["scheduled_encoder_input_stats"] = scheduled_encoder_input_stats
 
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
@@ -1109,8 +1109,7 @@ class ProfilingChunkScheduler(Scheduler):
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
-            scheduled_encoder_input_stats=scheduled_encoder_input_stats,
-            num_common_prefix_blocks=num_common_prefix_blocks,
+            **schedule_metadata,
             preempted_req_ids=self.reset_preempted_req_ids,
             # finished_req_ids is an existing state in the scheduler,
             # instead of being newly scheduled in this step.
@@ -1123,7 +1122,11 @@ class ProfilingChunkScheduler(Scheduler):
             kv_cache_block_copies=pending_kv_cache_block_copies,
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
-            ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
+            **(
+                {"ec_manager_metadata": self.encoder_cache_manager.get_manager_metadata()}
+                if vllm_version_is("0.33.0")
+                else {}
+            ),
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:

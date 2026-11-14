@@ -1,0 +1,8 @@
+pr: 21469
+entries:
+  - category: dependency
+    text: Updated the verified vLLM main revision from the November 6 pin to the November 12 pin while retaining v0.33.0 compatibility.
+  - category: bugfix
+    text: Adapted Ascend to the intervening compiler, scheduler, model runner, sampling, MoE scaling, pipeline auxiliary-state, and sparse-attention API changes.
+  - category: bugfix
+    text: Fixed MiniMax M3 initialization with the Transformers configuration used by the new vLLM revision.

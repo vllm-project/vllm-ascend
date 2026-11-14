@@ -31,6 +31,7 @@ from vllm.v1.metrics.reader import Counter, Vector
 from tests.e2e.conftest import DPVllmRunner, VllmRunner, wait_until_npu_memory_free
 from tests.e2e.pull_request.one_card.model_runner_v2.utils import calculate_acceptance_per_pos
 from tests.e2e.pull_request.utils import run_pd_disaggregation
+from vllm_ascend.utils import vllm_version_is
 
 MAX_NUM_SEQS = 4
 FULL_DECODE_GRAPH = {
@@ -583,7 +584,7 @@ EAGLE3_PCP_CASE = AccuracyCase(
             "model": EAGLE3_PCP_DRAFT_MODEL,
             "num_speculative_tokens": 3,
             "draft_tensor_parallel_size": 2,
-            "disable_padded_drafter_batch": False,
+            **({"disable_padded_drafter_batch": False} if vllm_version_is("0.33.0") else {}),
         },
     },
 )

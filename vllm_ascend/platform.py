@@ -65,6 +65,7 @@ from vllm_ascend.utils import (
     refresh_block_size,
     update_cudagraph_capture_sizes,
     enable_sp,
+    vllm_version_is,
 )
 
 if TYPE_CHECKING:
@@ -847,8 +848,12 @@ def _configure_minimax_m3_a5_mixed_kv_cache(vllm_config: VllmConfig) -> None:
         return
 
     sparse_config = getattr(text_config, "sparse_attention_config", None) or {}
-    sparse_freq = sparse_config.get("sparse_attention_freq") or []
-    sparse_layer_ids = {layer_idx for layer_idx, freq in enumerate(sparse_freq) if freq != 0}
+    if sparse_config:
+        sparse_freq = sparse_config.get("sparse_attention_freq") or []
+        sparse_layer_ids = {layer_idx for layer_idx, freq in enumerate(sparse_freq) if freq != 0}
+    else:
+        layer_types = getattr(text_config, "layer_types", None) or ()
+        sparse_layer_ids = {i for i, layer_type in enumerate(layer_types) if layer_type == "minimax_m3_sparse"}
     gqa_layer_ids = [str(layer_idx) for layer_idx in range(num_hidden_layers) if layer_idx not in sparse_layer_ids]
     if not gqa_layer_ids:
         return
@@ -1432,6 +1437,18 @@ def _setup_compile_backend(
             set(compilation_config.cudagraph_capture_sizes or []) | {reduced_cg_cap}
         )
         compilation_config.max_cudagraph_capture_size = None
+        # Main resolves separate prefill/decode sizes on the first pass. They
+        # were derived from the truncated grid, so regenerate them alongside
+        # the restored off-stride default rather than mixing two size sets.
+        # Explicit split sizes never receive reduced_cg_cap (see below).
+        if not vllm_version_is("0.33.0"):
+            for name in (
+                "prefill_cudagraph_capture_token_sizes",
+                "max_prefill_cudagraph_capture_tokens",
+                "decode_cudagraph_capture_request_sizes",
+                "max_decode_cudagraph_capture_requests",
+            ):
+                setattr(compilation_config, name, None)
         delattr(compilation_config, "reduced_cg_cap")
 
     # Recompute cudagraph sizes before extending splitting_ops (honors the
@@ -1446,7 +1463,13 @@ def _setup_compile_backend(
         and not vllm_config.model_config.enforce_eager
         and requires_tp_aligned_capture_sizes
     ):
-        original_sizes = compilation_config.cudagraph_capture_sizes
+        # Main V2 resolves prefill tokens and decode requests separately.
+        # The TP token-layout restriction applies to the prefill grid; keep
+        # the resolved decode request grid used by the graph managers intact.
+        prefill_sizes = None
+        if not vllm_version_is("0.33.0"):
+            prefill_sizes = compilation_config.prefill_cudagraph_capture_token_sizes
+        original_sizes = prefill_sizes if prefill_sizes is not None else compilation_config.cudagraph_capture_sizes
         tp_size = vllm_config.parallel_config.tensor_parallel_size
         sp_aclgraph_sizes = [size for size in original_sizes if size % tp_size == 0]
         if not sp_aclgraph_sizes:
@@ -1456,7 +1479,17 @@ def _setup_compile_backend(
                 f"{vllm_config.parallel_config.tensor_parallel_size}"
             )
 
-        if len(sp_aclgraph_sizes) != len(original_sizes):
+        if prefill_sizes is not None:
+            compilation_config.prefill_cudagraph_capture_token_sizes = sp_aclgraph_sizes
+            compilation_config.max_prefill_cudagraph_capture_tokens = sp_aclgraph_sizes[-1]
+            # Re-record the token union from the resolved split grids. Keeping
+            # a legacy-only list (e.g. [4] with one decode request) makes the
+            # engine handshake's config re-entry reject the derived sizes.
+            vllm_config._split_cudagraph_capture_sizes(
+                False, vllm_config.get_decode_cudagraph_query_lens(vllm_config.uniform_decode_query_len)
+            )
+            compilation_config.post_init_cudagraph_sizes()
+        elif len(sp_aclgraph_sizes) != len(original_sizes):
             # Match max_cudagraph_capture_size with the valid max size to avoid
             # initialization error of vllm server.
             compilation_config.max_cudagraph_capture_size = sp_aclgraph_sizes[-1]
@@ -1563,7 +1596,38 @@ def _setup_worker_and_scheduler(
                 "vllm_ascend.core.batch_job_aware_scheduler.BatchJobAwareScheduler"
             )
 
+    _validate_copied_scheduler_async_kv_limit(vllm_config, ascend_config)
     _downgrade_swa_bounded_replay(vllm_config, ascend_config)
+
+
+def _copied_scheduler_mode(ascend_config) -> str | None:
+    """Name a mode that replaces upstream's schedule implementation."""
+    scheduler_config = ascend_config.scheduler_config
+    if scheduler_config.recompute_scheduler_enable:
+        return "recompute_scheduler_enable"
+    if scheduler_config.dyntra_lb_config.enabled:
+        return "dyntra_lb_config"
+    if scheduler_config.profiling_chunk_config.enabled:
+        return "profiling_chunk_config"
+    if scheduler_config.enable_balance_scheduling:
+        return "enable_balance_scheduling"
+    return None
+
+
+def _validate_copied_scheduler_async_kv_limit(vllm_config: VllmConfig, ascend_config) -> None:
+    """Reject the new async-queue opt-in until copied schedulers drain it."""
+    if vllm_version_is("0.33.0"):
+        return
+    if getattr(vllm_config.scheduler_config, "max_async_kv_loads_per_step", None) is None:
+        return
+    mode = _copied_scheduler_mode(ascend_config)
+    if mode is not None:
+        # vLLM #61725 routes these requests into async_kv_waiting. The copied
+        # schedulers only scan waiting/kv_holding_waiting, leaving them stranded.
+        raise ValueError(
+            f"max_async_kv_loads_per_step is not supported with {mode}. "
+            "Leave this limit unset or disable the Ascend scheduler extension."
+        )
 
 
 def _swa_bounded_replay_unsupported_mode(ascend_config) -> str | None:
@@ -1582,16 +1646,7 @@ def _swa_bounded_replay_unsupported_mode(ascend_config) -> str | None:
     its ``super().schedule()`` fallback only applies while balancing is off.
 
     """
-    scheduler_config = ascend_config.scheduler_config
-    if scheduler_config.recompute_scheduler_enable:
-        return "recompute_scheduler_enable"
-    if scheduler_config.dyntra_lb_config.enabled:
-        return "dyntra_lb_config"
-    if scheduler_config.profiling_chunk_config.enabled:
-        return "profiling_chunk_config"
-    if scheduler_config.enable_balance_scheduling:
-        return "enable_balance_scheduling"
-    return None
+    return _copied_scheduler_mode(ascend_config)
 
 
 def _downgrade_swa_bounded_replay(vllm_config: VllmConfig, ascend_config) -> None:
@@ -1839,6 +1894,17 @@ def _get_reduced_cg_cap(vllm_config: VllmConfig) -> int | None:
     if compilation_config.max_cudagraph_capture_size is not None:
         return None
     if compilation_config.cudagraph_capture_sizes is not None:
+        return None
+    if not vllm_version_is("0.33.0") and any(
+        getattr(compilation_config, name) is not None
+        for name in (
+            "prefill_cudagraph_capture_token_sizes",
+            "max_prefill_cudagraph_capture_tokens",
+            "decode_cudagraph_capture_request_sizes",
+            "max_decode_cudagraph_capture_requests",
+            "max_decode_cudagraph_capture_tokens",
+        )
+    ):
         return None
 
     scheduler_config = getattr(vllm_config, "scheduler_config", None)

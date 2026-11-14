@@ -88,11 +88,20 @@ from vllm_ascend.utils import (
     enable_sfa,
     is_pd_decode_recompute_scheduler_enabled,
     maybe_trans_nz,
+    vllm_version_is,
     weak_ref_tensors,
 )
 
 BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
+
+
+def _uses_unpadded_drafter_batch(speculative_config) -> bool:
+    if vllm_version_is("0.33.0"):
+        return speculative_config.disable_padded_drafter_batch
+    # MRv1's optional unpadded drafter was removed in native #63373.
+    return False
+
 
 # Exclusive batch * K limit of the fused op with perm_x1=(1, 0, 2).
 TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
@@ -716,9 +725,8 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         if build_metadata_step == BUILD_METADATA_STEP_PREFILL:
             # If graph_pad_size > -1, mean is running in fullgraph mode.
             # NOTE: Maybe this block_table change can be removed when graph_pad_size > 1.
-            if (
-                self.graph_pad_size > common_attn_metadata.num_reqs
-                and self.speculative_config.disable_padded_drafter_batch
+            if self.graph_pad_size > common_attn_metadata.num_reqs and _uses_unpadded_drafter_batch(
+                self.speculative_config
             ):
                 return self.graph_pad_size
             return common_attn_metadata.num_reqs
@@ -787,12 +795,12 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
 
         # NOTE: MTP full graph is incompatible with context parallelism.
         # NOTE: Maybe this block_table change can be removed when graph_pad_size > 1.
-        if self.graph_pad_size > self.num_decodes and self.speculative_config.disable_padded_drafter_batch:
+        if self.graph_pad_size > self.num_decodes and _uses_unpadded_drafter_batch(self.speculative_config):
             self.block_table = self.block_table[: self.graph_pad_size, ...]
         seq_lens_list = self.seq_lens.tolist()
 
         if self.graph_pad_size > num_reqs:
-            if self.speculative_config.disable_padded_drafter_batch:
+            if _uses_unpadded_drafter_batch(self.speculative_config):
                 num_reqs_pad_size = self.graph_pad_size - num_reqs
                 actual_seq_lengths_q = self.pad_actual_seq_len_q_mtp_disable_pad(
                     num_reqs_pad_size, num_reqs, actual_seq_lengths_q
@@ -1138,7 +1146,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                     actual_seq_lengths = layer_metadata.decode.actual_seq_lengths_q
                     block_table = layer_metadata.decode.block_table
                     # TODO: This is a hack and should be fixed in the future.
-                    if speculative_config.disable_padded_drafter_batch:
+                    if _uses_unpadded_drafter_batch(speculative_config):
                         block_table = block_table[: len(actual_seq_lengths)]
                     seq_lens_list = seq_lens_list + [0] * (len(actual_seq_lengths) - len(seq_lens_list))
                 else:
