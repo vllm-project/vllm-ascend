@@ -1602,6 +1602,28 @@ def uses_mooncake_connector(kv_transfer_config: Any) -> bool:
     return bool(_collect_kv_connector_names(kv_transfer_config) & mooncake_connector_names)
 
 
+def uses_ascend_store_memcache(kv_transfer_config: Any) -> bool:
+    """Find an AscendStoreConnector using the Memcache backend, including in MultiConnector."""
+    if isinstance(kv_transfer_config, (list, tuple)):
+        return any(uses_ascend_store_memcache(item) for item in kv_transfer_config)
+
+    if isinstance(kv_transfer_config, dict):
+        connector = kv_transfer_config.get("kv_connector")
+        extra_config = kv_transfer_config.get("kv_connector_extra_config")
+    else:
+        connector = getattr(kv_transfer_config, "kv_connector", None)
+        extra_config = getattr(kv_transfer_config, "kv_connector_extra_config", None)
+
+    if connector == "AscendStoreConnector" and isinstance(extra_config, dict):
+        backend = extra_config.get("backend", "mooncake")
+        if isinstance(backend, str) and backend.lower() == "memcache":
+            return True
+
+    if isinstance(extra_config, dict):
+        return uses_ascend_store_memcache(extra_config.get("connectors", []))
+    return False
+
+
 def _collect_kv_connector_names(value: Any) -> set[str]:
     connector_names: set[str] = set()
     if isinstance(value, dict):
