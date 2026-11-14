@@ -1,0 +1,7 @@
+pr: 21820
+entries:
+  - category: performance
+    text: >-
+      Fused Qwen GDN QKVZ and BA projection unpacking with output-buffer
+      initialization to remove three Slice launches and one ZerosLike launch
+      from the decode path.
