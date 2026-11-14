@@ -957,8 +957,8 @@ request-indexed verification records, then reconstructs the accepted state
 after sampling. RecoverSSM is disabled by default.
 
 Add the following options to your existing Kimi serving command, replacing the
-draft-model path. Keep the parallelism, quantization, KV-cache dtype and memory
-settings appropriate for the model and devices:
+path with a compatible DSpark draft model. Keep the parallelism, quantization,
+KV-cache dtype and memory settings appropriate for the model and devices:
 
 ```shell
 --use-replayssm \
@@ -967,30 +967,22 @@ settings appropriate for the model and devices:
 
 Requirements:
 
-- Model Runner V2 and a compatible DSpark draft model are required.
-- With prefix caching, use `--enable-prefix-caching --mamba-cache-mode align`;
-  without prefix caching, use `--mamba-cache-mode none`.
 - Adaptive verification and stochastic rounding are unsupported.
 
 For experimental prefill/decode separation, use `MooncakeConnectorV2` or
 `MooncakePullConnector` and enable `--use-replayssm` on both Prefill and Decode.
 Both sides must use the same integration version, model and weights,
-TP size, prefix-caching configuration, speculative method and window, persistent
-state dtypes and SD convolution layout. Set `VLLM_SSM_CONV_STATE_LAYOUT=SD` on
-both sides. Kimi RecoverSSM rejects a local DS layout when P/D is enabled, but
+TP size, prefix-caching configuration, speculative method and window, and
+persistent state dtypes. Set `VLLM_SSM_CONV_STATE_LAYOUT=SD` on both sides;
 the connector does not validate the peer's convolution layout or all other peer
-settings. The deployment must align both sides.
+settings.
 
 !!! warning
 
     This feature is experimental. End-to-end P/D output equivalence remains
-    unverified, including when prefix caching is enabled. PP, PCP and DCP sizes
-    greater than 1 are not rejected by the Kimi RecoverSSM validator, but their
-    correctness is unverified and other parallelism constraints may still apply.
-    Validate eager and graph execution, model accuracy, acceptance rates, memory
-    and performance on the intended Ascend hardware and checkpoints before use.
-
-Removing `--use-replayssm` selects the existing KDA path.
+    unverified, including when prefix caching is enabled. Configurations with
+    PP, PCP or DCP greater than 1 are also unverified and may be subject to other
+    parallelism constraints.
 
 ## Synthetic Rejection Sampling
 
