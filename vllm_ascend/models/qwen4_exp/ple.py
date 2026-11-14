@@ -23,6 +23,7 @@ from typing import Any, Literal
 import torch
 import torch.nn.functional as F
 import torch_npu
+from vllm.distributed import get_pcp_group
 from vllm.logger import logger
 from vllm.models.qwen4_exp.amd.ple_layer import Qwen4ExpPLELayer
 from vllm.v1.attention.backends.short_conv_attn import (
@@ -32,6 +33,7 @@ from vllm.v1.attention.backends.short_conv_attn import (
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 from vllm_ascend.attention.utils import wait_for_kv_layer_from_connector
+from vllm_ascend.ops.recurrent_pcp import PCPRecurrentMetadataBuilderMixin, pcp_gather_tokens, pcp_scatter_tokens
 from vllm_ascend.ops.triton_ple import (
     ple_conv_decode,
     ple_conv_prefill,
@@ -297,22 +299,23 @@ def _wrap_ple_short_conv(original: Callable[..., Any]) -> Callable[..., Any]:
                         f"expect at least {state_capacity}."
                     )
                 conv_state = conv_state[:, -state_capacity:, :]
-            pcp_context = getattr(layer_attn_metadata, "pcp_context", None)
+            use_pcp = hasattr(layer_attn_metadata, "pcp_restore_idx")
             conv_inputs = inputs
             conv_residual = residual
-            if pcp_context is not None:
-                conv_inputs = pcp_context.gather_tokens(inputs)
+            if use_pcp:
+                pcp_size = get_pcp_group().world_size
+                conv_inputs = pcp_gather_tokens(inputs, pcp_size, self.prefix)
                 conv_residual = torch.zeros_like(conv_inputs)
             self._short_conv_dilated_dispatch(
                 inputs=conv_inputs,
                 residual=conv_residual,
-                outer_residual=outer_residual if pcp_context is None else None,
+                outer_residual=None if use_pcp else outer_residual,
                 metadata=layer_attn_metadata,
                 conv_state=conv_state,
                 conv_weights=conv_weights.to(dtype=inputs.dtype),
             )
-            if pcp_context is not None:
-                residual.add_(pcp_context.scatter_tokens(conv_residual))
+            if use_pcp:
+                residual.add_(pcp_scatter_tokens(conv_residual, pcp_size, self.prefix))
                 if outer_residual is not None:
                     residual.add_(outer_residual)
             return None
@@ -322,12 +325,8 @@ def _wrap_ple_short_conv(original: Callable[..., Any]) -> Callable[..., Any]:
     return wrapped
 
 
-class AscendPCPPLEMetadataBuilder(PleShortConvAttentionMetadataBuilder):
-    def build(self, common_prefix_len, common_attn_metadata, **kwargs):
-        metadata = super().build(common_prefix_len, common_attn_metadata, **kwargs)
-        context = common_attn_metadata.pcp_context
-        metadata.pcp_context = context if context is not None and context.local_token_indices is not None else None
-        return metadata
+class AscendPCPPLEMetadataBuilder(PCPRecurrentMetadataBuilderMixin, PleShortConvAttentionMetadataBuilder):
+    pass
 
 
 class AscendPCPPLEBackend(PleShortConvAttentionBackend):

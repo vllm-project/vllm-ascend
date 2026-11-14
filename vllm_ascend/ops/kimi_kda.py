@@ -44,7 +44,7 @@ from vllm_ascend.ops.head_parallel import (
     get_head_parallel_size,
 )
 from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
-from vllm_ascend.ops.kda_pcp import KimiKDAHostMetadataBackend
+from vllm_ascend.ops.recurrent_pcp import KimiKDAHostMetadataBackend
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDynamicLinearMethod,
 )
@@ -366,10 +366,10 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         positions: torch.Tensor,
     ) -> torch.Tensor:
         if self.pcp_size > 1:
-            hidden_states = torch.ops.vllm.kda_pcp_gather(hidden_states, self.pcp_size, self.prefix)
+            hidden_states = torch.ops.vllm.pcp_gather_tokens(hidden_states, self.pcp_size, self.prefix)
         output = self._forward_projections(hidden_states, positions)
         if self.pcp_size > 1:
-            output = torch.ops.vllm.kda_pcp_scatter(output, self.pcp_size, self.prefix)
+            output = torch.ops.vllm.pcp_scatter_tokens(output, self.pcp_size, self.prefix)
         return output
 
     def _forward_projections(self, hidden_states: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:

@@ -352,9 +352,11 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
 
         def build_metadata(**kwargs):
             if pcp_context is not None and (
-                not getattr(input_batch, "is_dummy", False) or getattr(input_batch, "is_cpp_profile", False)
+                not getattr(input_batch, "is_dummy", False)
+                or getattr(input_batch, "is_cpp_profile", False)
+                or pcp_context.global_batch is not input_batch
             ):
-                # Recurrent state uses global request order; SFA keeps local queries.
+                # Recurrent state uses global request order, including sharded decode capture.
                 local_groups = [
                     [group for group in groups if not isinstance(group.kv_cache_spec, MambaSpec)]
                     for groups in attn_groups

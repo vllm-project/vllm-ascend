@@ -67,7 +67,14 @@ def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch, pcp) 
         seq_lens=torch.tensor([2]),
     )
     if pcp:
-        side_metadata.pcp_context = SimpleNamespace(gather_tokens=lambda rows: torch.cat((rows, rows + 100)))
+        side_metadata.pcp_context = SimpleNamespace(
+            local_num_tokens=2,
+            global_batch=SimpleNamespace(num_tokens=4),
+            hidden_restore_idx=torch.tensor([0, 2, 3, 1]),
+        )
+        monkeypatch.setattr(qsa, "get_pcp_group", lambda: object())
+        gather = Mock(side_effect=lambda rows, *args, **kwargs: (torch.cat((rows, rows + 100)), None))
+        monkeypatch.setattr(qsa, "all_gather_async", gather)
         main_metadata.slot_mapping = torch.tensor([4, 5, 6, 7])
     monkeypatch.setattr(
         qsa,
@@ -118,8 +125,9 @@ def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch, pcp) 
     expected_key = projected_k.view(2, 1, 4)
     expected_value = projected_v.view(2, 1, 4)
     if pcp:
-        expected_key = torch.cat((expected_key, expected_key + 100))
-        expected_value = torch.cat((expected_value, expected_value + 100))
+        order = [0, 2, 3, 1]
+        expected_key = torch.cat((expected_key, expected_key + 100))[order]
+        expected_value = torch.cat((expected_value, expected_value + 100))[order]
     torch.testing.assert_close(update_args[1], expected_key)
     torch.testing.assert_close(update_args[2], expected_value)
     torch.testing.assert_close(update_args[4], main_metadata.slot_mapping)
@@ -172,18 +180,25 @@ def test_pcp_indexer_compresses_complete_groups_across_ranks(monkeypatch) -> Non
         slot_mapping=torch.tensor([4, 5, 6, 7]),
     )
     compressed_write = SimpleNamespace(slot_mapping=torch.tensor([-1, -1, -1, 8]))
-    local_keys = global_keys[[0, 3]]
-    context = SimpleNamespace(gather_tokens=Mock(return_value=global_keys))
+    local_keys = global_keys[[0, 3, 0]]
+    gathered = torch.cat((local_keys, global_keys[[1, 2, 0]]))
+    context = SimpleNamespace(
+        local_num_tokens=3, global_batch=SimpleNamespace(num_tokens=4), hidden_restore_idx=torch.tensor([0, 3, 4, 1, 0])
+    )
     raw = SimpleNamespace(pcp_context=context, write_metadata=raw_write)
     compressed = SimpleNamespace(write_metadata=compressed_write)
     compress = Mock(return_value=(torch.empty(1), torch.empty(1)))
     store = Mock()
+    group = object()
+    all_gather = Mock(return_value=(gathered, None))
+    monkeypatch.setattr(qsa, "get_pcp_group", lambda: group)
+    monkeypatch.setattr(qsa, "all_gather_async", all_gather)
     monkeypatch.setattr(qsa, "_compress_qsa_groups", compress)
     monkeypatch.setattr(qsa, "_store_qsa_cache_rows", store)
 
-    indexer._update_and_compress(local_keys, torch.tensor([0, 3]), raw, compressed)
+    indexer._update_and_compress(local_keys, torch.tensor([0, 3, 0]), raw, compressed)
 
-    context.gather_tokens.assert_called_once_with(local_keys)
+    all_gather.assert_called_once_with(local_keys, group, async_op=False)
     compression_args = compress.call_args.args
     torch.testing.assert_close(compression_args[0], global_keys)
     torch.testing.assert_close(compression_args[6], raw_write.logical_positions)
