@@ -636,8 +636,6 @@ class NPUPlatform(Platform):
                 if ratios:
                     config.compress_ratios = list(ratios)
 
-        # TODO: Remove this guard once GLM-5.3-Flash DFlash2 supports pipeline parallelism.
-        _validate_glm5next_dflash2_pp_config(vllm_config)
         cls._validate_indexer_pp_config(vllm_config)
 
         _validate_pcp_dcp_config(vllm_config)
@@ -2063,33 +2061,6 @@ def _validate_deepseek_v4_tp_config(vllm_config: VllmConfig) -> None:
     max_tp_size = 16 if variant == "V4 Pro" else 8
     if tp_size > max_tp_size:
         raise ValueError(f"DeepSeek {variant} supports at most TP{max_tp_size}. Got tp_size={tp_size}.")
-
-
-def _validate_glm5next_dflash2_pp_config(vllm_config: VllmConfig) -> None:
-    parallel_config = vllm_config.parallel_config
-    pp_size = parallel_config.pipeline_parallel_size
-    if pp_size <= 1:
-        return
-
-    speculative_config = vllm_config.speculative_config
-    if speculative_config is None or getattr(speculative_config, "method", None) != "dflash":
-        return
-
-    model_config = vllm_config.model_config
-    model_types = {
-        getattr(getattr(model_config, field, None), "model_type", None) for field in ("hf_config", "hf_text_config")
-    }
-    if model_types.isdisjoint({"glm5_next", "glm5_next_text"}):
-        return
-
-    draft_model_config = getattr(speculative_config, "draft_model_config", None)
-    draft_architectures = getattr(draft_model_config, "architectures", None) or ()
-    if "DFlash2DraftModel" not in draft_architectures:
-        return
-
-    raise ValueError(
-        f"GLM-5.3-Flash with DFlash2 currently requires pipeline_parallel_size=1. Got pipeline_parallel_size={pp_size}."
-    )
 
 
 def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> None:

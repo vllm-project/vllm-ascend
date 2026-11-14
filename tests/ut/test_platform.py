@@ -22,7 +22,6 @@ from vllm_ascend.platform import (
     _validate_deepseek_v4_tp_config,
     _validate_draft_decode_context_parallel_config,
     _validate_eplb_config,
-    _validate_glm5next_dflash2_pp_config,
     _validate_parallel_config,
     _validate_pcp_dcp_config,
     _validate_sfa_dcp_kv_sp,
@@ -67,36 +66,6 @@ def test_kimi_hybrid_pd_rejects_sub_kernel_interleave(connector, interleave):
         pytest.raises(ValueError, match="interleave.*kernel block size"),
     ):
         _validate_sfa_dcp_kv_sp(config)
-
-
-@pytest.mark.parametrize(
-    ("pp_size", "method", "architecture", "model_type", "should_raise"),
-    [
-        (2, "dflash", "DFlash2DraftModel", "glm5_next_text", True),
-        (2, "dflash", "DFlash2DraftModel", "glm5_next", True),
-        (1, "dflash", "DFlash2DraftModel", "glm5_next_text", False),
-        (2, "dflash", "DFlashDraftModel", "glm5_next_text", False),
-        (2, "dspark", "DFlash2DraftModel", "glm5_next_text", False),
-        (2, "dflash", "DFlash2DraftModel", "qwen3", False),
-    ],
-)
-def test_glm5next_dflash2_rejects_pipeline_parallel_size_above_one(
-    pp_size, method, architecture, model_type, should_raise
-):
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type=model_type)),
-        parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size),
-        speculative_config=SimpleNamespace(
-            method=method,
-            draft_model_config=SimpleNamespace(architectures=[architecture]),
-        ),
-    )
-
-    if should_raise:
-        with pytest.raises(ValueError, match="requires pipeline_parallel_size=1"):
-            _validate_glm5next_dflash2_pp_config(config)
-    else:
-        _validate_glm5next_dflash2_pp_config(config)
 
 
 @pytest.mark.parametrize(
