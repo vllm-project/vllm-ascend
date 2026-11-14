@@ -75,6 +75,11 @@ The following table lists additional configuration options available in vLLM Asc
 | `rl_config`                        | dict | `{}`    | One-click RL mode configuration. See <a href="#rl_config">rl_config</a> for all fields, the two deployment modes, usage examples, and the migration guide. |
 | `combine_quant_mode`                | int  | `0`     | Fused MC2 configuration. This configuration will be passed as the `comm_quant_mode` argument for the `torch_npu.npu_moe_distribute_combine_v2` operator. Please refer to the operator documentation for the valid value range. |
 
+For DeepSeek V4/V4.1, `weight_nz_mode=2` also enables NZ storage for unquantized
+BF16/FP16 `wo_a` and `wo_b` output-projection weights. The grouped `wo_a` layout
+is finalized before the NZ conversion; inputs and outputs remain ND. The default
+mode `1` continues to leave these unquantized weights in ND.
+
 The details of each configuration option are as follows:
 
 <span id="runtime_guard"></span>**runtime_guard**
