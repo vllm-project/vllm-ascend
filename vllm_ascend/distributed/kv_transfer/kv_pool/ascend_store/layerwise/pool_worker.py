@@ -66,6 +66,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata
     get_partial_block_index,
     masked_block_runs,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.transfer_mode import (
+    KVPoolTransferMode,
+    resolve_kv_pool_transfer_mode,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     ReqMeta,
@@ -124,6 +128,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self._init_layerwise_config()
 
     def _init_kv_transfer_config(self, vllm_config, extra_config, use_layerwise, kv_cache_config) -> None:
+        self.use_cross_layer = (
+            resolve_kv_pool_transfer_mode(vllm_config, use_layerwise) is KVPoolTransferMode.CROSS_LAYER
+        )
         backend_name = extra_config.get("backend", "mooncake").lower()
         self.layerwise_backend = get_backend_class(backend_name)
         self.layerwise_data_plane = (
@@ -135,7 +142,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         super()._init_kv_transfer_config(vllm_config, extra_config, use_layerwise, kv_cache_config)
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
         self._dspark_draft_layer_names = (
-            set(getattr(kv_cache_config, "dspark_draft_layer_names", ())) if self.use_layerwise_transfer else set()
+            set(getattr(kv_cache_config, "dspark_draft_layer_names", ()))
+            if self.use_layerwise_transfer and not self.use_cross_layer
+            else set()
         )
         if (
             self.backend_name != "memcache"
@@ -228,7 +237,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 "num_hidden_layers",
                 self.num_layers,
             )
-            if self.use_layerwise_transfer:
+            if self.use_layerwise_transfer and not getattr(self, "use_cross_layer", False):
                 self._layerwise_reuse_layout = build_layerwise_reuse_layout(
                     target_specs,
                     base_layers,
@@ -305,7 +314,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self.layerwise_offload = False
         self.independent_layers: list[int] = []
         self.prefetch_layer_map: dict[int, int] = {}
-        if self.use_layerwise_transfer:
+        if self.use_layerwise_transfer and not getattr(self, "use_cross_layer", False):
             if self._layerwise_reuse_layout is None:
                 cache_layout = build_layerwise_cache_layout(
                     self.num_layers,
@@ -1930,10 +1939,18 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 # Only call batch_add_lease for keys with valid size.
                 valid_keys = [keys[index] for index in valid_gva_indices]
                 if valid_keys:
-                    lease_results = self.m_store.batch_add_lease(valid_keys, LAYERWISE_READ_LEASE_TTL_MS)
-                    if lease_results is None or len(lease_results) != len(valid_keys):
+                    # Multiple requests in one step can share prefix keys. One
+                    # lease pins each key for the whole step, so acquire it only
+                    # once to match the set-based release at the step fence.
+                    new_keys = list(dict.fromkeys(key for key in valid_keys if key not in self._step_load_keys))
+                    new_results = (
+                        self.m_store.batch_add_lease(new_keys, LAYERWISE_READ_LEASE_TTL_MS) if new_keys else []
+                    )
+                    if new_results is None or len(new_results) != len(new_keys):
                         return False
-                    for key, res in zip(valid_keys, lease_results):
+                    result_by_key = dict(zip(new_keys, new_results))
+                    lease_results = [0 if key in self._step_load_keys else result_by_key[key] for key in valid_keys]
+                    for key, res in zip(new_keys, new_results):
                         if res == 0:
                             self._step_load_keys.add(key)
                     leased_keys = []
@@ -1942,6 +1959,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                         if lease_res == MEMCACHE_UNMATCHED_STATE and block_idx == partial_block_index:
                             partial_key = keys[gva_index]
                             for retry in range(1, PARTIAL_LEASE_RETRY_COUNT + 1):
+                                if partial_key in self._step_load_keys:
+                                    lease_res = 0
+                                    break
                                 time.sleep(PARTIAL_LEASE_RETRY_INTERVAL_S)
                                 retry_results = self.m_store.batch_add_lease(
                                     [partial_key],
@@ -1979,17 +1999,23 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     leased_infos = self.m_store.batch_get_key_info(leased_keys)
                     if leased_infos is None or len(leased_infos) != len(leased_keys):
                         return False
-                    key_indices: dict[str, int] = {}
+                    key_indices: dict[str, list[int]] = {}
                     for index, key in enumerate(keys):
-                        # Preserve keys.index()'s first occurrence for repeated keys.
-                        key_indices.setdefault(key, index)
+                        key_indices.setdefault(key, []).append(index)
+                    pinned_gvas: dict[str, int] = {}
                     for key, info in zip(leased_keys, leased_infos, strict=True):
-                        index = key_indices[key]
-                        gvas[index] = (
+                        if getattr(self, "use_cross_layer", False) and (
+                            info is None or info.size() != self._global_group_alloc_size(group_id)
+                        ):
+                            return False
+                        pinned_gvas[key] = (
                             next((address for address in info.gva_list() if address > 0), 0) if info is not None else 0
                         )
-                        if not gvas[index]:
-                            invalid_block_ids.append(int(block_ids_by_group[block_indices[index]]))
+                    for key, pinned_gva in pinned_gvas.items():
+                        for index in key_indices[key]:
+                            gvas[index] = pinned_gva
+                            if not pinned_gva:
+                                invalid_block_ids.append(int(block_ids_by_group[block_indices[index]]))
 
                 if invalid_block_ids:
                     return False

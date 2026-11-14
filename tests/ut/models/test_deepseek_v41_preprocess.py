@@ -19,7 +19,9 @@ def test_dsa_v41_custom_op_forwards_its_output_buffer(monkeypatch):
     hidden = torch.zeros(1, 8)
     output = torch.empty_like(hidden)
     impl = Mock()
-    attn = SimpleNamespace(v41_impl=impl)
+    attn = SimpleNamespace(v41_impl=impl, dsa_attn=SimpleNamespace(swa_cache_layer=SimpleNamespace(kv_cache=[])))
+    monkeypatch.setattr(dsa_v41, "wait_for_kv_layer_from_connector", Mock())
+    monkeypatch.setattr(dsa_v41, "maybe_save_kv_layer_to_connector", Mock())
     monkeypatch.setattr(
         dsa_v41,
         "get_forward_context",

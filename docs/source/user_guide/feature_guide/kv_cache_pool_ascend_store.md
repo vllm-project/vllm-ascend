@@ -969,6 +969,80 @@ Expected output: MetaService starts successfully with no errors.
 
     `use_layerwise` can be set to `true` to enable per-layer KV access, supported by both the Mooncake and Memcache backends; it is only supported on the Prefill node. `consumer_is_to_put` and `consumer_is_to_load` can also be configured via `kv_connector_extra_config`.
 
+    **Automatic layerwise strategy selection:** resolve the backend first.
+    Mooncake with `use_layerwise=true` retains its block-key path. Memcache
+    with `use_layerwise=true` selects `cross_layer` for shared KV sources,
+    such as DeepSeek-V4.1, and retains ordinary GVA for independent-layer
+    models such as DeepSeek-V4. Both use `LayerwiseKVPoolScheduler` and the
+    existing backend key builder; no additional public switch is required.
+    `use_layerwise=false` retains ordinary bulk transfers.
+
+    The cross-layer strategy requires Model Runner V2. Explicit V1
+    configurations fail before GVA initialization; existing bulk, ordinary
+    Memcache GVA and Mooncake block-key configurations keep their runner support.
+    Cross-layer derives source positions/count and the replay
+    cut from `kv_source_layer_ids` and `num_hidden_layers`. It validates the
+    registered cache layout and consumer hooks, without fixed layer numbers
+    or a model-name allowlist. Model implementations that reuse the same
+    cache and hook contract adapt to topology changes automatically.
+
+    With Memcache, full cache blocks, and eager execution, dependency loads
+    are submitted before forward and copied in first-consumer order. Each
+    layer waits only for the data it needs. The scheduler and worker use
+    synchronous admission (`load_async` is internally set to false), while
+    later copies overlap earlier computation. Physical-layer buffer reuse,
+    offload snapshots, and KVPP layer hooks are not enabled for shared sources.
+
+    Use `--enforce-eager` for cross-layer deployments. PIECEWISE and combined
+    graph modes containing PIECEWISE are temporarily unsupported and fail
+    before GVA initialization. Their DS4.1 model-runtime adaptation is being
+    tracked in [PR #21511](https://github.com/vllm-project/vllm-ascend/pull/21511).
+    In PD separation, enable layerwise on P only;
+    D keeps it disabled.
+
+    PD separation also supports `MultiConnector` with the existing
+    `AscendStoreConnector` store child alongside the PD transport child.
+    Set `backend=memcache` and `use_layerwise=true` in that P-side store
+    child's `kv_connector_extra_config`, rather than on the MultiConnector root.
+    Cross-layer uses the standard connector load/save interfaces. Composite
+    attention boundaries reach bound cross-layer store children, including
+    nested groups; the PD child's normal step lifecycle remains active.
+    D-side store children keep `use_layerwise=false`.
+
+    With `swa_bounded_replay=true`, target SWA is reconstructed by replay and
+    is excluded from pool storage. Otherwise SWA saves follow the existing
+    window/block retention masks at reusable prefix boundaries, rather than
+    keeping only the final 128 tokens of the request. The configured window,
+    block size, and retention interval determine how many blocks are saved.
+
+    Cross-layer reuses the existing Memcache GVA key namespace, allocations,
+    leases, descriptor builders and layerwise sender/receiver. Source-ready
+    ranges can save while later layers compute; the final step fence submits
+    replay-cut/missing-hook tasks and publishes after all planned copies.
+    Positive `batch_alloc` addresses do not imply exclusive ownership, so the
+    strategy adds no independent writer session or destructive failure cleanup.
+    Existing bulk-format pool objects are not queried by the GVA strategy.
+
+    With the V2 model runner, DeepSeek V4.1 DSpark can use pipelined target
+    loads. Draft KV and other unmapped cacheable groups load synchronously
+    before forward, and all target loads drain before drafting. Ready target
+    KV saves use the existing per-layer GVA sender during target computation.
+    Draft/mixed groups, replay-cut writes and final publication retain the
+    step-end fence after draft preparation. Other
+    speculative methods or draft architectures restore synchronously with GVA.
+
+    The initial shared-source worker supports TP/PCP; PP/DCP/KVPP are rejected.
+    V4.1 PCP keeps complete KV replicas on each rank and uses the existing GVA
+    keys and layer-load events. Explicitly configured P/D PCP or DCP topology
+    mismatches remain subject to the ordinary GVA validation.
+    Sequence parallelism, microbatching, unsupported graph modes, partial
+    objects or missing hooks use synchronous GVA restoration without changing
+    the key protocol.
+    A load failure after computation begins fails the step; automatic state
+    rollback/retry is not supported. NPU correctness and performance evidence
+    are required before production use. See the
+    [cross-layer KV design and SDK contract](../../developer_guide/Design_Documents/cross_layer_pool.md).
+
     To start proxy_server and run inference, refer to the corresponding sub-steps in "PD Disaggregation Scenario" of [Scenario 1: Mooncake Backend](#scenario-1-mooncake-backend).
 
     Expected output: Same as Mooncake scenario, returns OpenAI Completions API JSON response.

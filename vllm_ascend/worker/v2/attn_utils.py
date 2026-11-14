@@ -1300,7 +1300,7 @@ def _allocate_kv_cache(
     if (use_hybrid_layout or is_paired_sfa) and not is_dsv4_model:
         hybrid_backing = _allocate_int8_cache_tensor(kv_cache_config.kv_cache_tensors[0].size, alignment, device)
 
-    layerwise_reuse = get_layerwise_reuse_config(vllm_config.kv_transfer_config) is not None
+    layerwise_reuse = get_layerwise_reuse_config(vllm_config.kv_transfer_config, vllm_config=vllm_config) is not None
     layerwise_aliases: dict[str, str] = {}
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
         shared_names = get_kv_cache_tensor_layers(kv_cache_tensor)

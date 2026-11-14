@@ -2544,6 +2544,23 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         self.assertNotIn(201, request.load_block_gvas_by_group_np[0])
         self.assertEqual(worker.get_block_ids_with_load_errors(), set())
 
+    def test_shared_prefix_acquires_each_step_lease_once(self):
+        worker = self._make_gva_worker()
+        info = SimpleNamespace(size=lambda: 64, gva_list=lambda: [201])
+        worker.m_store.batch_get_key_info.return_value = [info]
+        worker.m_store.batch_add_lease.return_value = [0]
+        first = self._make_gva_request(load_spec=LoadSpec(0, 16, True))
+        second = self._make_gva_request(load_spec=LoadSpec(0, 16, True))
+
+        worker._prepare_load_gvas_for_request([first, second])
+
+        self.assertEqual(worker.m_store.batch_add_lease.call_count, 1)
+        self.assertEqual(len(worker._step_load_keys), 1)
+        self.assertTrue(first.load_spec.can_load)
+        self.assertTrue(second.load_spec.can_load)
+        self.assertEqual(first.load_block_gvas_by_group_np[0].tolist(), [201])
+        self.assertEqual(second.load_block_gvas_by_group_np[0].tolist(), [201])
+
     @staticmethod
     def _make_multi_block_gva_request(block_hashes):
         block_ids = list(range(7, 7 + len(block_hashes)))
@@ -2559,20 +2576,21 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             load_spec=LoadSpec(0, 16 * len(block_hashes), True),
         )
 
-    def test_layerwise_lease_refresh_preserves_first_duplicate_key_index(self):
+    def test_layerwise_lease_refresh_updates_all_duplicate_key_indices(self):
         worker = self._make_gva_worker()
         request = self._make_multi_block_gva_request(["h0", "h1", "h0"])
         before = [SimpleNamespace(size=lambda: 64, gva_list=lambda gva=gva: [gva]) for gva in (201, 202, 203)]
         pinned = [SimpleNamespace(gva_list=lambda gva=gva: [gva]) for gva in (301, 302, 303)]
         worker.m_store.batch_get_key_info.side_effect = [before, pinned]
-        worker.m_store.batch_add_lease.return_value = [0, 0, 0]
+        worker.m_store.batch_add_lease.return_value = [0, 0]
 
         self.assertIsNone(worker._prepare_load_gvas_for_request([request]))
 
-        # Repeated replies update the first matching slot, as keys.index did.
-        self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [303, 302, 203])
+        # No slot may retain a GVA read before the lease was acquired.
+        self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [303, 302, 303])
         queried = worker.m_store.batch_get_key_info.call_args_list[0].args[0]
         self.assertEqual(queried[0], queried[2])
+        self.assertEqual(worker.m_store.batch_add_lease.call_args.args[0], queried[:2])
         self.assertEqual(request.load_keys, queried)
         self.assertEqual(worker._step_load_keys, set(queried))
 

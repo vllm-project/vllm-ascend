@@ -30,6 +30,7 @@ from vllm.v1.kv_cache_interface import CircularBufferSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.dsa_v1 import build_dspark_swa_indices, dsv4_dsa_overlap_stream
+from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector, wait_for_kv_layer_from_connector
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
@@ -65,7 +66,10 @@ def dsa_v41_forward(
     """Execute V4.1 attention behind an explicit graph side-effect boundary."""
     forward_context = get_forward_context()
     attn = forward_context.no_compile_layers[layer_name]
+    wait_for_kv_layer_from_connector(layer_name)
     attn.v41_impl.forward(attn, None, hidden_states, output)
+    # This composite boundary uses registered group descriptors in the connector.
+    maybe_save_kv_layer_to_connector(layer_name, attn.dsa_attn.swa_cache_layer.kv_cache)
 
 
 def dsa_v41_forward_fake(
@@ -95,8 +99,11 @@ def dsa_v41_write_kv(
     forward_context = get_forward_context()
     attn = forward_context.no_compile_layers[layer_name]
     metadata = attn.v41_impl._get_layer_metadata(forward_context.attn_metadata)
+    wait_for_kv_layer_from_connector(layer_name)
     hidden_states = hidden_states[: metadata.swa.num_actual_tokens]
     attn.v41_impl._update_caches(attn, hidden_states, metadata)
+    # Replay can write this source again. Its save uses the step-end event,
+    # after all replay writes, rather than this cache-only boundary.
 
 
 def dsa_v41_write_kv_fake(
@@ -1343,6 +1350,7 @@ class AscendDSAV41StateMetadataBuilder(AscendDSAV41MetadataBuilder):
         return req
 
     def _build_compressor_cache(self, common, req: AscendDSAV41Metadata, **kwargs) -> None:
+        """Prepare C2 ring metadata and source RoPE views for compressor-state writes."""
         req.c2_ring_metadata = None
         req.c2_complete_mask = None
         req.c2_source_positions = None

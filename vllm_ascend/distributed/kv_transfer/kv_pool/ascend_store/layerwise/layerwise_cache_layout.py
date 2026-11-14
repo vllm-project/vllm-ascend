@@ -21,6 +21,10 @@ from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_backend_class,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.transfer_mode import (
+    KVPoolTransferMode,
+    resolve_kv_pool_transfer_mode,
+)
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 _NUM_SHARED_BUFFERS = "layerwise_num_shared_buffers"
@@ -112,14 +116,13 @@ class LayerwiseReuseLayout:
     has_layer_reuse: bool
 
 
-def get_layerwise_reuse_config(kv_transfer_config: Any) -> dict[str, Any] | None:
+def get_layerwise_reuse_config(kv_transfer_config: Any, *, vllm_config: Any = None) -> dict[str, Any] | None:
     """Return the extra config of the layerwise-reuse connector, if any.
 
     Layerwise cache reuse requires the GVA backend and an enabled connector.
     """
     if kv_transfer_config is None:
         return None
-
     connector_name = getattr(kv_transfer_config, "kv_connector", None)
     root_extra_config = getattr(kv_transfer_config, "kv_connector_extra_config", None) or {}
     if connector_name in ("AscendStoreConnector", "MooncakeConnectorStoreV1"):
@@ -147,6 +150,12 @@ def get_layerwise_reuse_config(kv_transfer_config: Any) -> dict[str, Any] | None
         if backend_class is None or backend_class.layerwise_data_plane != "gva":
             continue
         if extra_config.get("use_layerwise", False):
+            if (
+                vllm_config is not None
+                and resolve_kv_pool_transfer_mode(vllm_config, extra_config=extra_config)
+                is KVPoolTransferMode.CROSS_LAYER
+            ):
+                continue
             return extra_config
     return None
 
@@ -336,7 +345,7 @@ def apply_layerwise_kv_cache_plan(
     excluded_layer_names: set[str] | None = None,
 ) -> None:
     """Rewrite logical layer tensors to use shared physical KV buffers."""
-    extra_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config)
+    extra_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config, vllm_config=vllm_config)
     if extra_config is None:
         return
 
