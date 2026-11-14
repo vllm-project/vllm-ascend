@@ -1,6 +1,6 @@
 # K3.1 A3 MLA tiling 下沉：当前方案同步说明
 
-更新时间：2026-11-14。状态：框架 mock 接入已实现，拟以 Draft PR 评审；真实 A3 算子尚未交付。
+更新时间：2026-11-14。状态：框架 mock 接入已实现，已提交 [Draft PR #21876](https://github.com/vllm-project/vllm-ascend/pull/21876)；真实 A3 算子尚未交付。
 
 ## 给同事的一分钟说明
 
@@ -101,6 +101,7 @@ CPU 测试通过不等于生产验收通过。PR 保持 Draft，便于先评审�
 
 ## 8. 代码与参考
 
+- [本次 Draft PR #21876](https://github.com/vllm-project/vllm-ascend/pull/21876)
 - [完整实现方案及文件导航](a3_mla_tiling_sink.md)
 - [A5 参考 PR #21542](https://github.com/vllm-project/vllm-ascend/pull/21542)
 - [社区接口 PR #338](https://github.com/MinghuasLab/flash-attention-npu/pull/338)

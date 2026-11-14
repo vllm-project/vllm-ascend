@@ -1,7 +1,7 @@
 # K3.1 A3 MLA tiling 下沉：接口 mock 与框架接入方案
 
 初版日期：2026-11-13；PR 整理日期：2026-11-14。当前基线：vllm-ascend `76ea9d24f`，包含 #21542。
-开发分支：`codex/a3-mla-tiling-mock`。
+PR 分支：`codex/a3-mla-tiling-pr`。评审入口：[Draft PR #21876](https://github.com/vllm-project/vllm-ascend/pull/21876)。
 
 面向同事的简版说明见 [当前方案同步说明](a3_mla_tiling_sink_summary.md)。
 
@@ -187,7 +187,7 @@ python -m pytest --confcutdir=tests/ut/attention \
 
 ## 10. 发布与后续验收
 
-当前是本地开发分支，尚未建立 PR。创建 PR 时应按 `release_notes/TEMPLATE.yaml` 添加该 PR 编号的 fragment；不要把上游 #21542 的编号用于本改动。建议文案：
+当前以 [Draft PR #21876](https://github.com/vllm-project/vllm-ascend/pull/21876) 评审，release note 位于 `release_notes/fragments/21876.yaml`。范围为开发联调接入：
 
 > Added an opt-in A3 K3.1 DSpark MLA provider adapter and numerical mock for device-length integration development. Native operator, graph and end-to-end hardware validation remain required before production use.
 
