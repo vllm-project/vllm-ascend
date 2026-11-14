@@ -304,6 +304,21 @@ class EplbConfig:
     load_collection_phase: str = "all"
     stair_config: StairConfig = dataclasses.field(default_factory=StairConfig)
 
+    @field_validator(
+        "expert_heat_collection_interval",
+        "algorithm_execution_interval",
+        "num_redundant_experts",
+        mode="before",
+    )
+    @classmethod
+    def _reject_bool_for_int_fields(cls, value: Any) -> Any:
+        # bool is an int subclass and pydantic coerces True/False to 1/0 before
+        # the after-validator runs, so reject booleans up front for these
+        # configuration knobs (mirrors StairConfig._reject_bool).
+        if isinstance(value, bool):
+            raise ValueError("EPLB numeric fields must not be booleans")
+        return value
+
     @model_validator(mode="after")
     def _validate_config(self):
         if self.expert_map_path is not None:
@@ -318,12 +333,20 @@ class EplbConfig:
                 raise TypeError("The expert_map_record_path is not json.")
             dirname = os.path.dirname(self.expert_map_record_path)
             os.makedirs(dirname, exist_ok=True)
-        for key in ["expert_heat_collection_interval", "algorithm_execution_interval", "num_redundant_experts"]:
+        for key in ["expert_heat_collection_interval", "algorithm_execution_interval"]:
             value = getattr(self, key)
             if not isinstance(value, int):
                 raise TypeError(f"{key} must be an integer")
-            if value < 0:
-                raise ValueError(f"{key} must greater than 0; got {value} instead")
+            if value <= 0:
+                raise ValueError(
+                    f"{key} must be greater than 0; got {value} instead. "
+                    f"Use a positive interval so EPLB heat collection and "
+                    f"algorithm execution actually trigger."
+                )
+        if not isinstance(self.num_redundant_experts, int):
+            raise TypeError("num_redundant_experts must be an integer")
+        if self.num_redundant_experts < 0:
+            raise ValueError(f"num_redundant_experts must be non-negative; got {self.num_redundant_experts} instead")
         if self.eplb_policy_type not in [0, 1, 2, 3]:
             raise ValueError("eplb_policy_type must in [0, 1, 2, 3]")
         if self.dynamic_eplb:
@@ -986,7 +1009,7 @@ class AscendConfig:
                 decode_tp_size = min(decode_tp_size, num_kv_head)
                 self.pd_head_ratio = prefill_tp_size // decode_tp_size
             if self.pd_tp_ratio == 0:
-                raise AssertionError("Only support P node tp size lagger then D node tp size")
+                raise AssertionError("Only support P node tp size larger than D node tp size")
 
         # enable_kv_nz preconditions
         if self.enable_kv_nz:
