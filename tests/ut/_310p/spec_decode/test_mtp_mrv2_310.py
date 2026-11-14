@@ -42,13 +42,14 @@ class TestMRv2Mtp310(TestBase):
         self.assertEqual(num_sampled.tolist(), [2])
         self.assertEqual(sampled[0, :2].tolist(), [1, 2])
 
+    @patch.object(torch.Tensor, "record_stream", lambda self, stream: None)
     def test_probabilistic_rejection_accepts_when_u_below_p_draft(self):
-        """MRV1 IS_NGRAM: accept draft iff u < p(draft); forced u=0 always accepts."""
+        """Accept a one-hot draft iff u < p(draft)."""
         # After softmax, token1 dominates first row → p(draft=1) high.
         target_logits = torch.tensor(
             [
-                [0.0, 5.0, 0.0],
-                [0.0, 0.0, 5.0],
+                [-torch.inf, 5.0, -torch.inf],
+                [-torch.inf, -torch.inf, 5.0],
             ],
             dtype=torch.float32,
         )
@@ -58,8 +59,8 @@ class TestMRv2Mtp310(TestBase):
         idx_mapping_np = np.array([0], dtype=np.int32)
 
         with patch(
-            "vllm_ascend._310p.worker.v2.spec_utils._draw_uniform_cpu",
-            side_effect=[0.0, 0.99],  # accept draft; bonus near end of CDF → token 2
+            "vllm_ascend._310p.worker.v2.spec_utils._draw_uniform",
+            return_value=0.0,
         ):
             sampled, num_sampled, _, _ = probabilistic_rejection_sample_cpu(
                 target_logits,
@@ -75,6 +76,7 @@ class TestMRv2Mtp310(TestBase):
         self.assertEqual(int(sampled[0, 0].item()), 1)  # accepted draft
         self.assertEqual(int(sampled[0, 1].item()), 2)  # bonus from last logit row
 
+    @patch.object(torch.Tensor, "record_stream", lambda self, stream: None)
     def test_probabilistic_rejection_recovers_when_u_rejects_draft(self):
         """u >= p(draft) → recovered token from residual (draft mass zeroed)."""
         target_logits = torch.tensor(
@@ -90,8 +92,8 @@ class TestMRv2Mtp310(TestBase):
         idx_mapping_np = np.array([0], dtype=np.int32)
 
         with patch(
-            "vllm_ascend._310p.worker.v2.spec_utils._draw_uniform_cpu",
-            return_value=0.999,  # always reject / pick high CDF
+            "vllm_ascend._310p.worker.v2.spec_utils._draw_uniform",
+            return_value=0.999,  # Reject the draft.
         ):
             sampled, num_sampled, _, _ = probabilistic_rejection_sample_cpu(
                 target_logits,

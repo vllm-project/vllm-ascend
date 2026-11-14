@@ -957,7 +957,7 @@ def test_sampler_min_p_masks_low_probability_tokens() -> None:
 
 
 def test_sampler_min_p_restricts_softmax_mass() -> None:
-    """With temp>0, min_p must zero discarded tokens before inverse-CDF."""
+    """With temp>0, min_p must zero discarded tokens before sampling."""
     import vllm_ascend._310p.worker.v2.sampler as sampler_mod
 
     sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=3)
@@ -971,7 +971,7 @@ def test_sampler_min_p_restricts_softmax_mass() -> None:
         captured["probs"] = probs.detach().cpu().clone()
         return probs.argmax(dim=-1)
 
-    with patch.object(sampler_mod, "_random_sample_310p", side_effect=_capture_and_argmax):
+    with patch.object(sampler_mod, "random_sample", side_effect=_capture_and_argmax):
         out = sampler(logits, _make_sampler_batch())
 
     probs = captured["probs"][0]
@@ -994,9 +994,9 @@ def test_sampler_accepts_warmup_params_with_empty_history() -> None:
 
     assert sampler.sampling_states.temperature.gpu[0].item() == pytest.approx(0.9)
     assert sampler.sampling_states.min_p.gpu[0].item() == pytest.approx(0.1)
-    # CPU runners lack the NPU pinned-memory allocator used by random sampling.
+    # Mock the NPU sampler to exercise the sampler on CPU.
     with patch(
-        "vllm_ascend._310p.worker.v2.sampler._random_sample_310p",
+        "vllm_ascend._310p.worker.v2.sampler.random_sample",
         side_effect=lambda probs, generators: probs.argmax(dim=-1),
     ) as random_sample:
         output = sampler(torch.zeros((1, 64), dtype=torch.float32), _make_sampler_batch())
@@ -1035,6 +1035,7 @@ def _make_sampler_batch(req_idx: int = 0) -> SimpleNamespace:
     return SimpleNamespace(
         expanded_idx_mapping=torch.tensor([req_idx], dtype=torch.int32),
         idx_mapping_np=np.array([req_idx], dtype=np.int32),
+        cu_num_logits_np=np.array([0, 1], dtype=np.int32),
         num_reqs=1,
         seq_lens=torch.ones(1, dtype=torch.int32),
     )
@@ -1074,10 +1075,10 @@ def test_310p_mrv2_apply_top_k_top_p_masks_logits() -> None:
 
 
 def test_sampler_top_k_restricts_softmax_mass() -> None:
-    """With temp>0, top-k must zero-out discarded tokens before inverse-CDF.
+    """With temp>0, top-k must zero-out discarded tokens before sampling.
 
     vLLM clears top_k/top_p when temperature==0, so exercise the random path
-    with ``_random_sample_310p`` mocked (CPU-safe; mirrors MRV1 CDF unit style).
+    with ``random_sample`` mocked.
     """
     import vllm_ascend._310p.worker.v2.sampler as sampler_mod
 
@@ -1093,7 +1094,7 @@ def test_sampler_top_k_restricts_softmax_mass() -> None:
         captured["probs"] = probs.detach().cpu().clone()
         return probs.argmax(dim=-1)
 
-    with patch.object(sampler_mod, "_random_sample_310p", side_effect=_capture_and_argmax):
+    with patch.object(sampler_mod, "random_sample", side_effect=_capture_and_argmax):
         out = sampler(logits, _make_sampler_batch())
 
     probs = captured["probs"][0]
@@ -1116,7 +1117,7 @@ def test_sampler_top_k_one_matches_argmax_with_temperature() -> None:
         del generators
         return probs.argmax(dim=-1)
 
-    with patch.object(sampler_mod, "_random_sample_310p", side_effect=_argmax_sample):
+    with patch.object(sampler_mod, "random_sample", side_effect=_argmax_sample):
         out = sampler(logits, _make_sampler_batch())
     assert int(out.sampled_token_ids.view(-1)[0].item()) == int(logits.argmax(dim=-1).item())
 
@@ -1136,7 +1137,7 @@ def test_sampler_top_p_restricts_softmax_mass() -> None:
         captured["probs"] = probs.detach().cpu().clone()
         return probs.argmax(dim=-1)
 
-    with patch.object(sampler_mod, "_random_sample_310p", side_effect=_capture_and_argmax):
+    with patch.object(sampler_mod, "random_sample", side_effect=_capture_and_argmax):
         out = sampler(logits, _make_sampler_batch())
 
     probs = captured["probs"][0]
@@ -1396,7 +1397,6 @@ def test_worker_selects_v2_runner_on_310p() -> None:
 
     worker = object.__new__(NPUWorker310)
     worker.vllm_config = SimpleNamespace()
-    worker.use_v2_model_runner = True
     worker.device = torch.device("cpu")
     with patch("vllm_ascend._310p.worker.v2.model_runner.NPUModelRunner310V2") as runner_cls:
         worker.model_runner = worker._create_model_runner()
