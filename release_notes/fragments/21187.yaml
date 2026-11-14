@@ -1,0 +1,4 @@
+pr: 21187
+entries:
+  - category: performance
+    text: Reduced FIA decode overhead for supported hybrid KV cache layouts by reading shared cache pages without full-cache copies. Layouts whose expanded views exceed the FIA element limit retain the existing path.

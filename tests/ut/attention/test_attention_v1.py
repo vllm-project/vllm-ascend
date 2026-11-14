@@ -36,6 +36,86 @@ LARGE_HEAD_PREFILL_PATH = "vllm_ascend.device.utils.npu_large_head_prefill_atten
 
 
 class TestAttentionGraphHelpers(TestBase):
+    def test_fia_tables_are_prepared_before_both_capture_entrypoints(self):
+        builder = AscendAttentionMetadataBuilder.__new__(AscendAttentionMetadataBuilder)
+        layers = {}
+        for name, gap in (("first", 2), ("second", 2), ("padded", 4)):
+            backing = torch.empty(5, gap, 128, 1, 64)
+            impl = AscendAttentionBackendImpl.__new__(AscendAttentionBackendImpl)
+            impl.enable_c8_quant = False
+            impl.use_bnsd_kv_cache = False
+            layers[name] = SimpleNamespace(impl=impl, kv_cache=(backing[:, 0], backing[:, 1]))
+        builder.layer_names = list(layers)
+        builder.compilation_config = SimpleNamespace(static_forward_context=layers)
+        common_metadata = MagicMock()
+        for build in (builder.build_for_cudagraph_capture, builder.build_for_graph_capture):
+            metadata = AscendMetadata(block_tables=torch.tensor([[2, 0, 3]], dtype=torch.int32))
+            multiply = MagicMock(side_effect=torch.mul)
+            with (
+                patch.object(builder, "build", return_value=metadata),
+                patch.object(torch.Tensor, "__mul__", lambda table, stride, multiply=multiply: multiply(table, stride)),
+            ):
+                self.assertIs(build(common_metadata), metadata)
+                self.assertEqual(multiply.call_count, 2)
+                for stride in (2, 4):
+                    expected = torch.mul(metadata.block_tables, stride)
+                    torch.testing.assert_close(metadata.get_fia_block_tables(stride), expected)
+                # Getting the tables for any subsequent layer must not launch a
+                # multiply, including when the model forward is being captured.
+                self.assertEqual(multiply.call_count, 2)
+
+    def test_fia_tables_do_not_lazily_multiply_during_npu_capture(self):
+        table = MagicMock(spec=torch.Tensor)
+        table.device = torch.device("npu")
+        metadata = AscendMetadata(block_tables=table)
+        with (
+            patch.object(torch.npu, "is_current_stream_capturing", return_value=True),
+            self.assertRaisesRegex(RuntimeError, "before ACL graph capture"),
+        ):
+            metadata.get_fia_block_tables(2)
+        table.__mul__.assert_not_called()
+
+    def test_fia_capture_preparation_keeps_excluded_cache_paths(self):
+        builder = AscendAttentionMetadataBuilder.__new__(AscendAttentionMetadataBuilder)
+        impl = AscendAttentionBackendImpl.__new__(AscendAttentionBackendImpl)
+        builder.layer_names = ["layer"]
+        builder.compilation_config = SimpleNamespace(
+            static_forward_context={"layer": SimpleNamespace(impl=impl, kv_cache=())}
+        )
+        for c8, bnsd in ((True, False), (False, True)):
+            impl.enable_c8_quant = c8
+            impl.use_bnsd_kv_cache = bnsd
+            metadata = AscendMetadata(block_tables=torch.tensor([[1]], dtype=torch.int32))
+            builder._prepare_fia_block_tables(metadata)
+            self.assertEqual(metadata.fia_block_tables, {})
+
+    def test_fia_remapped_tables_are_shared_per_step_and_refreshed_for_replay(self):
+        metadata = AscendMetadata.__new__(AscendMetadata)
+        metadata.block_tables = torch.tensor([[2, 0, 3]], dtype=torch.int32)
+        metadata.fia_block_tables = {}
+        metadata.actual_seq_lengths_q = [1]
+        metadata.seq_lens_list = [9]
+        table = metadata.get_fia_block_tables(2)
+        torch.testing.assert_close(table, torch.tensor([[4, 0, 6]], dtype=torch.int32))
+        self.assertIs(table, metadata.get_fia_block_tables(2))
+        self.assertIs(metadata.block_tables, metadata.get_fia_block_tables(1))
+        for layer_name in ("first", "second"):
+            for provider in (
+                attn_module.FIAParamProvider(layer_name, None, block_stride=2),
+                attn_module.FIAV2ParamProvider(layer_name, block_stride=2),
+            ):
+                self.assertIs(provider.resolve({layer_name: metadata})["block_table"], table)
+        next_metadata = AscendMetadata.__new__(AscendMetadata)
+        next_metadata.block_tables = torch.tensor([[1, 3, 0]], dtype=torch.int32)
+        next_metadata.fia_block_tables = {}
+        next_metadata.actual_seq_lengths_q = [1]
+        next_metadata.seq_lens_list = [9]
+        updated = attn_module.FIAParamProvider("layer", None, block_stride=2).resolve({"layer": next_metadata})[
+            "block_table"
+        ]
+        torch.testing.assert_close(updated, torch.tensor([[2, 6, 0]], dtype=torch.int32))
+        torch.testing.assert_close(table, torch.tensor([[4, 0, 6]], dtype=torch.int32))
+
     @patch("vllm_ascend.attention.utils.using_paged_attention", return_value=True)
     def test_pa_contiguous_cache_requirement_is_limited_to_normal_impl(self, mock_using_pa):
         config = SimpleNamespace(model_config=SimpleNamespace(runner_type="generate"))
@@ -664,6 +744,32 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.assertIs(call_kwargs["value_cache"], value_cache)
         self.assertTrue(call_kwargs["use_bnsd"])
 
+    def test_get_fia_params_remaps_only_supported_cache_reads(self):
+        backing = torch.randn(5, 2, 128, 1, 64)
+        self.impl.use_bnsd_kv_cache = False
+        self.impl.enable_c8_quant = False
+        self.impl.key_cache = backing[:, 0]
+        self.impl.value_cache = backing[:, 1]
+        metadata = AscendMetadata.__new__(AscendMetadata)
+        metadata.attn_state = AscendAttentionState.DecodeOnly
+        metadata.block_tables = torch.tensor([[4, 1]], dtype=torch.int32)
+        metadata.fia_block_tables = {}
+        metadata.seq_lens_list = [129]
+        for draft in (False, True):
+            with patch("vllm_ascend.attention.attention_v1._EXTRA_CTX", SimpleNamespace(is_draft_model=draft)):
+                key, value, block_size, table, lengths = self.impl._get_fia_params(None, None, metadata)
+            self.assertEqual(block_size, 128)
+            self.assertEqual(lengths, [129])
+            self.assertEqual(self.impl._fia_block_stride, 1 if draft else 2)
+            self.assertEqual(key.is_contiguous(), not draft)
+            indices = table[0].long()
+            expected = metadata.block_tables[0].long()
+            torch.testing.assert_close(key[indices], self.impl.key_cache[expected].flatten(2))
+            torch.testing.assert_close(value[indices], self.impl.value_cache[expected].flatten(2))
+        # The write-side cache must retain its original physical page stride.
+        self.assertEqual(self.impl.key_cache.stride(0), 2 * 128 * 64)
+
+    @patch("vllm_ascend.attention.attention_v1._EXTRA_CTX", SimpleNamespace(is_draft_model=False))
     def test_get_fia_params_uses_layout_specific_cache_view(self):
         metadata = MagicMock()
         metadata.attn_state = AscendAttentionState.DecodeOnly
