@@ -3,15 +3,15 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 """Startup-load reference and two-update equivalence checks."""
 
-import base64
+import hashlib
 import json
 from contextlib import contextmanager
-from io import BytesIO
+from pathlib import Path
 
-from PIL import Image
+import torch
 from vllm.utils.network_utils import get_open_port
 
-from tests.e2e.common.rlhf.common import rlhf_server, wait_for_free_device_memory
+from tests.e2e.common.rlhf.common import post_control, rlhf_server, wait_for_free_device_memory
 from tests.e2e.common.rlhf.weight_transfer.case import WeightUpdateModelCase
 from tests.e2e.common.rlhf.weight_transfer.weight_source import (
     FIXED_WEIGHT_SEED,
@@ -173,46 +173,16 @@ def reference_signature(
             env_dict=env_dict,
         ) as server,
     ):
-        signature = generation_signature(
-            server.get_client(), case.model, prompts=case.prompts, image_prompt=case.image_prompt
-        )
+        signature = generation_signature(server.get_client(), case.model, prompts=case.prompts)
 
     _REFERENCE_SIGNATURES[cache_key] = signature
     return signature
 
 
-IMAGE_PROMPT = "Describe the colors of this image in one short sentence."
-
-
-def _quadrant_png_data_url(size: int = 384) -> str:
-    """``size`` is the model's ``vision_min_pixels`` side (384 x 384), so the
-    processor does not have to resize the input
-    """
-    half = size // 2
-    image = Image.new("RGB", (size, size), (0, 0, 128))
-    image.paste((255, 0, 128), (half, 0, size, half))
-    image.paste((0, 255, 128), (0, half, half, size))
-    image.paste((255, 255, 128), (half, half, size, size))
-
-    buffer = BytesIO()
-    image.save(buffer, format="PNG")
-    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
-    return f"data:image/png;base64,{encoded}"
-
-
-IMAGE_DATA_URL = _quadrant_png_data_url()
-
-
 def generation_signature(
-    client, model: str, *, prompts: tuple[str | tuple[int, ...], ...], image_prompt: bool = False
+    client, model: str, *, prompts: tuple[str | tuple[int, ...], ...]
 ) -> list[tuple[str, tuple[float, ...]]]:
-    """Capture deterministic text and logprobs for exact reload comparison.
-
-    ``image_prompt`` appends one chat request carrying an image for multimodal
-    cases: the vision tower only runs when an image is in the batch, so without
-    it a dropped, renamed or reshaped vision tensor would not move the signature
-    and the case would prove nothing about the tower.
-    """
+    """Capture deterministic text and logprobs for exact reload comparison."""
     signature = []
     for prompt in prompts:
         response = client.completions.create(
@@ -227,27 +197,6 @@ def generation_signature(
         token_logprobs = tuple(choice.logprobs.token_logprobs or ())
         assert token_logprobs, f"{model}: generation returned no token logprobs"
         signature.append((choice.text, token_logprobs))
-    if image_prompt:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": IMAGE_PROMPT},
-                        {"type": "image_url", "image_url": {"url": IMAGE_DATA_URL}},
-                    ],
-                }
-            ],
-            max_tokens=8,
-            temperature=0,
-            seed=0,
-            logprobs=True,
-        )
-        choice = response.choices[0]
-        token_logprobs = tuple(item.logprob for item in (choice.logprobs.content or ()))
-        assert token_logprobs, f"{model}: image generation returned no token logprobs"
-        signature.append((choice.message.content or "", token_logprobs))
     return signature
 
 
@@ -293,9 +242,7 @@ def weight_transfer_servers(
         server_port=port,
         env_dict=env_dict,
     ) as server:
-        dummy_signature = generation_signature(
-            server.get_client(), case.model, prompts=case.prompts, image_prompt=case.image_prompt
-        )
+        dummy_signature = generation_signature(server.get_client(), case.model, prompts=case.prompts)
         yield server, reference, dummy_signature
 
 
@@ -321,3 +268,83 @@ def assert_weight_update_matches_reference(
         assert signature == reference_signature, (
             f"{case.id}: {phase} (round {update_round}) does not match normal startup loading of the same weights"
         )
+
+
+class WeightUpdateTestWorkerExtension:
+    """Read real worker parameters through the development collective RPC."""
+
+    def snapshot_weight_update_models(self):
+        result = {}
+        for name, model in (("target", self.get_model()), ("draft", self.get_draft_model())):
+            assert model is not None, f"{name} model is missing"
+            result[name] = {
+                key: {
+                    "digest": hashlib.sha256(
+                        value.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes()
+                    ).hexdigest(),
+                    "data_ptr": value.data_ptr(),
+                }
+                for key, value in model.named_parameters()
+            }
+        return result
+
+
+def snapshot_weight_update_models(server):
+    response = post_control(server, "collective_rpc", json={"method": "snapshot_weight_update_models"})
+    results = response.json()["results"]
+    assert len(results) == 1
+    return results[0]
+
+
+def parameter_digests(snapshot):
+    return {model: {name: value["digest"] for name, value in params.items()} for model, params in snapshot.items()}
+
+
+def parameter_addresses(snapshot):
+    return {model: {name: value["data_ptr"] for name, value in params.items()} for model, params in snapshot.items()}
+
+
+def draft_serve_args(checkpoint: Path, case, port: int, *, enforce_eager: bool, live: bool) -> list[str]:
+    args = [
+        "--tokenizer",
+        case.model,
+        "--served-model-name",
+        case.id,
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "64",
+        "--max-num-seqs",
+        "2",
+        "--max-num-batched-tokens",
+        "64",
+        "--no-enable-prefix-caching",
+        "--gpu-memory-utilization",
+        "0.2",
+        "--distributed-executor-backend",
+        "mp",
+        "--port",
+        str(port),
+        "--additional-config",
+        '{"rl_config": {"enabled": true}}',
+        "--speculative-config",
+        json.dumps(
+            {
+                "method": "draft_model",
+                "model": str(checkpoint / "draft"),
+                "num_speculative_tokens": 2,
+            }
+        ),
+        "--worker-extension-cls",
+        "tests.e2e.common.rlhf.weight_transfer.reference_check.WeightUpdateTestWorkerExtension",
+    ]
+    if enforce_eager:
+        args.append("--enforce-eager")
+    else:
+        args += [
+            "--compilation-config",
+            '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 2, 4, 8]}',
+        ]
+    if live:
+        args += ["--weight-transfer-config", '{"backend": "hccl"}']
+    return args

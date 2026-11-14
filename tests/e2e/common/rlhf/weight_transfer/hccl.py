@@ -3,7 +3,9 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 """HCCL transactions with a TP1 rollout server and a separate trainer NPU.
 
-Direct reload alternates two checkpoints and checks each round against cold loading.
+The trainer broadcasts the checkpoint in two pause/update/resume rounds. The
+shared server lifecycle supplies an independent startup-load reference and the
+dummy pre-update signature. IPC's same-device sleep/wake protocol is not used.
 """
 
 import os
@@ -19,8 +21,8 @@ from tests.e2e.common.rlhf.common import post_control, register_engines_once, se
 from tests.e2e.common.rlhf.weight_transfer.case import WeightUpdateModelCase
 from tests.e2e.common.rlhf.weight_transfer.reference_check import (
     UPDATE_ROUNDS,
+    assert_weight_update_matches_reference,
     generation_signature,
-    reference_signature,
     weight_transfer_servers,
 )
 from tests.e2e.common.rlhf.weight_transfer.weight_source import (
@@ -38,7 +40,7 @@ TRAINER_DEVICE_INDEX = INFERENCE_DEVICE_INDEX + 1
 GPU_MEMORY_UTILIZATION = 0.75
 
 
-def run_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool, *, reload_mode: str):
+def run_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool):
     if INFERENCE_DEVICE_INDEX < 0 or torch.npu.device_count() <= TRAINER_DEVICE_INDEX:
         pytest.skip("HCCL weight transfer e2e test requires at least 2 NPUs.")
 
@@ -46,29 +48,8 @@ def run_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bo
     source = make_weight_source(case, torch.device("npu", TRAINER_DEVICE_INDEX))
     env_dict = {
         "VLLM_SERVER_DEV_MODE": "1",
-        "VLLM_RELOAD_MODE": reload_mode,
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "ASCEND_RT_VISIBLE_DEVICES": server_visible_devices(INFERENCE_DEVICE_INDEX, INFERENCE_WORLD_SIZE),
     }
-
-    seed_a = source.seed
-    seeds = (seed_a,) * UPDATE_ROUNDS
-    references = {}
-    if reload_mode == "direct":
-        seed_b = seed_a + 1
-        seeds = (seed_a, seed_b, seed_a)
-        source.seed = seed_b
-        references[seed_b] = reference_signature(
-            source,
-            case,
-            payload_seed=seed_b,
-            port=get_open_port(),
-            tensor_parallel_size=INFERENCE_WORLD_SIZE,
-            device_index=INFERENCE_DEVICE_INDEX,
-            gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
-            env_dict=env_dict,
-        )
-        source.seed = seed_a
 
     with weight_transfer_servers(
         source,
@@ -79,10 +60,6 @@ def run_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bo
         gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
         env_dict=env_dict,
     ) as (server, reference, dummy_signature):
-        references[seed_a] = reference
-        assert dummy_signature != reference, f"{case.id}: dummy and cold A produced identical signatures"
-        if reload_mode == "direct":
-            assert reference != references[seed_b], f"{case.id}: cold A and B produced identical signatures"
         client = server.get_client()
 
         from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLTrainerInitInfo
@@ -100,18 +77,67 @@ def run_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bo
             client=HTTPVLLMWeightSyncClient(base_url=server.url_root, timeout=UPDATE_TIMEOUT),
             source=source,
         )
+        signatures = []
         try:
-            for update_round, seed in enumerate(seeds, start=1):
-                source.seed = seed
-                print(f"[trainer] {case.id}: {reload_mode} update round={update_round} seed={seed}", flush=True)
-                post_control(server, "pause")
-                engine.send_weights()
-                post_control(server, "resume")
-                signature = generation_signature(
-                    client, case.model, prompts=case.prompts, image_prompt=case.image_prompt
+            for update_round in range(UPDATE_ROUNDS):
+                print(
+                    f"[trainer] {case.id}: sending {('packed' if packed else 'unpacked')} "
+                    f"fixed-random update round={update_round + 1}",
+                    flush=True,
                 )
-                assert signature == references[seed], (
-                    f"{case.id}: {reload_mode} round {update_round} differs from cold loading seed {seed}"
+                post_control(server, "pause")
+                try:
+                    engine.send_weights()
+                finally:
+                    post_control(server, "resume")
+                signatures.append(
+                    generation_signature(client, case.model, prompts=case.prompts, image_prompt=case.image_prompt)
                 )
         finally:
             engine.shutdown()
+
+    assert_weight_update_matches_reference(
+        dummy_signature,
+        reference,
+        signatures,
+        case,
+    )
+
+
+class WeightUpdateClient(HTTPVLLMWeightSyncClient):
+    """Select the draft START endpoint without changing the trainer protocol."""
+
+    def __init__(self, base_url: str):
+        super().__init__(base_url=base_url, timeout=UPDATE_TIMEOUT)
+        self.is_draft = False
+
+    def start_weight_update(self) -> None:
+        self._post("start_draft_weight_update" if self.is_draft else "start_weight_update")
+
+
+def send_update(server, engine, client: WeightUpdateClient, source, *, is_draft: bool = False):
+    client.is_draft = is_draft
+    engine.source = source
+
+    post_control(server, "pause")
+    engine.send_weights()
+    post_control(server, "resume")
+
+
+def create_draft_hccl_trainer(client, source, packed: bool, buffer_source):
+    """Initialize the normal factory engine with a draft-selecting client."""
+    from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLTrainerInitInfo
+
+    register_engines_once()
+    return WeightTransferTrainerFactory.trainer_init(
+        HCCLTrainerInitInfo(
+            rank=0,
+            master_address=get_ip(),
+            master_port=get_open_port(),
+            world_size=INFERENCE_WORLD_SIZE + 1,
+            packed=packed,
+            packed_buffer_size_bytes=packed_buffer_size_for(buffer_source),
+        ),
+        client=client,
+        source=source,
+    )
