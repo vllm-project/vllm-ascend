@@ -1917,7 +1917,20 @@ def use_updatable_graph(
 ) -> bool:
     from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 
-    return attn_backend is not None and issubclass(attn_backend, AscendAttentionBackend)
+    if attn_backend is None:
+        return False
+    if issubclass(attn_backend, AscendAttentionBackend):
+        return True
+    # Non-DCP MLA now registers decode FIA tasks during capture. Keep DCP MLA
+    # on its specialized graph-parameter path until its grouped update logic is
+    # migrated separately.
+    from vllm_ascend.attention.mla_v1 import AscendMLABackend
+
+    if issubclass(attn_backend, AscendMLABackend):
+        from vllm.distributed import get_dcp_group
+
+        return get_dcp_group().world_size == 1
+    return False
 
 
 def _is_glm_model(model_config) -> bool:

@@ -380,7 +380,14 @@ def test_v2_graph_shared_source_preserves_steps_layers_and_padding(is_prefill, c
     kinds = (CPKVScope.HISTORY, CPKVScope.CURRENT) if is_prefill and causal else (CPKVScope.FULL,)
     providers = [DCPFIAParamProvider(layer, rank, kind) for layer in steps[0] for kind in kinds]
     tasks = [
-        GraphUpdateTask(MagicMock(), {"step": step}, provider, step, None, None)
+        GraphUpdateTask(
+            MagicMock(),
+            {"step": step, "actual_seq_lengths": None, "actual_seq_lengths_kv": None, "block_table": None},
+            provider,
+            step,
+            None,
+            None,
+        )
         for step in range(len(steps))
         for provider in providers
     ]
@@ -409,7 +416,16 @@ def test_v2_graph_shared_source_preserves_steps_layers_and_padding(is_prefill, c
             assert task.kwargs["actual_seq_lengths_kv"][-1] == 0
             assert task.kwargs["block_table"] is layer_metadata.decode.block_tables
         assert "layer_name" not in task.kwargs
-    assert all(task.kwargs == {"step": task.provider_index} for task in tasks)
+    assert all(
+        task.kwargs
+        == {
+            "step": task.provider_index,
+            "actual_seq_lengths": None,
+            "actual_seq_lengths_kv": None,
+            "block_table": None,
+        }
+        for task in tasks
+    )
 
 
 def test_v2_draft_metadata_does_not_alias_history_between_steps():

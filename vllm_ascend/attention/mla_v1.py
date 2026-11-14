@@ -62,13 +62,7 @@ from vllm_ascend.attention.utils import (
     uses_pcp_sharded_layout,
     wait_for_kv_layer_from_connector,
 )
-from vllm_ascend.compilation.acl_graph import (
-    get_draft_graph_params,
-    get_draft_graph_prefill_params,
-    get_graph_params,
-    update_draft_graph_params_workspaces,
-    update_graph_params_workspaces,
-)
+from vllm_ascend.compilation.updatable_graph import get_capture_resource, register_task
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, supports_component_major_mla_pd
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -88,7 +82,6 @@ from vllm_ascend.utils import (
     enable_sfa,
     is_pd_decode_recompute_scheduler_enabled,
     maybe_trans_nz,
-    weak_ref_tensors,
 )
 
 BUILD_METADATA_STEP_PREFILL = 0
@@ -912,6 +905,45 @@ class PrefillMLAPreprocessResult(NamedTuple):
     value: torch.Tensor | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class MLAParamProvider:
+    layer_name: str
+    is_draft_model: bool = False
+    num_tokens: int | None = None
+    eagle_spec_multiple: int | None = None
+    disable_padded_batch: bool = False
+
+    def resolve(self, attn_metadata) -> dict[str, Any]:
+        decode = attn_metadata[self.layer_name].decode
+        assert decode is not None
+        role = "draft" if self.is_draft_model else "target"
+        logger.warning_once("DEBUG_MLA_PROVIDER_RESOLVE layer=%s role=%s", self.layer_name, role)
+
+        if self.is_draft_model:
+            actual_seq_qlen = decode.actual_seq_lengths_q
+            block_table = decode.block_table
+            if self.disable_padded_batch:
+                block_table = block_table[: len(actual_seq_qlen)]
+            return {
+                "actual_seq_qlen": actual_seq_qlen,
+                "actual_seq_kvlen": decode.seq_lens_list + [0] * (len(actual_seq_qlen) - len(decode.seq_lens_list)),
+                "block_table": block_table,
+            }
+
+        assert self.num_tokens is not None
+        num_sequences = self.num_tokens
+        if self.eagle_spec_multiple is not None:
+            num_sequences //= self.eagle_spec_multiple
+        params: dict[str, Any] = {
+            "actual_seq_kvlen": decode.seq_lens_list + [0] * (num_sequences - len(decode.seq_lens_list)),
+        }
+        if self.eagle_spec_multiple is not None:
+            params["actual_seq_qlen"] = [
+                self.eagle_spec_multiple * (i + 1) for i in range(self.num_tokens // self.eagle_spec_multiple)
+            ]
+        return params
+
+
 class AscendMLAImpl(MLAAttentionImpl):
     """
     NOTE: Please read the comment at the top of the file before trying to
@@ -1050,135 +1082,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         if not supports_component_major_mla_pd(config):
             return False
         return get_flashmla_ops() is not None
-
-    @staticmethod
-    def update_graph_params(
-        update_stream,
-        forward_context,
-        num_tokens,
-        vllm_config=None,
-        speculative_config=None,
-        draft_attn_metadatas=None,
-    ):
-        if _EXTRA_CTX.is_draft_model:
-            if _EXTRA_CTX.is_draft_model_prefill:
-                graph_params = get_draft_graph_prefill_params()
-            else:
-                graph_params = get_draft_graph_params()
-            attn_metadata = draft_attn_metadatas
-            # mla_graph_keys_filter: hybrid models such as GLM-5.3-Flash put KDA
-            # layers in the same metadata dict, but only MLA layers contribute a
-            # captured FIA op, so zipping unfiltered keys against attn_params
-            # pairs MLA params with KDA layer names.
-            attn_keys = [
-                k
-                for k in attn_metadata[0]
-                if getattr(attn_metadata[0][k], "decode", None) is not None
-                and getattr(attn_metadata[0][k], "external_flashmla", None) is None
-            ]
-        else:
-            graph_params = get_graph_params()
-            attn_metadata = forward_context.attn_metadata
-            attn_keys = [
-                k
-                for k in attn_metadata
-                if getattr(attn_metadata[k], "decode", None) is not None
-                and getattr(attn_metadata[k], "external_flashmla", None) is None
-            ]
-        # FIXME: Behold! We are using a temporary hack here to update the args
-        # for each layer's attention op in the graph.
-        num_layers = len(attn_keys)
-        if num_layers == 0:
-            return
-        if _EXTRA_CTX.is_draft_model:
-            attn_keys = attn_keys * (len(graph_params.attn_params[num_tokens]) // num_layers)
-        attn_count = 0
-        with torch.npu.stream(update_stream):
-            for key, param, handle, event in zip(
-                attn_keys,
-                graph_params.attn_params[num_tokens],
-                graph_params.handles[num_tokens],
-                graph_params.events[num_tokens],
-            ):
-                (
-                    q_nope,
-                    k_nope,
-                    q_pe,
-                    k_pe,
-                    num_heads,
-                    num_kv_heads,
-                    input_layout,
-                    attn_mask,
-                    sparse_mode,
-                    scale,
-                    block_table,
-                    block_size,
-                    seq_lens_list,
-                    actual_seq_lengths,
-                    attn_output,
-                    softmax_lse,
-                    dequant_scale_q_nope,
-                    fak_descale_float,
-                ) = param
-                if _EXTRA_CTX.is_draft_model:
-                    draft_step = attn_count // num_layers
-                    attn_metadata_current = attn_metadata[draft_step]
-                    attn_count = attn_count + 1
-                else:
-                    attn_metadata_current = attn_metadata
-
-                layer_metadata = attn_metadata_current[key]
-                seq_lens_list = layer_metadata.decode.seq_lens_list
-                if speculative_config and speculative_config.use_eagle() and not _EXTRA_CTX.is_draft_model:
-                    actual_seq_lengths = layer_metadata.decode.actual_seq_lengths_q
-                    spec_multiple = speculative_config.num_speculative_tokens + 1
-                    seq_lens_list = seq_lens_list + [0] * (num_tokens // spec_multiple - len(seq_lens_list))
-                    actual_seq_lengths = [spec_multiple * (i + 1) for i in range(num_tokens // spec_multiple)]
-                elif _EXTRA_CTX.is_draft_model:
-                    actual_seq_lengths = layer_metadata.decode.actual_seq_lengths_q
-                    block_table = layer_metadata.decode.block_table
-                    # TODO: This is a hack and should be fixed in the future.
-                    if speculative_config.disable_padded_drafter_batch:
-                        block_table = block_table[: len(actual_seq_lengths)]
-                    seq_lens_list = seq_lens_list + [0] * (len(actual_seq_lengths) - len(seq_lens_list))
-                else:
-                    seq_lens_list = seq_lens_list + [0] * (num_tokens - len(seq_lens_list))
-
-                extra_args = {}
-                if dequant_scale_q_nope is not None:
-                    extra_args = {
-                        "query_quant_mode": 3,
-                        "key_quant_mode": 0,
-                        "value_quant_mode": 0,
-                        "dequant_scale_query": dequant_scale_q_nope,
-                        "dequant_scale_key": fak_descale_float,
-                        "dequant_scale_value": fak_descale_float,
-                    }
-
-                torch.npu.graph_task_update_begin(update_stream, handle)
-                torch_npu.npu_fused_infer_attention_score_v2.out(
-                    q_nope,
-                    k_nope,
-                    k_nope,
-                    query_rope=q_pe,
-                    key_rope=k_pe,
-                    num_query_heads=num_heads,
-                    num_key_value_heads=num_kv_heads,
-                    input_layout=input_layout,
-                    atten_mask=attn_mask,
-                    sparse_mode=sparse_mode,
-                    softmax_scale=scale,
-                    block_table=block_table,
-                    block_size=block_size,
-                    actual_seq_kvlen=seq_lens_list,
-                    actual_seq_qlen=actual_seq_lengths,
-                    workspace=graph_params.workspaces.get(num_tokens),
-                    out=[attn_output, softmax_lse],
-                    **extra_args,
-                )
-                torch.npu.graph_task_update_end(update_stream)
-
-                event.record(update_stream)
 
     def _v_up_proj(self, x):
         # Convert from (N, B, L)/(N, B, 1, L) to (N, B, L)
@@ -2881,70 +2784,50 @@ class AscendMLAImpl(MLAAttentionImpl):
                 "dequant_scale_value": self.fak_descale_float,
             }
             common_kwargs.update(extra_fa_args)
-        if _EXTRA_CTX.is_draft_model:
-            if _EXTRA_CTX.is_draft_model_prefill:
-                graph_params = get_draft_graph_prefill_params()
-            else:
-                graph_params = get_draft_graph_params()
-        else:
-            graph_params = get_graph_params()
         # Release subsequent layer prefetches at the decode attention boundary,
         # just as prefill and external FlashMLA do.
         record_attention_compute_start()
         if _EXTRA_CTX.capturing:
-            stream = torch_npu.npu.current_stream()
-
-            event = torch.npu.ExternalEvent()
-            event.wait(stream)
-            event.reset(stream)
-            graph_params.events[num_tokens].append(event)
-
-            workspace = graph_params.workspaces.get(num_tokens)
+            workspace = get_capture_resource(
+                ("mla_fia_v2_workspace", num_tokens),
+                lambda: torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
+                    q_nope, k_nope, k_nope, **common_kwargs
+                ),
+                use_max_workspace=True,
+            )
             attn_output = torch.empty(attn_output_shape, dtype=q_pe.dtype, device=q_pe.device)
             softmax_lse = torch.empty(num_tokens, dtype=q_pe.dtype, device=q_pe.device)
-            attn_params = (
-                weak_ref_tensors(q_nope),
-                weak_ref_tensors(k_nope),
-                weak_ref_tensors(q_pe),
-                weak_ref_tensors(k_pe),
-                self.num_heads_padded,
-                self.num_kv_heads,
-                input_layout,
-                weak_ref_tensors(attn_mask) if attn_mask is not None else None,
-                sparse_mode,
-                self.scale,
-                decode_meta.block_table,
-                block_size,
-                decode_meta.seq_lens_list,
-                actual_seq_lengths,
-                weak_ref_tensors(attn_output),
-                weak_ref_tensors(softmax_lse),
+            operation_kwargs = {
+                "query": q_nope,
+                "key": k_nope,
+                "value": k_nope,
+                **common_kwargs,
+                "workspace": workspace,
+                "out": [attn_output, softmax_lse],
+            }
+            assert isinstance(self.layer_name, str)
+            is_draft_model = _EXTRA_CTX.is_draft_model
+            eagle_spec_multiple = None
+            if not is_draft_model and self.speculative_config is not None and self.speculative_config.use_eagle():
+                eagle_spec_multiple = self.speculative_config.num_speculative_tokens + 1
+            provider = MLAParamProvider(
+                layer_name=self.layer_name,
+                num_tokens=num_tokens,
+                is_draft_model=is_draft_model,
+                eagle_spec_multiple=eagle_spec_multiple,
+                disable_padded_batch=(
+                    is_draft_model
+                    and self.speculative_config is not None
+                    and self.speculative_config.disable_padded_drafter_batch
+                ),
             )
-            if self.fa_quant_layer:
-                attn_params = attn_params + (
-                    weak_ref_tensors(dequant_scale_q_nope),
-                    weak_ref_tensors(self.fak_descale_float),
-                )  # type: ignore
-            else:
-                attn_params = attn_params + (None, None)  # type: ignore
-
-            if workspace is None:
-                workspace = torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
-                    q_nope, k_nope, k_nope, **common_kwargs
-                )
-                if _EXTRA_CTX.is_draft_model:
-                    update_draft_graph_params_workspaces(num_tokens, workspace)
-                else:
-                    update_graph_params_workspaces(num_tokens, workspace)
-
-            graph_params.attn_params[num_tokens].append(attn_params)
-
-            torch.npu.graph_task_group_begin(stream)
-            torch_npu.npu_fused_infer_attention_score_v2.out(
-                q_nope, k_nope, k_nope, **common_kwargs, workspace=workspace, out=[attn_output, softmax_lse]
+            logger.warning(
+                "DEBUG_MLA_REGISTER layer=%s role=%s tokens=%s",
+                self.layer_name,
+                "draft" if _EXTRA_CTX.is_draft_model else "target",
+                num_tokens,
             )
-            handle = torch.npu.graph_task_group_end(stream)
-            graph_params.handles[num_tokens].append(handle)
+            register_task(torch_npu.npu_fused_infer_attention_score_v2.out, operation_kwargs, provider)
         else:
             attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(q_nope, k_nope, k_nope, **common_kwargs)
 

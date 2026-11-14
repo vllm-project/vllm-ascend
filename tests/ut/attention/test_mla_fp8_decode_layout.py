@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Exercise the FIA output-to-V-projection contract with token/head values."""
 
-from collections import defaultdict
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -68,7 +67,8 @@ def _make_decode(monkeypatch, num_tokens, speculative, quantization, num_heads, 
     impl.enable_kv_nz = False
     impl.fa_quant_layer = quantization != "bf16"
     impl.support_fp8_attention = quantization != "int8"
-    impl.speculative_config = SimpleNamespace() if speculative else None
+    impl.speculative_config = SimpleNamespace(use_eagle=lambda: False) if speculative else None
+    impl.layer_name = "layer"
     impl.scale = 1.0
     impl.fak_descale_float = torch.ones(1)
 
@@ -126,19 +126,13 @@ def _make_decode(monkeypatch, num_tokens, speculative, quantization, num_heads, 
         "_EXTRA_CTX",
         SimpleNamespace(capturing=capturing, is_draft_model=False, is_draft_model_prefill=False),
     )
-    graph_params = SimpleNamespace(
-        events=defaultdict(list),
-        handles=defaultdict(list),
-        attn_params=defaultdict(list),
-        workspaces={num_tokens: object()},
-    )
-    monkeypatch.setattr(mla_v1, "get_graph_params", lambda: graph_params)
-    # CPU graph tests inspect capture buffers and metadata, not NPU replay.
+    register_task = MagicMock(side_effect=lambda operation, kwargs, _provider: operation(**kwargs))
     if capturing:
-        monkeypatch.setattr(torch.npu, "ExternalEvent", MagicMock())
-        monkeypatch.setattr(torch.npu, "graph_task_group_begin", MagicMock())
-        monkeypatch.setattr(torch.npu, "graph_task_group_end", MagicMock())
-    return impl, preprocess, metadata, expected, fia, graph_params, projection_op
+        # CPU graph tests inspect the task registration contract, not NPU
+        # workspace allocation or replay.
+        monkeypatch.setattr(mla_v1, "get_capture_resource", MagicMock(return_value=object()))
+        monkeypatch.setattr(mla_v1, "register_task", register_task)
+    return impl, preprocess, metadata, expected, fia, register_task, projection_op
 
 
 def _assert_projection_input(impl, fia, projection_op, *, fused):
@@ -191,7 +185,7 @@ def test_decode_preserves_token_head_values(monkeypatch, num_tokens, speculative
 )
 @pytest.mark.parametrize("num_heads", [PADDED_HEADS, 12], ids=["no-padding", "padded-heads"])
 def test_capture_keeps_raw_fia_output_and_layout(monkeypatch, speculative, quantization, num_tokens, num_heads):
-    impl, preprocess, metadata, expected, fia, graph_params, projection_op = _make_decode(
+    impl, preprocess, metadata, expected, fia, register_task, projection_op = _make_decode(
         monkeypatch, num_tokens, speculative, quantization, num_heads=num_heads, capturing=True
     )
     actual = impl._forward_decode(preprocess, BLOCK_SIZE, metadata)
@@ -202,15 +196,20 @@ def test_capture_keeps_raw_fia_output_and_layout(monkeypatch, speculative, quant
         projection_op,
         fused=quantization == "fp8" and num_tokens > 1 and num_heads == PADDED_HEADS,
     )
-    params = graph_params.attn_params[num_tokens][0]
-    assert params[6] == fia.kwargs["input_layout"]
-    assert params[14] is fia.output
+    register_task.assert_called_once()
+    operation, params, provider = register_task.call_args.args
+    assert operation == fia.out
+    assert params["input_layout"] == fia.kwargs["input_layout"]
+    assert params["out"][0] is fia.output
+    resolved = provider.resolve({impl.layer_name: metadata})
+    assert resolved["actual_seq_kvlen"][0] == metadata.decode.seq_lens_list[0]
+    assert len(resolved["actual_seq_kvlen"]) == num_tokens
     if quantization == "fp8":
-        assert params[6] == ("TND" if speculative else "BNSD")
+        assert params["input_layout"] == ("TND" if speculative else "BNSD")
         shape = (num_tokens, PADDED_HEADS, LATENT_DIM) if speculative else (num_tokens, PADDED_HEADS, 1, LATENT_DIM)
-        assert params[14].shape == shape
+        assert params["out"][0].shape == shape
     else:
-        assert params[14].shape[:2] == (PADDED_HEADS, num_tokens)
+        assert params["out"][0].shape[:2] == (PADDED_HEADS, num_tokens)
 
 
 @pytest.mark.parametrize("speculative", [False, True], ids=["ordinary", "speculative"])
@@ -220,7 +219,7 @@ def test_capture_keeps_raw_fia_output_and_layout(monkeypatch, speculative, quant
 )
 def test_fp8_fusion_respects_transpose_bmm_limit(monkeypatch, speculative, capturing, limit_delta, fused):
     num_tokens = 4
-    impl, preprocess, metadata, expected, fia, graph_params, projection_op = _make_decode(
+    impl, preprocess, metadata, expected, fia, register_task, projection_op = _make_decode(
         monkeypatch, num_tokens, speculative, "fp8", num_heads=PADDED_HEADS, capturing=capturing
     )
     # Exercise the exclusive 65536 boundary with small, otherwise identical
@@ -232,6 +231,7 @@ def test_fp8_fusion_respects_transpose_bmm_limit(monkeypatch, speculative, captu
     torch.testing.assert_close(actual.view_as(expected), expected, rtol=0, atol=0)
     _assert_projection_input(impl, fia, projection_op, fused=fused)
     if capturing:
-        params = graph_params.attn_params[num_tokens][0]
-        assert params[6] == ("TND" if speculative else "BNSD")
-        assert params[14] is fia.output
+        register_task.assert_called_once()
+        params = register_task.call_args.args[1]
+        assert params["input_layout"] == ("TND" if speculative else "BNSD")
+        assert params["out"][0] is fia.output

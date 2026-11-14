@@ -17,6 +17,7 @@
 import torch
 from vllm.config import VllmConfig, replace
 from vllm.config.compilation import CUDAGraphMode
+from vllm.logger import logger
 from vllm.model_executor.models.utils import get_draft_quant_config
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -197,10 +198,10 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
     def build_fia_params(
         self,
         num_reqs_padded: int,
-        draft_attn_metadata: dict,
+        draft_attn_metadata: dict | list[dict],
         is_draft_model_prefill: bool,
     ) -> list[dict]:
-        """Per-layer FIA parameters for the UpdatableGraph task update.
+        """Per-layer attention parameters for the UpdatableGraph task update.
 
         Every attention task registered at capture time matches its update
         parameters by layer name and requires exactly one entry (see
@@ -208,16 +209,34 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
         layer. All layers share the same batch-level values because the
         three module forwards reuse one metadata.
         """
+        # AutoRegressiveAclGraphManager passes every draft step's metadata,
+        # while the 310P replay override passes only the first step's dict.
+        # All modules reuse one metadata, so either way the first step works.
+        if isinstance(draft_attn_metadata, list):
+            draft_attn_metadata = draft_attn_metadata[0]
         fia_params = []
         for layer_name, metadata in draft_attn_metadata.items():
-            fia_params.append(
-                {
-                    "layer_name": layer_name,
-                    "actual_seq_lengths": metadata.actual_seq_lengths_q,
-                    "actual_seq_lengths_kv": metadata.seq_lens_list,
-                    "block_table": metadata.block_tables,
-                }
-            )
+            decode_metadata = getattr(metadata, "decode", None)
+            if decode_metadata is not None and getattr(metadata, "external_flashmla", None) is None:
+                logger.warning_once("DEBUG_SPEC_FIA path=multi_module_mtp backend=mla")
+                fia_params.append(
+                    {
+                        "layer_name": layer_name,
+                        "actual_seq_qlen": decode_metadata.actual_seq_lengths_q,
+                        "actual_seq_kvlen": decode_metadata.seq_lens_list,
+                        "block_table": decode_metadata.block_table,
+                    }
+                )
+            else:
+                logger.warning_once("DEBUG_SPEC_FIA path=multi_module_mtp backend=non_mla")
+                fia_params.append(
+                    {
+                        "layer_name": layer_name,
+                        "actual_seq_lengths": metadata.actual_seq_lengths_q,
+                        "actual_seq_lengths_kv": metadata.seq_lens_list,
+                        "block_table": metadata.block_tables,
+                    }
+                )
         return fia_params
 
     def _build_attn_metadata(

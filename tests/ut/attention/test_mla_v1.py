@@ -22,6 +22,7 @@ from vllm_ascend.attention.mla_v1 import (
     AscendMLAPrefillMetadata,
     ChunkedContextMetadata,
     DecodeMLAPreprocessResult,
+    MLAParamProvider,
     PrefillMLAPreprocessResult,
     _mla_nope_zero_rope,
 )
@@ -2052,166 +2053,43 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(result.shape[0], batch_size)
         self.assertEqual(result.shape[1], self.impl.num_heads * self.impl.v_head_dim)
 
-    @patch("vllm_ascend.attention.mla_v1.get_draft_graph_params")
-    @patch("vllm_ascend.attention.mla_v1.get_graph_params")
-    @patch("torch.npu.stream")
-    @patch("torch.npu.graph_task_update_begin")
-    @patch("torch.npu.graph_task_update_end")
-    @patch("torch_npu.npu_fused_infer_attention_score_v2.out")
-    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    def test_update_graph_params(
-        self,
-        mock_get_forward_context,
-        mock_fia,
-        mock_update_end,
-        mock_update_begin,
-        mock_stream,
-        mock_get_graph_params,
-        mock_get_draft_graph_params,
-    ):
-        mock_update_stream = MagicMock()
-        mock_forward_context = MagicMock()
-        mock_attn_metadata = MagicMock()
-        mock_forward_context.attn_metadata = {"layer_0": mock_attn_metadata}
-        mock_attn_metadata.decode.seq_lens_list = [10, 20, 30]
-        mock_attn_metadata.decode.actual_seq_lengths_q = [10, 20, 30]
-        mock_attn_metadata.decode.block_table = torch.randint(0, 100, (3, 4))
-        mock_graph_params = MagicMock()
+    def test_mla_param_provider_target_pads_sequence_lengths(self):
+        metadata = SimpleNamespace(decode=SimpleNamespace(seq_lens_list=[10, 20, 30]))
+        provider = MLAParamProvider(layer_name="layer_0", num_tokens=5)
 
-        mock_graph_params.attn_params = {
-            100: [
-                (
-                    MagicMock(),
-                    MagicMock(),
-                    MagicMock(),
-                    MagicMock(),
-                    MagicMock(),
-                    MagicMock(),
-                    MagicMock(),
-                    MagicMock(),
-                    MagicMock(),
-                    MagicMock(),
-                    MagicMock(),
-                    MagicMock(),
-                    MagicMock(),
-                    MagicMock(),
-                    MagicMock(),
-                    MagicMock(),
-                    MagicMock(),
-                    MagicMock(),
-                ),
-            ]
-        }
-        mock_graph_params.handles = {100: [MagicMock()]}
-        mock_graph_params.events = {100: [MagicMock()]}
-        mock_graph_params.workspaces = {100: MagicMock()}
+        params = provider.resolve({"layer_0": metadata})
 
-        mock_get_graph_params.return_value = mock_graph_params
-        mock_get_draft_graph_params.return_value = mock_graph_params
+        self.assertEqual(params, {"actual_seq_kvlen": [10, 20, 30, 0, 0]})
 
-        # forward context
-        mock_ctx = MagicMock()
-        mock_get_forward_context.return_value = mock_ctx
+    def test_mla_param_provider_target_builds_eagle_query_lengths(self):
+        metadata = SimpleNamespace(decode=SimpleNamespace(seq_lens_list=[10, 20]))
+        provider = MLAParamProvider(layer_name="layer_0", num_tokens=6, eagle_spec_multiple=2)
 
-        # speculative_config
-        mock_speculative_config = MagicMock()
-        mock_speculative_config.disable_padded_drafter_batch = False
+        params = provider.resolve({"layer_0": metadata})
 
-        mock_ctx.is_draft_model = True
-        mock_ctx.is_draft_model_prefill = False
-        AscendMLAImpl.update_graph_params(
-            mock_update_stream,
-            mock_forward_context,
-            100,
-            speculative_config=mock_speculative_config,
-            draft_attn_metadatas=[{"layer_0": mock_attn_metadata}],
+        self.assertEqual(params["actual_seq_qlen"], [2, 4, 6])
+        self.assertEqual(params["actual_seq_kvlen"], [10, 20, 0])
+
+    def test_mla_param_provider_draft_trims_padded_block_table(self):
+        block_table = torch.arange(16).view(4, 4)
+        metadata = SimpleNamespace(
+            decode=SimpleNamespace(
+                actual_seq_lengths_q=[1, 2],
+                seq_lens_list=[10],
+                block_table=block_table,
+            )
+        )
+        provider = MLAParamProvider(
+            layer_name="layer_0",
+            is_draft_model=True,
+            disable_padded_batch=True,
         )
 
-    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    def test_update_graph_params_empty_layers(self, mock_get_forward_context):
-        # if num_layers == 0
-        mock_update_stream = MagicMock()
-        mock_forward_context = MagicMock()
-        mock_forward_context.attn_metadata = {}
+        params = provider.resolve({"layer_0": metadata})
 
-        mock_ctx = MagicMock()
-        mock_ctx.is_draft_model = False
-        mock_get_forward_context.return_value = mock_ctx
-
-        AscendMLAImpl.update_graph_params(mock_update_stream, mock_forward_context, 100)
-
-    @patch("vllm_ascend.attention.mla_v1.get_graph_params")
-    @patch("torch_npu.npu_fused_infer_attention_score_v2")
-    @patch("torch.npu.graph_task_update_end")
-    @patch("torch.npu.graph_task_update_begin")
-    @patch("torch.npu.stream")
-    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    def test_update_graph_params_with_mtp(
-        self,
-        mock_get_forward_context,
-        mock_npu_stream,
-        mock_graph_task_update_begin,
-        mock_graph_task_update_end,
-        mock_npu_fused_infer,
-        mock_get_graph_params,
-    ):
-        mock_update_stream = MagicMock()
-        mock_forward_context = MagicMock()
-
-        mock_attn_metadata = MagicMock()
-        mock_attn_metadata.decode = MagicMock()
-        mock_attn_metadata.decode.seq_lens_list = [10, 20, 30]
-        mock_attn_metadata.decode.actual_seq_lengths_q = [10, 20, 30]
-        mock_forward_context.attn_metadata = {"layer_0": mock_attn_metadata}
-
-        # forward context
-        mock_ctx = MagicMock()
-        mock_ctx.is_draft_model = False
-        mock_get_forward_context.return_value = mock_ctx
-
-        mock_stream_context = MagicMock()
-        mock_npu_stream.return_value = mock_stream_context
-
-        mock_out = MagicMock()
-        mock_npu_fused_infer.out = mock_out
-
-        mock_graph_params = MagicMock()
-
-        mock_graph_params.attn_params = {
-            100: [
-                (
-                    MagicMock(),
-                    MagicMock(),
-                    MagicMock(),
-                    MagicMock(),
-                    MagicMock(),
-                    MagicMock(),
-                    MagicMock(),
-                    MagicMock(),
-                    MagicMock(),
-                    MagicMock(),
-                    MagicMock(),
-                    MagicMock(),
-                    MagicMock(),
-                    MagicMock(),
-                    MagicMock(),
-                    MagicMock(),
-                    MagicMock(),
-                    MagicMock(),
-                ),
-            ]
-        }
-        mock_graph_params.handles = {100: [MagicMock()]}
-        mock_graph_params.events = {100: [MagicMock()]}
-        mock_get_graph_params.return_value = mock_graph_params
-
-        mock_speculative_config = MagicMock()
-        mock_speculative_config.method = "mtp"
-        mock_speculative_config.num_speculative_tokens = 4
-
-        AscendMLAImpl.update_graph_params(
-            mock_update_stream, mock_forward_context, 100, speculative_config=mock_speculative_config
-        )
+        self.assertEqual(params["actual_seq_qlen"], [1, 2])
+        self.assertEqual(params["actual_seq_kvlen"], [10, 0])
+        torch.testing.assert_close(params["block_table"], block_table[:2])
 
     def test_get_context_seq_len_npu(self):
         mock_attn_metadata = MagicMock()

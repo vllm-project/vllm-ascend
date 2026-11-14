@@ -502,7 +502,12 @@ def test_build_fia_params_prefill():
     """Test building FIA parameters for prefill."""
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
     block_table = torch.arange(12).reshape(4, 3)
-    metadata = SimpleNamespace(block_tables=block_table, actual_seq_lengths_q=[1, 2], seq_lens_list=[10, 20])
+    metadata = SimpleNamespace(
+        block_tables=block_table,
+        actual_seq_lengths_q=[1, 2],
+        seq_lens_list=[10, 20],
+        decode=SimpleNamespace(actual_seq_lengths_q=[1, 2], seq_lens_list=[10, 20]),
+    )
     speculator.use_dcp = False
     speculator.model_state = SimpleNamespace(attn_metadata={"draft": metadata})
     speculator.draft_attn_layer_names = {"draft"}
@@ -511,6 +516,8 @@ def test_build_fia_params_prefill():
     assert result[0]["layer_name"] == "draft"
     assert result[0]["actual_seq_lengths"] == [1, 2]
     assert result[0]["actual_seq_lengths_kv"] == [10, 20]
+    assert result[0]["actual_seq_qlen"] == [1, 2]
+    assert result[0]["actual_seq_kvlen"] == [10, 20]
     assert result[0]["block_table"].shape == (4, 3)
 
 
@@ -518,7 +525,10 @@ def test_build_fia_params_decode():
     """Test building FIA parameters for decode."""
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
     speculator.use_dcp = False
-    metadata = SimpleNamespace(block_tables=torch.arange(12).reshape(4, 3))
+    metadata = SimpleNamespace(
+        block_tables=torch.arange(12).reshape(4, 3),
+        decode=SimpleNamespace(actual_seq_lengths_q=[1, 2, 3], seq_lens_list=[10, 29]),
+    )
     speculator.model_state = SimpleNamespace(attn_metadata={"draft": metadata})
     speculator.draft_attn_layer_names = {"draft"}
     speculator.input_batch = SimpleNamespace(num_reqs=2, seq_lens_np=np.array([10, 29]))
@@ -528,6 +538,8 @@ def test_build_fia_params_decode():
     assert len(result) == 2
     assert result[0]["actual_seq_lengths"] == [1, 2, 3]
     assert result[0]["actual_seq_lengths_kv"] == [11, 30, 0]
+    assert result[0]["actual_seq_qlen"] == [1, 2, 3]
+    assert result[0]["actual_seq_kvlen"] == [11, 30, 0]
     assert result[1]["actual_seq_lengths_kv"] == [12, 30, 0]
 
 

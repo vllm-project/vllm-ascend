@@ -1129,7 +1129,14 @@ class TestDCPGraphParams(TestBase):
         provider = DCPFIAParamProvider("attn_layer_0", 1, CPKVScope.FULL)
         operation, handle, event = MagicMock(), MagicMock(), MagicMock()
         query = torch.randn(2, 4, 8)
-        task = GraphUpdateTask(operation, {"query": query, "actual_seq_lengths_kv": [1, 1]}, provider, 0, handle, event)
+        task = GraphUpdateTask(
+            operation,
+            {"query": query, "actual_seq_lengths": [0, 0], "actual_seq_lengths_kv": [1, 1], "block_table": None},
+            provider,
+            0,
+            handle,
+            event,
+        )
         params = provider.resolve({"attn_layer_0": metadata})
         task.bind(params).apply(self.update_stream)
         operation.assert_called_once_with(
