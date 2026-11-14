@@ -1392,6 +1392,7 @@ def test_verify_and_split_accepts_one_unique_spec_across_groups() -> None:
     )
     coordinator.single_type_managers = (_FakeEagleManager(), _FakeEagleManager())
     coordinator.eagle_group_ids = set()
+    coordinator.drop_eagle_group_ids = set()
     coordinator.enable_partial_hash_hits = False
     coordinator.dcp_world_size = 1
     coordinator.enable_caching = False
@@ -1421,6 +1422,7 @@ def test_verify_and_split_propagates_eagle_to_managers() -> None:
     coordinator.enable_caching = True
     # The c128 group (index 1) carries the EAGLE/MTP layers.
     coordinator.eagle_group_ids = {1}
+    coordinator.drop_eagle_group_ids = {1}
 
     coordinator.single_type_managers = (_FakeEagleManager(), _FakeEagleManager())
 
@@ -1613,6 +1615,7 @@ def test_verify_and_split_propagates_eagle_to_merged_spec_siblings() -> None:
     coordinator.enable_caching = True
     # Only the MTP sibling (gid 2) is flagged, exactly as upstream does.
     coordinator.eagle_group_ids = {2}
+    coordinator.drop_eagle_group_ids = {2}
 
     coordinator.single_type_managers = (
         _FakeEagleManager(),

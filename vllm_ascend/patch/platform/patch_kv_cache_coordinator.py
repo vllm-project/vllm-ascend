@@ -34,29 +34,15 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+from vllm_ascend.utils import vllm_version_is
 
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
 
 
 def _skips_eagle_block_drop(kv_transfer_config) -> bool:
-    """Whether the EAGLE last-block drop must be suppressed on this process.
-
-    Suppressed for a pure PD prefill producer (``is_kv_producer`` and not
-    ``is_kv_consumer``; ``getattr`` fallbacks keep the check working with
-    partial config doubles in unit tests and across vLLM revisions) and for
-    a standalone instance (``kv_transfer_config is None``). A standalone
-    instance has no connector: ``num_external_computed_tokens`` is always
-    zero and every content-hash match comes from verified local prompt
-    blocks, so the drop only erases hit length - on hybrid mamba-align
-    models with a fine ``prefix_match_unit`` it trims the full-attention
-    hit below the mamba partial-tail entry and collapses the reconciled
-    hybrid hit to 0 (the single-instance counterpart of the P-side kill
-    band). Consumers and ``kv_both`` instances keep upstream behavior: they
-    receive external loads whose verifier window the drop protects.
-    """
-    return kv_transfer_config is None or (
-        getattr(kv_transfer_config, "is_kv_producer", False)
-        and not getattr(kv_transfer_config, "is_kv_consumer", False)
+    """Keep the role exemption only for the pre-lookahead v0.32 pairing."""
+    return vllm_version_is("0.32.0") and (
+        kv_transfer_config is None or (kv_transfer_config.is_kv_producer and not kv_transfer_config.is_kv_consumer)
     )
 
 
@@ -123,7 +109,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # with the upstream coordinator interface. PCP is rejected by the platform.
         del pcp_world_size
         # main (cdc4824a21): upstream cache_blocks reads num_reprefillable_tokens
-        self.num_reprefillable_tokens = max(0, (num_prefill_lookahead or 0) - 1)
+        self.num_reprefillable_tokens = max(0, num_prefill_lookahead - 1)
         self.dcp_world_size = dcp_world_size
         self.scheduler_block_size = scheduler_block_size
         self.kv_cache_config = kv_cache_config
@@ -162,18 +148,16 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         self.eagle_group_ids: set[int] = {  # type: ignore[no-redef]
             i for i, g in enumerate(kv_cache_config.kv_cache_groups) if g.is_eagle_group
         }
-        # Fall back to flagging only full-attention groups when no group is
-        # flagged. Mamba/GDN state hits do not use the eagle drop (a draft
-        # model has no mamba layers), and flagging mamba groups truncates
-        # cached state writes, collapsing hybrid prefix-cache hits to 0.
         if use_eagle and not self.eagle_group_ids:
-            self.eagle_group_ids = {
-                i
-                for i, g in enumerate(kv_cache_config.kv_cache_groups)
-                if isinstance(g.kv_cache_spec, FullAttentionSpec)
-            }
-        # vLLM main (#61589) reads this base-class attribute in cache_blocks();
-        # lookahead hashes clear the drop while keeping the groups flagged.
+            if vllm_version_is("0.32.0"):
+                self.eagle_group_ids = {
+                    i
+                    for i, group in enumerate(kv_cache_config.kv_cache_groups)
+                    if isinstance(group.kv_cache_spec, FullAttentionSpec)
+                }
+            else:
+                self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
+        # Preserve EAGLE group identity; core resolves the effective drop policy.
         self.drop_eagle_group_ids = self.eagle_group_ids if use_eagle else set()
 
         extra_mgr_kwargs: dict = {"scheduler_block_size": scheduler_block_size}
@@ -191,6 +175,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 max_in_flight_tokens=token_budget,
                 max_model_len=max_model_len,
                 **extra_mgr_kwargs,
+                **({"role": kv_cache_group.role} if not vllm_version_is("0.32.0") else {}),
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
@@ -243,28 +228,16 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             mgr.cache_hit_alignment_tokens = self._cache_hit_alignment_tokens
 
         self.use_eagle = use_eagle
-        # Roles are derived here, where they are used, from the kv-transfer
-        # config attached by the ``get_kv_cache_config_from_groups`` builder
-        # in ``patch_kv_cache_utils`` (``KVCacheConfig`` has no native field;
-        # the attach survives the scheduler-side deepcopy and is dropped by
-        # worker pickle IPC, which never reads it). Configs built without it
-        # (e.g. unit tests) read as standalone (``kv_transfer_config is
-        # None``).
-        #
-        # A PD prefill producer only schedules fresh-request prefills;
-        # every content-hash block it can match is a verified prompt block
-        # (draft/lookahead tokens live in the request-private tail, whose
-        # hash can never match another request). The EAGLE last-block drop
-        # is therefore never needed on the producer, and with hybrid
-        # mamba-align pages (1536 tokens) it erases the whole shared prefix
-        # of typical ~2K prompts, pinning P-side prefix hits to 0.
         kv_transfer_config = getattr(kv_cache_config, "kv_transfer_config", None)
         self.skips_eagle_block_drop = _skips_eagle_block_drop(kv_transfer_config)
-        # Keep Mamba checkpoint writes on the same boundary as prefill split
-        # and cache lookup. Only roles using EAGLE replay need the block drop.
-        if use_eagle and not self.skips_eagle_block_drop:
+        # Current core uses a global Mamba replay boundary; v0.32 retains
+        # Ascend's role/group policy for legacy checkpoint lookup.
+        if use_eagle:
             for group_id, manager in enumerate(self.single_type_managers):
-                if isinstance(manager, MambaManager) and group_id in self.eagle_group_ids:
+                if isinstance(manager, MambaManager) and (
+                    not vllm_version_is("0.32.0")
+                    or (not self.skips_eagle_block_drop and group_id in self.eagle_group_ids)
+                ):
                     manager.drop_eagle_checkpoint_block = True
 
     @property
@@ -303,7 +276,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 continue
             manager_cls = self.single_type_managers[i].__class__
             spec = _manager_spec(g.kv_cache_spec)
-            use_eagle = i in self.eagle_group_ids
+            use_eagle = i in self.drop_eagle_group_ids
 
             # Try to find an existing group with the same spec
             for idx, group in enumerate(self.attention_groups):
@@ -436,7 +409,8 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                         and group_block_size > self.hash_block_size
                         else group_block_size
                     )
-                    _max_length = min(curr_hit_length + eagle_margin, max_cache_hit_length)
+                    # The proof block may follow the reusable prefix, as in core.
+                    _max_length = min(curr_hit_length + eagle_margin, len(block_hashes) * self.hash_block_size)
                 hit_result = manager_cls.find_longest_cache_hit(
                     block_hashes=_get_block_hashes(spec),
                     max_length=_max_length,
@@ -491,10 +465,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
     ) -> tuple[tuple[list[KVCacheBlock], ...], tuple[int, ...]]:
-        # PD + hybrid connector path. Skip the EAGLE drop on the prefill
-        # producer and on standalone instances (see
-        # ``self.skips_eagle_block_drop``): matched content blocks are
-        # always verified prompt blocks there.
+        # Use the same effective drop policy as the combined lookup.
         num_groups = len(self.kv_cache_config.kv_cache_groups)
         hit_blocks: list[list[KVCacheBlock]] = [[] for _ in range(num_groups)]
         hit_lengths: list[int] = [0] * num_groups

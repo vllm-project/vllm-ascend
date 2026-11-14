@@ -87,6 +87,7 @@ def test_scratch_groups_do_not_reduce_prefix_hits_or_truncation():
         kv_cache_config=SimpleNamespace(kv_cache_groups=groups),
         single_type_managers=[SimpleNamespace(), SimpleNamespace()],
         eagle_group_ids=set(),
+        drop_eagle_group_ids=set(),
         scheduler_block_size=128,
         _get_effective_block_size=lambda spec: spec.block_size,
     )

@@ -11,9 +11,10 @@ from unittest.mock import MagicMock, patch
 import msgspec
 import pytest
 import torch
+from vllm.config import DeviceConfig, KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorTransferResults
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec, MLAAttentionSpec
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker, pull_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
@@ -73,6 +74,37 @@ def make_thread(**overrides: object) -> MooncakePullRecvingThread:
     for name, value in overrides.items():
         setattr(thread, name, value)
     return thread
+
+
+def make_connector_worker(monkeypatch: pytest.MonkeyPatch, *, is_consumer: bool = False) -> MooncakePullConnectorWorker:
+    config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+    config.model_config = SimpleNamespace(
+        is_moe=False,
+        is_deepseek_mla=False,
+        use_mla=False,
+        enforce_eager=True,
+        architectures=[],
+        hf_text_config=SimpleNamespace(),
+        get_total_num_kv_heads=lambda: 0,
+        get_num_experts=lambda: 0,
+        get_hidden_size=lambda: 0,
+    )
+    config.kv_transfer_config = KVTransferConfig(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_consumer" if is_consumer else "kv_producer",
+        engine_id="engine-p",
+    )
+    # Only the distributed/device topology and transfer engine need replacing.
+    group = SimpleNamespace(rank_in_group=0, world_size=1)
+    monkeypatch.setattr(base_worker, "get_tensor_model_parallel_rank", lambda: 0)
+    for name in ("get_tp_group", "get_pp_group", "get_pcp_group"):
+        monkeypatch.setattr(base_worker, name, lambda: group)
+    monkeypatch.setattr(base_worker, "get_decode_context_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(base_worker, "get_ip", lambda: "127.0.0.1")
+    monkeypatch.setattr(base_worker, "global_te", MagicMock())
+    return MooncakePullConnectorWorker(
+        config, "engine-p", KVCacheConfig(num_blocks=8, kv_cache_tensors=[], kv_cache_groups=[])
+    )
 
 
 def make_req_meta(
@@ -1272,9 +1304,8 @@ def test_handle_requests_attributes_failed_tp_to_affected_requests(
     completed_result.assert_called_once_with()
 
 
-def test_connector_worker_groups_start_load_by_remote_engine() -> None:
-    worker = MooncakePullConnectorWorker.__new__(MooncakePullConnectorWorker)
-    worker.kv_transfer_config = SimpleNamespace(is_kv_consumer=True)
+def test_connector_worker_groups_start_load_by_remote_engine(monkeypatch: pytest.MonkeyPatch) -> None:
+    worker = make_connector_worker(monkeypatch, is_consumer=True)
     worker._recving_thread = MagicMock()
     metadata = MooncakeConnectorMetadata()
     metadata.requests = {
@@ -1291,14 +1322,29 @@ def test_connector_worker_groups_start_load_by_remote_engine() -> None:
     assert grouped == {"engine-1": {"a", "c"}, "engine-2": {"b"}}
 
 
-def test_connector_worker_exposes_finished_and_invalid_blocks() -> None:
-    worker = MooncakePullConnectorWorker.__new__(MooncakePullConnectorWorker)
+def test_producer_reports_ack_without_receive_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    worker = make_connector_worker(monkeypatch)
+    metadata = MooncakeConnectorMetadata()
+    metadata.finished_sending = {"request-p"}
+
+    worker.start_load_kv(metadata)
+
+    assert worker.get_transfer_results() == KVConnectorTransferResults(finished_sending={"request-p"})
+    assert worker.get_transfer_results() == KVConnectorTransferResults()
+
+
+def test_connector_worker_exposes_finished_and_invalid_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    worker = make_connector_worker(monkeypatch, is_consumer=True)
     worker._recving_thread = make_thread()
     worker._recving_thread.finished_requests.put(("request", True))
+    worker._recving_thread.finished_requests.put(("received", False))
     worker._recving_thread.invalid_block_ids = {10, 11}
+    metadata = MooncakeConnectorMetadata()
+    metadata.finished_sending = {"request-p"}
+    worker.start_load_kv(metadata)
 
     assert worker.get_transfer_results() == KVConnectorTransferResults(
-        finished_recving={"request"}, failed_recving={"request"}
+        finished_sending={"request-p"}, finished_recving={"request", "received"}, failed_recving={"request"}
     )
     assert worker.get_transfer_results() == KVConnectorTransferResults()
     assert worker.get_block_ids_with_load_errors() == {10, 11}

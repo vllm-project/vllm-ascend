@@ -18,10 +18,17 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 from tests.ut.kv_offload.utils import assert_scheduler_empty, create_model_runner_output, create_vllm_config
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec
+from vllm_ascend.patch.platform.patch_kv_cache_coordinator import _orig_get_kv_cache_coordinator
+from vllm_ascend.utils import vllm_version_is
 
 
+@pytest.mark.parametrize("native_coordinator", [False, True], ids=["ascend", "native"])
 @pytest.mark.parametrize("speculative_method", [None, "mtp", "dspark"])
-def test_prefill_truncation_precedes_local_prefix_lookup(speculative_method, monkeypatch):
+def test_prefill_truncation_precedes_local_prefix_lookup(speculative_method, native_coordinator, monkeypatch):
+    if native_coordinator:
+        if vllm_version_is("0.32.0"):
+            pytest.skip("v0.32 core does not support these Ascend hybrid groups")
+        monkeypatch.setattr("vllm.v1.core.kv_cache_manager.get_kv_cache_coordinator", _orig_get_kv_cache_coordinator)
     monkeypatch.setattr(KVConnectorFactory, "_registry", KVConnectorFactory._registry.copy())
     if "MooncakeHybridConnector" not in KVConnectorFactory._registry:
         KVConnectorFactory.register_connector(
@@ -96,4 +103,6 @@ def test_prefill_truncation_precedes_local_prefix_lookup(speculative_method, mon
     starts = run("hit", 513)
     assert starts[0] == 384
     assert run("shorter", 512)[0] == 384
-    assert run("longer", 514)[0] == 512
+    # MTP needs proof of the next token; DSpark and plain attention do not.
+    longer_hit = 384 if speculative_method == "mtp" and not vllm_version_is("0.32.0") else 512
+    assert run("longer", 514)[0] == longer_hit

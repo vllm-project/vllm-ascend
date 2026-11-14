@@ -1,36 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Regression tests for the hybrid coordinator MTP + prefix-cache fix.
+"""CPU contracts for effective Eagle drop, lookahead and legacy role exemptions.
 
-The patch ``0001-fix-mtp-prefix-cache-hit-hybrid-pd`` makes three changes to
-``AscendHybridKVCacheCoordinator``:
-
-1. ``eagle_group_ids`` fallback flags **only FullAttention** groups when no
-   group carries ``is_eagle_group`` (Mamba/GDN groups must stay out because
-   draft models have no mamba layers).
-2. The standard ``find_longest_cache_hit`` skips the EAGLE last-block drop on
-   the PD prefill producer and on standalone instances. The role is derived
-   from ``kv_transfer_config`` (``is_kv_producer and not is_kv_consumer``),
-   attached onto ``KVCacheConfig`` by the ``get_kv_cache_config_from_groups``
-   builder in ``patch_kv_cache_utils``, and read back by the coordinator -
-   no role environment variable is involved.
-3. ``find_longest_cache_hit_per_group`` applies the same drop gating and
-   keeps the ``(block_hashes, max_cache_hit_length)`` call convention used by
-   RecomputeScheduler / DyntraLB / BalanceScheduler.
-4. The producer/standalone EAGLE block-drop suppression is applied inline
-   inside ``Scheduler._mamba_block_aligned_split`` (see
-   ``patch_mamba_block_aligned_split``): on a pure producer or a standalone
-   instance the EAGLE block-drop bit (``use_eagle`` on vLLM 0.28.x,
-   ``use_eagle_block_drop`` on newer revisions) is cleared for the duration
-   of the original call. Otherwise the scheduler's one-page backoff
-   suppresses the final full mamba-align chunk split and the boundary state
-   is never materialized. Consumers / kv_both instances pass through
-   unchanged. The scheduler-side behavior itself is exercised in
-   ``test_patch_mamba_block_aligned_split``.
-
-These exercises run CPU-only: the heavy ``__init__`` is exercised with a
-lightweight BlockPool/manager factory, lookup tests build the coordinator
-with ``__new__`` and drive it through recording fake managers, and the
-scheduler wrapper is exercised against one-off scheduler double classes.
+Current main follows the native resolved policy for every role. Only v0.32
+keeps the historical producer/standalone exemption. No model or NPU execution.
 """
 
 from types import SimpleNamespace
@@ -41,6 +13,7 @@ from vllm.v1.core.kv_cache_coordinator import SpecGroup
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
+    KVCacheGroupRole,
     KVCacheGroupSpec,
     MambaSpec,
 )
@@ -49,6 +22,12 @@ from vllm_ascend.patch.platform import patch_kv_cache_coordinator as mod
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
 )
+
+
+@pytest.fixture(autouse=True)
+def current_main(monkeypatch):
+    monkeypatch.setattr(mod, "vllm_version_is", lambda version: False)
+
 
 HASH_BLOCK_SIZE = 128
 
@@ -73,19 +52,21 @@ MAMBA_SPEC = MambaSpec(
 
 class _FakeBlockPool:
     def __init__(self, *args, **kwargs):
-        pass
+        self.num_hash_lookahead_tokens = kwargs.get("num_hash_lookahead_tokens", 0)
 
 
 class _FakeFAManager:
     def __init__(self, **kwargs):
         self.use_eagle = False
+        self.role = kwargs.get("role")
         self.block_size = kwargs["kv_cache_spec"].block_size
 
 
 class _FakeMambaManager:
     def __init__(self, **kwargs):
-        self.use_eagle = False
         self.drop_eagle_checkpoint_block = False
+        self.use_eagle = False
+        self.role = kwargs.get("role")
         self.block_size = kwargs["kv_cache_spec"].block_size
 
 
@@ -96,9 +77,14 @@ def _fake_manager_factory(**kwargs):
     return _FakeFAManager(**kwargs)
 
 
-def _hybrid_config(*, mamba_eagle: bool = False, retention_interval: int | None = None) -> KVCacheConfig:
+def _hybrid_config(
+    *,
+    mamba_eagle: bool = False,
+    fa_eagle: bool = False,
+    retention_interval: int | None = None,
+) -> KVCacheConfig:
     groups = [
-        KVCacheGroupSpec(["fa-layer"], FA_SPEC, False),
+        KVCacheGroupSpec(["fa-layer"], FA_SPEC, fa_eagle),
         KVCacheGroupSpec(["mamba-layer"], MAMBA_SPEC, mamba_eagle),
     ]
     return KVCacheConfig(
@@ -115,12 +101,21 @@ def _make_coordinator(
     use_eagle: bool,
     kv_transfer_config=None,
     mamba_eagle: bool = False,
+    fa_eagle: bool = False,
+    num_hash_lookahead_tokens: int = 0,
     retention_interval: int | None = None,
+    scheduler_block_size: int = MAMBA_SPEC.block_size,
+    kv_cache_config: KVCacheConfig | None = None,
 ):
     monkeypatch.setattr(mod, "BlockPool", _FakeBlockPool)
     monkeypatch.setattr(mod, "MambaManager", _FakeMambaManager)
     monkeypatch.setattr(mod, "get_manager_for_kv_cache_spec", _fake_manager_factory)
-    kv_cache_config = _hybrid_config(mamba_eagle=mamba_eagle, retention_interval=retention_interval)
+    if kv_cache_config is None:
+        kv_cache_config = _hybrid_config(
+            mamba_eagle=mamba_eagle,
+            fa_eagle=fa_eagle,
+            retention_interval=retention_interval,
+        )
     # The kv-transfer config is attached by the
     # get_kv_cache_config_from_groups builder in real engine startup.
     kv_cache_config.kv_transfer_config = kv_transfer_config
@@ -133,28 +128,36 @@ def _make_coordinator(
         dcp_world_size=1,
         pcp_world_size=1,
         hash_block_size=HASH_BLOCK_SIZE,
-        scheduler_block_size=HASH_BLOCK_SIZE,
+        scheduler_block_size=scheduler_block_size,
+        num_hash_lookahead_tokens=num_hash_lookahead_tokens,
     )
 
 
 @pytest.mark.parametrize("retention_interval", [None, 0, 384])
 def test_coordinator_uses_resolved_retention_interval(monkeypatch, retention_interval):
-    coordinator = _make_coordinator(monkeypatch, use_eagle=False, retention_interval=retention_interval)
+    coordinator = _make_coordinator(
+        monkeypatch,
+        use_eagle=False,
+        retention_interval=retention_interval,
+        scheduler_block_size=HASH_BLOCK_SIZE,
+    )
     assert coordinator.retention_interval == retention_interval
 
 
 # ---------------------------------------------------------------------------
-# Fix ①: eagle fallback must not flag mamba groups
+# Eagle identity and version-specific fallback
 # ---------------------------------------------------------------------------
 
 
-def test_eagle_fallback_flags_only_full_attention_group(monkeypatch):
+@pytest.mark.parametrize("legacy", [False, True], ids=["main", "v032"])
+def test_unmarked_eagle_fallback_matches_paired_version(monkeypatch, legacy):
+    monkeypatch.setattr(mod, "vllm_version_is", lambda version: legacy and version == "0.32.0")
     coordinator = _make_coordinator(monkeypatch, use_eagle=True)
-    # Only the FA group is flagged; the mamba group stays out.
-    assert coordinator.eagle_group_ids == {0}
-    # Bit propagation after verify_and_split: FA manager eagle, mamba not.
+    expected = {0} if legacy else {0, 1}
+    assert coordinator.eagle_group_ids == expected
+    assert coordinator.drop_eagle_group_ids == expected
     assert coordinator.single_type_managers[0].use_eagle is True
-    assert coordinator.single_type_managers[1].use_eagle is False
+    assert coordinator.single_type_managers[1].use_eagle is (not legacy)
 
 
 def test_no_eagle_group_when_speculative_decoding_disabled(monkeypatch):
@@ -183,13 +186,13 @@ def _kv_transfer_config(*, is_kv_producer: bool, is_kv_consumer: bool):
     )
 
 
-def test_coordinator_reads_producer_tag(monkeypatch):
+def test_main_coordinator_does_not_exempt_producer(monkeypatch):
     coordinator = _make_coordinator(
         monkeypatch,
         use_eagle=True,
         kv_transfer_config=_kv_transfer_config(is_kv_producer=True, is_kv_consumer=False),
     )
-    assert coordinator.skips_eagle_block_drop is True
+    assert coordinator.skips_eagle_block_drop is False
 
 
 def test_coordinator_non_producer_tag(monkeypatch):
@@ -201,12 +204,9 @@ def test_coordinator_non_producer_tag(monkeypatch):
     assert coordinator.skips_eagle_block_drop is False
 
 
-def test_coordinator_reads_standalone_drop_exemption(monkeypatch):
-    # No kv-transfer config attached: a standalone instance. Not a PD
-    # producer, but every content-hash match is a verified local prompt
-    # block, so the EAGLE drop is suppressed just like on the producer.
+def test_main_coordinator_does_not_exempt_standalone(monkeypatch):
     coordinator = _make_coordinator(monkeypatch, use_eagle=True, kv_transfer_config=None)
-    assert coordinator.skips_eagle_block_drop is True
+    assert coordinator.skips_eagle_block_drop is False
 
 
 @pytest.mark.parametrize(
@@ -219,8 +219,10 @@ def test_coordinator_reads_standalone_drop_exemption(monkeypatch):
         (None, True),
     ],
 )
-def test_skips_eagle_block_drop_role_semantics(kv_transfer_config, expected):
-    assert mod._skips_eagle_block_drop(kv_transfer_config) is expected
+@pytest.mark.parametrize("legacy", [False, True], ids=["main", "v032"])
+def test_skips_eagle_block_drop_role_semantics(monkeypatch, kv_transfer_config, expected, legacy):
+    monkeypatch.setattr(mod, "vllm_version_is", lambda version: legacy and version == "0.32.0")
+    assert mod._skips_eagle_block_drop(kv_transfer_config) is (legacy and expected)
 
 
 @pytest.mark.parametrize(
@@ -237,6 +239,7 @@ def test_skips_eagle_block_drop_role_semantics(kv_transfer_config, expected):
 def test_mamba_checkpoint_drop_follows_lookup_policy(
     monkeypatch, kv_transfer_config, drop_for_role, use_eagle, mamba_eagle
 ):
+    monkeypatch.setattr(mod, "vllm_version_is", lambda version: version == "0.32.0")
     coordinator = _make_coordinator(
         monkeypatch,
         use_eagle=use_eagle,
@@ -313,7 +316,7 @@ class _RecordingMamba(_RecordingManager):
     calls = []
 
 
-def _make_lookup_coordinator(*, producer: bool, standalone: bool = False):
+def _make_legacy_lookup_coordinator(*, producer: bool, standalone: bool = False):
     coordinator = AscendHybridKVCacheCoordinator.__new__(AscendHybridKVCacheCoordinator)
     coordinator.skips_eagle_block_drop = producer or standalone
     coordinator.dcp_world_size = 1
@@ -347,22 +350,22 @@ def _make_lookup_coordinator(*, producer: bool, standalone: bool = False):
 
 
 def test_standard_lookup_drops_last_block_on_consumer():
-    coordinator = _make_lookup_coordinator(producer=False)
+    coordinator = _make_legacy_lookup_coordinator(producer=False)
     coordinator.find_longest_cache_hit(block_hashes=[], max_cache_hit_length=2048)
     assert _RecordingFA.calls[-1]["drop_eagle_block"] is True
     # Mamba group is never eagle.
     assert _RecordingMamba.calls[-1]["drop_eagle_block"] is False
 
 
-def test_standard_lookup_skips_drop_on_producer():
-    coordinator = _make_lookup_coordinator(producer=True)
+def test_legacy_standard_lookup_skips_drop_on_producer():
+    coordinator = _make_legacy_lookup_coordinator(producer=True)
     coordinator.find_longest_cache_hit(block_hashes=[], max_cache_hit_length=2048)
     assert _RecordingFA.calls[-1]["drop_eagle_block"] is False
     assert _RecordingMamba.calls[-1]["drop_eagle_block"] is False
 
 
-def test_standard_lookup_skips_drop_on_standalone():
-    coordinator = _make_lookup_coordinator(producer=False, standalone=True)
+def test_legacy_standard_lookup_skips_drop_on_standalone():
+    coordinator = _make_legacy_lookup_coordinator(producer=False, standalone=True)
     coordinator.find_longest_cache_hit(block_hashes=[], max_cache_hit_length=2048)
     assert _RecordingFA.calls[-1]["drop_eagle_block"] is False
     assert _RecordingMamba.calls[-1]["drop_eagle_block"] is False
@@ -374,23 +377,23 @@ def test_standard_lookup_skips_drop_on_standalone():
 
 
 def test_per_group_lookup_drops_last_block_on_consumer():
-    coordinator = _make_lookup_coordinator(producer=False)
+    coordinator = _make_legacy_lookup_coordinator(producer=False)
     _, hit_lengths = coordinator.find_longest_cache_hit_per_group([], 2048)
     assert _RecordingFA.calls[-1]["drop_eagle_block"] is True
     assert _RecordingMamba.calls[-1]["drop_eagle_block"] is False
     assert hit_lengths == (2048, 2048)
 
 
-def test_per_group_lookup_skips_drop_on_producer():
-    coordinator = _make_lookup_coordinator(producer=True)
+def test_legacy_per_group_lookup_skips_drop_on_producer():
+    coordinator = _make_legacy_lookup_coordinator(producer=True)
     _, hit_lengths = coordinator.find_longest_cache_hit_per_group([], 2048)
     assert _RecordingFA.calls[-1]["drop_eagle_block"] is False
     assert _RecordingMamba.calls[-1]["drop_eagle_block"] is False
     assert hit_lengths == (2048, 2048)
 
 
-def test_per_group_lookup_skips_drop_on_standalone():
-    coordinator = _make_lookup_coordinator(producer=False, standalone=True)
+def test_legacy_per_group_lookup_skips_drop_on_standalone():
+    coordinator = _make_legacy_lookup_coordinator(producer=False, standalone=True)
     _, hit_lengths = coordinator.find_longest_cache_hit_per_group([], 2048)
     assert _RecordingFA.calls[-1]["drop_eagle_block"] is False
     assert _RecordingMamba.calls[-1]["drop_eagle_block"] is False
@@ -400,12 +403,138 @@ def test_per_group_lookup_skips_drop_on_standalone():
 def test_per_group_lookup_matches_scheduler_call_convention():
     # RecomputeScheduler / DyntraLBScheduler / BalanceScheduler all call with
     # exactly two positional args: (request.block_hashes, request.num_tokens-1).
-    coordinator = _make_lookup_coordinator(producer=True)
+    coordinator = _make_legacy_lookup_coordinator(producer=True)
     block_hashes = ["hash-0", "hash-1"]
     blocks, hit_lengths = coordinator.find_longest_cache_hit_per_group(block_hashes, 4095)
     assert len(blocks) == 2
     assert _RecordingFA.calls[-1]["max_length"] == 4095
     assert hit_lengths == (4095, 4095)
+
+
+@pytest.mark.parametrize(
+    "lookahead, effective_drop",
+    [(0, True), (1, False), (0, False)],
+    ids=["legacy-hashes-or-disable-lookahead", "lookahead", "disable-eagle-block-drop"],
+)
+@pytest.mark.parametrize("role", ["standalone", "producer", "consumer", "both"])
+def test_main_resolved_drop_preserves_identity_and_lookup(monkeypatch, lookahead, effective_drop, role):
+    config = (
+        None
+        if role == "standalone"
+        else _kv_transfer_config(
+            is_kv_producer=role in ("producer", "both"),
+            is_kv_consumer=role in ("consumer", "both"),
+        )
+    )
+    coordinator = _make_coordinator(
+        monkeypatch,
+        use_eagle=effective_drop,
+        fa_eagle=True,
+        kv_transfer_config=config,
+        num_hash_lookahead_tokens=lookahead,
+    )
+    assert coordinator.eagle_group_ids == {0}
+    assert coordinator.drop_eagle_group_ids == ({0} if effective_drop else set())
+    assert coordinator.block_pool.num_hash_lookahead_tokens == lookahead
+    assert coordinator.skips_eagle_block_drop is False
+    assert [g.use_eagle for g in coordinator.attention_groups] == [effective_drop, False]
+    assert [m.use_eagle for m in coordinator.single_type_managers] == [effective_drop, False]
+    # Mamba is not an EAGLE group here, but follows the global replay boundary.
+    assert coordinator.single_type_managers[1].drop_eagle_checkpoint_block is effective_drop
+    # Keep the constructor's resolved group policy while recording both lookup APIs.
+    coordinator.attention_groups = [
+        g._replace(manager_cls=_RecordingFA if isinstance(g.spec, FullAttentionSpec) else _RecordingMamba)
+        for g in coordinator.attention_groups
+    ]
+    coordinator.find_longest_cache_hit([], 2048)
+    assert _RecordingFA.calls[-1]["drop_eagle_block"] is effective_drop
+    assert _RecordingMamba.calls[-1]["drop_eagle_block"] is False
+    coordinator.find_longest_cache_hit_per_group([], 2048)
+    assert _RecordingFA.calls[-1]["drop_eagle_block"] is effective_drop
+    assert _RecordingMamba.calls[-1]["drop_eagle_block"] is False
+
+
+@pytest.mark.parametrize("legacy", [False, True], ids=["main", "v032"])
+@pytest.mark.parametrize("retention", [0, MAMBA_SPEC.block_size])
+def test_retention_uses_resolved_cache_config(monkeypatch, retention, legacy):
+    monkeypatch.setattr(mod, "vllm_version_is", lambda version: legacy and version == "0.32.0")
+    # A conflicting environment value must not override the resolved config.
+    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "3072")
+    coordinator = _make_coordinator(
+        monkeypatch,
+        use_eagle=False,
+        fa_eagle=True,
+        num_hash_lookahead_tokens=1,
+        retention_interval=retention,
+    )
+    assert coordinator.retention_interval == retention
+
+
+@pytest.mark.parametrize("initial_retention", [0, 3072])
+def test_inherits_native_store_checkpoint_retention(monkeypatch, initial_retention):
+    try:
+        from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (  # type: ignore
+            scheduler as store_mod,
+        )
+    except ModuleNotFoundError:
+        from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (  # type: ignore
+            scheduler as store_mod,
+        )
+
+    # Exercise the real Store retention policy, stubbing only lookup transport
+    # and unrelated coordinator construction. No store client/network is opened.
+    monkeypatch.setattr(store_mod, "LookupKeyClient", lambda config: None)
+    monkeypatch.setattr(
+        store_mod,
+        "resolve_kv_cache_block_sizes",
+        lambda kv_config, config: (MAMBA_SPEC.block_size, HASH_BLOCK_SIZE),
+    )
+    monkeypatch.setattr(
+        store_mod,
+        "MooncakeStoreCoordinator",
+        SimpleNamespace(from_kv_cache_config=lambda *args: SimpleNamespace(enable_partial_hash_hits=True)),
+    )
+    kv_config = _hybrid_config(fa_eagle=True)
+    kv_config.prefix_cache_retention_interval = initial_retention
+    transfer = SimpleNamespace(
+        kv_role="kv_both",
+        is_kv_producer=True,
+        is_kv_consumer=True,
+        kv_connector_extra_config={"save_decode_cache": True},
+    )
+    config = SimpleNamespace(
+        kv_transfer_config=transfer,
+        kv_events_config=None,
+        parallel_config=SimpleNamespace(world_size=1),
+    )
+    store = store_mod.MooncakeStoreScheduler(config, kv_config)
+    # Store resolves its version's checkpoint policy; Ascend must preserve it.
+    expected = store.kv_cache_config.prefix_cache_retention_interval
+    assert store.kv_cache_config is kv_config
+    coordinator = _make_coordinator(
+        monkeypatch,
+        use_eagle=False,
+        num_hash_lookahead_tokens=1,
+        kv_transfer_config=transfer,
+        kv_cache_config=kv_config,
+    )
+    assert coordinator.kv_cache_config is kv_config
+    assert coordinator.retention_interval == expected
+    assert coordinator.retention_interval is not None  # Never silently fall back to dense.
+
+
+def test_main_forwards_cache_group_role_to_manager(monkeypatch):
+    config = _hybrid_config(fa_eagle=True)
+    config.kv_cache_groups[0].role = KVCacheGroupRole.HISPARSE_SOURCE
+    coordinator = _make_coordinator(
+        monkeypatch,
+        use_eagle=False,
+        num_hash_lookahead_tokens=1,
+        kv_cache_config=config,
+    )
+    assert [manager.role for manager in coordinator.single_type_managers] == [
+        group.role for group in config.kv_cache_groups
+    ]
 
 
 if __name__ == "__main__":
