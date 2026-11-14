@@ -17,7 +17,6 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
@@ -34,7 +33,6 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
-from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
@@ -120,7 +118,6 @@ class AscendPCPManager(PCPManager):
         pcp_rank: int,
         device: torch.device,
         shard_decode_requests: bool = False,
-        req_states: RequestState | None = None,
         max_num_reqs: int | None = None,
         max_num_tokens: int | None = None,
         block_tables: BlockTables | None = None,
@@ -208,53 +205,6 @@ class AscendPCPManager(PCPManager):
     def is_decode_sharded(self) -> bool:
         """Use the shared policy after the runner injects vllm_config."""
         return is_pcp_decode_sharding_enabled(self.vllm_config)
-
-    # TODO: Remove replicated_requests and _iter_rank_chunks once the paired
-    # vLLM includes #52162, which shards decode requests upstream.
-    def replicated_requests(self, num_scheduled_tokens: np.ndarray, is_prefilling: np.ndarray) -> np.ndarray:
-        """Sharded decodes have a single owner, so none of them is replicated."""
-        replicated = super().replicated_requests(num_scheduled_tokens, is_prefilling)
-        if self.is_decode_sharded:
-            replicated &= np.asarray(is_prefilling, dtype=np.bool_)
-        return replicated
-
-    def _iter_rank_chunks(
-        self,
-        rank: int,
-        num_scheduled_tokens: np.ndarray,
-        is_prefilling: np.ndarray,
-    ) -> Iterator[tuple[int, int, int]]:
-        """Split prefills as upstream does and assign decodes round-robin.
-
-        Only scheduled decodes count toward the round-robin order, which keeps
-        every step balanced. Ownership may change between steps because KV
-        and hidden states are gathered back to every PCP rank.
-        """
-        if not self.is_decode_sharded:
-            yield from super()._iter_rank_chunks(rank, num_scheduled_tokens, is_prefilling)
-            return
-
-        decode_ordinal = 0
-        num_chunks = 2 * self.pcp_world_size
-        for req_idx, num_tokens in enumerate(num_scheduled_tokens):
-            query_len = int(num_tokens)
-            if query_len == 0:
-                continue
-
-            if not is_prefilling[req_idx]:
-                owner_rank = decode_ordinal % self.pcp_world_size
-                decode_ordinal += 1
-                if rank == owner_rank:
-                    yield req_idx, 0, query_len
-                continue
-
-            # DCP == 1 here, so prefills use upstream's DualChunkSwap split.
-            chunk_size = (query_len + num_chunks - 1) // num_chunks
-            for chunk_idx in (rank, num_chunks - 1 - rank):
-                chunk_offset = chunk_idx * chunk_size
-                chunk_len = min(chunk_size, query_len - chunk_offset)
-                if chunk_len > 0:
-                    yield req_idx, chunk_offset, chunk_len
 
     @property
     def global_batch(self) -> AscendInputBatch:
@@ -663,48 +613,6 @@ class AscendPCPManager(PCPManager):
             for group in groups
             for layer_name in group.layer_names
         )
-
-    def prepare_slot_mappings(self) -> torch.Tensor:
-        """Pad PCP slot mappings to the fixed FULL-decode graph layout.
-
-        The upstream manager packs current local rows as
-        [rank 0 rows | rank 1 rows | ...]. A full-decode graph pads the model
-        input of each PCP rank to graph_num_tokens. Preserve that rank-major
-        layout when expanding the slot mapping:
-        [rank 0 rows | rank 0 padding | rank 1 rows | rank 1 padding | ...].
-
-        Sharded decode already uses the rank-local graph stride upstream.
-        """
-        slot_mappings = super().prepare_slot_mappings()
-        assert self._global_batch is not None
-        graph_num_tokens = self._global_batch.num_tokens_after_padding
-        is_decode_only = not bool(self._global_batch.is_prefilling_np.any())
-        if self.is_decode_sharded or not is_decode_only or graph_num_tokens <= self._global_batch.num_tokens:
-            return slot_mappings
-
-        assert self._gathered_kv_slot_mappings is not None
-        graph_num_slots = graph_num_tokens * self.pcp_world_size
-        local_num_tokens = slot_mappings.shape[1] // self.pcp_world_size
-        if local_num_tokens * self.pcp_world_size != slot_mappings.shape[1]:
-            raise RuntimeError(
-                "PCP gathered slot mappings must contain an equal local span "
-                f"for every rank, got {slot_mappings.shape[1]} slots for "
-                f"pcp_world_size={self.pcp_world_size}."
-            )
-
-        graph_slot_mappings = self._gathered_kv_slot_mappings[:, :graph_num_slots]
-        # The compact source is a view of this reusable destination buffer.
-        # Snapshot it first: a graph stride can overlap the next compact rank
-        # span (for example, 3 compact tokens expanded to a 4-token graph).
-        compact_slot_mappings = slot_mappings.clone()
-        for pcp_rank in range(self.pcp_world_size):
-            source_start = pcp_rank * local_num_tokens
-            target_start = pcp_rank * graph_num_tokens
-            graph_slot_mappings[:, target_start : target_start + local_num_tokens].copy_(
-                compact_slot_mappings[:, source_start : source_start + local_num_tokens]
-            )
-            graph_slot_mappings[:, target_start + local_num_tokens : target_start + graph_num_tokens].fill_(-1)
-        return graph_slot_mappings
 
     def refresh_gathered_slot_mappings(self, slot_mappings: torch.Tensor) -> None:
         """Publish updated global slots in the original rank-major PCP layout."""
