@@ -31,6 +31,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.attention.a3_mla_sink import A3MLAAdapter, A3MLAConfig, validate_sink_selection
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
@@ -70,7 +71,9 @@ from vllm_ascend.compilation.acl_graph import (
     update_graph_params_workspaces,
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, supports_component_major_mla_pd
+from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.paged_mla_cache_read import load_mla_cache_rows_by_slots
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
@@ -362,15 +365,17 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
         self.flashmla_state = None
         flashmla_choices = {static_forward_context[name].impl.use_flashmla for name in layer_names}
-        if len(flashmla_choices) > 1:
+        a3_choices = {getattr(static_forward_context[name].impl, "use_a3_mla_sink", False) for name in layer_names}
+        self.use_a3_mla_sink = True in a3_choices
+        if len(flashmla_choices) > 1 or len(a3_choices) > 1:
             raise ValueError("MLA layers in one attention group must use the same decode backend")
         if layer_names:
             logger.info(
                 "MLA decode backend for group starting at %s: %s",
                 layer_names[0],
-                "FlashMLA" if True in flashmla_choices else "FIA",
+                "A3 MLA sink" if self.use_a3_mla_sink else "FlashMLA" if True in flashmla_choices else "FIA",
             )
-        if True in flashmla_choices:
+        if True in flashmla_choices or self.use_a3_mla_sink:
             impl = static_forward_context[layer_names[0]].impl
             self.flashmla_state = FlashMLAMetadataBuilder(
                 impl, device, scheduler_config.max_num_seqs, self.attn_mask_builder.get_splitfuse_attn_mask()
@@ -1027,6 +1032,25 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.mlapo_weight_quant_mode = 3
         self._mlapo_uses_native_weights = False
         self.use_flashmla: bool = self._can_use_flashmla()
+        a3_mode = getattr(ascend_config, "a3_mla_sink_mode", "disabled")
+        self.use_a3_mla_sink = validate_sink_selection(
+            self,
+            mode=a3_mode,
+            is_a3=a3_mode != "disabled" and get_ascend_device_type() == AscendDeviceType.A3,
+            is_draft=backends.model_tag == "dspark_head",
+            allow_graph=getattr(ascend_config, "a3_mla_sink_allow_graph", False),
+        )
+        self.a3_mla_adapter = None
+        if self.use_a3_mla_sink:
+            self.a3_mla_adapter = A3MLAAdapter.load(
+                A3MLAConfig(self.num_heads, self.scale, return_softmax_lse=self.use_dcp, dtype=self.dtype),
+                ascend_config.a3_mla_sink_mode,
+                ascend_config.a3_mla_sink_module,
+            )
+            logger.warning_once(
+                "A3 MLA sink provider=%s is explicitly enabled; native graph/model validation is required.",
+                ascend_config.a3_mla_sink_mode,
+            )
         self._flashmla_writer_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
 
     def _can_use_flashmla(self) -> bool:
@@ -2963,7 +2987,7 @@ class AscendMLAImpl(MLAAttentionImpl):
     def _forward_external_flashmla(self, preprocessed, fused_cache, metadata):
         flash = metadata.external_flashmla
         assert flash is not None
-        if not isinstance(fused_cache, torch.Tensor):
+        if not isinstance(fused_cache, torch.Tensor) and not getattr(self, "use_a3_mla_sink", False):
             raise RuntimeError(
                 "External FlashMLA requires the original fused BBND cache; component-major tuples are invalid"
             )
@@ -3351,7 +3375,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         # MLA implementation still expects separate NoPE/RoPE logical tensors.
         # Split it here as zero-copy views.
         fused_mla_cache = isinstance(kv_cache, torch.Tensor)
-        external_flash_cache = kv_cache if fused_mla_cache else None
+        external_flash_cache = kv_cache if fused_mla_cache or getattr(self, "use_a3_mla_sink", False) else None
         if isinstance(kv_cache, torch.Tensor):
             kv_cache = (
                 kv_cache[..., : self.kv_lora_rank],

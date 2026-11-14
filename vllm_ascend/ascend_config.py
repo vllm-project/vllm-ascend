@@ -667,6 +667,11 @@ class AscendConfig:
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
+    # Explicit development/native provider for K3.1 A3 MLA DSpark (#338 ABI).
+    a3_mla_sink_mode: Literal["disabled", "mock", "external"] = "disabled"
+    a3_mla_sink_module: str = "flash_attn_npu_3.flash_attn_npu_interface"
+    # Native MLA graph support must be validated before opting in.
+    a3_mla_sink_allow_graph: bool = False
     kv_pool_range_debug: bool = False
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
     sfa_dcp_force_tmajor_restore: bool = False
