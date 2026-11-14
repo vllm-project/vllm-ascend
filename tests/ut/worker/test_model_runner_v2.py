@@ -15,6 +15,7 @@ from vllm.config.offload import OffloadConfig, PrefetchOffloadConfig
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.offloader.base import NoopOffloader, get_offloader, set_offloader
+from vllm.model_executor.offloader.base import create_offloader as create_vllm_offloader
 from vllm.sequence import IntermediateTensors
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
@@ -1106,11 +1107,19 @@ def _parent_init(self, vllm_config, device, *, full_graph=False, speculative=Fal
     self.speculator = object()
 
 
-def test_init_registers_ascend_prefetch_offloader():
+@pytest.mark.parametrize(
+    ("enforce_eager", "offload_backend", "use_ascend_offloader"),
+    [
+        pytest.param(True, "prefetch", True, id="eager-prefetch"),
+        pytest.param(False, "prefetch", False, id="graph-prefetch"),
+        pytest.param(True, "auto", False, id="eager-auto"),
+    ],
+)
+def test_init_selects_prefetch_offloader(enforce_eager, offload_backend, use_ascend_offloader):
     vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(enable_eplb=False, pipeline_parallel_size=1),
         offload_config=OffloadConfig(
-            offload_backend="prefetch",
+            offload_backend=offload_backend,
             prefetch=PrefetchOffloadConfig(offload_group_size=2, offload_num_in_group=1),
         ),
     )
@@ -1119,6 +1128,7 @@ def test_init_registers_ascend_prefetch_offloader():
         dump_config_path=None,
     )
     copy_stream = object()
+    parent_offloader = None
 
     @contextmanager
     def cuda_wrapper():
@@ -1127,8 +1137,10 @@ def test_init_registers_ascend_prefetch_offloader():
             yield
 
     def parent_init(self, config, device):
-        _parent_init(self, config, device)
-        set_offloader(NoopOffloader())
+        nonlocal parent_offloader
+        _parent_init(self, config, device, full_graph=not enforce_eager)
+        parent_offloader = create_vllm_offloader(config.offload_config)
+        set_offloader(parent_offloader)
 
     previous_offloader = get_offloader()
     try:
@@ -1152,8 +1164,11 @@ def test_init_registers_ascend_prefetch_offloader():
         ):
             NPUModelRunner(vllm_config, torch.device("cpu"))
             offloader = get_offloader()
-            assert isinstance(offloader, AscendPrefetchOffloader)
-            assert offloader.copy_stream is copy_stream
+            if use_ascend_offloader:
+                assert isinstance(offloader, AscendPrefetchOffloader)
+                assert offloader.copy_stream is copy_stream
+            else:
+                assert offloader is parent_offloader
     finally:
         set_offloader(previous_offloader)
 
@@ -1176,7 +1191,7 @@ def test_init_without_speculation(monkeypatch, use_pp, backend_name, env_buffer_
 
     vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(enable_eplb=False, pipeline_parallel_size=2 if use_pp else 1),
-        offload_config=None,
+        offload_config=OffloadConfig(),
     )
     ascend_config = SimpleNamespace(eplb_config=SimpleNamespace(load_collection_phase="all"), dump_config_path=None)
 
@@ -1222,7 +1237,6 @@ def test_init_without_speculation(monkeypatch, use_pp, backend_name, env_buffer_
         patch("vllm_ascend.worker.v2.model_runner.set_potential_max_tokens"),
         patch("vllm_ascend.worker.v2.model_runner.resolve_spec_pp_support", return_value=None),
         patch("vllm_ascend.worker.v2.model_runner.torch_cuda_wrapper", return_value=nullcontext()),
-        patch("vllm_ascend.worker.v2.model_runner.set_offloader"),
         patch.object(GPUModelRunner, "__init__", parent_init),
         patch("vllm_ascend.worker.v2.model_runner.AscendEPLBController", return_value="eplb"),
         patch("vllm_ascend.worker.v2.model_runner.AscendRequestState", return_value="req"),
@@ -1276,7 +1290,7 @@ def test_init_without_speculation(monkeypatch, use_pp, backend_name, env_buffer_
 def test_init_spec_pp_full_graph_and_speculator(method):
     vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(enable_eplb=True, pipeline_parallel_size=2),
-        offload_config=None,
+        offload_config=OffloadConfig(),
     )
     ascend_config = SimpleNamespace(eplb_config=SimpleNamespace(load_collection_phase="decode"), dump_config_path=None)
 
@@ -1301,7 +1315,6 @@ def test_init_spec_pp_full_graph_and_speculator(method):
         patch("vllm_ascend.worker.v2.model_runner.set_potential_max_tokens"),
         patch("vllm_ascend.worker.v2.model_runner.resolve_spec_pp_support", return_value=spec_pp),
         patch("vllm_ascend.worker.v2.model_runner.torch_cuda_wrapper", return_value=nullcontext()),
-        patch("vllm_ascend.worker.v2.model_runner.set_offloader"),
         patch.object(
             GPUModelRunner,
             "__init__",

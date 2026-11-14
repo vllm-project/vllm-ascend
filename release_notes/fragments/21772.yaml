@@ -1,4 +1,4 @@
 pr: 21772
 entries:
   - category: bugfix
-    text: Fixed NZ expert weight loading when using CPU prefetch with Model Runner V2.
+    text: Fixed NZ expert weight loading when using CPU prefetch in eager mode with Model Runner V2.

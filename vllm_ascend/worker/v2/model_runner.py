@@ -173,7 +173,10 @@ class NPUModelRunner(GPUModelRunner):
         spec_pp_support = resolve_spec_pp_support(vllm_config)
         with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
-            set_offloader(create_offloader(vllm_config.offload_config))
+            offload_config = vllm_config.offload_config
+            # Prefetch into NZ buffers requires a format conversion that ACL graphs cannot capture.
+            if self.model_config.enforce_eager and offload_config.offload_backend == "prefetch":
+                set_offloader(create_offloader(offload_config))
         if self.use_pp:
             assert self.pp_handler is not None
             old_broadcast_group = self.pp_handler.broadcast_group
