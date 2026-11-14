@@ -24,6 +24,7 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    get_tp_group,
 )
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
@@ -59,6 +60,7 @@ from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
 from vllm_ascend.attention.dsa_v41 import (
     DeepseekV41CacheLayer,
 )
+from vllm_ascend.attention.dsa_v41_indexer_shard import IndexerRowPartition
 from vllm_ascend.core.kv_cache_interface import resolve_bounded_replay
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -497,12 +499,31 @@ class DeepseekV41SharedAttentionState:
         self.candidates = candidates
         self.candidate_lengths = candidate_lengths
         self.topk_lengths = topk_lengths
+        self.candidate_partition: IndexerRowPartition | None = None
 
     def reset(self):
         # Source layers overwrite the active rows before any consumer reads
         # them. Keeping the storage intact avoids replay depending on Python
         # state mutation and preserves a fixed address for ACL Graph.
-        return None
+        self.candidate_partition = None
+
+    def compact_candidates(self, rows: torch.Tensor, num_padded_rows: int | None) -> None:
+        partition = self.candidate_partition
+        owns_row = None if partition is None else (rows >= partition.start) & (rows < partition.stop)
+        buffers = [(self.candidates, -1)]
+        if self.candidate_lengths is not None:
+            buffers.append((self.candidate_lengths, 0))
+        for buffer, invalid in buffers:
+            values = buffer.index_select(0, rows)
+            if owns_row is not None:
+                # Only the original TP owner contributes to each retained row.
+                # Offset by the sentinel so SUM reconstructs invalid entries too.
+                owner_mask = owns_row.view(-1, *([1] * (values.ndim - 1)))
+                values = get_tp_group().all_reduce((values - invalid).masked_fill_(~owner_mask, 0)) + invalid
+            buffer[: rows.numel()].copy_(values)
+            if num_padded_rows is not None:
+                buffer[rows.numel() : num_padded_rows].fill_(invalid)
+        self.candidate_partition = None
 
 
 def _latest_source(layer_idx: int, sources: tuple[int, ...]) -> int | None:

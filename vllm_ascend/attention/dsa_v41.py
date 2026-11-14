@@ -17,7 +17,9 @@ import torch.nn.functional as F
 from torch import nn
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig
+from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import (
@@ -30,6 +32,12 @@ from vllm.v1.kv_cache_interface import CircularBufferSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.dsa_v1 import build_dspark_swa_indices, dsv4_dsa_overlap_stream
+from vllm_ascend.attention.dsa_v41_indexer_shard import (
+    IndexerRowPartition,
+    gather_indexer_rows,
+    plan_indexer_rows,
+    rebase_indexer_lengths,
+)
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
@@ -229,6 +237,9 @@ class AscendDSAV41Metadata(AttentionMetadata):
     c2_source_sin: torch.Tensor | None = None
     c2_metadata_group_id: int | None = None
     global_metadata: "AscendDSAV41Metadata | None" = None
+    indexer_partition: IndexerRowPartition | None = None
+    local_indexer: "AscendDSAV41Metadata | None" = None
+    indexer_valid_rows: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -447,7 +458,7 @@ class AscendDSAV41Impl:
         if q is not None:
             self._apply_rotary(attn, q, cos, sin)
             # Consume local Query RoPE before compression can reuse source tables.
-            prepared_indexer = self._prepare_indexer_inputs(attn, hidden_states, qr, cos, sin)
+            prepared_indexer = self._prepare_indexer_inputs(attn, hidden_states, qr, cos, sin, local_metadata)
         self._prepare_compressed_cache(attn, hidden_states, cos, sin, local_metadata, global_metadata, prepared_indexer)
         return q.to(hidden_states.dtype) if q is not None else None, prepared_indexer
 
@@ -469,9 +480,14 @@ class AscendDSAV41Impl:
         else:
             self._quantize_indexer_query(attn, prepared_indexer, local_metadata)
 
-    def _prepare_indexer_inputs(self, attn, hidden_states, qr, cos, sin):
+    def _prepare_indexer_inputs(self, attn, hidden_states, qr, cos, sin, metadata):
         if not self.role.has_long_context or not self.role.is_index_source:
             return None
+        partition = getattr(metadata.indexer.cache, "indexer_partition", None)
+        if partition is not None:
+            rows = partition.rows
+            hidden_states = hidden_states[rows]
+            qr, cos, sin = qr[rows], cos[rows], sin[rows]
         indexer = attn.indexer
         main_stream = torch.npu.current_stream()
         aux_stream = dsv4_dsa_overlap_stream()
@@ -658,23 +674,50 @@ class AscendDSAV41Impl:
         assert prepared_indexer is not None
         if prepared_indexer.quantize_done is not None:
             torch.npu.current_stream().wait_event(prepared_indexer.quantize_done)
+        index_metadata = metadata.indexer.cache
+        partition = getattr(index_metadata, "indexer_partition", None)
+        rows = slice(num_tokens) if partition is None else partition.rows
+        local_metadata = index_metadata if partition is None else index_metadata.local_indexer
+        topk_lengths = None if shared.topk_lengths is None else shared.topk_lengths[rows]
         selected, candidates = attn.indexer.select_projected(
             prepared_indexer.query,
             prepared_indexer.weights,
-            positions,
+            positions[rows],
             source_cache,
-            metadata.indexer.cache,
+            local_metadata,
             quantized_query=prepared_indexer.quantized_query,
             query_scale=prepared_indexer.query_scale,
             is_candidate_source=self.role.is_candidate_source,
             uses_candidate_filter=self.role.uses_candidate_filter,
             candidate_topk_blocks=self.topology.candidate_topk_blocks,
             candidate_block_size=self.topology.candidate_block_size,
-            candidates=shared.candidates[:num_tokens],
-            candidate_lengths=(None if shared.candidate_lengths is None else shared.candidate_lengths[:num_tokens]),
-            topk_lengths=(None if shared.topk_lengths is None else shared.topk_lengths[:num_tokens]),
-            indices_output=shared.topk_indices[:num_tokens],
+            candidates=shared.candidates[rows],
+            candidate_lengths=None if shared.candidate_lengths is None else shared.candidate_lengths[rows],
+            topk_lengths=topk_lengths,
+            indices_output=shared.topk_indices[rows],
         )
+        if partition is not None:
+            # Native QLI can leave rows with no visible K unwritten. In FULL
+            # graphs, padded rows must also be invalid after every replay.
+            local_positions = positions[rows]
+            valid = torch.arange(local_positions.numel(), device=positions.device) < local_metadata.indexer_valid_rows
+            valid &= (local_positions + 1) >= local_metadata.compress_ratio
+            selected.masked_fill_(~valid[:, None], -1)
+            payload = selected
+            if topk_lengths is not None:
+                topk_lengths.masked_fill_(~valid[:, None], 0)
+                payload = torch.cat((selected, topk_lengths), dim=1)
+            gathered = gather_indexer_rows(payload, partition, get_tp_group())
+            output = shared.topk_indices[:num_tokens]
+            output.copy_(gathered[:, : output.shape[1]])
+            if topk_lengths is not None:
+                shared.topk_lengths[:num_tokens].copy_(gathered[:, -1:])
+            if self.role.is_candidate_source:
+                shared.candidate_partition = partition
+                shared.candidates[rows].copy_(candidates.masked_fill_(~valid[:, None, None], -1))
+                if shared.candidate_lengths is not None:
+                    shared.candidate_lengths[rows].masked_fill_(~valid[:, None], 0)
+            return output
         # An empty long-context cache does not write the stable output buffer.
         if selected.shape[1] == 0:
             shared.topk_indices[: selected.shape[0]].fill_(-1)
@@ -887,6 +930,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         self._cmp_residual = torch.zeros(max_reqs, dtype=torch.int32, device=device)
         self._smla_metadata = torch.zeros(query_metadata_size, dtype=torch.int32, device=device)
         self._qli_metadata = torch.zeros(query_metadata_size, dtype=torch.int32, device=device)
+        self._indexer_shard_lengths: torch.Tensor | None = None
         if self._supports_device_ops and self._uses_a5_packed_cache and self._cache_kind == "swa":
             self._a5_causal_swa_indices = torch.empty((max_tokens, 1, window_size), dtype=torch.int32, device=device)
             self._a5_causal_swa_lengths = torch.empty((max_tokens, 1), dtype=torch.int32, device=device)
@@ -1616,7 +1660,69 @@ class AscendDSAV41IndexerMetadataBuilder(AscendDSAV41AttentionMetadataBuilder):
 
     def _build_indexer_query(self, common, req: AscendDSAV41Metadata, **kwargs) -> None:
         self._prepare_query_inputs(common, req, **kwargs)
-        self._build_qli_metadata(common, req, **kwargs)
+        self._build_indexer_partition(req, full_graph=bool(kwargs.get("full_graph_mode", False)))
+        if req.local_indexer is None:
+            self._build_qli_metadata(common, req, **kwargs)
+        else:
+            self._build_qli_metadata(req.local_indexer, req.local_indexer, sharded=True, **kwargs)
+
+    def _build_indexer_partition(self, req: AscendDSAV41Metadata, *, full_graph: bool) -> None:
+        if not self._supports_device_ops:
+            return
+        parallel = self.vllm_config.parallel_config
+        if (
+            parallel.tensor_parallel_size < 2
+            or parallel.decode_context_parallel_size > 1
+            or self.vllm_config.lora_config is not None
+        ):
+            return
+        tp = get_tp_group()
+        ratio = req.compress_ratio
+        num_rows = req.num_input_tokens if full_graph else req.num_actual_tokens
+        key = f"indexer_partition:{ratio}:{full_graph}:{num_rows}"
+        shared = self.common_v41_batch_metadata
+        if key not in shared:
+            offsets = req.query_start_loc_cpu
+            lengths = req.seq_lens_cpu
+            partition = plan_indexer_rows(
+                num_rows,
+                tp.world_size,
+                tp.rank_in_group,
+                topk=int(_config_value(self.vllm_config.model_config.hf_text_config, "index_topk")),
+                ratio=ratio,
+                full_graph=full_graph,
+                query_offsets=offsets[: req.num_reqs + 1].tolist() if offsets is not None and not full_graph else None,
+                seq_lens=lengths[: req.num_reqs].tolist() if lengths is not None and not full_graph else None,
+            )
+            shared[key] = partition
+            if partition is not None and tp.rank_in_group == 0:
+                logger.debug("V4.1 indexer TP rows: FULL=%s, ratio=%d, sizes=%s", full_graph, ratio, partition.sizes)
+        partition = shared[key]
+        if partition is None:
+            return
+        if self._indexer_shard_lengths is None:
+            self._indexer_shard_lengths = req.seq_lens.new_empty((4, self._seq_lens.numel() + 1))
+        offsets, lengths, residual = rebase_indexer_lengths(
+            req.query_start_loc, req.seq_lens, partition, num_rows, ratio
+        )
+        local_offsets = self._indexer_shard_lengths[0, : req.num_reqs + 1]
+        local_lengths = self._indexer_shard_lengths[1, : req.num_reqs]
+        local_residual = None if residual is None else self._indexer_shard_lengths[2, : req.num_reqs]
+        local_offsets.copy_(offsets)
+        local_lengths.copy_(lengths)
+        if local_residual is not None:
+            local_residual.copy_(residual)
+        valid_rows = self._indexer_shard_lengths[3, 0]
+        valid_rows.fill_(max(0, min(req.num_actual_tokens, partition.stop) - partition.start))
+        req.local_indexer = replace(
+            req,
+            query_start_loc=local_offsets,
+            cache_seq_lens=local_lengths,
+            cmp_residual=local_residual,
+            max_query_len=min(req.max_query_len, partition.stop - partition.start),
+            indexer_valid_rows=valid_rows,
+        )
+        req.indexer_partition = partition
 
     def _build_qli_metadata(self, common, req: AscendDSAV41Metadata, **kwargs) -> None:
         text_config = self.vllm_config.model_config.hf_text_config
@@ -1687,7 +1793,7 @@ class AscendDSAV41IndexerMetadataBuilder(AscendDSAV41AttentionMetadataBuilder):
 
             req.qli_metadata = self._publish_task(
                 self.common_v41_batch_metadata,
-                f"qli:c{req.compress_ratio}",
+                f"qli:{'local:' if kwargs.get('sharded') else ''}c{req.compress_ratio}",
                 self._qli_metadata,
                 DeviceMetadataStage.INDEXER,
                 build_qli_metadata,
