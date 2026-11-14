@@ -280,7 +280,7 @@ def test_compressor_input_ready_before_query_quantization(monkeypatch, ratio, c2
     monkeypatch.setattr(dsa_v41, "wait_for_device_metadata", lambda *args: metadata_waits.append(args))
     monkeypatch.setattr(dsa_v41, "scatter_cache_sk", lambda *args: None)
     monkeypatch.setattr(AscendDSAV41Impl, "_apply_rotary", lambda *args, **kwargs: None)
-    cache = SimpleNamespace(slot_mapping=positions)
+    cache = SimpleNamespace(slot_mapping=positions, slot_metadata_group_id=None)
     metadata = SimpleNamespace(
         indexer=SimpleNamespace(cache=cache),
         compressor=SimpleNamespace(
@@ -326,8 +326,15 @@ def test_compressed_cache_writes_align_rope_and_slots_to_latent(monkeypatch, num
     sin = -cos
     rows = torch.arange(input_tokens, dtype=torch.int32)
     slots = rows if packed else torch.stack((rows // 128, rows % 128), dim=-1)
-    cache = SimpleNamespace(slot_mapping=slots, flat_slot_mapping=rows)
-    metadata = SimpleNamespace(indexer=SimpleNamespace(cache=cache), compressor=SimpleNamespace(cache=cache))
+    indexer_group = None if packed else 1
+    compressor_group = None if packed else 2
+    indexer_cache = SimpleNamespace(slot_mapping=slots, slot_metadata_group_id=indexer_group)
+    compressor_cache = SimpleNamespace(
+        slot_mapping=slots, flat_slot_mapping=rows, slot_metadata_group_id=compressor_group
+    )
+    metadata = SimpleNamespace(
+        indexer=SimpleNamespace(cache=indexer_cache), compressor=SimpleNamespace(cache=compressor_cache)
+    )
     calls = []
 
     def check_rope(stage, value, actual_cos, actual_sin):
@@ -351,6 +358,12 @@ def test_compressed_cache_writes_align_rope_and_slots_to_latent(monkeypatch, num
         head_dim=8,
         packed_cache_ops=SimpleNamespace(write_attention_cache=store) if packed else None,
     )
+
+    def wait_for_metadata(stage, group):
+        assert stage == dsa_v41.DeviceMetadataStage.PREPARE
+        calls.append(group)
+
+    monkeypatch.setattr(dsa_v41, "wait_for_device_metadata", wait_for_metadata)
     monkeypatch.setattr(dsa_v41, "scatter_cache_sk", store)
     monkeypatch.setattr(
         AscendDSAV41Impl,
@@ -359,7 +372,8 @@ def test_compressed_cache_writes_align_rope_and_slots_to_latent(monkeypatch, num
     )
     impl = AscendDSAV41Impl.__new__(AscendDSAV41Impl)
     impl._write_compressed_caches(attn, latent, cos, sin, metadata)
-    assert calls == ["index", "rotary", "store"]
+    expected_waits = [] if packed else [indexer_group, compressor_group]
+    assert calls == [*expected_waits, "index", "rotary", "store"]
 
 
 def test_a5_indexer_uses_prequantized_query(monkeypatch):

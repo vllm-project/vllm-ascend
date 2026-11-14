@@ -365,7 +365,7 @@ class Executor:
 
 class Builder:
     enabled = False
-    tasks = ()
+    tasks: tuple[DeviceMetadataTask, ...] = ()
 
     @contextmanager
     def defer_device_metadata(self, *, in_graph=False):
@@ -398,8 +398,17 @@ def prepare(state, builder, full=False, fail=False):
 
 
 def test_eager_lifecycle(state):
+    builder = Builder()
+    groups = [[SimpleNamespace(get_metadata_builder=lambda _: builder)]]
+
+    def build(**kwargs):
+        assert builder.enabled and not builder.in_graph
+        builder.tasks = (DeviceMetadataTask(DeviceMetadataStage.ATTENTION, lambda: None, 1),)
+        return {"cache": SimpleNamespace()}
+
     with execution(state):
-        prepare(state, Builder())
+        metadata = state.run_build(build, attn_groups=groups, full_graph_mode=False)
+        assert metadata["cache"].device_metadata_executor is state.executor
         assert state.executor.calls == ["submit"]
     assert state.executor.calls == ["submit", "wait", "release"]
 

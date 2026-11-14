@@ -1368,15 +1368,29 @@ def test_sample_tokens_leaves_draft_broadcast_to_upstream():
     runner.pp_handler.broadcast_drafts.assert_not_called()
 
 
-@pytest.mark.parametrize("a5", [False, True])
-@pytest.mark.parametrize("architecture", ["DeepseekV41ForCausalLM", "OtherModel"])
-def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture):
+@pytest.mark.parametrize(
+    "a5,architecture,mode,pcp,dcp,expect_device_metadata",
+    [
+        (False, "OtherModel", CUDAGraphMode.FULL_DECODE_ONLY, 1, 1, False),
+        (True, "OtherModel", CUDAGraphMode.FULL_DECODE_ONLY, 1, 1, False),
+        (True, "DeepseekV41ForCausalLM", CUDAGraphMode.NONE, 2, 1, True),
+        (False, "DeepseekV41ForCausalLM", CUDAGraphMode.NONE, 1, 1, False),
+        (False, "DeepseekV41ForCausalLM", CUDAGraphMode.FULL_DECODE_ONLY, 1, 1, True),
+        (False, "DeepseekV41ForCausalLM", CUDAGraphMode.FULL_DECODE_ONLY, 2, 1, False),
+        (False, "DeepseekV41ForCausalLM", CUDAGraphMode.FULL_DECODE_ONLY, 1, 2, False),
+    ],
+)
+def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(
+    a5, architecture, mode, pcp, dcp, expect_device_metadata
+):
     """Cache binding precedes KDA preparation and preserves PCP setup."""
     runner = _make_runner()
     runner.input_buffers = object()
-    runner.compilation_config = SimpleNamespace(static_forward_context={})
+    runner.compilation_config = SimpleNamespace(static_forward_context={}, cudagraph_mode=mode)
+    runner.parallel_config = SimpleNamespace(prefill_context_parallel_size=pcp, decode_context_parallel_size=dcp)
     runner.vllm_config = SimpleNamespace(
         compilation_config=runner.compilation_config,
+        parallel_config=runner.parallel_config,
         scheduler_config=SimpleNamespace(max_num_seqs=8),
         kv_transfer_config=None,
     )
@@ -1422,10 +1436,12 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
         seen["factory"](runner.vllm_config, torch.device("cpu"), CUDAGraphMode.FULL, 1)
 
     prepare_kda.assert_called_once_with(runner.compilation_config.static_forward_context, 8)
-    assert runner.model_state.device_metadata == (
-        "metadata" if a5 and architecture == "DeepseekV41ForCausalLM" else None
-    )
-    assert metadata_cls.call_count == int(a5 and architecture == "DeepseekV41ForCausalLM")
+    if expect_device_metadata:
+        assert runner.model_state.device_metadata == "metadata"
+        metadata_cls.assert_called_once_with()
+    else:
+        assert runner.model_state.device_metadata is None
+        metadata_cls.assert_not_called()
     assert seen["cfg"] == kv_cache_config
     assert seen["cfg"] is not kv_cache_config
     assert vllm_model_runner.ModelCudaGraphManager is original
@@ -1441,7 +1457,7 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
 def test_initialize_kv_cache_forwards_allocation_context():
     """Forward allocation context before preparing KDA state-copy plans."""
     runner = _make_runner()
-    runner.compilation_config = SimpleNamespace(static_forward_context={})
+    runner.compilation_config = SimpleNamespace(static_forward_context={}, cudagraph_mode=CUDAGraphMode.NONE)
     runner.vllm_config = SimpleNamespace(
         compilation_config=runner.compilation_config,
         scheduler_config=SimpleNamespace(max_num_seqs=8),

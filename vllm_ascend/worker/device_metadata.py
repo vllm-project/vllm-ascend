@@ -25,8 +25,9 @@ from vllm.forward_context import BatchDescriptor, get_forward_context, is_forwar
 
 class DeviceMetadataStage(IntEnum):
     COMPRESSOR = 0
-    ATTENTION = 1
-    INDEXER = 2
+    PREPARE = 1
+    ATTENTION = 2
+    INDEXER = 3
 
 
 @dataclass(frozen=True, slots=True)
