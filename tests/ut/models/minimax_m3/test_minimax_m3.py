@@ -117,6 +117,7 @@ def _make_decoder_layer(*, use_sequence_parallel: bool, is_moe: bool = True) -> 
     nn.Module.__init__(layer)
     layer.use_sequence_parallel = use_sequence_parallel
     layer.is_layer_sparse = is_moe
+    layer.fuse_o_proj_mm_reduce_scatter = False
     layer.input_layernorm = _PairNorm()
     layer.post_attention_layernorm = _PairNorm()
     layer.self_attn = _RecordingAttention()
@@ -190,6 +191,34 @@ class TestMiniMaxM3Modeling(unittest.TestCase):
         torch.testing.assert_close(shard.call_args.args[0], residual)
         self.assertEqual(layer.self_attn.input_shapes, [torch.Size([3, 2])])
         self.assertEqual(output.shape, torch.Size([2, 2]))
+        self.assertEqual(output_residual.shape, torch.Size([2, 2]))
+
+    @patch("vllm_ascend.models.minimax_m3.minimax_m3.sp_shard")
+    @patch("vllm_ascend.models.minimax_m3.minimax_m3.sp_reduce_scatter")
+    def test_fused_o_proj_skips_hidden_reduce_scatter_but_shards_residual(
+        self,
+        reduce_scatter: Mock,
+        shard: Mock,
+    ) -> None:
+        layer = _make_decoder_layer(use_sequence_parallel=True)
+        layer.fuse_o_proj_mm_reduce_scatter = True
+        hidden_states = torch.arange(6, dtype=torch.float32).reshape(3, 2)
+        residual = hidden_states + 10
+        shard.side_effect = lambda value: torch.nn.functional.pad(value, (0, 0, 0, 1))[:2]
+
+        output, output_residual = layer(
+            positions=torch.arange(3),
+            hidden_states=hidden_states,
+            residual=residual,
+        )
+
+        # The fused projection already returned the token shard, so the
+        # decoder must not reduce-scatter the hidden states again; the
+        # residual still gets its first shard.
+        reduce_scatter.assert_not_called()
+        shard.assert_called_once()
+        torch.testing.assert_close(shard.call_args.args[0], residual)
+        self.assertEqual(output.shape, torch.Size([3, 2]))
         self.assertEqual(output_residual.shape, torch.Size([2, 2]))
 
     @patch("vllm_ascend.models.minimax_m3.minimax_m3.sp_reduce_scatter")

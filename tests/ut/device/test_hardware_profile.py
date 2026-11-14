@@ -56,6 +56,7 @@ _STANDARD_CAPABILITIES = frozenset(
 _EXPECTED_CAPABILITIES = {
     AscendDeviceType.A2: _STANDARD_CAPABILITIES
     | {
+        HardwareCapability.MM_REDUCE_SCATTER_BF16,
         HardwareCapability.RMS_NORM_CAST,
         HardwareCapability.NPU_TOP_K_TOP_P,
     },
@@ -67,6 +68,7 @@ _EXPECTED_CAPABILITIES = {
         HardwareCapability.RMS_NORM_DYNAMIC_QUANT,
         HardwareCapability.CANN_MEGAMOE,
         HardwareCapability.MC2_FULLMESH_V2_COMM,
+        HardwareCapability.MM_REDUCE_SCATTER_BF16,
         HardwareCapability.RMS_NORM_CAST,
         HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
         HardwareCapability.NPU_TOP_K_TOP_P,
@@ -115,6 +117,7 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.MLAPO_NATIVE_WEIGHTS,
             HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
             HardwareCapability.MM_REDUCE_SCATTER_AI_CPU_INFERENCE,
+            HardwareCapability.MM_REDUCE_SCATTER_BF16,
             HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
             HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
             HardwareCapability.MOE_GATING_TOP_K_HASH_VISION,
