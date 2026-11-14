@@ -66,7 +66,7 @@ Whether you are a performance tuner looking to deploy vLLM-Ascend in production 
 
 ## Prerequisites
 
-- Hardware: Atlas 800I A2 series, Atlas 800I A3 series, Atlas 300I Duo, 950PR&950DT Products
+- Hardware: Atlas 800I A2 series, Atlas 800I A3 series, Atlas 300I Duo, Ascend 950PR&950DT Products
 - OS: Linux
 - Software:
     - Python == 3.12
