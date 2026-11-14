@@ -70,8 +70,12 @@ class SimpleCPUOffloadNPUWorker(SimpleCPUOffloadWorker):
         vllm_config: VllmConfig,
         kv_cache_config: "KVCacheConfig | None",
         cpu_capacity_bytes: int,
+        num_cpu_blocks: int | None = None,
     ) -> None:
-        super().__init__(vllm_config, kv_cache_config, cpu_capacity_bytes)
+        if num_cpu_blocks is None:
+            super().__init__(vllm_config, kv_cache_config, cpu_capacity_bytes)
+        else:
+            super().__init__(vllm_config, kv_cache_config, cpu_capacity_bytes, num_cpu_blocks=num_cpu_blocks)
         # Replace the CUDA backend created by ``super().__init__``.
         # ``DmaCopyBackend.__init__`` only assigns None defaults — no
         # CUDA resource was allocated, so the transient instance is
@@ -119,7 +123,12 @@ class SimpleCPUOffloadNPUWorker(SimpleCPUOffloadWorker):
 
         per_tensor_bpb = [t.stride(0) * t.element_size() for t in unique_caches.values()]
         total_bytes_per_block = sum(per_tensor_bpb)
-        self.num_cpu_blocks = max(1, self.cpu_capacity_bytes // total_bytes_per_block)
+        resolve_num_cpu_blocks = getattr(self, "_resolve_num_cpu_blocks", None)
+        self.num_cpu_blocks = (
+            resolve_num_cpu_blocks(self.cpu_capacity_bytes, total_bytes_per_block)
+            if resolve_num_cpu_blocks is not None
+            else max(1, self.cpu_capacity_bytes // total_bytes_per_block)
+        )
         logger.info(
             "SimpleCPUOffloadNPUWorker: %d unique NPU KV tensors, allocating %d CPU blocks (%.2f GB)",
             len(unique_caches),

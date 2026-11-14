@@ -1,0 +1,7 @@
+pr: 20987
+entries:
+  - category: bugfix
+    text: >-
+      Simple KV offload now preserves explicit block counts and cross-worker pool alignment on
+      supported upstream vLLM versions. Existing v0.32.0 local pool-sizing behavior is
+      preserved.
