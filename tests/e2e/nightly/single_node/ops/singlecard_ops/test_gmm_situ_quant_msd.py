@@ -299,7 +299,14 @@ def test_gmm_situ_quant_msd_zero_capacity(nz):
 
 @pytest.mark.parametrize(
     "experts,k,n,rows,capacity",
-    [(1, 320, 768, 5, 8), (3, 576, 1280, 33, 64), (14, 3584, 6144, 128, 7168), (14, 7168, 7168, 128, 7168)],
+    [
+        (1, 320, 768, 5, 8),
+        (3, 576, 1280, 33, 64),
+        (7, 3584, 6144, 1, 896),
+        (7, 3584, 6144, 896, 896),
+        (14, 3584, 6144, 128, 7168),
+        (14, 7168, 7168, 128, 7168),
+    ],
 )
 @pytest.mark.parametrize("stacked", [False, True])
 def test_gmm_situ_quant_msd_model_split_reference(experts, k, n, rows, capacity, stacked):
