@@ -15,8 +15,8 @@ from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.spec_decode import acceptance_estimator as estimator_module
 from vllm.v1.worker.gpu.spec_decode import adaptive_verification as adaptive
 from vllm.v1.worker.gpu.spec_decode import speculator as upstream_speculator
+from vllm.v1.worker.gpu.spec_decode.dflash import speculator as upstream_dflash
 
-import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_module
 import vllm_ascend.worker.v2.spec_decode.dspark.speculator as dspark_module
 from vllm_ascend.ascend_forward_context import get_mrv2_in_profile_run
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend, AscendDSAMetadataBuilder
@@ -147,10 +147,8 @@ def test_adaptive_draft_uses_its_own_request_count(monkeypatch, local_reqs, dp_r
     monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
     monkeypatch.setattr(dspark_module, "build_attn_metadata_wrapper", nullcontext)
     monkeypatch.setattr(dspark_module, "build_attn_metadata_factory", lambda *args, **kwargs: nullcontext())
-    kernel = Mock()
-    monkeypatch.setattr(dflash_module, "prepare_dflash_inputs_triton", kernel)
-    upstream = dspark_module.dflash_speculator
-    monkeypatch.setattr(upstream, "prepare_dflash_inputs", dflash_module.prepare_dflash_inputs)
+    prepare_inputs = Mock()
+    monkeypatch.setattr(upstream_dflash, "prepare_dflash_inputs", prepare_inputs)
 
     class InputsPrepared(Exception):
         pass
@@ -158,7 +156,7 @@ def test_adaptive_draft_uses_its_own_request_count(monkeypatch, local_reqs, dp_r
     # Stop after real propose() prepares inputs and constructs the draft DP
     # agreement, before dispatch can enter graph/device/collective execution.
     dispatch = Mock(side_effect=InputsPrepared)
-    monkeypatch.setattr(upstream, "dispatch_cg_and_sync_dp", dispatch)
+    monkeypatch.setattr(upstream_dflash, "dispatch_cg_and_sync_dp", dispatch)
     sync_kwargs = {} if vllm_version_is("0.33.0") else {"max_query_len": None}
     target_sync = DPSyncState(
         num_tokens_across_dp=torch.full((3,), target_capacity),
@@ -179,9 +177,10 @@ def test_adaptive_draft_uses_its_own_request_count(monkeypatch, local_reqs, dp_r
             dummy_run=dummy,
         )
 
-    kernel.assert_called_once()
-    assert kernel.call_args.kwargs["num_reqs_override"] == expected_reqs
-    assert kernel.call_args.args[22] == 5  # Query tokens per draft request.
+    prepare_inputs.assert_called_once()
+    assert prepare_inputs.call_args.args[17] == 32  # Manager block size.
+    assert prepare_inputs.call_args.args[22] == 5  # Query tokens per draft request.
+    assert prepare_inputs.call_args.args[28] == expected_reqs
     assert dispatch.call_args.args[1:3] == (expected_reqs, dp_reqs * 5)
     draft_sync = dispatch.call_args.kwargs["dp_sync_state"]
     assert draft_sync is not None

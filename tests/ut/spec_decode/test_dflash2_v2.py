@@ -637,8 +637,6 @@ def test_dflash_attention_uses_only_draft_layers_and_int32_slots(monkeypatch, ac
     cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=[name]) for name in backends])
     monkeypatch.setattr(DFlashSpeculator, "set_attn", MagicMock())
     monkeypatch.setattr(dflash_module, "get_layers_from_vllm_config", lambda *args: layers)
-    # set_attn installs an upstream callback; restore it after this test.
-    monkeypatch.setattr(dflash_module.dflash_speculator, "prepare_dflash_inputs", object())
 
     speculator.set_attn(None, cache, None, None, None)
 
@@ -648,48 +646,3 @@ def test_dflash_attention_uses_only_draft_layers_and_int32_slots(monkeypatch, ac
     assert speculator._context_slot_mappings.shape == (2, 8)
     assert speculator._context_slot_mappings.dtype == torch.int32
     assert torch.count_nonzero(speculator._context_slot_mappings) == 0
-
-
-@pytest.mark.parametrize("block_size", [128, 512, 640])
-def test_dflash_input_preparation_uses_manager_block_size(monkeypatch, block_size):
-    kernel = MagicMock()
-    monkeypatch.setattr(dflash_module, "prepare_dflash_inputs_triton", kernel)
-    inputs = [object() for _ in range(28)]
-    inputs[17] = block_size
-    inputs[-1] = True  # sample_from_anchor
-
-    dflash_module.prepare_dflash_inputs(*inputs)
-
-    kernel.assert_called_once_with(*inputs, num_reqs_override=None)
-
-
-@pytest.mark.skipif(False, reason="main-only num_reqs_override")
-def test_dflash_input_preparation_forwards_num_reqs_override(monkeypatch):
-    """Forward the DP-synced dummy request count without changing its size unit."""
-    kernel = MagicMock()
-    monkeypatch.setattr(dflash_module, "prepare_dflash_inputs_triton", kernel)
-    inputs = [object() for _ in range(28)]
-    inputs[17] = 640
-    inputs[-1] = True  # sample_from_anchor
-
-    dflash_module.prepare_dflash_inputs(*inputs, 5)
-
-    kernel.assert_called_once_with(*inputs, num_reqs_override=5)
-
-
-def test_dflash_input_preparation_keeps_manager_table_on_main(monkeypatch):
-    """The callback no longer needs a per-table kernel-size lookup."""
-    kernel = MagicMock()
-    monkeypatch.setattr(dflash_module, "prepare_dflash_inputs_triton", kernel)
-    block_table = torch.tensor([[7, 11]], dtype=torch.int32)
-    inputs = [object() for _ in range(28)]
-    inputs[16] = block_table
-    inputs[17] = 640
-    inputs[-1] = True
-
-    dflash_module.prepare_dflash_inputs(*inputs)
-
-    assert kernel.call_args.args[16] is block_table
-    assert kernel.call_args.args[17] == 640
-    assert "kv_cache_block_size" not in kernel.call_args.kwargs
-    torch.testing.assert_close(block_table, torch.tensor([[7, 11]], dtype=torch.int32))
