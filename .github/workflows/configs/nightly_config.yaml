@@ -336,6 +336,10 @@ a5:
 #        size: 2
   single_node:
     test_config:
+      - name: Kimi-K3-W4A8-E256-A5-GSM8K-First500
+        os: linux-aarch64-a5-8
+        config_file_path: Kimi-K3-W4A8-E256-A5.yaml
+        config_base_path: tests/SIT/cases/models/configs/Kimi
       - name: qwen3.6-27B-w8a8c8-A5
         os: linux-aarch64-a5-8
         config_file_path: qwen3.6-27B-w8a8c8-A5.yaml
