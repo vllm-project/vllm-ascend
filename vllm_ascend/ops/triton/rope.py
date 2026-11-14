@@ -586,6 +586,11 @@ def rope_forward_triton(
             rope_dim = cos.shape[-1] * 2
         elif cos_sin_cache is not None:
             rope_dim = cos_sin_cache.shape[-1]
+    if rope_dim == 0:
+        # NoPE layers (e.g. qk_rope_head_dim == 0) have nothing to rotate.
+        # Launching the kernel with a zero-width rotary axis would pad it to
+        # next_power_of_2(0) == 0 and fail on tl.arange(0, 0).
+        return q, k
     # Dynamically size the head tile to fit within NPU Unified Buffer,
     # replacing the previous hardcoded head_dim threshold approach.
     BLOCK_SIZE_HEAD = _compute_rope_block_size_head(head_dim, rope_dim, is_neox_style)
