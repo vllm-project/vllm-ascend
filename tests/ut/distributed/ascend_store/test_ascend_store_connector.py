@@ -53,12 +53,26 @@ class TestKVPoolWorkerConstruction(unittest.TestCase):
 
         config, cache = MagicMock(), MagicMock()
         with (
+            patch.object(LayerwiseKVPoolWorker, "enable_kv_events", False, create=True),
             patch.object(BaseKVPoolWorker, "__init__", autospec=True, return_value=None) as initialize,
             patch.object(LayerwiseKVPoolWorker, "_init_layerwise_config") as configure,
         ):
             worker = LayerwiseKVPoolWorker(config, True, cache)
             initialize.assert_called_once_with(worker, config, True, cache)
             configure.assert_called_once_with()
+
+    def test_layerwise_confirmed_events_bypass_replicated_quorum(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import BaseKVPoolWorker
+
+        worker = LayerwiseKVPoolWorker.__new__(LayerwiseKVPoolWorker)
+        event = MagicMock()
+        worker._layerwise_cpu_events = MagicMock()
+        worker._layerwise_cpu_events.drain.return_value = [event]
+        with patch.object(BaseKVPoolWorker, "take_kv_events", return_value=([], [])):
+            replicated, sharded = worker.take_kv_events()
+        self.assertEqual(replicated, [])
+        self.assertEqual(sharded, [event])
 
 
 def _mock_events(num_workers=1):
@@ -87,12 +101,14 @@ class TestAscendStoreKVEvents(unittest.TestCase):
         ev._aggregator.get_number_of_workers.return_value = 5
         self.assertEqual(ev.get_number_of_workers(), 5)
 
-        common = [MagicMock()]
-        ev._aggregator.get_common_events.return_value = common
+        common = MagicMock()
+        sharded = MagicMock()
+        ev._replicated_events = [common, common]
+        ev._sharded_events = [sharded, sharded]
         self.assertIs(ev.aggregate(), ev)
-        ev._aggregator.clear_events.assert_called_once()
-        ev._aggregator.add_events.assert_called_once_with(common)
         ev._aggregator.reset_workers.assert_called_once()
+        self.assertEqual(ev._replicated_events, [common])
+        self.assertEqual(ev._sharded_events, [sharded])
 
 
 class TestLookupKeyServer(unittest.TestCase):
@@ -213,6 +229,7 @@ class TestAscendStoreConnector(unittest.TestCase):
         config.kv_transfer_config.kv_connector = "AscendStoreConnector"
         config.kv_transfer_config.kv_connector_extra_config = extra_config or {}
         config.parallel_config.rank = 0
+        config.parallel_config.tensor_parallel_size = 1
         return config
 
     def test_sharded_mamba_rejects_joint_tp_pcp_before_pool_initialization(self):
@@ -335,15 +352,14 @@ class TestAscendStoreConnector(unittest.TestCase):
         output = MagicMock()
         output.kv_cache_events = None
         connector.update_connector_output(output)
-        self.assertIsNone(connector._kv_cache_events)
+        self.assertEqual(connector._pending_replicated, {})
 
-        for _ in range(2):
-            events = _mock_events()
-            events._aggregator.get_all_events.return_value = [MagicMock()]
-            events._aggregator.get_number_of_workers.return_value = 1
-            output.kv_cache_events = events
-            connector.update_connector_output(output)
-        self.assertIsNotNone(connector._kv_cache_events)
+        event = MagicMock()
+        events = AscendStoreKVEvents(num_workers=1, worker_rank=0)
+        events.add_events([event])
+        output.kv_cache_events = events
+        connector.update_connector_output(output)
+        self.assertEqual(connector._pending_replicated[event], {0})
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolScheduler")
     def test_take_events(self, mock_scheduler_cls):
@@ -359,15 +375,49 @@ class TestAscendStoreConnector(unittest.TestCase):
         result = list(connector.take_events())
         self.assertEqual(result, [])
 
-        # With events
-        events = _mock_events(num_workers=1)
+        # One rank is enough when tp_size is 1.
         mock_event = MagicMock()
-        events._aggregator.get_common_events.return_value = [mock_event]
-        events._aggregator.get_all_events.return_value = [mock_event]
-        connector._kv_cache_events = events
+        events = AscendStoreKVEvents(num_workers=1, worker_rank=0)
+        events.add_events([mock_event])
+        output = MagicMock()
+        output.kv_cache_events = events
+        connector.update_connector_output(output)
         result = list(connector.take_events())
-        self.assertEqual(len(result), 1)
-        self.assertIsNone(connector._kv_cache_events)
+        self.assertEqual(result, [mock_event])
+        self.assertEqual(connector._pending_replicated, {})
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolScheduler")
+    def test_replicated_events_wait_for_every_tp_rank(self, mock_scheduler_cls):
+        config = self._make_vllm_config()
+        config.parallel_config.tensor_parallel_size = 2
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+        connector = AscendStoreConnector(
+            vllm_config=config,
+            role=KVConnectorRole.SCHEDULER,
+            kv_cache_config=MagicMock(),
+        )
+        event = MagicMock()
+        output = MagicMock()
+
+        first = AscendStoreKVEvents(num_workers=1, worker_rank=0)
+        first.add_events([event])
+        output.kv_cache_events = first
+        connector.update_connector_output(output)
+        self.assertEqual(list(connector.take_events()), [])
+
+        second = AscendStoreKVEvents(num_workers=1, worker_rank=1)
+        second.add_events([event])
+        output.kv_cache_events = second
+        connector.update_connector_output(output)
+        self.assertEqual(list(connector.take_events()), [event])
+
+        sharded = MagicMock()
+        shard_events = AscendStoreKVEvents(num_workers=1, worker_rank=1)
+        shard_events.add_sharded_events([sharded])
+        output.kv_cache_events = shard_events
+        connector.update_connector_output(output)
+        self.assertEqual(list(connector.take_events()), [sharded])
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
@@ -602,8 +652,12 @@ class TestAscendStoreConnector(unittest.TestCase):
             role=KVConnectorRole.WORKER,
             kv_cache_config=None,
         )
-        for events, expected_type in (([], type(None)), ([MagicMock()], AscendStoreKVEvents)):
-            mock_worker_cls.return_value.get_kv_events.return_value = events
+        for taken, expected_type in (
+            (([], []), type(None)),
+            (([MagicMock()], []), AscendStoreKVEvents),
+            (([], [MagicMock()]), AscendStoreKVEvents),
+        ):
+            mock_worker_cls.return_value.take_kv_events.return_value = taken
             self.assertIsInstance(connector.get_kv_connector_kv_cache_events(), expected_type)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
@@ -825,6 +879,8 @@ def _scheduler_connector(backend="mooncake", use_layerwise=False):
     scheduler._loading_req_ids = set()
     scheduler.reset_store.return_value = True
     connector.connector_scheduler = scheduler
+    connector._pending_replicated = {}
+    connector._ready_sharded = []
     connector._kv_cache_events = MagicMock()
     return connector
 

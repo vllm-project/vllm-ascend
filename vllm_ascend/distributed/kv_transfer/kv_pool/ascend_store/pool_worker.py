@@ -1282,6 +1282,12 @@ class BaseKVPoolWorker(ABC):
                 break
         return hits
 
+    def take_kv_events(self) -> tuple[list[BlockStored], list[BlockStored]]:
+        """Return ``(replicated, sharded)`` CPU KV events from the sending thread."""
+        if self.enable_kv_events and self.kv_send_thread is not None:
+            return self.kv_send_thread.take_kv_events()
+        return [], []
+
     def get_kv_events(self) -> list[BlockStored]:
         if self.enable_kv_events and self.kv_send_thread is not None:
             # collect store kv events form sending thread
@@ -1779,11 +1785,6 @@ class KVPoolWorker(BaseKVPoolWorker):
                     )
                 )
             }
-            event_block_size = (
-                req_meta.original_block_size[0]
-                if isinstance(req_meta.original_block_size, list)
-                else req_meta.original_block_size
-            )
             stored_events: list[BlockStored] = []
             group_hashes = get_block_hashes(
                 req_meta.block_hashes,
@@ -1816,7 +1817,7 @@ class KVPoolWorker(BaseKVPoolWorker):
                         block_hashes=[block_hash],
                         parent_block_hash=parent_hash,
                         token_ids=token_ids,
-                        block_size=event_block_size,
+                        block_size=self.block_size,
                         lora_id=None,
                         medium="cpu",
                         lora_name=None,
