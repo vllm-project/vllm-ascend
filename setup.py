@@ -326,8 +326,21 @@ class cmake_build_ext(build_ext):
             raise RuntimeError(f"CMake configuration failed: {e}")
 
     def build_extensions(self) -> None:
-        if not envs.COMPILE_CUSTOM_KERNELS:
+        cmake_exts = [ext for ext in self.extensions if isinstance(ext, CMakeExtension)]
+        plain_exts = [ext for ext in self.extensions if not isinstance(ext, CMakeExtension)]
+
+        # rare_feed_native (and any future plain Extension) when kernels are off.
+        if plain_exts:
+            saved = self.extensions
+            self.extensions = plain_exts
+            try:
+                build_ext.build_extensions(self)
+            finally:
+                self.extensions = saved
+
+        if not cmake_exts or not envs.COMPILE_CUSTOM_KERNELS:
             return
+
         # Ensure that CMake is present and working
         try:
             subprocess.check_output(["cmake", "--version"])
@@ -345,10 +358,13 @@ class cmake_build_ext(build_ext):
         def target_name(s: str) -> str:
             return s.removeprefix("vllm_ascend.")
 
-        # Build all the extensions
-        for ext in self.extensions:
+        # Build Ascend CMake extensions only (rare_feed_native is the plain
+        # Extension above — always packaged by setuptools).
+        for ext in cmake_exts:
             self.configure(ext)
-            targets.append(target_name(ext.name))
+            name = target_name(ext.name)
+            if name not in targets:
+                targets.append(name)
 
         num_jobs = self.compute_num_jobs()
 
@@ -379,11 +395,12 @@ class cmake_build_ext(build_ext):
 
             for root, _, files in os.walk(self.build_temp):
                 for file in files:
-                    if file.endswith(".so"):
-                        src_path = os.path.join(root, file)
-                        dst_path = os.path.join(self.build_lib, "vllm_ascend", file)
-                        shutil.copy(src_path, dst_path)
-                        print(f"Copy: {src_path} -> {dst_path}")
+                    if not file.endswith(".so"):
+                        continue
+                    src_path = os.path.join(root, file)
+                    dst_path = os.path.join(self.build_lib, "vllm_ascend", file)
+                    shutil.copy(src_path, dst_path)
+                    print(f"Copy: {src_path} -> {dst_path}")
 
         # copy back _cann_ops_custom directory
         src_cann_ops_custom = os.path.join(ROOT_DIR, "vllm_ascend", "_cann_ops_custom")
@@ -419,9 +436,28 @@ except LookupError:
     # only checks out the commit. In this case, we set a dummy version.
     VERSION = "0.0.0"
 
-ext_modules = []
+# rare_feed_native: pure CPython C extension (no Ascend / CANN).
+# Always register as a setuptools Extension so bdist_wheel packages it for
+# both COMPILE_CUSTOM_KERNELS=0 (CPU CI / docs) and =1 (Ascend image / wheel).
+# Do not rely on a cmake sidecar alone: that path installs into the source
+# tree and is easy to omit from the wheel (*.so is gitignored).
+_RARE_FEED_NATIVE_SRC = os.path.join(
+    "vllm_ascend",
+    "observability",
+    "runtime_guard",
+    "detector",
+    "rare",
+    "rare_feed_native.c",
+)
+_RARE_FEED_NATIVE_EXT = Extension(
+    name="vllm_ascend.observability.runtime_guard.detector.rare.rare_feed_native",
+    sources=[_RARE_FEED_NATIVE_SRC],
+    extra_compile_args=["-O3"] if sys.platform != "win32" else [],
+)
+
+ext_modules: list[Extension] = [_RARE_FEED_NATIVE_EXT]
 if envs.COMPILE_CUSTOM_KERNELS:
-    ext_modules = [CMakeExtension(name="vllm_ascend.vllm_ascend_C")]
+    ext_modules.append(CMakeExtension(name="vllm_ascend.vllm_ascend_C"))
 
 
 def get_path(*filepath) -> str:
@@ -497,6 +533,11 @@ setup(
     packages=find_packages(exclude=("docs", "examples", "tests*", "csrc")),
     package_data={
         "vllm_ascend.observability.ms_metrics": ["config/*.yaml"],
+        "vllm_ascend.observability.runtime_guard.detector.rare": [
+            "rare.json",
+            "NOTICE",
+            "tables/*.npz",
+        ],
     },
     python_requires=">=3.10",
     install_requires=get_requirements(),

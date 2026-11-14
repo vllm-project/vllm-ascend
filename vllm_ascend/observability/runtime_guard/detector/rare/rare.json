@@ -1,0 +1,18 @@
+{
+ "name": "rare",
+ "label": "rare_chars",
+ "note": "rare_chars: two tiers in one pass. Rules without \"tier\" form the strict tier (per-corpus FPR target ~0.1%); \"tier\": \"monitor\" rules are added for the monitoring tier (~0.5%). Fixed rules + one learned-score (gb) rule per tier. gb scores gated tokens only (fs < 0.05 or bad_utf8); look-ahead by one token so alerts fire on the token after the trigger. lp1/lpc are log10 of top-1 / chosen probability; gap = lp1 - lpc. Uses ref=cats (no frequency reference tables).",
+ "gb": "rare_gb.npz",
+ "gate": "fs",
+ "ref": "cats",
+ "think_end": "auto",
+ "alert_monitor": false,
+ "rules": [
+  {"and": [{"f": "lpc", "lt": -4.0}, {"f": "fs", "lt": 0.002}, {"f": "caseless_after_latin"}]},
+  {"and": [{"f": "bad_utf8"}]},
+  {"and": [{"f": "lp1", "lt": -2.0}, {"f": "fs", "lt": 0.01}]},
+  {"and": [{"f": "gb", "gt": 2.07}, {"f": "gap", "lt": 0.3}]},
+  {"and": [{"f": "fs", "lt": 0.01}, {"f": "fsw", "lt": 0.05}, {"f": "caseless_after_latin"}], "tier": "monitor"},
+  {"and": [{"f": "gb", "gt": 1.35}, {"f": "gap", "lt": 0.3}], "tier": "monitor"}
+ ]
+}

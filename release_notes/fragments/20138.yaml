@@ -1,0 +1,21 @@
+pr: 20138
+entries:
+  - category: performance
+    text: >-
+      rare_chars collects top-1 and chosen logprobs without a host sync before
+      the sampler returns. Each step's device pair is attached to that step's
+      AscendAsyncOutput; collect-wait, pair D2H, and rare feed run on a dedicated
+      wait queue so get_output only submits.
+  - category: performance
+    text: >-
+      rare_chars pair-finish no longer reaps Guard state on every step (reap
+      stays on sync_for_step), and pack/feed use tighter host packing. On
+      Ascend950DT Qwen3-8B-W8A8 @out=64 c=256 this cut the rare vs off TPOT
+      tax from about +4.5 ms to about +1.2 ms.
+  - category: feature
+    text: >-
+      rare_chars builds its per-tokenizer table at model warmup from the
+      served tokenizer; think_end/alert_monitor live in packaged rare.json
+      (runtime_config only has enabled). rare_feed_native is always a
+      setuptools Extension so wheels include it for both
+      COMPILE_CUSTOM_KERNELS=0 and =1.
