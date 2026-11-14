@@ -1,4 +1,6 @@
 pr: 21828
 entries:
   - category: performance
-    text: Overlap compact bounded replay metadata preparation on the A5 producer stream.
+    text: >-
+      Overlap compact bounded replay metadata preparation on the A5 producer stream
+      and explicitly select row-only planning for shared shape-only metadata.

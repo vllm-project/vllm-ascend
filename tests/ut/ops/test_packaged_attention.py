@@ -3,10 +3,24 @@
 
 """Test packaged operator dispatcher contracts without the DSL compiler."""
 
+from unittest.mock import Mock
+
 import pytest
 import torch
 
 from vllm_ascend.ops import packaged_attention as ops
+
+
+@pytest.mark.parametrize("split_kv", [None, False, True])
+def test_attention_metadata_preserves_split_policy(monkeypatch, split_kv):
+    metadata = Mock(return_value=torch.empty(1024, dtype=torch.int32))
+    monkeypatch.setattr(ops, "_get_dsl_ops", lambda name: (None, metadata))
+    lengths = torch.empty((16, 1), dtype=torch.int32)
+    kwargs = {} if split_kv is None else {"split_kv": split_kv}
+    ops.mixed_quant_sparse_flash_mla_metadata(
+        lengths, lengths, num_heads_q=64, num_heads_kv=1, head_dim=512, quant_mode=1, **kwargs
+    )
+    assert metadata.call_args.kwargs["split_kv"] is (True if split_kv is None else split_kv)
 
 
 @pytest.mark.parametrize("return_value,candidate_blocks", [(False, -1), (True, 2048)])

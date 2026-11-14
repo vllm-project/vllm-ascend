@@ -1343,6 +1343,7 @@ class AscendDSAV41StateMetadataBuilder(AscendDSAV41MetadataBuilder):
         return req
 
     def _build_compressor_cache(self, common, req: AscendDSAV41Metadata, **kwargs) -> None:
+        """Prepare ring writes and source RoPE only for the state-cache owner."""
         req.c2_ring_metadata = None
         req.c2_complete_mask = None
         req.c2_source_positions = None
@@ -1522,6 +1523,9 @@ class AscendDSAV41AttentionMetadataBuilder(AscendDSAV41MetadataBuilder):
                     layout_kv="PA_BBND",
                     has_ori_kv=True,
                     has_cmp_kv=True,
+                    # These buffers supply row shapes, not layer-specific
+                    # visibility. The shared plan must not read their values.
+                    split_kv=False,
                 )
                 self._a5_smla_metadata.copy_(value)
 
