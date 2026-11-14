@@ -202,7 +202,11 @@ def build_qwen4_kv_cache_layout(
 
     if not role_members[QSA_RAW]:
         return None
-    required = (QSA_MAIN, QSA_RAW, QSA_COMPRESSED, GDN, PLE)
+    # PLE belongs to only the pipeline stage that owns the PLE layer, so it is
+    # optional in a per-stage layout.  When present it still receives its
+    # private allocation and owner mapping below.
+    required = (QSA_MAIN, QSA_RAW, QSA_COMPRESSED, GDN)
+    owner_roles = (*required, PLE)
     missing = [role for role in required if not role_members[role]]
     if missing or unknown:
         details = [(name, type(spec).__name__) for name, spec in unknown]
@@ -228,7 +232,7 @@ def build_qwen4_kv_cache_layout(
 
     dtype_sizes = {
         get_dtype_size(dtype)
-        for role in required
+        for role in owner_roles
         for _, spec in role_members[role]
         for dtype in (spec.dtypes if isinstance(spec, MambaSpec) else (spec.dtype,))
     }
@@ -296,11 +300,21 @@ def build_qwen4_kv_cache_layout(
         cursor += page_size * num_blocks
     slot_backing_size = round_up(cursor, alignment)
 
-    # Each QSA layer needs one slot. State groups reuse those slots with
-    # separate scheduler block tables, so live groups own disjoint block IDs.
-    slot_count = len(role_members[QSA_MAIN])
+    # PP can expose QSA owners from only one stage while one state group
+    # contains owners aggregated across stages.  State groups have disjoint
+    # block IDs and can reuse slots, so only the largest individual group must
+    # fit alongside the globally indexed QSA owners.
+    state_group_sizes: dict[tuple[str, int], int] = {}
+    for role in (GDN, PLE):
+        for layer_name, _ in role_members[role]:
+            key = (role, owner_group_ids[layer_name])
+            state_group_sizes[key] = state_group_sizes.get(key, 0) + 1
+    slot_count = max(
+        len(role_members[QSA_MAIN]),
+        max(state_group_sizes.values(), default=0),
+    )
     owners: list[CacheOwner] = []
-    for role in required:
+    for role in owner_roles:
         group_slots: dict[int, int] = {}
         for ordinal, (layer_name, spec) in enumerate(role_members[role]):
             group_id = owner_group_ids[layer_name]
