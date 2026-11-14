@@ -4,7 +4,7 @@
 import pytest
 import torch
 import torch_npu  # noqa: F401
-import triton
+from vllm.triton_utils import triton
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
