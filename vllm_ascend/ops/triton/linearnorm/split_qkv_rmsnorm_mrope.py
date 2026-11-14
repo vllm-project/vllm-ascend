@@ -458,6 +458,7 @@ def triton_split_qkv_rmsnorm_mrope(
         q_bias=q_bias,
         k_bias=k_bias,
         has_gate=has_gate,
+        positions=positions,
         weight_offset=weight_offset,
     )
 
@@ -494,6 +495,7 @@ def triton_split_qkv_rmsnorm_mrope_with_gate_out(
         q_bias=q_bias,
         k_bias=k_bias,
         has_gate=True,
+        positions=positions,
         weight_offset=weight_offset,
         gate_output=gate_output,
     )
