@@ -1255,8 +1255,12 @@ def test_state_uses_one_ring_page_and_block_table_entry(config, runtime):
 
 
 @pytest.mark.parametrize("pcp", [False, True])
-def test_projected_model_entry_keeps_fp32_state_and_existing_norm(config, monkeypatch, pcp):
+@pytest.mark.parametrize("bias_loaded", [False, True])
+def test_projected_model_entry_forwards_fused_norm_and_keeps_fp32_state(config, monkeypatch, pcp, bias_loaded):
     compressor = DeepseekV41Compressor(config, 2)
+    compressor.norm.bias_loaded = bias_loaded
+    if bias_loaded:
+        compressor.norm.bias = torch.nn.Parameter(torch.full((8,), 0.25, dtype=torch.bfloat16))
     compressor.register_buffer("_ring_pooled", torch.empty(4, 8, dtype=torch.bfloat16), persistent=False)
     compressor._ring_num_cores = 1
     state = torch.zeros(3, 32, 1, 16, dtype=torch.float32)
@@ -1275,7 +1279,11 @@ def test_projected_model_entry_keeps_fp32_state_and_existing_norm(config, monkey
         assert out.data_ptr() == pointer and out.dtype == torch.bfloat16
         assert kwargs["prev_rows"] is prev_rows
         assert kwargs["prev_row_indices"] is prev_row_indices
-        out.copy_(pooled)
+        assert kwargs["norm_w"] is (None if bias_loaded else compressor.norm.weight)
+        assert kwargs["rms_eps"] == compressor.norm.variance_epsilon
+        # The kernel now returns normalized rows. Applying norm again in the
+        # model would violate this contract and this test's exact comparison.
+        out.copy_(pooled if bias_loaded else expected)
         return out
 
     monkeypatch.setattr("vllm_ascend.ops.triton.compressor.compressor_triton.compressor_from_projected", kernel)
