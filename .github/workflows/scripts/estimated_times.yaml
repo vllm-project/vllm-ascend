@@ -13,6 +13,8 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_mla_prolog_head_padding.py: 30
   tests/e2e/pull_request/one_card/model_runner_v2/test_uva_prefix.py: 30
   tests/e2e/pull_request/one_card/test_kv_pool_accuracy.py: 410
+  # Initial estimate for four eager/FULL and trace OFF/ON engine starts.
+  tests/e2e/pull_request/one_card/test_kv_trace.py: 600
   tests/e2e/pull_request/one_card/test_flash_attn_precision.py: 30
   tests/e2e/pull_request/one_card/test_swiglu_mx_quant.py: 30
   tests/e2e/pull_request/four_card/model_runner_v2/test_kvpp_pp.py: 300
