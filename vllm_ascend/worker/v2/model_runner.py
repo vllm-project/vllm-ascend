@@ -525,16 +525,37 @@ class NPUModelRunner(GPUModelRunner):
         prepare_v41_source_rope(self)
         # Recreate along with KV initialization: profiling capture owns a
         # throwaway model state and must not leak event/buffer bindings.
+        packed_cache = uses_a5_packed_cache()
+        parallel_cfg = getattr(self, "parallel_config", None)
+        native_full_decode_metadata = (
+            not packed_cache
+            and getattr(self.compilation_config, "cudagraph_mode", None) == CUDAGraphMode.FULL_DECODE_ONLY
+            and getattr(parallel_cfg, "prefill_context_parallel_size", 1) == 1
+            and getattr(parallel_cfg, "decode_context_parallel_size", 1) == 1
+        )
+        draft_model = getattr(self.speculator, "model", None)
+        get_draft_kv_names = getattr(draft_model, "get_draft_kv_cache_layer_names", None)
+        target_metadata_draft_layers = frozenset(
+            (
+                *getattr(self.speculator, "draft_attn_layer_names", ()),
+                *(get_draft_kv_names() if callable(get_draft_kv_names) else ()),
+                *getattr(self.kv_cache_config, "dspark_draft_layer_names", ()),
+            )
+        )
         self.model_state.device_metadata = (
-            TargetDeviceMetadata()
-            if uses_a5_packed_cache()
-            and (
+            TargetDeviceMetadata(
+                draft_layer_names=target_metadata_draft_layers,
+                full_graph_only=not packed_cache,
+            )
+            if (
                 self.model_config.architecture == "DeepseekV41ForCausalLM"
-                or (
-                    self.model_config.architecture == "KimiK31ForConditionalGeneration"
-                    and enable_sfa_dcp_sharded_indexer(self.vllm_config)
-                    and self.vllm_config.attention_config.indexer_kv_dtype == "fp8"
-                )
+                and (packed_cache or native_full_decode_metadata)
+            )
+            or (
+                packed_cache
+                and self.model_config.architecture == "KimiK31ForConditionalGeneration"
+                and enable_sfa_dcp_sharded_indexer(self.vllm_config)
+                and self.vllm_config.attention_config.indexer_kv_dtype == "fp8"
             )
             else None
         )

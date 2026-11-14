@@ -1364,10 +1364,12 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
         seen["factory"](runner.vllm_config, torch.device("cpu"), CUDAGraphMode.FULL, **query_kwargs)
 
     prepare_kda.assert_called_once_with(runner.compilation_config.static_forward_context, 8)
-    assert runner.model_state.device_metadata == (
-        "metadata" if a5 and architecture == "DeepseekV41ForCausalLM" else None
-    )
-    assert metadata_cls.call_count == int(a5 and architecture == "DeepseekV41ForCausalLM")
+    if a5 and architecture == "DeepseekV41ForCausalLM":
+        assert runner.model_state.device_metadata == "metadata"
+        metadata_cls.assert_called_once_with(draft_layer_names=frozenset(), full_graph_only=False)
+    else:
+        assert runner.model_state.device_metadata is None
+        metadata_cls.assert_not_called()
     assert seen["cfg"] == kv_cache_config
     assert seen["cfg"] is not kv_cache_config
     assert vllm_model_runner.ModelCudaGraphManager is original
@@ -2625,3 +2627,76 @@ def test_load_failure_closes_unpublished_host_owners(published_model, cleanup_fa
             runner.shutdown()
         assert first.close_host_offload.call_count == 2
         assert runner._shared_engram_shutdown_pending == []
+
+
+@pytest.mark.parametrize(
+    ("cudagraph_mode", "pcp_size", "dcp_size", "expected"),
+    [
+        (CUDAGraphMode.FULL_DECODE_ONLY, 1, 1, True),
+        (CUDAGraphMode.PIECEWISE, 1, 1, False),
+        (CUDAGraphMode.FULL_DECODE_ONLY, 2, 1, False),
+        (CUDAGraphMode.FULL_DECODE_ONLY, 1, 2, False),
+    ],
+)
+def test_initialize_kv_cache_enables_native_target_device_metadata_with_draft_layers(
+    cudagraph_mode, pcp_size, dcp_size, expected
+):
+    runner = _make_runner()
+    runner.input_buffers = object()
+    runner.compilation_config = SimpleNamespace(
+        static_forward_context={},
+        cudagraph_mode=cudagraph_mode,
+    )
+    runner.parallel_config = SimpleNamespace(
+        prefill_context_parallel_size=pcp_size,
+        decode_context_parallel_size=dcp_size,
+    )
+    runner.vllm_config = SimpleNamespace(
+        compilation_config=runner.compilation_config,
+        parallel_config=runner.parallel_config,
+        scheduler_config=SimpleNamespace(max_num_seqs=8),
+        attention_config=SimpleNamespace(hisparse_config=None),
+        kv_transfer_config=None,
+    )
+    runner.max_num_reqs = 8
+    runner.pcp_manager = None
+    runner.model_state = SimpleNamespace(pcp_manager=None, kvpp_runtime=None)
+    runner.speculator = SimpleNamespace(
+        draft_attn_layer_names={"mtp.layers.0.self_attn.v41_attn"},
+        model=SimpleNamespace(
+            get_draft_kv_cache_layer_names=lambda: ["mtp.layers.0.self_attn.dsa_attn.swa_cache_layer"]
+        ),
+    )
+    runner.model_config = SimpleNamespace(architecture="DeepseekV41ForCausalLM")
+    kv_cache_config = KVCacheConfig(num_blocks=1, kv_cache_tensors=[], kv_cache_groups=[])
+
+    def _super(self, kv_cache_config, kv_cache_allocation_context=None):
+        kv_cache_config.dspark_draft_layer_names = ("mtp.layers.1.self_attn.dsa_attn.swa_cache_layer",)
+        self.kv_cache_config = kv_cache_config
+        self.attn_groups = []
+
+    with (
+        patch("vllm_ascend.worker.v2.model_runner.uses_a5_packed_cache", return_value=False),
+        patch("vllm_ascend.worker.v2.model_runner.TargetDeviceMetadata", return_value="metadata") as metadata_cls,
+        patch("vllm_ascend.ops.kda_state_copy_plan.initialize_kda_state_copy"),
+        patch.object(GPUModelRunner, "initialize_kv_cache", _super),
+        patch("vllm_ascend.worker.v2.model_runner.ModelAclGraphManager", return_value="acl"),
+        patch("vllm_ascend.worker.v2.model_runner.KVPPRuntime.create_from_kv_cache", return_value="kvpp"),
+    ):
+        runner.initialize_kv_cache(kv_cache_config)
+
+    if expected:
+        assert runner.model_state.device_metadata == "metadata"
+        metadata_cls.assert_called_once_with(
+            draft_layer_names=frozenset(
+                {
+                    "mtp.layers.0.self_attn.v41_attn",
+                    "mtp.layers.0.self_attn.dsa_attn.swa_cache_layer",
+                    "mtp.layers.1.self_attn.dsa_attn.swa_cache_layer",
+                }
+            ),
+            full_graph_only=True,
+        )
+    else:
+        assert runner.model_state.device_metadata is None
+        metadata_cls.assert_not_called()

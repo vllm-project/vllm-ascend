@@ -48,6 +48,7 @@ from vllm_ascend.utils import (
     oproj_tp_enable,
 )
 from vllm_ascend.worker.device_metadata import (
+    DeviceMetadataPriority,
     DeviceMetadataStage,
     DeviceMetadataTask,
     wait_for_device_metadata,
@@ -187,6 +188,7 @@ class AscendDSAV41Metadata(AttentionMetadata):
     storage_block_size: int
     is_compressor_state: bool
     flat_slot_mapping: torch.Tensor | None = None
+    slot_metadata_group_id: int | None = None
     cache_kind: str = "unknown"
     # MRV2 producer ownership follows this forward's metadata, including capture.
     device_metadata_executor: Any = None
@@ -380,6 +382,9 @@ class AscendDSAV41Impl:
     def _write_swa_cache(attn, metadata, value):
         if not value.shape[0]:
             return
+        slot_group_id = getattr(metadata, "slot_metadata_group_id", None)
+        if slot_group_id is not None:
+            wait_for_device_metadata(DeviceMetadataStage.PREPARE, slot_group_id)
         cache = attn.dsa_attn.swa_cache_layer.kv_cache[0]
         backend = getattr(attn, "packed_cache_ops", None)
         if backend is not None:
@@ -618,6 +623,10 @@ class AscendDSAV41Impl:
         source_sin = source_sin[:num_tokens]
         index_slots = indexer_metadata.cache.slot_mapping[:num_tokens]
         long_slots = compressor_metadata.cache.slot_mapping[:num_tokens]
+        for cache_meta in (indexer_metadata.cache, compressor_metadata.cache):
+            slot_group_id = getattr(cache_meta, "slot_metadata_group_id", None)
+            if slot_group_id is not None:
+                wait_for_device_metadata(DeviceMetadataStage.PREPARE, slot_group_id)
         attn.indexer.update_keys(
             latent,
             index_slots,
@@ -816,6 +825,8 @@ class AscendDSAV41Impl:
 
 
 class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]):
+    _first_consumer_slot: bool = False
+
     def __init__(
         self,
         kv_cache_spec,
@@ -880,6 +891,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         self._slot_mapping = torch.full((max_tokens,), -1, dtype=torch.int64, device=device)
         self._slot_mapping_2d = torch.full((max_tokens, 2), -1, dtype=torch.int32, device=device)
         self._flat_slot_mapping = torch.full((max_tokens,), -1, dtype=torch.int64, device=device)
+        self._slot_valid_end = torch.zeros((), dtype=torch.int32, device=device)
         self._seq_lens = torch.zeros(max_reqs, dtype=torch.int32, device=device)
         self._max_tokens = max_tokens
         self._dspark_swa_indices = None
@@ -926,6 +938,15 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         # FULL warmup/capture so producers and consumer waits share one graph.
         self._device_metadata_in_graph = False
         self._device_metadata_tasks: tuple[DeviceMetadataTask, ...] = ()
+        self._first_consumer_slot = False
+
+    @property
+    def first_consumer_slot(self) -> bool:
+        return self._first_consumer_slot
+
+    @first_consumer_slot.setter
+    def first_consumer_slot(self, value: bool) -> None:
+        self._first_consumer_slot = value
 
     @classmethod
     def get_cudagraph_support(
@@ -971,8 +992,6 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         """Defer this target build without changing the drafter's builder mode."""
         was_enabled = self._device_metadata_enabled
         was_in_graph = self._device_metadata_in_graph
-        if in_graph and not self._uses_a5_packed_cache:
-            raise ValueError("Captured V4.1 device metadata currently requires the A5 packed-cache backend")
         self.enable_device_metadata()
         self._device_metadata_in_graph = in_graph
         try:
@@ -993,6 +1012,8 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         buffer: torch.Tensor,
         stage: DeviceMetadataStage,
         run,
+        *,
+        priority: DeviceMetadataPriority = DeviceMetadataPriority.DEFAULT,
     ) -> torch.Tensor:
         existing = shared.get(key)
         if existing is not None:
@@ -1003,7 +1024,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         ):
             self._device_metadata_tasks = (
                 *self._device_metadata_tasks,
-                DeviceMetadataTask(stage, run, id(buffer)),
+                DeviceMetadataTask(stage, run, id(buffer), priority=priority),
             )
         else:
             run()
@@ -1128,6 +1149,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
     def _build_cache_slots(self, common, req: AscendDSAV41Metadata, **kwargs) -> None:
         # SWA uses original-token coordinates; circular state has no token slots.
         # Long KV and index K are addressed in completed compression groups.
+        in_graph_native = self._device_metadata_in_graph and not self._uses_a5_packed_cache
         compressed = req.cache_kind in {"long_kv", "index_k"}
         if req.is_compressor_state:
             # State writes use ring ownership metadata; this buffer stays PAD.
@@ -1160,35 +1182,73 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                         flat_output=self._flat_slot_mapping[: req.num_input_tokens],
                     )
                 else:
-                    if compressed and req.compress_ratio != 1:
-                        active_slots = compressed_slot_mapping(active_slots, req.compress_ratio)
-                    valid = active_slots >= 0
-                    if compressed and req.compress_ratio == 2:
-                        if kwargs.get("skip_ring_state_update", False):
-                            valid.zero_()
-                        else:
-                            valid_end = common.query_start_loc[req.num_actual_reqs].clamp_max(req.num_actual_tokens)
-                            valid &= torch.arange(req.num_input_tokens, device=active_slots.device) < valid_end
-                            if req.positions is not None:
-                                valid &= req.positions.remainder(2) == 1
-                    physical = active_slots.clamp_min(0)
-                    self._slot_mapping_2d[: req.num_input_tokens, 0].copy_(
-                        torch.where(
-                            valid,
-                            torch.div(physical, req.storage_block_size, rounding_mode="floor"),
-                            -1,
-                        )
-                    )
-                    self._slot_mapping_2d[: req.num_input_tokens, 1].copy_(
-                        torch.where(valid, physical.remainder(req.storage_block_size), -1)
-                    )
-                    self._flat_slot_mapping[: req.num_input_tokens].copy_(torch.where(valid, active_slots, -1))
                     prepared_slots = self._slot_mapping_2d[: req.num_input_tokens]
                     prepared_flat_slots = self._flat_slot_mapping[: req.num_input_tokens]
+                    skip_ring = bool(kwargs.get("skip_ring_state_update", False))
+                    is_c2 = compressed and req.compress_ratio == 2
+                    if in_graph_native and is_c2:
+                        if skip_ring:
+                            self._slot_valid_end.zero_()
+                        else:
+                            self._slot_valid_end.copy_(
+                                common.query_start_loc[req.num_actual_reqs].clamp_max(req.num_actual_tokens)
+                            )
+
+                    def prepare_native_slot_mapping() -> None:
+                        linear_slots = (
+                            compressed_slot_mapping(active_slots, req.compress_ratio)
+                            if compressed and req.compress_ratio != 1
+                            else active_slots
+                        )
+                        valid = linear_slots >= 0
+                        if is_c2:
+                            if not in_graph_native and skip_ring:
+                                valid.zero_()
+                            else:
+                                valid_bound = (
+                                    self._slot_valid_end
+                                    if in_graph_native
+                                    else common.query_start_loc[req.num_actual_reqs].clamp_max(req.num_actual_tokens)
+                                )
+                                valid &= torch.arange(req.num_input_tokens, device=linear_slots.device) < valid_bound
+                                if req.positions is not None:
+                                    valid &= req.positions.remainder(2) == 1
+                        physical = linear_slots.clamp_min(0)
+                        prepared_slots[:, 0].copy_(
+                            torch.where(
+                                valid,
+                                torch.div(physical, req.storage_block_size, rounding_mode="floor"),
+                                -1,
+                            )
+                        )
+                        prepared_slots[:, 1].copy_(torch.where(valid, physical.remainder(req.storage_block_size), -1))
+                        prepared_flat_slots.copy_(torch.where(valid, linear_slots, -1))
+
+                    if in_graph_native:
+                        slot_priority = (
+                            DeviceMetadataPriority.FIRST_CONSUMER_SLOT
+                            if req.cache_kind == "swa" and self._first_consumer_slot
+                            else DeviceMetadataPriority.DEFAULT
+                        )
+                        self._publish_task(
+                            self.common_v41_metadata,
+                            f"prepare:{slot_key}",
+                            self._slot_mapping_2d,
+                            DeviceMetadataStage.PREPARE,
+                            prepare_native_slot_mapping,
+                            priority=slot_priority,
+                        )
+                    else:
+                        prepare_native_slot_mapping()
                 self.common_v41_metadata[slot_key] = prepared_slots
                 self.common_v41_metadata[flat_slot_key] = prepared_flat_slots
             req.slot_mapping = prepared_slots
             req.flat_slot_mapping = prepared_flat_slots
+            if in_graph_native:
+                producer_buffer = self.common_v41_metadata.get(f"prepare:{slot_key}")
+                if producer_buffer is None:
+                    raise RuntimeError(f"Native captured slot mapping {slot_key!r} is missing its PREPARE producer")
+                req.slot_metadata_group_id = id(producer_buffer)
 
     def _prepare_cache_lengths(self, common, req: AscendDSAV41Metadata, **kwargs) -> None:
         compressed = req.cache_kind in {"long_kv", "index_k"}
@@ -1199,11 +1259,24 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         if compressed and req.compress_ratio == 2:
             compressed_lengths = self.common_v41_batch_metadata.get("lengths:c2")
             if compressed_lengths is None:
-                torch.div(
-                    req.seq_lens, req.compress_ratio, rounding_mode="floor", out=self._cache_seq_lens[: req.num_reqs]
-                )
-                torch.remainder(req.seq_lens, req.compress_ratio, out=self._cmp_residual[: req.num_reqs])
-                compressed_lengths = (self._cache_seq_lens[: req.num_reqs], self._cmp_residual[: req.num_reqs])
+                cache_lengths = self._cache_seq_lens[: req.num_reqs]
+                residual_lengths = self._cmp_residual[: req.num_reqs]
+
+                def prepare_c2_lengths() -> None:
+                    torch.div(req.seq_lens, 2, rounding_mode="floor", out=cache_lengths)
+                    torch.remainder(req.seq_lens, 2, out=residual_lengths)
+
+                if self._device_metadata_in_graph and not self._uses_a5_packed_cache:
+                    self._publish_task(
+                        self.common_v41_batch_metadata,
+                        "prepare:lengths:c2",
+                        self._cache_seq_lens,
+                        DeviceMetadataStage.PREPARE,
+                        prepare_c2_lengths,
+                    )
+                else:
+                    prepare_c2_lengths()
+                compressed_lengths = (cache_lengths, residual_lengths)
                 self.common_v41_batch_metadata["lengths:c2"] = compressed_lengths
             req.cache_seq_lens, req.cmp_residual = compressed_lengths
         # Capture the indexer path even when a dummy C2 decode has no
@@ -1525,10 +1598,11 @@ class AscendDSAV41AttentionMetadataBuilder(AscendDSAV41MetadataBuilder):
             has_compressed = operator_ratio in (1, 2)
             cmp_seq_lens = req.cache_seq_lens if has_compressed else None
             cmp_residual = req.cmp_residual
+            metadata_in_graph = self._device_metadata_in_graph
 
             def build_smla_metadata() -> None:
-                # Keep graph event frontiers stable even when this CP rank has no query.
-                if req.num_actual_tokens == 0:
+                # Keep graph event frontiers stable even when this rank has no live query.
+                if req.num_actual_tokens == 0 and not metadata_in_graph:
                     self._smla_metadata.zero_()
                     return
                 value = torch.ops._C_ascend.npu_sparse_flash_mla_metadata(
@@ -1564,6 +1638,11 @@ class AscendDSAV41AttentionMetadataBuilder(AscendDSAV41MetadataBuilder):
                 self._smla_metadata,
                 DeviceMetadataStage.ATTENTION,
                 build_smla_metadata,
+                priority=(
+                    DeviceMetadataPriority.SWA_METADATA
+                    if req.cache_kind == "swa" and not has_compressed
+                    else DeviceMetadataPriority.DEFAULT
+                ),
             )
 
 

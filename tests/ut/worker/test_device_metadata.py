@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from contextlib import contextmanager, nullcontext
+from itertools import chain
 from types import SimpleNamespace
 
 import pytest
@@ -23,8 +24,10 @@ from vllm.forward_context import BatchDescriptor
 import vllm_ascend.worker.device_metadata as device_metadata
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataExecutor,
+    DeviceMetadataPriority,
     DeviceMetadataStage,
     DeviceMetadataTask,
+    _mark_first_consumer_slots,
     wait_for_device_metadata,
 )
 
@@ -61,7 +64,7 @@ def executor_env(monkeypatch):
     allocations: list[str] = []
     model_stream = _FakeStream("model", calls)
     metadata_stream = _FakeStream("metadata", calls)
-    event_names = iter(("inputs", "reusable", "compressor", "attention", "indexer", "extra-0", "extra-1", "extra-2"))
+    event_names = chain(("inputs", "reusable", "compressor", "attention", "indexer"), (f"extra-{i}" for i in range(32)))
     external_event_names = iter(f"external-{index}" for index in range(12))
 
     def make_stream():
@@ -498,3 +501,226 @@ def test_capture_preparation_failure_retires_metadata(state, monkeypatch):
     prepare(state, Builder(), full=True)
     state.finish()
     assert state.executor.calls == []
+
+
+@pytest.mark.parametrize("full_graph", [False, True])
+def test_priority_buckets_preserve_c2_dependencies_and_frontiers(executor_env, full_graph):
+    executor, calls, _ = executor_env
+    descriptor = BatchDescriptor(num_tokens=6, num_reqs=1) if full_graph else None
+
+    executor._attention_order = {20: 0, 10: 1}
+
+    tasks = (
+        DeviceMetadataTask(
+            DeviceMetadataStage.INDEXER,
+            lambda: calls.append(("task", "c2_qli")),
+            30,
+        ),
+        DeviceMetadataTask(
+            DeviceMetadataStage.ATTENTION,
+            lambda: calls.append(("task", "c2_smla_10")),
+            10,
+        ),
+        DeviceMetadataTask(
+            DeviceMetadataStage.ATTENTION,
+            lambda: calls.append(("task", "c2_smla_20")),
+            20,
+        ),
+        DeviceMetadataTask(
+            DeviceMetadataStage.PREPARE,
+            lambda: calls.append(("task", "c2_lengths")),
+            2,
+        ),
+        DeviceMetadataTask(
+            DeviceMetadataStage.PREPARE,
+            lambda: calls.append(("task", "later_swa_slot")),
+            3,
+        ),
+        DeviceMetadataTask(
+            DeviceMetadataStage.PREPARE,
+            lambda: calls.append(("task", "first_swa_slot")),
+            1,
+            priority=DeviceMetadataPriority.FIRST_CONSUMER_SLOT,
+        ),
+        DeviceMetadataTask(
+            DeviceMetadataStage.COMPRESSOR,
+            lambda: calls.append(("task", "compressor")),
+            0,
+        ),
+        DeviceMetadataTask(
+            DeviceMetadataStage.ATTENTION,
+            lambda: calls.append(("task", "swa_smla")),
+            99,
+            priority=DeviceMetadataPriority.SWA_METADATA,
+        ),
+    )
+
+    executor.submit(tasks, descriptor)
+    executed = [entry[1] for entry in calls if entry[0] == "task"]
+    assert executed == [
+        "swa_smla",
+        "first_swa_slot",
+        "compressor",
+        "c2_lengths",
+        "later_swa_slot",
+        "c2_smla_20",
+        "c2_smla_10",
+        "c2_qli",
+    ]
+    expected_frontiers = {(task.stage, task.group_id) for task in tasks}
+    if full_graph:
+        assert executor._external_frontiers[descriptor] == expected_frontiers
+    else:
+        assert expected_frontiers <= set(executor._stage_ready)
+    executor.wait(DeviceMetadataStage.ATTENTION, 99)
+    executor.wait(DeviceMetadataStage.PREPARE, 1)
+    executor.wait(DeviceMetadataStage.INDEXER, 30)
+    executor.release()
+
+
+def test_mismatched_priority_stage_falls_back_to_default_bucket(executor_env):
+    executor, calls, _ = executor_env
+    tasks = (
+        DeviceMetadataTask(
+            DeviceMetadataStage.ATTENTION,
+            lambda: calls.append(("task", "attention_wrong_slot_prio")),
+            10,
+            priority=DeviceMetadataPriority.FIRST_CONSUMER_SLOT,
+        ),
+        DeviceMetadataTask(
+            DeviceMetadataStage.PREPARE,
+            lambda: calls.append(("task", "prepare_wrong_swa_prio")),
+            20,
+            priority=DeviceMetadataPriority.SWA_METADATA,
+        ),
+        DeviceMetadataTask(
+            DeviceMetadataStage.COMPRESSOR,
+            lambda: calls.append(("task", "compressor")),
+            30,
+        ),
+    )
+    executor.submit(tasks)
+    executed = [entry[1] for entry in calls if entry[0] == "task"]
+    assert executed == [
+        "compressor",
+        "prepare_wrong_swa_prio",
+        "attention_wrong_slot_prio",
+    ]
+    executor.release()
+
+
+class _TypedBuilder(Builder):
+    def __init__(self, cache_kind: str) -> None:
+        super().__init__()
+        self._cache_kind = cache_kind
+        self.first_consumer_slot = False
+        self.deferred_calls: list[bool] = []
+
+    @contextmanager
+    def defer_device_metadata(self, *, in_graph: bool = False):
+        self.deferred_calls.append(in_graph)
+        with super().defer_device_metadata(in_graph=in_graph):
+            yield
+
+
+def _group(builder: Builder, *layer_names: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        layer_names=list(layer_names),
+        get_metadata_builder=lambda _: builder,
+    )
+
+
+def test_first_consumer_slot_marks_only_earliest_target_swa_and_isolates_drafts(monkeypatch):
+    monkeypatch.setattr(device_metadata, "DeviceMetadataExecutor", Executor)
+    draft_swa = _TypedBuilder("swa")
+    swa_l0 = _TypedBuilder("swa")
+    c2_l1 = _TypedBuilder("long_kv")
+    swa_l2 = _TypedBuilder("swa")
+
+    draft_name = "mtp.layers.0.self_attn.dsa_attn.swa_cache_layer"
+    owner = device_metadata.TargetDeviceMetadata(
+        draft_layer_names={draft_name},
+        full_graph_only=True,
+    )
+    groups = [
+        [_group(draft_swa, draft_name)],
+        [_group(swa_l2, "model.layers.2.attn.dsa_attn.swa_cache_layer")],
+        [_group(c2_l1, "model.layers.1.attn.compressor.long_kv_cache")],
+        [_group(swa_l0, "model.layers.0.attn.dsa_attn.swa_cache_layer")],
+    ]
+
+    # Eager runs bypass deferral when full_graph_only=True.
+    eager_meta = owner.run_build(
+        lambda **_: {draft_name: SimpleNamespace(), "target": SimpleNamespace()},
+        attn_groups=groups,
+        full_graph_mode=False,
+    )
+    assert not hasattr(eager_meta["target"], "device_metadata_executor")
+    assert draft_swa.deferred_calls == []
+    assert swa_l0.deferred_calls == []
+
+    observed: dict[str, bool] = {}
+
+    def build_fn(**kwargs):
+        observed["draft"] = draft_swa.first_consumer_slot
+        observed["swa_l0"] = swa_l0.first_consumer_slot
+        observed["c2_l1"] = c2_l1.first_consumer_slot
+        observed["swa_l2"] = swa_l2.first_consumer_slot
+        return {draft_name: SimpleNamespace(), "target": SimpleNamespace()}
+
+    captured_meta = owner.run_build(build_fn, attn_groups=groups, full_graph_mode=True)
+    owner.finish()
+
+    assert observed == {
+        "draft": False,
+        "swa_l0": True,
+        "c2_l1": False,
+        "swa_l2": False,
+    }
+    assert draft_swa.deferred_calls == []
+    assert swa_l0.deferred_calls == [True]
+    assert not hasattr(captured_meta[draft_name], "device_metadata_executor")
+    assert captured_meta["target"].device_metadata_executor is owner.executor
+    assert not swa_l0.first_consumer_slot
+
+
+def test_first_consumer_slot_skips_later_swa_when_earliest_target_is_compressed():
+    draft_swa = _TypedBuilder("swa")
+    c2_l0 = _TypedBuilder("long_kv")
+    swa_l1 = _TypedBuilder("swa")
+    swa_l1.first_consumer_slot = True
+
+    groups = [
+        [_group(draft_swa, "mtp.layers.0.self_attn.dsa_attn.swa_cache_layer")],
+        [_group(c2_l0, "model.layers.0.attn.compressor.long_kv_cache")],
+        [_group(swa_l1, "model.layers.1.attn.dsa_attn.swa_cache_layer")],
+    ]
+    _mark_first_consumer_slots(
+        groups,
+        draft_layer_names={"mtp.layers.0.self_attn.dsa_attn.swa_cache_layer"},
+    )
+    assert not draft_swa.first_consumer_slot
+    assert not c2_l0.first_consumer_slot
+    assert not swa_l1.first_consumer_slot
+    assert _mark_first_consumer_slots([]) == []
+    unnamed_swa = _TypedBuilder("swa")
+    _mark_first_consumer_slots([[_group(unnamed_swa, "model.embed_tokens")]])
+    assert not unnamed_swa.first_consumer_slot
+
+
+def test_mixed_target_and_draft_group_raises():
+    builder = _TypedBuilder("swa")
+    groups = [
+        [
+            _group(
+                builder,
+                "mtp.layers.0.self_attn.dsa_attn.swa_cache_layer",
+                "model.layers.0.attn.dsa_attn.swa_cache_layer",
+            )
+        ]
+    ]
+    with pytest.raises(ValueError, match="Mixed target/draft"):
+        _mark_first_consumer_slots(
+            groups,
+            draft_layer_names={"mtp.layers.0.self_attn.dsa_attn.swa_cache_layer"},
+        )
