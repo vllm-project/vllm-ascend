@@ -1,0 +1,6 @@
+pr: 20612
+entries:
+  - category: feature
+    text: Added opt-in HIXL-based sharing of DeepSeek V4.1 host Engram tables across A2 and A5 serving instances.
+    model: deepseek-v4.1
+    hardware: [A2, A5]

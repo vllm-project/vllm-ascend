@@ -157,7 +157,7 @@ defaults:
 
 # only cancel in-progress runs of the same workflow
 concurrency:
-  group: ascend-nightly-${{ github.workflow_ref }}-${{ github.ref }}-${{ inputs.config_file_path || inputs.tests }}${{ inputs.request_id && format('-{0}', inputs.request_id) || '' }}
+  group: ascend-nightly-${{ github.workflow_ref }}-${{ github.ref }}-${{ inputs.vllm_ascend_branch }}-${{ inputs.config_file_path || inputs.tests }}${{ inputs.request_id && format('-{0}', inputs.request_id) || '' }}
   cancel-in-progress: true
 
 jobs:

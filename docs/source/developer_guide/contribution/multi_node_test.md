@@ -29,13 +29,33 @@ one branch no longer cancels the other. Log cleanup is also scoped to
 `${ASCEND_LOG_PREFIX}/<branch>` and leaves the other branch's in-flight logs
 untouched.
 
-Scheduled runs are dispatched with `request_id` empty and `test_cases=all`.
-Before they create any workload, the `setup-vars` job force-cancels PR-triggered
-runs of the same workflow whose `run-name` contains `(PR)`, using
-`secrets.PAT_TOKEN`. This prevents an earlier PR run from keeping the shared
-FIFO queue busy past the nightly start time. `force-cancel` bypasses the
-`if: always()` `Post process` step, so LWS resources created by a
+Scheduled nightly and weekly runs are dispatched with `request_id` empty and
+`test_cases=all`. Nightly and weekly workflows have no in-repo cron trigger;
+the external scheduler dispatches them through `workflow_dispatch` with
+`-f drain_pr_runs=true`. Before they create any workload, the `setup-vars` job
+force-cancels PR-triggered runs of the same workflow whose `run-name` contains
+`(PR)`, using `secrets.PAT_TOKEN`. This prevents an earlier PR run from keeping
+the shared FIFO queue busy past the nightly or weekly start time. The drain is
+opt-in because `request_id` is also empty for a normal manual dispatch; without
+`drain_pr_runs=true` a manually started run leaves PR runs alone. `force-cancel`
+bypasses the `if: always()` `Post process` step, so LWS resources created by a
 force-cancelled run may need to be cleaned up separately.
+
+## Timeouts
+
+`_e2e_nightly_multi_node.yaml` separates the test-run budget from the overall
+job budget:
+
+- `testcase_timeout` bounds the `Stream logs` step, i.e. the test execution
+  window. It defaults to 120 minutes (2h); the weekly A3 multi-node and
+  double-node jobs use the same 2h test window.
+- `job_timeout` bounds the whole job. It defaults to 360 minutes (6h) for
+  nightly runs, while the weekly A3 multi-node and double-node jobs pass 1200
+  minutes (20h). The extra headroom covers checkout, LWS creation, NPU queue
+  wait, log collection and artifact upload, so the job is not cancelled before
+  its logs are uploaded.
+- PR-triggered runs keep the shorter test window (240 minutes, or 1440 minutes
+  when AOP is enabled) and get 120 minutes of job headroom on top.
 
 ## How to contribute
 

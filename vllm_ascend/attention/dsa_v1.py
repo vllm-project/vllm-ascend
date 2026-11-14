@@ -16,6 +16,7 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionImplBase,
     AttentionMetadataBuilder,
+    max_decode_query_len,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -899,14 +900,15 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     ) -> AttentionCGSupport:
         # Explicit override in case the underlying builder specialized this getter.
         # @override omitted only because of mypy limitation due to type variable.
-        speculative_config = vllm_config.speculative_config
-        if (
-            speculative_config is not None
-            and speculative_config.method == "dspark"
-            and getattr(speculative_config, "enable_adaptive_verification", False)
-        ):
-            return AttentionCGSupport.ALWAYS
         return AttentionCGSupport.UNIFORM_BATCH
+
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls: type["AscendDSAMetadataBuilder"],
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+    ) -> int | None:
+        return max_decode_query_len(vllm_config)
 
     def set_num_actual_tokens(
         self,
@@ -1306,15 +1308,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         if preamble is None:
             query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
             max_seqlen_q = torch.max(query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).item()
-            if (
-                self.speculative_config is not None
-                and getattr(self.speculative_config, "method", None) == "dspark"
-                and getattr(self.speculative_config, "enable_adaptive_verification", False)
-                and self.num_prefills == 0
+            if self.speculative_config is not None and getattr(
+                self.speculative_config, "enable_adaptive_verification", False
             ):
-                # `query_start_loc_cpu` retains a layout with tokens evenly distributed across requests.
-                # Longer query will typically appear after reallocation, recorded in `query_start_loc`.
-                # So use the upper bound `num_speculative_tokens + 1` as `max_seqlen_q`.
+                # Adaptive verification redistributes decode tokens on device,
+                # so CPU query lengths may underestimate an individual request.
+                # Include the speculative-token limit plus one bonus token,
+                # while preserving the bound for longer prefill requests.
                 max_seqlen_q = max(max_seqlen_q, self.speculative_config.num_speculative_tokens + 1)
             preamble = (
                 max_seqlen_q,

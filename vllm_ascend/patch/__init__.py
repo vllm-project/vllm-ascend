@@ -910,6 +910,21 @@
 #       Remove only this embedding provisioning when the minimum supported vLLM
 #       version provides it in DeepseekV2Model; keep the unrelated PP transport.
 #
+#   3. `vllm.model_executor.models.deepseek_v2.DeepseekV2Model.forward`
+#      `vllm.model_executor.models.deepseek_v2.DeepseekV2ForCausalLM.set_aux_hidden_state_layers`
+#    Why:
+#       Ascend needs residual-aware aux capture, TP/SP gathering, and shared
+#       TopK buffers across PP boundaries with Model Runner V2.
+#    How:
+#       Reuse EagleModelMixin's aux-slot layout, packing, and collection. Keep
+#       the Ascend TopK transport separate from the upstream aux-slot relay.
+#       Shared AUX_HIDDEN_STATES transport remains available to other models.
+#    Related PR (if no, explain why):
+#       No upstream PR yet; capture and gathering use Ascend-specific layouts.
+#    Future Plan:
+#       Remove the forward patch when upstream extension points cover Ascend
+#       capture, gathering, and TopK transport without copying the forward.
+#
 # ** 3. File: worker/patch_distributed.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.distributed.parallel_state.GroupCoordinator`

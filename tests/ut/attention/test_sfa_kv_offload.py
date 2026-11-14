@@ -47,7 +47,6 @@ def test_exec_kv_offload_always_completes_compute_and_cache_write(defer_wait):
 
 def _make_boundary_decode_metadata():
     return SimpleNamespace(
-        context_parallel_metadata=None,
         max_query_len=1,
         num_reqs=1,
         num_actual_tokens=1,

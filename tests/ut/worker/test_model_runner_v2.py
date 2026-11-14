@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, Mock, patch
 import numpy as np
 import pytest
 import torch
+from vllm import envs
 from vllm.config import CompilationMode, CUDAGraphMode
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
@@ -66,7 +67,7 @@ def _make_runner(need_timing: bool = True):
     runner.debugger = None
     runner._debugger_started = False
     runner.attn_groups = []
-    runner._uses_flashmla = False
+    runner._target_uses_flashmla = False
     runner.adaptive_verification = None
     runner.input_buffers = SimpleNamespace(dummy_num_tokens=None)  # type: ignore[assignment]
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)
@@ -199,11 +200,85 @@ def _make_batch_state(
     )
 
 
+@pytest.mark.parametrize(
+    ("group_specs", "expected_target_flashmla"),
+    [
+        pytest.param(
+            [(("target.0",), False), (("draft.0",), True)],
+            False,
+            id="draft-only-flashmla",
+        ),
+        pytest.param(
+            [(("target.0",), False), (("draft.0",), False)],
+            False,
+            id="no-flashmla",
+        ),
+        pytest.param(
+            [(("target.0",), True), (("draft.0",), False)],
+            True,
+            id="target-only-flashmla",
+        ),
+        pytest.param(
+            [(("target.0",), True), (("draft.0",), True)],
+            True,
+            id="target-and-draft-flashmla",
+        ),
+        pytest.param(
+            [(("target.0", "draft.0"), True)],
+            True,
+            id="shared-group-containing-target",
+        ),
+    ],
+)
+@pytest.mark.parametrize("batch_kind", ["pd_tail", "decode", "prefill"])
+def test_flashmla_target_graph_gate_preserves_batch_semantics(group_specs, expected_target_flashmla, batch_kind):
+    runner = _make_runner()
+    runner.speculator = SimpleNamespace(draft_attn_layer_names={"draft.0"})
+    runner.attn_groups = [
+        [
+            SimpleNamespace(
+                layer_names=layer_names,
+                get_metadata_builder=Mock(return_value=SimpleNamespace(flashmla_state=object() if flashmla else None)),
+            )
+            for layer_names, flashmla in group_specs
+        ]
+    ]
+    runner._target_uses_flashmla = runner._has_target_flashmla_attention()
+    assert runner._target_uses_flashmla is expected_target_flashmla
+    runner.decode_query_len = 4
+    runner.vllm_config.kv_transfer_config = SimpleNamespace(is_kv_consumer=True, is_kv_producer=False)
+    if batch_kind == "pd_tail":
+        batch_state = _make_batch_state([127, 128], [4, 4], [128, 128], draft_tokens=3)
+        upstream_uniform = 4
+    elif batch_kind == "decode":
+        batch_state = _make_batch_state([128, 128], [4, 4], [128, 128], draft_tokens=3)
+        upstream_uniform = 4
+    else:
+        batch_state = _make_batch_state([0, 128], [4, 1], [128, 128])
+        upstream_uniform = None
+
+    with patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, upstream_uniform)):
+        gathered, uniform = runner.gather_batch_req_state(SimpleNamespace(), False)
+
+    target_prefill = expected_target_flashmla and batch_state.has_prefill
+    order = [1, 0] if target_prefill else [0, 1]
+    assert gathered.req_ids == [batch_state.req_ids[index] for index in order]
+    for field in batch_state._fields:
+        values = getattr(batch_state, field)
+        if isinstance(values, np.ndarray):
+            np.testing.assert_array_equal(getattr(gathered, field), values[order])
+    assert gathered.has_prefill is batch_state.has_prefill
+    assert gathered.decode_graph_eligible is (batch_state.decode_graph_eligible and not target_prefill)
+    assert uniform == (None if target_prefill else upstream_uniform)
+    if not expected_target_flashmla:
+        assert gathered is batch_state
+
+
 @pytest.mark.parametrize("uses_flashmla", [False, True])
 @pytest.mark.parametrize("draft_tokens", [0, 3])
 def test_gather_batch_preserves_pd_tail_and_flashmla_request_order(uses_flashmla, draft_tokens):
     runner = _make_runner()
-    runner._uses_flashmla = uses_flashmla
+    runner._target_uses_flashmla = uses_flashmla
     runner.decode_query_len = 1 + draft_tokens
     runner.vllm_config.kv_transfer_config = SimpleNamespace(is_kv_consumer=True, is_kv_producer=False)
     batch_state = _make_batch_state([127, 128], [runner.decode_query_len] * 2, [128, 128], draft_tokens)
@@ -233,7 +308,7 @@ def test_gather_batch_preserves_pd_tail_and_flashmla_request_order(uses_flashmla
 @pytest.mark.parametrize("graph_eligible", [False, True])
 def test_gather_decode_batch_preserves_upstream_graph_gate(uses_flashmla, graph_eligible):
     runner = _make_runner()
-    runner._uses_flashmla = uses_flashmla
+    runner._target_uses_flashmla = uses_flashmla
     batch_state = _make_batch_state([128, 64], [1, 1], [128, 64])._replace(decode_graph_eligible=graph_eligible)
     expected_uniform = 1 if graph_eligible else None
     with patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, expected_uniform)):
@@ -249,7 +324,7 @@ def test_gather_decode_batch_preserves_upstream_graph_gate(uses_flashmla, graph_
 @pytest.mark.parametrize("uses_flashmla", [False, True])
 def test_gather_dummy_batch_bypasses_flashmla(uses_flashmla):
     runner = _make_runner()
-    runner._uses_flashmla = uses_flashmla
+    runner._target_uses_flashmla = uses_flashmla
     scheduler_output = SimpleNamespace()
     with (
         patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(None, 4)) as parent,
@@ -1657,6 +1732,7 @@ def _run_prepare_inputs(
         patch("vllm_ascend.worker.v2.model_runner.update_cos_sin"),
     ):
         prepared = runner.prepare_inputs(scheduler_output, batch_req_state, batch_desc, 0)
+        batch.is_padding = make_batch.call_args.kwargs["is_padding"]
         assert make_batch.call_args.kwargs["decode_graph_eligible"] == batch_req_state.decode_graph_eligible
         assert make_batch.call_args.kwargs["prefill_runs_as_decode_np"] is batch_req_state.prefill_runs_as_decode_np
         assert make_batch.call_args.kwargs["max_seq_len_np"] is batch_req_state.max_seq_len_np
@@ -1671,6 +1747,27 @@ def test_prepare_inputs_common_path():
     assert out is partitioned
     runner.eplb.set_batch_phase.assert_called_once_with(True)
     np.testing.assert_array_equal(runner.input_buffers.seq_lens_cpu[:2], np.array([3, 4], dtype=np.int32))
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_prepare_inputs_refreshes_captured_padding_storage(monkeypatch, enabled):
+    monkeypatch.setattr(envs, "VLLM_MOE_SKIP_PADDING", enabled)
+    runner, scheduler_output, state, desc = _prepare_inputs_runner()
+    buffers = AscendInputBuffers(4, 13, runner.device)
+    runner.input_buffers = buffers
+    captured = buffers.is_padding[:]
+    assert captured.shape == (13,)
+    captured.fill_(True)  # Graph capture marks all dummy rows as padding.
+
+    for valid, padded in ((13, 13), (6, 8), (4, 7), (8, 8)):
+        scheduler_output.num_scheduled_tokens = {"r0": valid - 1, "r1": 1}
+        state.num_scheduled_tokens = np.array([valid - 1, 1], dtype=np.int32)
+        state.num_tokens = valid
+        desc.num_tokens = padded
+        batch, _ = _run_prepare_inputs(runner, scheduler_output, state, desc)
+        assert batch.is_padding.shape == (padded,)
+        assert batch.is_padding.data_ptr() == captured.data_ptr()
+        torch.testing.assert_close(captured[:padded], torch.arange(padded) >= valid)
 
 
 @pytest.mark.parametrize("num_spec_tokens", [0, 1, 5])
@@ -2179,10 +2276,12 @@ def m3_device_length_runner():
     "architecture", ["MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration", "GlmMoeDsaForCausalLM"]
 )
 @pytest.mark.parametrize("eager", [False, True])
-def test_m3_dspark_device_length_policy(m3_device_length_runner, architecture, eager):
+@pytest.mark.parametrize("kv_role", [None, "kv_producer", "kv_consumer"])
+def test_m3_dspark_device_length_policy(m3_device_length_runner, architecture, eager, kv_role):
     runner, _, _ = m3_device_length_runner
     runner.model_config.architecture = architecture
     runner.speculative_config.enforce_eager = eager
+    runner.vllm_config.kv_transfer_config = None if kv_role is None else SimpleNamespace(kv_role=kv_role)
     assert runner._can_skip_spec_cpu_length_sync() is True
 
 
@@ -2202,7 +2301,6 @@ def test_m3_dspark_device_length_policy(m3_device_length_runner, architecture, e
         "pipeline_parallel_size",
         "prefill_context_parallel_size",
         "decode_context_parallel_size",
-        "kv_transfer",
         "sparse_offload",
         "adaptive",
         "pp_exact_counts",
@@ -2212,6 +2310,7 @@ def test_m3_dspark_device_length_policy(m3_device_length_runner, architecture, e
 def test_m3_dspark_device_length_policy_falls_back(m3_device_length_runner, unsupported, architecture):
     runner, _, _ = m3_device_length_runner
     runner.model_config.architecture = architecture
+    runner.vllm_config.kv_transfer_config = SimpleNamespace(kv_role="kv_consumer")
     spec = runner.speculative_config
     if unsupported == "no_spec_config":
         runner.speculative_config = None
@@ -2235,8 +2334,6 @@ def test_m3_dspark_device_length_policy_falls_back(m3_device_length_runner, unsu
         runner.speculator.attn_backends["draft.1"] = AscendAttentionBackend
     elif unsupported.endswith("parallel_size"):
         setattr(runner.parallel_config, unsupported, 2)
-    elif unsupported == "kv_transfer":
-        runner.vllm_config.kv_transfer_config = object()
     elif unsupported == "sparse_offload":
         runner.ascend_config.sparse_kv_offload_config.enabled = True
     elif unsupported == "adaptive":
@@ -2259,10 +2356,12 @@ def _glm_mla_device_length_runner():
     "architecture", ["MiniMaxM3SparseForCausalLM", "MiniMaxM3SparseForConditionalGeneration", "GlmMoeDsaForCausalLM"]
 )
 @pytest.mark.parametrize("eager", [False, True])
-def test_glm_mla_dspark_flashmla_can_skip_cpu_length_sync(architecture, eager):
+@pytest.mark.parametrize("kv_role", [None, "kv_producer", "kv_consumer"])
+def test_glm_mla_dspark_flashmla_can_skip_cpu_length_sync(architecture, eager, kv_role):
     runner, _, _ = _glm_mla_device_length_runner()
     runner.model_config.architecture = architecture
     runner.speculative_config.enforce_eager = eager
+    runner.vllm_config.kv_transfer_config = None if kv_role is None else SimpleNamespace(kv_role=kv_role)
     assert runner._can_skip_spec_cpu_length_sync() is True
 
 
@@ -2279,7 +2378,6 @@ def test_glm_mla_dspark_flashmla_can_skip_cpu_length_sync(architecture, eager):
         "pipeline_parallel_size",
         "prefill_context_parallel_size",
         "decode_context_parallel_size",
-        "kv_transfer",
         "sparse_offload",
         "adaptive",
         "pp_exact_counts",
@@ -2287,6 +2385,7 @@ def test_glm_mla_dspark_flashmla_can_skip_cpu_length_sync(architecture, eager):
 )
 def test_glm_mla_dspark_requires_cpu_length_sync(unsupported):
     runner, _, _ = _glm_mla_device_length_runner()
+    runner.vllm_config.kv_transfer_config = SimpleNamespace(kv_role="kv_consumer")
     if unsupported == "no_speculator":
         runner.speculator = None
     elif unsupported == "method":
@@ -2303,8 +2402,6 @@ def test_glm_mla_dspark_requires_cpu_length_sync(unsupported):
         runner.speculator.use_flashmla = False
     elif unsupported.endswith("parallel_size"):
         setattr(runner.parallel_config, unsupported, 2)
-    elif unsupported == "kv_transfer":
-        runner.vllm_config.kv_transfer_config = object()
     elif unsupported == "sparse_offload":
         runner.ascend_config.sparse_kv_offload_config.enabled = True
     elif unsupported == "adaptive":
@@ -2314,8 +2411,64 @@ def test_glm_mla_dspark_requires_cpu_length_sync(unsupported):
     assert runner._can_skip_spec_cpu_length_sync() is False
 
 
-def test_glm_mla_dspark_fallback_copies_and_waits():
+def _kimi_k31_device_length_runner():
     runner, output, batch = _glm_mla_device_length_runner()
+    runner.model_config.architecture = "KimiK31ForConditionalGeneration"
+    runner.speculative_config.draft_model_config.architectures = ["K3DSparkModel"]
+    runner.parallel_config.decode_context_parallel_size = 8
+    runner.model_state.device_metadata = object()
+    return runner, output, batch
+
+
+@pytest.mark.parametrize("eager", [False, True])
+@pytest.mark.parametrize("kv_role", [None, "kv_producer", "kv_consumer"])
+def test_kimi_k31_dspark_flashmla_dcp_device_lengths(eager, kv_role):
+    runner, _, _ = _kimi_k31_device_length_runner()
+    runner.speculative_config.enforce_eager = eager
+    runner.vllm_config.kv_transfer_config = None if kv_role is None else SimpleNamespace(kv_role=kv_role)
+    assert runner._can_skip_spec_cpu_length_sync() is True
+
+
+@pytest.mark.parametrize(
+    "unsupported",
+    [
+        "draft_arch",
+        "draft_fia",
+        "no_device_metadata",
+        "no_backends",
+        "pipeline_parallel_size",
+        "prefill_context_parallel_size",
+        "sparse_offload",
+        "adaptive",
+        "pp_exact_counts",
+    ],
+)
+def test_kimi_k31_dspark_keeps_exact_cpu_lengths_for_unsupported_consumers(unsupported):
+    runner, _, _ = _kimi_k31_device_length_runner()
+    runner.vllm_config.kv_transfer_config = SimpleNamespace(kv_role="kv_consumer")
+    if unsupported == "draft_arch":
+        runner.speculative_config.draft_model_config.architectures = ["Qwen3DSparkModel"]
+    elif unsupported == "draft_fia":
+        runner.speculator.use_flashmla = False
+    elif unsupported == "no_device_metadata":
+        runner.model_state.device_metadata = None
+    elif unsupported == "no_backends":
+        runner.speculator.attn_backends = {}
+    elif unsupported.endswith("parallel_size"):
+        setattr(runner.parallel_config, unsupported, 2)
+    elif unsupported == "sparse_offload":
+        runner.ascend_config.sparse_kv_offload_config.enabled = True
+    elif unsupported == "adaptive":
+        runner.speculative_config.enable_adaptive_verification = True
+    elif unsupported == "pp_exact_counts":
+        runner.sync_spec_pp_cpu_counts = True
+    assert runner._can_skip_spec_cpu_length_sync() is False
+
+
+@pytest.mark.parametrize("target", ["glm", "kimi_k31"])
+def test_mla_dspark_fallback_copies_and_waits(target):
+    runner, output, batch = _glm_mla_device_length_runner() if target == "glm" else _kimi_k31_device_length_runner()
+    runner.vllm_config.kv_transfer_config = SimpleNamespace(kv_role="kv_consumer")
     runner.speculator.use_flashmla = False
     runner.req_states.num_computed_tokens.gpu[:] = torch.tensor([98, 195, 0, 0])
     runner.num_computed_tokens_stream = Mock()
@@ -2333,13 +2486,17 @@ def test_glm_mla_dspark_fallback_copies_and_waits():
 
 
 @pytest.mark.parametrize("rejected", [0, 1, 5])
-@pytest.mark.parametrize("draft", ["dflash", "m3_dspark", "glm_dspark", "glm_mla_dspark"])
-def test_rejection_reorder_and_padding_keep_device_lengths_without_d2h(rejected, draft):
+@pytest.mark.parametrize("draft", ["dflash", "m3_dspark", "glm_dspark", "glm_mla_dspark", "kimi_k31_dspark"])
+@pytest.mark.parametrize("kv_role", [None, "kv_producer", "kv_consumer"])
+def test_rejection_reorder_and_padding_keep_device_lengths_without_d2h(rejected, draft, kv_role):
     runner, output, _ = _device_length_runner() if draft == "dflash" else _m3_device_length_runner()
     if draft == "glm_dspark":
         runner.model_config.architecture = "GlmMoeDsaForCausalLM"
     elif draft == "glm_mla_dspark":
         runner, output, _ = _glm_mla_device_length_runner()
+    elif draft == "kimi_k31_dspark":
+        runner, output, _ = _kimi_k31_device_length_runner()
+    runner.vllm_config.kv_transfer_config = None if kv_role is None else SimpleNamespace(kv_role=kv_role)
     runner.num_computed_tokens_cpu.fill_(-99)  # An old staging snapshot must never be read.
     runner.input_buffers.seq_lens_cpu.fill_(777)
     runner.req_states.num_computed_tokens_cpu[:] = torch.tensor([100, 200, 0, 0])

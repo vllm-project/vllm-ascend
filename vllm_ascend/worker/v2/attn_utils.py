@@ -159,34 +159,6 @@ def ring_state_update_skipped() -> bool:
     return _SKIP_RING_STATE_UPDATE.get()
 
 
-def unwrap_mamba_kv_cache_groups(kv_cache_config: KVCacheConfig) -> KVCacheConfig:
-    """Expose homogeneous Mamba specs to the upstream MRV2 initializer.
-
-    vLLM 0.28 sizes block tables by checking MambaSpec directly. Leaving an identical
-    set of Mamba specs wrapped in UniformTypeKVCacheSpecs drops the extra
-    speculative state slots, so scheduler writes and GDN reads can overflow
-    the block table. Preserve the groups and allocation descriptors while
-    restoring the Mamba-specific sizing path.
-    """
-    # TODO: Remove this workaround once vLLM 0.28 support is dropped.
-    # vLLM 0.29 already handles wrapped Mamba block-table sizing correctly:
-    # https://github.com/vllm-project/vllm/pull/50493
-    # https://github.com/vllm-project/vllm/pull/50823
-    groups = []
-    for group in kv_cache_config.kv_cache_groups:
-        spec = group.kv_cache_spec
-        if isinstance(spec, UniformTypeKVCacheSpecs):
-            layer_specs = list(spec.kv_cache_specs.values())
-            if (
-                layer_specs
-                and isinstance(layer_specs[0], MambaSpec)
-                and all(layer_spec == layer_specs[0] for layer_spec in layer_specs)
-            ):
-                group = replace(group, kv_cache_spec=layer_specs[0])
-        groups.append(group)
-    return replace(kv_cache_config, kv_cache_groups=groups)
-
-
 def _align_hybrid_attention_page_sizes(kv_cache_specs: dict[str, KVCacheSpec], minimum_page_size: int = 0) -> None:
     """Align dense K/V segments before padding a shared Attention/Mamba pool."""
     if any(isinstance(spec, AscendSFAIndexerCacheSpec) for spec in kv_cache_specs.values()):
