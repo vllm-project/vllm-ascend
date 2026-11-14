@@ -100,3 +100,42 @@ def run_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bo
         signatures,
         case,
     )
+
+
+class WeightUpdateClient(HTTPVLLMWeightSyncClient):
+    """Select the draft START endpoint without changing the trainer protocol."""
+
+    def __init__(self, base_url: str):
+        super().__init__(base_url=base_url, timeout=UPDATE_TIMEOUT)
+        self.is_draft = False
+
+    def start_weight_update(self) -> None:
+        self._post("start_draft_weight_update" if self.is_draft else "start_weight_update")
+
+
+def send_update(server, engine, client: WeightUpdateClient, source, *, is_draft: bool = False):
+    client.is_draft = is_draft
+    engine.source = source
+
+    post_control(server, "pause")
+    engine.send_weights()
+    post_control(server, "resume")
+
+
+def create_draft_hccl_trainer(client, source, packed: bool, buffer_source):
+    """Initialize the normal factory engine with a draft-selecting client."""
+    from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLTrainerInitInfo
+
+    register_engines_once()
+    return WeightTransferTrainerFactory.trainer_init(
+        HCCLTrainerInitInfo(
+            rank=0,
+            master_address=get_ip(),
+            master_port=get_open_port(),
+            world_size=INFERENCE_WORLD_SIZE + 1,
+            packed=packed,
+            packed_buffer_size_bytes=packed_buffer_size_for(buffer_source),
+        ),
+        client=client,
+        source=source,
+    )

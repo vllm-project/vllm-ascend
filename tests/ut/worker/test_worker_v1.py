@@ -2299,6 +2299,8 @@ class TestNPUWorkerWeightUpdate(TestBase):
             worker = NPUWorker()
         worker.weight_transfer_engine = engine
         worker._weight_update_active = False
+        worker._weight_update_is_draft = False
+        worker.vllm_config = SimpleNamespace()
         worker.device = torch.device("cpu")
         worker.model_runner = MagicMock()
         worker.model_runner.model = MagicMock()
