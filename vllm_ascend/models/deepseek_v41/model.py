@@ -2202,6 +2202,13 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
 
         return loaded_params
 
+    def process_weights_after_loading(self):
+        from vllm_ascend.ops.dsv41_indexer_prologue import prepare_indexer_weights
+
+        for module in self.modules():
+            if isinstance(module, DeepseekV41Indexer) and module.fused_prologue_qw is not None:
+                prepare_indexer_weights(module)
+
     @property
     def engram_cache_layer_name(self) -> str | None:
         if not self.model.has_engram:

@@ -862,6 +862,11 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
         layer.weight_scale.data = layer.weight_scale.data.repeat_interleave(self.block_size, dim=0)
         n_dim, k_dim = layer.weight_scale.data.shape
         layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
+        if getattr(layer, "_dsv41_indexer_prologue", False):
+            from vllm_ascend.ops.dsv41_indexer_prologue import prepare_indexer_query_weights
+
+            prepare_indexer_query_weights(layer)
+            return
         layer.weight.data = layer.weight.data.transpose(0, 1)
         layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1)
 

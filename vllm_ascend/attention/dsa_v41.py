@@ -436,7 +436,12 @@ class AscendDSAV41Impl:
         else:
             if hidden_states.shape[0]:
                 qr = attn.q_norm(attn.wq_a(hidden_states))
-                q = attn.wq_b(qr).unflatten(-1, (-1, attn.head_dim))
+                if self.role.is_index_source and attn.indexer.fused_prologue_qw is not None:
+                    projection = attn.dsa_attn.dsa_attn.impl.cv_wq_b
+                    qr = projection.quantize(qr)
+                    q = projection.matmul(*qr, bias=attn.wq_b.bias).unflatten(-1, (-1, attn.head_dim))
+                else:
+                    q = attn.wq_b(qr).unflatten(-1, (-1, attn.head_dim))
                 kv = self._project_kv(attn, hidden_states, cos, sin)
             else:
                 q = qr = None
@@ -473,6 +478,16 @@ class AscendDSAV41Impl:
         if not self.role.has_long_context or not self.role.is_index_source:
             return None
         indexer = attn.indexer
+        if getattr(indexer, "fused_prologue_qw", None) is not None:
+            query, query_scale, weights = indexer.project_fused(hidden_states, *qr, cos, sin)
+            # Packed Q itself carries token/head geometry; no BF16 placeholder
+            # or conversion is needed by the selection/cache-empty paths.
+            return DeepseekV41PreparedIndexer(
+                query=query,
+                weights=weights,
+                quantized_query=query,
+                query_scale=query_scale,
+            )
         main_stream = torch.npu.current_stream()
         aux_stream = dsv4_dsa_overlap_stream()
 
@@ -570,6 +585,8 @@ class AscendDSAV41Impl:
         main_stream.wait_stream(aux_stream)
         if write_cache_on_main:
             self._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
+        if self.role.is_index_source and attn.indexer.fused_prologue_qw is not None:
+            qr = (q_b_quant, q_b_scale)
         return q, qr
 
     def _compress_and_write_caches(

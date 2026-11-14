@@ -2,12 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """V4.1 index projections, quantized QLI and cross-layer candidate selection."""
 
+from collections.abc import Callable
+from typing import cast
+
 import torch
 import torch_npu
 from torch import nn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.dsa_v41 import (
     DeepseekV41CacheLayer,
     scatter_cache_sk,
@@ -65,6 +69,19 @@ class DeepseekV41Indexer(nn.Module):
         _QUANTIZE_INDEXER_QUERY_KERNEL.register_warmup(vllm_config)
         self.softmax_scale = self.width**-0.5
         self.weights_scale = self.softmax_scale * self.n_heads**-0.5
+        self.fused_prologue_qw = None
+        if get_ascend_config().dsv41_indexer_prologue:
+            from vllm_ascend.ops.dsv41_indexer_prologue import get_indexer_prologue_qw
+
+            if self.packed_cache_ops is None or (
+                config.hidden_size,
+                config.q_lora_rank,
+                self.n_heads,
+                self.width,
+                self.rope_width,
+            ) != (5120, 1280, 32, 128, 64):
+                raise ValueError("dsv41_indexer_prologue requires the A5 V4.1 Flash MXFP8/MXFP4 geometry")
+            self.fused_prologue_qw = get_indexer_prologue_qw()
         self.wq_b = ReplicatedLinear(
             config.q_lora_rank,
             self.n_heads * self.width,
@@ -81,6 +98,7 @@ class DeepseekV41Indexer(nn.Module):
             prefix=f"{prefix}.weights_proj",
             return_bias=False,
         )
+        self.wq_b._dsv41_indexer_prologue = self.fused_prologue_qw is not None
         if owns_k:
             self.wk = nn.Linear(
                 config.head_dim,
@@ -176,6 +194,21 @@ class DeepseekV41Indexer(nn.Module):
 
     def project_query(self, qr):
         return self._output(self.wq_b, qr).unflatten(-1, (self.n_heads, self.width))
+
+    def project_fused(self, hidden_states, quantized_qr, qr_scale, cos, sin):
+        """Reuse the main Q projection's MXFP8 inputs, with no second quantize."""
+        prologue = cast(Callable[..., tuple[torch.Tensor, ...]], self.fused_prologue_qw)
+        return prologue(
+            hidden_states,
+            quantized_qr,
+            self.wq_b.weight.data,
+            self.weights_proj.weight.data,
+            qr_scale,
+            self.wq_b.weight_scale.data,
+            sin.view(-1, self.rope_width),
+            cos.view(-1, self.rope_width),
+            softmax_scale=self.weights_scale,
+        )
 
     def apply_query_rope(self, query, cos, sin):
         DeviceOperator.apply_partial_rotary_inplace(query, cos, sin, start=self.width - self.rope_width, end=self.width)
