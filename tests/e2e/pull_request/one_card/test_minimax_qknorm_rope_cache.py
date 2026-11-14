@@ -45,7 +45,7 @@ def core_boundary_tokens(num_vector_cores):
 @pytest.mark.parametrize("heads", [(8, 1, 1), (16, 2, 2), (5, 1, 3)])
 @pytest.mark.parametrize("rotary_dim", [64, 128])
 @torch.inference_mode()
-def test_minimax_qknorm_rope_cache(tokens, heads, rotary_dim):
+def test_minimax_qknorm_rope_cache(tokens, heads, rotary_dim, column_stride=1):
     torch.manual_seed(17)
     q_heads, kv_heads, index_heads = heads
     head_dim, eps, block_size = 128, 1e-6, 16
@@ -66,14 +66,21 @@ def test_minimax_qknorm_rope_cache(tokens, heads, rotary_dim):
     key_cache = torch.full(cache_shape, -3.0, dtype=torch.bfloat16, device="npu")
     value_cache = torch.full_like(key_cache, -4.0)
     index_cache = torch.full((blocks, block_size, head_dim), -5.0, dtype=torch.bfloat16, device="npu")
-    packed_npu = torch.empty((tokens, total_heads * head_dim + 32), dtype=packed.dtype, device="npu")
-    packed_npu = packed_npu[:, : total_heads * head_dim]
+    width = total_heads * head_dim
+    packed_npu = torch.empty((tokens, width * column_stride + 32), dtype=packed.dtype, device="npu")
+    packed_npu = packed_npu[:, : width * column_stride : column_stride]
     packed_npu.copy_(packed)
-    # Exercise independent main/index projections without concatenating them.
-    main_width = (q_heads + 2 * kv_heads) * head_dim
-    separate_index = tokens % 2 == 0
+    sizes = [q_heads * head_dim, kv_heads * head_dim, kv_heads * head_dim, index_heads * head_dim, head_dim]
+    q_in, k_in, v_in, iq_in, ik_in = packed_npu.split(sizes, dim=-1)
+    if column_stride != 1:
+        # V and index Q use different row and feature strides from the other views.
+        v_in, iq_in = v_in.contiguous(), iq_in.contiguous()
     q, iq = minimax_qknorm_rope_cache(
-        packed_npu[:, :main_width] if separate_index else packed_npu,
+        q_in,
+        k_in,
+        v_in,
+        iq_in,
+        ik_in,
         cos_sin.npu(),
         positions.npu(),
         *[w.npu() for w in weights],
@@ -83,11 +90,7 @@ def test_minimax_qknorm_rope_cache(tokens, heads, rotary_dim):
         slots.npu(),
         index_slots.npu(),
         actual,
-        q_heads,
-        kv_heads,
-        index_heads,
         eps,
-        index_packed=packed_npu[:, main_width:] if separate_index else None,
     )
     expected = reference(packed, cos_sin, positions, weights, q_heads, kv_heads, index_heads, eps)
     torch.testing.assert_close(q.cpu().float(), expected[0].to(q.dtype).float(), atol=0.032, rtol=0.01)
@@ -105,6 +108,10 @@ def test_minimax_qknorm_rope_cache(tokens, heads, rotary_dim):
         untouched = torch.ones(blocks * block_size, dtype=torch.bool)
         untouched[mapping[valid]] = False
         assert torch.equal(cache.cpu().view(blocks * block_size, -1)[untouched], gold[untouched])
+
+
+def test_strided_projection_columns():
+    test_minimax_qknorm_rope_cache(192, (8, 1, 1), 64, column_stride=2)
 
 
 @pytest.mark.parametrize("tokens", [1024, 2048, 4096, 8192])
@@ -129,7 +136,7 @@ def test_empty_minimax_qknorm_rope_cache():
     index_cache = torch.zeros((1, 16, 128), dtype=torch.bfloat16, device=device)
     slots = torch.empty(0, dtype=torch.int64, device=device)
     q, iq = minimax_qknorm_rope_cache(
-        torch.empty((0, 12 * 128), dtype=torch.bfloat16, device=device),
+        *torch.empty((0, 12 * 128), dtype=torch.bfloat16, device=device).split((1024, 128, 128, 128, 128), dim=-1),
         torch.empty((16, 64), dtype=torch.bfloat16, device=device),
         slots,
         weight,
@@ -142,9 +149,6 @@ def test_empty_minimax_qknorm_rope_cache():
         slots,
         slots,
         0,
-        8,
-        1,
-        1,
         1e-6,
     )
     assert q.shape == (0, 1024) and iq.shape == (0, 128)
@@ -173,7 +177,8 @@ def test_dynamic_cache_capacity_and_strided_positions(blocks, tokens):
     value = torch.zeros_like(key)
     index = torch.zeros((blocks, block_size, hd), dtype=packed.dtype, device="npu")
     q, iq = minimax_qknorm_rope_cache(
-        packed[:, : 10 * hd].contiguous().npu(),
+        *packed[:, : 10 * hd].contiguous().npu().split((8 * hd, hd, hd), dim=-1),
+        *packed[:, 10 * hd :].contiguous().npu().split((hd, hd), dim=-1),
         cs_npu,
         positions_npu,
         *[w.npu() for w in weights],
@@ -183,11 +188,7 @@ def test_dynamic_cache_capacity_and_strided_positions(blocks, tokens):
         slots.npu(),
         index_slots.npu(),
         tokens,
-        8,
-        1,
-        1,
         1e-6,
-        index_packed=packed[:, 10 * hd :].contiguous().npu(),
     )
     expected = reference(packed, cs, positions, weights, 8, 1, 1, 1e-6)
     for actual, gold in (
@@ -229,7 +230,7 @@ def test_cache_graph_replay_updates_slots_and_preserves_strides(cache_fp8, index
 
     def run():
         return minimax_qknorm_rope_cache(
-            packed,
+            *packed.split((qh * hd, kh * hd, kh * hd, ih * hd, hd), dim=-1),
             cs,
             positions,
             *weights,
@@ -239,9 +240,6 @@ def test_cache_graph_replay_updates_slots_and_preserves_strides(cache_fp8, index
             slots,
             index_slots,
             actual,
-            qh,
-            kh,
-            ih,
             1e-6,
         )
 
@@ -339,15 +337,17 @@ def make_compile_case(tokens=192, actual=192, blocks=64, layout="dense", q_heads
     # Deliberately give padding tokens valid slots. NUM_SLOTS, rather than -1
     # padding, must suppress their writes when the runtime scalar changes.
     slots = torch.arange(blocks * block_size - tokens, blocks * block_size, device="npu", dtype=torch.int64)
-    args = [main, cs, positions, *weights, key, value, cache, slots, slots, actual, q_heads, 1, 1, 1e-6]
-    return args, {"index_packed": index}
+    if index is None:
+        main, index = main.split((main_width, 2 * hd), dim=-1)
+    projections = (*main.split((q_heads * hd, hd, hd), dim=-1), *index.split((hd, hd), dim=-1))
+    return (*projections, cs, positions, *weights, key, value, cache, slots, slots, actual, 1e-6)
 
 
 @torch.inference_mode()
 def test_request_sizes_reuse_one_compiled_variant(isolated_fused_kernel):
     kernel, compile_spy = isolated_fused_kernel
-    args, kwargs = make_compile_case()
-    minimax_qknorm_rope_cache(*args, **kwargs)
+    args = make_compile_case()
+    minimax_qknorm_rope_cache(*args)
     torch.npu.synchronize()
     assert jit_variant_count(kernel) == compile_spy.call_count == 1
     # These are three independent sweeps, not a parametrized test with a fresh
@@ -360,19 +360,20 @@ def test_request_sizes_reuse_one_compiled_variant(isolated_fused_kernel):
     cases += [(192, n, 64) for n in (0, 1, 4, 15, 16, 17, 31, 32, 127, 191, 192)]
     cases += [(192, 192, n) for n in (3, 64, 5392, 8192)]
     for tokens, actual, blocks in cases:
-        args, kwargs = make_compile_case(tokens, actual, blocks)
-        minimax_qknorm_rope_cache(*args, **kwargs)
+        args = make_compile_case(tokens, actual, blocks)
+        minimax_qknorm_rope_cache(*args)
         torch.npu.synchronize()
         assert jit_variant_count(kernel) == 1, (tokens, actual, blocks)
         assert compile_spy.call_count == 1, (tokens, actual, blocks)
         # V has no norm/RoPE rounding: exact equality also verifies that each
         # invocation used the new runtime NUM_SLOTS instead of the warmup value.
-        written = args[8].reshape(-1, 128)[args[10]]
+        _, _, projected_value, _, _, _, _, _, _, _, _, key, value, index, slots, *_ = args
+        written = value.reshape(-1, 128)[slots]
         expected = torch.zeros_like(written)
-        expected[:actual] = args[0][:actual, -128:]
+        expected[:actual] = projected_value[:actual]
         assert torch.equal(written, expected), (tokens, actual, blocks)
-        for cache in (args[7], args[9]):
-            assert torch.count_nonzero(cache.reshape(-1, 128)[args[10][actual:]]).item() == 0
+        for cache in (key, index):
+            assert torch.count_nonzero(cache.reshape(-1, 128)[slots[actual:]]).item() == 0
     print(f"dynamic sweeps: {len(cases)} cases, variants=1, compile_entries=1")
 
 
@@ -381,16 +382,16 @@ def test_layout_variants_compile_once_then_reuse(isolated_fused_kernel):
     kernel, compile_spy = isolated_fused_kernel
     layouts = ("dense", "input", "index_input", "positions", "rope", "key", "value", "index_cache", "packed")
     for count, layout in enumerate(layouts, 1):
-        args, kwargs = make_compile_case(layout=layout)
-        minimax_qknorm_rope_cache(*args, **kwargs)
+        args = make_compile_case(layout=layout)
+        minimax_qknorm_rope_cache(*args)
         torch.npu.synchronize()
         assert jit_variant_count(kernel) == count, layout
         assert compile_spy.call_count == count, layout
     # Once every layout is warm, changing request lengths and revisiting layouts
     # must not compile again. Layout changes intentionally remain specialized.
     for layout in reversed(layouts):
-        args, kwargs = make_compile_case(tokens=32, actual=17, blocks=3, layout=layout)
-        minimax_qknorm_rope_cache(*args, **kwargs)
+        args = make_compile_case(tokens=32, actual=17, blocks=3, layout=layout)
+        minimax_qknorm_rope_cache(*args)
         torch.npu.synchronize()
         assert jit_variant_count(kernel) == len(layouts), layout
         assert compile_spy.call_count == len(layouts), layout

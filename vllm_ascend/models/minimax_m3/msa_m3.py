@@ -1525,26 +1525,32 @@ def minimax_m3_sparse_forward_fake(
 
 
 def minimax_m3_fused_sparse_forward(
-    qkv: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    index_q: torch.Tensor,
+    index_k: torch.Tensor,
     positions: torch.Tensor,
     attn_output: torch.Tensor,
     layer_name: str,
-    index_qk: torch.Tensor | None = None,
 ) -> None:
     forward_context = get_forward_context()
     if not isinstance(forward_context.attn_metadata, dict):
         attn_output.zero_()
         return
     layer = forward_context.no_compile_layers[layer_name]
-    layer._run_fused_sparse_attention(qkv, positions, attn_output, index_qk)
+    layer._run_fused_sparse_attention(q, k, v, index_q, index_k, positions, attn_output)
 
 
 def minimax_m3_fused_sparse_forward_fake(
-    qkv: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    index_q: torch.Tensor,
+    index_k: torch.Tensor,
     positions: torch.Tensor,
     attn_output: torch.Tensor,
     layer_name: str,
-    index_qk: torch.Tensor | None = None,
 ) -> None:
     return
 
