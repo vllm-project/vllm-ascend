@@ -1,0 +1,4 @@
+pr: 21201
+entries:
+  - category: documentation
+    text: Added Triton operator contribution guidelines and an Ascend JIT warmup integration guide covering registration, startup compilation, and validation.
