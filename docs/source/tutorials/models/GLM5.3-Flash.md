@@ -34,11 +34,8 @@ All deployment examples on this page use Model Runner V2 with
 `VLLM_USE_V2_MODEL_RUNNER=1`. Every PD Prefill role uses PCP8 with TP1;
 Decode keeps PCP1.
 
-GLM-5.3-Flash supports Prefill Context Parallelism (PCP), ReplaySSM
-(`--use-replayssm`), and BF16 SSM state (`--mamba-ssm-cache-dtype bfloat16`).
-The [A3 ordinary PD examples](#glm53-flash-5-3-a3) use these features together.
-The [A3 KV Cache Pool example](#glm53-flash-5-4-a3)
-uses native KDA because ReplaySSM does not support `MultiConnector`.
+The [A3 ordinary PD examples](#glm53-flash-5-3-a3) use Prefill Context
+Parallelism (PCP) and BF16 SSM state (`--mamba-ssm-cache-dtype bfloat16`).
 
 ## 3 Prerequisites
 
@@ -313,7 +310,6 @@ are not interchangeable.
       --trust-remote-code \
       --quantization ascend \
       --kv-cache-dtype int8 \
-      --attention-config.indexer_kv_dtype int8 \
       --mamba-ssm-cache-dtype bfloat16 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
       --gpu-memory-utilization 0.92 \
@@ -337,7 +333,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
   The complete single-node commands above use `fp8` on 950DT products and `int8` on A3 series.
   KV cache quantization is independent of weight quantization: enabling C8 does not require W8A8 weights or a separate C8 checkpoint.
   The examples use W8A8-MXFP8 weights on 950DT products and W8A8 weights on A3 series, as listed in Section 3.1.
-- `--attention-config.indexer_kv_dtype`: Uses FP8 KPool indexer cache on 950DT products and INT8 on A3 series, independently of `--kv-cache-dtype`.
+- `--attention-config.indexer_kv_dtype`: Uses FP8 KPool indexer cache on 950DT products, independently of `--kv-cache-dtype`. The A3 series example leaves the indexer cache dtype at its default.
 - `--mamba-ssm-cache-dtype bfloat16`: Uses BF16 SSM state in the A3 series single-node example.
 - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`: Enables graph capture for the decode phase only, improving decode performance by reducing kernel launch overhead.
 - `--limit-mm-per-prompt '{"image":1,"video":0}'`: Allows at most one image per prompt and disables video input where specified. A3 ordinary PD uses `'{"image":1}'` to limit image input only.
@@ -589,11 +585,14 @@ For DP>1, the launcher executes the role script without filtering.
             export TP_SOCKET_IFNAME=$nic_name
             export HCCL_SOCKET_IFNAME=$nic_name
             export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-            export HCCL_BUFFSIZE=3072
+            export HCCL_BUFFSIZE=2048
             export HCCL_OP_EXPANSION_MODE="AIV"
+            export ASCEND_RT_VISIBLE_DEVICES="$1"
+            export PYTHONHASHSEED=0
+            export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
             vllm serve "$MODEL_PATH" \
-              --device-ids "$1" \
+              --allowed-local-media-path / \
               --host 0.0.0.0 \
               --port $2 \
               --data-parallel-size $3 \
@@ -608,30 +607,31 @@ For DP>1, the launcher executes the role script without filtering.
               --safetensors-load-strategy prefetch \
               --kv-cache-dtype fp8 \
               --attention-config.indexer_kv_dtype fp8 \
-              --max-num-seqs 256 \
-              --max-model-len 133120 \
-              --max-num-batched-tokens 24576 \
+              --max-num-seqs 128 \
+              --max-model-len 1048576 \
+              --max-num-batched-tokens 32768 \
               --trust-remote-code \
               --quantization ascend \
               --tool-call-parser glm47 \
               --enable-auto-tool-choice \
               --reasoning-parser glm47 \
               --enable-prefix-caching \
-              --enable-chunked-prefill \
-              --limit-mm-per-prompt '{"image": 1, "video": 0}' \
-              --gpu-memory-utilization 0.9 \
+              --limit-mm-per-prompt '{"video": 0}' \
+              --gpu-memory-utilization 0.95 \
               --enforce-eager \
               --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}' \
               --additional-config '{
                 "enable_cpu_binding": true,
+                "enable_flashcomm1": false,
                 "enable_fused_mc2": 0,
-                "multistream_overlap_shared_expert": true
+                "enable_shared_expert_dp": false,
+                "multistream_overlap_shared_expert": false
               }' \
               --kv-transfer-config '{
                 "kv_connector": "MooncakeConnectorV2",
                 "kv_role": "kv_producer",
                 "engine_id": "0",
-                "kv_port": "30100",
+                "kv_port": "30000",
                 "kv_connector_extra_config": {
                   "prefill": {"dp_size": 1, "tp_size": 1, "pcp_size": 8},
                   "decode": {"dp_size": 8, "tp_size": 1, "pcp_size": 1}
@@ -657,9 +657,12 @@ For DP>1, the launcher executes the role script without filtering.
             export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
             export HCCL_BUFFSIZE=1024
             export HCCL_OP_EXPANSION_MODE="AIV"
+            export ASCEND_RT_VISIBLE_DEVICES="$1"
+            export PYTHONHASHSEED=0
+            export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 
             vllm serve "$MODEL_PATH" \
-              --device-ids "$1" \
+              --allowed-local-media-path / \
               --host 0.0.0.0 \
               --port $2 \
               --data-parallel-size $3 \
@@ -674,23 +677,28 @@ For DP>1, the launcher executes the role script without filtering.
               --safetensors-load-strategy prefetch \
               --kv-cache-dtype fp8 \
               --attention-config.indexer_kv_dtype fp8 \
-              --max-num-seqs 30 \
-              --max-model-len 133120 \
-              --max-num-batched-tokens 120 \
+              --max-num-seqs 60 \
+              --max-model-len 1048576 \
+              --max-num-batched-tokens 360 \
               --trust-remote-code \
               --quantization ascend \
               --tool-call-parser glm47 \
               --enable-auto-tool-choice \
               --reasoning-parser glm47 \
               --enable-prefix-caching \
-              --enable-chunked-prefill \
-              --limit-mm-per-prompt '{"image": 1, "video": 0}' \
+              --limit-mm-per-prompt '{"video": 0}' \
               --gpu-memory-utilization 0.95 \
               --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
               --speculative-config '{"num_speculative_tokens": 5, "method": "deepseek_mtp"}' \
               --additional-config '{
+                "enable_fused_mc2": 2,
                 "multistream_overlap_shared_expert": true,
-                "scheduler_config": {"recompute_scheduler_enable": true}
+                "scheduler_config": {"recompute_scheduler_enable": true},
+                "ascend_compilation_config": {
+                  "enable_npugraph_ex": true,
+                  "enable_static_kernel": false,
+                  "enable_super_kernel": false
+                }
               }' \
               --kv-transfer-config '{
                 "kv_connector": "MooncakeConnectorV2",
@@ -699,7 +707,8 @@ For DP>1, the launcher executes the role script without filtering.
                 "kv_port": "30800",
                 "kv_connector_extra_config": {
                   "prefill": {"dp_size": 1, "tp_size": 1, "pcp_size": 8},
-                  "decode": {"dp_size": 8, "tp_size": 1, "pcp_size": 1}
+                  "decode": {"dp_size": 8, "tp_size": 1, "pcp_size": 1},
+                  "use_ascend_direct": true
                 }
               }'
             ```
@@ -747,7 +756,7 @@ For DP>1, the launcher executes the role script without filtering.
     - `--data-parallel-size`, `--tensor-parallel-size`, and
       `--prefill-context-parallel-size` define TP1/PCP8/DP1 on Prefill
       and TP1/PCP1/DP8 on Decode. Each role uses eight devices on one node.
-      Prefill runs one eight-device engine. `--device-ids "$1"` binds each
+      Prefill runs one eight-device engine. `ASCEND_RT_VISIBLE_DEVICES="$1"` binds each
       engine to the device list passed by the launcher: devices `0-7` for
       Prefill and one device per DP rank for Decode.
     - `--data-parallel-address` and `--data-parallel-rpc-port` coordinate
@@ -756,27 +765,29 @@ For DP>1, the launcher executes the role script without filtering.
     - `--vllm-start-port 8000` assigns Prefill API port `8000` and Decode
       API ports `8000-8007`. Register all eight Decode endpoints with the
       proxy.
-    - Both roles use `--max-model-len 133120`, `--kv-cache-dtype fp8`, and
+    - Both roles use `--max-model-len 1048576`, `--kv-cache-dtype fp8`, and
       `deepseek_mtp` with five speculative tokens.
-    - Prefill sets `--max-num-seqs 256` and
-      `--max-num-batched-tokens 24576`; Decode sets `30` and `120`,
+    - Prefill sets `--max-num-seqs 128` and
+      `--max-num-batched-tokens 32768`; Decode sets `60` and `360`,
       respectively. Tune these per-engine scheduler limits for the workload.
-    - Prefill enables shared-expert multistream overlap, with
-      `enable_fused_mc2: 0`.
-      Decode enables shared-expert multistream overlap, recomputation
-      scheduling and `FULL_DECODE_ONLY` for target and MTP draft. Prefill
-      target and draft are eager. FlashComm1 and shared-expert DP require
-      TP>1 and are therefore not enabled on either role.
+    - Prefill enables CPU binding and disables FlashComm1, fused MC2,
+      shared-expert DP and multistream overlap. Its target and MTP draft
+      run eagerly. Decode uses `enable_fused_mc2: 2`, shared-expert
+      multistream overlap and recomputation scheduling through `scheduler_config`.
+      Decode uses `FULL_DECODE_ONLY` with `enable_npugraph_ex: true`,
+      while static and super kernels are disabled.
     - Prefill uses PCP8, while Decode keeps the default PCP1. Both roles
       keep the default DCP1. For PCP configuration, refer to
       [Context Parallel](../../user_guide/feature_guide/context_parallel.md).
-    - Both roles enable prefix caching and allow one image per prompt,
-      with video input disabled through `--limit-mm-per-prompt`.
-    - `MooncakeConnectorV2` uses `kv_producer` on Prefill and `kv_consumer`
-      on Decode, with base KV ports `30100` and `30800`, respectively.
-      Both roles declare Prefill TP1/PCP8/DP1 and Decode TP1/PCP1/DP8.
+    - Both roles enable prefix caching and disable video input through
+      `--limit-mm-per-prompt`. Images retain the runtime default limit.
+      `--allowed-local-media-path /` permits local media under the container root.
+    - `MooncakeConnectorV2` transfers KV cache directly between the roles. It uses
+      `kv_producer` on Prefill and `kv_consumer` on Decode, with base KV ports
+      `30000` and `30800`. Both roles declare Prefill TP1/PCP8/DP1 and
+      Decode TP1/PCP1/DP8; Decode enables `use_ascend_direct`.
     - `HCCL_IF_IP` and the socket interface variables select each node's
-      communication network. `HCCL_BUFFSIZE` is `3072` on Prefill and
+      communication network. `HCCL_BUFFSIZE` is `2048` on Prefill and
       `1024` on Decode. The DP RPC, API, Mooncake and proxy ports must be
       reachable between the corresponding hosts.
 
@@ -855,10 +866,8 @@ For DP>1, the launcher executes the role script without filtering.
       --reasoning-parser glm47 \
       --enable-auto-tool-choice \
       --kv-cache-dtype int8 \
-      --attention-config.indexer_kv_dtype int8 \
       --prefix-cache-retention-interval None \
       --enforce-eager \
-      --use-replayssm \
       --mamba-ssm-cache-dtype bfloat16 \
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": false}' \
       --additional-config '{"enable_shared_expert_dp": true,"enable_fused_mc2":2}' \
@@ -931,8 +940,6 @@ For DP>1, the launcher executes the role script without filtering.
       --reasoning-parser glm47 \
       --enable-auto-tool-choice \
       --kv-cache-dtype int8 \
-      --attention-config.indexer_kv_dtype int8 \
-      --use-replayssm \
       --mamba-ssm-cache-dtype bfloat16 \
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": false}' \
@@ -1004,11 +1011,9 @@ For DP>1, the launcher executes the role script without filtering.
       for each engine.
     - Prefill API ports are `9081-9082`; Decode API ports are `9900-9907`.
       All ten endpoints must be reachable from the proxy.
-    - Both roles use Model Runner V2, INT8 main and indexer KV caches,
-      `--max-model-len 1048576`, MTP3, `--use-replayssm`, and
+    - Both roles use Model Runner V2, INT8 main KV cache,
+      `--max-model-len 1048576`, MTP3, and
       `--mamba-ssm-cache-dtype bfloat16`. Prefix caching uses the model default.
-      Refer to [GLM KDA RecoverSSM](../../user_guide/feature_guide/speculative_decoding.md)
-      for the ReplaySSM switch and its requirements.
     - Prefill runs the target eagerly and enables draft graph execution.
       It enables asynchronous EPLB with the `stair` policy and `hixl`
       communicator. The Prefill configuration sets `enable_fused_mc2` to `2`
@@ -1444,6 +1449,14 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     Reuse the Prefill TP1/PCP8/DP1 and Decode TP1/PCP1/DP8 topology,
     launcher and proxy from [Section 5.3](#glm53-flash-5-3-950dt).
     Both roles use EP8, FP8 main KV cache and an FP8 indexer.
+    For this pool example, keep `--max-model-len 133120`,
+    `--limit-mm-per-prompt '{"image": 1, "video": 0}'` and explicit
+    `--enable-chunked-prefill` on both roles. Prefill uses
+    `HCCL_BUFFSIZE=3072`, `--max-num-seqs 256`,
+    `--max-num-batched-tokens 24576`, `--gpu-memory-utilization 0.9` and
+    `multistream_overlap_shared_expert: true`. Decode uses
+    `--max-num-seqs 30`, `--max-num-batched-tokens 120`,
+    `enable_fused_mc2: 0` and `enable_npugraph_ex: false`.
 
     Follow [Scenario 2: Memcache Backend](../../user_guide/feature_guide/kv_cache_pool_ascend_store.md#scenario-2-memcache-backend)
     for the Memcache backend configuration.
@@ -1458,7 +1471,7 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     1. On the Prefill node, replace the final `--kv-transfer-config`
        argument in `run_dp_template.sh` with the following fragment.
        Keep the remaining Prefill flags from Section 5.3, including
-       `--device-ids "$1"`, PCP8, FP8 indexer and eager execution.
+       `ASCEND_RT_VISIBLE_DEVICES="$1"`, PCP8, FP8 indexer and eager execution.
 
         ```shell
           --kv-transfer-config \
@@ -1543,12 +1556,11 @@ and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_gui
     using Model Runner V2 and native KDA. Prepare separate `run_p.sh` and
     `run_d.sh` files for this scenario from the [A3 PD scripts](#glm53-flash-5-3-a3).
     Keep the ordinary PD serving parameters on both roles, including
-    `ASCEND_RT_VISIBLE_DEVICES="$1"`, INT8 main and indexer KV caches,
+    `ASCEND_RT_VISIBLE_DEVICES="$1"`, INT8 main KV cache,
     BF16 SSM state, MTP3, and the role-specific scheduling and tuning options.
     Prefill uses 32 sequences and 16384 batched tokens; Decode uses 40
     sequences and 240 batched tokens. Both roles limit image input to one image.
-    Add `--enable-prefix-caching` and remove `--use-replayssm`: this pooling
-    example uses native KDA because ReplaySSM does not accept `MultiConnector`.
+    Add `--enable-prefix-caching` for this pooling example.
     Add the Memcache environment settings and replace the connectors as
     described below. Reuse the ordinary PD launch commands and proxy mapping.
 
@@ -2098,7 +2110,7 @@ and role-specific settings when reproducing the deployment.
 | Prefill MoE communication | Prefill | `enable_fused_mc2: 2`, `--enable-eplb` | Uses fused MoE communication and asynchronous EPLB with the `stair` policy and `hixl` communicator. |
 | Shared-expert overlap | Decode | `multistream_overlap_shared_expert: true` | Overlaps shared-expert execution with other work; the Decode configuration does not enable fused MC2. |
 | Decode execution | Decode | `FULL_DECODE_ONLY` | Reduces decode launch overhead. |
-| MTP | Prefill and Decode | `num_speculative_tokens: 3`, `--use-replayssm` | Uses ReplaySSM with draft graph execution on both roles; the Prefill target is eager. |
+| MTP | Prefill and Decode | `num_speculative_tokens: 3` | Uses draft graph execution on both roles; the Prefill target is eager. |
 | KV capacity | Prefill and Decode | `--kv-cache-dtype int8` | Reduces KV cache memory consumption for long contexts. |
 
 ### 9.2 Tuning Guidelines {: #92-workload-specific-settings }

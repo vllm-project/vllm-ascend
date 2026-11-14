@@ -224,6 +224,263 @@ must not span weight versions.
 See the upstream [Async RL guide](https://docs.vllm.ai/en/latest/training/async_rl/)
 for the API lifecycle.
 
+### Weight checker
+
+The Weight Checker helps validate the weight-transfer path during development.
+It computes SHA-256 digests for model parameters on each rank, resets the
+parameters, and checks whether transferring the original weights back restores
+the same digests. See the upstream
+[Weight Checker guide](https://docs.vllm.ai/en/latest/training/weight_checker/)
+for the full API.
+
+All three operations use `POST /weight_checker`:
+
+| Action | Purpose | Request body | Response |
+| --- | --- | --- | --- |
+| `checksum` | Compute the current digest of each checked parameter without changing it. Save the result as the baseline before resetting weights. | `{"action":"checksum"}` | `{"checksums": {key: sha256_hex}}` |
+| `reset` | Zero the checked parameters to test the transfer path. The model cannot serve valid requests until its weights are restored. | `{"action":"reset"}` | `{"status":"reset"}` |
+| `compare` | Compute current digests and compare them with the baseline supplied by the caller. | `{"action":"compare","baseline":{key: sha256_hex}}` | `{"match":bool,"mismatches":[key]}` |
+
+A checksum key has the form `dp{dp}:pp{pp}:pcp{pcp}:tp{tp}:{tensor_name}`,
+so each shard is checked separately. Expert-parallel ranks are identified by
+their DP/PCP/TP coordinates; there is no separate `ep` field. The server does
+not retain the baseline between requests: save the `checksum` response and
+pass its `checksums` object to `compare`.
+
+The standard check transfers the *same original weights* after `reset` and
+expects `compare` to report a full match. An old baseline should not match
+weights changed by a real training step. This procedure validates the
+weight-transfer path, not the correctness of newly trained weights.
+
+#### Example
+
+Use an installed vLLM-Ascend environment with compatible vLLM, CANN and
+TorchNPU, including the compiled Ascend custom operators. The paired vLLM
+must provide the Weight Checker API and the weight-transfer trainer API used
+below. Use the dependency versions selected by your vLLM-Ascend checkout;
+changing only `PYTHONPATH` does not install its custom operators.
+
+This example needs two available NPUs, `curl`, `jq`, and the full
+`Qwen/Qwen3-0.6B` checkpoint. The server and trainer must resolve the same
+checkpoint revision. Device IDs 0 and 1 below are examples; replace them
+consistently with two available physical devices. Do not use dummy weights
+or change the model's layer count for this checkpoint round trip.
+
+In terminal 1, start the server on physical NPU 0 and wait until
+`curl -fsS http://127.0.0.1:8000/health` succeeds:
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0 VLLM_SERVER_DEV_MODE=1 \
+vllm serve Qwen/Qwen3-0.6B \
+    --weight-transfer-config '{"backend": "hccl"}' \
+    --additional-config '{"rl_config": {"enabled": true}}'
+```
+
+In terminal 2, save the following as `weight_checker_trainer.py`. It uses the
+same trainer API as
+[`rlhf_http_hccl.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rl/rlhf_http_hccl.py),
+but waits for the reset and leaves generation paused after the transfer.
+Do not run that standalone example in the middle of this procedure: it
+requests generation before the transfer and resumes before checksum comparison.
+
+```python
+import torch
+import torch_npu  # noqa: F401
+from transformers import AutoModelForCausalLM
+from vllm.distributed.weight_transfer.base import ModuleSource
+from vllm.distributed.weight_transfer.clients import HTTPVLLMWeightSyncClient
+from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
+from vllm.utils.network_utils import get_ip, get_open_port
+
+from vllm_ascend.distributed.weight_transfer import register_engine
+from vllm_ascend.distributed.weight_transfer.hccl_engine import HCCLTrainerInitInfo
+
+
+def main():
+    # Both devices are visible here: logical NPU 1 is the trainer's device.
+    torch.accelerator.set_device_index("npu:1")
+    model = AutoModelForCausalLM.from_pretrained(
+        "Qwen/Qwen3-0.6B", dtype=torch.bfloat16
+    ).to("npu:1")
+    max_tensor_bytes = max(p.numel() * p.element_size() for p in model.parameters())
+    register_engine()
+    engine = WeightTransferTrainerFactory.trainer_init(
+        HCCLTrainerInitInfo(
+            rank=0,
+            master_address=get_ip(),
+            master_port=get_open_port(),
+            world_size=2,  # One trainer and one inference worker.
+            packed=True,
+            packed_buffer_size_bytes=max(max_tensor_bytes + 128 * 2**20, 2**30),
+        ),
+        client=HTTPVLLMWeightSyncClient(base_url="http://127.0.0.1:8000"),
+        source=ModuleSource(model),
+    )
+    try:
+        input(
+            "Trainer ready. Complete pause/checksum/reset in terminal 3, "
+            "then press Enter here to restore the original weights: "
+        )
+        # Owns START -> transfer -> FINISH, including worker RPCs.
+        engine.send_weights()
+        print("Transfer complete. Keep generation paused and compare in terminal 3.")
+    finally:
+        engine.shutdown()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+Run it with both devices visible, and wait for the `Trainer ready` prompt
+before resetting the server. Leave this terminal waiting at the prompt:
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=0,1 python weight_checker_trainer.py
+```
+
+In terminal 3, pause generation and save the original checksums:
+
+```bash
+URL=http://127.0.0.1:8000
+
+curl -fsS -X POST "$URL/pause?mode=abort"
+curl -fsS -X POST "$URL/weight_checker" \
+    -H 'Content-Type: application/json' \
+    -d '{"action":"checksum"}' > baseline.json
+
+jq -e '.checksums | length > 0' baseline.json
+```
+
+The final command should print `true`. `baseline.json` contains the actual
+parameter names and SHA-256 digests. Its response has this shape (the values
+below are placeholders):
+
+```json
+{
+  "checksums": {
+    "dp0:pp0:pcp0:tp0:<parameter_name>": "<SHA-256 hex digest>"
+  }
+}
+```
+
+Reset the weights while generation remains paused:
+
+```bash
+curl -fsS -X POST "$URL/weight_checker" \
+    -H 'Content-Type: application/json' \
+    -d '{"action":"reset"}'
+```
+
+Expected response:
+
+```json
+{"status":"reset"}
+```
+
+Before restoring the weights, verify that comparison detects the reset.
+Save a reusable comparison request so that the same baseline is used for
+both checks:
+
+```bash
+jq '{action: "compare", baseline: .checksums}' baseline.json > compare-request.json
+curl -fsS -X POST "$URL/weight_checker" \
+    -H 'Content-Type: application/json' \
+    --data-binary @compare-request.json > after-reset.json
+jq -e '.match == false and (.mismatches | length > 0)' after-reset.json
+```
+
+The final command should print `true`. Now press Enter in terminal 2 to
+transfer the *original checkpoint weights*, and wait for `Transfer complete`
+and a successful trainer exit. This step must not perform a training update
+or resume generation.
+
+Back in terminal 3, compare the restored weights with the saved baseline:
+
+```bash
+curl -fsS -X POST "$URL/weight_checker" \
+    -H 'Content-Type: application/json' \
+    --data-binary @compare-request.json > after-restore.json
+cat after-restore.json
+```
+
+Expected response after a successful restore:
+
+```json
+{"match":true,"mismatches":[]}
+```
+
+If `match` is `false`, inspect `mismatches` and restore the weights before
+serving requests. Resume generation only after a full match:
+
+```bash
+jq -e '.match == true and (.mismatches | length == 0)' after-restore.json && \
+    curl -fsS -X POST "$URL/resume"
+```
+
+Finally, verify that generation works again:
+
+```bash
+curl -fsS "$URL/v1/completions" \
+    -H 'Content-Type: application/json' \
+    -d '{"model":"Qwen/Qwen3-0.6B","prompt":"The capital of France is","max_tokens":16,"temperature":0}'
+```
+
+#### Automated checks
+
+Run these commands from the repository root in the installed environment:
+
+```bash
+bash format.sh ci
+python -m pytest -q \
+    tests/ut/worker/test_worker_weight_checker.py \
+    tests/ut/distributed/weight_transfer/test_hccl_engine.py
+ASCEND_RT_VISIBLE_DEVICES=0,1 VLLM_RL_TEST_DEVICE_INDEX=0 \
+python -m pytest -sv -ra \
+    tests/e2e/pull_request/two_card/rlhf/state_transitions/test_weight_checker.py
+```
+
+The unit tests cover worker integration and mocked HCCL behavior. The E2E
+suite needs two NPUs and the full `Qwen/Qwen3-0.6B` checkpoint. It covers
+checksum/reset/reload, packed and unpacked IPC/HCCL transfers, and TP=2/DP=2
+rank coverage. Its shared helpers live under `tests/e2e/common/rlhf/`.
+`VLLM_RL_TEST_DEVICE_INDEX` is a logical index into the visible device list;
+the trainer uses the next device. Check the pytest summary for skipped cases
+before claiming the full suite passed.
+
+Basic and TP/DP checksum cases use eager mode. Transfer cases use the shared
+RLHF helper's `FULL_DECODE_ONLY` configuration with capture size 1. Other
+graph configurations require separate validation.
+
+#### Operational constraints
+
+- Stay paused from `checksum` through `compare`. Weights are invalid between
+  `reset` and the transfer, and EPLB may move experts while serving. The
+  worker methods do not enforce the pause; the caller must do so.
+- Before `reset`, confirm that a recovery path is available: a working
+  weight-transfer configuration or a checkpoint that `reload_weights` can
+  restore. In RL mode, `rl_config.enabled=true` disables FRACTAL_NZ by setting
+  `weight_nz_mode=0`. In a non-RL deployment where `weight_nz_mode` remains
+  enabled, the weight-update transaction cannot start; checkpoint reload may
+  be needed to recover after `reset`.
+- If the transfer or comparison fails, keep generation paused and restore the
+  weights before resuming. The engine must be awake: sleep levels 1 and 2
+  release weight memory.
+- `reset` is a destructive development operation. Keep development endpoints
+  within a trusted access boundary and do not expose them to the public
+  internet.
+
+#### Limitations
+
+In addition to the
+[upstream limitations](https://docs.vllm.ai/en/latest/training/weight_checker/#limitations):
+
+- Weights held as buffers rather than parameters, such as some quantization
+  repacking paths, are invisible to the checker.
+- MoE weights padded beyond the checkpoint shape may report false mismatches;
+  validate the behavior with the target model before relying on `compare`.
+- Ascend 310P has not yet been verified with the Weight Checker.
+
 ## Training data returned by the engine
 
 ### Token log probabilities

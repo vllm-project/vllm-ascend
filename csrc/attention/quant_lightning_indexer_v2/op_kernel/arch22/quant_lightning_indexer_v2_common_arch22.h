@@ -52,6 +52,7 @@ struct RunInfo {
     uint32_t actS1Size = 1;
     uint32_t actS2Size = 1;
     uint32_t actS2SizeOrig = 1;
+    uint32_t causalGlobalLen = 0;  // DCP: 当前请求本次 Q 片段的全局 exclusive 上界 C
     uint32_t actMBaseSize;
     uint32_t actualSingleProcessSInnerSize;
     uint32_t actualSingleProcessSInnerSizeAlign;
@@ -111,9 +112,12 @@ struct ConstInfo {
     uint32_t maxBlockNumPerBatch = 0; // PA场景的最大单batch block number
     uint32_t keyStride0 = 0;          // key 第0维真实 stride (0=非PA/旧调用, 紧凑兜底; 对齐 arch35 A11)
     uint32_t keyDequantScaleStride0 = 0; // k_scale 第0维真实 stride (同上)
+    static constexpr uint16_t NEG_INF_BFLOAT = 0xFF80;  // BF16 负无穷位型 (排序缓冲 padding 值)
     LI_LAYOUT outputLayout;           // 输出的格式
     bool attenMaskFlag = false;
+    bool useLocalVisibleLengths = false; // private return_value=2: FP32 values + causal local prefix
     uint32_t cmpRatio = 1; // 压缩率
+    uint32_t returnValue = 0; // 是否输出 sparse_values (DCP 跨 rank 合并需要 score)
 
     uint32_t actualLenQDims = 0U;     // query的actualSeqLength 的维度
     uint32_t actualLenDims = 0U;      // KV 的actualSeqLength 的维度
@@ -125,6 +129,12 @@ struct ConstInfo {
     uint32_t candidateMode = 3U;        // 1=source 2=consumer 3=off
     uint32_t candidateTopkBlocks = 2048U;
     uint32_t candidateBlockSize = 8U;
+
+    // DCP (Decode Context Parallel, 解码上下文并行)
+    bool dcpEnable = false;
+    uint32_t cpWorld = 1U;           // P: CP 组大小
+    uint32_t cpRank = 0U;            // r: 当前 rank
+    uint32_t cpInterleaveSize = 1U;  // S: 每 S 个 token 轮换 rank
 
     uint32_t s2Start = 0U;
     uint32_t s2End = 0U;
@@ -171,6 +181,24 @@ template <typename T>
 __aicore__ inline T CeilDiv(T num, T rnd)
 {
     return (((rnd) == 0) ? 0 : (((num) + (rnd)-1) / (rnd)));
+}
+
+// DCP (Decode Context Parallel, 解码上下文并行): 由全局可见上界 u 算本地可见长度。
+// u = max(C - Q_len + rowIdx + 1, 0), 即该 Q 行全局可见 token 的 exclusive 上界。
+// 分片规则: 全局第 t 个 token 属于 rank (t / S) % P, 本地序号按时间序排列。
+__aicore__ inline uint32_t CalcDcpVisibleLen(uint32_t u, uint32_t localS2Len, uint32_t cpWorld, uint32_t cpRank,
+                                             uint32_t cpInterleaveSize)
+{
+    if (u == 0U || cpWorld == 0U || cpInterleaveSize == 0U) {
+        return 0U;
+    }
+    uint64_t period = static_cast<uint64_t>(cpWorld) * static_cast<uint64_t>(cpInterleaveSize);
+    uint64_t fullRounds = (static_cast<uint64_t>(u) / period) * cpInterleaveSize;
+    int64_t rem = static_cast<int64_t>(static_cast<uint64_t>(u) % period) -
+                  static_cast<int64_t>(cpRank) * static_cast<int64_t>(cpInterleaveSize);
+    uint64_t tail = (rem <= 0) ? 0U : static_cast<uint64_t>(Min(rem, static_cast<int64_t>(cpInterleaveSize)));
+    uint64_t visible = fullRounds + tail;
+    return static_cast<uint32_t>(Min(static_cast<uint64_t>(localS2Len), visible));
 }
 } // namespace QLIV2Common
 

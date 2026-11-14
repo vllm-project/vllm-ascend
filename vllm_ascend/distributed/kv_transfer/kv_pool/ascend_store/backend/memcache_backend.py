@@ -18,6 +18,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     parse_qos_from_extra_config,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import get_sharded_mamba_group_ids
 
 
 def _is_device_sdma() -> bool:
@@ -154,12 +155,15 @@ class MemcacheBackend(Backend):
         grouped_block_size: list[int],
     ) -> LayerwiseKeyBuilder:
         num_groups = len(grouped_block_size)
-        pp_size = vllm_config.parallel_config.pipeline_parallel_size
+        parallel = vllm_config.parallel_config
+        pp_size = parallel.pipeline_parallel_size
+        pcp_size = getattr(parallel, "prefill_context_parallel_size", 1)
+        pcp_sharded_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
 
         def make_key(group: int, block_hash: str, head: int, stage: int) -> str:
             return make_full_key(model_name, group, block_hash, head, num_groups, stage, pp_size)
 
-        return LayerwiseKeyBuilder(make_key, pp_size)
+        return LayerwiseKeyBuilder(make_key, pp_size, pcp_size, pcp_sharded_group_ids)
 
     @classmethod
     def make_partial_key(

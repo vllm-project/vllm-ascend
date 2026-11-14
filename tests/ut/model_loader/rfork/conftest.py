@@ -203,13 +203,6 @@ def rfork_helpers(monkeypatch, local_weights):
         RForkSeedServiceStartResult=types_module.RForkSeedServiceStartResult,
     )
 
-    package("vllm_ascend.eplb")
-    package("vllm_ascend.eplb.adaptor")
-
-    class VllmEplbAdaptor:
-        _registered_moe_layers = []
-
-    adaptor_module = install("vllm_ascend.eplb.adaptor.vllm_adaptor", VllmEplbAdaptor=VllmEplbAdaptor)
     package("vllm_ascend.ops")
     package("vllm_ascend.ops.fused_moe")
 
@@ -219,11 +212,6 @@ def rfork_helpers(monkeypatch, local_weights):
             self._quant_method = quant_method
 
     install("vllm_ascend.ops.fused_moe.fused_moe", AscendMoERunner=AscendMoERunner)
-
-    class AscendRoutedExperts:
-        moe_counter = -1
-
-    routed_experts_module = install("vllm_ascend.ops.fused_moe.routed_experts", AscendRoutedExperts=AscendRoutedExperts)
     rotary_module = install(
         "vllm_ascend.ops.rotary_embedding",
         _cos_sin_cache=None,
@@ -242,10 +230,44 @@ def rfork_helpers(monkeypatch, local_weights):
         loader=loader,
         safety=safety,
         AscendMoERunner=AscendMoERunner,
-        adaptor_module=adaptor_module,
-        routed_experts_module=routed_experts_module,
         rotary_module=rotary_module,
         dynamo_hooks=dynamo_hooks,
         rope_dict=rope_dict,
         mtp_module=mtp_module,
+    )
+
+
+@pytest.fixture
+def checkpoint_loader(monkeypatch, rfork_helpers):
+    @dataclass
+    class CheckpointSource:
+        model_or_path: str
+        revision: str | None
+        subfolder: str | None = None
+        prefix: str = ""
+        fall_back_to_pt: bool = True
+        allow_patterns_overrides: list[str] | None = None
+
+    calls = []
+    folders: dict[str, str] = {}
+    selections: dict[str, tuple[list[str], bool]] = {}
+    configs = []
+
+    class DefaultModelLoader:
+        Source = CheckpointSource
+
+        def __init__(self, load_config):
+            configs.append(load_config)
+
+        def _prepare_weights(self, *args):
+            calls.append(args)
+            return folders.get(args[0], "unused"), *selections[args[0]], "model.safetensors.index.json"
+
+    _stub(monkeypatch, "vllm.model_executor.model_loader.default_loader", DefaultModelLoader=DefaultModelLoader)
+    return SimpleNamespace(
+        Source=CheckpointSource,
+        calls=calls,
+        folders=folders,
+        selections=selections,
+        configs=configs,
     )

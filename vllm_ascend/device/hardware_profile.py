@@ -68,6 +68,10 @@ class HardwareCapability(Enum):
     CANN_MEGAMOE = auto()
     # Allow A5 MegaMoe's MXFP-only path and its A5-specific calling conventions.
     CANN_MEGAMOE_MXFP = auto()
+    # Fuse the shared expert into the A5 MegaMoe operator (enable_fused_mc2=3).
+    # A5 only: the fused shared-expert calling convention assumes the shared and
+    # routed experts share a residual width, which A3 does not provide.
+    CANN_MEGAMOE_SHARED_EXPERT_FUSION = auto()
     # Split a mixed chunked-prefill batch into separate prefill and decode FIA calls.
     CHUNKED_PREFILL_PHASE_SPLIT = auto()
     # CANN device-side FlashAttn metadata with strided paged GQA K/V.
@@ -122,6 +126,12 @@ class HardwareCapability(Enum):
     # Let inplace_partial_rotary_mul negate sine internally; profiles without
     # this contract negate the sine input explicitly and pass negate_sin=False.
     INPLACE_PARTIAL_ROTARY_MUL_NEGATE_SIN = auto()
+    # CANN FP8 indexer quantization plus separate page-strided K/scale writes.
+    INDEXER_QUANT_CACHE = auto()
+    # Prepare per-token INT8 KDA projection inputs before the BFG stream wait.
+    KDA_INT8_QUANT_OVERLAP = auto()
+    # Native sparse indexer ABI with INT8 Q/K, FP16 scales and FP32 scores.
+    NATIVE_INT8_SPARSE = auto()
     # Reserve host CPUs for interrupt handling when constructing worker CPU pools.
     IRQ_CPU_RESERVATION = auto()
     # Create the local communication resource used by supported KV-transfer deployments.
@@ -154,6 +164,8 @@ class HardwareCapability(Enum):
     RC_DEVICE_DISCOVERY = auto()
     # Fused RMSNorm+cast is available for the A2/A3 (CANN 9.1) path.
     RMS_NORM_CAST = auto()
+    # Fused RMSNorm and dynamic per-token INT8 quantization on A3.
+    RMS_NORM_DYNAMIC_QUANT = auto()
     # Import and register the compiled vLLM-Ascend custom-op library at runtime.
     # This is independent of whether custom ops are enabled by default.
     RUNTIME_CUSTOM_OPS = auto()
@@ -169,6 +181,36 @@ class HardwareCapability(Enum):
     TURBOQUANT_4BIT_NC_CACHE = auto()
     # Honor MLAPO enablement on any pipeline role; other profiles limit it to decode consumers.
     UNRESTRICTED_MLAPO = auto()
+
+
+class WeightFormat(Enum):
+    """Data formats a SoC can execute in its matmul units.
+
+    ``FP8`` names the OCP 8-bit floating point family the way checkpoints
+    declare it (``quant_method: fp8``), covering both E4M3 and E5M2 instead of
+    pinning one element dtype; Ascend's own ``hifloat8`` is a different numeric
+    format and keeps its own ``HIF8`` member so callers never have to guess
+    which one a device means. The MX members keep their OCP names because they
+    name a format *and* a scale scheme: ``MXFP8`` is ``FP8`` with one ``E8M0``
+    scale per 32 elements, and ``MXFP4`` is the FP4 E2M1 element format with the
+    same scaling. ``INT4`` covers the integer 4-bit matmul that both ``W4A8``
+    (int4 weights, int8 activations) and ``W4A4`` (int4 weights and activations)
+    build on; it is not interchangeable with the block-scaled ``MXFP4``.
+
+    Format support is a property of the silicon, not of the checkpoint: A5 adds
+    FP8 and the block-scaled MX variants on top of the formats every generation
+    has, so business logic that picks an execution path must ask for the format
+    instead of inferring it from the device identity.
+    """
+
+    BF16 = auto()
+    FP16 = auto()
+    INT8 = auto()
+    INT4 = auto()
+    FP8 = auto()
+    HIF8 = auto()
+    MXFP8 = auto()
+    MXFP4 = auto()
 
 
 class AttentionBackendFamily(Enum):
@@ -243,6 +285,7 @@ class HardwareProfile:
     weight_layout_policy: WeightLayoutPolicy
     moe_comm_policy: MoECommPolicy
     quantization_backend_family: QuantizationBackendFamily
+    native_weight_formats: frozenset[WeightFormat]
     # Independent, additive contracts queried with ``supports``.
     capabilities: frozenset[HardwareCapability]
 
@@ -260,6 +303,30 @@ class HardwareProfile:
         """Return whether the exact documented ``capability`` contract is available."""
 
         return capability in self.capabilities
+
+    def supports_weight_format(self, weight_format: WeightFormat) -> bool:
+        """Return whether this hardware family can execute ``weight_format``."""
+
+        return weight_format in self.native_weight_formats
+
+
+_STANDARD_WEIGHT_FORMATS = frozenset(
+    {
+        WeightFormat.BF16,
+        WeightFormat.FP16,
+        WeightFormat.INT8,
+    }
+)
+# A2/A3/A5 run int4 weights through the W4A8 quantized matmul; 310P only ships
+# INT8 quantized kernels.
+_INT4_WEIGHT_FORMATS = _STANDARD_WEIGHT_FORMATS | {WeightFormat.INT4}
+# A5 adds the FP8 and block-scaled MX formats on top of the int4 set.
+_FP8_WEIGHT_FORMATS = _INT4_WEIGHT_FORMATS | {
+    WeightFormat.FP8,
+    WeightFormat.HIF8,
+    WeightFormat.MXFP8,
+    WeightFormat.MXFP4,
+}
 
 
 _STANDARD_CAPABILITIES = frozenset(
@@ -292,7 +359,10 @@ _STANDARD_CAPABILITIES = frozenset(
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
+    HardwareCapability.KDA_INT8_QUANT_OVERLAP,
+    HardwareCapability.NATIVE_INT8_SPARSE,
     HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
+    HardwareCapability.RMS_NORM_DYNAMIC_QUANT,
     HardwareCapability.MC2_FULLMESH_V2_COMM,
     HardwareCapability.RMS_NORM_CAST,
 }
@@ -314,6 +384,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
             moe_comm_policy=MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
+            native_weight_formats=_INT4_WEIGHT_FORMATS,
             capabilities=_STANDARD_CAPABILITIES
             | {HardwareCapability.RMS_NORM_CAST, HardwareCapability.NPU_TOP_K_TOP_P},
         ),
@@ -327,6 +398,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
             moe_comm_policy=MoECommPolicy.FUSED_OR_CAPACITY,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
+            native_weight_formats=_INT4_WEIGHT_FORMATS,
             capabilities=_A3_CAPABILITIES
             | {
                 HardwareCapability.CANN_MEGAMOE,
@@ -344,6 +416,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             weight_layout_policy=WeightLayoutPolicy.FORCE_NZ,
             moe_comm_policy=MoECommPolicy.ALLGATHER,
             quantization_backend_family=QuantizationBackendFamily.COMPATIBILITY,
+            native_weight_formats=_STANDARD_WEIGHT_FORMATS,
             capabilities=frozenset(
                 {
                     HardwareCapability.COMPATIBILITY_OP_IMPLEMENTATIONS,
@@ -369,6 +442,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
             moe_comm_policy=MoECommPolicy.CAPACITY_AND_WORLD_SIZE,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
+            native_weight_formats=_FP8_WEIGHT_FORMATS,
             capabilities=frozenset(
                 {
                     HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
@@ -376,6 +450,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.SCATTER_ND_FP8_CACHE_STORE,
                     HardwareCapability.CANN_MEGAMOE,
                     HardwareCapability.CANN_MEGAMOE_MXFP,
+                    HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION,
                     HardwareCapability.DEVICE_LENGTH_FLASH_ATTN,
                     HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT,
                     HardwareCapability.CLUSTER_CPU_TOPOLOGY,
@@ -389,6 +464,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.FLA_GDN_PREFILL,
                     HardwareCapability.FP8_ATTENTION,
                     HardwareCapability.POOL_KEY_INDEXER_FP8,
+                    HardwareCapability.INDEXER_QUANT_CACHE,
                     HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE,
                     HardwareCapability.GRAPH_MM_REDUCE_SCATTER_FUSION,
                     HardwareCapability.GRAPH_MULS_ADD_FUSION,
