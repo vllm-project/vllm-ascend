@@ -1,0 +1,8 @@
+pr: 20595
+entries:
+  - category: bugfix
+    text: >-
+      Fixed FP16 attention overflow affecting unquantized Qwen2 models on 310P,
+      including DeepSeek-R1-Distill-Qwen-1.5B. Added verified Distill Llama
+      tokenizer preparation and dedicated 310P validation guidance.
+    hardware: [310P]
