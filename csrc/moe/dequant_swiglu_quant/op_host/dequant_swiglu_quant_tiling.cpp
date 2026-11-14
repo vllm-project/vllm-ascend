@@ -58,10 +58,7 @@ constexpr uint64_t TILING_KEY_BIAS_DTYPE = 1000;
 constexpr int64_t UB_RESERVE = 1024;
 constexpr int64_t SWI_FACTOR = 2;
 constexpr int64_t QUANT_MODE_DYNAMIC = 1;
-constexpr int64_t PERFORMANCE_H_2048 = 2048;
-constexpr int64_t PERFORMANCE_H_4096 = 4096;
-constexpr int64_t PERFORMANCE_CORE_NUM = 36;
-constexpr int64_t PERFORMANCE_UB_FACTOR = static_cast<int64_t>(4096) * 4;
+constexpr int64_t PERFORMANCE_CORE_NUM = 40;
 
 constexpr int QUANT_SCALE_DTYPE_BF16 = 2;
 constexpr int QUANT_SCALE_DTYPE_FP32 = 0;
@@ -596,31 +593,30 @@ void DequantSwigluQuantDskTiling::CountTilingKey() {
 
 ge::graphStatus DequantSwigluQuantDskTiling::CountMaxDim(int64_t& ubFactorDimx) {
   /*
-  x used mem: [UbFactorDimx, outDimy_ * 2] dtype: float
-  activation_scale used mem: [UbFactorDimx, 8] dtype: float
+  x used mem: [UbFactorDimx, outDimy_ * 2] dtype: int32 (xActQueue, db = 2)
+  activation_scale used mem: [UbFactorDimx, 8] dtype: float (inside xActQueue)
   weight_scale used mem: [1, outDimy_ * 2] dtype: float
   quant_scale used mem: [1, outDimy_] dtype: float
-  y used mem: [UbFactorDimx, outDimy_] dtype: int8_t
-  scale used mem: [UbFactorDimx,] dtype: float
-  tmp used mem: [UbFactorDimx, outDimy_ * 2] dtype: float
-  x, activation_scale enable db
+  y used mem: [UbFactorDimx, outDimy_] dtype: int8_t (outQueue, db = 1)
+  scale used mem: [UbFactorDimx,] dtype: float (inside outQueue)
+  tmp used mem: [UbFactorDimx, outDimy_ * 2] dtype: float (tmpBuf1)
   ub reserve 1024B
 
-  optional buffer：
+  optional buffer:
   bias used mem: [1, outDimy_ * 2] dtype: float
-
-  clamp tmp buffer: [UbFactorDimx, outDimy_] dtype: uint8
-
-  gather offset buffer: [UbFactorDimx, outDimy_] dtype: uint32
-
   */
-  int64_t db = 2;
+  // The kernel allocates DB_BUFFER(1) x buffers in xActQueue; the budget
+  // below must match, or tiles are silently capped below what fits.
+  int64_t db = 1;
   int64_t maxOutDimy = 0;
   int64_t biasBufferY = hasBias_ == false ? 0 : static_cast<int64_t>(SWI_FACTOR * sizeof(float));
   int64_t biasBufferX = hasBias_ == false ? 0 : outDimy_ * SWI_FACTOR * static_cast<int64_t>(sizeof(float));
 
-  int64_t SweiGLUBufferY = swigluMode_ == 0 ? 0 : static_cast<int64_t>(sizeof(int8_t) + sizeof(int32_t));
-  int64_t SweiGLUBufferX = swigluMode_ == 0 ? 0 : outDimy_ * static_cast<int64_t>(sizeof(int8_t)) + outDimy_ * static_cast<int64_t>(sizeof(int32_t));
+  // The swigluMode==1 clamp/gather scratch buffer this used to reserve was
+  // removed from the kernel (never referenced); the budget stays at 0.
+
+  int64_t SweiGLUBufferY = 0;
+  int64_t SweiGLUBufferX = 0;
 
   int64_t quantOffsetSpace = quantMode_ == QUANT_MODE_DYNAMIC ? 0 : static_cast<int64_t>(sizeof(float));
 
@@ -647,14 +643,31 @@ ge::graphStatus DequantSwigluQuantDskTiling::CountMaxDim(int64_t& ubFactorDimx) 
                 outDimy_ * SWI_FACTOR * static_cast<int64_t>(sizeof(float)) + SweiGLUBufferX +
                 BLOCK_ELEM * static_cast<int64_t>(sizeof(float));
   ubFactorDimx  = static_cast<int64_t>(numerator / denominator);
-  ubFactorDimx = std::min(ubFactorDimx, inDimx_);
+  // Larger tiles cut the per-tile overhead (queue choreography + issue
+  // gaps), but on batches that cannot fill every core they also reduce the
+  // core count (ceil(inDimx / ubFactorDimx)), and losing parallelism costs
+  // more than the tile overhead saves. Take the larger tile only when every
+  // core is saturated anyway; otherwise keep the legacy tile size (computed
+  // with the historical 5-bytes-per-output-element swiglu scratch reserve).
+  {
+    // Historical tile: the shipped formula reserved two x buffers and a
+    // 5-byte-per-output-element swiglu scratch that no longer exists. It
+    // reproduces the shipped tile sizes and anchors the small-batch guard.
+    int64_t legacyDenominator = denominator + (outDimy_ * SWI_FACTOR + BLOCK_ELEM) * static_cast<int64_t>(sizeof(float)) +
+                                (swigluMode_ == 0 ? 0 : outDimy_ * (sizeof(int8_t) + sizeof(int32_t)));
+    int64_t legacyTile = std::min(numerator / legacyDenominator, inDimx_);
+    int64_t saturatingTile = (inDimx_ + PERFORMANCE_CORE_NUM - 1) / PERFORMANCE_CORE_NUM;
+    ubFactorDimx = std::min(std::min(ubFactorDimx, inDimx_), std::max(legacyTile, saturatingTile));
+    ubFactorDimx = std::max(ubFactorDimx, static_cast<int64_t>(1));
+  }
   OP_LOGI(context_->GetNodeName(), "Get ubFactorDimx[%ld]", ubFactorDimx);
 
-  // special ub cut for 2048 4096
-  if (swigluMode_ == 0 && hasBias_ == false) {
-      ubFactorDimx =
-      (inDimy_ == PERFORMANCE_H_2048 || inDimy_ == PERFORMANCE_H_4096) ? PERFORMANCE_UB_FACTOR / inDimy_ : ubFactorDimx;
-  }
+  // NOTE: a forced tile size used to be applied here (PERFORMANCE_UB_FACTOR
+  // / inDimy_ for swigluMode 0 without bias: 4 rows at 2H=4096, 8 at 2H=2048),
+  // tuned for the historical buffer layout. The formula above (with the
+  // saturation guard) now picks the tile on its own; forcing sizes here
+  // fought the guard and overflowed UB in combination with kernel-side
+  // buffer changes.
 
   return ge::GRAPH_SUCCESS;
 }
@@ -670,7 +683,6 @@ ge::graphStatus DequantSwigluQuantDskTiling::DoOpTiling() {
   OP_CHECK_IF(CountMaxDim(ubFactorDimx) != ge::GRAPH_SUCCESS,
                 OP_LOGE(context_->GetNodeName(), "Count MaxDim failed."),
                 return ge::GRAPH_FAILED);
-
   maxPreCore_ = (inDimx_ + ubFactorDimx - 1) / ubFactorDimx;
   maxPreCore_ = std::min(maxPreCore_, static_cast<int64_t>(PERFORMANCE_CORE_NUM));
   maxPreCore_ = std::min(maxPreCore_, static_cast<int64_t>(coreNum_));
