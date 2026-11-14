@@ -8,12 +8,14 @@ from dataclasses import dataclass, field, replace
 import torch
 import torch.nn.functional as F
 
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackend,
     AscendAttentionBackendImpl,
     AscendAttentionMetadataBuilder,
     AscendMetadata,
 )
+from vllm_ascend.compilation.updatable_graph import get_capture_resource
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
 
 
@@ -27,6 +29,13 @@ class AscendFlashAttentionMetadata(AscendMetadata):
 
 class AscendFlashAttentionMetadataBuilder(AscendAttentionMetadataBuilder):
     metadata_cls = AscendFlashAttentionMetadata
+    supports_draft_decode_metadata_update = True
+
+    def update_draft_decode_metadata(self, metadata: AscendFlashAttentionMetadata) -> None:
+        # All inputs alias persistent device buffers. Length normalization and
+        # tiling run in forward_impl inside the graph, so nothing needs to be
+        # refreshed here. Opt in so V2 skips the eager build before FULL replay.
+        pass
 
     def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
         """Build from exact device lengths; CPU mirrors may be stale after rejection."""
@@ -99,8 +108,27 @@ class AscendFlashAttentionImpl(AscendAttentionBackendImpl):
     def do_kv_cache_update(self, layer, key, value, kv_cache, slot_mapping):
         return super().do_kv_cache_update(layer, self._pad_head(key), self._pad_head(value), kv_cache, slot_mapping)
 
+    @staticmethod
+    def _get_lengths(metadata, num_tokens):
+        def build():
+            num_reqs = metadata.block_tables.shape[0]
+            boundaries = metadata.query_start_loc_gpu[: num_reqs + 1].int()
+            # Dummy requests may have repeated or negative query boundaries.
+            boundaries = boundaries.clamp(min=0, max=num_tokens).cummax(dim=0).values
+            lengths = metadata.seq_lens_gpu[:num_reqs].int().clamp(min=1)
+            return boundaries, lengths
+
+        if _EXTRA_CTX.capturing:
+            # Warmup may already have populated the Python metadata cache.
+            # Capture the length operations again, once per attention group,
+            # so replay reads updated rejection counts and padding on device.
+            return get_capture_resource(("flash_attn.lengths", id(metadata), num_tokens), build)
+        if metadata.flash_attn_lengths is None:
+            metadata.flash_attn_lengths = build()
+        return metadata.flash_attn_lengths
+
     def forward_impl(self, query, key, value, kv_cache, attn_metadata, output):
-        """Reuse device lengths and tiling plans across layers in one draft step."""
+        """Reuse one device tiling plan per group and geometry, including in graphs."""
         # Load CANN only in workers using this backend.
         from cann_ops_transformer.ops import flash_attn, flash_attn_metadata
 
@@ -108,24 +136,18 @@ class AscendFlashAttentionImpl(AscendAttentionBackendImpl):
         output_head_size = query.shape[-1]
         query = self._pad_head(query)
         metadata = attn_metadata
-        if metadata.flash_attn_lengths is None:
-            num_reqs = metadata.block_tables.shape[0]
-            boundaries = metadata.query_start_loc_gpu[: num_reqs + 1].int()
-            # Dummy requests may have repeated or negative query boundaries.
-            boundaries = boundaries.clamp(min=0, max=query.shape[0]).cummax(dim=0).values
-            lengths = metadata.seq_lens_gpu[:num_reqs].int().clamp(min=1)
-            metadata.flash_attn_lengths = boundaries, lengths
+        boundaries, lengths = self._get_lengths(metadata, query.shape[0])
 
         layout_kv = "PA_BNBD" if self.use_bnsd_kv_cache else "PA_BBND"
         plan_key = (self.num_heads, self.num_kv_heads, query.shape[-1], self.sliding_window, layout_kv)
-        cached = metadata.flash_attn_plans.get(plan_key)
-        if cached is None:
+
+        def build_plan():
             window = self.sliding_window - 1 if self.sliding_window is not None else -1
             # Both CANN operators require the same lengths, mask and layout.
             # Mask modes: 0 = unmasked, 3 = causal, 4 = sliding window.
             attrs = dict(
-                cu_seqlens_q=metadata.flash_attn_lengths[0],
-                seqused_kv=metadata.flash_attn_lengths[1],
+                cu_seqlens_q=boundaries,
+                seqused_kv=lengths,
                 max_seqlen_q=metadata.max_query_len,
                 max_seqlen_kv=-1,
                 mask_mode=4 if self.sliding_window is not None else 3 if metadata.causal else 0,
@@ -135,9 +157,16 @@ class AscendFlashAttentionImpl(AscendAttentionBackendImpl):
                 layout_kv=layout_kv,
                 layout_out="TND",
             )
-            cached = flash_attn_metadata(self.num_heads, self.num_kv_heads, query.shape[-1], **attrs), attrs
-            metadata.flash_attn_plans[plan_key] = cached
-        plan, attrs = cached
+            return flash_attn_metadata(self.num_heads, self.num_kv_heads, query.shape[-1], **attrs), attrs
+
+        if _EXTRA_CTX.capturing:
+            # The metadata kernel executes in the graph on every replay. Scope
+            # reuse to this graph, never to a prior warmup or another graph size.
+            plan, attrs = get_capture_resource(("flash_attn.plan", id(metadata), query.shape[0], plan_key), build_plan)
+        else:
+            if plan_key not in metadata.flash_attn_plans:
+                metadata.flash_attn_plans[plan_key] = build_plan()
+            plan, attrs = metadata.flash_attn_plans[plan_key]
 
         with attention_transfer_window():
             result, _ = flash_attn(
