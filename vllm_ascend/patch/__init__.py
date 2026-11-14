@@ -154,25 +154,22 @@
 #
 # ** 7. File: platform/patch_eplb.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.config.parallel.current_platform`
-#   2. `vllm.distributed.eplb.eplb_state._move_to_workspace`
+#   1. EP-aware initial expert layout
+#   2. STAIR explicit transfers, changed-layer worker and prepared-map commits
 #    Why:
-#       Upstream EPLB owns the Model Runner V2 control plane, but its platform
-#       capability check excludes NPU. Its async workspace move also has no
-#       downstream callback after a per-layer map commit.
+#       The upstream lifecycle hooks do not express Ascend's initial placement,
+#       explicit transfer sources, or changed-layer scheduling contract.
 #    How:
-#       Expose EPLB capability only inside vllm.config.parallel and refresh the
-#       Ascend lookup after an async layer commit. Router behavior and load
-#       scope are owned by downstream instances rather than patched upstream
-#       classes; upstream torch.distributed communication runs over HCCL.
+#       Platform, policy and communicator construction use normal hooks. Keep
+#       only the initial layout and STAIR execution adapters;
+#       the state commit override refreshes routing before buffer acknowledgement.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/49700
 #    Related RFC:
 #       https://github.com/vllm-project/vllm/issues/49702
 #    Future Plan:
-#       Remove this patch once the upstream `EplbPlatformBackend` interface is
-#       available in the supported vLLM version. Retain only the NPU backend,
-#       operator, communicator, load normalization, and weight views.
+#       Propose initial-placement and explicit-transfer contracts separately;
+#       #49700 deliberately does not add a stateful policy framework.
 #
 # ** 8. File: platform/patch_fused_moe.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

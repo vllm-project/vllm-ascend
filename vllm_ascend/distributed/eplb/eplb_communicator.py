@@ -52,7 +52,7 @@ def _resolve_hixl_module() -> Any:
     keep the default HIXL transfer path.
     """
     try:
-        import hixl  # type: ignore[import-not-found]
+        import hixl  # type: ignore[import-not-found, import-untyped]
     except ImportError:
         pass
     else:

@@ -16,6 +16,7 @@ from vllm_ascend.distributed.eplb import eplb_state
 from vllm_ascend.distributed.eplb.eplb_communicator import AscendHixlEplbCommunicator, _HixlSession
 from vllm_ascend.distributed.eplb.eplb_state import (
     AscendEplbLayerState,
+    AscendEplbModelState,
     AscendEplbState,
 )
 from vllm_ascend.distributed.eplb.policy.stair import StairEplbPolicy
@@ -49,6 +50,8 @@ def test_update_mapping_refreshes_ascend_routing_without_replacing_state():
 
 def test_uses_upstream_policy_and_async_worker_lifecycle():
     state = AscendEplbState.__new__(AscendEplbState)
+    state.async_worker = None
+    state._stop_async = threading.Event()
     state._hixl_session = None
     state._close_error = None
     state._suspended = False
@@ -96,13 +99,12 @@ def test_result_readiness_defers_incomplete_transfer(monkeypatch):
     assert model_state._eplb_migration_deferred_steps == 2
 
 
-def test_configured_upstream_policy_registration_is_scoped():
+def test_policy_factory_preserves_instance_without_global_registration():
     policy = StairEplbPolicy(StairConfig())
+    state = object.__new__(AscendEplbState)
+    state._configured_policy = policy
     assert "stair" not in upstream_eplb_state.EPLB_POLICIES
-
-    with eplb_state._configured_upstream_policy("stair", policy):
-        assert upstream_eplb_state.EPLB_POLICIES["stair"] is policy
-
+    assert state.create_policy() is policy
     assert "stair" not in upstream_eplb_state.EPLB_POLICIES
 
 
@@ -308,12 +310,17 @@ def test_async_allgather_refresh_invalidates_history_without_comparing_device_ma
 
 
 def test_sync_rearrange_refreshes_all_model_routing_tables(monkeypatch):
+    monkeypatch.setattr(upstream_eplb_state.EplbModelState, "_commit_eplb_maps", lambda *_: None)
     sentinel = object()
-    model_states = {"model": object()}
+    model_state = object.__new__(AscendEplbModelState)
+    model_state.communicator = SimpleNamespace()
+    model_state.pending_result = None
+    model_states = {"model": model_state}
 
     def upstream_rearrange(self, is_profile=False, rank_mapping=None):
         assert not is_profile
         assert rank_mapping == {0: 0}
+        model_states["model"]._commit_eplb_maps(None)
         return sentinel
 
     refresh = MagicMock()
@@ -333,7 +340,7 @@ def test_sync_rearrange_refreshes_all_model_routing_tables(monkeypatch):
     result = state.rearrange(rank_mapping={0: 0})
 
     assert result is sentinel
-    refresh.assert_called_once_with(model_states["model"])
+    refresh.assert_called_once_with(model_states["model"], None)
 
 
 def test_async_rearrange_defers_routing_refresh_to_workspace_hook(monkeypatch):
@@ -471,6 +478,7 @@ def _shutdown_state():
     state._close_error = None
     state._suspended = False
     state._stop_async = threading.Event()
+    state._last_consumed_event = None
     state._close_error = None
     state.is_async = True
     state.async_worker = None
@@ -480,16 +488,55 @@ def _shutdown_state():
 
 def test_close_wakes_idle_worker_without_fake_device_event():
     state = _shutdown_state()
-    recorded = threading.Event()
-    event_wait = MagicMock()
-    state.rearrange_event = SimpleNamespace(_recorded=recorded, wait=event_wait)
-    state.async_worker = threading.Thread(target=state.wait_for_rearrangement, args=(None,))
+    with patch.object(torch, "Event", return_value=MagicMock()):
+        state.rearrange_event = upstream_eplb_state.CpuGpuEvent()
+    device_event = state.rearrange_event._event
+    entered = threading.Event()
+
+    def wait():
+        entered.set()
+        assert not state.wait_for_rearrangement(None)
+
+    state.async_worker = threading.Thread(target=wait)
     state.async_worker.start()
+    assert entered.wait(timeout=5)
     state.close()
     assert state.async_worker is None
     assert state._suspended
-    assert not recorded.is_set()
-    event_wait.assert_not_called()
+    assert not state.rearrange_event._recorded.is_set()
+    assert state.rearrange_event._event is device_event
+
+
+@pytest.mark.parametrize("event_fails", [False, True])
+def test_close_waits_for_last_consumption_before_releasing_session(event_fails):
+    state = _shutdown_state()
+    calls = []
+    worker = MagicMock()
+    worker.is_alive.side_effect = [True, False]
+    worker.join.side_effect = lambda **_: calls.append("joined")
+    state.async_worker = worker
+    event = MagicMock()
+
+    def finish_consumption():
+        calls.append("consumed")
+        if event_fails:
+            raise RuntimeError("device completion failed")
+
+    event.synchronize.side_effect = finish_consumption
+    state._last_consumed_event = event
+    session = MagicMock(spec=_HixlSession)
+    session._error = None
+    session.close.side_effect = lambda: calls.append("released")
+    state._hixl_session = session
+    if event_fails:
+        with pytest.raises(SystemExit, match="worker must terminate"):
+            state.close()
+        assert state._last_consumed_event is event
+        assert calls == ["joined", "consumed"]
+    else:
+        state.close()
+        assert state._last_consumed_event is None
+        assert calls == ["joined", "consumed", "released"]
 
 
 def test_close_failure_keeps_communicator_owner():

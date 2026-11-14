@@ -234,6 +234,16 @@ class NPUPlatform(Platform):
         return torch.npu.max_memory_allocated(device)
 
     @classmethod
+    def supports_eplb(cls) -> bool:
+        return True
+
+    @classmethod
+    def check_and_update_eplb_config(cls, parallel_config) -> None:
+        from vllm_ascend.distributed.eplb.config import check_and_update_eplb_config
+
+        check_and_update_eplb_config(parallel_config)
+
+    @classmethod
     def get_device_communicator_cls(cls) -> str:
         return "vllm_ascend.distributed.device_communicators.npu_communicator.NPUCommunicator"
 
