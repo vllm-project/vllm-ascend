@@ -33,7 +33,11 @@ except ImportError:
     IntermediateTensors = None
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention, Qwen3NextForCausalLM
 
-from vllm_ascend.attention.gdn import AscendGatedDeltaNetAttention, initialize_packed_conv_weight
+from vllm_ascend.attention.gdn import (
+    AscendGatedDeltaNetAttention,
+    initialize_packed_conv_weight,
+    initialize_recurrent_fp32_parameters,
+)
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.qwen_gdn_recoverssm import (
     _uses_gdn_recoverssm,
@@ -254,6 +258,7 @@ else:
         if vllm_config is None and len(args) > 1:
             vllm_config = args[1]
         _GDN_ORIGINAL_INIT(self, *args, **kwargs)
+        initialize_recurrent_fp32_parameters(self)
         if vllm_config is None:
             vllm_config = getattr(self, "vllm_config", None)
         if vllm_config is None:
