@@ -1,0 +1,4 @@
+pr: 20559
+entries:
+  - category: bugfix
+    text: Fixed native CPU KV cache offloading for hybrid Attention/GDN models with interleaved kernel blocks on Model Runner V2.

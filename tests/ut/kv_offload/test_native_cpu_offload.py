@@ -11,7 +11,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
 )
 from vllm.utils.math_utils import round_up
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    MambaSpec,
+)
 from vllm.v1.kv_offload.base import CanonicalKVCaches, OffloadingWorker
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
@@ -117,14 +122,23 @@ def test_npu_spec_caches_worker_without_upstream_platform_gate(monkeypatch) -> N
     assert create_calls == 1
 
 
+@pytest.mark.parametrize("sync_load_budget_bytes", [0, 1 << 20])
+@pytest.mark.parametrize("has_mamba", [False, True])
 def test_ascend_connector_replaces_worker_with_current_vllm_config(
     monkeypatch: pytest.MonkeyPatch,
+    sync_load_budget_bytes: int,
+    has_mamba: bool,
 ) -> None:
-    vllm_config = object()
-    kv_cache_config = object()
+    vllm_config = SimpleNamespace(use_v2_model_runner=True)
+    groups = []
+    if has_mamba:
+        mamba_spec = MambaSpec(block_size=2, shapes=((2,),), dtypes=(torch.int8,), mamba_cache_mode="align")
+        groups.append(KVCacheGroupSpec(layer_names=["mamba"], kv_cache_spec=mamba_spec))
+    kv_cache_config = KVCacheConfig(num_blocks=4, kv_cache_tensors=[], kv_cache_groups=groups)
     spec = SimpleNamespace(
         replicated_layout=False,
         config=SimpleNamespace(parallel=SimpleNamespace(rank=0)),
+        extra_config={"sync_load_budget_bytes": sync_load_budget_bytes},
     )
 
     def fake_upstream_init(
@@ -150,6 +164,7 @@ def test_ascend_connector_replaces_worker_with_current_vllm_config(
     assert connector.connector_worker.spec is spec
     assert connector.connector_worker.vllm_config is vllm_config
     assert connector.connector_worker.kv_cache_config is kv_cache_config
+    assert connector.requires_mamba_state_copy_after_load is (has_mamba and sync_load_budget_bytes > 0)
 
 
 def test_split_kv_cache_is_canonicalized_without_copy() -> None:
@@ -177,10 +192,90 @@ def test_split_kv_cache_coalesces_kernel_blocks() -> None:
         (key, value),
         num_blocks=4,
         unpadded_page_size_bytes=8,
+        coalesce_interleaved=True,
     )
 
     assert [view.shape for view, _ in views] == [(4, 4), (4, 4)]
     assert [copy_size for _, copy_size in views] == [4, 4]
+
+
+@pytest.mark.parametrize("factor", [1, 2, 4])
+@pytest.mark.parametrize("padded", [False, True])
+@pytest.mark.parametrize("dtype", [torch.int8, torch.bfloat16])
+def test_ascend_connector_round_trips_interleaved_kernel_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+    factor: int,
+    padded: bool,
+    dtype: torch.dtype,
+) -> None:
+    """Manager-page transfers preserve K/V, padding, and unselected pages."""
+    layer_name = "model.layers.0.self_attn"
+    num_blocks = 4
+    # Prefix storage and one extra manager page exercise offsets and capacity
+    # beyond the cache manager's minimum number of blocks.
+    slot_elements = 6 if padded else 4
+    raw = torch.arange(1 + (num_blocks + 1) * factor * slot_elements, dtype=torch.int64).to(dtype)
+    slots = raw[1:].view(-1, slot_elements)
+    key, value = slots[:, :2], slots[:, 2:4]
+    original = raw.clone()
+    spec = FullAttentionSpec(
+        block_size=factor,
+        num_kv_heads=1,
+        head_size=2,
+        dtype=dtype,
+    )
+    worker = AscendOffloadingConnectorWorker.__new__(AscendOffloadingConnectorWorker)
+    worker.kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec)],
+        kv_cache_tensors=[],
+    )
+    worker.vllm_config = SimpleNamespace(use_v2_model_runner=True)
+    captured: list[CanonicalKVCaches] = []
+    worker._init_worker = captured.append
+    monkeypatch.setattr(connector_mod, "derive_canonical_mappings", lambda *args: {})
+
+    worker.register_kv_caches({layer_name: (key, value)})
+
+    canonical = captured[0]
+    refs = canonical.group_data_refs[0]
+    assert sum(ref.page_size_bytes for ref in refs) == spec.unpadded_page_size_bytes
+    expected_refs = 2 if factor == 1 else factor if padded else 1
+    expected_ref_bytes = spec.unpadded_page_size_bytes // expected_refs
+    assert len(refs) == expected_refs
+    blocks = torch.tensor([3, 1])
+    saved = []
+    for ref in refs:
+        view = canonical.tensors[ref.tensor_idx].tensor
+        assert view.untyped_storage().data_ptr() == raw.untyped_storage().data_ptr()
+        assert view.shape == (num_blocks, expected_ref_bytes)
+        assert view.stride() == (factor * slot_elements * raw.element_size(), 1)
+        assert ref.mapping is None
+        saved.append(view[blocks].clone())
+        view[blocks] = 0
+
+    expected = original.clone()
+    expected_slots = expected[1:].view(-1, slot_elements)
+    for block in blocks.tolist():
+        expected_slots[block * factor : (block + 1) * factor, :4] = 0
+    assert torch.equal(raw.view(torch.int8), expected.view(torch.int8))
+
+    for ref, data in zip(refs, saved):
+        canonical.tensors[ref.tensor_idx].tensor[blocks] = data
+    assert torch.equal(raw.view(torch.int8), original.view(torch.int8))
+
+
+def test_interleaved_cache_keeps_gaps_between_components() -> None:
+    slots = torch.arange(40, dtype=torch.int8).view(8, 5)
+    key, value = slots[:, :2], slots[:, 3:]
+
+    views = _canonicalize_split_cache((key, value), num_blocks=4, unpadded_page_size_bytes=8, coalesce_interleaved=True)
+
+    expected = (key[::2], key[1::2], value[::2], value[1::2])
+    assert len(views) == len(expected)
+    for (view, size), component in zip(views, expected):
+        assert size == 2
+        torch.testing.assert_close(view, component)
 
 
 def test_extra_physical_blocks_do_not_hide_separate_value_cache() -> None:
@@ -208,6 +303,7 @@ def test_split_kv_cache_prefers_complete_overlapping_view() -> None:
         (key, scale, full),
         num_blocks=4,
         unpadded_page_size_bytes=8,
+        coalesce_interleaved=True,
     )
 
     assert len(views) == 1
@@ -216,16 +312,42 @@ def test_split_kv_cache_prefers_complete_overlapping_view() -> None:
     assert views[0][1] == 8
 
 
-def test_split_kv_cache_rejects_noncontiguous_block_payload() -> None:
-    key = torch.empty((4, 2, 3), dtype=torch.int8).transpose(1, 2)
-    value = torch.empty((4, 3, 2), dtype=torch.int8)
+@pytest.mark.parametrize("component_strides", [(6, 1), (8, 4)])
+def test_mrv2_overlapping_view_must_cover_the_whole_component(
+    component_strides: tuple[int, int],
+) -> None:
+    backing = torch.empty(32, dtype=torch.int8)
+    full = backing.view(4, 8)[:, :4]
+    # The component starts inside the full view, but its later rows or
+    # non-contiguous payload reach bytes outside of that view.
+    component = torch.as_strided(backing, (4, 2), component_strides, storage_offset=1)
+
+    with pytest.raises(ValueError, match="components do not cover one logical page"):
+        _canonicalize_split_cache(
+            (full, component), num_blocks=4, unpadded_page_size_bytes=4, coalesce_interleaved=True
+        )
+
+
+@pytest.mark.parametrize("factor", [1, 2])
+def test_split_kv_cache_rejects_noncontiguous_block_payload(factor: int) -> None:
+    key = torch.empty((4 * factor, 2, 3), dtype=torch.int8).transpose(1, 2)
+    value = torch.empty((4 * factor, 3, 2), dtype=torch.int8)
 
     with pytest.raises(ValueError, match="block payload is non-contiguous"):
         _canonicalize_split_cache(
             (key, value),
             num_blocks=4,
-            unpadded_page_size_bytes=12,
+            unpadded_page_size_bytes=12 * factor,
         )
+
+
+def test_interleaved_cache_rejects_noncontiguous_payload_before_coalescing() -> None:
+    slots = torch.empty((8, 12), dtype=torch.int8)
+    key = slots[:, :6].view(8, 2, 3).transpose(1, 2)
+    value = slots[:, 6:]
+
+    with pytest.raises(ValueError, match="block payload is non-contiguous"):
+        _canonicalize_split_cache((key, value), num_blocks=4, unpadded_page_size_bytes=24, coalesce_interleaved=True)
 
 
 def test_ascend_connector_worker_accepts_separate_kv_tensors(
@@ -238,17 +360,14 @@ def test_ascend_connector_worker_accepts_separate_kv_tensors(
         head_size=3,
         dtype=torch.bfloat16,
     )
-    kv_cache_config = SimpleNamespace(
+    kv_cache_config = KVCacheConfig(
         num_blocks=4,
-        kv_cache_groups=[SimpleNamespace(layer_names=[layer_name], kv_cache_spec=spec)],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec)],
         kv_cache_tensors=[],
-        # The connector offloads the groups vLLM selects, not all of them.
-        prefix_cacheable_group_ids=(0,),
-        hisparse_host_num_blocks=None,
     )
     worker = AscendOffloadingConnectorWorker.__new__(AscendOffloadingConnectorWorker)
     worker.kv_cache_config = kv_cache_config
-    worker.vllm_config = object()
+    worker.vllm_config = SimpleNamespace(use_v2_model_runner=True)
     captured: list[CanonicalKVCaches] = []
     worker._init_worker = captured.append
     monkeypatch.setattr(connector_mod, "derive_canonical_mappings", lambda *args: {})
@@ -285,17 +404,14 @@ def test_ascend_connector_worker_accepts_aligned_mamba_states(
         dtypes=(torch.int8, torch.int8),
         page_size_padded=8,
     )
-    kv_cache_config = SimpleNamespace(
+    kv_cache_config = KVCacheConfig(
         num_blocks=4,
-        kv_cache_groups=[SimpleNamespace(layer_names=[layer_name], kv_cache_spec=spec)],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec)],
         kv_cache_tensors=[],
-        # The connector offloads the groups vLLM selects, not all of them.
-        prefix_cacheable_group_ids=(0,),
-        hisparse_host_num_blocks=None,
     )
     worker = AscendOffloadingConnectorWorker.__new__(AscendOffloadingConnectorWorker)
     worker.kv_cache_config = kv_cache_config
-    worker.vllm_config = object()
+    worker.vllm_config = SimpleNamespace(use_v2_model_runner=True)
     captured: list[CanonicalKVCaches] = []
     worker._init_worker = captured.append
     monkeypatch.setattr(connector_mod, "derive_canonical_mappings", lambda *args: {})

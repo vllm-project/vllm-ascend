@@ -25,6 +25,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    FullAttentionSpec,
     KVCacheConfig,
     MambaSpec,
     UniformTypeKVCacheSpecs,
@@ -91,38 +92,108 @@ def _make_int8_block_view(
     )
 
 
+def _coalesce_interleaved_slots(
+    parts: tuple[tuple[torch.Tensor, int], ...],
+    num_blocks: int,
+    factor: int,
+) -> tuple[tuple[torch.Tensor, int], ...] | None:
+    """Use one byte range for K/V components that tile each kernel slot."""
+    first, first_bytes = parts[0]
+    storage_ptr = first.untyped_storage().data_ptr()
+    stride_bytes = first.stride(0) * first.element_size()
+    slot_bytes = sum(part_bytes for _, part_bytes in parts)
+    if slot_bytes > stride_bytes:
+        return None
+
+    offset_bytes = first.storage_offset() * first.element_size()
+    next_offset = offset_bytes
+    for part, part_bytes in parts:
+        element_size = part.element_size()
+        if (
+            part.device != first.device
+            or part.untyped_storage().data_ptr() != storage_ptr
+            or part.storage_offset() * element_size != next_offset
+            or part.stride(0) * element_size != stride_bytes
+        ):
+            return None
+        next_offset += part_bytes
+
+    # Validate each component's shape, bounds and inner contiguity before
+    # exposing the combined range. Byte offsets preserve mixed-dtype views.
+    physical_blocks = num_blocks * factor
+    first_view = _make_int8_block_view(first, physical_blocks, 1, first_bytes)
+    for part, part_bytes in parts[1:]:
+        _make_int8_block_view(part, physical_blocks, 1, part_bytes)
+    if stride_bytes == slot_bytes:
+        page_bytes = slot_bytes * factor
+        page = torch.as_strided(first_view, (num_blocks, page_bytes), (page_bytes, 1))
+        return ((page, page_bytes),)
+
+    # A padded slot still has a contiguous K/V payload. Keep the padding out
+    # of the copy and advance by a full manager page between rows.
+    slots = torch.as_strided(first_view, (physical_blocks, slot_bytes), (stride_bytes, 1))
+    return tuple((slots[slot::factor], slot_bytes) for slot in range(factor))
+
+
 def _canonicalize_split_cache(
     cache_parts: Sequence[torch.Tensor],
     num_blocks: int,
     unpadded_page_size_bytes: int,
+    *,
+    coalesce_interleaved: bool = False,
 ) -> tuple[tuple[torch.Tensor, int], ...]:
     """Canonicalize separate K/V, scale, or recurrent-state tensors."""
     parts = tuple(cache_parts)
     if not parts or any(not isinstance(part, torch.Tensor) for part in parts):
         raise TypeError("An Ascend KV cache must contain one or more tensors")
 
+    if coalesce_interleaved and any(part.ndim == 0 for part in parts):
+        raise ValueError("Ascend KV cache components must have a block dimension")
+
     part_block_bytes = tuple(math.prod(part.shape[1:]) * part.element_size() for part in parts)
+    # Strided aliases can span more bytes than their payload element count.
+    part_block_spans = (
+        tuple(
+            (1 + sum((size - 1) * stride for size, stride in zip(part.shape[1:], part.stride()[1:])))
+            * part.element_size()
+            for part in parts
+        )
+        if coalesce_interleaved
+        else part_block_bytes
+    )
     if any(size <= 0 for size in part_block_bytes):
         raise ValueError("Ascend KV cache components must be non-empty")
 
     # Some backends expose component views and an overlapping full-page view.
-    # Use the full view only if it really contains every component's first
-    # physical block; comparing shapes alone can silently omit V or scales.
+    # Verify byte coverage before dropping component views. On the MRV2
+    # path, also verify that this coverage repeats for every physical block.
     selected: tuple[tuple[torch.Tensor, int], ...] | None = None
     for part, part_bytes in sorted(zip(parts, part_block_bytes), key=lambda item: item[1], reverse=True):
         if unpadded_page_size_bytes % part_bytes:
             continue
         factor = unpadded_page_size_bytes // part_bytes
+        physical_blocks = num_blocks * factor
+        if part.shape[0] < physical_blocks:
+            continue
+        if coalesce_interleaved:
+            stride_bytes = part.stride(0) * part.element_size()
+            if any(
+                other.shape[0] < physical_blocks
+                or (physical_blocks > 1 and other.stride(0) * other.element_size() != stride_bytes)
+                for other in parts
+            ):
+                continue
+
         candidate_start = part.data_ptr()
         candidate_end = candidate_start + part_bytes
         candidate_storage_ptr = part.untyped_storage().data_ptr()
         contains_all_parts = all(
             other.untyped_storage().data_ptr() == candidate_storage_ptr
             and candidate_start <= other.data_ptr()
-            and other.data_ptr() + other_bytes <= candidate_end
-            for other, other_bytes in zip(parts, part_block_bytes)
+            and other.data_ptr() + other_span <= candidate_end
+            for other, other_span in zip(parts, part_block_spans)
         )
-        if contains_all_parts and part.shape[0] >= num_blocks * factor:
+        if contains_all_parts:
             selected = ((part, part_bytes),)
             break
 
@@ -138,18 +209,91 @@ def _canonicalize_split_cache(
 
     bytes_per_physical_block = sum(size for _, size in selected)
     factor = unpadded_page_size_bytes // bytes_per_physical_block
-    return tuple(
-        (
-            _make_int8_block_view(
-                part,
-                num_blocks,
-                factor,
-                part_bytes,
-            ),
-            part_bytes * factor,
+    if coalesce_interleaved and factor > 1 and len(selected) > 1:
+        combined = _coalesce_interleaved_slots(selected, num_blocks, factor)
+        if combined is not None:
+            return combined
+
+    views: list[tuple[torch.Tensor, int]] = []
+    for part, part_bytes in selected:
+        if factor > 1 and part.stride(0) * part.element_size() > part_bytes:
+            # Interleaved K/V or padded slots cannot be coalesced into one
+            # contiguous payload. Each view selects the same kernel slot in
+            # every manager block, preserving gaps without copying them.
+            for slot in range(factor):
+                view = _make_int8_block_view(part[slot::factor], num_blocks, 1, part_bytes)
+                views.append((view, part_bytes))
+        else:
+            view = _make_int8_block_view(part, num_blocks, factor, part_bytes)
+            views.append((view, part_bytes * factor))
+    return tuple(views)
+
+
+def _deduplicate_overlapping_views(kv_caches: CanonicalKVCaches) -> CanonicalKVCaches:
+    """Share CPU slots for overlapping pages of hybrid cache groups.
+
+    Attention and Mamba layers can overlay the same pool with different
+    component boundaries. Exact-view deduplication alone counts those bytes
+    twice. Partition each common block stride at component boundaries so
+    every reference still copies exactly its own payload.
+    """
+    pools: dict[tuple[int, int], list[int]] = {}
+    for idx, cache in enumerate(kv_caches.tensors):
+        tensor = cache.tensor
+        pools.setdefault((tensor.untyped_storage().data_ptr(), tensor.stride(0)), []).append(idx)
+
+    tensors: list[CanonicalKVCacheTensor] = []
+    replacements: dict[int, list[tuple[int, int, int]]] = {}
+    for indices in pools.values():
+        boundaries = sorted(
+            {
+                offset
+                for idx in indices
+                for offset in (
+                    kv_caches.tensors[idx].tensor.storage_offset(),
+                    kv_caches.tensors[idx].tensor.storage_offset() + kv_caches.tensors[idx].page_size_bytes,
+                )
+            }
         )
-        for part, part_bytes in selected
-    )
+        for start, end in zip(boundaries, boundaries[1:]):
+            owners = [
+                idx
+                for idx in indices
+                if kv_caches.tensors[idx].tensor.storage_offset() <= start
+                and end <= kv_caches.tensors[idx].tensor.storage_offset() + kv_caches.tensors[idx].page_size_bytes
+            ]
+            if not owners:
+                continue
+            source = kv_caches.tensors[owners[0]].tensor
+            tensor_idx = len(tensors)
+            tensors.append(
+                CanonicalKVCacheTensor(
+                    tensor=torch.as_strided(source, (source.shape[0], end - start), source.stride(), start),
+                    page_size_bytes=end - start,
+                )
+            )
+            for idx in owners:
+                replacements.setdefault(idx, []).append(
+                    (tensor_idx, start - kv_caches.tensors[idx].tensor.storage_offset(), end - start)
+                )
+
+    group_refs: list[list[CanonicalKVCacheRef]] = []
+    for refs in kv_caches.group_data_refs:
+        new_refs: list[CanonicalKVCacheRef] = []
+        for ref in refs:
+            pieces = replacements[ref.tensor_idx]
+            for tensor_idx, offset, size in pieces:
+                copy_size = min(size, ref.page_size_bytes - offset)
+                if copy_size > 0:
+                    new_refs.append(
+                        CanonicalKVCacheRef(
+                            tensor_idx=tensor_idx,
+                            page_size_bytes=copy_size,
+                            mapping=ref.mapping if len(pieces) == 1 else None,
+                        )
+                    )
+        group_refs.append(new_refs)
+    return CanonicalKVCaches(tensors=tensors, group_data_refs=group_refs)
 
 
 class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
@@ -192,6 +336,7 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
             return
 
         num_blocks = kv_cache_config.num_blocks
+        coalesce_interleaved = self.vllm_config.use_v2_model_runner
         mappings = derive_canonical_mappings(
             self.vllm_config,
             kv_cache_config,
@@ -272,6 +417,7 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
                             layer_cache,
                             num_blocks,
                             layer_spec.unpadded_page_size_bytes,
+                            coalesce_interleaved=coalesce_interleaved and type(layer_spec) is FullAttentionSpec,
                         )
                         # A page mapping describes the complete local page and
                         # is valid only when one canonical view covers it. For
@@ -319,9 +465,11 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
         if not canonical_tensors:
             raise ValueError("No KV cache tensors were registered for native offloading")
         self._init_worker(
-            CanonicalKVCaches(
-                tensors=canonical_tensors,
-                group_data_refs=group_data_refs,
+            _deduplicate_overlapping_views(
+                CanonicalKVCaches(
+                    tensors=canonical_tensors,
+                    group_data_refs=group_data_refs,
+                )
             )
         )
 
@@ -340,6 +488,13 @@ class AscendOffloadingConnector(OffloadingConnector):
         super().__init__(vllm_config, role, kv_cache_config)
         connector_worker = self.connector_worker
         if connector_worker is not None:
+            # An opt-in synchronous load completes in pre_forward. Defer the
+            # MRV2 state pre-copy so it reads the checkpoint after that load.
+            self.requires_mamba_state_copy_after_load = (
+                vllm_config.use_v2_model_runner
+                and int(connector_worker.spec.extra_config.get("sync_load_budget_bytes", 0)) > 0
+                and kv_cache_config.has_mamba_layers
+            )
             self.connector_worker = AscendOffloadingConnectorWorker(
                 connector_worker.spec,
                 vllm_config,
