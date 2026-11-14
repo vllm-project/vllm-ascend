@@ -1,0 +1,414 @@
+# Overlay for Qwen/Qwen3.8-Flash-Next on Huawei Ascend.
+# Verified on two Atlas A2 servers (800T A2 with 8 x Ascend 910B3, 800I A2 with
+# 8 x Ascend 910B4-1; 64 GB HBM per NPU), vLLM Ascend v0.32.0rc1.
+# 1P1D disaggregation, MooncakeConnectorV2 p2p KV transfer (no KV pool), MTP on both pools:
+#   prefill  TP4 x PP2 x DP1 x EP4         (node 1)
+#   decode   TP2 x DP4 x EP8               (node 2)
+# Source: scripts6.1 local bring-up (161 = prefill, 162 = decode).
+meta:
+  hardware:
+    ascend_910b: verified
+
+strategy_hardware:
+  single_node_tp:
+    npu: unsupported
+  single_node_tep:
+    npu: unsupported
+  single_node_dep:
+    npu: unsupported
+  single_node_dpa_tp:
+    npu: unsupported
+  multi_node_tp:
+    npu: unsupported
+  multi_node_tp_dp:
+    npu: unsupported
+  multi_node_tp_pp:
+    npu: unsupported
+  multi_node_tep:
+    npu: unsupported
+  multi_node_dep:
+    npu: unsupported
+  pd_cluster:
+    npu: unsupported
+    ascend_910b: supported
+
+features:
+  tool_calling:
+    hardware_overrides:
+      ascend_910b:
+        args:
+          - '--enable-auto-tool-choice'
+          - '--tool-call-parser'
+          - qwen3_xml
+  spec_decoding:
+    hardware_overrides:
+      ascend_910b:
+        args:
+          - '--speculative-config'
+          - '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}'
+
+variants:
+  ascend_w4a8:
+    model_id: Eco-Tech/Qwen3.8-Flash-Next-w4a8
+    label: W4A8 (Ascend A2)
+    precision: int4
+    # 180.9 GiB on disk = 194.3 GB, x 1.2 headroom (same convention as the DeepSeek recipes)
+    vram_minimum_gb: 234
+    description: >-
+      ModelSlim W4A8 checkpoint (181 GiB, 48 shards) for one two-node 1P1D pool on A2.
+      Engram keeps the 51B N-gram embedding table in host memory on both pools, so the
+      weights fit in 8 x 64 GB per node. Requires --quantization ascend.
+    supported_hardware:
+      - ascend_910b
+    min_vllm_version: 0.32.0rc1
+    extra_args:
+      - '--host'
+      - 0.0.0.0
+      - '--served-model-name'
+      - qwen38-flash-next-a2-pd
+      - '--trust-remote-code'
+      - '--quantization'
+      - ascend
+      - '--max-model-len'
+      - '141312'
+      - '--max-num-seqs'
+      - '32'
+      - '--max-num-batched-tokens'
+      - '8192'
+      - '--gpu-memory-utilization'
+      - '0.90'
+      - '--enable-prefix-caching'
+      - '--mamba-cache-mode'
+      - align
+      - '--async-scheduling'
+    extra_env:
+      VLLM_USE_MODELSCOPE: 'True'
+      VLLM_USE_V2_MODEL_RUNNER: '1'
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '3000'
+      VLLM_ENGINE_READY_TIMEOUT_S: '4800'
+      ASCEND_GLOBAL_RESOURCE_CONFIG: '{"comm_resource_config.protocol_desc":["roce:device"]}'
+      HCCL_CONNECT_TIMEOUT: '600'
+      ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7
+      PYTHONUNBUFFERED: '1'
+    hardware_overrides:
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1
+        install:
+          pip: false
+
+presets:
+  ascend_a2_w4a8_pd:
+    label: A2 W4A8 1P1D (TP4xPP2 prefill)
+    hardware: ascend_910b
+    strategy: pd_cluster
+    variants:
+      - ascend_w4a8
+    workload: Prefill/decode disaggregation, 141312 context, MTP
+    default: true
+    description: >-
+      One node per pool. A PD pool sized with parallelism tp/tep is the whole node (TP8),
+      so the prefill role appends --tensor-parallel-size 4 and --pipeline-parallel-size 2
+      after the pool's own TP8 (later flags win) to render the verified TP4 x PP2 prefill
+      layout. The decode role is DEP with TP2 x DP4; its --data-parallel-size-local and the
+      external DP coordinator flags are dropped because both pools run one `vllm serve`
+      per node, exactly as verified.
+    select:
+      frontend: python
+    roles:
+      prefill:
+        nodes: 1
+        parallelism: tep
+        args:
+          - '--tensor-parallel-size'
+          - '4'
+          - '--pipeline-parallel-size'
+          - '2'
+          - '--engram-config'
+          - '{"cpu_offload":true,"dp_shared_memory":false}'
+          - '--compilation-config'
+          - '{"cudagraph_mode":"NONE"}'
+          - '--additional-config'
+          - '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}'
+        json_args:
+          --kv-transfer-config:
+            kv_connector: MooncakeConnectorV2
+            kv_role: kv_producer
+            kv_load_failure_policy: null
+            kv_port: '55220'
+            kv_connector_extra_config:
+              prefill:
+                dp_size: 1
+                tp_size: 4
+                pp_size: 2
+              decode:
+                dp_size: 4
+                tp_size: 2
+        env:
+          HCCL_BUFFSIZE: '8192'
+          HCCL_NPU_SOCKET_PORT_RANGE: 61400-61499
+          VLLM_HOST_IP: 80.48.37.161
+          HCCL_IF_IP: 80.48.37.161
+          HCCL_SOCKET_IFNAME: enp189s0f0
+          GLOO_SOCKET_IFNAME: enp189s0f0
+          TP_SOCKET_IFNAME: enp189s0f0
+          no_proxy: localhost,127.0.0.1,80.48.37.161,80.48.37.162
+          NO_PROXY: localhost,127.0.0.1,80.48.37.161,80.48.37.162
+      decode:
+        nodes: 1
+        parallelism: dep
+        args:
+          - '--tensor-parallel-size'
+          - '2'
+          - '--data-parallel-size'
+          - '4'
+          - '--engram-config'
+          - '{"cpu_offload":true,"dp_shared_memory":true}'
+          - '--compilation-config'
+          - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+          - '--additional-config'
+          - '{"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}'
+        remove_args:
+          - '--data-parallel-size-local'
+          - '--data-parallel-start-rank'
+          - '--data-parallel-address'
+          - '--data-parallel-rpc-port'
+        json_args:
+          --speculative-config:
+            enforce_eager: false
+          --kv-transfer-config:
+            kv_connector: MooncakeConnectorV2
+            kv_role: kv_consumer
+            kv_load_failure_policy: null
+            kv_port: '56010'
+            kv_connector_extra_config:
+              prefill:
+                dp_size: 1
+                tp_size: 4
+                pp_size: 2
+              decode:
+                dp_size: 4
+                tp_size: 2
+        env:
+          HCCL_BUFFSIZE: '512'
+          HCCL_NPU_SOCKET_PORT_RANGE: 61500-61599
+          VLLM_HOST_IP: 80.48.37.162
+          HCCL_IF_IP: 80.48.37.162
+          HCCL_SOCKET_IFNAME: enp189s0f0
+          GLOO_SOCKET_IFNAME: enp189s0f0
+          TP_SOCKET_IFNAME: enp189s0f0
+          no_proxy: localhost,127.0.0.1,80.48.37.161,80.48.37.162
+          NO_PROXY: localhost,127.0.0.1,80.48.37.161,80.48.37.162
+
+hardware_notes:
+  ascend_910b:
+    title: Two-node A2 needs v0.32.0rc1 and 128g of shm
+    body: >-
+      Verified on two Atlas A2 servers (Atlas 800T A2 with 8 x Ascend 910B3 and
+      Atlas 800I A2 with 8 x Ascend 910B4-1, 64 GB HBM per NPU) with 1P1D disaggregation.
+      Pin quay.io/ascend/vllm-ascend:v0.32.0rc1 and start each container with
+      --shm-size 128g: at 32g, registering Engram's >20 GiB shared-memory file fails
+      (vLLM error 107017). The KV plane rides RoCE over the
+      NPU NICs (ASCEND_GLOBAL_RESOURCE_CONFIG, protocol_desc roce:device) and needs
+      VLLM_HOST_IP/HCCL_IF_IP plus GLOO/TP/HCCL_SOCKET_IFNAME pinned to each node's
+      business interface. In a generated `docker run` line, keep the
+      ASCEND_GLOBAL_RESOURCE_CONFIG value quoted (`-e ASCEND_GLOBAL_RESOURCE_CONFIG='…'`):
+      it is JSON, and an unquoted copy loses its inner double quotes in the shell.
+      A PD pool cannot express pipeline parallelism through
+      parallelism tp/tep/dep, so the default preset appends TP4 + PP2 after the pool's
+      own TP8; later flags win. Because the prefill pool is PP2, unset any
+      VLLM_PP_LAYER_PARTITION your launch wrapper exports. The Ascend guide
+      below carries the exact commands for both nodes.
+    link:
+      label: Ascend deployment
+      href: '#ascend-deployment'
+
+guide_sections:
+  ascend: |
+    ### Huawei Ascend A2 — two-node 1P1D (vLLM Ascend)
+
+    Verified end-to-end on two Atlas A2 servers (Atlas 800T A2 with 8 x Ascend 910B3,
+    Atlas 800I A2 with 8 x Ascend 910B4-1; 64 GB HBM per NPU) with vLLM Ascend 0.32.0rc1
+    from `quay.io/ascend/vllm-ascend:v0.32.0rc1`, one `vllm serve` process per node.
+    Prefill runs TP4 x PP2 x DP1 x EP4 on the first node, decode runs TP2 x DP4 x EP8
+    on the second. KV moves over `MooncakeConnectorV2` in p2p mode — no HBM/DRAM/SSD KV
+    pool. MTP (3 speculative tokens) is on for both pools; engram keeps the 51B N-gram
+    embedding table in host memory, which is what lets the checkpoint fit in
+    8 x 64 GB per node.
+
+    The weights are the ModelScope build `Eco-Tech/Qwen3.8-Flash-Next-w4a8`.
+    `VLLM_USE_MODELSCOPE=True` with the repo id works, and so does a local copy — mount
+    it into the container and pass the in-container path to `vllm serve`.
+
+    If you pull from ModelScope, mount its cache out of the container:
+    `-v ~/.cache/modelscope:/root/.cache/modelscope`, or set `MODELSCOPE_CACHE` to a
+    mounted path. The site's Docker command only mounts `~/.cache/huggingface`, which
+    ModelScope does not use — without this the ~181 GiB land in the container's
+    writable layer and are downloaded again whenever the container is recreated.
+
+    Create the container on **each** node:
+
+    ```bash
+    docker run -d --name vllm-a2 --network host --shm-size 128g \
+      --security-opt label=disable --security-opt seccomp=unconfined --ulimit memlock=-1 \
+      --device=/dev/davinci{0,1,2,3,4,5,6,7} \
+      --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc \
+      -v /usr/local/dcmi:/usr/local/dcmi:ro \
+      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
+      -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
+      -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
+      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info:ro \
+      -v /etc/hccn.conf:/etc/hccn.conf:ro \
+      quay.io/ascend/vllm-ascend:v0.32.0rc1 sleep infinity
+    ```
+
+    **Keep `--shm-size 128g`. If you start from the recipe page's Docker tab instead,
+    change its `--shm-size=16g` to `--shm-size=128g`** — that 16g is a generic Ascend
+    default and is far too small: engram registers 24-48 GiB of host shared memory
+    during startup, so at 16g both pools die in engram initialization with vLLM
+    error 107017, and the prefill pool already fails at 32g. `--ulimit memlock=-1` is a
+    cheap safeguard for that host-memory pinning in an unprivileged container, not a
+    hard requirement.
+    `/etc/hccn.conf` carries the per-NPU RoCE address/netmask the PD path uses, and the
+    image ships no copy of its own. The site's Docker tab does not mount it — if you
+    take that command, add `-v /etc/hccn.conf:/etc/hccn.conf:ro`.
+
+    The Docker command also carries `-e VLLM_NIXL_SIDE_CHANNEL_PORT` (5557 on the
+    prefill node, 5558 on the decode node) and `-e VLLM_NIXL_SIDE_CHANNEL_HOST`
+    (`$PREFILL_NODE_1` / `$DECODE_NODE_1`). The site emits them because its PD
+    connector row defaults to NIXL, but this deployment overrides the connector with
+    `--kv-transfer-config ... "MooncakeConnectorV2"`, and only the NIXL connector reads
+    those two variables — so they are inert here and can be left alone, including the
+    `$PREFILL_NODE_1` placeholder if your tooling never substitutes it.
+
+    Inside the container, on both nodes:
+
+    ```bash
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh
+    [ -f /usr/local/Ascend/nnal/atb/set_env.sh ] && source /usr/local/Ascend/nnal/atb/set_env.sh
+    unset ftp_proxy FTP_PROXY https_proxy HTTPS_PROXY http_proxy HTTP_PROXY all_proxy ALL_PROXY
+    unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
+    unset VLLM_PP_LAYER_PARTITION
+
+    export VLLM_USE_MODELSCOPE=True
+    export VLLM_USE_V2_MODEL_RUNNER=1
+    export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+    export VLLM_ENGINE_READY_TIMEOUT_S=4800
+    export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["roce:device"]}'
+    export HCCL_CONNECT_TIMEOUT=600
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+    export PYTHONUNBUFFERED=1
+    cd /workspace          # static-kernel cache root is <cwd>/static_kernel_compile_outputs
+    ```
+
+    The `CUDA_VISIBLE_DEVICES=0,1,...,7` in the rendered Docker command is a generic GPU
+    pin and is ignored on Ascend — vLLM-Ascend only reads `ASCEND_RT_VISIBLE_DEVICES`.
+    To run the engines on a subset of devices, change `ASCEND_RT_VISIBLE_DEVICES`
+    (the exports above and the Docker `-e`), not `CUDA_VISIBLE_DEVICES`.
+
+    The Docker command on the recipe page already sets the six communication variables
+    below, with the values from the verified lab nodes. **Those values are examples:
+    change each one to your own node's address or NIC name, and use the per-node value
+    on the two nodes** (the prefill node in the example is 80.48.37.161, the decode
+    node 80.48.37.162):
+
+    - `VLLM_HOST_IP` — the address this engine advertises to its peer over the KV
+      handshake channel; the peer connects back to exactly this address.
+    - `HCCL_IF_IP` — the address HCCL binds for inter-node collectives; it has to be an
+      address of the NIC named below.
+    - `HCCL_SOCKET_IFNAME` — the NIC HCCL opens its sockets on.
+    - `GLOO_SOCKET_IFNAME` — the NIC PyTorch Gloo uses for host-side collectives.
+    - `TP_SOCKET_IFNAME` — the NIC torch's own socket layer binds; the vLLM Ascend
+      multi-node PD tutorial exports it on every node.
+    - `no_proxy` / `NO_PROXY` — both node addresses, so the two engines' traffic to
+      each other never goes through an HTTP proxy the host may set.
+
+    Left unset, vLLM falls back to probing the default-route address and CANN picks a
+    NIC by itself. That is fine on a single-homed node but wrong on a multi-homed one
+    (the verified nodes have two NICs up), and the failure only shows up later, as a
+    handshake timeout between the two pools — not at startup. If you build the
+    container yourself instead of taking the recipe's Docker command, export the same
+    values before `vllm serve`.
+
+    Both engines run `--max-model-len 141312`; the model supports up to 262144 tokens.
+
+    **Prefill node** (HTTP :8001, KV producer :55220):
+
+    ```bash
+    export HCCL_BUFFSIZE=8192
+    export HCCL_NPU_SOCKET_PORT_RANGE=61400-61499
+
+    vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8 \
+      --host 0.0.0.0 --port 8001 \
+      --served-model-name qwen38-flash-next-a2-pd \
+      --enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3 \
+      --trust-remote-code --quantization ascend \
+      --tensor-parallel-size 4 --pipeline-parallel-size 2 \
+      --data-parallel-size 1 --enable-expert-parallel \
+      --max-model-len 141312 --max-num-seqs 32 --max-num-batched-tokens 8192 \
+      --gpu-memory-utilization 0.90 \
+      --enable-prefix-caching --mamba-cache-mode align --async-scheduling \
+      --engram-config '{"cpu_offload":true,"dp_shared_memory":false}' \
+      --compilation-config '{"cudagraph_mode":"NONE"}' \
+      --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}' \
+      --additional-config '{"enable_shared_expert_dp":true,"enable_flashcomm1":true,"enable_prefill_mc2":true,"enable_fused_mc2":0,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"ascend_compilation_config":{"fuse_norm_quant":false}}' \
+      --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_producer","kv_port":"55220","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2},"decode":{"dp_size":4,"tp_size":2}}}'
+    ```
+
+    HCCL_BUFFSIZE is 8192 on this node and the NPU socket range 61400-61499.
+
+    **Decode node** (HTTP :8002, KV consumer :56010). This is the only pool that
+    captures graphs, so it is also the only one that compiles static kernels:
+
+    ```bash
+    export HCCL_BUFFSIZE=512
+    export HCCL_NPU_SOCKET_PORT_RANGE=61500-61599
+
+    vllm serve Eco-Tech/Qwen3.8-Flash-Next-w4a8 \
+      --host 0.0.0.0 --port 8002 \
+      --served-model-name qwen38-flash-next-a2-pd \
+      --enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3 \
+      --trust-remote-code --quantization ascend \
+      --tensor-parallel-size 2 --data-parallel-size 4 --enable-expert-parallel \
+      --max-model-len 141312 --max-num-seqs 32 --max-num-batched-tokens 8192 \
+      --gpu-memory-utilization 0.90 \
+      --enable-prefix-caching --mamba-cache-mode align --async-scheduling \
+      --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+      --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":false}' \
+      --additional-config '{"enable_flashcomm1":true,"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"scheduler_config":{"recompute_scheduler_enable":true},"ascend_compilation_config":{"fuse_norm_quant":false,"enable_npugraph_ex":true,"enable_static_kernel":true,"enable_super_kernel":false}}' \
+      --kv-transfer-config '{"kv_connector":"MooncakeConnectorV2","kv_role":"kv_consumer","kv_port":"56010","kv_connector_extra_config":{"prefill":{"dp_size":1,"tp_size":4,"pp_size":2},"decode":{"dp_size":4,"tp_size":2}}}'
+    ```
+
+    Both nodes use the same `kv_connector_extra_config`; it advertises the pool shapes
+    (prefill dp1/tp4/pp2, decode dp4/tp2), so keep it in sync with the tp/pp/dp flags
+    on both sides.
+
+    Start decode first: its static-kernel compile makes it the slow node — about
+    60-70 minutes, against about 13 for prefill. Do not count on a warm cache; the
+    verified run got no reuse on a restart.
+
+    Put the vLLM PD proxy in front, on either node, and send requests to :8000:
+
+    ```bash
+    python3 /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py \
+      --host 0.0.0.0 --port 8000 \
+      --prefiller-hosts <prefill-node-ip> --prefiller-ports 8001 \
+      --decoder-hosts <decode-node-ip> --decoder-ports 8002
+    ```
+
+    8001 / 8002 are the site defaults for PD pools, and the `vllm-router` command it
+    renders points at `:8001` / `:8002`. The daemons themselves take whatever endpoints
+    you pass, so if you change `--port`, update the frontend's endpoints to match. With
+    `vllm-router` instead of this proxy, also pass `--intra-node-data-parallel-size 4`:
+    its default of 8 describes a TP8 pool, while this decode pool is DP4 x TP2 in one
+    process. The proxy does not need it.
+
+    ```bash
+    curl -s http://127.0.0.1:8000/v1/chat/completions \
+      -H 'Content-Type: application/json' \
+      -d '{"model":"qwen38-flash-next-a2-pd","messages":[{"role":"user","content":"Hello"}],"max_tokens":16}'
+    ```
+
+    `--reasoning-parser qwen3` matters: thinking mode is the default and the chat
+    template seeds the assistant turn with `<think>`, so without the parser the
+    reasoning block lands in `message.content`.
