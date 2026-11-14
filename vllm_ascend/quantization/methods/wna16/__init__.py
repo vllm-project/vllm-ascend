@@ -19,9 +19,11 @@
 from .w4a16 import AscendW4A16FusedMoEMethod
 from .w4a16_mxfp4 import AscendW4A16MXFP4FusedMoEMethod
 from .w8a16 import AscendW8A16LinearMethod
+from .w8a16_fp8 import AscendW8A16FP8FusedMoEMethod
 
 __all__ = [
     "AscendW4A16FusedMoEMethod",
     "AscendW4A16MXFP4FusedMoEMethod",
     "AscendW8A16LinearMethod",
+    "AscendW8A16FP8FusedMoEMethod",
 ]
