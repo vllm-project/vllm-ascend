@@ -18,7 +18,7 @@ def test_prepared_routing_preserves_embedding_and_engram_ids(monkeypatch, dtype,
     routed, mask = model.prepare_moe_routing_inputs(ids, SimpleNamespace(image_sentinel_base_id=image_lo))
     torch.testing.assert_close(ids, original)
     assert routed.data_ptr() != ids.data_ptr()
-    assert routed.dtype == dtype
+    assert routed.dtype == torch.int64
     assert routed.tolist() == [-2, 0, 0, 7, image_lo - 1, image_lo, image_lo + 4, image_lo + 5]
     assert mask.tolist() == [False, False, False, False, False, True, True, False]
 

@@ -117,7 +117,8 @@ def prepare_moe_routing_inputs(
         HardwareCapability.MOE_GATING_TOP_K_HASH_VISION
     ):
         return input_ids, None
-    routing_input_ids = torch.where(input_ids == -1, 0, input_ids)
+    # The router consumes int64 IDs; convert once rather than in every layer.
+    routing_input_ids = torch.where(input_ids == -1, 0, input_ids).to(torch.int64)
     image_lo = getattr(config, "image_sentinel_base_id", DEEPSEEK_V4_IMAGE_SENTINEL_BASE_ID)
     image_mask = (routing_input_ids >= image_lo) & (routing_input_ids < image_lo + DEEPSEEK_V4_IMAGE_SENTINEL_COUNT)
     return routing_input_ids, image_mask
