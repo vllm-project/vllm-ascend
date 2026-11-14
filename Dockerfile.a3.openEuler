@@ -144,4 +144,6 @@ RUN case "${TARGETPLATFORM:-$(uname -m)}" in \
 #     python3 -m pip install /tmp/torch_npu/torch_npu-2.10.0*_"$
 #     python3 -m pip cache purge
 
+RUN bash /vllm-workspace/vllm-ascend/tools/fix_runtime_permissions.sh
+
 CMD ["/bin/bash"]
