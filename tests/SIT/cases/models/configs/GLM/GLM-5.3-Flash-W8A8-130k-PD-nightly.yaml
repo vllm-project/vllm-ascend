@@ -1,5 +1,6 @@
-# GLM-5.3-Flash W8A8 1010-V2 MooncakeConnectorV2 PD separation testing
-test_name: "GLM-5.3-Flash-W8A8-1010-V2-1M-PD"
+# A3 ordinary PD serving parameters follow docs/source/tutorials/models/GLM5.3-Flash.md (Section 5.3).
+# Keep the historical 16K GSM8K performance and AIME2025 accuracy workloads below.
+test_name: "GLM-5.3-Flash-W8A8-130k-PD"
 model: "Eco-Tech/GLM-5.3-Flash-w8a8"
 num_nodes: 2
 npu_per_node: 16
@@ -13,8 +14,8 @@ routing:
 
 config:
   - node_index: 0
-    port_start: 7100
-    dp_rpc_port: 12321
+    port_start: 9081
+    dp_rpc_port: 12325
     dp_size: 2
     dp_size_local: 2
     dp_rank_start: 0
@@ -23,8 +24,8 @@ config:
     dp_address: "${NODE_0_IP}"
 
   - node_index: 1
-    port_start: 7100
-    dp_rpc_port: 12321
+    port_start: 9900
+    dp_rpc_port: 12325
     dp_size: 8
     dp_size_local: 8
     dp_rank_start: 0
@@ -49,7 +50,6 @@ templates:
     envs:
       <<: *env_common
     server_cmd_template:
-      - --enforce-eager
       - --host
       - "0.0.0.0"
       - --port
@@ -67,38 +67,46 @@ templates:
       - --prefill-context-parallel-size
       - ${CP_SIZE}
       - --enable-expert-parallel
+      - --enable-eplb
+      - --eplb-config
+      - '{"window_size": 3000, "step_interval": 3000, "num_redundant_experts": 0, "use_async": true, "policy": "stair", "communicator": "hixl"}'
       - --seed
       - "1024"
+      - --served-model-name
+      - ${MODEL}
       - --safetensors-load-strategy
       - "prefetch"
       - --max-num-seqs
-      - "64"
+      - "32"
       - --max-model-len
       - "1048576"
       - --max-num-batched-tokens
-      - "4096"
+      - "16384"
       - --trust-remote-code
       - --quantization
       - "ascend"
       - --limit-mm-per-prompt
-      - '{"image": 7, "video": 0}'
+      - '{"image": 1}'
       - --gpu-memory-utilization
       - "0.92"
       - --tool-call-parser
       - "glm47"
       - --reasoning-parser
-      - "glm45"
+      - "glm47"
       - --enable-auto-tool-choice
       - --kv-cache-dtype
       - "int8"
-      - --prefix_cache_retention_interval
+      - --prefix-cache-retention-interval
       - "None"
+      - --enforce-eager
+      - --mamba-ssm-cache-dtype
+      - "bfloat16"
       - --speculative-config
-      - '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
-      - --additional_config
-      - '{"enable_flashcomm1": true, "enable_prefill_mc2": true, "enable_fused_mc2": 1, "enable_shared_expert_dp": true, "multistream_overlap_shared_expert": false}'
+      - '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": false}'
+      - --additional-config
+      - '{"enable_shared_expert_dp": true, "enable_fused_mc2": 2}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "kv_port": "36680", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 1}, "decode": {"dp_size": 8, "tp_size": 2}}}'
+      - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "engine_id": "0", "kv_port": "36680"}'
 
   - node_index: 1
     envs:
@@ -121,36 +129,40 @@ templates:
       - --enable-expert-parallel
       - --seed
       - "1024"
+      - --served-model-name
+      - ${MODEL}
       - --safetensors-load-strategy
       - "prefetch"
       - --max-num-seqs
-      - "32"
+      - "40"
       - --max-model-len
       - "1048576"
       - --max-num-batched-tokens
-      - "192"
+      - "240"
       - --trust-remote-code
       - --quantization
       - "ascend"
       - --limit-mm-per-prompt
-      - '{"image": 7, "video": 0}'
+      - '{"image": 1}'
       - --gpu-memory-utilization
       - "0.92"
       - --tool-call-parser
       - "glm47"
       - --reasoning-parser
-      - "glm45"
+      - "glm47"
       - --enable-auto-tool-choice
       - --kv-cache-dtype
       - "int8"
+      - --mamba-ssm-cache-dtype
+      - "bfloat16"
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - --speculative-config
-      - '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": false}'
-      - --additional_config
-      - '{"multistream_overlap_shared_expert": true, "enable_shared_expert_dp": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "enable_flashcomm1": true}'
+      - '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": false}'
+      - --additional-config
+      - '{"multistream_overlap_shared_expert": true, "scheduler_config": {"recompute_scheduler_enable": true}, "enable_shared_expert_dp": true, "enable_flashcomm1": true}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "36580", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 1}, "decode": {"dp_size": 8, "tp_size": 2}}}'
+      - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "engine_id": "1", "kv_port": "36580"}'
 
 benchmarks:
   perf_warmup:
