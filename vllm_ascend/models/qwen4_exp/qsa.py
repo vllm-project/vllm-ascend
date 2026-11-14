@@ -723,19 +723,20 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-        """Stagger QSA projections to favor Cube/Vector overlap.
+        """Pipeline Indexer Vector/Cube work against main Cube/Vector work.
 
-        Submit the main QKV Cube work before recording the event consumed by
-        the auxiliary Indexer stream.  The Indexer Cube projection can then
-        overlap with the main stream's fused QKV Vector post-processing,
-        instead of aligning both branches as Cube/Cube followed by
-        Vector/Vector.
+        ``index_qk_proj`` submits dynamic MX quantization followed by its Q/K
+        matmul.  Launch it on the auxiliary stream first, then submit the main
+        QKV projection and fused split/norm/RoPE on the main stream.  This
+        pairs Indexer quantization (Vector) with the main QKV matmul (Cube),
+        followed by the Indexer Q/K matmul (Cube) with main QKV
+        post-processing (Vector).
         """
-        qkv, _ = self.qkv_proj(hidden_states)
         index_query, index_token_k = self._start_indexer_projection(
             hidden_states,
             positions,
         )
+        qkv, _ = self.qkv_proj(hidden_states)
         return qkv, index_query, index_token_k
 
     def forward(
