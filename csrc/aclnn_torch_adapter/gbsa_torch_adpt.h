@@ -56,10 +56,10 @@ at::Tensor npu_generic_block_sparse_attention_metadata(
     return output;
 }
 
-std::tuple<at::Tensor, at::Tensor> npu_generic_block_sparse_attention(
+at::Tensor npu_generic_block_sparse_attention_out(
     const at::Tensor &q, const at::Tensor &k, const at::Tensor &v,
     const at::Tensor &sparse_block_idx, const at::Tensor &sparse_block_count,
-    at::IntArrayRef block_shape,
+    at::IntArrayRef block_shape, at::Tensor &attention_out,
     const c10::optional<at::Tensor> &metadata,
     const c10::optional<at::Tensor> &attn_mask,
     const c10::optional<at::Tensor> &q_dequant_scale,
@@ -98,7 +98,15 @@ std::tuple<at::Tensor, at::Tensor> npu_generic_block_sparse_attention(
         output_dtype = q.scalar_type();
     }
 
-    auto attention_out = at::empty(q.sizes(), q.options().dtype(output_dtype));
+    TORCH_CHECK(attention_out.sizes() == q.sizes(),
+                "attention_out shape must match q");
+    TORCH_CHECK(attention_out.scalar_type() == output_dtype,
+                "attention_out dtype does not match the requested output dtype");
+    TORCH_CHECK(attention_out.device() == q.device(),
+                "attention_out must be on the same device as q");
+    TORCH_CHECK(attention_out.is_contiguous(),
+                "attention_out must be contiguous");
+
     std::vector<int64_t> lse_shape{0};
     if (return_softmax_lse) {
         const auto layout_q_str = std::string(layout_q);
@@ -127,6 +135,50 @@ std::tuple<at::Tensor, at::Tensor> npu_generic_block_sparse_attention(
                  dst_type_max, softmax_precision, win_left, win_right,
                  return_softmax_lse_flag, residual_block_mode,
                  is_consistent_topk, attention_out, softmax_lse);
+    return softmax_lse;
+}
+
+std::tuple<at::Tensor, at::Tensor> npu_generic_block_sparse_attention(
+    const at::Tensor &q, const at::Tensor &k, const at::Tensor &v,
+    const at::Tensor &sparse_block_idx, const at::Tensor &sparse_block_count,
+    at::IntArrayRef block_shape,
+    const c10::optional<at::Tensor> &metadata,
+    const c10::optional<at::Tensor> &attn_mask,
+    const c10::optional<at::Tensor> &q_dequant_scale,
+    const c10::optional<at::Tensor> &k_dequant_scale,
+    const c10::optional<at::Tensor> &v_dequant_scale,
+    const c10::optional<at::Tensor> &p_quant_scale,
+    const c10::optional<at::Tensor> &cu_seqlens_q,
+    const c10::optional<at::Tensor> &cu_seqlens_kv,
+    const c10::optional<at::Tensor> &seqused_q,
+    const c10::optional<at::Tensor> &seqused_kv,
+    const c10::optional<at::Tensor> &block_table,
+    c10::string_view layout_q, c10::string_view layout_kv,
+    int64_t layout_sparse_pattern, double softmax_scale,
+    int64_t mask_mode, int64_t quant_mode, double dst_type_max,
+    int64_t softmax_precision, int64_t win_left, int64_t win_right,
+    bool return_softmax_lse, int64_t residual_block_mode,
+    bool is_consistent_topk,
+    c10::optional<at::ScalarType> attention_out_dtype)
+{
+    at::ScalarType output_dtype;
+    if (attention_out_dtype.has_value()) {
+        output_dtype = attention_out_dtype.value();
+    } else {
+        TORCH_CHECK(quant_mode == GBSA_NO_QUANT,
+                    "attention_out_dtype must be specified when quant_mode != 0");
+        output_dtype = q.scalar_type();
+    }
+    auto attention_out = at::empty(q.sizes(), q.options().dtype(output_dtype));
+    auto softmax_lse = npu_generic_block_sparse_attention_out(
+        q, k, v, sparse_block_idx, sparse_block_count, block_shape,
+        attention_out, metadata, attn_mask, q_dequant_scale, k_dequant_scale,
+        v_dequant_scale, p_quant_scale, cu_seqlens_q, cu_seqlens_kv,
+        seqused_q, seqused_kv, block_table, layout_q, layout_kv,
+        layout_sparse_pattern, softmax_scale, mask_mode, quant_mode,
+        dst_type_max, softmax_precision, win_left, win_right,
+        return_softmax_lse, residual_block_mode, is_consistent_topk,
+        attention_out_dtype);
     return {attention_out, softmax_lse};
 }
 
