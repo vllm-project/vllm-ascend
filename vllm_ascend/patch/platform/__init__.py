@@ -16,6 +16,7 @@
 
 import os
 
+import vllm_ascend.patch.platform.patch_sched_yield 
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_glm53_reasoning  # noqa
 import vllm_ascend.patch.platform.patch_kimi_k31_config  # noqa
