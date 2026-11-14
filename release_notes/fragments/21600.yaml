@@ -1,0 +1,7 @@
+pr: 21600
+entries:
+  - category: bugfix
+    text: >-
+      Stopped synchronous hybrid KVPool load failures from being silently dropped
+      and prevented incompletely loaded requests from being saved. End-to-end
+      synchronous hybrid recovery still requires support in the paired vLLM scheduler.

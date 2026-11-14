@@ -1512,13 +1512,7 @@ class KVPoolWorker(BaseKVPoolWorker):
                 if len(request.block_ids_by_group) == 1:
                     self._invalid_block_ids.update(missing_block_ids)
                 elif missing_block_ids:
-                    logger.error(
-                        "KV load failed for hybrid request %s. "
-                        "Skip invalid-block fallback to avoid scheduler crash. "
-                        "failed_blocks=%s",
-                        request.req_id,
-                        missing_block_ids,
-                    )
+                    self._record_failed_request(request)
             elif ret is None:
                 missing_block_ids = record_failed_blocks(
                     block_id_list_c,
@@ -1527,13 +1521,7 @@ class KVPoolWorker(BaseKVPoolWorker):
                 if len(request.block_ids_by_group) == 1:
                     self._invalid_block_ids.update(missing_block_ids)
                 elif missing_block_ids:
-                    logger.error(
-                        "KV load failed for hybrid request %s. "
-                        "Skip invalid-block fallback to avoid scheduler crash. "
-                        "failed_blocks=%s",
-                        request.req_id,
-                        missing_block_ids,
-                    )
+                    self._record_failed_request(request)
             logger.debug(
                 "KV pool worker backend get returned request=%s token_len=%d groups=%s keys=%d",
                 request.req_id,

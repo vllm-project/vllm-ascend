@@ -89,6 +89,8 @@ _vllm_mock_modules = [
     "vllm.logger",
     "vllm.model_executor",
     "vllm.model_executor.layers",
+    "vllm.model_executor.model_loader",
+    "vllm.model_executor.model_loader.utils",
     "vllm.model_executor.layers.attention",
     "vllm.model_executor.layers.attention_layer_base",
     "vllm.model_executor.layers.linear",
@@ -122,6 +124,7 @@ _vllm_mock_modules = [
     "vllm.v1.request",
     "vllm.v1.serial_utils",
     "vllm.v1.worker",
+    "vllm.v1.worker.mamba_utils",
 ]
 if _MOCK_VLLM_DEPS:
     for _mod_name in _vllm_mock_modules:
