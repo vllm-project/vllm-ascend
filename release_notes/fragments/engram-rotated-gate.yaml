@@ -1,0 +1,7 @@
+# Draft fragment: replace the filename and pr field with the assigned PR number.
+pr: null
+entries:
+  - category: performance
+    text: Fused normalization, gating and residual addition for rotated DeepSeek V4.1 Engram checkpoints on A3, retaining the separate rotation projection.
+    model: deepseek-v4.1
+    hardware: [A3]
