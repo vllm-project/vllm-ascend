@@ -153,7 +153,7 @@ def test_adaptive_draft_uses_its_own_request_count(monkeypatch, local_reqs, dp_r
     kernel = Mock()
     monkeypatch.setattr(dflash_module, "prepare_dflash_inputs_triton", kernel)
     upstream = dspark_module.dflash_speculator
-    monkeypatch.setattr(upstream, "prepare_dflash_inputs", dflash_module.prepare_dflash_inputs_factory(32))
+    monkeypatch.setattr(upstream, "prepare_dflash_inputs", dflash_module.prepare_dflash_inputs)
 
     class InputsPrepared(Exception):
         pass
