@@ -93,13 +93,27 @@ def test_thinking_budget_mixed_generation(monkeypatch, model_name, enforce_eager
                 runner.model.generate(prompt, SamplingParams(thinking_token_budget=invalid), use_tqdm=False)
             assert error.value.parameter == "thinking_token_budget"
             print(json.dumps({"invalid_budget": invalid, "error": str(error.value)}))
-        boundary_outputs = runner.model.generate(
-            [prompt] * 2,
-            [SamplingParams(temperature=0, max_tokens=16, thinking_token_budget=b) for b in [None, 2**64 - 1]],
-            use_tqdm=False,
+        # Compare the same batch positions across budget settings. BF16 model
+        # numerics can produce different greedy tokens in different batch rows,
+        # even when both requests have the budget disabled.
+        boundary_tokens = []
+        for budgets in ([None, None], [None, 2**64 - 1], [2**64 - 1, 2**64 - 1]):
+            boundary_outputs = runner.model.generate(
+                [prompt] * 2,
+                [SamplingParams(temperature=0, max_tokens=16, thinking_token_budget=b) for b in budgets],
+                use_tqdm=False,
+            )
+            boundary_tokens.append([output.outputs[0].token_ids for output in boundary_outputs])
+        assert all(tokens == boundary_tokens[0] for tokens in boundary_tokens[1:])
+        print(
+            json.dumps(
+                {
+                    "transport_upper_bound": 2**64 - 1,
+                    "nonbinding_output_equal": True,
+                    "boundary_token_ids": boundary_tokens,
+                }
+            )
         )
-        assert boundary_outputs[0].outputs[0].token_ids == boundary_outputs[1].outputs[0].token_ids
-        print(json.dumps({"transport_upper_bound": 2**64 - 1, "nonbinding_output_equal": True}))
         for temperature in [0.0, 0.6]:
             params = [
                 SamplingParams(
