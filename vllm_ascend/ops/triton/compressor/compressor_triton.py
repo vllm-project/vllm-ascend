@@ -214,7 +214,7 @@ def _pooled_blocked(
     return pooled
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["total_group_slots", "GROUP_SLOTS_PER_BATCH", "NUM_BATCH", "NUM_CACHE_BLOCKS"])
 def _pool_kernel(
     out_ptr,
     kv_ptr,
@@ -238,7 +238,7 @@ def _pool_kernel(
     NO_PAD: tl.constexpr,
     HAS_PREV_ROWS: tl.constexpr,
     TOKEN_ALIGNED: tl.constexpr = False,
-    NUM_CACHE_BLOCKS: tl.constexpr = 0,
+    NUM_CACHE_BLOCKS=0,
 ):
     pid = tl.program_id(0)
     offs_h = tl.arange(0, HEAD_DIM)
@@ -355,7 +355,7 @@ def _pool_kernel(
 # ============================================================================
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["total_write_slots", "WRITE_SLOTS_PER_BATCH", "NUM_BATCH", "NUM_CACHE_BLOCKS"])
 def _cache_update_kernel(
     kv_ptr,
     score_ptr,
@@ -368,7 +368,7 @@ def _cache_update_kernel(
     CACHE_SIZE: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     PROTECT_NULL: tl.constexpr = False,
-    NUM_CACHE_BLOCKS: tl.constexpr = 0,
+    NUM_CACHE_BLOCKS=0,
 ):
     pid = tl.program_id(0)
     offs_h = tl.arange(0, HEAD_DIM)
