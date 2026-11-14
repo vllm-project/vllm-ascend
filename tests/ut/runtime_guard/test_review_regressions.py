@@ -2337,7 +2337,7 @@ def test_v30_cascade_purges_store_when_all_detectors_disabled():
     RequestGuardStore.reset_for_tests()
     try:
         store = RequestGuardStore.get()
-        store.get_or_create("r1")
+        old_state = store.get_or_create("r1")
         store.append_output_ids("r1", [1, 2])
         store.mark_finished(["r2"], wave=1)
 
@@ -2373,7 +2373,7 @@ def test_v30_cascade_purges_store_when_all_detectors_disabled():
         assert p._kv_dump_jobs == []
         assert p._deferred_kv_dump_jobs == [{"req_id": "kept", "arm_id": "a0"}]
         p.quota.refund.assert_called_once_with(consume_quota=True)
-        p.detectors.clear_finished.assert_any_call("r1")
+        p.detectors.clear_finished.assert_any_call("r1", expected_state=old_state)
     finally:
         RequestGuardStore.reset_for_tests()
 

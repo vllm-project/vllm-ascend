@@ -419,7 +419,7 @@ class RequestGuardStore:
                 if state.finish_mark_wave is None:
                     state.finish_mark_wave = w
 
-    def add_cpu_jobs(self, req_ids: Iterable[str] | None) -> None:
+    def add_cpu_jobs(self, req_ids: Iterable[str] | None, *, expected_states=None) -> None:
         """Pin finished reqs until the after-sample CPU job runs (or is dropped)."""
         if not req_ids:
             return
@@ -429,13 +429,17 @@ class RequestGuardStore:
                     continue
                 rid = str(raw)
                 state = self._by_req.get(rid)
+                if expected_states is not None:
+                    expected = expected_states.get(rid)
+                    if expected is None or (owner := expected()) is None or state is not owner:
+                        continue
                 if state is None:
                     self._discard_reaped_locked(rid)
                     state = RequestGuardState(req_id=rid)
                     self._by_req[rid] = state
                 state.cpu_jobs += 1
 
-    def finish_cpu_jobs(self, req_ids: Iterable[str] | None) -> None:
+    def finish_cpu_jobs(self, req_ids: Iterable[str] | None, *, expected_states=None) -> None:
         if not req_ids:
             return
         with self._lock:
@@ -443,6 +447,10 @@ class RequestGuardStore:
                 if not raw:
                     continue
                 state = self._by_req.get(str(raw))
+                if expected_states is not None:
+                    expected = expected_states.get(str(raw))
+                    if expected is None or state is not expected():
+                        continue
                 if state is not None and state.cpu_jobs > 0:
                     state.cpu_jobs -= 1
 
@@ -552,14 +560,16 @@ class RequestGuardStore:
         if not req_id:
             return None
         rid = str(req_id)
-        if detectors is not None:
-            detectors.clear_finished(rid)
         with self._lock:
             state = self._by_req.pop(rid, None)
             if state is not None:
                 self._finished.discard(rid)
                 self._note_reaped_locked(rid)
             hooks = list(self._on_clear)
+        # Remove shared identity before releasing private detector state. A late
+        # CPU snapshot must not recreate private state in the removal gap.
+        if detectors is not None:
+            detectors.clear_finished(rid, expected_state=state)
         for hook in hooks:
             try:
                 hook(rid)

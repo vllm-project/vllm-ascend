@@ -136,6 +136,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         ascend = runner.ascend_config
         runtime_config: RuntimeConfig = ascend.runtime_config
 
+        self._reap_lock = threading.RLock()
         self.runner = runner
         self.runtime_config = runtime_config
         # Leader materializes JSON once. Non-leaders no-op inside ensure_persisted.
@@ -192,21 +193,27 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
 
     def _rebind_runner(self, runner: Any) -> None:
         """Point nested components at a new runner (same process, rare rebuild)."""
-        if runner is self.runner:
-            return
-        logger.info("[runtime_guard] rebinding processor singleton to a new runner")
-        ascend = runner.ascend_config
-        runtime_config: RuntimeConfig = ascend.runtime_config
-        self.runner = runner
-        self.runtime_config = runtime_config
-        self.action_executor.rebind_runner(runner, runtime_config=runtime_config)
-        self.detectors.rebind_runner(runner)
-        # Tokenizer may differ across runners; force lazy reload.
-        self._tokenizer = None
-        self._tokenizer_failed = False
-        self.action_executor.start()
-        if not self._bus_worker.started:
-            self._bus_worker.start()
+        with self._reap_lock:
+            if runner is self.runner:
+                return
+            logger.info("[runtime_guard] rebinding processor singleton to a new runner")
+            ascend = runner.ascend_config
+            runtime_config: RuntimeConfig = ascend.runtime_config
+            self.runner = runner
+            self.runtime_config = runtime_config
+            self.action_executor.rebind_runner(runner, runtime_config=runtime_config)
+            self.detectors.rebind_runner(runner)
+            # Tokenizer may differ across runners; force lazy reload.
+            self._tokenizer = None
+            self._tokenizer_failed = False
+            self.action_executor.start()
+            if not self._bus_worker.started:
+                self._bus_worker.start()
+
+    def _apply_config_cascade(self, *, prev_needs_sample_hooks: bool) -> None:
+        # Serialize detector reset / IO purge with CPU incident delivery.
+        with self._reap_lock:
+            super()._apply_config_cascade(prev_needs_sample_hooks=prev_needs_sample_hooks)
 
     def shutdown(self) -> None:
         """Stop async workers (process teardown / tests)."""
@@ -395,12 +402,33 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         return int(self.wave_tracker.current_wave())
 
     def _reap_finished_requests(self) -> None:
+        with self._reap_lock:
+            self._reap_finished_requests_locked()
+
+    def _reap_finished_requests_locked(self) -> None:
         """Clear reqs that are finished and drained."""
         store = RequestGuardStore.get()
         wave = self._current_wave()
         reapable = store.list_reapable(current_wave=wave)
         if not reapable:
             return
+        # Flush M4's sub-64-token tail while IO/report context still exists.
+        # Forced reap may have outstanding jobs: Store identities invalidate
+        # late snapshots; never flush a state still being consumed.
+        drained = [rid for rid in reapable if (state := store.get_state(rid)) is not None and not state.cpu_jobs]
+        if len(drained) != len(reapable):
+            logger.warning(
+                "[runtime_guard] forced reap skips terminal M4 check for %d requests with outstanding CPU jobs",
+                len(reapable) - len(drained),
+            )
+        try:
+            for alert in self.detectors.finish_requests(drained):
+                self._handle_alert(alert, detector=self.detectors.get(alert.incident_type))
+        except Exception:
+            # Invalid optional resources must not pin finished Store rows forever.
+            logger.exception("[runtime_guard] terminal token-repeat detect failed; cleaning finished requests")
+        # Tail alerts may arm dump jobs, which now pin the request as usual.
+        reapable = [rid for rid in store.list_reapable(current_wave=wave) if rid in reapable]
         store.clear_many(reapable, detectors=self.detectors)
         self.wave_tracker.discard_many(reapable)
 
@@ -629,7 +657,9 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
                     self._enqueue_after_sample_cpu(snap, wave_by_req)
             self._reap_finished_requests()
 
-        self._soft_fail("check_after_sample", _run)
+        # Keep final output append and CPU pinning atomic against terminal reap.
+        with self._reap_lock:
+            self._soft_fail("check_after_sample", _run)
 
     def _enqueue_after_sample_cpu(
         self,
@@ -639,7 +669,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         """Submit CPU after-sample detect; never run inline on get_output."""
         req_ids_job = [rid for rid in snap.req_ids if rid]
         store = RequestGuardStore.get()
-        store.add_cpu_jobs(req_ids_job)
+        store.add_cpu_jobs(req_ids_job, expected_states=snap.request_states)
 
         def _cpu_job(
             snap: Any = snap,
@@ -648,16 +678,29 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         ) -> None:
             try:
                 for alert in self.detectors.run_after_sample_cpu(snap):
-                    arm_wave = wave_by_req.get(alert.req_id) if alert.req_id else None
-                    self._handle_alert(
-                        alert,
-                        detector=self.detectors.get(alert.incident_type),
-                        arm_wave=arm_wave,
-                    )
+                    # Native work runs outside the reap lock. Recheck ownership
+                    # at delivery: the request may have been reaped/reused since
+                    # detection returned, or disabled while the result waited.
+                    with self._reap_lock:
+                        expected = snap.request_states.get(alert.req_id)
+                        owner = expected() if expected is not None else None
+                        detector = self.detectors.get(alert.incident_type)
+                        if (
+                            owner is None
+                            or store.get_state(alert.req_id) is not owner
+                            or owner.detection_stopped
+                            or getattr(detector, "epoch", None) != snap.detector_epoch
+                        ):
+                            continue
+                        self._handle_alert(
+                            alert,
+                            detector=detector,
+                            arm_wave=wave_by_req.get(alert.req_id),
+                        )
             except Exception:
                 logger.exception("[runtime_guard] after-sample CPU detect failed")
             finally:
-                RequestGuardStore.get().finish_cpu_jobs(req_ids_job)
+                RequestGuardStore.get().finish_cpu_jobs(req_ids_job, expected_states=snap.request_states)
                 self._reap_finished_requests()
 
         queue = self.action_executor.action_queue
@@ -668,7 +711,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
                 "token_repeat may miss this step req_ids=%s",
                 req_ids_job,
             )
-            store.finish_cpu_jobs(req_ids_job)
+            store.finish_cpu_jobs(req_ids_job, expected_states=snap.request_states)
 
 
 # ---- sampling meta debug ----

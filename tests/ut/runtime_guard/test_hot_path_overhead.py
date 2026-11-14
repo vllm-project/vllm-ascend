@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -52,6 +53,7 @@ def _bind(cfg: RuntimeConfig, *, runner: MagicMock | None = None) -> RuntimeGuar
         runner.dp_rank = 0
 
     def _init(self, r):
+        self._reap_lock = threading.RLock()
         self.runner = r
         self.runtime_config = cfg
         self.action_executor = MagicMock()
