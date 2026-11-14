@@ -216,13 +216,17 @@ def _get_computed_blocks(self: KVCacheManager, request: Any, max_cache_hit_lengt
         return blocks, num_new_computed_tokens, shared_prefix_boundary
 
     aligned_hit = num_new_computed_tokens
+    # The core lookup already tightened the bound; a frontier may not widen it
+    # back, or a request that the caller asked to recompute would resume past
+    # the tokens it must recompute.
+    max_cache_hit_length = request.get_max_cache_hit_length(max_cache_hit_length)
     # Always look for a frontier: the first request of a session has no
     # recorded lookup yet, and gating on one would hide every checkpoint.
     extended, num_new_computed_tokens = checkpoints.extend_hit(
         request,
         blocks.blocks,
         num_new_computed_tokens,
-        request.num_tokens - 1,
+        max_cache_hit_length,
     )
     if num_new_computed_tokens != aligned_hit:
         blocks = KVCacheBlocks(extended)

@@ -95,3 +95,55 @@ def test_no_mutable_module_counters():
     assert not hasattr(module, "_DIAG")
     assert not hasattr(module, "_TIME")
     assert not hasattr(module, "_diag_bump")
+
+
+def _bounded_request(num_tokens, prefix_cache_hit_limit=None):
+    class _Request:
+        def __init__(self):
+            self.num_tokens = num_tokens
+            self.prefix_cache_hit_limit = prefix_cache_hit_limit
+            self.request_id = "req"
+
+        def get_max_cache_hit_length(self, bound=None):
+            # Same rule as ``vllm.v1.request.Request``: the last token is always
+            # recomputed and an explicit bound may only tighten, never widen.
+            limits = (self.num_tokens - 1, self.prefix_cache_hit_limit, bound)
+            return min(limit for limit in limits if limit is not None)
+
+    return _Request()
+
+
+def test_frontier_extension_respects_the_caller_bound(monkeypatch):
+    # A frontier longer than the caller's bound must not be resumed into: the
+    # core lookup tightened ``max_cache_hit_length`` and the wrapper has to use
+    # the same value, otherwise tokens the caller asked to recompute come back
+    # as cache hits.
+    module = _module()
+
+    class _Blocks:
+        blocks = ("aligned",)
+
+    class _Checkpoints:
+        def __init__(self):
+            self.max_lengths = []
+
+        def extend_hit(self, request, blocks, hit, max_length):
+            self.max_lengths.append(max_length)
+            return blocks, hit
+
+        def admitted(self, request, num_computed_tokens, blocks, num_external_tokens):
+            pass
+
+    checkpoints = _Checkpoints()
+    manager = SimpleNamespace(checkpoints=checkpoints)
+    monkeypatch.setattr(
+        module,
+        "_original_get_computed_blocks",
+        lambda self, request, max_cache_hit_length=None: (_Blocks(), 8, 0),
+    )
+
+    module._get_computed_blocks(manager, _bounded_request(num_tokens=100), 16)
+    module._get_computed_blocks(manager, _bounded_request(num_tokens=100, prefix_cache_hit_limit=32))
+    module._get_computed_blocks(manager, _bounded_request(num_tokens=100))
+
+    assert checkpoints.max_lengths == [16, 32, 99]
