@@ -1,0 +1,4 @@
+pr: 21883
+entries:
+  - category: bugfix
+    text: Keep the target model's MegaMoe configuration active when loading and validating speculative draft models.
