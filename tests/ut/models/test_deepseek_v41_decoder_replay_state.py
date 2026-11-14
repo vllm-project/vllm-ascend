@@ -253,15 +253,18 @@ def test_decoder_replay_builder_prepares_pcp_rope(state, monkeypatch):
 
 
 @pytest.mark.parametrize("world", [1, 2, 16])
-@pytest.mark.parametrize("actual_tokens", [0, 2])
-def test_replay_metadata_preserves_pcp_layout_contract(state, monkeypatch, actual_tokens, world):
+@pytest.mark.parametrize("num_reqs,actual_tokens", [(0, 0), (1, 0), (1, 2)])
+@pytest.mark.parametrize("batch_max_query_len", [0, 4])
+def test_replay_metadata_preserves_pcp_layout_contract(
+    state, monkeypatch, actual_tokens, world, num_reqs, batch_max_query_len
+):
     state.num_tokens = 2
     state.num_actual_tokens = actual_tokens
     state.config.model_config = SimpleNamespace(max_model_len=16)
     state.slots = torch.arange(64).reshape(2, 32)
     state.replay_pcp_context = SimpleNamespace(global_batch=object()) if world > 1 else None
-    offsets = np.array([0, actual_tokens], dtype=np.int32)
-    state.offsets[:2] = torch.from_numpy(offsets)
+    offsets = np.array([0, actual_tokens][: num_reqs + 1], dtype=np.int32)
+    state.offsets[: num_reqs + 1] = torch.from_numpy(offsets)
     monkeypatch.setattr(replay_mod, "get_cos_and_sin_dsa", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         replay_mod,
@@ -282,14 +285,16 @@ def test_replay_metadata_preserves_pcp_layout_contract(state, monkeypatch, actua
             assert common.slot_mapping.data_ptr() == state.slots[1].data_ptr()
         assert common.num_actual_tokens == actual_tokens
         assert common.num_input_tokens == 2
+        assert common.num_reqs == num_reqs
+        assert common.max_query_len == max(actual_tokens, batch_max_query_len)
         return metadata
 
     state.builders = [(1, ["decoder.swa_cache"], SimpleNamespace(build=build, take_device_metadata_tasks=lambda: []))]
     batch = SimpleNamespace(
-        num_reqs=1,
+        num_reqs=num_reqs,
         seq_lens=torch.tensor([8], dtype=torch.int32),
         seq_lens_np=np.array([8], dtype=np.int32),
-        max_query_len=4,
+        max_query_len=batch_max_query_len,
         attn_state=None,
         is_prefilling_np=np.array([True]),
     )

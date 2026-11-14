@@ -416,7 +416,7 @@ class DecoderReplayState:
         query_start_loc_cpu = torch.from_numpy(offsets)
         seq_lens_cpu = torch.from_numpy(batch.seq_lens_np[:num_reqs])
         is_prefilling = torch.from_numpy(batch.is_prefilling_np[:num_reqs])
-        max_query_len = max(int(np.diff(offsets).max()), batch.max_query_len or 0)
+        max_query_len = max(int(np.diff(offsets).max(initial=0)), batch.max_query_len or 0)
         for group_id, layer_names, builder in self.builders:
             common = AscendCommonAttentionMetadata(
                 query_start_loc=self.offsets[: num_reqs + 1],
