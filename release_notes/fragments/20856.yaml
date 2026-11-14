@@ -1,0 +1,13 @@
+pr: 20856
+entries:
+  - category: bugfix
+    text: >-
+      Reduced excess DRAM reservation in Memcache layerwise KV pooling by sizing
+      each cache group from its registered payload and PP byte origin. Rebuild
+      affected DCP cache objects during upgrade because shard strides can shrink.
+  - category: bugfix
+    text: >-
+      Fixed KV pool layer offsets and layer counts when pipeline and prefill
+      context parallelism are combined, preventing replicas from allocating
+      different object sizes for the same stage key. Clear existing external
+      cache objects before restarting affected deployments.

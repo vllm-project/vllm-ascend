@@ -6,6 +6,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
+from copy import copy
 
 import torch
 import vllm.envs as envs
@@ -162,7 +163,12 @@ class BaseKVPoolWorker(ABC):
         self.pp_layer_offset = 0
         self.total_layers = None
         try:
-            start, _ = model_config.get_layers_start_end_indices(parallel_config)
+            # The model partition API interprets rank as PP x TP, whereas
+            # Ascend workers include PCP in their global rank. Project onto
+            # the actual communication-group stage without mutating the config.
+            stage_config = copy(parallel_config)
+            stage_config.rank = self.pp_rank * self.tp_size + self.tp_rank
+            start, _ = model_config.get_layers_start_end_indices(stage_config)
             self.pp_layer_offset = start
             self.total_layers = model_config.get_total_num_hidden_layers()
         except AttributeError:
@@ -240,7 +246,9 @@ class BaseKVPoolWorker(ABC):
 
     def _init_key_head_config(self, model_config, parallel_config) -> None:
         self.current_layer = 0
-        self.num_layers = model_config.get_num_layers(parallel_config)
+        stage_config = copy(parallel_config)
+        stage_config.rank = self.pp_rank * self.tp_size + self.tp_rank
+        self.num_layers = model_config.get_num_layers(stage_config)
 
         if self.use_mla:
             self.num_kv_head = 1
@@ -556,12 +564,6 @@ class BaseKVPoolWorker(ABC):
         return get_physical_layer_index(layer_name, base_layers)
 
     def _global_group_alloc_size(self, group_id: int) -> int:
-        # GLOBAL region size: per-layer bytes x TOTAL model layers.
-        # Under PP each stage sees a LOCAL group view (non-uniform splits make
-        # the per-stage layer counts differ) but all stages plus the decode
-        # side share ONE region per pool key, so the region must cover the
-        # union of all writers. vllm groups layers by identical cache spec,
-        # so per-layer bytes are uniform within a group.
         gbl = self.group_block_len.get(group_id) or []
         if not gbl:
             return self.page_size_bytes
@@ -573,18 +575,13 @@ class BaseKVPoolWorker(ABC):
         n_local = int(self.group_num_layers.get(group_id, 0))
         if n_local <= 0:
             return sum(gbl)
-        per_layer = (sum(gbl) + n_local - 1) // n_local
-        n_global = max(total_layers, int(self.num_layers), n_local)
-        # Physical cache layers (for example MTP) can extend past the target
-        # model's last layer. Preserve the existing byte origin, but cover the
-        # complete local payload instead of sizing from target layers alone.
-        shard_bytes = max(per_layer * n_global, self._group_pp_byte_offset(group_id) + sum(gbl))
+        shard_bytes = self._group_pp_byte_offset(group_id) + sum(gbl)
         # DCP shard-major layout: ranks sharing head_or_tp_rank (put_step>1,
         # e.g. MLA) hold different context shards of the same logical block
         # and share ONE region, so the region must cover all shards. The
-        # per-shard stride is the group byte total aligned up to the GVA
-        # hugepage size: hybrid DSA groups have non-uniform per-layer bytes,
-        # and an unaligned stride would yield misaligned GVA addresses that
+        # per-shard stride covers the PP origin and group payload, aligned
+        # up to the GVA hugepage size. Hybrid DSA groups have non-uniform
+        # per-layer bytes, and an unaligned stride yields GVA addresses that
         # SDMA rejects. With put_step == 1 every rank owns a distinct region
         # key and no shard separation is needed.
         if self.put_step > 1 and self.dcp_size > 1:
