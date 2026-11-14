@@ -59,7 +59,7 @@ __aicore__ inline void GmmSwigluAswt(GM_ADDR x, GM_ADDR weight, GM_ADDR weightSc
     using Params = typename QGmmKernel::Params;
     using GMMTiling = typename QGmmKernel::GMMTiling;
     GMMTiling gmmParams{gmmSwigluQuantParams_.groupNum, gmmSwigluQuantParams_.groupListType, mmTilingData_.baseM,
-                        mmTilingData_.baseN, mmTilingData_.baseK};
+                        mmTilingData_.baseN, mmTilingData_.baseK, gmmSwigluQuantParams_.isMxWeightNzMultiTensor};
     gmmParams.matmulTiling = &mmTilingData_;
     Params params = {// template shape, gmm shape can not get now
                     {1, 1, 1, 1},

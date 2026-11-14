@@ -203,12 +203,19 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_v2_meta(
 {
 
     auto m = x.sym_size(0);
-    auto n = weight_scale[0].sym_size(weight_scale[0].dim() - 1);
-
+    // quant_mode=2 (MX quant) outputs fp8 with e8m0 scales; other modes output int8 with fp32 scales
+    bool is_mx_quant = quant_mode.has_value() && quant_mode.value() == 2;
+    // MX mode: weight_scale is [.., N, 2] (4D), n is the second-to-last dim; other modes: [.., N], n is last dim
+    auto n = is_mx_quant ? weight_scale[0].sym_size(-2) : weight_scale[0].sym_size(-1);
     c10::SymDimVector output_shape = {m, n / c10::SymInt(2)};
-    c10::SymDimVector scale_shape = {m};
-    at::Tensor output =  at::empty_symint(output_shape, x.options().dtype(at::kChar));
-    at::Tensor output_scale =  at::empty_symint(scale_shape, x.options().dtype(at::kFloat));
+    auto out_scalar_type = is_mx_quant ? at::kFloat8_e4m3fn : at::kChar;
+    auto scale_scalar_type = is_mx_quant ? at::kFloat8_e8m0fnu : at::kFloat;
+    // MX mode: scale shape is [m, ceil(n/2/64), 2]; pertoken mode: scale shape is [m]
+    c10::SymDimVector scale_shape = is_mx_quant
+        ? c10::SymDimVector({m, (n / c10::SymInt(2) + c10::SymInt(63)) / c10::SymInt(64), c10::SymInt(2)})
+        : c10::SymDimVector({m});
+    at::Tensor output =  at::empty_symint(output_shape, x.options().dtype(out_scalar_type));
+    at::Tensor output_scale =  at::empty_symint(scale_shape, x.options().dtype(scale_scalar_type));
 
 
 
