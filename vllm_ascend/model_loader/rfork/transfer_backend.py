@@ -5,6 +5,7 @@
 
 import contextlib
 import math
+import socket
 import threading
 import time
 from bisect import bisect_left, bisect_right
@@ -42,6 +43,16 @@ MAX_TRANSFER_ENGINE_FINALIZE_ATTEMPTS = 10
 TRANSFER_ENGINE_FINALIZE_RETRY_INTERVAL_SEC = 1.0
 TENSOR_LAYOUT_ERROR_EXCERPT_CHARS = 256
 MAX_TRANSFER_ENGINE_RPC_PORT = 65535
+TRANSFER_ENGINE_PORT_ATTEMPTS = 3
+
+
+def _reserve_local_transfer_port(host: str) -> int:
+    """Return a TCP port this process just released for the transfer engine to bind."""
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    wildcard = "::" if family == socket.AF_INET6 else ""
+    with socket.socket(family, socket.SOCK_STREAM) as sock:
+        sock.bind((wildcard, 0))
+        return int(sock.getsockname()[1])
 
 
 def _select_weight_blocks(
@@ -236,40 +247,59 @@ class RForkTransferBackend:
                 "RFork requires the YuanRong TransferEngine, MemoryRegistration, and ErrorCode APIs."
             ) from exc
 
-        engine = TransferEngine()
         host = get_ip()
-        # Port 0 lets the engine bind and hold a port itself (OS-assigned, or within
-        # YuanRong's YR_TE_RPC_PORT_MIN/MAX range); the real port is read back below.
-        endpoint = join_host_port(host, 0)
         device_name = f"npu:{torch.npu.current_device()}"
-        result = engine.initialize(endpoint, "ascend", device_name)
-        if result.is_error():
-            raise RuntimeError(
-                f"YuanRong TransferEngine initialize({endpoint!r}, 'ascend', {device_name!r}) failed: "
-                f"{result.to_string()}"
-            )
-        get_rpc_port = getattr(engine, "get_rpc_port", None)
-        if not callable(get_rpc_port):
-            self._finalize_failed_initialization(engine)
-            raise RuntimeError("RFork requires YuanRong TransferEngine with get_rpc_port support.")
-        try:
-            rpc_port = get_rpc_port()
-        except Exception as exc:
-            self._finalize_failed_initialization(engine)
-            raise RuntimeError(
-                f"YuanRong TransferEngine get_rpc_port() raised for endpoint {endpoint!r}: {exc}"
-            ) from exc
-        if not isinstance(rpc_port, int) or not (0 < rpc_port <= MAX_TRANSFER_ENGINE_RPC_PORT):
-            self._finalize_failed_initialization(engine)
-            raise RuntimeError(
-                f"YuanRong TransferEngine returned an invalid RPC port {rpc_port!r} for endpoint {endpoint!r}."
-            )
-        self.transfer_engine = engine
-        self.transfer_session_id = join_host_port(host, rpc_port)
-        self._memory_registration_cls = MemoryRegistration
-        self._not_ready_error_code = ErrorCode.kNotReady
-        self._not_found_error_code = getattr(ErrorCode, "kNotFound", None)
-        self._is_initialized = True
+        last_failure = "no initialization attempt was made"
+        for attempt in range(TRANSFER_ENGINE_PORT_ATTEMPTS):
+            engine = TransferEngine()
+            # Port 0 lets the engine bind and hold a port itself (OS-assigned, or within
+            # YuanRong's YR_TE_RPC_PORT_MIN/MAX range); the real port is read back below.
+            # Packaged SDK builds reject that endpoint ("targetHostname port should be
+            # positive") and two engines in one process can collide on a per-device port,
+            # so every retry hands the engine a port this process just released.
+            endpoint = join_host_port(host, 0 if attempt == 0 else _reserve_local_transfer_port(host))
+            result = engine.initialize(endpoint, "ascend", device_name)
+            if result.is_error():
+                last_failure = (
+                    f"YuanRong TransferEngine initialize({endpoint!r}, 'ascend', {device_name!r}) failed: "
+                    f"{result.to_string()}"
+                )
+                logger.warning(
+                    "RFork TransferEngine initialization attempt %d/%d failed: %s",
+                    attempt + 1,
+                    TRANSFER_ENGINE_PORT_ATTEMPTS,
+                    last_failure,
+                )
+                self._finalize_failed_initialization(engine)
+                continue
+            get_rpc_port = getattr(engine, "get_rpc_port", None)
+            if not callable(get_rpc_port):
+                self._finalize_failed_initialization(engine)
+                raise RuntimeError("RFork requires YuanRong TransferEngine with get_rpc_port support.")
+            try:
+                rpc_port = get_rpc_port()
+            except Exception as exc:
+                self._finalize_failed_initialization(engine)
+                raise RuntimeError(
+                    f"YuanRong TransferEngine get_rpc_port() raised for endpoint {endpoint!r}: {exc}"
+                ) from exc
+            if not isinstance(rpc_port, int) or not (0 < rpc_port <= MAX_TRANSFER_ENGINE_RPC_PORT):
+                self._finalize_failed_initialization(engine)
+                raise RuntimeError(
+                    f"YuanRong TransferEngine returned an invalid RPC port {rpc_port!r} for endpoint {endpoint!r}."
+                )
+            self.transfer_engine = engine
+            self.transfer_session_id = join_host_port(host, rpc_port)
+            self._memory_registration_cls = MemoryRegistration
+            self._not_ready_error_code = ErrorCode.kNotReady
+            self._not_found_error_code = getattr(ErrorCode, "kNotFound", None)
+            self._is_initialized = True
+            return
+
+        raise RuntimeError(
+            f"YuanRong TransferEngine initialization failed after {TRANSFER_ENGINE_PORT_ATTEMPTS} "
+            f"attempts; last error: {last_failure}"
+        )
 
     @staticmethod
     def _finalize_failed_initialization(engine: Any) -> None:
