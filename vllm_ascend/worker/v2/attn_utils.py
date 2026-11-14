@@ -454,6 +454,7 @@ def build_attn_metadata(
     for_cudagraph_capture: bool = False,
     causal: bool | Mapping[int, bool] = True,
     full_graph_mode: bool = False,
+    has_adaptive_draft_tokens: bool = False,
     skip_ring_state_update: bool | None = None,
     req_ids_tensor: torch.Tensor | None = None,
     token_to_req: torch.Tensor | None = None,
@@ -596,6 +597,7 @@ def build_attn_metadata(
             dcp_local_seq_lens_cpu=dcp_local_seq_lens_cpu,
             pcp_context=pcp_context,
             pcp_cache_group_idx=i if pcp_context is not None else None,
+            has_adaptive_draft_tokens=has_adaptive_draft_tokens,
             **common_attn_metadata_extra_kwargs,
         )
         if common_metadata_callback is not None:

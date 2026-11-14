@@ -1398,3 +1398,59 @@ def test_prepare_attn_uses_promised_varlen_capture_bound(mock_build_attn_metadat
     )
 
     assert mock_build_attn_metadata.call_args.kwargs["max_query_len"] == 9
+
+
+@pytest.mark.parametrize(
+    "adaptive,scheduled_drafts,has_adaptive_draft_tokens",
+    [(True, [5, 0], True), (True, None, False), (False, [5, 0], False)],
+)
+@patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.build_attn_metadata")
+def test_glm_adaptive_batch_marks_device_query_boundaries(
+    mock_build_attn_metadata, adaptive, scheduled_drafts, has_adaptive_draft_tokens
+):
+    state = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="glm5_next_text")),
+            speculative_config=SimpleNamespace(
+                method="mtp", enable_adaptive_verification=adaptive, num_speculative_tokens=5
+            ),
+            num_speculative_tokens=5,
+            parallel_config=SimpleNamespace(),
+        ),
+        max_model_len=32768,
+        num_accepted_tokens_gpu=torch.tensor([5, 1], dtype=torch.int32),
+    )
+    scheduled_decode_tokens = 1 if scheduled_drafts is None else 6
+    live_decode_tokens = 1 if adaptive else scheduled_decode_tokens
+    total_tokens = live_decode_tokens + 8
+    input_batch = SimpleNamespace(
+        num_reqs=2,
+        num_tokens=total_tokens,
+        num_draft_tokens=live_decode_tokens - 1,
+        num_draft_tokens_per_req=None if scheduled_drafts is None else np.array(scheduled_drafts, dtype=np.int32),
+        is_prefilling_np=np.array([False, True]),
+        prefill_runs_as_decode_np=None,
+        idx_mapping=torch.arange(2),
+        num_scheduled_tokens=np.array([scheduled_decode_tokens, 8], dtype=np.int32),
+        query_start_loc=torch.tensor([0, live_decode_tokens, total_tokens], dtype=torch.int32),
+        query_start_loc_np=np.array([0, live_decode_tokens, total_tokens], dtype=np.int32),
+        seq_lens=torch.tensor([9 + live_decode_tokens, 8], dtype=torch.int32),
+        dcp_local_seq_lens=None,
+        seq_lens_np=np.array([9 + scheduled_decode_tokens, 8], dtype=np.int32),
+        positions=None,
+        attn_state=None,
+    )
+
+    AscendMambaHybridModelState._build_attn_metadata_for_batch(
+        state,
+        input_batch=input_batch,
+        cudagraph_mode=CUDAGraphMode.NONE,
+        block_tables=(),
+        slot_mappings=torch.empty(0, dtype=torch.int64),
+        attn_groups=[],
+        kv_cache_config=MagicMock(),
+        for_capture=False,
+        use_pcp_padding=False,
+    )
+
+    assert mock_build_attn_metadata.call_args.kwargs["has_adaptive_draft_tokens"] is has_adaptive_draft_tokens

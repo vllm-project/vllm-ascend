@@ -4,6 +4,7 @@
 
 from vllm_ascend.models.glm5next.ops.state_ops import gather_initial_states, scatter_states
 from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
+from vllm_ascend.ops.triton.kda.fused_recurrent_kda import fused_recurrent_kda_varlen
 from vllm_ascend.ops.triton.kda.output_writeback import write_recurrent_output
 
 KDA_MAX_RECURRENT_TOKENS = 8
@@ -23,27 +24,48 @@ def recurrent_kda(
     lower_bound,
     num_accepted_tokens=None,
     output_buffer=None,
+    *,
+    use_triton=False,
 ):
     """Update the selected VK state slots, including MTP rejection rollback."""
     num_seqs = cu_seqlens.numel() - 1
     state_indices = state_indices[:num_seqs]
     if num_accepted_tokens is not None:
         num_accepted_tokens = num_accepted_tokens[:num_seqs]
-    output = run_recurrent_kda(
-        q,
-        k,
-        v,
-        raw_gate,
-        raw_beta,
-        state,
-        cu_seqlens,
-        state_indices,
-        a_log,
-        dt_bias,
-        lower_bound=lower_bound,
-        beta_is_preprocessed=False,
-        num_accepted_tokens=num_accepted_tokens,
-    )
+    if use_triton:
+        # AscendC bounds accepted_prev by this step's query length. Adaptive
+        # budgets can shrink below accepted_prev; retain the full state row
+        # and let the strided Triton kernel restore its accepted column.
+        output = fused_recurrent_kda_varlen(
+            q,
+            k,
+            v,
+            raw_gate,
+            raw_beta,
+            state,
+            cu_seqlens,
+            state_indices,
+            num_accepted_tokens,
+            a_log,
+            dt_bias,
+            lower_bound,
+        )
+    else:
+        output = run_recurrent_kda(
+            q,
+            k,
+            v,
+            raw_gate,
+            raw_beta,
+            state,
+            cu_seqlens,
+            state_indices,
+            a_log,
+            dt_bias,
+            lower_bound=lower_bound,
+            beta_is_preprocessed=False,
+            num_accepted_tokens=num_accepted_tokens,
+        )
     if output_buffer is not None:
         write_recurrent_output(output, output_buffer, cu_seqlens)
         return output_buffer

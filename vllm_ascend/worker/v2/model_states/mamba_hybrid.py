@@ -40,6 +40,7 @@ from vllm.v1.worker.mamba_utils import (
 )
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend.models.glm5next.adaptive import glm_mtp_adaptive_query_len
 from vllm_ascend.utils import model_uses_kimi_kda, model_uses_kpool_indexer
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
@@ -460,6 +461,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
 
         num_accepted_tokens = None
         num_decode_draft_tokens_cpu = None
+        has_adaptive_draft_tokens = False
         if not for_capture and self.vllm_config.num_speculative_tokens > 0:
             num_accepted_tokens = self.num_accepted_tokens_gpu.new_ones(num_reqs)
             num_accepted_tokens[: input_batch.num_reqs] = self.num_accepted_tokens_gpu[
@@ -468,6 +470,9 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
 
             num_decode_draft_tokens_np = np.full(num_reqs, -1, dtype=np.int32)
             num_draft_tokens_per_req = input_batch.num_draft_tokens_per_req
+            has_adaptive_draft_tokens = (
+                num_draft_tokens_per_req is not None and glm_mtp_adaptive_query_len(self.vllm_config) is not None
+            )
             if num_draft_tokens_per_req is None:
                 num_draft_tokens_per_req = np.zeros(input_batch.num_reqs, dtype=np.int32)
             # Match upstream request-state classification. Adaptive verification
@@ -530,4 +535,5 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             pcp_context=pcp_context,
             full_graph_mode=cudagraph_mode == CUDAGraphMode.FULL,
             for_cudagraph_capture=for_capture,
+            has_adaptive_draft_tokens=has_adaptive_draft_tokens,
         )
