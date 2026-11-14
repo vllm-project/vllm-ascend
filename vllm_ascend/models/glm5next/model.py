@@ -71,6 +71,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
     sequence_parallel_chunk,
+    spec_decode_needs_target_embed,
 )
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
@@ -598,6 +599,8 @@ class Glm5NextDecoderLayer(nn.Module):
 
 @support_torch_compile
 class Glm5NextModel(nn.Module, EagleModelMixin):
+    supports_aux_hidden_states_over_pp = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -629,7 +632,16 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             # Full-MLA config (no kpool sparse indexer): no topk buffer.
             topk_indices_buffer = None
 
-        if get_pp_group().is_first_rank:
+        # DFlash2 is loaded on the last PP stage and shares the target embedding.
+        spec_config = vllm_config.speculative_config
+        needs_dflash2_embedding = (
+            spec_config is not None
+            and spec_config.method == "dflash"
+            and spec_config.draft_model_config is not None
+            and "DFlash2DraftModel" in (spec_config.draft_model_config.architectures or ())
+            and spec_decode_needs_target_embed(vllm_config)
+        )
+        if get_pp_group().is_first_rank or needs_dflash2_embedding:
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
                 config.hidden_size,
@@ -742,8 +754,9 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
-    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
-        if get_pp_group().is_first_rank:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        pp_group = get_pp_group()
+        if pp_group.is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
@@ -765,38 +778,37 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             hidden_states = sp_shard(pad_sequence_parallel_tokens(hidden_states))
 
         aux_hidden_states: list[torch.Tensor] = []
-        # DFlash2 targets are validated as PP=1, so auxiliary layer IDs are
-        # local to this model instance and must not depend on a PP stage offset.
-        for layer_idx, layer in enumerate(self._active_layers):
-            if layer_idx in self.aux_hidden_state_layers:
+        if pp_group.is_first_rank and 0 in self.aux_hidden_state_layers:
+            aux_hidden_state = hidden_states
+            if self.is_sequence_parallel:
+                aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
+            aux_hidden_states.append(aux_hidden_state)
+
+        # EagleModelMixin assigns a boundary snapshot to the preceding stage.
+        # Complete the deferred mHC state before gathering token shards.
+        for layer_idx, layer in enumerate(self._active_layers, start=self.start_layer):
+            hidden_states, residual, post, comb = layer(positions, hidden_states, residual, post, comb)
+            if layer_idx + 1 in self.aux_hidden_state_layers:
                 aux_hidden_state = self._aux_hidden_state(hidden_states, residual, post, comb)
                 if self.is_sequence_parallel:
                     aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
                 aux_hidden_states.append(aux_hidden_state)
-            hidden_states, residual, post, comb = layer(positions, hidden_states, residual, post, comb)
 
-        if not get_pp_group().is_last_rank:
+        if not pp_group.is_last_rank:
             # Ship the deferred mHC state produced by this rank's last layer so
             # the next stage can continue exactly where this one stopped.
             tensors = {"hidden_states": hidden_states, "residual": residual}
             if self.config.mhc:
                 tensors["post"] = post
                 tensors["comb"] = comb
+            tensors.update(self.pack_local_aux_hidden_states(aux_hidden_states))
             return IntermediateTensors(tensors)
-
-        # The mHC inputs are still sequence-parallel shards here. Materialize
-        # the final aux state before gathering the model output so residual,
-        # post, and comb all keep the same rank-local token layout.
-        if self.end_layer in self.aux_hidden_state_layers:
-            final_aux = self._aux_hidden_state(hidden_states, residual, post, comb)
-            if self.is_sequence_parallel:
-                final_aux = sp_all_gather(final_aux)[:full_num_tokens]
-            aux_hidden_states.append(final_aux)
 
         if self.is_sequence_parallel:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
 
         hidden_states = self.norm(hidden_states)
+        aux_hidden_states = self.collect_remote_aux_hidden_states(intermediate_tensors) + aux_hidden_states
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states
