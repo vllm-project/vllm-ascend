@@ -49,14 +49,25 @@ def _swiglu_quant_kernel(
             scale = tl.max(tl.abs(out)).to(tl.float32) / DTYPE_MAX
             # store scale
             tl.store(scale_ptr + row_idx, scale.to(scale_ptr.dtype.element_ty))
-            for col_blk_idx in range(0, HALF_COLS, COL_BLOCK_SIZE):
+            # Slice whole tiles and the remainder separately, so that every
+            # extract_slice stays inside out. A single fixed-size loop would
+            # slice past the end of out on the final partial tile.
+            FULL_COLS: tl.constexpr = (HALF_COLS // COL_BLOCK_SIZE) * COL_BLOCK_SIZE
+            TAIL_COLS: tl.constexpr = HALF_COLS % COL_BLOCK_SIZE
+            for col_blk_idx in range(0, FULL_COLS, COL_BLOCK_SIZE):
                 tmp_out = extract_slice(out, offsets=(col_blk_idx,), sizes=(COL_BLOCK_SIZE,), strides=(1,))
                 tmp_out = (tmp_out.to(tl.float32) / scale).to(x_ptr.dtype.element_ty)
                 tmp_out = tmp_out.cast(tl.int8, overflow_mode="saturate")
 
                 o_offsets = row_idx * HALF_COLS + col_blk_idx + tl.arange(0, COL_BLOCK_SIZE)
-                mask = (col_blk_idx + tl.arange(0, COL_BLOCK_SIZE)) < HALF_COLS
-                tl.store(out_ptr + o_offsets, tmp_out.to(out_ptr.dtype.element_ty), mask=mask)
+                tl.store(out_ptr + o_offsets, tmp_out.to(out_ptr.dtype.element_ty))
+            if TAIL_COLS > 0:
+                tmp_out = extract_slice(out, offsets=(FULL_COLS,), sizes=(TAIL_COLS,), strides=(1,))
+                tmp_out = (tmp_out.to(tl.float32) / scale).to(x_ptr.dtype.element_ty)
+                tmp_out = tmp_out.cast(tl.int8, overflow_mode="saturate")
+
+                o_offsets = row_idx * HALF_COLS + FULL_COLS + tl.arange(0, TAIL_COLS)
+                tl.store(out_ptr + o_offsets, tmp_out.to(out_ptr.dtype.element_ty))
         else:
             # store out
             o_offsets = row_idx * HALF_COLS + tl.arange(0, HALF_COLS)
