@@ -12,7 +12,7 @@ Kimi K2.6 is an open-source, native multimodal agentic model built through conti
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
-This document is validated and written based on **vLLM-Ascend {{ vllm_ascend_version }}**. Kimi-K2.6 was first supported in vLLM-Ascend v0.20.0rc1.
+This document is validated and written based on **vLLM-Ascend {{ vllm_ascend_version }}**. Kimi-K2.6 was first supported in vLLM-Ascend v0.22.1rc1.
 
 ## 2 Supported Features
 
@@ -799,4 +799,4 @@ For common environment, installation, and general parameter issues, please refer
 
 - **Q: What transformer version is required for tool_calls feature?**
 
-  A: For vLLM-Ascend v0.20.0 and earlier versions, transformers must be version 4.57.6 or lower to use the tool_calls feature.
+  A: For vLLM-Ascend versions earlier than v0.21, transformers must be version 4.57.6 or lower to use the tool_calls feature.

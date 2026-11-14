@@ -451,15 +451,38 @@ class QuantizedAllReduceConfig:
 
 @config
 class SharedEngramConfig:
+    """Shared Engram owner and per-rank receive capacity."""
+
     model_config = ConfigDict(extra="forbid")
-    backend: Literal["a3"]
+    backend: Literal["a2", "a3", "a5"]
     endpoint: str
+    capacity: int = 65536
+    library_path: str | None = None
+    listen_port: int | None = None
+    local_comm_res: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_backend_options(cls, data: Any) -> Any:
+        options = data.kwargs if isinstance(data, ArgsKwargs) else data
+        if isinstance(options, dict) and options.get("backend") == "a3":
+            # Serialized dataclasses include the other backend's default fields.
+            defaults = {"capacity": 65536, "library_path": None, "listen_port": None, "local_comm_res": None}
+            if any(name in options and options[name] != default for name, default in defaults.items()):
+                raise ValueError("A3 does not accept A2/A5 shared Engram options")
+        return data
 
     @model_validator(mode="after")
-    def validate_endpoint(self):
+    def _validate(self):
         host, separator, port = self.endpoint.rpartition(":")
         if not separator or not host or not port.isdigit() or not 0 < int(port) < 65536:
             raise ValueError("shared Engram endpoint must be host:port")
+        if not 0 < self.capacity <= 262144:
+            raise ValueError("shared Engram capacity must be in [1, 262144]")
+        if self.listen_port is not None and not 0 < self.listen_port < 65536:
+            raise ValueError("shared Engram listen_port must be in [1, 65535]")
+        if self.listen_port is not None and self.local_comm_res:
+            raise ValueError("listen_port and local_comm_res are mutually exclusive")
         return self
 
 
@@ -773,8 +796,12 @@ class AscendConfig:
     # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        if self.shared_engram is not None and self.shared_engram.backend in ("a2", "a5"):
+            if getattr(vc, "shutdown_timeout", 0) <= 0:
+                raise ValueError("shared_engram requires --shutdown-timeout > 0 to retire reader leases")
+            os.environ.setdefault("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS", "120")
         engram_config = getattr(vc, "engram_config", None)
-        if self.shared_engram is not None:
+        if self.shared_engram is not None and self.shared_engram.backend == "a3":
             if not vc.use_v2_model_runner:
                 raise ValueError("shared_engram requires Model Runner V2")
             if not engram_config or not engram_config.cpu_offload:

@@ -104,6 +104,16 @@ When a PR run is detected (`is_pr_test: true`), the workflow additionally:
 3. Installs all dependencies from source.
 4. Installs the `aisbench` benchmark suite.
 
+## Scheduled Runs
+
+Scheduled nightly runs are dispatched by the external scheduler through
+`workflow_dispatch` with `request_id` empty and `-f drain_pr_runs=true`. Before
+the tests start, the `setup-vars` job force-cancels in-flight PR runs of the
+same workflow so they do not stay ahead of the scheduled run in the
+`npu-scheduler` FIFO queue. The drain is opt-in: a manual dispatch from the
+Actions UI (where `request_id` is also empty) does not cancel PR runs. Without
+`drain_pr_runs=true`, scheduled runs skip the cleanup.
+
 ## Test Matrix Data Source
 
 The set of nightly test cases (their names, runners, test paths, model configs) is
@@ -187,7 +197,7 @@ The `pr-accuracy-group-*` entries only run on `/nightly` (PR-triggered) runs;
 | Test name | Description |
 |-----------|-------------|
 
-**Double-node tests** (`a3.double_node.test_config`, 2-node, run after multi-node):
+**Double-node tests** (`a3.double_node.test_config`, 2-node):
 
 | Test name | Description |
 |-----------|-------------|
@@ -197,10 +207,15 @@ The `pr-accuracy-group-*` entries only run on `/nightly` (PR-triggered) runs;
 
 !!! warning
 
-    The A3 resource pool has a maximum concurrency of **5×16 NPUs**. Multi-node tests
-    run with `max-parallel: 2` to avoid resource exhaustion. Running `/nightly all` on
-    A3 will queue a large number of jobs — prefer targeting specific test names when
-    possible.
+    All multi-node and double-node jobs are submitted at the same time and their LWS
+    pods are queued in FIFO order by the `npu-scheduler`, so the A3 pool may hold more
+    pending jobs than can run concurrently. Running `/nightly all` on A3 will queue a
+    large number of jobs — prefer targeting specific test names when possible.
+
+Multi-node and double-node jobs use the `job_timeout` input of
+`_e2e_nightly_multi_node.yaml`, which defaults to 360 minutes (6h) for nightly
+runs. The test execution itself is bounded by `testcase_timeout`, which
+defaults to 120 minutes (2h).
 
 ### A3-560T workflow (`.github/workflows/schedule_nightly_test_a3_560t.yaml`)
 
