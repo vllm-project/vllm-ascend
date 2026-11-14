@@ -104,6 +104,10 @@ def _refresh_recurrent_gate_bias(layer: nn.Module) -> None:
     """Refresh the FP32 gate constant after loading, never during decode."""
     bias = getattr(layer, "_recurrent_dt_bias_fp32", None)
     if bias is not None and not layer.dt_bias.is_meta:
+        if bias.device != layer.dt_bias.device:
+            # Materialize deferred buffers; same-device reloads keep graph addresses.
+            bias = torch.empty_like(layer.dt_bias, dtype=torch.float32)
+            layer._recurrent_dt_bias_fp32 = bias
         bias.copy_(layer.dt_bias)
 
 
@@ -187,11 +191,15 @@ def _supports_fused_recurrent_gdn() -> bool:
     required = {"use_qk_l2norm_in_kernel", "use_gate_in_kernel", "use_beta_sigmoid_in_kernel", "A_log", "dt_bias"}
     # Hybrid wheels retain the old public wrapper signature while dispatching
     # to the new stable backend. Inspect that selected backend once.
-    from fla_npu.ops import ascendc
+    try:
+        from fla_npu.ops import ascendc
 
-    resolver = getattr(ascendc, "_get_direct_op", None)
-    op = resolver("npu_recurrent_gated_delta_rule") if resolver is not None else recurrent_gated_delta_rule
-    return required.issubset(signature(op).parameters)
+        resolver = getattr(ascendc, "_get_direct_op", None)
+        op = resolver("npu_recurrent_gated_delta_rule") if resolver is not None else recurrent_gated_delta_rule
+        return callable(op) and required.issubset(signature(op).parameters)
+    except (ImportError, AttributeError, RuntimeError, TypeError, ValueError):
+        # An unavailable or uninspectable optional API must not enable fusion.
+        return False
 
 
 def _flatten_recurrent_state_indices(
