@@ -1,0 +1,4 @@
+pr: 21437
+entries:
+  - category: bugfix
+    text: Fixed P-side prefix-cache lookups in the hybrid and layerwise Mooncake KV connectors by truncating the prompt and rebuilding its block hashes before the local cache lookup.

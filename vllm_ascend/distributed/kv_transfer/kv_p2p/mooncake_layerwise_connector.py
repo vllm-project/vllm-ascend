@@ -771,6 +771,10 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
         # request's own blocks, i.e. every transfer group.
         return self._kv_cache_config.transfer_group_ids
 
+    def on_new_request(self, request: "Request") -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.on_new_request(request)
+
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(request, num_computed_tokens)
@@ -953,6 +957,9 @@ class MooncakeLayerwiseConnectorScheduler:
         request._all_token_ids.pop()
         request.num_prompt_tokens -= 1
         request.max_tokens = 1
+        # Request already hashed the full prompt. Rebuild for the shortened one.
+        request.block_hashes.clear()
+        request.update_block_hashes()
         params["_p_side_truncated"] = True
 
     def _trim_hybrid_remote_block_ids(self, block_ids: tuple[list[int], ...], prompt_len: int) -> tuple[list[int], ...]:
@@ -966,6 +973,12 @@ class MooncakeLayerwiseConnectorScheduler:
             else:
                 trimmed_block_ids.append(list(group_block_ids))
         return tuple(trimmed_block_ids)
+
+    def on_new_request(self, request: "Request") -> None:
+        # Use the shortened prompt for the scheduler's first local prefix-cache lookup.
+        params = request.kv_transfer_params
+        if params is not None and params.get("do_remote_decode") and not params.get("do_remote_prefill"):
+            self._truncate_request_for_hybrid_prefill(request)
 
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         """
@@ -995,9 +1008,6 @@ class MooncakeLayerwiseConnectorScheduler:
             assert num_computed_tokens % min(self.block_size) == 0
             count = max(self._hybrid_prefill_token_count(len(request.prompt_token_ids)) - num_computed_tokens, 0)
             return count, count > 0
-
-        if params is not None and params.get("do_remote_decode"):
-            self._truncate_request_for_hybrid_prefill(request)
 
         # No remote prefill for this request.
         return 0, False

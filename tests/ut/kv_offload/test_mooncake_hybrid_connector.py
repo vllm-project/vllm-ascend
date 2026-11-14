@@ -911,6 +911,53 @@ class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
 
         self.assertEqual(transfer_block_ids, (list(range(10)), [100, 101]))
 
+    def _make_truncatable_request(self):
+        request = types.SimpleNamespace(
+            kv_transfer_params={"do_remote_decode": True},
+            prompt_token_ids=[1, 2, 3],
+            prompt_embeds=None,
+            _all_token_ids=[1, 2, 3],
+            num_prompt_tokens=3,
+            max_tokens=16,
+            block_hashes=["old-prompt-hash"],
+        )
+
+        def update_block_hashes():
+            request.block_hashes.append("short-prompt-hash")
+
+        request.update_block_hashes = update_block_hashes
+        return request
+
+    def test_on_new_request_truncates_prefill_and_rebuilds_block_hashes(self):
+        scheduler = self._make_scheduler()
+        scheduler.need_truncate = True
+        request = self._make_truncatable_request()
+
+        # Preemption/reschedule must not drop a second token.
+        scheduler.on_new_request(request)
+        scheduler.on_new_request(request)
+
+        self.assertEqual(request.prompt_token_ids, [1, 2])
+        self.assertEqual(request._all_token_ids, [1, 2])
+        self.assertEqual(request.num_prompt_tokens, 2)
+        self.assertEqual(request.max_tokens, 1)
+        self.assertTrue(request.kv_transfer_params["_p_side_truncated"])
+        # Stale full-prompt hashes must be rebuilt for the shortened prompt.
+        self.assertEqual(request.block_hashes, ["short-prompt-hash"])
+
+    def test_on_new_request_skips_truncation_without_remote_decode(self):
+        scheduler = self._make_scheduler()
+        scheduler.need_truncate = True
+        request = self._make_truncatable_request()
+        request.kv_transfer_params = {"do_remote_prefill": True}
+
+        scheduler.on_new_request(request)
+
+        self.assertEqual(request.num_prompt_tokens, 3)
+        self.assertEqual(request.max_tokens, 16)
+        self.assertNotIn("_p_side_truncated", request.kv_transfer_params)
+        self.assertEqual(request.block_hashes, ["old-prompt-hash"])
+
     def test_request_finished_preserves_group_layout_with_pcp(self):
         scheduler = self._make_scheduler()
         scheduler.group_block_size = [512, 16384, 128]
