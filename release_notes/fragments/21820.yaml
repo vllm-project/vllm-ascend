@@ -11,3 +11,8 @@ entries:
       Removed Qwen QSA output TensorMove launches by writing GBSA directly into
       the graph-owned attention buffer and keeping the output projection outside
       the eager multi-stream core.
+  - category: performance
+    text: >-
+      Reordered the Qwen QSA Indexer auxiliary stream so its dynamic MX
+      quantization overlaps the main QKV matmul and its Q/K matmul overlaps the
+      main split, RMSNorm, and MRoPE post-processing kernel.

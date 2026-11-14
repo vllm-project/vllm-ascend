@@ -44,7 +44,7 @@ def test_indexer_projection_runs_on_auxiliary_stream(monkeypatch) -> None:
     token_k.record_stream.assert_called_once_with(main_stream)
 
 
-def test_qsa_projections_stagger_main_cube_before_indexer() -> None:
+def test_qsa_projections_pipeline_indexer_vector_before_main_cube() -> None:
     launches: list[str] = []
     qkv = Mock()
     index_query = Mock()
@@ -72,7 +72,7 @@ def test_qsa_projections_stagger_main_cube_before_indexer() -> None:
     )
 
     assert actual == (qkv, index_query, index_token_k)
-    assert launches == ["main_qkv", "indexer"]
+    assert launches == ["indexer", "main_qkv"]
 
 
 def test_qsa_core_side_effect_op_writes_graph_output(monkeypatch) -> None:
