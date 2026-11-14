@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 
+import inspect
 from functools import lru_cache, wraps
 
 import torch
@@ -33,6 +34,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculat
 from vllm.model_executor.utils import replace_parameter
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 from vllm.triton_utils import triton
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -49,6 +51,7 @@ from vllm_ascend.ops.gdn_attn_builder import (
     GDNSpecCausalConv1dMetadata,
 )
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
+from vllm_ascend.ops.triton.fla.fused_gdn_prepare import fused_gdn_prepare
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
@@ -56,6 +59,24 @@ from vllm_ascend.ops.triton.mamba.state_index import gather_ssm_states, scatter_
 from vllm_ascend.utils import vllm_version_is
 
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
+
+
+@torch.no_grad()
+def initialize_recurrent_fp32_parameters(layer: nn.Module) -> None:
+    """Keep recurrent-only scalar weights in their native FP32 ABI dtype.
+
+    Qwen creates ``dt_bias`` without an explicit dtype, so model construction
+    under the BF16 default-dtype context leaves it in BF16.  The fused
+    recurrent operator requires both ``A_log`` and ``dt_bias`` in FP32; doing
+    the conversion in its per-layer forward path launches a Cast every step.
+    Normalize the parameters once before weight loading instead.  vLLM's
+    parameter replacement preserves their weight loaders, so checkpoint loads
+    continue to write directly into FP32 storage.
+    """
+    for name in ("A_log", "dt_bias"):
+        parameter = getattr(layer, name, None)
+        if parameter is not None and parameter.dtype != torch.float32:
+            replace_parameter(layer, name, parameter.float())
 
 
 @lru_cache(maxsize=1)
@@ -224,6 +245,143 @@ def _get_recurrent_state_flat_indices(
     return flat_indices
 
 
+@lru_cache(maxsize=1)
+def _supports_recurrent_gdn_fusion() -> bool:
+    """Inspect the published wrapper ABI once, without launching a kernel.
+
+    Older wheels retain the external preprocessing and packed-index path.
+    Do not retry a failed native call: it may already have mutated State.
+    """
+    try:
+        parameters = inspect.signature(recurrent_gated_delta_rule).parameters
+    except (TypeError, ValueError):
+        return False
+    return {
+        "use_qk_l2norm_in_kernel",
+        "use_gate_in_kernel",
+        "use_beta_sigmoid_in_kernel",
+        "allow_neg_eigval",
+        "A_log",
+        "dt_bias",
+    }.issubset(parameters)
+
+
+def _run_recurrent_gdn(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    state: torch.Tensor,
+    *,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    actual_seq_lengths: torch.Tensor | None,
+    state_indices: torch.Tensor,
+    num_accepted_tokens: torch.Tensor | None = None,
+    query_start_loc: torch.Tensor | None = None,
+    recurrent_metadata: GDNSpecCausalConv1dMetadata | None = None,
+) -> torch.Tensor:
+    """Run recurrent GDN with raw gates and request-row checkpoint indices.
+
+    Q/K/V are [1,T,H,128]; a/b are raw projection outputs [T,HV].
+    Keep all metadata request rows, including zero-length graph padding rows.
+    Fusion requires the published fla_npu fused ABI; existing upstream
+    older wheels retain external preprocessing and cached token mappings.
+    """
+    if not _supports_recurrent_gdn_fusion():
+        g, beta = DeviceOperator.fused_gdn_gating(A_log, a.contiguous(), b.contiguous(), dt_bias)
+        query = l2norm_fwd(query.contiguous())
+        key = l2norm_fwd(key.contiguous())
+        flat_indices = None
+        if recurrent_metadata is not None:
+            flat_indices = _get_recurrent_state_flat_indices(
+                recurrent_metadata, state_indices, query.shape[1], query_start_loc
+            )
+        return recurrent_gated_delta_rule(
+            query.squeeze(0),
+            key.squeeze(0),
+            value.squeeze(0).contiguous(),
+            state,
+            g=g.squeeze(0),
+            beta=beta.squeeze(0),
+            scale=key.shape[-1] ** -0.5,
+            actual_seq_lengths=actual_seq_lengths,
+            ssm_state_indices=_flatten_recurrent_state_indices(
+                state_indices,
+                query.shape[1],
+                query_start_loc,
+                flat_indices,
+            ),
+            num_accepted_tokens=num_accepted_tokens,
+        ).unsqueeze(0)
+
+    return _call_fused_recurrent_gdn(
+        query,
+        key,
+        value,
+        state,
+        a=a,
+        b=b,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        actual_seq_lengths=actual_seq_lengths,
+        state_indices=state_indices,
+        num_accepted_tokens=num_accepted_tokens,
+    )
+
+
+def _call_fused_recurrent_gdn(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    state: torch.Tensor,
+    *,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    actual_seq_lengths: torch.Tensor | None,
+    state_indices: torch.Tensor,
+    num_accepted_tokens: torch.Tensor | None,
+) -> torch.Tensor:
+    """Adapt model tensors to the fused native ABI, preserving checkpoint rows.
+
+    The scheduler owns slot allocation and accepted counts. This adapter only
+    selects the metadata rows and converts ABI dtypes; it never reads values
+    back to the CPU or changes which checkpoint is accepted.
+    """
+    assert actual_seq_lengths is not None
+    num_sequences = actual_seq_lengths.shape[0] - 1
+    if state_indices.ndim == 1:
+        state_indices = state_indices.unsqueeze(-1)
+    if state_indices.ndim != 2 or state_indices.shape[0] < num_sequences:
+        raise ValueError("GDN state indices must provide one checkpoint row per metadata request")
+    state_indices = state_indices[:num_sequences].to(torch.int32)
+    if num_accepted_tokens is not None:
+        num_accepted_tokens = num_accepted_tokens[:num_sequences]
+    if A_log.dtype != torch.float32 or dt_bias.dtype != torch.float32:
+        raise TypeError("Fused recurrent GDN requires pre-materialized FP32 A_log and dt_bias")
+    return recurrent_gated_delta_rule(
+        query.squeeze(0),
+        key.squeeze(0),
+        value.squeeze(0),
+        state,
+        g=a,
+        beta=b,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        scale=key.shape[-1] ** -0.5,
+        actual_seq_lengths=actual_seq_lengths,
+        ssm_state_indices=state_indices,
+        num_accepted_tokens=num_accepted_tokens,
+        use_qk_l2norm_in_kernel=True,
+        use_gate_in_kernel=True,
+        use_beta_sigmoid_in_kernel=True,
+        allow_neg_eigval=False,
+    ).unsqueeze(0)
+
+
 def _split_head_first_conv_output(
     output: torch.Tensor, num_k_heads: int, num_v_heads: int
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -243,21 +401,26 @@ def _rearrange_decode_qkv(
     head_k_dim: int,
     head_v_dim: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Expose contiguous token-major Q/K/V without an intermediate concat.
+    """Expose token-major Q/K/V views into the convolution output.
 
-    Multi-token split views can have gaps between rows, so each component
-    still needs its own contiguous buffer. Single-token views need no copy.
+    The fused native ABI preserves token/head strides and storage offsets.
+    Legacy backends materialize their inputs in _run_recurrent_gdn instead.
     """
-    num_tokens = mixed_qkv.shape[0]
     query, key, value = mixed_qkv.split((key_dim, key_dim, value_dim), dim=-1)
+    if mixed_qkv.stride(-1) != 1:
+        query, key, value = (part.contiguous() for part in (query, key, value))
     return (
-        query.contiguous().view(1, num_tokens, key_dim // head_k_dim, head_k_dim),
-        key.contiguous().view(1, num_tokens, key_dim // head_k_dim, head_k_dim),
-        value.contiguous().view(1, num_tokens, value_dim // head_v_dim, head_v_dim),
+        query.unflatten(-1, (key_dim // head_k_dim, head_k_dim)).unsqueeze(0),
+        key.unflatten(-1, (key_dim // head_k_dim, head_k_dim)).unsqueeze(0),
+        value.unflatten(-1, (value_dim // head_v_dim, head_v_dim)).unsqueeze(0),
     )
 
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        initialize_recurrent_fp32_parameters(self)
+
     @torch.no_grad()
     def _pack_conv_weights(self) -> None:
         """Refresh the kernel-layout convolution parameter in place."""
@@ -419,6 +582,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         3. Output projection
         """
         num_tokens = hidden_states.size(0)
+        core_attn_out = None
+        packed_qkvz = None
+        packed_ba = None
         if hasattr(self, "in_proj_qkv"):
             mixed_qkv, _ = self.in_proj_qkv(hidden_states)
             ba, _ = self.in_proj_ba(hidden_states)
@@ -429,17 +595,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             a = a.contiguous()
         else:
             if not self.gqa_interleaved_layout:
-                mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-                num_tokens = mixed_qkvz.size(0)
-                qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
-                z_size = self.value_dim // self.tp_size
-                mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
-                z = z.reshape(z.size(0), -1, self.head_v_dim)
-                ba, _ = self.in_proj_ba(hidden_states)
-                b, a = self._split_ba_for_tp(ba)
-
-                b = b.contiguous()
-                a = a.contiguous()
+                packed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+                packed_ba, _ = self.in_proj_ba(hidden_states)
+                num_tokens = packed_qkvz.size(0)
             else:
                 projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
                 projected_states_ba, _ = self.in_proj_ba(hidden_states)
@@ -457,32 +615,47 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 2: Core Attention (Custom Op)
         # ============================================================
-        # Note: we should not use torch.empty here like other attention backends,
-        # see discussions in https://github.com/vllm-project/vllm/pull/28182
-        core_attn_out = torch.zeros(
-            (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
-
-        torch.ops.vllm.qwen_gdn_attention_core(
-            mixed_qkv,
-            b,
-            a,
-            core_attn_out,
-            self.prefix,
-            False,
-        )
+        if packed_qkvz is not None:
+            assert packed_ba is not None
+            # The packed custom op initializes every row in this buffer before
+            # recurrent GDN writes the live rows, so graph padding remains
+            # deterministic without a separate zero-fill launch.
+            core_attn_out = torch.empty(
+                (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+            torch.ops.vllm.qwen_gdn_packed_attention_core_norm_with_output(
+                packed_qkvz,
+                packed_ba,
+                core_attn_out,
+                self.prefix,
+                False,
+            )
+        else:
+            core_attn_out = torch.zeros(
+                (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+            torch.ops.vllm.qwen_gdn_attention_core_norm_with_output(
+                mixed_qkv,
+                b,
+                a,
+                z,
+                core_attn_out,
+                self.prefix,
+                False,
+            )
 
         # ============================================================
         # Part 3: Output Projection
         # ============================================================
-        z_shape_og = z.shape
-        # Reshape input data into 2D tensor
-        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
-        z = z.reshape(-1, z.shape[-1])
-        core_attn_out = self.norm(core_attn_out, z)
-        core_attn_out = core_attn_out.reshape(z_shape_og)
+        core_attn_out = core_attn_out.reshape(
+            num_tokens,
+            self.num_v_heads // self.tp_size,
+            self.head_v_dim,
+        )
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
         out, _ = self.out_proj(core_attn_out)
         if output is not None:
@@ -495,6 +668,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         b: torch.Tensor,
         a: torch.Tensor,
         core_attn_out: torch.Tensor,
+        z: torch.Tensor | None = None,
     ):
         """
         Core attention computation (called by custom op).
@@ -716,24 +890,19 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(mixed_qkv_non_spec)
 
-        # 2. Recurrent attention
-        g, beta = DeviceOperator.fused_gdn_gating(self.A_log, a, b, self.dt_bias)
+        # 2. Partition raw gate projections along their token dimension.
         if spec_sequence_masks is not None:
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
-                g_spec = g
-                beta_spec = beta
-                g_non_spec = None
-                beta_non_spec = None
+                a_spec, b_spec = a, b
+                a_non_spec, b_non_spec = None, None
             else:
-                g_spec = g.index_select(1, spec_token_indx)
-                beta_spec = beta.index_select(1, spec_token_indx)
-                g_non_spec = g.index_select(1, non_spec_token_indx)
-                beta_non_spec = beta.index_select(1, non_spec_token_indx)
+                a_spec = a.index_select(0, spec_token_indx)
+                b_spec = b.index_select(0, spec_token_indx)
+                a_non_spec = a.index_select(0, non_spec_token_indx)
+                b_non_spec = b.index_select(0, non_spec_token_indx)
         else:
-            g_spec = None
-            beta_spec = None
-            g_non_spec = g
-            beta_non_spec = beta
+            a_spec, b_spec = None, None
+            a_non_spec, b_non_spec = a, b
 
         split_non_spec = (
             spec_sequence_masks is None and attn_metadata.num_prefills > 0 and attn_metadata.num_decodes > 0
@@ -742,38 +911,28 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 2.1: Process the multi-query part
         if spec_sequence_masks is not None:
-            actual_seq_lengths = attn_metadata.spec_decode_metadata.actual_seq_lengths
-            query_spec = l2norm_fwd(query_spec)
-            key_spec = l2norm_fwd(key_spec)
-            core_attn_out_spec = recurrent_gated_delta_rule(
-                query_spec.squeeze(0),
-                key_spec.squeeze(0),
-                value_spec.squeeze(0),
+            core_attn_out_spec = _run_recurrent_gdn(
+                query_spec,
+                key_spec,
+                value_spec,
                 ssm_state,
-                g=g_spec.squeeze(0),
-                beta=beta_spec.squeeze(0),
-                scale=key_spec.shape[-1] ** -0.5,
-                actual_seq_lengths=actual_seq_lengths,
-                ssm_state_indices=_flatten_recurrent_state_indices(
-                    spec_state_indices_tensor,
-                    query_spec.shape[1],
-                    spec_causal_conv1d_meta.query_start_loc,
-                    _get_recurrent_state_flat_indices(
-                        spec_causal_conv1d_meta,
-                        spec_state_indices_tensor,
-                        query_spec.shape[1],
-                        spec_causal_conv1d_meta.query_start_loc,
-                    ),
-                ),
-                num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens.to(torch.int32),
-            ).unsqueeze(0)
+                a=a_spec,
+                b=b_spec,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                actual_seq_lengths=attn_metadata.spec_decode_metadata.actual_seq_lengths,
+                state_indices=spec_state_indices_tensor,
+                num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens,
+                query_start_loc=spec_causal_conv1d_meta.query_start_loc,
+                recurrent_metadata=spec_causal_conv1d_meta,
+            )
         else:
             core_attn_out_spec, last_recurrent_state = None, None
 
         # 2.2: Process non-spec-decode part in mixed non-spec batches
         if split_non_spec:
-            assert g_non_spec is not None
-            assert beta_non_spec is not None
+            assert a_non_spec is not None
+            assert b_non_spec is not None
             if split_conv:
                 assert decode_conv_qkv is not None
                 query_decode, key_decode, value_decode = decode_conv_qkv
@@ -782,22 +941,18 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 key_decode = key_non_spec[:, :num_decode_tokens]
                 value_decode = value_non_spec[:, :num_decode_tokens]
             actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
-            query_decode = l2norm_fwd(query_decode.contiguous())
-            key_decode = l2norm_fwd(key_decode.contiguous())
-            core_attn_out_decode = recurrent_gated_delta_rule(
-                query_decode.squeeze(0),
-                key_decode.squeeze(0),
-                value_decode.squeeze(0),
+            core_attn_out_decode = _run_recurrent_gdn(
+                query_decode,
+                key_decode,
+                value_decode,
                 ssm_state,
-                g=g_non_spec[:, :num_decode_tokens].squeeze(0),
-                beta=beta_non_spec[:, :num_decode_tokens].squeeze(0),
-                scale=key_decode.shape[-1] ** -0.5,
+                a=a_non_spec[:num_decode_tokens],
+                b=b_non_spec[:num_decode_tokens],
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
                 actual_seq_lengths=actual_seq_lengths,
-                ssm_state_indices=_flatten_recurrent_state_indices(
-                    non_spec_state_indices_tensor,
-                    num_decode_tokens,
-                ),
-            ).unsqueeze(0)
+                state_indices=non_spec_state_indices_tensor,
+            )
         else:
             core_attn_out_decode = None
 
@@ -809,15 +964,20 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             assert prefill_query_start_loc is not None
             assert prefill_state_indices is not None
             assert prefill_has_initial_state is not None
-            assert g_non_spec is not None
-            assert beta_non_spec is not None
+            assert a_non_spec is not None
+            assert b_non_spec is not None
             if split_non_spec:
                 if not split_conv:
                     query_non_spec = query_non_spec[:, num_decode_tokens:]
                     key_non_spec = key_non_spec[:, num_decode_tokens:]
                     value_non_spec = value_non_spec[:, num_decode_tokens:]
-                g_non_spec = g_non_spec[:, num_decode_tokens:]
-                beta_non_spec = beta_non_spec[:, num_decode_tokens:]
+                a_non_spec = a_non_spec[num_decode_tokens:]
+                b_non_spec = b_non_spec[num_decode_tokens:]
+
+            # Chunk prefill still consumes precomputed gate and beta tensors.
+            g_non_spec, beta_non_spec = DeviceOperator.fused_gdn_gating(
+                self.A_log, a_non_spec.contiguous(), b_non_spec.contiguous(), self.dt_bias
+            )
 
             # Both fused prefill kernels (torch_npu.npu_chunk_gated_delta_rule and
             # fla_npu's chunk_gated_delta_rule_fwd) only support bfloat16 inputs.
@@ -929,22 +1089,18 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 )
         elif attn_metadata.num_decodes > 0:
             actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
-            query_non_spec = l2norm_fwd(query_non_spec)
-            key_non_spec = l2norm_fwd(key_non_spec)
-            core_attn_out_non_spec = recurrent_gated_delta_rule(
-                query_non_spec.squeeze(0),
-                key_non_spec.squeeze(0),
-                value_non_spec.squeeze(0),
+            core_attn_out_non_spec = _run_recurrent_gdn(
+                query_non_spec,
+                key_non_spec,
+                value_non_spec,
                 ssm_state,
-                g=g_non_spec.squeeze(0) if g_non_spec is not None else g_non_spec,
-                beta=beta_non_spec.squeeze(0) if beta_non_spec is not None else beta_non_spec,
-                scale=key_non_spec.shape[-1] ** -0.5,
+                a=a_non_spec,
+                b=b_non_spec,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
                 actual_seq_lengths=actual_seq_lengths,
-                ssm_state_indices=_flatten_recurrent_state_indices(
-                    non_spec_state_indices_tensor,
-                    num_decode_tokens,
-                ),
-            ).unsqueeze(0)
+                state_indices=non_spec_state_indices_tensor,
+            )
         else:
             core_attn_out_non_spec, last_recurrent_state = None, None
 
@@ -957,9 +1113,92 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
             merged_out.index_copy_(1, spec_token_indx, core_attn_out_spec)
             merged_out.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
-            core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
+            recurrent_out = merged_out.squeeze(0)
         elif spec_sequence_masks is not None:
-            core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
+            recurrent_out = core_attn_out_spec.squeeze(0)
         else:
-            core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
+            recurrent_out = core_attn_out_non_spec.squeeze(0)
+        if z is None:
+            core_attn_out[:num_actual_tokens] = recurrent_out
+        else:
+            # Write the final gated RMSNorm result directly into the stable
+            # graph output. This removes the recurrent-output materialization
+            # while retaining the zero-filled padded tail.
+            self.norm.forward_oot(
+                recurrent_out,
+                z[:num_actual_tokens],
+                out=core_attn_out[:num_actual_tokens],
+            )
         maybe_save_kv_layer_to_connector("", [])
+
+
+def qwen_gdn_attention_core_norm_with_output(
+    mixed_qkv: torch.Tensor,
+    b: torch.Tensor,
+    a: torch.Tensor,
+    z: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+    is_prefill: bool,
+) -> None:
+    layer = get_forward_context().no_compile_layers[layer_name]
+    layer._forward_core(mixed_qkv, b, a, core_attn_out, z=z)
+
+
+def qwen_gdn_attention_core_norm_with_output_fake(
+    mixed_qkv: torch.Tensor,
+    b: torch.Tensor,
+    a: torch.Tensor,
+    z: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+    is_prefill: bool,
+) -> None:
+    return None
+
+
+def qwen_gdn_packed_attention_core_norm_with_output(
+    mixed_qkvz: torch.Tensor,
+    mixed_ba: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+    is_prefill: bool,
+) -> None:
+    layer = get_forward_context().no_compile_layers[layer_name]
+    qkv_width = (layer.key_dim * 2 + layer.value_dim) // layer.tp_size
+    mixed_qkv, z, b, a, _ = fused_gdn_prepare(
+        mixed_qkvz,
+        mixed_ba,
+        qkv_width,
+        layer.num_v_heads // layer.tp_size,
+        layer.head_v_dim,
+        core_attn_out=core_attn_out,
+    )
+    layer._forward_core(mixed_qkv, b, a, core_attn_out, z=z)
+
+
+def qwen_gdn_packed_attention_core_norm_with_output_fake(
+    mixed_qkvz: torch.Tensor,
+    mixed_ba: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+    is_prefill: bool,
+) -> None:
+    return None
+
+
+direct_register_custom_op(
+    op_name="qwen_gdn_attention_core_norm_with_output",
+    op_func=qwen_gdn_attention_core_norm_with_output,
+    fake_impl=qwen_gdn_attention_core_norm_with_output_fake,
+    mutates_args=["core_attn_out"],
+    dispatch_key="PrivateUse1",
+)
+
+direct_register_custom_op(
+    op_name="qwen_gdn_packed_attention_core_norm_with_output",
+    op_func=qwen_gdn_packed_attention_core_norm_with_output,
+    fake_impl=qwen_gdn_packed_attention_core_norm_with_output_fake,
+    mutates_args=["core_attn_out"],
+    dispatch_key="PrivateUse1",
+)

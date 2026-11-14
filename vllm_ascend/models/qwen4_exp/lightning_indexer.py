@@ -194,6 +194,15 @@ def qsa_select_paged_tokens_lightning_v2(
     *,
     num_actual_requests: int | None = None,
     num_actual_tokens: int | None = None,
+    out_initialized: bool = False,
+    prepared_compressed_lengths: torch.Tensor | None = None,
+    prepared_residual_lengths: torch.Tensor | None = None,
+    prepared_score_weights: torch.Tensor | None = None,
+    main_key: torch.Tensor | None = None,
+    main_value: torch.Tensor | None = None,
+    main_key_cache: torch.Tensor | None = None,
+    main_value_cache: torch.Tensor | None = None,
+    main_slot_mapping: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Select QSA groups with native request-batched LightningIndexerV2.
 
@@ -245,15 +254,20 @@ def qsa_select_paged_tokens_lightning_v2(
         raise ValueError("QSA LI V2 output must match query rows, INT32 dtype and device")
     if out is None:
         out = torch.empty((rows, output_width), dtype=torch.int32, device=query.device)
-    out.fill_(-1)
+    if not out_initialized:
+        out.fill_(-1)
     if not live_rows:
         return out
 
     # Metadata uses original-token lengths. Only these two request-sized arrays
     # are materialized; there is no token-wise length or page-table gather.
     lengths = sequence_lengths[:requests]
-    compressed_lengths = lengths.floor_divide(compress_ratio)
-    residual_lengths = lengths.remainder(compress_ratio)
+    if prepared_compressed_lengths is not None and prepared_residual_lengths is not None:
+        compressed_lengths = prepared_compressed_lengths[:requests]
+        residual_lengths = prepared_residual_lengths[:requests]
+    else:
+        compressed_lengths = lengths.floor_divide(compress_ratio)
+        residual_lengths = lengths.remainder(compress_ratio)
     common = dict(
         cu_seqlens_q=query_start_loc[: requests + 1],
         seqused_k=compressed_lengths,
@@ -278,12 +292,15 @@ def qsa_select_paged_tokens_lightning_v2(
         round(math.ldexp(1.0 / math.sqrt(_HEAD_DIM), _LI_V2_WEIGHT_FRACTION_BITS)),
         -_LI_V2_WEIGHT_FRACTION_BITS,
     )
-    weights = torch.full(
-        (live_rows, query.shape[1]),
-        score_weight,
-        dtype=torch.float32,
-        device=query.device,
-    )
+    if prepared_score_weights is not None:
+        weights = prepared_score_weights[:live_rows, : query.shape[1]]
+    else:
+        weights = torch.full(
+            (live_rows, query.shape[1]),
+            score_weight,
+            dtype=torch.float32,
+            device=query.device,
+        )
     groups, _ = lightning_indexer_v2(
         query[:live_rows],
         compressed_key_cache,
@@ -303,5 +320,10 @@ def qsa_select_paged_tokens_lightning_v2(
         compress_ratio,
         token_topk,
         out[:live_rows, :packed_width],
+        key=main_key,
+        value=main_value,
+        key_cache=main_key_cache,
+        value_cache=main_value_cache,
+        slot_mapping=main_slot_mapping,
     )
     return out

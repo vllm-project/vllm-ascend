@@ -146,7 +146,10 @@ class LayerNormFn(torch.autograd.Function):
             x = x.contiguous()
         if z is not None:
             assert z.shape == x_shape_og
-            z = z.reshape(-1, z.shape[-1])
+            # Preserve a token/head/feature view so the NPU kernel can read a
+            # gate embedded in a packed projection without materializing it.
+            if z.ndim != 3 or z.stride(-1) != 1:
+                z = z.reshape(-1, z.shape[-1])
             if z.stride(-1) != 1:
                 z = z.contiguous()
         weight = weight.contiguous()
@@ -209,8 +212,37 @@ class AscendRMSNormGated(RMSNormGated):
     def reset_parameters(self):
         torch.nn.init.ones_(self.weight)
 
-    def forward_oot(self, x, z=None):
+    def forward_oot(self, x, z=None, out=None):
         """If z is not None, we do norm(x) * silu(z) if norm_before_gate, else norm(x * silu(z))"""
+        if out is not None:
+            if out.shape != x.shape:
+                raise ValueError("RMSNormGated output must have the same shape as the input")
+            x_2d = x.reshape(-1, x.shape[-1])
+            if x_2d.stride(-1) != 1:
+                x_2d = x_2d.contiguous()
+            if z is not None:
+                if z.shape != x.shape:
+                    raise ValueError("RMSNormGated gate must have the same shape as the input")
+                if z.ndim != 3 or z.stride(-1) != 1:
+                    z = z.reshape(-1, z.shape[-1])
+                if z.stride(-1) != 1:
+                    z = z.contiguous()
+            out_2d = out.reshape(-1, out.shape[-1])
+            if out_2d.stride(-1) != 1:
+                raise ValueError("RMSNormGated output must be contiguous in its feature dimension")
+            y, _, _ = layer_norm_fwd_npu(
+                x_2d,
+                self.weight.contiguous(),
+                self.bias,
+                self.eps,
+                z=z,
+                group_size=self.group_size,
+                norm_before_gate=self.norm_before_gate,
+                is_rms_norm=True,
+                activation=self.activation,
+                out=out_2d,
+            )
+            return y.reshape(x.shape)
         return LayerNormFn.apply(
             x,
             self.weight,

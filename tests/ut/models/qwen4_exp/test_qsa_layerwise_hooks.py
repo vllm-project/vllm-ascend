@@ -35,7 +35,8 @@ def test_qsa_restores_before_updates_and_opens_prefetch_after_updates(monkeypatc
         raw_key_cache = SimpleNamespace(prefix="raw")
         output_width = 4
 
-        def __call__(self, *args):
+        def __call__(self, *args, **kwargs):
+            del kwargs
             order.append("indexer_update")
             return torch.zeros(2, self.output_width, dtype=torch.int32)
 
