@@ -63,6 +63,7 @@ from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
 )
 from vllm_ascend.ops.linear import AscendColumnParallelLinear
 from vllm_ascend.ops.linear_op import get_parallel_op
+from vllm_ascend.utils import vllm_version_is
 
 # Minimum used by heterogeneous-KV alignment; the final FP8 cache block is 128.
 _MINIMAX_M3_FP8_KV_CACHE_BLOCK_SIZE = 64
@@ -1149,6 +1150,8 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
 class AscendMiniMaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
     """Fused [q | k | v | index_q | index_k] column-parallel GEMM for M3 sparse layers."""
 
+    shard_ids = ("q", "k", "v", "index_q", "index_k")
+
     def __init__(
         self,
         hidden_size: int,
@@ -1181,6 +1184,8 @@ class AscendMiniMaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
             self.num_kv_heads = divide(self.total_num_kv_heads, tp_size)
             self.num_kv_head_replicas = 1
         self.num_index_heads = self.num_kv_heads
+        # #63752: this class bypasses StackedColumnParallelLinear.__init__.
+        self.loaded_shard_ids: dict[str, set[str | int]] = {}
 
         q = self.num_heads * self.head_size
         kv = self.num_kv_heads * self.head_size
@@ -1210,15 +1215,18 @@ class AscendMiniMaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
             return self.custom_op.apply(input_)
         return super().forward(input_)
 
-    def validate_shard_id(self, loaded_shard_id: str | None) -> None:
-        if loaded_shard_id is None:
-            return
-        if loaded_shard_id not in ("q", "k", "v", "index_q", "index_k"):
+    def validate_shard_id(self, shard_id: Any, param: Parameter | None = None) -> bool:
+        if not vllm_version_is("0.33.0"):
+            return super().validate_shard_id(shard_id, param)
+        if shard_id is None:
+            return True
+        if shard_id not in self.shard_ids:
             raise ValueError(
                 "Shard id for AscendMiniMaxM3QKVParallelLinearWithIndexer must be "
                 "one of 'q', 'k', 'v', 'index_q', 'index_k'; got "
-                f"{loaded_shard_id}."
+                f"{shard_id}."
             )
+        return True
 
     def _get_shard_offset_mapping(self, loaded_shard_id: str) -> int | None:
         h = self.head_size
@@ -1247,7 +1255,7 @@ class AscendMiniMaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
         loaded_weight,
         loaded_shard_id: str | None = None,
     ) -> None:
-        self.validate_shard_id(loaded_shard_id)
+        self.validate_shard_id(loaded_shard_id, param)
         assert loaded_shard_id in ("q", "k", "v", "index_q", "index_k")
 
         shard_offset = self._get_shard_offset_mapping(loaded_shard_id)
@@ -1273,7 +1281,7 @@ class AscendMiniMaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
         loaded_weight,
         loaded_shard_id: str | None = None,
     ) -> None:
-        self.validate_shard_id(loaded_shard_id)
+        self.validate_shard_id(loaded_shard_id, param)
         assert loaded_shard_id in ("q", "k", "v", "index_q", "index_k")
         output_dim = getattr(param, "output_dim", None)
         assert output_dim is not None

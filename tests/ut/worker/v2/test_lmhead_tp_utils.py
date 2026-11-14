@@ -349,7 +349,7 @@ def test_propose_uses_request_bounds(draft_mixin, dp_size, pcp_enabled, shared_r
     draft.__dict__.update(make_drafter(mixin).__dict__)
     draft.dp_size = dp_size
     draft.pcp_manager = object() if pcp_enabled else None
-    draft._get_pcp_draft_prefill_metadata = lambda metadata: metadata
+    draft._get_draft_prefill_metadata = lambda metadata: metadata
     batch = SimpleNamespace(num_reqs=2, num_tokens_after_padding=24)
     state = None if shared_reqs is None else SimpleNamespace(num_reqs=shared_reqs)
     assert draft.propose(batch, *([None] * 10), dp_sync_state=state) == "drafted"

@@ -280,8 +280,8 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             and sync_state.uniform_token_count is not None
         ):
             sync_state = replace(sync_state, uniform_token_count=None)
-        if self.pcp_manager is not None:
-            attn_metadata = self._get_pcp_draft_prefill_metadata(attn_metadata)
+        if attn_metadata is not None:
+            attn_metadata = self._get_draft_prefill_metadata(attn_metadata)
         # wrap build_attn_metadata to use Ascend attention metadata building.
         # so we can call super().propose() directly.
         with (
@@ -313,10 +313,10 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             )
 
     @staticmethod
-    def _get_pcp_draft_prefill_metadata(attn_metadata: dict[str, Any]) -> dict[str, Any]:
+    def _get_draft_prefill_metadata(attn_metadata: dict[str, Any]) -> dict[str, Any]:
         """Keep eager draft MLA queries within the target's real decode rows.
 
-        FULL target graphs include query offsets for padded PCP requests. The
+        FULL target graphs include query offsets for padded requests. The
         draft prefill runs outside FULL graphs and MLA slices its query to
         num_decode_tokens, so padding requests must have zero query length.
         Copy only the changed metadata: target graph updates still need the
@@ -439,17 +439,31 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         FIA operator."""
         # vLLM #60335 added `num_speculative_steps` on main.
         with self._lmhead_pad_size_context(capture_num_reqs=num_reqs):
-            super()._generate_draft(
-                num_reqs,
-                num_tokens_padded,
-                attn_metadata,
-                slot_mappings,
-                num_tokens_across_dp,
-                cudagraph_runtime_mode,
-                num_speculative_steps,
-            )
+            if vllm_version_is("0.33.0"):
+                super()._generate_draft(
+                    num_reqs,
+                    num_tokens_padded,
+                    attn_metadata,
+                    slot_mappings,
+                    num_tokens_across_dp,
+                    cudagraph_runtime_mode,
+                    num_speculative_steps,
+                )
+            else:
+                super()._decode(
+                    num_reqs,
+                    num_tokens_padded,
+                    attn_metadata,
+                    slot_mappings,
+                    num_tokens_across_dp,
+                    cudagraph_runtime_mode,
+                    num_speculative_steps,
+                )
         if attn_metadata is not None:
             self._update_decode_attn_metadata(attn_metadata, 1, num_reqs)
+
+    # #60989 invokes _decode through the new shared AR loop.
+    _decode = _generate_draft
 
     def _multi_step_decode(
         self,

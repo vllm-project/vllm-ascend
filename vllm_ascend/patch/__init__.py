@@ -1543,8 +1543,8 @@
 # ** 25. File: worker/patch_eagle_speculator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator.SpeculatorCudaGraphManager`
-#       (named `vllm.v1.worker.gpu.spec_decode.autoregressive.speculator` before
-#       upstream vLLM #60335; both supported lanes use the new path).
+#   2. `vllm.v1.worker.gpu.spec_decode.autoregressive.speculator.SpeculatorCudaGraphManager`
+#       (vLLM main #60989 constructs the decode manager in the shared AR base).
 #    Why:
 #       The shared v2 autoregressive speculative-decoding path (Eagle/MTP) uses
 #       an upstream CUDA graph manager, which is not usable on Ascend.
@@ -1669,6 +1669,8 @@
 #       before device filtering. Preserve the original dictionary and container
 #       types for model bindings and connector registration; remove the old
 #       first-tensor wrapper in patch_attn_utils.py.
+#       Preserve #55688's ReplaySSM tracker collection for inherited scheduler
+#       block copies when the supported upstream exports that collector.
 #    Related PR (if no, explain why):
 #       No upstream PR linked; this adapts Ascend multi-tensor allocations.
 #    Future Plan:
