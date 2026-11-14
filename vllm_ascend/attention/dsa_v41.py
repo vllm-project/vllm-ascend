@@ -30,7 +30,7 @@ from vllm.v1.kv_cache_interface import CircularBufferSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.dsa_v1 import build_dspark_swa_indices, dsv4_dsa_overlap_stream
-from vllm_ascend.attention.utils import notify_dsv41_cache_written
+from vllm_ascend.attention.utils import notify_dsv41_cache_written, wait_for_kv_layer_from_connector
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
@@ -97,6 +97,7 @@ def dsa_v41_write_kv(
     attn = forward_context.no_compile_layers[layer_name]
     metadata = attn.v41_impl._get_layer_metadata(forward_context.attn_metadata)
     hidden_states = hidden_states[: metadata.swa.num_actual_tokens]
+    wait_for_kv_layer_from_connector(attn.v41_impl.swa_prefix)
     attn.v41_impl._update_caches(attn, hidden_states, metadata)
     if hidden_states.shape[0]:
         slots = metadata.swa.flat_slot_mapping
@@ -801,6 +802,7 @@ class AscendDSAV41Impl:
                 projector._forward_o_proj(o_proj_input, output)
             return output
         metadata = self._get_layer_metadata(forward_context.attn_metadata)
+        wait_for_kv_layer_from_connector(self.swa_prefix)
         q, prepared_indexer = self._prepare_inputs_and_caches(
             attn, hidden_states, metadata, forward_context.attn_metadata
         )
