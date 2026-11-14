@@ -632,6 +632,7 @@ def _mixed_quant_sparse_flash_mla_impl(
         _erase_stream(attn_out, stream)
     return (attn_out, softmax_lse)
 
+
 # Keep the implementation callable for CPU contract tests.
 torch.library.impl("vllm_ascend::mixed_quant_sparse_flash_mla", "PrivateUse1")(_mixed_quant_sparse_flash_mla_impl)
 
