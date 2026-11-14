@@ -91,7 +91,7 @@ tests/e2e/pull_request/four_card/_310p/  # 310P four card
 Run a single one_card test:
 
 ```text
-/e2e tests/e2e/pull_request/one_card/test_offline_inference.py
+/e2e tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_0_6B_basic.py
 ```
 
 Run a two_card test:
@@ -103,7 +103,7 @@ Run a two_card test:
 Run tests across multiple hardware categories in one comment:
 
 ```text
-/e2e tests/e2e/pull_request/one_card/test_offline_inference.py tests/e2e/pull_request/two_card/test_data_parallel.py
+/e2e tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_0_6B_basic.py tests/e2e/pull_request/two_card/test_data_parallel.py
 ```
 
 Re-trigger after fixing an issue: pushing a new commit does not start CI by itself.
