@@ -1,0 +1,4 @@
+pr: 21679
+entries:
+  - category: performance
+    text: Eligible sequence-parallel W8A8 and W4A8 shared experts without an output gate pad inputs before the down projection.

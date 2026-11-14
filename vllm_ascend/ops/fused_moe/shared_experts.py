@@ -688,7 +688,7 @@ class AscendSharedExperts:
         original_num_tokens = shared_out.shape[0]
         pad_size = (tp_size - original_num_tokens % tp_size) % tp_size
         if pad_size > 0:
-            shared_out = F.pad(shared_out, (0, 0, 0, pad_size))
+            shared_out = _pad_tokens_with_cat(shared_out, original_num_tokens + pad_size, tp_size=tp_size)
         return tensor_model_parallel_reduce_scatter(shared_out, dim=0)
 
     def prepare_input_async(
@@ -912,6 +912,7 @@ class AscendSharedExperts:
         self,
         submitted_gate_up: SubmittedSharedExpertGateUp,
         milestones: RoutedMoEMilestones,
+        mode: SharedExpertParallelMode | None = None,
     ) -> torch.Tensor:
         """Finish the fused W8A8/W4A8 INT-activation shared MLP.
 
@@ -965,6 +966,7 @@ class AscendSharedExperts:
             milestones.routed_combine_start,
             "routed_combine_start",
         )
+        quantized_x, swiglu_out_scale = self._pad_a8_down_input(quantized_x, swiglu_out_scale, mode)
         shared_out = torch_npu.npu_quant_matmul(
             quantized_x,
             self.layer.down_proj.weight,
@@ -974,6 +976,40 @@ class AscendSharedExperts:
             output_dtype=submitted_gate_up.hidden_states.dtype,
         )
         return self._apply_output_gate(submitted_gate_up.hidden_states, shared_out)
+
+    def _pad_a8_down_input(
+        self,
+        quantized_x: torch.Tensor,
+        pertoken_scale: torch.Tensor,
+        mode: SharedExpertParallelMode | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Pad supported quantized rows before Down, leaving other paths unchanged.
+
+        In the SP-only path the down result is padded for TP reduce-scatter.
+        Padding the bias-free INT8 inputs and their per-token scales produces
+        the same zero output rows, with a smaller padding width. An output
+        gate needs the original token count and therefore keeps the old path.
+        """
+        if (
+            mode is not SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY
+            or getattr(self.layer, "expert_gate", None) is not None
+            or quantized_x.ndim != 2
+            or pertoken_scale.ndim != 1
+            or quantized_x.shape[0] != pertoken_scale.shape[0]
+            or quantized_x.dtype != torch.int8
+            or pertoken_scale.dtype != torch.float32
+        ):
+            return quantized_x, pertoken_scale
+
+        tp_size = self.moe_config.tp_group.world_size
+        rows = quantized_x.shape[0]
+        padded_rows = ((rows + tp_size - 1) // tp_size) * tp_size
+        if padded_rows == rows:
+            return quantized_x, pertoken_scale
+        return (
+            _pad_tokens_with_cat(quantized_x, padded_rows, tp_size=tp_size),
+            _pad_tokens_with_cat(pertoken_scale, padded_rows, tp_size=tp_size),
+        )
 
     def _run_a8_mxfp_mlp(
         self,
@@ -1086,9 +1122,10 @@ class AscendSharedExperts:
         self,
         submitted_gate_up: SubmittedSharedExpertGateUp,
         milestones: RoutedMoEMilestones,
+        mode: SharedExpertParallelMode | None = None,
     ) -> torch.Tensor:
         if submitted_gate_up.path is SharedExpertMLPPath.A8_INT_FUSED:
-            return self._run_a8_int_mlp(submitted_gate_up, milestones)
+            return self._run_a8_int_mlp(submitted_gate_up, milestones, mode)
         if submitted_gate_up.path is SharedExpertMLPPath.A8_MXFP_FUSED:
             return self._run_a8_mxfp_mlp(submitted_gate_up, milestones)
         return self._finish_linear_wrapped_mlp(submitted_gate_up, milestones)
@@ -1156,7 +1193,7 @@ class AscendSharedExperts:
 
         local_dp_metadata = submitted_gate_up.local_dp_metadata
         with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap):
-            shared_out = self._finish_shared_mlp(submitted_gate_up, milestones)
+            shared_out = self._finish_shared_mlp(submitted_gate_up, milestones, mode)
             if self.multistream_overlap and mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY:
                 self._wait_for_milestone(
                     milestones.routed_finalize_done,
