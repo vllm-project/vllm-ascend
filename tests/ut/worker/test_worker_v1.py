@@ -2303,6 +2303,14 @@ class TestNPUWorkerWeightUpdate(TestBase):
         worker.model_runner = MagicMock()
         worker.model_runner.model = MagicMock()
         worker.model_config = MagicMock()
+        worker.vllm_config = MagicMock()
+        worker.vllm_config.parallel_config = MagicMock()
+        worker.vllm_config.parallel_config.distributed_executor_backend = "mp"
+        worker.vllm_config.parallel_config.data_parallel_index = 0
+        worker.vllm_config.parallel_config.world_size = 1
+        worker.rank = 0
+        worker._weight_update_is_draft = False
+        worker._incomplete_weight_updates = set()
         return worker
 
     def test_check_engine_raises_when_unconfigured(self):
@@ -2372,6 +2380,35 @@ class TestNPUWorkerWeightUpdate(TestBase):
         worker.update_weights({"foo": "bar"})
 
         engine.update_weights.assert_called_once_with({"foo": "bar"})
+
+    def test_update_weights_list_offsets_by_dp_replica(self):
+        """List payloads are indexed by global worker rank across DP replicas."""
+        engine = MagicMock()
+        worker = self._make_worker(engine=engine)
+        worker._weight_update_active = True
+        worker.rank = 2
+        worker.vllm_config.parallel_config.data_parallel_index = 1
+        worker.vllm_config.parallel_config.world_size = 4
+
+        payload = [{"entry": i} for i in range(8)]
+        worker.update_weights(payload)
+
+        engine.update_weights.assert_called_once_with({"entry": 6})
+
+    def test_update_weights_list_uses_global_rank_under_external_launcher(self):
+        """The external launcher ranks each worker across all DP replicas."""
+        engine = MagicMock()
+        worker = self._make_worker(engine=engine)
+        worker._weight_update_active = True
+        worker.rank = 6
+        worker.vllm_config.parallel_config.distributed_executor_backend = "external_launcher"
+        worker.vllm_config.parallel_config.data_parallel_index = 1
+        worker.vllm_config.parallel_config.world_size = 8
+
+        payload = [{"entry": i} for i in range(8)]
+        worker.update_weights(payload)
+
+        engine.update_weights.assert_called_once_with({"entry": 6})
 
     def test_update_weights_resets_active_on_error(self):
         engine = MagicMock()
