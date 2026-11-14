@@ -209,6 +209,7 @@ class TestMoECommMethod(TestBase):
 
     def test_situ_activation_is_bound_at_initialization(self):
         self.mock_ascend_config.enable_fused_mc2 = 1
+        self.mock_ascend_config.megamoe_enabled = True
         self.moe_config.activation = "situ"
         self.moe_config.activation_situ_beta = 4.0
         self.moe_config.activation_situ_linear_beta = 25.0
@@ -224,7 +225,6 @@ class TestMoECommMethod(TestBase):
         with (
             patch.object(FusedMC2CommImpl, "_get_token_dispatcher"),
             patch.object(FusedMC2CommImpl, "_get_prepare_finalize"),
-            patch("vllm_ascend.ops.fused_moe.moe_comm_method.is_mega_moe_supported", return_value=True),
             patch("vllm_ascend.ops.fused_moe.moe_utils.load_cann_mega_moe_ops", return_value=(MagicMock(), op)),
             patch("vllm_ascend.ops.fused_moe.moe_comm_method.torch.zeros"),
         ):

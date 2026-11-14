@@ -10,7 +10,7 @@ from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parall
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
 
-from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.device.hardware_profile import (
     HardwareCapability,
     MoECommPolicy,
@@ -101,9 +101,9 @@ def get_mrv2_in_profile_run() -> bool:
 def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
     # TODO: drop the EP-size guard when MegaMoe supports larger EP sizes.
     return (
-        is_mega_moe_supported()
+        get_ascend_config().enable_fused_mc2 == 1
+        and get_ascend_config().megamoe_enabled
         and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE)
-        and get_ascend_config().enable_fused_mc2 == 1
         and is_moe_model(vllm_config)
         and vllm_config.parallel_config.enable_expert_parallel
         and 1 < get_ep_group().world_size <= 64
@@ -356,7 +356,7 @@ def _select_capacity_and_world_size_moe_comm_method(
     draft_moe_quant_type: QuantType = QuantType.NONE,
 ) -> MoECommType:
     if get_ascend_config().enable_fused_mc2 == 1:
-        if is_mega_moe_supported():
+        if get_ascend_config().megamoe_enabled:
             if is_draft_model and draft_moe_quant_type not in A5_SUPPORT_MEGA_MOE_QUANT_TYPES:
                 # The A5 mega moe (FUSED_MC2) operator only supports a subset of
                 # quantized weight layouts. An unquantized (or unsupported-quantized)
