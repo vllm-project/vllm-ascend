@@ -80,7 +80,6 @@ RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/cann/set_env.sh && \
     export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     # Install memfabric_hybrid kernels
-    umask 022 && \
     TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A2 --install-for-all && \
     # Install flash-linear-attention-npu from the Ascend mirror
     python3 -m pip install "flash-linear-attention-npu-a2===${FLA_VERSION}" --force-reinstall --no-deps && \
