@@ -18,6 +18,7 @@ from dataclasses import replace
 from typing import Protocol, TypeAlias, cast
 
 import torch
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.models.qwen4_exp.amd import (
@@ -722,26 +723,27 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        encoded_layer_name = upstream_qsa._encode_layer_name(self.layer_name)
-        indexer_metadata = self.indexer._metadata()
-        if current_platform.opaque_attention_op() and indexer_metadata is not None:
-            raw_metadata, _ = indexer_metadata
-            qkv, index_query, index_token_k = (
-                torch.ops.vllm.qwen4_exp_ascend_qsa_parallel_projections(
-                    hidden_states,
-                    positions,
-                    encoded_layer_name,
-                    raw_metadata.num_actual_tokens,
-                    self.qkv_proj.output_size_per_partition,
-                    self.indexer.index_n_heads,
-                    self.indexer.index_head_dim,
-                )
-            )
-        else:
-            index_query, index_token_k = self._start_indexer_projection(hidden_states, positions)
-            qkv, _ = self.qkv_proj(hidden_states)
+        if not current_platform.opaque_attention_op():
+            return self._forward_impl(positions, hidden_states)
+        output = torch.empty_like(hidden_states)
+        torch.ops.vllm.qwen4_exp_ascend_qsa_forward_with_output(
+            hidden_states,
+            positions,
+            output,
+            upstream_qsa._encode_layer_name(self.layer_name),
+        )
+        return output
+
+    def _forward_impl(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        index_query, index_token_k = self._start_indexer_projection(hidden_states, positions)
+        qkv, _ = self.qkv_proj(hidden_states)
         num_tokens = hidden_states.shape[0]
         num_actual_tokens = self._num_actual_tokens()
+        encoded_layer_name = upstream_qsa._encode_layer_name(self.layer_name)
         if self.use_fused_qsa_prepare:
             attn_output = qkv.new_empty(num_tokens, self.num_heads, self.head_dim)
             gate = torch.empty_like(attn_output)
@@ -1040,47 +1042,25 @@ def _ascend_qsa_layer(layer_name: LayerNameType) -> AscendQwen4ExpQSAAttention:
     return layer
 
 
-def qwen4_exp_ascend_qsa_parallel_projections(
+@eager_break_during_capture
+def qwen4_exp_ascend_qsa_forward_with_output(
     hidden_states: torch.Tensor,
     positions: torch.Tensor,
+    output: torch.Tensor,
     layer_name: LayerNameType,
-    num_actual_tokens: int,
-    qkv_output_size: int,
-    index_n_heads: int,
-    index_head_dim: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Submit the Indexer branch before QKV behind one opaque graph node.
-
-    Keeping both independent projections in this custom-op boundary prevents
-    the compiled decode graph from flattening the auxiliary stream context
-    back onto the model stream.  The QSA consumer performs the stream join.
-    Shape arguments are used only by the fake implementation.
-    """
-    del num_actual_tokens, qkv_output_size, index_n_heads, index_head_dim
+) -> None:
+    """Execute QSA eagerly so its auxiliary stream survives graph replay."""
     layer = _ascend_qsa_layer(layer_name)
-    index_query, index_token_k = layer._start_indexer_projection(hidden_states, positions)
-    if index_query is None or index_token_k is None:
-        raise RuntimeError("QSA Indexer metadata is unavailable during projection")
-    qkv, _ = layer.qkv_proj(hidden_states)
-    return qkv, index_query, index_token_k
+    output.copy_(layer._forward_impl(positions, hidden_states))
 
 
-def qwen4_exp_ascend_qsa_parallel_projections_fake(
+def qwen4_exp_ascend_qsa_forward_with_output_fake(
     hidden_states: torch.Tensor,
     positions: torch.Tensor,
+    output: torch.Tensor,
     layer_name: LayerNameType,
-    num_actual_tokens: int,
-    qkv_output_size: int,
-    index_n_heads: int,
-    index_head_dim: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    del positions, layer_name
-    qkv = hidden_states.new_empty((*hidden_states.shape[:-1], qkv_output_size))
-    index_query = hidden_states.new_empty(
-        (num_actual_tokens, index_n_heads, index_head_dim)
-    )
-    index_token_k = hidden_states.new_empty((num_actual_tokens, 1, index_head_dim))
-    return qkv, index_query, index_token_k
+) -> None:
+    return None
 
 
 def qwen4_exp_ascend_qsa_prepare_with_output(
@@ -1131,10 +1111,11 @@ def qwen4_exp_ascend_qsa_with_output(
 
 
 direct_register_custom_op(
-    op_name="qwen4_exp_ascend_qsa_parallel_projections",
-    op_func=qwen4_exp_ascend_qsa_parallel_projections,
-    mutates_args=[],
-    fake_impl=qwen4_exp_ascend_qsa_parallel_projections_fake,
+    op_name="qwen4_exp_ascend_qsa_forward_with_output",
+    op_func=qwen4_exp_ascend_qsa_forward_with_output,
+    mutates_args=["output"],
+    fake_impl=qwen4_exp_ascend_qsa_forward_with_output_fake,
+    dispatch_key="PrivateUse1",
 )
 direct_register_custom_op(
     op_name="qwen4_exp_ascend_qsa_prepare_with_output",
