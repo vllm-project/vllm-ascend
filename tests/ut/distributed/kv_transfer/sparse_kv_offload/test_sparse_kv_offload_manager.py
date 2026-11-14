@@ -2,18 +2,146 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 from torch import Tensor
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload import (
     sparse_kv_offload_manager as manager_module,
 )
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.request_identity import RequestIdentityRegistry
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     SparseKVOffloadManager,
     get_sparse_kv_offload_cpu_pool_size_bytes,
     plan_sparse_kv_offload_memory,
 )
 from vllm_ascend.utils import AscendDeviceType
+
+
+class TestSparseKVOffloadRequestMetadata(unittest.TestCase):
+    def setUp(self):
+        self.identity = RequestIdentityRegistry()
+        self.req_ids = SimpleNamespace(np=np.full(4, 99, dtype=np.int64), copy_to_gpu=MagicMock())
+        self.token_to_req = SimpleNamespace(np=np.full(8, 99, dtype=np.int32), copy_to_gpu=MagicMock())
+
+    def update(self, ids, *, num_reqs=None, is_dummy=False, query_start=None):
+        if num_reqs is None:
+            num_reqs = len(ids)
+        if query_start is None:
+            query_start = np.arange(num_reqs + 1, dtype=np.int32)
+        manager_module.update_sparse_kv_offload_metadata(
+            int(query_start[-1]),
+            num_reqs,
+            8,
+            4,
+            ids,
+            query_start,
+            self.req_ids,
+            self.token_to_req,
+            request_identity=self.identity,
+            is_dummy=is_dummy,
+        )
+
+    def test_colliding_ids_have_distinct_stable_owners_after_batch_reorder(self):
+        ids = ["234054828099429543", "471754017250656876", "304399536143223879"]
+        self.update(ids)
+        owners = dict(zip(ids, self.req_ids.np[:3].tolist()))
+        self.assertEqual(len(set(owners.values())), 3)
+        self.assertTrue(all(owner > 0 for owner in owners.values()))
+        self.update(ids[::-1])
+        self.assertEqual(self.req_ids.np.tolist(), [owners[req_id] for req_id in ids[::-1]] + [0])
+        self.assertEqual(self.req_ids.np.dtype, np.dtype(np.int64))
+        self.assertEqual(self.token_to_req.np.tolist(), [0, 1, 2, 0, 0, 0, 0, 0])
+        self.req_ids.copy_to_gpu.assert_called_with(4)
+        self.token_to_req.copy_to_gpu.assert_called_with(8)
+
+    def test_owner_change_after_finished_request_reuses_the_same_string(self):
+        self.update(["same-id"])
+        old_owner = int(self.req_ids.np[0])
+        self.identity.remove("same-id")
+        self.update(["same-id"])
+        self.assertGreater(int(self.req_ids.np[0]), old_owner)
+
+    def test_dummy_does_not_alias_live_owners_or_consume_real_ids(self):
+        self.update(["live"])
+        owner = int(self.req_ids.np[0])
+        self.update([], num_reqs=2, is_dummy=True)
+        self.assertEqual(self.req_ids.np.tolist(), [-2, -3, 0, 0])
+        self.update(["live", "next"])
+        self.assertEqual(self.req_ids.np.tolist(), [owner, owner + 1, 0, 0])
+
+    def test_invalid_or_incomplete_active_ids_are_rejected_before_copy(self):
+        for ids in ([], ["only-one"], ["valid", None], ["valid", 123]):
+            with self.subTest(ids=ids):
+                with self.assertRaises((ValueError, TypeError, RuntimeError)):
+                    self.update(ids, num_reqs=2)
+                self.req_ids.copy_to_gpu.assert_not_called()
+                self.token_to_req.copy_to_gpu.assert_not_called()
+
+    def test_zero_request_batch_publishes_only_padding(self):
+        self.update([])
+        self.assertEqual(self.req_ids.np.tolist(), [0] * 4)
+        self.assertEqual(self.token_to_req.np.tolist(), [0] * 8)
+
+    def test_int64_owner_is_published_without_uint32_truncation(self):
+        self.identity._next_owner_id = 1 << 32
+        self.update(["large-owner"])
+        self.assertEqual(self.req_ids.np.tolist(), [1 << 32, 0, 0, 0])
+
+    def test_int64_wrap_publishes_valid_owners_and_keeps_target_draft_identity(self):
+        self.update(["retained"])
+        retained_owner = int(self.req_ids.np[0])
+        invalidate = MagicMock()
+        self.identity._on_wrap = invalidate
+        self.identity._next_owner_id = (1 << 63) - 1
+        self.update(["last", "overflow", "retained"])
+        self.assertEqual(self.req_ids.np.tolist(), [(1 << 63) - 1, 2, retained_owner, 0])
+        invalidate.assert_called_once_with()
+        self.update(["retained", "overflow", "last"])
+        self.assertEqual(self.req_ids.np.tolist(), [retained_owner, 2, (1 << 63) - 1, 0])
+        self.assertEqual(self.req_ids.np.dtype, np.dtype(np.int64))
+
+
+class TestSparseKVOffloadOwnerReset(unittest.TestCase):
+    def test_reset_drains_plans_and_invalidates_target_draft_and_fallback_in_place(self):
+        target_owners = manager_module.torch.tensor([1, 2], dtype=manager_module.torch.int64)
+        draft_owners = manager_module.torch.tensor([3, 4], dtype=manager_module.torch.int64)
+        fallback_owners = manager_module.torch.tensor([5, 6], dtype=manager_module.torch.int64)
+        buffers = (target_owners, draft_owners, fallback_owners)
+        pointers = [buffer.data_ptr() for buffer in buffers]
+        manager = SimpleNamespace(
+            lru_last_req_ids_cpu_list=[target_owners, draft_owners],
+            fused_overlap_plan_owner_layer_id=1,
+            fused_overlap_plan_topk=2,
+            fused_overlap_plan_num_tokens=2,
+            fused_overlap_plan_membership_map=object(),
+        )
+        config = SimpleNamespace(
+            compilation_config=SimpleNamespace(
+                static_forward_context={
+                    "target": SimpleNamespace(impl=SimpleNamespace(fused_overlap_last_req_ids=fallback_owners)),
+                    "draft-unallocated": SimpleNamespace(impl=SimpleNamespace(fused_overlap_last_req_ids=None)),
+                    "other": object(),
+                }
+            )
+        )
+        snapshots = []
+        with (
+            patch.object(manager_module, "get_sparse_kv_offload_manager", return_value=manager),
+            patch.object(
+                manager_module.torch_npu.npu,
+                "synchronize",
+                side_effect=lambda: snapshots.append([buffer.tolist() for buffer in buffers]),
+            ),
+        ):
+            manager_module.reset_sparse_kv_offload_request_owners(config)
+
+        self.assertEqual(snapshots, [[[1, 2], [3, 4], [5, 6]], [[-1, -1], [-1, -1], [-1, -1]]])
+        self.assertEqual([buffer.data_ptr() for buffer in buffers], pointers)
+        self.assertIsNone(manager.fused_overlap_plan_owner_layer_id)
+        self.assertIsNone(manager.fused_overlap_plan_topk)
+        self.assertEqual(manager.fused_overlap_plan_num_tokens, 0)
+        self.assertIsNone(manager.fused_overlap_plan_membership_map)
 
 
 class _FakeKVCacheSpec:
