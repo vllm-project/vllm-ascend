@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""A3/A5 QSFA native heads, statistics, and graph replay (requires PR #54)."""
+"""QSFA native heads, statistics, and graph replay across operator backends."""
 
 from types import SimpleNamespace
 
@@ -15,7 +15,7 @@ from vllm_ascend.device.hardware import AscendDeviceType
 
 pytestmark = pytest.mark.skipif(
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
-    reason="Requires A2/A3/A5 and the custom QSFA kernel from PR #54.",
+    reason="Requires A2/A3/A5 with native-head QSFA support (ops-transformer on A3).",
 )
 
 
@@ -70,13 +70,16 @@ def _check_reference(result, query, key, value, scale, return_lse, *, empty_spar
     if value.shape[0] == 0:
         assert torch.count_nonzero(output) == 0
         if return_lse:
-            if get_ascend_device_type() in (AscendDeviceType.A2, AscendDeviceType.A3):
-                # Arch22 preserves the masked logits' raw MAX/SUM, unlike A5.
+            if get_ascend_device_type() == AscendDeviceType.A2:
+                # The repository's A2 kernel preserves the masked raw MAX/SUM.
                 assert empty_sparse_length is not None
                 torch.testing.assert_close(maximum, torch.full_like(maximum, -2e38), rtol=0, atol=0)
                 torch.testing.assert_close(total, torch.full_like(total, empty_sparse_length), rtol=0, atol=0)
             else:
-                assert torch.count_nonzero(total) == 0
+                if get_ascend_device_type() == AscendDeviceType.A5:
+                    assert torch.count_nonzero(total) == 0
+                else:
+                    torch.testing.assert_close(total, torch.ones_like(total), rtol=0, atol=0)
                 assert torch.isneginf(maximum + total.log()).all()
         return
     scores = query.float() @ key.T * scale
@@ -91,9 +94,12 @@ def _run_adaptor(inputs, return_lse, *, packed=False):
     rope_dim = inputs["rope_head_dim"]
     query = inputs["query"]
     nope, rope = query.split((512, rope_dim), dim=-1)
-    # Native heads and the three-result contract require Kimi's custom QSFA path.
+    # Reuse the layer-owned no-sink buffer through warmup, capture, and replay.
+    impl = inputs.setdefault(
+        "sfa_impl", SimpleNamespace(scale=inputs["scale_value"], qk_rope_head_dim=rope_dim, is_kimi_k31=True)
+    )
     return get_device_adaptor()._execute_kv_quant_sparse_flash_attention_vllm(
-        SimpleNamespace(scale=inputs["scale_value"], qk_rope_head_dim=rope_dim, is_kimi_k31=True),
+        impl,
         nope,
         rope,
         inputs["key"],

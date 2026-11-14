@@ -16,6 +16,7 @@
 # This file is a part of the vllm-ascend project.
 #
 import os
+from collections.abc import Callable
 from functools import lru_cache
 from importlib import import_module
 from typing import TYPE_CHECKING, Any
@@ -26,6 +27,8 @@ import torch_npu
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device import utils as device_utils
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.paged_mla_cache_read import try_load_strided_mla_cache
 from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
@@ -720,6 +723,19 @@ class BaseDeviceAdaptor:
             return result[0]
 
     @staticmethod
+    @lru_cache(maxsize=1)
+    def _load_cann_kv_quant_sparse_flash_attention() -> Callable:
+        try:
+            return import_module("cann_ops_transformer.ops").kv_quant_sparse_flash_attention
+        except (ImportError, AttributeError) as exc:
+            raise RuntimeError(
+                "Kimi K3.1 INT8 KV on Ascend A3 requires cann_ops_transformer with "
+                "kv_quant_sparse_flash_attention (KvQuantSparseFlashAttentionV2), "
+                "including A3 NoPE, native query heads, and softmax max/sum support. "
+                "Install a matching ops-transformer operator package and Torch extension."
+            ) from exc
+
+    @staticmethod
     def _execute_kv_quant_sparse_flash_attention_vllm(
         sfa_impl,
         ql_nope: torch.Tensor,
@@ -734,7 +750,7 @@ class BaseDeviceAdaptor:
         return_lse: bool = False,
         packed_query: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # The custom QSFA kernel supports native query groups 1..128 on A3/A5.
+        # Both QSFA implementations accept native query groups 1..128 on A3/A5.
         # Reuse the packed gather without splitting and concatenating it again.
         query = (
             packed_query
@@ -767,6 +783,21 @@ class BaseDeviceAdaptor:
             rope_head_dim=rope_head_dim,
         )
         use_kimi_path = sfa_impl.is_kimi_k31 or packed_query is not None
+        if sfa_impl.is_kimi_k31 and get_ascend_device_type() == AscendDeviceType.A3:
+            attention_op = BaseDeviceAdaptor._load_cann_kv_quant_sparse_flash_attention()
+            # The CANN Torch wrapper replaces sinks=None with zero logits.
+            # Kimi has no sink: -inf preserves its softmax, including DCP merges.
+            # Keep each shape's immutable vector alive on the layer: separate
+            # captured graphs must retain their sink storage across warmups.
+            sink_buffers = getattr(sfa_impl, "sfa_qsfa_sinks", None)
+            if sink_buffers is None:
+                sink_buffers = sfa_impl.sfa_qsfa_sinks = {}
+            sink_key = (query.shape[1], query.device)
+            sinks = sink_buffers.get(sink_key)
+            if sinks is None:
+                sinks = torch.full((query.shape[1],), -float("inf"), dtype=torch.float32, device=query.device)
+                sink_buffers[sink_key] = sinks
+            return attention_op(**kwargs, sinks=sinks, return_softmax_lse=True)
         if use_kimi_path or return_lse or rope_head_dim == 0:
             # Kimi requires the LSE path to trim trailing invalid candidates.
             return torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention_vllm(
