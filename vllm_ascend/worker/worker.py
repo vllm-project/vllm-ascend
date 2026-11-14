@@ -1481,6 +1481,10 @@ class NPUWorker(WorkerBase):
         self.model_runner.update_config(overrides)
 
     def _refresh_recurrent_gate_biases(self) -> None:
+        if not get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_RECURRENT_FUSION):
+            return
+
+        # Non-A5 workers, including 310P, must not import optional GDN dependencies.
         # Keep the optional GDN implementation lazy for worker initialization.
         from vllm_ascend.ops.gdn import refresh_recurrent_gate_biases
 

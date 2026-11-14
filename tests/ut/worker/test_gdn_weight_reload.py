@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import builtins
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -9,8 +10,47 @@ import torch
 from torch import nn
 from vllm.model_executor.model_loader.reload.inplace import reload_weights
 
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.ops.gdn import _refresh_recurrent_gate_bias
 from vllm_ascend.worker.worker import NPUWorker
+
+
+@pytest.fixture(autouse=True)
+def _use_a5_profile(monkeypatch):
+    monkeypatch.setattr(
+        "vllm_ascend.worker.worker.get_current_hardware_profile",
+        lambda: get_hardware_profile(AscendDeviceType.A5),
+    )
+
+
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType._310P])
+@pytest.mark.parametrize("operation", ["reload_weights", "finish_weight_update"])
+def test_non_a5_weight_update_does_not_import_gdn(monkeypatch, device_type, operation):
+    monkeypatch.setattr(
+        "vllm_ascend.worker.worker.get_current_hardware_profile", lambda: get_hardware_profile(device_type)
+    )
+    worker = NPUWorker.__new__(NPUWorker)
+    worker.model_runner = MagicMock()
+    worker.weight_transfer_engine = MagicMock()
+    worker._weight_update_active = True
+    original_import = builtins.__import__
+
+    def reject_gdn_import(name, *args, **kwargs):
+        if name == "vllm_ascend.ops.gdn" or name.startswith(("fla_npu", "triton")):
+            raise AssertionError(f"Non-A5 weight update imported optional GDN dependency: {name}")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", reject_gdn_import)
+    getattr(worker, operation)()
+
+    worker.model_runner.get_model.assert_not_called()
+    if operation == "reload_weights":
+        worker.model_runner.reload_weights.assert_called_once_with()
+    else:
+        worker.weight_transfer_engine.finish_weight_update.assert_called_once_with()
+        worker.model_runner.reset_lora_state.assert_called_once_with()
+        assert not worker._weight_update_active
 
 
 def _make_model():
