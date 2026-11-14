@@ -52,11 +52,12 @@ Environment knobs:
   ``TP_SIZE``, one per DRAM-enabled local service).
 
 Host / runner prerequisites (official KV pool guide): the mooncake legs run
-the HIXL RoCE direct mode (``HCCL_INTRA_ROCE_ENABLE=1``, set by the test)
-over reserved 2MB hugepages (the guide reserves 200000 on the host; the
-test skips when none are visible to the container), and the memcache tier-3
-legs need the raw UBS IO block device above (the test skips with provisioning
-steps when it is missing).
+the HIXL RoCE direct mode (``HCCL_INTRA_ROCE_ENABLE=1``, set by the test).
+The official A2 environment also reserves 2MB hugepages, but no scenario
+consumes them (all four scenarios were verified passing with
+``nr_hugepages=0`` on A2), so their absence only prints a note. The memcache
+tier-3 legs need the raw UBS IO block device above (the test skips with
+provisioning steps when it is missing).
 """
 
 import math
@@ -311,14 +312,15 @@ def _leg(
                 # RoCE links) runs the HIXL RoCE direct mode selected by
                 # HCCL_INTRA_ROCE_ENABLE=1. The guide's multi-node script also
                 # binds HCCL_IF_IP / *_SOCKET_IFNAME to a reachable NIC and
-                # reserves 200000 2MB hugepages (a host/runner prerequisite;
-                # the single-node legs keep the loopback route and only need
-                # the pages to exist). Without RoCE direct mode the default
-                # HCCS P2P channel fails cross-rank with DisableP2P=17 / IPC
-                # import 107000 (put error -800). ASCEND_ENABLE_USE_FABRIC_MEM
-                # must stay unset: fabric mem is the documented A3-HCCS mode,
-                # and an empty-string value still reads as "set" to the
-                # engine, which then fails its hugepage-reserve path on A2.
+                # reserves 200000 2MB hugepages (a production-environment
+                # guideline; the single-node legs keep the loopback route and
+                # were verified passing with no reserved hugepages at all).
+                # Without RoCE direct mode the default HCCS P2P channel fails
+                # cross-rank with DisableP2P=17 / IPC import 107000 (put error
+                # -800). ASCEND_ENABLE_USE_FABRIC_MEM must stay unset: fabric
+                # mem is the documented A3-HCCS mode, and an empty-string
+                # value still reads as "set" to the engine, which then fails
+                # its hugepage-reserve path on A2.
                 os.environ.pop("ASCEND_ENABLE_USE_FABRIC_MEM", None)
                 stack.enter_context(patch.dict(os.environ, {"HCCL_INTRA_ROCE_ENABLE": "1"}))
                 mooncake_config = _mooncake_pool_config(tier_ssd, case_name)
@@ -546,11 +548,17 @@ def test_qwen38_kv_pool_ab_a2(backend: str, use_layerwise: bool):
         # gate was opened at the maintainer's direction. Print the
         # version for diagnostics.
         print(f"[kv_pool_a2] {case}: mooncake {_mooncake_version()}", flush=True)
+        # The official A2 environment reserves 2MB hugepages for the RoCE
+        # direct mode, but these scenarios do not consume them: all four
+        # scenarios were verified passing with nr_hugepages=0 on A2 (the
+        # mooncake engine registers its RDMA buffers from regular pages on
+        # this stack), so this stays informational rather than a skip.
         if _hugepages_total() == 0:
-            pytest.skip(
-                "mooncake pooling on A2 requires reserved 2MB hugepages (the official "
-                "guide reserves 200000); none are visible to the container. Reserve them "
-                "on the host/runner before running this test."
+            print(
+                f"[kv_pool_a2] {case}: note: no reserved 2MB hugepages visible "
+                "(the official A2 env reserves 200000); verified passing "
+                "without them on A2.",
+                flush=True,
             )
     if backend == "memcache" and tier_ssd and not os.path.exists(MEMCACHE_UBSIO_DISK):
         pytest.skip(
