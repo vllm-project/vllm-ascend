@@ -52,6 +52,21 @@ def test_prompt_scoring_token_id_row_stride(layout):
     torch.testing.assert_close(actual, expected, atol=1e-4, rtol=1e-5)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
+def test_logprobs_fully_masked_first_tile():
+    """A later finite token must recover after an entirely masked tile."""
+    tile_size = 15 * 1024
+    logits = torch.full((1, tile_size + 1), -torch.inf, device="npu", dtype=torch.float32)
+    logits[0, -1] = 1.0
+    token_ids = torch.tensor([[0, tile_size]], device="npu")
+    actual = compute_token_logprobs(logits, token_ids)
+    expected = torch.tensor([[-torch.inf, 0.0]], device="npu", dtype=torch.float32)
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
 # Common vocab sizes from mainstream models
 VOCAB_SIZES = [
     32000,  # LLaMA / LLaMA2 / Mistral
