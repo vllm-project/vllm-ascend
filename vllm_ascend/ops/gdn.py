@@ -45,8 +45,9 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
-from vllm_ascend.ops.gdn_attn_builder import AscendGDNFusedAttentionBackend, AscendGDNPCPBackend
+from vllm_ascend.ops.gdn_attn_builder import AscendGDNFusedAttentionBackend
 from vllm_ascend.ops.gdn_checkpoint import ensure_gdn_checkpoint_workspace, run_gdn_checkpoint_prefill
+from vllm_ascend.ops.recurrent_pcp import AscendGDNPCPBackend
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
@@ -443,18 +444,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         2. Core attention (custom op)
         3. Output projection
         """
-        local_num_tokens = hidden_states.size(0)
-        pcp_context = None
-        if hasattr(self.out_proj, "pcp_group"):
-            metadata = get_forward_context().attn_metadata
-            if metadata is None:
-                # Profiling runs before the PCP manager has built token maps.
-                # Size the projections for the gathered token extent.
-                hidden_states = self.out_proj.pcp_group.all_gather(hidden_states.contiguous(), dim=0)
-            elif self.prefix in metadata:
-                pcp_context = metadata[self.prefix].pcp_context
-                if pcp_context is not None:
-                    hidden_states = pcp_context.gather_tokens(hidden_states)
+        pcp_group = getattr(self.out_proj, "pcp_group", None)
+        if pcp_group is not None:
+            hidden_states = torch.ops.vllm.pcp_gather_tokens(hidden_states, pcp_group.world_size, self.prefix)
         num_tokens = hidden_states.size(0)
         if hasattr(self, "in_proj_qkv"):
             mixed_qkv, _ = self.in_proj_qkv(hidden_states)
@@ -522,10 +514,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
         out, _ = self.out_proj(core_attn_out)
-        if pcp_context is not None:
-            out = pcp_context.scatter_tokens(out)
-        elif num_tokens != local_num_tokens:
-            out = out[:local_num_tokens]
+        if pcp_group is not None:
+            out = torch.ops.vllm.pcp_scatter_tokens(out, pcp_group.world_size, self.prefix)
         if output is not None:
             output[: out.shape[0]] = out
         return out

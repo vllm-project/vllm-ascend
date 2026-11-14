@@ -13,7 +13,7 @@ from tests.ut.ops.test_gdn_attn_builder import (
     _patch_missing_runtime_cdiv,
     create_common_attn_metadata,
 )
-from vllm_ascend.ops import gdn_attn_builder, kda_pcp
+from vllm_ascend.ops import gdn_attn_builder, recurrent_pcp
 
 
 @pytest.mark.parametrize("rank", range(8))
@@ -24,10 +24,10 @@ def test_real_builder_pcp8_context_restores_and_scatters(rank, for_capture, monk
 
     def make_kimi(spec, layers, config, device):
         config.parallel_config.prefill_context_parallel_size = 8
-        return kda_pcp.KimiKDAHostMetadataBuilder(spec, layers, config, device)
+        return recurrent_pcp.KimiKDAHostMetadataBuilder(spec, layers, config, device)
 
     with (
-        patch.object(kda_pcp, "get_pcp_group", return_value=group),
+        patch.object(recurrent_pcp, "get_pcp_group", return_value=group),
         patch.object(gdn_attn_builder, "get_pcp_group", return_value=group),
     ):
         builder = _make_builder(
@@ -39,7 +39,12 @@ def test_real_builder_pcp8_context_restores_and_scatters(rank, for_capture, monk
         # Rank-major all-gather of cyclic shards must restore causal order.
         restore = torch.tensor([2 * (i % 8) + i // 8 for i in range(15)])
         local_indices = torch.arange(rank, 15, 8)
-        context = SimpleNamespace(local_num_tokens=2, hidden_restore_idx=restore, local_token_indices=local_indices)
+        context = SimpleNamespace(
+            local_num_tokens=2,
+            global_batch=SimpleNamespace(num_tokens=15),
+            hidden_restore_idx=restore,
+            local_token_indices=local_indices,
+        )
         common.pcp_context = context
         if for_capture:
             metadata = builder.build_for_cudagraph_capture(common)
@@ -48,14 +53,15 @@ def test_real_builder_pcp8_context_restores_and_scatters(rank, for_capture, monk
 
     gathered = torch.tensor([[r, r + 8 if r < 7 else -1] for r in range(8)]).float().reshape(-1, 1)
     group.all_gather = lambda x, dim: gathered
-    forward = SimpleNamespace(
-        attn_metadata={"kda": metadata}, no_compile_layers={"kda": SimpleNamespace(pcp_group=group)}
-    )
-    with patch.object(kda_pcp, "get_forward_context", return_value=forward):
-        restored = kda_pcp.kda_pcp_gather(gathered[2 * rank : 2 * rank + 2], 8, "kda")
+    forward = SimpleNamespace(attn_metadata={"kda": metadata})
+    with (
+        patch.object(recurrent_pcp, "get_pcp_group", return_value=group),
+        patch.object(recurrent_pcp, "get_forward_context", return_value=forward),
+    ):
+        restored = recurrent_pcp.pcp_gather_tokens(gathered[2 * rank : 2 * rank + 2], 8, "kda")
         torch.testing.assert_close(restored[:15, 0], torch.arange(15).float())
         assert restored[15, 0] == 0
-        output = kda_pcp.kda_pcp_scatter(restored * 10 + 1, 8, "kda")
+        output = recurrent_pcp.pcp_scatter_tokens(restored * 10 + 1, 8, "kda")
     expected = torch.zeros(2)
     expected[: len(local_indices)] = local_indices.float() * 10 + 1
     torch.testing.assert_close(output[:, 0], expected)
