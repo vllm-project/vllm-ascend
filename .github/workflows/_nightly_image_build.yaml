@@ -59,7 +59,7 @@ on:
         required: false
         type: string
         default: 'release'
-        description: "Matrix shape only (dependency versions always come from the Dockerfiles): 'full' builds both OS variants on amd64+arm64; 'release' builds ubuntu on arm64 only."
+        description: "Matrix shape only (dependency versions always come from the Dockerfiles): 'full' builds both OS variants on amd64+arm64; 'release' builds arm64 only and covers the ubuntu variant by default, or the openEuler variant when os_filter='openeuler'."
       swr_registry:
         required: false
         type: string
@@ -70,6 +70,16 @@ on:
         type: boolean
         default: false
         description: "If true, login to SWR and push built images. Set to false for PR verification builds."
+      isolated_build:
+        required: false
+        type: boolean
+        default: false
+        description: "If true, build the isolated (/presmoke) variant of the nightly test image. Only the repositories differ: it consumes and publishes to the '-presmoke' repositories while keeping the standard 'nightly-ci-<branch>-<target>[-openeuler]' tag. It is pushed only to the CI repository (never atlas_inference), the quay.io and swr.cn-north-4 syncs are skipped, and the build is always full-scale (ubuntu and openEuler on amd64 and arm64). Default false keeps the standard nightly behaviour untouched."
+      source_ref:
+        required: false
+        type: string
+        default: ''
+        description: "Optional git ref the whole source tree is built from (e.g. refs/pull/<n>/head). When set, the build checks out this ref ('pre-merge') instead of the branch, but vllm_ascend_branch still decides the published tag. /presmoke passes the triggering PR so the test image contains the code under review. Default '' builds vllm_ascend_branch."
       cann_swr_url:
         required: false
         type: string
@@ -112,12 +122,24 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 1
-          ref: ${{ inputs.base_image_branch || inputs.vllm_ascend_branch }}
+          ref: ${{ inputs.source_ref || inputs.base_image_branch || inputs.vllm_ascend_branch }}
 
       - id: set-matrix
         run: |
-          if [ "${{ inputs.build_type }}" = "full" ]; then
+          # An isolated (/presmoke) build is always full-scale, so the matrix
+          # shape is derived rather than passed.
+          MATRIX_SHAPE="${{ inputs.build_type }}"
+          if [ "${{ inputs.isolated_build }}" = "true" ]; then
+            MATRIX_SHAPE="full"
+          fi
+          if [ "$MATRIX_SHAPE" = "full" ]; then
             ALL='{"include":[{"arch_name":"amd64","arch_runner":"linux-amd64-cpu-4","arch_platform":"linux/amd64","os":"ubuntu"},{"arch_name":"amd64","arch_runner":"linux-amd64-cpu-4","arch_platform":"linux/amd64","os":"openeuler"},{"arch_name":"arm64","arch_runner":"linux-aarch64-cpu-4","arch_platform":"linux/arm64","os":"ubuntu"},{"arch_name":"arm64","arch_runner":"linux-aarch64-cpu-4","arch_platform":"linux/arm64","os":"openeuler"}]}'
+          elif [ "${{ inputs.os_filter }}" = "openeuler" ]; then
+            # The non-'full' shape builds arm64 only and used to be ubuntu-only. An
+            # explicit os_filter=openeuler narrows it to the openEuler variant, so
+            # callers such as /presmoke can cover openEuler without switching to the
+            # multi-arch 'full' matrix (which would also build amd64).
+            ALL='{"include":[{"arch_name":"arm64","arch_runner":"linux-aarch64-cpu-4","arch_platform":"linux/arm64","os":"openeuler"}]}'
           else
             ALL='{"include":[{"arch_name":"arm64","arch_runner":"linux-aarch64-cpu-4","arch_platform":"linux/arm64","os":"ubuntu"}]}'
           fi
@@ -127,8 +149,7 @@ jobs:
           else
             MATRIX=$(echo "$ALL" | jq -c --arg os "$OS" '{include:[.include[]|select(.os==$os)]}')
           fi
-          # Guard against an empty matrix (e.g. os_filter='openeuler' with build_type
-          # 'release', where release only builds ubuntu, or an unsupported os_filter).
+          # Guard against an empty matrix (e.g. an unsupported os_filter).
           # An empty `include` yields a matrix with no jobs, so fail loudly instead.
           COUNT=$(echo "$MATRIX" | jq '.include | length')
           if [ "$COUNT" = "0" ]; then
@@ -144,7 +165,11 @@ jobs:
           #   -cann<cann_version>-<build_date>-r<run_number>
           # The suffix is computed once here and reused by the build and merge
           # jobs. Release builds only keep the stable tag.
-          if [ "${{ inputs.build_type }}" != "full" ]; then
+          MATRIX_SHAPE="${{ inputs.build_type }}"
+          if [ "${{ inputs.isolated_build }}" = "true" ]; then
+            MATRIX_SHAPE="full"
+          fi
+          if [ "$MATRIX_SHAPE" != "full" ]; then
             echo "tag_suffix_ubuntu=" >> "$GITHUB_OUTPUT"
             echo "tag_suffix_openeuler=" >> "$GITHUB_OUTPUT"
             exit 0
@@ -195,7 +220,9 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-          ref: ${{ inputs.vllm_ascend_branch }}
+          # The source tree (and the Dockerfile built below) comes from
+          # source_ref when set ('pre-merge', e.g. /presmoke), else the branch.
+          ref: ${{ inputs.source_ref || inputs.vllm_ascend_branch }}
 
       - name: Record source commit
         if: ${{ inputs.should_push }}
@@ -234,16 +261,20 @@ jobs:
           fi
           BASE_BRANCH_TAG=$(echo "$BASE_BRANCH_TAG" | tr '/' '-')
 
-          # Runtime images are published by the runtime build workflow as
-          # nightly-<branch>[-<target>][-openeuler] from the root Dockerfiles.
-          BASE_IMAGE="${{ inputs.swr_registry }}/ascend/vllm-ascend"
+          # The isolated (/presmoke) build keeps the standard tags; only the
+          # repositories differ ('-presmoke').
+          ISOLATED_REPO_SUFFIX="${{ inputs.isolated_build && '-presmoke' || '' }}"
+
+          # The runtime image it consumes is published by the runtime build workflow
+          # under the same 'nightly-<branch>[-<target>][-openeuler]' tag, in the
+          # matching repository.
+          BASE_IMAGE="${{ inputs.swr_registry }}/ascend/vllm-ascend${ISOLATED_REPO_SUFFIX}"
           OS_MARK=""
           if [ "${{ matrix.os }}" = "openeuler" ]; then
             OS_MARK="-openeuler"
           fi
-          # Runtime image tags are stable now that dependency versions are pinned
-          # in the Dockerfiles, so no CANN/date suffix is appended.
-          TAG_SUFFIX=""
+          # Nightly tags carry no extra suffix now that dependency versions are
+          # pinned in the Dockerfiles.
           FULL_TAG="nightly-ci-${BRANCH_TAG}-${{ inputs.target }}${OS_MARK}"
           # Same dual-tag rule as the mainline nightly builds: the stable tag is
           # overwritten by each nightly, while a unique tag (CANN version +
@@ -255,19 +286,28 @@ jobs:
           fi
           UNIQUE_TAG="${FULL_TAG}${UNIQUE_SUFFIX}"
 
-          if [ "${{ inputs.build_type }}" = "full" ]; then
+          # An isolated (/presmoke) build is always full-scale, so the matrix
+          # shape is derived rather than passed.
+          MATRIX_SHAPE="${{ inputs.build_type }}"
+          if [ "${{ inputs.isolated_build }}" = "true" ]; then
+            MATRIX_SHAPE="full"
+          fi
+          if [ "$MATRIX_SHAPE" = "full" ]; then
             # Arch-specific images are pushed to the temp repo under the unique
-            # tag; the merge job creates the final multi-arch manifests. Ubuntu
-            # full builds are published to the CI repo and to atlas_inference
-            # (mirrored to swr.cn-north-4); openEuler only to atlas_inference.
-            if [ -n "$OS_MARK" ]; then
+            # tag; the merge job creates the final multi-arch manifests. Standard
+            # ubuntu builds go to the CI repo and to atlas_inference (mirrored to
+            # swr.cn-north-4), standard openEuler builds only to atlas_inference;
+            # an isolated build only ever goes to the CI repo.
+            if [ "${{ inputs.isolated_build }}" = "true" ]; then
+              FINAL_IMAGE="${{ inputs.swr_registry }}/base_image/ascend-ci/vllm-ascend${ISOLATED_REPO_SUFFIX}:${FULL_TAG}"
+            elif [ -n "$OS_MARK" ]; then
               FINAL_IMAGE="${{ inputs.swr_registry }}/atlas_inference/vllm-ascend:${FULL_TAG}"
             else
               FINAL_IMAGE="${{ inputs.swr_registry }}/base_image/ascend-ci/vllm-ascend:${FULL_TAG}, ${{ inputs.swr_registry }}/atlas_inference/vllm-ascend:${FULL_TAG}"
             fi
             PUSH_IMAGE="${{ inputs.swr_registry }}/atlas_ci/vllm-atlas-temp:${UNIQUE_TAG}-${{ matrix.arch_name }}"
           else
-            FINAL_IMAGE="${{ inputs.swr_registry }}/base_image/ascend-ci/vllm-ascend:${FULL_TAG}"
+            FINAL_IMAGE="${{ inputs.swr_registry }}/base_image/ascend-ci/vllm-ascend${ISOLATED_REPO_SUFFIX}:${FULL_TAG}"
             PUSH_IMAGE="${FINAL_IMAGE}"
           fi
 
@@ -277,7 +317,6 @@ jobs:
             --build-arg VLLM_ASCEND_BRANCH="${BASE_BRANCH_TAG}"
             --build-arg BASE_IMAGE="${BASE_IMAGE}"
             --build-arg OS_MARK="${OS_MARK}"
-            --build-arg TAG_SUFFIX="${TAG_SUFFIX}"
           )
 
           if [ "${{ inputs.should_push }}" = "true" ]; then
@@ -302,8 +341,9 @@ jobs:
     runs-on: linux-amd64-cpu-4
     needs: [generate-matrix, build]
     # Run even if some matrix instances failed. Each OS variant is merged
-    # independently, only when BOTH arch images exist.
-    if: ${{ inputs.should_push && always() && inputs.build_type == 'full' }}
+    # independently, only when BOTH arch images exist. An isolated (/presmoke)
+    # build is always full-scale, so it is merged too.
+    if: ${{ inputs.should_push && always() && (inputs.build_type == 'full' || inputs.isolated_build) }}
     steps:
       - name: Login to SWR
         uses: docker/login-action@v4
@@ -321,9 +361,15 @@ jobs:
           OS_FILTER: ${{ inputs.os_filter }}
           TAG_SUFFIX_UBUNTU: ${{ needs.generate-matrix.outputs.tag_suffix_ubuntu }}
           TAG_SUFFIX_OPENEULER: ${{ needs.generate-matrix.outputs.tag_suffix_openeuler }}
+          ISOLATED_REPO_SUFFIX: ${{ inputs.isolated_build && '-presmoke' || '' }}
         run: |
           set -euo pipefail
           BRANCH_TAG="${VLLM_ASCEND_BRANCH//\//-}"
+          # An isolated (/presmoke) build is CI-repo-only for both OS variants;
+          # a standard build keeps the ubuntu -> CI + atlas_inference and
+          # openeuler -> atlas_inference destinations.
+          CI_REPO="${SWR_REGISTRY}/base_image/ascend-ci/vllm-ascend${ISOLATED_REPO_SUFFIX}"
+          ATLAS_REPO="${SWR_REGISTRY}/atlas_inference/vllm-ascend"
 
           # Restrict to the requested OS variant so ubuntu and openeuler
           # pipelines merge independently of each other.
@@ -341,16 +387,26 @@ jobs:
             if [ "$OS_NAME" = "openeuler" ]; then
               OS_MARK="-openeuler"
               TAG_SUFFIX="${TAG_SUFFIX_OPENEULER}"
-              # openEuler nightly images only live in the release-shaped repo
-              # that the sync-tools workflow mirrors to swr.cn-north-4.
-              DESTS="${SWR_REGISTRY}/atlas_inference/vllm-ascend"
+              if [ -n "$ISOLATED_REPO_SUFFIX" ]; then
+                # Isolated builds never reach atlas_inference; both OS variants
+                # stay in the CI repository.
+                DESTS="${CI_REPO}"
+              else
+                # openEuler nightly images only live in the release-shaped repo
+                # that the sync-tools workflow mirrors to swr.cn-north-4.
+                DESTS="${ATLAS_REPO}"
+              fi
             else
               OS_MARK=""
               TAG_SUFFIX="${TAG_SUFFIX_UBUNTU}"
-              # ubuntu nightly images serve the CI contract (test workflows
-              # pull from ascend-ci) and the north-4 consumers through the
-              # atlas_inference mirror, matching the retired daily pipeline.
-              DESTS="${SWR_REGISTRY}/base_image/ascend-ci/vllm-ascend ${SWR_REGISTRY}/atlas_inference/vllm-ascend"
+              if [ -n "$ISOLATED_REPO_SUFFIX" ]; then
+                DESTS="${CI_REPO}"
+              else
+                # ubuntu nightly images serve the CI contract (test workflows
+                # pull from ascend-ci) and the north-4 consumers through the
+                # atlas_inference mirror, matching the retired daily pipeline.
+                DESTS="${CI_REPO} ${ATLAS_REPO}"
+              fi
             fi
             TAG="nightly-ci-${BRANCH_TAG}-${TARGET}${OS_MARK}"
             # The build step pushed the per-arch images under the unique tag.
@@ -403,7 +459,7 @@ jobs:
           echo "merged=${MERGED_VARIANT}" >> "$GITHUB_OUTPUT"
 
       - name: Dispatch cn-north-4 sync
-        if: ${{ steps.merge.outputs.merged == '1' && github.repository == 'vllm-project/vllm-ascend' }}
+        if: ${{ steps.merge.outputs.merged == '1' && github.repository == 'vllm-project/vllm-ascend' && !inputs.isolated_build }}
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.SYNC_TOOLS_TOKEN }}
