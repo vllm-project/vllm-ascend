@@ -144,8 +144,6 @@ llm = LLM(model="/path/to/your/quantized_model",
           # Set appropriate TP and DP values
           tensor_parallel_size=2,
           data_parallel_size=1,
-          # Set an unused port
-          port=8000,
           # Set serving model name
           served_model_name="quantized_model",
           # Specify `quantization="ascend"` to enable quantization for models quantized by ModelSlim
@@ -162,7 +160,7 @@ for output in outputs:
 
 ```bash
 # Corresponding to offline inference
-python -m vllm.entrypoints.api_server \
+python -m vllm.entrypoints.openai.api_server \
     --model /path/to/your/quantized_model \
     --max-model-len 4096 \
     --port 8000 \
