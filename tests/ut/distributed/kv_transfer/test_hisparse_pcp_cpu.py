@@ -282,7 +282,7 @@ def test_connector_stages_canonical_requests_and_gathered_slot_rows():
     assert args["request_state_indices"] is global_batch.idx_mapping
     assert args["request_ids"] == ["A", "B"]
     assert args["num_tokens"] == 6
-    assert global_batch.num_tokens == 7  # dataclass copy must leave scheduler batch intact.
+    assert global_batch.num_tokens == 7  # Load kwargs must leave the scheduler batch intact.
     assert meta.hisparse_request_state_indices.tolist() == local.idx_mapping.tolist()
     assert cache.slot_mapping.tolist() == [100, 103, -1, 101, 104, -1]
     assert cache.mirror_slot_mapping.tolist() == [50, 53, -1, 51, 54, -1]
@@ -372,6 +372,17 @@ def test_connector_disabled_and_no_forward_do_not_require_pcp_layout():
     connector._disabled = False
     connector.pre_forward(NS(kv_connector_metadata=object(), has_sync_kv_loads=True))
     assert connector._pending_load_kwargs == {}
+
+
+@pytest.mark.parametrize("sync_load", [False, True])
+def test_connector_inherits_core_load_scheduling(sync_load):
+    connector, _, meta, local, global_batch, _ = make_connector()
+    scheduler = NS(kv_connector_metadata=object(), has_sync_kv_loads=sync_load)
+    connector.pre_forward(scheduler, local, {"layer0": meta})
+    connector.kv_connector.handle_preemptions.assert_called_once_with(scheduler.kv_connector_metadata)
+    connector.kv_connector.bind_connector_metadata.assert_called_once_with(scheduler.kv_connector_metadata)
+    assert connector._pending_load_kwargs["request_state_indices"] is global_batch.idx_mapping
+    assert connector._start_load_kv.call_count == int(sync_load)
 
 
 def test_connector_eager_reads_metadata_from_forward_context(monkeypatch):

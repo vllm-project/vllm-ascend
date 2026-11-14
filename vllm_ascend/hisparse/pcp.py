@@ -6,8 +6,6 @@ C8 request-sharded target and replicated draft decode, including full graphs.
 Core retains residency scheduling, DMA and the Host write completion fence.
 """
 
-from dataclasses import replace
-
 import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import HiSparseConnector
 from vllm.forward_context import get_forward_context, is_forward_context_available
@@ -98,9 +96,9 @@ class PCPHiSparseConnector(ActiveKVConnector):
                 cache.runtime.hot_block_table = block_tables.input_block_tables[hot_group_id]
                 cache.runtime.request_state_indices = states
 
-    def pre_forward(self, scheduler_output, input_batch=None, attn_metadata=None):
-        if self._disabled or input_batch is None:
-            return super().pre_forward(scheduler_output, input_batch, attn_metadata)
+    def _build_load_kwargs(self, scheduler_output, input_batch, attn_metadata):
+        if input_batch is None:
+            return super()._build_load_kwargs(scheduler_output, input_batch, attn_metadata)
         # The eager runner passes metadata through the active forward context;
         # only graph capture supplies it explicitly to this connector.
         if attn_metadata is None and is_forward_context_available():
@@ -124,11 +122,11 @@ class PCPHiSparseConnector(ActiveKVConnector):
         write_request_ids = get_pcp_write_request_ids(global_batch, indices, mask)
         for metadata in (attn_metadata or {}).values():
             metadata.hisparse_write_req_id_per_token = write_request_ids
-        # Core's canonical state table has max_num_seqs entries. PCP dual chunks
-        # may repeat a request locally, so they must never be supplied here.
-        # num_tokens also controls the Resident slot snapshot used by row DMA.
-        write_batch = replace(global_batch, num_tokens=count)
-        return super().pre_forward(scheduler_output, write_batch, attn_metadata)
+        # Core owns request lifecycle and load scheduling. Only its load kwargs
+        # need canonical requests and a gathered Resident slot snapshot length.
+        load_kwargs = super()._build_load_kwargs(scheduler_output, global_batch, attn_metadata)
+        load_kwargs["num_tokens"] = count
+        return load_kwargs
 
 
 def adapt_pcp_hisparse_connector(runner):
