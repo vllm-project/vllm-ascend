@@ -19,6 +19,7 @@ def _builder(
     block_size, a5, monkeypatch, rope_dim=0, builder_cls=sfa.AscendSFAMetadataBuilder, tp_size=1, speculative=False
 ):
     config = SimpleNamespace(
+        kv_transfer_config=None,
         cache_config=SimpleNamespace(block_size=block_size),
         model_config=SimpleNamespace(
             max_model_len=max(4096, block_size + 2),
