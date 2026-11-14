@@ -68,12 +68,10 @@ class KVTransferThread(threading.Thread):
         self.save_disabled = threading.Event()
         self.load_disabled = threading.Event()
 
-    def _mark_failed_requests(self, requests: list[ReqMeta]) -> None:
+    def _mark_failed_requests(self, requests: list[ReqMeta], *, finish_receiving: bool = False) -> None:
         logger.error("Memcache transfer failed for requests=%s", [request.req_id for request in requests])
         for request in requests:
             request.can_save = False
-        with self.done_task_lock:
-            self.failed_requests.update(request.req_id for request in requests if len(request.block_ids_by_group) > 1)
         self.save_disabled.set()
         with self._invalid_block_ids_lock:
             self._invalid_block_ids.update(
@@ -84,6 +82,10 @@ class KVTransferThread(threading.Thread):
                 for block_id in group
                 if block_id > 0
             )
+        with self.done_task_lock:
+            self.failed_requests.update(request.req_id for request in requests if len(request.block_ids_by_group) > 1)
+            if finish_receiving:
+                self.finished_requests.update(request.req_id for request in requests)
 
     def get_and_clear_failed_requests(self) -> set[str]:
         with self.done_task_lock:
@@ -1138,6 +1140,19 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         self.worker = worker
         self._record_operation_cb = record_operation
 
+    def get_and_clear_receive_results(
+        self, loading_req_ids: set[str], preempted_req_ids: set[str]
+    ) -> tuple[set[str], set[str]]:
+        """Consume each completed receive with its failure status under the same lock."""
+        with self.done_task_lock:
+            self.finished_requests.difference_update(preempted_req_ids)
+            self.failed_requests.difference_update(preempted_req_ids)
+            finished = self.finished_requests & loading_req_ids
+            failed = self.failed_requests & finished
+            self.finished_requests.difference_update(finished)
+            self.failed_requests.difference_update(failed)
+        return finished, failed
+
     def _handle_request(self, req_meta: ReqMeta):
         try:
             load_spec = req_meta.load_spec
@@ -1158,8 +1173,9 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     mask_num,
                 )
                 if loaded is False:
-                    self._mark_failed_requests([req_meta])
-                self.set_finished_request(req_id)
+                    self._mark_failed_requests([req_meta], finish_receiving=True)
+                else:
+                    self.set_finished_request(req_id)
                 return
 
             addr_list = []
@@ -1237,8 +1253,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             if (isinstance(self.m_store, MemcacheBackend) or len(req_meta.block_ids_by_group) > 1) and (
                 ret is None or len(ret) != len(key_list_c) or any(r != 0 for r in ret)
             ):
-                self._mark_failed_requests([req_meta])
-                self.set_finished_request(req_id)
+                self._mark_failed_requests([req_meta], finish_receiving=True)
                 return
             if ret is not None and any(r != 0 for r in ret):
                 missing_block_ids = record_failed_blocks(

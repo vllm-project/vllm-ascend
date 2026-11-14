@@ -17,10 +17,12 @@
 
 import threading
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import numpy as np
+import pytest
 
 # isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
@@ -34,6 +36,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata
     SharedBlockData,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    AscendConnectorMetadata,
     ChunkedTokenDatabase,
     KeyMetadata,
     LoadSpec,
@@ -41,6 +44,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 )
 
 # isort: on
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import AscendStoreConnector
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MemcacheBackend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
@@ -51,6 +56,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_trans
     KVCacheStoreLayerSendingThread,
     LayerBatchBuilder,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
 
 class FakeStore:
@@ -1335,44 +1341,82 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
 
 
 class TestKVCacheStoreRecvingThread(unittest.TestCase):
-    def test_hybrid_get_failure_is_independent_of_partial_hit_capability(self):
-        for partial_hits in (False, True):
-            for result in (None, [], [0, 0], [-1]):
-                with (
-                    self.subTest(partial_hits=partial_hits, result=result),
-                    patch.object(FakeStore, "get", return_value=result),
-                ):
-                    store = FakeStore()
-                    db = MaskedFakeTokenDatabase(masks=([True], [True]))
-                    db.cache_coordinator = MagicMock(enable_partial_hash_hits=partial_hits)
-                    db.process_token_key_strings_with_block_ids = MagicMock(
-                        return_value=iter([(0, 16, "key", b"hash", 1)])
+    def test_hybrid_failure_waits_for_other_rank_and_is_reported_once(self):
+        utils = pytest.importorskip("vllm.distributed.kv_transfer.kv_connector.utils")
+        outputs = pytest.importorskip("vllm.v1.outputs")
+        aggregator = utils.KVOutputAggregator(expected_finished_count=2)
+        metadata = AscendConnectorMetadata(set(), loading_req_ids={"r1"})
+
+        def make_receiver(rank: int, result: list[int]):
+            db = ChunkedTokenDatabase([KeyMetadata("m", rank, 0, 0, group) for group in (0, 1)], [16, 16], None)
+            db.set_group_buffers({0: [1000], 1: [2000]}, {0: [16], 1: [32]}, {0: [16], 1: [32]})
+            store = MagicMock(spec=MemcacheBackend)
+            store.get.return_value = result
+            thread = KVCacheStoreRecvingThread(store, db, 16, rank, tp_size=2, host_resident_groups=frozenset({0}))
+
+            worker = KVPoolWorker.__new__(KVPoolWorker)
+            worker.kv_recv_thread = thread
+            worker.kv_send_thread = None
+            worker.load_async = True
+            worker.use_layerwise = False
+            worker.tp_rank = rank
+            worker._invalid_block_ids_lock = threading.Lock()
+            worker._failed_requests = set()
+
+            connector = AscendStoreConnector.__new__(AscendStoreConnector)
+            connector.connector_worker = worker
+            connector.use_layerwise = False
+            connector._current_step_has_real_forward = False
+            connector._connector_metadata = metadata
+            request = ReqMeta(
+                req_id="r1",
+                token_len_chunk=16,
+                block_ids_by_group=[[2], [3]],
+                kv_cache_group_ids=[0, 1],
+                block_hashes=[b"h0"],
+                load_spec=LoadSpec(0, 16, can_load=True, token_len=16),
+            )
+            thread.request_queue.put(request)
+            return connector, thread, request, store
+
+        def poll(ranks):
+            worker_outputs = []
+            for connector in ranks:
+                result = connector.get_transfer_results(set())
+                worker_outputs.append(
+                    SimpleNamespace(
+                        kv_connector_output=outputs.KVConnectorOutput(
+                            finished_recving=result.finished_recving, failed_recving=result.failed_recving
+                        )
                     )
-                    thread = KVCacheStoreRecvingThread(
-                        m_store=store,
-                        token_database=db,
-                        block_size=16,
-                        tp_rank=0,
-                        dcp_size=1,
-                        ready_event=threading.Event(),
-                        invalid_block_ids=set(),
-                        invalid_block_ids_lock=threading.Lock(),
-                    )
-                    request = ReqMeta(
-                        "hybrid",
-                        block_ids_by_group=[[1], [2]],
-                        kv_cache_group_ids=[0],
-                        block_hashes=[b"hash"],
-                        can_save=True,
-                        load_spec=LoadSpec(0, 16, can_load=True, token_len=16),
-                    )
-                    thread.request_queue.put(request)
-                    thread._handle_request(request)
-                    self.assertEqual(thread.get_and_clear_failed_requests(), {"hybrid"})
-                    self.assertEqual(thread._invalid_block_ids, set())
-                    self.assertFalse(request.can_save)
-                    self.assertEqual(thread.get_and_clear_finished_requests(), {"hybrid"})
-                    self.assertEqual(thread.request_queue.unfinished_tasks, 0)
+                )
+            return aggregator.aggregate(worker_outputs).kv_connector_output
+
+        first, failed_recv, failed_request, failed_store = make_receiver(0, [-3106, 0])
+        second, delayed_recv, delayed_request, delayed_store = make_receiver(1, [0, 0])
+        ranks = (first, second)
+        original_poll = first.get_finished
+
+        def fail_during_poll(finished_req_ids):
+            result = original_poll(finished_req_ids)
+            failed_recv._handle_request(failed_request)
+            return result
+
+        with patch.object(first, "get_finished", side_effect=fail_during_poll):
+            assert poll(ranks).finished_recving is None
+        assert poll(ranks).finished_recving is None
+        assert poll(ranks).finished_recving is None
+        delayed_store.get.assert_not_called()
+
+        delayed_recv._handle_request(delayed_request)
+        result = poll(ranks)
+        assert result.finished_recving == result.failed_recving == {"r1"}
+        assert poll(ranks).finished_recving is None
+        assert failed_store.get.call_args.kwargs["host_keys"] == [True, False]
+        keys, addrs, sizes = delayed_store.get.call_args.args
+        assert ["@group:1" in key for key in keys] == [True, False]
+        assert (addrs, sizes) == ([[2096], [1032]], [[32], [16]])
+        assert delayed_store.get.call_args.kwargs["host_keys"] == [False, True]
 
     def test_handle_request(self):
         store = FakeStore()

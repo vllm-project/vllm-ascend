@@ -950,9 +950,10 @@ class BaseKVPoolWorker(ABC):
         with self._invalid_block_ids_lock:
             failed = self._failed_requests.copy()
             self._failed_requests.clear()
-        for thread in (self.kv_send_thread, self.kv_recv_thread):
-            if thread is not None:
-                failed.update(thread.get_and_clear_failed_requests())
+        if self.kv_send_thread is not None:
+            failed.update(self.kv_send_thread.get_and_clear_failed_requests())
+        if self.kv_recv_thread is not None and (not self.load_async or self.use_layerwise):
+            failed.update(self.kv_recv_thread.get_and_clear_failed_requests())
         return failed
 
     def get_block_ids_with_load_errors(self) -> set[int]:
@@ -1011,9 +1012,16 @@ class BaseKVPoolWorker(ABC):
 
         done_recving = set()
         if self.kv_recv_thread is not None:
-            self.kv_recv_thread.discard_finished_requests(meta.preempted_req_ids)
             if self.load_async and not self.use_layerwise:
-                done_recving = self.kv_recv_thread.get_and_clear_finished_requests(meta.loading_req_ids)
+                assert isinstance(self.kv_recv_thread, KVCacheStoreRecvingThread)
+                done_recving, failed = self.kv_recv_thread.get_and_clear_receive_results(
+                    meta.loading_req_ids, meta.preempted_req_ids
+                )
+                if failed:
+                    with self._invalid_block_ids_lock:
+                        self._failed_requests.update(failed)
+            else:
+                self.kv_recv_thread.discard_finished_requests(meta.preempted_req_ids)
 
         logger.debug(
             "Number of completed KV cache send requests: %d, receive requests: %d, tp_rank:%d",
