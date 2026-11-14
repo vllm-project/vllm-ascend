@@ -976,7 +976,7 @@ def test_pcp_manager_skips_hidden_restore_before_last_pp_rank() -> None:
     parent_restore.assert_not_called()
 
 
-@pytest.mark.parametrize("method", ["mtp", "eagle3", "dspark"])
+@pytest.mark.parametrize("method", ["mtp", "eagle3", "dspark", "dflash"])
 @pytest.mark.parametrize("draft_sample_method", ["greedy", "probabilistic"])
 @pytest.mark.parametrize(
     ("cudagraph_mode", "sparse_mla"),

@@ -2322,12 +2322,23 @@ def test_main_entry_allocates_and_reshapes_kvpp_views(monkeypatch, packed):
         return result
 
     monkeypatch.setattr(attn_utils, "allocate_kvpp_cache", allocate)
+    config.attention_config = SimpleNamespace(hisparse_config=None)
+    config.cache_config.get_resolved_kv_cache_layout = lambda: None
+    config.compilation_config.static_forward_context = layers
     assert upstream_model_runner.get_kv_cache_spec is patch_attn_utils.get_kv_cache_spec
+    assert upstream_model_runner.init_kv_cache is upstream_attn_utils.init_kv_cache
+    assert upstream_model_runner.init_kv_cache.__globals__ is vars(upstream_attn_utils)
     assert upstream_attn_utils.allocate_kv_cache is patch_attn_utils.allocate_kv_cache_main
-    caches = upstream_attn_utils.allocate_kv_cache(
-        make_cache_config(specs), device=torch.device("cpu"), layout=None, kernel_block_sizes=[2]
+    assert upstream_attn_utils.bind_kv_cache_to_layers is patch_attn_utils.bind_kv_cache_to_layers
+    caches = upstream_model_runner.init_kv_cache(
+        forward_context=layers,
+        kv_cache_config=make_cache_config(specs),
+        device=torch.device("cpu"),
+        kernel_block_sizes=[2],
+        vllm_config=config,
     )
     assert_attention_cache_views(caches, raw, packed)
+    assert all(layers[name].kv_cache is cache for name, cache in caches.items())
 
 
 def _make_mla_layer(*, fa_quant: bool = False, sparse_c8: bool = False):

@@ -203,13 +203,6 @@ def rfork_helpers(monkeypatch, local_weights):
         RForkSeedServiceStartResult=types_module.RForkSeedServiceStartResult,
     )
 
-    package("vllm_ascend.eplb")
-    package("vllm_ascend.eplb.adaptor")
-
-    class VllmEplbAdaptor:
-        _registered_moe_layers = []
-
-    adaptor_module = install("vllm_ascend.eplb.adaptor.vllm_adaptor", VllmEplbAdaptor=VllmEplbAdaptor)
     package("vllm_ascend.ops")
     package("vllm_ascend.ops.fused_moe")
 
@@ -219,11 +212,6 @@ def rfork_helpers(monkeypatch, local_weights):
             self._quant_method = quant_method
 
     install("vllm_ascend.ops.fused_moe.fused_moe", AscendMoERunner=AscendMoERunner)
-
-    class AscendRoutedExperts:
-        moe_counter = -1
-
-    routed_experts_module = install("vllm_ascend.ops.fused_moe.routed_experts", AscendRoutedExperts=AscendRoutedExperts)
     rotary_module = install(
         "vllm_ascend.ops.rotary_embedding",
         _cos_sin_cache=None,
@@ -242,8 +230,6 @@ def rfork_helpers(monkeypatch, local_weights):
         loader=loader,
         safety=safety,
         AscendMoERunner=AscendMoERunner,
-        adaptor_module=adaptor_module,
-        routed_experts_module=routed_experts_module,
         rotary_module=rotary_module,
         dynamo_hooks=dynamo_hooks,
         rope_dict=rope_dict,

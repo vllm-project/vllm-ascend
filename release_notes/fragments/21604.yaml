@@ -1,0 +1,10 @@
+pr: 21604
+entries:
+  - category: breaking
+    text: >-
+      Native block-wise FP8 checkpoints (`"quant_method": "fp8"` with a
+      `weight_block_size`) are now rejected at startup on Ascend A2/A3 and Atlas
+      300I DUO instead of being silently dequantized into the model dtype.
+      Serve the BF16 release of the model on those devices, or re-quantize the
+      checkpoint with ModelSlim or LLM-Compressor; Ascend 950 is unaffected and
+      still re-groups the block scales into MXFP8.

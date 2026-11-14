@@ -62,24 +62,6 @@ _orig_annotate_eagle_groups = getattr(_kv_cache_planning, "_annotate_eagle_group
 _orig_get_kv_cache_config_from_groups = _kv_cache_planning.get_kv_cache_config_from_groups
 _orig_max_memory_usage_bytes_from_groups = _kv_cache_planning._max_memory_usage_bytes_from_groups
 _orig_pool_bytes_per_block = _kv_cache_planning._pool_bytes_per_block
-if UniformTypeKVCacheSpecs.max_num_blocks_per_req is KVCacheSpec.max_num_blocks_per_req:
-
-    def _uniform_type_max_num_blocks_per_req(
-        self: UniformTypeKVCacheSpecs,
-        vllm_config: VllmConfig,
-        max_len: int,
-    ) -> int:
-        """Preserve the inner spec's block-table width."""
-        widths = {spec.max_num_blocks_per_req(vllm_config, max_len) for spec in self.kv_cache_specs.values()}
-        assert len(widths) == 1, (
-            "All layers in the same KV cache group must need the same number "
-            f"of block table entries, got {sorted(widths)}."
-        )
-        return next(iter(widths))
-
-    UniformTypeKVCacheSpecs.max_num_blocks_per_req = (  # type: ignore[method-assign]
-        _uniform_type_max_num_blocks_per_req
-    )
 
 
 def _page_sizes(spec: UniformTypeKVCacheSpecs) -> set[int]:
@@ -99,11 +81,6 @@ def _get_kv_cache_groups_uniform_page_size(
     if kimi_k3_groups is not None:
         return kimi_k3_groups
     return _orig_get_kv_cache_groups_uniform_page_size(kv_cache_spec)
-
-
-def _kv_cache_config_has_mamba_layers(self: KVCacheConfig) -> bool:
-    """Recognize Mamba layers nested in UniformType cache groups."""
-    return any(get_kv_cache_spec_kind(group.kv_cache_spec) == KVCacheSpecKind.MAMBA for group in self.kv_cache_groups)
 
 
 def group_and_unify_kv_cache_specs(
@@ -658,9 +635,6 @@ if _orig_annotate_eagle_groups is not None:
 _kv_cache_planning._get_packed_kv_cache_groups = _ascend_get_packed_kv_cache_groups
 _kv_cache_planning._get_kv_cache_groups_uniform_page_size = _get_kv_cache_groups_uniform_page_size
 _kv_cache_planning.get_kv_cache_groups = _get_ascend_kv_cache_groups
-KVCacheConfig.has_mamba_layers = property(  # type: ignore[assignment]
-    _kv_cache_config_has_mamba_layers
-)
 _kv_cache_planning.get_kv_cache_config_from_groups = _ascend_get_kv_cache_config_from_groups
 _kv_cache_planning._max_memory_usage_bytes_from_groups = _ascend_max_memory_usage_bytes_from_groups
 _kv_cache_planning._pool_bytes_per_block = _ascend_pool_bytes_per_block
