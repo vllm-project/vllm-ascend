@@ -1,0 +1,4 @@
+pr: 21857
+entries:
+  - category: performance
+    text: Reduced redundant full-prompt hashing after Mooncake V2 prefill truncation, improving long-context P/D scheduling efficiency while preserving prefix-cache hash correctness.

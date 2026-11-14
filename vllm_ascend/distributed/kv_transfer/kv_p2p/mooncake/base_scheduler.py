@@ -528,8 +528,25 @@ class MooncakeBaseConnectorScheduler:
         request._all_token_ids.pop()
         request.num_prompt_tokens -= 1
         request.max_tokens = 1
-        # Request already hashed the full prompt. Rebuild for the shortened one.
-        request.block_hashes.clear()
+        # Removing the final token leaves every hash whose full dependency
+        # window still fits in the shortened sequence unchanged. Use the
+        # resolved request-hash geometry, not the physical KV page size.
+        kv_cache_config = getattr(self, "kv_cache_config", None)
+        hash_block_size = getattr(kv_cache_config, "hash_block_size", None)
+        vllm_config = getattr(self, "vllm_config", None)
+        lookahead = getattr(vllm_config, "num_hash_lookahead_tokens", None)
+        if isinstance(hash_block_size, int) and hash_block_size > 0 and isinstance(lookahead, int) and lookahead >= 0:
+            truncate_hashes = getattr(request, "truncate_block_hashes", None)
+            if callable(truncate_hashes):
+                truncate_hashes(hash_block_size, lookahead)
+            else:
+                # Backport vLLM Request.truncate_block_hashes() for older pins.
+                num_valid_hashes = max(0, request.num_tokens - lookahead) // hash_block_size
+                del request.block_hashes[num_valid_hashes:]
+                request._prompt_embeds_per_block_hashes.clear()
+        else:
+            # Older/unknown KVCacheConfig geometry: preserve the safe rebuild.
+            request.block_hashes.clear()
         request.update_block_hashes()
         params["_p_side_truncated"] = True
 
