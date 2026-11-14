@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Sequence
 from dataclasses import replace
@@ -37,6 +38,8 @@ from vllm.v1.kv_offload.base import (
 )
 
 from vllm_ascend.utils import get_kv_cache_tensor_layers
+
+logger = logging.getLogger(__name__)
 
 
 def _make_int8_block_view(
@@ -175,6 +178,22 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
         requires_layout_adaptation = False
         for group in selected_groups:
             group_spec = group.kv_cache_spec
+            # Skip MambaSpec groups (GDN / linear attention layers): their
+            # state tensors use a non-coalescible interleaved layout on
+            # Ascend NPUs (stride != payload because hybrid model pools pack
+            # full-attention KV blocks and Mamba state slots in the same
+            # storage). Mamba states remain in NPU and are managed by vLLM's
+            # HybridKVCacheCoordinator state cache, not by the offloading
+            # connector. The upstream OffloadingConnector's
+            # _bounding_group_ids already bounds load depth for groups that
+            # are not offloaded, so the scheduler side requires no changes.
+            if isinstance(group_spec, MambaSpec):
+                logger.info(
+                    "Skipping MambaSpec group for native offloading: "
+                    "mamba state tensors use non-coalescible layout "
+                    "on Ascend. States remain in NPU."
+                )
+                continue
             per_layer_specs = group_spec.kv_cache_specs if isinstance(group_spec, UniformTypeKVCacheSpecs) else {}
             for layer_name in group.layer_names:
                 layer_spec = per_layer_specs.get(layer_name, group_spec)
@@ -236,6 +255,22 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
 
         for group in selected_groups:
             group_spec = group.kv_cache_spec
+            # Skip MambaSpec groups (GDN / linear attention layers): their
+            # state tensors use a non-coalescible interleaved layout on
+            # Ascend NPUs (stride != payload because hybrid model pools pack
+            # full-attention KV blocks and Mamba state slots in the same
+            # storage). Mamba states remain in NPU and are managed by vLLM's
+            # HybridKVCacheCoordinator state cache, not by the offloading
+            # connector. The upstream OffloadingConnector's
+            # _bounding_group_ids already bounds load depth for groups that
+            # are not offloaded, so the scheduler side requires no changes.
+            if isinstance(group_spec, MambaSpec):
+                logger.info(
+                    "Skipping MambaSpec group for native offloading: "
+                    "mamba state tensors use non-coalescible layout "
+                    "on Ascend. States remain in NPU."
+                )
+                continue
             per_layer_specs = group_spec.kv_cache_specs if isinstance(group_spec, UniformTypeKVCacheSpecs) else {}
             for layer_name in group.layer_names:
                 if layer_name in refs_by_layer:
@@ -311,6 +346,12 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
 
         group_data_refs: list[list[CanonicalKVCacheRef]] = []
         for group in selected_groups:
+            # Keep group index alignment: append an empty ref list for
+            # skipped MambaSpec groups so that downstream consumers that
+            # iterate by group index remain consistent.
+            if isinstance(group.kv_cache_spec, MambaSpec):
+                group_data_refs.append([])
+                continue
             group_refs: list[CanonicalKVCacheRef] = []
             for layer_name in group.layer_names:
                 group_refs.extend(refs_by_layer[layer_name])
