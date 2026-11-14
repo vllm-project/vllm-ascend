@@ -208,21 +208,27 @@ class TestQuantizedAllReduce(unittest.TestCase):
         original = x.clone()
         q_fake = torch.zeros(4, 64, dtype=torch.int8)
         deq_fake = torch.randn_like(x)
+        original_npu = torch.npu
+        original_capture = original_npu.is_current_stream_capturing
         with (
             patch(
                 "vllm.forward_context.get_forward_context",
                 side_effect=AssertionError("Routing must not inspect forward metadata"),
             ) as mock_context,
-            patch.object(torch.npu, "is_current_stream_capturing", return_value=True, create=True) as mock_capture,
+            # Replace the backend so cleanup preserves dynamically created
+            # MagicMock attributes used by subsequent CPU tests.
+            patch.object(torch, "npu", is_current_stream_capturing=MagicMock(return_value=True)) as mock_npu,
             patch("torch.linalg.vector_norm", wraps=torch.linalg.vector_norm) as mock_norm,
             patch("torch.distributed.all_reduce") as mock_ar,
             patch("torch_npu.npu_quantize", create=True, return_value=q_fake),
             patch("torch_npu.npu_anti_quant", create=True, return_value=deq_fake),
         ):
             out = wrapper.all_reduce(x)
+        self.assertIs(torch.npu, original_npu)
+        self.assertIs(torch.npu.is_current_stream_capturing, original_capture)
         self.assertEqual(mock_ar.call_count, 2)
         mock_context.assert_not_called()
-        mock_capture.assert_not_called()
+        mock_npu.is_current_stream_capturing.assert_not_called()
         mock_norm.assert_called_once()
         self.assertTrue(torch.equal(out, deq_fake))
         self.assertTrue(torch.equal(x, original))
