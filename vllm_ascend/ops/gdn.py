@@ -192,6 +192,71 @@ def _flatten_recurrent_state_indices(
 _MAX_RECURRENT_GDN_TOKENS = 8
 
 
+def _use_upstream_recurrent(attn_metadata, spec_state_indices_tensor, ssm_state) -> bool:
+    """Whether the speculative recurrent update must use the strided FLA kernel.
+
+    Three independent reasons:
+    * the metadata already asked for it (adaptive verification, hardware profile);
+    * the mamba state is fp32 — the native packed-index AscendC kernel rejects it
+      (``aclnnRecurrentGatedDeltaRuleGetWorkspaceSize`` returns 161002), which is
+      the case for every Qwen3.5/3.6 checkpoint regardless of weight dtype;
+    * the speculative window is wider than the AscendC kernel's per-sequence cap.
+    """
+    return bool(
+        attn_metadata.spec_decode_metadata.use_upstream_recurrent
+        or ssm_state.dtype == torch.float32
+        or (
+            spec_state_indices_tensor.ndim == 2
+            and spec_state_indices_tensor.shape[1] > _MAX_RECURRENT_GDN_TOKENS
+        )
+    )
+
+
+def _recurrent_gated_delta_rule(
+    query,
+    key,
+    value,
+    ssm_state,
+    *,
+    g,
+    beta,
+    scale,
+    actual_seq_lengths,
+    ssm_state_indices,
+):
+    """Run the recurrent update, choosing the kernel the state dtype allows.
+
+    The native packed-index AscendC kernel rejects an fp32 mamba state (161002),
+    which is what every Qwen3.5/3.6 checkpoint uses. Non-speculative decode paths
+    (including the dummy decode captured for ACL graphs) therefore have to fall
+    back to the strided FLA kernel as well, not only the speculative path.
+    """
+    if ssm_state.dtype == torch.float32:
+        output, _ = fused_recurrent_gated_delta_rule(
+            q=query.unsqueeze(0),
+            k=key.unsqueeze(0),
+            v=value.unsqueeze(0),
+            g=g.unsqueeze(0),
+            beta=beta.unsqueeze(0),
+            scale=scale,
+            initial_state=ssm_state,
+            cu_seqlens=actual_seq_lengths.cumsum(dim=0),
+            ssm_state_indices=ssm_state_indices,
+        )
+        return output.squeeze(0)
+    return recurrent_gated_delta_rule(
+        query,
+        key,
+        value,
+        ssm_state,
+        g=g,
+        beta=beta,
+        scale=scale,
+        actual_seq_lengths=actual_seq_lengths,
+        ssm_state_indices=ssm_state_indices,
+    )
+
+
 def _split_head_first_conv_output(
     output: torch.Tensor, num_k_heads: int, num_v_heads: int
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -732,8 +797,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         if spec_sequence_masks is not None:
             query_spec = l2norm_fwd(query_spec)
             key_spec = l2norm_fwd(key_spec)
-            use_upstream_recurrent = attn_metadata.spec_decode_metadata.use_upstream_recurrent or (
-                spec_state_indices_tensor.ndim == 2 and spec_state_indices_tensor.shape[1] > _MAX_RECURRENT_GDN_TOKENS
+            use_upstream_recurrent = _use_upstream_recurrent(
+                attn_metadata, spec_state_indices_tensor, ssm_state
             )
             if use_upstream_recurrent:
                 # The native packed-index API bounds accepted_prev by the
@@ -787,7 +852,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
             query_decode = l2norm_fwd(query_decode.contiguous())
             key_decode = l2norm_fwd(key_decode.contiguous())
-            core_attn_out_decode = recurrent_gated_delta_rule(
+            core_attn_out_decode = _recurrent_gated_delta_rule(
                 query_decode.squeeze(0),
                 key_decode.squeeze(0),
                 value_decode.squeeze(0),
@@ -953,7 +1018,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
             query_non_spec = l2norm_fwd(query_non_spec)
             key_non_spec = l2norm_fwd(key_non_spec)
-            core_attn_out_non_spec = recurrent_gated_delta_rule(
+            core_attn_out_non_spec = _recurrent_gated_delta_rule(
                 query_non_spec.squeeze(0),
                 key_non_spec.squeeze(0),
                 value_non_spec.squeeze(0),
