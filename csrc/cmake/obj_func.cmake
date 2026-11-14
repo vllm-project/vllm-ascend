@@ -465,8 +465,6 @@ macro(add_modules_sources_aicpu)
     target_sources(${GRAPH_PLUGIN_NAME}_proto_headers INTERFACE ${OP_GRAPH_PROTO_HEADERS})
   endif()
 
-  set(ENABLE_AICPU ON CACHE BOOL "enable aicpu kernel" FORCE)
-
 endmacro()
 
 # 添加opapi object
