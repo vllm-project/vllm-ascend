@@ -86,7 +86,12 @@ def device_chosen_token_ids(sampled_token_ids: torch.Tensor) -> torch.Tensor:
 
 
 def pack_rare_step(cpu: Any, sampled: Any, n_req: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Token ids and logprob columns for one step, without a Python list per row."""
+    """Token ids and logprob columns for one step (contiguous 1-D host arrays).
+
+    Avoids a full ``float64`` round-trip plus two column ``ascontiguousarray``
+    copies when the pair tensor is already a CPU numpy/torch buffer: one
+    cast/slice pass materializes ``top1`` / ``chosen``.
+    """
     if isinstance(cpu, torch.Tensor):
         pairs = cpu.detach()
         if pairs.device.type != "cpu":
@@ -101,9 +106,18 @@ def pack_rare_step(cpu: Any, sampled: Any, n_req: int) -> tuple[np.ndarray, np.n
         empty_i = np.zeros(0, np.int64)
         empty_f = np.zeros(0, np.float64)
         return empty_i, empty_f, empty_f
-    base = np.ascontiguousarray(pairs_np[:n], np.float64)
+    # One contiguous [n, 2] float64 block, then copy columns into 1-D vectors
+    # (column views of [n,2] are not C-contiguous).
+    if pairs_np.dtype == np.float64 and pairs_np.flags.c_contiguous:
+        base = pairs_np[:n]
+    else:
+        base = np.ascontiguousarray(pairs_np[:n], dtype=np.float64)
+    top1 = np.empty(n, dtype=np.float64)
+    chosen = np.empty(n, dtype=np.float64)
+    top1[:] = base[:, 0]
+    chosen[:] = base[:, 1]
     token_ids = _last_token_ids(sampled, n)
-    return token_ids, np.ascontiguousarray(base[:, 0]), np.ascontiguousarray(base[:, 1])
+    return token_ids, top1, chosen
 
 
 def _last_token_ids(sampled: Any, n: int) -> np.ndarray:
@@ -113,7 +127,11 @@ def _last_token_ids(sampled: Any, n: int) -> np.ndarray:
     chosen = device_chosen_token_ids(sampled)
     if chosen.device.type != "cpu":
         chosen = chosen.detach().cpu()
-    return np.ascontiguousarray(chosen.numpy()[:n], np.int64)
+    arr = chosen.numpy()
+    out = arr[:n]
+    if out.dtype == np.int64 and out.flags.c_contiguous:
+        return out
+    return np.ascontiguousarray(out, dtype=np.int64)
 
 
 @dataclass
@@ -297,27 +315,21 @@ class RareCharsDetector(ConfigBackedDetector):
             except Exception as exc:
                 self._mark_warmup_failed(exc)
                 return []
-            keep_ids: list[str] = []
-            keep_idx: list[int] = []
-            keep_tok: list[int] = []
-            keep_top1: list[float] = []
-            keep_chosen: list[float] = []
-            for i in range(n):
-                req_id = req_ids[i]
-                token_id = int(token_ids[i])
-                if not req_id or token_id < 0:
-                    continue
-                keep_ids.append(req_id)
-                keep_idx.append(i)
-                keep_tok.append(token_id)
-                keep_top1.append(float(top1_logprobs[i]))
-                keep_chosen.append(float(chosen_logprobs[i]))
+            # Vector filter: one index pass + numpy gather (no per-row Python
+            # float()/append into five parallel lists).
+            tok = np.asarray(token_ids[:n], dtype=np.int64)
+            top1_a = np.asarray(top1_logprobs[:n], dtype=np.float64)
+            chosen_a = np.asarray(chosen_logprobs[:n], dtype=np.float64)
+            keep_idx = [i for i in range(n) if req_ids[i] and int(tok[i]) >= 0]
+            if not keep_idx:
+                return []
+            keep_ids = [req_ids[i] for i in keep_idx]
             return self._feed_native_locked(
                 req_ids=keep_ids,
                 req_idxs=keep_idx,
-                token_ids=keep_tok,
-                top1=keep_top1,
-                chosen=keep_chosen,
+                token_ids=tok[keep_idx],
+                top1=top1_a[keep_idx],
+                chosen=chosen_a[keep_idx],
                 log_leader=runner_tp_rank(self._runner) == 0,
             )
 
