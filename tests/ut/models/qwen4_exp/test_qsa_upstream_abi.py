@@ -44,50 +44,24 @@ def test_indexer_projection_runs_on_auxiliary_stream(monkeypatch) -> None:
     token_k.record_stream.assert_called_once_with(main_stream)
 
 
-def test_parallel_projection_custom_op_submits_indexer_before_qkv(monkeypatch) -> None:
-    calls = []
-    query = Mock()
-    token_k = Mock()
-    qkv = Mock()
+def test_qsa_forward_side_effect_op_copies_into_stable_output(monkeypatch) -> None:
+    hidden_states = torch.empty((2, 8))
+    positions = torch.arange(2)
+    expected = torch.arange(16, dtype=torch.float32).reshape(2, 8)
+    output = torch.empty_like(expected)
     layer = Mock()
-    layer._start_indexer_projection.side_effect = lambda *_args: (
-        calls.append("indexer"),
-        (query, token_k),
-    )[1]
-    layer.qkv_proj.side_effect = lambda *_args: (calls.append("qkv"), (qkv, None))[1]
+    layer._forward_impl.return_value = expected
     monkeypatch.setattr(qsa, "_ascend_qsa_layer", lambda _name: layer)
 
-    actual = qsa.qwen4_exp_ascend_qsa_parallel_projections(
-        Mock(),
-        Mock(),
-        "layer",
-        2,
-        16,
-        4,
-        8,
-    )
-
-    assert actual == (qkv, query, token_k)
-    assert calls == ["indexer", "qkv"]
-
-
-def test_parallel_projection_fake_shapes() -> None:
-    hidden_states = torch.empty((8, 2560), dtype=torch.bfloat16)
-
-    qkv, query, token_k = qsa.qwen4_exp_ascend_qsa_parallel_projections_fake(
+    qsa.qwen4_exp_ascend_qsa_forward_with_output(
         hidden_states,
-        torch.empty((3, 8), dtype=torch.int64),
+        positions,
+        output,
         "layer",
-        5,
-        6144,
-        16,
-        128,
     )
 
-    assert qkv.shape == (8, 6144)
-    assert query.shape == (5, 16, 128)
-    assert token_k.shape == (5, 1, 128)
-    assert qkv.dtype == query.dtype == token_k.dtype == torch.bfloat16
+    layer._forward_impl.assert_called_once_with(positions, hidden_states)
+    torch.testing.assert_close(output, expected)
 
 
 def test_main_uses_ascend_projection_and_draft_uses_upstream(monkeypatch) -> None:
