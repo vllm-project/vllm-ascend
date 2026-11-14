@@ -530,6 +530,8 @@ class AscendConfig:
             "mega_moe_max_tokens": 0,
             "ascend_log_path": "~/ascend/log/vllm_ascend",
             "enable_fused_mc2": 0,
+            "enable_mega_moe_low_latency": false,
+            "mega_moe_low_latency_fused_gather": true,
             "enable_mlapo": true,
             "mlapo_keep_prefill_weights": false,
             "msmonitor_use_daemon": false,
@@ -706,6 +708,10 @@ class AscendConfig:
     # the operator instead of the separate shared-expert forward. enable_fused_mc2=2
     # keeps the shared expert separate. Internal flag, not user-settable.
     megamoe_shared_expert_fusion: bool = False
+    # Run the communication-free A5 MegaMoeLowLatency operator between an
+    # external AllGather and ReduceScatter. This is independent of fused MC2.
+    enable_mega_moe_low_latency: bool = False
+    mega_moe_low_latency_fused_gather: bool = True
     enable_mlapo: bool = True
     # When True, keep MLAPO prefill weights on NPU instead of freeing them
     # on kv_consumer D nodes. Trades NPU memory for stability — D nodes have
@@ -930,6 +936,26 @@ class AscendConfig:
 
         # enable_fused_mc2 enum + MiniMax mutex + multistream auto-disable
         assert self.enable_fused_mc2 in (0, 1), f"enable_fused_mc2 must be 0 or 1, got {self.enable_fused_mc2}"
+        if self.enable_mega_moe_low_latency:
+            if self.enable_fused_mc2:
+                raise ValueError("enable_mega_moe_low_latency cannot be combined with enable_fused_mc2.")
+            if not get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_LOW_LATENCY):
+                raise ValueError("enable_mega_moe_low_latency is supported only on Ascend 950PR/950DT.")
+            if importlib.util.find_spec("cann_ops_transformer") is None:
+                raise ValueError(
+                    "enable_mega_moe_low_latency requires an ops-transformer package "
+                    "that exports cann_ops_transformer.ops.mega_moe_low_latency."
+                )
+            if not vc.parallel_config.enable_expert_parallel:
+                raise ValueError("enable_mega_moe_low_latency requires expert parallelism.")
+            if getattr(vc, "lora_config", None) is not None:
+                raise ValueError("enable_mega_moe_low_latency does not support MoE LoRA.")
+            if (
+                getattr(vc.parallel_config, "enable_eplb", False)
+                or self.eplb_config.dynamic_eplb
+                or self.eplb_config.num_redundant_experts
+            ):
+                raise ValueError("enable_mega_moe_low_latency does not support EPLB or redundant experts.")
         model_architectures = getattr(vc.model_config, "architectures", None) or []
         is_minimax_m3 = any(architecture.startswith("MiniMaxM3") for architecture in model_architectures)
         # dispatch_ffn_combine (enable_fused_mc2=1 after MegaMoe rollback) does not

@@ -1839,6 +1839,7 @@ class TestTopLevelSwitchTypeValidation(TestBase):
             "msmonitor_use_daemon": "false",
             "enable_transpose_kv_cache_by_block": "false",
             "weight_nz_mode": "2",
+            "enable_mega_moe_low_latency": "false",
         }
 
         config = init_ascend_config(vc)
@@ -1848,6 +1849,19 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         self.assertFalse(config.msmonitor_use_daemon)
         self.assertFalse(config.enable_transpose_kv_cache_by_block)
         self.assertEqual(config.weight_nz_mode, 2)
+        self.assertFalse(config.enable_mega_moe_low_latency)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_low_latency_megamoe_rejects_fused_mc2(self, mock_fix):
+        vc = VllmConfig()
+        vc.additional_config = {
+            "enable_fused_mc2": 1,
+            "enable_mega_moe_low_latency": True,
+        }
+
+        with self.assertRaisesRegex(ValueError, "cannot be combined with enable_fused_mc2"):
+            init_ascend_config(vc)
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

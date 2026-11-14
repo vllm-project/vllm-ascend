@@ -39,7 +39,12 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.lora.fused_moe import has_lora
 from vllm_ascend.ops.activation import AscendSiluAndMul
 from vllm_ascend.ops.fused_moe import moe_utils
-from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MegamoeSharedExpertFusion, MegamoeSharedWeights
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import (
+    MegaMoeLowLatencySharedDescriptor,
+    MegaMoeLowLatencySharedFusion,
+    MegamoeSharedExpertFusion,
+    MegamoeSharedWeights,
+)
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import (
     PreparedSharedExpertInput,
     RoutedMoEMilestones,
@@ -47,6 +52,7 @@ from vllm_ascend.ops.fused_moe.dataclass.shared_experts import (
 from vllm_ascend.ops.fused_moe.moe_utils import _pad_tokens_with_cat
 from vllm_ascend.quantization.prepared_linear_input import PreparedLinearInput
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, npu_stream_switch, shared_experts_calculation_stream
 
 # CANN uses 36 to select FP8 E4M3FN output for situ_mx_quant.
@@ -153,6 +159,9 @@ class AscendSharedExperts:
         # Handed out by megamoe_shared_fusion() and filled in place once the
         # shared linears are rebuilt; see MegamoeSharedExpertFusion.
         self._megamoe_shared_fusion = MegamoeSharedExpertFusion()
+        self._mega_moe_low_latency_shared_fusion = MegaMoeLowLatencySharedFusion()
+        self._mega_moe_low_latency_shared_parts: dict[str, object] = {}
+        self._mega_moe_low_latency_shared_disabled = False
 
         if self.multistream_overlap:
             # Wrap the quant_method's process_weights_after_loading to validate that
@@ -170,6 +179,171 @@ class AscendSharedExperts:
             quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore
 
         self._setup_megamoe_shared_fusion()
+        self._setup_mega_moe_low_latency_shared_fusion()
+
+    def _setup_mega_moe_low_latency_shared_fusion(self) -> None:
+        """Prepare the shared MLP for MegaMoeLowLatency Shared API v6."""
+        if not getattr(get_ascend_config(), "enable_mega_moe_low_latency", False):
+            return
+        if self.quant_type not in (QuantType.W4A4MXFP, QuantType.W8A8MXFP):
+            self._mega_moe_low_latency_shared_disabled = True
+            return
+        # Unlike the older fused-MC2 MegaMoe path, AllGather finalization
+        # reduces the operator output across TP ranks.  A TP-sharded shared
+        # MLP is therefore valid: each rank contributes its local F shard and
+        # the final reduce combines it with routed experts in one collective.
+        if self._shared_megamoe_activation_signature() != ("silu", {"alpha": 1.0, "beta": 0.0}):
+            self._mega_moe_low_latency_shared_disabled = True
+            return
+        if getattr(self.layer.gate_up_proj, "bias", None) is not None or getattr(
+            self.layer.down_proj, "bias", None
+        ) is not None:
+            self._mega_moe_low_latency_shared_disabled = True
+            return
+        for linear, slot in ((self.layer.gate_up_proj, "w1"), (self.layer.down_proj, "w2")):
+            quant_method = getattr(linear, "quant_method", None)
+            original = getattr(quant_method, "process_weights_after_loading", None)
+            if original is None:
+                self._mega_moe_low_latency_shared_disabled = True
+                return
+
+            @wraps(original)
+            def wrapped(*args, _linear=linear, _slot=slot, _original=original, **kwargs):
+                result = _original(*args, **kwargs)
+                if args and args[0] is _linear:
+                    self._collect_mega_moe_low_latency_shared_weight(_slot, _linear)
+                return result
+
+            quant_method.process_weights_after_loading = wrapped  # type: ignore
+
+    @staticmethod
+    def _pair_shared_rows(tensor: torch.Tensor, intermediate: int) -> torch.Tensor:
+        return tensor.reshape(2, intermediate // 32, 32, *tensor.shape[1:]).transpose(0, 1).flatten(0, 2)
+
+    @staticmethod
+    def _shared_nz_bytes(tensor: torch.Tensor) -> torch.Tensor:
+        """Materialize Shared API v6's explicit [Kbytes/32,O/16,16,32] carrier."""
+        payload = tensor if tensor.dtype == torch.uint8 else tensor.view(torch.uint8)
+        output, k_bytes = payload.shape
+        if output % 16 or k_bytes % 32:
+            raise ValueError("MegaMoeLowLatency shared Cube weights require O%16 == Kbytes%32 == 0.")
+        carrier = (
+            payload.reshape(output // 16, 16, k_bytes // 32, 32)
+            .permute(2, 0, 1, 3)
+            .contiguous()
+        )
+        # A rank-4 NPU tensor can be allocated in NCHW even though it is
+        # contiguous.  The Shared v6 bridge deliberately accepts only an
+        # explicit ND byte carrier, because it re-declares these bytes as the
+        # physical FRACTAL_NZ storage without performing a format conversion.
+        # Force ND here rather than relying on rank-derived allocation rules.
+        if torch_npu.get_npu_format(carrier) != torch_npu.Format.ND:
+            carrier = torch_npu.npu_format_cast(carrier, torch_npu.Format.ND)
+        return carrier
+
+    def _collect_mega_moe_low_latency_shared_weight(self, slot: str, linear: torch.nn.Module) -> None:
+        if self._mega_moe_low_latency_shared_disabled:
+            return
+        if any(getattr(linear, "mxfp8_tp_padding", getattr(linear, "mxfp4_tp_padding", (0, 0)))):
+            self._mega_moe_low_latency_shared_disabled = True
+            return
+        raw_weight = torch_npu.npu_format_cast(linear.weight.data, 2)
+        weight_scale = getattr(linear, "weight_scale", None)
+        if weight_scale is None:
+            # Qwen3.5 checkpoints commonly keep the shared MLP in BF16 even
+            # when routed experts are MXFP.  Shared API v6 requires the same
+            # MX format as routed experts, so quantize this small dense MLP
+            # once after loading.  The operator's dynamic quantizer emits
+            # canonical [O,K] weights and paired E8M0 scales directly.
+            if slot == "w1":
+                if raw_weight.shape[1] == self.hidden_size:
+                    weight = raw_weight.contiguous()
+                elif raw_weight.shape[0] == self.hidden_size:
+                    weight = raw_weight.transpose(0, 1).contiguous()
+                else:
+                    self._mega_moe_low_latency_shared_disabled = True
+                    return
+            elif raw_weight.shape[0] == self.hidden_size:
+                weight = raw_weight.contiguous()
+            elif raw_weight.shape[1] == self.hidden_size:
+                weight = raw_weight.transpose(0, 1).contiguous()
+            else:
+                self._mega_moe_low_latency_shared_disabled = True
+                return
+            dst_type = (
+                torch_npu.float4_e2m1fn_x2
+                if self.quant_type == QuantType.W4A4MXFP
+                else torch.float8_e4m3fn
+            )
+            weight, scale = torch_npu.npu_dynamic_mx_quant(
+                weight,
+                dst_type=dst_type,
+                scale_alg=get_dynamic_mx_quant_scale_alg(),
+            )
+            weight = weight.contiguous()
+            scale = scale.contiguous()
+        else:
+            weight = raw_weight.transpose(0, 1).contiguous()
+            scale = weight_scale.data.transpose(0, 1).contiguous()
+        packed_fp4 = weight.dtype == torch.uint8
+        if not packed_fp4 and weight.dtype != torch.float8_e4m3fn:
+            self._mega_moe_low_latency_shared_disabled = True
+            return
+        if slot == "w1":
+            intermediate = weight.shape[0] // 2
+            if intermediate < 32 or intermediate > 512 or intermediate % 32:
+                self._mega_moe_low_latency_shared_disabled = True
+                return
+            weight = self._pair_shared_rows(weight, intermediate)
+            scale = self._pair_shared_rows(scale, intermediate)
+        else:
+            intermediate = weight.shape[1] * (2 if packed_fp4 else 1)
+            if intermediate % 64:
+                self._mega_moe_low_latency_shared_disabled = True
+                return
+        if packed_fp4:
+            quant_format = "FP4_E2M1"
+        else:
+            quant_format = "FP8_E4M3FN"
+        self._mega_moe_low_latency_shared_parts[slot] = self._shared_nz_bytes(weight)
+        scale_carrier = scale.unsqueeze(0).view(torch.uint8).contiguous()
+        # Like the explicit weight carrier above, rank-4 scale tensors may be
+        # allocated as NCHW (format 30). Shared v6 declares them through the
+        # forced-ND bridge, so their physical format must also be ND.
+        if torch_npu.get_npu_format(scale_carrier) != torch_npu.Format.ND:
+            scale_carrier = torch_npu.npu_format_cast(scale_carrier, torch_npu.Format.ND)
+        self._mega_moe_low_latency_shared_parts[slot + "_scale"] = scale_carrier
+        self._mega_moe_low_latency_shared_parts["quant_format"] = quant_format
+        self._publish_mega_moe_low_latency_shared_fusion()
+
+    def _publish_mega_moe_low_latency_shared_fusion(self) -> None:
+        parts = self._mega_moe_low_latency_shared_parts
+        if self._mega_moe_low_latency_shared_disabled or not all(
+            name in parts for name in ("w1", "w2", "w1_scale", "w2_scale", "quant_format")
+        ):
+            return
+        gate = getattr(self.layer, "expert_gate", None)
+        gate_weight = None
+        if gate is not None:
+            gate_weight = torch_npu.npu_format_cast(gate.weight.data, 2)
+            if tuple(gate_weight.shape) != (1, self.hidden_size):
+                gate_weight = gate_weight.transpose(0, 1).contiguous()
+            if gate_weight.dtype != torch.bfloat16 or tuple(gate_weight.shape) != (1, self.hidden_size):
+                self._mega_moe_low_latency_shared_disabled = True
+                return
+        fusion = self._mega_moe_low_latency_shared_fusion
+        fusion.w1 = parts["w1"]  # type: ignore[assignment]
+        fusion.w2 = parts["w2"]  # type: ignore[assignment]
+        fusion.w1_scale = parts["w1_scale"]  # type: ignore[assignment]
+        fusion.w2_scale = parts["w2_scale"]  # type: ignore[assignment]
+        fusion.gate_weight = gate_weight
+        fusion.descriptor = MegaMoeLowLatencySharedDescriptor(
+            version=6, quant_format=parts["quant_format"]  # type: ignore[arg-type]
+        )
+        logger.info_once("Prepared shared expert for MegaMoeLowLatency Shared API v6.")
+
+    def mega_moe_low_latency_shared_fusion(self) -> MegaMoeLowLatencySharedFusion:
+        return self._mega_moe_low_latency_shared_fusion
 
     def _setup_megamoe_shared_fusion(self) -> None:
         """Fuse the shared expert into the A5 MegaMoe operator when supported.
