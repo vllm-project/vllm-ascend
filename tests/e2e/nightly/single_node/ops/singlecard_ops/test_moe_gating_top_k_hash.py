@@ -100,7 +100,7 @@ def test_v41_vision_bias_and_image_sentinel(
     for current_ids in (input_ids, input_ids.roll(1)):
         # Hash inputs can be normalized once outside all MoE layers. The
         # prepared mask must retain image routing after sentinel IDs are lost.
-        normalized = current_ids.clamp_max(tid2eid.shape[0] - 1) if prepared_mask and with_hash else current_ids
+        normalized = current_ids.clamp_max(tid2eid.shape[0] - 1) if prepared_mask and tid2eid is not None else current_ids
         npu_input_ids.copy_(normalized)
         if npu_image_mask is not None:
             npu_image_mask.copy_(
