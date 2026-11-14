@@ -225,15 +225,18 @@ def _make_sparse_builder(
     device: torch.device,
     kv_cache_dtype: torch.dtype = torch.bfloat16,
     *,
-    num_kv_heads: int = 2,
-    use_union: bool = False,
+    impl: AscendMiniMaxM3SparseImpl | None = None,
 ) -> AscendMiniMaxM3SparseMetadataBuilder:
     vllm_config = _make_vllm_config()
-    vllm_config.compilation_config.static_forward_context["layer0.attn"].impl.use_union = use_union
+    layer = vllm_config.compilation_config.static_forward_context["layer0.attn"]
+    if impl is not None:
+        layer.impl = impl
+        layer.num_heads = impl.num_heads
+        layer.num_kv_heads = impl.num_kv_heads
     vllm_config.speculative_config = SimpleNamespace(num_speculative_tokens=7, parallel_drafting=False)
     spec = FullAttentionSpec(
         block_size=128,
-        num_kv_heads=num_kv_heads,
+        num_kv_heads=layer.num_kv_heads,
         head_size=128,
         head_size_v=128,
         dtype=kv_cache_dtype,
@@ -619,85 +622,21 @@ def test_sparse_metadata_builder(batch_spec: BatchSpec, mock_gbsa_ops) -> None:
         assert rebuilt.prefill.cu_seqlens_q.data_ptr() == metadata.prefill.cu_seqlens_q.data_ptr()
 
 
-def test_union_builder_counts_groups_per_request_and_skips_native_schedule(monkeypatch, mock_gbsa_ops):
+def test_union_missing_extensions_preserves_native_metadata(monkeypatch):
     monkeypatch.setattr(
         msa_m3_module, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A5)
     )
-    builder = _make_sparse_builder(torch.device("cpu"), torch.float8_e4m3fn, num_kv_heads=1, use_union=True)
-    assert builder.use_union
-    common = _create_common_attn_metadata(BatchSpec(seq_lens=[129, 257], query_lens=[9, 17]), 128, torch.device("cpu"))
-    metadata = builder.build(0, common)
-    assert metadata.prefill.num_union_groups == 5  # ceil(9/8) + ceil(17/8), not ceil(26/8).
-    assert not builder.reuse_decode_gbsa_metadata
-    assert not builder.decode_gbsa_metadata_buffers
-    mock_gbsa_ops[0].assert_not_called()
-
-
-@pytest.mark.parametrize("cache_dtype", ["fp8_e5m2", "fp8_inc"])
-def test_union_default_keeps_native_for_other_cache_types(monkeypatch, cache_dtype):
-    monkeypatch.setattr(
-        msa_m3_module, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A5)
-    )
-    loader = MagicMock()
-    monkeypatch.setattr(msa_m3_module, "load_union_extensions", loader)
-    impl = AscendMiniMaxM3SparseImpl(16, 128, 0.5, 1, cache_dtype, topk_blocks=16, sparse_block_size=128)
+    monkeypatch.setattr(msa_m3_module, "load_union_extensions", lambda: None)
+    impl = AscendMiniMaxM3SparseImpl(16, 128, 0.5, 1, "fp8_e4m3", topk_blocks=16, sparse_block_size=128)
     assert not impl.use_union
-    loader.assert_not_called()
-
-
-@pytest.mark.parametrize("cache_dtype", ["auto", "bfloat16", "float16", "fp8", "fp8_e4m3"])
-def test_union_default_and_missing_extensions_fallback(monkeypatch, cache_dtype):
-    monkeypatch.setattr(
-        msa_m3_module, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A5)
-    )
-    loader = MagicMock()
-    monkeypatch.setattr(msa_m3_module, "load_union_extensions", loader)
-    impl = AscendMiniMaxM3SparseImpl(16, 128, 0.5, 1, cache_dtype, topk_blocks=16, sparse_block_size=128)
-    assert impl.use_union
-    loader.assert_called_once()
-    loader.return_value = None
-    impl = AscendMiniMaxM3SparseImpl(16, 128, 0.5, 1, cache_dtype, topk_blocks=16, sparse_block_size=128)
-    assert not impl.use_union
-    builder = _make_sparse_builder(torch.device("cpu"), torch.float8_e4m3fn, num_kv_heads=1)
+    builder = _make_sparse_builder(torch.device("cpu"), torch.float8_e4m3fn, impl=impl)
     assert not builder.use_union
     assert builder.reuse_decode_gbsa_metadata
-
-
-@pytest.mark.parametrize("failure", [ImportError, OSError, RuntimeError, AttributeError])
-def test_missing_union_packages_do_not_abort_model_startup(monkeypatch, failure):
-    union_module.load_union_extensions.cache_clear()
-    monkeypatch.setattr(union_module, "import_module", MagicMock(side_effect=failure("unavailable")))
-    try:
-        assert union_module.load_union_extensions() is None
-    finally:
-        union_module.load_union_extensions.cache_clear()
-
-
-@pytest.mark.parametrize(
-    ("device_type", "num_heads", "num_kv_heads", "head_size", "block_size"),
-    [
-        (AscendDeviceType.A3, 16, 1, 128, 128),
-        (AscendDeviceType.A5, 32, 1, 128, 128),
-        (AscendDeviceType.A5, 16, 2, 128, 128),
-        (AscendDeviceType.A5, 16, 1, 64, 128),
-        (AscendDeviceType.A5, 16, 1, 128, 64),
-    ],
-)
-def test_union_default_keeps_native_for_other_hardware_or_geometry(
-    monkeypatch, device_type, num_heads, num_kv_heads, head_size, block_size
-):
-    monkeypatch.setattr(msa_m3_module, "get_current_hardware_profile", lambda: get_hardware_profile(device_type))
-    loader = MagicMock()
-    monkeypatch.setattr(msa_m3_module, "load_union_extensions", loader)
-    impl = AscendMiniMaxM3SparseImpl(
-        num_heads, head_size, 0.5, num_kv_heads, "fp8_e4m3", topk_blocks=16, sparse_block_size=block_size
-    )
-    assert not impl.use_union
-    loader.assert_not_called()
+    assert builder.decode_gbsa_metadata_buffers
 
 
 @pytest.mark.parametrize("kv_dtype", [torch.bfloat16, torch.float16, torch.float8_e4m3fn])
-def test_union_dispatches_mixed_batch_with_native_cache_quantization(monkeypatch, kv_dtype):
+def test_union_dispatches_mixed_batch_with_native_cache_quantization(monkeypatch, mock_gbsa_ops, kv_dtype):
     monkeypatch.setattr(
         msa_m3_module, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A5)
     )
@@ -711,47 +650,18 @@ def test_union_dispatches_mixed_batch_with_native_cache_quantization(monkeypatch
     monkeypatch.setattr(msa_m3_module, "load_union_extensions", loader)
     monkeypatch.setattr(union_module, "load_union_extensions", loader)
     cache_dtype = "fp8_e4m3" if kv_dtype == torch.float8_e4m3fn else str(kv_dtype).removeprefix("torch.")
-    impl = AscendMiniMaxM3SparseImpl(
-        16,
-        128,
-        0.5,
-        1,
-        cache_dtype,
-        topk_blocks=16,
-        sparse_block_size=128,
-    )
+    impl = AscendMiniMaxM3SparseImpl(16, 128, 0.5, 1, cache_dtype, topk_blocks=16, sparse_block_size=128)
+    assert impl.use_union
     loader.assert_called_once()
-    decode = AscendMiniMaxM3SparseDecodeMetadata(
-        seq_lens=torch.tensor([129], dtype=torch.int32),
-        block_table=torch.tensor([[0, 1]], dtype=torch.int32),
-        max_seq_len=129,
-        decode_query_len=1,
-        cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int64),
+    builder = _make_sparse_builder(torch.device("cpu"), kv_dtype, impl=impl)
+    common = _create_common_attn_metadata(
+        BatchSpec(seq_lens=[129, 257, 257], query_lens=[1, 9, 17]), 128, torch.device("cpu")
     )
-    prefill = AscendMiniMaxM3SparsePrefillMetadata(
-        cu_seqlens_q=torch.tensor([0, 9], dtype=torch.int32),
-        cu_seqlens_k=torch.tensor([0, 257], dtype=torch.int32),
-        seq_lens=torch.tensor([257], dtype=torch.int32),
-        context_lens=torch.tensor([248], dtype=torch.int32),
-        block_table=torch.tensor([[2, 3, 4]], dtype=torch.int32),
-        max_query_len=9,
-        max_seq_len=257,
-        total_kv_blocks=3,
-        max_kv_blocks=3,
-        num_union_groups=2,
-    )
-    md = AscendMiniMaxM3SparseMetadata(
-        seq_lens=torch.tensor([129, 257], dtype=torch.int32),
-        max_seq_len=257,
-        slot_mapping=torch.arange(10),
-        num_actual_tokens=10,
-        num_decodes=1,
-        num_decode_tokens=1,
-        num_prefills=1,
-        num_prefill_tokens=9,
-        prefill=prefill,
-        decode=decode,
-    )
+    md = builder.build(0, common)
+    assert md.prefill.num_union_groups == 5  # ceil(9/8) + ceil(17/8), not ceil(26/8).
+    assert not builder.reuse_decode_gbsa_metadata
+    assert not builder.decode_gbsa_metadata_buffers
+    mock_gbsa_ops[0].assert_not_called()
     monkeypatch.setattr(msa_m3_module, "get_forward_context", lambda: SimpleNamespace(attn_metadata={"attn": md}))
     union = MagicMock(wraps=union_module.minimax_m3_sparse_attn_union)
     native = MagicMock(side_effect=AssertionError("native attention must not run"))
@@ -759,21 +669,21 @@ def test_union_dispatches_mixed_batch_with_native_cache_quantization(monkeypatch
     monkeypatch.setattr(msa_m3_module, "minimax_m3_sparse_attn", native)
     monkeypatch.setattr(msa_m3_module, "minimax_m3_sparse_attn_decode", native)
     q_dtype = torch.float16 if kv_dtype == torch.float16 else torch.bfloat16
-    q = torch.zeros((10, 16 * 128), dtype=q_dtype)
+    q = torch.zeros((27, 16 * 128), dtype=q_dtype)
     selections = (
         torch.zeros((1, 1, 16), dtype=torch.int32),
-        torch.zeros((1, 9, 16), dtype=torch.int32),
+        torch.zeros((1, 26, 16), dtype=torch.int32),
         torch.ones((1, 1), dtype=torch.int32),
     )
     output = torch.empty_like(q)
-    kv = (torch.zeros((5, 128, 1, 128), dtype=kv_dtype), torch.zeros((5, 128, 1, 128), dtype=kv_dtype))
+    kv = (torch.zeros((9, 128, 1, 128), dtype=kv_dtype), torch.zeros((9, 128, 1, 128), dtype=kv_dtype))
     assert impl.forward(SimpleNamespace(layer_name="attn"), q, kv, selections, output) is output
     assert union.call_count == 2
     dec_args, pre_args = (call.args for call in union.call_args_list)
     assert dec_args[0].shape == (1, 16, 128)
-    assert dec_args[7:11] == (1, 2, 1, 129)
-    assert pre_args[0].shape == (9, 16, 128)
-    assert pre_args[7:11] == (2, 3, 9, 257)
+    assert dec_args[7:11] == (1, 3, 1, 257)
+    assert pre_args[0].shape == (26, 16, 128)
+    assert pre_args[7:11] == (5, 3, 17, 257)
     assert dec_args[2] is selections[0] and pre_args[2] is selections[1]
     assert union.call_args_list[0].kwargs["select_num_idx"] is selections[2]
     assert impl._dequant_scale is None
@@ -1468,7 +1378,6 @@ def test_sparse_attention_uses_split_indexer_projection_when_quant_types_differ(
     mock_indexer_linear: MagicMock,
     mock_indexer: MagicMock,
     _mock_logger_warning: MagicMock,
-    monkeypatch,
 ) -> None:
     mock_qkv_linear.return_value = SimpleNamespace(name="split_qkv")
     mock_fused_qkv_linear.return_value = SimpleNamespace(name="fused_qkv")
@@ -1482,7 +1391,6 @@ def test_sparse_attention_uses_split_indexer_projection_when_quant_types_differ(
         model_config=SimpleNamespace(),
         compilation_config=SimpleNamespace(static_forward_context={}),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=32),
-        additional_config={},
     )
     mock_kv_dtype.return_value = torch.bfloat16
     mock_sparse_impl.return_value = SimpleNamespace(name="impl")

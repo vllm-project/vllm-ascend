@@ -1,7 +1,0 @@
-pr: 21860
-entries:
-  - category: feature
-    text: >-
-      MiniMax-M3 sparse attention can now use optional Union exact-mask kernels on Ascend 950.
-      Compatible layers select Union when the extensions are available, preserve native attention dispatch otherwise, and follow the existing KV-cache dtype settings.
-    model: minimax-m3
