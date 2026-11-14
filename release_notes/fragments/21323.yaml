@@ -1,0 +1,4 @@
+pr: 21323
+entries:
+  - category: feature
+    text: Added opt-in layerwise receive queue profiling for Ascend Store, with per-task dependency timelines and head-of-line blocking analysis.
