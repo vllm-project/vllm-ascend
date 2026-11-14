@@ -20,6 +20,8 @@ from dataclasses import dataclass, fields
 
 import numpy as np
 import torch
+from vllm.config import get_current_vllm_config_or_none
+from vllm.utils.math_utils import round_up
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -35,11 +37,12 @@ class AscendInputBuffers(InputBuffers):
         max_num_tokens: int,
         device: torch.device,
     ):
-        super().__init__(
-            max_num_reqs,
-            max_num_tokens,
-            device,
-        )
+        super().__init__(max_num_reqs, max_num_tokens, device)
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is not None and vllm_config.parallel_config.use_sequence_parallel_moe:
+            padding_capacity = round_up(max_num_tokens, vllm_config.parallel_config.tensor_parallel_size)
+            if padding_capacity != max_num_tokens:
+                self.is_padding = torch.zeros(padding_capacity, dtype=torch.bool, device=device)
         del self.query_start_loc
 
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
