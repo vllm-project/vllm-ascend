@@ -1642,6 +1642,25 @@
 #       Remove the draft scope when upstream exposes draft construction context
 #       to the platform validation hook.
 #
+#   2. `vllm.v1.worker.gpu.spec_decode.eagle.utils.maybe_share_target_embed`
+#    Why:
+#       Under PP the DSpark draft runs on the last stage, where the target
+#       embedding is a PPMissingLayer; the upstream share check would raise
+#       there. After a successful share, the post-load align step
+#       (align_draft_weights) would also reload a private copy over the
+#       shared module.
+#    How:
+#       Wrap every DSpark draft load with a PP-safe check that defers to the
+#       draft post_process when no target shard exists, and flags a
+#       successful unrotated share so the align step keeps the shared shard.
+#       QuaRot loads skip the flag: the align step must rebuild the rotated
+#       copy there.
+#    Related PR:
+#       https://github.com/vllm-project/vllm-ascend/pull/21687
+#    Future Plan:
+#       Remove together with the align_draft_weights fallback in RFC #21537
+#       PR 2.
+#
 # ** 31. File: worker/patch_adaptive_verification.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.spec_decode.adaptive_verification._assign_draft_token_budget_compiled`

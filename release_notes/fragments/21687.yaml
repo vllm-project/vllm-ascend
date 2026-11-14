@@ -1,0 +1,4 @@
+pr: 21687
+entries:
+  - category: feature
+    text: DSpark draft loading now records a successful share of the target input embedding so the post-load align step keeps the shared module instead of reloading a private copy from the checkpoint; with Kimi K3 targets provisioning the missing last-PP-stage shard, PP>1 speculative decoding reuses the loaded target embedding (most visibly with Qwen3 GQA DSpark drafts).

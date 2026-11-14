@@ -924,6 +924,41 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
         return prefix_sum, block_residual, hidden_states
 
 
+def _draft_needs_target_embed(vllm_config: VllmConfig) -> bool:
+    """Whether this PP stage must provision the target input embedding for a draft.
+
+    A DSpark draft without a checkpoint-owned embedding shares the target's
+    input embedding (see ``maybe_share_target_embed``). Under PP the draft runs
+    on the last stage while the target embedding normally lives on the first,
+    so the target creates the missing shard locally and lets the normal target
+    checkpoint loader fill it. Unlike upstream ``spec_decode_needs_target_embed``
+    — which answers whether the draft may use the target embedding at all —
+    this asks whether this stage must create the shard the draft will alias,
+    and is scoped to the dspark method and drafts that consume the target
+    hidden states. The Kimi K3 MLA DSpark draft is excluded: it ships a frozen
+    checkpoint-owned embedding and allocates its own copy under PP, so
+    provisioning a second target copy would waste a vocab shard on every
+    last-stage TP rank. Drafts whose vocab exceeds the target's are
+    excluded too: ``load_dspark_model`` skips the share check for them, so a
+    provisioned shard would have no consumer. QuaRot targets are excluded as
+    well: the draft's post_process rebuilds a rotated private copy over the
+    shared one, so the provisioned shard would sit unconsumed.
+    """
+    spec_config = vllm_config.speculative_config
+    if spec_config is None or spec_config.method != "dspark" or not spec_config.uses_target_hidden_states:
+        return False
+    draft_model_config = spec_config.draft_model_config
+    draft_architectures = draft_model_config.hf_config.architectures or ()
+    if "K3DSparkModel" in draft_architectures:
+        return False
+    if draft_model_config.get_vocab_size() > vllm_config.model_config.get_vocab_size():
+        return False
+    if get_rotation_path(vllm_config) is not None:
+        return False
+    pp = get_pp_group()
+    return pp.world_size > 1 and pp.is_last_rank
+
+
 class AscendKimiLinearModel(UpstreamKimiLinearModel):
     """Kimi text model assembled from the Ascend decoder layer."""
 
@@ -977,7 +1012,10 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             and parallel_config.tensor_parallel_size > 1
         )
 
-        if get_pp_group().is_first_rank:
+        # A DSpark draft that shares the target embedding runs on the last PP
+        # stage, where this layer is otherwise a PPMissingLayer. Provision the
+        # real shard there and let the normal target checkpoint loader fill it.
+        if get_pp_group().is_first_rank or _draft_needs_target_embed(vllm_config):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
                 config.hidden_size,

@@ -52,7 +52,9 @@ def align_draft_weights(model, projection, vllm_config):
             return
         # PP stages past the first cannot alias the target's stage-0
         # embedding; load this rank's vocab shard from the target
-        # checkpoint unrotated so the draft owns its copy.
+        # checkpoint unrotated so the draft owns its copy. Both items are
+        # skipped when the load-time share already placed the target shard
+        # (own flags above).
         rotation = None
         weight = projection.weight
     target_config = vllm_config.model_config.hf_text_config
@@ -75,6 +77,14 @@ def align_draft_weights(model, projection, vllm_config):
 
 
 class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
+    # Explicit declaration mirroring every other upstream drafter class.
+    # SupportsEagleBase already provides this attribute through the Qwen3
+    # MRO; restating it here keeps the class self-documenting and guards
+    # against upstream MRO changes. A checkpoint-owned embedding still sets
+    # the instance flag during loading and keeps its own copy (see
+    # _should_share).
+    has_own_embed_tokens = False
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
