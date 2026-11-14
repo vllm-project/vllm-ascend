@@ -2244,6 +2244,52 @@ def test_pp_exact_counts_override_device_length_exemption(model_type):
     assert runner._can_skip_spec_cpu_length_sync() is False
 
 
+def _kimi_dflash_device_length_runner():
+    runner, output, batch = _device_length_runner()
+    runner.model_config.architecture = "KimiK31ForConditionalGeneration"
+    runner.model_config.hf_text_config = SimpleNamespace(model_type="kimi_linear")
+    runner.parallel_config = SimpleNamespace(
+        pipeline_parallel_size=1, prefill_context_parallel_size=1, decode_context_parallel_size=1
+    )
+    runner.speculative_config.enable_adaptive_verification = False
+    return runner, output, batch
+
+
+def test_kimi_dflash2_device_lengths_skip_cpu_sync():
+    runner, _, _ = _kimi_dflash_device_length_runner()
+    assert runner._can_skip_spec_cpu_length_sync() is True
+
+
+@pytest.mark.parametrize(
+    "unsupported",
+    [
+        "target_arch",
+        "draft_arch",
+        "pipeline_parallel_size",
+        "prefill_context_parallel_size",
+        "decode_context_parallel_size",
+        "kv_transfer",
+        "sparse_offload",
+        "adaptive",
+    ],
+)
+def test_kimi_dflash2_device_length_policy_falls_back(unsupported):
+    runner, _, _ = _kimi_dflash_device_length_runner()
+    if unsupported == "target_arch":
+        runner.model_config.architecture = "OtherModel"
+    elif unsupported == "draft_arch":
+        runner.speculative_config.draft_model_config.architectures = ["OtherDraftModel"]
+    elif unsupported.endswith("parallel_size"):
+        setattr(runner.parallel_config, unsupported, 2)
+    elif unsupported == "kv_transfer":
+        runner.vllm_config.kv_transfer_config = object()
+    elif unsupported == "sparse_offload":
+        runner.ascend_config.sparse_kv_offload_config.enabled = True
+    elif unsupported == "adaptive":
+        runner.speculative_config.enable_adaptive_verification = True
+    assert runner._can_skip_spec_cpu_length_sync() is False
+
+
 def _m3_device_length_runner():
     runner, output, batch, _ = _prepare_inputs_runner(speculator=True)
     runner.speculator = SimpleNamespace(

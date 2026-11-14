@@ -590,6 +590,17 @@ def test_dflash_dummy_metadata_fits_draft_graph(monkeypatch, num_reqs_padded):
     assert speculator._draft_metadata_num_reqs is None
 
 
+def test_dflash_mla_metadata_spans_padded_queries():
+    speculator = AscendDFlashSpeculator.__new__(AscendDFlashSpeculator)
+    speculator.num_query_per_req = 6
+    layer = SimpleNamespace(decode=SimpleNamespace(actual_seq_lengths_q=[6, 6]))
+
+    speculator._update_draft_attn_metadata({"draft.0": layer}, 2)
+
+    assert layer.decode.actual_seq_lengths_q == [6, 12]
+    assert not hasattr(layer, "actual_seq_lengths_q")
+
+
 @pytest.mark.parametrize("dummy_run,skip_attn", [(False, False), (False, True), (True, False), (True, True)])
 @pytest.mark.parametrize("pcp_enabled", [False, True])
 def test_dflash_profiling_does_not_reuse_target_dp_counts(monkeypatch, dummy_run, skip_attn, pcp_enabled):
