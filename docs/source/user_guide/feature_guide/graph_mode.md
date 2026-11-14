@@ -109,6 +109,20 @@ On Ascend, the current attention backend support levels are:
 
 This is why the effective graph mode on Ascend may differ from the mode requested in configuration.
 
+### Measuring startup and first-request latency
+
+Record engine startup, time to first token (TTFT), and decoding latency when comparing graph configurations.
+
+- **Engine startup** includes model loading, memory profiling, compilation, KV-cache initialization, and graph capture performed before the engine is ready. Record process imports separately when timing an offline constructor.
+- **TTFT** runs from request submission to receipt of the first token. Record whether the engine is already loaded, whether requests queue, and whether the prompt hits the prefix cache.
+- **Decoding latency** includes work performed after the first token. If graph preparation occurs after that token, include it in the first-to-second-token interval and the complete request time.
+
+Keep the model, dtype, input and output token counts, concurrency, KV-cache capacity, and capture sizes fixed. Record the effective `cudagraph_mode` and `enable_npugraph_ex`, `enable_static_kernel`, and `enable_super_kernel` settings so the measured configuration can be reproduced.
+
+Use a fresh process for each startup sample and alternate the configuration order. State whether the compilation cache is enabled and whether it was already populated. Include the first measured request in the results, and report warmed requests with their warmup procedure.
+
+Use profiling to locate expensive startup or request operations, then collect comparison timings with profiling disabled. Report NPU device-task durations alongside request wall-clock timings, accounting for overlap between device tasks.
+
 ### Troubleshooting capture resource exhaustion
 
 If ACLGraph capture fails because the configured graph sizes exceed the runtime resources available on the current stack, vLLM Ascend now raises a dedicated error with mitigation guidance. In practice, the most useful actions are:
