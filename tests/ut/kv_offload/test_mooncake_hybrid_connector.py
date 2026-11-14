@@ -979,3 +979,38 @@ class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
 class TestMooncakeHybridConnectorLoadedGroups(unittest.TestCase):
     def test_loaded_group_ids_hook_is_version_gated(self):
         self.assertIn("get_loaded_kv_cache_group_ids", MooncakeConnector.__dict__)
+
+
+class TestHybridKVCacheSendingThreadDelayedFree(unittest.TestCase):
+    """Untracked delayed-free entries must be dropped with a warning, never released."""
+
+    def _make_thread(self):
+        thread = KVCacheSendingThread.__new__(KVCacheSendingThread)
+        thread.task_tracker = KVCacheTaskTracker()
+        return thread
+
+    def test_add_delayed_request_untracked_entry_is_dropped_with_warning(self):
+        thread = self._make_thread()
+        warnings: list[str] = []
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector.logger.warning"
+        ) as log_warning:
+            thread.add_delayed_request("req-aborted", 1000.0)
+            for call in log_warning.call_args_list:
+                args = call.args
+                warnings.append(args[0] % args[1:] if args[1:] else args[0])
+
+        self.assertNotIn("req-aborted", thread.task_tracker.delayed_free_requests)
+        self.assertTrue(any("Skipping delayed free" in w for w in warnings))
+        self.assertTrue(any("MooncakeHybridConnector" in w for w in warnings))
+
+    def test_add_delayed_request_tracked_entry_is_recorded_without_warning(self):
+        thread = self._make_thread()
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector.logger.warning"
+        ) as log_warning:
+            thread.task_tracker.reqs_to_process.add("req-normal")
+            thread.add_delayed_request("req-normal", 1000.0)
+
+        self.assertEqual(thread.task_tracker.delayed_free_requests["req-normal"], 1000.0)
+        log_warning.assert_not_called()

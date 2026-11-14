@@ -236,8 +236,18 @@ class KVCacheTaskTracker:
     def add_delayed_request(self, request_id: str, delay_start_time: float):
         """Add a delayed free request."""
         with self.done_task_lock:
-            if request_id in self.reqs_to_process:
+            tracked = request_id in self.reqs_to_process
+            if tracked:
                 self.delayed_free_requests[request_id] = delay_start_time
+        if not tracked:
+            # Logged outside the lock: a burst of aborts would otherwise hold
+            # done_task_lock through the warning I/O and stall the drain path.
+            logger.warning(
+                "Skipping delayed free for untracked Mooncake request %s "
+                "(KVCacheTaskTracker); its KV blocks will not be tracked "
+                "for delayed release",
+                request_id,
+            )
 
     def _retrieve_expired_requests(self):
         """Retrieve all expired delayed requests."""
