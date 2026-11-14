@@ -209,7 +209,7 @@ def test_dense_layer_uses_model_backend_only_for_affected_config(hardware, dtype
         )
         stack.enter_context(patch.object(msa_m3_module, "get_current_vllm_config_or_none", return_value=config))
         stack.enter_context(patch(f"{model_module}.get_tensor_model_parallel_world_size", return_value=1))
-        for name in ("QKVParallelLinear", "RowParallelLinear", "GemmaRMSNorm", "get_rope"):
+        for name in ("QKVParallelLinear", "RowParallelLinear", "MiniMaxM3RMSNorm", "get_rope"):
             stack.enter_context(patch(f"{model_module}.{name}", return_value=torch.nn.Identity()))
         attention = stack.enter_context(patch(f"{model_module}.Attention", return_value=original_attention))
         MiniMaxM3Attention(
