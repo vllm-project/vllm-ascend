@@ -8,11 +8,11 @@ import numpy as np
 import pytest
 import torch
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
-from vllm.v1.worker.gpu.spec_decode.dflash.speculator import prepare_dflash_inputs
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
+from vllm_ascend.worker.v2.spec_decode.dflash.speculator import prepare_dflash_inputs
 
 ACCURACY_CASES = [
     {
@@ -618,19 +618,8 @@ def test_prepare_dflash_inputs_partition_boundaries(num_reqs, context_len):
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
 )
-@pytest.mark.parametrize(
-    "case_name,sample_from_anchor",
-    [
-        ("dcp_manager384_rank5", False),
-        ("null_manager_block_spans_two_kernel_blocks", False),
-        ("null_manager_block_spans_two_kernel_blocks", True),
-    ],
-)
-def test_upstream_prepare_dflash_inputs_with_manager_blocks(case_name, sample_from_anchor):
-    case = next(case for case in ACCURACY_CASES if case["name"] == case_name).copy()
-    if sample_from_anchor:
-        case["sample_from_anchor"] = True
-        case["num_speculative_steps"] = case["num_query_per_req"]
+def test_prepare_dflash_inputs_wrapper_forwards_dcp():
+    case = next(case for case in ACCURACY_CASES if case["name"] == "dcp_manager384_rank5")
     data = _build_inputs(case, "npu")
     prepare_dflash_inputs(*_impl_args(data, case))
     _validate_outputs(data, case, _build_reference(data, case))

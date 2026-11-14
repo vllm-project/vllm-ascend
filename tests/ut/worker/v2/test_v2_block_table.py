@@ -128,6 +128,7 @@ def _make_uninitialized_tables():
     tables.block_table_ptrs = MagicMock(name="ptrs")
     tables.block_table_strides = MagicMock(name="strides")
     tables.block_sizes_tensor = MagicMock(name="sizes")
+    tables.kernel_block_sizes_tensor = MagicMock(name="kernel_sizes")
     tables.slot_mapping_enabled = MagicMock(name="enabled")
     tables.dcp_sharded = torch.tensor([True, False])
     tables.cp_rank = 1
