@@ -270,9 +270,20 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             reshaped_scale = reshaped_scale.reshape(n_dim, k_dim // 2 + 1, 2)
         else:
             reshaped_scale = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
-        target_scale = reshaped_scale.transpose(0, 1)
 
-        transposed_weight = padded_weight.transpose(0, 1).contiguous()
+        # Set by models whose DSA consumes wo_a through
+        # npu_transpose_quant_batchmatmul, which needs ND weight
+        # [n_local_groups, hidden, o_lora_rank].
+        dsa_wo_a_3d_layout = getattr(layer, "dsa_wo_a_3d_layout", False)
+        if dsa_wo_a_3d_layout:
+            o_lora_rank = layer.o_lora_rank
+            n_local_groups = padded_weight.shape[0] // o_lora_rank
+            transposed_weight = padded_weight.reshape(n_local_groups, o_lora_rank, -1).transpose(1, 2).contiguous()
+            target_scale = reshaped_scale.reshape(n_local_groups, o_lora_rank, -1, 2).transpose(1, 2).contiguous()
+        else:
+            transposed_weight = padded_weight.transpose(0, 1).contiguous()
+            target_scale = reshaped_scale.transpose(0, 1)
+
         layer._mxfp8_gmm_nz_layout = (
             getattr(layer, "_single_group_gmm_nz", False)
             and not getattr(layer, "_fused_preprocess_managed", False)
@@ -287,7 +298,10 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         if not hasattr(layer, "_mxfp8_weight_buf"):
             # First call: allocate the persistent transformed buffers.
             layer._mxfp8_weight_buf = transposed_weight
-            if not getattr(layer, "_fused_preprocess_managed", False):
+            if (
+                not getattr(layer, "_fused_preprocess_managed", False)
+                and not getattr(layer, "skip_weight_nz_conversion", False)
+            ):
                 layer._mxfp8_weight_buf = maybe_trans_nz(layer._mxfp8_weight_buf, **mxfp8_nz().cast_kwargs())
             layer._mxfp8_scale_buf = target_scale.contiguous()
         else:
@@ -334,6 +348,16 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
 
         orig_shapes = layer._mxfp8_original_shapes
         orig_scale_shape = orig_shapes["weight_scale"]
+
+        if getattr(layer, "dsa_wo_a_3d_layout", False) and layer.weight.data.ndim == 3:
+            groups, _, rank = layer.weight.data.shape
+            layer.weight.data = (
+                layer.weight.data.transpose(1, 2).reshape(groups * rank, -1).transpose(0, 1).contiguous()
+            )
+            scale = layer.weight_scale.data
+            layer.weight_scale.data = (
+                scale.transpose(1, 2).reshape(scale.shape[0] * scale.shape[2], scale.shape[1], 2).transpose(0, 1).contiguous()
+            )
 
         if getattr(layer, "_mxfp8_gmm_nz_layout", False):
             restored_weight = torch_npu.npu_format_cast(layer.weight.data, 2, customize_dtype=torch.float8_e4m3fn)
