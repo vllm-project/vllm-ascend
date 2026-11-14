@@ -26,6 +26,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
@@ -145,6 +146,8 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         )
         if self.quant_method == ASCEND_QUANTIZATION_METHOD and self.tp_size > _MODELSLIM_SCALE_BIAS_PARTITIONS:
             raise ValueError(f"The current weight does not support moe part tp>{_MODELSLIM_SCALE_BIAS_PARTITIONS}.")
+
+        self.fuse_situ_msd = get_ascend_config().ascend_fusion_config.fusion_ops_gmmsituquant
 
         try:
             device_group = get_mc2_group().device_group
@@ -456,6 +459,28 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             w2_scale_bias=[layer.w2_scale_bias.detach()] if hasattr(layer, "w2_scale_bias") else None,
         )
 
+    def _can_fuse_situ_msd(self, hidden_states, pertoken_scale, weights, scales, assist, group_list, group_list_type):
+        # Weight loading produces native NZ with logical rank 3 (stacked) or
+        # rank 2 (EPLB). Rank 4/5 is not a reliable way to detect NZ storage.
+        return (
+            get_current_hardware_profile().supports(HardwareCapability.GROUPED_MATMUL_SITU_QUANT_MSD)
+            and self.fuse_situ_msd
+            and self.is_per_channel_weight
+            and hidden_states.dtype == torch.int8
+            and hidden_states.shape[-1] % 64 == 0
+            and pertoken_scale is not None
+            and pertoken_scale.dtype == torch.float32
+            and group_list is not None
+            and group_list_type in (0, 1)
+            and bool(weights)
+            and bool(scales)
+            and assist is not None
+            and len(weights) == len(scales) == len(assist)
+            and all(w.dtype == torch.int32 and w.is_contiguous() and w.storage_offset() == 0 for w in weights)
+            and all(s.dtype == torch.int64 and s.shape[-1] % 128 == 0 for s in scales)
+            and all(a.dtype == torch.float32 for a in assist)
+        )
+
     def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
         hidden_states = mlp_compute_input.hidden_states
         hidden_states, pertoken_scale = self._quant_hidden_states(hidden_states, mlp_compute_input.dynamic_scale)
@@ -465,6 +490,34 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         group_list, group_list_type = self._maybe_convert_group_list(mlp_compute_input)
 
         if mlp_compute_input.activation == MoEActivation.SITU:
+            if self._can_fuse_situ_msd(hidden_states, pertoken_scale, w1, w1_scale, bias1, group_list, group_list_type):
+                op = torch.ops._C_ascend.grouped_matmul_situ_quant_weight_nz
+                if self.use_expert_weight_list:
+                    op = op.list
+                    weights, scales, assist = w1, w1_scale, bias1
+                else:
+                    weights, scales, assist = w1[0], w1_scale[0], bias1[0]
+                hidden_states, out_scale = op(
+                    x=hidden_states,
+                    weight=weights,
+                    weight_scale=scales,
+                    weight_assist_matrix=assist,
+                    bias=None,
+                    x_scale=pertoken_scale,
+                    smooth_scale=None,
+                    group_list=group_list.to(torch.int64),
+                    dequant_mode=0,
+                    dequant_dtype=0,
+                    quant_mode=0,
+                    group_list_type=group_list_type,
+                    tuning_config=None,
+                    beta=1.0
+                    if mlp_compute_input.activation_situ_beta is None
+                    else mlp_compute_input.activation_situ_beta,
+                    linear_beta=mlp_compute_input.activation_situ_linear_beta or 0.0,
+                )
+                dispose_tensor(mlp_compute_input.hidden_states)
+                return hidden_states, out_scale
             # SituAndMul: run the dequantized gmm1 first, then fuse the situ
             # activation with dynamic output quantization (Kimi K3 W4A8).
             # W4A8 only supports per-channel weights (is_per_channel_weight is
