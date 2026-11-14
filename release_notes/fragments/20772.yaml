@@ -1,0 +1,4 @@
+pr: 20772
+entries:
+  - category: performance
+    text: Reduced host-side DMA descriptor construction for large contiguous Simple CPU offload transfers by coalescing adjacent block pairs.
