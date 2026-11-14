@@ -1130,6 +1130,20 @@
 #       patch Qwen3_5GatedDeltaNet._forward_core to use triton ops like `fused_recurrent_gated_delta_rule`.
 #    Future Plan:
 #       Remove this patch when all ops in _forward_core support both Qwen3_5 and Qwen3Next.
+#   2. `vllm.model_executor.models.qwen3_5.Qwen3_5DecoderLayer.__init__/forward`
+#    Why:
+#       CANN communication-GEMM operators need to replace the separate Qwen3.5
+#       sequence-parallel AllGather/ReduceScatter at the decoder-layer boundary.
+#       Upstream has no platform hook around those collectives.
+#    How:
+#       Attach Ascend output-projection MM+ReduceScatter and GDN input
+#       AllGather+MatMul operators for supported BF16 prefill layers, with the
+#       original collective path retained for decode and unsupported layouts.
+#    Related PR (if no, explain why):
+#       No upstream PR: the implementation calls Ascend-specific CANN operators.
+#    Future Plan:
+#       Remove the decoder patch when vLLM exposes platform hooks for attention
+#       input/output sequence-parallel collectives.
 #
 # ** 15. File: worker/patch_qwen3_dflash.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
