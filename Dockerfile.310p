@@ -114,4 +114,6 @@ RUN echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib' >> ~/.bashrc
 
 # Set entrypoint and default command
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+RUN bash /vllm-workspace/vllm-ascend/tools/fix_runtime_permissions.sh
+
 CMD ["/bin/bash"]

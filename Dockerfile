@@ -92,4 +92,6 @@ RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
 # Append `libascend_hal.so` path (devlib) to LD_LIBRARY_PATH
 RUN echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib' >> ~/.bashrc
 
+RUN bash /vllm-workspace/vllm-ascend/tools/fix_runtime_permissions.sh
+
 CMD ["/bin/bash"]
