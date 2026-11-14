@@ -73,6 +73,14 @@ def _ensure_global_patch():
 
 def register():
     """Register the NPU platform."""
+    import os
+
+    # Worker processes inherit this from coverage collection and do not load
+    # the pytest plugin. Install before the first kernel launch.
+    if os.environ.get("VLLM_ASCEND_TRITON_COVERAGE") == "1":
+        from vllm_ascend.triton_line_coverage import install
+
+        install()
 
     return "vllm_ascend.platform.NPUPlatform"
 

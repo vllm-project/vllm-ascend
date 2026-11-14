@@ -96,6 +96,11 @@ for p in all_expanded_files:
                 actual_runner_keys.add(rk)
             break
 
+_precision_only = meta.get("precision_only_e2e") or {}
+for partition in _precision_only.get("partitions") or []:
+    if isinstance(partition, str) and partition:
+        actual_runner_keys.add(partition)
+
 for key in sorted(actual_runner_keys - _part.keys()):
     part_errors.append(f"Referenced partition {key!r}: missing configuration")
 

@@ -432,6 +432,34 @@ class CoverageSelector:
         source_path = self.source_dir / REPO_NAME / filename
         return source_path if source_path.exists() else None
 
+    def _add_covered_lines(self, file_lines_map: dict, filename: str, lines: set[int]) -> None:
+        """Keep executable covered lines for one source file."""
+        if not lines:
+            return
+        if self.source_dir:
+            source_file = self._resolve_source_file(filename)
+            if source_file and source_file.exists():
+                lines = self._filter_noise_lines(str(source_file), lines)
+        if lines:
+            file_lines_map[filename].update(lines)
+
+    def _read_triton_lines(self, covdata_dir: Path) -> dict[str, set[int]]:
+        """Read kernel lines recorded by ``vllm_ascend.triton_line_coverage``."""
+        path = covdata_dir / "triton_lines.json"
+        if not path.is_file():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                return {}
+            lines_by_file: dict[str, set[int]] = {}
+            for filename, line_list in payload.items():
+                lines_by_file[str(filename)] = {int(line) for line in line_list}
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            print(f"  Warning: Error reading {path}: {exc}")
+            return {}
+        return lines_by_file
+
     def build_test_case_map(self) -> dict:
         """Build test case -> covered files mapping (with line numbers)"""
         print("Scanning test cases...")
@@ -449,15 +477,13 @@ class CoverageSelector:
 
                 for filename in covered_files:
                     lines = self.get_covered_lines_from_file(str(cov_file), filename)
-                    if lines:
-                        # Filter noise lines if source_dir is available
-                        if self.source_dir:
-                            source_file = self._resolve_source_file(filename)
-                            if source_file and source_file.exists():
-                                lines = self._filter_noise_lines(str(source_file), lines)
-                        # Skip files with no coverage after filtering
-                        if lines:
-                            file_lines_map[filename].update(lines)
+                    self._add_covered_lines(file_lines_map, filename, lines)
+
+            triton_lines = self._read_triton_lines(covdata_dir)
+            if triton_lines:
+                print(f"    -> triton execution lines from {len(triton_lines)} files")
+            for filename, lines in triton_lines.items():
+                self._add_covered_lines(file_lines_map, filename, lines)
 
             normalized_name = self.normalize_test_name(test_case)
             self.test_case_map[normalized_name] = {
@@ -1920,6 +1946,31 @@ class TestSelector:
         return ", ".join(result[:5]) + ("..." if len(changed_files) > 5 else "")
 
 
+def _load_verification_operator_tests() -> list[str]:
+    """Read precision_only_e2e.verification_tests without requiring PyYAML.
+
+    The recommend job installs regex only. The list is a temporary check and
+    uses the same entries as test_config.yaml.
+    """
+    config_path = Path(__file__).with_name("test_config.yaml")
+    tests: list[str] = []
+    collecting = False
+    for line in config_path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("verification_tests:"):
+            collecting = True
+            continue
+        if not collecting:
+            continue
+        if stripped.startswith("- "):
+            tests.append(stripped[2:].strip().strip("\"'"))
+            continue
+        if stripped == "" or stripped.startswith("#"):
+            continue
+        break
+    return tests
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Coverage-based precision test selector (line, function, file granularity)"
@@ -2239,6 +2290,17 @@ def main():
 
     # ===== Output results =====
     test_names = [s[0] for s in base_selected]
+    # Temporary verification paths from test_config.yaml. Remove
+    # precision_only_e2e.verification_tests after the single-card assignment
+    # has been checked. This PR changes the selection pipeline, so CI runs the
+    # full suite and would otherwise ignore the recommendation file.
+    verify_operator_tests = _load_verification_operator_tests()
+    for operator_test in verify_operator_tests:
+        if operator_test not in test_names:
+            test_names.append(operator_test)
+    if verify_operator_tests:
+        print(f"\n=== Verification Operator Tests ({len(verify_operator_tests)}) ===")
+        print(verify_operator_tests)
     if test_names:
         print(f"\n=== Recommended Test Cases ({len(test_names)} tests) ===")
         print(test_names)
