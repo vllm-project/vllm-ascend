@@ -25,7 +25,6 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
-from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
@@ -34,9 +33,7 @@ from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
 )
 from vllm.v1.worker.mamba_utils import (
     MambaSpecDecodeGPUContext,
-    get_mamba_groups,
     preprocess_mamba_align_fused_kernel,
-    validate_mamba_state_copy_funcs,
 )
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -215,27 +212,19 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         mamba_group_ids: list[int],
         block_tables: tuple[torch.Tensor, ...],
     ) -> MambaSpecDecodeGPUContext:
-        if self._mamba_ctx is None:
-            if self._mamba_state_copy_funcs is None:
-                mamba_groups = get_mamba_groups(kv_cache_config)
-                mamba_types = {spec.mamba_type for spec in mamba_groups}
-                copy_funcs = self.model.get_mamba_state_copy_funcs(mamba_types)
-                validate_mamba_state_copy_funcs(mamba_groups, copy_funcs)
-                self._mamba_state_copy_funcs = copy_funcs
-            self._mamba_ctx = MambaSpecDecodeGPUContext.create(
-                max_num_reqs=self.max_num_reqs,
-                kv_cache_config=kv_cache_config,
-                copy_funcs=self._mamba_state_copy_funcs,
-                device=self.device,
-                make_buffer=lambda n, dtype: CpuGpuBuffer(n, dtype=dtype, device=self.device),
-            )
+        """Keep the upstream request-slot block-table binding authoritative.
+
+        ``block_tables`` contains batch-ordered views. Recreating the context
+        from those views would violate the state-copy kernels' request-slot
+        contract when ``input_batch.idx_mapping`` is not an identity mapping.
+        Profiling teardown is followed by a real ``initialize_kv_cache`` call
+        before request preprocessing, which must rebuild the context instead.
+        """
         ctx = self._mamba_ctx
-        if not ctx.is_initialized:
-            ctx.initialize_from_forward_context(
-                kv_cache_config,
-                self.vllm_config.compilation_config.static_forward_context,
-                self._mamba_state_copy_funcs,
-                [block_tables[gid] for gid in mamba_group_ids],
+        if ctx is None or not ctx.is_initialized:
+            raise RuntimeError(
+                "Mamba align context must be initialized with persistent request-slot "
+                "block tables by initialize_kv_cache before preprocessing requests."
             )
         return ctx
 
@@ -260,10 +249,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         if not self._align_mode:
             return
         pcp_manager = getattr(self, "pcp_manager", None)
-        if pcp_manager is not None and (
-            model_uses_kpool_indexer(self.vllm_config.model_config)
-            or model_uses_kimi_kda(self.vllm_config.model_config)
-        ):
+        if pcp_manager is not None and self._uses_global_mamba_pcp():
             pcp_context = pcp_manager.build_attention_context(input_batch, block_tables)
             input_batch = pcp_context.global_batch
             block_tables = pcp_context.global_block_tables
@@ -330,6 +316,10 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             self._pending_bulk_copy = None
         super().finish_execution(failed=failed)
 
+    def _uses_global_mamba_pcp(self) -> bool:
+        model_config = self.vllm_config.model_config
+        return model_uses_kpool_indexer(model_config) or model_uses_kimi_kda(model_config)
+
     def prepare_attn(
         self,
         input_batch: AscendInputBatch,
@@ -346,18 +336,13 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         assert ubatch_idx == 0, "DBO is not supported on Ascend"
         pcp_manager = getattr(self, "pcp_manager", None)
         pcp_context = None
-        if (
-            pcp_manager is not None
-            and (
-                model_uses_kpool_indexer(self.vllm_config.model_config)
-                or model_uses_kimi_kda(self.vllm_config.model_config)
-            )
-            and pcp_manager.is_target_attn_groups(attn_groups)
-        ):
+        if pcp_manager is not None and self._uses_global_mamba_pcp() and pcp_manager.is_target_attn_groups(attn_groups):
             pcp_context = pcp_manager.build_attention_context(input_batch, block_tables, slot_mappings)
 
         def build_metadata(**kwargs):
-            if pcp_context is not None and not getattr(input_batch, "is_dummy", False):
+            if pcp_context is not None and (
+                not getattr(input_batch, "is_dummy", False) or getattr(input_batch, "is_cpp_profile", False)
+            ):
                 # Recurrent state uses global request order; SFA keeps local queries.
                 local_groups = [
                     [group for group in groups if not isinstance(group.kv_cache_spec, MambaSpec)]

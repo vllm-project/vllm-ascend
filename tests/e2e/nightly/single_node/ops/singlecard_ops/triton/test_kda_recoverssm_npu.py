@@ -11,14 +11,12 @@ import torch
 pytest.importorskip("torch_npu")
 
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first  # noqa: E402
-from vllm.triton_utils import triton  # noqa: E402
 
 import vllm_ascend.ops.triton.kda.recoverssm as recoverssm_module  # noqa: E402
+import vllm_ascend.ops.triton.mamba.recoverssm as shared_recoverssm  # noqa: E402
 from vllm_ascend.device.device_config import is_950  # noqa: E402
 from vllm_ascend.ops.triton.kda.recoverssm import (  # noqa: E402
     KDARecoverSSMCommitContext,
-    _compact_conv_state_kernel,
-    _conv_compaction_block_d,
     kda_recoverssm_verify,
 )
 
@@ -199,7 +197,7 @@ def test_multilayer_paged_commit_maps_sampler_rows_and_compacts_conv(
 
 @pytest.mark.skip_global_cleanup
 @torch.inference_mode()
-def test_conv_compaction_recorded_b11_l11_shape():
+def test_conv_compaction_recorded_b11_l11_shape(monkeypatch):
     if not torch.npu.is_available():
         pytest.skip("requires an Ascend NPU")
     torch.manual_seed(73)
@@ -237,7 +235,9 @@ def test_conv_compaction_recorded_b11_l11_shape():
     counts = torch.tensor(accepted + [0] * (plan_capacity - len(blocks)), dtype=torch.int32, device="npu")
     finals = torch.tensor(blocks + [0] * (plan_capacity - len(blocks)), dtype=torch.int32, device="npu")
     boundary = torch.zeros(plan_capacity, dtype=torch.int32, device="npu")
-    _compact_conv_state_kernel[(triton.cdiv(channels, block_d), len(blocks), layers)](
+    # Reproduce the captured channel tile while using the shared launch path.
+    monkeypatch.setattr(shared_recoverssm, "RECOVERSSM_CONV_TILE", block_d)
+    shared_recoverssm.compact_conv_state(
         views[0],
         *metadata,
         indices,
@@ -245,15 +245,10 @@ def test_conv_compaction_recorded_b11_l11_shape():
         finals,
         boundary,
         boundary,
-        0,
-        channels,
-        history,
-        1,
-        BLOCK_D=block_d,
-        BLOCK_HISTORY=4,
-        ALIGN_MODE=False,
-        DIM_STRIDE=1,
-        num_warps=4,
+        conv_history_len=history,
+        align_mode=False,
+        dim_stride=1,
+        null_block_id=0,
     )
     for backing, expected_backing in zip(backings, expectations):
         torch.testing.assert_close(backing[checked_blocks], expected_backing, atol=0, rtol=0)
@@ -300,8 +295,7 @@ def test_conv_compaction_device_tile_preserves_other_slots(channels, dim_first, 
         torch.tensor(values, dtype=torch.int32, device="npu")
         for values in (sources, accepted, destinations, boundaries, boundary_lengths)
     )
-    block_d = _conv_compaction_block_d(views[0].stride(1))
-    _compact_conv_state_kernel[(triton.cdiv(channels, block_d), len(sources), len(views))](
+    shared_recoverssm.compact_conv_state(
         views[0],
         *metadata,
         indices,
@@ -309,16 +303,10 @@ def test_conv_compaction_device_tile_preserves_other_slots(channels, dim_first, 
         finals,
         boundary,
         lengths,
-        0,
-        channels,
-        history,
-        1,
-        BLOCK_D=block_d,
-        BLOCK_HISTORY=4,
-        ALIGN_MODE=align,
-        DIM_STRIDE=views[0].stride(1),
-        USE_1D_CHANNEL_GATHER=not is_950(),
-        num_warps=4,
+        conv_history_len=history,
+        align_mode=align,
+        dim_stride=views[0].stride(1),
+        null_block_id=0,
     )
     for actual, expected in zip(backings, expected_backings):
         torch.testing.assert_close(actual, expected, atol=0, rtol=0)

@@ -16,6 +16,7 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 from vllm_ascend.device.device_config import is_950
+from vllm_ascend.ops.triton.mamba.recoverssm import compact_conv_state, prepare_commit_plan
 from vllm_ascend.ops.triton.triton_utils import get_ub_size_bytes, init_device_properties_triton
 
 RECOVERSSM_COMMIT_HEAD_TILE = 2
@@ -29,8 +30,6 @@ RECOVERSSM_COMMIT_UB_HEADROOM_ROWS = 2
 RECOVERSSM_VALUE_TILE = 64
 RECOVERSSM_VALUE_TILE_LARGE = 128
 RECOVERSSM_LARGE_TILE_MIN_PROGRAMS = 96
-RECOVERSSM_CONV_TILE = 4096
-RECOVERSSM_CONV_STRIDED_TILE = 256
 
 
 @triton.jit
@@ -332,219 +331,6 @@ def _kda_recoverssm_verify_kernel(
                 raw_g,
                 mask=mask_k,
             )
-
-
-@triton.heuristics(
-    {
-        "HAS_REQUEST_INDICES": lambda args: args["request_indices_ptr"] is not None,
-        "ALIGN_MODE": lambda args: args["block_table_ptr"] is not None,
-    }
-)
-@triton.jit
-def _prepare_commit_plan_kernel(
-    num_accepted_ptr,
-    request_indices_ptr,
-    state_indices_ptr,
-    query_start_loc_ptr,
-    block_table_ptr,
-    num_computed_ptr,
-    commit_lens_ptr,
-    state_commit_lens_ptr,
-    boundary_commit_lens_ptr,
-    final_state_indices_ptr,
-    boundary_state_indices_ptr,
-    boundary_recovery_lens_ptr,
-    null_block_id,
-    mamba_block_size,
-    block_table_width,
-    stride_num_accepted,
-    stride_request_indices,
-    stride_state_indices,
-    stride_query_start_loc,
-    stride_block_table_row,
-    stride_block_table_col,
-    stride_num_computed,
-    SPEC_QUERY_LEN: tl.constexpr,
-    HAS_REQUEST_INDICES: tl.constexpr,
-    ALIGN_MODE: tl.constexpr,
-):
-    spec_idx = tl.program_id(0)
-    source_state_idx = tl.load(state_indices_ptr + spec_idx * stride_state_indices).to(tl.int64)
-    request_idx = spec_idx
-    if HAS_REQUEST_INDICES:
-        request_idx = tl.load(request_indices_ptr + spec_idx * stride_request_indices).to(tl.int64)
-    num_accepted = tl.load(num_accepted_ptr + request_idx * stride_num_accepted).to(tl.int32)
-    bos = tl.load(query_start_loc_ptr + spec_idx * stride_query_start_loc).to(tl.int64)
-    eos = tl.load(query_start_loc_ptr + (spec_idx + 1) * stride_query_start_loc).to(tl.int64)
-    query_len = (eos - bos).to(tl.int32)
-    commit_len = tl.minimum(tl.maximum(num_accepted, 0), query_len)
-    commit_len = tl.minimum(commit_len, SPEC_QUERY_LEN)
-
-    final_state_idx = source_state_idx
-    boundary_state_idx = null_block_id
-    boundary_recovery_len = 0
-    if ALIGN_MODE:
-        num_computed = tl.load(num_computed_ptr + request_idx * stride_num_computed).to(tl.int32)
-        final_num_computed = num_computed + commit_len
-        final_state_col = tl.minimum(final_num_computed // mamba_block_size, block_table_width - 1)
-        final_state_idx = tl.load(
-            block_table_ptr + request_idx * stride_block_table_row + final_state_col * stride_block_table_col
-        ).to(tl.int64)
-        next_boundary = (num_computed // mamba_block_size + 1) * mamba_block_size
-        crosses_boundary = final_num_computed >= next_boundary
-        boundary_recovery_len = next_boundary - num_computed
-        boundary_state_idx = tl.load(
-            block_table_ptr
-            + request_idx * stride_block_table_row
-            + (next_boundary // mamba_block_size - 1) * stride_block_table_col,
-            mask=crosses_boundary,
-            other=null_block_id,
-        ).to(tl.int64)
-    valid = (source_state_idx > null_block_id) & (commit_len > 0)
-    tl.store(commit_lens_ptr + spec_idx, tl.where(valid, commit_len, 0))
-    has_boundary = (boundary_state_idx > null_block_id) & (boundary_recovery_len > 0)
-    # Predicate once per request, rather than reading several metadata arrays in
-    # every head/value program merely to discover that it has no work.
-    tl.store(state_commit_lens_ptr + spec_idx, tl.where(valid & ~has_boundary, commit_len, 0))
-    tl.store(boundary_commit_lens_ptr + spec_idx, tl.where(valid & has_boundary, commit_len, 0))
-    tl.store(
-        final_state_indices_ptr + spec_idx,
-        tl.where(valid, final_state_idx, null_block_id),
-    )
-    tl.store(
-        boundary_state_indices_ptr + spec_idx,
-        tl.where(valid, boundary_state_idx, null_block_id),
-    )
-    tl.store(
-        boundary_recovery_lens_ptr + spec_idx,
-        tl.where(valid, boundary_recovery_len, 0),
-    )
-
-
-@triton.jit
-def _copy_conv_state_tile(
-    source_ptr,
-    final_ptr,
-    boundary_ptr,
-    channel_offsets,
-    history_offsets,
-    token_stride,
-    commit_len,
-    boundary_recovery_len,
-    mask,
-    boundary_valid,
-    ALIGN_MODE: tl.constexpr,
-):
-    final_values = tl.load(
-        source_ptr + channel_offsets + (commit_len - 1 + history_offsets) * token_stride,
-        mask=mask,
-    )
-    if ALIGN_MODE:
-        boundary_values = tl.load(
-            source_ptr + channel_offsets + (boundary_recovery_len - 1 + history_offsets) * token_stride,
-            mask=mask & boundary_valid,
-        )
-        tl.store(
-            boundary_ptr + channel_offsets + history_offsets * token_stride,
-            boundary_values,
-            mask=mask & boundary_valid,
-        )
-    tl.store(
-        final_ptr + channel_offsets + history_offsets * token_stride,
-        final_values,
-        mask=mask,
-    )
-
-
-@triton.jit
-def _compact_conv_state_kernel(
-    conv_state_ref_ptr,
-    conv_state_base_addrs_ptr,
-    conv_state_block_strides_ptr,
-    conv_state_dim_strides_ptr,
-    conv_state_token_strides_ptr,
-    state_indices_ptr,
-    commit_lens_ptr,
-    final_state_indices_ptr,
-    boundary_state_indices_ptr,
-    boundary_recovery_lens_ptr,
-    null_block_id,
-    conv_dim,
-    conv_history_len,
-    stride_state_indices,
-    BLOCK_D: tl.constexpr,
-    BLOCK_HISTORY: tl.constexpr,
-    ALIGN_MODE: tl.constexpr,
-    DIM_STRIDE: tl.constexpr = None,
-    USE_1D_CHANNEL_GATHER: tl.constexpr = False,
-):
-    pid_d = tl.program_id(0)
-    pid_b = tl.program_id(1)
-    pid_l = tl.program_id(2)
-    source_state_idx = tl.load(state_indices_ptr + pid_b * stride_state_indices).to(tl.int64)
-    if source_state_idx <= null_block_id:
-        return
-
-    commit_len = tl.load(commit_lens_ptr + pid_b)
-    if commit_len == 0:
-        return
-    final_state_idx = tl.load(final_state_indices_ptr + pid_b).to(tl.int64)
-    boundary_state_idx = tl.load(boundary_state_indices_ptr + pid_b).to(tl.int64)
-    boundary_recovery_len = tl.load(boundary_recovery_lens_ptr + pid_b)
-
-    if final_state_idx <= null_block_id:
-        return
-
-    base_addr = tl.load(conv_state_base_addrs_ptr + pid_l)
-    block_stride = tl.load(conv_state_block_strides_ptr + pid_l)
-    if DIM_STRIDE is None:
-        dim_stride = tl.load(conv_state_dim_strides_ptr + pid_l)
-    else:
-        dim_stride = DIM_STRIDE
-    token_stride = tl.load(conv_state_token_strides_ptr + pid_l)
-    conv_state_ptr = base_addr.to(tl.pointer_type(conv_state_ref_ptr.dtype.element_ty))
-    source_ptr = conv_state_ptr + source_state_idx * block_stride
-    final_ptr = conv_state_ptr + final_state_idx * block_stride
-
-    boundary_ptr = None
-    if ALIGN_MODE:
-        boundary_ptr = conv_state_ptr + boundary_state_idx * block_stride
-
-    if USE_1D_CHANNEL_GATHER and (DIM_STRIDE is not None and DIM_STRIDE != 1):
-        # A3 Triton 3.2 requires one-dimensional gathers for strided channels.
-        offs_d = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)
-        for history in tl.static_range(BLOCK_HISTORY):
-            mask = (offs_d < conv_dim) & (history < conv_history_len)
-            _copy_conv_state_tile(
-                source_ptr,
-                final_ptr,
-                boundary_ptr,
-                offs_d * dim_stride,
-                history,
-                token_stride,
-                commit_len,
-                boundary_recovery_len,
-                mask,
-                boundary_state_idx > null_block_id,
-                ALIGN_MODE,
-            )
-        return
-    offs_d = (pid_d * BLOCK_D + tl.arange(0, BLOCK_D))[None, :]
-    offs_h = tl.arange(0, BLOCK_HISTORY)[:, None]
-    mask = (offs_d < conv_dim) & (offs_h < conv_history_len)
-    _copy_conv_state_tile(
-        source_ptr,
-        final_ptr,
-        boundary_ptr,
-        offs_d * dim_stride,
-        offs_h,
-        token_stride,
-        commit_len,
-        boundary_recovery_len,
-        mask,
-        boundary_state_idx > null_block_id,
-        ALIGN_MODE,
-    )
 
 
 @triton.jit
@@ -1151,11 +937,6 @@ def kda_recoverssm_verify(
     return out
 
 
-def _conv_compaction_block_d(dim_stride):
-    # A3 strided gathers need smaller tiles to fit the 192 KiB UB.
-    return RECOVERSSM_CONV_TILE if is_950() or dim_stride == 1 else RECOVERSSM_CONV_STRIDED_TILE
-
-
 @dataclass
 class KDARecoverSSMCommitContext:
     conv_states: tuple[torch.Tensor, ...]
@@ -1376,42 +1157,25 @@ class KDARecoverSSMCommitContext:
         ):
             raise ValueError("KDA RecoverSSM commit inputs must be on the same device")
 
-        block_table_stride = (0, 0) if block_table is None else block_table.stride()
-        num_computed_stride = 0 if num_computed_tokens is None else num_computed_tokens.stride(0)
-
-        num_layers = len(self.checkpoints)
-        conv_ref = self.conv_states[0]
-        conv_dim = conv_ref.shape[1]
-        block_history = triton.next_power_of_2(self.conv_history_len)
-        _prepare_commit_plan_kernel[(batch,)](
+        prepare_commit_plan(
             num_accepted_tokens,
-            request_indices,
             state_indices,
             query_start_loc,
-            block_table,
-            num_computed_tokens,
             self.commit_lens,
             self.state_commit_lens,
             self.boundary_commit_lens,
             self.final_state_indices,
             self.boundary_state_indices,
             self.boundary_recovery_lens,
-            NULL_BLOCK_ID,
-            mamba_block_size or 1,
-            block_table.shape[1] if block_table is not None else 1,
-            num_accepted_tokens.stride(0),
-            request_indices.stride(0) if request_indices is not None else 0,
-            state_indices.stride(0),
-            query_start_loc.stride(0),
-            block_table_stride[0],
-            block_table_stride[1],
-            num_computed_stride,
-            SPEC_QUERY_LEN=self.spec_query_len,
-            num_warps=1,
+            spec_query_len=self.spec_query_len,
+            null_block_id=NULL_BLOCK_ID,
+            request_indices=request_indices,
+            block_table=block_table,
+            num_computed_tokens=num_computed_tokens,
+            mamba_block_size=mamba_block_size,
         )
-        conv_block_d = _conv_compaction_block_d(self.conv_dim_stride)
-        _compact_conv_state_kernel[(triton.cdiv(conv_dim, conv_block_d), batch, num_layers)](
-            conv_ref,
+        compact_conv_state(
+            self.conv_states[0],
             self.conv_state_base_addrs,
             self.conv_state_block_strides,
             self.conv_state_dim_strides,
@@ -1421,18 +1185,13 @@ class KDARecoverSSMCommitContext:
             self.final_state_indices,
             self.boundary_state_indices,
             self.boundary_recovery_lens,
-            NULL_BLOCK_ID,
-            conv_dim,
-            self.conv_history_len,
-            state_indices.stride(0),
-            BLOCK_D=conv_block_d,
-            BLOCK_HISTORY=block_history,
-            ALIGN_MODE=block_table is not None,
-            DIM_STRIDE=self.conv_dim_stride,
-            USE_1D_CHANNEL_GATHER=not is_950(),
-            num_warps=4,
+            conv_history_len=self.conv_history_len,
+            align_mode=block_table is not None,
+            dim_stride=self.conv_dim_stride,
+            null_block_id=NULL_BLOCK_ID,
         )
 
+        num_layers = len(self.checkpoints)
         state_ref = self.checkpoints[0]
         correction_ref = self.correction_caches[0]
         assert correction_ref.dtype == torch.float32

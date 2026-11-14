@@ -5,8 +5,8 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from vllm_ascend.attention.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
-from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 
 
 @pytest.mark.parametrize("kind", ["head_first", "sequence_first", "mixed_slice"])
@@ -81,8 +81,8 @@ def test_head_first_l2norm_fallback_accepts_multiple_heads(backend, sliced):
             return output.squeeze(0), kwargs["initial_state"]
 
         with (
-            patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=norm),
-            patch("vllm_ascend.ops.gdn.torch_npu.npu_chunk_gated_delta_rule", side_effect=fused, create=True),
+            patch("vllm_ascend.attention.gdn.l2norm_fwd", side_effect=norm),
+            patch("vllm_ascend.attention.gdn.torch_npu.npu_chunk_gated_delta_rule", side_effect=fused, create=True),
         ):
             actual, _ = AscendGatedDeltaNetAttention._chunk_gated_delta_rule_fused(
                 *qkv, gate, gate, state, torch.tensor([0, count], dtype=torch.int32), dim**-0.5

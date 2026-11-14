@@ -138,6 +138,7 @@ class GDNChunkedPrefillMetadata:
     num_decodes: int = 0
     cu_seqlens_kern: tuple[int, ...] | None = None
     keep_meta: torch.Tensor | None = None
+    head_sharded_pcp: bool = False
 
 
 @dataclass
@@ -153,6 +154,9 @@ class GDNSpecCausalConv1dMetadata:
     query_start_loc: torch.Tensor
     cache_indices: torch.Tensor
     num_accepted_tokens: torch.Tensor
+    # Token-major offsets into ``cache_indices.reshape(-1)``. The mapping is
+    # layer-independent and can be reused by all GDN layers in one step.
+    recurrent_state_flat_indices: torch.Tensor | None = None
     output_buffer: torch.Tensor | None = None
 
 
@@ -291,15 +295,20 @@ def _build_non_spec_chunked_prefill_metadata(
     build_device_metadata: bool = True,
 ) -> GDNChunkedPrefillMetadata:
     chunk_indices_chunk64 = prepare_chunk_indices(cu_seqlens_cpu, _GDN_CHUNK_SIZE)
+    head_sharded_pcp = isinstance(builder, AscendGDNPCPMetadataBuilder)
     if build_device_metadata:
+        parallel = builder.vllm_config.parallel_config
+        head_shards = parallel.tensor_parallel_size
+        if head_sharded_pcp:
+            from vllm_ascend.ops.head_parallel import get_head_parallel_size
+
+            head_shards = get_head_parallel_size(parallel)
         hf_text_config = getattr(builder.vllm_config.model_config, "hf_text_config", None)
         linear_attn_config = getattr(hf_text_config, "linear_attn_config", None)
         if isinstance(linear_attn_config, dict) and linear_attn_config.get("num_heads") is not None:
-            gdn_num_heads = linear_attn_config["num_heads"] // builder.vllm_config.parallel_config.tensor_parallel_size
+            gdn_num_heads = linear_attn_config["num_heads"] // head_shards
         elif hf_text_config is not None and hasattr(hf_text_config, "linear_num_value_heads"):
-            gdn_num_heads = (
-                hf_text_config.linear_num_value_heads // builder.vllm_config.parallel_config.tensor_parallel_size
-            )
+            gdn_num_heads = hf_text_config.linear_num_value_heads // head_shards
         else:
             gdn_num_heads = builder.vllm_config.model_config.get_num_attention_heads(
                 builder.vllm_config.parallel_config
@@ -349,6 +358,7 @@ def _build_non_spec_chunked_prefill_metadata(
         **device_chunk_metadata,
         cu_seqlens_kern=cu_seqlens_kern,
         keep_meta=keep_meta,
+        head_sharded_pcp=head_sharded_pcp,
     )
 
 
@@ -861,8 +871,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             spec_token_indx = None
             non_spec_token_indx = None
             spec_state_indices_tensor = None
-            non_spec_state_indices_tensor = block_table_tensor[:, 0]
-            non_spec_conv1d_cache_indices = block_table_tensor
+            non_spec_state_indices_tensor = block_table_tensor[: query_start_loc_cpu.shape[0] - 1, 0]
+            non_spec_conv1d_cache_indices = block_table_tensor[: query_start_loc_cpu.shape[0] - 1]
             spec_query_start_loc = None
             non_spec_query_start_loc = query_start_loc
             num_accepted_tokens = None
@@ -1413,8 +1423,26 @@ class AscendGDNFusedAttentionBackend(AscendGDNAttentionBackend):
     def get_builder_cls() -> type[AscendGDNAttentionMetadataBuilder]:
         # Import lazily to avoid the gdn <-> builder import cycle at module
         # initialization.  The probe result is cached by the attention class.
-        from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+        from vllm_ascend.attention.gdn import AscendGatedDeltaNetAttention
 
         if get_pcp_group().world_size == 1 and AscendGatedDeltaNetAttention._supports_host_metadata_prefill():
             return AscendGDNHostMetadataBuilder
         return AscendGDNAttentionMetadataBuilder
+
+
+class AscendGDNPCPMetadataBuilder(AscendGDNAttentionMetadataBuilder):
+    def build(self, common_prefix_len, common_attn_metadata, **kwargs):
+        metadata = super().build(common_prefix_len, common_attn_metadata, **kwargs)
+        context = common_attn_metadata.pcp_context
+        metadata.pcp_context = context if context is not None and context.local_token_indices is not None else None
+        return metadata
+
+
+class AscendGDNPCPBackend(AscendGDNAttentionBackend):
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        return True
+
+    @staticmethod
+    def get_builder_cls() -> type[AscendGDNPCPMetadataBuilder]:
+        return AscendGDNPCPMetadataBuilder

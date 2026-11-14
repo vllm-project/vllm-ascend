@@ -625,6 +625,9 @@ class TestMooncakeTransferGroups(unittest.TestCase):
         worker._decode_tp_size = 8
         worker._prefill_tp_size = 16
         worker._prefill_pp_size = 1
+        worker._decode_pp_size = 1
+        worker.kv_role = "kv_consumer"
+        worker.pp_rank = 0
         worker.use_sparse = False
         _, rank_group_pulls = worker._get_hybrid_remote_rank_group_pulls("req-1", prefill_tp_size=16)
         pulls = [pull for group_pulls in rank_group_pulls.values() for pull in group_pulls]
@@ -658,6 +661,9 @@ class TestMooncakeTransferGroups(unittest.TestCase):
         worker._decode_tp_size = 4
         worker._prefill_tp_size = 8
         worker._prefill_pp_size = 1
+        worker._decode_pp_size = 1
+        worker.kv_role = "kv_consumer"
+        worker.pp_rank = 0
         worker.num_key_value_heads = 128
         worker.use_sparse = False
         worker.kv_group2layeridx = {
@@ -706,6 +712,9 @@ class TestMooncakeTransferGroups(unittest.TestCase):
             worker._decode_tp_size = 8
             worker._prefill_tp_size = 16
             worker._prefill_pp_size = 1
+            worker._decode_pp_size = 1
+            worker.kv_role = "kv_consumer"
+            worker.pp_rank = 0
             worker.num_key_value_heads = 1
             worker.use_sparse = False
             worker.kv_group2layeridx = {
@@ -757,6 +766,9 @@ class TestMooncakeTransferGroups(unittest.TestCase):
         worker._decode_tp_size = 4
         worker._prefill_tp_size = 8
         worker._prefill_pp_size = 1
+        worker._decode_pp_size = 1
+        worker.kv_role = "kv_consumer"
+        worker.pp_rank = 0
         worker.num_key_value_heads = 128
         worker.use_sparse = False
         worker.kv_group2layeridx = {
@@ -3503,7 +3515,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         # Existing V1 constraints, not new compatibility rules invented by UT.
         cases = (
             (2, 4, 1, 1, 1, ValueError, "prefill_tp_size"),
-            (2, 2, 2, 1, 1, AssertionError, "decode pp size must be 1"),
+            (2, 2, 2, 1, 1, ValueError, "matching prefill/decode pp_size"),
             (2, 2, 1, 2, 2, AssertionError, "pp and pcp cannot open in same time"),
         )
         for prefill_tp, decode_tp, decode_pp, local_pp, local_pcp, error, message in cases:
@@ -3511,7 +3523,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                 prefill_tp=prefill_tp, decode_tp=decode_tp, decode_pp=decode_pp, pp=local_pp, pcp=local_pcp
             ):
                 parallel = {
-                    "prefill": {"tp_size": prefill_tp, "dp_size": 1},
+                    "prefill": {"tp_size": prefill_tp, "dp_size": 1, "pp_size": local_pp},
                     "decode": {"tp_size": decode_tp, "dp_size": 1, "pp_size": decode_pp},
                 }
                 self.vllm_config.kv_transfer_config.get_from_extra_config.side_effect = parallel.get
@@ -3533,7 +3545,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         for prefill_tp, decode_tp, local_pp, local_pcp in ((2, 2, 1, 1), (4, 2, 2, 1), (4, 2, 1, 2)):
             with self.subTest(prefill_tp=prefill_tp, decode_tp=decode_tp, pp=local_pp, pcp=local_pcp):
                 parallel = {
-                    "prefill": {"tp_size": prefill_tp, "dp_size": 1},
+                    "prefill": {"tp_size": prefill_tp, "dp_size": 1, "pp_size": local_pp},
                     "decode": {"tp_size": decode_tp, "dp_size": 1},
                 }
                 self.vllm_config.kv_transfer_config.get_from_extra_config.side_effect = parallel.get
@@ -3553,6 +3565,35 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                 backend.assert_called_once_with("127.0.0.1", device_name="5" if local_pp > 1 else None)
                 self.assertEqual((worker._prefill_tp_size, worker._decode_tp_size), (prefill_tp, decode_tp))
                 self.assertEqual(worker.handshake_port, 5000)
+
+    def test_decode_pp_filters_to_the_matching_prefill_stage(self):
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.kv_role = "kv_consumer"
+        worker._decode_pp_size = 4
+        worker.pp_rank = 2
+
+        self.assertEqual(
+            worker._filter_prefill_ranks_for_decode_pp([[0, 2, 4, 6], [1, 3, 5, 7]], 2),
+            [[4], [5]],
+        )
+
+    def test_decode_pp_hybrid_mamba_pulls_only_matching_prefill_stage(self):
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.kv_role = "kv_consumer"
+        worker._decode_pp_size = 4
+        worker._prefill_pp_size = 4
+        worker.pp_rank = 2
+        worker.tp_rank = 1
+        worker.tp_size = 2
+        worker.kv_group2layeridx = {
+            0: ({"kv_cache_spec_type": "MambaSpec"}, [0]),
+        }
+
+        remote_ranks, pulls = worker._get_hybrid_remote_rank_group_pulls("request", prefill_tp_size=2)
+
+        self.assertEqual(remote_ranks, [5])
+        self.assertEqual(len(pulls[5]), 1)
+        self.assertEqual(pulls[5][0].prefill_pp_rank, 2)
 
     def test_register_kv_caches_consumer(self):
         self.vllm_config.kv_transfer_config.kv_role = "kv_consumer"
@@ -3713,6 +3754,11 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         for pp_size, expected_device in ((1, None), (2, "5")):
             with self.subTest(pp_size=pp_size):
                 self.vllm_config.parallel_config.pipeline_parallel_size = pp_size
+                parallel = {
+                    "prefill": {"tp_size": 2, "dp_size": 1, "pp_size": pp_size},
+                    "decode": {"tp_size": 2, "dp_size": 1, "pp_size": 1},
+                }
+                self.vllm_config.kv_transfer_config.get_from_extra_config.side_effect = parallel.get
                 with (
                     patch.object(
                         module.global_te, "get_transfer_engine", return_value=self.mock_transfer_engine
@@ -3754,6 +3800,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             ):
                 self.vllm_config.model_config.hf_text_config.num_key_value_heads = num_kv_heads
                 self.vllm_config.model_config.is_deepseek_mla = is_deepseek_mla
+                self.vllm_config.kv_transfer_config.kv_role = "kv_consumer"
                 worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
                 worker.tp_num_need_pulls = tp_num_need_pulls
                 worker.use_sparse = False
@@ -4179,6 +4226,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         ):
             self.vllm_config.model_config.is_deepseek_mla = case["use_mla"]
             self.vllm_config.model_config.hf_text_config.num_key_value_heads = case["num_key_value_heads"]
+            self.vllm_config.kv_transfer_config.kv_role = "kv_consumer"
             worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
 
         worker.use_mla = case["use_mla"]
@@ -4400,6 +4448,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                     self.vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
                     self.vllm_config.model_config.is_deepseek_mla = False
                     self.vllm_config.model_config.hf_text_config.num_key_value_heads = 8
+                    self.vllm_config.kv_transfer_config.kv_role = "kv_consumer"
                     worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
 
                 worker._is_hma_required = True

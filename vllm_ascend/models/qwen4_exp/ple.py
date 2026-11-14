@@ -24,6 +24,11 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 from vllm.logger import logger
+from vllm.models.qwen4_exp.amd.ple_layer import Qwen4ExpPLELayer
+from vllm.v1.attention.backends.short_conv_attn import (
+    PleShortConvAttentionBackend,
+    PleShortConvAttentionMetadataBuilder,
+)
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 from vllm_ascend.attention.utils import wait_for_kv_layer_from_connector
@@ -32,6 +37,20 @@ from vllm_ascend.ops.triton_ple import (
     ple_conv_prefill,
     ple_conv_spec,
 )
+
+
+def _get_npu_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
+    """Return the NPU UVA view used by Qwen4Exp's host-resident Engram table."""
+    import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401
+
+    if not cpu_tensor.is_pinned():
+        raise RuntimeError("Qwen4Exp Engram CPU offload requires pinned host memory")
+    view = torch.ops._C_ascend.get_npu_view_from_cpu_tensor(cpu_tensor)
+    if view is None:
+        raise RuntimeError(
+            "Qwen4Exp Engram CPU offload requires NPU UVA; set PYTORCH_NPU_ALLOC_CONF=pinned_mem_register:True"
+        )
+    return view
 
 
 def _ple_conv_ascend(*args: Any, mode: Literal["decode", "spec", "prefill"], **kwargs: Any) -> None:
@@ -292,19 +311,52 @@ def _wrap_ple_short_conv(original: Callable[..., Any]) -> Callable[..., Any]:
                         f"expect at least {state_capacity}."
                     )
                 conv_state = conv_state[:, -state_capacity:, :]
+            pcp_context = getattr(layer_attn_metadata, "pcp_context", None)
+            conv_inputs = inputs
+            conv_residual = residual
+            if pcp_context is not None:
+                conv_inputs = pcp_context.gather_tokens(inputs)
+                conv_residual = torch.zeros_like(conv_inputs)
             self._short_conv_dilated_dispatch(
-                inputs=inputs,
-                residual=residual,
-                outer_residual=outer_residual,
+                inputs=conv_inputs,
+                residual=conv_residual,
+                outer_residual=outer_residual if pcp_context is None else None,
                 metadata=layer_attn_metadata,
                 conv_state=conv_state,
                 conv_weights=conv_weights.to(dtype=inputs.dtype),
             )
+            if pcp_context is not None:
+                residual.add_(pcp_context.scatter_tokens(conv_residual))
+                if outer_residual is not None:
+                    residual.add_(outer_residual)
             return None
         finally:
             _set_allow_internal_format(previous)
 
     return wrapped
+
+
+class AscendPCPPLEMetadataBuilder(PleShortConvAttentionMetadataBuilder):
+    def build(self, common_prefix_len, common_attn_metadata, **kwargs):
+        metadata = super().build(common_prefix_len, common_attn_metadata, **kwargs)
+        context = common_attn_metadata.pcp_context
+        metadata.pcp_context = context if context is not None and context.local_token_indices is not None else None
+        return metadata
+
+
+class AscendPCPPLEBackend(PleShortConvAttentionBackend):
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        return True
+
+    @staticmethod
+    def get_builder_cls() -> type[AscendPCPPLEMetadataBuilder]:
+        return AscendPCPPLEMetadataBuilder
+
+
+class AscendPCPPLELayer(Qwen4ExpPLELayer):
+    def get_attn_backend(self) -> type[AscendPCPPLEBackend]:
+        return AscendPCPPLEBackend
 
 
 def _patch_legacy_prefill(ple_layer_cls: type[Any]) -> None:
@@ -328,6 +380,7 @@ def patch_upstream_ple_short_conv() -> None:
     """Install Ascend PLE runtime adaptations on the upstream classes."""
     from vllm.models.qwen4_exp.amd import ple_layer as upstream_ple_layer
     from vllm.models.qwen4_exp.amd.ple_layer import Qwen4ExpPLELayer
+    from vllm.models.qwen4_exp.common import ngram_embedding as upstream_ngram_embedding
     from vllm.models.qwen4_exp.common.ngram_embedding import (
         Qwen4ExpPLEEmbeddingMethod,
         Qwen4ExpPLEUnquantizedEmbeddingMethod,
@@ -340,6 +393,10 @@ def patch_upstream_ple_short_conv() -> None:
     # The AMD PLE class binds this function at module import time.  Replace
     # only that model-local binding; other platforms keep the upstream kernel.
     upstream_ple_layer.ple_conv = _ple_conv_ascend
+    # The upstream Engram class also binds the platform-neutral UVA helper at
+    # import time. Keep the NPU-specific dispatch local to Qwen4Exp instead of
+    # patching vLLM's global CUDA/XPU helper.
+    upstream_ngram_embedding.get_accelerator_view_from_cpu_tensor = _get_npu_view_from_cpu_tensor
 
     original_attr = "_ascend_original_short_conv"
     if not hasattr(Qwen4ExpPLELayer, original_attr):

@@ -1,0 +1,4 @@
+pr: 21693
+entries:
+  - category: feature
+    text: Added prefill context parallelism for Qwen3.8-Flash-Next on Model Runner V2.
