@@ -23,6 +23,12 @@ import vllm_ascend.ops.layernorm  # noqa
 import vllm_ascend.ops.register_custom_ops  # noqa
 
 if HAS_TRITON:
+    from vllm.model_executor.layers.rotary_embedding import mrope_vit_setup
+
+    # vLLM v0.32.0 has only the legacy function; its fix lives on the release branch.
+    if hasattr(mrope_vit_setup, "VitMropeSetup"):
+        import vllm_ascend.ops.mrope_vit_setup  # noqa: F401
+
     import vllm_ascend.ops.triton.linearnorm.qsa_rmsnorm_mrope
     import vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_mrope
     import vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_rope  # noqa

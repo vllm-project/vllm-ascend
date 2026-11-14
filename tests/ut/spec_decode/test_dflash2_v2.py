@@ -29,10 +29,14 @@ from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.forward_context import is_forward_context_available, override_forward_context
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
+import vllm_ascend.worker.v2.pcp_manager as pcp_module
 import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_module
 from vllm_ascend.ops.vocab_parallel_embedding import VocabParallelMode
 from vllm_ascend.worker.v2.spec_decode import init_speculator
-from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
+from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
+    AscendDFlashSpeculator,
+    draft_metadata_request_count,
+)
 from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import (
     AscendDFlash2Speculator,
     _selector_walk_kernel_ascend,
@@ -545,14 +549,63 @@ def test_dflash_metadata_spans_padded_queries(monkeypatch, num_reqs_padded):
         assert layer.actual_seq_lengths_q == list(range(3, num_reqs_padded * 3 + 1, 3))
 
 
-@pytest.mark.parametrize("dummy_run,skip_attn", [(False, False), (False, True), (True, False), (True, True)])
-def test_dflash_profiling_does_not_reuse_target_dp_counts(monkeypatch, dummy_run, skip_attn):
+@pytest.mark.parametrize("num_reqs_padded", [1, 4])
+def test_dflash_dummy_metadata_fits_draft_graph(monkeypatch, num_reqs_padded):
+    from vllm.v1.worker.gpu.spec_decode import speculator as upstream_speculator
+
     speculator = AscendDFlashSpeculator.__new__(AscendDFlashSpeculator)
-    batch, sync_state, result = object(), object(), object()
+    speculator.input_batch = SimpleNamespace(num_reqs=8)
+    speculator.num_query_per_req = 8
+    speculator._group_causal = {0: False}
+    speculator.arange_np = torch.arange(9, dtype=torch.int32).numpy()
+    speculator.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=1024))
+    speculator.draft_max_seq_len = 1024
+    speculator.dcp_size = 1
+    speculator.input_buffers = SimpleNamespace(
+        query_start_loc=torch.arange(9, dtype=torch.int32) * 8,
+        seq_lens=torch.zeros(8, dtype=torch.int32),
+        positions=torch.arange(64),
+    )
+    speculator.draft_is_prefilling = torch.zeros(8, dtype=torch.bool)
+    speculator.block_tables = SimpleNamespace(
+        input_block_tables=[torch.zeros(8, 1, dtype=torch.int32)],
+        slot_mappings=torch.zeros(1, 64, dtype=torch.int32),
+    )
+    speculator.attn_groups = []
+    speculator.kv_cache_config = object()
+    metadata = {"draft": SimpleNamespace(actual_seq_lengths_q=[])}
+    build = MagicMock(return_value=metadata)
+    monkeypatch.setattr(upstream_speculator, "build_attn_metadata", build)
+    monkeypatch.setattr(dflash_module, "build_attn_metadata_wrapper", nullcontext)
+
+    with draft_metadata_request_count(speculator, 1):
+        assert speculator.build_draft_attn_metadatas(num_reqs_padded, torch.full((8,), 10)) == [metadata]
+
+    kwargs = build.call_args.kwargs
+    assert kwargs["query_start_loc_cpu"].tolist() == [0] + [8] * num_reqs_padded
+    assert kwargs["seq_lens_cpu_upper_bound"].tolist() == [18] + [0] * (num_reqs_padded - 1)
+    assert kwargs["num_tokens"] == num_reqs_padded * 8 and kwargs["num_reqs"] == num_reqs_padded
+    assert metadata["draft"].actual_seq_lengths_q == list(range(8, num_reqs_padded * 8 + 1, 8))
+    assert speculator.input_batch.num_reqs == 8
+    assert speculator._draft_metadata_num_reqs is None
+
+
+@pytest.mark.parametrize("dummy_run,skip_attn", [(False, False), (False, True), (True, False), (True, True)])
+@pytest.mark.parametrize("pcp_enabled", [False, True])
+def test_dflash_profiling_does_not_reuse_target_dp_counts(monkeypatch, dummy_run, skip_attn, pcp_enabled):
+    speculator = AscendDFlashSpeculator.__new__(AscendDFlashSpeculator)
+    speculator.pcp_manager = object.__new__(pcp_module.AscendPCPManager) if pcp_enabled else None
+    speculator.draft_logits = None
+    monkeypatch.setattr(pcp_module, "get_pcp_group", lambda: SimpleNamespace(broadcast=lambda tensor, src: tensor))
+    batch = SimpleNamespace(num_reqs=8, idx_mapping=torch.arange(8))
+    sync_state = SimpleNamespace(num_reqs=1)
+    result = torch.zeros(8, 1, dtype=torch.int64)
     received = []
 
     def propose(self, *args, **kwargs):
         assert self.input_batch is batch
+        expected_reqs = 1 if dummy_run and not skip_attn and not pcp_enabled else 8
+        assert self._draft_metadata_num_reqs == expected_reqs
         received.append(args[11])
         return result
 
@@ -566,7 +619,9 @@ def test_dflash_profiling_does_not_reuse_target_dp_counts(monkeypatch, dummy_run
         )
         is result
     )
-    assert received == [None if dummy_run and skip_attn else sync_state]
+    assert received == [None if pcp_enabled or (dummy_run and skip_attn) else sync_state]
+    assert speculator._draft_metadata_num_reqs is None
+    assert batch.num_reqs == 8
 
 
 @pytest.mark.parametrize("active_layers", [None, {"draft.1"}])
@@ -582,8 +637,6 @@ def test_dflash_attention_uses_only_draft_layers_and_int32_slots(monkeypatch, ac
     cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=[name]) for name in backends])
     monkeypatch.setattr(DFlashSpeculator, "set_attn", MagicMock())
     monkeypatch.setattr(dflash_module, "get_layers_from_vllm_config", lambda *args: layers)
-    # set_attn installs an upstream callback; restore it after this test.
-    monkeypatch.setattr(dflash_module.dflash_speculator, "prepare_dflash_inputs", object())
 
     speculator.set_attn(None, cache, None, None, None)
 
@@ -593,48 +646,3 @@ def test_dflash_attention_uses_only_draft_layers_and_int32_slots(monkeypatch, ac
     assert speculator._context_slot_mappings.shape == (2, 8)
     assert speculator._context_slot_mappings.dtype == torch.int32
     assert torch.count_nonzero(speculator._context_slot_mappings) == 0
-
-
-@pytest.mark.parametrize("block_size", [128, 512, 640])
-def test_dflash_input_preparation_uses_manager_block_size(monkeypatch, block_size):
-    kernel = MagicMock()
-    monkeypatch.setattr(dflash_module, "prepare_dflash_inputs_triton", kernel)
-    inputs = [object() for _ in range(28)]
-    inputs[17] = block_size
-    inputs[-1] = True  # sample_from_anchor
-
-    dflash_module.prepare_dflash_inputs(*inputs)
-
-    kernel.assert_called_once_with(*inputs, num_reqs_override=None)
-
-
-@pytest.mark.skipif(False, reason="main-only num_reqs_override")
-def test_dflash_input_preparation_forwards_num_reqs_override(monkeypatch):
-    """Forward the DP-synced dummy request count without changing its size unit."""
-    kernel = MagicMock()
-    monkeypatch.setattr(dflash_module, "prepare_dflash_inputs_triton", kernel)
-    inputs = [object() for _ in range(28)]
-    inputs[17] = 640
-    inputs[-1] = True  # sample_from_anchor
-
-    dflash_module.prepare_dflash_inputs(*inputs, 5)
-
-    kernel.assert_called_once_with(*inputs, num_reqs_override=5)
-
-
-def test_dflash_input_preparation_keeps_manager_table_on_main(monkeypatch):
-    """The callback no longer needs a per-table kernel-size lookup."""
-    kernel = MagicMock()
-    monkeypatch.setattr(dflash_module, "prepare_dflash_inputs_triton", kernel)
-    block_table = torch.tensor([[7, 11]], dtype=torch.int32)
-    inputs = [object() for _ in range(28)]
-    inputs[16] = block_table
-    inputs[17] = 640
-    inputs[-1] = True
-
-    dflash_module.prepare_dflash_inputs(*inputs)
-
-    assert kernel.call_args.args[16] is block_table
-    assert kernel.call_args.args[17] == 640
-    assert "kv_cache_block_size" not in kernel.call_args.kwargs
-    torch.testing.assert_close(block_table, torch.tensor([[7, 11]], dtype=torch.int32))

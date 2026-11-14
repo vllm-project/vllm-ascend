@@ -62,7 +62,7 @@ on:
         required: false
         type: string
         default: 'full'
-        description: "Matrix shape for the nightly test image: 'full' builds both architectures; 'release' builds ubuntu arm64 only. Dependency versions always come from the Dockerfiles."
+        description: "Matrix shape for the nightly test image: 'full' builds both architectures and both OS variants; 'release' builds arm64 only. Dependency versions always come from the Dockerfiles. Callers of this chain leave it at the default, which keeps the standard nightly artifacts unchanged."
       should_push:
         required: false
         type: boolean
@@ -78,6 +78,16 @@ on:
         type: string
         default: 'swr.cn-north-12.myhuaweicloud.com'
         description: 'SWR registry domain'
+      isolated_build:
+        required: false
+        type: boolean
+        default: false
+        description: "If true, build an isolated (/presmoke) pair instead of the standard nightly one. Both layers are derived from this single flag: they are published to the '-presmoke' repositories with the standard tags unchanged, never pushed to atlas_inference and never synced to quay.io. Default false keeps the standard repositories and tags."
+      source_ref:
+        required: false
+        type: string
+        default: ''
+        description: "Optional git ref the whole source tree is built from (e.g. refs/pull/<n>/head). /presmoke passes the triggering PR so both layers are built from the code and Dockerfiles under review ('pre-merge'), while vllm_ascend_branch still decides the branch and the published tag. Default '' builds vllm_ascend_branch."
     secrets:
       SWR_USERNAME:
         required: false
@@ -98,7 +108,12 @@ jobs:
       should_push: ${{ inputs.should_push }}
       schedule_tag_pattern: 'main'
       branch_ref: ${{ inputs.vllm_ascend_branch || 'main' }}
+      source_ref: ${{ inputs.source_ref }}
       swr_registry: ${{ inputs.swr_registry }}
+      # An isolated build publishes the runtime image to its own '-presmoke' repo
+      # while keeping the standard tag.
+      swr_repo: ${{ inputs.swr_registry }}/ascend/vllm-ascend${{ inputs.isolated_build && '-presmoke' || '' }}
+      isolated_build: ${{ inputs.isolated_build }}
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
@@ -117,6 +132,8 @@ jobs:
       build_type: ${{ inputs.build_type }}
       should_push: ${{ inputs.should_push }}
       soc: ${{ inputs.soc }}
+      isolated_build: ${{ inputs.isolated_build }}
+      source_ref: ${{ inputs.source_ref }}
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}

@@ -98,6 +98,7 @@ BUILD_METADATA_STEP_DECODE = 1
 TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
 
 PROLOG_V3_SUPPORTED_INPUT_SIZES = (1024, 2048, 3072, 4096, 5120, 6144, 7168, 7680, 8192)
+PROLOG_V3_MAX_BLOCK_SIZE = 1024
 
 
 class AscendMLABackend(AttentionBackend):
@@ -1030,9 +1031,6 @@ class AscendMLAImpl(MLAAttentionImpl):
 
     def _can_use_flashmla(self) -> bool:
         config = self.vllm_config
-        # Remove this restriction once the K3.1 draft model supports FlashMLA.
-        if config.model_config.hf_config.model_type == "kimi_k31":
-            return False
         if not getattr(config, "use_v2_model_runner", False):
             return False
         if config.speculative_config is not None and config.speculative_config.method != "dspark":
@@ -1326,7 +1324,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         if self._flashmla_writer_buffers is not None:
             return
         capacity = self.vllm_config.scheduler_config.max_num_batched_tokens
-        block_size = self.vllm_config.cache_config.block_size
+        # PROLOG_V3 limits blockSize to 1024. FlashMLA history pages can be
+        # larger (e.g. 1536), but this private writer is scattered by slot.
+        block_size = min(self.vllm_config.cache_config.block_size, PROLOG_V3_MAX_BLOCK_SIZE)
         shape = (cdiv(capacity, block_size), block_size, self.num_kv_heads)
         self._flashmla_writer_buffers = (
             torch.empty((*shape, self.kv_lora_rank), dtype=self.dtype, device=self.W_UV.device),

@@ -5,13 +5,15 @@
 
 import unittest
 from copy import deepcopy
+from itertools import product
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 
 # isort: split
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
+import torch
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_layerwise
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MemcacheBackend
@@ -19,17 +21,17 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_b
 
 
 class TestBoundLayerwiseKeys(unittest.TestCase):
-    def test_pcp_keys_cover_all_workers_and_isolate_topologies(self):
+    def test_attention_keys_share_pcp_replicas(self):
         for pp_size in (1, 2):
-            for num_groups in (1, 2):
-                with self.subTest(pp_size=pp_size, num_groups=num_groups):
+            for num_groups, backend_class in product((1, 2), (MooncakeBackend, MemcacheBackend)):
+                with self.subTest(pp_size=pp_size, num_groups=num_groups, backend=backend_class.__name__):
                     config = self.make_config(pp_size)
                     cache = self.make_cache_config(num_groups)
                     builders = []
                     for pcp_size in (1, 2, 4):
                         config.parallel_config.prefill_context_parallel_size = pcp_size
                         builders.append(
-                            MooncakeBackend.bind_layerwise_keys(
+                            backend_class.bind_layerwise_keys(
                                 vllm_config=config,
                                 kv_cache_config=cache,
                                 model_name="model",
@@ -38,7 +40,6 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
                             )
                         )
                     for group in range(num_groups):
-                        # One saving MLA head or two independent TP state shards.
                         for heads in (1, 2):
                             sets = []
                             for builder in builders:
@@ -49,10 +50,40 @@ class TestBoundLayerwiseKeys(unittest.TestCase):
                                     for pcp_rank in range(builder.pcp_size)
                                     for head in range(heads)
                                 ]
-                                self.assertEqual(keys, writers)
-                                self.assertEqual(len(set(keys)), pp_size * builder.pcp_size * heads)
+                                self.assertEqual(set(keys), set(writers))
+                                self.assertEqual(len(keys), pp_size * heads)
+                                self.assertEqual(len(set(keys)), len(keys))
                                 sets.append(set(keys))
-                            self.assertFalse(sets[0] & sets[1] or sets[0] & sets[2] or sets[1] & sets[2])
+                            self.assertEqual(sets[0], sets[1])
+                            self.assertEqual(sets[1], sets[2])
+
+    def test_sharded_mamba_keys_isolate_pcp_topologies_without_scratch_blocks(self):
+        config = self.make_config()
+        config.parallel_config.tensor_parallel_size = 1
+        cache = self.make_cache_config(2)
+        cache.kv_cache_groups[1].kv_cache_spec = MambaSpec(
+            block_size=32,
+            shapes=((4,),),
+            dtypes=(torch.float32,),
+            mamba_cache_mode="align",
+        )
+        for backend_class in (MooncakeBackend, MemcacheBackend):
+            with self.subTest(backend=backend_class.__name__):
+                key_sets = []
+                for pcp_size in (1, 2, 4):
+                    config.parallel_config.prefill_context_parallel_size = pcp_size
+                    builder = backend_class.bind_layerwise_keys(
+                        vllm_config=config,
+                        kv_cache_config=cache,
+                        model_name="model",
+                        use_hybrid=True,
+                        grouped_block_size=[16, 32],
+                    )
+                    keys = builder.make_hit_check_keys(1, "hash", 1)
+                    self.assertEqual(keys, [builder.make_full_key(1, "hash", 0, 0, rank) for rank in range(pcp_size)])
+                    self.assertEqual(len(set(keys)), pcp_size)
+                    key_sets.append(set(keys))
+                self.assertFalse(key_sets[0] & key_sets[1] or key_sets[0] & key_sets[2] or key_sets[1] & key_sets[2])
 
     def test_pcp_does_not_enable_dcp(self):
         with self.assertRaisesRegex(ValueError, "decode_context_parallel_size=2"):

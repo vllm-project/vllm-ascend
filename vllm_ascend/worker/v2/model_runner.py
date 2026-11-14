@@ -21,7 +21,6 @@ import inspect
 import logging
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
-from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -30,6 +29,8 @@ from vllm.compilation import breakable_cudagraph
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
+from vllm.distributed.parallel_state import get_pp_group
+from vllm.distributed.utils import get_distributed_timeout_or_none
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
@@ -103,6 +104,7 @@ from vllm_ascend.observability.runtime_guard.hooks import (
 from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
+    create_hccl_pg_options,
     enable_sfa_dcp_sharded_indexer,
     is_c8_mxfp_kv_quant,
     is_deepseek_v41,
@@ -161,7 +163,7 @@ class NPUModelRunner(GPUModelRunner):
         # Adaptive verification uses this flag to apply FIA-specific query
         # boundary and sequence length padding during FULL graph execution.
         self.use_fia = False
-        self._uses_flashmla = False
+        self._target_uses_flashmla = False
         # FusedMoE can be constructed by the parent initializer and reads this
         # capacity while setting up MC2 communication.
         set_potential_max_tokens(vllm_config)
@@ -170,6 +172,20 @@ class NPUModelRunner(GPUModelRunner):
         spec_pp_support = resolve_spec_pp_support(vllm_config)
         with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
+        if self.use_pp:
+            assert self.pp_handler is not None
+            old_broadcast_group = self.pp_handler.broadcast_group
+            if torch.distributed.get_backend(old_broadcast_group) == "hccl":
+                broadcast_group, _ = torch.distributed.new_subgroups_by_enumeration(
+                    get_pp_group().group_ranks,
+                    timeout=get_distributed_timeout_or_none(),
+                    backend="hccl",
+                    pg_options=create_hccl_pg_options("pp_broadcast"),
+                    group_desc="pp_broadcast",
+                )
+                assert broadcast_group is not None
+                self.pp_handler.broadcast_group = broadcast_group
+                torch.distributed.destroy_process_group(old_broadcast_group)
         # These FIA models need post-rejection host counts on every PP stage.
         # TODO: Remove this extra PP sync when FIA and its metadata builders
         # use device lengths instead of exact CPU lengths.
@@ -414,6 +430,17 @@ class NPUModelRunner(GPUModelRunner):
                 kv_cache_allocation_context=kv_cache_allocation_context,
             )
 
+    def _has_target_flashmla_attention(self) -> bool:
+        # Draft attention has its own graph dispatch. Only target layers may
+        # restrict target batches containing decode-like PD prompt tails.
+        draft_layer_names = getattr(self.speculator, "draft_attn_layer_names", ())
+        return any(
+            any(layer_name not in draft_layer_names for layer_name in group.layer_names)
+            and getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None
+            for groups in self.attn_groups
+            for group in groups
+        )
+
     def initialize_kv_cache(
         self,
         kv_cache_config: KVCacheConfig,
@@ -458,11 +485,7 @@ class NPUModelRunner(GPUModelRunner):
             initialize_kernel_block_table_buffers(
                 (group for groups in metadata_groups for group in groups), max_metadata_reqs
             )
-            self._uses_flashmla = any(
-                getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None
-                for groups in self.attn_groups
-                for group in groups
-            )
+            self._target_uses_flashmla = self._has_target_flashmla_attention()
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
                 self.pcp_manager.set_runner_state(self.vllm_config, kv_cache_config, self.input_buffers)
@@ -560,6 +583,12 @@ class NPUModelRunner(GPUModelRunner):
                 fill_mxfp_v_scale_cache(layer.v_cache_scale, value_scale_cache)
 
     def shutdown(self) -> None:
+        model = getattr(self, "model", None)
+        shared_embeddings = getattr(self, "_shared_engram_shutdown_pending", None) or (
+            [module for module in model.modules() if getattr(module, "_shared_pool_client", None) is not None]
+            if model is not None
+            else []
+        )
         # Drop C8 packet views before the parent collects tensors and
         # empties the allocator cache.
         entries = getattr(self, "_c8_mxfp_v_scale_caches", None)
@@ -569,7 +598,20 @@ class NPUModelRunner(GPUModelRunner):
         if isinstance(zeroer, C8KVBlockZeroer):
             zeroer.entries.clear()
             self.kv_block_zeroer = zeroer.delegate
-        super().shutdown()
+        self._shared_engram_shutdown_pending = shared_embeddings
+        if not getattr(self, "_shared_engram_parent_stopped", False):
+            super().shutdown()
+            self._shared_engram_parent_stopped = True
+        first_error = None
+        for embedding in shared_embeddings:
+            try:
+                embedding.close_host_offload()
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
+        self._shared_engram_shutdown_pending = []
 
     def _register_sparse_kv_caches(self, kv_caches: dict[str, Any]) -> None:
         """Bind host pools before the V2 KV connector registers its destinations."""
@@ -715,21 +757,6 @@ class NPUModelRunner(GPUModelRunner):
             execution_start_time,
         )
 
-        # TODO: Remove this workaround once upstream vLLM restores idle DP ranks'
-        # logical request counts before draft DP synchronization.
-        # In adaptive verification, idle DP ranks dummy-run at target graph capacity.
-        # Restore their request counts before draft DP sync to avoid inflating all ranks.
-        if (
-            dummy_run
-            and not is_profile
-            and context_len == 0
-            and self.adaptive_verification is not None
-            and self.execute_model_state is not None
-        ):
-            state = self.execute_model_state
-            self.execute_model_state = state._replace(
-                input_batch=replace(state.input_batch, num_reqs=len(scheduler_output.num_scheduled_tokens))
-            )
         return output
 
     def _maybe_send_draft_kv(self, scheduler_output: SchedulerOutput) -> None:
@@ -798,7 +825,7 @@ class NPUModelRunner(GPUModelRunner):
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
-        if self._uses_flashmla and batch_state is not None:
+        if self._target_uses_flashmla and batch_state is not None:
             # The backend order must precede derived inputs and graph dispatch.
             batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
         return batch_state, uniform_token_count
@@ -812,6 +839,13 @@ class NPUModelRunner(GPUModelRunner):
                 "batch, a request-arrival step misclassified as prefill, or a full prefill "
                 "scheduled locally — a request sent directly to the decode node)."
             )
+
+    def prepare_padding_mask(self, num_tokens: int, num_tokens_after_padding: int) -> torch.Tensor:
+        # EPLB and decoder replay also consume validity when MoE padding skipping is off.
+        mask = self.input_buffers.is_padding[:num_tokens_after_padding]
+        mask[:num_tokens].fill_(False)
+        mask[num_tokens:].fill_(True)
+        return mask
 
     def _prepare_inputs_impl(
         self,
@@ -1070,7 +1104,7 @@ class NPUModelRunner(GPUModelRunner):
             **pp_kwargs,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
-            is_padding=self.input_buffers.is_padding[:num_tokens_after_padding],
+            is_padding=self.prepare_padding_mask(num_tokens, num_tokens_after_padding),
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
@@ -1335,29 +1369,35 @@ class NPUModelRunner(GPUModelRunner):
             spec is not None
             and self.speculator is not None
             and spec.method == "dflash"
-            and self.model_config.hf_text_config.model_type == "glm_moe_dsa"
+            and self.model_config.hf_text_config.model_type in ("glm_moe_dsa", "glm5_next_text")
             and spec.draft_model_config is not None
             and "DFlash2DraftModel" in (spec.draft_model_config.architectures or [])
         ):
             return True
 
-        if (
-            spec is None
-            or self.speculator is None
-            or spec.method != "dspark"
-            or self.model_config.architecture
+        if spec is None or self.speculator is None or spec.method != "dspark" or spec.draft_model_config is None:
+            return False
+
+        draft_architectures = spec.draft_model_config.architectures or ()
+        use_flashmla = getattr(self.speculator, "use_flashmla", False)
+        # K3.1 SFA/KDA and the FlashMLA draft consume corrected device lengths.
+        # The initialized target producer also covers sharded SFA DCP metadata.
+        kimi_k31_device_lengths = (
+            self.model_config.architecture == "KimiK31ForConditionalGeneration"
+            and "K3DSparkModel" in draft_architectures
+            and use_flashmla
+            and getattr(self.model_state, "device_metadata", None) is not None
+        )
+        if not kimi_k31_device_lengths and (
+            self.model_config.architecture
             not in (
                 "MiniMaxM3SparseForCausalLM",
                 "MiniMaxM3SparseForConditionalGeneration",
                 "GlmMoeDsaForCausalLM",
             )
-            or spec.draft_model_config is None
             or (
-                "Qwen3DSparkModel" not in (spec.draft_model_config.architectures or ())
-                and (
-                    "Glm5DSparkForCausalLM" not in (spec.draft_model_config.architectures or ())
-                    or not getattr(self.speculator, "use_flashmla", False)
-                )
+                "Qwen3DSparkModel" not in draft_architectures
+                and ("Glm5DSparkForCausalLM" not in draft_architectures or not use_flashmla)
             )
         ):
             return False
@@ -1366,7 +1406,7 @@ class NPUModelRunner(GPUModelRunner):
         # rules for hardware, Q dtype and KV dtype. Before set_attn, keep syncing.
         draft_backends = getattr(self.speculator, "attn_backends", {})
         parallel_config = self.parallel_config
-        # Keep parallel, transfer, offload and adaptive paths on host counts.
+        # Keep unverified parallel, offload and adaptive paths on host counts.
         return (
             bool(draft_backends)
             and (
@@ -1375,8 +1415,7 @@ class NPUModelRunner(GPUModelRunner):
             )
             and parallel_config.pipeline_parallel_size == 1
             and parallel_config.prefill_context_parallel_size == 1
-            and parallel_config.decode_context_parallel_size == 1
-            and self.vllm_config.kv_transfer_config is None
+            and (parallel_config.decode_context_parallel_size == 1 or kimi_k31_device_lengths)
             and not self.ascend_config.sparse_kv_offload_config.enabled
             and not spec.enable_adaptive_verification
         )
