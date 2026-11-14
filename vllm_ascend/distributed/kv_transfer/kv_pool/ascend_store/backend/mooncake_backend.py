@@ -320,25 +320,45 @@ class MooncakeBackend(Backend):
         grouped_block_size: list[int],
     ) -> LayerwiseKeyBuilder:
         parallel = vllm_config.parallel_config
+        cache_config = getattr(vllm_config, "cache_config", None)
 
         def parallel_size(name: str) -> int:
             value = getattr(parallel, name, 1)
             return value if isinstance(value, int) and not isinstance(value, bool) else 1
 
-        dimensions = (("decode_context_parallel_size", parallel_size("decode_context_parallel_size")),)
-        unsupported = [f"{name}={size}" for name, size in dimensions if size > 1]
-        if unsupported:
+        pcp_size = parallel_size("prefill_context_parallel_size")
+        dcp_size = parallel_size("decode_context_parallel_size")
+        if pcp_size > 1 and dcp_size > 1:
             raise ValueError(
-                "Mooncake block-key layerwise supports TP/PP/PCP, but not decode context parallelism; unsupported "
-                + ", ".join(unsupported)
+                "Mooncake block-key layerwise supports PCP or DCP, not both; unsupported "
+                f"prefill_context_parallel_size={pcp_size}, decode_context_parallel_size={dcp_size}"
             )
+        if (pcp_size > 1 or dcp_size > 1) and (getattr(vllm_config, "additional_config", None) or {}).get(
+            "enable_kvpp", False
+        ):
+            raise ValueError("Mooncake layerwise context parallelism does not support enable_kvpp layer-sharded caches")
+        if dcp_size > 1:
+            mooncake_layerwise.validate_dcp_groups(kv_cache_config)
+            model_config = getattr(vllm_config, "model_config", None)
+            num_kv_heads = (
+                1
+                if getattr(model_config, "use_mla", False)
+                else int(getattr(model_config, "get_total_num_kv_heads", lambda: 1)())
+            )
+            tp_size = parallel.tensor_parallel_size
+            put_step = tp_size // num_kv_heads if num_kv_heads < tp_size else 1
+            if put_step < dcp_size:
+                raise ValueError(
+                    "Mooncake layerwise DCP requires put_step >= decode_context_parallel_size; got "
+                    f"put_step={put_step}, num_kv_heads={num_kv_heads}, "
+                    f"tensor_parallel_size={tp_size}, decode_context_parallel_size={dcp_size}."
+                )
+            if getattr(cache_config, "prefix_match_unit", None) is not None:
+                raise ValueError("Mooncake layerwise DCP does not support prefix_match_unit.")
         mooncake_layerwise.validate_pp_groups(kv_cache_config, parallel)
         namespace = mooncake_layerwise.layerwise_topology_namespace(vllm_config, kv_cache_config)
         pp_size = parallel.pipeline_parallel_size
-        pcp_size = parallel_size("prefill_context_parallel_size")
         pcp_sharded_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
-        if pcp_size > 1 and (getattr(vllm_config, "additional_config", None) or {}).get("enable_kvpp", False):
-            raise ValueError("Mooncake layerwise PCP does not support enable_kvpp layer-sharded caches")
         if pp_size > 1:
             logger.info(
                 "Mooncake PP namespace=%s rank=%d pp_size=%d config_block_size=%s group_block_sizes=%s",
@@ -367,12 +387,12 @@ class MooncakeBackend(Backend):
                     pp_rank=stage if pp_size > 1 else None,
                 )
 
-            return LayerwiseKeyBuilder(make_key, pp_size, pcp_size, pcp_sharded_group_ids)
+            return LayerwiseKeyBuilder(make_key, pp_size, pcp_size, pcp_sharded_group_ids, dcp_size)
 
         def make_single_group_key(group: int, block_hash: str, head: int, stage: int) -> str:
             return mooncake_layerwise.make_block_key(model_name, block_hash, head, namespace=namespace, pp_rank=stage)
 
-        return LayerwiseKeyBuilder(make_single_group_key, pp_size, pcp_size, pcp_sharded_group_ids)
+        return LayerwiseKeyBuilder(make_single_group_key, pp_size, pcp_size, pcp_sharded_group_ids, dcp_size)
 
     @classmethod
     def send_fence_backlog(cls) -> int:
