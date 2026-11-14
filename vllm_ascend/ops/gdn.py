@@ -559,6 +559,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         """
         num_tokens = hidden_states.size(0)
         core_attn_out = None
+        packed_qkvz = None
+        packed_ba = None
         if hasattr(self, "in_proj_qkv"):
             mixed_qkv, _ = self.in_proj_qkv(hidden_states)
             ba, _ = self.in_proj_ba(hidden_states)
@@ -569,17 +571,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             a = a.contiguous()
         else:
             if not self.gqa_interleaved_layout:
-                mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-                num_tokens = mixed_qkvz.size(0)
-                qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
-                ba, _ = self.in_proj_ba(hidden_states)
-                mixed_qkv, z, b, a, core_attn_out = fused_gdn_prepare(
-                    mixed_qkvz,
-                    ba,
-                    qkv_size,
-                    self.num_v_heads // self.tp_size,
-                    self.head_v_dim,
-                )
+                packed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+                packed_ba, _ = self.in_proj_ba(hidden_states)
+                num_tokens = packed_qkvz.size(0)
             else:
                 projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
                 projected_states_ba, _ = self.in_proj_ba(hidden_states)
@@ -597,29 +591,47 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 2: Core Attention (Custom Op)
         # ============================================================
-        # Note: we should not use torch.empty here like other attention backends,
-        # see discussions in https://github.com/vllm-project/vllm/pull/28182
-        if core_attn_out is None:
+        if packed_qkvz is not None:
+            assert packed_ba is not None
+            # The packed custom op initializes every row in this buffer before
+            # recurrent GDN writes the live rows, so graph padding remains
+            # deterministic without a separate zero-fill launch.
+            core_attn_out = torch.empty(
+                (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+            torch.ops.vllm.qwen_gdn_packed_attention_core_norm_with_output(
+                packed_qkvz,
+                packed_ba,
+                core_attn_out,
+                self.prefix,
+                False,
+            )
+        else:
             core_attn_out = torch.zeros(
                 (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
                 dtype=hidden_states.dtype,
                 device=hidden_states.device,
             )
-
-        torch.ops.vllm.qwen_gdn_attention_core_norm_with_output(
-            mixed_qkv,
-            b,
-            a,
-            z,
-            core_attn_out,
-            self.prefix,
-            False,
-        )
+            torch.ops.vllm.qwen_gdn_attention_core_norm_with_output(
+                mixed_qkv,
+                b,
+                a,
+                z,
+                core_attn_out,
+                self.prefix,
+                False,
+            )
 
         # ============================================================
         # Part 3: Output Projection
         # ============================================================
-        core_attn_out = core_attn_out.reshape(z.shape)
+        core_attn_out = core_attn_out.reshape(
+            num_tokens,
+            self.num_v_heads // self.tp_size,
+            self.head_v_dim,
+        )
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
         out, _ = self.out_proj(core_attn_out)
         if output is not None:
@@ -1121,10 +1133,48 @@ def qwen_gdn_attention_core_norm_with_output_fake(
     return None
 
 
+def qwen_gdn_packed_attention_core_norm_with_output(
+    mixed_qkvz: torch.Tensor,
+    mixed_ba: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+    is_prefill: bool,
+) -> None:
+    layer = get_forward_context().no_compile_layers[layer_name]
+    qkv_width = (layer.key_dim * 2 + layer.value_dim) // layer.tp_size
+    mixed_qkv, z, b, a, _ = fused_gdn_prepare(
+        mixed_qkvz,
+        mixed_ba,
+        qkv_width,
+        layer.num_v_heads // layer.tp_size,
+        layer.head_v_dim,
+        core_attn_out=core_attn_out,
+    )
+    layer._forward_core(mixed_qkv, b, a, core_attn_out, z=z)
+
+
+def qwen_gdn_packed_attention_core_norm_with_output_fake(
+    mixed_qkvz: torch.Tensor,
+    mixed_ba: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+    is_prefill: bool,
+) -> None:
+    return None
+
+
 direct_register_custom_op(
     op_name="qwen_gdn_attention_core_norm_with_output",
     op_func=qwen_gdn_attention_core_norm_with_output,
     fake_impl=qwen_gdn_attention_core_norm_with_output_fake,
+    mutates_args=["core_attn_out"],
+    dispatch_key="PrivateUse1",
+)
+
+direct_register_custom_op(
+    op_name="qwen_gdn_packed_attention_core_norm_with_output",
+    op_func=qwen_gdn_packed_attention_core_norm_with_output,
+    fake_impl=qwen_gdn_packed_attention_core_norm_with_output_fake,
     mutates_args=["core_attn_out"],
     dispatch_key="PrivateUse1",
 )

@@ -46,6 +46,7 @@ def fused_gdn_prepare(
     qkv_width: int,
     num_v_heads: int,
     head_v_dim: int,
+    core_attn_out: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Split packed QKVZ/BA projections and zero the padded GDN output.
 
@@ -75,11 +76,20 @@ def fused_gdn_prepare(
         device=mixed_ba.device,
     )
     a = torch.empty_like(b)
-    core_attn_out = torch.empty(
-        (num_tokens, num_v_heads, head_v_dim),
-        dtype=mixed_qkvz.dtype,
-        device=mixed_qkvz.device,
-    )
+    expected_core_shape = (num_tokens, num_v_heads, head_v_dim)
+    if core_attn_out is None:
+        core_attn_out = torch.empty(
+            expected_core_shape,
+            dtype=mixed_qkvz.dtype,
+            device=mixed_qkvz.device,
+        )
+    elif (
+        core_attn_out.shape != expected_core_shape
+        or core_attn_out.dtype != mixed_qkvz.dtype
+        or core_attn_out.device != mixed_qkvz.device
+        or not core_attn_out.is_contiguous()
+    ):
+        raise ValueError("core_attn_out must be contiguous and match the expected shape, dtype, and device")
 
     if num_tokens > 0:
         block_size = 1024

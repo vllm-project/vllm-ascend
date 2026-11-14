@@ -51,3 +51,15 @@ def test_fused_gdn_prepare(num_tokens: int, dtype: torch.dtype):
         assert z.storage_offset() == qkv_width
         if num_tokens > 1:
             assert z.stride(0) == mixed_qkvz.stride(0)
+
+    supplied_core_attn_out = torch.full_like(core_attn_out, float("nan"))
+    *_, reused_core_attn_out = fused_gdn_prepare(
+        mixed_qkvz,
+        mixed_ba,
+        qkv_width,
+        num_v_heads,
+        head_v_dim,
+        core_attn_out=supplied_core_attn_out,
+    )
+    assert reused_core_attn_out.data_ptr() == supplied_core_attn_out.data_ptr()
+    torch.testing.assert_close(reused_core_attn_out, torch.zeros_like(reused_core_attn_out), rtol=0, atol=0)
