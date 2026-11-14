@@ -352,10 +352,13 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         # Compute row geometry once; LIM state and attention consume the same
         # values. CPU seq_lens may still be optimistic after MTP rejection.
         seq_lens = torch.where(active, common_attn_metadata.seq_lens[:count], widths)
-        prefix = (
-            torch.div((seq_lens - widths).clamp_min(0), LIM_CACHE_BLOCK_SIZE, rounding_mode="floor")
-            * LIM_CACHE_BLOCK_SIZE
-        )
+        # The resident working table lags computed tokens by up to two
+        # blocks; only retired full blocks may leave the resident tail,
+        # so geometry follows the runner-owned stable prefixes.
+        stable_prefixes = common_attn_metadata.req_topk_buffer_stable_prefixes
+        if stable_prefixes is None:
+            raise RuntimeError("delayed D2H requires runner-owned stable prefixes")
+        prefix = torch.where(active, stable_prefixes[:count], 0)
         is_short = prefix < self.copy_sfa_hot_tokens
         cache = torch.where(active, torch.where(is_short, 0, prefix.clamp_max(self.copy_sfa_hot_tokens)), LIM_TOPK)
         logical = torch.where(active, torch.where(is_short, seq_lens, cache + seq_lens - prefix), 0)
@@ -383,7 +386,7 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         metadata.lim_request_state = state
         if draft_index == 0:
             buffer = self.copy_sfa_vectors["reuse_logical_lens"][step, :count]
-            buffer.copy_(torch.where(active, torch.where(is_short, seq_lens, cache), 0))
+            buffer.copy_(logical)
             metadata.copy_sfa_reuse_logical_lens = buffer
 
         cache_blocks = cache[:, None] // LIM_CACHE_BLOCK_SIZE
@@ -595,6 +598,8 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         self._fused_overlap_selection_capacity: tuple[int, int, int, int] | None = None
 
     def _resolve_preprocess_type(self, act_dtype: torch.dtype) -> PreprocessType:
+        if self.use_fused_copy_sfa and not get_ascend_config().sparse_kv_offload_config.keep_device_kv_cache:
+            return super()._resolve_preprocess_type(act_dtype)
         logger.warning_once(
             "Sparse KV offload requires the native SFA preprocessing path; sfa_prolog_v3/mlapo is disabled."
         )
@@ -851,6 +856,80 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         )
         return k_nope, k_pe
 
+    def _get_current_layer_resident_cache_tensors(self) -> tuple[torch.Tensor, torch.Tensor]:
+        manager = get_sparse_kv_offload_manager()
+        layer_name = self._offload_layer_name()
+        layer_id = manager._get_offload_layer_id(layer_name)
+        resident_k = manager.topk_buffers_k[layer_id].view(
+            -1,
+            self.block_size,
+            self.num_kv_heads,
+            self.kv_lora_rank,
+        )
+        resident_v = manager.topk_buffers_v[layer_id].view(
+            -1,
+            self.block_size,
+            self.num_kv_heads,
+            self.qk_rope_head_dim,
+        )
+        return (resident_k, resident_v)
+
+    def _sfa_preprocess_prolog_v3(  # type: ignore[override]
+        self,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        *,
+        attn_metadata: M | None = None,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None,
+    ]:
+        if attn_metadata is not None and self._is_decode_only(attn_metadata):
+            kv_cache = self._get_current_layer_resident_cache_tensors()
+            slot_mapping = attn_metadata.copy_sfa_device_slots
+        return super()._sfa_preprocess_prolog_v3(
+            hidden_states=hidden_states,
+            kv_cache=kv_cache,
+            cos=cos,
+            sin=sin,
+            slot_mapping=slot_mapping,
+            attn_metadata=attn_metadata,
+        )
+
+    def _sfa_preprocess_mlapo(  # type: ignore[override]
+        self,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        *,
+        num_input_tokens: int = 0,
+        attn_metadata: M | None = None,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None,
+    ]:
+        if attn_metadata is not None and self._is_decode_only(attn_metadata):
+            kv_cache = self._get_current_layer_resident_cache_tensors()
+            slot_mapping = attn_metadata.copy_sfa_device_slots
+        return super()._sfa_preprocess_mlapo(
+            hidden_states=hidden_states,
+            kv_cache=kv_cache,
+            cos=cos,
+            sin=sin,
+            slot_mapping=slot_mapping,
+            num_input_tokens=num_input_tokens,
+            attn_metadata=attn_metadata,
+        )
+
     def exec_kv(
         self,
         kv_no_split: torch.Tensor,
@@ -865,20 +944,23 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         # Offload completes synchronously, including cache writes and CPU commits.
         attn_metadata = cast(AscendSFAOffloadMetadata, attn_metadata)
         if self._is_decode_only(attn_metadata):
-            k_nope, k_pe = self._compute_kv_only(kv_no_split, cos, sin)
             manager = get_sparse_kv_offload_manager()
             layer_name = self._offload_layer_name()
-            k_cache_cpu, v_cache_cpu = self._cpu_cache_pair(manager, layer_name)
             if attn_metadata.fused_copy_sfa_enabled:
-                layer_id = manager._get_offload_layer_id(layer_name)
-                device_slots = attn_metadata.copy_sfa_device_slots
-                assert device_slots is not None
-                for cache_tensor, value in (
-                    (manager.topk_buffers_k[layer_id], k_nope),
-                    (manager.topk_buffers_v[layer_id], k_pe),
-                ):
-                    rows = cache_tensor.view(-1, cache_tensor.shape[-1])
-                    rows.index_copy_(0, device_slots[: value.shape[0]], value.reshape(value.shape[0], -1))
+                # Fused normalize/rotate/write: current-token KV is scattered
+                # directly into the resident tail pages by one operator.
+                kv_cache = self._get_current_layer_resident_cache_tensors()
+                slot_mapping = attn_metadata.copy_sfa_device_slots
+                return super().exec_kv(
+                    kv_no_split=kv_no_split,
+                    cos=cos,
+                    sin=sin,
+                    kv_cache=kv_cache,
+                    slots=slot_mapping,
+                    attn_metadata=attn_metadata,
+                )
+            k_nope, k_pe = self._compute_kv_only(kv_no_split, cos, sin)
+            k_cache_cpu, v_cache_cpu = self._cpu_cache_pair(manager, layer_name)
             manager.offload_new_kv(
                 layer_name=layer_name,
                 slot_mapping=slots,

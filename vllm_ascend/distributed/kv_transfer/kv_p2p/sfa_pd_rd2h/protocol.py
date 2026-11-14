@@ -193,6 +193,13 @@ class CopySfaTailDest:
 class SfaPDConsumerMetadata(KVConnectorMetadata):
     def __init__(self) -> None:
         self.requests: list[SfaPDConsumerReqMeta] = []
+        # Finished requests whose request-owned HBM row and vLLM host blocks
+        # must remain reserved until the worker acknowledges that no delayed
+        # D2H batch still references them.
+        self.d2h_releases: dict[str, int] = {}
+
+    def add_d2h_release(self, request_id: str, pool_slot: int) -> None:
+        self.d2h_releases[request_id] = pool_slot
 
     def add_request(
         self,

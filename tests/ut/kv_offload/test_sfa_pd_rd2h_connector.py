@@ -539,6 +539,7 @@ def test_small_chunks_rotate_across_tp_ranks():
 
 def _make_consumer_worker_for_completion_test():
     worker = SFAPDRD2HConsumerWorker.__new__(SFAPDRD2HConsumerWorker)
+    worker._d2h_pending_release_req_ids = ()
     worker.tp_rank = 0
     worker.tp_size = 2
     worker.request_map = {"req-0": "req-0-internal"}
@@ -1554,6 +1555,7 @@ def test_consumer_scheduler_binds_copy_sfa_tail_at_alloc():
     scheduler._dspark_pending_recv = set()
     scheduler._deferred_finished_req_ids = set()
     scheduler._copy_sfa_bindings = {}
+    scheduler._d2h_pending_releases = {}
     scheduler._copy_sfa_hot_tokens = 8192
     scheduler._copy_sfa_slot_allocator = CopySfaTopkSlotAllocator(4)
     scheduler._metaserver_lock = threading.Lock()
@@ -1581,7 +1583,16 @@ def test_consumer_scheduler_binds_copy_sfa_tail_at_alloc():
     assert req_meta.tail_block_index == 80
     assert req_meta.kv_tokens == 10367
 
-    scheduler.request_finished_all_groups(request, ([1, 2], [3]))
+    from unittest.mock import patch as _patch
+
+    _cfg = SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=True))
+    with _patch("vllm_ascend.ascend_config.get_ascend_config", return_value=_cfg):
+        finished, _ = scheduler.request_finished_all_groups(request, ([1, 2], [3]))
+    # Delayed D2H keeps the request-owned row reserved until every worker
+    # retires the batches referencing it (finished_sending handshake).
+    assert finished
+    assert scheduler._copy_sfa_slot_allocator.get("req-tail") == 0
+    scheduler.update_connector_output(SimpleNamespace(finished_sending=["req-tail"], finished_recving=[]))
     assert scheduler._copy_sfa_slot_allocator.get("req-tail") is None
 
 
@@ -1604,6 +1615,7 @@ def test_consumer_scheduler_binds_copy_sfa_dense_row_at_alloc():
     scheduler._request_trackers = {}
     scheduler._reqs_need_recv = set()
     scheduler._copy_sfa_bindings = {}
+    scheduler._d2h_pending_releases = {}
     scheduler._copy_sfa_hot_tokens = 8192
     scheduler._copy_sfa_slot_allocator = CopySfaTopkSlotAllocator(4)
     scheduler._metaserver_lock = threading.Lock()

@@ -108,6 +108,7 @@ def test_full_graph_metadata_preserves_live_ids_pool_cpu_views_and_step(monkeypa
         "token_to_req",
         "req_topk_buffer_slots",
         "req_topk_buffer_active",
+        "req_topk_buffer_stable_prefixes",
         "copy_sfa_draft_index",
         "offload_dummy",
     }
