@@ -291,6 +291,9 @@ def _build_non_spec_chunked_prefill_metadata(
     device: torch.device,
     build_device_metadata: bool = True,
 ) -> GDNChunkedPrefillMetadata:
+    # Import lazily because the PCP builder extends this module's GDN builder.
+    from vllm_ascend.ops.recurrent_pcp import AscendGDNPCPMetadataBuilder
+
     chunk_indices_chunk64 = prepare_chunk_indices(cu_seqlens_cpu, _GDN_CHUNK_SIZE)
     head_sharded_pcp = isinstance(builder, AscendGDNPCPMetadataBuilder)
     if build_device_metadata:
@@ -1425,21 +1428,3 @@ class AscendGDNFusedAttentionBackend(AscendGDNAttentionBackend):
         if get_pcp_group().world_size == 1 and AscendGatedDeltaNetAttention._supports_host_metadata_prefill():
             return AscendGDNHostMetadataBuilder
         return AscendGDNAttentionMetadataBuilder
-
-
-class AscendGDNPCPMetadataBuilder(AscendGDNAttentionMetadataBuilder):
-    def build(self, common_prefix_len, common_attn_metadata, **kwargs):
-        metadata = super().build(common_prefix_len, common_attn_metadata, **kwargs)
-        context = common_attn_metadata.pcp_context
-        metadata.pcp_context = context if context is not None and context.local_token_indices is not None else None
-        return metadata
-
-
-class AscendGDNPCPBackend(AscendGDNAttentionBackend):
-    @classmethod
-    def supports_pcp(cls) -> bool:
-        return True
-
-    @staticmethod
-    def get_builder_cls() -> type[AscendGDNPCPMetadataBuilder]:
-        return AscendGDNPCPMetadataBuilder

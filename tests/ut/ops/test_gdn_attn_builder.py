@@ -33,7 +33,7 @@ from vllm_ascend.ops.gdn_attn_builder import (
     AscendGDNHostMetadataBackend,
     AscendGDNHostMetadataBuilder,
 )
-from vllm_ascend.ops.kda_pcp import KimiKDAHostMetadataBackend
+from vllm_ascend.ops.recurrent_pcp import KimiKDAHostMetadataBackend
 from vllm_ascend.ops.triton.fla import utils as fla_utils
 from vllm_ascend.ops.triton.fla.utils import (
     prepare_chunk_indices as runtime_prepare_chunk_indices,

@@ -39,7 +39,7 @@ from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
-from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext, AscendPCPManager
+from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar import aclgraph as aclgraph_module
@@ -61,34 +61,6 @@ def _mock_async_copy_to_cpu(value, out=None, device=None):
         return out
 
     return value.to(device="cpu")
-
-
-@pytest.mark.parametrize("empty_rank", [False, True])
-def test_pcp_attention_context_restores_causal_order_and_padding(empty_rank):
-    if empty_rank:
-        rank_tokens = torch.zeros((4, 1), dtype=torch.long)
-        peer_tokens = torch.tensor([[10], [11], [12], [13]])
-        restore_indices = [4, 5, 6, 7]
-        local_indices = []
-    else:
-        rank_tokens = torch.tensor([[10], [13], [0]])
-        peer_tokens = torch.tensor([[11], [12], [0]])
-        restore_indices = [0, 3, 4, 1]
-        local_indices = [0, 3]
-    context = AscendPCPAttentionContext(
-        global_batch=SimpleNamespace(num_tokens=4),
-        global_block_tables=(),
-        global_slot_mappings=torch.empty(0),
-        hidden_restore_idx=torch.tensor(restore_indices),
-        local_num_tokens=rank_tokens.shape[0],
-        local_token_indices=torch.tensor(local_indices, dtype=torch.long),
-    )
-    with patch("vllm_ascend.worker.v2.pcp_manager.get_pcp_group") as get_group:
-        get_group.return_value.all_gather.return_value = torch.cat((rank_tokens, peer_tokens))
-        restored = context.gather_tokens(rank_tokens)
-        get_group.return_value.all_gather.assert_called_once_with(rank_tokens, dim=0)
-    torch.testing.assert_close(restored, torch.tensor([[10], [11], [12], [13]]))
-    torch.testing.assert_close(context.scatter_tokens(restored), rank_tokens)
 
 
 def _make_pcp_config(

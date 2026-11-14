@@ -16,10 +16,11 @@
 
 from copy import copy
 from dataclasses import replace
-from typing import Any, Protocol, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, cast
 
 import torch
 from vllm.config import VllmConfig
+from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 
@@ -41,6 +42,7 @@ from vllm_ascend.attention.utils import (
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
+from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.triton.linearnorm import qsa_rmsnorm_mrope as _qsa_rmsnorm_mrope  # noqa: F401
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_compress_groups_with_ratio as qsa_compress_groups_with_ratio_fused,
@@ -53,6 +55,9 @@ from vllm_ascend.utils import vllm_version_is
 from .attention_dispatch import build_qsa_request_plan, dispatch_qsa_attention
 from .gbsa import GBSA_PAGE_SIZE, qsa_gbsa_attention
 from .lightning_indexer import qsa_select_paged_tokens_lightning
+
+if TYPE_CHECKING:
+    from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 if vllm_version_is("0.33.0"):
     import vllm.models.qwen4_exp.amd.indexer_qsa as upstream_indexer  # type: ignore[import-not-found]
@@ -77,6 +82,13 @@ else:
     UpstreamQSABackend = upstream_qsa.Qwen4ExpQSABackend  # type: ignore[attr-defined]
 
 QSAKVCache: TypeAlias = tuple[torch.Tensor, torch.Tensor]
+
+
+def _gather_pcp_cache_rows(rows: torch.Tensor, pcp_context: "AscendPCPAttentionContext") -> torch.Tensor:
+    if rows.shape[0] != pcp_context.local_num_tokens:
+        raise ValueError("QSA PCP cache input must include the rank-local padding")
+    gathered, _ = all_gather_async(rows.contiguous(), get_pcp_group(), async_op=False)
+    return gathered.index_select(0, pcp_context.hidden_restore_idx[: pcp_context.global_batch.num_tokens])
 
 
 def _store_qsa_cache_rows(
@@ -433,9 +445,9 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         if pcp_context is not None:
             raw_metadata = raw_metadata.write_metadata
             compressed_metadata = compressed_metadata.write_metadata
-            token_k = pcp_context.gather_tokens(token_k)
+            token_k = _gather_pcp_cache_rows(token_k, pcp_context)
             if self.raw_key_cache.rope_position_cache is not None:
-                positions = pcp_context.gather_tokens(positions.movedim(-1, 0)).movedim(0, -1)
+                positions = _gather_pcp_cache_rows(positions.movedim(-1, 0), pcp_context).movedim(0, -1)
         num_tokens = raw_metadata.num_actual_tokens
         raw_key_cache = self.raw_key_cache.key_cache
         rope_position_cache = self.raw_key_cache.rope_position_cache
@@ -929,7 +941,7 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         pcp_context = getattr(side_metadata, "pcp_context", None)
         write_key, write_value = key, value
         if pcp_context is not None:
-            write_key, write_value = pcp_context.gather_tokens(torch.stack((key, value), dim=1)).unbind(dim=1)
+            write_key, write_value = _gather_pcp_cache_rows(torch.stack((key, value), dim=1), pcp_context).unbind(dim=1)
         self.impl.do_kv_cache_update(
             self,
             write_key,
