@@ -1,0 +1,17 @@
+{
+  "schema_version": "5.0",
+  "artifacts": {
+    "mem_scan_a3": {
+      "path": "artifacts/mem_scan.py",
+      "source": "https://gitcode.com/Ascend/memfabric_hybrid/blob/develop/src/smem/python/memfabric_hybrid/memfabric_hybrid/mem_scan.py",
+      "source_commit": "4bad3e24285bf835e242365ff09c2c2db34d862ef",
+      "modified": true
+    },
+    "hccs_test_a3": {
+      "path": "artifacts/hccs_test_a3.py",
+      "source": "Implemented by this tool; the communication model follows the single-node collective communication and correctness-test semantics in the in-container CANN 9.1 HCCL Test README",
+      "source_reference": "/usr/local/Ascend/cann-9.1.0/tools/hccl_test/README.md",
+      "modified": true
+    }
+  }
+}

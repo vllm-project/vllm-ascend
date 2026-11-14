@@ -1,0 +1,273 @@
+{
+  "schema_version": "7.1",
+  "supported_hardware": ["A2", "A3"],
+  "supported_backends": ["memcache", "mooncake"],
+  "supported_link_types": ["roce", "hccs"],
+  "supported_deployment_modes": ["single-node", "multi-node"],
+  "hardware_identification": {
+    "A2": {
+      "name_patterns": ["^(?:Ascend\\s*)?910B[0-9A-Za-z._-]*$"]
+    },
+    "A3": {
+      "name_patterns": ["^(?:Ascend\\s*)?910$"],
+      "dies_per_npu": 2
+    }
+  },
+  "rules": [
+    {
+      "id": "MEM-001",
+      "problem": "Managed memory check failed",
+      "impact": "The backend cannot confirm and register the requested managed memory capacity.",
+      "hardware": ["A2", "A3"],
+      "backends": ["memcache", "mooncake"],
+      "scope": "docker",
+      "blocking": true,
+      "probe": "memory_scan",
+      "evaluator": "memory_scan",
+      "parameters": {},
+      "evidence_method": "On A3, scan with the official mem_scan.py at 1 GB and 2 MB granularity. On A2, read HugePages_Total, HugePages_Free, HugePages_Rsvd, and Hugepagesize, then compare unreserved static huge-page capacity (Free - Rsvd) with the target.",
+      "remediation": {"type": "drop_caches_then_rescan", "description": "Restore scan capability or release memory according to the check details, then rerun the check.", "requires_root": true, "requires_reboot": false}
+    },
+    {
+      "id": "CANN-001",
+      "problem": "CANN version is lower than 9.1.0",
+      "impact": "Required pooled-memory semantic features are unavailable, so KV Pool cannot be used.",
+      "hardware": ["A2", "A3"],
+      "backends": ["memcache", "mooncake"],
+      "scope": "docker",
+      "blocking": true,
+      "probe": "hdk",
+      "evaluator": "version_range",
+      "parameters": {"value_key": "cann_version", "operator": "lt", "threshold": "9.1.0", "unknown_status": "BLOCK"},
+      "evidence_method": "Read CANN Toolkit installation information and ASCEND_TOOLKIT_HOME inside the container.",
+      "remediation": {"type": "manual_offline_upgrade", "description": "Rebuild or update the image with a CANN 9.1.0 or newer offline package matching the hardware, image, and operating system, then rerun the check.", "requires_root": false, "requires_reboot": false}
+    },
+    {
+      "id": "HDK-001",
+      "problem": "HDK version does not meet the requirement for the current hardware and backend",
+      "impact": "The HDK version is lower than the minimum required by the current hardware and backend, which may reduce managed-memory availability or prevent KV Pool initialization.",
+      "hardware": ["A2", "A3"],
+      "backends": ["memcache", "mooncake"],
+      "scope": "docker",
+      "blocking": true,
+      "probe": "hdk",
+      "evaluator": "hdk_requirement",
+      "parameters": {
+        "requirements": [
+          {"hardware": "A2", "backend": "memcache", "minimum": "25.5.0"},
+          {"hardware": "A2", "backend": "mooncake", "minimum": "25.5.0"},
+          {"hardware": "A3", "backend": "memcache", "minimum": "25.5.0"},
+          {"hardware": "A3", "backend": "mooncake", "minimum": "25.5.0"}
+        ],
+        "unknown_status": "BLOCK"
+      },
+      "evidence_method": "Read the npu-smi and driver version.info files visible in the container, and select the minimum HDK version from the hardware/backend pair. Mooncake software dependencies are evaluated by a separate scenario.",
+      "remediation": {"type": "manual_host_upgrade", "description": "Upgrade host HDK to the minimum version in the check details. Refresh the Docker mounts, restart the container, and rerun the check.", "requires_root": true, "requires_reboot": true}
+    },
+    {
+      "id": "KERNEL-001",
+      "problem": "Linux kernel version is lower than 6.6.0",
+      "impact": "KV Pool may fail in multi-node deployments. Single-node deployments are not affected by this dependency.",
+      "hardware": ["A3"],
+      "backends": ["memcache"],
+      "scope": "docker",
+      "blocking": true,
+      "deployment_modes": ["multi-node"],
+      "probe": "kernel",
+      "evaluator": "kernel_requirement",
+      "parameters": {"threshold": "6.6.0", "unknown_status": "BLOCK"},
+      "evidence_method": "Run uname -r inside the container to read the host Linux kernel version visible to the container.",
+      "remediation": {"type": "manual_host_upgrade", "description": "Upgrade the host Linux kernel to 6.6.0 or newer through the host maintenance process. Rebuild or restart the container and rerun the check.", "requires_root": true, "requires_reboot": true}
+    },
+    {
+      "id": "LINGQU-001",
+      "problem": "L1 1520 Lingqu CC version requires manual confirmation of 1.5.0 or newer",
+      "impact": "A3 with memcache or mooncake may fail to establish links, making KV Pool unavailable.",
+      "hardware": ["A3"],
+      "backends": ["memcache", "mooncake"],
+      "scope": "docker",
+      "blocking": true,
+      "link_types": ["hccs"],
+      "deployment_modes": ["multi-node"],
+      "probe": "manual_confirmation",
+      "evaluator": "manual_confirmation",
+      "parameters": {"required_confirmation": "The version cannot be detected automatically. Log in to the L1 1520 switch or use the BMC managed-device interface to confirm that the version meets the requirement."},
+      "evidence_method": "The version cannot be detected automatically. Log in to the L1 1520 switch or use the BMC managed-device interface to confirm that the version meets the requirement.",
+      "remediation": {"type": "manual_switch_upgrade", "description": "Log in to the L1 1520 switch and the BMC managed-device interface to check the Lingqu CC version. If it is lower than 1.5.0, ask the network device administrator to upgrade it.", "requires_root": false, "requires_reboot": true}
+    },
+    {
+      "id": "HCCS-001",
+      "problem": "Intra-node SIO/HCCS links on A3 are not ready",
+      "impact": "Basic die-to-die interconnect inside the A3 node is unavailable.",
+      "hardware": ["A3"],
+      "backends": ["memcache", "mooncake"],
+      "scope": "docker",
+      "blocking": true,
+      "link_types": ["hccs"],
+      "probe": "hccs_diagnostics",
+      "evaluator": "hccs_static",
+      "parameters": {"coverage": "all_visible_cards_and_dies", "same_card_relation": "SIO", "cross_card_relations": ["HCCS", "HCCS_SW"], "required_health": "OK", "require_complete_lanes": true, "require_positive_speed": true},
+      "positioning": {"layer": "A3 intra-node NPU interconnect", "target": "Static intra-chip SIO and cross-chip HCCS topology and link state", "coverage": "All visible A3 cards and dies on the current host", "excludes": ["Dynamic data correctness", "Cross-host communication", "L1 1520 Lingqu CC version"]},
+      "evidence_method": "Enumerate all visible A3 cards and dies, and check SIO/HCCS topology, health, lane completeness, and link speed.",
+      "remediation": {"type": "manual_hccs_link_fix", "description": "Use the failed card, die, and lane details to inspect the corresponding SIO/HCCS physical link, then rerun the check after repair.", "requires_root": true, "requires_reboot": true}
+    },
+    {
+      "id": "HCCS-002",
+      "problem": "Intra-node cross-chip communication on A3 is abnormal",
+      "impact": "HCCL data exchange inside the A3 node is unreliable.",
+      "hardware": ["A3"],
+      "backends": ["memcache", "mooncake"],
+      "scope": "docker",
+      "blocking": true,
+      "link_types": ["hccs"],
+      "probe": "hccs_diagnostics",
+      "evaluator": "hccs_dynamic",
+      "parameters": {"collective": "all_to_all_single", "coverage": "all_visible_dies", "elements_per_peer": 16384, "iterations": 3, "timeout_seconds": 90, "counter_mode": "delta", "required_retry_error_delta": 0},
+      "positioning": {"layer": "A3 intra-node NPU interconnect", "target": "Dynamic HCCL data paths across all visible dies", "coverage": "All visible A3 dies on the current host", "excludes": ["Cross-host communication", "Fixed bandwidth threshold", "Historical cumulative error counters"]},
+      "evidence_method": "When static links are healthy and all NPUs are idle, start one HCCL rank for each visible die, run an all-to-all data-correctness test, and compare HCCS retry/error counter deltas from the test window.",
+      "remediation": {"type": "manual_hccs_data_path_fix", "description": "Use the failed ranks or newly incremented retry/error counters to locate the HCCL data path, then rerun the check after repair.", "requires_root": false, "requires_reboot": false}
+    },
+    {
+      "id": "ROCE-001",
+      "problem": "NPU RoCE port is not ready",
+      "impact": "The corresponding NPU RoCE port is unavailable.",
+      "hardware": ["A2", "A3"],
+      "backends": ["memcache", "mooncake"],
+      "scope": "docker",
+      "blocking": true,
+      "link_types": ["roce"],
+      "probe": "roce_diagnostics",
+      "evaluator": "roce_link",
+      "parameters": {"coverage": "all_visible_npus", "required_link": "UP", "required_health": "Success", "require_unique_ip": true, "require_consistent_netmask_mtu": true},
+      "positioning": {"layer": "NPU device side", "target": "Static readiness of each NPU port", "coverage": "All visible NPUs on the current host", "excludes": ["Local NPU-to-NPU data path", "Cross-host network connectivity"]},
+      "evidence_method": "Use hccn_tool on each NPU to read the IP address, netmask, Link state, net health, and MTU. Check IP uniqueness and netmask/MTU consistency without sending test traffic.",
+      "remediation": {"type": "manual_roce_link_fix", "description": "Use the failed NPU details to inspect the IP address, netmask, Link state, net health, and MTU, then rerun the check after restoring static port readiness.", "requires_root": true, "requires_reboot": false}
+    },
+    {
+      "id": "ROCE-002",
+      "problem": "Local NPU-to-NPU RoCE data path is abnormal",
+      "impact": "RoCE data transfer between NPUs on the current host is unreliable.",
+      "hardware": ["A2", "A3"],
+      "backends": ["memcache", "mooncake"],
+      "scope": "docker",
+      "blocking": true,
+      "link_types": ["roce"],
+      "probe": "roce_diagnostics",
+      "evaluator": "roce_local",
+      "parameters": {"coverage": "all_directed_pairs", "packet_size": "minimum_mtu_minus_32", "required_packet_loss_percent": 0, "error_counter_mode": "delta", "timeout_seconds": 15},
+      "positioning": {"layer": "NPU device side", "target": "Dynamic local NPU-to-NPU RoCE data paths", "coverage": "All N*(N-1) directed NPU pairs on the current host", "excludes": ["Cross-host network connectivity"]},
+      "evidence_method": "When static ports are ready, run N*(N-1) directed hccn_tool ping checks across all visible NPUs. Check packet loss and deltas for FCS, RoCE, checksum, and QP error counters from the current test window.",
+      "remediation": {"type": "manual_roce_network_fix", "description": "Use the failed directed pairs or newly incremented error counters to inspect the source and destination NPUs, switch ports, VLAN/PFC settings, and HCCN configuration. Rerun the full local matrix after repair.", "requires_root": true, "requires_reboot": false}
+    },
+    {
+      "id": "DOCKER-001",
+      "problem": "Docker does not expose the Ascend devices, driver, or HCCN entry point",
+      "impact": "The container cannot access the NPU, driver, or an available HCCN entry point, so KV Pool cannot initialize correctly.",
+      "hardware": ["A2", "A3"],
+      "backends": ["memcache", "mooncake"],
+      "scope": "docker",
+      "blocking": true,
+      "probe": "docker_prereqs",
+      "evaluator": "docker_prereqs",
+      "parameters": {
+        "required_all": ["docker", "npu_smi", "davinci_device_count", "driver_dir"],
+        "required_any": [["hccn_conf", "hccn_tool"]]
+      },
+      "evidence_method": "Check the Docker marker, npu-smi, /dev/davinci*, /usr/local/Ascend/driver, and confirm that at least one of /etc/hccn.conf or an executable hccn_tool is available.",
+      "remediation": {"type": "manual_container_recreate", "description": "Recreate the container with Ascend devices and driver directories exposed. Mount /etc/hccn.conf or ensure hccn_tool is executable, then rerun the check.", "requires_root": true, "requires_reboot": false}
+    },
+    {
+      "id": "DEP-MOONCAKE-001",
+      "problem": "mooncake-transfer-engine-npu is unavailable or does not meet the requirement for the current HDK",
+      "impact": "Mooncake backend software dependencies are not satisfied, so KV Pool cannot run reliably.",
+      "hardware": ["A2", "A3"],
+      "backends": ["mooncake"],
+      "scope": "docker",
+      "blocking": true,
+      "probe": "package_versions",
+      "evaluator": "package_version",
+      "parameters": {
+        "package": "mooncake-transfer-engine-npu",
+        "threshold": "0.3.11.post1",
+        "threshold_exceptions": [
+          {"hardware": "A3", "backend": "mooncake", "minimum_hdk": "26.0.0"}
+        ]
+      },
+      "evidence_method": "Read the mooncake-transfer-engine-npu version from Python package metadata and apply the A3 HDK-dependent minimum version.",
+      "remediation": {"type": "manual_offline_image_update", "description": "Install mooncake-transfer-engine-npu. A3 with HDK 26.0.0 or newer has no minimum package version; A2 and A3 with HDK 25.5.0 require 0.3.11.post1 or newer.", "requires_root": false, "requires_reboot": false}
+    },
+    {
+      "id": "DEP-MOONCAKE-002",
+      "problem": "glibc version is lower than 2.35",
+      "impact": "Mooncake wheel runtime dependencies are not satisfied, so the backend cannot load correctly.",
+      "hardware": ["A2", "A3"],
+      "backends": ["mooncake"],
+      "scope": "docker",
+      "blocking": true,
+      "probe": "glibc",
+      "evaluator": "version_range",
+      "parameters": {"operator": "lt", "threshold": "2.35.0", "unknown_status": "BLOCK"},
+      "evidence_method": "Parse the glibc version from ldd --version inside the container.",
+      "remediation": {"type": "manual_image_rebuild", "description": "Rebuild the runtime image from a base image with glibc 2.35 or newer, then rerun the check.", "requires_root": false, "requires_reboot": false}
+    },
+    {
+      "id": "DEP-MEMCACHE-001",
+      "problem": "memfabric-hybrid is not installed",
+      "impact": "The Memcache backend is missing a required dependency, so KV Pool cannot run correctly.",
+      "hardware": ["A2", "A3"],
+      "backends": ["memcache"],
+      "scope": "docker",
+      "blocking": true,
+      "probe": "package_versions",
+      "evaluator": "package_version",
+      "parameters": {"package": "memfabric-hybrid"},
+      "evidence_method": "Confirm through Python package metadata that memfabric-hybrid is installed.",
+      "remediation": {"type": "manual_offline_image_update", "description": "Bake the memfabric-hybrid offline package into the image, recreate the container, and rerun the check.", "requires_root": false, "requires_reboot": false}
+    },
+    {
+      "id": "DEP-MEMCACHE-002",
+      "problem": "memcache-hybrid is not installed",
+      "impact": "The Memcache backend is missing a required dependency, so KV Pool cannot run correctly.",
+      "hardware": ["A2", "A3"],
+      "backends": ["memcache"],
+      "scope": "docker",
+      "blocking": true,
+      "exclude_feature": "ssd_offload",
+      "probe": "package_versions",
+      "evaluator": "package_version",
+      "parameters": {"package": "memcache-hybrid"},
+      "evidence_method": "Confirm through Python package metadata that memcache-hybrid is installed.",
+      "remediation": {"type": "manual_offline_image_update", "description": "Bake the memcache-hybrid offline package into the image, recreate the container, and rerun the check.", "requires_root": false, "requires_reboot": false}
+    },
+    {
+      "id": "DEP-MEMCACHE-SSD-001",
+      "problem": "memcache-hybrid is not installed or is lower than 1.2.0",
+      "impact": "SSD cache dependencies are not satisfied, so Memcache SSD Offload cannot work correctly.",
+      "hardware": ["A2", "A3"],
+      "backends": ["memcache"],
+      "scope": "docker",
+      "blocking": true,
+      "feature": "ssd_offload",
+      "probe": "package_versions",
+      "evaluator": "package_version",
+      "parameters": {"package": "memcache-hybrid", "threshold": "1.2.0"},
+      "evidence_method": "Read the memcache-hybrid version from Python package metadata.",
+      "remediation": {"type": "manual_offline_image_update", "description": "Upgrade memcache-hybrid to 1.2.0 or newer and bake it into the image, then recreate the container and rerun the check.", "requires_root": false, "requires_reboot": false}
+    },
+    {
+      "id": "SSD-001",
+      "problem": "SSD Offload storage requirements are not satisfied",
+      "impact": "SSD Offload cannot initialize.",
+      "hardware": ["A2", "A3"],
+      "backends": ["memcache", "mooncake"],
+      "scope": "docker",
+      "blocking": true,
+      "feature": "ssd_offload",
+      "probe": "ssd_storage",
+      "evaluator": "ssd_storage",
+      "parameters": {"path_required": true},
+      "evidence_method": "Check --ssd-path according to the storage policy for the current backend.",
+      "remediation": {"type": "manual_ssd_prepare", "description": "Prepare the SSD path required by the current backend according to the check details, then rerun the check.", "requires_root": true, "requires_reboot": false}
+    }
+  ]
+}
