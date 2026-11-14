@@ -79,6 +79,12 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         self._lmhead_tp_validate_draft_sampling()
         self.input_batch: InputBatch | None = None
         self._draft_metadata_num_reqs: int | None = None
+        # FULL draft graphs give every request slot the same query width.
+        # Keep both views stable across captures and replay metadata rebuilds.
+        self._graph_query_start_loc_cpu = (
+            torch.arange(self.max_num_reqs + 1, dtype=torch.int32) * self.num_query_per_req
+        )
+        self._graph_query_start_loc_gpu = self._graph_query_start_loc_cpu.to(device)
         self.attn_architecture: str | None = None
         self.use_flashmla: bool = False
         self._init_dcp()
@@ -365,6 +371,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         # attention only consumes the tokens owned by real requests there.
         num_tokens = batch_desc.num_tokens if batch_desc.cg_mode == CUDAGraphMode.FULL else int(query_start_loc_np[-1])
         seq_lens_cpu, is_prefilling = self._prepare_draft_dcp_metadata_inputs(num_reqs, num_reqs_padded, step)
+        full_graph = batch_desc.cg_mode == CUDAGraphMode.FULL
         with (
             build_attn_metadata_wrapper(),
             build_attn_metadata_factory(
@@ -374,6 +381,8 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 seq_lens_cpu=seq_lens_cpu,
                 attn_state=AscendAttentionState.ChunkedPrefill,
                 parallel_config=self.attn_vllm_config.parallel_config,
+                query_start_loc_cpu=self._graph_query_start_loc_cpu[: num_reqs_padded + 1] if full_graph else None,
+                query_start_loc_gpu=self._graph_query_start_loc_gpu[: num_reqs_padded + 1] if full_graph else None,
             ),
         ):
             attn_metadata = super()._build_attn_metadata(
@@ -385,20 +394,6 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 causal=causal,
                 dcp_local_seq_lens=dcp_local_seq_lens,
             )
-        if batch_desc.cg_mode == CUDAGraphMode.FULL and attn_metadata is not None:
-            # FULL replay uses the captured padded Q, so FIA needs cumulative
-            # query lengths through every padded request slot.
-            self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)
-        return attn_metadata
-
-    def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
-        """Match FULL-graph query lengths to the padded request count."""
-        query_lens_list = [(i + 1) * self.num_query_per_req for i in range(num_reqs_padded)]
-        for metadata in attn_metadata.values():
-            if getattr(metadata, "external_flashmla", None) is not None:
-                continue
-            decode_metadata = metadata.decode if self.attn_architecture == "MLA" else metadata
-            decode_metadata.actual_seq_lengths_q = query_lens_list
         return attn_metadata
 
     def propose(

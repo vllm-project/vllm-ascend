@@ -13,6 +13,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManager
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
+import vllm_ascend.worker.v2.attn_utils as attn_utils_module
 import vllm_ascend.worker.v2.spec_decode.dflash.aclgraph as aclgraph_module
 import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_module
 import vllm_ascend.worker.v2.spec_decode.dspark.speculator as speculator_module
@@ -105,6 +106,8 @@ def test_draft_metadata_matches_full_or_actual_query_shape(monkeypatch, architec
         num_query_per_req=8,
         arange_np=np.arange(5, dtype=np.int32),
         input_buffers=SimpleNamespace(positions=object()),
+        _graph_query_start_loc_cpu=torch.arange(5, dtype=torch.int32) * 8,
+        _graph_query_start_loc_gpu=torch.arange(5, dtype=torch.int32) * 8,
         vllm_config=SimpleNamespace(parallel_config=object()),
     )
     speculator._prepare_draft_dcp_metadata_inputs = MagicMock(return_value=(None, torch.zeros(4, dtype=torch.bool)))
@@ -122,7 +125,13 @@ def test_draft_metadata_matches_full_or_actual_query_shape(monkeypatch, architec
     assert parent_build.call_args.kwargs["batch_desc"] is batch_desc
     np.testing.assert_array_equal(parent_build.call_args.kwargs["query_start_loc_np"], [0, 8, 16, 24])
     assert metadata_factory.call_args.args[1] == (32 if graph_mode == CUDAGraphMode.FULL else 24)
-    assert metadata.actual_seq_lengths_q == ([8, 16, 24, 32] if graph_mode == CUDAGraphMode.FULL else [8, 16, 24, 24])
+    for name in ("query_start_loc_cpu", "query_start_loc_gpu"):
+        boundaries = metadata_factory.call_args.kwargs[name]
+        if graph_mode == CUDAGraphMode.FULL:
+            assert boundaries.tolist() == [0, 8, 16, 24, 32]
+        else:
+            assert boundaries is None
+    assert metadata.actual_seq_lengths_q == [8, 16, 24, 24]
 
 
 def test_sfa_draft_metadata_passes_through_upstream(monkeypatch):
@@ -143,21 +152,6 @@ def test_sfa_draft_metadata_passes_through_upstream(monkeypatch):
 
     assert result is metadata
     assert parent_build.call_args.kwargs["batch_desc"] is batch_desc
-
-
-@pytest.mark.parametrize("query_count", [1, 7, 8])
-@pytest.mark.parametrize("num_reqs_padded", [1, 2, 4, 16])
-def test_update_draft_metadata_refreshes_all_padded_query_lengths(query_count, num_reqs_padded):
-    speculator = _speculator(num_query_per_req=query_count)
-    metadata = {
-        name: SimpleNamespace(actual_seq_lengths_q=[query_count], seq_lens=object()) for name in ("draft.2", "draft.0")
-    }
-    seq_lens = {name: value.seq_lens for name, value in metadata.items()}
-
-    assert speculator._update_draft_attn_metadata(metadata, num_reqs_padded) is metadata
-    for name, value in metadata.items():
-        assert value.actual_seq_lengths_q == [query_count * (i + 1) for i in range(num_reqs_padded)]
-        assert value.seq_lens is seq_lens[name]
 
 
 def test_replay_installs_forward_context_before_accessing_extra_ctx(monkeypatch):
@@ -328,3 +322,77 @@ def test_dflash_updatable_replay_resolves_current_metadata_before_replay(monkeyp
     manager.speculator.build_draft_attn_metadatas.assert_called_once_with(
         2, manager.speculator.input_batch.seq_lens_cpu_upper_bound
     )
+
+
+@pytest.mark.parametrize("architecture", ["GQA", "MLA"])
+@pytest.mark.parametrize("graph_mode", [CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE, CUDAGraphMode.NONE])
+@pytest.mark.parametrize("query_count", [1, 3, 8])
+def test_draft_builder_receives_consistent_request_boundaries(monkeypatch, architecture, graph_mode, query_count):
+    capacity = 6
+    uniform = torch.arange(capacity + 1, dtype=torch.int32) * query_count
+    device_uniform = uniform.clone()
+    inputs = SimpleNamespace(
+        positions=torch.arange(capacity * query_count),
+        query_start_loc=torch.zeros(capacity + 1, dtype=torch.int32),
+        seq_lens=torch.zeros(capacity, dtype=torch.int32),
+    )
+    tables = torch.arange(capacity * 2).reshape(capacity, 2)
+    slots = torch.full((1, capacity * query_count), -1, dtype=torch.int32)
+    speculator = _speculator(
+        attn_architecture=architecture,
+        num_query_per_req=query_count,
+        arange_np=np.arange(capacity + 1, dtype=np.int32),
+        _graph_query_start_loc_cpu=uniform,
+        _graph_query_start_loc_gpu=device_uniform,
+        input_buffers=inputs,
+        block_tables=SimpleNamespace(input_block_tables=[tables], slot_mappings=slots),
+        dcp_size=1,
+        max_model_len=1024,
+        draft_max_seq_len=1024,
+        attn_groups=[],
+        kv_cache_config=object(),
+        draft_is_prefilling=torch.zeros(capacity, dtype=torch.bool),
+        vllm_config=SimpleNamespace(parallel_config=object()),
+    )
+    speculator._prepare_draft_dcp_metadata_inputs = MagicMock(
+        return_value=(None, torch.zeros(capacity, dtype=torch.bool))
+    )
+    monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: self.vllm_config))
+    captured = {}
+
+    def build_metadata(**kwargs):
+        captured.clear()
+        captured.update(kwargs)
+        return {"draft.0": kwargs}
+
+    monkeypatch.setattr(attn_utils_module, "build_attn_metadata", build_metadata)
+    desc = BatchExecutionDescriptor(cg_mode=graph_mode, num_tokens=capacity * query_count, num_reqs=capacity)
+    # Capture-sized input followed by smaller replay batches reuses the same buffers.
+    for real_requests in (capacity, 4, 1):
+        inputs.query_start_loc.copy_(uniform.clamp(max=real_requests * query_count))
+        inputs.seq_lens.zero_()
+        inputs.seq_lens[:real_requests] = 17 + query_count
+        slots.fill_(-1)
+        slots[:, : real_requests * query_count] = 42
+        original_query = inputs.query_start_loc.clone()
+        original_slots = slots.clone()
+        speculator._build_uniform_attn_metadata(
+            batch_desc=desc,
+            num_reqs=real_requests,
+            num_query_per_req=query_count,
+            seq_lens_cpu_upper_bound=torch.full((real_requests,), 17, dtype=torch.int32),
+            step=query_count,
+        )
+        expected = uniform if graph_mode == CUDAGraphMode.FULL else original_query
+        torch.testing.assert_close(captured["query_start_loc_cpu"], expected)
+        torch.testing.assert_close(captured["query_start_loc_gpu"], expected)
+        assert captured["num_tokens"] == expected[-1].item()
+        assert captured["num_reqs"] == capacity
+        assert captured["seq_lens"].tolist() == [17 + query_count] * real_requests + [0] * (capacity - real_requests)
+        assert captured["seq_lens_cpu_upper_bound"].tolist() == captured["seq_lens"].tolist()
+        assert captured["block_tables"][0].data_ptr() == tables.data_ptr()
+        assert captured["block_tables"][0].shape[0] == capacity
+        torch.testing.assert_close(inputs.query_start_loc, original_query)
+        torch.testing.assert_close(slots, original_slots)
+        if graph_mode == CUDAGraphMode.FULL:
+            assert captured["query_start_loc_gpu"].data_ptr() == device_uniform.data_ptr()

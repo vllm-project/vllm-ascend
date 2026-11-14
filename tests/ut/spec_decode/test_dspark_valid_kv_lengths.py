@@ -81,6 +81,8 @@ def test_dcp_existing_delegate():
 def test_regular_and_graph_metadata_get_same_exact_cpu_view(monkeypatch, entrypoint):
     spec = _spec([22666, 99999, 99999, 99999])
     spec.num_query_per_req = 8
+    spec._graph_query_start_loc_cpu = torch.arange(5, dtype=torch.int32) * 8
+    spec._graph_query_start_loc_gpu = spec._graph_query_start_loc_cpu.clone()
     spec.arange_np = np.arange(5, dtype=np.int32)
     spec.input_batch = SimpleNamespace(num_reqs=1)
     spec._group_causal = False
@@ -115,4 +117,4 @@ def test_regular_and_graph_metadata_get_same_exact_cpu_view(monkeypatch, entrypo
     assert result is metadata
     assert supplied and all(value is not None and value.tolist() == [22666, 0, 0, 0] for value in supplied)
     assert upper_bound.tolist() == [22666]
-    assert decode.actual_seq_lengths_q == [8, 16, 24, 32]
+    assert decode.actual_seq_lengths_q == [8]

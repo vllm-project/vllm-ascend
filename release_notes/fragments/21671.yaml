@@ -1,0 +1,4 @@
+pr: 21671
+entries:
+  - category: bugfix
+    text: Fixed padded DSpark FULL-graph attention metadata by constructing consistent CPU and device query boundaries before backend metadata generation.

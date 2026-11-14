@@ -2239,6 +2239,8 @@ def build_attn_metadata_factory(
     attn_state=None,
     parallel_config=None,
     offload_kwargs=None,
+    query_start_loc_cpu: torch.Tensor | None = None,
+    query_start_loc_gpu: torch.Tensor | None = None,
 ):
     """Wrap build_attn_metadata with Ascend draft-model context.
 
@@ -2255,6 +2257,11 @@ def build_attn_metadata_factory(
         kwargs["is_prefilling"] = is_prefilling
         kwargs["attn_state"] = attn_state
         kwargs["parallel_config"] = parallel_config
+        if query_start_loc_cpu is not None:
+            assert query_start_loc_gpu is not None
+            kwargs["query_start_loc_cpu"] = query_start_loc_cpu
+            kwargs["query_start_loc_gpu"] = query_start_loc_gpu
+            kwargs["max_query_len"] = int((query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).max())
         if seq_lens_cpu is not None:
             kwargs["seq_lens_np"] = seq_lens_cpu.numpy()
         if offload_kwargs is not None:
