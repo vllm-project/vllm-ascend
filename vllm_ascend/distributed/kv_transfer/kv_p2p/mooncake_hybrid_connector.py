@@ -227,8 +227,13 @@ class KVCacheTaskTracker:
             self.finished_requests.add(request_id)
             self.reqs_to_process.discard(request_id)
 
-    def update_done_task_count(self, request_id: str):
+    def update_done_task_count(self, request_id: str, *, report_completion: bool = True):
         with self.done_task_lock:
+            if not report_completion:
+                # Notification-only requests never entered WAITING_FOR_REMOTE_KVS.
+                self.reqs_to_process.discard(request_id)
+                self.delayed_free_requests.pop(request_id, None)
+                return
             if request_id in self.reqs_to_process:
                 self.finished_requests.add(request_id)
                 self.reqs_to_process.discard(request_id)
@@ -561,6 +566,7 @@ class KVCacheRecvingThread(threading.Thread):
         tp_num_need_pulls: int,
         remote_port_send_num: dict[int, RemotePortInfo] | None = None,
         all_task_done: bool = False,
+        awaiting_kvs: bool = True,
     ):
         """Add a new request to the queue for processing."""
         if remote_port_send_num is None:
@@ -579,6 +585,7 @@ class KVCacheRecvingThread(threading.Thread):
                 "tp_num_need_pulls": tp_num_need_pulls,
                 "remote_port_send_num": remote_port_send_num,
                 "all_task_done": all_task_done,
+                "awaiting_kvs": awaiting_kvs,
             }
         )
 
@@ -693,8 +700,9 @@ class KVCacheRecvingThread(threading.Thread):
         finally:
             self._send_done_signal_to_free_remote_port(remote_request_id, remote_host, remote_port_send_num)
             if self._mark_request_task_done(request_id, all_task_done):
-                if len(req_meta["local_block_ids"]) > 0:
-                    self.task_tracker.update_done_task_count(request_id)
+                self.task_tracker.update_done_task_count(
+                    request_id, report_completion=req_meta.get("awaiting_kvs", True)
+                )
                 with self.proc_not_transfer_request_lock:
                     self.proc_not_transfer_request.pop(remote_request_id, None)
             self.request_queue.task_done()
@@ -1570,11 +1578,18 @@ class MooncakeConnectorScheduler:
             "MooncakeConnector request_finished, request_status=%s, kv_transfer_params=%s", request.status, params
         )
 
-        if (
-            params is None
-            or not params.get("do_remote_decode")
-            or request.status != RequestStatus.FINISHED_LENGTH_CAPPED
-        ):
+        if params is None:
+            return False, None
+
+        # As in V1, an empty receive skips the transfer but still sends DONE
+        # to release P's retained blocks when D finishes before worker dispatch.
+        if params.get("do_remote_prefill") or request.request_id in self._reqs_need_recv:
+            empty_block_ids: BlockIds = tuple([] for _ in self.kv_cache_config.kv_cache_groups)
+            self._reqs_need_recv[request.request_id] = (request, empty_block_ids, 0)
+            params["do_remote_prefill"] = False
+            return False, None
+
+        if not params.get("do_remote_decode") or request.status != RequestStatus.FINISHED_LENGTH_CAPPED:
             return False, None
 
         # P-side truncation can leave block ids allocated for the original
@@ -2002,6 +2017,7 @@ class MooncakeConnectorWorker:
                         offset=i,
                         tp_num_need_pulls=pulls_per_stage,
                         all_task_done=(i == num_pulls - 1),
+                        awaiting_kvs=meta.num_external_tokens > 0,
                     )
             else:  # TODO: support prefill context parallel and pipeline parallel open at the same time
                 chosen_rank_list = self._get_remote_rank(remote_req_id, prefill_tp_size)
@@ -2026,6 +2042,7 @@ class MooncakeConnectorWorker:
                         offset=i,
                         tp_num_need_pulls=tp_num_need_pulls,
                         all_task_done=(i == tp_num_need_pulls * self._prefill_pp_size - 1),
+                        awaiting_kvs=meta.num_external_tokens > 0,
                     )
 
         for req_id in metadata.reqs_in_batch:

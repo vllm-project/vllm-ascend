@@ -90,18 +90,24 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
         thread.engine = MagicMock()
         thread._send_done_recv_signal = MagicMock()
 
-        for outcome in ("success", "empty", "failure"):
+        for outcome in ("success", "empty", "notification", "failure"):
             with self.subTest(outcome=outcome):
                 request_id = f"decode-{outcome}"
                 remote_request_id = f"prefill-{outcome}"
                 thread.engine.reset_mock()
                 thread.engine.batch_transfer_sync_read.return_value = -1 if outcome == "failure" else 0
                 thread._send_done_recv_signal.reset_mock()
+                producer = KVCacheTaskTracker()
+                producer.add_req_to_process(remote_request_id)
+                producer.add_delayed_request(remote_request_id, time.time())
+                thread._send_done_recv_signal.side_effect = (
+                    lambda *args, tracker=producer: tracker.update_done_task_count(args[0])
+                )
                 thread.task_tracker.add_req_to_process(request_id)
                 thread.add_request(
                     request_id=request_id,
                     remote_request_id=remote_request_id,
-                    local_block_ids=([], []) if outcome == "empty" else ([2, 3], [4]),
+                    local_block_ids=([], []) if outcome in ("empty", "notification") else ([2, 3], [4]),
                     remote_block_ids=([1, 2], [3]),
                     remote_engine_id="prefill",
                     remote_host="192.0.2.1",
@@ -109,6 +115,7 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
                     offset=0,
                     tp_num_need_pulls=1,
                     all_task_done=True,
+                    awaiting_kvs=outcome != "notification",
                 )
                 req_meta = thread.request_queue.get_nowait()
                 thread._mark_request_task_submitted(req_meta)
@@ -117,7 +124,7 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
                 ) as log_exception:
                     thread._handle_request(req_meta)
                 self.assertEqual(log_exception.call_count, int(outcome == "failure"))
-                if outcome == "empty":
+                if outcome in ("empty", "notification"):
                     thread.engine.batch_transfer_sync_read.assert_not_called()
                 else:
                     thread.engine.batch_transfer_sync_read.assert_called_once_with(
@@ -127,7 +134,11 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
                         [32, 16, 32],
                     )
                 thread._send_done_recv_signal.assert_called_once_with(remote_request_id, "192.0.2.1", 31002, {})
-                self.assertEqual(thread.get_and_clear_finished_requests(), {request_id})
+                self.assertEqual(
+                    thread.get_and_clear_finished_requests(), set() if outcome == "notification" else {request_id}
+                )
+                self.assertEqual(producer.get_and_clear_finished_requests(), {remote_request_id})
+                self.assertFalse(producer.delayed_free_requests)
                 self.assertEqual(thread.get_and_clear_finished_requests(), set())
                 self.assertFalse(thread.task_tracker.reqs_to_process)
                 self.assertFalse(thread.request_task_counts)
@@ -496,6 +507,7 @@ class TestMooncakeHybridConnectorWorker(unittest.TestCase):
                             self.assertEqual(pull["remote_request_id"], request_id)
                             self.assertEqual(pull["local_block_ids"], ([20, 21], [40, 41]))
                             self.assertEqual(pull["remote_block_ids"], ([10, 11], [30, 31]))
+                            self.assertTrue(pull["awaiting_kvs"])
                             self.assertEqual(
                                 (pull["offset"], pull["tp_num_need_pulls"], pull["all_task_done"]), (0, 1, True)
                             )
@@ -519,6 +531,32 @@ class TestMooncakeHybridConnectorWorker(unittest.TestCase):
                             self.assertEqual(tracker.get_and_clear_finished_requests(), set())
                             self.assertFalse(tracker.delayed_free_requests)
                             self.assertFalse(tracker.reqs_to_process)
+
+    def test_start_load_kv_marks_notification_only_receives(self):
+        for use_mamba in (False, True):
+            with self.subTest(use_mamba=use_mamba):
+                worker = self._make_worker(2, 2, 0, 1, 0, 0, use_mamba, "kv_consumer")
+                metadata = MooncakeConnectorMetadata()
+                metadata.add_new_req(
+                    "decode-request",
+                    ([], []),
+                    0,
+                    {
+                        "remote_block_ids": ([10], [30]),
+                        "remote_engine_id": "prefill",
+                        "remote_request_id": "prefill-request",
+                        "remote_host": "192.0.2.1",
+                        "remote_port": 31000,
+                    },
+                )
+
+                worker.start_load_kv(metadata)
+
+                worker.kv_recv_thread.add_request.assert_called_once()
+                pull = worker.kv_recv_thread.add_request.call_args.kwargs
+                self.assertFalse(pull["awaiting_kvs"])
+                self.assertEqual(pull["local_block_ids"], ([], []))
+                self.assertEqual(pull["remote_request_id"], "prefill-request")
 
 
 class TestMooncakeHybridConnectorRegistration(unittest.TestCase):
@@ -882,6 +920,9 @@ class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
         # C4 exposes a 512-token logical block backed by one 128-token page.
         scheduler.group_block_size = [512, 128]
         scheduler._reqs_need_send = {}
+        scheduler._reqs_need_recv = {}
+        scheduler._reqs_in_batch = set()
+        scheduler.kv_cache_config = types.SimpleNamespace(kv_cache_groups=[MagicMock(), MagicMock()])
         scheduler.block_size = 128
         scheduler.engine_id = "engine"
         scheduler.side_channel_host = "127.0.0.1"
@@ -890,6 +931,67 @@ class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
         scheduler.pcp_size = 1
         scheduler.multi_nodes_meta_mapping = {}
         return scheduler
+
+    def _make_remote_prefill(self):
+        return MockRequest(
+            "decode-request",
+            list(range(129)),
+            {
+                "do_remote_prefill": True,
+                "do_remote_decode": False,
+                "remote_block_ids": ([10], [30, 31]),
+                "remote_engine_id": "prefill",
+                "remote_request_id": "prefill-request",
+                "remote_host": "192.0.2.1",
+                "remote_port": 31000,
+            },
+            RequestStatus.FINISHED_ABORTED,
+        )
+
+    def test_unallocated_abort_enqueues_notification_without_local_completion(self):
+        scheduler = self._make_scheduler()
+        request = self._make_remote_prefill()
+
+        self.assertEqual(scheduler.request_finished_all_groups(request, ([], [])), (False, None))
+
+        metadata = scheduler.build_connector_meta(MagicMock())
+        recv = metadata.requests[request.request_id]
+        self.assertEqual(recv.local_block_ids, ([], []))
+        self.assertEqual(recv.num_external_tokens, 0)
+        self.assertEqual(recv.remote_request_id, "prefill-request")
+        self.assertFalse(request.kv_transfer_params["do_remote_prefill"])
+        self.assertFalse(scheduler._reqs_need_recv)
+        self.assertFalse(scheduler.build_connector_meta(MagicMock()).requests)
+
+    def test_allocated_abort_replaces_pending_receive_with_notification(self):
+        scheduler = self._make_scheduler()
+        request = self._make_remote_prefill()
+        blocks = MagicMock()
+        blocks.get_unhashed_block_ids_all_groups.return_value = ([20], [40, 41])
+        scheduler.update_state_after_alloc(request, blocks, 128)
+        self.assertFalse(request.kv_transfer_params["do_remote_prefill"])
+
+        self.assertEqual(scheduler.request_finished_all_groups(request, ([], [])), (False, None))
+
+        metadata = scheduler.build_connector_meta(MagicMock())
+        recv = metadata.requests[request.request_id]
+        self.assertEqual(recv.local_block_ids, ([], []))
+        self.assertEqual(recv.num_external_tokens, 0)
+        self.assertEqual(recv.remote_request_id, "prefill-request")
+        self.assertIn(request.request_id, metadata.reqs_in_batch)
+
+    def test_dispatched_abort_does_not_send_early_done(self):
+        scheduler = self._make_scheduler()
+        request = self._make_remote_prefill()
+        blocks = MagicMock()
+        blocks.get_unhashed_block_ids_all_groups.return_value = ([20], [40, 41])
+        scheduler.update_state_after_alloc(request, blocks, 128)
+        metadata = scheduler.build_connector_meta(MagicMock())
+        self.assertEqual(metadata.requests[request.request_id].local_block_ids, ([20], [40, 41]))
+
+        self.assertEqual(scheduler.request_finished_all_groups(request, ([], [])), (False, None))
+
+        self.assertFalse(scheduler.build_connector_meta(MagicMock()).requests)
 
     def test_compute_transfer_block_ids_trims_swa_groups(self):
         scheduler = self._make_scheduler()
