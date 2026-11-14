@@ -298,10 +298,19 @@ def chunk_gated_delta_rule_fwd_h_kda(
             chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT)
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
-    h = k.new_empty(B, NT, H, V, K)
-    final_state = k.new_empty(N, H, V, K, dtype=torch.float32) if output_final_state else None
+    # Zero-initialized on purpose: the h kernel writes only the (BV, 64)
+    # tiles it processes and, for short/padded tails, parts of these buffers
+    # stay unwritten. With a pooled caching allocator those bytes hold the
+    # previous launch's data, making the final recurrent state (the decode
+    # hand-off) depend on request history.
+    h = torch.zeros(B, NT, H, V, K, dtype=k.dtype, device=k.device)
+    final_state = (
+        torch.zeros(N, H, V, K, dtype=torch.float32, device=k.device)
+        if output_final_state
+        else None
+    )
 
-    v_new = torch.empty_like(u) if save_new_value else None
+    v_new = torch.zeros_like(u) if save_new_value else None
 
     def grid(meta):
         return (triton.cdiv(V, meta["BV"]), N * H)
