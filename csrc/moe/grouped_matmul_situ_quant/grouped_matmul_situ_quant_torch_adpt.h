@@ -63,6 +63,8 @@
 #include "torch_npu/csrc/aten/CustomFunctions.h"
 #include "torch_npu/csrc/core/npu/NPUFormat.h"
 
+#include "grouped_matmul_situ_quant_msd_torch_adpt.h"
+
 namespace ascend_kernel {
 
 namespace {
@@ -211,6 +213,15 @@ std::tuple<at::Tensor, at::Tensor> gmm_situ_quant_v2_nd(
     int64_t dequantMode, int64_t dequantDtype, int64_t quantMode, int64_t groupListType,
     const std::optional<std::vector<int64_t>> &tuningConfigOptional, double beta, double linearBeta)
 {
+    if (x.scalar_type() == at::kChar) {
+        std::optional<std::vector<at::Tensor>> assist;
+        if (weightAssistMatrix.has_value()) {
+            assist = std::vector<at::Tensor>{*weightAssistMatrix};
+        }
+        return RunSituMsd(x, {weight}, {weightScale}, assist, bias, xScale, smoothScale, groupList,
+                          dequantMode, dequantDtype, quantMode, groupListType, tuningConfigOptional,
+                          beta, linearBeta, false, true);
+    }
     ValidateV2Params(weightAssistMatrix, bias, smoothScale, dequantMode, dequantDtype, quantMode, groupListType);
     ValidateXScales(x, xScale);
 
@@ -237,6 +248,15 @@ std::tuple<at::Tensor, at::Tensor> gmm_situ_quant_v2_nz(
     int64_t dequantMode, int64_t dequantDtype, int64_t quantMode, int64_t groupListType,
     const std::optional<std::vector<int64_t>> &tuningConfigOptional, double beta, double linearBeta)
 {
+    if (x.scalar_type() == at::kChar) {
+        std::optional<std::vector<at::Tensor>> assist;
+        if (weightAssistMatrix.has_value()) {
+            assist = std::vector<at::Tensor>{*weightAssistMatrix};
+        }
+        return RunSituMsd(x, {weight}, {weightScale}, assist, bias, xScale, smoothScale, groupList,
+                          dequantMode, dequantDtype, quantMode, groupListType, tuningConfigOptional,
+                          beta, linearBeta, true, true);
+    }
     ValidateV2Params(weightAssistMatrix, bias, smoothScale, dequantMode, dequantDtype, quantMode, groupListType);
     ValidateXScales(x, xScale);
 
@@ -263,6 +283,11 @@ std::tuple<at::Tensor, at::Tensor> gmm_situ_quant_v2_nd_list(
     int64_t dequantMode, int64_t dequantDtype, int64_t quantMode, int64_t groupListType,
     const std::optional<std::vector<int64_t>> &tuningConfigOptional, double beta, double linearBeta)
 {
+    if (x.scalar_type() == at::kChar) {
+        return RunSituMsd(x, weight, weightScale, weightAssistMatrix, bias, xScale, smoothScale, groupList,
+                          dequantMode, dequantDtype, quantMode, groupListType, tuningConfigOptional,
+                          beta, linearBeta, false, false);
+    }
     std::optional<at::Tensor> assist =
         weightAssistMatrix.has_value() && !weightAssistMatrix->empty() ? std::optional<at::Tensor>((*weightAssistMatrix)[0])
                                                                       : std::nullopt;
@@ -294,6 +319,11 @@ std::tuple<at::Tensor, at::Tensor> gmm_situ_quant_v2_nz_list(
     int64_t dequantMode, int64_t dequantDtype, int64_t quantMode, int64_t groupListType,
     const std::optional<std::vector<int64_t>> &tuningConfigOptional, double beta, double linearBeta)
 {
+    if (x.scalar_type() == at::kChar) {
+        return RunSituMsd(x, weight, weightScale, weightAssistMatrix, bias, xScale, smoothScale, groupList,
+                          dequantMode, dequantDtype, quantMode, groupListType, tuningConfigOptional,
+                          beta, linearBeta, true, false);
+    }
     std::optional<at::Tensor> assist =
         weightAssistMatrix.has_value() && !weightAssistMatrix->empty() ? std::optional<at::Tensor>((*weightAssistMatrix)[0])
                                                                       : std::nullopt;

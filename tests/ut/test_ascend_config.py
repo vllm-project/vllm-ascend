@@ -487,6 +487,7 @@ class TestAscendConfig(TestBase):
 
         ascend_fusion_config = ascend_config.ascend_fusion_config
         self.assertTrue(ascend_fusion_config.fusion_ops_gmmswigluquant)
+        self.assertFalse(ascend_fusion_config.fusion_ops_gmmsituquant)
         self.assertFalse(ascend_config.rl_config.enabled)
 
     @_clean_up_ascend_config
@@ -581,6 +582,7 @@ class TestAscendConfig(TestBase):
             },
             "ascend_fusion_config": {
                 "fusion_ops_gmmswigluquant": False,
+                "fusion_ops_gmmsituquant": True,
             },
             "multistream_overlap_shared_expert": True,
             "enable_force_eplb": True,
@@ -605,6 +607,7 @@ class TestAscendConfig(TestBase):
 
         ascend_fusion_config = ascend_config.ascend_fusion_config
         self.assertFalse(ascend_fusion_config.fusion_ops_gmmswigluquant)
+        self.assertTrue(ascend_fusion_config.fusion_ops_gmmsituquant)
         self.assertTrue(ascend_config.xlite_graph_config.full_mode)
         self.assertEqual(ascend_config.finegrained_tp_config.lmhead_tensor_parallel_size, 0)
 
@@ -1367,6 +1370,8 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         # bool("false") is True in Python; pydantic lax must resolve to False.
         self.assertFalse(AscendFusionConfig(fusion_ops_gmmswigluquant="false").fusion_ops_gmmswigluquant)
         self.assertTrue(AscendFusionConfig(fusion_ops_gmmswigluquant="true").fusion_ops_gmmswigluquant)
+        self.assertFalse(AscendFusionConfig(fusion_ops_gmmsituquant="false").fusion_ops_gmmsituquant)
+        self.assertTrue(AscendFusionConfig(fusion_ops_gmmsituquant="true").fusion_ops_gmmsituquant)
 
     def test_ascend_fusion_config_forbids_unknown_key(self):
         with self.assertRaises(ValueError):
