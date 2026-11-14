@@ -2325,6 +2325,7 @@ class TestKVPPConfig(TestBase):
         from tests.ut.kvpp_utils import make_kvpp_config
 
         mooncake = {"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer"}
+        push = {**mooncake, "kv_connector": "MooncakePushConnector"}
         store = {"kv_connector": "AscendStoreConnector", "kv_role": "kv_both"}
 
         def multi(children):
@@ -2334,7 +2335,7 @@ class TestKVPPConfig(TestBase):
                 "kv_connector_extra_config": {"connectors": children},
             }
 
-        for transfer in (mooncake, store, multi([mooncake, store]), multi([store, mooncake])):
+        for transfer in (mooncake, push, store, multi([mooncake, store]), multi([store, mooncake])):
             with self.subTest(transfer=transfer):
                 config = make_kvpp_config()
                 config.kv_transfer_config = KVTransferConfig(**deepcopy(transfer))
@@ -2344,6 +2345,7 @@ class TestKVPPConfig(TestBase):
         unsupported = {**mooncake, "kv_connector": "MooncakeConnectorV1"}
         cases = (
             (consumer, "decode-only"),
+            ({**push, "kv_role": "kv_consumer"}, "decode-only"),
             (multi([store, consumer]), "decode-only"),
             (unsupported, "MooncakeConnectorV1"),
             (multi([mooncake, unsupported]), "MooncakeConnectorV1"),

@@ -68,7 +68,9 @@ Set `kv_connector` to `MooncakePushConnector` on P and D, with `kv_role` set to
 `kv_producer` and `kv_consumer`, respectively. Use
 `examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py`
 as the proxy. This experimental path supports PCP/TP routing and PP layer
-lookup; workers currently require DCP=1 and do not support KVPP.
+lookup; workers currently require DCP=1. KVPP can be enabled on P for supported
+MLA/SFA models. Each target layer's persistent owner writes to every D worker
+that holds that layer. Replicated draft caches use the usual replica selection.
 
 The proxy sends the request to D first. After allocating blocks, D's scheduler
 submits an immutable destination snapshot to a 32-worker HTTP thread pool,

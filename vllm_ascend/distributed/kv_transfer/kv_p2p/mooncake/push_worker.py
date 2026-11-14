@@ -222,9 +222,6 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
     def register_kv_caches(self, kv_caches: dict[str, "torch.Tensor | list[torch.Tensor]"]) -> None:
         super().register_kv_caches(kv_caches)
         if self.kv_transfer_config.is_kv_producer:
-            # KVPP is outside the Push support plan.
-            if self.ascend_config.kvpp_config.size > 1:
-                raise ValueError("Mooncake Push does not support KVPP yet")
             self._device = torch.npu.current_device()
             self._layer_indices = {name: i for i, name in enumerate(self.transfer_metadata.layer_names)}
             model_type = self.vllm_config.model_config.hf_text_config.model_type
@@ -340,7 +337,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         if metadata.engine_id != params["consumer_engine_id"] or metadata.dcp_size != 1:
             raise ValueError("Push requires matching D engine metadata with DCP=1")
         if metadata.use_kv_pp:
-            raise ValueError("Push does not support KVPP yet")
+            raise ValueError("Push requires KVPP to be disabled on the decode node")
         return metadata
 
     def _send_done(self, params: dict[str, Any], error: str | None) -> bool:
@@ -445,6 +442,10 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             return (0, 0, 1) if matched else None
         whole = isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec)) or is_circular_kv_cache_spec(spec)
         if whole:
+            # Registration exposes each KVPP target layer only on its persistent owner.
+            # That owner supplies the full page to every destination holding the layer.
+            if layer_name in self.kvpp_layer_owners:
+                return (0, 0, 1)
             # Replicated pages: exactly one P worker writes each D replica.
             owner = (rank[2] * remote.pcp_size + rank[1]) % (self.tp_size * self.pcp_size)
             return (0, 0, 1) if self.tp_rank * self.pcp_size + self.pcp_rank == owner else None

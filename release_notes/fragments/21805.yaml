@@ -1,0 +1,4 @@
+pr: 21805
+entries:
+  - category: feature
+    text: Enabled prefill-side KVPP with MooncakePushConnector for supported non-hybrid MLA and SFA models, including GLM-5.3 W8A8C8.

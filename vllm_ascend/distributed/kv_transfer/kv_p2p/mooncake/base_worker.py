@@ -508,7 +508,7 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
         logger.info("num_blocks: %s", self.num_blocks)
         self.kv_caches = kv_caches
         self._build_kv_cache_spec_mappings()
-        owners = (
+        self.kvpp_layer_owners = (
             map_kvpp_layers_to_owners(self.vllm_config, kv_caches.keys())
             if self.ascend_config.kvpp_config.size > 1
             else {}
@@ -539,7 +539,7 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
                 configured_layer_names.add(layer_name)
                 # Foreign target layers alias scratch. Publish persistent owners
                 # only; MTP caches are absent from owners and remain replicated.
-                owner = owners.get(layer_name)
+                owner = self.kvpp_layer_owners.get(layer_name)
                 if owner is not None and owner != kvpp_rank:
                     continue
 
