@@ -40,6 +40,7 @@ import vllm_ascend.patch.worker.patch_minimax_m2  # noqa
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa
 import vllm_ascend.patch.worker.patch_bind_kv_cache  # noqa
 import vllm_ascend.patch.worker.patch_step3p5  # noqa
+import vllm_ascend.patch.worker.patch_mooncake_store  # noqa
 
 if get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
     import vllm_ascend.patch.worker.patch_qwen3_5  # noqa
