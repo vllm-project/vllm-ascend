@@ -88,6 +88,7 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
 
 # Install cannbot wheels from the Ascend mirror (only aarch64)
 ARG TARGETPLATFORM
+ARG ASCEND_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly"
 RUN case "$TARGETPLATFORM" in \
   linux/arm64) \
     PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" \
