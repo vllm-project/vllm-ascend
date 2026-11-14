@@ -33,6 +33,8 @@ def _config(max_len, interleave):
         scheduler_config=SimpleNamespace(max_num_seqs=30, max_num_batched_tokens=120),
         model_config=SimpleNamespace(max_model_len=max_len, hf_text_config=SimpleNamespace()),
         speculative_config=SimpleNamespace(num_speculative_tokens=3),
+        compilation_config=SimpleNamespace(cudagraph_mode=None),
+        attention_config=SimpleNamespace(indexer_kv_dtype="bf16"),
     )
 
 
@@ -48,6 +50,10 @@ def _create_builder(spec, config, indexer):
 
     with (
         patch.object(DCPMetadataBuilderMixin, "__init__", init_base),
+        patch(
+            "vllm_ascend.attention.indexer.get_ascend_config",
+            return_value=SimpleNamespace(enable_indexer_query_parallel=False),
+        ),
         patch("vllm_ascend.attention.context_parallel.sfa_cp.is_dcp_enabled", return_value=True),
         patch(
             "vllm_ascend.attention.context_parallel.sfa_cp.get_dcp_group",
