@@ -1443,6 +1443,7 @@ def test_heartbeat_logs_batch_outcomes_outside_state_lock(monkeypatch) -> None:
 
     assert messages == [
         "MooncakeHeartbeat event=process engine_id=engine-p received=4 extended=1 unchanged=1 expired=1 unknown=1",
+        "Force freed expired Mooncake request expired after KV lease expired; "
         "MooncakeHeartbeat event=lease_finish engine_id=engine-p request_id=expired "
         "reason=expired expired_by_s=0.000 action=queued_for_release",
     ]
@@ -1485,8 +1486,10 @@ def test_lease_finish_logs_once_outside_state_lock(monkeypatch, finish, renewed)
 
     ends = [message for message in messages if "event=lease_finish" in message]
     reason = "reason=done" if finish == "done" else "reason=expired expired_by_s=0.500"
+    prefix = "" if finish == "done" else "Force freed expired Mooncake request request after KV lease expired; "
     assert ends == [
-        f"MooncakeHeartbeat event=lease_finish engine_id=engine-p request_id=request {reason} action=queued_for_release"
+        f"{prefix}MooncakeHeartbeat event=lease_finish engine_id=engine-p "
+        f"request_id=request {reason} action=queued_for_release"
     ]
     assert logger.error.call_count == (0 if finish == "done" else 1)
 
@@ -1500,7 +1503,7 @@ def test_heartbeat_logs_only_successfully_sent_batches(monkeypatch) -> None:
     poller = MagicMock()
     socket.recv.return_value = ACK_MSG
     sent = []
-    messages = []
+    messages: list[str] = []
 
     def send(payload, **kwargs):
         if socket.send.call_count == 1:
