@@ -108,13 +108,17 @@ def override_envs_for_invariance():
     os.environ["HCCL_DETERMINISTIC"] = "strict"
     os.environ["LCCL_DETERMINISTIC"] = "1"
 
-    # Enable deterministic computation for operators. Some operators on Ascend A5
-    # do not have deterministic mode enabled by default and must be explicitly set.
-    torch.use_deterministic_algorithms(True, warn_only=True)
+    # Enable deterministic computation for operators: on the target stack
+    # (torch-npu >= 2.10.0.post7 with CANN 9.2.0) deterministic level 3 guarantees
+    # batch consistency for the operators. Set the torch flag first so that
+    # set_deterministic_level() keeps warn_only=True instead of forcing strict mode.
+    # Do not use `torch.use_deterministic_algorithms` after `torch_npu.npu.set_deterministic_level`
+    # because the latter is already implicitly invoked when calling the former.
+    torch_npu.npu.set_deterministic_level(3)
 
     logger.debug(
         "Batch-invariant env override: weight_nz_mode=0, HCCL_DETERMINISTIC=strict, "
-        "LCCL_DETERMINISTIC=1, use_deterministic_algorithms=True",
+        "LCCL_DETERMINISTIC=1, deterministic_level=3",
     )
 
 
