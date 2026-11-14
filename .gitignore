@@ -20,7 +20,7 @@ shellcheck*/
 gitleaks
 
 
-# Python gitignore
+# Python gitignore.
 ## Adapted from:
 ## https://github.com/github/gitignore/blob/main/Python.gitignore
 
