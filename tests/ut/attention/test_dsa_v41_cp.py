@@ -819,6 +819,7 @@ def runtime(builders, monkeypatch):
         projector = _projector(monkeypatch, 2, rank, events, sharding=sharding, decode_sharded=decode_sharded)
         attn = SimpleNamespace(
             rotary_emb=SimpleNamespace(layername=LAYER),
+            fused_attn_epilogue=None,
             n_heads=2,
             n_local_heads=2,
             head_dim=2,

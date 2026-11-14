@@ -74,6 +74,7 @@ from vllm_ascend.ops.triton.mul_add import muls_add_triton
 from vllm_ascend.utils import (
     get_rotation_path,
     normalize_deepseek_v41_config,
+    oproj_tp_enable,
 )
 
 from .cache_config import (
@@ -446,6 +447,26 @@ def init_attention_projections(self, config, quant_config, prefix, reduce_result
         prefix=f"{prefix}.wo_b",
         return_bias=False,
     )
+    self.fused_attn_epilogue = None
+    epilogue_layout = get_ascend_config().dsv41_attn_epilogue
+    if epilogue_layout:
+        from vllm_ascend.ops.dsv41_attn_epilogue import get_attn_epilogue_out
+        from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DSDynamicLinearMethod
+
+        parallel = get_current_vllm_config().parallel_config
+        scheme = getattr(self.wo_a.quant_method, "quant_method", None)
+        if (
+            (tp_size, self.n_heads, self.n_groups, self.head_dim, self.rope_head_dim, self.o_lora_rank, self.dim)
+            != (1, 64, 8, 512, 64, 1024, 5120)
+            or parallel.prefill_context_parallel_size != 1
+            or parallel.decode_context_parallel_size != 1
+            or oproj_tp_enable()
+            or not isinstance(scheme, AscendW8A8MXFP8DSDynamicLinearMethod)
+        ):
+            raise ValueError("dsv41_attn_epilogue requires local TP1 V4.1 Flash DS MXFP8 projections without CP/OTP")
+        for projection in (self.wo_a, self.wo_b):
+            projection._dsv41_attn_epilogue_layout = epilogue_layout
+        self.fused_attn_epilogue = get_attn_epilogue_out()
 
 
 @dataclass(frozen=True)

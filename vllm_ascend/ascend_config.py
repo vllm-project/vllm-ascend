@@ -707,6 +707,7 @@ class AscendConfig:
     # keeps the shared expert separate. Internal flag, not user-settable.
     megamoe_shared_expert_fusion: bool = False
     enable_mlapo: bool = True
+    dsv41_attn_epilogue: Literal["", "nd", "nz"] = ""
     # When True, keep MLAPO prefill weights on NPU instead of freeing them
     # on kv_consumer D nodes. Trades NPU memory for stability — D nodes have
     # normal local-prefill paths (recompute / fallback / preempt) that crash

@@ -862,6 +862,12 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
         layer.weight_scale.data = layer.weight_scale.data.repeat_interleave(self.block_size, dim=0)
         n_dim, k_dim = layer.weight_scale.data.shape
         layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
+        epilogue_layout = getattr(layer, "_dsv41_attn_epilogue_layout", "")
+        if epilogue_layout:
+            from vllm_ascend.ops.dsv41_attn_epilogue import prepare_attn_epilogue_weights
+
+            prepare_attn_epilogue_weights(layer, epilogue_layout, self.o_lora_rank)
+            return
         layer.weight.data = layer.weight.data.transpose(0, 1)
         layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1)
 

@@ -40,6 +40,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `finegrained_tp_config`             | dict | `{}`    | Configuration options for fine-grained tensor parallelism. See [Fine-Grained Tensor Parallelism](../feature_guide/Fine_grained_TP.md). |
 | `ascend_compilation_config`         | dict | `{}`    | Configuration options for ascend compilation                                                              |
 | `ascend_warmup_config`              | dict | `{}`    | Configuration options for startup warmup that overlaps weight loading                                     |
+| `dsv41_attn_epilogue`               | str | `""` | Local Ascend 950 V4.1 Flash DS MXFP8 output projection. `"nd"` keeps checkpoint NK weights; `"nz"` packs logical KN weights to private format 29 during loading. Requires TP1 and no context parallelism or output-projection TP. Install the matching arena package with `attn_epilogue_out_op` first. |
 | `eplb_config`                       | dict | `{}`    | Runner-specific EPLB extensions. See [Expert Parallelism Load Balancer](../feature_guide/expert_parallelism_load_balancer.md). |
 | `scheduler_config`                  | dict | `{}`    | Configuration options for Ascend scheduler extensions, including balance scheduling, recompute scheduling, DyntraLB, ShortRequestFirst, and dynamic chunked pipeline parallel. |
 | `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or ut/e2e test case. |
