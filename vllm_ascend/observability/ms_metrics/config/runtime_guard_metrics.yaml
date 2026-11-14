@@ -1,0 +1,4 @@
+# Runtime-guard anomaly detection: count alerts by incident_type (basic).
+# Custom WRAP handler — no yaml metrics block (see handlers/common.py).
+- symbol: vllm_ascend.observability.runtime_guard.processor_report:RuntimeGuardReportMixin._handle_alert
+  handler: vllm_ascend.observability.ms_metrics.handlers:runtime_guard_handle_alert_handler

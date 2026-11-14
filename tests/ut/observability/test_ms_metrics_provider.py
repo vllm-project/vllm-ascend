@@ -82,11 +82,12 @@ def test_get_metric_provider_returns_packaged_yaml(monkeypatch):
     assert [Path(path).name for path in provider.config_paths] == [
         "base_metrics.yaml",
         "eplb_metrics.yaml",
+        "runtime_guard_metrics.yaml",
         "schedule_execute_metrics.yaml",
     ]
     assert all(Path(path).is_file() for path in provider.config_paths)
     config = _load_all_provider_configs(provider.config_paths)
-    assert len(config) == 13
+    assert len(config) == 14
     assert all(item["symbol"].startswith("vllm_ascend.") for item in config)
     assert all("id" not in item for item in config)
     assert all(
@@ -151,21 +152,26 @@ def test_ascend_handler_module_loads_from_yaml_path(monkeypatch):
         "vllm_ascend.observability.ms_metrics.handlers",
         "vllm_ascend.observability.ms_metrics.handlers.common",
         "vllm_ascend.observability.ms_metrics.handlers.eplb",
+        "vllm_ascend.observability.ms_metrics.handlers.runtime_guard",
         "vllm_ascend.observability.ms_metrics.handlers.schedule_execute",
     ):
         monkeypatch.delitem(sys.modules, module_name, raising=False)
 
     handler_module = __import__(
         _HANDLER_PACKAGE,
-        fromlist=["eplb_do_update_hotness_handler"],
+        fromlist=[
+            "eplb_do_update_hotness_handler",
+            "runtime_guard_handle_alert_handler",
+        ],
     )
 
     assert callable(handler_module.eplb_do_update_hotness_handler)
+    assert callable(handler_module.runtime_guard_handle_alert_handler)
 
 
 def test_provider_yaml_symbols_exist_in_current_vllm_ascend_source():
     config_paths = sorted((_PACKAGE_ROOT / "config").glob("*.yaml"))
-    assert len(config_paths) == 3
+    assert len(config_paths) == 4
     config = _load_all_provider_configs(config_paths)
 
     for item in config:
@@ -482,3 +488,89 @@ def test_custom_handlers_are_not_factory_created_from_yaml_metrics():
             # Provider built-ins follow the factory convention; nothing to
             # assert here beyond the prefix check already done above.
             pass
+
+
+def test_runtime_guard_handler_counts_alerts_by_incident_type(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(
+        monkeypatch,
+        "test_vllm_ascend_metric_handlers_runtime_guard",
+        "runtime_guard",
+    )
+    alert = type("Alert", (), {"incident_type": "token_repeat"})()
+
+    result = handlers.runtime_guard_handle_alert_handler(
+        lambda *_a, **_k: "armed",
+        object(),
+        alert,
+    )
+
+    assert result == "armed"
+    metrics.get_or_create_metric.assert_called_once_with(
+        metric_name="runtime_guard:anomaly:count",
+        metric_type="counter",
+        label_names=["incident_type"],
+    )
+    metrics.record_metric.assert_called_once_with(
+        "runtime_guard:anomaly:count",
+        value=1.0,
+        labels={"incident_type": "token_repeat"},
+    )
+
+
+def test_runtime_guard_handler_skips_noop_early_return(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(
+        monkeypatch,
+        "test_vllm_ascend_metric_handlers_runtime_guard_noop",
+        "runtime_guard",
+    )
+    alert = type("Alert", (), {"incident_type": "logits_finite"})()
+
+    result = handlers.runtime_guard_handle_alert_handler(
+        lambda *_a, **_k: None,
+        object(),
+        alert,
+        write_report=False,
+    )
+
+    assert result is None
+    metrics.record_metric.assert_not_called()
+
+
+def test_runtime_guard_handler_preserves_result_when_recording_fails(monkeypatch):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge", "HISTOGRAM": "histogram", "COUNTER": "counter"})
+    metrics = Mock()
+    metrics.get_or_create_metric.side_effect = RuntimeError("registry unavailable")
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: metrics,
+    )
+    handlers = _load_feature_handlers(
+        monkeypatch,
+        "test_vllm_ascend_metric_handlers_runtime_guard_fail",
+        "runtime_guard",
+    )
+    alert = type("Alert", (), {"incident_type": "rare_chars"})()
+
+    assert (
+        handlers.runtime_guard_handle_alert_handler(
+            lambda *_a, **_k: "armed",
+            object(),
+            alert,
+        )
+        == "armed"
+    )
