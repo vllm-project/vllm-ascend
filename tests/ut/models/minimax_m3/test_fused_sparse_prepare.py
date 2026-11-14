@@ -158,7 +158,7 @@ def test_fused_cache_insert_precedes_indexer_and_attention():
         return "topk"
 
     layer.indexer = Mock(side_effect=run_indexer)
-    layer.indexer.index_cache = SimpleNamespace(prefix="index", kv_cache=[index_cache])
+    layer.indexer.index_cache = SimpleNamespace(prefix="index", kv_cache=[index_cache], context_parallel_size=1)
     layer.impl = SimpleNamespace(forward=Mock(side_effect=lambda *args: order.append("attention")))
     layer._insert_kv = Mock(side_effect=AssertionError("duplicate cache insertion"))
     layer.rotary_emb.cos_sin_cache = torch.empty(32, 64)
@@ -186,4 +186,41 @@ def test_fused_cache_insert_precedes_indexer_and_attention():
     assert kernel.call_args.args[10] is main_slots
     assert kernel.call_args.args[11] is index_slots
     assert kernel.call_args.args[12] == 3
+    assert kernel.call_args.kwargs["index_context_parallel_size"] == 1
+    assert kernel.call_args.kwargs["index_context_parallel_rank"] == 0
     layer._insert_kv.assert_not_called()
+
+
+@pytest.mark.parametrize("size", [2, 4])
+def test_fused_prepare_passes_index_shard_ownership(size):
+    layer = make_layer()
+    layer.layer_name = "main"
+    layer.num_heads, layer.num_kv_heads, layer.num_idx_heads = 16, 1, 1
+    layer.kv_cache = torch.empty(2, 3, 128, 1, 128)
+    cache = torch.empty(3, 128 // size, 128)
+    layer.indexer = Mock(return_value="topk")
+    layer.indexer.index_cache = SimpleNamespace(prefix="index", kv_cache=cache, context_parallel_size=size)
+    layer.impl = SimpleNamespace(forward=Mock())
+    layer.rotary_emb.cos_sin_cache = torch.empty(256, 64)
+    slots = torch.tensor([0, 31, 127, 128])
+    context = SimpleNamespace(
+        attn_metadata={
+            "main": SimpleNamespace(slot_mapping=slots, num_actual_tokens=4),
+            "index": SimpleNamespace(slot_mapping=slots),
+        }
+    )
+    q, iq = torch.empty(4, 2048), torch.empty(4, 128)
+    kernel = Mock(return_value=(q, iq))
+    module = SimpleNamespace(minimax_qknorm_rope_cache=kernel)
+    with (
+        patch.dict("sys.modules", {"vllm_ascend.ops.triton.msa.minimax_qknorm_rope_cache": module}),
+        patch("vllm_ascend.models.minimax_m3.minimax_m3.get_forward_context", return_value=context),
+        patch(
+            "vllm_ascend.models.minimax_m3.minimax_m3.get_tp_group",
+            return_value=SimpleNamespace(rank_in_group=size - 1),
+        ),
+    ):
+        MiniMaxM3SparseAttention._run_fused_sparse_attention(layer, torch.empty(4, 2560), torch.arange(4), q)
+    assert kernel.call_args.args[9] is cache
+    assert kernel.call_args.kwargs["index_context_parallel_size"] == size
+    assert kernel.call_args.kwargs["index_context_parallel_rank"] == size - 1

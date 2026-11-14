@@ -734,6 +734,8 @@ class AscendConfig:
     # Still factory-injected: construction depends on vllm_config.
     sparse_kv_offload_config: Any = dataclasses.field(kw_only=True)
     kvpp_config: KVPPConfig = dataclasses.field(default_factory=KVPPConfig, kw_only=True)
+    # Experimental M3 index-key context sharding across the existing TP group.
+    enable_minimax_m3_indexer_dcp: bool = False
 
     # ---- derived fields: sentinel default, after-validator overwrites ----
     # This switches the prefill recurrence; keep opt-in until cold/cache-hit

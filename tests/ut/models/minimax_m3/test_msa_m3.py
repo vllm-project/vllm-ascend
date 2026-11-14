@@ -921,6 +921,7 @@ def test_a5_indexer_forward_keeps_triton_decode_branch() -> None:
         AscendMiniMaxM3IndexerCache,
         SimpleNamespace(
             prefix="layer.attn.index_cache",
+            context_parallel_size=1,
             kv_cache=torch.zeros(4, 128, 4),
         ),
     )
@@ -998,6 +999,7 @@ def test_triton_indexer_forward_accepts_single_return_value() -> None:
         AscendMiniMaxM3IndexerCache,
         SimpleNamespace(
             prefix="layer.attn.index_cache",
+            context_parallel_size=1,
             kv_cache=torch.zeros(4, 128, 4),
         ),
     )
@@ -1074,6 +1076,7 @@ def test_a3_indexer_forward_receives_fused_select_counts() -> None:
         AscendMiniMaxM3IndexerCache,
         SimpleNamespace(
             prefix="layer.attn.index_cache",
+            context_parallel_size=1,
             kv_cache=torch.zeros(4, 128, 4),
         ),
     )
@@ -1137,6 +1140,7 @@ def test_a5_indexer_forward_keeps_original_prefill_path() -> None:
         AscendMiniMaxM3IndexerCache,
         SimpleNamespace(
             prefix="layer.attn.index_cache",
+            context_parallel_size=1,
             kv_cache=torch.zeros(4, 128, 4),
         ),
     )
@@ -2656,7 +2660,8 @@ def test_ascendc_index_decode_uses_full_cache_without_tp_collectives(
     impl.init_blocks = 1
     impl.local_blocks = 1
     impl.index_cache = cast(
-        AscendMiniMaxM3IndexerCache, SimpleNamespace(prefix="index", kv_cache=torch.zeros(258, 128, 4))
+        AscendMiniMaxM3IndexerCache,
+        SimpleNamespace(prefix="index", context_parallel_size=1, kv_cache=torch.zeros(258, 128, 4)),
     )
     context = _make_mrv2_padding_context() if idle_dp else SimpleNamespace(additional_kwargs={})
     context.attn_metadata = {"index": metadata}

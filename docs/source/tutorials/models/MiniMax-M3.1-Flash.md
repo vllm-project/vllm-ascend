@@ -20,6 +20,54 @@ The features described below are those enabled by the deployment commands in thi
 
 Refer to the [Supported Models](../../user_guide/support_matrix/supported_models.md) page for the support matrix and the [Feature Guide](../../user_guide/feature_guide/index.md) for feature configuration.
 
+### Experimental indexer context sharding on A3
+
+For BF16 KV caches with TP2 or TP4, add
+`"enable_minimax_m3_indexer_dcp": true` to `--additional-config` to shard
+MiniMax's replicated index-key cache across the existing TP group. Keep the
+ordinary `--decode-context-parallel-size` and
+`--prefill-context-parallel-size` at their default value of `1`.
+
+This model-specific mode requires CANN MsaIndexScore, 128-token blocks, and
+128-dimensional index keys. Main K/V remain head-parallel. On TP4, each layer stores one quarter of
+the index keys on each rank; local block scores are combined with a MAX
+reduction before the normal TopK selection. With BF16 caches, the 60-layer
+main-model cache payload falls from 45 KiB to 33.75 KiB per cached token per
+rank. Decode uses BF16 GEMM against the compact index pool, followed by a fused
+page lookup, causal mask, and block MAX. FP32 intermediate matrices are bounded
+to 128 query/head rows; no expanded KV pool is created. Computing extra dot
+products for unreferenced pages trades arithmetic for contiguous reads and
+Cube utilization; the lookup mask excludes those values. A MAX reduce-scatter sends each
+head's final scores only to its owning TP rank. The fused Norm/RoPE/cache
+writer applies the same interleaved ownership rule as the separate scatter.
+Block maxima stay in FP16 storage and communication, preserving the BF16 CANN
+path's intermediate precision. The existing TopK preparation widens them to
+FP32 before applying forced-block priorities, without a separate cast launch.
+Weights, graph workspaces, score buffers, and speculative model caches are
+separate. The compact kernel and HCCL MAX reduce-scatter graph path require
+hardware validation on the selected CANN/torch_npu stack before deployment.
+
+For PD deployments, enable this option on both Prefill and Decode, use the
+same TP size on both roles, and select `MooncakeConnectorV2`. Prefill gathers
+only the index pages referenced within the current sequence lengths and uses the existing
+prefill attention operator. PP layer partitioning can differ between roles.
+A producer without indexer sharding cannot send raw index pages to a sharded
+consumer. This mode does not configure the hosts' NPU interconnect.
+
+Before deployment, run the one-card compact-score/fused-write tests and the
+four-card HCCL/graph tests on the matching software stack:
+
+```bash
+pytest -q tests/e2e/pull_request/one_card/test_minimax_m3_indexer_dcp.py
+pytest -q tests/e2e/pull_request/four_card/test_minimax_m3_indexer_dcp.py
+torchrun --standalone --nproc-per-node=4 benchmarks/benchmark_minimax_m3_indexer_dcp.py --graph
+```
+
+The benchmark compares one indexer layer with replicated keys, expanded DCP,
+and compact DCP. It checks numerical scores before reporting latency and
+temporary memory; graph-capture memory is reported separately. These operator
+measurements do not establish serving throughput or end-to-end PD performance.
+
 ## 3 Prerequisites
 
 ### 3.1 Model Weight

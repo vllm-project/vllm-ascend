@@ -398,6 +398,15 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
 
 
 @dataclass(frozen=True, kw_only=True)
+class AscendMiniMaxM3IndexerDCPSpec(AscendSFAIndexerCacheSpec):
+    """Token-interleaved M3 index keys; accounting head_size is 128 / TP.
+
+    Each logical 128-token page stores 128 / TP keys with dimension 128.
+    A distinct spec prevents treating shards as interchangeable PD replicas.
+    """
+
+
+@dataclass(frozen=True, kw_only=True)
 class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
     """Sliding window attention with MLA cache format."""
 
@@ -574,6 +583,11 @@ def register_ascend_kv_cache_specs() -> None:
 
     KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendMLAAttentionSpec,
+        manager_class=FullAttentionManager,
+        uniform_type_base_spec=FullAttentionSpec,
+    )
+    KVCacheSpecRegistry.register(
+        kvcache_spec_cls=AscendMiniMaxM3IndexerDCPSpec,
         manager_class=FullAttentionManager,
         uniform_type_base_spec=FullAttentionSpec,
     )
