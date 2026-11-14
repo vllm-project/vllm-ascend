@@ -6,3 +6,8 @@ entries:
       initialization to remove three Slice launches and one ZerosLike launch
       from the decode path, and taught gated RMSNorm to consume the strided Z
       view directly to remove its post-recurrent Slice launch.
+  - category: performance
+    text: >-
+      Removed Qwen QSA output TensorMove launches by writing GBSA directly into
+      the graph-owned attention buffer and keeping the output projection outside
+      the eager multi-stream core.
