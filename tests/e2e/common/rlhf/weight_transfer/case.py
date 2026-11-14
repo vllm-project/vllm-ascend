@@ -8,7 +8,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from tests.e2e.common.rlhf.weight_transfer.checkpoint_adapters import deepseek_v4_checkpoint_name
+from vllm import envs
+
+from tests.e2e.common.rlhf.weight_transfer.checkpoint_adapters import (
+    deepseek_v4_checkpoint_name,
+    expand_fused_expert_params,
+    expand_minimax_m3_params,
+    minimax_m3_checkpoint_name,
+)
 
 
 @dataclass(frozen=True)
@@ -21,7 +28,11 @@ class WeightUpdateModelCase:
     meta_config_attribute: str | None = None
     checkpoint_model_prefix: str | None = None
     checkpoint_name_map: Callable[[str], str] | None = None
+    checkpoint_param_expander: Callable[[str, tuple[int, ...]], list[tuple[str, tuple[int, ...]]]] = (
+        expand_fused_expert_params
+    )
     expert_intermediate_size: int | None = None
+    trust_remote_code: bool = True
     extra_server_args: tuple[str, ...] = ()
     # One representative model covers both backends and packing modes.
     full_transfer_matrix: bool = False
@@ -116,6 +127,36 @@ GLM51_CASE = WeightUpdateModelCase(
 GLM_CASES = (GLM51_CASE,)
 
 
+# Bound KV allocation to leave room for the sparse-attention graph workspace.
+MINIMAX_M3_KV_CACHE_BYTES = 128 * 2**20
+
+
+MINIMAX_M3_CASE = WeightUpdateModelCase(
+    id="minimax-m3-sparse-moe-layout",
+    # CI uses ModelScope's namespace; Hugging Face publishes under MiniMaxAI.
+    model="MiniMax/MiniMax-M3" if envs.VLLM_USE_MODELSCOPE else "MiniMaxAI/MiniMax-M3",
+    hf_overrides={
+        "architectures": ["MiniMaxM3SparseForCausalLM"],
+        "text_config": {
+            "num_hidden_layers": 4,
+            "num_local_experts": 8,
+            # Explicit schedules for the fixed four-layer test model;
+            # native config derives these before overrides are applied.
+            "layer_types": ["full_attention", "full_attention", "full_attention", "minimax_m3_sparse"],
+            "mlp_layer_types": ["dense", "dense", "dense", "sparse"],
+        },
+    },
+    meta_config_attribute="text_config",
+    checkpoint_model_prefix="language_model.model.",
+    checkpoint_name_map=minimax_m3_checkpoint_name,
+    checkpoint_param_expander=expand_minimax_m3_params,
+    # The legacy remote config creates a generic text config; the native
+    # Transformers config resolves to the registered text model instead.
+    trust_remote_code=False,
+    extra_server_args=("--block-size", "128", "--kv-cache-memory-bytes", str(MINIMAX_M3_KV_CACHE_BYTES)),
+)
+
+
 # Keep packed lanes skipped until #18763 fixes cross-stream chunk loading.
 # HCCL's second update diverged in #18726 (38570793020, attempts 1/2) and
 # main daily runs 38186343470, 38325024027, 38657430708 and 38679145716;
@@ -128,7 +169,7 @@ PACKED_LANE_SKIP_REASON = (
 )
 
 
-MODEL_CASES = (*QWEN_CASES, *DEEPSEEK_CASES, *GLM_CASES)
+MODEL_CASES = (*QWEN_CASES, *DEEPSEEK_CASES, *GLM_CASES, MINIMAX_M3_CASE)
 
 
 def pytest_model_cases(backend: str, *, model_cases: tuple[WeightUpdateModelCase, ...] = MODEL_CASES) -> list[Any]:

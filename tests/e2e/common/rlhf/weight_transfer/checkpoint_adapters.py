@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""DeepSeek checkpoint-name conversion."""
+"""Checkpoint-facing name and shape conversions."""
 
 import regex as re
 
@@ -78,3 +78,56 @@ def deepseek_v4_checkpoint_name(name: str) -> str:
         if name.endswith(old):
             return name[: -len(old)] + new
     return name
+
+
+def minimax_m3_checkpoint_name(name: str) -> str:
+    """Map native HF text tensors to MiniMax's published checkpoint namespace."""
+    if name.startswith("lm_head."):
+        return f"language_model.{name}"
+    name = name.replace(".self_attn.indexer.", ".self_attn.index_")
+    name = name.replace(".mlp.gate.e_score_correction_bias", ".block_sparse_moe.e_score_correction_bias")
+    name = re.sub(r"\.mlp\.(experts|shared_experts|gate)\.", r".block_sparse_moe.\1.", name)
+    match = re.match(r"^(.*\.block_sparse_moe\.experts\.\d+)\.(gate_proj|down_proj|up_proj)\.weight$", name)
+    if match:
+        shard = {"gate_proj": "w1", "down_proj": "w2", "up_proj": "w3"}[match.group(2)]
+        return f"{match.group(1)}.{shard}.weight"
+    return name
+
+
+def expand_fused_expert_params(name: str, shape: tuple[int, ...]) -> list[tuple[str, tuple[int, ...]]]:
+    """Map HF fused routed-expert tensors onto checkpoint-facing per-expert names.
+
+    ``GlmMoeDsaForCausalLM`` keeps routed experts fused as
+    ``mlp.experts.gate_up_proj`` ``[E, 2I, H]`` and ``mlp.experts.down_proj``
+    ``[E, H, I]``, while the published checkpoint - and therefore vLLM's
+    ``expert_params_mapping`` - stores one tensor per expert
+    (``mlp.experts.{e}.gate_proj.weight`` etc.).  Without this expansion the
+    fused names reach ``load_weights`` unmatched and raise
+    ``KeyError: 'layers.N.mlp.experts.gate_up_proj'``.
+    """
+    for suffix, kind in ((".mlp.experts.gate_up_proj", "gate_up"), (".mlp.experts.down_proj", "down")):
+        if not name.endswith(suffix):
+            continue
+        prefix = name[: -len(suffix.rsplit(".", 1)[-1])]  # keeps the trailing dot
+        if kind == "gate_up":
+            num_experts, fused_inter, hidden = shape
+            inter = fused_inter // 2
+            out: list[tuple[str, tuple[int, ...]]] = []
+            for expert in range(num_experts):
+                out.append((f"{prefix}{expert}.gate_proj.weight", (inter, hidden)))
+                out.append((f"{prefix}{expert}.up_proj.weight", (inter, hidden)))
+            return out
+        num_experts, hidden, inter = shape
+        return [(f"{prefix}{expert}.down_proj.weight", (hidden, inter)) for expert in range(num_experts)]
+    return [(name, shape)]
+
+
+def expand_minimax_m3_params(name: str, shape: tuple[int, ...]) -> list[tuple[str, tuple[int, ...]]]:
+    """Expand MiniMax's dense/shared gate-up and routed-expert tensors."""
+    if name.endswith((".mlp.gate_up_proj.weight", ".mlp.shared_experts.gate_up_proj.weight")):
+        fused_intermediate, hidden = shape
+        assert fused_intermediate % 2 == 0, f"{name}: odd fused gate/up dimension"
+        shard_shape = (fused_intermediate // 2, hidden)
+        prefix = name.removesuffix(".gate_up_proj.weight")
+        return [(f"{prefix}.{projection}.weight", shard_shape) for projection in ("gate_proj", "up_proj")]
+    return expand_fused_expert_params(name, shape)

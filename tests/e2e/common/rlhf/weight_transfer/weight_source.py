@@ -20,34 +20,6 @@ from vllm.distributed.weight_transfer.base import ParamMeta, WeightSource
 from tests.e2e.common.rlhf.weight_transfer.case import WeightUpdateModelCase
 
 
-def expand_fused_expert_params(name: str, shape: tuple[int, ...]) -> list[tuple[str, tuple[int, ...]]]:
-    """Map HF fused routed-expert tensors onto checkpoint-facing per-expert names.
-
-    ``GlmMoeDsaForCausalLM`` keeps routed experts fused as
-    ``mlp.experts.gate_up_proj`` ``[E, 2I, H]`` and ``mlp.experts.down_proj``
-    ``[E, H, I]``, while the published checkpoint - and therefore vLLM's
-    ``expert_params_mapping`` - stores one tensor per expert
-    (``mlp.experts.{e}.gate_proj.weight`` etc.).  Without this expansion the
-    fused names reach ``load_weights`` unmatched and raise
-    ``KeyError: 'layers.N.mlp.experts.gate_up_proj'``.
-    """
-    for suffix, kind in ((".mlp.experts.gate_up_proj", "gate_up"), (".mlp.experts.down_proj", "down")):
-        if not name.endswith(suffix):
-            continue
-        prefix = name[: -len(suffix.rsplit(".", 1)[-1])]  # keeps the trailing dot
-        if kind == "gate_up":
-            num_experts, fused_inter, hidden = shape
-            inter = fused_inter // 2
-            out: list[tuple[str, tuple[int, ...]]] = []
-            for expert in range(num_experts):
-                out.append((f"{prefix}{expert}.gate_proj.weight", (inter, hidden)))
-                out.append((f"{prefix}{expert}.up_proj.weight", (inter, hidden)))
-            return out
-        num_experts, hidden, inter = shape
-        return [(f"{prefix}{expert}.down_proj.weight", (hidden, inter)) for expert in range(num_experts)]
-    return [(name, shape)]
-
-
 def resize_expert_shape(name: str, shape: tuple[int, ...], intermediate_size: int | None) -> tuple[int, ...]:
     """Force expert MLP tensors to the checkpoint's intermediate dimension.
 
@@ -96,18 +68,20 @@ class FixedRandomWeightSource(WeightSource):
     """
 
     def __init__(self, case: WeightUpdateModelCase, device: torch.device) -> None:
-        config = AutoConfig.from_pretrained(case.model, trust_remote_code=True)
+        config = AutoConfig.from_pretrained(case.model, trust_remote_code=case.trust_remote_code)
         _apply_hf_overrides(config, case.hf_overrides)
         self._case = case
         meta_config = getattr(config, case.meta_config_attribute) if case.meta_config_attribute else config
         with torch.device("meta"):
-            meta_model = AutoModelForCausalLM.from_config(meta_config, trust_remote_code=True)
+            meta_model = AutoModelForCausalLM.from_config(meta_config, trust_remote_code=case.trust_remote_code)
+
+        persistent_state_names = set(meta_model.state_dict())
 
         # Two distinct steps: ``_checkpoint_name`` applies the namespace prefix
         # to the raw meta-model name (once), then the checkpoint rename map runs
         # on the *expanded* names, because the meta model exposes routed experts
         # fused and the per-expert names (gate/up/down -> w1/w3/w2) only exist
-        # after ``expand_fused_expert_params`` has split them.
+        # after the case's checkpoint parameter expander has split them.
         parameters = [
             (
                 self._apply_name_map(expanded_name, case),
@@ -115,25 +89,20 @@ class FixedRandomWeightSource(WeightSource):
                 torch.bfloat16,
             )
             for name, parameter in meta_model.named_parameters()
-            for expanded_name, expanded_shape in expand_fused_expert_params(
+            for expanded_name, expanded_shape in case.checkpoint_param_expander(
                 self._checkpoint_name(name, case), tuple(parameter.shape)
             )
         ]
-        # Learned integer tables must travel with the payload too. Some
-        # architectures expose them as HF *buffers* while the served model keeps
-        # them as parameters: DeepSeek-V4's hash router keeps ``tid2eid`` as a
-        # (vocab, topk) token -> expert table, and the real checkpoint ships it
-        # (``model.layers.{0,1,2}.mlp.gate.tid2eid`` in the safetensors index).
-        # Omitting it leaves the table to be re-materialised with ``torch.empty``
-        # during a live update, and the router then indexes experts out of range.
+        # Include persistent checkpoint state in BF16, while integer tables
+        # retain their dtype even when HF marks them non-persistent.
         parameters += [
             (
                 self._apply_name_map(self._checkpoint_name(name, case), case),
                 tuple(buffer.shape),
-                buffer.dtype,
+                torch.bfloat16 if buffer.dtype.is_floating_point else buffer.dtype,
             )
             for name, buffer in meta_model.named_buffers()
-            if not buffer.dtype.is_floating_point and not buffer.dtype.is_complex
+            if name in persistent_state_names or (not buffer.dtype.is_floating_point and not buffer.dtype.is_complex)
         ]
         self._num_experts = int(getattr(meta_config, "n_routed_experts", 0) or 0)
         del meta_model
