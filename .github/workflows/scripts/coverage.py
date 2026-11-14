@@ -66,7 +66,10 @@ cpu_ut_leaked = sorted(cpu_ut_files & existing_et_keys)
 # ============================================================
 # 3. Correctness of runner_mapping
 # ============================================================
-all_expanded_files = e2e_files | ut_files
+# runner_mapping may also route nightly suites, which are not part of the
+# estimated_times coverage, so validate patterns against the whole tests/e2e tree.
+all_e2e_files = {str(f) for f in Path("tests/e2e").rglob("test_*.py")}
+all_expanded_files = all_e2e_files | ut_files
 rm_errors: list[str] = []
 for pattern_str, runner_config in sorted(_rm.items()):
     try:
