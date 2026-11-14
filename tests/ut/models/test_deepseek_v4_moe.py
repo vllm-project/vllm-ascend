@@ -80,7 +80,7 @@ def test_deepseek_v4_hash_layer_uses_upstream_hash_router(monkeypatch):
     )
 
     monkeypatch.setattr(deepseek_v4_module, "FusedMoEFactory", fused_moe)
-    monkeypatch.setattr(deepseek_v4_module, "ReplicatedLinear", lambda *args, **kwargs: gate)
+    monkeypatch.setattr(deepseek_v4_module, "GateLinear", lambda *args, **kwargs: gate)
     monkeypatch.setattr(deepseek_v4_module, "get_ep_group", lambda: ep_group)
     monkeypatch.setattr(deepseek_v4_module, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(deepseek_v4_module, "get_tensor_model_parallel_world_size", lambda: 1)
@@ -146,7 +146,7 @@ def test_deepseek_v4_hash_tid2eid_has_unique_experts_per_row(monkeypatch):
     )
 
     monkeypatch.setattr(deepseek_v4_module, "FusedMoEFactory", fused_moe)
-    monkeypatch.setattr(deepseek_v4_module, "ReplicatedLinear", lambda *args, **kwargs: gate)
+    monkeypatch.setattr(deepseek_v4_module, "GateLinear", lambda *args, **kwargs: gate)
     monkeypatch.setattr(deepseek_v4_module, "get_ep_group", lambda: ep_group)
     monkeypatch.setattr(deepseek_v4_module, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(deepseek_v4_module, "get_tensor_model_parallel_world_size", lambda: 1)
@@ -238,7 +238,7 @@ def test_deepseek_v4_hash_vision_layer_exposes_bias_vl(monkeypatch):
     )
 
     monkeypatch.setattr(deepseek_v4_module, "FusedMoEFactory", fused_moe)
-    monkeypatch.setattr(deepseek_v4_module, "ReplicatedLinear", lambda *args, **kwargs: gate)
+    monkeypatch.setattr(deepseek_v4_module, "GateLinear", lambda *args, **kwargs: gate)
     monkeypatch.setattr(deepseek_v4_module, "get_ep_group", lambda: ep_group)
     monkeypatch.setattr(deepseek_v4_module, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(deepseek_v4_module, "get_tensor_model_parallel_world_size", lambda: 1)
