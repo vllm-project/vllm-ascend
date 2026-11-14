@@ -20,9 +20,12 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from vllm_ascend.device_allocator.sleep_mem_optimized import (
     AclGraphSleepWakeupManager,
     HcclSleepWakeupManager,
+    SleepHcclState,
     SleepWakeupManager,
 )
 from vllm_ascend.utils import (
@@ -101,6 +104,8 @@ def test_sleep_wakeup_manager_cleans_acl_before_hccl_when_aclgraph_enabled():
 
 def test_hccl_wakeup_restores_and_refreshes_moe_groups():
     manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
+    manager._state = SleepHcclState.ASLEEP
+    manager._destroyed_groups = True
 
     with (
         patch("vllm_ascend.device_allocator.sleep_mem_optimized.set_current_vllm_config", return_value=nullcontext()),
@@ -111,6 +116,8 @@ def test_hccl_wakeup_restores_and_refreshes_moe_groups():
 
     mock_restore.assert_called_once_with()
     mock_refresh.assert_called_once_with()
+    assert manager.state is SleepHcclState.IDLE
+    assert manager._destroyed_groups is False
 
 
 def test_hccl_lifecycle_anchor_uses_minimum_supported_buffer_size():
@@ -327,6 +334,8 @@ def test_hccl_sleep_prepares_moe_state_before_business_group_teardown():
 
 def test_hccl_wakeup_refreshes_dispatcher_then_moe_runtime_state():
     manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
+    manager._state = SleepHcclState.ASLEEP
+    manager._destroyed_groups = True
     calls: list[str] = []
 
     def record_restore() -> int:
@@ -378,3 +387,386 @@ def test_staged_wakeup_keeps_anchor_until_kv_cache_recapture():
 
     manager.wakeup(tags=["kv_cache"])
     manager.hccl.release_lifecycle_anchor.assert_called_once_with()
+
+
+def _hccl_manager_with_group() -> tuple[HcclSleepWakeupManager, MagicMock]:
+    worker = MagicMock()
+    worker._pp_send_work = []
+    manager = HcclSleepWakeupManager(MagicMock(), worker)
+    group = MagicMock(group_name="tp")
+    group.device_group = object()
+    return manager, group
+
+
+def test_hccl_state_machine_rejects_illegal_transition():
+    manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
+
+    with pytest.raises(RuntimeError, match="Illegal HCCL sleep transition"):
+        manager._transition(SleepHcclState.ASLEEP)
+
+
+def test_hccl_sleep_and_wakeup_are_idempotent():
+    manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
+    manager._state = SleepHcclState.ASLEEP
+    manager.destroy_hccl = MagicMock()
+    manager.sleep()
+    manager.destroy_hccl.assert_not_called()
+    assert manager.state is SleepHcclState.ASLEEP
+
+    manager._state = SleepHcclState.IDLE
+    manager.wakeup()
+    assert manager.state is SleepHcclState.IDLE
+
+
+def test_hccl_sleep_lightweight_suspends_groups():
+    manager, group = _hccl_manager_with_group()
+
+    with (
+        patch.object(manager, "_resolve_sleep_hccl_policy", return_value=("lightweight", True)),
+        patch.object(manager._suspend_backend, "available", return_value=True),
+        patch.object(manager, "_drain_and_sync"),
+        patch.object(manager, "iter_alive_group_coordinators", return_value=[group]),
+        patch(
+            "vllm_ascend.device_allocator.sleep_mem_optimized.suspend_group",
+            return_value=(True, [42]),
+        ) as mock_suspend,
+        patch.object(manager, "destroy_hccl") as mock_destroy,
+    ):
+        manager.sleep()
+
+    assert manager.state is SleepHcclState.ASLEEP
+    assert manager._suspended_groups == [(group, [42])]
+    assert manager.active_policy == "lightweight"
+    mock_suspend.assert_called_once_with(group.device_group, manager._suspend_backend)
+    mock_destroy.assert_not_called()
+
+
+def test_hccl_sleep_falls_back_to_destroy_when_suspend_fails():
+    manager, group = _hccl_manager_with_group()
+
+    with (
+        patch.object(manager, "_resolve_sleep_hccl_policy", return_value=("auto", True)),
+        patch.object(manager._suspend_backend, "available", return_value=True),
+        patch.object(manager, "_drain_and_sync"),
+        patch.object(manager, "iter_alive_group_coordinators", return_value=[group]),
+        patch(
+            "vllm_ascend.device_allocator.sleep_mem_optimized.suspend_group",
+            return_value=(False, []),
+        ),
+        patch.object(manager, "destroy_hccl", return_value=2) as mock_destroy,
+    ):
+        manager.sleep()
+
+    assert manager.state is SleepHcclState.ASLEEP
+    assert manager._destroyed_groups is True
+    assert manager.suspend_stats.fallbacks == 1
+    mock_destroy.assert_called_once_with()
+
+
+def test_hccl_sleep_unavailable_falls_back_to_destroy():
+    manager, group = _hccl_manager_with_group()
+
+    with (
+        patch.object(manager, "_resolve_sleep_hccl_policy", return_value=("auto", True)),
+        patch.object(manager._suspend_backend, "available", return_value=False),
+        patch.object(manager, "_drain_and_sync"),
+        patch.object(manager, "iter_alive_group_coordinators", return_value=[group]),
+        patch.object(manager, "destroy_hccl", return_value=1) as mock_destroy,
+        patch(
+            "vllm_ascend.device_allocator.sleep_mem_optimized.suspend_group",
+        ) as mock_suspend,
+    ):
+        manager.sleep()
+
+    assert manager.state is SleepHcclState.ASLEEP
+    assert manager.suspend_stats.fallbacks == 1
+    mock_suspend.assert_not_called()
+    mock_destroy.assert_called_once_with()
+
+
+def test_hccl_sleep_without_fallback_marks_failed_and_raises():
+    manager, group = _hccl_manager_with_group()
+
+    with (
+        patch.object(manager, "_resolve_sleep_hccl_policy", return_value=("lightweight", False)),
+        patch.object(manager._suspend_backend, "available", return_value=False),
+        patch.object(manager, "_drain_and_sync"),
+        patch.object(manager, "iter_alive_group_coordinators", return_value=[group]),
+        patch.object(manager, "destroy_hccl") as mock_destroy,
+        pytest.raises(RuntimeError, match="suspend/resume is unavailable"),
+    ):
+        manager.sleep()
+
+    assert manager.state is SleepHcclState.FAILED
+    mock_destroy.assert_not_called()
+
+
+def test_hccl_sleep_skip_policy_does_not_touch_groups():
+    manager, group = _hccl_manager_with_group()
+
+    with (
+        patch.object(manager, "_resolve_sleep_hccl_policy", return_value=("skip", True)),
+        patch.object(manager, "destroy_hccl") as mock_destroy,
+    ):
+        manager.sleep()
+        assert manager.state is SleepHcclState.ASLEEP
+        manager.wakeup()
+
+    assert manager.state is SleepHcclState.IDLE
+    mock_destroy.assert_not_called()
+
+
+def test_hccl_wakeup_resumes_suspended_groups():
+    manager, group = _hccl_manager_with_group()
+    manager._state = SleepHcclState.ASLEEP
+    manager._suspended_groups = [(group, [42])]
+    manager._suspend_backend.stats.suspended_handles = [42]
+
+    with (
+        patch(
+            "vllm_ascend.device_allocator.sleep_mem_optimized.resume_group",
+            return_value=True,
+        ) as mock_resume,
+        patch(
+            "vllm_ascend.device_allocator.sleep_mem_optimized.set_current_vllm_config",
+            return_value=nullcontext(),
+        ),
+        patch.object(manager, "refresh_moe_hccl_groups") as mock_refresh,
+        patch.object(manager, "refresh_moe_hccl_runtime_state"),
+    ):
+        manager.wakeup()
+
+    assert manager.state is SleepHcclState.IDLE
+    assert manager._suspended_groups == []
+    mock_resume.assert_called_once_with(group.device_group, [42], manager._suspend_backend)
+    mock_refresh.assert_called_once_with()
+
+
+def test_hccl_wakeup_falls_back_when_resume_fails():
+    manager, group = _hccl_manager_with_group()
+    manager._state = SleepHcclState.ASLEEP
+    manager._suspended_groups = [(group, [42])]
+
+    with (
+        patch.object(manager, "_resolve_sleep_hccl_policy", return_value=("auto", True)),
+        patch(
+            "vllm_ascend.device_allocator.sleep_mem_optimized.resume_group",
+            return_value=False,
+        ),
+        patch.object(manager, "_force_destroy_and_restore") as mock_force,
+        patch(
+            "vllm_ascend.device_allocator.sleep_mem_optimized.set_current_vllm_config",
+            return_value=nullcontext(),
+        ),
+        patch.object(manager, "refresh_moe_hccl_groups"),
+        patch.object(manager, "refresh_moe_hccl_runtime_state"),
+    ):
+        manager.wakeup()
+
+    assert manager.state is SleepHcclState.IDLE
+    assert manager.suspend_stats.fallbacks == 1
+    mock_force.assert_called_once_with()
+
+
+def test_hccl_wakeup_without_fallback_marks_failed_when_resume_fails():
+    manager, group = _hccl_manager_with_group()
+    manager._state = SleepHcclState.ASLEEP
+    manager._suspended_groups = [(group, [42])]
+
+    with (
+        patch.object(manager, "_resolve_sleep_hccl_policy", return_value=("lightweight", False)),
+        patch(
+            "vllm_ascend.device_allocator.sleep_mem_optimized.resume_group",
+            return_value=False,
+        ),
+        patch(
+            "vllm_ascend.device_allocator.sleep_mem_optimized.set_current_vllm_config",
+            return_value=nullcontext(),
+        ),
+        pytest.raises(RuntimeError, match="Failed to resume"),
+    ):
+        manager.wakeup()
+
+    assert manager.state is SleepHcclState.FAILED
+
+
+def test_hccl_sleep_repeated_cycles_track_policy():
+    manager, group = _hccl_manager_with_group()
+
+    with (
+        patch.object(manager, "_resolve_sleep_hccl_policy", return_value=("lightweight", True)),
+        patch.object(manager._suspend_backend, "available", return_value=True),
+        patch.object(manager, "_drain_and_sync"),
+        patch.object(manager, "iter_alive_group_coordinators", return_value=[group]),
+        patch(
+            "vllm_ascend.device_allocator.sleep_mem_optimized.suspend_group",
+            return_value=(True, [7]),
+        ) as mock_suspend,
+        patch(
+            "vllm_ascend.device_allocator.sleep_mem_optimized.resume_group",
+            return_value=True,
+        ) as mock_resume,
+        patch(
+            "vllm_ascend.device_allocator.sleep_mem_optimized.set_current_vllm_config",
+            return_value=nullcontext(),
+        ),
+        patch.object(manager, "refresh_moe_hccl_groups"),
+        patch.object(manager, "refresh_moe_hccl_runtime_state"),
+    ):
+        for _ in range(3):
+            manager.sleep()
+            manager.wakeup()
+
+    assert manager.state is SleepHcclState.IDLE
+    assert mock_suspend.call_count == 3
+    assert mock_resume.call_count == 3
+    assert manager._suspended_groups == []
+
+
+def test_hccl_suspend_timeout_rolls_back_and_falls_back():
+    manager, group = _hccl_manager_with_group()
+    second_group = MagicMock(group_name="ep")
+    second_group.device_group = object()
+
+    with (
+        patch.object(manager, "_resolve_sleep_hccl_policy", return_value=("auto", True)),
+        patch.object(manager._suspend_backend, "available", return_value=True),
+        patch.object(manager, "_drain_and_sync"),
+        patch.object(manager, "iter_alive_group_coordinators", return_value=[group, second_group]),
+        patch(
+            "vllm_ascend.device_allocator.sleep_mem_optimized.suspend_group",
+            side_effect=[(True, [9]), TimeoutError("suspend timed out")],
+        ),
+        patch(
+            "vllm_ascend.device_allocator.sleep_mem_optimized.resume_group",
+            return_value=True,
+        ) as mock_resume,
+        patch.object(manager, "destroy_hccl", return_value=3) as mock_destroy,
+    ):
+        manager.sleep()
+
+    assert manager.state is SleepHcclState.ASLEEP
+    assert manager.suspend_stats.fallbacks == 1
+    mock_resume.assert_called_once_with(group.device_group, [9], manager._suspend_backend)
+    mock_destroy.assert_called_once_with()
+
+
+def test_hccl_resume_timeout_falls_back():
+    manager, group = _hccl_manager_with_group()
+    manager._state = SleepHcclState.ASLEEP
+    manager._suspended_groups = [(group, [9])]
+
+    with (
+        patch.object(manager, "_resolve_sleep_hccl_policy", return_value=("auto", True)),
+        patch(
+            "vllm_ascend.device_allocator.sleep_mem_optimized.resume_group",
+            side_effect=TimeoutError("resume timed out"),
+        ),
+        patch.object(manager, "_force_destroy_and_restore") as mock_force,
+        patch(
+            "vllm_ascend.device_allocator.sleep_mem_optimized.set_current_vllm_config",
+            return_value=nullcontext(),
+        ),
+        patch.object(manager, "refresh_moe_hccl_groups"),
+        patch.object(manager, "refresh_moe_hccl_runtime_state"),
+    ):
+        manager.wakeup()
+
+    assert manager.state is SleepHcclState.IDLE
+    mock_force.assert_called_once_with()
+
+
+def test_hccl_suspend_vote_rejected_rolls_back_and_falls_back():
+    manager, group = _hccl_manager_with_group()
+
+    with (
+        patch.object(manager, "_resolve_sleep_hccl_policy", return_value=("auto", True)),
+        patch.object(manager._suspend_backend, "available", return_value=True),
+        patch.object(manager, "_drain_and_sync"),
+        patch.object(manager, "iter_alive_group_coordinators", return_value=[group]),
+        patch(
+            "vllm_ascend.device_allocator.sleep_mem_optimized.suspend_group",
+            return_value=(True, [11]),
+        ),
+        patch.object(manager, "_agree_on_suspend", return_value=False) as mock_vote,
+        patch(
+            "vllm_ascend.device_allocator.sleep_mem_optimized.resume_group",
+            return_value=True,
+        ) as mock_resume,
+        patch.object(manager, "destroy_hccl", return_value=2) as mock_destroy,
+    ):
+        manager.sleep()
+
+    assert manager.state is SleepHcclState.ASLEEP
+    assert manager.suspend_stats.fallbacks == 1
+    mock_vote.assert_called_once_with(True)
+    mock_resume.assert_called_once_with(group.device_group, [11], manager._suspend_backend)
+    mock_destroy.assert_called_once_with()
+
+
+def test_hccl_suspend_vote_timeout_fails_without_destroy():
+    manager, group = _hccl_manager_with_group()
+
+    with (
+        patch.object(manager, "_resolve_sleep_hccl_policy", return_value=("auto", True)),
+        patch.object(manager._suspend_backend, "available", return_value=True),
+        patch.object(manager, "_drain_and_sync"),
+        patch.object(manager, "iter_alive_group_coordinators", return_value=[group]),
+        patch(
+            "vllm_ascend.device_allocator.sleep_mem_optimized.suspend_group",
+            return_value=(True, [12]),
+        ),
+        patch.object(manager, "_agree_on_suspend", return_value=None),
+        patch(
+            "vllm_ascend.device_allocator.sleep_mem_optimized.resume_group",
+            return_value=True,
+        ) as mock_resume,
+        patch.object(manager, "destroy_hccl") as mock_destroy,
+        pytest.raises(RuntimeError, match="vote failed"),
+    ):
+        manager.sleep()
+
+    assert manager.state is SleepHcclState.FAILED
+    mock_resume.assert_called_once_with(group.device_group, [12], manager._suspend_backend)
+    mock_destroy.assert_not_called()
+
+
+def test_hccl_capability_vote_rejected_falls_back_on_all_ranks():
+    manager, group = _hccl_manager_with_group()
+
+    with (
+        patch.object(manager, "_resolve_sleep_hccl_policy", return_value=("auto", True)),
+        patch.object(manager._suspend_backend, "available", return_value=True),
+        patch.object(manager, "_drain_and_sync"),
+        patch.object(manager, "_all_rank_vote", return_value=False) as mock_vote,
+        patch.object(manager, "iter_alive_group_coordinators", return_value=[group]),
+        patch(
+            "vllm_ascend.device_allocator.sleep_mem_optimized.suspend_group",
+        ) as mock_suspend,
+        patch.object(manager, "destroy_hccl", return_value=1) as mock_destroy,
+    ):
+        manager.sleep()
+
+    assert manager.state is SleepHcclState.ASLEEP
+    assert manager.suspend_stats.fallbacks == 1
+    mock_vote.assert_called_once_with(True, "capability")
+    mock_suspend.assert_not_called()
+    mock_destroy.assert_called_once_with()
+
+
+def test_hccl_capability_vote_timeout_fails_fast():
+    manager, group = _hccl_manager_with_group()
+
+    with (
+        patch.object(manager, "_resolve_sleep_hccl_policy", return_value=("auto", True)),
+        patch.object(manager._suspend_backend, "available", return_value=True),
+        patch.object(manager, "_drain_and_sync"),
+        patch.object(manager, "_all_rank_vote", return_value=None),
+        patch.object(manager, "iter_alive_group_coordinators", return_value=[group]),
+        patch.object(manager, "destroy_hccl") as mock_destroy,
+        pytest.raises(RuntimeError, match="capability vote failed"),
+    ):
+        manager.sleep()
+
+    assert manager.state is SleepHcclState.FAILED
+    mock_destroy.assert_not_called()
