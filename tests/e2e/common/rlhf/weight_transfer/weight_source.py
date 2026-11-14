@@ -5,6 +5,7 @@
 
 import contextlib
 import hashlib
+import json
 import math
 import shutil
 import tempfile
@@ -102,6 +103,7 @@ class FixedRandomWeightSource(WeightSource):
         meta_config = getattr(config, case.meta_config_attribute) if case.meta_config_attribute else config
         with torch.device("meta"):
             meta_model = AutoModelForCausalLM.from_config(meta_config, trust_remote_code=True)
+        self._buffer_values = self._ple_buffer_values(meta_model)
 
         # Two distinct steps: ``_checkpoint_name`` applies the namespace prefix
         # to the raw meta-model name (once), then the checkpoint rename map runs
@@ -144,6 +146,35 @@ class FixedRandomWeightSource(WeightSource):
         self._parameters = parameters
         self._device = device
 
+    def _ple_buffer_values(self, meta_model) -> dict[str, torch.Tensor]:
+        """Materialize only PLE hash constants; learned parameters stay on meta."""
+        if meta_model.config.model_type != "qwen4_exp_text":
+            return {}
+
+        # Load this optional model implementation only for its own case, using
+        # the same hash initialization as the meta model instead of duplicating it.
+        from transformers.models.qwen4_exp.modeling_qwen4_exp import (
+            Qwen4ExpTextNGramEmbedding,
+            _build_layer_multipliers,
+        )
+
+        values = {}
+        with torch.device("cpu"):
+            for module_name, module in meta_model.named_modules():
+                if not isinstance(module, Qwen4ExpTextNGramEmbedding):
+                    continue
+                buffers = {
+                    "layer_multipliers": _build_layer_multipliers(
+                        module.unigram_vocab_size, module.ngram_size, module.ple_layer_index, module.seed
+                    ),
+                    "ngram_heads_vocab_sizes": torch.tensor(module.head_vocab_sizes, dtype=torch.int64),
+                    "ngram_heads_offsets": torch.tensor(module.head_offsets, dtype=torch.int64),
+                }
+                for leaf, tensor in buffers.items():
+                    name = self._apply_name_map(self._checkpoint_name(f"{module_name}.{leaf}", self._case), self._case)
+                    values[name] = tensor
+        return values
+
     @staticmethod
     def _checkpoint_name(name: str, case: WeightUpdateModelCase) -> str:
         """Apply the case's checkpoint namespace prefix exactly once."""
@@ -164,6 +195,11 @@ class FixedRandomWeightSource(WeightSource):
         return int.from_bytes(digest[:8], "little") % (2**63 - 1)
 
     def _make_tensor(self, name: str, shape: tuple[int, ...], dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:
+        if name in self._buffer_values:
+            buffer = self._buffer_values[name]
+            if tuple(buffer.shape) != shape or buffer.dtype != dtype:
+                raise ValueError(f"PLE buffer metadata mismatch: {name}")
+            return buffer.to(device=self._device, dtype=dtype, copy=True)
         seed = self._parameter_seed(name)
         torch.manual_seed(seed)
         torch.npu.manual_seed(seed)
@@ -204,8 +240,8 @@ class FixedRandomWeightSource(WeightSource):
     def write_checkpoint(self, directory: str | Path) -> None:
         """Materialize this source's payload as a normally-loadable checkpoint.
 
-        Writes the repository's *own* ``config.json`` (byte for byte) next to one
-        safetensors file holding exactly what iteration yields: the same
+        Writes the repository's *own* ``config.json`` (byte for byte) next to a
+        safetensors payload holding exactly what iteration yields: the same
         checkpoint-facing names — including the language-model prefix, the
         DeepSeek-V4 rename map and the fused-expert expansion — the same
         corrected expert shapes, and the same integer tables. Nothing is
@@ -226,9 +262,72 @@ class FixedRandomWeightSource(WeightSource):
 
         target = Path(directory)
         target.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(hf_hub_download(self._case.model, "config.json"), target / "config.json")
+        model_dir = Path(self._case.model)
+        config_path = model_dir / "config.json"
+        if not config_path.is_file():
+            config_path = Path(hf_hub_download(self._case.model, "config.json"))
+        shutil.copyfile(config_path, target / "config.json")
+        if self._case.checkpoint_shard_size_bytes is not None:
+            # Preserve local processor/tokenizer assets for the conditional-
+            # generation reference without reading any pretrained tensor values.
+            for pattern in (
+                "*token*.json",
+                "*preprocessor*.json",
+                "vocab.json",
+                "merges.txt",
+                "*.jinja",
+                "generation_config.json",
+            ):
+                for asset in model_dir.glob(pattern):
+                    if asset.is_file():
+                        shutil.copyfile(asset, target / asset.name)
+            self._write_sharded_checkpoint(target, self._case.checkpoint_shard_size_bytes)
+            return
         state = {name: tensor.detach().to("cpu").contiguous() for name, tensor in self}
         save_file(state, str(target / "model.safetensors"), metadata={"format": "pt"})
+
+    def _write_sharded_checkpoint(self, target: Path, shard_limit: int) -> None:
+        """Bound CPU checkpoint storage by one shard and share the IPC iterator."""
+        from safetensors.torch import save_file
+
+        if shard_limit <= 0:
+            raise ValueError("Checkpoint shard size must be positive")
+        required_bytes = sum(math.prod(meta.shape) * meta.dtype.itemsize for meta in self.metadata)
+        if shutil.disk_usage(target).free < required_bytes + shard_limit:
+            raise OSError("Insufficient space for the generated reference checkpoint and shard headroom")
+        state: dict[str, torch.Tensor] = {}
+        weight_map: dict[str, str] = {}
+        total_bytes = shard_bytes = shard_index = 0
+
+        def flush() -> None:
+            nonlocal shard_bytes, shard_index
+            if not state:
+                return
+            shard_index += 1
+            filename = f"generated-{shard_index:05d}.safetensors"
+            save_file(state, str(target / filename), metadata={"format": "pt"})
+            weight_map.update(dict.fromkeys(state, filename))
+            state.clear()
+            shard_bytes = 0
+
+        for name, tensor in self.iter_full():
+            size_bytes = tensor.numel() * tensor.element_size()
+            if state and shard_bytes + size_bytes > shard_limit:
+                flush()
+            state[name] = tensor.detach().to("cpu").contiguous()
+            shard_bytes += size_bytes
+            total_bytes += size_bytes
+        flush()
+        # Release transient trainer tensors before the reference server measures
+        # free memory on the same chips. Parameters are regenerated for IPC.
+        del tensor
+        if self._device.type == "npu":
+            with torch.npu.device(self._device):
+                torch.npu.synchronize()
+                torch.npu.empty_cache()
+        (target / "model.safetensors.index.json").write_text(
+            json.dumps({"metadata": {"total_size": total_bytes}, "weight_map": weight_map}, indent=2) + "\n"
+        )
 
 
 def packed_buffer_size_for(source: FixedRandomWeightSource) -> int:

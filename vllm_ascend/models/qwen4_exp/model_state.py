@@ -37,6 +37,13 @@ class AscendQwen4ExpModelState(Qwen4ExpModelState, AscendMambaHybridModelState):
 
     _skip_spec_cpu_length_sync: bool
 
+    def __init__(self, vllm_config, model, encoder_cache, device) -> None:
+        super().__init__(vllm_config, model, encoder_cache, device)
+        if self.uses_ngram_embedding:
+            # MRV2 constructs model state inside the discardable weights pool.
+            # Expose immutable PLE offsets to the worker's level-2 buffer backup.
+            model.register_buffer("_qwen4_exp_ngram_context_offsets", self.ngram_context_offsets, persistent=False)
+
     def initialize_spec_cpu_length_sync(self, runner: Any) -> None:
         """Bind length consumers once, after target and draft KV initialization."""
         from vllm_ascend.models.qwen4_exp.cpu_length_sync import can_skip_qwen_cpu_length_sync
