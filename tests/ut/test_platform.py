@@ -20,6 +20,7 @@ from vllm_ascend.platform import (
     NPUPlatform,
     _setup_compile_backend,
     _validate_deepseek_v4_tp_config,
+    _validate_deepseek_v41_adaptive_config,
     _validate_draft_decode_context_parallel_config,
     _validate_eplb_config,
     _validate_glm5next_dflash2_pp_config,
@@ -190,6 +191,36 @@ def test_ascend_sequence_parallel_moe_supports_dp1(dp_size, tp_size, enable_ep, 
     )
 
     assert config.use_sequence_parallel_moe is expected
+
+
+@pytest.mark.parametrize("method", ["dspark", "mtp"])
+@pytest.mark.parametrize("pcp_size,dcp_size", [(2, 1), (1, 2), (2, 2)])
+def test_validate_v41_adaptive_rejects_cp(method, pcp_size, dcp_size):
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(method=method, enable_adaptive_verification=True),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="deepseek_v41")),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size, decode_context_parallel_size=dcp_size),
+    )
+    with pytest.raises(ValueError, match=rf"V4.1 adaptive verification.*PCP={pcp_size}, DCP={dcp_size}") as exc:
+        _validate_deepseek_v41_adaptive_config(config)
+    assert "enable_adaptive_verification=false" in str(exc.value)
+    assert "--prefill-context-parallel-size 1" in str(exc.value)
+    assert "--decode-context-parallel-size 1" in str(exc.value)
+
+
+@pytest.mark.parametrize("mode", ["plain", "fixed", "other_model", "cp_disabled"])
+def test_validate_v41_adaptive_preserves_other_configs(mode):
+    config = SimpleNamespace(
+        speculative_config=None if mode == "plain" else SimpleNamespace(enable_adaptive_verification=mode != "fixed"),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="qwen3" if mode == "other_model" else "deepseek_v41")
+        ),
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1 if mode == "cp_disabled" else 2,
+            decode_context_parallel_size=1 if mode == "cp_disabled" else 2,
+        ),
+    )
+    _validate_deepseek_v41_adaptive_config(config)
 
 
 @pytest.mark.parametrize(

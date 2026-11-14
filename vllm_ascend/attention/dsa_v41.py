@@ -25,6 +25,7 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadata,
     AttentionMetadataBuilder,
+    max_decode_query_len,
 )
 from vllm.v1.kv_cache_interface import CircularBufferSpec
 
@@ -37,6 +38,7 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
 )
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
 from vllm_ascend.ops.rope_dsv4 import (
     get_cos_and_sin_dsa,
     get_full_cos_and_sin_dsa_for_layer,
@@ -815,6 +817,13 @@ class AscendDSAV41Impl:
 
 
 class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]):
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(cls, vllm_config: VllmConfig, kv_cache_spec) -> int | None:
+        # Every proposed row is written to the C2 ring before rejection. Keep
+        # the first accepted row available when the next step rolls back to it.
+        # Wider blocks could overwrite that row even if only the anchor survives.
+        return min(max_decode_query_len(vllm_config), STATE_RING_ROWS)
+
     def __init__(
         self,
         kv_cache_spec,
@@ -1161,6 +1170,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 else:
                     if compressed and req.compress_ratio != 1:
                         active_slots = compressed_slot_mapping(active_slots, req.compress_ratio)
+                    # The common slot-mapping producer already marks padding as PAD.
                     valid = active_slots >= 0
                     if compressed and req.compress_ratio == 2:
                         if kwargs.get("skip_ring_state_update", False):

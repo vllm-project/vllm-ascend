@@ -562,6 +562,67 @@ vllm serve Qwen/Qwen3-8B \
   }'
 ```
 
+#### DeepSeek-V4.1-Flash targets
+
+The Ascend V4.1 cache backend implements DSpark adaptive verification with
+Model Runner V2 and FULL decode graphs. Use a V4.1 checkpoint containing its
+native DSpark draft weights, Markov head, and confidence head:
+
+```shell
+vllm serve /path/to/DeepSeek-V4.1-Flash \
+  --tensor-parallel-size 4 --enable-expert-parallel \
+  --trust-remote-code --no-enable-prefix-caching \
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+  --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true,"enable_adaptive_verification":true}'
+```
+
+Keep the hardware-specific quantization, Engram, memory, and cache settings
+from the [V4.1 model guide](../../tutorials/models/DeepSeek-V4.1-Flash.md).
+The draft's `enforce_eager` setting does not disable target graphs. Do not set
+the target's `--enforce-eager`. PCP/DCP, PP, LM head TP and LoRA retain the
+adaptive-verification restrictions above. Start validation with colocated
+serving and prefix caching disabled; PD, cache offload and prefix-cache reuse
+require separate qualification.
+
+V4.1 adaptive verification on Ascend requires both
+`--prefill-context-parallel-size 1` and `--decode-context-parallel-size 1`.
+CP currently partitions requests using host query boundaries, while adaptive
+verification updates each request's budget on device. Configurations combining
+V4.1 adaptive verification with PCP or DCP greater than 1 are rejected during
+configuration validation. Disable adaptive verification to use an otherwise
+supported CP configuration.
+
+Budget selection, draft allocation and sampling reuse the common adaptive
+verification implementation. The V4.1 backend supplies its graph capability
+and cache metadata; it does not implement a separate adaptive policy.
+The Ascend runner preserves the query-width bound supplied by the common
+graph descriptor. Slot mappings use the common producer's padding contract.
+
+V4.1 uses device query boundaries for SWA writes, compressed cache lengths,
+indexer/attention metadata, and C2 ring state. FULL graph capture preserves
+the maximum verification width even when its dummy queries have one token.
+Padding rows do not write caches. The graph capability is bounded by both
+`1 + num_speculative_tokens` and the 32-row C2 ring: configurations with more
+than 31 draft tokens are rejected by adaptive initialization. The target model
+uses the checkpoint's zero-based auxiliary layer IDs unchanged and captures
+the residual entering each selected layer in both normal and decoder-replay
+execution. No draft-side layer-ID translation is required.
+
+Run the focused NPU runner/graph regression:
+
+```shell
+pytest -q tests/e2e/pull_request/one_card/test_dsv41_adaptive_graph.py
+```
+
+Validate each hardware/operator/weight combination before deployment. Measure
+performance using natural budgets against both
+plain decoding and tuned fixed DSpark under identical prompts, concurrency,
+context length, precision and graph settings. Record throughput, TTFT, TPOT,
+tail latency, memory, and admitted draft counts. Adaptive verification does
+not guarantee a speedup, and acceptance length alone does not establish
+output correctness. This implementation adds no device-to-host length copy
+to the V4.1 target path.
+
 #### Hybrid Gated DeltaNet targets
 
 The GDN path supports variable verification lengths, including

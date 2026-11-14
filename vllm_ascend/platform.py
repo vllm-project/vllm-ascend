@@ -640,6 +640,7 @@ class NPUPlatform(Platform):
         _validate_glm5next_dflash2_pp_config(vllm_config)
         cls._validate_indexer_pp_config(vllm_config)
 
+        _validate_deepseek_v41_adaptive_config(vllm_config)
         _validate_pcp_dcp_config(vllm_config)
         _validate_draft_decode_context_parallel_config(vllm_config)
         _validate_parallel_config(vllm_config)
@@ -2052,6 +2053,26 @@ def _get_deepseek_v4_variant(model_config: ModelConfig) -> str | None:
     if num_experts == 384:
         return "V4 Pro"
     return None
+
+
+def _validate_deepseek_v41_adaptive_config(vllm_config: VllmConfig) -> None:
+    spec = vllm_config.speculative_config
+    if spec is None or not spec.enable_adaptive_verification:
+        return
+    if _get_deepseek_v4_variant(vllm_config.model_config) != "V4.1":
+        return
+    parallel = vllm_config.parallel_config
+    pcp_size = parallel.prefill_context_parallel_size
+    dcp_size = parallel.decode_context_parallel_size
+    # CP partitions from host boundaries, which do not describe the per-request
+    # draft budgets allocated on device by adaptive verification.
+    if pcp_size > 1 or dcp_size > 1:
+        raise ValueError(
+            "DeepSeek V4.1 adaptive verification on Ascend does not support "
+            f"context parallelism (PCP={pcp_size}, DCP={dcp_size}). "
+            "Set --prefill-context-parallel-size 1 and --decode-context-parallel-size 1, "
+            "or set enable_adaptive_verification=false in --speculative-config."
+        )
 
 
 def _validate_deepseek_v4_tp_config(vllm_config: VllmConfig) -> None:
