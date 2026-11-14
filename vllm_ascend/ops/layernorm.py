@@ -146,7 +146,10 @@ class LayerNormFn(torch.autograd.Function):
             x = x.contiguous()
         if z is not None:
             assert z.shape == x_shape_og
-            z = z.reshape(-1, z.shape[-1])
+            # Preserve a token/head/feature view so the NPU kernel can read a
+            # gate embedded in a packed projection without materializing it.
+            if z.ndim != 3 or z.stride(-1) != 1:
+                z = z.reshape(-1, z.shape[-1])
             if z.stride(-1) != 1:
                 z = z.contiguous()
         weight = weight.contiguous()
