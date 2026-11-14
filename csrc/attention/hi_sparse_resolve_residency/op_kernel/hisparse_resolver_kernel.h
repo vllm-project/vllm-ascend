@@ -48,6 +48,23 @@ __simt_callee__ inline int prefix(int value, __ubuf__ int* sums, int tid) {
     return value + (warp == 0 ? 0 : sums[warp - 1]);
 }
 
+// Tile scan when a single warp covers every tile: the exclusive prefix is
+// derived in registers from the warp scan, so one barrier publishes both the
+// per-tile offsets and the block total. Replaces prefix()'s two barriers and
+// the caller's per-batch loop barrier with a single barrier.
+__simt_callee__ inline int scan_tiles_small(
+    int count, __ubuf__ int* offsets, __ubuf__ int* sums, int tid, int tiles) {
+    int inclusive = count;
+    for (int offset = 1; offset < 32; offset *= 2) {
+        const int other = asc_shfl_up(inclusive, offset, 32);
+        if ((tid & 31) >= offset) inclusive += other;
+    }
+    if (tid == 31) sums[kTotal] = inclusive;
+    if (tid < tiles) offsets[tid] = inclusive - count;
+    asc_syncthreads();
+    return sums[kTotal];
+}
+
 __simt_callee__ inline int hash_slot(int key, int size) {
     const uint32_t mixed = uint32_t(key) * 2654435761U;
     return (size & (size - 1)) == 0 ? int(mixed & (size - 1)) :
@@ -107,15 +124,20 @@ __simt_callee__ inline void compact_attention(
         if ((tid & 31) == 0 && col < topk) masks[col >> 5] = mask;
     }
     asc_syncthreads();
-    int total = 0;
-    for (int base = 0; base < tiles; base += kThreads) {
-        const int tile = base + tid;
-        const int count = tile < tiles ? __popc(masks[tile]) : 0;
-        const int preceding = prefix(count, sums, tid);
-        const int tile_total = sums[kTotal];
-        if (tile < tiles) offsets[tile] = total + preceding - count;
-        asc_syncthreads();
-        total += tile_total;
+    int total;
+    if (tiles <= 32) {
+        total = scan_tiles_small(tid < tiles ? __popc(masks[tid]) : 0, offsets, sums, tid, tiles);
+    } else {
+        total = 0;
+        for (int base = 0; base < tiles; base += kThreads) {
+            const int tile = base + tid;
+            const int count = tile < tiles ? __popc(masks[tile]) : 0;
+            const int preceding = prefix(count, sums, tid);
+            const int tile_total = sums[kTotal];
+            if (tile < tiles) offsets[tile] = total + preceding - count;
+            asc_syncthreads();
+            total += tile_total;
+        }
     }
     for (int col = tid; col < topk; col += kThreads) {
         const int value = values[col];
@@ -386,15 +408,20 @@ __simt_vf__ __launch_bounds__(kThreads) inline void resolve_vf(
     }
     asc_syncthreads();
     int tiles = (hot + 31) / 32;
-    int hit_count = 0;
-    for (int base = 0; base < tiles; base += kThreads) {
-        int tile = base + tid;
-        int count = tile < tiles ? offsets[tile] : 0;
-        int preceding = prefix(count, sums, tid);
-        int tile_total = sums[kTotal];
-        if (tile < tiles) offsets[tile] = hit_count + preceding - count;
-        asc_syncthreads();
-        hit_count += tile_total;
+    int hit_count;
+    if (tiles <= 32) {
+        hit_count = scan_tiles_small(tid < tiles ? offsets[tid] : 0, offsets, sums, tid, tiles);
+    } else {
+        hit_count = 0;
+        for (int base = 0; base < tiles; base += kThreads) {
+            int tile = base + tid;
+            int count = tile < tiles ? offsets[tile] : 0;
+            int preceding = prefix(count, sums, tid);
+            int tile_total = sums[kTotal];
+            if (tile < tiles) offsets[tile] = hit_count + preceding - count;
+            asc_syncthreads();
+            hit_count += tile_total;
+        }
     }
     for (int p = tid; p < hot; p += kThreads) {
         int slot = int(lru[int64_t(state) * hot + p]);
@@ -441,9 +468,13 @@ __simt_vf__ __launch_bounds__(kThreads) inline void resolve_vf(
         }
         asc_syncthreads();
         int tiles = (positions + 31) / 32;
-        int preceding = prefix(tid < tiles ? offsets[tid] : 0, sums, tid);
-        if (tid < tiles) offsets[tid] = preceding - __popc(masks[tid]);
-        asc_syncthreads();
+        if (tiles <= 32) {
+            scan_tiles_small(tid < tiles ? offsets[tid] : 0, offsets, sums, tid, tiles);
+        } else {
+            int preceding = prefix(tid < tiles ? offsets[tid] : 0, sums, tid);
+            if (tid < tiles) offsets[tid] = preceding - __popc(masks[tid]);
+            asc_syncthreads();
+        }
         for (int position = tid; position < positions; position += kThreads) {
             uint32_t mask = masks[position >> 5];
             uint32_t bit = uint32_t(1) << (position & 31);
