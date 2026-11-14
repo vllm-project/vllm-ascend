@@ -152,14 +152,14 @@ class TestShouldReshapeWoATo3d(unittest.TestCase):
         profile.supports.return_value = mx_quant_fusion
         return profile
 
-    def _reshape_decision(self, prefix, dtype, mx_quant_fusion):
+    def _reshape_decision(self, prefix, dtype, mx_quant_fusion, n_local_groups=2):
         with patch(
             "vllm_ascend.ops.linear.get_current_hardware_profile",
             return_value=self._profile_supporting(mx_quant_fusion),
         ):
             from vllm_ascend.ops.linear import _should_reshape_wo_a_to_3d
 
-            return _should_reshape_wo_a_to_3d(prefix, dtype)
+            return _should_reshape_wo_a_to_3d(prefix, dtype, n_local_groups)
 
     def test_bf16_wo_a_reshapes_on_a5(self):
         """Regression: ModelSlim keeps unquantized bf16 wo_a while the model
@@ -169,6 +169,30 @@ class TestShouldReshapeWoATo3d(unittest.TestCase):
 
     def test_bf16_wo_a_reshapes_without_mx_quant_fusion(self):
         self.assertTrue(self._reshape_decision("model.layers.0.self_attn.wo_a", torch.bfloat16, mx_quant_fusion=False))
+
+    def test_bf16_wo_a_single_group_keeps_2d(self):
+        """Single local group (TP >= o_groups): the o_proj path dispatches to
+        the plain 2D matmul on an NZ weight, so the 3D reshape must not run
+        and the NZ conversion must be allowed."""
+        self.assertFalse(
+            self._reshape_decision(
+                "model.layers.0.self_attn.wo_a", torch.bfloat16, mx_quant_fusion=True, n_local_groups=1
+            )
+        )
+        self.assertFalse(
+            self._reshape_decision(
+                "model.layers.0.self_attn.wo_a", torch.bfloat16, mx_quant_fusion=False, n_local_groups=1
+            )
+        )
+
+    def test_quantized_wo_a_single_group_still_reshaped(self):
+        """fp8/int8 wo_a layout stays owned by the quantization path even with
+        a single local group."""
+        self.assertTrue(
+            self._reshape_decision(
+                "model.layers.0.self_attn.wo_a", torch.float8_e4m3fn, mx_quant_fusion=False, n_local_groups=1
+            )
+        )
 
     def test_quantized_wo_a_not_reshaped_by_weight_loader(self):
         """fp8 wo_a is left to the quantization path (process_weights_after_loading)."""

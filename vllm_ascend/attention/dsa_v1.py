@@ -2220,6 +2220,14 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 perm_x2=(0, 1, 2),
                 perm_y=(1, 0, 2),
             )
+        if self.n_local_groups == 1 and self.wo_a.weight.ndim == 2:
+            # Single local group (TP >= o_groups): the grouped transpose matmul
+            # degenerates to a plain linear. The 2D matmul on the NZ-format
+            # weight computes the same math (x[T, 1, K] @ W[K, N]) several
+            # times faster at decode batch sizes, where M << N makes
+            # npu_transpose_batchmatmul's kernel selection the bottleneck.
+            num_tokens = o_proj_input.shape[0]
+            return torch.ops.vllm.unquantized_gemm(o_proj_input.view(num_tokens, -1), self.wo_a.weight).unsqueeze(1)
         return torch_npu.npu_transpose_batchmatmul(
             o_proj_input,
             self.wo_a.weight,

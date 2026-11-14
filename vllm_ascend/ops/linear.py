@@ -79,7 +79,7 @@ def _should_keep_nd_for_compatibility_weight(weight: torch.Tensor) -> bool:
     )
 
 
-def _should_reshape_wo_a_to_3d(prefix: str, dtype: torch.dtype) -> bool:
+def _should_reshape_wo_a_to_3d(prefix: str, dtype: torch.dtype, n_local_groups: int) -> bool:
     """Whether a DSV4 wo_a weight must be reshaped to
     [n_local_groups, hidden_size, o_lora_rank] for npu_transpose_batchmatmul.
 
@@ -89,12 +89,21 @@ def _should_reshape_wo_a_to_3d(prefix: str, dtype: torch.dtype) -> bool:
     config, and no quant method's process_weights_after_loading will run for
     those layers. Quantized (fp8/int8) wo_a is unaffected and still handled by
     the quantization path.
+
+    With a single local group (n_local_groups == 1) the grouped o_proj
+    degenerates to a plain linear, so bf16 wo_a keeps its 2D layout and picks
+    up the NZ conversion from AscendUnquantizedLinearMethod instead — the 2D
+    matmul is faster than npu_transpose_batchmatmul at decode batch sizes.
     """
+    if "wo_a" not in prefix:
+        return False
+    if n_local_groups == 1 and dtype == torch.bfloat16:
+        return False
     supports_dynamic_mx_quant_fusion = get_current_hardware_profile().supports(
         HardwareCapability.DYNAMIC_MX_QUANT_FUSION
     )
-    reshape_bf16_wo_a = "wo_a" in prefix and supports_dynamic_mx_quant_fusion and dtype == torch.bfloat16
-    return "wo_a" in prefix and (not supports_dynamic_mx_quant_fusion or reshape_bf16_wo_a)
+    reshape_bf16_wo_a = supports_dynamic_mx_quant_fusion and dtype == torch.bfloat16
+    return not supports_dynamic_mx_quant_fusion or reshape_bf16_wo_a
 
 
 class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
@@ -126,7 +135,10 @@ class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
         # DSV4 wo_a is consumed by npu_transpose_batchmatmul in the 3D layout
         # [n_local_groups, hidden_size, o_lora_rank]. Reshape it here so it
         # applies to load-format=dummy too, where weight_loader never runs.
-        if _should_reshape_wo_a_to_3d(layer.prefix, layer.weight.data.dtype) and layer.weight.data.ndim == 2:
+        if (
+            _should_reshape_wo_a_to_3d(layer.prefix, layer.weight.data.dtype, getattr(layer, "n_local_groups", 0))
+            and layer.weight.data.ndim == 2
+        ):
             layer.weight.data = (
                 layer.weight.data.view(layer.n_local_groups, layer.o_lora_rank, -1).transpose(2, 1).contiguous()
             )
@@ -493,7 +505,7 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
         return super().forward(input_)
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        if _should_reshape_wo_a_to_3d(self.prefix, loaded_weight.dtype):
+        if _should_reshape_wo_a_to_3d(self.prefix, loaded_weight.dtype, getattr(self, "n_local_groups", 0)):
             if self.weight.ndim == 2:
                 # Keep the raw 2D layout here. The 2D -> 3D reshape happens in
                 # process_weights_after_loading so it also runs for
