@@ -2,6 +2,7 @@ e2e-upstream_pr:
   - name: tests/v1/worker/test_mamba_utils.py
     estimated_time: 20
 e2e-upstream_singlecard:
+e2e-upstream_singlecard:
   - name: tests/config/test_watchdog_config.py
     estimated_time: 20
   - name: tests/distributed/test_cpu_all_reduce.py
@@ -46,9 +47,15 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/models/kimi_k3/test_amd_kda_adaptive_verification.py
     estimated_time: 20
+  - name: tests/models/multimodal/generation/test_deepseek_vl2.py
+    estimated_time: 20
+  - name: tests/models/multimodal/generation/test_nemotron_parse_35.py
+    estimated_time: 20
   - name: tests/models/multimodal/generation/test_nemotron_parse_35_mtp.py
     estimated_time: 20
   - name: tests/models/multimodal/pooling/test_colultravbert.py
+    estimated_time: 20
+  - name: tests/models/multimodal/pooling/test_d3.py
     estimated_time: 20
   - name: tests/models/multimodal/processing/test_alpamayo2_super.py
     estimated_time: 20
