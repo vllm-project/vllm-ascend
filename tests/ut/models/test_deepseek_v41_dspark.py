@@ -329,6 +329,7 @@ def test_context_wkv_weights_load_into_the_matching_merged_shard(monkeypatch):
 
 
 def test_context_kv_uses_one_stacked_wkv_projection(monkeypatch):
+    monkeypatch.setattr(deepseek_v41_dspark_module.ascend_envs, "VLLM_ASCEND_DSPARK_CONTEXT_KV_FUSION", False)
     projection_calls = []
     rope_calls = []
     rope = object()
@@ -388,3 +389,39 @@ def test_context_kv_uses_one_stacked_wkv_projection(monkeypatch):
     assert [call[3] for call in projected] == [rope, rope]
     assert stored[0][1] is slot_mappings[0]
     assert stored[1][1] is slot_mappings[2]
+
+
+def test_context_kv_fuses_selected_layers_without_projecting_intermediates(monkeypatch):
+    monkeypatch.setattr(deepseek_v41_dspark_module.ascend_envs, "VLLM_ASCEND_DSPARK_CONTEXT_KV_FUSION", True)
+    monkeypatch.setattr(deepseek_v41_dspark_module, "get_cos_and_sin_dsa", lambda *a, **kw: "rope")
+    monkeypatch.setattr(deepseek_v41_dspark_module, "can_fuse_dspark_context_kv", lambda *a: True)
+    fused = MagicMock()
+    monkeypatch.setattr(deepseek_v41_dspark_module, "fused_dspark_context_kv", fused)
+    layers = {
+        str(i): SimpleNamespace(self_attn=SimpleNamespace(rotary_emb=SimpleNamespace(layername=str(i))))
+        for i in range(3)
+    }
+    raw = torch.arange(24, dtype=torch.bfloat16).reshape(2, 12)
+    model = SimpleNamespace(
+        context_wkv_proj=lambda x: raw,
+        num_dspark_layers=3,
+        config=SimpleNamespace(head_dim=4),
+        layers=layers,
+        _project_shared_kv=MagicMock(),
+        _store_standard_swa_kv=MagicMock(),
+    )
+    slots = [torch.tensor([0, 1]), None, torch.tensor([4, 5])]
+    DeepseekV41DSparkModel.precompute_and_store_context_kv(model, torch.ones(2, 4), torch.arange(2), slots)
+    assert fused.call_count == 1
+    assert fused.call_args.args[-1] == [0, 2]
+    assert fused.call_args.args[0].stride() == (12, 4, 1)
+    model._project_shared_kv.assert_not_called()
+    model._store_standard_swa_kv.assert_not_called()
+
+
+def test_context_kv_fusion_rejects_cpu_and_single_layer():
+    from vllm_ascend.ops.triton.dspark_context_kv import can_fuse_dspark_context_kv
+
+    cpu_kv = torch.empty(2, 3, 512, dtype=torch.bfloat16)
+    assert not can_fuse_dspark_context_kv(cpu_kv, [], [], None)
+    assert not can_fuse_dspark_context_kv(cpu_kv, [object()], [torch.tensor([0, 1])], None)

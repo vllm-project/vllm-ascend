@@ -34,6 +34,7 @@ from vllm.model_executor.models.qwen3_dspark import DSparkConfidenceHead, DSpark
 from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix, process_eagle_weight
 from vllm.platforms import current_platform
 
+from vllm_ascend import envs as ascend_envs
 from vllm_ascend.attention.context_parallel.dsa_v41_cp import get_v41_cp_classes
 from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
 from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend, scatter_cache_sk
@@ -53,6 +54,7 @@ from vllm_ascend.models.deepseek_v41.model import (
     DeepseekV41SWAAttention,
 )
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
+from vllm_ascend.ops.triton.dspark_context_kv import can_fuse_dspark_context_kv, fused_dspark_context_kv
 from vllm_ascend.utils import normalize_deepseek_v41_config
 
 from .model import DeepseekV41MixtureOfExperts, DeepseekV41MoE
@@ -345,12 +347,35 @@ class DeepseekV41DSparkModel(torch.nn.Module):
 
         rope_layers = [layer.self_attn.rotary_emb.layername for layer in self.layers.values()]
         rope = get_cos_and_sin_dsa(context_positions, layer_names=rope_layers)
-        for layer_idx, (layer, kv) in enumerate(zip(self.layers.values(), all_kv.unbind(1), strict=True)):
+        layers = list(self.layers.values())
+        fused_indices = []
+        if ascend_envs.VLLM_ASCEND_DSPARK_CONTEXT_KV_FUSION:
+            fused_indices = [
+                idx for idx, mapping in enumerate(context_slot_mapping[: len(layers)]) if mapping is not None
+            ]
+            if not can_fuse_dspark_context_kv(
+                all_kv,
+                [layers[idx] for idx in fused_indices],
+                [context_slot_mapping[idx] for idx in fused_indices],
+                rope,
+            ):
+                fused_indices = []
+        if fused_indices:
+            fused_dspark_context_kv(
+                all_kv,
+                [layers[idx] for idx in fused_indices],
+                [context_slot_mapping[idx] for idx in fused_indices],
+                rope,
+                fused_indices,
+            )
+        for layer_idx, layer in enumerate(layers):
+            if layer_idx in fused_indices:
+                continue
             layer_context_slot_mapping = context_slot_mapping[layer_idx]
             if layer_context_slot_mapping is None:
                 continue
             attn = layer.self_attn
-            shared_kv = self._project_shared_kv(kv, context_positions, attn, rope=rope)
+            shared_kv = self._project_shared_kv(all_kv[:, layer_idx], context_positions, attn, rope=rope)
             self._store_standard_swa_kv(shared_kv, layer_context_slot_mapping, attn)
 
     def hc_head(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
