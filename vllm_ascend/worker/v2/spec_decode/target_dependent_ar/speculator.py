@@ -722,7 +722,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
     ) -> list[dict[str, Any]]:
         """Build all draft steps' FIA parameters for a single graph update."""
         if self.use_dcp:
-            return self.build_fia_params_dcp(num_reqs_padded, draft_attn_metadata, is_draft_model_prefill, num_tokens=num_tokens)
+            return self.build_fia_params_dcp(num_reqs_padded, draft_attn_metadata, is_draft_model_prefill)
         block_table = next(iter(draft_attn_metadata.values())).block_tables
         if is_draft_model_prefill:
             return [
@@ -754,46 +754,24 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
                 )
         return fia_params
 
-    def get_dcp_param_provider_factory(self, num_tokens: int | None):
-        if self.attn_architecture == "MLA":
-            if num_tokens is None:
-                raise ValueError("num_tokens is required for MLA with DCP")
-            from vllm_ascend.attention.context_parallel.mla_cp import MLADCPParamProvider
-
-            def create_provider(layer_name, kind):
-                return MLADCPParamProvider(layer_name, kind, num_tokens)
-        else:
-            from vllm_ascend.attention.context_parallel.attention_cp import DCPFIAParamProvider
-
-            assert self.dcp_manager is not None
-
-            def create_provider(layer_name, kind):
-                return DCPFIAParamProvider(layer_name, self.dcp_manager.dcp_world_rank, kind)
-
-        return create_provider
-
     def build_fia_params_dcp(
         self,
         num_reqs_padded: int,
         draft_attn_metadata: dict[str, Any],
         is_draft_model_prefill: bool,
-        *,
-        num_tokens: int | None = None,
     ) -> list[dict[str, Any]]:
         """Build DCP draft attention parameters for prefill or decode."""
         assert self.dcp_manager is not None
         if is_draft_model_prefill:
-            provider_factory = self.get_dcp_param_provider_factory(num_tokens)
+            if self.attn_architecture == "MLA":
+                raise ValueError("MLA DCP prefill must use build_param_source")
             return [
                 params
                 for layer_name, metadata in draft_attn_metadata.items()
-                if self.attn_architecture != "MLA"
-                or (metadata.decode is not None and metadata.external_flashmla is None)
                 for params in build_dcp_fia_params(
                     layer_name,
                     metadata,
                     self.dcp_manager.dcp_world_rank,
-                    provider_factory=provider_factory,
                     is_draft_model=True,
                     is_draft_model_prefill=True,
                 )

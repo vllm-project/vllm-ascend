@@ -15,9 +15,8 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -384,7 +383,6 @@ def build_dcp_fia_params(
     metadata,
     dcp_rank: int,
     *,
-    provider_factory: Callable[[str, CPKVScope], Any] | None = None,
     is_draft_model: bool = False,
     is_draft_model_prefill: bool = False,
     use_spec_decode: bool = False,
@@ -399,11 +397,7 @@ def build_dcp_fia_params(
     kinds = (CPKVScope.HISTORY, CPKVScope.CURRENT) if use_split else (CPKVScope.FULL,)
     params = []
     for kind in kinds:
-        provider = (
-            provider_factory(layer_name, kind)
-            if provider_factory is not None
-            else DCPFIAParamProvider(layer_name, dcp_rank, kind)
-        )
+        provider = DCPFIAParamProvider(layer_name, dcp_rank, kind)
         params.append({"layer_name": provider.layer_name, **provider.resolve({layer_name: metadata})})
     return params
 
