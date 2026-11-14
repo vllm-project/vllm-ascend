@@ -26,6 +26,7 @@ import torch_npu
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device import utils as device_utils
+from vllm_ascend.device.fla import is_fla_gdn_chunk32_supported
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.paged_mla_cache_read import try_load_strided_mla_cache
 from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
@@ -1907,6 +1908,8 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         fused_fwd,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the A5 arch35 FLA NPU GDN prefill kernel."""
+        if not is_fla_gdn_chunk32_supported():
+            raise ValueError("A5 chunk32 prefill requires supported hardware and an approved FLA build")
         # Conv1d head-first output is exposed as BSND views by GDN. Recover
         # its contiguous BNSD storage instead of copying all three tensors.
         # A token slice in a mixed batch may break contiguity; retain BSND

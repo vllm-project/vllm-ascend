@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from vllm_ascend.device.fla import _get_fla_a5_version, is_fla_gdn_chunk32_supported
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention, _get_fla_gdn_prefill_op
@@ -14,8 +15,10 @@ from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention, _get_fla_gdn_prefi
 
 @pytest.fixture(autouse=True)
 def clear_prefill_probe():
+    _get_fla_a5_version.cache_clear()
     _get_fla_gdn_prefill_op.cache_clear()
     yield
+    _get_fla_a5_version.cache_clear()
     _get_fla_gdn_prefill_op.cache_clear()
 
 
@@ -42,6 +45,7 @@ def test_importable_fla_requires_chunk32_contract_only_on_a5(version_result, exp
     with (
         patch.dict(sys.modules, {module.__name__: module}),
         patch("vllm_ascend.ops.gdn.get_current_hardware_profile", return_value=get_hardware_profile(device)),
+        patch("vllm_ascend.device.fla.get_current_hardware_profile", return_value=get_hardware_profile(device)),
         patch("importlib.metadata.version", **version_kwargs) as version,
     ):
         op = _get_fla_gdn_prefill_op()
@@ -59,6 +63,21 @@ def test_importable_fla_requires_chunk32_contract_only_on_a5(version_result, exp
 def test_missing_fla_entry_point_uses_fallback():
     with patch.dict(sys.modules, {"fla_npu.ops.ascendc": ModuleType("fla_npu.ops.ascendc")}):
         assert _get_fla_gdn_prefill_op() is None
+
+
+@pytest.mark.parametrize("device", list(AscendDeviceType))
+@pytest.mark.parametrize("approved,installed", [(False, "test-only"), (True, "test-only"), (True, "other-build")])
+def test_chunk32_requires_device_and_allowlist(device, approved, installed):
+    with (
+        patch("vllm_ascend.device.fla.get_current_hardware_profile", return_value=get_hardware_profile(device)),
+        patch(
+            "vllm_ascend.device.fla._FLA_GDN_CHUNK32_VERSIONS", frozenset({"test-only"}) if approved else frozenset()
+        ),
+        patch("importlib.metadata.version", return_value=installed),
+    ):
+        assert is_fla_gdn_chunk32_supported() is (
+            device == AscendDeviceType.A5 and approved and installed == "test-only"
+        )
 
 
 @pytest.mark.parametrize("fused_available", [False, True])

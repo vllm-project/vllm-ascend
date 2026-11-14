@@ -16,7 +16,6 @@
 #
 
 from functools import lru_cache, wraps
-from importlib import metadata
 
 import torch
 import torch_npu
@@ -43,6 +42,7 @@ from vllm_ascend.attention.utils import (
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.fla import is_fla_gdn_chunk32_supported
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNFusedAttentionBackend
@@ -54,10 +54,6 @@ from vllm_ascend.ops.triton.mamba.state_index import gather_ssm_states, scatter_
 from vllm_ascend.utils import vllm_version_is
 
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
-# No supported FLA wheel provides the required chunk32 contract yet, including
-# 26.9.1+dev153268a. Keep all A5 installations on the compatible fallback until
-# a supporting wheel is available and validated. Git-hash suffixes are not ordered.
-_FLA_GDN_CHUNK32_VERSIONS: frozenset[str] = frozenset()
 
 
 @lru_cache(maxsize=1)
@@ -69,13 +65,11 @@ def _get_fla_gdn_prefill_op():
         from fla_npu.ops.ascendc import chunk_gated_delta_rule_fwd  # type: ignore[import-not-found]
     except ImportError:
         return None
-    if get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL_CHUNK32):
-        try:
-            fla_version = metadata.version("flash-linear-attention-npu-a5")
-        except (metadata.PackageNotFoundError, OSError):
-            return None
-        if fla_version not in _FLA_GDN_CHUNK32_VERSIONS:
-            return None
+    if (
+        get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL_CHUNK32)
+        and not is_fla_gdn_chunk32_supported()
+    ):
+        return None
     # A2/A3 retain the existing chunk64 FLA contract. Compatible A5 wheels use
     # the public queued entry point; importability alone cannot establish ABI.
     return chunk_gated_delta_rule_fwd
@@ -832,7 +826,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 # beta = sigmoid(b); dt_bias belongs only to the decay gate
                 # g = -exp(A_log) * softplus(a + dt_bias), computed above.
                 beta_fla = beta_non_spec
-                if get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL_CHUNK32):
+                if is_fla_gdn_chunk32_supported():
                     beta_fla = b.unsqueeze(0)
                     if spec_sequence_masks is not None:
                         beta_fla = beta_fla.index_select(1, non_spec_token_indx)

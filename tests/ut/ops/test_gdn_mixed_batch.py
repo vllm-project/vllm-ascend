@@ -11,6 +11,7 @@ from torch import nn
 from vllm.forward_context import ForwardContext, override_forward_context
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
+from vllm_ascend.device.fla import _get_fla_a5_version
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.ops.gdn import (
@@ -29,7 +30,9 @@ from vllm_ascend.ops.gdn_attn_builder import (
 
 
 @pytest.mark.parametrize("batch_kind", ["prefill", "mixed", "spec"])
-@pytest.mark.parametrize("backend", ["a5", "a2", "a3", "legacy_fla", "missing_fla", "other_device", "fp16"])
+@pytest.mark.parametrize(
+    "backend", ["a5", "a5_approved", "a2", "a3", "legacy_fla", "missing_fla", "other_device", "fp16"]
+)
 def test_chunk32_raw_beta_routing(batch_kind, backend):
     """Unapproved A5 FLA builds fall back with processed beta, including mixed/spec tokens."""
     layer = _make_layer()
@@ -95,6 +98,12 @@ def test_chunk32_raw_beta_routing(batch_kind, backend):
         "other_device": AscendDeviceType._310P,
     }.get(backend, AscendDeviceType.A5)
     with ExitStack() as stack:
+        _get_fla_a5_version.cache_clear()
+        stack.callback(_get_fla_a5_version.cache_clear)
+        stack.enter_context(
+            patch("vllm_ascend.device.fla.get_current_hardware_profile", return_value=get_hardware_profile(device_type))
+        )
+        stack.enter_context(patch("vllm_ascend.device.fla._FLA_GDN_CHUNK32_VERSIONS", frozenset({"test-only-chunk32"})))
         _get_fla_gdn_prefill_op.cache_clear()
         stack.callback(_get_fla_gdn_prefill_op.cache_clear)
         fla_module = ModuleType("fla_npu.ops.ascendc")
@@ -104,7 +113,13 @@ def test_chunk32_raw_beta_routing(batch_kind, backend):
         stack.enter_context(
             patch(
                 "importlib.metadata.version",
-                return_value="26.9.1+dev5cc6990" if backend == "legacy_fla" else "26.9.1+dev153268a",
+                return_value=(
+                    "test-only-chunk32"
+                    if backend == "a5_approved"
+                    else "26.9.1+dev5cc6990"
+                    if backend == "legacy_fla"
+                    else "26.9.1+dev153268a"
+                ),
             )
         )
         stack.enter_context(override_forward_context(context))
@@ -130,13 +145,13 @@ def test_chunk32_raw_beta_routing(batch_kind, backend):
             mocks[name] = stack.enter_context(patch(f"vllm_ascend.ops.gdn.{name}", **kwargs))
         AscendGatedDeltaNetAttention._forward_core(layer, packed, b, a, output)
 
-    use_fla = backend in ("a2", "a3")
+    use_fla = backend in ("a5_approved", "a2", "a3")
     selected = "DeviceOperator.fla_gdn_prefill" if use_fla else "chunk_gated_delta_rule"
     unused = "chunk_gated_delta_rule" if use_fla else "DeviceOperator.fla_gdn_prefill"
     mocks[selected].assert_called_once()
     mocks[unused].assert_not_called()
     call = mocks[selected].call_args.kwargs
-    beta = expected_beta
+    beta = b[:total] if backend == "a5_approved" else expected_beta
     torch.testing.assert_close(call["beta"], beta[prefill_tokens].unsqueeze(0))
     torch.testing.assert_close(call["g"], expected_g[prefill_tokens].unsqueeze(0))
     if decode_tokens is None:

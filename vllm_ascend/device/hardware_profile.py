@@ -94,7 +94,8 @@ class HardwareCapability(Enum):
     DYNAMIC_MX_QUANT_SCALE_ALG_ONE = auto()
     # Allow GDN prefill to use the external FLA NPU fused operator.
     FLA_GDN_PREFILL = auto()
-    # A5 chunk32 ABI: prebuilt host descriptors and raw beta with fused sigmoid.
+    # Hardware eligibility for A5 chunk32, not installed FLA availability.
+    # Runtime users must also check device.fla.is_fla_gdn_chunk32_supported().
     FLA_GDN_PREFILL_CHUNK32 = auto()
     # Enable the FP8/C8 attention KV-cache ABI and matching attention preprocess paths.
     # This is not a general statement that every FP8 operation is supported.

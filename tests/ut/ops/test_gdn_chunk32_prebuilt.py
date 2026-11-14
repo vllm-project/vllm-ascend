@@ -22,6 +22,7 @@ from unittest.mock import Mock, patch
 import torch
 import vllm  # noqa: F401 - Initialize vLLM before Ascend adaptors.
 
+from vllm_ascend.device.fla import _get_fla_a5_version
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.ops.gdn_attn_builder import _build_non_spec_chunked_prefill_metadata
@@ -34,8 +35,18 @@ class NoIterationTuple(tuple):
 
 class TestChunk32Prebuilt(TestCase):
     def setUp(self):
+        _get_fla_a5_version.cache_clear()
+        self.addCleanup(_get_fla_a5_version.cache_clear)
+        # Exercise the dormant implementation with a test-only approved build.
+        for target, kwargs in (
+            ("vllm_ascend.device.fla._FLA_GDN_CHUNK32_VERSIONS", {"new": frozenset({"test-only-chunk32"})}),
+            ("importlib.metadata.version", {"return_value": "test-only-chunk32"}),
+        ):
+            dependency_patch = patch(target, **kwargs)
+            dependency_patch.start()
+            self.addCleanup(dependency_patch.stop)
         profile_patch = patch(
-            "vllm_ascend.ops.gdn_attn_builder.get_current_hardware_profile",
+            "vllm_ascend.device.fla.get_current_hardware_profile",
             return_value=get_hardware_profile(AscendDeviceType.A5),
         )
         profile_patch.start()
@@ -54,7 +65,7 @@ class TestChunk32Prebuilt(TestCase):
             with (
                 self.subTest(device_type=device_type),
                 patch(
-                    "vllm_ascend.ops.gdn_attn_builder.get_current_hardware_profile",
+                    "vllm_ascend.device.fla.get_current_hardware_profile",
                     return_value=get_hardware_profile(device_type),
                 ),
                 patch("vllm_ascend.ops.gdn_attn_builder.prepare_chunk_indices", side_effect=reject_chunk32),
@@ -70,6 +81,37 @@ class TestChunk32Prebuilt(TestCase):
             torch.device("cpu"),
             build_device_metadata=False,
         )
+
+    def test_unapproved_a5_does_not_build_chunk32(self):
+        from vllm_ascend.ops import gdn_attn_builder
+
+        original = gdn_attn_builder.prepare_chunk_indices
+
+        def reject_chunk32(cu, chunk_size):
+            self.assertNotEqual(chunk_size, 32)
+            return original(cu, chunk_size)
+
+        with (
+            patch("importlib.metadata.version", return_value="26.9.1+dev153268a"),
+            patch("vllm_ascend.ops.gdn_attn_builder.prepare_chunk_indices", side_effect=reject_chunk32),
+        ):
+            metadata = self.build([0, 64, 128])
+        self.assertIsNone(metadata.chunk_indices_chunk32_host)
+        self.assertEqual(metadata.chunk_indices_chunk64_host, (0, 0, 1, 0))
+
+    def test_unapproved_adaptor_rejects_before_kernel(self):
+        from vllm_ascend.device.device_op import A5DeviceAdaptor
+
+        metadata = self.build([0, 32])
+        fused = Mock()
+        qkv = torch.zeros(1, 32, 1, 4)
+        gate = torch.zeros(1, 32, 1)
+        with (
+            patch("vllm_ascend.device.fla._FLA_GDN_CHUNK32_VERSIONS", frozenset()),
+            self.assertRaisesRegex(ValueError, "approved FLA build"),
+        ):
+            A5DeviceAdaptor.fla_gdn_prefill(qkv, qkv, qkv, gate, gate, torch.zeros(1, 1, 4, 4), 0.5, metadata, fused)
+        fused.assert_not_called()
 
     def test_two_sequences(self):
         m = self.build([0, 64, 128])
