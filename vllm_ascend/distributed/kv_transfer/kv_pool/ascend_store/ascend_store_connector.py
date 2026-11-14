@@ -34,6 +34,7 @@ from vllm.v1.request import Request
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_backend_class,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import require_hisparse_host_tcp
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     has_shared_kv_sources,
@@ -152,11 +153,13 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             getattr(group, "role", None) == "hisparse_source"
             for group in getattr(kv_cache_config, "kv_cache_groups", ())
         )
-        if has_hisparse and (self.use_layerwise or self.backend_name != "memcache" or self.kv_role != "kv_both"):
-            raise ValueError("HiSparse with AscendStore requires bulk MemCache transfers with kv_role=kv_both.")
-        if has_hisparse and not extra_config.get("load_async", False):
-            # HiSparse publishes imported Host Source pages on receive completion.
-            raise ValueError("HiSparse with AscendStore requires load_async=true.")
+        if has_hisparse:
+            if self.use_layerwise or self.backend_name != "memcache" or self.kv_role != "kv_both":
+                raise ValueError("HiSparse with AscendStore requires bulk MemCache transfers with kv_role=kv_both.")
+            if not extra_config.get("load_async", False):
+                # HiSparse publishes imported Host Source pages on receive completion.
+                raise ValueError("HiSparse with AscendStore requires load_async=true.")
+            require_hisparse_host_tcp()
         self.backend_class = get_backend_class(self.backend_name) if self.use_layerwise else None
         self.layerwise_data_plane = self.backend_class.layerwise_data_plane if self.backend_class is not None else None
         self.use_block_key_layerwise = self.use_layerwise and self.layerwise_data_plane == "block_key"

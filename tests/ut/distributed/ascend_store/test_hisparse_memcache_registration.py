@@ -152,6 +152,7 @@ def test_hisparse_groups_register_with_independent_host_blocks(indexer_c8: bool,
     assert all(worker.group_block_len[index] == [] for index in range(2, len(groups)))
     worker.m_store.register_buffer.assert_called_once()
     ptrs, lengths = worker.m_store.register_buffer.call_args.args
+    assert worker.m_store.register_buffer.call_args.kwargs == {"check_result": True}
     assert lengths[ptrs.index(source.data_ptr())] == num_host_blocks * 32768
     assert worker._hisparse_host_resident_groups == frozenset({0})
     if indexer_c8:
@@ -266,3 +267,68 @@ def test_hisparse_requires_async_store_load(extra_config):
     cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(role="hisparse_source", layer_names=[])])
     with pytest.raises(ValueError, match="requires load_async=true"):
         AscendStoreConnector(config, KVConnectorRole.SCHEDULER, cache)
+
+
+@pytest.mark.parametrize(
+    ("has_hisparse", "protocol", "error"),
+    [
+        (True, "host_tcp", None),
+        (True, "host_shm", "requires .*host_tcp.*host_shm"),
+        (True, "device_sdma", "requires .*host_tcp.*device_sdma"),
+        (True, "device_urma", "requires .*host_tcp.*device_urma"),
+        (True, "", "requires .*host_tcp"),
+        (True, None, "MMC_LOCAL_CONFIG_PATH.*not set"),
+        (True, "host_tcp\nock.mmc.local_service.protocol=device_sdma", "duplicate.*protocol"),
+        (False, None, None),
+        (False, "device_sdma", None),
+    ],
+)
+def test_bulk_store_protocol_is_scoped_to_hisparse(monkeypatch, tmp_path, has_hisparse, protocol, error):
+    monkeypatch.delenv("MMC_LOCAL_CONFIG_PATH", raising=False)
+    if protocol is not None:
+        path = tmp_path / "mmc-local.conf"
+        value = f"  ock.mmc.local_service.protocol = {protocol}\n" if protocol else ""
+        path.write_text("# ock.mmc.local_service.protocol = host_shm\n\n" + value, encoding="utf-8")
+        monkeypatch.setenv("MMC_LOCAL_CONFIG_PATH", str(path))
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(),
+        kv_transfer_config=SimpleNamespace(
+            kv_role="kv_both",
+            kv_connector="AscendStoreConnector",
+            kv_connector_extra_config={"backend": "memcache", "load_async": True},
+        ),
+    )
+    cache = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(role="hisparse_source" if has_hisparse else None, layer_names=[])]
+    )
+    with patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.create_kv_pool_scheduler"
+    ) as scheduler:
+        if error:
+            with pytest.raises(ValueError, match=error):
+                AscendStoreConnector(config, KVConnectorRole.SCHEDULER, cache)
+            scheduler.assert_not_called()
+        else:
+            connector = AscendStoreConnector(config, KVConnectorRole.SCHEDULER, cache)
+            assert connector.connector_scheduler is scheduler.return_value
+
+
+def test_memcache_hisparse_registration_rolls_back_on_sdk_error():
+    backend = MemcacheBackend.__new__(MemcacheBackend)
+    backend.store = Mock()
+    backend._store_initialized = True
+    backend._pending_buffers = None
+    backend.store.register_buffer.side_effect = [0, -7, 0]
+    backend.store.unregister_buffer.return_value = 0
+
+    with pytest.raises(RuntimeError, match="buffer registration failed: size=20, result=-7"):
+        backend.register_buffer([100, 200, 300], [10, 20, 30], check_result=True)
+
+    assert backend.store.register_buffer.call_args_list == [call(100, 10), call(200, 20)]
+    backend.store.unregister_buffer.assert_called_once_with(100, 10)
+    assert backend._pending_buffers is None
+
+    # Preserve the existing behavior for regular AscendStore users.
+    backend.store.register_buffer.side_effect = [-7]
+    backend.register_buffer([200], [20])
+    backend.store.unregister_buffer.assert_called_once_with(100, 10)

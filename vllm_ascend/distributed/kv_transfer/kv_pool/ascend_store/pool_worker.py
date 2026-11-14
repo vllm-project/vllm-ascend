@@ -920,7 +920,10 @@ class BaseKVPoolWorker(ABC):
             )
 
         # Register buffers before starting the transfer threads.
-        self.m_store.register_buffer(ptrs, lengths)
+        if getattr(self, "_hisparse_host_resident_groups", ()):
+            self.m_store.register_buffer(ptrs, lengths, check_result=True)
+        else:
+            self.m_store.register_buffer(ptrs, lengths)
         self._start_kv_transfer_threads()
 
     def _record_kv_connector_operation(self, operation: str, duration_seconds: float, num_keys: int) -> None:
