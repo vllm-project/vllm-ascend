@@ -290,6 +290,7 @@ def make_state(model, monkeypatch):
     state.rope_state = None
     state.supports_mm_inputs = False
     state.prompt_embeds_state = None
+    state.decoder_replay_state = None
     state.model = model
     state.lookback_token_ids = torch.full((4, 2), -1, dtype=torch.int32)
     state._cg_mode = CUDAGraphMode.FULL
