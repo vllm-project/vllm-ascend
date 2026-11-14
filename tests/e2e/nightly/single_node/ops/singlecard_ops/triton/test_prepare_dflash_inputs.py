@@ -8,11 +8,11 @@ import numpy as np
 import pytest
 import torch
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.worker.gpu.spec_decode.dflash.speculator import prepare_dflash_inputs
 
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
-from vllm_ascend.worker.v2.spec_decode.dflash.speculator import prepare_dflash_inputs
 
 ACCURACY_CASES = [
     {
@@ -130,6 +130,22 @@ ACCURACY_CASES = [
         "parallel_drafting_token_id": 777,
     },
     {
+        # A 256-token manager block can back two 128-token attention blocks.
+        # Context and query slots cover the null block and the next valid block.
+        "name": "null_manager_block_spans_two_kernel_blocks",
+        "req_lens": [255],
+        "position_starts": [0],
+        "idx_mapping": [0],
+        "null_blocks": [(0, 0)],
+        "max_num_reqs": 2,
+        "max_num_tokens": 512,
+        "max_model_len": 512,
+        "block_size": 256,
+        "num_query_per_req": 5,
+        "num_speculative_steps": 4,
+        "parallel_drafting_token_id": 778,
+    },
+    {
         "name": "dcp_rank0_interleave1_null_block",
         "req_lens": [17, 9],
         "position_starts": [6, 30],
@@ -195,17 +211,16 @@ ACCURACY_CASES = [
         "parallel_drafting_token_id": 781,
     },
     {
-        # Physical DCP blocks are 384 tokens, but the attention table uses
-        # 128-token kernel pages. Position 2048 belongs to rank 5, not rank 0.
-        "name": "dcp_physical384_kernel128",
+        # Manager blocks are 384 tokens for both ownership and table lookup.
+        # Position 2048 belongs to rank 5, not rank 0.
+        "name": "dcp_manager384_rank5",
         "req_lens": [8],
         "position_starts": [2045],
         "idx_mapping": [0],
         "max_num_reqs": 2,
         "max_num_tokens": 32,
         "max_model_len": 8192,
-        "block_size": 128,
-        "kv_cache_block_size": 384,
+        "block_size": 384,
         "cp_rank": 5,
         "cp_size": 16,
         "cp_interleave": 384,
@@ -271,16 +286,16 @@ def _build_positions(req_lens, position_starts):
     return values
 
 
-def _local_slot(position, block_table_row, kv_cache_block_size, block_size, cp_rank, cp_size, cp_interleave):
+def _local_slot(position, block_table_row, block_size, cp_rank, cp_size, cp_interleave):
     if cp_size == 1:
         local_position = position
     else:
-        virtual_block_size = kv_cache_block_size * cp_size
+        virtual_block_size = block_size * cp_size
         virtual_block_idx, virtual_offset = divmod(position, virtual_block_size)
         if (virtual_offset // cp_interleave) % cp_size != cp_rank:
             return PAD_SLOT_ID
         local_offset = (virtual_offset // (cp_interleave * cp_size)) * cp_interleave + virtual_offset % cp_interleave
-        local_position = virtual_block_idx * kv_cache_block_size + local_offset
+        local_position = virtual_block_idx * block_size + local_offset
 
     block_idx = min(local_position // block_size, len(block_table_row) - 1)
     kernel_block = block_table_row[block_idx]
@@ -392,7 +407,6 @@ def _build_reference(data, case):
     num_query_per_req = case["num_query_per_req"]
     num_speculative_steps = case["num_speculative_steps"]
     block_size = case["block_size"]
-    kv_cache_block_size = case.get("kv_cache_block_size", block_size)
     cp_rank = case.get("cp_rank", 0)
     cp_size = case.get("cp_size", 1)
     cp_interleave = case.get("cp_interleave", 1)
@@ -443,7 +457,7 @@ def _build_reference(data, case):
             ctx_pos = positions[ctx_idx]
             ref.context_positions[ctx_idx] = ctx_pos
             ref.context_slot_mapping[ctx_idx] = _local_slot(
-                ctx_pos, block_table[req_idx], kv_cache_block_size, block_size, cp_rank, cp_size, cp_interleave
+                ctx_pos, block_table[req_idx], block_size, cp_rank, cp_size, cp_interleave
             )
 
         query_base = req_idx * num_query_per_req
@@ -458,7 +472,7 @@ def _build_reference(data, case):
             ref.input_ids[query_idx] = bonus_token if query_off == 0 else case["parallel_drafting_token_id"]
             ref.query_positions[query_idx] = min(query_pos, max_model_len - 1)
             ref.query_slot_mapping[query_idx] = _local_slot(
-                query_pos, block_table[req_idx], kv_cache_block_size, block_size, cp_rank, cp_size, cp_interleave
+                query_pos, block_table[req_idx], block_size, cp_rank, cp_size, cp_interleave
             )
 
         for sample_local in range(num_speculative_steps):
@@ -565,9 +579,7 @@ def _cleanup():
 
 def _run_case(case):
     data = _build_inputs(case, "npu")
-    prepare_dflash_inputs_triton(
-        *_impl_args(data, case), kv_cache_block_size=case.get("kv_cache_block_size", case["block_size"])
-    )
+    prepare_dflash_inputs_triton(*_impl_args(data, case))
     _validate_outputs(data, case, _build_reference(data, case))
     _cleanup()
 
@@ -606,9 +618,20 @@ def test_prepare_dflash_inputs_partition_boundaries(num_reqs, context_len):
     get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
     reason="Requires Ascend A2/A3/A5",
 )
-def test_prepare_dflash_inputs_wrapper_forwards_dcp():
-    case = next(case for case in ACCURACY_CASES if case["name"] == "dcp_physical384_kernel128")
+@pytest.mark.parametrize(
+    "case_name,sample_from_anchor",
+    [
+        ("dcp_manager384_rank5", False),
+        ("null_manager_block_spans_two_kernel_blocks", False),
+        ("null_manager_block_spans_two_kernel_blocks", True),
+    ],
+)
+def test_upstream_prepare_dflash_inputs_with_manager_blocks(case_name, sample_from_anchor):
+    case = next(case for case in ACCURACY_CASES if case["name"] == case_name).copy()
+    if sample_from_anchor:
+        case["sample_from_anchor"] = True
+        case["num_speculative_steps"] = case["num_query_per_req"]
     data = _build_inputs(case, "npu")
-    prepare_dflash_inputs(*_impl_args(data, case), kv_cache_block_size=case["kv_cache_block_size"])
+    prepare_dflash_inputs(*_impl_args(data, case))
     _validate_outputs(data, case, _build_reference(data, case))
     _cleanup()

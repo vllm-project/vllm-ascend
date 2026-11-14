@@ -637,8 +637,6 @@ def test_dflash_attention_uses_only_draft_layers_and_int32_slots(monkeypatch, ac
     cache = SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=[name]) for name in backends])
     monkeypatch.setattr(DFlashSpeculator, "set_attn", MagicMock())
     monkeypatch.setattr(dflash_module, "get_layers_from_vllm_config", lambda *args: layers)
-    # set_attn installs an upstream callback; restore it after this test.
-    monkeypatch.setattr(dflash_module.dflash_speculator, "prepare_dflash_inputs", object())
 
     speculator.set_attn(None, cache, None, None, None)
 
@@ -648,66 +646,3 @@ def test_dflash_attention_uses_only_draft_layers_and_int32_slots(monkeypatch, ac
     assert speculator._context_slot_mappings.shape == (2, 8)
     assert speculator._context_slot_mappings.dtype == torch.int32
     assert torch.count_nonzero(speculator._context_slot_mappings) == 0
-
-
-def test_dflash_input_preparation_keeps_physical_and_kernel_block_sizes_separate(monkeypatch):
-    kernel = MagicMock()
-    monkeypatch.setattr(dflash_module, "prepare_dflash_inputs_triton", kernel)
-    inputs = [object() for _ in range(28)]
-    inputs[17] = 16  # Kernel block size, distinct from physical KV blocks.
-    inputs[-1] = True  # sample_from_anchor
-
-    dflash_module.prepare_dflash_inputs_factory(128)(*inputs)
-
-    kernel.assert_called_once_with(*inputs, num_reqs_override=None, kv_cache_block_size=128)
-
-
-@pytest.mark.skipif(False, reason="main-only num_reqs_override")
-def test_dflash_input_preparation_forwards_num_reqs_override(monkeypatch):
-    """vLLM main (#58984) forwards the DP-synced request count positionally."""
-    kernel = MagicMock()
-    monkeypatch.setattr(dflash_module, "prepare_dflash_inputs_triton", kernel)
-    inputs = [object() for _ in range(28)]
-    inputs[-1] = True  # sample_from_anchor
-
-    dflash_module.prepare_dflash_inputs_factory(128)(*inputs, 5)
-
-    kernel.assert_called_once_with(*inputs, num_reqs_override=5, kv_cache_block_size=128)
-
-
-def test_dflash_input_preparation_restores_kernel_block_size_on_main(monkeypatch):
-    """vLLM main forwards the physical block size, but the Ascend block table is
-    kernel-block addressed, so the factory restores the kernel size per group."""
-    kernel = MagicMock()
-    monkeypatch.setattr(dflash_module, "prepare_dflash_inputs_triton", kernel)
-    block_table = torch.zeros(2, 4, dtype=torch.int32)
-    block_tables = SimpleNamespace(
-        kernel_block_sizes=[128],
-        input_block_tables=[block_table],
-    )
-    inputs = [object() for _ in range(28)]
-    inputs[16] = block_table
-    inputs[17] = 384  # Physical KV block size forwarded by the DFlash caller.
-    inputs[-1] = True  # sample_from_anchor
-    dflash_module.prepare_dflash_inputs_factory(384, block_tables)(*inputs)
-
-    restored = kernel.call_args.args[17]
-    assert restored == 128
-    assert kernel.call_args.kwargs["kv_cache_block_size"] == 384
-
-
-def test_dflash_input_preparation_rejects_unknown_block_table(monkeypatch):
-    kernel = MagicMock()
-    monkeypatch.setattr(dflash_module, "prepare_dflash_inputs_triton", kernel)
-    block_tables = SimpleNamespace(
-        kernel_block_sizes=[128],
-        input_block_tables=[torch.zeros(2, 4, dtype=torch.int32)],
-    )
-    inputs = [object() for _ in range(28)]
-    # A block table that AscendBlockTables never handed out.
-    inputs[16] = torch.zeros(2, 4, dtype=torch.int32)
-
-    with pytest.raises(RuntimeError, match="unknown to AscendBlockTables"):
-        dflash_module.prepare_dflash_inputs_factory(384, block_tables)(*inputs)
-
-    kernel.assert_not_called()

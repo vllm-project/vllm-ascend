@@ -121,6 +121,7 @@ from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_state,
+    initialize_kernel_block_table_buffers,
     skip_ring_state_update,
 )
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
@@ -475,6 +476,15 @@ class NPUModelRunner(GPUModelRunner):
             )
         with graph_manager_wrapper(self):
             self._initialize_kv_cache_upstream(kv_cache_config, kv_cache_allocation_context)
+            # PCP owns the local-row capacity; FIA may append one padding
+            # request for either target or draft metadata.
+            max_metadata_reqs = (
+                self.pcp_manager.max_num_local_reqs if self.pcp_manager is not None else self.max_num_reqs
+            ) + 1
+            metadata_groups = [*self.attn_groups, *getattr(self.speculator, "attn_groups", [])]
+            initialize_kernel_block_table_buffers(
+                (group for groups in metadata_groups for group in groups), max_metadata_reqs
+            )
             self._target_uses_flashmla = self._has_target_flashmla_attention()
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)

@@ -38,7 +38,6 @@ def _builder(
         "get_current_hardware_profile",
         lambda: SimpleNamespace(device_adaptor_family=DeviceAdaptorFamily.FP8_OPTIMIZED if a5 else None),
     )
-    monkeypatch.setattr(sfa, "select_common_block_size", lambda *args: 128)
     config_flags = SimpleNamespace(enable_sparse_sfa_c8=False, enable_sparse_sfa_turboquant=False)
     monkeypatch.setattr(sfa, "get_ascend_config", lambda: config_flags)
     monkeypatch.setattr(
@@ -53,7 +52,8 @@ def _builder(
         self.model_config, self.metadata_cls = cfg.model_config, metadata_cls
 
     with patch.object(MLACommonMetadataBuilder, "__init__", base_init):
-        return builder_cls(SimpleNamespace(block_size=block_size), ["layer"], config, torch.device("cpu"))
+        # AttentionGroup passes the selected kernel spec; config keeps the manager size.
+        return builder_cls(SimpleNamespace(block_size=128), ["layer"], config, torch.device("cpu"))
 
 
 def _common(block_size):
@@ -123,11 +123,9 @@ def test_shared_sfa_nope_metadata_pages_and_draft_buffers(monkeypatch, block_siz
         assert draft.smla_topk_length.data_ptr() != first.smla_topk_length.data_ptr()
     else:
         assert first.smla_metadata is None and not seen
-    common.block_table_tensor[0, : builder.nope_states[None].split] = 3 * builder.nope_states[
-        None
-    ].split + torch.arange(builder.nope_states[None].split)
+    page_multiplier = block_size // builder.kernel_block_size
+    common.block_table_tensor[0, :page_multiplier] = 3 * page_multiplier + torch.arange(page_multiplier)
     builder.build(0, common)
-    page_multiplier = builder.nope_states[None].split
     assert first.block_table[0, 0] == 3 * page_multiplier
     assert draft.block_table[0, 0] == 5 * page_multiplier
     if a5:
@@ -147,7 +145,9 @@ def test_nope_metadata_preserves_all_pcp_request_chunks(monkeypatch, pcp_size, a
     config.scheduler_config.max_num_seqs = 8
     config.scheduler_config.max_num_batched_tokens = 32
     config.parallel_config.prefill_context_parallel_size = pcp_size
-    state = sparse_mla.SparseMLAMetadataState(SimpleNamespace(block_size=128), config, torch.device("cpu"))
+    state = sparse_mla.SparseMLAMetadataState(
+        SimpleNamespace(block_size=128), config, torch.device("cpu"), kernel_block_size=builder.kernel_block_size
+    )
     address = state.block_table_buffer.data_ptr()
     rows = 17 if pcp_size > 1 else 9
     width = state.block_table_buffer.shape[1]
