@@ -29,6 +29,7 @@ from vllm_ascend.ops.gdn import (
     _pack_conv_weights,
     initialize_packed_conv_weight,
     qwen_gdn_attention_core_norm_with_output,
+    qwen_gdn_packed_attention_core_norm_with_output,
 )
 from vllm_ascend.ops.gdn_attn_builder import (
     GDNCausalConv1dMetadata,
@@ -141,6 +142,56 @@ def _make_prefill_metadata(device: torch.device | str = "cpu") -> GDNAttentionMe
         chunk=Mock(),
     )
     return metadata
+
+
+def test_packed_custom_op_keeps_prepare_outputs_inside_boundary():
+    layer = SimpleNamespace(
+        key_dim=4,
+        value_dim=4,
+        tp_size=1,
+        num_v_heads=2,
+        head_v_dim=2,
+        _forward_core=Mock(),
+    )
+    mixed_qkvz = torch.empty(3, 16)
+    mixed_ba = torch.empty(3, 4)
+    core_attn_out = torch.empty(3, 2, 2)
+    prepared_qkv = torch.empty(3, 12)
+    prepared_z = torch.empty(3, 2, 2)
+    prepared_b = torch.empty(3, 2)
+    prepared_a = torch.empty(3, 2)
+    context = SimpleNamespace(no_compile_layers={"layers.0.linear_attn": layer})
+
+    with (
+        patch("vllm_ascend.ops.gdn.get_forward_context", return_value=context),
+        patch(
+            "vllm_ascend.ops.gdn.fused_gdn_prepare",
+            return_value=(prepared_qkv, prepared_z, prepared_b, prepared_a, core_attn_out),
+        ) as prepare,
+    ):
+        qwen_gdn_packed_attention_core_norm_with_output(
+            mixed_qkvz,
+            mixed_ba,
+            core_attn_out,
+            "layers.0.linear_attn",
+            False,
+        )
+
+    prepare.assert_called_once_with(
+        mixed_qkvz,
+        mixed_ba,
+        12,
+        2,
+        2,
+        core_attn_out=core_attn_out,
+    )
+    layer._forward_core.assert_called_once_with(
+        prepared_qkv,
+        prepared_b,
+        prepared_a,
+        core_attn_out,
+        z=prepared_z,
+    )
 
 
 def test_fla_prefill_uses_host_metadata_with_strided_ssm_cache():
