@@ -1,0 +1,115 @@
+name: Dependency compatibility probe
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/manual_dependency_compatibility.yaml'
+      - 'tools/dependency_compatibility.py'
+      - 'tests/ut/test_dependency_compatibility.py'
+      - 'tests/dependency_compatibility/**'
+  workflow_dispatch:
+    inputs:
+      source:
+        description: 'Dependency source; plain pyproject selects build requirements'
+        type: choice
+        options:
+          - requirements.txt
+          - requirements-dev.txt
+          - requirements-lint.txt
+          - pyproject.toml
+          - pyproject.toml:project.dependencies
+        default: requirements.txt
+      packages_json:
+        description: 'JSON array of direct package names; [] selects the entire source'
+        type: string
+        default: '["packaging"]'
+      candidates_json:
+        description: 'JSON array of candidate requirements; replaces selected direct declarations or adds packages'
+        type: string
+        default: '["packaging>=24.2,<27"]'
+      python_version:
+        description: 'Python version for both clean environments'
+        type: choice
+        options: ['3.10', '3.11', '3.12']
+        default: '3.12'
+      smoke:
+        description: 'Optional candidate smoke test; required packages must be part of the candidate graph'
+        type: choice
+        options: [none, numpy-pyarrow]
+        default: none
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-compatibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ inputs.python_version || '3.12' }}
+      - name: Prepare baseline and candidate declarations
+        id: prepare
+        env:
+          DEPENDENCY_SOURCE: ${{ inputs.source || 'requirements.txt' }}
+          PACKAGES_JSON: ${{ inputs.packages_json || '["packaging"]' }}
+          CANDIDATES_JSON: ${{ inputs.candidates_json || '["packaging>=24.2,<27"]' }}
+        run: |
+          python -m venv .compatibility-tools
+          .compatibility-tools/bin/python -m pip install packaging 'tomli; python_version < "3.11"'
+          .compatibility-tools/bin/python -m unittest tests.ut.test_dependency_compatibility -v
+          .compatibility-tools/bin/python -m tools.dependency_compatibility prepare \
+            --source "$DEPENDENCY_SOURCE" --packages-json "$PACKAGES_JSON" \
+            --candidates-json "$CANDIDATES_JSON"
+      - name: Resolve and install both profiles without dependency bypass
+        env:
+          PIP_EXTRA_INDEX_URL: https://repo.huaweicloud.com/ascend/repos/pypi https://download.pytorch.org/whl/cpu
+          SMOKE: ${{ inputs.smoke || 'none' }}
+        run: |
+          run_profile() {
+            local profile="$1"
+            local directory="compatibility-results/$profile"
+            local python=".compatibility-$profile/bin/python"
+            mkdir -p "$directory" || return 1
+            python -m venv ".compatibility-$profile" || return 1
+            "$python" -m pip install --only-binary=:all: \
+              --report "$directory/installation.json" -r "compatibility-results/$profile.txt" \
+              2>&1 | tee "$directory/installation.log" || return 1
+            "$python" -m pip check 2>&1 | tee "$directory/pip-check.log" || return 1
+            if [ "$profile" = candidate ] && [ "$SMOKE" = numpy-pyarrow ]; then
+              "$python" -m unittest tests.dependency_compatibility.numpy_pyarrow_smoke -v \
+                2>&1 | tee "$directory/smoke-tests.log" || return 1
+            fi
+            "$python" -m pip inspect > "$directory/installed.json" || return 1
+            touch "$directory/success"
+          }
+          status=0
+          for profile in baseline candidate; do
+            if ! run_profile "$profile"; then
+              status=1
+              if [ -x ".compatibility-$profile/bin/python" ]; then
+                ".compatibility-$profile/bin/python" -m pip inspect \
+                  > "compatibility-results/$profile/installed.json" || status=1
+              fi
+            fi
+          done
+          exit "$status"
+      - name: Compare graphs and record probe context
+        if: always() && steps.prepare.outcome == 'success'
+        run: |
+          git rev-parse HEAD > compatibility-results/revision.txt
+          python --version > compatibility-results/python.txt
+          uname -a > compatibility-results/platform.txt
+          .compatibility-tools/bin/python -m tools.dependency_compatibility compare
+      - name: Upload probe evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: dependency-compatibility
+          path: compatibility-results/
+          if-no-files-found: ignore
