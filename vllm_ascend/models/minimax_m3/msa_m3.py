@@ -16,6 +16,7 @@ from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config, get_cu
 from vllm.config.cache import CacheDType
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
@@ -60,6 +61,11 @@ from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
 )
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     minimax_m3_index_prefill as minimax_m3_index_prefill_ascendc,
+)
+from vllm_ascend.models.minimax_m3.ops.msa_m3_union import (
+    UNION_SIZE,
+    load_union_extensions,
+    minimax_m3_sparse_attn_union,
 )
 from vllm_ascend.ops.linear import AscendColumnParallelLinear
 from vllm_ascend.ops.linear_op import get_parallel_op
@@ -115,6 +121,31 @@ else:
 
 # CANN GenericBlockSparseAttentionMetadata returns exactly 1024 int32 values.
 _GBSA_METADATA_SIZE = 1024
+
+
+def _use_union_attention(
+    kv_cache_dtype: str | torch.dtype,
+    num_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+    block_size: int,
+) -> bool:
+    """Select Union for supported geometry and device-specific KV dtypes."""
+    hardware_profile = get_current_hardware_profile()
+    return (
+        hardware_profile.supports(HardwareCapability.MINIMAX_M3_UNION_ATTENTION)
+        and (
+            kv_cache_dtype in ("auto", "bfloat16", "float16", torch.bfloat16, torch.float16)
+            or (
+                hardware_profile.supports(HardwareCapability.FP8_ATTENTION)
+                and kv_cache_dtype in ("fp8", "fp8_e4m3", torch.float8_e4m3fn)
+            )
+        )
+        and num_kv_heads == 1
+        and 1 <= num_heads <= 16
+        and head_size == _MSA_INDEX_BLOCK_SIZE
+        and block_size == _MSA_INDEX_BLOCK_SIZE
+    )
 
 
 def _active_decode_num_reqs(
@@ -768,6 +799,7 @@ class AscendMiniMaxM3SparsePrefillMetadata:
     max_seq_len: int
     total_kv_blocks: int
     max_kv_blocks: int
+    num_union_groups: int = 0
 
 
 @dataclass
@@ -834,7 +866,13 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
             for query_len in self.decode_gbsa_query_lengths
         }
         hardware_profile = get_current_hardware_profile()
-        self.reuse_decode_gbsa_metadata = hardware_profile.supports(HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE)
+        context = vllm_config.compilation_config.static_forward_context
+        # Preserve native metadata reuse when optional Union operators are absent.
+        self.use_union = any(context[name].impl.use_union for name in layer_names)
+        native_layers = [context[name] for name in layer_names if not context[name].impl.use_union]
+        self.reuse_decode_gbsa_metadata = bool(native_layers) and hardware_profile.supports(
+            HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE
+        )
         self.decode_gbsa_kv_dtype = kv_cache_spec.dtype
         self.decode_gbsa_configs: set[tuple[int, int, int, int]] = set()
         if (
@@ -850,8 +888,7 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
             and vllm_config.model_config.dtype == torch.bfloat16
         ):
             context = vllm_config.compilation_config.static_forward_context
-            for name in layer_names:
-                layer = context[name]
+            for layer in native_layers:
                 self.decode_gbsa_configs.add((layer.num_heads, layer.num_kv_heads, layer.head_dim, layer.topk_blocks))
         # CANN's fixed output layout is independent of batch size. Each layer
         # configuration/query length can share one persistent buffer across
@@ -986,6 +1023,9 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
                 max_seq_len=common_attn_metadata.max_seq_len,
                 total_kv_blocks=total_kv_blocks,
                 max_kv_blocks=max_kv_blocks,
+                num_union_groups=(
+                    int(((prefill_query_lens_cpu + UNION_SIZE - 1) // UNION_SIZE).sum().item()) if self.use_union else 0
+                ),
             )
 
         decode_metadata: AscendMiniMaxM3SparseDecodeMetadata | None = None
@@ -1036,6 +1076,10 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
         topk_blocks: int,
         sparse_block_size: int,
     ) -> None:
+        if kv_cache_dtype.startswith("fp8") and not get_current_hardware_profile().supports(
+            HardwareCapability.FP8_ATTENTION
+        ):
+            raise TypeError("MiniMax-M3 FP8 sparse attention is not supported on this device")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = scale
@@ -1044,6 +1088,14 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
         self.topk_blocks = topk_blocks
         self.block_size = sparse_block_size
         self._dequant_scale: torch.Tensor | None = None
+        self.use_union = (
+            _use_union_attention(kv_cache_dtype, num_heads, self.num_kv_heads, head_size, sparse_block_size)
+            and load_union_extensions() is not None
+        )
+        if self.use_union:
+            logger.info_once("MiniMax-M3 Union enabled: UnionSparseGen + GBSA exactMask, union_size=8")
+        elif not get_current_hardware_profile().minimax_m3_prefill_allow_kv_gather_q:
+            logger.info_once("MiniMax-M3 Union not selected; using native GBSA Q-gather-KV")
 
     def forward(
         self,
@@ -1082,49 +1134,85 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
                     d.gbsa_metadata_first_layer = layer.layer_name
                 elif d.gbsa_metadata_first_layer == layer.layer_name:
                     d.gbsa_metadata_cache.clear()
-            if self.kv_cache_dtype.startswith("fp8") and self._dequant_scale is None:
+            if not self.use_union and self.kv_cache_dtype.startswith("fp8") and self._dequant_scale is None:
                 self._dequant_scale = torch.ones(
                     (1, 1, 1, 1),
                     dtype=torch.float32,
                     device=query.device,
                 )
-            minimax_m3_sparse_attn_decode(
-                q[:num_decode_tokens],
-                kv_cache,
-                decode_topk,
-                d.block_table,
-                d.seq_lens,
-                self.num_kv_heads,
-                self.scale,
-                out[:num_decode_tokens],
-                d.decode_query_len,
-                block_size=self.block_size,
-                select_num_idx=decode_select_num_idx,
-                dequant_scale=self._dequant_scale,
-                cu_seqlens_q=d.cu_seqlens_q,
-                gbsa_metadata_cache=d.gbsa_metadata_cache,
-                indices_are_sorted=_USE_ASCENDC_INDEX_SCORE_DECODE or _TRITON_DECODE_SUPPORTS_SORTED_INDICES,
-            )
+            if self.use_union:
+                assert d.cu_seqlens_q is not None
+                minimax_m3_sparse_attn_union(
+                    q[:num_decode_tokens],
+                    kv_cache,
+                    decode_topk,
+                    d.block_table,
+                    d.cu_seqlens_q,
+                    None,
+                    d.seq_lens,
+                    d.seq_lens.numel() * ((d.decode_query_len + UNION_SIZE - 1) // UNION_SIZE),
+                    (d.max_seq_len + self.block_size - 1) // self.block_size,
+                    d.decode_query_len,
+                    d.max_seq_len,
+                    self.scale,
+                    out[:num_decode_tokens],
+                    select_num_idx=decode_select_num_idx,
+                )
+            else:
+                minimax_m3_sparse_attn_decode(
+                    q[:num_decode_tokens],
+                    kv_cache,
+                    decode_topk,
+                    d.block_table,
+                    d.seq_lens,
+                    self.num_kv_heads,
+                    self.scale,
+                    out[:num_decode_tokens],
+                    d.decode_query_len,
+                    block_size=self.block_size,
+                    select_num_idx=decode_select_num_idx,
+                    dequant_scale=self._dequant_scale,
+                    cu_seqlens_q=d.cu_seqlens_q,
+                    gbsa_metadata_cache=d.gbsa_metadata_cache,
+                    indices_are_sorted=_USE_ASCENDC_INDEX_SCORE_DECODE or _TRITON_DECODE_SUPPORTS_SORTED_INDICES,
+                )
 
         if main_md.num_prefills > 0:
             p = main_md.prefill
             assert p is not None and prefill_topk is not None
-            minimax_m3_sparse_attn(
-                q[num_decode_tokens:],
-                kv_cache,
-                prefill_topk,
-                p.block_table,
-                p.cu_seqlens_q,
-                p.seq_lens,
-                p.context_lens,
-                p.max_query_len,
-                self.num_kv_heads,
-                self.scale,
-                out[num_decode_tokens:],
-                block_size=self.block_size,
-                total_kv_blocks=p.total_kv_blocks,
-                max_kv_blocks=p.max_kv_blocks,
-            )
+            if self.use_union:
+                minimax_m3_sparse_attn_union(
+                    q[num_decode_tokens:],
+                    kv_cache,
+                    prefill_topk,
+                    p.block_table,
+                    p.cu_seqlens_q,
+                    p.cu_seqlens_k,
+                    p.seq_lens,
+                    p.num_union_groups,
+                    p.max_kv_blocks,
+                    p.max_query_len,
+                    p.max_seq_len,
+                    self.scale,
+                    out[num_decode_tokens:],
+                )
+            else:
+                minimax_m3_sparse_attn(
+                    q[num_decode_tokens:],
+                    kv_cache,
+                    prefill_topk,
+                    p.block_table,
+                    p.cu_seqlens_q,
+                    p.seq_lens,
+                    p.context_lens,
+                    p.max_query_len,
+                    self.num_kv_heads,
+                    self.scale,
+                    out[num_decode_tokens:],
+                    block_size=self.block_size,
+                    total_kv_blocks=p.total_kv_blocks,
+                    max_kv_blocks=p.max_kv_blocks,
+                )
         return output
 
     @staticmethod

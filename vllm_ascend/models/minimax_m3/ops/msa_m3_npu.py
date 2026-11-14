@@ -680,9 +680,12 @@ def minimax_m3_sparse_attn(
     )
     hardware_profile = get_current_hardware_profile()
     supports_fp8 = hardware_profile.supports(HardwareCapability.FP8_ATTENTION)
-    # Select the optional optimization by ACLNN availability. The installed
-    # experimental package must provide kernels for the current device.
-    if not _is_minimax_sparse_attention_split_kv_available():
+    # A3 uses Q-gather-KV when Union is unavailable, even if SplitKv is
+    # installed. Other devices retain selection by ACLNN availability.
+    if (
+        not hardware_profile.minimax_m3_prefill_allow_kv_gather_q
+        or not _is_minimax_sparse_attention_split_kv_available()
+    ):
         _minimax_m3_sparse_attn_a3(*common_args, max_query_len=max_query_len)
         return
 

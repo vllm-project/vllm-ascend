@@ -216,6 +216,41 @@ For text-only deployment, `--limit-mm-per-prompt` can be omitted. For multimodal
 
 ### 5.1 Single-Node Online Deployment
 
+On A3 series and 950DT products, MiniMax-M3 sparse attention automatically uses Union when
+the optional, matched `cann_ops_nn_custom` UnionSparseGen and
+`cann_ops_transformer_custom` GBSA exact-mask extensions are installed. The
+supported geometry is 128-token pages, head dimension 128, one local KV head,
+and up to 16 local query heads. Other hardware, unsupported geometry, or missing
+extensions retain native attention. On A3, native prefill always uses GBSA
+Q-gather-KV, even when the optional SplitKv/KV-gather-Q operator is installed.
+Other devices retain native prefill selection by SplitKv availability:
+KV-gather-Q when available, otherwise GBSA Q-gather-KV.
+
+Union uses the existing `--kv-cache-dtype` and `--kv-cache-dtype-skip-layers`
+settings: `auto` keeps the model dtype. A3 supports BF16/FP16 attention only;
+FP8 KV cache settings are rejected during initialization, whether or not the
+Union extensions are installed. On 950DT products, `fp8`/`fp8_e4m3` uses E4M3 KV
+and casts Q through the native FP8 helper; FP8 Union requires BF16 Q and output.
+No routing policy or separate quantization
+switch is needed. Groups contain up to eight adjacent queries within each
+request; the exact mask preserves each query's selected KV blocks and causality.
+The optional extensions must provide matching UnionSparseGen and GBSA exact-mask
+kernels; package names alone do not establish binary compatibility.
+
+Build and install both the `.run` operator package and Python wheel from each
+of these matching source revisions, using `--soc=ascend910_93` on A3 or
+`--soc=ascend950` on 950DT products for the operator packages:
+
+| Package | Operator PR | Source revision |
+| --- | --- | --- |
+| `cann_ops_nn_custom` | [ops-nn #14010](https://gitcode.com/cann/ops-nn/pull/14010) | `2e5eb4f6f0142936bb7d46df5f43b2f1c02fa427` |
+| `cann_ops_transformer_custom` | [ops-transformer #15473](https://gitcode.com/cann/ops-transformer/pull/15473) | `bff6fe527aeea743473177c671d8e4b674624108` |
+
+The UnionSparseGen interface requires INT64 Q/KV prefix tensors,
+`block_shape=[1,128]`, `union_size=8`, and `mask_type=1` for right-aligned
+causality. Earlier packages using separate block dimensions and `is_causal`
+are incompatible with this interface.
+
 Single-node deployment runs Prefill and Decode on the same host. The A3 example uses W8A8 weights on all 16 NPUs, and the 950DT products example uses W8A8-MXFP8 weights on all eight NPUs. Both use [DSpark speculative decoding](../../user_guide/feature_guide/speculative_decoding.md#speculating-using-dspark), which generates draft tokens and verifies them with the target model.
 
 === "A3 series (W8A8)"
