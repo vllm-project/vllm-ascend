@@ -1,0 +1,5 @@
+pr: 21414
+entries:
+  - category: performance
+    text: PCP prefill now overlaps the local Q projection with global cache preparation by default for nonempty local query shards.
+    hardware: [A2]

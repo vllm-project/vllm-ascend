@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from contextlib import ExitStack
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -126,3 +127,91 @@ class TestAscendDSAPCPGraphPadding:
         assert rotary.call_args.args[2] is sin
         scatter.assert_called_once()
         assert scatter.call_args.args[2] is slot_mapping
+
+
+@pytest.fixture
+def cache_query_case():
+    impl = AscendDSAPCPImpl.__new__(AscendDSAPCPImpl)
+    impl.compress_ratio = 4
+    metadata = MagicMock(spec=dsa_cp.AscendDSAPCPMetadata)
+    metadata.pcp_has_global_prefill = True
+    metadata.global_dsa_metadata = object()
+    common = SimpleNamespace(num_actual_tokens=2)
+    layer_metadata = SimpleNamespace(attention=common, swa=common)
+    global_layer_metadata = SimpleNamespace(swa=object(), compressor=object(), indexer=object())
+    operations = MagicMock()
+    prepared_query = (object(), object(), object())
+    operations.query.return_value = prepared_query
+    current_stream = MagicMock()
+    query_stream = MagicMock()
+    operations.attach_mock(query_stream.wait_stream, "query_wait")
+    operations.attach_mock(current_stream.wait_stream, "current_wait")
+    impl._mla_prolog_single_stream = operations.query
+    impl._gather_and_restore_hidden_states = operations.gather
+    impl._get_layer_metadata = MagicMock(return_value=global_layer_metadata)
+    impl._update_global_swa_cache = operations.swa
+    impl._update_global_compressor_cache = operations.compressor
+    impl._update_global_indexer_cache = operations.indexer
+    impl._parallel_o_proj = SimpleNamespace(all_gather_weights=operations.weights)
+    hidden_states = MagicMock()
+    caches = tuple(object() for _ in range(6))
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(dsa_cp.torch.npu, "current_stream", return_value=current_stream))
+        stack.enter_context(patch.object(dsa_cp.torch.npu, "stream"))
+        stack.enter_context(patch.object(dsa_cp.dsa_v1, "dsv4_dsa_overlap_stream", return_value=query_stream))
+        stack.enter_context(patch.object(dsa_cp.dsa_v1, "_require_req_metadata", return_value=MagicMock()))
+        stack.enter_context(patch.object(dsa_cp.DeviceOperator, "unpack_dsa_forward_kv_cache", return_value=caches))
+        yield SimpleNamespace(
+            impl=impl,
+            metadata=metadata,
+            common=common,
+            operations=operations,
+            prepared_query=prepared_query,
+            current_stream=current_stream,
+            query_stream=query_stream,
+            args=("layer", hidden_states, caches, {"layer": metadata}, layer_metadata),
+        )
+
+
+@pytest.mark.parametrize("global_prefill,local_tokens", [(True, 2), (True, 0), (False, 2)])
+@pytest.mark.parametrize("compress_ratio", [1, 4, 128])
+def test_cache_query_preparation_preserves_collectives(cache_query_case, global_prefill, local_tokens, compress_ratio):
+    case = cache_query_case
+    case.metadata.pcp_has_global_prefill = global_prefill
+    case.common.num_actual_tokens = local_tokens
+    case.impl.compress_ratio = compress_ratio
+    overlap = global_prefill and local_tokens > 0
+    expected = ["gather", "swa"]
+    if compress_ratio > 1:
+        expected.append("compressor")
+    if compress_ratio == 4:
+        expected.append("indexer")
+    expected.append("weights")
+    if overlap:
+        expected = ["query_wait", "query"] + expected + ["current_wait"]
+    for _ in range(2):
+        case.operations.reset_mock()
+        result = case.impl._prepare_caches_and_query(*case.args)
+        assert result == (True, case.prepared_query if overlap else None)
+        assert [call[0] for call in case.operations.mock_calls] == expected
+        if overlap:
+            case.query_stream.wait_stream.assert_called_once_with(case.current_stream)
+            case.current_stream.wait_stream.assert_called_once_with(case.query_stream)
+            assert case.operations.query.call_args.kwargs == {"write_swa_cache": False}
+
+
+@pytest.mark.parametrize("failure_stage", ["query", "gather", "swa", "compressor", "indexer", "weights"])
+def test_cache_query_preparation_joins_stream_on_failure(cache_query_case, failure_stage):
+    case = cache_query_case
+    getattr(case.operations, failure_stage).side_effect = RuntimeError("injected failure")
+    with pytest.raises(RuntimeError, match="injected failure"):
+        case.impl._prepare_caches_and_query(*case.args)
+    case.current_stream.wait_stream.assert_called_once_with(case.query_stream)
+    assert case.operations.mock_calls[-1][0] == "current_wait"
+
+
+def test_cache_query_preparation_delegates_ordinary_metadata(cache_query_case):
+    case = cache_query_case
+    args = (*case.args[:3], {"layer": object()}, case.args[4])
+    assert case.impl._prepare_caches_and_query(*args) == (False, None)
+    assert not case.operations.mock_calls
