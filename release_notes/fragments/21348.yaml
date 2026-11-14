@@ -1,0 +1,7 @@
+pr: 21348
+entries:
+  - category: bugfix
+    text: >-
+      Fixed AscendStore Prefill-PP KV key expansion on Decode instances that run
+      pipeline parallelism, preventing partial Prefill writes from overwriting
+      each other or being treated as complete cache blocks.
