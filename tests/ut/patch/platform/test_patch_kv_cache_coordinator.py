@@ -472,7 +472,14 @@ def test_retention_uses_resolved_cache_config(monkeypatch, retention, legacy):
 
 @pytest.mark.parametrize("initial_retention", [0, 3072])
 def test_inherits_native_store_checkpoint_retention(monkeypatch, initial_retention):
-    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import scheduler as store_mod
+    try:
+        from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (  # type: ignore
+            scheduler as store_mod,
+        )
+    except ModuleNotFoundError:
+        from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (  # type: ignore
+            scheduler as store_mod,
+        )
 
     # Exercise the real Store retention policy, stubbing only lookup transport
     # and unrelated coordinator construction. No store client/network is opened.

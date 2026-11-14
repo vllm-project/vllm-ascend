@@ -9,13 +9,21 @@ from contextlib import contextmanager
 from dataclasses import replace
 
 import torch
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import (
-    KVCacheStoreRecvingThread,
-    KVCacheStoreSendingThread,
-    MooncakeStoreWorker,
-)
 from vllm.distributed.mooncake_store import MooncakeStoreConfig
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
+
+try:
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.worker import (  # type: ignore
+        KVCacheStoreRecvingThread,
+        KVCacheStoreSendingThread,
+        MooncakeStoreWorker,
+    )
+except ModuleNotFoundError:
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import (  # type: ignore
+        KVCacheStoreRecvingThread,
+        KVCacheStoreSendingThread,
+        MooncakeStoreWorker,
+    )
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import (
@@ -83,7 +91,9 @@ class AscendNativeStoreWorker(MooncakeStoreWorker):
             tenant_id=config.tenant_id,
         )
 
-    def _setup_store(self, store_config, local_hostname):
+    def _setup_store(self, store_config, local_hostname, *, engine=None):
+        if engine is not None:
+            raise ValueError("reuse_pd_transfer_engine is not supported by the Ascend Mooncake Store worker")
         config = self._ascend_vllm_config
         backend = MooncakeBackend(
             config.parallel_config,

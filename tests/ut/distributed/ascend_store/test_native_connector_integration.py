@@ -11,7 +11,14 @@ import torch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 
-native_connector_module = pytest.importorskip("vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.connector")
+try:
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (  # type: ignore
+        connector as native_connector_module,
+    )
+except ModuleNotFoundError:
+    native_connector_module = pytest.importorskip(
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.connector"
+    )
 if not hasattr(native_connector_module.MooncakeStoreConnector, "_create_worker"):
     pytest.skip("requires vLLM native Store device hooks (#66294)", allow_module_level=True)
 
@@ -19,8 +26,23 @@ if not hasattr(native_connector_module.MooncakeStoreConnector, "_create_worker")
 from vllm.config import CacheConfig, KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import worker as native_worker
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import MambaStoreLayout, TokenMajorStoreLayout
+
+try:
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (  # type: ignore
+        worker as native_worker,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (  # type: ignore
+        MambaStoreLayout,
+        TokenMajorStoreLayout,
+    )
+except ModuleNotFoundError:
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (  # type: ignore
+        worker as native_worker,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import (  # type: ignore
+        MambaStoreLayout,
+        TokenMajorStoreLayout,
+    )
 
 from tests.ut.distributed.ascend_store.native_glm_fixture import make_glm_connectors
 from tests.ut.distributed.ascend_store.test_native_cache_views import (

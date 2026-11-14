@@ -1,7 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """NPU bindings for the upstream Mooncake Store connector."""
 
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.connector import MooncakeStoreConnector
+try:
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.connector import (  # type: ignore
+        MooncakeStoreConnector,
+    )
+except ModuleNotFoundError:
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.connector import (  # type: ignore
+        MooncakeStoreConnector,
+    )
 
 from .native_worker import AscendNativeStoreWorker
 

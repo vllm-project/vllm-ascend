@@ -22,8 +22,12 @@ from unittest.mock import MagicMock, patch
 _vllm_spec = PathFinder.find_spec("vllm")
 assert _vllm_spec is not None and _vllm_spec.submodule_search_locations
 VLLM = Path(_vllm_spec.submodule_search_locations[0])
-STORE = VLLM / "distributed/kv_transfer/kv_connector/v1/mooncake/store"
-NATIVE = "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store"
+if (VLLM / "distributed/kv_transfer/kv_connector/v1/mooncake_store").is_dir():
+    STORE = VLLM / "distributed/kv_transfer/kv_connector/v1/mooncake_store"
+    NATIVE = "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store"
+else:
+    STORE = VLLM / "distributed/kv_transfer/kv_connector/v1/mooncake/store"
+    NATIVE = "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store"
 
 
 def load(name: str, path: Path) -> Any:

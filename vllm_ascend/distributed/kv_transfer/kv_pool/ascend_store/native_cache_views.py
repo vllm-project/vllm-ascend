@@ -5,15 +5,28 @@ from dataclasses import replace
 
 import torch
 from vllm import envs
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import ChunkedTokenDatabase
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import (
-    AttentionStoreLayout,
-    MambaStoreLayout,
-    RankLocalStoreLayout,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import derive_mamba_conv_split
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.v1.kv_cache_interface import MambaAttentionBackendEnum, MLAAttentionSpec, group_kernel_blocks
+
+try:
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (  # type: ignore
+        ChunkedTokenDatabase,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (  # type: ignore
+        AttentionStoreLayout,
+        MambaStoreLayout,
+        RankLocalStoreLayout,
+    )
+except ModuleNotFoundError:
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # type: ignore
+        ChunkedTokenDatabase,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import (  # type: ignore
+        AttentionStoreLayout,
+        MambaStoreLayout,
+        RankLocalStoreLayout,
+    )
 
 from vllm_ascend.distributed.kv_transfer.utils.utils import collect_storage_merged_register_regions
 

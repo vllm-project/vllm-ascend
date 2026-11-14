@@ -9,8 +9,21 @@ import torch
 from vllm.config import CacheConfig, KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import scheduler as native_scheduler
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import worker as native_worker
+
+try:
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (  # type: ignore
+        scheduler as native_scheduler,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (  # type: ignore
+        worker as native_worker,
+    )
+except ModuleNotFoundError:
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (  # type: ignore
+        scheduler as native_scheduler,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (  # type: ignore
+        worker as native_worker,
+    )
 
 from vllm_ascend.distributed.kv_transfer import _register_with_class_name_alias
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import native_worker as ascend_worker
@@ -38,7 +51,13 @@ def make_native_registration_inputs(*, use_recoverssm=False):
     layer.kv_cache = states
     state_spec = MambaSpec(block_size=8, shapes=shapes, dtypes=dtypes, mamba_type=MambaAttentionBackendEnum.GDN_ATTN)
     tail_spec = AscendIndexerKPoolTailSpec(
-        block_size=8, num_kv_heads=1, head_size=8, dtype=torch.float32, sliding_window=2, compress_ratio=2
+        block_size=2,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.float32,
+        sliding_window=2,
+        compress_ratio=2,
+        ring_capacity=8,
     )
     c8_spec = AscendMLAAttentionSpec(
         block_size=8,

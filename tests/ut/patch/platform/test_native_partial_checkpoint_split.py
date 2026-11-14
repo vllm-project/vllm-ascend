@@ -10,7 +10,10 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from vllm.v1.core.kv_cache_utils import resolve_cache_hit_alignment_tokens
+from vllm.v1.core.kv_cache_utils import (
+    resolve_cache_hit_alignment_tokens,
+    resolve_kv_cache_block_sizes,
+)
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     MambaManager,
@@ -26,7 +29,6 @@ from vllm_ascend.core.kv_cache_interface import (
 )
 from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import _skips_eagle_block_drop
-from vllm_ascend.patch.platform.patch_kv_cache_utils import _ascend_resolve_kv_cache_block_sizes
 from vllm_ascend.patch.platform.patch_mamba_block_aligned_split import (
     _mamba_block_aligned_split,
     _original_mamba_block_aligned_split,
@@ -70,6 +72,7 @@ def _resolved_glm_config(enable_prefix_caching, block_size=_PRODUCER_BLOCK, cons
             block_size=4,
             sliding_window=4,
             compress_ratio=4,
+            ring_capacity=8,
             num_kv_heads=1,
             head_size=128,
             dtype=torch.float32,
@@ -98,7 +101,7 @@ def _resolved_glm_config(enable_prefix_caching, block_size=_PRODUCER_BLOCK, cons
     assert not managers[3].supports_fine_grained_hash_lookup
     assert not specs[3].prefix_cacheable  # Private tail cannot veto partial hits.
 
-    resolved_block_size, hash_size = _ascend_resolve_kv_cache_block_sizes(kv_config, config)
+    resolved_block_size, hash_size = resolve_kv_cache_block_sizes(kv_config, config)
     assert (resolved_block_size, hash_size) == (block_size, 128)
     alignment = resolve_cache_hit_alignment_tokens(kv_config, config, resolved_block_size, hash_size)
     # Connector hashing remains 128 even with local prefix caching disabled.

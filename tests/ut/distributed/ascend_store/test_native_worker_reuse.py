@@ -20,6 +20,11 @@ from unittest.mock import Mock
 vllm_spec = PathFinder.find_spec("vllm")
 assert vllm_spec is not None and vllm_spec.submodule_search_locations
 VLLM = Path(vllm_spec.submodule_search_locations[0])
+UPSTREAM_STORE = (
+    VLLM / "distributed/kv_transfer/kv_connector/v1/mooncake_store"
+    if (VLLM / "distributed/kv_transfer/kv_connector/v1/mooncake_store").is_dir()
+    else VLLM / "distributed/kv_transfer/kv_connector/v1/mooncake/store"
+)
 STORE = Path(__file__).resolve().parents[4] / "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store"
 
 
@@ -137,7 +142,7 @@ class NativeWorkerReuseTests(unittest.TestCase):
         return worker
 
     @unittest.skipUnless(
-        (VLLM / "distributed/kv_transfer/kv_connector/v1/mooncake/store/layout.py").is_file(),
+        (UPSTREAM_STORE / "layout.py").is_file(),
         "requires vLLM split Mooncake Store worker",
     )
     def test_native_receiver_publishes_only_after_known_completion(self):
@@ -159,7 +164,7 @@ class NativeWorkerReuseTests(unittest.TestCase):
             logger=Mock(),
         )
         load_classes(
-            VLLM / "distributed/kv_transfer/kv_connector/v1/mooncake/store/worker.py",
+            UPSTREAM_STORE / "worker.py",
             {"KVCacheStoreRecvingThread", "_rotate_list", "_sum_batch_bytes"},
             self.namespace,
         )
@@ -222,6 +227,11 @@ class NativeWorkerReuseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "custom_mem_pool"):
             worker._create_mem_pool({"custom_mem_pool": "NVLINK"}, object())
 
+    def test_native_worker_rejects_reused_pd_transfer_engine(self):
+        worker = self.native_worker()
+        with self.assertRaisesRegex(ValueError, "reuse_pd_transfer_engine"):
+            worker._setup_store(object(), "local", engine=object())
+
     def test_native_close_retains_pending_or_unknown_store_for_retry(self):
         self.namespace.update(
             KVCacheStoreSendingThread=object,
@@ -233,7 +243,7 @@ class NativeWorkerReuseTests(unittest.TestCase):
             time=SimpleNamespace(monotonic=Mock(side_effect=range(0, 100, 6)), sleep=Mock()),
         )
         load_classes(
-            VLLM / "distributed/kv_transfer/kv_connector/v1/mooncake/store/worker.py",
+            UPSTREAM_STORE / "worker.py",
             {"MooncakeStoreWorker"},
             self.namespace,
         )
