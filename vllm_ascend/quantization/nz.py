@@ -17,6 +17,7 @@ A cast whose parameters are read off a destination at runtime, rather than
 chosen for a weight role, is not a recipe and stays where it is.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,6 +25,31 @@ import torch
 import torch_npu
 
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
+
+
+def _cast_with_format_fallback(cast: Callable[[], torch.Tensor]) -> torch.Tensor:
+    """Run a FRACTAL_NZ cast, retrying once with internal formats disabled.
+
+    ``npu_format_cast`` with ``input_dtype=float4_e2m1fn_x2`` fails with
+    ``aclnnNpuFormatCast not support recovery format`` on devices that honour
+    ``allow_internal_format=True``. ACLNN-only devices force the flag off, so
+    they silently take the plain ND path and only that path was ever exercised.
+    Disabling the flag reproduces it, so the same checkpoint loads either way.
+
+    ``torch.npu.config`` is write-only in this torch_npu release, so the
+    previous value cannot be read back. vLLM Ascend enables the flag globally
+    in ``worker.py``; restore that known state in ``finally``.
+    """
+    try:
+        return cast()
+    except RuntimeError as error:
+        if "recovery format" not in str(error):
+            raise
+        torch.npu.config.allow_internal_format = False
+        try:
+            return cast()
+        finally:
+            torch.npu.config.allow_internal_format = True
 
 
 @dataclass(frozen=True)
@@ -48,11 +74,15 @@ class NzCastSpec:
 
     def cast(self, tensor: torch.Tensor) -> torch.Tensor:
         """Return ``tensor`` cast to FRACTAL_NZ with this recipe."""
-        return torch_npu.npu_format_cast(tensor, ACL_FORMAT_FRACTAL_NZ, **self.cast_kwargs())
+        return _cast_with_format_fallback(
+            lambda: torch_npu.npu_format_cast(tensor, ACL_FORMAT_FRACTAL_NZ, **self.cast_kwargs())
+        )
 
     def cast_(self, tensor: torch.Tensor) -> torch.Tensor:
         """Cast ``tensor`` to FRACTAL_NZ in place with this recipe."""
-        torch_npu.npu_format_cast_(tensor, ACL_FORMAT_FRACTAL_NZ, **self.cast_kwargs())
+        _cast_with_format_fallback(
+            lambda: torch_npu.npu_format_cast_(tensor, ACL_FORMAT_FRACTAL_NZ, **self.cast_kwargs())
+        )
         return tensor
 
 

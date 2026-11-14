@@ -175,6 +175,148 @@ def test_dynamic_int8_lora_reads_weights_from_layer_via_quant_method() -> None:
     quant_method.get_mlp_weights.assert_called_once_with(mlp_input.layer)
 
 
+def _make_w4a8_input(**overrides) -> MoEMlpComputeInput:
+    values = dict(
+        quant=MoEQuantParams(quant_type=QuantType.W4A8, is_per_channel_weight=True),
+        layer=SimpleNamespace(),
+    )
+    values.update(overrides)
+    return _make_input(**values)
+
+
+def _make_w4a8_method(**weight_overrides) -> Mock:
+    weights = dict(
+        w1=[torch.ones(1, 4, 3, dtype=torch.int32)],
+        w2=[torch.ones(1, 3, 2, dtype=torch.int32)],
+        w1_scale=[torch.ones(1, 6, dtype=torch.float32)],
+        w2_scale=[torch.ones(1, 4, dtype=torch.float32)],
+        w1_scale_bias=[torch.ones(1, 6, dtype=torch.float32)],
+        w2_scale_bias=[torch.ones(1, 4, dtype=torch.float32)],
+    )
+    weights.update(weight_overrides)
+    quant_method = Mock()
+    quant_method.get_mlp_weights.return_value = MoEWeights(**weights)
+    quant_method.get_mlp_group_list.return_value = (torch.tensor([1, 1], dtype=torch.int64), 1)
+    return quant_method
+
+
+def test_w4a8_lora_injects_at_float_boundaries() -> None:
+    mlp_input = _make_w4a8_input()
+    quant_method = _make_w4a8_method()
+    quantized_input = torch.ones(2, 4, dtype=torch.int8)
+    input_scale = torch.ones(2)
+    gate_up_out = torch.randn(2, 6, dtype=torch.bfloat16)
+    activated = torch.randn(2, 3, dtype=torch.bfloat16)
+    quantized_activated = torch.ones(2, 3, dtype=torch.int8)
+    activated_scale = torch.ones(2)
+    down_out = torch.randn(2, 4, dtype=torch.bfloat16)
+    routing = (torch.tensor([0, 1]), torch.tensor([0, 1]))
+    event = object()
+    stream = Mock(record_event=Mock(return_value=event))
+
+    with (
+        patch(f"{QUANT_MOE}._EXTRA_CTX") as extra_ctx,
+        patch.object(
+            DeviceOperator,
+            "npu_dynamic_quant",
+            side_effect=[(quantized_input, input_scale), (quantized_activated, activated_scale)],
+        ) as dynamic_quant,
+        patch(
+            f"{QUANT_MOE}.torch_npu.npu_grouped_matmul",
+            side_effect=[[gate_up_out], [down_out]],
+        ) as grouped_matmul,
+        patch(f"{QUANT_MOE}._apply_moe_activation", return_value=activated),
+        patch(f"{QUANT_MOE}._recover_moe_lora_routing_allgather", return_value=routing),
+        patch(f"{QUANT_MOE}.moe_lora_apply_w13") as apply_w13,
+        patch(f"{QUANT_MOE}.moe_lora_apply_w2") as apply_w2,
+        patch(f"{QUANT_MOE}.torch.npu.current_stream", return_value=stream),
+    ):
+        extra_ctx.moe_comm_type = MoECommType.ALLGATHER
+        output, output_event = quant_apply_mlp_with_moe_lora(
+            mlp_compute_input=mlp_input,
+            quant_method=quant_method,
+        )
+
+    assert output is down_out
+    assert output_event is event
+    assert dynamic_quant.call_count == 2
+    quant_method.get_mlp_weights.assert_called_once_with(mlp_input.layer)
+    quant_method.get_mlp_group_list.assert_called_once_with(mlp_input)
+    # The INT4 gmm reuses the packed weights and passes the scale-bias as bias.
+    weights = quant_method.get_mlp_weights.return_value
+    gmm1 = grouped_matmul.call_args_list[0].kwargs
+    assert gmm1["weight"] is weights.w1
+    assert gmm1["bias"] is weights.w1_scale_bias
+    assert gmm1["x"][0] is quantized_input
+    assert gmm1["per_token_scale"][0] is input_scale
+    # The A8W4 gmm needs the per-channel w13 scale in [E, 1, N] layout. The
+    # loader hands over [E, N]; without the unsqueeze the kernel tiling reads
+    # the flattened scale as the quant group count and aborts.
+    gmm1_scale = gmm1["scale"][0]
+    assert gmm1_scale.shape == (1, 1, 6)
+    assert gmm1_scale.dtype == weights.w2_scale[0].dtype
+    gmm2 = grouped_matmul.call_args_list[1].kwargs
+    assert gmm2["weight"] is weights.w2
+    assert gmm2["bias"] is weights.w2_scale_bias
+    assert gmm2["x"][0] is quantized_activated
+    # The w2 scale already carries the [E, 1, N] layout from the loader.
+    assert gmm2["scale"][0].shape == (1, 4)
+    apply_w13.assert_called_once_with(
+        mlp_input.lora_context,
+        gate_up_out=gate_up_out,
+        hidden_states=mlp_input.hidden_states,
+        lora_routing=routing,
+    )
+    apply_w2.assert_called_once_with(
+        mlp_input.lora_context,
+        down_out=down_out,
+        silu_out=activated,
+        lora_routing=routing,
+    )
+
+
+def test_w4a8_lora_rejects_per_group_scales() -> None:
+    mlp_input = _make_input(
+        quant=MoEQuantParams(quant_type=QuantType.W4A8, is_per_channel_weight=False),
+        layer=SimpleNamespace(),
+    )
+    with patch(f"{QUANT_MOE}._EXTRA_CTX") as extra_ctx:
+        extra_ctx.moe_comm_type = MoECommType.ALLGATHER
+        with pytest.raises(ValueError, match="per-channel"):
+            quant_apply_mlp_with_moe_lora(
+                mlp_compute_input=mlp_input,
+                quant_method=_make_w4a8_method(),
+            )
+
+
+def test_w4a8_lora_requires_the_quant_method_and_layer() -> None:
+    with patch(f"{QUANT_MOE}._EXTRA_CTX") as extra_ctx:
+        extra_ctx.moe_comm_type = MoECommType.ALLGATHER
+        with pytest.raises(NotImplementedError, match="quantization method"):
+            quant_apply_mlp_with_moe_lora(mlp_compute_input=_make_w4a8_input())
+        with pytest.raises(AssertionError, match="routed-expert layer"):
+            quant_apply_mlp_with_moe_lora(
+                mlp_compute_input=_make_w4a8_input(layer=None),
+                quant_method=_make_w4a8_method(),
+            )
+
+
+def test_w4a8_lora_rejects_per_expert_weight_lists() -> None:
+    quant_method = _make_w4a8_method(
+        w1=[torch.ones(1, 4, 3, dtype=torch.int32)] * 2,
+        w2=[torch.ones(1, 3, 2, dtype=torch.int32)] * 2,
+        w1_scale=[torch.ones(1, 6)] * 2,
+        w2_scale=[torch.ones(1, 4)] * 2,
+    )
+    with patch(f"{QUANT_MOE}._EXTRA_CTX") as extra_ctx:
+        extra_ctx.moe_comm_type = MoECommType.ALLGATHER
+        with pytest.raises(NotImplementedError, match="per-expert tensor lists"):
+            quant_apply_mlp_with_moe_lora(
+                mlp_compute_input=_make_w4a8_input(),
+                quant_method=quant_method,
+            )
+
+
 @pytest.mark.parametrize(
     ("comm_type", "mlp_input", "message"),
     [
@@ -232,7 +374,7 @@ def test_registered_backend_requires_float_input() -> None:
 def test_unregistered_quantized_moe_lora_fails_fast() -> None:
     with pytest.raises(NotImplementedError, match="no implementation registered"):
         validate_quant_moe_lora_activation_input(
-            quant_type=QuantType.W4A8,
+            quant_type=QuantType.W4A16,
             hidden_states=torch.randn(2, 4),
             dynamic_scale=None,
         )
@@ -370,3 +512,67 @@ def test_mc2_comm_type_is_unsupported() -> None:
         extra_ctx.moe_comm_type = MoECommType.MC2
         with pytest.raises(NotImplementedError, match="AllGather TP"):
             quant_apply_mlp_with_moe_lora(mlp_compute_input=_make_input())
+
+
+class _ConfigRecorder:
+    """Records assignments to ``torch.npu.config`` for the FP4 cast fallback."""
+
+    assignments: list[tuple[str, object]]
+
+    def __init__(self) -> None:
+        object.__setattr__(self, "assignments", [])
+
+    def __setattr__(self, name, value):
+        if name == "assignments":
+            object.__setattr__(self, name, value)
+            return
+        object.__getattribute__(self, "assignments").append((name, value))
+
+
+def test_w4a8_mxfp_moe_lora_backend_is_registered() -> None:
+    from vllm_ascend.lora.quant_moe import _get_quant_moe_lora_impl
+
+    impl = _get_quant_moe_lora_impl(QuantType.W4A8MXFP)
+    assert impl.apply is not None
+    # Packed FP4 experts also consume unquantized (BF16/FP16) routed
+    # activations, so the shared "reject pre-quantized input" guard applies.
+    assert impl.validate_activation_input is not None
+    with pytest.raises(NotImplementedError):
+        impl.validate_activation_input(torch.zeros(2, dtype=torch.int8), None)
+
+
+def test_packed_fp4_format_cast_retries_without_internal_format() -> None:
+    from vllm_ascend.quantization.nz import fp4_packed_nz
+
+    seen = []
+    tensor = torch.zeros(4)
+
+    def fake_cast(input_tensor, fmt, **kwargs):
+        seen.append(torch.npu.config.assignments[-1][1] if torch.npu.config.assignments else True)
+        if len(seen) == 1:
+            raise RuntimeError("aclnnNpuFormatCast not support recovery format")
+        return input_tensor
+
+    recorder = _ConfigRecorder()
+    with (
+        patch.object(torch.npu, "config", recorder),
+        patch.object(torch_npu, "npu_format_cast", side_effect=fake_cast),
+    ):
+        out = fp4_packed_nz().cast(tensor)
+
+    assert out is tensor
+    assert seen == [True, False]
+    assert recorder.assignments == [
+        ("allow_internal_format", False),
+        ("allow_internal_format", True),
+    ]
+
+
+def test_packed_fp4_format_cast_propagates_unrelated_errors() -> None:
+    from vllm_ascend.quantization.nz import fp4_packed_nz
+
+    with (
+        patch.object(torch_npu, "npu_format_cast", side_effect=RuntimeError("unrelated failure")),
+        pytest.raises(RuntimeError, match="unrelated failure"),
+    ):
+        fp4_packed_nz().cast(torch.zeros(4))

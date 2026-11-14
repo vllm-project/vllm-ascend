@@ -175,6 +175,9 @@ def dsa_forward(
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     attn_metadata = forward_context.attn_metadata
+    # LoRA activation replaces the linear modules in the model tree after the
+    # impl was built; keep the impl's cached projections pointing at them.
+    self.dsa_attn.impl.sync_projection_layers(self)
 
     if attn_metadata is None:
         # Profiling run: forward() handles OTP by running _forward_o_proj on a

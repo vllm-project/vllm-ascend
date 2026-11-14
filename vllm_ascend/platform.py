@@ -78,12 +78,19 @@ else:
     FlexibleArgumentParser = None
     AscendConfig = None
 
-# Keep Breakable CUDAGraph opt-in on Ascend. Upstream may auto-enable it
-# for selected architectures when the environment variable is absent.
-value = os.environ.setdefault("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
+# Keep breakable ACL graph opt-in on Ascend, but never shadow upstream's
+# per-architecture requirement. Upstream only auto-enables
+# VLLM_USE_BREAKABLE_CUDAGRAPH when the variable is absent, and only for
+# architectures that cannot be torch.compile'd
+# (vllm/config/vllm.py: DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES, e.g.
+# DeepseekV41ForCausalLM). Forcing "0" here suppressed that auto-enable, so
+# those models captured a regular ACL graph, which replays corrupted logits
+# and NaN logprobs on Ascend. Leaving the variable unset keeps the upstream
+# policy -- opt-in for every other architecture -- while an explicit
+# VLLM_USE_BREAKABLE_CUDAGRAPH=0 still forces it off.
 logger.info_once(
-    "Breakable CUDAGraph on Ascend is opt-in; using VLLM_USE_BREAKABLE_CUDAGRAPH=%s.",
-    value,
+    "Breakable CUDAGraph on Ascend follows upstream policy (VLLM_USE_BREAKABLE_CUDAGRAPH=%s).",
+    os.environ.get("VLLM_USE_BREAKABLE_CUDAGRAPH", "unset"),
     scope="process",
 )
 
