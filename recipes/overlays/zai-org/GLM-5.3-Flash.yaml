@@ -3,7 +3,7 @@
 meta:
   hardware:
     ascend_950pr_8x: verified
-    ascend_910b: supported
+    ascend_910b: verified
 hardware_overrides:
   npu:
     extra_args:
@@ -77,6 +77,7 @@ variants:
     hardware_overrides:
       ascend_950pr_8x:
         docker_image: quay.io/ascend/vllm-ascend:nightly-main-a5
+        docker_serve_command: "vllm serve"
         install:
           pip: false
   ascend_w8a8:
@@ -125,6 +126,7 @@ variants:
     hardware_overrides:
       ascend_910b:
         docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1
+        docker_serve_command: "vllm serve"
         install:
           pip: false
 presets:
