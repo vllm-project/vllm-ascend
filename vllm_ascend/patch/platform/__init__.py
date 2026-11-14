@@ -19,6 +19,7 @@ import os
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_glm53_reasoning  # noqa
 import vllm_ascend.patch.platform.patch_kimi_k31_config  # noqa
+import vllm_ascend.patch.platform.patch_kv_cache_admission  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
 import vllm_ascend.patch.platform.patch_mamba_block_aligned_split  # noqa
 import vllm_ascend.patch.platform.patch_mla_prefill_backend  # noqa
@@ -133,3 +134,13 @@ import vllm_ascend.patch.platform.patch_example_connector  # noqa
 #    Future Plan:
 #       Remove this patch when upstream supports per-group or backend-defined
 #       prefill boundaries.
+
+# ** File: platform/patch_kv_cache_admission.py **
+# Targets SWA and chunked-local admission in SingleTypeKVCacheManager.
+# First-time admission shifts the cap past skipped prefix entries. Existing
+# requests offset the cap only with non-NULL blocks held exclusively by that
+# request; releasing shared blocks does not return capacity to the pool.
+# Uncapped allocation and full-attention managers retain upstream behavior.
+# Upstream plan: contribute physical-block accounting to vLLM and remove this
+# patch once both supported vLLM versions cover first-time and shared-block
+# admission accounting.

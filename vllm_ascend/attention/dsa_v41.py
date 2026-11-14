@@ -1343,6 +1343,7 @@ class AscendDSAV41StateMetadataBuilder(AscendDSAV41MetadataBuilder):
         return req
 
     def _build_compressor_cache(self, common, req: AscendDSAV41Metadata, **kwargs) -> None:
+        """Publish C2 ring updates and source RoPE metadata for the state cache."""
         req.c2_ring_metadata = None
         req.c2_complete_mask = None
         req.c2_source_positions = None
