@@ -13,7 +13,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import HiSpars
 from vllm.v1.hisparse.runtime import HiSparseCacheHandle
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
-from vllm_ascend.hisparse.pcp import PCPHiSparseConnector, prepare_pcp_metadata, prepare_pcp_query_metadata
+from vllm_ascend.hisparse.pcp import PCPHiSparseConnector, get_pcp_write_request_ids, prepare_pcp_query_metadata
 from vllm_ascend.patch.worker.patch_hisparse import install_pcp_cache_layout
 
 install_pcp_cache_layout()
@@ -181,7 +181,7 @@ def gathered_metadata(local_tokens=3, prefill=False):
     prepare_pcp_query_metadata(
         meta, torch.empty_like(local.idx_mapping), torch.empty(1, dtype=torch.int32), local.idx_mapping, 2
     )
-    prepare_pcp_metadata(meta, global_batch, indices, mask)
+    meta.hisparse_write_req_id_per_token = get_pcp_write_request_ids(global_batch, indices, mask)
     return meta, local, global_batch, indices, mask
 
 
@@ -191,7 +191,6 @@ def test_int64_batch_indices_follow_hisparse_int32_contract():
     prepare_pcp_query_metadata(
         meta, meta.hisparse_request_state_indices, meta.hisparse_num_valid_write_rows, local.idx_mapping, 2
     )
-    prepare_pcp_metadata(meta, batch, indices, mask)
     assert meta.hisparse_request_state_indices.dtype == torch.int32
     assert meta.hisparse_request_state_indices.device == indices.device
     assert meta.hisparse_request_state_indices.tolist() == [7, 7, 9]
@@ -276,7 +275,9 @@ def make_connector():
 def test_connector_stages_canonical_requests_and_gathered_slot_rows():
     connector, cache, meta, local, global_batch, manager = make_connector()
     scheduler = NS(kv_connector_metadata=object(), has_sync_kv_loads=True)
-    connector.pre_forward(scheduler, local, {"layer0": meta, "layer1": meta})
+    other = NS()
+    connector.pre_forward(scheduler, local, {"layer0": meta, "layer1": other, "layer2": meta})
+    assert other.hisparse_write_req_id_per_token is meta.hisparse_write_req_id_per_token
     args = connector._pending_load_kwargs
     assert args["request_state_indices"] is global_batch.idx_mapping
     assert args["request_ids"] == ["A", "B"]
@@ -551,7 +552,9 @@ def test_real_pcp_layout_maps_each_global_write_once(monkeypatch, lengths, prefi
     )
     meta = metadata(counts[0], decode=not any(prefills))
     local = NS(idx_mapping=torch.tensor([s.global_batch_req_idx for s in segments[0]], dtype=torch.int32))
-    prepare_pcp_metadata(meta, batch, manager._padded_gather_idx, manager._gathered_kv_write_mask)
+    meta.hisparse_write_req_id_per_token = get_pcp_write_request_ids(
+        batch, manager._padded_gather_idx, manager._gathered_kv_write_mask
+    )
     mask = manager._gathered_kv_write_mask
     indices = manager._padded_gather_idx
     assert sorted(indices[mask].tolist()) == list(range(int(sum(lens))))
