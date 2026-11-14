@@ -27,12 +27,16 @@ extern "C" __global__ __aicore__ void hi_sparse_resolve_residency(
     GET_TILING_DATA(tilingData, tiling);
     (void)workspace;
 
-    // Reserve the SIMT shared region in the compiled kernel. ACLNN does not
-    // supply the dynamic UB size carried by the direct launch configuration.
+    // Allocate the SIMT scratch dynamically through the standard UB interface;
+    // the tiling stage derives the byte budget from GetCoreMemSize. The
+    // descriptor sits at the low end of the allocation and the scratch area
+    // follows it, so the highest accessed byte stays within the buffer.
     using vllm_ascend::hisparse::kResolverDescriptorBytes;
-    using vllm_ascend::hisparse::kResolverUbBytes;
-    __ubuf__ int32_t scratch[kResolverUbBytes / sizeof(int32_t)];
-    auto descriptor = (__ubuf__ uint64_t*)(scratch + (tilingData.ubBytes - kResolverDescriptorBytes) / sizeof(int32_t));
+    AscendC::TPipe resolverPipe;
+    AscendC::TBuf<AscendC::TPosition::VECCALC> scratchBuf;
+    resolverPipe.InitBuffer(scratchBuf, tilingData.ubBytes);
+    auto descriptor = (__ubuf__ uint64_t*)scratchBuf.Get<int32_t>().GetPhyAddr();
+    auto scratch = (__ubuf__ int32_t*)(descriptor + kResolverDescriptorBytes / sizeof(uint64_t));
     descriptor[0] = reinterpret_cast<uintptr_t>(logical);
     descriptor[1] = reinterpret_cast<uintptr_t>(requests);
     descriptor[2] = reinterpret_cast<uintptr_t>(states);

@@ -2,6 +2,8 @@
 #include "hi_sparse_resolve_residency_tiling.h"
 #include "register/op_impl_registry.h"
 #include "log/log.h"
+#include "tiling/platform/platform_ascendc.h"
+#include <algorithm>
 #include "../op_kernel/resolver_scratch.h"
 
 namespace optiling {
@@ -93,9 +95,22 @@ ge::graphStatus TileHiSparseResolveResidency(gert::TilingContext* context) {
     OP_CHECK_IF(*hotBlockSize <= 0 || *attentionBlockStride < *hotBlockSize,
                 OP_LOGE(context->GetNodeName(), "invalid hot/attention block strides."),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(resolver_scratch_bytes(hot, *unionRows + 1) > kResolverUbBytes,
+    fe::PlatFormInfos* platformInfoPtr = context->GetPlatformInfo();
+    OP_CHECK_IF(platformInfoPtr == nullptr,
+                OP_LOGE(context->GetNodeName(), "PlatformInfo is null."),
+                return ge::GRAPH_FAILED);
+    auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
+    uint64_t platformUbBytes = 0;
+    ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, platformUbBytes);
+    // SIMT dynamic UB = platform UB minus the DCache reservation; declared to
+    // the runtime through SetLocalMemorySize below.
+    const uint64_t ubBudget = resolver_simt_ub_budget(platformUbBytes);
+    OP_CHECK_IF(ubBudget == 0,
+                OP_LOGE(context->GetNodeName(), "platform UB does not cover the SIMT DCache reserve."),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(resolver_scratch_bytes(hot, *unionRows + 1) > ubBudget,
                 OP_LOGE(context->GetNodeName(),
-                        "HiSparse scratch requirement exceeds the compiled UB budget; "
+                        "HiSparse scratch requirement exceeds the platform UB budget; "
                         "lower device_buffer_size or speculative tokens."),
                 return ge::GRAPH_FAILED);
 
@@ -171,7 +186,11 @@ ge::graphStatus TileHiSparseResolveResidency(gert::TilingContext* context) {
                 OP_LOGE(context->GetNodeName(), "failed to query tiling or workspace."),
                 return ge::GRAPH_FAILED);
 
-    const uint64_t hashSize = resolver_hash_capacity(hot, *unionRows);
+    const uint64_t hashSize = resolver_hash_capacity(hot, *unionRows, ubBudget);
+    const uint32_t ubBytes = static_cast<uint32_t>(resolver_scratch_bytes(hot, hashSize));
+    OP_CHECK_IF(context->SetLocalMemorySize(ubBytes) != ge::GRAPH_SUCCESS,
+                OP_LOGE(context->GetNodeName(), "failed to declare SIMT local memory of %u bytes.", ubBytes),
+                return ge::GRAPH_FAILED);
     tiling.set_rows(rows);
     tiling.set_topk(topk);
     tiling.set_hotSlots(hot);
@@ -182,7 +201,7 @@ ge::graphStatus TileHiSparseResolveResidency(gert::TilingContext* context) {
     tiling.set_residentRows(resident ? resident->GetOriginShape().GetDim(0) : 0);
     tiling.set_residentColumns(resident ? resident->GetOriginShape().GetDim(1) : 0);
     tiling.set_hashSize(hashSize);
-    tiling.set_ubBytes(static_cast<uint32_t>(resolver_scratch_bytes(hot, hashSize)));
+    tiling.set_ubBytes(ubBytes);
 
     tiling.set_hostRows(*hostRows);
     tiling.set_hotBlockSize(*hotBlockSize);

@@ -13,10 +13,10 @@ inline void validate_resolver_scratch(int64_t hot, int64_t union_rows)
     TORCH_CHECK(union_rows > 0 && union_rows <= hot && hot <= 32768,
                 "HiSparse union must fit the hot cache and int16 LRU slots");
     const uint64_t minimum_bytes = resolver_scratch_bytes(hot, union_rows + 1);
-    TORCH_CHECK(minimum_bytes <= kResolverUbBytes,
+    TORCH_CHECK(minimum_bytes <= kResolverMaxSimtUbBytes,
                 "HiSparse hot_size=", hot, ", max_union_rows=", union_rows,
                 " needs at least ", minimum_bytes,
-                " UB bytes; the compiled target allows ", kResolverUbBytes,
+                " UB bytes; the target SIMT UB budget allows ", kResolverMaxSimtUbBytes,
                 ". Lower device_buffer_size or speculative tokens.");
 }
 
