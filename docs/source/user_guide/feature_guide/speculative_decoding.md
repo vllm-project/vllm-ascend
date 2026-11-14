@@ -954,43 +954,42 @@ Removing `--use-replayssm` selects the native KDA path.
 Kimi K3 and K3.1 can use the Ascend KDA RecoverSSM path with DSpark speculative
 decoding. It keeps one recurrent checkpoint per request and writes compact,
 request-indexed verification records, then reconstructs the accepted state
-after sampling. The default remains the existing KDA path.
+after sampling. RecoverSSM is disabled by default.
 
-For a compatible DSpark draft model, enable Model Runner V2 and add the
-RecoverSSM options to the model's serving configuration. Replace the paths
-and choose tensor parallelism, quantization, and memory settings for the
-checkpoint and hardware:
+Add the following options to your existing Kimi serving command, replacing the
+draft-model path. Keep the parallelism, quantization, KV-cache dtype and memory
+settings appropriate for the model and devices:
 
 ```shell
-export VLLM_USE_V2_MODEL_RUNNER=1
-vllm serve /path/to/kimi-target \
-  --tensor-parallel-size 8 \
-  --use-replayssm \
-  --enable-prefix-caching \
-  --mamba-cache-mode align \
-  --speculative-config '{"method": "dspark", "model": "/path/to/dspark", "num_speculative_tokens": 3}'
+--use-replayssm \
+--speculative-config '{"method": "dspark", "model": "/path/to/dspark", "num_speculative_tokens": 3}'
 ```
 
-Prefix caching is supported with Mamba cache mode `align` for colocated serving;
-without prefix caching, use mode `none`. PP, PCP and DCP must each be 1, and
-adaptive verification and stochastic rounding are unsupported.
+Requirements:
+
+- Model Runner V2 and a compatible DSpark draft model are required.
+- With prefix caching, use `--enable-prefix-caching --mamba-cache-mode align`;
+  without prefix caching, use `--mamba-cache-mode none`.
+- PP, PCP and DCP must each be 1. Adaptive verification and stochastic rounding
+  are unsupported.
 
 For experimental prefill/decode separation, use `MooncakeConnectorV2` or
 `MooncakePullConnector` and enable `--use-replayssm` on both Prefill and Decode.
-Use Mamba cache mode `align` when prefix caching is enabled and `none` when it
-is disabled. Both sides must use the same integration version, model and weights,
+Both sides must use the same integration version, model and weights,
 TP size, prefix-caching configuration, speculative method and window, persistent
 state dtypes and SD convolution layout. Set `VLLM_SSM_CONV_STATE_LAYOUT=SD` on
 both sides. Kimi RecoverSSM rejects a local DS layout when P/D is enabled, but
 the connector does not validate the peer's convolution layout or all other peer
-settings. The deployment must align both sides. The P/D prefix-caching
-combination has not yet been validated for production; verify correctness on the
-intended workload.
+settings. The deployment must align both sides.
 
-This integration is experimental. Validate eager and graph execution, model
-accuracy, acceptance rates, memory and performance on the actual Ascend
-hardware and checkpoints before deploying it. Removing `--use-replayssm`
-selects the existing KDA path.
+!!! warning
+
+    This feature is experimental. End-to-end P/D output equivalence remains
+    unverified, including when prefix caching is enabled. Validate eager and
+    graph execution, model accuracy, acceptance rates, memory and performance on
+    the intended Ascend hardware and checkpoints before use.
+
+Removing `--use-replayssm` selects the existing KDA path.
 
 ## Synthetic Rejection Sampling
 

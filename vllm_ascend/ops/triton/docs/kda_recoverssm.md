@@ -162,6 +162,9 @@ for single-layer calls; it does not introduce a layer-count constexpr.
   absent or all be supplied. Low-level align can additionally write a boundary
   checkpoint/history; full align commit is not covered by the GLM `none`-mode
   serving validation. Compact's align copy path has separate exact-copy tests.
+  In `align` mode, the final checkpoint is written to the page containing the
+  last accepted token. If that token ends exactly at a page boundary, commit
+  writes the current page even when the next page has not been allocated.
 - Normalization and nonlinear arithmetic operate on FP32 values after existing
   load-time conversions. Output is stored in the activation dtype; checkpoints
   retain their storage dtype. This does not change caller tensor dtype/layout.
@@ -251,6 +254,22 @@ Pool-stride cases retain the recorded strides with B+2 pages and independent
 per-layer allocations; they do not reproduce every shared-pool address alias.
 The criteria themselves test the 99% boundary and independently failing the
 ratio or maximum-error gate.
+The request-indexed regression
+`test_request_records_recover_permuted_pages_and_sampler_rows` permutes physical
+cache pages and sampler rows independently of speculative request rows. It
+checks that verify and commit use the same request's scratch records, including
+rejected suffixes filled with NaNs, null pages, and eager/graph execution.
+`test_multilayer_paged_commit_maps_sampler_rows_and_compacts_conv` additionally
+checks sampler-row mapping and convolution compaction across layers.
+
+On A5, 44 selected operator cases passed for PR revision `58f28bc`, including
+the request-indexed page/sampler-row regressions. The later exact-boundary fix
+was tested on A5 with the working tree subsequently committed as `d2a511455`:
+10 `test_align_context` cases selected by `fp32_small` and two selected by
+`exact and fp32_model` passed. A separate two-case `exact and fp32_small` run
+passed and overlaps the 10-case selection. These results do not establish that
+the complete operator suite passed at the current PR head. The earlier A3/A5
+results below remain tied to their stated source revisions and hashes.
 Window regressions explicitly check the selected ordinary/grouped path for
 Q1/Q2/Q4/Q6/Q8, both local head counts and eager/graph execution, with additional
 FP16 and unbounded-gate cases. This prevents a fixed-window fallback from masking
