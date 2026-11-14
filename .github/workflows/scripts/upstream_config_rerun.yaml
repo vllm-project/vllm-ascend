@@ -1,0 +1,25 @@
+e2e-upstream_pr:
+  - name: tests/v1/worker/test_mamba_utils.py
+    estimated_time: 20
+e2e-upstream_singlecard:
+  - name: tests/v1/e2e/test_replayssm_decode.py
+    estimated_time: 20
+  - name: tests/models/multimodal/processing/test_qwen3_omni.py
+    estimated_time: 20
+  - name: tests/entrypoints/launchers/test_run_batch.py
+    estimated_time: 20
+  - name: tests/v1/spec_decode/test_dflash_prepare_inputs.py
+    estimated_time: 20
+  - name: tests/v1/worker/test_gpu_warmup_blocks.py
+    estimated_time: 20
+  - name: tests/v1/worker/test_gpu_warmup_blocks.py
+    estimated_time: 20
+e2e-upstream_online_1:
+  - name: tests/model_executor/model_loader/runai_streamer_loader/test_runai_model_streamer_s3.py
+    estimated_time: 20
+e2e-upstream_a2_2:
+  - name: tests/v1/distributed/test_async_llm_dp.py
+    estimated_time: 20
+e2e-upstream_a2_4:
+  - name: tests/v1/distributed/test_hybrid_lb_dp.py
+    estimated_time: 20
