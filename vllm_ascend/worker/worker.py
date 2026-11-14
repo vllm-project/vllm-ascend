@@ -1215,18 +1215,6 @@ class NPUWorker(WorkerBase):
             return {(pp_rank, pcp_rank, tp_rank): metadata}
         return {(pp_rank, tp_rank): metadata}
 
-    def get_simple_cpu_offload_num_cpu_blocks(self) -> int | None:
-        from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (  # noqa: E501
-            _find_simple_cpu_offload_connector,
-        )
-
-        if not has_kv_transfer_group():
-            return None
-        connector = _find_simple_cpu_offload_connector(get_kv_transfer_group())
-        if connector is None:
-            return None
-        return connector.get_aligned_num_cpu_blocks()
-
     def _get_layerwise_kv_cache_memory_info(
         self,
         kv_cache_spec: dict[str, KVCacheSpec],

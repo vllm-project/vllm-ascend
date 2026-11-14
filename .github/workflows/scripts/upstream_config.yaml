@@ -846,8 +846,6 @@ e2e-upstream_singlecard:
     estimated_time: 20
   - name: tests/v1/executor/test_vllm_net_devices.py
     estimated_time: 20
-  - name: tests/v1/kv_connector/unit/test_nixl_simple_cpu_offload.py
-    estimated_time: 20
   - name: tests/v1/kv_connector/unit/test_transfer_topology_sharded.py
     estimated_time: 20
   - name: tests/v1/kv_connector/unit/test_hma_auto_config.py
@@ -1323,8 +1321,6 @@ e2e-upstream_singlecard:
   - name: tests/v1/sample/test_thinking_budget_state.py
     estimated_time: 20
   - name: tests/v1/sample/test_trace_replay_params.py
-    estimated_time: 20
-  - name: tests/v1/simple_kv_offload/test_hip_mem_ops.py
     estimated_time: 20
   - name: tests/v1/spec_decode/test_adaptive_verification.py
     estimated_time: 20
