@@ -25,8 +25,8 @@ hit-token count, token identity against the cold output and an R4
 disjoint-prompt miss), and performance (TTFT-proxy sampling on the
 repeatedly-hit prefix). The A/B comparison asserts that the pooled leg
 reproduces the control leg's tokens exactly and stays within the per-tier
-performance gates calibrated on A2 (see ``TIER_TTFT_LIMITS`` /
-``TIER_THROUGHPUT_LIMITS``).
+performance gates calibrated on A2 (see ``TTFT_LIMITS`` /
+``THROUGHPUT_LIMITS``).
 
 The tier-3 scenarios arm the SSD storage tier but keep it eviction-free
 (deliberately, see the tier sizing comment below): the pool DRAM tier holds the
@@ -132,19 +132,29 @@ AB_MODE = os.environ.get("KV_POOL_AB_MODE", "gate")
 # maintainer's direction. The version is printed per case for diagnostics,
 # and the SSD offload + prefetch below only activates on builds exposing
 # ExistOptions (mooncake >= 0.3.14, Mooncake PR 4272).
-# Performance gates are per storage tier and calibrated on A2 (Qwen3.8-27B
-# W8A8, TP2): against the local prefix-cache control leg the pooled leg
-# transfers ~1GB per request through the pool, which costs 5-25% TTFT and
-# 4-17% throughput (observed p50/p95 ratios across repeated runs on the
-# shared machine: 1.05x-1.23x TTFT, 0.83x-0.96x throughput). The gates keep
-# headroom for that inherent cost plus shared-machine noise while still
-# failing catastrophic regressions (a full re-prefill miss runs ~12x slower
-# and ~0.1x throughput). The tier-3 layerwise path is intrinsically slower
-# (streamed per-layer loads, observed 0.42x-0.46x throughput for memcache)
-# so it only gates catastrophic regressions. Both limits stay overridable
-# via TIER_TTFT_LIMITS / TIER_THROUGHPUT_LIMITS edits for recalibration.
-TIER_TTFT_LIMITS = {"tier2": 1.35, "tier3": 3.0}
-TIER_THROUGHPUT_LIMITS = {"tier2": 0.75, "tier3": 0.30}
+# Performance gates per scenario, calibrated on A2 (Qwen3.8-27B W8A8, TP2)
+# against the local prefix-cache control leg:
+#
+#   scenario                  observed TTFT    observed throughput
+#   mooncake_bulk_tier2        1.06-1.16x       0.86-0.94x
+#   mooncake_layerwise_tier3  1.12-1.18x       0.85-0.88x
+#   memcache_bulk_tier2        1.06-1.15x       0.86-0.92x
+#   memcache_layerwise_tier3   1.17-1.19x       0.36-0.47x
+#
+# The first three scenarios cluster tightly: the pool transfer is their only
+# cost and the mooncake layerwise streaming does not hurt its throughput on
+# A2, so they share the default gate (across repeated runs on the shared
+# machine the cluster's noise band reaches 1.23x TTFT / 0.83x throughput, so
+# 1.35/0.75 keeps ~10% headroom while still failing catastrophic
+# regressions; a full re-prefill miss runs ~12x slower and ~0.1x
+# throughput). memcache layerwise is the sole outlier - its streamed
+# per-layer loads cost more than half the throughput - so it carries its own
+# gate; the TTFT bound stays at 1.6 (the worst observed 1.19x leaves 34%
+# headroom) because the per-layer streaming shows real latency variance.
+# Both dicts stay editable for recalibration; recalibrate with CI medians
+# once available.
+TTFT_LIMITS = {"default": 1.35, "memcache_layerwise_tier3": 1.6}
+THROUGHPUT_LIMITS = {"default": 0.75, "memcache_layerwise_tier3": 0.30}
 MEMCACHE_UBSIO_DISK = os.environ.get("KV_POOL_MEMCACHE_UBSIO_DISK", "/dev/ubsio0")
 MEMCACHE_UBSIO_DEVICES = int(os.environ.get("KV_POOL_MEMCACHE_UBSIO_DEVICES", TP_SIZE))
 
@@ -588,8 +598,9 @@ def test_qwen38_kv_pool_ab_a2(backend: str, use_layerwise: bool):
         b_p50, b_p95, b_throughput = _phase_perf(runner, b_state["prompt_a"], f"{case}-B")
 
     token_identical = a_state["hit"] == b_state["hit"]
-    ttft_limit = TIER_TTFT_LIMITS["tier3" if tier_ssd else "tier2"]
-    throughput_limit = TIER_THROUGHPUT_LIMITS["tier3" if tier_ssd else "tier2"]
+    scenario = f"{backend}_{'layerwise' if use_layerwise else 'bulk'}_{'tier3' if tier_ssd else 'tier2'}"
+    ttft_limit = TTFT_LIMITS.get(scenario, TTFT_LIMITS["default"])
+    throughput_limit = THROUGHPUT_LIMITS.get(scenario, THROUGHPUT_LIMITS["default"])
     perf_ok = (
         a_p50 <= b_p50 * ttft_limit and a_p95 <= b_p95 * ttft_limit and a_throughput >= b_throughput * throughput_limit
     )
