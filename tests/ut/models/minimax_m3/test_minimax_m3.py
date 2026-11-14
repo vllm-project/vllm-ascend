@@ -468,6 +468,49 @@ class TestMiniMaxM3Modeling(unittest.TestCase):
 
         self.assertEqual(_sparse_attention_layer_ids(config), {1, 3})
 
+    def test_decoder_uses_transformers_layer_types(self) -> None:
+        config = PretrainedConfig(
+            hidden_size=16,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            rotary_dim=4,
+            rms_norm_eps=1e-6,
+            dense_intermediate_size=32,
+            mlp_layer_types=["dense", "sparse"],
+            layer_types=["full_attention", "minimax_m3_sparse"],
+            index_n_heads=4,
+            index_head_dim=8,
+            index_topk_blocks=16,
+            index_block_size=128,
+            index_local_blocks=1,
+        )
+        module = MiniMaxM3DecoderLayer.__module__
+        with (
+            patch(f"{module}.MiniMaxM3Attention") as attention,
+            patch(f"{module}.MiniMaxM3SparseAttention") as sparse_attention,
+            patch(f"{module}.MiniMaxM3MLP") as mlp,
+            patch(f"{module}.MiniMaxM3MoE") as moe,
+        ):
+            for layer_id in range(2):
+                layer = MiniMaxM3DecoderLayer(
+                    config=config,
+                    prefix=f"model.layers.{layer_id}",
+                    model_config=Mock(),
+                    cache_config=None,
+                    quant_config=None,
+                    parallel_config=SimpleNamespace(use_sequence_parallel_moe=False),
+                )
+                self.assertEqual(layer.is_layer_sparse, layer_id == 1)
+
+        attention.assert_called_once()
+        sparse_attention.assert_called_once()
+        mlp.assert_called_once()
+        moe.assert_called_once()
+        self.assertEqual(mlp.call_args.kwargs["prefix"], "model.layers.0.mlp")
+        self.assertEqual(moe.call_args.kwargs["prefix"], "model.layers.1.block_sparse_moe")
+        self.assertTrue(sparse_attention.call_args.kwargs["disable_index_value"])
+        self.assertEqual(sparse_attention.call_args.kwargs["sparse_cfg"]["sparse_index_dim"], 8)
+
     def test_rope_parameters_are_copied_from_config(self) -> None:
         config = PretrainedConfig(
             rope_parameters={

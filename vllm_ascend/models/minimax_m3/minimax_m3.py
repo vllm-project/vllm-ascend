@@ -590,7 +590,11 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
 def _sparse_attention_layer_ids(config: PretrainedConfig) -> set[int]:
     cfg = getattr(config, "sparse_attention_config", None)
     if not cfg:
-        return set()
+        return {
+            i
+            for i, layer_type in enumerate(getattr(config, "layer_types", None) or ())
+            if layer_type == "minimax_m3_sparse"
+        }
     freq = cfg.get("sparse_attention_freq")
     if freq is None:
         return set()
@@ -700,7 +704,9 @@ class MiniMaxM3MLP(nn.Module):
             reduce_results=False if is_sequence_parallel else reduce_results,
             prefix=f"{prefix}.down_proj",
         )
-        if hidden_act == "swigluoai":
+        # Transformers uses silu for the pointwise fallback. The model's
+        # gate/up projection still uses the SwiGLU-OAI clamp and scale.
+        if hidden_act == "swigluoai" or (hidden_act == "silu" and getattr(config, "mlp_layer_types", None) is not None):
             use_mx_quant = (
                 get_ascend_device_type() == AscendDeviceType.A5
                 and _is_w8a8_mxfp8_linear(self.gate_up_proj)
@@ -984,20 +990,17 @@ class MiniMaxM3DecoderLayer(nn.Module):
         # rest of sglang -- ``OperationsStrategy``, ``LayerScatterModes``,
         # ``LayerCommunicator``, ``gpt_oss``, ``falcon_h1`` etc all access
         # ``layer.is_layer_sparse``.
-        self.is_layer_sparse = moe_layer_freq[layer_idx] != 0 if moe_layer_freq is not None else True
+        mlp_layer_types = getattr(config, "mlp_layer_types", None)
+        if mlp_layer_types is not None:
+            self.is_layer_sparse = mlp_layer_types[layer_idx] == "sparse"
+        else:
+            self.is_layer_sparse = moe_layer_freq is None or moe_layer_freq[layer_idx] != 0
         # Keep both dense and MoE layers sequence-sharded. Dense MLPs gather
         # around their TP-sharded weights; MoE layers use the SP-aware runner.
         # Pipeline stages close the SP region before handing tensors onward.
         self.use_sequence_parallel = parallel_config.use_sequence_parallel_moe
 
         sparse_attention_config = getattr(config, "sparse_attention_config", None)
-
-        if sparse_attention_config is not None:
-            is_sparse_attention_layer = layer_idx in _sparse_attention_layer_ids(config)
-            disable_index_value = sparse_attention_config["sparse_disable_index_value"][layer_idx] == 1
-        else:
-            is_sparse_attention_layer = False
-            disable_index_value = False
 
         attn_kwargs = dict(
             hidden_size=self.hidden_size,
@@ -1014,7 +1017,19 @@ class MiniMaxM3DecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
             reduce_results=not self.use_sequence_parallel,
         )
-        if is_sparse_attention_layer:
+        if layer_idx in _sparse_attention_layer_ids(config):
+            if sparse_attention_config is None:
+                sparse_attention_config = {
+                    "sparse_num_index_heads": config.index_n_heads,
+                    "sparse_index_dim": config.index_head_dim,
+                    "sparse_topk_blocks": config.index_topk_blocks,
+                    "sparse_block_size": config.index_block_size,
+                    "sparse_local_block": config.index_local_blocks,
+                }
+                # The Transformers schema only supports index Q/K projections.
+                disable_index_value = True
+            else:
+                disable_index_value = sparse_attention_config["sparse_disable_index_value"][layer_idx] == 1
             self.self_attn = MiniMaxM3SparseAttention(
                 **attn_kwargs,
                 sparse_cfg=sparse_attention_config,
