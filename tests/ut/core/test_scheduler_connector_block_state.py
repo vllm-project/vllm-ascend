@@ -22,13 +22,12 @@ from vllm_ascend.core.recompute_scheduler import (
     DyntraLBRecomputeScheduler,
     RecomputeScheduler,
 )
-from vllm_ascend.core.scheduler_profiling_chunk import ProfilingChunkAsyncScheduler, ProfilingChunkScheduler
 from vllm_ascend.patch.platform.patch_balance_schedule import BalanceScheduler
 
 
 @pytest.mark.parametrize(
     "scheduler_cls",
-    [DyntraLBScheduler, AsyncDyntraLBScheduler, BalanceScheduler, ProfilingChunkScheduler],
+    [DyntraLBScheduler, AsyncDyntraLBScheduler, BalanceScheduler],
 )
 @pytest.mark.parametrize("with_connector", [False, True])
 def test_boundary_state_is_drained_consumed_and_not_dispatched(monkeypatch, scheduler_cls, with_connector):
@@ -94,8 +93,6 @@ def test_boundary_state_is_drained_consumed_and_not_dispatched(monkeypatch, sche
         AsyncRecomputeScheduler,
         DyntraLBRecomputeScheduler,
         AsyncDyntraLBRecomputeScheduler,
-        ProfilingChunkScheduler,
-        ProfilingChunkAsyncScheduler,
     ],
 )
 @pytest.mark.parametrize("loaded_groups", [(), (0,), (0, 1)])

@@ -40,7 +40,6 @@ from vllm_ascend.ascend_config import (
     EplbConfig,
     FinegrainedTPConfig,
     KVPPConfig,
-    ProfilingChunkConfig,
     QuantizedAllReduceConfig,
     RejectionSamplerConfig,
     RlConfig,
@@ -651,7 +650,6 @@ class TestAscendConfig(TestBase):
                 "enable_balance_scheduling": True,
                 "recompute_scheduler_enable": True,
                 "short_request_first_config": {"enabled": True, "threshold": 512},
-                "profiling_chunk_config": {"enabled": False},
             }
         }
 
@@ -661,7 +659,6 @@ class TestAscendConfig(TestBase):
         self.assertTrue(scheduler_config.recompute_scheduler_enable)
         self.assertTrue(scheduler_config.short_request_first_config.enabled)
         self.assertEqual(scheduler_config.short_request_first_config.threshold, 512)
-        self.assertFalse(scheduler_config.profiling_chunk_config.enabled)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -670,7 +667,6 @@ class TestAscendConfig(TestBase):
         test_vllm_config.additional_config = {
             "recompute_scheduler_enable": "false",
             "short_request_first_config": {"enabled": "true", "threshold": "512"},
-            "profiling_chunk_config": {"enabled": "false"},
             "batch_job_sched_config": {"enabled": "false"},
         }
 
@@ -679,7 +675,6 @@ class TestAscendConfig(TestBase):
         self.assertFalse(scheduler_config.recompute_scheduler_enable)
         self.assertTrue(scheduler_config.short_request_first_config.enabled)
         self.assertEqual(scheduler_config.short_request_first_config.threshold, 512)
-        self.assertFalse(scheduler_config.profiling_chunk_config.enabled)
         self.assertFalse(scheduler_config.batch_job_sched_config.enabled)
 
     @_clean_up_ascend_config
@@ -1248,7 +1243,6 @@ class TestSchedulerConfig(TestBase):
         self.assertFalse(config.enable_balance_scheduling)
         self.assertFalse(config.recompute_scheduler_enable)
         self.assertFalse(config.short_request_first_config.enabled)
-        self.assertFalse(config.profiling_chunk_config.enabled)
         self.assertFalse(hasattr(config, "_additional_config"))
         self.assertFalse(hasattr(config, "_balance_env_value"))
 
@@ -1271,12 +1265,6 @@ class TestSchedulerConfig(TestBase):
     def test_unknown_nested_scheduler_key_is_rejected(self):
         with self.assertRaises(ValueError):
             SchedulerConfig.from_additional_config({"scheduler_config": {"unknown_option": {"enabled": True}}})
-
-    def test_unknown_profiling_chunk_key_is_rejected(self):
-        with self.assertRaises(ValueError):
-            SchedulerConfig.from_additional_config(
-                {"scheduler_config": {"profiling_chunk_config": {"unknown_option": False}}}
-            )
 
     def test_unknown_batch_job_key_is_rejected(self):
         with self.assertRaises(ValueError):
@@ -1306,7 +1294,6 @@ class TestSchedulerConfig(TestBase):
                         "threshold": 512,
                         "long_max_wait_ms": 2000,
                     },
-                    "profiling_chunk_config": {"enabled": True, "need_timing": False},
                 }
             },
         )
@@ -1316,8 +1303,6 @@ class TestSchedulerConfig(TestBase):
         self.assertTrue(config.short_request_first_config.enabled)
         self.assertEqual(config.short_request_first_config.threshold, 512)
         self.assertEqual(config.short_request_first_config.long_max_wait_ms, 2000.0)
-        self.assertTrue(config.profiling_chunk_config.enabled)
-        self.assertFalse(config.profiling_chunk_config.need_timing)
 
     @patch("vllm_ascend.ascend_config.logger.warning_once")
     def test_legacy_top_level_config_warns_and_remains_supported(self, mock_warning_once):
@@ -1326,15 +1311,13 @@ class TestSchedulerConfig(TestBase):
                 "enable_balance_scheduling": True,
                 "recompute_scheduler_enable": True,
                 "short_request_first_config": {"enabled": True},
-                "profiling_chunk_config": {"enabled": True},
             },
         )
 
         self.assertTrue(config.enable_balance_scheduling)
         self.assertTrue(config.recompute_scheduler_enable)
         self.assertTrue(config.short_request_first_config.enabled)
-        self.assertTrue(config.profiling_chunk_config.enabled)
-        self.assertEqual(mock_warning_once.call_count, 4)
+        self.assertEqual(mock_warning_once.call_count, 3)
 
     @patch("vllm_ascend.ascend_config.logger.warning_once")
     def test_nested_config_wins_and_legacy_fields_fill_missing_values(self, mock_warning_once):
@@ -1384,14 +1367,6 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         self.assertFalse(cfg.enable_npugraph_ex)
         with self.assertRaises(ValueError):
             AscendCompilationConfig(unknown_key=1)
-
-    def test_profiling_chunk_config_int_lax_and_range(self):
-        # int string "2" coerces to 2 (fixes "2"==2 silent failure)
-        cfg = ProfilingChunkConfig(min_chunk="4096", max_fit_chunk="30")
-        self.assertEqual(cfg.min_chunk, 4096)
-        # range check preserved
-        with self.assertRaises(ValueError):
-            ProfilingChunkConfig(smooth_factor=1.5)
 
     def test_short_request_first_config_unknown_key_forbidden(self):
         # Was hand-written unknown-key check; now extra="forbid".

@@ -166,26 +166,15 @@ removed. They no longer take effect.
 
 **scheduler_config**
 
-The legacy top-level `enable_balance_scheduling`, `recompute_scheduler_enable`, `short_request_first_config`, and `profiling_chunk_config` keys remain supported during the migration period, but are deprecated. If both formats provide the same field, the value in `scheduler_config` takes precedence.
+The legacy top-level `enable_balance_scheduling`, `recompute_scheduler_enable`, `short_request_first_config` keys remain supported during the migration period, but are deprecated. If both formats provide the same field, the value in `scheduler_config` takes precedence.
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `enable_balance_scheduling` | bool | `False` | Whether to enable balance scheduling. The legacy `VLLM_ASCEND_BALANCE_SCHEDULING` environment variable is no longer supported. |
 | `recompute_scheduler_enable` | bool | `False` | Whether to enable the recompute scheduler. **Only valid on PD-disaggregated D nodes** (`kv_role` is `kv_consumer`). **Do not enable on P nodes or in PD-mixed mode** (no `kv_transfer_config`, `kv_role` is `kv_producer`, or `kv_role` is `kv_both`); startup will fail with a clear error. |
-| `profiling_chunk_config` | dict | `{}` | Configuration options for dynamic chunked pipeline parallel. See [Dynamic Chunked Pipeline Parallel](../feature_guide/dynamic_chunk_pipeline_parallel.md) for details. |
 | `short_request_first_config` | dict | `{}` | Configuration options for ShortRequestFirst prefill scheduling on FCFS synchronous or asynchronous, PD-prefill (P), or PD-mixed nodes. |
 | `batch_job_sched_config` | dict | `{}` | Configuration options for the batch-job-aware scheduler. See [Batch-Job-Aware Scheduler](../feature_guide/batch_job_aware_scheduler.md) for details. |
 | `dyntra_lb_config` | dict | `{}` | Configuration options for DyntraLB load balancing on PD-disaggregated decode nodes. |
-
-**scheduler_config.profiling_chunk_config**
-
-| Name | Type | Default | Description |
-| ---- | ---- | ------- | ----------- |
-| `enabled`       | bool  | `False` | Whether to enable dynamic chunked pipeline parallel. Requires `pipeline-parallel-size > 1`. |
-| `smooth_factor` | float | `1.0`   | Smoothing factor (0 < x ≤ 1.0). Higher values trust the dynamic prediction more. To disable CPP and return to normal fixed chunking, set `enabled` to `false`. |
-| `min_chunk`     | int   | `4096`  | Minimum chunk size for dynamic calculation. Should be smaller than `max-num-batched-tokens`. |
-| `need_timing` | bool | True | Enable/disable Online Calibration |
-| `max_fit_chunk` | int | 30 | Number of chunk-time data for Online Calibration |
 
 **scheduler_config.dyntra_lb_config**
 

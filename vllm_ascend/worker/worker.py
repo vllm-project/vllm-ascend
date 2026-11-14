@@ -87,9 +87,6 @@ from vllm_ascend.core.kv_cache_placement import (
     create_kvpp_cache_allocation_plan,
     register_kvpp_draft_layers,
 )
-from vllm_ascend.core.profiling_chunk_predictor import (
-    _attach_profiling_chunk_execution_time,
-)
 from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device_allocator.camem import CaMemAllocator
@@ -939,11 +936,6 @@ class NPUWorker(WorkerBase):
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         output = self.model_runner.sample_tokens(grammar_output)
-        _attach_profiling_chunk_execution_time(
-            self.model_runner.ascend_config.scheduler_config.profiling_chunk_config,
-            self.model_runner,
-            output,
-        )
         return output
 
     def load_model(self) -> None:
@@ -1131,68 +1123,6 @@ class NPUWorker(WorkerBase):
                 "reset weights can only be restored via checkpoint reload (reload_weights)."
             )
         zero_weights(self._weight_checksum_model())
-
-    @torch.inference_mode()
-    def profile_prefill_latency(self, num_tokens: int) -> float:
-        """
-        Profile prefill latency for a given number of tokens.
-
-        This runs a real model forward pass and measures the execution time.
-        Used for profiling-based dynamic chunk sizing.
-
-        In PP (Pipeline Parallelism) mode:
-        - All workers execute the forward pass to stay synchronized
-        - Only the timing from PP0 (first rank) is meaningful for scheduling
-        - PP0 includes all the pipeline stages' latency when using async scheduling
-
-        Args:
-            num_tokens: Number of tokens to profile
-
-        Returns:
-            Latency in milliseconds
-        """
-        import time
-
-        # Clamp to valid range
-        num_tokens = min(num_tokens, self.scheduler_config.max_num_batched_tokens)
-        num_tokens = max(num_tokens, 1)
-
-        # Synchronize all devices before timing
-        # This ensures clean measurement in PP/TP scenarios
-        torch.npu.synchronize()
-
-        # In PP mode, we still run on all ranks to keep them synchronized
-        # but only the first rank's timing is used for scheduling decisions
-        is_first_pp_rank = get_pp_group().is_first_rank
-
-        start = time.perf_counter()
-
-        # Run a real model forward with attention enabled in eager mode.
-        # _dummy_run handles PP internally (intermediate tensors, etc.).
-        self.model_runner._dummy_run(
-            num_tokens=num_tokens,
-            force_attention=True,
-            is_profile=False,
-            cudagraph_runtime_mode=CUDAGraphMode.NONE,
-            profile_cpp=True,
-        )
-
-        # Synchronize after forward to ensure NPU operations complete
-        torch.npu.synchronize()
-
-        latency_ms = (time.perf_counter() - start) * 1000
-
-        # Log for debugging in PP mode
-        if not is_first_pp_rank:
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    "[ProfilingChunk] PP rank %s: profiled %s tokens, latency=%.2f ms (not used)",
-                    get_pp_group().rank_in_group,
-                    num_tokens,
-                    latency_ms,
-                )
-
-        return latency_ms
 
     def get_kv_connector_handshake_metadata(
         self,

@@ -598,13 +598,6 @@ class AscendConfig:
                     "threshold": 256,
                     "long_max_wait_ms": 0.0
                 },
-                "profiling_chunk_config": {
-                    "enabled": false,
-                    "smooth_factor": 1.0,
-                    "min_chunk": 4096,
-                    "need_timing": null,
-                    "max_fit_chunk": 30
-                },
                 "batch_job_sched_config": {
                     "enabled": false,
                     "max_jobs": 20,
@@ -645,7 +638,7 @@ class AscendConfig:
       ``num_head_replica``.
     - Deprecated top-level scheduler keys (``enable_balance_scheduling``,
       ``recompute_scheduler_enable``, ``short_request_first_config``,
-      ``profiling_chunk_config``, ``batch_job_sched_config``) still resolve,
+      ``batch_job_sched_config``) still resolve,
       but emit deprecation warnings; prefer nesting under
       ``scheduler_config`` as shown above.
     """
@@ -792,8 +785,6 @@ class AscendConfig:
     # ---- derivations + cross-config downgrades/mutex ----
     # Business validation: invoked explicitly by init_ascend_config (NOT a
     # pydantic after-validator). Preserves the original __init__ ordering —
-    # multi-step downgrades are order-dependent (e.g. profiling_chunk reads
-    # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
         if self.shared_engram is not None and self.shared_engram.backend in ("a2", "a5"):
@@ -834,39 +825,6 @@ class AscendConfig:
         ):
             raise ValueError("enable_force_eplb cannot be mixed with dynamic_eplb.")
         self._check_mooncake_c8_kv_cache_quant(vc)
-
-        # profiling_chunk vs min_chunk clamp
-        if self.scheduler_config.profiling_chunk_config.enabled:
-            logger.warning_once(
-                "Dynamic chunk size Chunked Pipeline Parallelism (CPP) is deprecated "
-                "as of v0.32.0 and has entered the sunset process. It will be removed "
-                "in a future release. See RFC #21304 (https://github.com/vllm-project/vllm-ascend/issues/21304) "
-                "for details and migration guidance."
-            )
-            max_batched = vc.scheduler_config.max_num_batched_tokens
-            if max_batched < self.scheduler_config.profiling_chunk_config.min_chunk:
-                logger.warning(
-                    "max_num_batched_tokens is smaller than profiling_chunk_config.min_chunk. "
-                    "max_num_batched_tokens=%d, min_chunk=%d. "
-                    "Clamping min_chunk to %d to avoid it being silently ignored.",
-                    max_batched,
-                    self.scheduler_config.profiling_chunk_config.min_chunk,
-                    max_batched,
-                )
-                self.scheduler_config.profiling_chunk_config.min_chunk = max_batched
-        if self.scheduler_config.profiling_chunk_config.enabled and vc.parallel_config.pipeline_parallel_size <= 1:
-            raise ValueError(
-                "profiling_chunk_config requires pipeline parallelism (pp > 1). "
-                "Please set --pipeline-parallel-size to a value greater than 1, "
-                "or disable profiling_chunk_config."
-            )
-
-        # profiling_chunk vs balance mutex
-        if self.scheduler_config.profiling_chunk_config.enabled and self.scheduler_config.enable_balance_scheduling:
-            raise ValueError(
-                "profiling_chunk_config and balance scheduling (enable_balance_scheduling) "
-                "cannot be enabled at the same time. Please disable one of them."
-            )
 
         # enable_shared_expert_dp = val and ep and tp>1
         from vllm_ascend.utils import enable_sp
@@ -1610,45 +1568,6 @@ class XliteGraphConfig:
 
 
 @config
-class ProfilingChunkConfig:
-    """Configuration for profiling-based dynamic chunk sizing.
-
-    Migrated to ``@config`` (pydantic dataclass). Range/positivity checks
-    moved to an ``after`` model_validator. ``need_timing`` uses ``None`` as a
-    "not provided" sentinel so the after-validator can distinguish "user did
-    not set it" (→ default to ``enabled``) from "user explicitly set False"
-    (→ keep False), mirroring the original ``config.get("need_timing", self.enabled)``.
-    """
-
-    enabled: bool = False
-    smooth_factor: float = 1.0
-    min_chunk: int = 4096
-    need_timing: bool | None = None
-    max_fit_chunk: int = 30
-
-    @model_validator(mode="after")
-    def _validate_and_link_need_timing(self):
-        # need_timing defaults to enabled when not explicitly set by the user.
-        # (Original: config.get("need_timing", self.enabled).) Using None as
-        # sentinel distinguishes "not provided" from "explicitly False".
-        if self.need_timing is None:
-            self.need_timing = self.enabled
-        if not self.enabled and self.need_timing:
-            logger.warning(
-                "profiling_chunk_config.need_timing=True is ignored because "
-                "profiling_chunk_config.enabled=False. Setting need_timing to False."
-            )
-            self.need_timing = False
-        if not (0 < self.smooth_factor <= 1.0):
-            raise ValueError(f"profiling_chunk_config.smooth_factor must be in (0, 1], got {self.smooth_factor}")
-        if self.min_chunk <= 0:
-            raise ValueError(f"profiling_chunk_config.min_chunk must be positive, got {self.min_chunk}")
-        if self.max_fit_chunk <= 5:
-            raise ValueError(f"Recommend to use at least 30 data points for fitting, got {self.max_fit_chunk}")
-        return self
-
-
-@config
 class BatchJobSchedConfig:
     """Configuration for batch-job-aware scheduler.
 
@@ -1757,14 +1676,13 @@ class SchedulerConfig:
     resolves the precedence (nested scheduler_config > top-level legacy >
     default), preserving the original deprecation warnings, and then constructs
     this class from final configuration values. Sub-configs
-    (ShortRequestFirstConfig / ProfilingChunkConfig / BatchJobSchedConfig) are
+    (ShortRequestFirstConfig / BatchJobSchedConfig) are
     typed fields that pydantic coerces from nested dicts.
     """
 
     enable_balance_scheduling: bool = False
     recompute_scheduler_enable: bool = False
     short_request_first_config: ShortRequestFirstConfig = dataclasses.field(default_factory=ShortRequestFirstConfig)
-    profiling_chunk_config: ProfilingChunkConfig = dataclasses.field(default_factory=ProfilingChunkConfig)
     batch_job_sched_config: BatchJobSchedConfig = dataclasses.field(default_factory=BatchJobSchedConfig)
     dyntra_lb_config: DyntraLBConfig = dataclasses.field(default_factory=DyntraLBConfig)
 
@@ -1805,7 +1723,6 @@ class SchedulerConfig:
             "recompute_scheduler_enable": _resolve("recompute_scheduler_enable", False),
             # Let pydantic coerce the resolved dicts into typed sub-configs.
             "short_request_first_config": _resolve("short_request_first_config", {}),
-            "profiling_chunk_config": _resolve("profiling_chunk_config", {}),
             "batch_job_sched_config": _resolve("batch_job_sched_config", {}),
             "dyntra_lb_config": scheduler_config.get("dyntra_lb_config", {}),
         }
@@ -2051,7 +1968,6 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         "enable_balance_scheduling",
         "recompute_scheduler_enable",
         "short_request_first_config",
-        "profiling_chunk_config",
         "batch_job_sched_config",
     }
     kwargs = {k: v for k, v in additional_config.items() if k not in _NON_USER_INPUT_KEYS}

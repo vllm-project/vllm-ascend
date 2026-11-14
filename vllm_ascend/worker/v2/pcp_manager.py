@@ -356,7 +356,6 @@ class AscendPCPManager(PCPManager):
     ) -> AscendInputBatch:
         """Refresh Ascend-only local metadata after upstream PCP partitioning."""
         local_batch.is_dummy = getattr(global_batch, "is_dummy", False)
-        local_batch.is_cpp_profile = getattr(global_batch, "is_cpp_profile", False)
         self._pad_hidden_restore_idx(global_batch)
         if not self.is_decode_sharded:
             local_batch = self._pad_replicated_decode_graph(global_batch, local_batch)
@@ -391,28 +390,6 @@ class AscendPCPManager(PCPManager):
             kv_cache_config=self.kv_cache_config,
         )
         return local_batch
-
-    # vLLM main renamed ``PCPManager.prepare_inputs_to_capture`` to
-    # ``prepare_inputs_for_capture_or_profile`` so the capture path also expands
-    # ``is_padding`` to the rows the MoE routes.
-
-    def prepare_inputs_for_capture_or_profile(  # type: ignore[misc]
-        self,
-        input_batch: AscendInputBatch,
-    ) -> AscendInputBatch:
-        """Stage ordinary dummies, but partition CPP's global prefill dummy."""
-        if not getattr(input_batch, "is_cpp_profile", False):
-            staged = super().prepare_inputs_for_capture_or_profile(input_batch)
-            assert isinstance(staged, AscendInputBatch)
-            return staged
-
-        # The parent implementation only copies a dummy into PCP-local buffers.
-        # CPP instead supplies a global prompt, so use the real prefill splitter
-        # before those buffers are overwritten with the rank-local layout.
-        return self.partition_batch(
-            input_batch,
-            BatchExecutionDescriptor(CUDAGraphMode.NONE, input_batch.num_tokens, None),
-        )
 
     def _pad_hidden_restore_idx(self, global_batch: AscendInputBatch) -> None:
         """Extend restore indices to the global padded extent.
@@ -754,7 +731,7 @@ class AscendPCPManager(PCPManager):
         slot_mappings: torch.Tensor | None = None,
     ) -> AscendPCPAttentionContext:
         """Build PCP context for the current real, capture, or idle DP batch."""
-        if input_batch is not None and input_batch.is_dummy and not input_batch.is_cpp_profile:
+        if input_batch is not None and input_batch.is_dummy:
             # Both capture and runtime dummy batches bypass partition_batch().
             # Saved layout state may be absent or belong to a previous request.
             assert block_tables is not None

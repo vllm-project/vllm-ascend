@@ -35,10 +35,10 @@ from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.utils import C8KVBlockZeroer
 
 
-def _make_runner(need_timing: bool = True):
+def _make_runner(*args, **kwargs):
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.ascend_config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=need_timing)),
+        scheduler_config=SimpleNamespace(),
         sparse_kv_offload_config=SimpleNamespace(enabled=False),
         kvpp_config=SimpleNamespace(size=1),
     )
@@ -384,70 +384,6 @@ def test_pd_recompute_preserves_decode_graph_eligible_prefill(prefill_runs_as_de
     assert gathered.has_prefill is True
     assert gathered.decode_graph_eligible is prefill_runs_as_decode
     assert uniform == expected_uniform
-
-
-def test_execute_model_records_profiling_time():
-    runner = _make_runner()
-    scheduler_output = SimpleNamespace(disable_profiling_timing=False, total_num_scheduled_tokens=0)
-
-    with (
-        patch.object(
-            GPUModelRunner,
-            "execute_model",
-            return_value=None,
-        ) as mock_execute_model,
-        patch(
-            "vllm_ascend.worker.v2.model_runner.should_skip_allreduce_across_dp_group",
-            return_value=False,
-        ),
-        patch("vllm_ascend.core.profiling_chunk_predictor.torch.npu.synchronize") as mock_synchronize,
-        patch(
-            "vllm_ascend.core.profiling_chunk_predictor.time.perf_counter",
-            side_effect=[10.0, 10.125],
-        ),
-    ):
-        output = runner.execute_model(scheduler_output)
-
-    assert output is None
-    assert runner._cpp_execution_time_ms == pytest.approx(125.0)
-    assert mock_synchronize.call_count == 2
-    expected_kwargs: dict[str, object] = {
-        "intermediate_tensors": None,
-        "dummy_run": False,
-        "skip_attn_for_dummy_run": False,
-        "is_profile": False,
-        "context_len": 0,
-        "valid_dummy_state_slots": False,
-        "randomize_inputs": False,
-    }
-    mock_execute_model.assert_called_once_with(scheduler_output, **expected_kwargs)
-
-
-def test_execute_model_disables_profiling_timer_and_clears_stale_time():
-    runner = _make_runner()
-    runner._cpp_execution_time_ms = 123.0
-    scheduler_output = SimpleNamespace(disable_profiling_timing=True, total_num_scheduled_tokens=0)
-
-    with (
-        patch.object(
-            GPUModelRunner,
-            "execute_model",
-            return_value=None,
-        ),
-        patch(
-            "vllm_ascend.worker.v2.model_runner.should_skip_allreduce_across_dp_group",
-            return_value=False,
-        ),
-        patch("vllm_ascend.core.profiling_chunk_predictor.torch.npu.synchronize") as mock_synchronize,
-        patch("vllm_ascend.core.profiling_chunk_predictor.time.perf_counter") as mock_perf_counter,
-    ):
-        runner.execute_model(scheduler_output)
-
-    profiling_config = runner.ascend_config.scheduler_config.profiling_chunk_config
-    assert not profiling_config.need_timing
-    assert runner._cpp_execution_time_ms is None
-    mock_synchronize.assert_not_called()
-    mock_perf_counter.assert_not_called()
 
 
 def test_execute_model_skips_dp_coordination_when_safe():

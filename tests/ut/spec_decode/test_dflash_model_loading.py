@@ -14,9 +14,7 @@ from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import AscendDFlash2Sp
 @pytest.mark.parametrize("speculator_cls", [AscendDFlashSpeculator, AscendDFlash2Speculator])
 @pytest.mark.parametrize("outcome", ["success", "no_hook", "load_error", "hook_error"])
 def test_draft_post_process_uses_restored_target_config(monkeypatch, speculator_cls, outcome):
-    additional_config = {"scheduler_config": {"profiling_chunk_config": {"enabled": True}}}
     config = SimpleNamespace(
-        additional_config=additional_config,
         quant_config=object(),
         parallel_config=SimpleNamespace(pipeline_parallel_size=2),
     )
@@ -28,8 +26,6 @@ def test_draft_post_process_uses_restored_target_config(monkeypatch, speculator_
 
     def post_process(received):
         assert received is config
-        assert received.additional_config is additional_config
-        assert additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] is True
         if outcome == "hook_error":
             raise ValueError("post process failed")
 
@@ -41,8 +37,6 @@ def test_draft_post_process_uses_restored_target_config(monkeypatch, speculator_
         assert self is spec
         assert received_target is target
         assert received_names is names
-        assert config.additional_config is not additional_config
-        assert config.additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] is False
         if outcome == "load_error":
             raise ValueError("load failed")
         return draft
@@ -55,8 +49,6 @@ def test_draft_post_process_uses_restored_target_config(monkeypatch, speculator_
     else:
         assert spec.load_draft_model(target, names) is draft
 
-    assert config.additional_config is additional_config
-    assert additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] is True
     if outcome in ("success", "hook_error"):
         hook.assert_called_once_with(config)
     else:
