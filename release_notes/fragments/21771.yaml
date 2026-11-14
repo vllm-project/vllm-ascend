@@ -1,0 +1,8 @@
+pr: 21771
+entries:
+  - category: feature
+    text: >-
+      Qwen3.8-Flash-Next QSA now uses request-batched LightningIndexerV2 through
+      the upstream cann_ops_transformer Torch interface. Install the matching
+      Torch extension and CANN transformer operators in the serving environment.
+    model: Qwen3.8-Flash-Next
