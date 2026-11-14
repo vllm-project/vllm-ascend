@@ -90,6 +90,10 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_xlite.py: 215
   tests/e2e/pull_request/one_card/test_batch_job_aware_scheduler_e2e.py: 820
   tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py: 20
+  # Measured 2026-11-11/12 on an A2 runner (TP2, record mode, all four
+  # scenarios in one pytest run: 1700-2100s) with headroom for cold weight
+  # loads; recalibrate with CI medians once available.
+  tests/e2e/pull_request/two_card/kv_pool/test_qwen38_kv_pool_ab_a2.py: 2700
   tests/e2e/pull_request/two_card/lora/test_ilama_lora_tp2.py: 180
   tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py: 430
   tests/e2e/pull_request/two_card/lora/test_qwen3moe_lora.py: 470

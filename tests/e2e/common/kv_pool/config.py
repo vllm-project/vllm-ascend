@@ -21,6 +21,9 @@ class MooncakeKVPoolConfig(KVPoolConfig):
 
     master_port: int
     metrics_port: int
+    # Extra CLI flags for mooncake_master (e.g. ["--enable_offload=true"] for
+    # the tier-3 SSD-offload scenarios). The harness owns flag spelling.
+    master_extra_args: tuple[str, ...] = ()
 
     @property
     def type(self) -> str:
