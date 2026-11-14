@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from torch import nn
+from vllm.model_executor.layers.attention import is_deferred_attention_layer
 
 from vllm_ascend.ops.kimi_kda import (
     _PACKED_CONV_WEIGHT_NAME,
@@ -506,6 +507,38 @@ def test_kda_conv_weight_is_packed_once_in_kernel_layout():
         packed,
         source[:, 0, :].transpose(0, 1).to(torch.bfloat16),
     )
+
+
+def test_kda_conv_weight_is_repacked_by_post_load_hook():
+    attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
+    nn.Module.__init__(attention)
+    attention.conv_size = 4
+    attention.local_projection_size = 6
+    attention.conv1d = nn.Module()
+    source = torch.arange(18 * 4, dtype=torch.float32).reshape(18, 1, 4)
+    attention.conv1d.weight = nn.Parameter(source)
+    attention.register_parameter(
+        _PACKED_CONV_WEIGHT_NAME,
+        nn.Parameter(torch.empty(4, 18, dtype=torch.bfloat16), requires_grad=False),
+    )
+    original_ptr = attention.get_parameter(_PACKED_CONV_WEIGHT_NAME).data_ptr()
+
+    assert is_deferred_attention_layer(attention)
+
+    # vLLM v0.33.0 and the vLLM main commit tested by this repo call the hook
+    # with the model dtype; newer vLLM main calls it without arguments.
+    attention.process_weights_after_loading(torch.bfloat16)
+    packed = attention.get_parameter(_PACKED_CONV_WEIGHT_NAME)
+    torch.testing.assert_close(packed, source[:, 0, :].transpose(0, 1).to(torch.bfloat16))
+    assert packed.data_ptr() == original_ptr
+
+    # Simulate a layerwise reload: conv1d is restored, then the hook repacks.
+    reloaded = source + 1
+    attention.conv1d.weight.data.copy_(reloaded)
+    attention.process_weights_after_loading()
+    packed = attention.get_parameter(_PACKED_CONV_WEIGHT_NAME)
+    torch.testing.assert_close(packed, reloaded[:, 0, :].transpose(0, 1).to(torch.bfloat16))
+    assert packed.data_ptr() == original_ptr
 
 
 @pytest.mark.parametrize(
