@@ -91,14 +91,15 @@ def test_v41_otp_profile_exercises_only_decode_capacity(monkeypatch):
 
 
 @pytest.mark.parametrize("in_graph", [False, True])
-def test_cp_defer_scope_forwards_graph_mode_and_restores_both_builders(monkeypatch, in_graph):
+@pytest.mark.parametrize("packed_cache", [False, True])
+def test_cp_defer_scope_forwards_graph_mode_and_restores_both_builders(monkeypatch, in_graph, packed_cache):
     base = dsa_v41.AscendDSAV41MetadataBuilder
     cp = dsa_v41_cp._ReplicatedCacheMetadataBuilder.__new__(dsa_v41_cp._ReplicatedCacheMetadataBuilder)
     cp._global_builder = base.__new__(base)
     for builder in (cp, cp._global_builder):
         builder._device_metadata_enabled = False
         builder._device_metadata_in_graph = False
-        builder._uses_a5_packed_cache = True
+        builder._uses_a5_packed_cache = packed_cache
     monkeypatch.setattr(base, "prepare_source_rope", lambda self: None)
     with cp.defer_device_metadata(in_graph=in_graph):
         for builder in (cp, cp._global_builder):
@@ -188,6 +189,96 @@ def test_a5_qli_preserves_graph_mode_after_defer_scope(monkeypatch, in_graph, nu
         metadata_op.assert_not_called()
         torch.testing.assert_close(req.qli_metadata, torch.zeros_like(output))
     assert builder._qli_metadata is buffer
+
+
+@pytest.mark.parametrize("in_graph", [False, True])
+@pytest.mark.parametrize("num_actual_tokens", [0, 2])
+@pytest.mark.parametrize("kind", ["swa", "long_kv", "index_k"])
+def test_a3_deferred_metadata_uses_persistent_inputs_after_scope(monkeypatch, in_graph, num_actual_tokens, kind):
+    builder_cls = (
+        dsa_v41.AscendDSAV41IndexerMetadataBuilder
+        if kind == "index_k"
+        else dsa_v41.AscendDSAV41AttentionMetadataBuilder
+    )
+    builder = builder_cls.__new__(builder_cls)
+    builder._device_metadata_enabled = False
+    builder._device_metadata_in_graph = False
+    builder._device_metadata_tasks = ()
+    builder._supports_device_ops = True
+    builder._uses_a5_packed_cache = False
+    builder.common_v41_batch_metadata = {}
+    builder.common_v41_smla_metadata = {}
+    buffer = torch.full((dsa_v41.V41_METADATA_BUFFER_SIZE,), -1, dtype=torch.int32)
+    builder._qli_metadata = builder._smla_metadata = buffer
+    builder.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(tensor_parallel_size=1),
+        model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(
+                num_attention_heads=64, head_dim=512, index_topk=512, index_n_heads=64, index_head_dim=128
+            )
+        ),
+    )
+    monkeypatch.setattr(builder, "prepare_source_rope", lambda: None)
+    req = dsa_v41.AscendDSAV41Metadata(
+        block_table=torch.zeros((1, 1), dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+        seq_lens=torch.tensor([8], dtype=torch.int32),
+        slot_mapping=torch.full((2,), -1, dtype=torch.int64),
+        compress_ratio=1 if kind == "swa" else 2,
+        storage_block_size=16,
+        is_compressor_state=False,
+        cache_kind=kind,
+        num_actual_tokens=num_actual_tokens,
+        num_input_tokens=2,
+        num_reqs=1,
+        cache_seq_lens=torch.tensor([4], dtype=torch.int32),
+        max_cache_seq_len=4,
+        cmp_residual=torch.tensor([0], dtype=torch.int32),
+    )
+    calls = []
+
+    def metadata_op(*args, **kwargs):
+        # The operator sees the refreshed device input, rather than a host
+        # length frozen when the deferred closure was created.
+        lengths = kwargs["seqused_k" if kind == "index_k" else "seqused_ori_kv"]
+        calls.append(kwargs)
+        return torch.full_like(buffer, int(lengths[0]))
+
+    op_name = "npu_quant_lightning_indexer_v2_metadata" if kind == "index_k" else "npu_sparse_flash_mla_metadata"
+    monkeypatch.setattr(torch.ops._C_ascend, op_name, metadata_op, raising=False)
+    common = SimpleNamespace(query_start_loc=req.query_start_loc, max_query_len=2)
+    with builder.defer_device_metadata(in_graph=in_graph):
+        if kind == "index_k":
+            builder._build_qli_metadata(common, req)
+        else:
+            builder._build_smla_metadata(common, req, max_ori_seq_len=8)
+        tasks = builder.take_device_metadata_tasks()
+        assert not calls
+        assert torch.all(buffer == -1)
+
+    assert not builder._device_metadata_enabled
+    assert not builder._device_metadata_in_graph
+    assert len(tasks) == 1
+    assert tasks[0].stage == (
+        dsa_v41.DeviceMetadataStage.INDEXER if kind == "index_k" else dsa_v41.DeviceMetadataStage.ATTENTION
+    )
+    assert tasks[0].group_id == id(buffer)
+    assert (req.qli_metadata if kind == "index_k" else req.smla_metadata) is buffer
+    req.seq_lens.fill_(16)
+    req.cache_seq_lens.fill_(8)
+    tasks[0].run()
+    if in_graph or num_actual_tokens:
+        assert len(calls) == 1
+        assert calls[0]["max_seqlen_q"] == (0 if in_graph else 2)
+        if kind == "index_k":
+            assert calls[0]["max_seqlen_k"] == (0 if in_graph else 4)
+        else:
+            assert calls[0]["max_seqlen_ori_kv"] == (0 if in_graph else 8)
+            assert calls[0]["max_seqlen_cmp_kv"] == (0 if kind == "swa" or in_graph else 4)
+        torch.testing.assert_close(buffer, torch.full_like(buffer, 8 if kind == "index_k" else 16))
+    else:
+        assert not calls
+        assert torch.count_nonzero(buffer) == 0
 
 
 def _impl(role):

@@ -16,6 +16,11 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+"""[Role] Integrate Ascend execution with upstream Model Runner V2.
+[Invariants] Target and draft metadata retain independent builder ownership.
+[Timeouts & Locks] Device events order metadata production and consumption.
+[Side-Effect Policy] KV initialization recreates worker-local execution state.
+"""
 
 import inspect
 import logging
@@ -77,6 +82,7 @@ from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
     _start_profiling_chunk_timing,
 )
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     bind_dspark_context_receiver,
     configure_dspark_kv_transfer,
@@ -504,11 +510,17 @@ class NPUModelRunner(GPUModelRunner):
         # throwaway model state and must not leak event/buffer bindings.
         self.model_state.device_metadata = (
             TargetDeviceMetadata()
-            if uses_a5_packed_cache()
-            and (
-                self.model_config.architecture == "DeepseekV41ForCausalLM"
+            if (
+                (
+                    self.model_config.architecture == "DeepseekV41ForCausalLM"
+                    and (
+                        uses_a5_packed_cache()
+                        or get_current_hardware_profile().supports(HardwareCapability.NATIVE_INT8_SPARSE)
+                    )
+                )
                 or (
-                    self.model_config.architecture == "KimiK31ForConditionalGeneration"
+                    uses_a5_packed_cache()
+                    and self.model_config.architecture == "KimiK31ForConditionalGeneration"
                     and enable_sfa_dcp_sharded_indexer(self.vllm_config)
                     and self.vllm_config.attention_config.indexer_kv_dtype == "fp8"
                 )

@@ -29,6 +29,8 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -1368,9 +1370,9 @@ def test_sample_tokens_leaves_draft_broadcast_to_upstream():
     runner.pp_handler.broadcast_drafts.assert_not_called()
 
 
-@pytest.mark.parametrize("a5", [False, True])
-@pytest.mark.parametrize("architecture", ["DeepseekV41ForCausalLM", "OtherModel"])
-def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture):
+@pytest.mark.parametrize("hardware", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
+@pytest.mark.parametrize("architecture", ["DeepseekV41ForCausalLM", "KimiK31ForConditionalGeneration", "OtherModel"])
+def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(hardware, architecture):
     """Cache binding precedes KDA preparation and preserves PCP setup."""
     runner = _make_runner()
     runner.input_buffers = object()
@@ -1379,6 +1381,7 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
         compilation_config=runner.compilation_config,
         scheduler_config=SimpleNamespace(max_num_seqs=8),
         kv_transfer_config=None,
+        attention_config=SimpleNamespace(indexer_kv_dtype="fp8"),
     )
     runner.max_num_reqs = runner.vllm_config.scheduler_config.max_num_seqs
     runner.pcp_manager = MagicMock(spec=AscendPCPManager)
@@ -1408,7 +1411,12 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
         assert maximum == 8
 
     with (
-        patch("vllm_ascend.worker.v2.model_runner.uses_a5_packed_cache", return_value=a5),
+        patch("vllm_ascend.worker.v2.model_runner.uses_a5_packed_cache", return_value=hardware == AscendDeviceType.A5),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.get_current_hardware_profile",
+            return_value=get_hardware_profile(hardware),
+        ),
+        patch("vllm_ascend.worker.v2.model_runner.enable_sfa_dcp_sharded_indexer", return_value=True),
         patch("vllm_ascend.worker.v2.model_runner.TargetDeviceMetadata", return_value="metadata") as metadata_cls,
         patch("vllm_ascend.ops.kda_state_copy_plan.initialize_kda_state_copy", side_effect=_prepare_kda) as prepare_kda,
         patch.object(GPUModelRunner, "initialize_kv_cache", _super),
@@ -1422,10 +1430,11 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
         seen["factory"](runner.vllm_config, torch.device("cpu"), CUDAGraphMode.FULL, 1)
 
     prepare_kda.assert_called_once_with(runner.compilation_config.static_forward_context, 8)
-    assert runner.model_state.device_metadata == (
-        "metadata" if a5 and architecture == "DeepseekV41ForCausalLM" else None
+    enabled = (hardware in (AscendDeviceType.A3, AscendDeviceType.A5) and architecture == "DeepseekV41ForCausalLM") or (
+        hardware == AscendDeviceType.A5 and architecture == "KimiK31ForConditionalGeneration"
     )
-    assert metadata_cls.call_count == int(a5 and architecture == "DeepseekV41ForCausalLM")
+    assert runner.model_state.device_metadata == ("metadata" if enabled else None)
+    assert metadata_cls.call_count == int(enabled)
     assert seen["cfg"] == kv_cache_config
     assert seen["cfg"] is not kv_cache_config
     assert vllm_model_runner.ModelCudaGraphManager is original
