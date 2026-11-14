@@ -36,7 +36,7 @@ def clear_prefill_probe():
     ],
 )
 @pytest.mark.parametrize("device", [AscendDeviceType.A5, AscendDeviceType.A2, AscendDeviceType.A3])
-def test_importable_fla_requires_chunk32_contract_only_on_a5(version_result, expected, device):
+def test_importable_fla_retains_chunk64_for_unapproved_versions(version_result, expected, device):
     module = ModuleType("fla_npu.ops.ascendc")
     module.chunk_gated_delta_rule_fwd = Mock()
     version_kwargs = (
@@ -50,10 +50,10 @@ def test_importable_fla_requires_chunk32_contract_only_on_a5(version_result, exp
     ):
         op = _get_fla_gdn_prefill_op()
         assert _get_fla_gdn_prefill_op() is op
-    if device != AscendDeviceType.A5 or expected:
-        assert op is module.chunk_gated_delta_rule_fwd
-    else:
-        assert op is None
+        version.assert_not_called()
+        assert is_fla_gdn_chunk32_supported() is expected
+        assert is_fla_gdn_chunk32_supported() is expected
+    assert op is module.chunk_gated_delta_rule_fwd
     if device == AscendDeviceType.A5:
         version.assert_called_once_with("flash-linear-attention-npu-a5")
     else:
@@ -81,7 +81,7 @@ def test_chunk32_requires_device_and_allowlist(device, approved, installed):
 
 
 @pytest.mark.parametrize("fused_available", [False, True])
-def test_legacy_fla_does_not_force_host_only_metadata(fused_available):
+def test_legacy_fla_supports_host_only_metadata(fused_available):
     module = ModuleType("fla_npu.ops.ascendc")
     module.chunk_gated_delta_rule_fwd = Mock()
     with (
@@ -92,4 +92,4 @@ def test_legacy_fla_does_not_force_host_only_metadata(fused_available):
         patch("importlib.metadata.version", return_value="26.9.1+dev5cc6990"),
         patch.object(AscendGatedDeltaNetAttention, "_probe_fused_chunk", return_value=fused_available),
     ):
-        assert AscendGatedDeltaNetAttention._supports_host_metadata_prefill() is fused_available
+        assert AscendGatedDeltaNetAttention._supports_host_metadata_prefill() is True

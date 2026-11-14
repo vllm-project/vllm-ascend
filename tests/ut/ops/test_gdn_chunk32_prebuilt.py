@@ -99,19 +99,39 @@ class TestChunk32Prebuilt(TestCase):
         self.assertIsNone(metadata.chunk_indices_chunk32_host)
         self.assertEqual(metadata.chunk_indices_chunk64_host, (0, 0, 1, 0))
 
-    def test_unapproved_adaptor_rejects_before_kernel(self):
+    def test_unapproved_adaptor_retains_chunk64(self):
         from vllm_ascend.device.device_op import A5DeviceAdaptor
 
-        metadata = self.build([0, 32])
-        fused = Mock()
-        qkv = torch.zeros(1, 32, 1, 4)
-        gate = torch.zeros(1, 32, 1)
-        with (
-            patch("vllm_ascend.device.fla._FLA_GDN_CHUNK32_VERSIONS", frozenset()),
-            self.assertRaisesRegex(ValueError, "approved FLA build"),
-        ):
-            A5DeviceAdaptor.fla_gdn_prefill(qkv, qkv, qkv, gate, gate, torch.zeros(1, 1, 4, 4), 0.5, metadata, fused)
-        fused.assert_not_called()
+        with patch("vllm_ascend.device.fla._FLA_GDN_CHUNK32_VERSIONS", frozenset()):
+            for cu in ([0, 64, 128], [0, 0, 33, 33, 98, 98]):
+                with self.subTest(cu=cu):
+                    metadata = self.build(cu)
+                    self.assertIsNone(metadata.chunk_indices_chunk32_host)
+                    tokens = cu[-1]
+                    qkv = torch.zeros(1, tokens, 2, 4)
+                    gate = torch.zeros(1, tokens, 2)
+                    beta = torch.full_like(gate, 0.5)
+                    state = torch.zeros(len(cu) - 1, 2, 4, 4)
+                    fused = Mock(side_effect=lambda *args, qkv=qkv, **kw: (qkv, kw["initial_state"] + 1))
+                    _, final = A5DeviceAdaptor.fla_gdn_prefill(qkv, qkv, qkv, gate, beta, state, 0.5, metadata, fused)
+                    args, kwargs = fused.call_args
+                    self.assertIs(kwargs["chunk_indices"], metadata.chunk_indices_chunk64_host)
+                    self.assertEqual(kwargs["chunk_size"], 64)
+                    self.assertTrue(kwargs["use_exp2"])
+                    self.assertTrue(kwargs["disable_recompute"])
+                    self.assertFalse(kwargs["use_beta_sigmoid_in_kernel"])
+                    self.assertTrue(kwargs["use_qk_l2norm_in_kernel"])
+                    self.assertTrue(kwargs["state_v_first"])
+                    torch.testing.assert_close(args[4], beta)
+                    if metadata.keep_meta is None:
+                        self.assertEqual(kwargs["cu_seqlens"], tuple(cu))
+                        torch.testing.assert_close(final, state + 1)
+                    else:
+                        self.assertEqual(kwargs["cu_seqlens"], (0, 33, 98))
+                        self.assertEqual(kwargs["chunk_indices"], (0, 0, 1, 0, 1, 1))
+                        expected = state.clone()
+                        expected[[1, 3]] += 1
+                        torch.testing.assert_close(final, expected)
 
     def test_two_sequences(self):
         m = self.build([0, 64, 128])

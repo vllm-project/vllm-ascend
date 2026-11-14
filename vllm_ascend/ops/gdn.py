@@ -58,20 +58,12 @@ _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 
 @lru_cache(maxsize=1)
 def _get_fla_gdn_prefill_op():
-    # Cache both availability and package inspection once per worker. The same
-    # result selects metadata construction and execution, so a rejected FLA
-    # build gets the device metadata and processed beta needed by the fallback.
+    # FLA availability is independent of chunk32 support. Unapproved A5
+    # builds retain the existing chunk64 contract.
     try:
         from fla_npu.ops.ascendc import chunk_gated_delta_rule_fwd  # type: ignore[import-not-found]
     except ImportError:
         return None
-    if (
-        get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL_CHUNK32)
-        and not is_fla_gdn_chunk32_supported()
-    ):
-        return None
-    # A2/A3 retain the existing chunk64 FLA contract. Compatible A5 wheels use
-    # the public queued entry point; importability alone cannot establish ABI.
     return chunk_gated_delta_rule_fwd
 
 

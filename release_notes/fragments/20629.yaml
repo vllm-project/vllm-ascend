@@ -1,5 +1,5 @@
 pr: 20629
 entries:
   - category: feature
-    text: Prepared A5 chunk32 GDN prefill integration with shared host metadata, disabled until a supporting FLA wheel is validated. All A5 installations currently use the existing fused or Triton prefill fallback.
+    text: Prepared A5 chunk32 GDN prefill integration with shared host metadata, disabled until a supporting FLA wheel is validated. A5 installations retain FLA chunk64 until both hardware and the FLA build support chunk32.
     hardware: [A5]

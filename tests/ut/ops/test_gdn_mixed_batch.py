@@ -34,7 +34,7 @@ from vllm_ascend.ops.gdn_attn_builder import (
     "backend", ["a5", "a5_approved", "a2", "a3", "legacy_fla", "missing_fla", "other_device", "fp16"]
 )
 def test_chunk32_raw_beta_routing(batch_kind, backend):
-    """Unapproved A5 FLA builds fall back with processed beta, including mixed/spec tokens."""
+    """Unapproved A5 FLA builds retain chunk64 with processed beta, including mixed/spec tokens."""
     layer = _make_layer()
     layer.dt_bias.fill_(1.75)
     layer.A_log.fill_(0.5)
@@ -145,7 +145,7 @@ def test_chunk32_raw_beta_routing(batch_kind, backend):
             mocks[name] = stack.enter_context(patch(f"vllm_ascend.ops.gdn.{name}", **kwargs))
         AscendGatedDeltaNetAttention._forward_core(layer, packed, b, a, output)
 
-    use_fla = backend in ("a5_approved", "a2", "a3")
+    use_fla = backend in ("a5", "a5_approved", "a2", "a3", "legacy_fla")
     selected = "DeviceOperator.fla_gdn_prefill" if use_fla else "chunk_gated_delta_rule"
     unused = "chunk_gated_delta_rule" if use_fla else "DeviceOperator.fla_gdn_prefill"
     mocks[selected].assert_called_once()
