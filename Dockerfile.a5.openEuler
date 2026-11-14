@@ -79,6 +79,13 @@ ARG COMPILE_CUSTOM_KERNELS=1
 RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     export VLLM_BATCH_INVARIANT=1 && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    if [ -f "${ASCEND_HOME_PATH}/share/info/ascendnpu-ir/bin/set_env.sh" ]; then \
+        chmod a+r,go-w "${ASCEND_HOME_PATH}/share/info/ascendnpu-ir/bin/set_env.sh"; \
+    fi && \
+    if [ -d "${ASCEND_HOME_PATH}/tools/msmemscope/lib64" ]; then \
+        chmod a+rx,go-w "${ASCEND_HOME_PATH}/tools/msmemscope" && \
+        chmod -R a+rX,go-w "${ASCEND_HOME_PATH}/tools/msmemscope/lib64"; \
+    fi && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip cache purge
@@ -99,6 +106,10 @@ ARG FLA_PACKAGE="flash-linear-attention-npu-a5"
 RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     # Install memfabric_hybrid kernels
     TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A5 && \
+    if [ -d "${ASCEND_OPP_PATH}/vendors/cust" ]; then \
+        chmod a+rx,go-w "${ASCEND_OPP_PATH}/vendors" && \
+        chmod -R a+rX,go-w "${ASCEND_OPP_PATH}/vendors/cust"; \
+    fi && \
     # Install flash-linear-attention-npu from the Ascend mirror
     PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" \
     python3 -m pip install --force-reinstall --no-deps \
@@ -110,7 +121,5 @@ RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
 
 # Append `libascend_hal.so` path (devlib) to LD_LIBRARY_PATH
 RUN echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib' >> ~/.bashrc
-
-RUN bash /vllm-workspace/vllm-ascend/tools/fix_runtime_permissions.sh
 
 CMD ["/bin/bash"]
