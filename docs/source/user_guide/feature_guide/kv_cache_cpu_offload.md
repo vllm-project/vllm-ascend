@@ -108,6 +108,17 @@ The `fs` tier reuses vLLM's batched filesystem implementation. It probes `O_DIRE
 3. **Prefix cache hit (CPU)**: When a request shares a prefix with previously computed data, and the prefix cache is not found on NPU but exists in CPU memory, the KV cache blocks are asynchronously loaded back from CPU to NPU via a dedicated H2D NPU stream.
 4. **LRU management**: The CPU block pool uses LRU eviction to discard the least recently used blocks when CPU memory is full.
 
+### DeepSeek V4.1 SWA bounded replay
+
+With `--enable-prefix-caching --swa-bounded-replay`, the connector offloads
+prefix-cacheable main KV and indexer caches. SWA caches stay out of the CPU
+prefix cache; after a CPU hit, the scheduler recomputes the hit's final SWA
+window before continuing inference.
+
+The `cpu_bytes_to_use` budget applies across all workers and all V4.1 cache
+slots. CPU mirrors of split layouts omit unused page padding. No additional
+connector options are required.
+
 ## Optional: KV Cache Events
 
 You can enable KV cache event publishing for monitoring or debugging purposes:

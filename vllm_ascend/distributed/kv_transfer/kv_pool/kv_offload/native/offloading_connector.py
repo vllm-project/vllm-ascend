@@ -11,11 +11,16 @@ from dataclasses import replace
 import torch
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.canonical_mapping import (
     derive_canonical_mappings,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
+    build_offloading_config,
     get_offloading_group_ids,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
+    OffloadingConnectorScheduler,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
     OffloadingConnectorWorker,
@@ -35,7 +40,9 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCacheTensor,
     CanonicalPageMapping,
 )
+from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 
+from vllm_ascend.models.deepseek_v41.cache_config import is_deepseek_v41_cache
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 
@@ -257,7 +264,7 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
                         )
                         view = torch.as_strided(
                             raw,
-                            (num_blocks, page_size_bytes),
+                            (num_blocks, layer_spec.unpadded_page_size_bytes),
                             (block_stride_bytes, 1),
                             layer_cache.storage_offset() * element_size,
                         )
@@ -337,6 +344,34 @@ class AscendOffloadingConnector(OffloadingConnector):
         role: KVConnectorRole,
         kv_cache_config: KVCacheConfig,
     ) -> None:
+        if (
+            is_deepseek_v41_cache(kv_cache_config.kv_cache_groups)
+            and kv_cache_config.num_blocks > 0
+            and any(group.kv_cache_spec.prefix_replay_tokens for group in kv_cache_config.kv_cache_groups)
+        ):
+            # V4.1 has independent physical slots. Upstream treats the first
+            # descriptor's size as the entire pool, which undercounts this
+            # reservation and can allocate CPU mirrors beyond the byte budget.
+            # Bounded replay excludes the SWA aliases, so the physical slot
+            # reservation bounds the remaining main/indexer CPU payload.
+            KVConnectorBase_V1.__init__(self, vllm_config, role, kv_cache_config)
+            offloading_config = build_offloading_config(vllm_config, kv_cache_config)
+            offloading_config = replace(
+                offloading_config,
+                worker_kv_bytes_per_block=(
+                    sum(tensor.size for tensor in kv_cache_config.kv_cache_tensors) // kv_cache_config.num_blocks
+                ),
+            )
+            self._canonical_layout = offloading_config.canonical_layout
+            spec = OffloadingSpecFactory.create_spec(offloading_config)
+            self.connector_scheduler = None
+            self.connector_worker = None
+            if role == KVConnectorRole.SCHEDULER:
+                self.connector_scheduler = OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
+            elif role == KVConnectorRole.WORKER:
+                self.connector_worker = AscendOffloadingConnectorWorker(spec, vllm_config, kv_cache_config)
+            return
+
         super().__init__(vllm_config, role, kv_cache_config)
         connector_worker = self.connector_worker
         if connector_worker is not None:
