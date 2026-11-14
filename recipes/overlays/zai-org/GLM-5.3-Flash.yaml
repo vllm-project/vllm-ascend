@@ -3,7 +3,7 @@
 meta:
   hardware:
     ascend_950pr_8x: verified
-    ascend_910b: verified
+    ascend_910b: supported
 hardware_overrides:
   npu:
     extra_args:
@@ -29,7 +29,21 @@ hardware_notes:
     body: Single-node TP8 on 8×950PR. Pin quay.io/ascend/vllm-ascend:nightly-main-a5 and overlay vLLM#53906 / vllm-ascend#15127. Do not pass --quantization ascend. --block-size 512 is required (kpool indexer). EP is not available on this interconnect.
   ascend_910b:
     title: W8A8 prefill/decode disaggregation on Atlas 800I A2 (910B4)
-    body: Validated on 4 nodes x 8 NPU (32x Ascend 910B4, 64 GB HBM each), prefill pool 2 nodes at DP2 x TP1 x PCP8 and decode pool 2 nodes at DP8 x TP2
+    body: >-
+      Validated on 4 nodes x 8 NPU (32x Ascend 910B4, 64 GB HBM each): prefill
+      pool 2 nodes at DP2 x TP1 x PCP8 with --enforce-eager and
+      --max-num-batched-tokens 8192; decode pool 2 nodes at DP8 x TP2 with
+      --max-num-batched-tokens 240 and FULL_DECODE_ONLY cudagraphs; KV transfer
+      via MooncakeConnectorV2 with use_ascend_direct (prefill dp_size=2
+      tp_size=1, decode dp_size=8 tp_size=2); int8 KV cache plus int8 indexer
+      KV; MTP drafts (deepseek_mtp, 3 tokens) on both pools; 1M-token context.
+      --quantization ascend is required for the W8A8 checkpoint. Evidence was
+      collected on an internal nightly build of the v0.32.0rc line; this recipe
+      pins the closest public tag quay.io/ascend/vllm-ascend:v0.32.0rc1
+      (verified to exist) - re-validate on that tag before upgrading supported
+      to verified. HCCL interface/IP/rank values (HCCL_SOCKET_IFNAME,
+      HCCL_IF_IP, VLLM_HOST_IP, --data-parallel-address) are environment-bound
+      and must be set per deployment.
     link:
       label: vLLM Ascend GLM-5.3-Flash tutorial
       href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/GLM5.3-Flash.html
