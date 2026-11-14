@@ -414,7 +414,7 @@ vLLM Ascend revision.
     can use RPC port `12321`. Within each group, all ranks must use the same
     coordinator IP and RPC port.
 
-    ##### Prepare the 950DT DP Launcher
+    ##### Prepare the 950DT DP Launcher {: #prepare-the-950dt-dp-launcher}
 
     On both nodes, create a working directory inside the container:
 
@@ -872,7 +872,7 @@ vLLM Ascend revision.
     For W8A8 weights, use Prefill DP4/TP4 and Decode DP8/TP2. Adjust the
     launcher, connector layouts, and proxy endpoints to match that topology.
 
-    #### 5.2.1.1 Prepare the DP Launcher
+    #### 5.2.1.1 Prepare the DP Launcher {: #5211-prepare-the-dp-launcher}
 
     Save the following script as `launch_online_dp.py` on both nodes. It divides
     the node's visible devices among local DP ranks and starts one vLLM process per
