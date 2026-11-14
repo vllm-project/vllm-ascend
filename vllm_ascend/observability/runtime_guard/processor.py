@@ -785,7 +785,9 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
                 released = True
                 if pinned_ids:
                     RequestGuardStore.get().finish_rare_pair_jobs(pinned_ids)
-                self._reap_finished_requests()
+                # Do not reap on every pair-finish. sync_for_step already reaps
+                # each wave; per-step reap under the store lock dominated the
+                # recoverable rare_chars host cost in Ascend ablation.
 
             try:
                 cpu = self._materialize_rare_pair_cpu(pair_hold, collect_event)
