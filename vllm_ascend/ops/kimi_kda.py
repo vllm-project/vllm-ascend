@@ -21,6 +21,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import replace_parameter
 from vllm.models.kimi_k3.nvidia.kda import (
     KimiK3DeltaAttention,
+    _KimiGDNMergedColumnParallelLinear,
     _make_decode_conv1d_weight_loader,
 )
 from vllm.v1.attention.backend import AttentionBackend
@@ -35,16 +36,15 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
     record_attention_compute_start,
 )
-from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
-from vllm_ascend.ops.kda_parallel import (
-    KDAColumnParallelLinear,
-    KDAInputParallelLinear,
-    KDAMergedColumnParallelLinear,
-    KDARowParallelLinear,
-    get_kda_parallel_rank,
-    get_kda_parallel_size,
+from vllm_ascend.ops.head_parallel import (
+    HeadParallelColumnLinear,
+    HeadParallelMergedColumnLinear,
+    HeadParallelRowLinear,
+    get_head_parallel_rank,
+    get_head_parallel_size,
 )
-from vllm_ascend.ops.kda_pcp import KimiKDAHostMetadataBackend
+from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
+from vllm_ascend.ops.recurrent_pcp import KimiKDAHostMetadataBackend
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDynamicLinearMethod,
 )
@@ -67,6 +67,13 @@ def _kda_bfg_stream() -> torch.npu.Stream:
     return _KDA_BFG_STREAM
 
 
+class KimiKDAInputParallelLinear(_KimiGDNMergedColumnParallelLinear, HeadParallelMergedColumnLinear):
+    def __init__(self, input_size: int, output_sizes: list[int], tp_size: int, **kwargs) -> None:
+        # Keep upstream replication/padding setup; the next MRO class allocates
+        # its merged projection using the combined TP/PCP rank.
+        super().__init__(input_size, output_sizes, replicated_shard_id=4, tp_size=tp_size, **kwargs)
+
+
 class _KDAFusedBFGLinear(MergedColumnParallelLinear):
     """Pack beta, an offline-composed F projection, and the output gate."""
 
@@ -87,7 +94,7 @@ class _KDAFusedBFGLinear(MergedColumnParallelLinear):
                 self,
                 hidden_size,
                 sum(self.output_sizes),
-                tp_rank=get_kda_parallel_rank(),
+                tp_rank=get_head_parallel_rank(),
                 tp_size=tp_size,
                 bias=False,
                 quant_config=quant_config,
@@ -226,7 +233,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         merged_linear = MergedColumnParallelLinear
         if self.pcp_size > 1:
             self._init_pcp_projections(vllm_config, prefix)
-            merged_linear = KDAMergedColumnParallelLinear
+            merged_linear = HeadParallelMergedColumnLinear
         self.uses_mixed_projection = uses_mixed_projection
         self._ascend_kda_state_copy = None
         if uses_mixed_projection:
@@ -288,8 +295,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
 
     def _init_pcp_projections(self, vllm_config, prefix: str) -> None:
         """Bind every KDA head parameter and cache to the same TP x PCP shard."""
-        self.tp_size = get_kda_parallel_size(vllm_config.parallel_config)
-        self.tp_rank = get_kda_parallel_rank()
+        self.tp_size = get_head_parallel_size(vllm_config.parallel_config)
+        self.tp_rank = get_head_parallel_rank()
         self.local_num_heads = divide(self.num_heads, self.tp_size)
         self.local_projection_size = divide(self.projection_size, self.tp_size)
         local_output_size = 4 * self.local_projection_size + self.head_dim + self.local_num_heads
@@ -303,7 +310,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         output_sizes = [self.projection_size] * 4 + [self.head_dim, self.num_heads]
         if self.in_proj_padding:
             output_sizes.append(self.in_proj_padding * self.tp_size)
-        self.in_proj_qkvgfab = KDAInputParallelLinear(
+        self.in_proj_qkvgfab = KimiKDAInputParallelLinear(
             self.hidden_size,
             output_sizes,
             self.tp_size,
@@ -312,7 +319,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             quant_config=self.quant_config,
             prefix=f"{prefix}.in_proj_qkvgfab",
         )
-        self.f_b_proj = KDAColumnParallelLinear(
+        self.f_b_proj = HeadParallelColumnLinear(
             self.head_dim,
             self.projection_size,
             bias=False,
@@ -323,7 +330,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         self.dt_bias.weight_loader = self._head_weight_loader
         self.A_log = nn.Parameter(torch.empty(self.local_num_heads, dtype=torch.float32))
         self.A_log.weight_loader = self._head_weight_loader
-        self.conv1d = KDAColumnParallelLinear(
+        self.conv1d = HeadParallelColumnLinear(
             self.conv_size,
             3 * self.projection_size,
             bias=False,
@@ -337,7 +344,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             self.tp_rank,
             None,
         )
-        self.o_proj = KDARowParallelLinear(
+        self.o_proj = HeadParallelRowLinear(
             self.projection_size,
             self.hidden_size,
             bias=False,
@@ -359,10 +366,10 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         positions: torch.Tensor,
     ) -> torch.Tensor:
         if self.pcp_size > 1:
-            hidden_states = torch.ops.vllm.kda_pcp_gather(hidden_states, self.pcp_size, self.prefix)
+            hidden_states = torch.ops.vllm.pcp_gather_tokens(hidden_states, self.pcp_size, self.prefix)
         output = self._forward_projections(hidden_states, positions)
         if self.pcp_size > 1:
-            output = torch.ops.vllm.kda_pcp_scatter(output, self.pcp_size, self.prefix)
+            output = torch.ops.vllm.pcp_scatter_tokens(output, self.pcp_size, self.prefix)
         return output
 
     def _forward_projections(self, hidden_states: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:

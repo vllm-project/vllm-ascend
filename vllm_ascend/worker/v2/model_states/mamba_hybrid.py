@@ -260,10 +260,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         if not self._align_mode:
             return
         pcp_manager = getattr(self, "pcp_manager", None)
-        if pcp_manager is not None and (
-            model_uses_kpool_indexer(self.vllm_config.model_config)
-            or model_uses_kimi_kda(self.vllm_config.model_config)
-        ):
+        if pcp_manager is not None and self._uses_global_mamba_pcp():
             pcp_context = pcp_manager.build_attention_context(input_batch, block_tables)
             input_batch = pcp_context.global_batch
             block_tables = pcp_context.global_block_tables
@@ -330,6 +327,10 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             self._pending_bulk_copy = None
         super().finish_execution(failed=failed)
 
+    def _uses_global_mamba_pcp(self) -> bool:
+        model_config = self.vllm_config.model_config
+        return model_uses_kpool_indexer(model_config) or model_uses_kimi_kda(model_config)
+
     def prepare_attn(
         self,
         input_batch: AscendInputBatch,
@@ -346,19 +347,16 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
         assert ubatch_idx == 0, "DBO is not supported on Ascend"
         pcp_manager = getattr(self, "pcp_manager", None)
         pcp_context = None
-        if (
-            pcp_manager is not None
-            and (
-                model_uses_kpool_indexer(self.vllm_config.model_config)
-                or model_uses_kimi_kda(self.vllm_config.model_config)
-            )
-            and pcp_manager.is_target_attn_groups(attn_groups)
-        ):
+        if pcp_manager is not None and self._uses_global_mamba_pcp() and pcp_manager.is_target_attn_groups(attn_groups):
             pcp_context = pcp_manager.build_attention_context(input_batch, block_tables, slot_mappings)
 
         def build_metadata(**kwargs):
-            if pcp_context is not None and not getattr(input_batch, "is_dummy", False):
-                # Recurrent state uses global request order; SFA keeps local queries.
+            if pcp_context is not None and (
+                not getattr(input_batch, "is_dummy", False)
+                or getattr(input_batch, "is_cpp_profile", False)
+                or pcp_context.global_batch is not input_batch
+            ):
+                # Recurrent state uses global request order, including sharded decode capture.
                 local_groups = [
                     [group for group in groups if not isinstance(group.kv_cache_spec, MambaSpec)]
                     for groups in attn_groups

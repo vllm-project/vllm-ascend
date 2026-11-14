@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Graph-stable token permutations for head-sharded Kimi KDA."""
+"""Graph-stable PCP token permutations for recurrent layers."""
 
 from copy import copy
 
@@ -9,14 +9,19 @@ from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend, AscendGDNHostMetadataBuilder
+from vllm_ascend.ops.gdn_attn_builder import (
+    AscendGDNAttentionBackend,
+    AscendGDNAttentionMetadataBuilder,
+    AscendGDNHostMetadataBackend,
+    AscendGDNHostMetadataBuilder,
+)
 
 
-class KimiKDAHostMetadataBuilder(AscendGDNHostMetadataBuilder):
+class PCPRecurrentMetadataBuilderMixin:
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         if pcp_size > 1:
-            # Runner capture sizes count local tokens. KDA runs on the restored
+            # Runner capture sizes count local tokens. Recurrence uses the
             # global batch, including requests owned by other decode shards.
             vllm_config = copy(vllm_config)
             vllm_config.compilation_config = copy(vllm_config.compilation_config)
@@ -37,11 +42,11 @@ class KimiKDAHostMetadataBuilder(AscendGDNHostMetadataBuilder):
             return metadata
         local_tokens = context.local_num_tokens
         if local_tokens is None:
-            raise ValueError("KDA PCP metadata requires the padded local token count")
+            raise ValueError("Recurrent PCP metadata requires the padded local token count")
         global_tokens = local_tokens * self.pcp_size
-        restore = context.hidden_restore_idx
+        restore = context.hidden_restore_idx[: context.global_batch.num_tokens]
         if global_tokens > self._pcp_restore_idx.numel() or restore.numel() > global_tokens:
-            raise ValueError("KDA PCP token permutation exceeds the input capacity")
+            raise ValueError("Recurrent PCP token permutation exceeds the input capacity")
         restore_idx = self._pcp_restore_idx[:global_tokens]
         restore_mask = self._pcp_restore_mask[:global_tokens]
         restore_idx.zero_()
@@ -66,9 +71,27 @@ class KimiKDAHostMetadataBuilder(AscendGDNHostMetadataBuilder):
         metadata.pcp_local_mask = local_mask
         return metadata
 
-    def build(self, *args, **kwargs):
-        metadata = super().build(*args, **kwargs)
-        return self._attach_pcp(metadata, metadata.pcp_context)
+    def build(self, common_prefix_len, common_attn_metadata, *args, **kwargs):
+        metadata = super().build(common_prefix_len, common_attn_metadata, *args, **kwargs)
+        return self._attach_pcp(metadata, getattr(common_attn_metadata, "pcp_context", None))
+
+
+class KimiKDAHostMetadataBuilder(PCPRecurrentMetadataBuilderMixin, AscendGDNHostMetadataBuilder):
+    pass
+
+
+class AscendGDNPCPMetadataBuilder(PCPRecurrentMetadataBuilderMixin, AscendGDNAttentionMetadataBuilder):
+    pass
+
+
+class AscendGDNPCPBackend(AscendGDNAttentionBackend):
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        return True
+
+    @staticmethod
+    def get_builder_cls() -> type[AscendGDNPCPMetadataBuilder]:
+        return AscendGDNPCPMetadataBuilder
 
 
 class KimiKDAHostMetadataBackend(AscendGDNHostMetadataBackend):
@@ -81,32 +104,32 @@ class KimiKDAHostMetadataBackend(AscendGDNHostMetadataBackend):
         return True
 
 
-def kda_pcp_gather(hidden_states: torch.Tensor, pcp_size: int, layer_name: str) -> torch.Tensor:
+def pcp_gather_tokens(hidden_states: torch.Tensor, pcp_size: int, layer_name: str) -> torch.Tensor:
+    """All-gather token rows and restore request order at the padded extent."""
     context = get_forward_context()
-    gathered = context.no_compile_layers[layer_name].pcp_group.all_gather(hidden_states.contiguous(), dim=0)
-    metadata_dict = context.attn_metadata
-    if metadata_dict is None:
+    gathered = get_pcp_group().all_gather(hidden_states.contiguous(), dim=0)
+    metadata = (context.attn_metadata or {}).get(layer_name)
+    if metadata is None:
+        # Profiling may omit the recurrent metadata. Keep the gathered extent.
         return gathered
-    metadata = metadata_dict[layer_name]
     output = gathered.index_select(0, metadata.pcp_restore_idx)
     return output.masked_fill(~metadata.pcp_restore_mask[:, None], 0)
 
 
-def kda_pcp_gather_fake(hidden_states: torch.Tensor, pcp_size: int, layer_name: str) -> torch.Tensor:
+def pcp_gather_tokens_fake(hidden_states: torch.Tensor, pcp_size: int, layer_name: str) -> torch.Tensor:
     return hidden_states.new_empty((hidden_states.shape[0] * pcp_size, hidden_states.shape[1]))
 
 
-def kda_pcp_scatter(output: torch.Tensor, pcp_size: int, layer_name: str) -> torch.Tensor:
-    metadata_dict = get_forward_context().attn_metadata
-    local_tokens = output.shape[0] // pcp_size
-    if metadata_dict is None:
-        return output[:local_tokens].clone()
-    metadata = metadata_dict[layer_name]
+def pcp_scatter_tokens(output: torch.Tensor, pcp_size: int, layer_name: str) -> torch.Tensor:
+    """Select and pad the current rank's rows from a restored tensor."""
+    metadata = (get_forward_context().attn_metadata or {}).get(layer_name)
+    if metadata is None:
+        return output[: output.shape[0] // pcp_size].clone()
     local_output = output.index_select(0, metadata.pcp_local_idx)
     return local_output.masked_fill(~metadata.pcp_local_mask[:, None], 0)
 
 
-def kda_pcp_scatter_fake(output: torch.Tensor, pcp_size: int, layer_name: str) -> torch.Tensor:
+def pcp_scatter_tokens_fake(output: torch.Tensor, pcp_size: int, layer_name: str) -> torch.Tensor:
     return output.new_empty((output.shape[0] // pcp_size, output.shape[1]))
 
 
@@ -114,14 +137,14 @@ def kda_pcp_scatter_fake(output: torch.Tensor, pcp_size: int, layer_name: str) -
 # request metadata stays outside Dynamo; tensor permutations and collectives
 # remain capturable in PIECEWISE/FULL graphs. Builders refresh stable buffers.
 direct_register_custom_op(
-    op_name="kda_pcp_gather",
-    op_func=kda_pcp_gather,
+    op_name="pcp_gather_tokens",
+    op_func=pcp_gather_tokens,
     mutates_args=[],
-    fake_impl=kda_pcp_gather_fake,
+    fake_impl=pcp_gather_tokens_fake,
 )
 direct_register_custom_op(
-    op_name="kda_pcp_scatter",
-    op_func=kda_pcp_scatter,
+    op_name="pcp_scatter_tokens",
+    op_func=pcp_scatter_tokens,
     mutates_args=[],
-    fake_impl=kda_pcp_scatter_fake,
+    fake_impl=pcp_scatter_tokens_fake,
 )

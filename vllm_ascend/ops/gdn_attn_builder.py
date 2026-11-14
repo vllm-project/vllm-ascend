@@ -138,6 +138,7 @@ class GDNChunkedPrefillMetadata:
     num_decodes: int = 0
     cu_seqlens_kern: tuple[int, ...] | None = None
     keep_meta: torch.Tensor | None = None
+    head_sharded_pcp: bool = False
 
 
 @dataclass
@@ -290,16 +291,24 @@ def _build_non_spec_chunked_prefill_metadata(
     device: torch.device,
     build_device_metadata: bool = True,
 ) -> GDNChunkedPrefillMetadata:
+    # Import lazily because the PCP builder extends this module's GDN builder.
+    from vllm_ascend.ops.recurrent_pcp import AscendGDNPCPMetadataBuilder
+
     chunk_indices_chunk64 = prepare_chunk_indices(cu_seqlens_cpu, _GDN_CHUNK_SIZE)
+    head_sharded_pcp = isinstance(builder, AscendGDNPCPMetadataBuilder)
     if build_device_metadata:
+        parallel = builder.vllm_config.parallel_config
+        head_shards = parallel.tensor_parallel_size
+        if head_sharded_pcp:
+            from vllm_ascend.ops.head_parallel import get_head_parallel_size
+
+            head_shards = get_head_parallel_size(parallel)
         hf_text_config = getattr(builder.vllm_config.model_config, "hf_text_config", None)
         linear_attn_config = getattr(hf_text_config, "linear_attn_config", None)
         if isinstance(linear_attn_config, dict) and linear_attn_config.get("num_heads") is not None:
-            gdn_num_heads = linear_attn_config["num_heads"] // builder.vllm_config.parallel_config.tensor_parallel_size
+            gdn_num_heads = linear_attn_config["num_heads"] // head_shards
         elif hf_text_config is not None and hasattr(hf_text_config, "linear_num_value_heads"):
-            gdn_num_heads = (
-                hf_text_config.linear_num_value_heads // builder.vllm_config.parallel_config.tensor_parallel_size
-            )
+            gdn_num_heads = hf_text_config.linear_num_value_heads // head_shards
         else:
             gdn_num_heads = builder.vllm_config.model_config.get_num_attention_heads(
                 builder.vllm_config.parallel_config
@@ -349,6 +358,7 @@ def _build_non_spec_chunked_prefill_metadata(
         **device_chunk_metadata,
         cu_seqlens_kern=cu_seqlens_kern,
         keep_meta=keep_meta,
+        head_sharded_pcp=head_sharded_pcp,
     )
 
 

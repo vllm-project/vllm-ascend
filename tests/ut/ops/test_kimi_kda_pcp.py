@@ -9,15 +9,15 @@ import pytest
 import torch
 
 from vllm_ascend.models.kimi_k3 import kimi_k3
-from vllm_ascend.ops import kda_parallel, kda_pcp
-from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention
+from vllm_ascend.ops import head_parallel, recurrent_pcp
+from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention, KimiKDAInputParallelLinear
 
 
 @contextmanager
 def parallel_groups(tp, pcp):
     with (
-        patch.object(kda_parallel, "get_tp_group", return_value=tp),
-        patch.object(kda_parallel, "get_pcp_group", return_value=pcp),
+        patch.object(head_parallel, "get_tp_group", return_value=tp),
+        patch.object(head_parallel, "get_pcp_group", return_value=pcp),
         patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=tp.rank_in_group),
         patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=tp.world_size),
     ):
@@ -64,8 +64,8 @@ def test_kda_projections_cover_global_heads_once(tp, pcp):
         tp_group = SimpleNamespace(world_size=tp, rank_in_group=tp_rank, all_reduce=lambda x: x)
         pcp_group = SimpleNamespace(world_size=pcp, rank_in_group=pcp_rank, all_reduce=lambda x: x)
         with parallel_groups(tp_group, pcp_group):
-            projection = kda_parallel.KDAInputParallelLinear(hidden, [width] * 4 + [4, 16], size, bias=False)
-            out = kda_parallel.KDARowParallelLinear(width, hidden, bias=False)
+            projection = KimiKDAInputParallelLinear(hidden, [width] * 4 + [4, 16], size, bias=False)
+            out = head_parallel.HeadParallelRowLinear(width, hidden, bias=False)
         for sid, weight in enumerate(weights):
             projection.weight.weight_loader(projection.weight, weight, sid)
         expected = torch.cat(
@@ -89,7 +89,7 @@ def test_kda_input_projection_preserves_upstream_padding_and_replication(loader,
     if padding:
         output_sizes.append(padding * 4)
     with parallel_groups(tp, pcp):
-        projection = kda_parallel.KDAInputParallelLinear(8, output_sizes, 4, padding_size=padding, bias=False)
+        projection = KimiKDAInputParallelLinear(8, output_sizes, 4, padding_size=padding, bias=False)
     projection.weight.data.fill_(9)
     weight = torch.arange(32).float().view(4, 8)
     getattr(projection, loader)(projection.weight, weight, 4)
@@ -115,7 +115,7 @@ def test_kda_pcp_reduction_is_required_when_tp_reduction_is_deferred(reduce_resu
     tp = SimpleNamespace(world_size=4, rank_in_group=0, all_reduce=reduce_tp)
     pcp = SimpleNamespace(world_size=2, rank_in_group=0, all_reduce=reduce_pcp)
     with parallel_groups(tp, pcp):
-        projection = kda_parallel.KDARowParallelLinear(64, 8, bias=False, reduce_results=reduce_results)
+        projection = head_parallel.HeadParallelRowLinear(64, 8, bias=False, reduce_results=reduce_results)
     projection.weight.data.fill_(1)
     output = projection(torch.ones(3, 8))[0]
     torch.testing.assert_close(output, torch.full((3, 8), 64.0 if reduce_results else 16.0))
@@ -126,7 +126,7 @@ def test_pcp_kda_output_projection_does_not_enter_tp_only_fusion(monkeypatch):
     tp = SimpleNamespace(world_size=4, rank_in_group=0)
     pcp = SimpleNamespace(world_size=2, rank_in_group=0)
     with parallel_groups(tp, pcp):
-        projection = kda_parallel.KDARowParallelLinear(64, 8, bias=False)
+        projection = head_parallel.HeadParallelRowLinear(64, 8, bias=False)
     layer = kimi_k3.AscendKimiDecoderLayer.__new__(kimi_k3.AscendKimiDecoderLayer)
     torch.nn.Module.__init__(layer)
     layer.use_sequence_parallel = True
@@ -137,8 +137,8 @@ def test_pcp_kda_output_projection_does_not_enter_tp_only_fusion(monkeypatch):
     assert not layer._enable_o_proj_mm_reduce_scatter(SimpleNamespace(lora_config=None))
 
 
-def make_builder(pcp_rank, capacity=16):
-    builder = object.__new__(kda_pcp.KimiKDAHostMetadataBuilder)
+def make_builder(pcp_rank, capacity=16, builder_cls=recurrent_pcp.KimiKDAHostMetadataBuilder):
+    builder = object.__new__(builder_cls)
     builder.pcp_size = 2
     builder.pcp_rank = pcp_rank
     builder._pcp_restore_idx = torch.zeros(capacity * 2, dtype=torch.long)
@@ -164,21 +164,20 @@ def test_pcp_causal_order_decode_sharding_and_padding(rank_inputs, restore, loca
         builder = make_builder(rank)
         context = SimpleNamespace(
             local_num_tokens=count,
+            global_batch=SimpleNamespace(num_tokens=len(restore)),
             hidden_restore_idx=torch.tensor(restore),
             local_token_indices=torch.tensor(local_indices[rank], dtype=torch.long),
         )
         metadata = builder._attach_pcp(SimpleNamespace(), context)
         group = SimpleNamespace(all_gather=lambda x, dim: gathered)
-        with patch.object(
-            kda_pcp,
-            "get_forward_context",
-            return_value=SimpleNamespace(
-                attn_metadata={"kda": metadata}, no_compile_layers={"kda": SimpleNamespace(pcp_group=group)}
-            ),
+        forward = SimpleNamespace(attn_metadata={"kda": metadata})
+        with (
+            patch.object(recurrent_pcp, "get_pcp_group", return_value=group),
+            patch.object(recurrent_pcp, "get_forward_context", return_value=forward),
         ):
-            restored = kda_pcp.kda_pcp_gather(gathered[:count], 2, "kda")
+            restored = recurrent_pcp.pcp_gather_tokens(gathered[:count], 2, "kda")
             torch.testing.assert_close(restored[: len(restore), 0], torch.arange(len(restore)).float())
-            local = kda_pcp.kda_pcp_scatter(restored * 10 + 1, 2, "kda")
+            local = recurrent_pcp.pcp_scatter_tokens(restored * 10 + 1, 2, "kda")
         expected = torch.zeros(count)
         expected[: len(local_indices[rank])] = torch.tensor(local_indices[rank]).float() * 10 + 1
         torch.testing.assert_close(local[:, 0], expected)
@@ -187,14 +186,18 @@ def test_pcp_causal_order_decode_sharding_and_padding(rank_inputs, restore, loca
 def test_pcp_metadata_refresh_preserves_captured_addresses():
     builder = make_builder(0)
     context = SimpleNamespace(
-        local_num_tokens=2, hidden_restore_idx=torch.tensor([0, 2, 1]), local_token_indices=torch.tensor([0, 2])
+        local_num_tokens=2,
+        global_batch=SimpleNamespace(num_tokens=3),
+        hidden_restore_idx=torch.tensor([0, 2, 1, 0]),
+        local_token_indices=torch.tensor([0, 2]),
     )
     first = builder._attach_pcp(SimpleNamespace(), context)
     addresses = [
         getattr(first, name).data_ptr()
         for name in ("pcp_restore_idx", "pcp_restore_mask", "pcp_local_idx", "pcp_local_mask")
     ]
-    context.hidden_restore_idx = torch.tensor([2, 0])
+    context.global_batch.num_tokens = 2
+    context.hidden_restore_idx = torch.tensor([2, 0, 0, 0])
     context.local_token_indices = torch.tensor([1])
     second = builder._attach_pcp(SimpleNamespace(), context)
     assert addresses == [
@@ -208,10 +211,20 @@ def test_pcp_metadata_refresh_preserves_captured_addresses():
 
 
 @pytest.mark.parametrize("for_capture", [False, True])
-def test_pcp_builder_consumes_common_metadata_context(for_capture):
-    builder = make_builder(0)
+@pytest.mark.parametrize(
+    ("builder_cls", "base_cls"),
+    [
+        (recurrent_pcp.KimiKDAHostMetadataBuilder, recurrent_pcp.AscendGDNHostMetadataBuilder),
+        (recurrent_pcp.AscendGDNPCPMetadataBuilder, recurrent_pcp.AscendGDNAttentionMetadataBuilder),
+    ],
+)
+def test_pcp_builder_consumes_common_metadata_context(for_capture, builder_cls, base_cls):
+    builder = make_builder(0, builder_cls=builder_cls)
     context = SimpleNamespace(
-        local_num_tokens=2, hidden_restore_idx=torch.tensor([0, 2, 1]), local_token_indices=torch.tensor([0, 2])
+        local_num_tokens=2,
+        global_batch=SimpleNamespace(num_tokens=3),
+        hidden_restore_idx=torch.tensor([0, 2, 1, 0]),
+        local_token_indices=None if for_capture else torch.tensor([0, 2]),
     )
     common = SimpleNamespace(pcp_context=context)
 
@@ -222,15 +235,16 @@ def test_pcp_builder_consumes_common_metadata_context(for_capture):
         return self.build(0, common_attn_metadata)
 
     with (
-        patch.object(kda_pcp.AscendGDNHostMetadataBuilder, "build", build_base),
-        patch.object(kda_pcp.AscendGDNHostMetadataBuilder, "build_for_cudagraph_capture", capture_base),
+        patch.object(base_cls, "build", build_base),
+        patch.object(base_cls, "build_for_cudagraph_capture", capture_base),
     ):
         if for_capture:
             result = builder.build_for_cudagraph_capture(common)
         else:
             result = builder.build(common_prefix_len=0, common_attn_metadata=common)
     assert result.pcp_restore_idx.tolist() == [0, 2, 1, 0]
-    assert result.pcp_local_idx.tolist() == [0, 2]
+    assert result.pcp_restore_mask.tolist() == [True, True, True, False]
+    assert result.pcp_local_idx.tolist() == ([0, 1] if for_capture else [0, 2])
 
 
 def test_pcp_fake_ops_keep_shapes_traceable():
@@ -238,9 +252,9 @@ def test_pcp_fake_ops_keep_shapes_traceable():
 
     with FakeTensorMode():
         local = torch.empty(7, 32)
-        global_tokens = torch.ops.vllm.kda_pcp_gather(local, 2, "kda")
+        global_tokens = torch.ops.vllm.pcp_gather_tokens(local, 2, "kda")
         assert global_tokens.shape == (14, 32)
-        assert torch.ops.vllm.kda_pcp_scatter(global_tokens, 2, "kda").shape == local.shape
+        assert torch.ops.vllm.pcp_scatter_tokens(global_tokens, 2, "kda").shape == local.shape
 
 
 def test_capture_capacity_counts_global_kda_tokens_without_changing_runner():
@@ -254,10 +268,10 @@ def test_capture_capacity_counts_global_kda_tokens_without_changing_runner():
         self.decode_cudagraph_max_bs = vllm_config.compilation_config.max_cudagraph_capture_size
 
     with (
-        patch.object(kda_pcp.AscendGDNHostMetadataBuilder, "__init__", init_metadata),
-        patch.object(kda_pcp, "get_pcp_group", return_value=SimpleNamespace(rank_in_group=0)),
+        patch.object(recurrent_pcp.AscendGDNHostMetadataBuilder, "__init__", init_metadata),
+        patch.object(recurrent_pcp, "get_pcp_group", return_value=SimpleNamespace(rank_in_group=0)),
     ):
-        builder = kda_pcp.KimiKDAHostMetadataBuilder(None, [], config, torch.device("cpu"))
+        builder = recurrent_pcp.KimiKDAHostMetadataBuilder(None, [], config, torch.device("cpu"))
     assert builder.decode_cudagraph_max_bs == 8
     assert config.compilation_config.max_cudagraph_capture_size == 4
 
