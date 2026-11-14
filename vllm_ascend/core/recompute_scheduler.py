@@ -88,10 +88,10 @@ class RecomputeSchedulerOutput(SchedulerOutput):
 class RecomputeScheduler(Scheduler):
     """Use vLLM scheduling with best-effort decode-side preemption offload.
 
-    This keeps a local copy of vLLM's schedule() only to pad the first decode
-    request for stable Ascend speculative-decode graph shapes. Preempted KV is
-    offloaded when possible; otherwise the request returns to P to redo
-    prefill, or is aborted under o_proj TP.
+    The local schedule() adds preemption offload/recompute handling, padding
+    for stable Ascend speculative-decode graph shapes, and DyntraLB hooks.
+    Preempted KV is offloaded when possible; otherwise the request returns to
+    P to redo prefill, or is aborted when o_proj or MLP TP size exceeds one.
     """
 
     prefill_capacity_bound: bool

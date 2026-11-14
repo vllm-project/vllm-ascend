@@ -57,11 +57,12 @@ def reset_ascend_config() -> Iterator[None]:
     clear_ascend_config()
 
 
-def make_scheduler(scheduler_cls: type[Scheduler]) -> Scheduler:
+def make_scheduler(scheduler_cls: type[Scheduler], *, max_num_active_seqs: int | None = None) -> Scheduler:
     config = make_dyntra_test_config(block_size=BLOCK_SIZE)
     # Use the real cache manager without constructing a transport backend.
     config.kv_transfer_config = None
     config.scheduler_config.async_scheduling = issubclass(scheduler_cls, AsyncScheduler)
+    config.scheduler_config.max_num_active_seqs = max_num_active_seqs
     scheduler = create_dyntra_lb_scheduler(config, scheduler_cls, num_blocks=NUM_BLOCKS)
     if isinstance(scheduler, BalanceScheduler):
         # Exercise the copied schedule(), rather than its disabled-path fallback.
@@ -300,17 +301,25 @@ def test_dyntra_pause_all_does_not_apply_outgoing_plan(scheduler_cls):
     assert scheduler.modifications is None
 
 
-def test_balance_pause_still_obeys_rank_capacity():
+@pytest.mark.parametrize("max_num_active_seqs", [None, 8], ids=["default-cap", "lower-active-cap"])
+def test_balance_pause_still_obeys_rank_capacity(max_num_active_seqs):
     # PAUSED_NEW intentionally retains the global capacity freeze for KV holders.
-    scheduler = make_scheduler(BalanceScheduler)
+    scheduler = make_scheduler(BalanceScheduler, max_num_active_seqs=max_num_active_seqs)
     loading = start_async_load(scheduler, load_done=True)
+    queued = create_request(2, num_tokens=BLOCK_SIZE, block_size=BLOCK_SIZE)
+    scheduler.add_request(queued)
     scheduler.set_pause_state(PauseState.PAUSED_NEW)
-    scheduler.balance_queue = [torch.tensor([scheduler.max_num_running_reqs], dtype=torch.int)]
+    scheduler.balance_queue = [torch.tensor([scheduler.max_num_active_reqs], dtype=torch.int)]
 
     assert not step(scheduler).num_scheduled_tokens
     assert loading in scheduler.kv_holding_waiting
 
     # Simulate balance_gather() observing freed capacity during a coordinated pause.
     scheduler.balance_queue = [torch.tensor([0], dtype=torch.int)]
-    drain(scheduler)
+    drain(scheduler, queued)
     assert loading.request_id not in scheduler.requests
+    assert list(scheduler.waiting) == [queued]
+    assert scheduler.get_num_unfinished_requests() == 0
+
+    scheduler.set_pause_state(PauseState.UNPAUSED)
+    assert queued.request_id in step(scheduler).num_scheduled_tokens

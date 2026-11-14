@@ -4,16 +4,16 @@
 Keeps running-request counts even across DP ranks: every step an all-gather
 of each rank's ``len(running)`` runs once via ``BalanceScheduler.balance_gather``
 (invoked from the engine core, NOT from inside ``schedule()``); if any rank
-was at the running cap at the end of the previous step, every rank stops
-admitting new WAITING requests (``any-rank-at-cap => global freeze``). Each
-rank reaches that decision independently from the same gathered snapshot --
-there is no leader. See ``docs/.../balance_schedule_refactor.md`` for the
-design.
+was at or above ``max_num_active_reqs`` at the end of the previous step,
+every rank stops admitting waiting requests (``any-rank-at-cap => global
+freeze``). This is the same admission limit as upstream, which may be lower
+than the model-runner capacity. Each rank uses the same gathered snapshot;
+there is no leader.
 
 The copied ``schedule()`` follows vLLM v0.33.0 and verified main revision
 24420b7a341af37a9bc3186e6fc6062512e0aa58. The balance deltas are:
 (1) the disabled-path early return that delegates to ``super()``,
-(2) the ``balance_flag`` break inside the WAITING loop
+(2) the global-capacity break inside the waiting loop
 (``any-rank-at-cap => global freeze``). The shared queue path stops before
 peeking an empty waiting queue, including when every request is deferred. Both
 supported vLLM refs expose ``schedule(throttle_prefills=False)``, so the
@@ -154,6 +154,9 @@ class BalanceScheduler(Scheduler):
         ``all_gather`` is a collective, so any rank skipping it deadlocks
         the busy ranks. Returns early when balance is disabled or the DP
         group has not been injected yet.
+
+        Count running requests only: parked streaming sessions may wait
+        indefinitely and must not freeze admission on other ranks during drain.
         """
         if not self._balance_enabled or self.dp_group is None:
             return
@@ -515,7 +518,7 @@ class BalanceScheduler(Scheduler):
 
                 # Intentionally retain the global capacity freeze under PAUSED_NEW.
                 # Running requests drain as balance_gather() refreshes rank counts.
-                if max(t.item() for t in self.balance_queue) == self.max_num_running_reqs:
+                if max(t.item() for t in self.balance_queue) >= self.max_num_active_reqs:
                     break
 
                 request = request_queue.peek_request()

@@ -324,7 +324,7 @@ def _schedule_body_ast(source: str) -> str:
             if "_balance_enabled" in test:
                 return None
             # delta 2: the balance admission gate inside the WAITING loop.
-            if "balance_queue" in test and "max_num_running_reqs" in test:
+            if "balance_queue" in test and "max_num_active_reqs" in test:
                 return None
             return self.generic_visit(node)
 
@@ -368,9 +368,8 @@ def test_balance_deltas_present_in_schedule():
     assert "if not self._balance_enabled:" in src
     assert "super().schedule(throttle_prefills)" in src
 
-    # delta 2: the balance_flag admission gate (leader-at-cap => global freeze).
-    assert "max(t.item() for t in self.balance_queue)" in src
-    assert "self.max_num_running_reqs" in src
+    # delta 2: the global admission gate (any-rank-at-cap => global freeze).
+    assert "if max(t.item() for t in self.balance_queue) >= self.max_num_active_reqs:" in src
 
     # The shared queue path must stop before peeking an empty request queue.
     assert "if not request_queue or input_budget <= draft_slots:" in src
@@ -548,7 +547,8 @@ def _make_output(scheduler):
     )
 
 
-def _make_balance_scheduler(*, dp_size=2, max_num_seqs=16, policy="fcfs", num_blocks=10000):
+def _make_balance_scheduler(*, dp_size=2, max_num_seqs=16, max_num_active_seqs=None, policy="fcfs", num_blocks=10000):
+    """Build a BalanceScheduler with real KV allocation and mocked model metadata."""
     from contextlib import ExitStack
     from unittest.mock import PropertyMock
 
@@ -595,6 +595,7 @@ def _make_balance_scheduler(*, dp_size=2, max_num_seqs=16, policy="fcfs", num_bl
         model_config.runner_type = "generate"
         scheduler_config = SchedulerConfig(
             max_num_seqs=max_num_seqs,
+            max_num_active_seqs=max_num_active_seqs,
             policy=policy,
             max_model_len=8192,
             long_prefill_token_threshold=0,
@@ -662,14 +663,47 @@ def test_balance_gather_all_gathers_when_enabled():
     from vllm_ascend.patch.platform import patch_balance_schedule as pbs
 
     scheduler = _make_balance_scheduler()
+    scheduler.add_request(_create_requests(1)[0])
+    scheduler.schedule()
+    scheduler.num_waiting_for_streaming_input = 2
     scheduler.dp_group = object()
     with patch.object(pbs.dist, "all_gather") as mock_gather:
         scheduler.balance_gather()
     mock_gather.assert_called_once()
+    # Parked streaming sessions must not hold the global freeze during drain.
+    assert mock_gather.call_args.args[1].item() == len(scheduler.running) == 1
     scheduler.dp_group = None
     with patch.object(pbs.dist, "all_gather") as mock_gather:
         scheduler.balance_gather()
     mock_gather.assert_not_called()
+
+
+@pytest.mark.parametrize("max_num_active_seqs", [None, 8], ids=["default-cap", "lower-active-cap"])
+def test_balance_freezes_at_active_capacity_and_resumes(max_num_active_seqs):
+    scheduler = _make_balance_scheduler(max_num_active_seqs=max_num_active_seqs)
+    running, waiting = _create_requests(2, num_tokens=16, max_tokens=8)
+    scheduler.add_request(running)
+    output = scheduler.schedule()
+    scheduler.update_from_output(output, _make_output(scheduler))
+    scheduler.add_request(waiting)
+    scheduler.balance_queue = [
+        torch.tensor([len(scheduler.running)], dtype=torch.int),
+        torch.tensor([scheduler.max_num_active_reqs], dtype=torch.int),
+    ]
+
+    output = scheduler.schedule()
+
+    assert set(output.num_scheduled_tokens) == {running.request_id}
+    assert waiting.status == RequestStatus.WAITING
+    assert list(scheduler.waiting) == [waiting]
+    assert not any(scheduler.kv_cache_manager.get_block_ids(waiting.request_id))
+    scheduler.update_from_output(output, _make_output(scheduler))
+
+    scheduler.balance_queue[1] = torch.tensor([scheduler.max_num_active_reqs - 1], dtype=torch.int)
+    output = scheduler.schedule()
+
+    assert waiting.request_id in output.num_scheduled_tokens
+    assert waiting.status == RequestStatus.RUNNING
 
 
 def test_balance_schedule_waiting_and_running_paths():
@@ -845,17 +879,15 @@ def test_balance_schedule_pause_freeze_and_v2():
     out = v2_sched.schedule()
     assert out.total_num_scheduled_tokens > 0
 
-    # Fresh scheduler: lowering max_num_running_reqs below len(running) trips
-    # schedule()'s running-cap assert.
-    cap_sched = _make_balance_scheduler()
-    cap_sched.max_num_running_reqs = 0
-    cap_sched.balance_queue = [torch.tensor([0], dtype=torch.int)]
-    cap_sched.add_request(_create_requests(1, num_tokens=8, id_offset=10)[0])
+    cap_sched = _make_balance_scheduler(max_num_seqs=2, max_num_active_seqs=1)
+    running, waiting = _create_requests(2, num_tokens=8, id_offset=10)
+    cap_sched.add_request(running)
+    cap_sched.add_request(waiting)
     capped = cap_sched.schedule()
-    assert capped.total_num_scheduled_tokens == 0
+    assert set(capped.num_scheduled_tokens) == {running.request_id}
+    assert list(cap_sched.waiting) == [waiting]
 
-    freeze_sched = _make_balance_scheduler()
-    freeze_sched.max_num_running_reqs = 1
+    freeze_sched = _make_balance_scheduler(max_num_seqs=1)
     freeze_sched.balance_queue = [torch.tensor([1], dtype=torch.int)]
     freeze_sched.add_request(_create_requests(1, num_tokens=8, id_offset=20)[0])
     frozen = freeze_sched.schedule()
