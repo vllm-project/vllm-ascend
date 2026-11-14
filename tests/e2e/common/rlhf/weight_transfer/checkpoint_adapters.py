@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""DeepSeek checkpoint-name conversion."""
+"""Checkpoint-name conversion and metadata missing from HF meta models."""
+
+from typing import Any
 
 import regex as re
+import torch
 
 _DSV4_SELF_ATTN_RENAMES = (
     # Descriptive HF names -> the compact names the checkpoint/loader expect.
@@ -78,3 +81,55 @@ def deepseek_v4_checkpoint_name(name: str) -> str:
         if name.endswith(old):
             return name[: -len(old)] + new
     return name
+
+
+def deepseek_v4_vision_params(config: Any) -> list[tuple[str, tuple[int, ...], torch.dtype]]:
+    """Describe vision and router parameters absent from the HF text meta model.
+
+    The shared weight source enumerates the text backbone, expands expert
+    shards and applies ``deepseek_v4_checkpoint_name``. This adapter adds only
+    missing checkpoint entries; it does not allocate or generate weights.
+
+    Shapes follow the vision checkpoint: fused ViT gate/up projections,
+    downsampled aligner input and four image-marker vectors. Router biases
+    remain FP32; vision and marker payloads use BF16, including markers whose
+    served parameters are FP32 and are cast by the loader on copy.
+    """
+    dim = int(config.vision_dim)
+    inter = int(config.vision_inter_dim)
+    patch = int(config.vision_patch_size)
+    ratio = int(config.vision_downsample_ratio)
+    hidden = int(config.hidden_size)
+    params: list[tuple[str, tuple[int, ...], torch.dtype]] = [
+        ("vision.patch_embed.proj.weight", (dim, 3 * patch * patch), torch.bfloat16),
+        ("vision.patch_embed.proj.bias", (dim,), torch.bfloat16),
+        ("vision.norm.weight", (dim,), torch.bfloat16),
+    ]
+    for layer in range(int(config.vision_n_layers)):
+        prefix = f"vision.blocks.{layer}"
+        params += [
+            (f"{prefix}.norm1.weight", (dim,), torch.bfloat16),
+            (f"{prefix}.attn.wqkv.weight", (3 * dim, dim), torch.bfloat16),
+            (f"{prefix}.attn.wqkv.bias", (3 * dim,), torch.bfloat16),
+            (f"{prefix}.attn.wo.weight", (dim, dim), torch.bfloat16),
+            (f"{prefix}.attn.wo.bias", (dim,), torch.bfloat16),
+            (f"{prefix}.norm2.weight", (dim,), torch.bfloat16),
+            (f"{prefix}.mlp.w1.weight", (2 * inter, dim), torch.bfloat16),
+            (f"{prefix}.mlp.w2.weight", (dim, inter), torch.bfloat16),
+        ]
+    params += [
+        ("aligner.w1.weight", (hidden, dim * ratio * ratio), torch.bfloat16),
+        ("aligner.w1.bias", (hidden,), torch.bfloat16),
+        ("aligner.w2.weight", (hidden, hidden), torch.bfloat16),
+        ("aligner.w2.bias", (hidden,), torch.bfloat16),
+    ]
+    params += [(name, (hidden,), torch.bfloat16) for name in ("image_start", "image_end", "image_newline", "image_pad")]
+    # HF's text meta model omits these real router parameters. A full update
+    # must carry them rather than relying on the previous device allocation.
+    expert_shape = (int(config.n_routed_experts),)
+    for layer in range(int(config.num_hidden_layers)):
+        prefix = f"model.layers.{layer}.mlp.gate"
+        params.append((f"{prefix}.bias_vl", expert_shape, torch.float32))
+        if config.mlp_layer_types[layer] != "hash_moe":
+            params.append((f"{prefix}.e_score_correction_bias", expert_shape, torch.float32))
+    return params

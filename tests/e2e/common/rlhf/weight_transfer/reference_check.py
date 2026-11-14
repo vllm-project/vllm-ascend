@@ -3,9 +3,12 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 """Startup-load reference and two-update equivalence checks."""
 
+import base64
 import json
 from contextlib import contextmanager
+from io import BytesIO
 
+from PIL import Image
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.common.rlhf.common import rlhf_server, wait_for_free_device_memory
@@ -18,7 +21,7 @@ from tests.e2e.common.rlhf.weight_transfer.weight_source import (
 UPDATE_ROUNDS = 2
 
 
-FULL_DECODE_ONLY_CONFIG = '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1]}'
+FULL_DECODE_ONLY_CONFIG = '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 
 
 def _common_serve_args(
@@ -167,7 +170,7 @@ def reference_signature(
             env_dict=env_dict,
         ) as server,
     ):
-        signature = generation_signature(server.get_client(), case.model)
+        signature = generation_signature(server.get_client(), case.model, image_prompt=case.image_prompt)
 
     _REFERENCE_SIGNATURES[cache_key] = signature
     return signature
@@ -179,8 +182,36 @@ PROMPTS = [
 ]
 
 
-def generation_signature(client, model: str) -> list[tuple[str, tuple[float, ...]]]:
-    """Capture deterministic text and logprobs for exact reload comparison."""
+IMAGE_PROMPT = "Describe the colors of this image in one short sentence."
+
+
+def _quadrant_png_data_url(size: int = 384) -> str:
+    """``size`` is the model's ``vision_min_pixels`` side (384 x 384), so the
+    processor does not have to resize the input
+    """
+    half = size // 2
+    image = Image.new("RGB", (size, size), (0, 0, 128))
+    image.paste((255, 0, 128), (half, 0, size, half))
+    image.paste((0, 255, 128), (0, half, half, size))
+    image.paste((255, 255, 128), (half, half, size, size))
+
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+IMAGE_DATA_URL = _quadrant_png_data_url()
+
+
+def generation_signature(client, model: str, *, image_prompt: bool = False) -> list[tuple[str, tuple[float, ...]]]:
+    """Capture deterministic text and logprobs for exact reload comparison.
+
+    ``image_prompt`` appends one chat request carrying an image for multimodal
+    cases: the vision tower only runs when an image is in the batch, so without
+    it a dropped, renamed or reshaped vision tensor would not move the signature
+    and the case would prove nothing about the tower.
+    """
     signature = []
     for prompt in PROMPTS:
         response = client.completions.create(
@@ -195,6 +226,27 @@ def generation_signature(client, model: str) -> list[tuple[str, tuple[float, ...
         token_logprobs = tuple(choice.logprobs.token_logprobs or ())
         assert token_logprobs, f"{model}: generation returned no token logprobs"
         signature.append((choice.text, token_logprobs))
+    if image_prompt:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": IMAGE_PROMPT},
+                        {"type": "image_url", "image_url": {"url": IMAGE_DATA_URL}},
+                    ],
+                }
+            ],
+            max_tokens=8,
+            temperature=0,
+            seed=0,
+            logprobs=True,
+        )
+        choice = response.choices[0]
+        token_logprobs = tuple(item.logprob for item in (choice.logprobs.content or ()))
+        assert token_logprobs, f"{model}: image generation returned no token logprobs"
+        signature.append((choice.message.content or "", token_logprobs))
     return signature
 
 
@@ -239,7 +291,7 @@ def weight_transfer_servers(
         server_port=port,
         env_dict=env_dict,
     ) as server:
-        dummy_signature = generation_signature(server.get_client(), case.model)
+        dummy_signature = generation_signature(server.get_client(), case.model, image_prompt=case.image_prompt)
         yield server, reference, dummy_signature
 
 

@@ -24,17 +24,22 @@ silently turn the comparison into apples-to-oranges, so the parity and the
 caching contract are pinned here.
 """
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
+from safetensors.torch import load_file
+from transformers import Qwen3Config
 
 from tests.e2e.common.rlhf.weight_transfer import reference_check as utils
-from tests.e2e.common.rlhf.weight_transfer.case import MODEL_CASES
+from tests.e2e.common.rlhf.weight_transfer.case import MODEL_CASES, WeightUpdateModelCase
 from tests.e2e.common.rlhf.weight_transfer.reference_check import (
     live_update_serve_args,
     reference_serve_args,
     reference_signature,
 )
+from tests.e2e.common.rlhf.weight_transfer.weight_source import FIXED_WEIGHT_SEED, FixedRandomWeightSource
 
 CASE = MODEL_CASES[0]
 PORT = 8123
@@ -187,3 +192,62 @@ def test_reference_signature_starts_one_server_per_measurement_conditions(refere
     assert mock_generate.call_count == 2
     # One gate per startup, not per call: a cache hit must not stop the world.
     assert mock_wait.call_count == 2
+
+
+@pytest.fixture
+def random_weight_case(tmp_path):
+    directory = tmp_path / "model"
+    Qwen3Config(
+        architectures=["Qwen3ForCausalLM"],
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        head_dim=8,
+        tie_word_embeddings=False,
+    ).save_pretrained(directory)
+    return WeightUpdateModelCase(id="random", model=str(directory), hf_overrides={})
+
+
+def test_default_weight_seed_matches_explicit_seed(random_weight_case):
+    plain = FixedRandomWeightSource(random_weight_case, torch.device("cpu"))
+    explicit = FixedRandomWeightSource(random_weight_case, torch.device("cpu"), seed=FIXED_WEIGHT_SEED)
+    assert plain.metadata == explicit.metadata
+    for (name, expected), (actual_name, actual) in zip(plain, explicit, strict=True):
+        assert name == actual_name
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_weight_payload_is_repeatable_and_does_not_reseed_global_rng(random_weight_case):
+    source = FixedRandomWeightSource(random_weight_case, torch.device("cpu"), seed=123)
+    rng_state = torch.get_rng_state()
+    first = dict(source)
+    second = dict(source)
+    assert torch.equal(torch.get_rng_state(), rng_state)
+    for name in first:
+        torch.testing.assert_close(first[name], second[name], rtol=0, atol=0)
+
+
+def test_weight_seed_changes_payload_without_changing_metadata(random_weight_case):
+    first = FixedRandomWeightSource(random_weight_case, torch.device("cpu"), seed=1)
+    second = FixedRandomWeightSource(random_weight_case, torch.device("cpu"), seed=2)
+    assert first.metadata == second.metadata
+    second_payload = dict(second)
+    for name, tensor in first:
+        assert not torch.equal(tensor, second_payload[name]), name
+
+
+def test_random_checkpoint_contains_exact_seeded_payload(random_weight_case, tmp_path):
+    source = FixedRandomWeightSource(random_weight_case, torch.device("cpu"), seed=123)
+    destination = tmp_path / "checkpoint"
+    with patch("huggingface_hub.hf_hub_download", side_effect=lambda model, filename: str(Path(model) / filename)):
+        source.write_checkpoint(destination)
+    assert {path.name for path in destination.iterdir()} == {"config.json", "model.safetensors"}
+    checkpoint = load_file(str(destination / "model.safetensors"))
+    payload = dict(source)
+    assert checkpoint.keys() == payload.keys()
+    for name, tensor in payload.items():
+        torch.testing.assert_close(checkpoint[name], tensor, rtol=0, atol=0)
+    assert (destination / "config.json").read_bytes() == (Path(random_weight_case.model) / "config.json").read_bytes()

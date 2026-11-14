@@ -8,7 +8,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from tests.e2e.common.rlhf.weight_transfer.checkpoint_adapters import deepseek_v4_checkpoint_name
+from tests.e2e.common.rlhf.weight_transfer.checkpoint_adapters import (
+    deepseek_v4_checkpoint_name,
+    deepseek_v4_vision_params,
+)
 
 
 @dataclass(frozen=True)
@@ -23,6 +26,8 @@ class WeightUpdateModelCase:
     checkpoint_name_map: Callable[[str], str] | None = None
     expert_intermediate_size: int | None = None
     extra_server_args: tuple[str, ...] = ()
+    extra_param_builder: Callable[[Any], list[tuple[str, tuple[int, ...], Any]]] | None = None
+    image_prompt: bool = False
     # One representative model covers both backends and packing modes.
     full_transfer_matrix: bool = False
     skip_reason: str | None = None
@@ -101,6 +106,28 @@ DEEPSEEK_V4_CASE = WeightUpdateModelCase(
 
 
 DEEPSEEK_CASES = (DEEPSEEK_V4_CASE,)
+
+
+DEEPSEEK_V4_VISION_CASE = WeightUpdateModelCase(
+    id="deepseek-v4-flash-vision-bf16-4l-vit2-e8-hash3",
+    model="deepseek-ai/DeepSeek-V4-Flash-Vision-Exp",
+    full_transfer_matrix=True,
+    hf_overrides={
+        "architectures": ["DeepseekV4ForConditionalGeneration"],
+        "num_hidden_layers": 4,
+        "vision_n_layers": 2,
+        "n_routed_experts": 8,
+        "num_hash_layers": 3,
+        "num_nextn_predict_layers": 0,
+        "dspark_target_layer_ids": [],
+        "quantization_config": None,
+    },
+    checkpoint_name_map=deepseek_v4_checkpoint_name,
+    expert_intermediate_size=2048,
+    extra_param_builder=deepseek_v4_vision_params,
+    image_prompt=True,
+    extra_server_args=("--tokenizer-mode", "deepseek_v4"),
+)
 
 
 GLM51_CASE = WeightUpdateModelCase(
