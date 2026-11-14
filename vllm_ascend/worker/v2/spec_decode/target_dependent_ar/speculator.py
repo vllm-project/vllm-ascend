@@ -47,6 +47,7 @@ from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAMetadata
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+from vllm_ascend.compilation.updatable_graph import ContextSource, SharedSource
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
@@ -699,6 +700,22 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
 
             metadata.seq_lens_cpu.copy_(next_seq_lens_cpu)
 
+    def build_param_source(
+        self,
+        num_reqs_padded: int,
+        draft_attn_metadata: dict[str, Any],
+        is_draft_model_prefill: bool,
+        *,
+        num_tokens: int | None = None,
+    ) -> ContextSource | SharedSource:
+        if self.use_dcp and self.attn_architecture == "MLA" and is_draft_model_prefill:
+            return ContextSource(draft_attn_metadata)
+        return SharedSource(
+            self.build_fia_params(
+                num_reqs_padded, draft_attn_metadata, is_draft_model_prefill, num_tokens=num_tokens
+            )
+        )
+
     # TODO: Move build_fia_params and build_fia_params_dcp out of the
     # speculator into the attention backend's graph-parameter helpers.
     def build_fia_params(
@@ -706,6 +723,8 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         num_reqs_padded: int,
         draft_attn_metadata: dict[str, Any],
         is_draft_model_prefill: bool,
+        *,
+        num_tokens: int | None = None,
     ) -> list[dict[str, Any]]:
         """Build all draft steps' FIA parameters for a single graph update."""
         if self.use_dcp:
@@ -747,7 +766,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         draft_attn_metadata: dict[str, Any],
         is_draft_model_prefill: bool,
     ) -> list[dict[str, Any]]:
-        """Build all GQA DCP draft steps' history/current or cache parameters."""
+        """Build DCP draft attention parameters for prefill or decode."""
         assert self.dcp_manager is not None
         if is_draft_model_prefill:
             return [
@@ -780,14 +799,21 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             ).tolist()
             for layer_name in self.draft_attn_layer_names:
                 metadata = draft_attn_metadata[layer_name]
-                fia_params.append(
-                    {
+                if self.attn_architecture == "MLA":
+                    if metadata.decode is None or metadata.external_flashmla is not None:
+                        continue
+                    params = {
+                        "layer_name": (layer_name, CPKVScope.FULL),
+                        "actual_seq_kvlen": local_kv_lens,
+                    }
+                else:
+                    params = {
                         "layer_name": (layer_name, CPKVScope.FULL),
                         "actual_seq_lengths": query_start_loc,
                         "actual_seq_lengths_kv": local_kv_lens,
                         "block_table": metadata.decode.block_tables,
                     }
-                )
+                fia_params.append(params)
         return fia_params
 
     def _calc_next_seq_lens_cpu(self, seq_lens_cpu, num_reqs, num_reqs_padded, step):
