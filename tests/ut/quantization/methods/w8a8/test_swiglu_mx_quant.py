@@ -23,7 +23,9 @@ def make_method(scale_alg, enable_eplb=False):
         patch.object(module, "get_current_vllm_config", return_value=config),
         patch.object(module, "get_ascend_config"),
         patch.object(module, "get_dynamic_mx_quant_scale_alg", return_value=scale_alg) as get_scale_alg,
+        patch("vllm_ascend.quantization.methods.base.get_current_hardware_profile") as mx_profile,
     ):
+        mx_profile.return_value.supports_weight_format.return_value = True
         method = module.AscendW8A8MXFP8DynamicFusedMoEMethod()
     get_scale_alg.assert_called_once_with(config)
     return method

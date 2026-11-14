@@ -26,6 +26,7 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import WeightFormat
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
@@ -42,6 +43,7 @@ from ..base import (
     PreparedLinearInput,
     QuantType,
     WeightSwitchGatherSpec,
+    require_mx_weight_format,
 )
 from ..registry import register_scheme
 
@@ -69,6 +71,7 @@ class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
     supports_weight_switch = True
 
     def __init__(self):
+        require_mx_weight_format(WeightFormat.MXFP4)
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
 
@@ -172,6 +175,7 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
     fused_activations = frozenset({"silu", "situ"})
 
     def __init__(self):
+        require_mx_weight_format(WeightFormat.MXFP4)
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
         ascend_config = get_ascend_config()

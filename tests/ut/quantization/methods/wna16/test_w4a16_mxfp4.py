@@ -18,6 +18,9 @@ class TestAscendW4A16MXFP4MoEMethod(TestBase):
     def setUp(self, mock_ascend, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
         mock_ascend.return_value = create_mock_ascend_config()
+        mx_profile = patch("vllm_ascend.quantization.methods.base.get_current_hardware_profile")
+        mx_profile.start().return_value.supports_weight_format.return_value = True
+        self.addCleanup(mx_profile.stop)
         self.scheme = AscendW4A16MXFP4FusedMoEMethod()
 
     def test_get_weight_static_method(self):

@@ -2,6 +2,8 @@ import torch
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+
 from ..base import AscendAttentionScheme
 
 
@@ -58,6 +60,13 @@ class AscendC8MXFPKVCacheAttentionMethod(AscendAttentionScheme):
     """
 
     def __init__(self, quant_description: dict, prefix: str):
+        # C8-MXFP caches K/V in the FP8/E8M0 attention ABI, which ships with
+        # the FP8 attention capability (Ascend 950) only.
+        if not get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
+            raise NotImplementedError(
+                "--kv-cache-dtype mxfp8 runs on Ascend 950 only, and this device has no FP8 "
+                "attention support. Drop --kv-cache-dtype mxfp8, or deploy on an Ascend 950 device."
+            )
         self.quant_description = quant_description
         self.prefix = prefix
 
