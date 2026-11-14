@@ -1,0 +1,4 @@
+pr: 21859
+entries:
+  - category: bugfix
+    text: GLM-5.3-Flash multimodal preprocessing now builds its processor with the engine tokenizer and honours --trust-remote-code and --revision, so checkpoints whose tokenizer config names a remote-code tokenizer class no longer fail when the processor is built, and --tokenizer / --tokenizer-revision also apply to multimodal requests.

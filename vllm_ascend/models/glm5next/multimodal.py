@@ -637,7 +637,15 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
     def _glm5_next_hf_processor(self):
         from vllm_ascend.models.glm5next.processor import Glm5NextProcessor
 
-        return Glm5NextProcessor.from_pretrained(self.ctx.model_config.model)
+        # Same tokenizer/revision/trust_remote_code sources as vLLM's
+        # ``InputProcessingContext.get_hf_processor``.
+        model_config = self.ctx.model_config
+        return Glm5NextProcessor.from_pretrained(
+            model_config.model,
+            tokenizer=self.ctx.tokenizer,
+            revision=model_config.revision,
+            trust_remote_code=model_config.trust_remote_code,
+        )
 
     def get_hf_processor(self, **kwargs: object):
         return self._glm5_next_hf_processor
