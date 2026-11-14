@@ -1,0 +1,4 @@
+pr: 20702
+entries:
+  - category: bugfix
+    text: Fixed W8A8 grouped matmul failures by passing FP32 scales while preserving the existing output dtype.
