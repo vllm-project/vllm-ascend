@@ -3745,5 +3745,96 @@ class TestKVPoolWorkerResetStore(unittest.TestCase):
         worker.m_store.remove_all.assert_called_once_with()
 
 
+class TestLayerwiseSupportMatrixAndConfigContract(unittest.TestCase):
+    def test_layerwise_prefetch_layers_defaults_and_overrides(self):
+        mooncake_worker = make_worker(self, extra_config={"backend": "mooncake"}, use_layerwise=True)
+        self.assertEqual(mooncake_worker.num_prefetch_layers, 1)
+
+        gva_worker = make_worker(
+            self,
+            extra_config={"backend": "memcache"},
+            use_layerwise=True,
+            num_layers=12,
+        )
+        self.assertEqual(gva_worker.num_prefetch_layers, 8)
+
+        gva_reuse_worker = make_worker(
+            self,
+            extra_config={"backend": "memcache", "layerwise_num_shared_buffers": 4},
+            use_layerwise=True,
+            num_layers=12,
+        )
+        self.assertEqual(gva_reuse_worker.num_prefetch_layers, 4)
+
+        for value, expected in [(1, 1), (3, 3), ("3", 3)]:
+            with self.subTest(value=value):
+                w = make_worker(
+                    self,
+                    extra_config={"backend": "mooncake", "layerwise_prefetch_layers": value},
+                    use_layerwise=True,
+                )
+                self.assertEqual(w.num_prefetch_layers, expected)
+
+    def test_layerwise_prefetch_layers_rejects_invalid_values_before_backend_or_thread_init(self):
+        for invalid in [0, -1, True, False, 1.5, 2.0, "", "-1", "1.5", "abc"]:
+            with self.subTest(invalid=invalid):
+                with (
+                    patch.object(
+                        LayerwiseKVPoolWorker,
+                        "_init_backend",
+                    ) as mock_init_backend,
+                    patch.object(
+                        LayerwiseKVPoolWorker,
+                        "_start_kv_transfer_threads",
+                    ) as mock_start_threads,
+                    self.assertRaises((ValueError, TypeError)),
+                ):
+                    make_worker(
+                        self,
+                        extra_config={"backend": "mooncake", "layerwise_prefetch_layers": invalid},
+                        use_layerwise=True,
+                    )
+                mock_init_backend.assert_not_called()
+                mock_start_threads.assert_not_called()
+
+    def test_unsupported_layerwise_backend_rejected_before_backend_or_thread_init(self):
+        for bad_backend in ["yuanrong", "unknown_backend"]:
+            with self.subTest(backend=bad_backend):
+                with (
+                    patch.object(
+                        LayerwiseKVPoolWorker,
+                        "_init_backend",
+                    ) as mock_init_backend,
+                    patch.object(
+                        LayerwiseKVPoolWorker,
+                        "_start_kv_transfer_threads",
+                    ) as mock_start_threads,
+                    self.assertRaises(ValueError),
+                ):
+                    make_worker(
+                        self,
+                        extra_config={"backend": bad_backend},
+                        use_layerwise=True,
+                    )
+                mock_init_backend.assert_not_called()
+                mock_start_threads.assert_not_called()
+
+    def test_discard_partial_chunks_defaults_to_true_across_modes(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_scheduler import (
+            LayerwiseKVPoolScheduler,
+        )
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import (
+            KVPoolScheduler,
+        )
+
+        normal_sched = KVPoolScheduler.__new__(KVPoolScheduler)
+        normal_sched._extra_config = {}
+        self.assertTrue(normal_sched._extra_config.get("discard_partial_chunks", True))
+
+        layerwise_sched = LayerwiseKVPoolScheduler.__new__(LayerwiseKVPoolScheduler)
+        layerwise_sched._extra_config = {}
+        self.assertTrue(layerwise_sched._extra_config.get("discard_partial_chunks", True))
+
+
 if __name__ == "__main__":
     unittest.main()

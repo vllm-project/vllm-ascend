@@ -25,7 +25,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
     reset_attention_compute_start_gate,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
-    get_backend_class,
+    resolve_backend,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
     require_aligned_batch_results,
@@ -56,6 +56,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
     get_layerwise_kv_cache_specs,
+    parse_layerwise_prefetch_layers,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
     LayerBlockRange,
@@ -124,11 +125,17 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self._init_layerwise_config()
 
     def _init_kv_transfer_config(self, vllm_config, extra_config, use_layerwise, kv_cache_config) -> None:
-        backend_name = extra_config.get("backend", "mooncake").lower()
-        self.layerwise_backend = get_backend_class(backend_name)
+        backend_name, self.layerwise_backend = resolve_backend(extra_config)
         self.layerwise_data_plane = (
             self.layerwise_backend.layerwise_data_plane if self.layerwise_backend is not None else None
         )
+        if use_layerwise and self.layerwise_data_plane not in ("block_key", "gva"):
+            raise ValueError(
+                f"Backend {backend_name!r} does not support layerwise KV pooling: "
+                f"unsupported layerwise_data_plane={self.layerwise_data_plane!r}"
+            )
+        if use_layerwise:
+            parse_layerwise_prefetch_layers(extra_config.get("layerwise_prefetch_layers"), default=1)
         self.use_block_key_layerwise = self.layerwise_data_plane == "block_key"
         self.use_layerwise_transfer = self.layerwise_data_plane == "gva"
         self._step_load_keys: set[str] = set()
@@ -330,17 +337,12 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 self.layerwise_offload = layout.has_layer_reuse
                 self.num_prefetch_layers = layout.num_prefetch_layers
         else:
-            self.num_prefetch_layers = 2
+            self.num_prefetch_layers = 1
             if self.use_layerwise:
-                prefetch_layers = self._extra_config.get("layerwise_prefetch_layers", 2)
-                if isinstance(prefetch_layers, bool):
-                    raise ValueError("layerwise_prefetch_layers must be a positive integer")
-                try:
-                    self.num_prefetch_layers = int(prefetch_layers)
-                except (TypeError, ValueError) as exc:
-                    raise ValueError("layerwise_prefetch_layers must be a positive integer") from exc
-                if self.num_prefetch_layers <= 0:
-                    raise ValueError("layerwise_prefetch_layers must be a positive integer")
+                self.num_prefetch_layers = parse_layerwise_prefetch_layers(
+                    self._extra_config.get("layerwise_prefetch_layers"),
+                    default=1,
+                )
         self.sync_save_events: list[torch.npu.Event] | None = None
 
         logger.info(
