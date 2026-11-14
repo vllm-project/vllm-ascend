@@ -70,7 +70,7 @@ def test_target_exports_residual_entering_selected_layers(monkeypatch):
             self.layer_idx = index
             self.engram = None
 
-        def __call__(self, positions, hidden, pre_mix, unused, input_ids):
+        def __call__(self, positions, hidden, pre_mix, unused, input_ids, image_mask=None):
             return hidden + self.layer_idx + 1, pre_mix
 
         @staticmethod
@@ -78,6 +78,7 @@ def test_target_exports_residual_entering_selected_layers(monkeypatch):
             return hidden.mean(dim=1)
 
     model = SimpleNamespace(
+        config=SimpleNamespace(),
         hc_mult=4,
         decoder_replay_layers=None,
         needs_moe_input_ids=False,
@@ -138,7 +139,7 @@ def test_v41_draft_sequence_parallel_shards_inputs_and_restores_output(monkeypat
         def hc_collapse(hidden, pre_mix):
             return hidden.mean(dim=1)
 
-        def __call__(self, positions, hidden, pre_mix, llama_4_scaling, input_ids):
+        def __call__(self, positions, hidden, pre_mix, llama_4_scaling, input_ids, image_mask=None):
             return hidden, pre_mix
 
     hidden = torch.arange(16, dtype=torch.float32).reshape(4, 4)
@@ -159,6 +160,7 @@ def test_v41_draft_sequence_parallel_shards_inputs_and_restores_output(monkeypat
     monkeypatch.setattr(deepseek_v41_dspark_module.envs, "VLLM_MOE_SKIP_PADDING", True)
 
     model = SimpleNamespace(
+        config=SimpleNamespace(),
         embed_tokens=MagicMock(return_value=hidden),
         hc_mult=4,
         use_sequence_parallel_moe=True,
