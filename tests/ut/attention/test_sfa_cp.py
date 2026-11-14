@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 import torch
 import vllm.distributed as vllm_distributed
+from vllm.config import AttentionConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs
 
@@ -504,7 +505,10 @@ def test_sfa_dcp_extends_v1_backend() -> None:
 
 @pytest.mark.parametrize("pcp_size,dcp_enabled", [(1, False), (2, False), (1, True), (2, True)])
 def test_sfa_backend_selects_dcp_subclass_and_layout_specific_builder(pcp_size, dcp_enabled):
-    config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size))
+    config = SimpleNamespace(
+        attention_config=AttentionConfig(),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size),
+    )
     with (
         patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config", return_value=config),
         patch("vllm_ascend.attention.sfa_v1.get_ascend_config") as ascend_config,

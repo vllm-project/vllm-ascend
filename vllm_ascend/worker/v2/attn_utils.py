@@ -256,6 +256,17 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             mamba_specs[layer_name] = spec
             continue
 
+        if isinstance(attn_module, MLAAttention) and vllm_config.attention_config.hisparse_config is not None:
+            # Keep Core's row-packed source spec and actual index-group ownership.
+            source_layout: dict[str, Any] = {}
+            if getattr(attn_module.impl, "enable_sparse_sfa_c8", False):
+                from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
+
+                source_layout.update(head_size=C8_ROW_BYTES, dtype=attn_module.impl.c8_cache_dtype)
+            kv_cache_spec[layer_name] = replace(
+                spec, is_index_group_leader=attn_module.hisparse_cache.runtime.is_group_leader, **source_layout
+            )
+            continue
         if isinstance(attn_module, MLAAttention):
             cache_sparse_sfa_c8 = False
             cache_sparse_sfa_turboquant = False
@@ -331,6 +342,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 block_size=vllm_config.cache_config.block_size,
                 dcp_sharded=spec.dcp_sharded,
                 num_kv_heads=1,
+                cache_role=spec.cache_role,
                 head_size=head_dim // 2 if cache_sparse_li_c4 else head_dim,
                 dtype=torch.uint8
                 if cache_sparse_li_c4
@@ -406,6 +418,19 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                     mamba_specs[layer_name] = replace(spec, page_size_padded=common_page_size)
             kv_cache_spec.update(mamba_specs)
 
+    if vllm_config.attention_config.hisparse_config is not None:
+        from vllm.v1.hisparse.binding import resolve_hisparse_specs
+
+        from vllm_ascend.hisparse.binding import align_hisparse_indexer_specs
+
+        packed_row_bytes = None
+        if get_ascend_config().enable_sparse_sfa_c8:
+            from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
+
+            packed_row_bytes = C8_ROW_BYTES
+        return align_hisparse_indexer_specs(
+            resolve_hisparse_specs(vllm_config, kv_cache_spec, attn_layers), packed_row_bytes=packed_row_bytes
+        )
     return kv_cache_spec
 
 
@@ -551,6 +576,9 @@ def build_attn_metadata(
             plan = get_dsa_attn_kv_plan(dsa_builder.vllm_config, dsa_builder.compressor_ratio)
             formatted_slot_mappings = plan.format_dsa_slot_mapping(slot_mappings[:, :num_input_tokens], block_sizes)
     for i, kv_cache_spec in enumerate(kv_cache_groups):
+        # Resident/hot storage groups have no Attention metadata consumer.
+        if not attn_groups[i]:
+            continue
         block_table = block_tables[i]
         slot_mapping = slot_mappings[i]
         # Hybrid drafters can configure causality per KV cache group.
@@ -1581,6 +1609,8 @@ def allocate_kv_cache_main(
     device: torch.device,
     layout: Any,
     kernel_block_sizes: list[int],
+    *,
+    allocate: Callable[[int], torch.Tensor] | None = None,
 ) -> dict[str, Any]:
     """Allocate Ascend KV cache through vLLM main's #51718 entry point.
 
@@ -1589,6 +1619,8 @@ def allocate_kv_cache_main(
     still consumes separate K/V (and backend-specific state) tensors, so keep
     the Ascend allocation/reshape contract behind the new entry point.
     """
+    if allocate is not None:
+        raise NotImplementedError("Extensible KV cache allocation is not supported on Ascend.")
     del layout
     vllm_config = get_current_vllm_config()
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)

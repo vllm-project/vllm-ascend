@@ -171,6 +171,10 @@ class NPUPlatform(Platform):
         return True
 
     @classmethod
+    def get_hisparse_backend_cls(cls) -> str:
+        return "vllm_ascend.hisparse.backend.AscendHiSparseBackend"
+
+    @classmethod
     def opaque_attention_op(cls) -> bool:
         return True
 
@@ -1188,6 +1192,13 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
     """
     # Validate scheduler extension policies (read ascend_config.scheduler_config)
     from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
+
+    attention_config = getattr(vllm_config, "attention_config", None)
+    if (
+        getattr(attention_config, "hisparse_config", None) is not None
+        and ascend_config.sparse_kv_offload_config.enabled
+    ):
+        raise ValueError("Sparse KV offload cannot be combined with HiSparse")
 
     additional_config = vllm_config.additional_config
     if additional_config is None:

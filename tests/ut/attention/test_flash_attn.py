@@ -7,6 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+from vllm.config import AttentionConfig
 from vllm.model_executor.layers.attention.attention import Attention
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.selector import AttentionSelectorConfig
@@ -127,7 +128,7 @@ def test_flash_attn_192_cache_spec_integration(monkeypatch, backend):
     config = SimpleNamespace(
         model_config=SimpleNamespace(dtype=torch.bfloat16),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
-        attention_config=SimpleNamespace(indexer_kv_dtype="auto"),
+        attention_config=AttentionConfig(),
         cache_config=SimpleNamespace(cache_dtype="fp8", block_size=128, skip_page_size_padded=None),
     )
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args: {"draft.attn": layer})
@@ -478,7 +479,7 @@ def test_only_undersized_draft_swa_pages_drop_inherited_padding(
     config = SimpleNamespace(
         model_config=SimpleNamespace(dtype=torch.bfloat16),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
-        attention_config=SimpleNamespace(indexer_kv_dtype="auto"),
+        attention_config=AttentionConfig(),
         cache_config=SimpleNamespace(cache_dtype="fp8", block_size=128, skip_page_size_padded=padding),
     )
     original = layer.get_kv_cache_spec(config)
