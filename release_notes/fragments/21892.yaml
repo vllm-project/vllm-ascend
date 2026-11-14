@@ -1,0 +1,4 @@
+pr: 21892
+entries:
+  - category: feature
+    text: Added support for combining native C8 HiSparse with prefill context parallelism on Ascend Model Runner V2, including decode graphs and MTP.
