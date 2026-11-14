@@ -14,6 +14,10 @@ We should keep in mind that Patch is not the best way to make vLLM Ascend compat
 
 ## How it works
 
+### MoE component registration
+
+MRV2 registers concrete Ascend router, expert and runner subclasses through `PluggableLayer`. The router contract is provided by [vLLM #51006](https://github.com/vllm-project/vllm/pull/51006). The two `patch_fused_moe.py` modules are removed; routers own their Ascend EPLB mapping operation. Existing EPLB configuration, policy and asynchronous lifecycle adaptations remain in place.
+
 In `vllm_ascend/patch`, you can see the code structure as follows:
 
 ```shell

@@ -5,16 +5,17 @@ from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
 )
-from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
+
+from vllm_ascend.ops.fused_moe.router.eplb_router import AscendEplbRouter
 
 
-class AscendGroupedTopKRouter(BaseRouter):
+class AscendGroupedTopKRouter(AscendEplbRouter):
     def __init__(
         self,
         top_k: int,
         global_num_experts: int,
-        num_expert_group: int | None,
-        topk_group: int | None,
+        num_expert_group: int | None = None,
+        topk_group: int | None = None,
         use_grouped_topk: bool = False,
         renormalize: bool = True,
         scoring_func: str = "softmax",

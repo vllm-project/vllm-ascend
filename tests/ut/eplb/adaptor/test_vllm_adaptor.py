@@ -38,8 +38,10 @@ class TestVllmAdaptor(unittest.TestCase):
         num_dense_layers = getattr(config, "first_k_dense_replace", 0)
         self.model.model.layers[num_dense_layers].mlp.experts.quant_type = QuantType.W8A8
 
-        self.mock_rank = patch("vllm_ascend.eplb.adaptor.vllm_adaptor.dist.get_rank", return_value=0).start()
-        self.mock_size = patch("vllm_ascend.eplb.adaptor.vllm_adaptor.dist.get_world_size", return_value=4).start()
+        for name, value in (("get_rank", 0), ("get_world_size", 4)):
+            patcher = patch(f"vllm_ascend.eplb.adaptor.vllm_adaptor.dist.{name}", return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     @patch("torch.empty_like", return_value=torch.zeros(16, 32))
     @patch("vllm_ascend.eplb.adaptor.vllm_adaptor.get_ascend_config")
@@ -226,8 +228,6 @@ class TestVllmAdaptor(unittest.TestCase):
             torch.testing.assert_close(expert_tensor, buffer_tensor)
 
     def tearDown(self):
-        self.mock_rank.stop()
-        self.mock_size.stop()
         VllmEplbAdaptor._registered_moe_layers = []
 
 
