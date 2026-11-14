@@ -207,6 +207,12 @@ class AscendQwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock):
 class AscendQwenGatedDeltaNetAttention(AscendGatedDeltaNetAttention, upstream_model.QwenGatedDeltaNetAttention):
     """Keep Qwen projections while using Ascend GDN execution and metadata."""
 
+    # The MTP checkpoint table remains two-dimensional for recurrent rollback,
+    # while CausalConv1d only consumes its first column. Ask the metadata
+    # builder to materialize that column once per step into its fixed-address
+    # INT32 buffer instead of copying it in every GDN layer.
+    use_contiguous_conv_indices = True
+
 
 class AscendQwen4ExpDecoderLayer(upstream_model.Qwen4ExpDecoderLayer):
     """Qwen4Exp decoder layer whose MoE owns the local SP region."""

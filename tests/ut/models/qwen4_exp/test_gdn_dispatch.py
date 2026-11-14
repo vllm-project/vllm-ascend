@@ -48,3 +48,4 @@ def test_decoder_uses_ascend_gdn_with_qwen_projection_initialization(monkeypatch
     assert set(decoder.state_dict()) == {"linear_attn.in_proj_qkvz.weight"}
     assert type(attention)._forward_core is gdn.AscendGatedDeltaNetAttention._forward_core
     assert attention.get_attn_backend() is gdn.AscendGDNFusedAttentionBackend
+    assert attention.use_contiguous_conv_indices

@@ -61,9 +61,7 @@ def qsa_gbsa_attention(
     if logical_positions.shape != (query.shape[0],):
         raise ValueError("QSA GBSA logical positions must match query rows")
 
-    if (
-        prepared_visible_lengths is not None and prepared_cu_query is not None and prepared_row_block_table is not None
-    ):
+    if prepared_visible_lengths is not None and prepared_cu_query is not None and prepared_row_block_table is not None:
         rows = query.shape[0]
         row_visible_lens = prepared_visible_lengths[:rows]
         cu_q = prepared_cu_query[: rows + 1]
