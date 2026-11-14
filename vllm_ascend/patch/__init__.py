@@ -1802,3 +1802,25 @@
 # How: initialize the capability-gated per-layer NPU adaptation after upstream init.
 # Related PR: vllm-project/vllm#60050.
 # Future Plan: remove this initialization hook when a shared backend extension supports it.
+
+# ** 36. File: worker/patch_staged_writes.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.block_table.BlockTables.__init__`,
+#      `vllm.v1.worker.gpu.block_table.BlockTables.append_block_ids`
+#    Why:
+#      num_blocks.np is written only in append_block_ids, but upstream flushes
+#      num_blocks.copy_to_uva unconditionally on every step, costing one H2D
+#      copy per decode step even when no block was appended.
+#    How:
+#      Track a dirty flag set by append_block_ids and make the instance-level
+#      num_blocks.copy_to_uva a no-op when clean. apply_staged_writes keeps
+#      calling it, so upstream logic and ordering are untouched. The flag is
+#      cleared only after a successful copy so failed flushes are retried.
+#    Related PR (if no, explain why):
+#      Upstream vllm#62748 already guarded the Sampler staged-write flush
+#      (removed here per review; arrives via main2main). No upstream PR yet
+#      for the num_blocks flush; follow https://github.com/vllm-project/vllm/pull/65880.
+#    Future Plan:
+#      Remove when upstream adds dirty tracking to UvaBackedTensor flushes.
+#
+>>>>>>> 06753326b (perf: skip no-op staged-write flushes in Sampler and BlockTables)
