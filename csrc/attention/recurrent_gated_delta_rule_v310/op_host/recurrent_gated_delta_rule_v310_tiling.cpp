@@ -250,8 +250,17 @@ ge::graphStatus RecurrentGatedDeltaRuleV310Tiling::CheckShapeDimAndRelation(cons
         !CheckDim(valueShape, QKV_DIM_NUM, "value") || !CheckDim(betaShape, BETA_DIM_NUM, "beta") ||
         !CheckDim(stateShape, STATE_DIM_NUM, "state") ||
         !CheckDim(cuSeqlensShape, CUSEQLENS_DIM_NUM, "actual_seq_lengths") ||
-        !CheckDim(ssmStateShape, SSM_STATE_INDICES_DIM_NUM, "ssm_state_indices")) {
+        (ssmStateShape.GetDimNum() != 1 && ssmStateShape.GetDimNum() != 2)) {
         return ge::GRAPH_FAILED;
+    }
+    tilingData_.stateIndexStride = 0;
+    if (ssmStateShape.GetDimNum() == 2) {
+        if (ssmStateShape.GetDim(0) != cuSeqlensShape.GetDim(0) ||
+            ssmStateShape.GetDim(1) <= 0 || ssmStateShape.GetDim(1) > MAX_MTP) {
+            OP_LOGE(inputParams_.opName, "Invalid per-request state index table shape");
+            return ge::GRAPH_FAILED;
+        }
+        tilingData_.stateIndexStride = ssmStateShape.GetDim(1);
     }
 
     if (!CheckDimEqual(queryShape, DIM_0, keyShape, DIM_0, "query", "key", "T dimension") ||
