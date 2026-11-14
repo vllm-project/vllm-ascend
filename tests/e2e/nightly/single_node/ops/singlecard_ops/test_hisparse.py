@@ -14,10 +14,25 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 
-from vllm_ascend.device.device_config import is_950
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.utils import bootstrap_custom_op_env
 
-pytestmark = pytest.mark.skipif(not is_950(), reason="HiSparse resolver requires Ascend 950 (A5)")
+pytestmark = [
+    pytest.mark.skipif(
+        get_ascend_device_type() != AscendDeviceType.A5,
+        reason="The HiSparse resolver is a SIMT-only op targeting Ascend A5",
+    ),
+    pytest.mark.e2e_coverage(
+        arch="",
+        feature="",
+        parallel="",
+        deploy="",
+        hardware="A5",
+        quantization="",
+        graph_mode="eager",
+    ),
+]
 
 bootstrap_custom_op_env()
 import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: E402, F401
