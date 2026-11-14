@@ -281,6 +281,20 @@
 #    Future Plan:
 #       Remove once upstream exposes the PD role to the coordinator or
 #       removes the EAGLE last-block drop for verified prompt blocks.
+#   3. `HybridKVCacheCoordinator.find_longest_cache_hit` and
+#      `...find_longest_cache_hit_per_group`
+#    Why:
+#       Layerwise scratch buffers overwrite locally hashed prefix pages.
+#       Hash presence alone cannot establish that their payload is resident.
+#    How:
+#       When the physical planner marks layerwise cache reuse, reject local
+#       prefix hits and let AscendStore verify and restore the external data.
+#       Ordinary persistent cache layouts retain their existing hit policy.
+#    Related PR (if no, explain why):
+#       No upstream PR; this accompanies layerwise main-cache reuse.
+#    Future Plan:
+#       Remove when upstream prefix admission can track scratch residency or
+#       delegate hit validation to the layerwise connector before admission.
 #
 # ** 10. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -291,10 +305,17 @@
 #       accounting.
 #    How:
 #       Both supported versions select AscendKVCacheConfigBuilder through
-#       NPUPlatform. Its default materialization delegates to the patched
-#       planning functions.
+#       NPUPlatform. Its inherited materialization calls the patched planning
+#       function, which applies offload after native placement. The builder
+#       probes that placement for device cost. Offload admission uses Core's
+#       group-lifetime calculation with that cost; ordinary layouts retain
+#       their native admission paths.
 #    Related PR:
 #       https://github.com/vllm-project/vllm/pull/53558
+#    Future Plan:
+#       Remove the remaining native placement/admission patches when upstream
+#       supports those Ascend layouts.
+#
 #   2. `vllm.v1.core.kv_cache_planning.get_kv_cache_config_from_groups`
 #      `vllm.v1.core.kv_cache_planning._pool_bytes_per_block`
 #    Why:

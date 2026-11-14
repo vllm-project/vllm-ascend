@@ -1,5 +1,6 @@
 from collections.abc import Sequence
 from typing import Any
+from uuid import uuid4
 
 from vllm.config import VllmConfig
 from vllm.logger import logger
@@ -11,12 +12,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     resolve_backend,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    build_layerwise_cache_layout,
-    build_layerwise_reuse_layout,
-    get_layerwise_kv_cache_specs,
-    get_layerwise_reuse_config,
-)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
     RequestTracker,
@@ -29,6 +24,23 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler imp
 
 
 class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
+    def _build_req_meta(self, request_tracker: RequestTracker, *args, **kwargs):
+        request_tuple = self._unfinished_requests.get(request_tracker.req_id)
+        if self.layerwise_offload and request_tuple is not None:
+            # Verifier rows have no corresponding input KV/state to snapshot.
+            request_tracker.token_len = min(request_tracker.token_len, len(request_tuple[0].all_token_ids))
+        if self.layerwise_offload and request_tracker.layerwise_request_id is None:
+            request_tracker.layerwise_request_id = uuid4().hex
+        meta = super()._build_req_meta(request_tracker, *args, **kwargs)
+        if meta is not None and self.layerwise_offload and request_tuple is not None:
+            request = request_tuple[0]
+            meta.needs_private_snapshot = not (
+                meta.target_token_len == meta.num_prompt_tokens
+                and not request.resumable
+                and request.num_output_tokens + 1 + (request.num_output_placeholders > 0) >= request.max_tokens
+            )
+        return meta
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -53,7 +65,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         self.sharded_mamba_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
         self.load_async = False
         if self.use_layerwise_transfer:
-            self._init_layerwise_offload(vllm_config, kv_cache_config, extra_config)
+            self._init_layerwise_offload(kv_cache_config)
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
         self.layerwise_keys = (
             self.layerwise_backend.bind_layerwise_keys(
@@ -84,25 +96,11 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
     def _async_load_enabled(self) -> bool:
         return False
 
-    def _init_layerwise_offload(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig, extra_config) -> Any:
-        reuse_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config)
-        if kv_cache_config is not None and reuse_config is not None:
-            reuse_layout = build_layerwise_reuse_layout(
-                get_layerwise_kv_cache_specs(kv_cache_config),
-                self.num_layers,
-                reuse_config,
-            )
-            if reuse_layout.layer_cache_specs:
-                self.num_layers = max(
-                    self.num_layers,
-                    max(reuse_layout.layer_cache_specs) + 1,
-                )
-            self.layerwise_offload = reuse_layout.has_layer_reuse
-        else:
-            self.layerwise_offload = build_layerwise_cache_layout(
-                self.num_layers,
-                extra_config,
-            ).has_layer_reuse
+    def _init_layerwise_offload(self, kv_cache_config: KVCacheConfig | None) -> None:
+        reuse_layout = getattr(kv_cache_config, "layerwise_reuse_layout", None)
+        self.layerwise_offload = reuse_layout is not None and reuse_layout.has_layer_reuse
+        if self.layerwise_offload and reuse_layout.layers:
+            self.num_layers = max(self.num_layers, max(reuse_layout.layers) + 1)
 
     def get_running_target_token_len(self, request: Request, num_new_tokens: int) -> int:
         target_token_len = request.num_computed_tokens + num_new_tokens
@@ -116,9 +114,6 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
                 vllm_cached_tokens=num_current_tokens,
                 kvpool_cached_tokens=num_current_tokens,
                 can_load=True,
-                layerwise_snapshot_end_token=request_tracker.last_layerwise_snapshot_end_token,
-                layerwise_snapshot_block_index=request_tracker.last_layerwise_snapshot_block_index,
-                layerwise_snapshot_start_block=request_tracker.last_layerwise_snapshot_start_block,
                 layerwise_previous_step=True,
             )
         return None
@@ -150,6 +145,15 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         num_computed_tokens: int,
     ) -> int:
         self._get_or_create_request_tracker(request.request_id)
+        if self.layerwise_offload and (
+            self.num_speculative_blocks_by_group or len(self.cacheable_group_ids) != len(self.original_block_size)
+        ):
+            # Probe the endpoint we can actually resume from. Trimming a full
+            # hit afterwards could select an earlier recurrent checkpoint that was
+            # never produced by chunked prefill.
+            token_len = min(token_len, self._floor_to_cache_transfer_granularity(request.num_tokens - 1))
+            if token_len <= 0:
+                return 0
         if self.cache_coordinator is not None:
             return self._lookup_layerwise_with_coordinator(
                 request, token_len, 0 if self.layerwise_offload else num_computed_tokens
