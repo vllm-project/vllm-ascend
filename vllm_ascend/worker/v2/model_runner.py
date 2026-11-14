@@ -574,8 +574,9 @@ class NPUModelRunner(GPUModelRunner):
 
     def shutdown(self) -> None:
         model = getattr(self, "model", None)
+        # Include private/shared UVA owners, which have no MemFabric client.
         shared_embeddings = getattr(self, "_shared_engram_shutdown_pending", None) or (
-            [module for module in model.modules() if getattr(module, "_shared_pool_client", None) is not None]
+            [module for module in model.modules() if callable(getattr(module, "close_host_offload", None))]
             if model is not None
             else []
         )

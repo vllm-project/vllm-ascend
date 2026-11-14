@@ -2631,3 +2631,14 @@ def test_sample_tokens_refreshes_lmhead_padding_each_step(monkeypatch, lmhead_tp
             assert runner._lmhead_pad_size is None
 
     assert observed == ([4, 8, None] if lmhead_tp else [None, None, None])
+
+
+def test_shutdown_releases_uva_owner_without_shared_pool_client():
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    embedding = torch.nn.Module()
+    calls = []
+    embedding.close_host_offload = lambda: calls.append("release")
+    runner.model = embedding
+    with patch.object(GPUModelRunner, "shutdown", side_effect=lambda: calls.append("parent")):
+        runner.shutdown()
+    assert calls == ["parent", "release"]

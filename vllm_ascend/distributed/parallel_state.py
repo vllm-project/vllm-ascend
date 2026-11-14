@@ -106,9 +106,16 @@ def init_ascend_model_parallel(
             group_name="etp",
         )
 
-    if engram_config is not None and global_pcp_size > 1:
-        # Worker initialization defers the upstream DP-only group so the final
-        # DP x PCP group is created once. Upstream owns its getter and teardown.
+    # With PCP > 1, worker initialization defers the upstream Engram group
+    # so Ascend can create it with DP x PCP ranks. With PCP == 1, shared PLE
+    # tables need a DP group connecting replicas of the same TP shard; create
+    # it only if upstream left it unset, otherwise reuse the existing group.
+    if engram_config is not None and (
+        global_pcp_size > 1
+        or (engram_config.dp_shared_memory and global_dp_size > 1 and vllm_parallel_state.get_engram_dp_group() is None)
+    ):
+        # PCP > 1 requires the deferred group to be unset; PCP == 1 checks
+        # this in the condition above. Upstream owns its getter and teardown.
         assert vllm_parallel_state.get_engram_dp_group() is None
         # Reuse upstream node boundaries and shard-size fallback for DP x PCP.
         engram_size = vllm_parallel_state._engram_dp_shard_size(
