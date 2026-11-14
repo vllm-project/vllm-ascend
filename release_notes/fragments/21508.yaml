@@ -12,11 +12,5 @@ entries:
       quantized all-reduce backend on Atlas A5. Atlas A2 defaults to INT8;
       quantized_all_reduce_config.quant_dtype can override the hardware default.
       MXFP8 requires the public torch_npu MX quantization and dequantization APIs.
-    hardware: [A5]
-  - category: feature
-    text: >-
-      Added optional two-chunk MXFP8 communication pipelining on Atlas
-      A5, enabled with enable_pipeline and a separate pipeline_min_numel
-      threshold. Eager calls can overlap computation and communication while
-      graph capture retains the existing whole-tensor path.
+      It uses ceil-rounded E8M0 scales (scale_alg=1) to avoid E4M3FN range overflow.
     hardware: [A5]

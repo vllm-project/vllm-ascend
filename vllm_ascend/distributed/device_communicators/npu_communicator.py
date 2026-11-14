@@ -88,18 +88,13 @@ class NPUCommunicator(DeviceCommunicatorBase):
                     self.device_group,
                     min_numel=quantized_cfg.min_numel,
                     group_name=self.unique_name,
-                    enable_pipeline=quantized_cfg.enable_pipeline,
-                    pipeline_min_numel=quantized_cfg.pipeline_min_numel,
                 )
                 if self.quantized_ar.supported:
                     logger.info_once(
                         "MXFP8 AllToAll quantized all-reduce enabled "
-                        "(group=%s, min_numel=%d, enable_pipeline=%s, pipeline_min_numel=%d, "
-                        "dequant_dtype=bf16, sum_output_dtype=bf16; pipeline is Eager-only).",
+                        "(group=%s, min_numel=%d, dequant_dtype=bf16, sum_output_dtype=bf16).",
                         self.unique_name,
                         self.quantized_ar.min_numel,
-                        self.quantized_ar.enable_pipeline,
-                        self.quantized_ar.pipeline_min_numel,
                     )
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
