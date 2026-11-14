@@ -1,64 +1,244 @@
-# See https://help.github.com/articles/about-codeowners/
-# for more info about CODEOWNERS file
+# See https://help.github.com/articles/about-codeowners/ for more info about CODEOWNERS file
 
 # Infra, CI
-/.gemini @wangxiyuan @Yikun
-/.github @wangxiyuan @Yikun
-/tools @wangxiyuan @Yikun
-/.gitignore @wangxiyuan
-/.gitmodules @wangxiyuan @zzzzwwjj
-/.pre-commit-config.yaml @wangxiyuan
-/codecov.yml @wangxiyuan
-/Dockerfile* @wangxiyuan
-/format.sh @wangxiyuan
-/mypy.ini @wangxiyuan
-/requirements* @wangxiyuan
+/.gemini @wangxiyuan
+/.github @zhangxinyuehfad
+/tools @zhangxinyuehfad
+/.gitignore @zhangxinyuehfad
+/.pre-commit-config.yaml @zhangxinyuehfad
+/codecov.yml @zhangxinyuehfad
+/format.sh @zhangxinyuehfad
+/mypy.ini @zhangxinyuehfad
+/requirements* @zhangxinyuehfad
+/typos.toml @zhangxinyuehfad
+/packages.txt @zhangxinyuehfad
+/.markdownlint.yaml @MrZ20
+/.gitleaks.toml @zhangxinyuehfad
+/.clang-format @MrZ20
 /setup.py @wangxiyuan
-/typos.toml @wangxiyuan
+/pyproject.toml @wangxiyuan
+/collect_env.py @zhangxinyuehfad
+/.gitmodules @zzzzwwjj
 
-# benchmark
-# /benchmarks
+# Repo metadata
+/CONTRIBUTING.md @wangxiyuan
+/CODE_OF_CONDUCT.md @wangxiyuan
+/LICENSE @wangxiyuan
+/DCO @wangxiyuan
+
+# Agent
+/.agents/ @zhangxinyuehfad
+/.claude/ @MrZ20
+/AGENTS.md @MrZ20
+/CLAUDE.md @MrZ20
+
+# Dockerfiles
+/Dockerfile* @zhangxinyuehfad
 
 # docs
-/docs @Yikun @LCAIZJ
-/.readthedocs.yaml @Yikun
-/README* @wangxiyuan @Yikun
+/docs @liqian79
+/docs/source/getting_started @MrZ20
+/docs/source/user_guide/feature_guide/rfork.md @yangsonglin13
+/docs/source/user_guide/feature_guide/rl.md @Ronald1995
+/docs/source/user_guide/feature_guide/batch_invariance.md @Ronald1995
+/.readthedocs.yaml @liqian79 @MrZ20
+/README* @liqian79
+/mkdocs.yml @MrZ20
 
-# # example
-# /examples
-
-# # tests
-# /tests
+# examples
+/examples/ @MrZ20
+/examples/rl/ @Ronald1995
+/examples/eplb/ @freyfwt
+/examples/rfork/ @yangsonglin13
 
 # c++ source code
 /cmake @zzzzwwjj @ZT-AIA
 /csrc @zzzzwwjj @ZT-AIA
 /CMakeLists.txt @zzzzwwjj @ZT-AIA
+/vllm_ascend/_cann_ops_custom @ZT-AIA
 
-# python source code
-/vllm_ascend/attention @weijinqian0
-/vllm_ascend/compilation @yiz-liu
-# /vllm_ascend/core
-/vllm_ascend/device @weijinqian0 @zzzzwwjj
-/vllm_ascend/device_allocator @weijinqian0
+# attention
+/vllm_ascend/attention/context_parallel @weiguihua2 @zhenwenqi2024 @pisceskkk
+/vllm_ascend/attention/attention_c8_mxfp.py @kunpengW-code
+# /vllm_ascend/attention/attention_mask.py
+# /vllm_ascend/attention/attention_v1.py
+/vllm_ascend/attention/dsa*.py @weijinqian0 @lcfenglinwan @GDzhu01 @linfeng-yuan
+/vllm_ascend/attention/fa_v1.py @jiajinzhu2
+/vllm_ascend/attention/fa3_v1.py @Ronald1995
+# /vllm_ascend/attention/flashmla.py
+/vllm_ascend/attention/indexer.py @weijinqian0 @lijiahang226
+/vllm_ascend/attention/indexer_kpool.py @weijinqian0 @lijiahang226
+/vllm_ascend/attention/mixed_quant_sparse_flash_mla.py @kunpengW-code
+# /vllm_ascend/attention/mla_v1.py
+# /vllm_ascend/attention/sfa_kv_offload.py
+/vllm_ascend/attention/sfa_v1.py @lijiahang226
+/vllm_ascend/attention/sparse_flash_mla.py @kunpengW-code 
+# /vllm_ascend/attention/utils.py
+
+# compilation
+/vllm_ascend/compilation @yiz-liu @wxsIcey
+
+# device / device_allocator
+/vllm_ascend/device @zzzzwwjj
+/vllm_ascend/device_allocator @weijinqian0 @Ronald1995
+
+# distributed
 /vllm_ascend/distributed @LCAIZJ
-# /vllm_ascend/eplb
-/vllm_ascend/distributed/kv_transfer/kv_pool/kv_offload @nalinaly
-/vllm_ascend/lora @paulyu12
-# /vllm_ascend/model_loader
-/vllm_ascend/ops @zzzzwwjj @realliujiaxu
-# /vllm_ascend/patch
-/vllm_ascend/quantization @kunpengW-code
-/vllm_ascend/sample @realliujiaxu
-# /vllm_ascend/worker/v1/spec_decode
-# /vllm_ascend/worker
-# /vllm_ascend/xlite
-# /vllm_ascend/ascend_config.py
-# /vllm_ascend/ascend_forward_context.py
-# /vllm_ascend/batch_invariant.py
-# /vllm_ascend/cpu_binding.py
-# /vllm_ascend/envs.py
-# /vllm_ascend/meta_registration.py
-# /vllm_ascend/platform.py
+/vllm_ascend/distributed/eplb @freyfwt
+/vllm_ascend/distributed/weight_transfer @Ronald1995 @Annarine
+/vllm_ascend/distributed/kv_transfer/kv_pool @weijinqian0 @HF-001
+/vllm_ascend/distributed/kv_transfer/kv_p2p @wangxiaoteng888 @nwpu-zxr
+/vllm_ascend/distributed/kv_transfer/sparse_kv_offload @weiguihua2 @zhangsicheng5 @zhenwenqi2024 @pisceskkk @weijinqian0
+
+# lora
+/vllm_ascend/lora @paulyu12 @voidvelocity
+
+# ops
+/vllm_ascend/ops @zzzzwwjj
+/vllm_ascend/ops/linear_op.py @xuchi-0808
+/vllm_ascend/ops/vocab_parallel_embedding.py @xuchi-0808
+/vllm_ascend/ops/triton @AuroraEmiya @ZT-AIA @yiz-liu
+/vllm_ascend/ops/triton/eplb.py @freyfwt
+/vllm_ascend/ops/triton/batch_invariant @Ronald1995
+/vllm_ascend/ops/triton/kda/recoverssm.py @drslark
+/vllm_ascend/ops/fused_moe @weijinqian0 @Tflowers-0129 @ZT-AIA @zhenwenqi2024 @linfeng-yuan
+/vllm_ascend/ops/fused_moe/eplb.py @freyfwt
+/vllm_ascend/ops/fused_moe/force_eplb.py @freyfwt
+/vllm_ascend/ops/kimi_kda.py @Dawn952
+/vllm_ascend/ops/kimi_mla.py @Dawn952
+
+# quantization
+/vllm_ascend/quantization @kunpengW-code @menogrey @Tflowers-0129 @lcfenglinwan
+
+/vllm_ascend/worker/v2/sample @realliujiaxu @zouzy5137 @zhenwenqi2024
+
+# spec decode
+/vllm_ascend/worker/v2/spec_decode @wxsIcey @Tflowers-0129 @HF-001 @drslark @slippersss @lilinsiman @zhenwenqi2024 @yiz-liu @jiajinzhu2
+/vllm_ascend/worker/v2/spec_decode/lmhead_tp_utils.py @xuchi-0808
+
+# scheduler
+/vllm_ascend/core @DavidJiang9
+/vllm_ascend/core/recompute_scheduler.py @nwpu-zxr
+/vllm_ascend/core/scheduler_profiling_chunk.py @weiguihua2
+
+# kv cache
+/vllm_ascend/core/kv_cache_config_builder.py @yzeyu71 @Angazenn @zhenwenqi2024 @@yiz-liu
+/vllm_ascend/core/kv_cache_interface.py @yzeyu71 @Angazenn @zhenwenqi2024 @yiz-liu
+/vllm_ascend/core/kv_cache_placement.py @yzeyu71 @Angazenn @zhenwenqi2024 @yiz-liu
+/vllm_ascend/core/single_type_kv_cache_manager.py @yzeyu71 @Angazenn @zhenwenqi2024 @yiz-liu
+
+# Core framework
+/vllm_ascend/__init__.py @wangxiyuan
+/vllm_ascend/ascend_config.py @ningjingbengxiaohai @zzzzwwjj
+/vllm_ascend/ascend_forward_context.py @zzzzwwjj @yiz-liu
+/vllm_ascend/batch_invariant.py @Ronald1995
+/vllm_ascend/config_utils.py @wxsIcey
+/vllm_ascend/cpu_binding.py @zouyida2052
+/vllm_ascend/envs.py @ningjingbengxiaohai @zzzzwwjj
+/vllm_ascend/logger.py @wangxiyuan
+/vllm_ascend/meta_registration.py @ZT-AIA
+/vllm_ascend/mrv2_utils.py @yzeyu71
+/vllm_ascend/platform.py @wxsIcey @Tflowers-0129
 # /vllm_ascend/profiling_config.py
-# /vllm_ascend/utils.py
+/vllm_ascend/utils.py @wxsIcey
+
+# Patch
+/vllm_ascend/patch @wxsIcey
+/vllm_ascend/patch/platform/patch_eplb.py @freyfwt
+/vllm_ascend/patch/worker/patch_kimi_k25.py @Dawn952
+
+# Worker base
+/vllm_ascend/worker/dcp_utils.py @weiguihua2 @zhenwenqi2024 @pisceskkk
+/vllm_ascend/worker/worker.py @wxsIcey @Ronald1995
+/vllm_ascend/worker/device_metadata.py @linfeng-yuan
+/vllm_ascend/worker/dspark_utils.py @wxsIcey
+/vllm_ascend/worker/encoder_acl_graph.py @yiz-liu
+# /vllm_ascend/worker/kvpp_cache.py
+/vllm_ascend/worker/spec_decode_utils.py @wxsIcey
+/vllm_ascend/worker/utils.py @wxsIcey
+
+# Worker V2
+/vllm_ascend/worker/v2/model_states @zzzzwwjj
+/vllm_ascend/worker/v2/aclgraph_utils.py @yiz-liu @drslark
+/vllm_ascend/worker/v2/attn_utils.py @Angazenn @zzzzwwjj @zhenwenqi2024 @drslark
+/vllm_ascend/worker/v2/block_table.py @Tflowers-0129 @zzzzwwjj
+/vllm_ascend/worker/v2/eplb.py @freyfwt
+/vllm_ascend/worker/v2/input_batch.py @yiz-liu @zzzzwwjj
+/vllm_ascend/worker/v2/kv_connector.py @yzeyu71
+/vllm_ascend/worker/v2/kvpp.py @recky-c
+/vllm_ascend/worker/v2/model_runner.py @yiz-liu @zzzzwwjj @xuchi-0808 @zhenwenqi2024 @drslark
+/vllm_ascend/worker/v2/pcp_manager.py @weiguihua2 @pisceskkk
+# /vllm_ascend/worker/v2/pp_transport.py
+/vllm_ascend/worker/v2/states.py @yiz-liu @zzzzwwjj
+/vllm_ascend/worker/v2/utils.py @zzzzwwjj
+
+# Models
+# /vllm_ascend/models/__init__.py
+# /vllm_ascend/models/common/
+# /vllm_ascend/models/layer/
+# /vllm_ascend/models/qwen4_exp/
+/vllm_ascend/models/minimax_m3 @realliujiaxu
+/vllm_ascend/models/deepseek_v4 @lcfenglinwan @GDzhu01 @linfeng-yuan
+/vllm_ascend/models/deepseek_v41 @lcfenglinwan @GDzhu01 @linfeng-yuan
+/vllm_ascend/models/deepseek_mtp.py @lcfenglinwan @GDzhu01 @linfeng-yuan
+/vllm_ascend/models/glm5next @lijiahang226
+/vllm_ascend/models/glm5_dspark.py @lijiahang226
+/vllm_ascend/models/kimi_k3.py @Dawn952
+/vllm_ascend/models/kimi_k3_mtp.py @Dawn952
+/vllm_ascend/models/kimi_k3_dspark.py @Dawn952
+# /vllm_ascend/models/d3.py
+# /vllm_ascend/models/gemma4_mm.py
+# /vllm_ascend/models/llama_eagle3.py
+# /vllm_ascend/models/llama_eagle3_vwn.py
+# /vllm_ascend/models/qwen3_5_vl.py
+# /vllm_ascend/models/qwen3_dflash2.py
+# /vllm_ascend/models/qwen3_dspark.py
+
+# 310P
+/vllm_ascend/_310p @Tflowers-0129 @YangShuai52
+
+# xlite
+/vllm_ascend/xlite @lulina @SijieFu
+
+# release_notes
+/release_notes/ @wangxiyuan
+
+# recipes
+/recipes/ @SOMEONEUNSEEN
+
+# tests
+/tests/ @wenjun91
+/tests/e2e/nightly @wenjun91
+/tests/e2e/nightly/single_node/ops @Foriv
+
+# EPLB
+/vllm_ascend/eplb @freyfwt
+
+# observability
+# /vllm_ascend/observability
+/vllm_ascend/observability/ms_metrics/config/eplb_metrics.yaml @freyfwt
+/vllm_ascend/observability/ms_metrics/handlers/eplb.py @freyfwt
+
+# profiler
+# /vllm_ascend/profiler
+
+# model executor
+# /vllm_ascend/model_executor
+
+# weight switch
+# /vllm_ascend/weight_switch
+
+# EC manager
+/vllm_ascend/ec_manager @wangxiyuan
+
+# Benchmark
+/benchmarks @wangxiyuan
+
+
+# Model loader
+/vllm_ascend/model_loader @yilunh998
+/vllm_ascend/model_loader/rfork/ @yangsonglin13
+
+# Files/modules not owned by any person(No need to be approved)
+# SKIP(owner): /tests/ut/
+# SKIP(owner): /tests/e2e/pull_request/

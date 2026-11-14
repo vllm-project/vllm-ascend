@@ -427,6 +427,46 @@ test coverage and validation evidence the change needs. See the preceding
 sections for environment setup and commands, and [E2E CI tests](e2e_ci_test.md)
 for PR CI.
 
+### CODEOWNERS approval gate
+
+Alongside `DCO` and the CI gate, every changed file must be approved by at
+least one of its [CODEOWNERS](https://github.com/vllm-project/vllm-ascend/blob/main/.github/CODEOWNERS)
+owners before the PR can merge. Key points:
+
+- Any owner listed in `.github/CODEOWNERS` counts as an approver, regardless of
+  their repository role — owners without org membership are intentional.
+- A pending "changes requested" review from any owner of a changed file blocks
+  the merge even if another owner has approved. Address the feedback, then ask
+  the owner to re-review (they can approve or dismiss their review).
+- Owners are cumulative down the directory tree: when parent and child
+  directories have separate owners (for example `/vllm_ascend/model_loader`
+  and `/vllm_ascend/model_loader/rfork/`), an rfork change needs one approval
+  from either owner, and a "changes requested" from either owner blocks it.
+  A more specific rule adds owners for the subtree; it does not transfer
+  ownership away from the parent owner.
+- The PR author does not count as an approver even when listed as an owner.
+- Submitting or dismissing a review re-evaluates the gate without re-running
+  the heavy CI jobs; previously green CI results on the same commit are kept.
+- The failure comment is posted by `.github/workflows/bot_ci_gate_comment.yaml`
+  (a `workflow_run` bot running in the base repository context), so it works
+  for fork PRs too - the gate job itself only has a read-only token on fork
+  PRs and never posts comments directly.
+- The gate also runs a CODEOWNERS health check: a tracked file without any
+  owner entry, or an entry pointing at a deleted/renamed path, fails the gate
+  for everyone. If your change adds, removes, or renames files, update
+  `.github/CODEOWNERS` in the same PR.
+- Paths marked `SKIP(owner)` in the file (for example, `tests/ut/`) are
+  deliberately unowned and do not require an owner approval.
+- If an owner is unresponsive, contact the module's other owners or a
+  maintainer; maintainers can merge with an admin override in exceptional
+  cases.
+
+The check logic lives in
+`.github/workflows/scripts/codeowner_gate.py` (colocated unit tests in
+`.github/workflows/scripts/test_codeowner_gate.py`; run them manually with
+`pytest .github/workflows/scripts/test_codeowner_gate.py` - the cpu-ut CI
+partition only covers `tests/ut`).
+
 ### Choose coverage for the change
 
 Run the affected tests and required repository checks. Expand coverage when the
