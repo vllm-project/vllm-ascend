@@ -1583,6 +1583,55 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.kv_send_thread.add_save_batch.assert_not_called()
         worker.kv_send_thread.request_queue.join.assert_called_once_with()
 
+    def test_drain_queued_saves_waits_until_queue_is_empty(self):
+        worker = self._make_worker()
+        request_queue: queue.Queue[str] = queue.Queue()
+        request_queue.put("batch")
+        send_thread = MagicMock(spec=KVCacheStoreSendingThread)
+        send_thread.name = "KVCacheSendingThread"
+        send_thread.request_queue = request_queue
+        send_thread._fatal_error = None
+        send_thread.is_alive.return_value = True
+        entered = threading.Event()
+        send_thread.raise_if_failed.side_effect = entered.set
+        worker.kv_send_thread = send_thread
+
+        done = threading.Event()
+
+        def drain():
+            worker.drain_queued_saves()
+            done.set()
+
+        threading.Thread(target=drain).start()
+        self.assertTrue(entered.wait(2))
+        request_queue.get()
+        request_queue.task_done()
+        self.assertTrue(done.wait(2))
+        self.assertEqual(request_queue.unfinished_tasks, 0)
+
+    def test_drain_queued_saves_raises_when_dead_thread_leaves_work(self):
+        worker = self._make_worker()
+        request_queue: queue.Queue[str] = queue.Queue()
+        request_queue.put("batch")
+        send_thread = MagicMock(spec=KVCacheStoreSendingThread)
+        send_thread.name = "KVCacheSendingThread"
+        send_thread.request_queue = request_queue
+        send_thread._fatal_error = RuntimeError("put failed")
+        send_thread.is_alive.return_value = False
+        worker.kv_send_thread = send_thread
+
+        with self.assertRaisesRegex(RuntimeError, "unfinished saves"):
+            worker.drain_queued_saves()
+
+    def test_drain_queued_saves_noop_without_store_send_thread(self):
+        worker = self._make_worker()
+        worker.kv_send_thread = None
+        worker.drain_queued_saves()
+
+        worker.kv_send_thread = MagicMock()
+        worker.drain_queued_saves()
+        worker.kv_send_thread.raise_if_failed.assert_not_called()
+
     def test_get_finished_producer_clears_synchronous_completions(self):
         worker = self._make_worker(kv_role="kv_producer")
 
