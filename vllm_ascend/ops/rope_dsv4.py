@@ -248,6 +248,25 @@ class ComplexExpRotaryEmbedding(nn.Module):
             rope_groups = ["default"]
         self.layername = layername
         self.rotary_dim = rotary_dim
+        init_device = torch.get_default_device()
+        if init_device.type == "meta":
+            # ``--mm-encoder-only`` constructs the skipped language model on
+            # meta.  Its RoPE tables must stay local to that disposable module:
+            # publishing meta tensors through the process-global cache would
+            # let a later materialized model reuse unusable tables.
+            cache_length = math.ceil(max_position_embeddings * scaling_factor)
+            cache_shape = (cache_length, 1, 1, rotary_dim)
+            self.register_buffer(
+                "full_rope_cos",
+                torch.empty(cache_shape, dtype=torch.float32, device=init_device),
+                persistent=False,
+            )
+            self.register_buffer(
+                "full_rope_sin",
+                torch.empty(cache_shape, dtype=torch.float32, device=init_device),
+                persistent=False,
+            )
+            return
         beta_fast = extra_kwargs.get("beta_fast", 32)
         beta_slow = extra_kwargs.get("beta_slow", 1)
         original_seq_len = extra_kwargs.get("original_max_position_embeddings", max_position_embeddings)

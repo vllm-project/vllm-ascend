@@ -60,6 +60,54 @@ def test_plain_rope_disables_yarn_explicitly():
     torch.testing.assert_close(actual, expected)
 
 
+def test_rope_meta_init_does_not_publish_device_caches(monkeypatch):
+    state = rope_dsv4.RopeGlobalState()
+    monkeypatch.setattr(rope_dsv4, "_ROPE_STATE", state)
+    monkeypatch.setattr(
+        rope_dsv4,
+        "current_platform",
+        SimpleNamespace(device_type="cpu"),
+    )
+    vllm_config = SimpleNamespace(
+        speculative_config=None,
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
+    )
+    kwargs = {
+        "vllm_config": vllm_config,
+        "head_size": 8,
+        "rotary_dim": 8,
+        "max_position_embeddings": 64,
+        "base": 10000,
+        "scaling_factor": 1.0,
+    }
+
+    with torch.device("meta"):
+        meta_rope = ComplexExpRotaryEmbedding(
+            layername="ut.meta_rope",
+            **kwargs,
+        )
+
+    assert meta_rope.full_rope_cos.device.type == "meta"
+    assert meta_rope.full_rope_sin.device.type == "meta"
+    assert meta_rope.full_rope_cos.shape == (64, 1, 1, 8)
+    assert meta_rope.full_rope_sin.shape == (64, 1, 1, 8)
+    assert state.full_rope_cache == {}
+    assert state.runtime_buffer == {}
+    assert state.spec_runtime_buffer == {}
+    assert state.layer_info == {}
+    assert state.registry_summary == {}
+
+    materialized_rope = ComplexExpRotaryEmbedding(
+        layername="ut.materialized_rope",
+        **kwargs,
+    )
+
+    assert materialized_rope.full_rope_cos.device.type == "cpu"
+    assert materialized_rope.full_rope_sin.device.type == "cpu"
+    assert len(state.full_rope_cache) == 1
+    assert len(state.runtime_buffer) == 1
+
+
 # ──────────────────────────────────────────────
 # Equivalence: pad_to + slice  vs  pad-positions + gather + slice
 # ──────────────────────────────────────────────
