@@ -63,7 +63,13 @@ class AscendSwigluOAIAndMul:
         return SwigluOAIAndMul.forward_native(layer, x)
 
 
-class AscendSwigluStepAndMul:
+class AscendSwigluStepAndMul(SwigluStepAndMul):
+    def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
+        from vllm_ascend.ops.triton.activation.swiglustep import (
+            swiglustep_forward_triton,
+        )
+        return swiglustep_forward_triton(x, self.limit)
+
     def swiglustep_forward(x: torch.Tensor, limit: float = 7.0) -> torch.Tensor:
         if limit is None:
             raise ValueError("SwigluStepAndMul requires limit to be set.")
