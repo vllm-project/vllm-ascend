@@ -1,4 +1,6 @@
 pr: 21826
 entries:
   - category: feature
-    text: Add an opt-in fused output projection for DeepSeek V4.1 on A5.
+    text: >-
+      Add an opt-in fused output projection for DeepSeek V4.1 on A5,
+      releasing temporary attention buffers after their last consumer.

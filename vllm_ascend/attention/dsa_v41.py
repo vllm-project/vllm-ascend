@@ -819,6 +819,16 @@ class AscendDSAV41Impl:
                     cos.view(num_tokens, attn.rope_head_dim),
                     output,
                 )
+                if not torch.npu.is_current_stream_capturing():
+                    from torch_npu.npu.utils import _erase_stream
+
+                    # DSL records this temporary again after MLA retired it.
+                    # Retire its last consumer before same-stream allocation
+                    # reuse; the device event preserves execution ordering.
+                    stream = torch.npu.current_stream(attention_output.device)
+                    submitted = stream.record_event()
+                    stream.wait_event(submitted)
+                    _erase_stream(attention_output, stream)
                 return output
             AscendDSAV41Impl._apply_rotary(attn, attention_output, cos, sin, inverse=True)
         else:

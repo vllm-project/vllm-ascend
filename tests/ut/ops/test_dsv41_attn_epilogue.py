@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import sys
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -41,7 +42,8 @@ def test_pack_preserves_weight_and_scale_bytes(monkeypatch, name, layout):
 
 
 @pytest.mark.parametrize("fused", [False, True])
-def test_forward_folds_inverse_once_and_preserves_destination(monkeypatch, fused):
+@pytest.mark.parametrize("capturing", [False, True])
+def test_forward_folds_inverse_once_and_preserves_destination(monkeypatch, fused, capturing):
     from vllm_ascend.attention import dsa_v41 as module
 
     active, padded = 2, 4
@@ -64,6 +66,14 @@ def test_forward_folds_inverse_once_and_preserves_destination(monkeypatch, fused
     monkeypatch.setattr(module.AscendDSAV41Impl, "_apply_rotary", rotary)
     monkeypatch.setattr(module, "get_forward_context", lambda: SimpleNamespace(attn_metadata={}))
     epilogue = Mock()
+    stream, erase = Mock(), Mock()
+    order = Mock()
+    order.attach_mock(epilogue, "epilogue")
+    order.attach_mock(stream, "stream")
+    order.attach_mock(erase, "erase")
+    monkeypatch.setattr(module.torch.npu, "is_current_stream_capturing", lambda: capturing)
+    monkeypatch.setattr(module.torch.npu, "current_stream", lambda device: stream)
+    monkeypatch.setitem(sys.modules, "torch_npu.npu.utils", SimpleNamespace(_erase_stream=erase))
     projection = SimpleNamespace(
         weight=torch.nn.Parameter(torch.empty(1), requires_grad=False),
         weight_scale=torch.nn.Parameter(torch.zeros(1, dtype=torch.uint8), requires_grad=False),
@@ -76,6 +86,19 @@ def test_forward_folds_inverse_once_and_preserves_destination(monkeypatch, fused
         rotary_emb=SimpleNamespace(layername="test"),
     )
     assert impl.forward(attn, None, hidden, output) is output
+    if fused and not capturing:
+        stream.record_event.assert_called_once_with()
+        stream.wait_event.assert_called_once_with(stream.record_event.return_value)
+        erase.assert_called_once_with(raw_attention, stream)
+        assert [entry[0] for entry in order.mock_calls] == [
+            "epilogue",
+            "stream.record_event",
+            "stream.wait_event",
+            "erase",
+        ]
+    else:
+        stream.record_event.assert_not_called()
+        erase.assert_not_called()
     if fused:
         epilogue.assert_called_once()
         assert epilogue.call_args.args[0] is raw_attention
