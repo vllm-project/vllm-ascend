@@ -1,0 +1,4 @@
+pr: 21457
+entries:
+  - category: bugfix
+    text: Keep Mooncake transfer-engine buffer registrations when a level-1 sleep is followed by a weights-only wake-up, so KV-cache P2P transfers keep working instead of silently failing for the rest of the process lifetime.
