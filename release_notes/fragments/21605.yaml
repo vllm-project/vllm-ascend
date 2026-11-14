@@ -1,0 +1,5 @@
+pr: 21605
+entries:
+  - category: performance
+    text: Reduce packed DCP LSE combine latency on Ascend A3 by caching rank weights per output row.
+    hardware: [A3]
