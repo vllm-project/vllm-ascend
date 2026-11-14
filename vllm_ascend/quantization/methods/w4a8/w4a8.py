@@ -26,6 +26,8 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
+from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
@@ -46,6 +48,8 @@ _INT4_VALUES_PER_BYTE = 2
 _INT4_VALUES_PER_INT32 = 8
 _INT4_NZ_OUTPUT_ALIGNMENT = 64
 _INT4_NZ_INPUT_ALIGNMENT = 16
+_SITU_K_ALIGNMENT = 64
+_SITU_N_ALIGNMENT = 128
 
 
 @register_scheme("W4A8_DYNAMIC", "moe")
@@ -463,6 +467,29 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         w1, w1_scale, _, w2_scale = self._get_mlp_weights(layer)
         bias1, _ = self._get_mlp_scale_bias(layer)
         group_list, group_list_type = self._maybe_convert_group_list(mlp_compute_input)
+
+        if (
+            mlp_compute_input.activation == MoEActivation.SITU
+            and get_current_hardware_profile().supports(HardwareCapability.GROUPED_MATMUL_SITU_QUANT)
+            and self.is_per_channel_weight
+            and bias1 is not None
+            and group_list_type in (0, 1)
+            and hidden_states.shape[-1] % _SITU_K_ALIGNMENT == 0
+            and w1_scale[0].shape[-1] % _SITU_N_ALIGNMENT == 0
+        ):
+            hidden_states, out_scale, _ = DeviceOperator.npu_grouped_matmul_situ_quant(
+                x=hidden_states,
+                weight=w1 if self.use_expert_weight_list else w1[0],
+                weight_scale=w1_scale if self.use_expert_weight_list else w1_scale[0],
+                weight_assist_matrix=bias1 if self.use_expert_weight_list else bias1[0],
+                x_scale=pertoken_scale,
+                group_list=group_list,
+                group_list_type=group_list_type,
+                beta=1.0 if mlp_compute_input.activation_situ_beta is None else mlp_compute_input.activation_situ_beta,
+                linear_beta=mlp_compute_input.activation_situ_linear_beta or 0.0,
+            )
+            dispose_tensor(mlp_compute_input.hidden_states)
+            return hidden_states, out_scale
 
         if mlp_compute_input.activation == MoEActivation.SITU:
             # SituAndMul: run the dequantized gmm1 first, then fuse the situ

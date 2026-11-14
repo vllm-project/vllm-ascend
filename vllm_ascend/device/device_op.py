@@ -470,9 +470,35 @@ class BaseDeviceAdaptor:
         x_scale: torch.Tensor,
         beta: float,
         linear_beta: float,
+        weight_assist_matrix: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...] | None = None,
         mxfp_quant_dtype: QuantType | None = None,
     ):
-        raise RuntimeError("GMM-SiTU quant fusion is only supported on Ascend A5.")
+        if not get_current_hardware_profile().supports(HardwareCapability.GROUPED_MATMUL_SITU_QUANT):
+            raise RuntimeError("INT8 GMM-SiTU quant fusion requires Ascend A3.")
+        if x.dtype != torch.int8 or mxfp_quant_dtype is not None:
+            raise ValueError("A3 GMM-SiTU quant fusion requires INT8 activations and INT4 weights.")
+
+        op = torch.ops._C_ascend.grouped_matmul_situ_quant_weight_nz
+        if isinstance(weight, (list, tuple)):
+            op = op.list
+        out, out_scale = op(
+            x=x,
+            weight=weight,
+            weight_scale=weight_scale,
+            weight_assist_matrix=weight_assist_matrix,
+            bias=None,
+            x_scale=x_scale,
+            smooth_scale=None,
+            group_list=group_list.to(torch.int64),
+            dequant_mode=0,
+            dequant_dtype=0,
+            quant_mode=0,
+            group_list_type=group_list_type,
+            tuning_config=None,
+            beta=beta,
+            linear_beta=linear_beta,
+        )
+        return out, out_scale, None
 
     @staticmethod
     def get_quant_gmm2_kwargs(
@@ -1388,6 +1414,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         x_scale: torch.Tensor,
         beta: float,
         linear_beta: float,
+        weight_assist_matrix: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...] | None = None,
         mxfp_quant_dtype: QuantType | None = None,
     ):
         if mxfp_quant_dtype != QuantType.W4A8MXFP:
@@ -1414,7 +1441,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             x=x,
             weight=weight,
             weight_scale=weight_scale,
-            weight_assist_matrix=None,
+            weight_assist_matrix=weight_assist_matrix,
             bias=None,
             x_scale=x_scale,
             smooth_scale=None,

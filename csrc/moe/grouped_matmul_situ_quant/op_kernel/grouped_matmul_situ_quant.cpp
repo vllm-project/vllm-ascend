@@ -30,6 +30,7 @@ using GmmSituTilingData = gmm_situ::SituTilingHeader;
 // tiling struct" / capacity-8 tiling buffer at runtime).
 extern "C" __global__ __aicore__ void grouped_matmul_situ_quant(
     GM_ADDR x, GM_ADDR xScale, GM_ADDR w, GM_ADDR wScale, GM_ADDR groupList,
+    GM_ADDR weightAssistMatrix, GM_ADDR bias, GM_ADDR smoothScale,
     GM_ADDR y, GM_ADDR yScale, GM_ADDR workspace, GM_ADDR tiling)
 {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
