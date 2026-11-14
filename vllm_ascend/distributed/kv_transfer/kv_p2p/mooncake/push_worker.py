@@ -215,6 +215,14 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         self._prefilling_request_ids: tuple[str, ...] = ()
         self._pending_sends: list[tuple[LayerTransferBatch, Future]] = []
         self._sending_futures: dict[str, list[Future]] = {}
+        self._shared_layer_indices: dict[str, int] = {}
+        self._shared_layer_writes: dict[int, tuple[Future, ...]] = {}
+        if getattr(kv_cache_config, "layerwise_kv_cache_reuse", False):
+            layout = kv_cache_config.layerwise_reuse_layout
+            stage_indices = {layer: index for index, layer in enumerate(layout.layers)}
+            self._shared_layer_indices = {
+                name: stage_indices[layout.cache_layer_indices[name]] for name in layout.reused_cache_names
+            }
         self._remote_metadata: SizedDict = SizedDict(max_size=128)
         self._sender_executor: ThreadPoolExecutor | None = None
         self._zmq_context: Context | None = None
@@ -264,13 +272,15 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
     def start_load_kv(self, metadata: MooncakeConnectorMetadata) -> None:
         if self.kv_transfer_config.is_kv_producer:
             # The previous step's wait_for_save has joined its WRITE tasks.
+            self._shared_layer_writes.clear()
             for local_request_id, request in metadata.push_send_requests.items():
                 state = self._reqs_send_state.setdefault(request.request_id, SendReqInfo(local_request_id))
                 state.metadata = request
                 if not state.destinations:
                     self._prepare_destinations(state, request)
-                # A prefix hit is already resident before this forward.
-                if not state.available_layers and request.num_computed_tokens:
+                # With offload, layerwise store loads can restore the prefix
+                # during forward, including cache entries with resident slots.
+                if not self._shared_layer_indices and not state.available_layers and request.num_computed_tokens:
                     event = torch.npu.Event()
                     event.record()
                     state.available_layers = {
@@ -751,6 +761,31 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                         self._send_done_after_transfers, destination.transfer_params, state.error, transfers
                     )
 
+    def _submit_shared_layer_writes(self, layer_idx: int, shared_names: list[str]) -> None:
+        # A busy engine or pending metadata must not defer a shared cache read
+        # beyond the point where AscendStore can hand the slot to another layer.
+        wait_futures(
+            destination.metadata_future
+            for request_id in self._prefilling_request_ids
+            for destination in self._reqs_send_state[request_id].destinations.values()
+            if destination.metadata_future is not None
+        )
+        self._process_sending_requests(layer_hook=True, force=True)
+        self._shared_layer_writes[layer_idx] = tuple(
+            future for batch, future in self._pending_sends if batch.layer_name in shared_names
+        )
+        # Only resident caches can be picked up by later hooks. Subsequent
+        # chunks restore the unsent part of a shared cache before writing it.
+        for request_id in self._prefilling_request_ids:
+            available_layers = self._reqs_send_state[request_id].available_layers
+            for name in shared_names:
+                available_layers.pop(name, None)
+
+    def wait_for_layer_reuse(self, layer_idx: int) -> None:
+        # May run on the store receive thread. It only observes futures published
+        # before the store's save completion and leaves bookkeeping to Push.
+        wait_futures(self._shared_layer_writes.get(layer_idx, ()))
+
     def save_kv_layer(self, layer_name: str) -> None:
         if not self.kv_transfer_config.is_kv_producer or not self._prefilling_request_ids:
             return
@@ -760,6 +795,10 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         # Share one fence across the physical layer's caches and requests.
         # Duplicate hooks with no new tokens do not record another device event.
         layer_names = self._layer_names_by_index[layer_index]
+        shared_names = [name for name in layer_names if name in self._shared_layer_indices]
+        shared_layer = self._shared_layer_indices[shared_names[0]] if shared_names else None
+        if shared_layer is not None and shared_layer in self._shared_layer_writes:
+            return
         event = None
         for request_id in self._prefilling_request_ids:
             state = self._reqs_send_state[request_id]
@@ -774,7 +813,9 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                         event.record()
                     state.available_layers[cache_name] = end, event
         last_layer = layer_index == self._last_layer_index
-        if event is not None or last_layer:
+        if shared_layer is not None:
+            self._submit_shared_layer_writes(shared_layer, shared_names)
+        elif event is not None or last_layer:
             self._process_sending_requests(layer_hook=True, force=last_layer)
         if last_layer:
             self._send_completions()
@@ -797,6 +838,8 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             assert state.metadata is not None
             end = state.metadata.num_computed_tokens + state.metadata.num_scheduled_tokens
             for layer_name in self._layer_indices:
+                if layer_name in self._shared_layer_indices:
+                    continue
                 if state.available_layers.get(layer_name, (-1, None))[0] < end:
                     if event is None:
                         event = torch.npu.Event()
