@@ -1881,20 +1881,16 @@ class TestTopLevelSwitchTypeValidation(TestBase):
     @patch.object(AscendConfig, "_is_megamoe_supported_by_config", return_value=True)
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_fused_mc2_rolls_back_even_when_config_supported(self, mock_fix, mock_megamoe_supported):
-        # After the megamoe op rollback (#15267), enable_fused_mc2=1 short-circuits
-        # _MEGA_MOE_SUPPORTED to False in _validate_user_input_ranges, regardless
-        # of whether the model config supports megamoe. So even when
-        # _is_megamoe_supported_by_config() is True, is_mega_moe_supported() ends
-        # up False and the fused path routes to dispatch_ffn_combine instead of
-        # mega_moe.
+        # Plain fused MC2 remains a per-model policy even when the operator
+        # package is installed and the model is eligible for MegaMoe.
         vc = VllmConfig()
         vc.additional_config = {"enable_fused_mc2": 1}
 
         config = init_ascend_config(vc)
         self.assertEqual(config.enable_fused_mc2, 1)
-        # The rollback forces _MEGA_MOE_SUPPORTED=False, so the fused path
-        # routes to dispatch_ffn_combine instead of mega_moe.
-        self.assertFalse(is_mega_moe_supported())
+        # Choosing plain fused MC2 must not change package capability.
+        self.assertFalse(config.megamoe_enabled)
+        self.assertTrue(is_mega_moe_supported())
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -1925,11 +1921,14 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         vc.parallel_config.world_size = 8
         vc.additional_config = {"enable_fused_mc2": 2}
 
-        with patch("vllm_ascend.ascend_config.importlib.util.find_spec", side_effect=_fake_find_spec):
+        with (
+            patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", None),
+            patch("vllm_ascend.ascend_config.importlib.util.find_spec", side_effect=_fake_find_spec),
+        ):
             config = init_ascend_config(vc)
 
         self.assertEqual(config.enable_fused_mc2, 1)
-        self.assertTrue(is_mega_moe_supported())
+        self.assertTrue(config.megamoe_enabled)
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -1940,6 +1939,7 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         # Exercise a custom entry point with normalized MC2 mode and an
         # uninitialized capability cache, outside the usual factory ordering.
         config.enable_fused_mc2 = 1
+        config.megamoe_enabled = True
         with (
             patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", None),
             patch("vllm_ascend.ascend_config.importlib.util.find_spec", return_value=object()),
@@ -1949,8 +1949,9 @@ class TestTopLevelSwitchTypeValidation(TestBase):
             self.assertEqual(config.enable_fused_mc2, 1)
             self.assertTrue(is_mega_moe_supported())
 
-        # An explicitly disabled cache must stay disabled even with CANN
-        # installed: MiniMax cannot use dispatch_ffn_combine.
+        # Per-model policy remains independent of package availability:
+        # MiniMax cannot use plain dispatch_ffn_combine.
+        config.megamoe_enabled = False
         with (
             patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", False),
             patch("vllm_ascend.ascend_config.importlib.util.find_spec", return_value=object()),

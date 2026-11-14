@@ -1062,7 +1062,7 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.platform.refresh_block_size")
     @patch("vllm_ascend.platform.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A3))
     @patch("vllm_ascend.platform.enable_sp", return_value=False)
-    @patch("vllm_ascend.platform.init_ascend_config")
+    @patch("vllm_ascend.platform.build_ascend_config")
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     def test_check_and_update_config_preserves_platform_default_max_input(
         self,
@@ -1114,7 +1114,7 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.platform.refresh_block_size")
     @patch("vllm_ascend.platform.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A3))
     @patch("vllm_ascend.platform.enable_sp", return_value=True)
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.ascend_config.build_ascend_config")
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     def test_check_and_update_config_skips_sp_capture_sizes_without_cudagraph(
         self,
@@ -1362,7 +1362,7 @@ class TestNPUPlatform(TestBase):
         self.assertTrue(kwargs["in_profile_run"])
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.ascend_config.build_ascend_config")
     @patch(
         "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A3),
@@ -1383,9 +1383,9 @@ class TestNPUPlatform(TestBase):
         mock_init_recompute.return_value = MagicMock()
         vllm_config.scheduler_config = MagicMock()
 
-        # Use importlib.reload to reload the platform module, ensuring the mocked init_ascend_config method is used.
+        # Use importlib.reload to reload the platform module, ensuring the mocked build_ascend_config method is used.
         # Without this reload, when calling self.platform.check_and_update_config,
-        # it would execute the original unmocked init_ascend_config method, causing the unit test to fail.
+        # it would execute the original unmocked build_ascend_config method, causing the unit test to fail.
         from vllm_ascend import platform
 
         importlib.reload(platform)
@@ -1399,7 +1399,7 @@ class TestNPUPlatform(TestBase):
         "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A3),
     )
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.ascend_config.build_ascend_config")
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
     def test_check_and_update_config_no_model_config_warning(
         self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
@@ -1431,7 +1431,7 @@ class TestNPUPlatform(TestBase):
         "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A3),
     )
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.ascend_config.build_ascend_config")
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
     def test_check_and_update_config_enforce_eager_mode(
         self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
@@ -1476,7 +1476,7 @@ class TestNPUPlatform(TestBase):
         "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A3),
     )
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.ascend_config.build_ascend_config")
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
     def test_check_and_update_config_unsupported_compilation_level(
         self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
@@ -1520,7 +1520,7 @@ class TestNPUPlatform(TestBase):
         "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A3),
     )
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.ascend_config.build_ascend_config")
     def test_check_and_update_config_unsupported_cudagraph_mode(
         self, mock_init_ascend, mock_soc_version, mock_auto_detect
     ):
@@ -1550,7 +1550,7 @@ class TestNPUPlatform(TestBase):
         "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A3),
     )
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.ascend_config.build_ascend_config")
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
     def test_check_and_update_config_cache_config_block_size(
         self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
@@ -1578,7 +1578,7 @@ class TestNPUPlatform(TestBase):
         "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A3),
     )
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.ascend_config.build_ascend_config")
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
     def test_check_and_update_config_recompute_scheduler_rejects_pd_mixed_no_kv_transfer(
         self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
@@ -1613,7 +1613,7 @@ class TestNPUPlatform(TestBase):
         "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A3),
     )
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.ascend_config.build_ascend_config")
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
     def test_check_and_update_config_recompute_scheduler_rejects_pd_mixed_kv_both(
         self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
@@ -1649,7 +1649,7 @@ class TestNPUPlatform(TestBase):
         "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A3),
     )
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.ascend_config.build_ascend_config")
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
     def test_check_and_update_config_recompute_scheduler_warns_and_disables_kv_producer(
         self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
@@ -1694,7 +1694,7 @@ class TestNPUPlatform(TestBase):
         "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A3),
     )
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.ascend_config.build_ascend_config")
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
     def test_check_and_update_config_recompute_scheduler_accepts_kv_consumer(
         self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
@@ -1737,7 +1737,7 @@ class TestNPUPlatform(TestBase):
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.ascend_config.build_ascend_config")
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
     def test_check_and_update_config_selects_dyntra_lb_recompute_scheduler(
         self,
@@ -1798,7 +1798,7 @@ class TestNPUPlatform(TestBase):
         "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A3),
     )
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.ascend_config.build_ascend_config")
     def test_check_and_update_config_short_request_first_rejects_unsupported_combinations(
         self, mock_init_ascend, mock_soc_version, mock_auto_detect
     ):
@@ -1847,7 +1847,7 @@ class TestNPUPlatform(TestBase):
         "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A3),
     )
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.ascend_config.build_ascend_config")
     def test_check_and_update_config_short_request_first_accepts_profiling_chunk(
         self,
         mock_init_ascend,
@@ -1884,7 +1884,7 @@ class TestNPUPlatform(TestBase):
         "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A3),
     )
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.ascend_config.build_ascend_config")
     def test_check_and_update_config_short_request_first_selects_async_profiling_chunk(
         self,
         mock_init_ascend,
@@ -1922,7 +1922,7 @@ class TestNPUPlatform(TestBase):
         "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A3),
     )
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.ascend_config.build_ascend_config")
     def test_check_and_update_config_profiling_chunk_scheduler_selection(
         self,
         mock_init_ascend,
@@ -1972,7 +1972,7 @@ class TestNPUPlatform(TestBase):
         "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A3),
     )
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.ascend_config.build_ascend_config")
     def test_check_and_update_config_short_request_first_accepts_standard_prefill_paths(
         self, mock_init_ascend, mock_soc_version, mock_auto_detect
     ):
@@ -2004,7 +2004,7 @@ class TestNPUPlatform(TestBase):
         "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A3),
     )
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.ascend_config.build_ascend_config")
     def test_check_and_update_config_short_request_first_selects_async_scheduler(
         self, mock_init_ascend, mock_soc_version, mock_auto_detect
     ):
@@ -2040,7 +2040,7 @@ class TestNPUPlatform(TestBase):
         "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A3),
     )
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.ascend_config.build_ascend_config")
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
     def test_check_and_update_config_short_request_first_survives_p_recompute_disable(
         self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
@@ -2084,7 +2084,7 @@ class TestNPUPlatform(TestBase):
         "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A3),
     )
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.ascend_config.build_ascend_config")
     def test_check_and_update_config_selects_dyntra_lb_scheduler(
         self, mock_init_ascend, mock_soc_version, mock_auto_detect
     ):
@@ -2142,7 +2142,7 @@ class TestNPUPlatform(TestBase):
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.ascend_config.build_ascend_config")
     def test_check_and_update_config_rejects_dyntra_lb_outside_disaggregated_d_node(
         self, mock_init_ascend, mock_soc_version, mock_auto_detect
     ):
@@ -2180,7 +2180,7 @@ class TestNPUPlatform(TestBase):
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.ascend_config.build_ascend_config")
     def test_check_and_update_config_rejects_multinode_dyntra_lb_decoder(
         self, mock_init_ascend, mock_soc_version, mock_auto_detect
     ):
@@ -2213,7 +2213,7 @@ class TestNPUPlatform(TestBase):
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.ascend_config.build_ascend_config")
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
     def test_check_and_update_config_balance_scheduler_rejects_pd_disaggregated_kv_producer(
         self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
@@ -2248,7 +2248,7 @@ class TestNPUPlatform(TestBase):
         "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A3),
     )
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.ascend_config.build_ascend_config")
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
     def test_check_and_update_config_balance_scheduler_rejects_pd_disaggregated_kv_consumer(
         self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
@@ -2569,7 +2569,7 @@ class TestNPUPlatform(TestBase):
         "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType.A3),
     )
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.ascend_config.build_ascend_config")
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
     def test_check_and_update_config_v1_worker_class_selection(
         self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
@@ -2604,7 +2604,7 @@ class TestNPUPlatform(TestBase):
         )
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.ascend_config.build_ascend_config")
     @patch(
         "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
         return_value=get_hardware_profile(AscendDeviceType._310P),

@@ -38,7 +38,7 @@ from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.device.device_config import (  # noqa: F401
     AscendDeviceType,
     check_ascend_device_type,
@@ -258,8 +258,6 @@ def enable_sfa_dcp_sharded_indexer(vllm_config: VllmConfig | None = None) -> boo
 
 
 def clear_enable_sp():
-    enable_pcp_o_proj_weight_sharding.cache_clear()
-    enable_pcp_embedding_lmhead_weight_sharding.cache_clear()
     _libc_getenv.cache_clear()
 
 
@@ -1392,7 +1390,7 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     # 2. When use mega_moe, op don't support dynamic global_bs;
     # we need to do allreduce and pad token across dp every step.
     # TODO(zzzzwwjj): remove it when op can support dynamic bs.
-    if ascend_config.get_mc2_comm_alg() == "hierarchy" or is_mega_moe_supported():
+    if ascend_config.get_mc2_comm_alg() == "hierarchy" or ascend_config.megamoe_enabled:
         return False
 
     # For dense models, since we don't actually need dp communication, we simply skip it.
@@ -1643,7 +1641,6 @@ def enable_sfa_dcp_force_tmajor_restore() -> bool:
     return get_ascend_config().sfa_dcp_force_tmajor_restore
 
 
-@lru_cache(maxsize=1)
 def enable_pcp_o_proj_weight_sharding() -> bool:
     """Whether PCP shards O-proj weights across its communication group."""
     from vllm_ascend.ascend_config import get_ascend_config
@@ -1651,7 +1648,6 @@ def enable_pcp_o_proj_weight_sharding() -> bool:
     return get_ascend_config().enable_pcp_o_proj_weight_sharding
 
 
-@lru_cache(maxsize=1)
 def enable_pcp_embedding_lmhead_weight_sharding() -> bool:
     """Whether PCP shards embedding and LM Head weights."""
     from vllm_ascend.ascend_config import get_ascend_config

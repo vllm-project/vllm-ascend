@@ -20,7 +20,7 @@ def reset_mc2_tokens_capacity(monkeypatch):
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
-        lambda: SimpleNamespace(enable_prefill_mc2=False, enable_fused_mc2=0),
+        lambda: SimpleNamespace(enable_prefill_mc2=False, enable_fused_mc2=0, megamoe_enabled=False),
     )
 
 
@@ -96,7 +96,7 @@ def _patch_select_moe_comm_method_deps(
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
-        lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2),
+        lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2, megamoe_enabled=False),
     )
 
 
@@ -474,7 +474,7 @@ def test_select_moe_comm_method_a5_uses_megamoe_when_enabled(monkeypatch, num_to
         capacity=128,
         enable_fused_mc2=1,
     )
-    monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: True)
+    monkeypatch.setattr(afc, "get_ascend_config", lambda: SimpleNamespace(enable_fused_mc2=1, megamoe_enabled=True))
     vllm_config = _make_vllm_config(world_size=8, top_k_experts=8)
 
     assert afc.select_moe_comm_method(num_tokens, vllm_config) == MoECommType.FUSED_MC2
@@ -489,7 +489,7 @@ def test_select_moe_comm_method_a5_preserves_draft_quant_guard(monkeypatch, num_
         capacity=128,
         enable_fused_mc2=1,
     )
-    monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: True)
+    monkeypatch.setattr(afc, "get_ascend_config", lambda: SimpleNamespace(enable_fused_mc2=1, megamoe_enabled=True))
     vllm_config = _make_vllm_config(world_size=8, top_k_experts=4)
     expected = MoECommType.FUSED_MC2
     if draft_quant == QuantType.NONE:
