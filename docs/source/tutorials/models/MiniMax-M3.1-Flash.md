@@ -2925,6 +2925,8 @@ Use the commands in [Section 5](#5-online-service-deployment) as starting config
 
 #### 9.2.1 DSpark and KV Cache Configuration
 
+On compatible A5 configurations, native MiniMax M3.1 DSpark drafts retain CANN FlashAttn in both eager and graph modes. This requires FP16/BF16 queries, unquantized draft KV cache, decoder attention, PP/PCP/DCP sizes of one, and disabled adaptive verification; unsupported configurations keep their existing backend. Compare graph and eager performance with the same attention backend.
+
 The examples explicitly enable FlashComm1 and seven-token DSpark. On 950DT products, the PD main model uses FP8 KV cache while the DSpark draft uses BF16 KV cache. Preserve that distinction when tuning; the draft cache dtype is configured inside `--speculative-config`.
 
 #### 9.2.2 Workload-Specific Tuning
