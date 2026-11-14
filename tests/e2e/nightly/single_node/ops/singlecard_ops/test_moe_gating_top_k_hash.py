@@ -36,6 +36,7 @@ def _reference(
     return (weights * routed_scaling_factor).to(logits.dtype), expert_ids.int()
 
 
+@pytest.mark.parametrize("prepared_mask", [False, True])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("with_hash", [False, True])
 @pytest.mark.parametrize("execution_mode", ["eager", "graph"])
@@ -43,6 +44,7 @@ def test_v41_vision_bias_and_image_sentinel(
     dtype: torch.dtype,
     with_hash: bool,
     execution_mode: str,
+    prepared_mask: bool,
 ):
     torch.manual_seed(20260909)
     rows, experts, top_k = 8, 384, 6
@@ -59,20 +61,14 @@ def test_v41_vision_bias_and_image_sentinel(
         for token_id in range(tid2eid.shape[0]):
             tid2eid[token_id] = torch.randperm(experts)[:top_k]
 
-    expected_weights, expected_ids = _reference(
-        logits,
-        text_bias,
-        bias_vl,
-        input_ids,
-        tid2eid,
-        top_k,
-        routed_scaling_factor=1.5,
-    )
     npu_logits = logits.npu()
     npu_text_bias = text_bias.npu()
     npu_bias_vl = bias_vl.npu()
     npu_input_ids = input_ids.npu()
     npu_tid2eid = tid2eid.npu() if tid2eid is not None else None
+    npu_image_mask = torch.empty(rows, dtype=torch.bool, device="npu") if prepared_mask else None
+    if npu_image_mask is not None:
+        npu_image_mask.copy_((input_ids >= IMAGE_SENTINEL_LO) & (input_ids < IMAGE_SENTINEL_LO + IMAGE_SENTINEL_COUNT))
 
     def run_op():
         return torch.ops._C_ascend.moe_gating_top_k_hash(
@@ -92,6 +88,7 @@ def test_v41_vision_bias_and_image_sentinel(
             bias_vl=npu_bias_vl,
             image_sentinel_lo=IMAGE_SENTINEL_LO,
             image_sentinel_count=IMAGE_SENTINEL_COUNT,
+            image_mask=npu_image_mask,
         )
 
     if execution_mode == "graph":
@@ -100,16 +97,25 @@ def test_v41_vision_bias_and_image_sentinel(
         graph = torch.npu.NPUGraph()
         with torch.npu.graph(graph):
             actual_weights, actual_ids, _ = run_op()
-        graph.replay()
+    for current_ids in (input_ids, input_ids.roll(1)):
+        # Hash inputs can be normalized once outside all MoE layers. The
+        # prepared mask must retain image routing after sentinel IDs are lost.
+        normalized = (
+            current_ids.clamp_max(tid2eid.shape[0] - 1) if prepared_mask and tid2eid is not None else current_ids
+        )
+        npu_input_ids.copy_(normalized)
+        if npu_image_mask is not None:
+            npu_image_mask.copy_(
+                (current_ids >= IMAGE_SENTINEL_LO) & (current_ids < IMAGE_SENTINEL_LO + IMAGE_SENTINEL_COUNT)
+            )
+        expected_weights, expected_ids = _reference(
+            logits, text_bias, bias_vl, current_ids, tid2eid, top_k, routed_scaling_factor=1.5
+        )
+        if execution_mode == "graph":
+            graph.replay()
+        else:
+            actual_weights, actual_ids, _ = run_op()
         torch.npu.synchronize()
-    else:
-        actual_weights, actual_ids, _ = run_op()
-
-    torch.testing.assert_close(actual_ids.cpu(), expected_ids, rtol=0, atol=0)
-    tolerance = 1e-5 if dtype == torch.float32 else 1e-2
-    torch.testing.assert_close(
-        actual_weights.cpu(),
-        expected_weights,
-        rtol=tolerance,
-        atol=tolerance,
-    )
+        torch.testing.assert_close(actual_ids.cpu(), expected_ids, rtol=0, atol=0)
+        tolerance = 1e-5 if dtype == torch.float32 else 1e-2
+        torch.testing.assert_close(actual_weights.cpu(), expected_weights, rtol=tolerance, atol=tolerance)

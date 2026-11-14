@@ -638,14 +638,29 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         router_logits: torch.Tensor,
         enable_force_load_balance: bool,
         input_ids: torch.Tensor | None = None,
+        image_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.router is None:
             raise RuntimeError("AscendRoutedExperts requires a router for expert selection.")
-        topk_weights, topk_ids = self.router._select_experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            input_ids=input_ids,
-        )
+        if image_mask is None:
+            topk_weights, topk_ids = self.router._select_experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                input_ids=input_ids,
+            )
+        else:
+            self.router._validate_eplb_state()
+            topk_weights, topk_ids = self.router._compute_routing(
+                hidden_states,
+                router_logits,
+                None,
+                input_ids=input_ids,
+                image_mask=image_mask,
+            )
+            if self.router.capture_fn is not None:
+                self.router.capture_fn(topk_ids)
+            topk_ids = self.router._apply_eplb_mapping(topk_ids)
+            topk_ids = self.router._convert_indices_dtype(topk_ids, None)
         if self.log2phy is not None:
             topk_ids = self.log2phy[topk_ids]
 
@@ -693,6 +708,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
+        image_mask: torch.Tensor | None = None,
     ):
         forward_context = get_forward_context()
         # When static kernels are enabled, the forward pass runs twice
@@ -731,6 +747,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             router_logits=router_logits,
             enable_force_load_balance=enable_force_load_balance,
             input_ids=input_ids,
+            image_mask=image_mask,
         )
         self.ascend_pertoken_scale = pertoken_scale
         self.ascend_mc2_mask = mc2_mask

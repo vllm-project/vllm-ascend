@@ -901,7 +901,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k_hash(
     bool out_flag,
     const c10::optional<at::Tensor>& bias_vl_opt,
     int64_t image_sentinel_lo,
-    int64_t image_sentinel_count)
+    int64_t image_sentinel_count,
+    const c10::optional<at::Tensor>& image_mask_opt)
 {
 
     TORCH_CHECK(x.dim() == 2, "x must be 2D, but got dim=", x.dim());
@@ -979,6 +980,13 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k_hash(
     const at::Tensor& tid2eid = c10::value_or_else(tid2eid_opt, [] { return at::Tensor(); });
     const at::Tensor& bias_vl = c10::value_or_else(bias_vl_opt, [] { return at::Tensor(); });
 
+    const at::Tensor& image_mask = c10::value_or_else(image_mask_opt, [] { return at::Tensor(); });
+    if (image_mask.defined()) {
+        TORCH_CHECK(image_mask.scalar_type() == at::kBool && image_mask.dim() == 1 &&
+                    image_mask.numel() == rows && image_mask.is_contiguous(),
+                    "image_mask must be a contiguous bool vector with one entry per row");
+        TORCH_CHECK(image_mask.device() == x.device(), "image_mask must be on the same device as x");
+    }
     at::Tensor y = at::empty({rows, k}, x.options());
     at::Tensor expert_idx = at::empty({rows, k}, x.options().dtype(at::kInt));
     at::Tensor out = at::empty({rows, expert_num}, x.options().dtype(at::kFloat));
@@ -989,6 +997,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k_hash(
                  input_ids,
                  tid2eid,
                  bias_vl,
+                 image_mask,
                  k,
                  k_group,
                  group_count,
@@ -3254,7 +3263,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "bool out_flag=False, "
         "Tensor? bias_vl=None, "
         "int image_sentinel_lo=129257, "
-        "int image_sentinel_count=5"
+        "int image_sentinel_count=5, "
+        "Tensor? image_mask=None"
         ") -> (Tensor y, Tensor expert_idx, Tensor out)"
         );
     ops.impl("moe_gating_top_k_hash", torch::kPrivateUse1,&vllm_ascend::moe_gating_top_k_hash);
