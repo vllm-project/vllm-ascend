@@ -26,8 +26,8 @@
 using namespace Catlass;
 
 #if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 200)
-// 310P keeps the arch20 kernel ABI: no TileShapes/kGated templates and no gk path.
-// The host still passes the unified gk argument; arch20 ignores it.
+// Keep the unified OpDef entry ABI, including the optional gk slot.
+// The arch20 implementation has no key-wise gating; tiling rejects non-null gk.
 extern "C" __global__ __aicore__ void chunk_gated_delta_rule_fwd_h_vllm(GM_ADDR k, GM_ADDR w, GM_ADDR u, GM_ADDR g,
                                                          GM_ADDR gk, GM_ADDR inital_state, GM_ADDR cu_seqlens,
                                                          GM_ADDR chunk_indices, GM_ADDR h, GM_ADDR v_new,

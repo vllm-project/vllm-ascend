@@ -1,0 +1,8 @@
+pr: 17640
+entries:
+  - category: performance
+    text: Improved Gated DeltaNet prefill on Ascend 310P with native compute-WY and optimized FwdH/FwdO operators.
+    hardware: [310P]
+  - category: bugfix
+    text: Fixed numerical stability, causal masking, and NZ-layout tail handling in the optimized Ascend 310P Gated DeltaNet path.
+    hardware: [310P]

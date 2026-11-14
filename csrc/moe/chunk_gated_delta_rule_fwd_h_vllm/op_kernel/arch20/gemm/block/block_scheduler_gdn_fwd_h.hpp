@@ -34,6 +34,7 @@ CATLASS_DEVICE T Max(T a, T b) {
 namespace Catlass::Gemm::Block {
 
 struct GDNFwdHOffsets {
+    uint32_t slot;        // headInnerIdx: which L1-resident h bank this body's head uses
     uint32_t hSrcOffset;
     uint32_t hDstOffset;
     uint32_t uvOffset;
@@ -227,6 +228,7 @@ struct BlockSchedulerGdnFwdH {
         offsets[currStage].batchIdx = batchIdx;
         offsets[currStage].headIdx = vHeadIdx;
         offsets[currStage].chunkIdx = chunkIdx;
+        offsets[currStage].slot = headInnerIdx;
 
         processNewTask = chunkIdx == batchChunks - 1 && headInnerIdx == PING_PONG_STAGES - 1;
         if (processNewTask) {
