@@ -12,6 +12,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     SparseKVOffloadManager,
     get_sparse_kv_offload_cpu_pool_size_bytes,
     plan_sparse_kv_offload_memory,
+    resolve_sparse_kv_offload_store_url,
 )
 from vllm_ascend.utils import AscendDeviceType
 
@@ -248,7 +249,7 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "host-resident"):
             get_sparse_kv_offload_cpu_pool_size_bytes(kv_cache_config)
 
-    def _make_manager_init_inputs(self, dram_size_per_dp_gb=1):
+    def _make_manager_init_inputs(self, dram_size_per_dp_gb=1, store_port_base=8500):
         spec = _FakeKVCacheSpec(
             page_size_bytes=1024,
             max_blocks_per_request=100,
@@ -276,20 +277,24 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
             use_fused_overlap=False,
             use_fused_copy_sfa=False,
             dram_size_per_dp_GB=dram_size_per_dp_gb,
+            store_port_base=store_port_base,
         )
         return vllm_config, kv_cache_config, offload_config
 
     def test_manager_initializes_offload_with_planned_pool_size(self):
         vllm_config, kv_cache_config, offload_config = self._make_manager_init_inputs()
         planned_pool_size = 4096
-        for rank, expected_alloc_size, dp_index in (
-            (0, planned_pool_size, 0),
-            (1, 0, 0),
-            (0, planned_pool_size, 1),
-            (1, 0, 1),
+        for rank, expected_alloc_size, dp_index, store_port_base in (
+            (0, planned_pool_size, 0, 8500),
+            (1, 0, 0, 8500),
+            (0, planned_pool_size, 1, 8500),
+            (1, 0, 1, 8500),
+            (0, planned_pool_size, 0, 9500),
+            (1, 0, 0, 9500),
         ):
-            with self.subTest(rank=rank, dp_index=dp_index):
+            with self.subTest(rank=rank, dp_index=dp_index, store_port_base=store_port_base):
                 vllm_config.parallel_config.data_parallel_index = dp_index
+                offload_config.store_port_base = store_port_base
                 offload_backend = SimpleNamespace(
                     OffloadConfig=lambda: SimpleNamespace(),
                     Scene=SimpleNamespace(SHARED="shared"),
@@ -355,7 +360,7 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
                 self.assertEqual(initialized_config.rank_id, rank)
                 self.assertEqual(
                     initialized_config.store_url,
-                    f"tcp://127.0.0.1:{manager_module.OFFLOAD_STORE_PORT_BASE + dp_index}",
+                    f"tcp://127.0.0.1:{offload_config.store_port_base + dp_index}",
                 )
                 tp_group.barrier.assert_called_once_with()
 
@@ -479,3 +484,47 @@ class TestHostKVRegistration(unittest.TestCase):
                 self.assertEqual(manager.cpu_block_lens, [(1024, 512)])
                 manager._bind_copy_sfa_bases.assert_called_once()
                 manager._init_fused_overlap_planner.assert_not_called()
+
+
+class TestSparseKVOffloadStorePort(unittest.TestCase):
+    def test_default_base_keeps_the_historical_endpoint(self):
+        config = SimpleNamespace(store_port_base=8500)
+
+        self.assertEqual(
+            resolve_sparse_kv_offload_store_url(config, 0),
+            "tcp://127.0.0.1:8500",
+        )
+        self.assertEqual(
+            resolve_sparse_kv_offload_store_url(config, 3),
+            "tcp://127.0.0.1:8503",
+        )
+
+    def test_independent_services_can_use_distinct_bases(self):
+        service_a = SimpleNamespace(store_port_base=8500)
+        service_b = SimpleNamespace(store_port_base=9500)
+
+        # Two services in the same network namespace may reuse the same DP
+        # index, so the configured base has to keep their endpoints apart.
+        self.assertEqual(
+            resolve_sparse_kv_offload_store_url(service_a, 0),
+            "tcp://127.0.0.1:8500",
+        )
+        self.assertEqual(
+            resolve_sparse_kv_offload_store_url(service_b, 0),
+            "tcp://127.0.0.1:9500",
+        )
+
+    def test_tp_ranks_of_one_group_share_the_endpoint(self):
+        config = SimpleNamespace(store_port_base=9000)
+
+        # The endpoint only depends on the DP index, so every TP rank of the
+        # same offload group agrees on it.
+        endpoints = {resolve_sparse_kv_offload_store_url(config, 1) for _ in range(4)}
+
+        self.assertEqual(endpoints, {"tcp://127.0.0.1:9001"})
+
+    def test_port_out_of_range_is_rejected(self):
+        config = SimpleNamespace(store_port_base=65535)
+
+        with self.assertRaisesRegex(ValueError, "valid TCP port"):
+            resolve_sparse_kv_offload_store_url(config, 1)
