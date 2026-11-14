@@ -1059,7 +1059,25 @@ def enable_sp(vllm_config=None) -> bool:
     if vllm_config is None:
         return False
 
-    return bool(vllm_config.parallel_config.use_sequence_parallel_moe)
+    if bool(vllm_config.parallel_config.use_sequence_parallel_moe):
+        return True
+
+    # Dense-family sequence parallelism: the predicate is owned by the
+    # Qwen3.5 patch (vllm_ascend.patch.worker.patch_qwen3_5). The lazy import
+    # keeps this module free of the patch module's import-time monkey
+    # patches. Mirror the STANDARD_WORKER_PATCHES gate from
+    # patch/worker/__init__.py: patch_qwen3_5 imports vllm_ascend.ops.gdn
+    # (fla_npu) at module level, which 310P runners do not install, so
+    # devices excluded from the standard worker patch bundle must not
+    # import it from here either.
+    from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+
+    if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
+        return False
+
+    from vllm_ascend.patch.worker.patch_qwen3_5 import enable_dense_sp
+
+    return enable_dense_sp(vllm_config)
 
 
 def pad_sequence_parallel_tokens(hidden_states: torch.Tensor) -> torch.Tensor:

@@ -198,7 +198,11 @@ class TestUtils(TestBase):
             parallel_config=SimpleNamespace(
                 use_sequence_parallel_moe=True,
                 enable_expert_parallel=False,
-            )
+                tensor_parallel_size=2,
+                pipeline_parallel_size=1,
+            ),
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen3_5_text")),
+            additional_config={},
         )
         self.assertTrue(utils.enable_sp(sequence_parallel_config))
 
@@ -206,7 +210,11 @@ class TestUtils(TestBase):
             parallel_config=SimpleNamespace(
                 use_sequence_parallel_moe=False,
                 enable_expert_parallel=True,
-            )
+                tensor_parallel_size=2,
+                pipeline_parallel_size=1,
+            ),
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen3_5_text")),
+            additional_config={},
         )
         self.assertFalse(utils.enable_sp(shared_expert_dp_config))
 
@@ -214,7 +222,11 @@ class TestUtils(TestBase):
             parallel_config=SimpleNamespace(
                 use_sequence_parallel_moe=False,
                 enable_expert_parallel=False,
-            )
+                tensor_parallel_size=2,
+                pipeline_parallel_size=1,
+            ),
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen3_5_text")),
+            additional_config={},
         )
         self.assertFalse(utils.enable_sp(no_sequence_parallel_config))
 
