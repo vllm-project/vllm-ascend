@@ -38,7 +38,7 @@ def test_replay_plans_follow_visibility_not_physical_cache_group(
         owner.enable_device_metadata()
     common = _batch(2, 0, "prefill").local
     floor = torch.zeros_like(common.seq_lens)
-    batch_cache = {}
+    batch_cache: dict[str, object] = {}
     results, tasks = [], []
     for index, owner in enumerate(owners):
         view = floor[:]
