@@ -3,11 +3,14 @@
 """NPU comparisons against upstream PLE, including state writeback."""
 
 from itertools import accumulate
+from types import SimpleNamespace
 
 import pytest
 import torch
 import torch_npu  # noqa: F401
+from vllm.model_executor.layers.mamba.checkpoint import MambaPrefillCheckpointMetadata
 from vllm.models.qwen4_exp.common.ops.ple import ple_conv as upstream_ple_conv
+from vllm.v1.attention.backends.short_conv_attn import PleShortConvAttentionMetadata
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 from vllm_ascend.models.qwen4_exp import ple as ple_adapter
@@ -57,6 +60,91 @@ def test_model_dispatch_uses_ascend_kernels(monkeypatch):
     for mode in ("prefill", "decode", "spec"):
         ple_layer.ple_conv(mode=mode)
     assert calls == ["ascend_prefill", "decode", "spec"]
+
+
+def test_internal_checkpoint_matches_prefill_resume(monkeypatch):
+    from vllm import forward_context
+    from vllm.model_executor.layers.mamba import mamba_utils
+
+    patch_upstream_ple_short_conv()
+    layer_cls = ple_adapter.AscendQwen4ExpPLELayer
+    layer = layer_cls.__new__(layer_cls)
+    torch.nn.Module.__init__(layer)
+    layer.prefix = "ple"
+    layer.short_conv_dilation = 3
+    layer.conv_state_len = 9
+    layer.num_spec_tokens = 3
+    channels = 10240
+    boundary, prefill_len = 64, 70
+    prefill_start = 5  # One regular decode token and four speculative tokens.
+    inputs = torch.randn(prefill_start + prefill_len, channels, device="npu", dtype=torch.bfloat16)
+    residual = torch.zeros_like(inputs)
+    weights = torch.randn(channels, 4, device="npu", dtype=inputs.dtype)
+    layer.conv1d = SimpleNamespace(weight=weights.unsqueeze(1))
+    # Real cache pages may include trailing capacity and padded page strides.
+    backing = torch.zeros(5, 14 * channels + 16, device="npu", dtype=inputs.dtype)
+    state = backing[:, : 14 * channels].view(5, 14, channels)
+    layer.kv_cache = (state,)
+    monkeypatch.setattr(mamba_utils, "is_conv_state_dim_first", lambda: False)
+    monkeypatch.setattr(ple_adapter, "wait_for_kv_layer_from_connector", lambda _prefix: None)
+
+    def int_tensor(values):
+        return torch.tensor(values, device="npu", dtype=torch.int32)
+
+    metadata = PleShortConvAttentionMetadata(
+        num_prefills=1,
+        num_prefill_tokens=prefill_len,
+        num_decodes=1,
+        num_decode_tokens=1,
+        num_reqs=3,
+        num_actual_tokens=inputs.shape[0],
+        has_initial_states_p=torch.tensor([False], device="npu"),
+        has_initial_states_d=torch.tensor([True], device="npu"),
+        query_start_loc_p=int_tensor([0, prefill_len]),
+        state_indices_tensor_p=int_tensor([2]),
+        state_indices_tensor_d=int_tensor([1]),
+        query_start_loc_d=int_tensor([0, 1]),
+        num_accepted_tokens=int_tensor([1]),
+        seq_lens=int_tensor([1, 4, prefill_len]),
+        state_indices_tensor=int_tensor([1, 2]),
+        num_spec_decodes=1,
+        num_spec_decode_tokens=4,
+        spec_query_len=4,
+        spec_sequence_masks=torch.tensor([False, True, False], device="npu"),
+        spec_state_indices_tensor=int_tensor([3]),
+        spec_query_start_loc=int_tensor([0, 4]),
+        spec_token_indx=int_tensor([1, 2, 3, 4]),
+        non_spec_query_start_loc=int_tensor([0, 1, 1 + prefill_len]),
+        non_spec_token_indx=int_tensor([0, *range(prefill_start, inputs.shape[0])]),
+        checkpoint=MambaPrefillCheckpointMetadata(int_tensor([0, boundary]), int_tensor([NULL_BLOCK_ID, 4])),
+    )
+    monkeypatch.setattr(
+        forward_context, "get_forward_context", lambda: SimpleNamespace(attn_metadata={layer.prefix: metadata})
+    )
+    layer._short_conv(inputs, residual, None)
+
+    checkpoint_end = prefill_start + boundary
+    conv_state = state[:, -12:, :]
+    torch.testing.assert_close(conv_state[4, :9], inputs[checkpoint_end - 9 : checkpoint_end], atol=0, rtol=0)
+    assert torch.count_nonzero(conv_state[4, 9:]).item() == 0
+    assert torch.count_nonzero(state[NULL_BLOCK_ID]).item() == 0
+
+    tail = inputs[checkpoint_end:]
+    resumed = torch.zeros_like(tail)
+    _ple_conv_ascend(
+        tail,
+        resumed,
+        conv_state,
+        weights,
+        int_tensor([4]),
+        None,
+        mode="prefill",
+        dilation=layer.short_conv_dilation,
+        query_start_loc=int_tensor([0, tail.shape[0]]),
+        has_initial_states=torch.tensor([True], device="npu"),
+    )
+    torch.testing.assert_close(resumed, residual[checkpoint_end:], atol=0, rtol=0)
+    torch.testing.assert_close(conv_state[4, :9], conv_state[2, :9], atol=0, rtol=0)
 
 
 def test_decode_batch_sizes():

@@ -2078,9 +2078,13 @@ class TestNPUWorker(TestBase):
             # Create mock kv_cache_config
             mock_kv_cache_config = MagicMock()
             mock_kv_cache_config.needs_kv_cache_zeroing = False
+            mock_kv_cache_config.hash_block_size = 64
+            mock_kv_cache_config.cache_hit_alignment_tokens = 128
 
             # Test initialize_from_config
             worker.initialize_from_config(mock_kv_cache_config)
+            assert worker.vllm_config.cache_config.hash_block_size == 64
+            assert worker.vllm_config.cache_config.cache_hit_alignment_tokens == 128
 
             # Verify the kv_cache pool is created but not entered by the worker.
             # Model runners enter it only around backing cache allocation.

@@ -17,21 +17,62 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from functools import wraps
 from typing import Any, Literal
 
 import torch
 import torch.nn.functional as F
 import torch_npu
+from vllm.config import VllmConfig
+from vllm.distributed import get_pp_group
 from vllm.logger import logger
+from vllm.model_executor.layers.mamba.abstract import (
+    get_mamba_prefill_checkpoint_alignment,
+    get_mamba_prefill_checkpoint_grid,
+)
+from vllm.model_executor.layers.mamba.checkpoint import MambaPrefillCheckpointExporter
+from vllm.models.qwen4_exp.amd.ple_layer import Qwen4ExpPLELayer
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.utils import wait_for_kv_layer_from_connector
 from vllm_ascend.ops.triton_ple import (
     ple_conv_decode,
     ple_conv_prefill,
     ple_conv_spec,
 )
+
+
+class AscendQwen4ExpPLELayer(Qwen4ExpPLELayer):
+    def get_prefill_checkpoint_alignment(self) -> int | None:
+        if (
+            self.cache_config.mamba_cache_mode == "align"
+            and getattr(get_ascend_config(), "gdn_internal_prefill_checkpoints", False)
+            # Model-wide alignment is resolved from the layers on this worker.
+            and get_pp_group().world_size == 1
+            and self.conv_state_len > 0
+            # Resuming from the cache must preserve the input history exactly.
+            and self.get_state_dtype()[0] in (self.model_config.dtype, torch.float32)
+        ):
+            return 1
+        return None
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
+        spec = super().get_kv_cache_spec(vllm_config)
+        if (
+            not isinstance(spec, MambaSpec)
+            or self.get_prefill_checkpoint_alignment() is None
+            or get_mamba_prefill_checkpoint_alignment(vllm_config) is None
+        ):
+            return spec
+
+        grid = get_mamba_prefill_checkpoint_grid(vllm_config)
+        # Every positive offset must cover a full window of this step's inputs.
+        if grid < self.conv_state_len:
+            return spec
+        return replace(spec, num_prefill_checkpoint_blocks=1, prefill_checkpoint_alignment=grid)
 
 
 def _ple_conv_ascend(*args: Any, mode: Literal["decode", "spec", "prefill"], **kwargs: Any) -> None:
@@ -300,6 +341,19 @@ def _wrap_ple_short_conv(original: Callable[..., Any]) -> Callable[..., Any]:
                 conv_state=conv_state,
                 conv_weights=conv_weights.to(dtype=inputs.dtype),
             )
+            checkpoint = layer_attn_metadata.checkpoint
+            if checkpoint is not None:
+                # Checkpoint rows include regular decodes but exclude spec
+                # decodes. Use the whole non-spec token map, including decodes.
+                cu_seqlens = layer_attn_metadata.non_spec_query_start_loc
+                assert cu_seqlens is not None
+                MambaPrefillCheckpointExporter().export(
+                    checkpoint,
+                    raw_qkv=inputs,
+                    conv_state=conv_state[:, : self.conv_state_len, :].transpose(-1, -2),
+                    cu_seqlens=cu_seqlens,
+                    token_indices=layer_attn_metadata.non_spec_token_indx,
+                )
             return None
         finally:
             _set_allow_internal_format(previous)
@@ -327,7 +381,6 @@ def _patch_legacy_prefill(ple_layer_cls: type[Any]) -> None:
 def patch_upstream_ple_short_conv() -> None:
     """Install Ascend PLE runtime adaptations on the upstream classes."""
     from vllm.models.qwen4_exp.amd import ple_layer as upstream_ple_layer
-    from vllm.models.qwen4_exp.amd.ple_layer import Qwen4ExpPLELayer
     from vllm.models.qwen4_exp.common.ngram_embedding import (
         Qwen4ExpPLEEmbeddingMethod,
         Qwen4ExpPLEUnquantizedEmbeddingMethod,
@@ -374,4 +427,4 @@ def patch_upstream_ple_short_conv() -> None:
     _patch_legacy_prefill(Qwen4ExpPLELayer)
 
 
-__all__ = ["patch_upstream_ple_short_conv"]
+__all__ = ["AscendQwen4ExpPLELayer", "patch_upstream_ple_short_conv"]

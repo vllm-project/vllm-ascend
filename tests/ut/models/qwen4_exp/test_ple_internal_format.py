@@ -208,7 +208,7 @@ def test_set_internal_format_without_any_api_only_warns(
 
 
 class _DummyPLEMetadata:
-    pass
+    checkpoint = None
 
 
 def _install_ple_forward_context(monkeypatch: pytest.MonkeyPatch, attn_metadata: object) -> object:
@@ -290,6 +290,85 @@ def test_ple_wrap_transposes_dim_first_state(monkeypatch: pytest.MonkeyPatch) ->
     conv_state = calls[0]["conv_state"]
     assert conv_state.shape == (3, 12, 4)
     assert conv_state.untyped_storage().data_ptr() == state.untyped_storage().data_ptr()
+
+
+@pytest.mark.parametrize(
+    "mode,history,dtype,model_alignment,grid,expected",
+    [
+        ("align", 9, torch.bfloat16, 64, 128, 128),
+        ("align", 9, torch.float32, 64, 128, 128),
+        ("align", 9, torch.float16, 64, 128, None),
+        ("align", 9, torch.bfloat16, None, 128, None),
+        ("align", 9, torch.bfloat16, 1, 8, None),
+        ("align", 0, torch.bfloat16, 64, 128, None),
+        ("all", 9, torch.bfloat16, 64, 128, None),
+    ],
+)
+def test_ple_checkpoint_spec(monkeypatch, mode, history, dtype, model_alignment, grid, expected):
+    spec = ple.MambaSpec(shapes=((12, 4),), dtypes=(dtype,), block_size=128)
+    layer = ple.AscendQwen4ExpPLELayer.__new__(ple.AscendQwen4ExpPLELayer)
+    torch.nn.Module.__init__(layer)
+    layer.cache_config = SimpleNamespace(mamba_cache_mode=mode)
+    layer.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    layer.conv_state_len = history
+    monkeypatch.setattr(ple, "get_ascend_config", lambda: SimpleNamespace(gdn_internal_prefill_checkpoints=True))
+    monkeypatch.setattr(ple, "get_pp_group", lambda: SimpleNamespace(world_size=1))
+    monkeypatch.setattr(layer, "get_state_dtype", lambda: (dtype,))
+    monkeypatch.setattr(ple.Qwen4ExpPLELayer, "get_kv_cache_spec", lambda self, config: spec)
+    monkeypatch.setattr(ple, "get_mamba_prefill_checkpoint_alignment", lambda config: model_alignment)
+    monkeypatch.setattr(ple, "get_mamba_prefill_checkpoint_grid", lambda config: grid)
+
+    actual = layer.get_kv_cache_spec(SimpleNamespace())
+    if expected is None:
+        assert actual is spec
+    else:
+        assert actual.num_prefill_checkpoint_blocks == 1
+        assert actual.prefill_checkpoint_alignment == expected
+        assert actual.shapes == spec.shapes
+
+
+@pytest.mark.parametrize("opt_in,pp_size,expected", [(True, 1, 1), (False, 1, None), (True, 2, None)])
+def test_ple_checkpoint_capability_requires_opt_in_and_single_pp_stage(monkeypatch, opt_in, pp_size, expected):
+    layer = SimpleNamespace(
+        cache_config=SimpleNamespace(mamba_cache_mode="align"),
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+        conv_state_len=9,
+        get_state_dtype=lambda: (torch.bfloat16,),
+    )
+    monkeypatch.setattr(ple, "get_ascend_config", lambda: SimpleNamespace(gdn_internal_prefill_checkpoints=opt_in))
+    monkeypatch.setattr(ple, "get_pp_group", lambda: SimpleNamespace(world_size=pp_size))
+
+    assert ple.AscendQwen4ExpPLELayer.get_prefill_checkpoint_alignment(layer) == expected
+
+
+def test_ple_wrap_exports_history_with_non_spec_token_map(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ple, "_get_allow_internal_format", lambda: True)
+    monkeypatch.setattr(ple, "_set_allow_internal_format", lambda _enabled: None)
+    monkeypatch.setattr(ple, "wait_for_kv_layer_from_connector", Mock())
+    exporter = Mock()
+    monkeypatch.setattr(ple, "MambaPrefillCheckpointExporter", lambda: exporter)
+    state = torch.randn(3, 14, 4)
+    layer = _make_ple_layer(state, Mock())
+    metadata = _DummyPLEMetadata()
+    metadata.checkpoint = object()
+    metadata.non_spec_query_start_loc = torch.tensor([0, 1, 12])
+    metadata.non_spec_token_indx = torch.tensor([0, *range(4, 15)])
+    mamba_utils = _install_ple_forward_context(monkeypatch, {layer.prefix: metadata})
+    monkeypatch.setattr(mamba_utils, "is_conv_state_dim_first", lambda: False)
+    inputs = torch.randn(15, 4)
+
+    ple._wrap_ple_short_conv(Mock())(layer, inputs, torch.zeros_like(inputs), None)
+
+    args, kwargs = exporter.export.call_args
+    assert args == (metadata.checkpoint,)
+    assert kwargs["raw_qkv"] is inputs
+    assert kwargs["cu_seqlens"] is metadata.non_spec_query_start_loc
+    assert kwargs["token_indices"] is metadata.non_spec_token_indx
+    cache_window = kwargs["conv_state"]
+    expected = state[:, 2:11].transpose(1, 2)
+    assert cache_window.data_ptr() == expected.data_ptr()
+    assert cache_window.shape == expected.shape
+    assert cache_window.stride() == expected.stride()
 
 
 def test_ple_wrap_is_a_noop_without_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
