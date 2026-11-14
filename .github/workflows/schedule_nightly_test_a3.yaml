@@ -22,7 +22,7 @@ name: Nightly-A3
 
 run-name: >-
   ${{ inputs.request_id != '' &&
-      (inputs.request_id == 'daily' &&
+      ((inputs.request_id == 'daily' || startsWith(inputs.request_id, 'daily-')) &&
         'Nightly-A3 (Daily)' ||
         format('Nightly-A3 (PR) {0}', inputs.request_id)) ||
       'Nightly-A3 (scheduled)' }}
@@ -313,6 +313,7 @@ jobs:
           )
         }}
     secrets:
+      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
       HW_OBS_PROFILE_AK: ${{ secrets.HW_OBS_PROFILE_AK }}
       HW_OBS_PROFILE_SK: ${{ secrets.HW_OBS_PROFILE_SK }}
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
@@ -367,6 +368,7 @@ jobs:
           )
         }}
     secrets:
+      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
       HW_OBS_PROFILE_AK: ${{ secrets.HW_OBS_PROFILE_AK }}
       HW_OBS_PROFILE_SK: ${{ secrets.HW_OBS_PROFILE_SK }}
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
@@ -421,6 +423,7 @@ jobs:
       bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
       bisect_config_base_path: ${{ matrix.test_config.config_base_path }}
     secrets:
+      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
       HW_OBS_PROFILE_AK: ${{ secrets.HW_OBS_PROFILE_AK }}
       HW_OBS_PROFILE_SK: ${{ secrets.HW_OBS_PROFILE_SK }}
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
@@ -475,6 +478,7 @@ jobs:
       bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
       bisect_config_base_path: ${{ matrix.test_config.config_base_path }}
     secrets:
+      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
       HW_OBS_PROFILE_AK: ${{ secrets.HW_OBS_PROFILE_AK }}
       HW_OBS_PROFILE_SK: ${{ secrets.HW_OBS_PROFILE_SK }}
       OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}

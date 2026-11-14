@@ -142,6 +142,8 @@ on:
         default: ''
         description: override CONFIG_BASE_PATH for bisect
     secrets:
+      PAT_TOKEN:
+        required: false
       HW_OBS_PROFILE_AK:
         required: false
       HW_OBS_PROFILE_SK:
@@ -547,6 +549,15 @@ jobs:
           echo "vllm_hash=${HASH_vllm:-N/A}" >> "$GITHUB_OUTPUT"
           echo "vllm_ascend_hash=${HASH_vllm_ascend:-N/A}" >> "$GITHUB_OUTPUT"
           rm -f "$LEADER_TMP"
+
+      - name: Dispatch Daily Issue update
+        id: daily-report
+        if: ${{ !cancelled() && startsWith(inputs.request_id, 'daily-') && steps.stream_logs.outcome == 'failure' }}
+        uses: ./.github/actions/dispatch-daily-issue
+        with:
+          github-token: ${{ secrets.PAT_TOKEN }}
+          request-id: ${{ inputs.request_id }}
+          case-name: ${{ inputs.name }}
 
       - name: Update good_table.csv on success
         if: ${{ steps.stream_logs.outcome == 'success' && inputs.request_id == '' }}
