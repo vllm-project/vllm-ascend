@@ -3,6 +3,7 @@
 meta:
   hardware:
     ascend_950pr_8x: verified
+    ascend_910b: verified
 hardware_overrides:
   npu:
     extra_args:
@@ -22,10 +23,54 @@ hardware_overrides:
       HCCL_BUFFSIZE: '512'
       HCCL_OP_EXPANSION_MODE: AIV
       HCCL_CONNECT_TIMEOUT: '7200'
+  ascend_910b:
+    extra_args:
+      - '--enable-expert-parallel'
+      - '--safetensors-load-strategy'
+      - prefetch
+      - '--max-num-seqs'
+      - '32'
+      - '--max-model-len'
+      - '1048576'
+      - '--max-num-batched-tokens'
+      - '8192'
+      - '--trust-remote-code'
+      - '--quantization'
+      - ascend
+      - '--limit-mm-per-prompt'
+      - '{"image":7,"video":0}'
+      - '--gpu-memory-utilization'
+      - '0.9'
+      - '--kv-cache-dtype'
+      - int8
+      - '--attention-config.indexer_kv_dtype'
+      - int8
+      - '--enforce-eager'
+      - '--enable-prefix-caching'
+      - '--additional-config'
+      - '{"enable_flashcomm1":false,"enable_shared_expert_dp":true}'
+    extra_env:
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+      HCCL_BUFFSIZE: '1024'
+      HCCL_OP_EXPANSION_MODE: AIV
+      HCCL_INTRA_ROCE_ENABLE: '1'
+      TASK_QUEUE_ENABLE: '1'
+      OMP_NUM_THREADS: '1'
+      HCCL_SOCKET_IFNAME: '$IFACE_NAME'
+      GLOO_SOCKET_IFNAME: '$IFACE_NAME'
+      TP_SOCKET_IFNAME: '$IFACE_NAME'
 hardware_notes:
   ascend_950pr_8x:
     title: vLLM Ascend A5 image required
     body: Single-node TP8 on 8×950PR. Pin quay.io/ascend/vllm-ascend:nightly-main-a5 and overlay vLLM#53906 / vllm-ascend#15127. Do not pass --quantization ascend. --block-size 512 is required (kpool indexer). EP is not available on this interconnect.
+  ascend_910b:
+    title: vLLM Ascend A2 image required
+    body: |-
+      Pin quay.io/ascend/vllm-ascend:v0.32.0rc1 - the NVIDIA pip wheel cannot run on Ascend NPU.
+      PD roles = prefill + decode; TP/DP per role: prefill dp=2/tp=1/pcp=8, decode dp=8/tp=2; total NPUs = 32.
+      Before declaring PD ready: every backend process healthy, requests via the router/proxy succeed, KV transfer completes.
+      stop/cleanup: stop prefill/decode processes and the proxy on every node before restart.
+      Set HCCL_BUFFSIZE=1024 before launch.
 strategy_hardware:
   single_node_tep:
     npu: unsupported
@@ -41,6 +86,7 @@ strategy_hardware:
     npu: unsupported
   pd_cluster:
     npu: unsupported
+    ascend_910b: supported
 variants:
   default:
     hardware_overrides:
@@ -48,3 +94,165 @@ variants:
         docker_image: quay.io/ascend/vllm-ascend:nightly-main-a5
         install:
           pip: false
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1
+        install:
+          pip: false
+  ascend_w8a8:
+    model_id: Eco-Tech/GLM-5.3-Flash-w8a8
+    label: W8A8 (Ascend A2)
+    precision: int8
+    vram_minimum_gb: 386
+    description: 'ModelSlim INT8 W8A8 checkpoint measured on a 4-node Atlas 800I A2 (Ascend 910B) prefill/decode cluster: prefill DP2+TP1+PCP8 across 2 node(s), decode DP8+TP2 across 2 node(s). Requires --quantization ascend. Published at https://modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8.'
+    supported_hardware: [ascend_910b]
+    tp:
+      ascend_910b: 1
+    min_vllm_version: 0.29.0
+    extra_args:
+      - '--quantization'
+      - ascend
+    hardware_overrides:
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1
+        install:
+          pip: false
+
+strategy_min_gpus:
+  ascend_910b: 32
+strategy_overrides:
+  pd_cluster:
+    prefill:
+      tp:
+        ascend_910b: 1
+    decode:
+      tp:
+        ascend_910b: 2
+features:
+  reasoning:
+    hardware_overrides:
+      ascend_910b:
+        args:
+          - '--reasoning-parser'
+          - glm47
+  tool_calling:
+    hardware_overrides:
+      ascend_910b:
+        args:
+          - '--enable-auto-tool-choice'
+          - '--tool-call-parser'
+          - glm47
+hardware_opt_in_features:
+  ascend_910b:
+    - reasoning
+    - tool_calling
+guide_sections:
+  ascend: |-
+    ### Huawei Atlas 800I A2 (Ascend 910B) w8a8 (vLLM Ascend)
+
+    Verified with `quay.io/ascend/vllm-ascend:v0.32.0rc1` on Atlas 800I A2 (Ascend 910B), as a prefill/decode PD cluster (measured pools: 2 prefill + 2 decode nodes); full per-role runbook below.
+
+    Served W8A8 checkpoint: [Eco-Tech/GLM-5.3-Flash-w8a8](https://modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8).
+
+    #### Prefill role — run on every prefill node
+
+    The prefill pool runs 2 engine(s) in total; every engine needs a distinct
+    `--data-parallel-rank` (the measured script below carries rank 0), plus the pool's
+    `--data-parallel-address` / `--data-parallel-rpc-port` of the rendezvous node — these
+    site-specific values are stripped from the published command.
+
+    ```bash
+    export IFACE_NAME=<cluster-nic-name>   # e.g. eth7 / bond0 of the RoCE plan
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_BUFFSIZE=1024
+    export HCCL_OP_EXPANSION_MODE=AIV
+    export HCCL_INTRA_ROCE_ENABLE=1
+    export TASK_QUEUE_ENABLE=1
+    export OMP_NUM_THREADS=1
+    export HCCL_SOCKET_IFNAME="$IFACE_NAME"
+    export GLOO_SOCKET_IFNAME="$IFACE_NAME"
+    export TP_SOCKET_IFNAME="$IFACE_NAME"
+    vllm serve Eco-Tech/GLM-5.3-Flash-w8a8 \
+      --data-parallel-size 2 \
+      --tensor-parallel-size 1 \
+      --prefill-context-parallel-size 8 \
+      --enable-expert-parallel \
+      --seed 1024 \
+      --served-model-name glm \
+      --safetensors-load-strategy prefetch \
+      --max-num-seqs 32 \
+      --max-model-len 1048576 \
+      --max-num-batched-tokens 8192 \
+      --trust-remote-code \
+      --quantization ascend \
+      --limit-mm-per-prompt '{"image": 7, "video": 0}' \
+      --gpu-memory-utilization 0.9 \
+      --tool-call-parser glm47 \
+      --reasoning-parser glm47 \
+      --enable-auto-tool-choice \
+      --kv-cache-dtype int8 \
+      --attention-config.indexer_kv_dtype int8 \
+      --enforce-eager \
+      --enable-prefix-caching \
+      --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": false}' \
+      --additional-config '{"enable_flashcomm1": false, "enable_shared_expert_dp": true}' \
+      --kv-transfer-config '{ "kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "kv_port": "36680", "engine_id": "0", "kv_connector_extra_config": { "use_ascend_direct": true, "prefill": { "dp_size": 2, "tp_size": 1 }, "decode": { "dp_size": 8, "tp_size": 2 } } }'
+    ```
+
+    #### Decode role — run on every decode node
+
+    The decode pool runs 8 engine(s) in total; every engine needs a distinct
+    `--data-parallel-rank` (the measured script below carries rank 1), plus the pool's
+    `--data-parallel-address` / `--data-parallel-rpc-port` of the rendezvous node — these
+    site-specific values are stripped from the published command.
+
+    ```bash
+    export IFACE_NAME=<cluster-nic-name>   # e.g. eth7 / bond0 of the RoCE plan
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_BUFFSIZE=1024
+    export HCCL_OP_EXPANSION_MODE=AIV
+    export HCCL_INTRA_ROCE_ENABLE=1
+    export TASK_QUEUE_ENABLE=1
+    export OMP_NUM_THREADS=1
+    export HCCL_SOCKET_IFNAME="$IFACE_NAME"
+    export GLOO_SOCKET_IFNAME="$IFACE_NAME"
+    export TP_SOCKET_IFNAME="$IFACE_NAME"
+    vllm serve Eco-Tech/GLM-5.3-Flash-w8a8 \
+      --data-parallel-size 8 \
+      --tensor-parallel-size 2 \
+      --enable-expert-parallel \
+      --seed 1024 \
+      --served-model-name glm \
+      --safetensors-load-strategy prefetch \
+      --max-num-seqs 40 \
+      --max-model-len 1048576 \
+      --max-num-batched-tokens 240 \
+      --trust-remote-code \
+      --quantization ascend \
+      --limit-mm-per-prompt '{"image": 7, "video": 0}' \
+      --gpu-memory-utilization 0.9 \
+      --tool-call-parser glm47 \
+      --reasoning-parser glm47 \
+      --enable-auto-tool-choice \
+      --enable-prefix-caching \
+      --kv-cache-dtype int8 \
+      --attention-config.indexer_kv_dtype int8 \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+      --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": false}' \
+      --additional-config '{ "enable_shared_expert_dp": true, "recompute_scheduler_enable": true, "enable_flashcomm1": false, "ascend_compilation_config": { "enable_npugraph_ex": true, "enable_static_kernel": false, "enable_super_kernel": false }}' \
+      --kv-transfer-config '{ "kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "36580", "engine_id": "101", "kv_connector_extra_config": { "use_ascend_direct": true, "prefill": { "dp_size": 2, "tp_size": 1 }, "decode": { "dp_size": 8, "tp_size": 2 } } }'
+    ```
+
+    #### Router — single client entry in front of the pools
+
+    Recommended defaults below (`round_robin`, per the vLLM PD guide). Add one `--prefill` / `--decode`
+    flag per engine endpoint — the measured topology implies 2 prefill and 8 decode endpoints;
+    replace `<...>` placeholders with the real host:port (vLLM default port 8000).
+
+    ```bash
+    vllm-router --policy round_robin --vllm-pd-disaggregation \
+      --prefill http://<prefill-host-1>:8000 \
+      --prefill http://<prefill-host-2>:8000 \
+      --decode http://<decode-host-1>:8000 \
+      --decode http://<decode-host-2>:8000 \
+      --host 0.0.0.0 --port 8080
+    ```
