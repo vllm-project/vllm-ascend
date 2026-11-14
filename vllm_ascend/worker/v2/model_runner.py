@@ -103,6 +103,7 @@ from vllm_ascend.observability.runtime_guard.hooks import (
 )
 from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
+from vllm_ascend.quantization.draft_lm_head import draft_lm_head_quantization_scope
 from vllm_ascend.utils import (
     create_hccl_pg_options,
     enable_sfa_dcp_sharded_indexer,
@@ -323,7 +324,11 @@ class NPUModelRunner(GPUModelRunner):
         start_nz_warm_thread("thread")
         try:
             aux_layers = get_pd_dspark_aux_layer_ids(self.vllm_config)
-            super().load_model(load_dummy_weights, *args, **kwargs)
+            # The draft model (and its shared lm_head copy) is loaded inside
+            # super().load_model(); bridge the Ascend draft_lm_head_quantization
+            # format onto the upstream speculative field for that window only.
+            with draft_lm_head_quantization_scope(self.vllm_config):
+                super().load_model(load_dummy_weights, *args, **kwargs)
             self.pd_dspark_aux_layer_ids = aux_layers
         finally:
             # Join even when weight loading fails: these threads touch the NPU

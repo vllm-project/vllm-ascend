@@ -65,6 +65,8 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_mlapo`                      | bool | `True`  | Whether to enable MLAPO (Model Layer-wise Adaptive Parallel Optimization). The legacy `VLLM_ASCEND_ENABLE_MLAPO` environment variable is no longer supported. |
 | `mlapo_keep_prefill_weights`        | bool | `False` | When True, keep MLAPO prefill weights on NPU instead of freeing them on kv_consumer (decode-only D) nodes. D nodes have normal local-prefill paths (recompute / fallback / preempt) that crash when the weights are freed (issue #11882). Enable this to trade NPU memory for stability. |
 | `weight_nz_mode`                    | int  | `1`     | Weight NZ mode. `0` disables NZ, `1` enables NZ only for quantized weights, and `2` also enables NZ for BF16/FP16 weights when supported. The legacy `VLLM_ASCEND_ENABLE_NZ` environment variable is no longer supported. |
+| `lm_head_quantization`             | str or null | `None` | Optional target LM head quantization. Accepts `"w8a8_dynamic"`; when omitted, preserves the checkpoint scheme. See the restrictions below. |
+| `draft_lm_head_quantization`       | str or null | `None` | Optional online quantization for the drafter's copy of a shared target LM head (EAGLE/EAGLE3/MTP). Accepts `"w8a8_dynamic"`; the format is adjudicated by hardware (MXFP8 on A5, INT8 on A2/A3). Requires Model Runner V2 and a drafter that shares the target LM head. When `lm_head_quantization` is also set, this option is absorbed: the drafter shares the quantized target LM head directly. |
 | `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. `0` disables the fused path, `1` selects dispatch-FFN-combine, and `2` selects CANN MegaMoe when the model and parallel configuration support it. On A5, SiTU models require a CANN MegaMoe wrapper exposing `activation` and `activation_params`; both SiTU parameters are bound from the MoE configuration during initialization. The legacy `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable is no longer supported. |
 | `enable_transpose_kv_cache_by_block`| bool | `True`  | Whether to enable transpose KV cache by block. The legacy `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable is no longer supported. |
 | `enable_flashcomm1`                 | bool | `False` | Whether to enable SP MoE. See [Sequence Parallelism](../feature_guide/sequence_parallelism.md). |
@@ -76,6 +78,25 @@ The following table lists additional configuration options available in vLLM Asc
 | `combine_quant_mode`                | int  | `0`     | Fused MC2 configuration. This configuration will be passed as the `comm_quant_mode` argument for the `torch_npu.npu_moe_distribute_combine_v2` operator. Please refer to the operator documentation for the valid value range. |
 
 The details of each configuration option are as follows:
+
+**lm_head_quantization**
+
+Select W8A8 dynamic quantization for the target model's `lm_head` with Model Runner V2. The accepted value is `"w8a8_dynamic"`; omit it to preserve the checkpoint scheme. Enabling it with Model Runner V1 raises an error.
+
+```bash
+vllm serve /path/to/model \
+  --additional-config '{"lm_head_quantization": "w8a8_dynamic"}'
+```
+
+Keep the checkpoint's usual quantization setting, such as `--quantization ascend` for ModelSlim models.
+
+On A2/A3, online conversion uses `npu_dynamic_quant` with INT8 weights and activations. On A5, the same option selects MXFP8: weights are quantized once after loading and activations are quantized during inference with `npu_dynamic_mx_quant`. The A5 path uses FP8 E4M3FN values and E8M0 scales for groups of 32 along the hidden dimension, and reuses the MXFP8 matrix multiplication implementation.
+
+Floating-point models, ModelSlim heads marked `FLOAT`, and compressed-tensors heads explicitly excluded from quantization are converted online. ModelSlim `W8A8_DYNAMIC` heads retain their checkpoint method; on A5, native `W8A8_MXFP8` heads also retain their checkpoint method. A compressed-tensors head that is not excluded also retains its checkpoint method. Other or unknown formats fail at startup. Online conversion requires BF16 or FP16 checkpoint weights and an untied output head. Bias retains its floating-point checkpoint values. The online path is not yet adapted for 310P.
+
+Each tensor-parallel weight shard is quantized per output channel with `torch_npu.npu_dynamic_quant` after loading. Inference uses dynamic per-token activation quantization and the existing W8A8 quantized matrix multiplication path. This changes the logits numerically; evaluate model quality before enabling it for a deployment.
+
+Method selection applies only to the target model. Independently loaded draft heads keep their checkpoint method. If the speculative loader subsequently shares the target's head with a draft, that draft uses the same quantized head; this option does not prevent that sharing. This option adds no separate restrictions on LoRA, weight updates, weight offloading, parallel configuration, model loaders, or speculative methods; their existing component checks still apply.
 
 <span id="runtime_guard"></span>**runtime_guard**
 
