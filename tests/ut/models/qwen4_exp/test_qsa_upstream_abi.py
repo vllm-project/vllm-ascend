@@ -75,24 +75,67 @@ def test_qsa_projections_stagger_main_cube_before_indexer() -> None:
     assert launches == ["main_qkv", "indexer"]
 
 
-def test_qsa_forward_side_effect_op_copies_into_stable_output(monkeypatch) -> None:
+def test_qsa_core_side_effect_op_writes_graph_output(monkeypatch) -> None:
     hidden_states = torch.empty((2, 8))
     positions = torch.arange(2)
-    expected = torch.arange(16, dtype=torch.float32).reshape(2, 8)
-    output = torch.empty_like(expected)
+    output = torch.empty((2, 2, 4))
     layer = Mock()
-    layer._forward_impl.return_value = expected
     monkeypatch.setattr(qsa, "_ascend_qsa_layer", lambda _name: layer)
 
-    qsa.qwen4_exp_ascend_qsa_forward_with_output(
+    qsa.qwen4_exp_ascend_qsa_core_with_output(
         hidden_states,
         positions,
         output,
         "layer",
     )
 
-    layer._forward_impl.assert_called_once_with(positions, hidden_states)
-    torch.testing.assert_close(output, expected)
+    layer._forward_core_with_output.assert_called_once_with(
+        positions,
+        hidden_states,
+        output,
+    )
+
+
+def test_qsa_opaque_forward_runs_output_projection_after_core(monkeypatch) -> None:
+    class OutputProjection(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.input: torch.Tensor | None = None
+
+        def forward(self, tensor: torch.Tensor) -> tuple[torch.Tensor, None]:
+            self.input = tensor.clone()
+            return tensor.add(1), None
+
+    def core_with_output(
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        output: torch.Tensor,
+        layer_name: str,
+    ) -> None:
+        del hidden_states, positions, layer_name
+        output.copy_(torch.arange(output.numel(), dtype=output.dtype).reshape_as(output))
+
+    monkeypatch.setattr(qsa.current_platform, "opaque_attention_op", lambda: True)
+    monkeypatch.setattr(
+        qsa.torch.ops.vllm,
+        "qwen4_exp_ascend_qsa_core_with_output",
+        core_with_output,
+    )
+    layer = qsa.AscendQwen4ExpQSAAttention.__new__(qsa.AscendQwen4ExpQSAAttention)
+    torch.nn.Module.__init__(layer)
+    layer.layer_name = "model.layers.0.self_attn.attn"
+    layer.num_heads = 2
+    layer.head_dim = 4
+    projection = OutputProjection()
+    layer.o_proj = projection
+    hidden_states = torch.empty((2, 8))
+    positions = torch.arange(2)
+
+    result = layer.forward(positions, hidden_states)
+
+    expected_core = torch.arange(16, dtype=hidden_states.dtype).reshape(2, 8)
+    torch.testing.assert_close(projection.input, expected_core)
+    torch.testing.assert_close(result, expected_core + 1)
 
 
 def test_main_uses_ascend_projection_and_draft_uses_upstream(monkeypatch) -> None:

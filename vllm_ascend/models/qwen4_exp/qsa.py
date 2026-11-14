@@ -745,13 +745,15 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
     ) -> torch.Tensor:
         if not current_platform.opaque_attention_op():
             return self._forward_impl(positions, hidden_states)
-        output = torch.empty_like(hidden_states)
-        torch.ops.vllm.qwen4_exp_ascend_qsa_forward_with_output(
+        num_tokens = hidden_states.shape[0]
+        attn_output = hidden_states.new_empty(num_tokens, self.num_heads, self.head_dim)
+        torch.ops.vllm.qwen4_exp_ascend_qsa_core_with_output(
             hidden_states,
             positions,
-            output,
+            attn_output,
             upstream_qsa._encode_layer_name(self.layer_name),
         )
+        output, _ = self.o_proj(attn_output.view(num_tokens, -1))
         return output
 
     def _forward_impl(
@@ -759,6 +761,19 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        num_tokens = hidden_states.shape[0]
+        attn_output = hidden_states.new_empty(num_tokens, self.num_heads, self.head_dim)
+        self._forward_core_with_output(positions, hidden_states, attn_output)
+        output, _ = self.o_proj(attn_output.view(num_tokens, -1))
+        return output
+
+    def _forward_core_with_output(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        attn_output: torch.Tensor,
+    ) -> None:
+        """Run the multi-stream QSA core into a graph-owned output buffer."""
         qkv, index_query, index_token_k = self._start_staggered_projections(
             hidden_states,
             positions,
@@ -767,7 +782,6 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         num_actual_tokens = self._num_actual_tokens()
         encoded_layer_name = upstream_qsa._encode_layer_name(self.layer_name)
         if self.use_fused_qsa_prepare:
-            attn_output = qkv.new_empty(num_tokens, self.num_heads, self.head_dim)
             gate = torch.empty_like(attn_output)
             if index_query is not None and index_token_k is not None and current_platform.opaque_attention_op():
                 torch.ops.vllm.qwen4_exp_ascend_qsa_prepare_with_output(
@@ -812,14 +826,12 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
             flat_output = attn_output.view(num_tokens, -1)
             flat_gate = gate.view(num_tokens, -1)
             torch.ops.vllm.qwen4_exp_ascend_qsa_sigmoid_mul_(flat_output, flat_gate, num_actual_tokens)
-            output, _ = self.o_proj(flat_output)
-            return output
+            return
 
         q, k, v, gate = self._project_qkv_gate(qkv, positions)
         query = q.view(num_tokens, self.num_heads, self.head_dim)
         key = k.view(num_tokens, self.num_kv_heads, self.head_dim)
         value = v.view(num_tokens, self.num_kv_heads, self.head_dim)
-        attn_output = torch.empty_like(query)
         if index_query is not None and index_token_k is not None and current_platform.opaque_attention_op():
             torch.ops.vllm.qwen4_exp_ascend_qsa_with_output(
                 hidden_states,
@@ -869,8 +881,6 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
             torch.ops.vllm.qwen4_exp_ascend_qsa_sigmoid_mul_(flat_output, gate, num_actual_tokens)
         else:
             flat_output[num_actual_tokens:].zero_()
-        output, _ = self.o_proj(flat_output)
-        return output
 
     def _main_fused_norm_rope_eligible(
         self,
@@ -1081,18 +1091,18 @@ def _ascend_qsa_layer(layer_name: LayerNameType) -> AscendQwen4ExpQSAAttention:
 
 
 @eager_break_during_capture
-def qwen4_exp_ascend_qsa_forward_with_output(
+def qwen4_exp_ascend_qsa_core_with_output(
     hidden_states: torch.Tensor,
     positions: torch.Tensor,
     output: torch.Tensor,
     layer_name: LayerNameType,
 ) -> None:
-    """Execute QSA eagerly so its auxiliary stream survives graph replay."""
+    """Execute the QSA core eagerly so its auxiliary stream survives replay."""
     layer = _ascend_qsa_layer(layer_name)
-    output.copy_(layer._forward_impl(positions, hidden_states))
+    layer._forward_core_with_output(positions, hidden_states, output)
 
 
-def qwen4_exp_ascend_qsa_forward_with_output_fake(
+def qwen4_exp_ascend_qsa_core_with_output_fake(
     hidden_states: torch.Tensor,
     positions: torch.Tensor,
     output: torch.Tensor,
@@ -1149,10 +1159,10 @@ def qwen4_exp_ascend_qsa_with_output(
 
 
 direct_register_custom_op(
-    op_name="qwen4_exp_ascend_qsa_forward_with_output",
-    op_func=qwen4_exp_ascend_qsa_forward_with_output,
+    op_name="qwen4_exp_ascend_qsa_core_with_output",
+    op_func=qwen4_exp_ascend_qsa_core_with_output,
     mutates_args=["output"],
-    fake_impl=qwen4_exp_ascend_qsa_forward_with_output_fake,
+    fake_impl=qwen4_exp_ascend_qsa_core_with_output_fake,
     dispatch_key="PrivateUse1",
 )
 direct_register_custom_op(
