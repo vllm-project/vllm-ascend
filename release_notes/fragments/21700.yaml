@@ -1,0 +1,4 @@
+pr: 21700
+entries:
+  - category: bugfix
+    text: MemCache store initialization failures now report the detected driver Innerversion and an actionable mount hint instead of a bare AssertionError.
