@@ -516,6 +516,11 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
     understand this class
     """
 
+    def supports_spec_device_lengths(self) -> bool:
+        # Execution uses seq_lens/query_start_loc tensors. The optional CPU
+        # mirror is diagnostic; unreviewed subclasses must opt in separately.
+        return type(self) is AscendSFAMetadataBuilder and not self.use_pcp
+
     def __init__(
         self,
         kv_cache_spec,
@@ -541,6 +546,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         self.nope = layer.qk_rope_head_dim == 0
         self.use_rope = not getattr(vllm_config.model_config.hf_text_config, "mla_use_nope", False)
         self.nope_states: dict[int | None, SparseMLAMetadataState] = {}
+        self.allow_a3_device_lengths = getattr(get_ascend_config(), "a3_mla_sink_mode", "disabled") != "disabled"
 
         self.use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
         self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
@@ -663,9 +669,9 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             seq_lens_cpu = common_attn_metadata._seq_lens_cpu[:num_reqs]
         elif common_attn_metadata.seq_lens_cpu is not None:
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_reqs]
-        elif self.nope:
-            # MTP accepted counts are device-resident. NoPE operators use
-            # device lengths and scheduler upper bounds, so need no CPU copy.
+        elif self.nope or (getattr(self, "allow_a3_device_lengths", False) and self.supports_spec_device_lengths()):
+            # These consumers use device lengths and scheduler upper bounds;
+            # do not recreate an exact CPU mirror when it is absent.
             seq_lens_cpu = None
         else:
             seq_lens_cpu = common_attn_metadata.seq_lens[:num_reqs].to("cpu")

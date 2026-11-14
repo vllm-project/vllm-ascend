@@ -181,8 +181,19 @@ def runtime(monkeypatch):
         classmethod(lambda cls, config: cls(config, attention_op, metadata_op)),
     )
 
-    def builder(*, size=8, rank=0, interleave=1, heads=8, dtype=torch.float16, use_rope=False, speculative=True):
+    def builder(
+        *,
+        size=8,
+        rank=0,
+        interleave=1,
+        heads=8,
+        dtype=torch.float16,
+        use_rope=False,
+        speculative=True,
+        a3_adapter=None,
+    ):
         impl = SimpleNamespace(
+            a3_mla_adapter=a3_adapter,
             num_heads=heads,
             scale=0.125,
             dtype=dtype,
@@ -443,12 +454,32 @@ def test_noncausal_draft_metadata_ignores_rejected_cpu_upper_bound(runtime):
         (False, True, 4, torch.float16, True),
     ],
 )
+@pytest.mark.parametrize("provider", ["a5", "a3"])
 def test_forward_matches_dense_with_strided_history_and_empty_ranks(
-    runtime, monkeypatch, causal, speculative, interleave, dtype, capturing
+    runtime, monkeypatch, causal, speculative, interleave, dtype, capturing, provider
 ):
     runtime.context.capturing = capturing
     torch.manual_seed(41)
     size, local_heads, tokens = 8, 8, 5
+    a3_adapter = None
+    if provider == "a3":
+        # Load the real A3 adapter/mock, retaining the existing independent
+        # dense oracle and actual framework stream/DCP orchestration below.
+        a3 = runpy.run_path(str(ROOT / "vllm_ascend/attention/a3_mla_sink.py"))
+        mock = runpy.run_path(str(ROOT / "vllm_ascend/attention/a3_mla_mock.py"))
+
+        def a3_attention(*args, **kwargs):
+            kind = "current" if kwargs["causal"] else "history"
+            runtime.events.append((kind, runtime.active_stream[0]))
+            return mock["flash_attn_with_kvcache"](*args, **kwargs)
+
+        runtime.attention_op = Mock(side_effect=a3_attention)
+        a3_adapter = a3["A3MLAAdapter"](
+            a3["A3MLAConfig"](local_heads, 0.125, dtype=dtype),
+            runtime.attention_op,
+            mock["get_scheduler_metadata"],
+            is_mock=True,
+        )
     split = causal and speculative
     queries = [3, 1] if speculative else [1, 1]
     histories = [257, 0]
@@ -462,7 +493,13 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
         start += qlen
     flashes, caches, partials = [], [], []
     for rank in range(size):
-        builder = runtime.builder(rank=rank, interleave=interleave, dtype=dtype, speculative=speculative)
+        builder = runtime.builder(
+            rank=rank,
+            interleave=interleave,
+            dtype=dtype,
+            speculative=speculative,
+            a3_adapter=a3_adapter,
+        )
         inputs = common(lengths, queries, tokens=tokens, causal=causal)
         inputs.block_table_tensor.copy_(torch.tensor([[1, 3, 5], [2, 4, 6]]))
         flash = builder.build(inputs, 2, sum(queries), False)
@@ -537,6 +574,7 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
 
         impl = runtime.bind(
             SimpleNamespace(
+                use_a3_mla_sink=provider == "a3",
                 kv_lora_rank=512,
                 qk_rope_head_dim=64,
                 num_kv_heads=1,
@@ -562,7 +600,10 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
             runtime.current_query_storages.add(flash.current.query.untyped_storage().data_ptr())
         # Production external metadata has no FIA CPU length mirrors.
         decode = SimpleNamespace(cp_history_seq_len=None, actual_seq_lengths_q=None)
-        result = runtime.forward(impl, preprocessed, cache, SimpleNamespace(external_flashmla=flash, decode=decode))
+        provider_cache = (cache[..., :512], cache[..., 512:]) if provider == "a3" else cache
+        result = runtime.forward(
+            impl, preprocessed, provider_cache, SimpleNamespace(external_flashmla=flash, decode=decode)
+        )
         impl._forward_decode_split_attention.assert_called_once()
         impl._run_dcp_mtp_split_attention_op.assert_not_called()
         combined.assert_called_once()
@@ -610,7 +651,12 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
         )
         assert torch.equal(backing, snapshot)  # Forward never repacks or writes persistent history.
         cache_call = runtime.attention_op.call_args_list[-2 if split else -1]
-        assert cache_call.args[1] is cache
+        if provider == "a3":
+            assert cache_call.args[1] is provider_cache[1]
+            assert cache_call.args[2] is provider_cache[0]
+            assert cache_call.args[2].untyped_storage().data_ptr() == cache.untyped_storage().data_ptr()
+        else:
+            assert cache_call.args[1] is cache
     runtime.scope["get_graph_params"].assert_not_called()
     runtime.scope["torch_npu"]._npu_fused_infer_attention_score_get_max_workspace.assert_not_called()
 

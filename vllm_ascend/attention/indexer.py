@@ -925,6 +925,11 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
 
     reorder_batch_threshold = None
 
+    def supports_spec_device_lengths(self) -> bool:
+        # Both replicated and sharded DCP paths derive visible KV from the
+        # device sequence; scheduling boundaries may use host upper bounds.
+        return type(self) is AscendSFAIndexerMetadataBuilder and not self.use_pcp
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,

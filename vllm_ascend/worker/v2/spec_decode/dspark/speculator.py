@@ -81,6 +81,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         self._draft_metadata_num_reqs: int | None = None
         self.attn_architecture: str | None = None
         self.use_flashmla: bool = False
+        self.use_a3_mla_sink: bool = False
         self._init_dcp()
 
     def _init_dcp(self) -> None:
@@ -264,7 +265,12 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                     if issubclass(group.backend, AscendMLABackend)
                 ]
                 self.use_flashmla = bool(mla_groups) and all(
-                    getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None for group in mla_groups
+                    getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None
+                    and not getattr(group.get_metadata_builder(0), "use_a3_mla_sink", False)
+                    for group in mla_groups
+                )
+                self.use_a3_mla_sink = bool(mla_groups) and all(
+                    getattr(group.get_metadata_builder(0), "use_a3_mla_sink", False) for group in mla_groups
                 )
             elif issubclass(backend, AscendAttentionBackend):
                 self.attn_architecture = "GQA"
@@ -279,6 +285,9 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         self, num_reqs: int, num_reqs_padded: int, step: int
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
         is_prefilling = torch.zeros(num_reqs_padded, dtype=torch.bool)
+        if getattr(self, "use_a3_mla_sink", False):
+            # A3 adapter derives DCP-local lengths from exact device state.
+            return None, is_prefilling
         if not self.use_dcp:
             if self.attn_architecture == "MLA" and not self.use_flashmla:
                 # FIA requires exact host lengths; FlashMLA reads device lengths.

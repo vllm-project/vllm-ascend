@@ -1,0 +1,7 @@
+pr: 21876
+entries:
+  - category: feature
+    text: >-
+      Added an opt-in A3 K3.1 DSpark MLA provider adapter and numerical mock for
+      device-length integration development. Native operator, graph, full-model
+      and performance validation remain required before production use.

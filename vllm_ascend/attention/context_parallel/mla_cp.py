@@ -574,7 +574,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
 
     def _forward_external_flashmla(self, preprocessed, fused_cache, metadata):
         assert metadata.external_flashmla is not None
-        if not isinstance(fused_cache, torch.Tensor):
+        if not isinstance(fused_cache, torch.Tensor) and not getattr(self, "use_a3_mla_sink", False):
             raise RuntimeError("DCP FlashMLA requires the original fused BBND cache")
         record_attention_compute_start()
         # The framework owns stream ordering, exchange, reduction and V-up.
@@ -585,7 +585,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             None,
             preprocessed.current_k_nope,
             preprocessed.current_k_pe,
-            fused_cache.shape[1],
+            fused_cache[0].shape[1] if isinstance(fused_cache, tuple) else fused_cache.shape[1],
             metadata,
         )
 

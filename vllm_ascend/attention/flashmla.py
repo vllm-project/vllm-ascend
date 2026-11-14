@@ -318,7 +318,11 @@ class FlashMLAMetadataBuilder:
         # speculative causal queries need the replicated current chunk.
         self.use_spec_decode = impl.vllm_config.speculative_config is not None
         self.cp_interleave = impl.vllm_config.parallel_config.cp_kv_cache_interleave_size if self.dcp_size > 1 else 1
-        adapter = FlashMLAImpl.load(FlashMLAConfig(impl.num_heads, impl.scale, return_softmax_lse=self.dcp_size > 1))
+        adapter = getattr(impl, "a3_mla_adapter", None)
+        if adapter is None:
+            adapter = FlashMLAImpl.load(
+                FlashMLAConfig(impl.num_heads, impl.scale, return_softmax_lse=self.dcp_size > 1)
+            )
         self.current_adapter = adapter
         history_adapter = replace(
             adapter,
@@ -335,14 +339,19 @@ class FlashMLAMetadataBuilder:
     def _allocate(self, tokens: int, rows: int, columns: int, causal: bool) -> FlashMLADecode:
         ints = {"dtype": torch.int32, "device": self.device}
         adapter = self.adapters[causal]
+        if hasattr(adapter, "for_capacity"):
+            adapter = adapter.for_capacity(columns, tokens)
         cu = torch.zeros(rows + 1, **ints)
         used = torch.zeros(rows, **ints)
         lengths = torch.zeros(rows, **ints)
-        schedule_meta = adapter.build_metadata(
-            torch.empty_like(lengths, device="meta"),
-            torch.empty_like(cu, device="meta"),
-            torch.empty_like(used, device="meta"),
-        )
+        if getattr(adapter, "metadata_requires_device_inputs", False):
+            schedule_meta = adapter.build_metadata(lengths, cu, used)
+        else:
+            schedule_meta = adapter.build_metadata(
+                torch.empty_like(lengths, device="meta"),
+                torch.empty_like(cu, device="meta"),
+                torch.empty_like(used, device="meta"),
+            )
         rope_shape = (tokens, 1, 1, FLASHMLA_QK_DIM - FLASHMLA_V_DIM)
         flash = FlashMLADecode(
             adapter=adapter,
@@ -366,13 +375,19 @@ class FlashMLAMetadataBuilder:
             # As in split DCP attention, each rank retains every current row.
             # Only persistent history writes use the runner's rank-owned slots.
             block_columns = (tokens + FLASHMLA_BLOCK_SIZE - 1) // FLASHMLA_BLOCK_SIZE
-            current_schedule = self.current_adapter.build_metadata(
-                torch.empty_like(used, device="meta"),
-                torch.empty_like(cu, device="meta"),
-                torch.empty_like(used, device="meta"),
-            )
+            current_adapter = self.current_adapter
+            if hasattr(current_adapter, "for_capacity"):
+                current_adapter = current_adapter.for_capacity(block_columns, tokens)
+            if getattr(current_adapter, "metadata_requires_device_inputs", False):
+                current_schedule = current_adapter.build_metadata(used, cu, used)
+            else:
+                current_schedule = current_adapter.build_metadata(
+                    torch.empty_like(used, device="meta"),
+                    torch.empty_like(cu, device="meta"),
+                    torch.empty_like(used, device="meta"),
+                )
             flash.current = FlashMLACurrent(
-                adapter=self.current_adapter,
+                adapter=current_adapter,
                 query=torch.empty(
                     (tokens, self.current_adapter.config.num_heads, FLASHMLA_QK_DIM),
                     dtype=self.dtype,
