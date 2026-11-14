@@ -1,0 +1,4 @@
+pr: 21234
+entries:
+  - category: bugfix
+    text: Fixed KV pool prefill endpoints that included speculative verifier padding, preventing false decode-commit detection after prefix cache hits.
