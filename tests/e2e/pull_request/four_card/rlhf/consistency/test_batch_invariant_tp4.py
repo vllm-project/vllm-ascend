@@ -288,9 +288,10 @@ def _assert_bitwise_batch_invariance(vllm_runner) -> None:
 
 def _model(model_name: str, *, utilization: float = 0.9, overrides: dict | None = None) -> dict:
     """Engine kwargs shared by the batch-invariance cases; only the model differs."""
-    extra_kwargs = {"enable_chunked_prefill": False, "block_size": 128}
+    extra_kwargs: dict = {"enable_chunked_prefill": False, "block_size": 128}
     if overrides is not None:
-        extra_kwargs.update(load_format="dummy", hf_overrides=overrides)
+        extra_kwargs["load_format"] = "dummy"
+        extra_kwargs["hf_overrides"] = overrides
     return {
         "model_name": model_name,
         "max_num_seqs": 144,
