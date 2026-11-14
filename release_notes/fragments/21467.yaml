@@ -1,0 +1,4 @@
+pr: 21467
+entries:
+  - category: performance
+    text: Avoided redundant zero-filling of GDN attention rows that the core fully overwrites, while retaining explicit initialization for profiling and graph padding.

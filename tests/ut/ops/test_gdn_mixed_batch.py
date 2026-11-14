@@ -122,7 +122,8 @@ def _make_layer() -> SimpleNamespace:
 
 
 @pytest.mark.parametrize("initial_state", [True, False])
-def test_mixed_non_spec_splits_conv_per_slice(initial_state) -> None:
+@pytest.mark.parametrize("padding", [0, 5])
+def test_mixed_non_spec_splits_conv_per_slice(initial_state, padding) -> None:
     layer = _make_layer()
     metadata = _make_mixed_metadata()
     if not initial_state:
@@ -139,7 +140,7 @@ def test_mixed_non_spec_splits_conv_per_slice(initial_state) -> None:
     )
     a = torch.zeros(3, 1)
     b = torch.zeros(3, 1)
-    core_attn_out = torch.empty(3, 1, 2)
+    core_attn_out = torch.full((3 + padding, 1, 2), float("nan"))
 
     forward_context = ForwardContext(
         no_compile_layers={layer.prefix: layer},
@@ -269,7 +270,7 @@ def test_mixed_non_spec_splits_conv_per_slice(initial_state) -> None:
 
     # Decode and prefill outputs are stitched back in original token order.
     torch.testing.assert_close(
-        core_attn_out,
+        core_attn_out[:3],
         torch.tensor(
             [
                 [[21.0, 22.0]],
@@ -279,9 +280,12 @@ def test_mixed_non_spec_splits_conv_per_slice(initial_state) -> None:
         ),
     )
 
+    torch.testing.assert_close(core_attn_out[3:], torch.zeros(padding, 1, 2))
+
 
 @pytest.mark.parametrize("speculative,adaptive", [(False, False), (True, False), (True, True)])
-def test_decode_forward_does_not_reconcat_qkv(speculative, adaptive):
+@pytest.mark.parametrize("padding", [0, 5])
+def test_decode_forward_does_not_reconcat_qkv(speculative, adaptive, padding):
     layer = _make_layer()
     packed = torch.arange(24, dtype=torch.float32).reshape(4, 6)
     metadata = _make_mixed_metadata()
@@ -311,7 +315,7 @@ def test_decode_forward_does_not_reconcat_qkv(speculative, adaptive):
         conv_metadata.query_start_loc = torch.tensor([0, 1, 4], dtype=torch.int32)
         conv_metadata.num_accepted_tokens = torch.tensor([3, 2], dtype=torch.int32)
         metadata.spec_decode_metadata.actual_seq_lengths = torch.tensor([0, 1, 3], dtype=torch.int32)
-    output = torch.empty(4, 1, 2)
+    output = torch.full((4 + padding, 1, 2), float("nan"))
     context = ForwardContext(
         no_compile_layers={layer.prefix: layer},
         attn_metadata={layer.prefix: metadata},
@@ -358,7 +362,8 @@ def test_decode_forward_does_not_reconcat_qkv(speculative, adaptive):
         patch("vllm_ascend.ops.gdn.maybe_save_kv_layer_to_connector"),
     ):
         AscendGatedDeltaNetAttention._forward_core(layer, packed, torch.zeros(4, 1), torch.zeros(4, 1), output)
-    torch.testing.assert_close(output, packed[:, 4:].reshape(4, 1, 2))
+    torch.testing.assert_close(output[:4], packed[:, 4:].reshape(4, 1, 2))
+    torch.testing.assert_close(output[4:], torch.zeros(padding, 1, 2))
     if speculative:
         selected_conv = varlen_conv if adaptive else conv
         torch.testing.assert_close(
@@ -530,3 +535,10 @@ def test_prefill_gathers_only_selected_rows_from_padded_state(padded_state) -> N
         scatter_mock.assert_not_called()
         clear_mock.assert_called_once()
         torch.testing.assert_close(ssm_state[1], torch.full((1, head_dim, head_dim), 7.0))
+
+
+def test_profile_core_initializes_unwritten_output():
+    output = torch.full((5, 2, 4), float("nan"))
+    with patch("vllm_ascend.ops.gdn.get_forward_context", return_value=SimpleNamespace(attn_metadata=None)):
+        AscendGatedDeltaNetAttention._forward_core(None, None, None, None, output)
+    torch.testing.assert_close(output, torch.zeros_like(output))
