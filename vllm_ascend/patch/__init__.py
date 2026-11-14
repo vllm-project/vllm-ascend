@@ -1437,6 +1437,22 @@
 #    Future Plan:
 #       Remove this patch when Triton-Ascend can compile and efficiently lower
 #       the upstream kernel, or after an equivalent fix lands upstream.
+#
+#   9. `vllm.v1.worker.gpu.spec_decode.rejection_sampler.RejectionSampler._verify`
+#    Why:
+#       The generic V2 rejection sampler computes target argmax statistics for
+#       greedy sampling and also launches the generic resampling path for the replacement
+#       or bonus token.
+#    How:
+#       When the experimental V2 greedy-verification switch is enabled, use a
+#       target-only blockwise argmax and verify each request up to its first
+#       rejected draft. Unsupported verification modes fall back to upstream.
+#    Related PR (if no, explain why):
+#       No. This is an opt-in experiment for measuring an Ascend-specific V2
+#       greedy-verification fast path.
+#    Future Plan:
+#       Remove the patch after an equivalent backend-dispatched fast path lands
+#       upstream, or remove the experiment if NPU measurements show no benefit.
 # ** 22. File: worker/patch_attn_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.attn_utils.get_kv_cache_spec`

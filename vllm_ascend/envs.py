@@ -87,6 +87,8 @@ env_variables: dict[str, Callable[[], Any]] = {
     # In this case, developers need to set this value to "0.9.0" to make sure
     # that the correct package is installed.
     "VLLM_VERSION": lambda: os.getenv("VLLM_VERSION", None),
+    # Experimental V2 greedy MTP verification; 0 disables, 1 enables. Not sensitive.
+    "VLLM_ASCEND_EXPERIMENT_GREEDY_VERIFY": lambda: bool(int(os.getenv("VLLM_ASCEND_EXPERIMENT_GREEDY_VERIFY", "0"))),
     # Whether to anbale dynamic EPLB
     "DYNAMIC_EPLB": lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
