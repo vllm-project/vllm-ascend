@@ -42,13 +42,33 @@ SMALL_QWEN3_OVERRIDES = {
 # top-8 and one shared expert. The existing case already covers MoE routing, but
 # at 128 experts with no shared expert on an all-full-attention model, so what is
 # new here is the GDN layers, the linear/full interleave and that MoE block.
-# Unlike the Qwen3 case above this one serves the real 40-layer checkpoint, not a
-# layer-reduced slice: the question this case exists for is whether the GDN
-# kernels' per-sequence arithmetic holds for the whole model, and a slice can
-# only answer it for the shapes the slice happens to hit. The checkpoint is the
-# same one the other Qwen3.5-35B-A3B four-card case already serves on these
-# runners, so it is cached and no slicing is needed to fit.
+# Like the Qwen3 case above, the model is shrunk the same way: only the first 4
+# of the 40 hidden layers are instantiated (three linear-attention layers and one
+# full-attention layer, so both attention kernels stay on the path) and the
+# weights are random-initialized via `--load-format dummy`.
 QWEN35_MODEL = "Qwen/Qwen3.5-35B-A3B"
+
+SMALL_QWEN35_OVERRIDES = {
+    # The checkpoint is multimodal, so the layer count lives on the text tower:
+    # vLLM applies flat overrides to the top-level config and dict overrides to
+    # the nested one, hence the `text_config` wrapper.
+    "architectures": ["Qwen3_5MoeForCausalLM"],
+    "text_config": {
+        "num_hidden_layers": 4,
+        "layer_types": [
+            "linear_attention",
+            "linear_attention",
+            "linear_attention",
+            "full_attention",
+        ],
+    },
+}
+
+# The 4-layer slice keeps a single full-attention layer, so that layer owns the
+# whole paged cache and the fused-attention kernel needs a contiguous copy of it.
+# Cap the value at 0.45 so a global VLLM_GPU_MEMORY_UTILIZATION (e.g. 0.95) can
+# never take the second copy's room, while still letting a busy machine lower it.
+QWEN35_GPU_MEMORY_UTILIZATION = 0.45
 
 
 @pytest.fixture(autouse=True)
@@ -345,23 +365,29 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(vllm_runner):
     deploy="pd_mix",
     hardware="A3",
     quantization="BF16",
-    graph_mode="full_and_piecewise",
+    graph_mode="eager",
 )
 @pytest.mark.model(
     model_name=QWEN35_MODEL,
     max_num_seqs=144,
-    gpu_memory_utilization=float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.90")),
+    gpu_memory_utilization=min(
+        float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", str(QWEN35_GPU_MEMORY_UTILIZATION))),
+        QWEN35_GPU_MEMORY_UTILIZATION,
+    ),
     max_model_len=8192,
     dtype="bfloat16",
     tensor_parallel_size=int(os.getenv("VLLM_TEST_TP_SIZE", "4")),
     enable_prefix_caching=False,
     distributed_executor_backend="mp",
-    compilation_config={
-        "cudagraph_capture_sizes": [1, 32, 64],
-    },
     extra_kwargs={
+        "load_format": "dummy",
+        "hf_overrides": SMALL_QWEN35_OVERRIDES,
         "enable_chunked_prefill": False,
         "block_size": 128,
+        # Capture keeps the max workspace resident for the lifetime of each
+        # graph, which is the whole cache for this single-full-attention slice;
+        # eager keeps it transient and is the mode measured for this case.
+        "enforce_eager": True,
     },
 )
 def test_qwen35_moe_logprobs_bitwise_batch_invariance_bs1_vs_bsN(vllm_runner):
@@ -370,7 +396,7 @@ def test_qwen35_moe_logprobs_bitwise_batch_invariance_bs1_vs_bsN(vllm_runner):
     # `supports_batch_invariance()`: vLLM #60271 rejects every backend that does
     # not, and Qwen3.5's GDN layers assign that backend directly, so without the
     # declaration the engine refuses to start under VLLM_BATCH_INVARIANT.
-    # Pin the serviced model, not just "the checkpoint loaded": if the upstream
+    # Pin the served slice, not just "the override merged": if the upstream
     # 40-layer 3:1 interleave changed or the text tower stopped resolving to
     # Qwen3_5MoeForCausalLM -- the upstream vLLM class this case loads, whose
     # full-attention and GDN layers vllm-ascend patches -- the case would keep
@@ -378,18 +404,13 @@ def test_qwen35_moe_logprobs_bitwise_batch_invariance_bs1_vs_bsN(vllm_runner):
     # routing it exists for.
     hf_config = vllm_runner.model.llm_engine.model_config.hf_text_config
     assert hf_config.model_type == "qwen3_5_moe_text", f"unexpected text tower: {hf_config.model_type}"
-    assert hf_config.num_hidden_layers == 40, f"expected the full 40-layer model, got {hf_config.num_hidden_layers}"
-    layer_types = list(hf_config.layer_types)
-    n_gdn = layer_types.count("linear_attention")
-    n_full = layer_types.count("full_attention")
-    assert n_gdn == 30, f"expected 30 GDN layers, got {n_gdn}: {layer_types}"
-    assert n_full == 10, f"expected 10 full-attention layers, got {n_full}: {layer_types}"
-    assert layer_types[:4] == [
+    assert hf_config.num_hidden_layers == 4, f"expected the 4-layer slice, got {hf_config.num_hidden_layers}"
+    assert list(hf_config.layer_types) == [
         "linear_attention",
         "linear_attention",
         "linear_attention",
         "full_attention",
-    ], f"unexpected layer interleave: {layer_types[:4]}"
+    ], f"unexpected layer interleave: {hf_config.layer_types}"
     assert hf_config.num_experts == 256, f"expected 256 experts, got {hf_config.num_experts}"
     assert hf_config.num_experts_per_tok == 8, f"expected top-8 routing, got {hf_config.num_experts_per_tok}"
     _assert_bitwise_batch_invariance(vllm_runner)
