@@ -38,6 +38,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_conne
     create_kv_pool_worker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+    KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import LayerBatchBuilder
@@ -1878,8 +1879,8 @@ class TestKVPoolWorkerGetFinishedAsync(unittest.TestCase):
         worker = self._make_worker(kv_role="kv_consumer")
         worker.load_async = True
 
-        recv_thread = MagicMock()
-        recv_thread.get_and_clear_finished_requests.return_value = {"r1"}
+        recv_thread = MagicMock(spec=KVCacheStoreRecvingThread)
+        recv_thread.get_and_clear_receive_results.return_value = ({"r1"}, {"r1"})
         worker.kv_recv_thread = recv_thread
         worker.kv_send_thread = None
 
@@ -1888,13 +1889,15 @@ class TestKVPoolWorkerGetFinishedAsync(unittest.TestCase):
         done_s, done_r = worker.get_finished(set(), meta)
         self.assertEqual(done_s, set())
         self.assertEqual(done_r, {"r1"})
-        recv_thread.get_and_clear_finished_requests.assert_called_once_with(loading_req_ids)
+        recv_thread.get_and_clear_receive_results.assert_called_once_with(loading_req_ids, set())
+        self.assertEqual(worker.get_failed_requests(), {"r1"})
+        recv_thread.get_and_clear_failed_requests.assert_not_called()
 
         recv_thread.reset_mock()
-        recv_thread.get_and_clear_finished_requests.return_value = set()
+        recv_thread.get_and_clear_receive_results.return_value = (set(), set())
         meta = AscendConnectorMetadata({"r_preempted"}, loading_req_ids=set())
         worker.get_finished(set(), meta)
-        recv_thread.discard_finished_requests.assert_called_once_with({"r_preempted"})
+        recv_thread.get_and_clear_receive_results.assert_called_once_with(set(), {"r_preempted"})
 
     def test_get_finished_layerwise_send_thread(self):
         worker = self._make_worker(kv_role="kv_producer")
