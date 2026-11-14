@@ -1416,13 +1416,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
             not attn_metadata.causal or self.attn_type == AttentionType.ENCODER_ONLY
         ):
             attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
-            output[:num_tokens] = attn_output[:num_tokens]
+            if attn_output is not output:
+                output[:num_tokens] = attn_output[:num_tokens]
             return output
         if output_padded is not None:
             attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output_padded)
         else:
             attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output)
-        output[:num_tokens] = attn_output[:num_tokens]
+        # The inner backend usually writes directly into the supplied output.
+        # Preserve write-back for padded outputs and distinct views.
+        if attn_output is not output:
+            output[:num_tokens] = attn_output[:num_tokens]
         return output
 
 
