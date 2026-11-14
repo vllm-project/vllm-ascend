@@ -65,6 +65,13 @@ jobs:
       cpu_ut_versions: ${{ steps.vllm.outputs.cpu_ut_versions }}
       src: ${{ steps.filter.outputs.src }}
       ci_pipeline: ${{ steps.filter.outputs.ci_pipeline }}
+      # CPU UT is skipped when every changed file is documentation, text or an
+      # image (see the "Detect CPU UT scope" step), or when the run carries no
+      # run-enabling label and ci-gate rejects it anyway. A deny-list is used
+      # instead of the src allow-list so a brand-new directory defaults to
+      # running tests; downstream jobs accept a skipped cpu-ut only when this
+      # output is 'false'.
+      run_cpu_ut: ${{ steps.ut-filter.outputs.run_cpu_ut }}
     steps:
       - name: Validate PR title prefix
         run: |
@@ -240,6 +247,44 @@ jobs:
               - '.github/workflows/scripts/runner_label.json'
               - '.github/workflows/scripts/coverage.py'
 
+      - name: Detect CPU UT scope
+        id: ut-filter
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          # The src filter above is an allow-list, so a brand-new top-level
+          # directory would never match it. CPU UT instead uses a deny-list:
+          # skip only when every changed file is documentation, text, office or
+          # image content. Dependency manifests are kept as code because they
+          # change what tests/ut imports.
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          changed="$RUNNER_TEMP/changed_files.txt"
+          git diff --name-only --no-renames "${BASE_SHA}...HEAD" > "$changed"
+
+          run_cpu_ut=false
+          while IFS= read -r file; do
+            [ -n "$file" ] || continue
+            case "$file" in
+              requirements.txt|requirements-*.txt|packages.txt)
+                run_cpu_ut=true
+                break
+                ;;
+              *.md|*.mdx|*.rst|*.txt|*.doc|*.docx|*.pdf|*.png|*.jpg|*.jpeg|*.gif|*.svg|*.ico|*.webp)
+                continue
+                ;;
+              *)
+                run_cpu_ut=true
+                break
+                ;;
+            esac
+          done < "$changed"
+
+          echo "Changed files considered for CPU UT:"
+          cat "$changed"
+          echo "run_cpu_ut=${run_cpu_ut}" >> "$GITHUB_OUTPUT"
+          echo "run_cpu_ut=${run_cpu_ut}"
+
       - name: Install vllm-ascend dev (conditional)
         if: steps.filter.outputs.lint_tracker == 'true'
         env:
@@ -304,9 +349,31 @@ jobs:
     # main commit and once on the matched release tag. Independent of the
     # main2main label, which only widens the NPU matrix. Release branches only
     # run the release tag (see the pre-commit ref resolution).
+    # Skipped when every changed file is documentation, text or an image (see
+    # the "Detect CPU UT scope" step in pre-commit): tests/ut cannot be affected
+    # by those, and pre-commit still lints every changed file.
+    # Also skipped when the PR has no run-enabling label (ready-precise /
+    # ready-all / main2main) but touches src or ci_pipeline: ci-gate rejects that
+    # run anyway, and the `labeled` event reruns this workflow with
+    # cancel-in-progress, so CPU UT started here would be discarded unused.
+    # A diff outside src and ci_pipeline still runs CPU UT even unlabeled: that
+    # run can pass the gate without a label, and CPU UT is then the only signal.
     name: cpu-ut (vllm@${{ matrix.vllm }})
     needs: pre-commit
-    if: ${{ needs.pre-commit.result == 'success' }}
+    if: >-
+      ${{
+        needs.pre-commit.result == 'success' &&
+        needs.pre-commit.outputs.run_cpu_ut == 'true' &&
+        (
+          contains(github.event.pull_request.labels.*.name, 'main2main') ||
+          contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
+          contains(github.event.pull_request.labels.*.name, 'ready-all') ||
+          (
+            needs.pre-commit.outputs.src != 'true' &&
+            needs.pre-commit.outputs.ci_pipeline != 'true'
+          )
+        )
+      }}
     strategy:
       fail-fast: false
       matrix:
@@ -694,7 +761,8 @@ jobs:
       - cpu-ut
       - select-tests
       - prepare-csrc-cache
-    # Require both CPU UT versions before allocating NPU runners.
+    # Require both CPU UT versions before allocating NPU runners. A skipped
+    # cpu-ut is accepted only when run_cpu_ut is false (docs/text-only diff).
     # !cancelled() overrides transitive skip-propagation from recommend-tests
     # (skipped under ready-all or main2main) through select-tests, without
     # running after workflow cancel.
@@ -702,7 +770,10 @@ jobs:
       ${{
         !cancelled() &&
         needs.pre-commit.result == 'success' &&
-        needs.cpu-ut.result == 'success' &&
+        (
+          needs.cpu-ut.result == 'success' ||
+          (needs.cpu-ut.result == 'skipped' && needs.pre-commit.outputs.run_cpu_ut != 'true')
+        ) &&
         needs.select-tests.result == 'success' &&
         needs.prepare-csrc-cache.result == 'success' &&
         (
@@ -735,14 +806,18 @@ jobs:
       - cpu-ut
       - select-tests
       - prepare-csrc-cache
-    # Require both CPU UT versions before allocating NPU runners.
+    # Require both CPU UT versions before allocating NPU runners. A skipped
+    # cpu-ut is accepted only when run_cpu_ut is false (docs/text-only diff).
     # !cancelled() overrides transitive skip-propagation from recommend-tests
     # (skipped under ready-all) through select-tests, without running after workflow cancel.
     if: >-
       ${{
         !cancelled() &&
         needs.pre-commit.result == 'success' &&
-        needs.cpu-ut.result == 'success' &&
+        (
+          needs.cpu-ut.result == 'success' ||
+          (needs.cpu-ut.result == 'skipped' && needs.pre-commit.outputs.run_cpu_ut != 'true')
+        ) &&
         needs.select-tests.result == 'success' &&
         needs.prepare-csrc-cache.result == 'success' &&
         contains(github.event.pull_request.labels.*.name, 'ready-precise') &&
@@ -763,14 +838,18 @@ jobs:
 
   run-selected-tests-a5:
     needs: [pre-commit, cpu-ut, select-tests]
-    # Require both CPU UT versions before allocating NPU runners.
+    # Require both CPU UT versions before allocating NPU runners. A skipped
+    # cpu-ut is accepted only when run_cpu_ut is false (docs/text-only diff).
     # !cancelled() overrides transitive skip-propagation from recommend-tests
     # (skipped under ready-all) through select-tests, without running after workflow cancel.
     if: >-
       ${{
         !cancelled() &&
         needs.pre-commit.result == 'success' &&
-        needs.cpu-ut.result == 'success' &&
+        (
+          needs.cpu-ut.result == 'success' ||
+          (needs.cpu-ut.result == 'skipped' && needs.pre-commit.outputs.run_cpu_ut != 'true')
+        ) &&
         needs.select-tests.result == 'success' &&
         needs.select-tests.outputs.has_tests_a5 == 'true' &&
         contains(github.event.pull_request.labels.*.name, 'ready-a5')
@@ -800,6 +879,7 @@ jobs:
           HAS_READY_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-precise') }}
           HAS_READY_ALL_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-all') }}
           HAS_READY_A5_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-a5') }}
+          HAS_RUN_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'main2main') || contains(github.event.pull_request.labels.*.name, 'ready-precise') || contains(github.event.pull_request.labels.*.name, 'ready-all') }}
           SELECTION_SOURCE: ${{ needs.select-tests.outputs.source }}
           MATCHED_MODULES: ${{ needs.select-tests.outputs.matched_modules }}
         run: |
@@ -807,6 +887,9 @@ jobs:
 
           PRE_COMMIT_RESULT="${{ needs.pre-commit.result }}"
           CPU_UT_RESULT="${{ needs.cpu-ut.result }}"
+          RUN_CPU_UT="${{ needs.pre-commit.outputs.run_cpu_ut }}"
+          SRC_FILTER="${{ needs.pre-commit.outputs.src }}"
+          CI_PIPELINE_FILTER="${{ needs.pre-commit.outputs.ci_pipeline }}"
           SELECT_TESTS_RESULT="${{ needs.select-tests.result }}"
           HAS_TESTS="${{ needs.select-tests.outputs.has_tests == 'true' }}"
           HAS_TESTS_A5="${{ needs.select-tests.outputs.has_tests_a5 }}"
@@ -831,7 +914,13 @@ jobs:
             exit 1
           fi
 
-          if [ "${CPU_UT_RESULT}" != "success" ]; then
+          if [ "${CPU_UT_RESULT}" = "skipped" ] && [ "${RUN_CPU_UT}" != "true" ]; then
+            echo "::notice::cpu-ut was skipped: every changed file is documentation, text or an image."
+          elif [ "${CPU_UT_RESULT}" = "skipped" ] && [ "${HAS_RUN_LABEL}" != "true" ]; then
+            # Expected: the label check below rejects this run, and the rerun
+            # triggered by the label starts CPU UT together with the NPU suite.
+            echo "::notice::cpu-ut was skipped: no run-enabling label yet."
+          elif [ "${CPU_UT_RESULT}" != "success" ]; then
             echo "::error::cpu-ut did not succeed (result: ${CPU_UT_RESULT})."
             echo "::error::Open the failed 'cpu-ut' job above, fix the failing test(s) and push again."
             exit 1
@@ -842,14 +931,13 @@ jobs:
             # (ready-precise / ready-all / main2main). An unlabeled run
             # passes the gate when (and only when) the paths-filter in
             # pre-commit found no src or ci_pipeline paths in the diff.
-            SRC_FILTER="${{ needs.pre-commit.outputs.src }}"
-            CI_PIPELINE_FILTER="${{ needs.pre-commit.outputs.ci_pipeline }}"
             if [ "${SRC_FILTER}" != "true" ] && [ "${CI_PIPELINE_FILTER}" != "true" ]; then
               echo "::notice::No source paths changed; precision tests are not required for this PR."
               echo "=== CI Gate: PASSED ==="
               exit 0
             fi
             echo "::error::This PR touches source code (src=${SRC_FILTER}, ci_pipeline=${CI_PIPELINE_FILTER}), so precision/full tests are required before merge."
+            echo "::error::CPU UT was skipped in this run because no run-enabling label is set yet; it runs together with the NPU tests once the label is added."
             echo "::error::How to fix: a maintainer adds exactly one label to this PR - 'ready-precise' to run the selected tests (recommended), 'ready-all' to run the full suite, or 'main2main' to run the full suite against both the vLLM main commit and the release tag. The workflow reruns automatically once the label is added."
             exit 1
           fi
