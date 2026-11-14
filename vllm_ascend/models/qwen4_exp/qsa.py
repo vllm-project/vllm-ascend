@@ -718,6 +718,26 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         token_k.record_stream(main_stream)
         return index_query, token_k
 
+    def _start_staggered_projections(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        """Stagger QSA projections to favor Cube/Vector overlap.
+
+        Submit the main QKV Cube work before recording the event consumed by
+        the auxiliary Indexer stream.  The Indexer Cube projection can then
+        overlap with the main stream's fused QKV Vector post-processing,
+        instead of aligning both branches as Cube/Cube followed by
+        Vector/Vector.
+        """
+        qkv, _ = self.qkv_proj(hidden_states)
+        index_query, index_token_k = self._start_indexer_projection(
+            hidden_states,
+            positions,
+        )
+        return qkv, index_query, index_token_k
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -739,8 +759,10 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        index_query, index_token_k = self._start_indexer_projection(hidden_states, positions)
-        qkv, _ = self.qkv_proj(hidden_states)
+        qkv, index_query, index_token_k = self._start_staggered_projections(
+            hidden_states,
+            positions,
+        )
         num_tokens = hidden_states.shape[0]
         num_actual_tokens = self._num_actual_tokens()
         encoded_layer_name = upstream_qsa._encode_layer_name(self.layer_name)
