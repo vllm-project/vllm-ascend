@@ -233,9 +233,14 @@ def _require_a5_preprocess():
 @pytest.mark.parametrize("capture", [False, True])
 @pytest.mark.parametrize("cache_dtype", [torch.bfloat16, torch.float8_e4m3fn])
 @pytest.mark.usefixtures("_require_a5_preprocess")
-def test_preprocess_writes_hisparse_mapping_once(cache_dtype, capture):
+def test_preprocess_writes_hisparse_mapping_once(cache_dtype, capture, monkeypatch):
     from vllm_ascend.attention.sfa_hisparse import AscendHiSparseImpl
-    from vllm_ascend.attention.sfa_v1 import custom_kv_rmsnorm_rope
+    from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, custom_kv_rmsnorm_rope
+
+    def reject_ordinary_store(*args, **kwargs):
+        pytest.fail("HiSparse must not execute the ordinary packed KV cache store")
+
+    monkeypatch.setattr(AscendSFAImpl, "_store_packed_kv_cache", reject_ordinary_store)
 
     rows, block = 5, 128
     c8 = cache_dtype == torch.float8_e4m3fn
@@ -276,7 +281,8 @@ def test_preprocess_writes_hisparse_mapping_once(cache_dtype, capture):
     def forward():
         rope, latent, *scales = impl.exec_kv(values, cos, sin, source_cache, slots, metadata)
         scales = scales[0] if scales else None
-        impl._store_parallel_kv(rope, latent, scales, source_cache, slots, metadata)
+        if impl.uses_packed_sfa_main_cache:
+            impl._store_packed_kv_cache(rope, latent, scales, source_cache, slots, metadata)
 
     graph = None
     try:

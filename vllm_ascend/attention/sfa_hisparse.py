@@ -362,11 +362,11 @@ class AscendHiSparseImpl(AscendSFAImpl):
         finish_hisparse_kv_update(cache, attn_metadata)
         return rope, latent
 
-    def _store_parallel_kv(self, k_pe, k_nope, knope_scale, kv_cache, slot_mapping_sfa, attn_metadata):
+    def _store_packed_kv_cache(self, k_pe, k_nope, knope_scale, kv_cache, slot_mapping_sfa, attn_metadata) -> None:
         # exec_kv has already written through the current HiSparse destination
         # and row mapping. The ordinary C8 store uses source slots instead,
         # which would duplicate the write and can overwrite unrelated slab rows.
-        return k_pe, k_nope
+        return
 
     def _c8_physical_attention(self, query, query_rope, cache, indices, *, indices_are_mapped=False, lengths=None):
         """Adapt native packed rows to the existing quantized SFA operation.
