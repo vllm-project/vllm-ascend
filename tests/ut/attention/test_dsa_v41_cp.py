@@ -294,6 +294,7 @@ def _projector(
 def _query_indexer(select):
     # Keep the real prepared-query/quantization orchestration; emulate kernels.
     return SimpleNamespace(
+        fused_prologue_qw=None,
         project_query=lambda qr: qr.clone(),
         project_weights=lambda hidden: hidden.clone(),
         apply_query_rope=lambda *args: None,
@@ -840,7 +841,7 @@ def runtime(builders, monkeypatch):
         monkeypatch.setattr(dsa_v41, "oproj_tp_enable", lambda: False)
         impl = dsa_v41_cp.AscendDSAV41PCPImpl(
             "model.layers.0",
-            SimpleNamespace(is_kv_source=False, has_long_context=False, compress_ratio=0),
+            SimpleNamespace(is_kv_source=False, is_index_source=False, has_long_context=False, compress_ratio=0),
             None,
             None,
             None,
