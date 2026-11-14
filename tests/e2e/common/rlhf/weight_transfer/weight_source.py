@@ -5,6 +5,7 @@
 
 import contextlib
 import hashlib
+import json
 import math
 import shutil
 import tempfile
@@ -238,6 +239,9 @@ class FixedRandomWeightSource(WeightSource):
         for the *original* layer count, for example), which neither matches the
         published file nor survives vLLM's config validation once
         ``num_hidden_layers`` is reduced.
+
+        Cases with independently loaded draft configs opt into writing explicit
+        hf_overrides. Other cases preserve the original file byte for byte.
         """
         from huggingface_hub import hf_hub_download
         from safetensors.torch import save_file
@@ -245,6 +249,11 @@ class FixedRandomWeightSource(WeightSource):
         target = Path(directory)
         target.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(hf_hub_download(self._case.model, "config.json"), target / "config.json")
+        if self._case.write_config_overrides:
+            config_path = target / "config.json"
+            config = json.loads(config_path.read_text())
+            config.update(self._case.hf_overrides)
+            config_path.write_text(json.dumps(config))
         state = {name: tensor.detach().to("cpu").contiguous() for name, tensor in self}
         save_file(state, str(target / "model.safetensors"), metadata={"format": "pt"})
         if self.draft_source is not None:

@@ -21,6 +21,8 @@ class WeightUpdateModelCase:
     meta_config_attribute: str | None = None
     checkpoint_model_prefix: str | None = None
     checkpoint_name_map: Callable[[str], str] | None = None
+    # Independent draft configs cannot inherit target CLI overrides.
+    write_config_overrides: bool = False
     expert_intermediate_size: int | None = None
     extra_server_args: tuple[str, ...] = ()
     # One representative model covers both backends and packing modes.
@@ -76,6 +78,21 @@ QWEN35_CASE = WeightUpdateModelCase(
 
 
 QWEN_CASES = (QWEN35_CASE,)
+
+# A separate draft_model uses the same Qwen3 schema and tokenizer as its
+# target. Reduce depth while retaining the published parameter dimensions.
+QWEN3_DRAFT_TARGET_CASE = WeightUpdateModelCase(
+    id="qwen3-draft-target",
+    model="Qwen/Qwen3-8B",
+    hf_overrides={"num_hidden_layers": 2, "layer_types": ["full_attention"] * 2},
+    write_config_overrides=True,
+)
+QWEN3_DRAFT_CASE = WeightUpdateModelCase(
+    id="qwen3-draft",
+    model="Qwen/Qwen3-8B",
+    hf_overrides={"num_hidden_layers": 1, "layer_types": ["full_attention"]},
+    write_config_overrides=True,
+)
 
 
 DEEPSEEK_V4_CASE = WeightUpdateModelCase(

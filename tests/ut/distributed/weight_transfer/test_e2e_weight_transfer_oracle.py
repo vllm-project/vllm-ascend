@@ -288,7 +288,7 @@ def test_target_only_checkpoint_keeps_its_original_layout(random_weight_cases, t
 
 @pytest.mark.parametrize("is_draft", [False, True])
 def test_hccl_client_selects_only_the_start_endpoint(is_draft):
-    from tests.e2e.common.rlhf.weight_transfer import draft_hccl as hccl
+    from tests.e2e.common.rlhf.weight_transfer import hccl
 
     client = hccl.WeightUpdateClient("http://unused")
     client.is_draft = is_draft
@@ -305,12 +305,12 @@ def test_hccl_client_selects_only_the_start_endpoint(is_draft):
 
 @pytest.mark.parametrize("is_draft", [False, True])
 def test_hccl_send_uses_the_selected_source_and_factory_engine(is_draft):
-    from tests.e2e.common.rlhf.weight_transfer import draft_hccl as hccl
+    from tests.e2e.common.rlhf.weight_transfer import hccl
 
     server, engine = MagicMock(), MagicMock()
     client = hccl.WeightUpdateClient("http://unused")
     source = object()
-    with patch.object(hccl, "_post") as post:
+    with patch.object(hccl, "post_control") as post:
         hccl.send_update(server, engine, client, source, is_draft=is_draft)
     assert client.is_draft is is_draft
     assert engine.source is source
@@ -319,14 +319,14 @@ def test_hccl_send_uses_the_selected_source_and_factory_engine(is_draft):
 
 
 def test_hccl_send_does_not_resume_after_a_trainer_failure():
-    from tests.e2e.common.rlhf.weight_transfer import draft_hccl as hccl
+    from tests.e2e.common.rlhf.weight_transfer import hccl
 
     server, engine = MagicMock(), MagicMock()
     error = RuntimeError("transfer failed")
     engine.send_weights.side_effect = error
 
     with (
-        patch.object(hccl, "_post") as post,
+        patch.object(hccl, "post_control") as post,
         pytest.raises(RuntimeError, match="transfer failed") as caught,
     ):
         hccl.send_update(
@@ -340,3 +340,46 @@ def test_hccl_send_does_not_resume_after_a_trainer_failure():
     assert caught.value is error
     engine.send_weights.assert_called_once_with()
     post.assert_called_once_with(server, "pause")
+
+
+@pytest.mark.parametrize("layers", [1, 2])
+def test_reduced_checkpoint_is_independently_loadable(random_weight_cases, tmp_path, layers):
+    """A draft reads its own reduced config without target CLI overrides."""
+    from dataclasses import replace
+
+    from transformers import AutoConfig, AutoModelForCausalLM
+
+    original_case, _ = random_weight_cases
+    original_config = (Path(original_case.model) / "config.json").read_bytes()
+    case = replace(
+        original_case,
+        hf_overrides={"num_hidden_layers": layers, "layer_types": ["full_attention"] * layers},
+        write_config_overrides=True,
+    )
+    source = FixedRandomWeightSource(case, torch.device("cpu"))
+    destination = tmp_path / "reduced-checkpoint"
+    with patch("huggingface_hub.hf_hub_download", return_value=str(Path(case.model) / "config.json")):
+        source.write_checkpoint(destination)
+    config = AutoConfig.from_pretrained(destination)
+    assert config.num_hidden_layers == layers
+    assert config.layer_types == ["full_attention"] * layers
+    with torch.device("meta"):
+        model = AutoModelForCausalLM.from_config(config)
+    checkpoint = load_file(str(destination / "model.safetensors"))
+    assert {name: tuple(value.shape) for name, value in checkpoint.items()} == {
+        name: tuple(value.shape) for name, value in model.named_parameters()
+    }
+    assert (Path(case.model) / "config.json").read_bytes() == original_config
+
+
+def test_draft_reference_and_hccl_lane_keep_identical_model_settings(tmp_path):
+    from tests.e2e.common.rlhf.weight_transfer.case import QWEN3_DRAFT_TARGET_CASE
+    from tests.e2e.common.rlhf.weight_transfer.reference_check import draft_serve_args
+
+    for eager in (True, False):
+        reference = _flag_map(
+            draft_serve_args(tmp_path, QWEN3_DRAFT_TARGET_CASE, PORT, enforce_eager=eager, live=False)
+        )
+        lane = _flag_map(draft_serve_args(tmp_path, QWEN3_DRAFT_TARGET_CASE, PORT, enforce_eager=eager, live=True))
+        assert lane.pop("--weight-transfer-config") == '{"backend": "hccl"}'
+        assert lane == reference

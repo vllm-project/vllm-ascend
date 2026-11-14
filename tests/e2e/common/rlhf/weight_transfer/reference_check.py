@@ -3,12 +3,15 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 """Startup-load reference and two-update equivalence checks."""
 
+import hashlib
 import json
 from contextlib import contextmanager
+from pathlib import Path
 
+import torch
 from vllm.utils.network_utils import get_open_port
 
-from tests.e2e.common.rlhf.common import rlhf_server, wait_for_free_device_memory
+from tests.e2e.common.rlhf.common import post_control, rlhf_server, wait_for_free_device_memory
 from tests.e2e.common.rlhf.weight_transfer.case import WeightUpdateModelCase
 from tests.e2e.common.rlhf.weight_transfer.weight_source import (
     FixedRandomWeightSource,
@@ -265,3 +268,83 @@ def assert_weight_update_matches_reference(
         assert signature == reference_signature, (
             f"{case.id}: {phase} (round {update_round}) does not match normal startup loading of the same weights"
         )
+
+
+class WeightUpdateTestWorkerExtension:
+    """Read real worker parameters through the development collective RPC."""
+
+    def snapshot_weight_update_models(self):
+        result = {}
+        for name, model in (("target", self.get_model()), ("draft", self.get_draft_model())):
+            assert model is not None, f"{name} model is missing"
+            result[name] = {
+                key: {
+                    "digest": hashlib.sha256(
+                        value.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes()
+                    ).hexdigest(),
+                    "data_ptr": value.data_ptr(),
+                }
+                for key, value in model.named_parameters()
+            }
+        return result
+
+
+def snapshot_weight_update_models(server):
+    response = post_control(server, "collective_rpc", json={"method": "snapshot_weight_update_models"})
+    results = response.json()["results"]
+    assert len(results) == 1
+    return results[0]
+
+
+def parameter_digests(snapshot):
+    return {model: {name: value["digest"] for name, value in params.items()} for model, params in snapshot.items()}
+
+
+def parameter_addresses(snapshot):
+    return {model: {name: value["data_ptr"] for name, value in params.items()} for model, params in snapshot.items()}
+
+
+def draft_serve_args(checkpoint: Path, case, port: int, *, enforce_eager: bool, live: bool) -> list[str]:
+    args = [
+        "--tokenizer",
+        case.model,
+        "--served-model-name",
+        case.id,
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "64",
+        "--max-num-seqs",
+        "2",
+        "--max-num-batched-tokens",
+        "64",
+        "--no-enable-prefix-caching",
+        "--gpu-memory-utilization",
+        "0.2",
+        "--distributed-executor-backend",
+        "mp",
+        "--port",
+        str(port),
+        "--additional-config",
+        '{"rl_config": {"enabled": true}}',
+        "--speculative-config",
+        json.dumps(
+            {
+                "method": "draft_model",
+                "model": str(checkpoint / "draft"),
+                "num_speculative_tokens": 2,
+            }
+        ),
+        "--worker-extension-cls",
+        "tests.e2e.common.rlhf.weight_transfer.reference_check.WeightUpdateTestWorkerExtension",
+    ]
+    if enforce_eager:
+        args.append("--enforce-eager")
+    else:
+        args += [
+            "--compilation-config",
+            '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 2, 4, 8]}',
+        ]
+    if live:
+        args += ["--weight-transfer-config", '{"backend": "hccl"}']
+    return args
