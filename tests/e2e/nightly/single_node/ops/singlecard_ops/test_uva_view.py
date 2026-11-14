@@ -214,3 +214,18 @@ def test_pool_real_path_returns_mapped_view(monkeypatch):
     assert result.device.type == "npu"
     expected_view = _mapped_view(pool._uva_bufs[pool._curr].cpu)
     assert result.data_ptr() == expected_view.data_ptr()
+
+
+@requires_registered_pinned
+@requires_triton_uva
+def test_qwen4exp_ple_uses_mapped_npu_view():
+    from vllm_ascend.models.qwen4_exp.ple import _get_npu_view_from_cpu_tensor
+
+    cpu = torch.arange(32, dtype=torch.float32).pin_memory()
+    view = _get_npu_view_from_cpu_tensor(cpu)
+
+    assert view.device.type == "npu"
+    torch.testing.assert_close(_read_on_npu(view), cpu)
+
+    cpu.add_(100)
+    torch.testing.assert_close(_read_on_npu(view), cpu)

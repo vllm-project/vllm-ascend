@@ -1,0 +1,6 @@
+pr: 21664
+entries:
+  - category: bugfix
+    text: Fixed Qwen3.8-Flash-Next startup with Qwen4Exp PLE embeddings offloaded to pinned host memory on Ascend.
+    model: qwen3.8-flash-next
+    hardware: [A2]

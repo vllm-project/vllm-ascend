@@ -387,3 +387,23 @@ def test_legacy_prefill_patch_skips_removed_upstream_method() -> None:
         "_ascend_original_short_conv_dilated_prefill_batched",
     )
     assert not hasattr(FusedPLELayer, "_short_conv_dilated_prefill_batched")
+
+
+def test_installing_ple_patch_routes_uva_through_ascend() -> None:
+    from vllm.models.qwen4_exp.common import ngram_embedding as upstream_ngram_embedding
+    from vllm.utils.platform_utils import is_uva_available
+    from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
+
+    original_is_uva_available = upstream_ngram_embedding.is_uva_available
+    original_get_view = upstream_ngram_embedding.get_accelerator_view_from_cpu_tensor
+    try:
+        upstream_ngram_embedding.is_uva_available = is_uva_available
+        upstream_ngram_embedding.get_accelerator_view_from_cpu_tensor = get_accelerator_view_from_cpu_tensor
+
+        ple.patch_upstream_ple_short_conv()
+
+        assert upstream_ngram_embedding.is_uva_available is ple._is_npu_uva_available
+        assert upstream_ngram_embedding.get_accelerator_view_from_cpu_tensor is ple._get_npu_view_from_cpu_tensor
+    finally:
+        upstream_ngram_embedding.is_uva_available = original_is_uva_available
+        upstream_ngram_embedding.get_accelerator_view_from_cpu_tensor = original_get_view
