@@ -2846,6 +2846,33 @@ def test_forward_impl_skips_milestones_when_overlap_disabled(monkeypatch):
     assert milestones.router_output_ready is None
 
 
+def test_low_latency_shared_forward_skips_external_router_and_shared_path():
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    hidden_states = torch.randn(2, 4)
+    router_logits = torch.randn(2, 3)
+    routed_out = torch.randn(2, 4)
+    milestones = RoutedMoEMilestones()
+    runner.routed_input_transform = None
+    runner.routed_output_transform = None
+    runner.routed_experts = SimpleNamespace(
+        mega_moe_low_latency_shared_active=True,
+        forward_impl=MagicMock(return_value=(routed_out, milestones)),
+    )
+    runner.ascend_shared_experts = MagicMock()
+    runner._sequence_parallel_context = MagicMock(return_value=nullcontext())
+    runner._prepare_router_and_milestones = MagicMock(
+        side_effect=AssertionError("MegaMoeLowLatency must own the routed gate matmul")
+    )
+
+    result = runner._forward_impl(hidden_states, router_logits, shared_experts_input=None)
+
+    assert result[0] is None
+    assert result[1] is routed_out
+    runner._prepare_router_and_milestones.assert_not_called()
+    runner.ascend_shared_experts.prepare_input_before_routed.assert_not_called()
+
+
 @pytest.mark.parametrize("has_shared_experts", [False, True])
 @pytest.mark.parametrize("has_fp32_input", [False, True])
 def test_internal_router_reuses_fused_fp32_input(monkeypatch, has_shared_experts, has_fp32_input):

@@ -15,6 +15,7 @@ from vllm_ascend.ops.fused_moe.moe_utils import (
     interleave_mega_moe_low_latency_w1,
     load_cann_mega_moe_ops,
     load_cann_mega_moe_low_latency_op,
+    load_cann_mega_moe_low_latency_with_shared_op,
     select_mega_moe_activation_kwargs,
 )
 from vllm_ascend.quantization.quant_type import QuantType
@@ -98,6 +99,24 @@ class TestMegaMoeLoading(unittest.TestCase):
             self.assertRaisesRegex(RuntimeError, "does not export"),
         ):
             load_cann_mega_moe_low_latency_op()
+
+    def test_loads_low_latency_with_shared_op_from_public_package(self):
+        op = object()
+        with patch(
+            "vllm_ascend.ops.fused_moe.moe_utils.import_module",
+            return_value=SimpleNamespace(mega_moe_low_latency_with_shared=op),
+        ):
+            self.assertIs(load_cann_mega_moe_low_latency_with_shared_op(), op)
+
+    def test_low_latency_with_shared_op_requires_public_symbol(self):
+        with (
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_utils.import_module",
+                return_value=SimpleNamespace(),
+            ),
+            self.assertRaisesRegex(RuntimeError, "Shared API v6"),
+        ):
+            load_cann_mega_moe_low_latency_with_shared_op()
 
     def test_preloads_current_comm_extension(self):
         ops = SimpleNamespace(get_symm_buffer_for_mega_moe=object(), mega_moe=object())

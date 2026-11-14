@@ -294,6 +294,25 @@ class TestPrepareAndFinalize(unittest.TestCase):
 
 
 class TestSequenceParallelPCP(unittest.TestCase):
+    def test_low_latency_ep_path_gathers_only_hidden_states(self):
+        config = MagicMock()
+        config.is_sequence_parallel = True
+        hidden_states = torch.arange(12).view(3, 4).float()
+        gathered_hidden_states = hidden_states.repeat(2, 1)
+        with (
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_dynamic_mx_quant_scale_alg", return_value=0),
+            patch(
+                "torch.ops.vllm.maybe_all_gather_and_maybe_unpad",
+                return_value=gathered_hidden_states,
+            ) as gather,
+        ):
+            layer = PrepareAndFinalizeWithAllGather(config)
+            result = layer.prepare_low_latency(hidden_states)
+
+        torch.testing.assert_close(result, gathered_hidden_states)
+        gather.assert_called_once_with(hidden_states)
+        self.assertEqual(layer.num_tokens, gathered_hidden_states.shape[0])
+
     def test_ep_path_gathers_inputs_once_without_dp_pcp_collectives(self):
         config = MagicMock()
         config.is_sequence_parallel = True

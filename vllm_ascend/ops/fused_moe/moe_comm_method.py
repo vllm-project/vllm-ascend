@@ -119,6 +119,10 @@ class MoECommMethod(ABC):
             quant_type=quant_type,
         )
 
+    def prepare_low_latency(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Prepare activations for a fused operator that owns routing."""
+        raise NotImplementedError("This communication method does not support routing-free preparation.")
+
     def finalize(
         self,
         hidden_states: torch.Tensor,
@@ -220,8 +224,14 @@ class AllGatherCommImpl(MoECommMethod):
     def __init__(self, moe_config):
         super().__init__(moe_config)
         self.mega_moe_low_latency = None
+        self.mega_moe_low_latency_with_shared = None
         if getattr(get_ascend_config(), "enable_mega_moe_low_latency", False) is True:
             self.mega_moe_low_latency = moe_utils.load_cann_mega_moe_low_latency_op()
+            self.mega_moe_low_latency_with_shared = moe_utils.load_cann_mega_moe_low_latency_with_shared_op()
+
+    def prepare_low_latency(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        prepare_finalize = cast(PrepareAndFinalizeWithAllGather, self.prepare_finalize)
+        return prepare_finalize.prepare_low_latency(hidden_states)
 
     def fused_experts_low_latency(self, layer, hidden_states, gate, router, quant_method) -> FusedExpertsResult:
         """Run fused scoring and this rank's local experts.
@@ -246,7 +256,14 @@ class AllGatherCommImpl(MoECommMethod):
         if activation_clamp is None or activation_clamp <= 0:
             activation_clamp = float("inf")
         before_dispatch_evt = maybe_record_event()
-        routed_out = self.mega_moe_low_latency(
+        shared = getattr(layer, "mega_moe_low_latency_shared_fusion", None)
+        op = self.mega_moe_low_latency_with_shared if shared is not None and shared.ready else self.mega_moe_low_latency
+        shared_args = (
+            (shared.w1, shared.w2, shared.w1_scale, shared.w2_scale)
+            if shared is not None and shared.ready
+            else ()
+        )
+        routed_out = op(
             hidden_states,
             gate.weight,
             router.e_score_correction_bias,
@@ -254,12 +271,22 @@ class AllGatherCommImpl(MoECommMethod):
             weights.w2,
             weights.w1_scale,
             weights.w2_scale,
+            *shared_args,
             self.moe_config.ep_rank * self.moe_config.num_local_experts,
             int(getattr(get_ascend_config(), "mega_moe_low_latency_fused_gather", True)),
             router.top_k,
             router.routed_scaling_factor,
             quant_out_dtype,
             activation_clamp,
+            **(
+                {
+                    "shared_cube": 1,
+                    "shared_descriptor": shared.descriptor,
+                    "shared_gate_weight": shared.gate_weight,
+                }
+                if shared is not None and shared.ready
+                else {}
+            ),
             scoring_activation=scoring_activation,
         )
         before_combine_evt = maybe_record_event()

@@ -64,6 +64,34 @@ class MegamoeSharedExpertFusion:
 
 
 @dataclass(frozen=True, slots=True)
+class MegaMoeLowLatencySharedDescriptor:
+    """Subset of the Shared API v6 descriptor checked by ops-transformer."""
+
+    version: int
+    quant_format: str
+    backend: str = "cube"
+
+
+@dataclass(slots=True)
+class MegaMoeLowLatencySharedFusion:
+    """Live Shared API v6 payload populated after shared-weight loading."""
+
+    w1: torch.Tensor | None = None
+    w2: torch.Tensor | None = None
+    w1_scale: torch.Tensor | None = None
+    w2_scale: torch.Tensor | None = None
+    gate_weight: torch.Tensor | None = None
+    descriptor: MegaMoeLowLatencySharedDescriptor | None = None
+
+    @property
+    def ready(self) -> bool:
+        return all(
+            value is not None
+            for value in (self.w1, self.w2, self.w1_scale, self.w2_scale, self.descriptor)
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class MoEWeights:
     """Dense and quantized weight payloads consumed by MoE execution."""
 

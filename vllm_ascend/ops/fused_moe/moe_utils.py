@@ -185,6 +185,19 @@ def load_cann_mega_moe_low_latency_op():
     return op
 
 
+def load_cann_mega_moe_low_latency_with_shared_op():
+    """Load the Shared API v6 entry from the public ops-transformer package."""
+    ops_module = import_module("cann_ops_transformer.ops")
+    op = getattr(ops_module, "mega_moe_low_latency_with_shared", None)
+    if op is None:
+        raise RuntimeError(
+            "The installed ops-transformer package does not export "
+            "cann_ops_transformer.ops.mega_moe_low_latency_with_shared. "
+            "Install a build containing Shared API v6."
+        )
+    return op
+
+
 def interleave_mega_moe_low_latency_w1(
     weight: torch.Tensor,
     scale: torch.Tensor,

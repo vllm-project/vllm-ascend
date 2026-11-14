@@ -683,7 +683,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             or getattr(quant_method, "group_size", None) != 32
             or gate is None
             or router is None
-            or getattr(self, "mega_moe_low_latency_has_shared_experts", False)
             or getattr(self, "_ascend_moe_lora_context", None) is not None
             or self.apply_router_weight_on_input
             or self.dynamic_eplb
@@ -701,6 +700,10 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         if hidden_states.ndim != 2 or hidden_states.dtype != torch.bfloat16:
             return False
         num_tokens, hidden_size = hidden_states.shape
+        shared = getattr(self, "mega_moe_low_latency_shared_fusion", None)
+        if getattr(self, "mega_moe_low_latency_has_shared_experts", False):
+            if shared is None or not shared.ready or num_tokens > 16:
+                return False
         num_experts = gate_weight.shape[0]
         if (
             num_tokens == 0
@@ -755,24 +758,11 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
         num_source_tokens = hidden_states.shape[0]
         use_low_latency = self.can_use_mega_moe_low_latency(hidden_states)
-        prepare_output = moe_comm_method.prepare(
-            hidden_states=hidden_states,
-            # The fused operator computes logits itself. A one-column tensor
-            # preserves AllGather's row-padding contract without materializing
-            # or communicating the full [tokens, experts] logits tensor.
-            router_logits=hidden_states[:, :1] if use_low_latency else router_logits,
-            # The SP model wrapper already shards and gathers the MoE sequence.
-            replace_allreduce=self.moe_config.is_sequence_parallel,
-            # MegaMoeLowLatency dynamically quantizes BF16 activations inside
-            # the operator and therefore must receive the gathered BF16 input.
-            quant_type=QuantType.NONE if use_low_latency else self.quant_type,
-        )
-        hidden_states = prepare_output.hidden_states
-        router_logits = prepare_output.router_logits
-        mc2_mask = prepare_output.mc2_mask
-        padded_hidden_states_shape = prepare_output.padded_hidden_states_shape
-        pertoken_scale = prepare_output.pertoken_scale
         if use_low_latency:
+            # MegaMoeLowLatency owns gate matmul and routing.  Gather only the
+            # BF16 activations it consumes; the generic AllGather preparation
+            # would also gather an unused router-logit placeholder.
+            hidden_states = moe_comm_method.prepare_low_latency(hidden_states)
             quant_method = getattr(self.quant_method, "quant_method", self.quant_method)
             fused_experts_results = moe_comm_method.fused_experts_low_latency(
                 layer=self,
@@ -784,7 +774,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             routed_out = moe_comm_method.finalize(
                 hidden_states=fused_experts_results.routed_out,
                 reduce_results=True,
-                padded_hidden_states_shape=padded_hidden_states_shape,
+                padded_hidden_states_shape=None,
             )
             if self.return_with_event:
                 return routed_out, RoutedMoEMilestones(
@@ -793,6 +783,19 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
                     routed_combine_start=fused_experts_results.before_combine_evt,
                 )
             return routed_out
+
+        prepare_output = moe_comm_method.prepare(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            # The SP model wrapper already shards and gathers the MoE sequence.
+            replace_allreduce=self.moe_config.is_sequence_parallel,
+            quant_type=self.quant_type,
+        )
+        hidden_states = prepare_output.hidden_states
+        router_logits = prepare_output.router_logits
+        mc2_mask = prepare_output.mc2_mask
+        padded_hidden_states_shape = prepare_output.padded_hidden_states_shape
+        pertoken_scale = prepare_output.pertoken_scale
         if self.router is None:
             raise RuntimeError("AscendRoutedExperts requires a router for expert selection.")
         topk_weights, topk_ids = self._select_experts(
