@@ -1430,27 +1430,50 @@ class NPUModelRunner(GPUModelRunner):
             # Restore its rows before Mamba aligns the accepted recurrent state.
             # Postprocess skips -1 (freed/unsampled) rows; gather needs valid indices.
             self.block_tables.gather_block_tables(idx_mapping.clamp_min(0), idx_mapping.shape[0])
-        if draft_tokens is None:
-            super().postprocess_sampled(
-                idx_mapping,
-                sampled_tokens,
-                num_sampled,
-                num_rejected,
-                query_start_loc,
-            )
-        else:
-            # Non-last PP ranks receive drafts from the last rank on both versions.
-            super().postprocess_sampled(
-                idx_mapping,
-                sampled_tokens,
-                num_sampled,
-                num_rejected,
-                query_start_loc,
-                draft_tokens,  # type: ignore[call-arg]
-            )
+        # Issue the num_computed_tokens D2H before the RecoverSSM commit that
+        # model_state.postprocess_state enqueues. The snapshot only depends on
+        # the post_update kernel, so keeping the commit out of the copy's wait
+        # stream lets the CPU consumer unblock while the commit still executes,
+        # overlapping it with the next step's input preparation.
+        issue_copy = self.speculator is not None or self.sync_spec_pp_cpu_counts
+        model_state = self.model_state
+        orig_postprocess_state = model_state.postprocess_state
 
-        # Non-last PP stages receive rejections without owning a speculator.
-        if self.speculator is not None or self.sync_spec_pp_cpu_counts:
+        # Signature-agnostic pass-through: upstream postprocess_state evolves
+        # independently, so mirror its arguments verbatim instead of naming them.
+        def _postprocess_state_after_early_copy(*args, **kwargs):
+            nonlocal issue_copy
+            if issue_copy:
+                self._copy_num_computed_tokens_to_cpu()
+                issue_copy = False
+            orig_postprocess_state(*args, **kwargs)
+
+        model_state.postprocess_state = _postprocess_state_after_early_copy
+        try:
+            if draft_tokens is None:
+                super().postprocess_sampled(
+                    idx_mapping,
+                    sampled_tokens,
+                    num_sampled,
+                    num_rejected,
+                    query_start_loc,
+                )
+            else:
+                # Non-last PP ranks receive drafts from the last rank on both versions.
+                super().postprocess_sampled(
+                    idx_mapping,
+                    sampled_tokens,
+                    num_sampled,
+                    num_rejected,
+                    query_start_loc,
+                    draft_tokens,  # type: ignore[call-arg]
+                )
+        finally:
+            model_state.postprocess_state = orig_postprocess_state
+
+        # Non-last PP stages receive rejections without owning a speculator;
+        # fallback for paths whose postprocess_state never runs this step.
+        if issue_copy:
             self._copy_num_computed_tokens_to_cpu()
 
     def postprocess_num_computed_tokens(self, input_batch: AscendInputBatch) -> None:
@@ -1464,6 +1487,12 @@ class NPUModelRunner(GPUModelRunner):
             return
 
         # Match this D2H and event with the consumer in _update_seq_lens_cpu.
+        # The next step may stage request-state GPU writes before the consumer
+        # waits on the event, so this copy can overlap them without a stream
+        # barrier. That is safe by slot disjointness: staged writes only touch
+        # newly added requests' slots, while the consumer reads only
+        # scheduled_cached_reqs slots; the last writer of those slots is
+        # post_update, which wait_stream below already orders this copy after.
         default_stream = torch.cuda.current_stream()
         assert self.num_computed_tokens_stream is not None
         assert self.num_computed_tokens_cpu is not None
