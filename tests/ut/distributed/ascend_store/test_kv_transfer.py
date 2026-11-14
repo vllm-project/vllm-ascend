@@ -702,7 +702,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=32,
-            block_ids=[0, 1],
+            block_ids=[1, 2],
             block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
             current_event=None,
             token_ids=list(range(32)),
@@ -730,7 +730,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
                 request = ReqMeta(
                     req_id="descriptor-filter",
                     token_len_chunk=48,
-                    block_ids=[0, 1, 2],
+                    block_ids=[1, 2, 3],
                     block_hashes=[b"h0", b"h1", b"h2"],
                     token_ids=list(range(48)),
                     original_block_size=16,
@@ -776,7 +776,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=32,
-            block_ids=[0, 1],
+            block_ids=[1, 2],
             block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
             token_ids=list(range(32)),
             original_block_size=16,
@@ -794,7 +794,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=512,
-            block_ids=list(range(4)),
+            block_ids=list(range(1, 5)),
             block_hashes=[b"h0", b"h1", b"h2", b"h3"],  # type: ignore[arg-type]
             token_ids=list(range(512)),
             original_block_size=128,
@@ -825,7 +825,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
                 req = ReqMeta(
                     req_id="r1",
                     token_len_chunk=512,
-                    block_ids=list(range(4)),
+                    block_ids=list(range(1, 5)),
                     block_hashes=[b"h0", b"h1", b"h2", b"h3"],  # type: ignore[arg-type]
                     token_ids=list(range(512)),
                     original_block_size=128,
@@ -847,7 +847,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=16,
-            block_ids=[0],
+            block_ids=[1],
             block_hashes=[b"h0"],  # type: ignore[arg-type]
             token_ids=list(range(16)),
             original_block_size=16,
@@ -865,7 +865,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=32,
-            block_ids=[0, 1],
+            block_ids=[1, 2],
             block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
             token_ids=list(range(32)),
             original_block_size=16,
@@ -972,7 +972,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         stale = ReqMeta(
             req_id="reused",
             token_len_chunk=16,
-            block_ids=[0],
+            block_ids=[1],
             block_hashes=[b"old"],  # type: ignore[arg-type]
             event_id=1,
             store_job_id=1,
@@ -1225,7 +1225,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=128,
-            block_ids=[0, 1],
+            block_ids=[1, 2],
             block_hashes=[f"h{i}" for i in range(8)],
             load_spec=LoadSpec(
                 vllm_cached_tokens=0,
@@ -1239,7 +1239,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t._handle_request(req)
         keys, addrs, _ = store.put_calls[0]
         self.assertEqual(len(keys), 1)
-        self.assertEqual(addrs, [[1001]])
+        self.assertEqual(addrs, [[1002]])
 
     def test_save_exception_cleans_queue_lifecycle(self):
         t, store = self._make_thread([0])
@@ -1247,7 +1247,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=16,
-            block_ids=[0],
+            block_ids=[1],
             block_hashes=[b"h0"],  # type: ignore[arg-type]
         )
         t.add_stored_request(req)
