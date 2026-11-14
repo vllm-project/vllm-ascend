@@ -37,6 +37,10 @@ Decode keeps PCP1.
 The [A3 ordinary PD examples](#glm53-flash-5-3-a3) use Prefill Context
 Parallelism (PCP) and BF16 SSM state (`--mamba-ssm-cache-dtype bfloat16`).
 
+With native KDA, enabling PCP shards the KDA attention heads and recurrent
+state across the product of tensor parallel size and prefill context parallel
+size. The KDA head count must be divisible by that product.
+
 ## 3 Prerequisites
 
 ### 3.1 Model Weight

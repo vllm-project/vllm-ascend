@@ -1,0 +1,5 @@
+pr: 21510
+entries:
+  - category: feature
+    text: GLM-5.3-Flash native KDA can shard attention heads and recurrent state across tensor and prefill context parallel ranks.
+    model: glm-5.3-flash

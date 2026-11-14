@@ -57,10 +57,12 @@ def test_kda_pcp_restores_prefill_and_skips_decode_gather(
         projection.reduce_results = True
         projection.return_bias = True
         projection.quant_method = SimpleNamespace(apply=lambda _, inputs, bias: inputs)
-        projection.tp_group = SimpleNamespace(
+        projection.pcp_group = SimpleNamespace(
+            world_size=pcp_size,
             all_reduce=Mock(side_effect=lambda values: values),
             reduce_scatter=Mock(side_effect=lambda values, dim: values.chunk(pcp_size, dim=dim)[pcp_rank]),
         )
+        projection.tp_group = SimpleNamespace(world_size=1)
         layer.o_proj = projection
     seen = []
 
@@ -111,10 +113,10 @@ def test_kda_pcp_restores_prefill_and_skips_decode_gather(
     assert torch.count_nonzero(output[:, 1]) == 0
     if pcp_projection:
         use_reduce_scatter = uses_pcp_prefill and not mixed
-        assert projection.tp_group.reduce_scatter.call_count == int(use_reduce_scatter)
-        assert projection.tp_group.all_reduce.call_count == int(pcp_size > 1 and not use_reduce_scatter)
+        assert projection.pcp_group.reduce_scatter.call_count == int(use_reduce_scatter)
+        assert projection.pcp_group.all_reduce.call_count == int(pcp_size > 1 and not use_reduce_scatter)
         if mixed and pcp_size > 1:
-            assert projection.tp_group.all_reduce.call_args.args[0].shape[0] == 6
+            assert projection.pcp_group.all_reduce.call_args.args[0].shape[0] == 6
 
 
 @pytest.mark.parametrize("recover", [False, True])
