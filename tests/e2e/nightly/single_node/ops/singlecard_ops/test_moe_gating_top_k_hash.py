@@ -18,6 +18,7 @@ def _reference(
     top_k: int,
     routed_scaling_factor: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    input_ids = torch.where(input_ids == -1, 0, input_ids)
     scores = torch.nn.functional.softplus(logits.float()).sqrt()
     image_mask = (input_ids >= IMAGE_SENTINEL_LO) & (input_ids < IMAGE_SENTINEL_LO + IMAGE_SENTINEL_COUNT)
     row_bias = torch.where(
@@ -37,10 +38,12 @@ def _reference(
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("id_dtype", [torch.int32, torch.int64])
 @pytest.mark.parametrize("with_hash", [False, True])
 @pytest.mark.parametrize("execution_mode", ["eager", "graph"])
 def test_v41_vision_bias_and_image_sentinel(
     dtype: torch.dtype,
+    id_dtype: torch.dtype,
     with_hash: bool,
     execution_mode: str,
 ):
@@ -50,8 +53,8 @@ def test_v41_vision_bias_and_image_sentinel(
     text_bias = torch.randn(experts, dtype=dtype) * 0.2
     bias_vl = torch.randn(experts, dtype=dtype) * 0.2
     input_ids = torch.tensor(
-        [11, IMAGE_SENTINEL_LO, 22, IMAGE_SENTINEL_LO + 2, 33, IMAGE_SENTINEL_LO + 4, 44, 55],
-        dtype=torch.int64,
+        [-1, IMAGE_SENTINEL_LO, 22, IMAGE_SENTINEL_LO + 2, 33, IMAGE_SENTINEL_LO + 4, 44, -1],
+        dtype=id_dtype,
     )
     tid2eid = None
     if with_hash:
