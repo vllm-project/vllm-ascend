@@ -1939,10 +1939,18 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 # Only call batch_add_lease for keys with valid size.
                 valid_keys = [keys[index] for index in valid_gva_indices]
                 if valid_keys:
-                    lease_results = self.m_store.batch_add_lease(valid_keys, LAYERWISE_READ_LEASE_TTL_MS)
-                    if lease_results is None or len(lease_results) != len(valid_keys):
+                    # Multiple requests in one step can share prefix keys. One
+                    # lease pins each key for the whole step, so acquire it only
+                    # once to match the set-based release at the step fence.
+                    new_keys = list(dict.fromkeys(key for key in valid_keys if key not in self._step_load_keys))
+                    new_results = (
+                        self.m_store.batch_add_lease(new_keys, LAYERWISE_READ_LEASE_TTL_MS) if new_keys else []
+                    )
+                    if new_results is None or len(new_results) != len(new_keys):
                         return False
-                    for key, res in zip(valid_keys, lease_results):
+                    result_by_key = dict(zip(new_keys, new_results))
+                    lease_results = [0 if key in self._step_load_keys else result_by_key[key] for key in valid_keys]
+                    for key, res in zip(new_keys, new_results):
                         if res == 0:
                             self._step_load_keys.add(key)
                     leased_keys = []
@@ -1951,6 +1959,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                         if lease_res == MEMCACHE_UNMATCHED_STATE and block_idx == partial_block_index:
                             partial_key = keys[gva_index]
                             for retry in range(1, PARTIAL_LEASE_RETRY_COUNT + 1):
+                                if partial_key in self._step_load_keys:
+                                    lease_res = 0
+                                    break
                                 time.sleep(PARTIAL_LEASE_RETRY_INTERVAL_S)
                                 retry_results = self.m_store.batch_add_lease(
                                     [partial_key],
@@ -1988,21 +1999,23 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     leased_infos = self.m_store.batch_get_key_info(leased_keys)
                     if leased_infos is None or len(leased_infos) != len(leased_keys):
                         return False
-                    key_indices: dict[str, int] = {}
+                    key_indices: dict[str, list[int]] = {}
                     for index, key in enumerate(keys):
-                        # Preserve keys.index()'s first occurrence for repeated keys.
-                        key_indices.setdefault(key, index)
+                        key_indices.setdefault(key, []).append(index)
+                    pinned_gvas: dict[str, int] = {}
                     for key, info in zip(leased_keys, leased_infos, strict=True):
-                        index = key_indices[key]
                         if getattr(self, "use_cross_layer", False) and (
                             info is None or info.size() != self._global_group_alloc_size(group_id)
                         ):
                             return False
-                        gvas[index] = (
+                        pinned_gvas[key] = (
                             next((address for address in info.gva_list() if address > 0), 0) if info is not None else 0
                         )
-                        if not gvas[index]:
-                            invalid_block_ids.append(int(block_ids_by_group[block_indices[index]]))
+                    for key, pinned_gva in pinned_gvas.items():
+                        for index in key_indices[key]:
+                            gvas[index] = pinned_gva
+                            if not pinned_gva:
+                                invalid_block_ids.append(int(block_ids_by_group[block_indices[index]]))
 
                 if invalid_block_ids:
                     return False

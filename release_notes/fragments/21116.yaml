@@ -30,6 +30,11 @@ entries:
       SWA and draft data when bounded replay is disabled. Fresh pool objects
       are required when switching from the previous allocation layout.
     model: deepseek-v4.1
+  - category: bugfix
+    text: >-
+      Reuse read leases for shared prefix keys within a layerwise Memcache load
+      step and refresh every matching cache address under the lease, preventing
+      leaked leases and stale addresses for repeated keys.
   - category: feature
     text: >-
       Composite attention save boundaries now also reach connectors that
