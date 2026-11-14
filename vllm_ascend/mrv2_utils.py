@@ -61,6 +61,12 @@ def _validate_v2_model_runner(self) -> None:
     while the CPU test lanes and config-only hosts import neither, and there
     is no V1 runner left to fall back to.
     """
+    spec_config = getattr(self, "speculative_config", None)
+    if getattr(spec_config, "method", None) == "suffix":
+        from vllm_ascend.worker.v2.spec_decode.suffix import validate_suffix_runtime
+
+        validate_suffix_runtime(spec_config)
+
     unsupported = self._get_v2_model_runner_unsupported_features()
     if unsupported:
         raise ValueError(f"Model Runner V2 does not yet support: {', '.join(unsupported)}")

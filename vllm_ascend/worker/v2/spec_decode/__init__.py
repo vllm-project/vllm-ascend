@@ -40,6 +40,16 @@ def init_speculator(
         vllm_config = copy.copy(vllm_config)
         vllm_config.compilation_config = copy.copy(vllm_config.compilation_config)
         vllm_config.compilation_config.mode = CompilationMode.NONE
+    if speculative_config.method == "suffix":
+        if req_states is None:
+            raise ValueError("MRV2 suffix speculative decoding requires request states")
+        from vllm_ascend.worker.v2.spec_decode.suffix import validate_suffix_runtime
+
+        validate_suffix_runtime(speculative_config)
+        # Import the subclass only after checking its upstream dependency.
+        from vllm_ascend.worker.v2.spec_decode.suffix.speculator import AscendSuffixSpeculator
+
+        return AscendSuffixSpeculator(vllm_config, device, req_states)
     if speculative_config.method in ("ngram", "ngram_gpu"):
         if req_states is None:
             raise ValueError("MRV2 n-gram speculative decoding requires request states")
