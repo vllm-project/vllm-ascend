@@ -1,0 +1,10 @@
+pr: 21893
+entries:
+  - category: breaking
+    text: >-
+      ModelSlim MXFP checkpoints (W8A8_MXFP8, W4A8_MXFP, W4A4_MXFP4, W4A16_MXFP4)
+      and `--kv-cache-dtype mxfp8` are now rejected at startup on Ascend A2/A3 and
+      Atlas 300I DUO, which have no MX matmul, instead of failing deep inside
+      weight loading with an opaque aclnn error. Re-quantize the checkpoint with
+      ModelSlim (e.g. W8A8_DYNAMIC) or deploy on Ascend 950.
+    hardware: [A2, A3]
