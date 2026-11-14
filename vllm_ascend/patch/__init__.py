@@ -1251,19 +1251,26 @@
 #
 # ** 19. File: worker/patch_routed_experts_capture.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.layers.fused_moe.routed_experts_capturer.RoutedExpertsCapturer.capture`
-#    Why:
-#       The upstream implementation doesn't support vllm-ascend specific MoE communication types
-#       (ALLTOALL and MC2). In the SP + modular-kernel path, the original code cannot correctly
-#       handle tensor splitting and all-gather operations on NPU, especially when tokens are
-#       unevenly distributed across TP ranks or padded to max_tokens in MC2 mode.
+#   1. `vllm.model_executor.layers.fused_moe.routed_experts_capturer.RoutedExpertsCapturer._restore_local_topk_ids`
+#     Why:
+#       The upstream implementation restores this DP rank's token rows from the recorded batch
+#       layout, and rebuilds a TP-sharded batch with an equal-shape `tp_group.all_gather`.
+#       vllm-ascend's ALLTOALL and MC2 `prepare()` split the token dimension with `tensor_split`,
+#       so the local shard length is rank-dependent (MC2 additionally pads it to
+#       `padded_num_tokens / tp_size`), which an equal-shape gather cannot rebuild.
 #    How：
-#       Override the capture method to add support for vllm-ascend's MoECommType:
-#         - Check `_EXTRA_CTX.moe_comm_type` to determine if ALLTOALL or MC2 mode is active
-#         - Calculate correct gather_topk_ids_shape based on communication type:
-#           * ALLTOALL: uses actual token_num_per_dp for shape calculation
-#           * MC2: uses padded max_tokens * tp_size for shape calculation
-#         - Properly handle tensor_split and all_gather operations for NPU distributed communication
+#       Override only the row restore, so upstream keeps owning `capture` and every layout it
+#       already restores correctly:
+#         - Read `moe_comm_type` from the forward context handed to the hook (the V1 runner
+#           stores it as an attribute, the V2 runner in `additional_kwargs`) and only act for
+#           ALLTOALL / MC2 / FUSED_MC2 with `tp_size > 1`; otherwise defer to upstream.
+#           ALLGATHER is excluded on purpose: it gathers the batch before routing.
+#         - Defer to upstream for a cross-DP batch, a local batch, a gathered DP/EP shard group
+#           and the padded all-gather across the DP group.
+#         - Rebuild a TP-sharded batch with `tensor_split` + `dist.all_gather`, sizing the
+#           gather from the row count `prepare()` padded to (`max(num_tokens, tp_size)` for
+#           All2All, `padded_num_tokens` for MC2) so even and uneven splits both restore the
+#           original row order.
 #    Future Plan:
 #       Remove this patch when upstream vLLM supports MoE communication type abstraction that
 #       can be extended by hardware plugins like vllm-ascend.
