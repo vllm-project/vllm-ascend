@@ -34,6 +34,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculat
 from vllm.model_executor.utils import replace_parameter
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 from vllm.triton_utils import triton
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -605,10 +606,11 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 device=hidden_states.device,
             )
 
-        torch.ops.vllm.qwen_gdn_attention_core(
+        torch.ops.vllm.qwen_gdn_attention_core_norm_with_output(
             mixed_qkv,
             b,
             a,
+            z,
             core_attn_out,
             self.prefix,
             False,
@@ -617,12 +619,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 3: Output Projection
         # ============================================================
-        z_shape_og = z.shape
-        # Keep the token/head layout here.  In the packed QKVZ path, Z is a
-        # view whose token stride still includes QKV.  The gated RMSNorm
-        # kernel addresses that stride directly instead of packing Z first.
-        core_attn_out = self.norm(core_attn_out, z)
-        core_attn_out = core_attn_out.reshape(z_shape_og)
+        core_attn_out = core_attn_out.reshape(z.shape)
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
         out, _ = self.out_proj(core_attn_out)
         if output is not None:
@@ -635,6 +632,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         b: torch.Tensor,
         a: torch.Tensor,
         core_attn_out: torch.Tensor,
+        z: torch.Tensor | None = None,
     ):
         """
         Core attention computation (called by custom op).
@@ -1079,9 +1077,54 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
             merged_out.index_copy_(1, spec_token_indx, core_attn_out_spec)
             merged_out.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
-            core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
+            recurrent_out = merged_out.squeeze(0)
         elif spec_sequence_masks is not None:
-            core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
+            recurrent_out = core_attn_out_spec.squeeze(0)
         else:
-            core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
+            recurrent_out = core_attn_out_non_spec.squeeze(0)
+        if z is None:
+            core_attn_out[:num_actual_tokens] = recurrent_out
+        else:
+            # Write the final gated RMSNorm result directly into the stable
+            # graph output. This removes the recurrent-output materialization
+            # while retaining the zero-filled padded tail.
+            self.norm.forward_oot(
+                recurrent_out,
+                z[:num_actual_tokens],
+                out=core_attn_out[:num_actual_tokens],
+            )
         maybe_save_kv_layer_to_connector("", [])
+
+
+def qwen_gdn_attention_core_norm_with_output(
+    mixed_qkv: torch.Tensor,
+    b: torch.Tensor,
+    a: torch.Tensor,
+    z: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+    is_prefill: bool,
+) -> None:
+    layer = get_forward_context().no_compile_layers[layer_name]
+    layer._forward_core(mixed_qkv, b, a, core_attn_out, z=z)
+
+
+def qwen_gdn_attention_core_norm_with_output_fake(
+    mixed_qkv: torch.Tensor,
+    b: torch.Tensor,
+    a: torch.Tensor,
+    z: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+    is_prefill: bool,
+) -> None:
+    return None
+
+
+direct_register_custom_op(
+    op_name="qwen_gdn_attention_core_norm_with_output",
+    op_func=qwen_gdn_attention_core_norm_with_output,
+    fake_impl=qwen_gdn_attention_core_norm_with_output_fake,
+    mutates_args=["core_attn_out"],
+    dispatch_key="PrivateUse1",
+)

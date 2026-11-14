@@ -132,7 +132,14 @@ def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch) -> No
     projected_k = torch.arange(8, dtype=torch.float32).reshape(2, 4)
     projected_v = projected_k + 10
     projected_gate = projected_q + 20
-    layer._project_qkv_gate = Mock(return_value=(projected_q, projected_k, projected_v, projected_gate))
+
+    def project_into_gate(qkv_arg, positions_arg, gate_out=None):
+        assert qkv_arg is qkv
+        assert positions_arg is positions
+        gate_out.copy_(projected_gate.view_as(gate_out))
+        return projected_q, projected_k, projected_v, gate_out.view(2, 8)
+
+    layer._project_qkv_gate = Mock(side_effect=project_into_gate)
 
     hidden_states = torch.empty((2, 8))
     positions = torch.arange(2)
@@ -151,7 +158,7 @@ def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch) -> No
         gate=gate,
     )
 
-    layer._project_qkv_gate.assert_called_once_with(qkv, positions)
+    layer._project_qkv_gate.assert_called_once_with(qkv, positions, gate_out=gate)
     torch.testing.assert_close(gate, projected_gate.view_as(gate))
     layer.impl.do_kv_cache_update.assert_called_once()
     update_args = layer.impl.do_kv_cache_update.call_args.args
