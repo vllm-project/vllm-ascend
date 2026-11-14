@@ -137,10 +137,8 @@ def test_cache_spec_allocates_one_checkpoint_and_compact_records(recover):
     spec = layer.get_kv_cache_spec(SimpleNamespace(cache_config=cache, num_speculative_tokens=5))
     assert spec.num_speculative_blocks == (0 if recover else 5)
     assert spec.shapes[1] == (2, 128, 128)
-    assert len(spec.shapes) == len(spec.dtypes) == (4 if recover else 2)
-    if recover:
-        assert spec.shapes[2:] == ((2, 6, 128), (2, 6, 256))
-        assert spec.dtypes == (torch.bfloat16, torch.float32, torch.float32, torch.bfloat16)
+    assert len(spec.shapes) == len(spec.dtypes) == 2
+    assert spec.dtypes == (torch.bfloat16, torch.float32)
 
 
 @pytest.mark.parametrize(
@@ -161,8 +159,11 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(
     layer.num_spec = 1
     state_shape = (8, 384, 6) if dim_first else (8, 6, 384)
     layer.kv_cache = (torch.zeros(state_shape, dtype=torch.bfloat16), torch.zeros(8, 1, 128, 128))
-    if recover:
-        layer.kv_cache += (torch.zeros(8, 1, 2, 128), torch.zeros(8, 1, 2, 256, dtype=torch.bfloat16))
+    layer.recoverssm_records = (
+        SimpleNamespace(correction=torch.zeros(1, 1, 2, 128), key_gate=torch.zeros(1, 1, 2, 256, dtype=torch.bfloat16))
+        if recover
+        else None
+    )
     layer._conv_state_dim_first = dim_first
     layer._merged_conv_weight = None
     # Checkpoints retain FP32 convolution weights; AscendC needs the activation
@@ -334,7 +335,7 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(
     monkeypatch.setattr(model_kda, "recurrent_kda", recurrent)
 
     def verify(q, k, v, gate, beta, a_log, bias, bound, state, correction, kg, starts, indices, capacity):
-        assert correction is layer.kv_cache[2] and kg is layer.kv_cache[3]
+        assert correction is layer.recoverssm_records.correction and kg is layer.recoverssm_records.key_gate
         assert capacity == 2 and a_log.shape == (1,)
         torch.testing.assert_close(indices, metadata.spec_state_indices_tensor[:, 0])
         assert state is layer.kv_cache[1]

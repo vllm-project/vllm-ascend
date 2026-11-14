@@ -949,6 +949,41 @@ layerwise hybrid pooling, the
 
 Removing `--use-replayssm` selects the native KDA path.
 
+## Experimental Kimi K3 and K3.1 KDA RecoverSSM
+
+Kimi K3 and K3.1 can use the Ascend KDA RecoverSSM path with DSpark speculative
+decoding. It keeps one recurrent checkpoint per request and writes compact,
+request-indexed verification records, then reconstructs the accepted state
+after sampling. RecoverSSM is disabled by default.
+
+Add the following options to your existing Kimi serving command, replacing the
+path with a compatible DSpark draft model. Keep the parallelism, quantization,
+KV-cache dtype and memory settings appropriate for the model and devices:
+
+```shell
+--use-replayssm \
+--speculative-config '{"method": "dspark", "model": "/path/to/dspark", "num_speculative_tokens": 3}'
+```
+
+Requirements:
+
+- Adaptive verification and stochastic rounding are unsupported.
+
+For experimental prefill/decode separation, use `MooncakeConnectorV2` or
+`MooncakePullConnector` and enable `--use-replayssm` on both Prefill and Decode.
+Both sides must use the same integration version, model and weights,
+TP size, prefix-caching configuration, speculative method and window, and
+persistent state dtypes. Set `VLLM_SSM_CONV_STATE_LAYOUT=SD` on both sides;
+the connector does not validate the peer's convolution layout or all other peer
+settings.
+
+!!! warning
+
+    This feature is experimental. End-to-end P/D output equivalence remains
+    unverified, including when prefix caching is enabled. Configurations with
+    PP, PCP or DCP greater than 1 are also unverified and may be subject to other
+    parallelism constraints.
+
 ## Synthetic Rejection Sampling
 
 In addition to the default `standard` rejection sampling (which accepts a draft token when `target_prob / draft_prob >= uniform`), vLLM Ascend supports **synthetic** rejection sampling. In this mode each draft token at position `i` is accepted with a configured probability `rates[i]`, compared against a uniform random draw — **independent of the target/draft probability match**. The first rejected position stops the request and emits a recovered token; if every draft token is accepted, the bonus token is appended.

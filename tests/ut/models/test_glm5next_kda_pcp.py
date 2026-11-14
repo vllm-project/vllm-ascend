@@ -103,6 +103,7 @@ def test_pcp_output_projection_loads_input_heads_and_reduces_over_pcp(
         parallel_groups.all_reduce.assert_not_called()
 
 
+@pytest.mark.parametrize("recover", [False, True])
 @pytest.mark.parametrize(("tp_size", "pcp_size"), [(1, 1), (1, 2), (1, 4), (2, 1), (2, 4), (4, 2)])
 @pytest.mark.parametrize(
     ("cudagraph_mode", "needs_output_buffer"),
@@ -115,12 +116,13 @@ def test_pcp_output_projection_loads_input_heads_and_reduces_over_pcp(
     ],
 )
 def test_kda_projection_and_state_sharding_follow_pcp_only_with_tp_one(
-    monkeypatch, parallel_groups, tp_size, pcp_size, cudagraph_mode, needs_output_buffer
+    monkeypatch, parallel_groups, tp_size, pcp_size, cudagraph_mode, needs_output_buffer, recover
 ):
     # Construct the complete KDA layer to catch mismatched projection, gate,
     # convolution, and cache dimensions, including the TP>1 fallback.
     monkeypatch.setattr(linear, "get_tensor_model_parallel_world_size", lambda: tp_size)
     monkeypatch.setattr(linear, "get_tensor_model_parallel_rank", lambda: tp_size - 1)
+    monkeypatch.setattr(model_kda, "use_glm_recoverssm", lambda _: recover)
     parallel_groups.world_size = pcp_size
     parallel_groups.rank_in_group = pcp_size - 1
     config = SimpleNamespace(
@@ -135,7 +137,8 @@ def test_kda_projection_and_state_sharding_follow_pcp_only_with_tp_one(
         parallel_config=SimpleNamespace(tensor_parallel_size=tp_size, prefill_context_parallel_size=pcp_size),
         model_config=SimpleNamespace(dtype=torch.bfloat16, hf_config=config, hf_text_config=config),
         cache_config=SimpleNamespace(mamba_cache_dtype="auto", use_replayssm=False),
-        speculative_config=None,
+        speculative_config=SimpleNamespace(num_speculative_tokens=3) if recover else None,
+        scheduler_config=SimpleNamespace(max_num_seqs=4),
         quant_config=None,
         compilation_config=SimpleNamespace(static_forward_context={}, cudagraph_mode=cudagraph_mode),
     )
@@ -145,7 +148,7 @@ def test_kda_projection_and_state_sharding_follow_pcp_only_with_tp_one(
         self.tp_size, self.tp_rank = tp_size, tp_size - 1
         self.hidden_size = config.hidden_size
         self.quant_config = vllm_config.quant_config
-        self.num_spec = 0
+        self.num_spec = 3 if recover else 0
 
     monkeypatch.setattr(model_kda.GatedDeltaNetAttention, "__init__", init_base)
     monkeypatch.setattr(model_kda, "get_current_vllm_config", lambda: vllm_config)
@@ -162,6 +165,13 @@ def test_kda_projection_and_state_sharding_follow_pcp_only_with_tp_one(
     rank = pcp_size - 1 if tp_size == 1 else tp_size - 1
     assert layer.tp_size == size and layer.tp_rank == rank
     assert layer.local_num_heads == 8 // size
+    if recover:
+        assert layer.recoverssm_records.correction.shape == (4, 8 // size, 4, 128)
+        assert layer.recoverssm_records.key_gate.shape == (4, 8 // size, 4, 256)
+        assert layer.recoverssm_records.correction.dtype == torch.float32
+        assert layer.recoverssm_records.key_gate.dtype is torch.bfloat16
+    else:
+        assert layer.recoverssm_records is None
     assert layer.local_projection_size == 1024 // size
     assert layer.use_pcp_head_sharding == (tp_size == 1 and pcp_size > 1)
     assert (

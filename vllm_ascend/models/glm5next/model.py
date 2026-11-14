@@ -11,7 +11,6 @@ from transformers import Glm5NextTextConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (
-    divide,
     get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -80,7 +79,6 @@ from vllm.models.common.ops.sequence_parallel import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils.torch_utils import get_kv_cache_torch_dtype
 
 from vllm_ascend.utils import pad_sequence_parallel_tokens
 
@@ -92,7 +90,6 @@ from .multimodal import (
     Glm5NextVisionTransformer,
 )
 from .ops.mhc_ops import hc_contract, hc_expand
-from .recoverssm_config import use_glm_recoverssm
 
 # Trained GLM-5.3-Flash values formerly supplied by vLLM's vendored config.
 _MHC_TAU = 0.05
@@ -991,16 +988,11 @@ class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, DeepseekV2Mixtur
         cls,
         vllm_config: "VllmConfig",
     ) -> tuple[torch.dtype, torch.dtype]:
-        dtypes = MambaStateDtypeCalculator.kda_state_dtype(
+        return MambaStateDtypeCalculator.kda_state_dtype(
             vllm_config.model_config.dtype,
             vllm_config.cache_config.mamba_cache_dtype,
             vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
-        if use_glm_recoverssm(vllm_config):
-            # vLLM main moved KDA RecoverSSM records out of the KV cache and
-            # removed the calculator helper, but Ascend still packs them in.
-            return (*dtypes, torch.float32, get_kv_cache_torch_dtype("auto", vllm_config.model_config.dtype))
-        return dtypes
 
     @classmethod
     def get_mamba_state_shape_from_config(
@@ -1010,27 +1002,18 @@ class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, DeepseekV2Mixtur
         hf_config = vllm_config.model_config.hf_text_config
         tp_size = get_kda_parallel_size(parallel_config)
         num_spec = vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
-        shapes = MambaStateShapeCalculator.kda_state_shape(
+        return MambaStateShapeCalculator.kda_state_shape(
             tp_size,
             hf_config.linear_num_heads,
             hf_config.linear_head_dim,
             conv_kernel_size=hf_config.linear_conv_kernel_dim,
             num_spec=num_spec,
         )
-        if use_glm_recoverssm(vllm_config):
-            local_num_heads = divide(hf_config.linear_num_heads, tp_size)
-            spec_query_len = num_spec + 1
-            return (
-                *shapes,
-                (local_num_heads, spec_query_len, hf_config.linear_head_dim),
-                (local_num_heads, spec_query_len, 2 * hf_config.linear_head_dim),
-            )
-        return shapes
 
     @classmethod
     def get_mamba_state_copy_func(
         cls,
-    ) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc, MambaStateCopyFunc, MambaStateCopyFunc]:
+    ) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
         return MambaStateCopyFuncCalculator.kda_state_copy_func()
 
     def compute_logits(

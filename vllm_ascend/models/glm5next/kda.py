@@ -23,7 +23,8 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils.torch_utils import direct_register_custom_op, get_kv_cache_torch_dtype
+from vllm.models.kimi_k3.nvidia.ops.recoverssm import KDARecoverSSMRecords
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from vllm_ascend.attention.utils import (
@@ -214,17 +215,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
     ) -> tuple[torch.dtype, torch.dtype]:
         if self.model_config is None or self.cache_config is None:
             raise ValueError("model_config and cache_config must be set")
-        dtypes = MambaStateDtypeCalculator.kda_state_dtype(
+        return MambaStateDtypeCalculator.kda_state_dtype(
             self.model_config.dtype,
             self.cache_config.mamba_cache_dtype,
             self.cache_config.mamba_ssm_cache_dtype,
         )
-        if self.use_recoverssm:
-            # vLLM main moved KDA RecoverSSM records out of the KV cache and
-            # removed the calculator helper, but Ascend still packs the
-            # float32 correction and activation key/gate records into the page.
-            return (*dtypes, torch.float32, get_kv_cache_torch_dtype("auto", self.model_config.dtype))
-        return dtypes
 
     def get_state_shape(
         self,
@@ -233,24 +228,13 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # (AscendC causal-conv with num_accepted_tokens) can
         # slide the window across the draft-verify tokens without reading past
         # the allocated width. Matches qwen_gdn_linear_attn.get_state_shape.
-        shapes = MambaStateShapeCalculator.kda_state_shape(
+        return MambaStateShapeCalculator.kda_state_shape(
             self.tp_size,
             self.num_heads,
             self.head_dim,
             conv_kernel_size=self.conv_size,
             num_spec=self.num_spec,
         )
-        if self.use_recoverssm:
-            # One checkpoint per request plus compact update records, matching
-            # the layout the Ascend commit context allocates from.
-            local_num_heads = divide(self.num_heads, self.tp_size)
-            spec_query_len = self.num_spec + 1
-            return (
-                *shapes,
-                (local_num_heads, spec_query_len, self.head_dim),
-                (local_num_heads, spec_query_len, 2 * self.head_dim),
-            )
-        return shapes
 
     def __init__(
         self,
@@ -366,6 +350,16 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
 
         self.A_log = nn.Parameter(torch.empty(1, 1, self.local_num_heads, 1, dtype=torch.float32))
         set_weight_attrs(self.A_log, {"weight_loader": self._a_log_weight_loader})
+        self.recoverssm_records: KDARecoverSSMRecords | None = None
+        if self.use_recoverssm:
+            self.recoverssm_records = KDARecoverSSMRecords.allocate(
+                vllm_config.scheduler_config.max_num_seqs,
+                self.local_num_heads,
+                self.num_spec + 1,
+                self.head_dim,
+                vllm_config.model_config.dtype,
+                self.A_log.device,
+            )
 
         self.g_b_proj = column_linear(
             self.head_dim,
@@ -556,13 +550,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         use_spec = num_spec_decodes > 0 and spec_state_indices_tensor is not None
         # Safe-gate checkpoints use the bounded sigmoid variant.
         lower_bound = self.kda_lower_bound
-        constant_caches = self.kv_cache
 
         qkv_proj_states = qkv_proj_states[:num_actual_tokens]
         g1 = g1[:, :num_actual_tokens]
         beta = beta[:, :num_actual_tokens]
 
-        conv_state, recurrent_state, *records = constant_caches
+        conv_state, recurrent_state = self.kv_cache
         # AscendC consumes [cache, state_len, dim]. Preserve the original storage.
         # Layout is process-global and resolved once at init (see __init__).
         if self._conv_state_dim_first:
@@ -678,7 +671,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # groups. Recurrent writeback handles decode padding without a pre-clear.
         if use_spec:
             if self.use_recoverssm:
-                correction_cache, kg_cache = records
+                records = self.recoverssm_records
+                assert records is not None
                 # One paged checkpoint per request; verification only records
                 # compact updates. MRV2 commits after rejection sampling.
                 spec_output = kda_recoverssm_verify(
@@ -691,8 +685,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     self.dt_bias,
                     lower_bound,
                     recurrent_state,
-                    correction_cache,
-                    kg_cache,
+                    records.correction,
+                    records.key_gate,
                     spec_query_start_loc,
                     spec_state_indices_tensor[:, 0],
                     self.num_spec + 1,
