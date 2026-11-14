@@ -6,6 +6,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
+from copy import copy
 
 import torch
 import vllm.envs as envs
@@ -162,7 +163,12 @@ class BaseKVPoolWorker(ABC):
         self.pp_layer_offset = 0
         self.total_layers = None
         try:
-            start, _ = model_config.get_layers_start_end_indices(parallel_config)
+            # The model partition API interprets rank as PP x TP, whereas
+            # Ascend workers include PCP in their global rank. Project onto
+            # the actual communication-group stage without mutating the config.
+            stage_config = copy(parallel_config)
+            stage_config.rank = self.pp_rank * self.tp_size + self.tp_rank
+            start, _ = model_config.get_layers_start_end_indices(stage_config)
             self.pp_layer_offset = start
             self.total_layers = model_config.get_total_num_hidden_layers()
         except AttributeError:
@@ -240,7 +246,9 @@ class BaseKVPoolWorker(ABC):
 
     def _init_key_head_config(self, model_config, parallel_config) -> None:
         self.current_layer = 0
-        self.num_layers = model_config.get_num_layers(parallel_config)
+        stage_config = copy(parallel_config)
+        stage_config.rank = self.pp_rank * self.tp_size + self.tp_rank
+        self.num_layers = model_config.get_num_layers(stage_config)
 
         if self.use_mla:
             self.num_kv_head = 1

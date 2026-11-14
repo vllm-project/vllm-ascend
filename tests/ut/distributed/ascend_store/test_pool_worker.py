@@ -155,10 +155,13 @@ def make_worker(
     config.parallel_config.decode_context_parallel_size = dcp_size
     if pp_partition is not None:
         config.parallel_config.pipeline_parallel_size = len(pp_partition)
-        config.parallel_config.rank = pp_rank * tp_size + tp_rank
         config.model_config.get_layers_start_end_indices.side_effect = lambda parallel: (
-            sum(pp_partition[: parallel.rank // tp_size]),
-            sum(pp_partition[: parallel.rank // tp_size + 1]),
+            sum(pp_partition[: (parallel.rank // tp_size) % len(pp_partition)]),
+            sum(pp_partition[: (parallel.rank // tp_size) % len(pp_partition) + 1]),
+        )
+        config.model_config.get_num_layers.side_effect = lambda parallel: (
+            config.model_config.get_layers_start_end_indices(parallel)[1]
+            - config.model_config.get_layers_start_end_indices(parallel)[0]
         )
         config.model_config.get_total_num_hidden_layers.return_value = sum(pp_partition)
         config.model_config.compute_hash.return_value = "test-model-config"
@@ -193,6 +196,40 @@ def make_worker(
 
 
 class TestPCPPoolWorker(unittest.TestCase):
+    def test_pp_pcp_ranks_agree_on_stage_object_layout(self):
+        partition = (23, 22)
+        per_layer_bytes = 337920 + 40960
+        for tp_size in (1, 2):
+            for pp_rank, pcp_rank, tp_rank in product(range(2), range(8), range(tp_size)):
+                with self.subTest(tp_size=tp_size, pp_rank=pp_rank, pcp_rank=pcp_rank, tp_rank=tp_rank):
+                    worker = make_worker(
+                        self,
+                        pp_rank=pp_rank,
+                        pp_partition=partition,
+                        pcp_size=8,
+                        pcp_rank=pcp_rank,
+                        tp_size=tp_size,
+                        tp_rank=tp_rank,
+                        use_layerwise=True,
+                        extra_config={"backend": "memcache"},
+                    )
+                    start = sum(partition[:pp_rank])
+                    self.assertEqual(worker.pp_layer_offset, start)
+                    self.assertEqual(worker.num_layers, partition[pp_rank])
+                    self.assertEqual(
+                        worker.vllm_config.parallel_config.rank,
+                        (pp_rank * 8 + pcp_rank) * tp_size + tp_rank,
+                    )
+                    # Real hybrid group widths: every PCP replica sharing a
+                    # stage key must use the same origin and allocation size.
+                    group_layers = (5, 7)[pp_rank]
+                    worker.layerwise_key_layer_offset = worker.pp_layer_offset
+                    worker.use_block_key_layerwise = False
+                    worker.group_num_layers = {0: group_layers}
+                    worker.group_block_len = {0: [337920, 40960] * group_layers}
+                    self.assertEqual(worker._group_pp_byte_offset(0), start * per_layer_bytes)
+                    self.assertEqual(worker._global_group_alloc_size(0), (start + group_layers) * per_layer_bytes)
+
     def test_nonzero_pcp_rank_keeps_dcp_save_leader(self):
         for dcp_size, tp_rank, expected in ((1, 0, False), (2, 1, True), (2, 3, False)):
             with self.subTest(dcp_size=dcp_size, tp_rank=tp_rank):
