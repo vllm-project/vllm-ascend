@@ -37,7 +37,7 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend._310p.worker.v2.spec_utils import set_draft_step_host
-from vllm_ascend.compilation.updatable_graph import UpdatableGraph
+from vllm_ascend.compilation.updatable_graph import SharedSource, UpdatableGraph
 from vllm_ascend.worker.v2.aclgraph_utils import model_capture_wrapper
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.aclgraph import (
@@ -61,12 +61,12 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
         """
         graph = self.graphs[desc]
         assert isinstance(graph, UpdatableGraph)
-        source = self.speculator.build_param_source(
+        fia_params = self.speculator.build_fia_params(
             desc.num_reqs,
             draft_attn_metadatas[0],
             self.is_draft_model_prefill,
         )
-        resolved_tasks = graph.resolve_tasks(source)
+        resolved_tasks = graph.resolve_tasks(SharedSource(fia_params))
         # Empty tasks (typical on 310P): no host-side graph update work.
         if resolved_tasks:
             self.update_stream.wait_stream(torch.npu.current_stream())
