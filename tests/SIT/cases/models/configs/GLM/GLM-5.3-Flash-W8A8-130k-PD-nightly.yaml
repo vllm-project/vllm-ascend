@@ -1,4 +1,4 @@
-# A3 ordinary PD serving parameters follow docs/source/tutorials/models/GLM5.3-Flash.md (Section 5.3).
+# A3 ordinary PD serving parameters follow the v0.32.0rc1 GLM5.3-Flash tutorial (Section 5.3).
 # Keep the historical 16K GSM8K performance and AIME2025 accuracy workloads below.
 test_name: "GLM-5.3-Flash-W8A8-130k-PD"
 model: "Eco-Tech/GLM-5.3-Flash-w8a8"
@@ -96,9 +96,12 @@ templates:
       - --enable-auto-tool-choice
       - --kv-cache-dtype
       - "int8"
+      - --attention-config.indexer_kv_dtype
+      - "int8"
       - --prefix-cache-retention-interval
       - "None"
       - --enforce-eager
+      - --use-replayssm
       - --mamba-ssm-cache-dtype
       - "bfloat16"
       - --speculative-config
@@ -153,6 +156,9 @@ templates:
       - --enable-auto-tool-choice
       - --kv-cache-dtype
       - "int8"
+      - --attention-config.indexer_kv_dtype
+      - "int8"
+      - --use-replayssm
       - --mamba-ssm-cache-dtype
       - "bfloat16"
       - --compilation-config
