@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import torch
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import MoERunner, RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
@@ -290,6 +291,58 @@ class TestAscendFp8Config(TestBase):
         config = self.build_config()
         method = config.get_quant_method(MagicMock(spec=VocabParallelEmbedding), "model.embed_tokens")
         self.assertIsNone(method)
+
+    def test_full_attention_uses_mxfp_c8_method_when_enabled(self):
+        config = self.build_config()
+        attention = MagicMock(spec=Attention)
+        c8_scheme = MagicMock()
+        c8_method = MagicMock()
+
+        with (
+            patch.object(config, "_mxfp_c8_enabled", return_value=True),
+            patch(
+                "vllm_ascend.quantization.methods.kv_cache.mxfp_c8."
+                "AscendC8MXFPKVCacheAttentionMethod",
+                return_value=c8_scheme,
+            ) as mock_scheme,
+            patch(
+                "vllm_ascend.quantization.method_adapters.AscendKVCacheMethod",
+                return_value=c8_method,
+            ) as mock_method,
+        ):
+            method = config.get_quant_method(attention, "model.layers.3.self_attn.attn")
+
+        mock_scheme.assert_called_once_with({}, "model.layers.3.self_attn.attn")
+        mock_method.assert_called_once_with(c8_scheme)
+        self.assertIs(method, c8_method)
+
+    def test_full_attention_is_unchanged_when_mxfp_c8_is_disabled(self):
+        config = self.build_config()
+        with patch.object(config, "_mxfp_c8_enabled", return_value=False):
+            method = config.get_quant_method(
+                MagicMock(spec=Attention), "model.layers.3.self_attn.attn"
+            )
+        self.assertIsNone(method)
+
+    def test_mxfp_c8_cache_scale_mapper_maps_fa_v_scale(self):
+        config = self.build_config()
+        with patch.object(config, "_mxfp_c8_enabled", return_value=True):
+            mapper = config.get_cache_scale_mapper()
+
+        self.assertEqual(
+            mapper._map_name("model.layers.3.self_attn.fa_v.scale"),
+            "model.layers.3.self_attn.attn.v_cache_scale",
+        )
+
+    def test_default_cache_scale_mapper_does_not_map_fa_v_scale(self):
+        config = self.build_config()
+        with patch.object(config, "_mxfp_c8_enabled", return_value=False):
+            mapper = config.get_cache_scale_mapper()
+
+        self.assertNotEqual(
+            mapper._map_name("model.layers.3.self_attn.fa_v.scale"),
+            "model.layers.3.self_attn.attn.v_cache_scale",
+        )
 
     def test_per_tensor_checkpoint_reports_an_actionable_error(self):
         config = self.build_config(weight_block_size=None)
