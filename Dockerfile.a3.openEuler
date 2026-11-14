@@ -80,11 +80,8 @@ RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/cann/set_env.sh && \
     export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     # Install memfabric_hybrid kernels
-    TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A3 && \
-    if [ -d "${ASCEND_OPP_PATH}/vendors/cust" ]; then \
-        chmod a+rx,go-w "${ASCEND_OPP_PATH}/vendors" && \
-        chmod -R a+rX,go-w "${ASCEND_OPP_PATH}/vendors/cust"; \
-    fi && \
+    umask 022 && \
+    TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A3 --install-for-all && \
     # Install flash-linear-attention-npu from the Ascend mirror
     python3 -m pip install --force-reinstall --no-deps \
         "flash-linear-attention-npu-a3===${FLA_VERSION}" && \
