@@ -1,0 +1,16 @@
+pr: 21508
+entries:
+  - category: feature
+    text: >-
+      Added opt-in INT8 quantized all-reduce on Atlas A5 with the same
+      payload, dtype, shape and group-size routing as A2, including
+      mixed prefill/decode batches.
+    hardware: [A5]
+  - category: feature
+    text: >-
+      Added MXFP8 AllToAll/AllGather with BF16 staging as the default
+      quantized all-reduce backend on Atlas A5. Atlas A2 defaults to INT8;
+      quantized_all_reduce_config.quant_dtype can override the hardware default.
+      MXFP8 requires the public torch_npu MX quantization and dequantization APIs.
+      It uses ceil-rounded E8M0 scales (scale_alg=1) to avoid E4M3FN range overflow.
+    hardware: [A5]

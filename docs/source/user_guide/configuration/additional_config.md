@@ -338,6 +338,52 @@ KVPP can be combined with `MooncakeConnectorV2` for P/D disaggregation and `Asce
 
 PCP gathers prefill KV before cache writes. KVPP layer broadcasts restore prior-forward cache contents before attention; the broadcast decision uses the global scheduled batch rather than PCP-local segment offsets.
 
+### Quantized all-reduce
+
+Configure `quantized_all_reduce_config` to enable quantized communication for large BF16 inputs. The feature is disabled by default. A2 supports INT8; A5 supports INT8 and MXFP8. A3 is unsupported.
+
+#### Recommended parameter values
+
+| Parameter | Valid values and default | Recommendation |
+| --- | --- | --- |
+| `enable` | `true` or `false`; default `false` | Set `true` to enable quantized all-reduce. |
+| `quant_dtype` | `"int8"` or `"mxfp8"`; defaults to `"int8"` on A2 and `"mxfp8"` on A5 | Use INT8 on A2 and MXFP8 on A5. A5 can explicitly select `"int8"`. |
+| `min_numel` | Positive integer; default `16777216` | Start with `16777216` (32 MiB BF16) for both INT8 and MXFP8. If enabling quantized communication degrades performance, raise it to `41943040` (80 MiB) or `83886080` (160 MiB) and compare again. |
+
+The threshold counts elements in each rank's original full BF16 tensor. Quantized communication requires `numel >= min_numel`. Use the same configuration on every worker.
+
+#### Supported configurations
+
+- INT8: TP=2 to 8; BF16 inputs with at least two dimensions and a last dimension of at least 64.
+- MXFP8: TP=2/4/8; BF16 inputs with at least two dimensions, a last dimension divisible by 64, and a flattened row count divisible by the communication group size.
+- TP=1 bypasses communication. Inputs outside the supported tensor conditions use ordinary all-reduce.
+- MXFP8 requires matching `torch_npu`/CANN versions providing `torch_npu.npu_dynamic_mx_quant` and `torch_npu.npu_anti_mx_quant`.
+
+#### INT8 example
+
+```json
+{
+    "quantized_all_reduce_config": {
+        "enable": true,
+        "quant_dtype": "int8",
+        "min_numel": 16777216
+    }
+}
+```
+
+#### MXFP8 example (A5)
+
+Omitting `quant_dtype` selects MXFP8 on A5:
+
+```json
+{
+    "quantized_all_reduce_config": {
+        "enable": true,
+        "min_numel": 16777216
+    }
+}
+```
+
 ## GDN internal prefill checkpoints
 
 Enable with `--additional-config '{"gdn_internal_prefill_checkpoints": true}'`.
