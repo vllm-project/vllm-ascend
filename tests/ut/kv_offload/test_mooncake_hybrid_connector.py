@@ -15,7 +15,7 @@ fake_engine = types.ModuleType("mooncake.engine")
 fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
 sys.modules["mooncake.engine"] = fake_engine
 
-from vllm.v1.kv_cache_interface import MambaSpec  # noqa: E402
+from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs  # noqa: E402
 from vllm.v1.request import RequestStatus  # noqa: E402
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector import (  # noqa: E402
@@ -874,6 +874,71 @@ class TestMooncakeHybridConnectorRegistration(unittest.TestCase):
 
 
 class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
+    def test_prefill_and_remote_token_count_follow_state_type(self):
+        config = types.SimpleNamespace(
+            cache_config=types.SimpleNamespace(block_size=128),
+            parallel_config=types.SimpleNamespace(
+                tensor_parallel_size=1,
+                prefill_context_parallel_size=1,
+                decode_context_parallel_size=1,
+                data_parallel_size=1,
+                pipeline_parallel_size=1,
+                data_parallel_rank=0,
+            ),
+            kv_transfer_config=types.SimpleNamespace(kv_port=31000),
+            scheduler_config=types.SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+            model_config=types.SimpleNamespace(hf_config=types.SimpleNamespace()),
+        )
+        # Exercise the real initializer: compress_ratios must not select the
+        # Mamba N-1 path, including when specs are wrapped in a uniform group.
+        for compressed in (False, True):
+            config.model_config.hf_config = types.SimpleNamespace(**({"compress_ratios": [1, 4]} if compressed else {}))
+            for mamba in (False, True):
+                for uniform in (False, True):
+                    with self.subTest(compressed=compressed, mamba=mamba, uniform=uniform):
+                        spec = (
+                            MagicMock(spec=MambaSpec, block_size=128)
+                            if mamba
+                            else types.SimpleNamespace(block_size=128)
+                        )
+                        group_spec = (
+                            MagicMock(spec=UniformTypeKVCacheSpecs, block_size=128, kv_cache_specs={"layer": spec})
+                            if uniform
+                            else spec
+                        )
+                        cache_config = types.SimpleNamespace(
+                            kv_cache_groups=[types.SimpleNamespace(kv_cache_spec=group_spec, layer_names=["layer"])]
+                        )
+                        with patch.multiple(
+                            "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector",
+                            init_ascend_config=MagicMock(),
+                            get_ascend_config=MagicMock(),
+                            get_ip=MagicMock(return_value="127.0.0.1"),
+                        ):
+                            scheduler = MooncakeConnectorScheduler(config, "engine", cache_config)
+                        for length in (1, 128, 129):
+                            tokens = list(range(length))
+                            request = types.SimpleNamespace(
+                                prompt_token_ids=tokens.copy(),
+                                _all_token_ids=tokens.copy(),
+                                num_prompt_tokens=length,
+                                max_tokens=1,
+                                kv_transfer_params={"do_remote_decode": True},
+                            )
+                            expected = length - int(mamba and length > 1)
+                            scheduler.on_new_request(request)
+                            scheduler.on_new_request(request)
+                            self.assertEqual(request.prompt_token_ids, tokens[:expected])
+                            self.assertEqual(request._all_token_ids, tokens[:expected])
+                            self.assertEqual(request.num_prompt_tokens, expected)
+                            self.assertEqual(
+                                bool(request.kv_transfer_params.get("_p_side_truncated")), expected < length
+                            )
+                            request.prompt_token_ids = tokens
+                            request.kv_transfer_params = {"do_remote_prefill": True}
+                            self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (expected, True))
+                            self.assertEqual(scheduler.get_num_new_matched_tokens(request, expected), (0, False))
+
     def _make_scheduler(self):
         scheduler = object.__new__(MooncakeConnectorScheduler)
         scheduler.use_hybrid = True
