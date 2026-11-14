@@ -1,4 +1,4 @@
-pr: 0
+pr: 21868
 entries:
   - category: feature
     text: Added opt-in A3 INT8/INT4 grouped matmul, SiTU activation and dynamic quantization fusion through the existing SiTU operator interfaces. Enable fusion_ops_gmmsituquant in ascend_fusion_config to use it; A5 retains its existing MX kernel and interface.
