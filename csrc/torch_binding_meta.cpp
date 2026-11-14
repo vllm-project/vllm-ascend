@@ -1762,6 +1762,20 @@ void npu_fused_quant_lightning_indexer_manage_meta(
     return;
 }
 
+void fused_indexer_prologue_meta(
+    const at::Tensor &latent,
+    const at::Tensor &wk_weight,
+    const at::Tensor &norm_weight,
+    const at::Tensor &cos,
+    const at::Tensor &sin,
+    const at::Tensor &slot_mapping,
+    at::Tensor &k_cache,
+    at::Tensor &scale_cache,
+    double epsilon)
+{
+    return;
+}
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -1803,6 +1817,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
              &vllm_ascend::meta::grouped_matmul_situ_quant_list_meta);
     // fused_quant_lightning_indexer_manage meta implementation
     ops.impl("npu_fused_quant_lightning_indexer_manage", &vllm_ascend::meta::npu_fused_quant_lightning_indexer_manage_meta);
+    ops.impl("fused_indexer_prologue", &vllm_ascend::meta::fused_indexer_prologue_meta);
     // Launch host print from device
     ops.impl("device_print", &vllm_ascend::meta::device_print_meta);
     // launch host print from device for tensors

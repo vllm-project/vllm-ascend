@@ -543,7 +543,7 @@ public:
     __aicore__ __force_inline__ void Process()
     {
 #ifdef __DAV_C220_CUBE__
-        if (block_idx >= num_core) {
+        if (AscendC::GetBlockIdx() >= num_core) {
             return;
         }
         using LocalTensor = AscendC::LocalTensor<InDtype>;

@@ -1112,6 +1112,7 @@ class TestPCPBatchLifecycle:
         indexer = DeepseekV41Indexer.__new__(DeepseekV41Indexer)
         torch.nn.Module.__init__(indexer)
         indexer.owns_k, indexer.width, indexer.rope_width = True, 2, 2
+        indexer.use_fused_indexer_prologue_int8 = False
         indexer.packed_cache_ops = None
         indexer.wk, indexer.k_norm = _linear(2, 2).to(torch.bfloat16), torch.nn.Identity()
         indexer.k_cache = SimpleNamespace(kv_cache=[(k_cache, scale_cache)])

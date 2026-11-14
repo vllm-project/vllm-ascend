@@ -48,3 +48,14 @@ def test_compressor_call_sites_use_compiled_modes():
                 kw.arg: ast.literal_eval(kw.value) for kw in call.keywords if kw.arg in ("rotary_mode", "cache_mode")
             }
             assert modes == {"rotary_mode": 2, "cache_mode": 1}
+
+
+def test_indexer_key_update_uses_registered_a2_a3_prologue():
+    source = ast.parse((REPO_ROOT / "vllm_ascend/models/deepseek_v41/indexer.py").read_text())
+    calls = [
+        node
+        for node in ast.walk(source)
+        if isinstance(node, ast.Call) and ast.unparse(node.func) == "torch.ops._C_ascend.fused_indexer_prologue"
+    ]
+    assert len(calls) == 1
+    assert len(calls[0].args) == 9

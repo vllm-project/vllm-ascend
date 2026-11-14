@@ -13,6 +13,7 @@ from vllm_ascend.attention.dsa_v41 import (
     scatter_cache_sk,
 )
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.deepseek_v41.cache_config import (
     make_folded_index_cache_spec,
     make_index_cache_spec,
@@ -28,6 +29,7 @@ from vllm_ascend.ops.triton.quantize_indexer_query import (
     quantize_indexer_query,
 )
 from vllm_ascend.ops.triton.quantize_mxfp4_indexer import quantize_mxfp4_indexer
+from vllm_ascend.utils import enable_custom_op
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
     wait_for_device_metadata,
@@ -65,6 +67,13 @@ class DeepseekV41Indexer(nn.Module):
         _QUANTIZE_INDEXER_QUERY_KERNEL.register_warmup(vllm_config)
         self.softmax_scale = self.width**-0.5
         self.weights_scale = self.softmax_scale * self.n_heads**-0.5
+        self.use_fused_indexer_prologue_int8 = (
+            get_current_hardware_profile().supports(HardwareCapability.FUSED_INDEXER_PROLOGUE)
+            and int(config.head_dim) == 512
+            and self.width == 128
+            and self.rope_width == 64
+            and enable_custom_op()
+        )
         self.wq_b = ReplicatedLinear(
             config.q_lora_rank,
             self.n_heads * self.width,
@@ -117,10 +126,24 @@ class DeepseekV41Indexer(nn.Module):
         """Publish source-owned index K before latent is RoPE'd as long KV."""
         if not self.owns_k or latent.shape[0] == 0:
             return
+        k_cache, scale_cache = self.k_cache.kv_cache[0]
+        if self.use_fused_indexer_prologue_int8:
+            torch.ops._C_ascend.fused_indexer_prologue(
+                latent,
+                self.wk.weight,
+                self.k_norm.weight,
+                cos,
+                sin,
+                slots,
+                k_cache,
+                scale_cache,
+                self.k_norm.variance_epsilon,
+            )
+            return
+
         key = self.k_norm(self.wk(latent)).view(-1, 1, self.width)
         DeviceOperator.apply_partial_rotary_inplace(key, cos, sin, start=self.width - self.rope_width, end=self.width)
         key = key.squeeze(1)
-        k_cache, scale_cache = self.k_cache.kv_cache[0]
         if self.packed_cache_ops is not None:
             self.packed_cache_ops.write_index_cache((k_cache, scale_cache), slots, key)
             if self.k_cache_folded is not None:
