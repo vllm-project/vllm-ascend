@@ -5462,5 +5462,106 @@ def test_head_reformat_preserves_token_head_order_at_scatter_boundary(monkeypatc
     assert captured[0]["cache_mode"] == "Norm"
 
 
+def test_stash_pending_reformat_merges_batches_arriving_separately():
+    """Regression test: groups of one shard become transfer-complete in
+    different pull tasks (single-pull groups end on their first pull, multi-pull
+    groups on their last), so _stash_pending_reformat is called more than once
+    per shard from different executor threads. A later call must merge into the
+    stash instead of overwriting the groups stashed earlier."""
+    receiver = KVCacheRecvingThread.__new__(KVCacheRecvingThread)
+    receiver.pending_reformat = defaultdict(dict)
+    receiver.pending_reformat_lock = threading.Lock()
+
+    # (group_idx, grouped_local_block_ids, num_group_pulls, layer_indices)
+    indexer_group = (0, [[10, 11]], 1, [0])
+    mla_group = (1, [[10, 11]], 1, [1])
+    gqa_group = (2, [[12, 13], [14, 15]], 8, [2, 3, 4])
+
+    # Single ready batch: stash keeps the exact entries (original behavior).
+    receiver._stash_pending_reformat("req-single", 0, [indexer_group, mla_group, gqa_group])
+    assert receiver.pending_reformat["req-single"][0] == [indexer_group, mla_group, gqa_group]
+
+    # Batches arriving separately for the same shard are merged in arrival order.
+    receiver._stash_pending_reformat("req-split", 0, [indexer_group, mla_group])
+    receiver._stash_pending_reformat("req-split", 0, [gqa_group])
+    assert receiver.pending_reformat["req-split"][0] == [indexer_group, mla_group, gqa_group]
+
+    # A group already stashed is not duplicated by a repeated arrival.
+    receiver._stash_pending_reformat("req-split", 0, [gqa_group, mla_group])
+    assert receiver.pending_reformat["req-split"][0] == [indexer_group, mla_group, gqa_group]
+
+    # Shards of the same request keep independent stashes.
+    receiver._stash_pending_reformat("req-split", 1, [gqa_group])
+    assert receiver.pending_reformat["req-split"][1] == [gqa_group]
+    assert receiver.pending_reformat["req-split"][0] == [indexer_group, mla_group, gqa_group]
+
+    # The merged bucket of one shard is now mixed-pull (1-pull groups plus the
+    # 8-pull GQA group). Consuming it is covered end-to-end against the real
+    # consumer by
+    # test_reformat_pending_kv_caches_dispatches_mixed_pull_bucket.
+
+    # A group index repeated within one batch is stashed once (first arrival wins).
+    receiver._stash_pending_reformat("req-dup", 0, [gqa_group, gqa_group])
+    assert receiver.pending_reformat["req-dup"][0] == [gqa_group]
+
+    # A later arrival carrying a different block layout for an already-stashed
+    # group is ignored, so the consumer applies that group exactly once.
+    receiver._stash_pending_reformat("req-dup", 0, [(2, [[99, 100]], 8, [2, 3, 4])])
+    assert receiver.pending_reformat["req-dup"][0] == [gqa_group]
+
+
+def test_reformat_pending_kv_caches_dispatches_mixed_pull_bucket(monkeypatch):
+    """Merging groups into one per-shard bucket lets a shard hold groups with
+    different pull counts: single-pull indexer/MLA groups complete on their
+    first pull, the GQA group on its last. The non-hybrid reformat path applies
+    a single num_group_pulls to the whole batch, so the stash consumer has to
+    dispatch one reformat per pull count.
+
+    Only the device-level transpose is stubbed here; the dispatch and the
+    uniform-pull precondition under test are the real ones."""
+    receiver = KVCacheRecvingThread.__new__(KVCacheRecvingThread)
+    receiver.pending_reformat = defaultdict(dict)
+    receiver.pending_reformat_lock = threading.Lock()
+    receiver.is_hma_required = False
+    receiver.kv_group2layeridx = {
+        0: ({"kv_cache_spec_type": "FullAttentionSpec"}, [0]),
+        2: ({"kv_cache_spec_type": "FullAttentionSpec"}, [2, 3, 4]),
+    }
+    receiver._get_group_kv_caches = lambda group_idx, layer_indices=None: {group_idx: object()}
+
+    module = sys.modules[KVCacheRecvingThread.__module__]
+    monkeypatch.setattr(
+        module,
+        "get_ascend_config",
+        lambda: types.SimpleNamespace(enable_kv_nz=False, enable_transpose_kv_cache_by_block=False),
+    )
+    reformats: list[tuple[list[list[int]], int]] = []
+    monkeypatch.setattr(
+        receiver,
+        "reformat_kv_cache",
+        lambda block_ids, num_group_pulls, need_cat_cache, need_nz_cache, kv_caches: reformats.append(
+            (block_ids, num_group_pulls)
+        ),
+    )
+
+    indexer_group = (0, [[10, 11]], 1, [0])
+    gqa_group = (2, [[12, 13], [14, 15]], 8, [2, 3, 4])
+
+    # A single dispatch over the merged bucket trips the consumer's uniform-pull
+    # precondition, which is why the stash consumer partitions by pull count.
+    with pytest.raises(RuntimeError, match="uniform group pulls"):
+        receiver._apply_kv_cache_reformat([indexer_group, gqa_group])
+
+    # The two groups arrive in different stash calls, exactly as in the field.
+    receiver._stash_pending_reformat("req-mixed", 0, [indexer_group])
+    receiver._stash_pending_reformat("req-mixed", 0, [gqa_group])
+    receiver._reformat_pending_kv_caches("req-mixed")
+
+    # Only the multi-pull GQA group needs the cross-rank head reassembly; the
+    # single-pull group must not be dragged into it.
+    assert reformats == [([[12, 13], [14, 15]], 8)]
+    assert "req-mixed" not in receiver.pending_reformat
+
+
 if __name__ == "__main__":
     unittest.main()

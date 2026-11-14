@@ -1099,7 +1099,25 @@ class KVCacheRecvingThread(threading.Thread):
         ready_attention_group_reformat_block_ids: list[tuple[int, list[list[int]], int, list[int]]],
     ) -> None:
         with self.pending_reformat_lock:
-            self.pending_reformat[request_id][shard_idx] = ready_attention_group_reformat_block_ids
+            # Attention groups of the same shard can become transfer-complete in
+            # different pull tasks running on different executor threads, each
+            # of which stashes once. Merge instead of overwriting so
+            # earlier-stashed groups survive until _reformat_pending_kv_caches
+            # consumes them; skip groups already stashed so a group is
+            # reformatted exactly once.
+            stashed = self.pending_reformat[request_id].setdefault(shard_idx, [])
+            stashed_group_ids = {entry[0] for entry in stashed}
+            # Walk the batch one entry at a time so a group index repeated
+            # within the same call is deduplicated too; the previous
+            # set-comprehension snapshot only covered groups stashed by
+            # earlier calls. A group arriving again with a different block
+            # layout keeps its first layout, so the consumer applies each
+            # group exactly once.
+            for entry in ready_attention_group_reformat_block_ids:
+                if entry[0] in stashed_group_ids:
+                    continue
+                stashed_group_ids.add(entry[0])
+                stashed.append(entry)
 
     def _reformat_pending_kv_caches(self, request_id: str) -> None:
         with self.pending_reformat_lock:
@@ -1110,7 +1128,15 @@ class KVCacheRecvingThread(threading.Thread):
                 request_id,
                 shard_idx,
             )
-            self._apply_kv_cache_reformat(shard_reformats[shard_idx])
+            # A shard's bucket can mix pull counts: 1-pull indexer/MLA groups
+            # complete before the multi-pull GQA group, and hybrid models mix
+            # mamba and attention groups. The non-hybrid path below applies one
+            # num_group_pulls to the whole batch, so dispatch per pull count.
+            groups_by_pulls: dict[int, list[tuple[int, list[list[int]], int, list[int]]]] = {}
+            for entry in shard_reformats[shard_idx]:
+                groups_by_pulls.setdefault(entry[2], []).append(entry)
+            for num_group_pulls in sorted(groups_by_pulls):
+                self._apply_kv_cache_reformat(groups_by_pulls[num_group_pulls])
 
     def _apply_kv_cache_reformat(
         self,
