@@ -1,4 +1,0 @@
-pr: 18849
-entries:
-  - category: bugfix
-    text: Fixed AscendStore CPU KV cache events for sharded transfers and complete layerwise offloads, allowing cache affinity scheduling to discover confirmed CPU prefixes.
