@@ -763,8 +763,6 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         """Build DCP draft attention parameters for prefill or decode."""
         assert self.dcp_manager is not None
         if is_draft_model_prefill:
-            if self.attn_architecture == "MLA":
-                raise ValueError("MLA DCP prefill must use build_param_source")
             return [
                 params
                 for layer_name, metadata in draft_attn_metadata.items()
