@@ -1,0 +1,46 @@
+name: Publish Daily Issue
+
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:
+        description: 'Daily round identity passed by the main workflow'
+        required: true
+        type: string
+      case_name:
+        description: 'Failed Daily case name'
+        required: true
+        type: string
+      run_url:
+        description: 'Failed case execution link'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+# The whole lookup/create/read/merge/write operation is serialized. The default
+# pending queue replaces older events; max retains up to 100 pending updates.
+concurrency:
+  group: daily-issue-${{ inputs.request_id }}
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  update-issue:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Create or incrementally update the Daily Issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/workflows/scripts/update_daily_issue.py

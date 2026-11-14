@@ -239,7 +239,7 @@ jobs:
             -f test_cases='${{ needs.daily-select-tests.outputs.daily_a2_tests }}' \
             -f vllm_ascend_branch='main' \
             -f skip_build_image='true' \
-            -f request_id='daily' \
+            -f request_id='daily-${{ github.run_id }}-${{ github.run_attempt }}' \
             -f vllm_ascend_ref='main'
 
   daily-dispatch-a3:
@@ -269,7 +269,7 @@ jobs:
             -f test_cases='${{ needs.daily-select-tests.outputs.daily_a3_tests }}' \
             -f vllm_ascend_branch='main' \
             -f skip_build_image='true' \
-            -f request_id='daily' \
+            -f request_id='daily-${{ github.run_id }}-${{ github.run_attempt }}' \
             -f vllm_ascend_ref='main'
 
   daily-dispatch-a3-560t:
@@ -299,7 +299,7 @@ jobs:
             -f test_cases='${{ needs.daily-select-tests.outputs.daily_a3_560t_tests }}' \
             -f vllm_ascend_branch='main' \
             -f skip_build_image='true' \
-            -f request_id='daily' \
+            -f request_id='daily-${{ github.run_id }}-${{ github.run_attempt }}' \
             -f vllm_ascend_ref='main'
 
   daily-dispatch-a5:
@@ -329,7 +329,7 @@ jobs:
             -f test_cases='${{ needs.daily-select-tests.outputs.daily_a5_tests }}' \
             -f vllm_ascend_branch='main' \
             -f skip_build_image='true' \
-            -f request_id='daily' \
+            -f request_id='daily-${{ github.run_id }}-${{ github.run_attempt }}' \
             -f vllm_ascend_ref='main'
 
   update-estimated-times:
