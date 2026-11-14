@@ -116,6 +116,12 @@ def override_envs_for_invariance():
     # because the latter is already implicitly invoked when calling the former.
     torch_npu.npu.set_deterministic_level(3)
 
+    warnings.warn(
+        "After using 'torch_npu.npu.set_deterministic_level', "
+        "please do not use 'torch.use_deterministic_algorithms' anymore, "
+        "as it may cause unknown errors."
+    )
+    
     logger.debug(
         "Batch-invariant env override: weight_nz_mode=0, HCCL_DETERMINISTIC=strict, "
         "LCCL_DETERMINISTIC=1, deterministic_level=3",
