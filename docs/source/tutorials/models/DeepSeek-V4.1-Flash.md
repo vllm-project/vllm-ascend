@@ -296,6 +296,19 @@ vLLM Ascend revision.
         }'
     ```
 
+    Long-context notes (measured on one Atlas 850E node, 8 x Ascend 950DT,
+    64K-in / 1K-out; see also [Section 11](#11-limitations)):
+
+    - For 64K-context serving, leave `--speculative-config` off. On this
+      hardware, enabling DSpark (5 draft tokens) roughly doubled per-token decode
+      latency at 64K while barely changing time-to-first-token; the gain only
+      appears when the acceptance rate is high (short prompts).
+    - If a larger prefill chunk is used (`--max-num-batched-tokens 16384`),
+      `--gpu-memory-utilization 0.90` hits NPU OOM; 0.85 leaves activation
+      headroom. With the 4096-token chunk used above, 0.90 is fine.
+    - `--max-model-len 69632` is enough for 64K input + 1K output; raise it only
+      if longer contexts are required and memory allows.
+
 === "A3 series"
 
     This configuration runs Prefill and Decode on one Atlas 800 A3 server. It
@@ -2883,3 +2896,8 @@ For common environment, installation, and parameter issues, refer to the
 - The 950DT pooling example uses Memcache for storage and
   `MooncakeHybridConnector` for P-to-D KV transfer. Verify external pool
   hits as described in [Section 5.3.1.4](#5314-start-the-proxy-and-verify-pooling).
+- On Ascend 950DT (A5), DeepSeek-V4.1-Flash currently supports only DP8/TP1:
+  TP>1 fails while reshaping block-quantized weight scales
+  ([#20398](https://github.com/vllm-project/vllm-ascend/issues/20398)), and PP>1
+  is rejected because Engram requires `PP=DCP=1`. Parallelism beyond DP
+  therefore cannot be used for this model on A5 yet.
