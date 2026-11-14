@@ -909,6 +909,7 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         self,
         qkv: torch.Tensor,
         positions: torch.Tensor,
+        gate_out: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
         # Preserve the MTP fallback until draft FULL-graph replay is validated
         # separately. Removing the gathered temporary alone does not establish
@@ -916,7 +917,11 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         # ForwardContext has no draft-model flag. The layer name is fixed when
         # the target or MTP model is built and remains stable during graph replay.
         if self.layer_name.startswith("mtp."):
-            return super()._project_qkv_gate(qkv, positions)
+            q, k, v, projected_gate = super()._project_qkv_gate(qkv, positions)
+            if gate_out is not None and projected_gate is not None:
+                gate_out.copy_(projected_gate.view_as(gate_out))
+                projected_gate = gate_out.view(projected_gate.shape)
+            return q, k, v, projected_gate
         if not self._main_fused_norm_rope_eligible(qkv, positions):
             # Graph warmup can use padded projection geometry that is outside
             # the Ascend fused kernel ABI. Keep the portable upstream
@@ -935,12 +940,10 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         if prepared is not None and tuple(prepared.shape) == expected_shape:
             cache = prepared.to(device=qkv.device, dtype=qkv.dtype)
             rope_positions = None
-        return torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
+        op_kwargs = dict(
             qkv=qkv,
             q_weight=q_weight,
             k_weight=k_weight,
-            cos_sin=cache,
-            positions=rope_positions,
             num_q_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_dim,
@@ -948,9 +951,26 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
             mrope_section=list(self.rotary_emb.mrope_section),
             is_interleaved=self.rotary_emb.mrope_interleaved,
             rope_dim=self.rotary_emb.rotary_dim,
-            has_gate=True,
             weight_offset=1.0,
         )
+        if gate_out is None:
+            return torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
+                **op_kwargs,
+                cos_sin=cache,
+                positions=rope_positions,
+                has_gate=True,
+            )
+        gate_cos_sin = cache
+        if rope_positions is not None:
+            safe_positions = rope_positions.clamp(0, cache.shape[0] - 1).contiguous()
+            gate_cos_sin = cache[safe_positions]
+        flat_gate = gate_out.view(qkv.shape[0], -1)
+        q, k, v = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope_with_gate_out(
+            **op_kwargs,
+            cos_sin=gate_cos_sin,
+            gate_output=flat_gate,
+        )
+        return q, k, v, flat_gate
 
     def bind_kv_cache(self, kv_cache: QSAKVCache) -> None:
         self.kv_cache = kv_cache
@@ -992,13 +1012,14 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         # Q/K/V preparation and indexer paths, so materialize the same outputs
         # here before entering the existing cache/update transaction.
         if qkv is not None:
-            q, k, v, projected_gate = self._project_qkv_gate(qkv, positions)
+            if gate is None:
+                raise RuntimeError("Fused QSA preparation requires an output gate")
+            q, k, v, projected_gate = self._project_qkv_gate(qkv, positions, gate_out=gate)
             query = q.view(-1, self.num_heads, self.head_dim)
             key = k.view(-1, self.num_kv_heads, self.head_dim)
             value = v.view(-1, self.num_kv_heads, self.head_dim)
-            if gate is None or projected_gate is None:
+            if projected_gate is None:
                 raise RuntimeError("Fused QSA preparation requires an output gate")
-            gate.copy_(projected_gate.view_as(gate))
 
         if (index_query is None) != (index_token_k is None):
             raise RuntimeError("QSA indexer projection outputs must be provided together")
