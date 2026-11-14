@@ -23,7 +23,7 @@ import torch
 import torch.distributed as dist
 from torch import nn
 from torch.nn.parameter import Parameter
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.distributed import divide
 from vllm.distributed.parallel_state import get_pcp_group, get_tp_group
 from vllm.forward_context import is_forward_context_available
@@ -223,6 +223,11 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         quant_method = None
         if quant_config is not None:
             quant_method = quant_config.get_quant_method(self, prefix=prefix)
+        current_config = get_current_vllm_config_or_none()
+        if isinstance(self, ParallelLMHead) and current_config is not None:
+            from vllm_ascend.quantization.lm_head import select_lm_head_method
+
+            quant_method = select_lm_head_method(self, prefix, quant_config, quant_method, current_config)
         if quant_method is None:
             quant_method = UnquantizedEmbeddingMethod()
 

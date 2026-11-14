@@ -51,6 +51,9 @@ from ..base import (
 )
 from ..registry import register_scheme
 
+_LM_HEAD_QUANT_CHUNK_ROWS = 4096
+_LM_HEAD_MX_GROUP_SIZE = 32
+
 
 @register_scheme("W8A8_MXFP8", "linear")
 class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
@@ -355,6 +358,44 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
 
         # Mark as not transformed (ready for weight loading)
         layer._mxfp8_transformed = False
+
+
+@register_scheme("W8A8_MXFP8", "lm_head")
+class AscendW8A8MXFP8DynamicLmHeadMethod(AscendW8A8MXFP8DynamicLinearMethod):
+    """Quantize floating-point LM head weights into per-group MXFP8 on A5."""
+
+    def __init__(self):
+        super().__init__()
+        self.group_size = _LM_HEAD_MX_GROUP_SIZE
+
+    def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, torch.Tensor]:
+        if params_dtype not in (torch.float16, torch.bfloat16):
+            raise ValueError("Online LM head quantization requires float16 or bfloat16 weights.")
+        return {"weight": torch.empty(output_size, input_size, dtype=params_dtype)}
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if getattr(layer, "_mxfp8_transformed", False):
+            return
+        weight = layer.weight.data
+        if weight.dtype not in (torch.float16, torch.bfloat16):
+            raise ValueError("Online LM head quantization requires float16 or bfloat16 weights.")
+        quantized_weight = torch.empty_like(weight, dtype=torch.float8_e4m3fn)
+        weight_scale = layer.weight_scale.data
+        for start in range(0, weight.shape[0], _LM_HEAD_QUANT_CHUNK_ROWS):
+            end = min(start + _LM_HEAD_QUANT_CHUNK_ROWS, weight.shape[0])
+            quantized_chunk, scale = torch_npu.npu_dynamic_mx_quant(
+                weight[start:end].contiguous(),
+                dst_type=torch.float8_e4m3fn,
+                block_size=self.group_size,
+                scale_alg=self.dynamic_mx_quant_scale_alg,
+            )
+            quantized_weight[start:end].copy_(quantized_chunk)
+            # MX scales include an even-group pad; the linear method adds it
+            # when converting the checkpoint-shaped scales to the matmul layout.
+            weight_scale[start:end].copy_(scale.reshape(end - start, -1)[:, : weight_scale.shape[1]])
+        layer.weight.data = quantized_weight
+        del weight, quantized_weight
+        super().process_weights_after_loading(layer)
 
 
 @register_scheme("W8A8_MXFP8", "moe")
