@@ -11,6 +11,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import (
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import (
     MooncakeBaseConnector,
     MooncakeConnector,
+    MooncakeConnectorV2,
     MooncakePullConnector,
     MooncakePushConnector,
 )
@@ -40,6 +41,7 @@ __all__ = [
     "MooncakeBaseConnectorScheduler",
     "MooncakeBaseConnectorWorker",
     "MooncakeConnector",
+    "MooncakeConnectorV2",
     "MooncakeConnectorMetadata",
     "MooncakeKVConnectorStats",
     "MooncakePullConnector",
