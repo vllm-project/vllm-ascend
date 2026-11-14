@@ -1209,7 +1209,6 @@ layerwise setting and topology.
 
             export PROMETHEUS_MULTIPROC_DIR=/dev/shm/vllm_metrics && mkdir -p $PROMETHEUS_MULTIPROC_DIR
             export HCCL_DFS_CONFIG="task_exception:off,inconsistent_check:off"
-            export VLLM_ASCEND_DP_ALLREDUCE_ON_NPU=1
 
             unset ftp_proxy
             unset https_proxy
@@ -2694,7 +2693,6 @@ Select the tab that matches the deployment hardware and its Prefill topology.
 
             export PROMETHEUS_MULTIPROC_DIR=/dev/shm/vllm_metrics && mkdir -p $PROMETHEUS_MULTIPROC_DIR
             export HCCL_DFS_CONFIG="task_exception:off,inconsistent_check:off"
-            export VLLM_ASCEND_DP_ALLREDUCE_ON_NPU=1
 
             unset ftp_proxy
             unset https_proxy
@@ -4012,7 +4010,6 @@ Select the tab that matches your deployment hardware.
 
             export PROMETHEUS_MULTIPROC_DIR=/dev/shm/vllm_metrics && mkdir -p $PROMETHEUS_MULTIPROC_DIR
             export HCCL_DFS_CONFIG="task_exception:off,inconsistent_check:off"
-            export VLLM_ASCEND_DP_ALLREDUCE_ON_NPU=1
 
             unset ftp_proxy
             unset https_proxy
