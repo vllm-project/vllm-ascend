@@ -67,7 +67,10 @@ def apply_moe_mlp(
                 quant_method=quant_method,
             )
 
-    if quant_method.supports_fused_activation(mlp_compute_input.activation):
+    # The MXFP4 GMM+SwiGLU+quant kernel has no clamp argument. Keep the
+    # separate activation path so positive limits are applied before SwiGLU.
+    needs_unfused_swiglu = mlp_compute_input.quant.is_w4a4_mxfp and mlp_compute_input.swiglu_limit > 0
+    if quant_method.supports_fused_activation(mlp_compute_input.activation) and not needs_unfused_swiglu:
         hidden_states, act_out_scale = quant_method.apply_gmm1_act_quant(mlp_compute_input)
     else:
         hidden_states = quant_method.apply_gmm1(mlp_compute_input)

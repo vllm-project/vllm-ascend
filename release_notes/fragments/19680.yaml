@@ -1,0 +1,4 @@
+pr: 19680
+entries:
+  - category: bugfix
+    text: Fixed W4A4 MXFP4 routed experts ignoring positive SwiGLU limits by applying clipping through the unfused activation path.
