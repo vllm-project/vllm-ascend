@@ -8,7 +8,6 @@ from dataclasses import replace
 import torch
 from vllm.models.kimi_k3.nvidia.kda_metadata import KimiK3KDAMetadataBuilder
 from vllm.v1.attention.backend import AttentionCGSupport
-from vllm.v1.attention.backends.utils import mamba_get_block_table_tensor
 
 from vllm_ascend.ops.gdn_attn_builder import (
     GDNCausalConv1dMetadata,
@@ -18,6 +17,9 @@ from vllm_ascend.ops.gdn_attn_builder import (
     GDNSpecDecodeMetadata,
     _build_actual_seq_lengths,
     _build_non_spec_chunked_prefill_metadata,
+)
+from vllm_ascend.ops.triton.mamba.align_block_table import (
+    mamba_get_block_table_tensor,
 )
 
 
