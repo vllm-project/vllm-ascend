@@ -107,6 +107,95 @@ Choose one complete path based on your requirements. Container-based paths requi
 
 {% include "getting_started/installation/base_environment.inc.md" %}
 
+### (Optional) Use Ascend Docker Runtime {: #installation-ascend-docker-runtime }
+
+The container commands in [Quick Start](quick_start.md) pass the NPU device nodes and the driver paths to `docker run` explicitly, so they work on any host with a working Ascend driver. If Ascend Docker Runtime is installed on the host, the same container can be started with a single device variable instead.
+
+Ascend Docker Runtime is an OCI prestart hook that runs between the `created` and `running` container states. For every container it starts, it mounts the NPUs selected by `ASCEND_VISIBLE_DEVICES`, limits the container's device cgroup to those NPUs, and mounts the host CANN runtime libraries into the container. It does not modify the Docker engine and does not replace the Ascend driver.
+
+#### Install and verify {: #installation-ascend-docker-runtime-install }
+
+Install the package that matches the CANN release on the host, following the [MindCluster installation guide](https://www.hiascend.com/document/detail/zh/mindcluster/latest/). Run the installer as `root` on every node that runs containers, including each node of a multi-node deployment:
+
+```bash
+chmod +x Ascend-docker-runtime_<version>_linux-<arch>.run
+./Ascend-docker-runtime_<version>_linux-<arch>.run --install
+```
+
+The installer updates `/etc/docker/daemon.json` and restarts Docker. Confirm that the runtime is registered and is the default:
+
+{% raw %}
+```bash
+docker info --format 'default={{.DefaultRuntime}}'
+docker info --format '{{range $n, $_ := .Runtimes}}{{$n}} {{end}}'
+```
+{% endraw %}
+
+The first command must print `default=ascend`, and the second must list the registered runtimes, including `ascend`:
+
+```text
+default=ascend
+ascend runc
+```
+
+The `--format` check reads the fields directly, so it does not depend on the order or the language of the `docker info` output. The restart stops the containers that are already running, so schedule the installation on shared nodes.
+
+#### Start a container {: #installation-ascend-docker-runtime-start }
+
+With the runtime installed, replace the `--device` and `-v` flags that pass the devices and the driver into the container with `ASCEND_VISIBLE_DEVICES`:
+
+```bash
+export MODEL_CACHE="${HOME}/.cache"
+
+docker run --rm -it \
+    --name vllm-ascend \
+    --shm-size=1g \
+    -e ASCEND_VISIBLE_DEVICES=0 \
+    -v "$MODEL_CACHE:/root/.cache" \
+    -p 8000:8000 \
+    quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }} \
+    bash
+```
+
+Set the value for your hardware, using explicit device IDs:
+
+| Hardware | `ASCEND_VISIBLE_DEVICES` |
+| --- | --- |
+| A2 series products | `0` |
+| A3 series products | `0,1` |
+| Atlas 300I DUO, Atlas 200I Pro | `0` |
+| 950DT Products | `0` |
+
+A3 exposes each NPU as two DIE devices, which is why the Quick Start commands map two devices there. The image tag also selects the hardware variant, for example `{{ vllm_ascend_version }}-a3` on A3.
+
+???+ warning "The device variable is not interchangeable with `--device`"
+
+    - `all` is not supported. The runtime exits with an error and the container does not start.
+    - Do not omit the variable. A container started without it sees no NPU, even though the runtime itself is configured correctly.
+    - `ASCEND_VISIBLE_DEVICES` and `--device` are additive. Passing both exposes the union of the two selections, so remove the `--device` flags instead of combining them.
+
+???+ note "If `ascend` is not the default runtime"
+
+    A host can register the runtime without making it the default. In that case add `--runtime ascend` to `docker run`, or set `"default-runtime": "ascend"` in `/etc/docker/daemon.json` and restart Docker.
+
+#### Mount additional host paths {: #installation-ascend-docker-runtime-mounts }
+
+The runtime mounts the host paths listed in `/etc/ascend-docker-runtime.d/base.list` into every container it starts. The default list covers the driver libraries, DCMI, and `npu-smi`. It does not include `/usr/local/Ascend/driver/version.info` or `/etc/ascend_install.info`, which the explicit `-v` flags in the Quick Start commands provide.
+
+If containers need those files, for example to install or upgrade CANN inside the container, add them to `/etc/ascend-docker-runtime.d/base.list`. After the addition, the list on a host with Ascend Docker Runtime 26.1.0 looks like:
+
+```text
+/usr/local/Ascend/driver/lib64
+/usr/local/Ascend/driver/include
+/usr/local/dcmi
+/usr/local/bin/npu-smi
+/var/queue_schedule
+/usr/local/Ascend/driver/version.info
+/etc/ascend_install.info
+```
+
+The added paths are mounted read-only. The change applies to containers created afterwards; running containers must be recreated, and Docker does not need a restart. Adding file paths requires a runtime release that accepts them. Some older releases treat the list as directories only and fail to start any new container when a file path is present, so keep the explicit `-v` flags when the runtime version is unknown.
+
 ### Verify the installation {: #installation-verification }
 
 Go to [Quick Start > Inference](quick_start.md#quick-start-inference) and run a simple inference test to verify the installation.
