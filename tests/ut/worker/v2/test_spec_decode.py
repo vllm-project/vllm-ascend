@@ -175,14 +175,20 @@ def test_init_speculator_dflash(monkeypatch):
     speculator_cls.assert_called_once_with(config, device)
 
 
-def test_init_speculator_mtp(monkeypatch):
-    """Test dispatching the regular MTP speculative decoding path."""
-    config = _make_config("mtp")
+@pytest.mark.parametrize(
+    ("architectures", "class_name"),
+    [
+        ([], "AscendMTPSpeculator"),
+        (["Glm5NextMTPModel"], "AscendGlm5NextMTPSpeculator"),
+    ],
+)
+def test_init_speculator_mtp(monkeypatch, architectures, class_name):
+    config = _make_config("mtp", architectures=architectures)
     device = torch.device("cpu")
     speculator_cls = _mock_speculator_module(
         monkeypatch,
         "vllm_ascend.worker.v2.spec_decode.mtp.speculator",
-        "AscendMTPSpeculator",
+        class_name,
     )
 
     result = init_speculator(config, device)
