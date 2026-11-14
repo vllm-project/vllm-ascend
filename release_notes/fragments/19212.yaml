@@ -1,0 +1,83 @@
+pr: 19212
+entries:
+  - category: config
+    text: >-
+      MooncakeConnectorV2 with Sparse KV offload requires the same original
+      prompt on P and D. D generates the complete output; appending P's first
+      output token to D's prompt is rejected before receiving KV. Ordinary
+      Mooncake transfers retain their existing first-token behavior.
+  - category: breaking
+    text: >-
+      Retired the independent DSA Host KV allocator, TP-shared pool and their
+      V1/V2 CPU-store branches. Nonempty dsa_sparse_attention_config settings
+      now fail with a migration message. Use MooncakeConnectorV2, ModelRunner V2
+      and sparse_kv_offload_config for Manager-owned Host KV with LIM + Copy-SFA.
+      Ordinary HBM Mooncake transfers and the existing SFA connector are preserved.
+  - category: config
+    text: >-
+      MooncakeConnectorV2 with Sparse KV offload now rejects unsupported
+      MultiConnector and DSpark combinations at startup. Consumers require the
+      default fail policy, including keep_device_kv_cache debugging mode, until
+      failed-PD recovery to local prefill is supported. The existing SFA
+      connector configuration is unchanged.
+  - category: performance
+    text: >-
+      Reused TP-shared Host KV block ownership plans across layers and KV
+      components within each Mooncake pull spec call, and built block groups
+      only for the required coalescing modes.
+  - category: breaking
+    text: >-
+      Removed the experimental DSA CPU-offload staging extension from
+      MooncakeLayerwiseConnector. This unsupported combination now fails before
+      allocation; request-level DSA Mooncake transfers and the separate SFA
+      layerwise Decode-offload path are preserved.
+  - category: performance
+    text: >-
+      Reduced construction overhead for immutable DSA Mooncake staging copy and
+      batch records while preserving target bounds and overlap validation.
+  - category: config
+    text: >-
+      Added VLLM_ASCEND_DSA_PD_MOONCAKE_COPY_STREAMS_PER_BANK (default 1) to
+      distribute independent DSA Host KV landing copies across multiple streams
+      per bank without changing Host worker count or staging capacity.
+      All participating streams complete before staging reuse or receive return.
+  - category: performance
+    text: >-
+      Reused one completion event per DSA Mooncake staging bank and processed
+      each bank queue in one Host task to reduce event and Future overhead,
+      preserving staging reuse waits and final landing synchronization.
+  - category: performance
+    text: Reused the request staging buffer for DSA Host KV landing without repeating capacity checks for each copy.
+  - category: performance
+    text: Cached DSA Host KV byte views with lifecycle-aware invalidation to avoid rebuilding them for every landing copy.
+  - category: performance
+    text: Reused the resolved Host KV target and byte offset from each receive plan during DSA landing.
+  - category: performance
+    text: Indexed DSA Mooncake buffer ranges to avoid rebuilding and scanning the registry on every address lookup.
+  - category: performance
+    text: Carried local KV destination metadata through Mooncake V2 receive plans to avoid rediscovering each address classification.
+  - category: performance
+    text: >-
+      Reused bounded zero-copy staging slices and repeated Host KV destination slices
+      to reduce DSA Mooncake landing metadata construction.
+  - category: performance
+    text: >-
+      Reduced CPU work for Mooncake V2 transfer address lists with a single-group
+      fast path and bulk construction for fragmented requests.
+  - category: performance
+    text: >-
+      Reduced repeated address conversion and alignment calculations while
+      splitting DSA Mooncake Host KV transfers into staging slots.
+  - category: breaking
+    text: >-
+      DSA Mooncake Host workers now follow VLLM_ASCEND_DSA_PD_MOONCAKE_BANKS
+      (default 4) when pipelining is enabled, with one worker per effective bank
+      and serial submission for a single bank, probes, or overlapping destinations.
+      Removed VLLM_ASCEND_DSA_PD_MOONCAKE_BANK_WORKERS and ignored its old values,
+      so the default pipelined setup now uses four workers instead of the caller
+      thread while preserving staging capacity and ownership until join and drain.
+  - category: performance
+    text: >-
+      Assigned Manager-owned shared Host KV receives to balanced consecutive
+      destination-block ranges instead of interleaved modulo ownership, preserving
+      source pairing and merging only byte-contiguous transfers.

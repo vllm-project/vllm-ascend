@@ -6,7 +6,9 @@ class GlobalTE:
         self.transfer_engine = None
         self._initialization_attempted = False
         self.is_register_buffer: bool = False
-        self.registered_buffers: list[tuple[int, int]] = []
+        # Keep registration order across sleep/wake cycles.
+        # False entries remain known, but must be registered again before use.
+        self.registered_buffers: dict[tuple[int, int], bool] = {}
         self.transfer_engine_lock = threading.Lock()
         self.register_buffer_lock = threading.Lock()
 
@@ -45,17 +47,29 @@ class GlobalTE:
                     self.transfer_engine = engine
         return self.transfer_engine
 
-    def register_buffer(self, ptrs: list[int], sizes: list[int]):
+    def register_buffer(
+        self,
+        ptrs: list[int],
+        sizes: list[int],
+    ):
         with self.register_buffer_lock:
             assert self.transfer_engine is not None, "Transfer engine must be initialized"
-            if self.is_register_buffer:
-                return
+            # Register each buffer at most once, so lazily allocated buffers
+            # (e.g. the NPU staging window) can register after the initial
+            # kv_caches registration instead of being silently skipped.
             for ptr, size in zip(ptrs, sizes):
-                ret_value = self.transfer_engine.register_memory(ptr, size)
-                if ret_value != 0:
-                    raise RuntimeError("Mooncake memory registration failed.")
-            self.registered_buffers = list(zip(ptrs, sizes))
-            self.is_register_buffer = True
+                key = (int(ptr), int(size))
+                if self.registered_buffers.get(key, False):
+                    continue
+                self._register_memory(*key)
+                self.registered_buffers[key] = True
+                self.is_register_buffer = True
+
+    def _register_memory(self, ptr: int, size: int):
+        assert self.transfer_engine is not None, "Transfer engine must be initialized"
+        ret_value = self.transfer_engine.register_memory(ptr, size)
+        if ret_value != 0:
+            raise RuntimeError(f"Mooncake memory registration failed for ptr={ptr:#x}, ret_value={ret_value}")
 
     def unregister_buffer(self):
         with self.register_buffer_lock:
@@ -64,27 +78,29 @@ class GlobalTE:
             assert self.transfer_engine is not None, "Transfer engine must be initialized"
 
             # Ascend Direct unregister_memory also disconnects peers.
-            for ptr, _ in self.registered_buffers:
+            for key, registered in self.registered_buffers.items():
+                if not registered:
+                    continue
+                ptr = key[0]
                 ret_value = self.transfer_engine.unregister_memory(ptr)
                 if ret_value != 0:
                     raise RuntimeError(f"Mooncake memory unregistration failed for ptr={ptr:#x}, ret_value={ret_value}")
 
-            self.is_register_buffer = False
+                self.registered_buffers[key] = False
+                self.is_register_buffer = any(self.registered_buffers.values())
 
     def reregister_buffer(self):
         with self.register_buffer_lock:
-            if self.is_register_buffer or not self.registered_buffers:
+            if not self.registered_buffers:
                 return
             assert self.transfer_engine is not None, "Transfer engine must be initialized"
 
-            for ptr, size in self.registered_buffers:
-                ret_value = self.transfer_engine.register_memory(ptr, size)
-                if ret_value != 0:
-                    raise RuntimeError(
-                        f"Mooncake memory re-registration failed for ptr={ptr:#x}, ret_value={ret_value}"
-                    )
-
-            self.is_register_buffer = True
+            for key, registered in self.registered_buffers.items():
+                if registered:
+                    continue
+                self._register_memory(*key)
+                self.registered_buffers[key] = True
+                self.is_register_buffer = True
 
 
 global_te = GlobalTE()

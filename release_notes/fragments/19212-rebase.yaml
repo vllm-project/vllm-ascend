@@ -1,0 +1,22 @@
+pr: 19212
+entries:
+  - category: feature
+    text: Added an explicit MooncakeSFAConnector entry backed by Mooncake Pull subclasses, retaining existing MooncakeConnectorV2 configurations through an outer compatibility adapter and keeping SFA policy outside the common Mooncake package.
+  - category: bugfix
+    text: Limited Mooncake SFA preparation hooks to the pull connector so layerwise push workers do not call unsupported sparse preparation.
+  - category: bugfix
+    text: Retained Mooncake Host landing resources after failed NPU waits and deferred receive completion until pending copies were drained.
+  - category: bugfix
+    text: Rejected overlapping Mooncake V2 Host destinations before starting a receive, including any direct HBM reads in a mixed transfer.
+  - category: bugfix
+    text: Preserved late Mooncake staging registrations and CPU location hints across sleep and wake cycles, including retries after partial registration failures.
+  - category: bugfix
+    text: Kept Mooncake DSA configuration optional for direct AscendConfig construction after the upstream config migration.
+  - category: feature
+    text: Adapted DSA Host KV offload to MooncakeConnectorV2 with ModelRunner V2, preserving bounded staging, pipeline landing, and completion ordering.
+  - category: feature
+    text: Connected MooncakeConnectorV2 with ModelRunner V2 to the existing SFA Host KV manager and LIM + Copy-SFA backend, preserving pipelined Host landing and directly priming rank-local HBM hot rows and circular tails during PD, without changing the existing SFA connector flow.
+  - category: bugfix
+    text: Used the native int32 byte-length ABI for SFA dense hot-row initialization while retaining int64 source and destination offsets.
+  - category: bugfix
+    text: Matched Mooncake V2 hot-row and circular-tail PD initialization to SFA's full received KV extent, while separately restoring history for last-token replay across a block-aligned long prefill.

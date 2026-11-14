@@ -47,6 +47,7 @@ OFFLOAD_TOPK_BUFFER_K_INDEX = 4
 OFFLOAD_TOPK_BUFFER_V_INDEX = 5
 OFFLOAD_STORE_PORT_BASE = 8500
 
+
 FSA_EXTERNAL_PLAN_READY_MARKER = 0x5A45
 FSA_PAIRED_SELECTION_COPY_MARKER = 0x5A56
 FSA_SELECTION_MEMBERSHIP_MAP_INT16_COUNT = 16376
@@ -1061,7 +1062,9 @@ class SparseKVOffloadManager:
             )
             dst_block_tokens = torch.arange(nblocks, dtype=torch.int64, device=topk_k.device) * block_size
             dst_offsets = (slot * stride_tokens + dst_block_tokens.view(1, -1).expand(2, -1)) * token_bytes
-            lengths_bytes = lengths.view(1, -1).expand(2, -1) * token_bytes
+            # Byte offsets need int64, but sparse_copy reads int32 lengths.
+            # Passing int64 silently turns every second length into zero.
+            lengths_bytes = (lengths.view(1, -1).expand(2, -1) * token_bytes).to(torch.int32)
             count = torch.full((1,), 2 * nblocks, dtype=torch.int32, device=topk_k.device)
             for host_bases, device_bases in zip(self.copy_sfa_host_bases, self.copy_sfa_device_bases):
                 sources = (src_offsets + host_bases).reshape(-1)

@@ -506,6 +506,7 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
         """Register configured KV cache allocations and publish metadata."""
         self.num_blocks = self.kv_cache_config.num_blocks
         logger.info("num_blocks: %s", self.num_blocks)
+        kv_caches = self._prepare_transfer_caches(kv_caches)
         self.kv_caches = kv_caches
         self._build_kv_cache_spec_mappings()
         owners = (
@@ -613,7 +614,9 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
 
         register_regions = collect_configured_register_regions(self.kv_cache_config, kv_caches)
         validate_register_region_count(register_regions)
-        global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
+        device_regions = self._get_transfer_register_regions(register_regions)
+        if device_regions:
+            global_te.register_buffer([ptr for ptr, _ in device_regions], [length for _, length in device_regions])
 
         transfer_metadata = MooncakeTransferMetadata(
             engine_id=self.engine_id,
@@ -643,8 +646,8 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
             self.engine_id,
             len(layer_names),
             self.num_blocks,
-            len(register_regions.ptrs),
-            sum(register_regions.lengths),
+            len(device_regions),
+            sum(length for _, length in device_regions),
         )
 
         logger.debug(
@@ -653,6 +656,16 @@ class MooncakeBaseConnectorWorker(MooncakeTransferAddressMixin):
             register_regions.ptrs,
             register_regions.lengths,
         )
+
+    def _prepare_transfer_caches(
+        self, kv_caches: dict[str, torch.Tensor | list[torch.Tensor]]
+    ) -> dict[str, torch.Tensor | list[torch.Tensor]]:
+        """Return the cache views used to build transfer metadata."""
+        return kv_caches
+
+    def _get_transfer_register_regions(self, register_regions) -> list[tuple[int, int]]:
+        """Select registered storage independently of the published cache views."""
+        return list(zip(register_regions.ptrs, register_regions.lengths))
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         """Compatibility wrapper for the legacy completion API."""

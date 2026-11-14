@@ -103,12 +103,26 @@ def test_fused_dense_fill_tensor_block_table_promotes_offsets_without_to():
     manager.copy_sfa_kv = MagicMock()
     block_table = torch.tensor([[17_000_000]], dtype=torch.int32)
 
-    with patch.object(torch.Tensor, "to", side_effect=AssertionError("Tensor block table must not call to()")):
+    original_to = torch.Tensor.to
+
+    def to_without_block_table_copy(tensor, *args, **kwargs):
+        # Reject casts/transfers of the table and its views, while allowing
+        # the copy operator's lengths to be converted to int32.
+        assert tensor.untyped_storage().data_ptr() != block_table.untyped_storage().data_ptr()
+        return original_to(tensor, *args, **kwargs)
+
+    with patch.object(torch.Tensor, "to", new=to_without_block_table_copy):
         manager.dense_fill_copy_sfa_rows({0: (0, 128)}, block_size=128, block_table=block_table)
 
-    sources = manager.copy_sfa_kv.call_args.args[0]
+    sources, destinations, lengths, count = manager.copy_sfa_kv.call_args.args
     assert sources.dtype == torch.int64
     assert sources.tolist() == [8_704_001_000, 8_704_002_000]
+    assert destinations.dtype == torch.int64
+    assert destinations.tolist() == [3000, 4000]
+    assert lengths.dtype == torch.int32
+    assert lengths.tolist() == [512, 512]
+    assert count.dtype == torch.int32
+    assert count.tolist() == [2]
 
 
 def test_fused_dense_fill_rejects_tensor_block_table_on_another_device():

@@ -339,6 +339,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         if type(self._kv_lease_duration) is not int or self._kv_lease_duration < 6:
             raise ValueError("Mooncake kv_lease_duration must be an integer of at least 6 seconds")
 
+        self._initialize_request_state(vllm_config)
         if self.kv_transfer_config.is_kv_consumer:
             recving_ready_event = threading.Event()
             self._recving_thread = MooncakeSchedulerRecvingThread(recving_ready_event)
@@ -346,6 +347,9 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             recving_ready_event.wait()
             self._heartbeat_thread = MooncakeHeartbeatThread(self._kv_lease_duration // 6)
             self._heartbeat_thread.start()
+
+    def _initialize_request_state(self, vllm_config: "VllmConfig") -> None:
+        """Initialize subclass policy before any background thread is started."""
 
     def on_new_request(self, request: "Request") -> None:
         """Track remote KV leases from scheduler admission until receive completion."""
@@ -481,8 +485,11 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         # Only trigger one transfer for a request.
         params["do_remote_prefill"] = False
 
+    def _create_connector_metadata(self) -> MooncakeConnectorMetadata:
+        return MooncakeConnectorMetadata()
+
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
-        meta = MooncakeConnectorMetadata()
+        meta = self._create_connector_metadata()
 
         for (
             req_id,
@@ -578,6 +585,9 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             "last_token_id": request.output_token_ids[-1],
         }
 
+    def _on_receive_finished(self, request_id: str) -> None:
+        """A receive has completed on every worker, before its ACK is queued."""
+
     def update_connector_output(
         self,
         connector_output: KVConnectorOutput,
@@ -588,6 +598,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             if self._heartbeat_thread is not None:
                 self._heartbeat_thread.remove_request(req_id)
             remote = self._reqs_recv_info.pop(req_id, None)
+            self._on_receive_finished(req_id)
             if remote is not None:
                 if self._recving_thread is None:
                     raise RuntimeError("Producer Mooncake scheduler received a receive-completion event")

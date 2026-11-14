@@ -43,8 +43,9 @@ from .helpers import (
 )
 
 
-def make_thread(**overrides: object) -> MooncakePullRecvingThread:
-    thread = MooncakePullRecvingThread.__new__(MooncakePullRecvingThread)
+def make_thread(*, thread_cls=MooncakePullRecvingThread, **overrides: object) -> MooncakePullRecvingThread:
+    thread = thread_cls.__new__(thread_cls)
+    thread.staging_reader = None
     thread.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=16))
     thread.tp_rank = 0
     thread.tp_size = 1
@@ -1248,7 +1249,8 @@ def test_handle_requests_attributes_failed_tp_to_affected_requests(
     completed_result = MagicMock(wraps=completed_future.result)
     completed_future.result = completed_result  # type: ignore[method-assign]
 
-    def submit(_func: object, _pp: int, _pcp: int, tp_rank: int, *_args: object) -> Future[None]:
+    def submit(_func: object, _pp: int, _pcp: int, tp_rank: int, *_args: object, **kwargs: object) -> Future[None]:
+        assert kwargs["requests"] is requests
         if tp_rank == 0:
             return completed_future
         if submission_error:

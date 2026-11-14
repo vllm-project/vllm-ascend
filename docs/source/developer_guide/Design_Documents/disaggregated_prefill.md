@@ -170,6 +170,104 @@ for staging.
 For startup scripts and a proxy example, see
 [D2RH deployment on Atlas 850E](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md#d2rh-deployment-on-atlas-850e-uboe).
 
+#### DSA Host KV offload with MooncakeConnectorV2
+
+DSA CPU-offloaded KV uses request-level Mooncake transfers after Prefill finishes.
+`MooncakeLayerwiseConnector` does not support this DSA CPU-offload path and is
+rejected before offloaded KV allocation. Its ordinary layerwise transfer remains
+available without DSA CPU offload. `SfaRemoteD2HConnector` retains its separate
+layerwise Decode-offload protocol.
+
+With vLLM 0.32.0, enable ModelRunner V2 with
+`VLLM_USE_V2_MODEL_RUNNER=1` and select `MooncakeConnectorV2` on both nodes:
+
+```json
+{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer"}
+```
+
+Set `kv_role` to `kv_producer` on P. On D, enable the existing Manager
+path in `additional_config`:
+
+```json
+{
+  "sparse_kv_offload_config": {
+    "enabled": true,
+    "topk_buffer_size": 2048,
+    "dram_size_per_dp_GB": 128,
+    "use_fused_overlap": false
+  }
+}
+```
+
+`SparseKVOffloadManager` owns Host KV, hot rows and current-token writeback.
+Mooncake borrows its cache views and transfers Host-bound bytes through the
+existing bounded HBM staging window. Indexer, dense-prefix and circular-tail
+HBM destinations retain their direct READ plans. Completion requires the
+existing landing/event drain before decode can use the received KV.
+
+P and D must receive the same original prompt. Discard P's first output token
+and let D replay the final prompt token and generate the complete output, as
+with the SFA connector. Appending P's first output token to D's prompt is not
+supported with Sparse KV offload and is rejected before receiving KV. Ordinary
+Mooncake transfers retain their existing first-token behavior.
+
+The retired `dsa_sparse_attention_config` is rejected when nonempty. Remove
+its CPU-store and TP-shared-pool settings and use the Manager configuration
+above. The experimental independent Host pool and its V1/V2 allocation
+branches have been removed. Ordinary device-resident Mooncake transfers and
+the separate SFA connector retain their existing configuration.
+
+See [Mooncake V2 with SFA offload](../../user_guide/feature_guide/mooncake_sfa_v2.md)
+for supported layouts and failure-policy requirements.
+
+`VLLM_ASCEND_DSA_PD_MOONCAKE_STAGING_WINDOW` keeps its total slot count
+(default 16), with each slot rounded to at least 2 MiB. Source page offsets
+are preserved. `VLLM_ASCEND_DSA_PD_MOONCAKE_PIPELINE=1` enables the existing
+landing streams and one reusable completion event per bank, and
+`VLLM_ASCEND_DSA_PD_MOONCAKE_BANKS` sets their bank count (default 4).
+Disabling the pipeline retains the synchronous landing path. These controls
+are independent of the `MooncakeConnectorV2` and ModelRunner V2 names.
+
+With the pipeline enabled, `BANKS` also selects the Host worker count.
+One effective bank runs on the caller thread without a thread pool; multiple
+effective banks use one Host worker per bank. The count is derived after banks
+are clamped to the staging window. For example, `BANKS=1`, `2`, and `4` use
+`0`, `2`, and `4` workers respectively, with the total staging capacity and
+cache budget unchanged. Each worker sets its NPU device before executing;
+one task owns each bank's entire request queue, keeping READ then copy order
+serial within that bank without coordinator resubmission between batches.
+Each batch records its completion event once after all landing copies have
+been submitted. Before another READ overwrites that bank's staging, its worker
+waits for the previous recording to complete. The final batch is drained before
+the receive returns; events survive successful drains for reuse across receives.
+
+`VLLM_ASCEND_DSA_PD_MOONCAKE_COPY_STREAMS_PER_BANK` controls landing copy
+streams within each bank (default 1; positive integer, capped by slots per
+bank). For example, `BANKS=4`, `STAGING_WINDOW=16`, and 1/2/4 copy streams
+per bank use at most 4/8/16 copy streams while retaining four Host workers
+and the same READ batches, staging allocation, and total view-cache budget.
+The setting is read at receive boundaries. Independent copy ranges are
+distributed across the bank's streams; overlapping ranges in a batch retain
+their original order on its first stream. Each auxiliary stream records a
+reusable event, which the first stream waits on before recording the bank's
+completion event. Reclaiming staging and completing a receive therefore wait
+for all submitted copies. Pipeline-off and READ probes use one copy stream.
+Additional streams provide execution opportunities, not a guaranteed speedup.
+
+`VLLM_ASCEND_DSA_PD_MOONCAKE_BANK_WORKERS` has been removed and is ignored.
+With `PIPELINE=1`, the default `BANKS=4` now uses four workers instead of
+caller-thread submission. Use `BANKS=1` for caller-thread submission, or
+disable the pipeline for the synchronous landing path.
+
+The request lock remains held until every started worker has joined and
+submitted landing work has drained, including failures. Cross-bank destination
+overlap, a disabled pipeline, and `READ_PROBE=1` use serial submission.
+For overlapping bank destinations, pending landing events drain between
+batches to preserve write dependencies across streams.
+The receive timing line reports `bank_workers`; with workers enabled,
+`read_s` and `land_exposed_s` accumulate worker durations that can overlap,
+so they must not be interpreted as disjoint parts of `total_s`.
+
 ### 3. Interface Design
 
 Taking MooncakeConnector as an example, the system is organized into three primary classes:
