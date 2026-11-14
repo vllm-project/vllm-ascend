@@ -4,7 +4,30 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import torch
+
+if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import HiSparseConnectorWorker
+
+
+def finish_draft_host_mirror_for_save(worker: HiSparseConnectorWorker) -> None:
+    """Make Core's pending draft rows durable before the external Host PUT."""
+    if not worker._draft_mirror_pending:
+        return
+
+    # Called by the bulk Store during Core's post-draft finalize_step. Core
+    # ordinarily defers the draft Host copy until the next start_step, too
+    # late for this step's PUT. Keep its related page transfers queued there.
+    compute_stream = torch.accelerator.current_stream()
+    draft_ready = torch.Event()
+    draft_ready.record(compute_stream)
+    worker._enqueue_row_dma(worker._draft_layers, ready_event=draft_ready)
+    worker._draft_mirror_pending = False
+    if worker._dma_submitted:
+        compute_stream.wait_event(worker.host_write_event)
+        worker._dma_submitted = False
 
 
 def _host_disjoint(caches, draft_layers):
