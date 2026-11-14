@@ -178,6 +178,10 @@ jobs:
           yum install -y python3-pip net-tools numactl patch clang
           pip install uv
 
+      - name: Install DeepGEMM build dependencies (A5)
+        if: startsWith(fromJSON(inputs.target).soc_version, 'ascend950')
+        run: bash tools/deepgemm/install_build_deps.sh
+
       # Stage manifests where both the job container and runner can read them.
       - name: Check layout and stage actions
         shell: bash

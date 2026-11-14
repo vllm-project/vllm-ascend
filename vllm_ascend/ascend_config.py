@@ -706,6 +706,8 @@ class AscendConfig:
     # the operator instead of the separate shared-expert forward. enable_fused_mc2=2
     # keeps the shared expert separate. Internal flag, not user-settable.
     megamoe_shared_expert_fusion: bool = False
+    # DeepSeek V4.1 FP8 x FP4 backend from DeepGEMM-Ascend (950, TP1/EP8).
+    deepgemm_mega_moe: bool = False
     enable_mlapo: bool = True
     # When True, keep MLAPO prefill weights on NPU instead of freeing them
     # on kv_consumer D nodes. Trades NPU memory for stability — D nodes have

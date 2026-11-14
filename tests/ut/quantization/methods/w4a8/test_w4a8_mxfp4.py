@@ -148,10 +148,14 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
     intermediate_size = 256
 
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_current_vllm_config")
-    @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_ascend_config")
-    def setUp(self, mock_ascend, mock_vllm):
+    def setUp(self, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
-        mock_ascend.return_value = create_mock_ascend_config()
+        ascend_config_patch = patch(
+            "vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_ascend_config",
+            return_value=create_mock_ascend_config(),
+        )
+        self.addCleanup(ascend_config_patch.stop)
+        ascend_config_patch.start()
         self.scheme = AscendW4A8MXFPDynamicFusedMoEMethod()
         # The recipes read torch_npu's FP4 enum and perform the cast in their
         # own module, which environments without the NPU extension do not

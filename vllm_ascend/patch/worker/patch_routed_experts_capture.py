@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 _TP_SHARDED_COMM_TYPES = frozenset(
     {
         MoECommType.ALLTOALL,
+        MoECommType.DEEPGEMM,
         MoECommType.MC2,
         MoECommType.FUSED_MC2,
     }
@@ -59,7 +60,7 @@ def _padded_batch_rows(tp_size: int) -> int:
         # Sequence parallel: the model wrapper already chunked the sequence to a
         # multiple of the TP size, so this batch-wide target is the padded length.
         total_rows = padded_num_tokens if isinstance(padded_num_tokens, int) else None
-    elif _EXTRA_CTX.moe_comm_type == MoECommType.ALLTOALL:
+    elif _EXTRA_CTX.moe_comm_type in {MoECommType.ALLTOALL, MoECommType.DEEPGEMM}:
         # All2All pads to the TP size, and only when the batch is smaller than it.
         total_rows = max(num_tokens, tp_size) if isinstance(num_tokens, int) else None
     elif isinstance(num_tokens, int) and isinstance(padded_num_tokens, int):
@@ -231,7 +232,7 @@ def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
             # but we fires all2all scenario first.
             # the result will be the same.
             # all2all scenario in vllm-ascend.
-            if _EXTRA_CTX.moe_comm_type == MoECommType.ALLTOALL:
+            if _EXTRA_CTX.moe_comm_type in {MoECommType.ALLTOALL, MoECommType.DEEPGEMM}:
                 gather_topk_ids_shape = (
                     (token_num_per_dp, topk_ids.shape[1])
                     if token_num_per_dp >= self.tp_size

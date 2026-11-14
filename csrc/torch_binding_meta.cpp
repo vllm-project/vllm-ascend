@@ -41,6 +41,8 @@ const int64_t INT4_NUMS_IN_INT32 = 8;
 constexpr int64_t DSA_SLOT_MAPPING_FLAT = 1;
 constexpr int64_t DSA_SLOT_MAPPING_BLOCK_OFFSET = 2;
 
+void dynamic_mx_quant_out_meta(const at::Tensor& x, at::Tensor out, at::Tensor scale) {}
+
 c10::SymInt ceil_div(const c10::SymInt& value, int64_t divisor)
 {
     return (value + c10::SymInt(divisor - 1)) / c10::SymInt(divisor);
@@ -1795,6 +1797,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_gemma_rms_norm", &vllm_ascend::meta::npu_gemma_rms_norm_meta);
     ops.impl("dequant_situ_quant", &vllm_ascend::meta::dequant_situ_quant_meta);
     ops.impl("situ_mx_quant", &vllm_ascend::meta::situ_mx_quant_meta);
+    ops.impl("dynamic_mx_quant_out", &vllm_ascend::meta::dynamic_mx_quant_out_meta);
 
     ops.impl("grouped_matmul_situ_quant", &vllm_ascend::meta::grouped_matmul_situ_quant_meta);
     ops.impl("grouped_matmul_situ_quant.list", &vllm_ascend::meta::grouped_matmul_situ_quant_list_meta);

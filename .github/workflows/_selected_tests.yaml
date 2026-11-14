@@ -241,6 +241,10 @@ jobs:
             libnuma1
           ldconfig
 
+      - name: Install DeepGEMM build dependencies (A5)
+        if: matrix.group.npu_type == 'a5'
+        run: bash tools/deepgemm/install_build_deps.sh
+
       - name: Install vllm-project/vllm-ascend with device
         if: ${{ matrix.group.npu_type != 'cpu' }}
         env:
