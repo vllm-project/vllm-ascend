@@ -299,6 +299,7 @@ def _triton_split_qkv_rmsnorm_mrope(
     q_bias: torch.Tensor | None = None,
     k_bias: torch.Tensor | None = None,
     has_gate: bool = False,
+    positions: torch.Tensor | None = None,
     weight_offset: float = 0.0,
     gate_output: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -312,6 +313,13 @@ def _triton_split_qkv_rmsnorm_mrope(
 
     if rope_dim is None:
         rope_dim = head_size
+    if positions is not None:
+        if positions.ndim != 2 or positions.shape[0] != 3 or positions.shape[1] != num_tokens:
+            raise ValueError("positions must have shape [3, num_tokens]")
+        if cos_sin.ndim != 2 or cos_sin.shape[1] != rope_dim:
+            raise ValueError("cos_sin must be a full rotary cache when positions are provided")
+        safe_positions = positions.clamp(0, cos_sin.shape[0] - 1).contiguous()
+        cos_sin = cos_sin[safe_positions]
     IS_PARTIAL_ROPE = rope_dim != head_size
 
     front_core_num = core_num
@@ -392,6 +400,7 @@ def triton_split_qkv_rmsnorm_mrope(
     q_bias: torch.Tensor | None = None,
     k_bias: torch.Tensor | None = None,
     has_gate: bool = False,
+    positions: torch.Tensor | None = None,
     weight_offset: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     return _triton_split_qkv_rmsnorm_mrope(
@@ -409,6 +418,7 @@ def triton_split_qkv_rmsnorm_mrope(
         q_bias,
         k_bias,
         has_gate,
+        positions,
         weight_offset,
     )
 
@@ -428,6 +438,7 @@ def triton_split_qkv_rmsnorm_mrope_with_gate_out(
     rope_dim: int | None = None,
     q_bias: torch.Tensor | None = None,
     k_bias: torch.Tensor | None = None,
+    positions: torch.Tensor | None = None,
     weight_offset: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     q_output, k_output, v_output, _ = _triton_split_qkv_rmsnorm_mrope(
@@ -445,6 +456,7 @@ def triton_split_qkv_rmsnorm_mrope_with_gate_out(
         q_bias,
         k_bias,
         True,
+        positions,
         weight_offset,
         gate_output,
     )
@@ -466,6 +478,7 @@ def triton_split_qkv_rmsnorm_mrope_fake(
     q_bias: torch.Tensor | None = None,
     k_bias: torch.Tensor | None = None,
     has_gate: bool = False,
+    positions: torch.Tensor | None = None,
     weight_offset: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     num_tokens = qkv.shape[0]
@@ -519,6 +532,7 @@ def triton_split_qkv_rmsnorm_mrope_with_gate_out_fake(
     rope_dim: int | None = None,
     q_bias: torch.Tensor | None = None,
     k_bias: torch.Tensor | None = None,
+    positions: torch.Tensor | None = None,
     weight_offset: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     num_tokens = qkv.shape[0]
