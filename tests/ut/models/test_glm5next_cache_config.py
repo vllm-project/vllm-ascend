@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from vllm.config import AttentionConfig
 from vllm.v1.core.single_type_kv_cache_manager import (
     register_all_kvcache_specs,
 )
@@ -71,6 +72,7 @@ def _ratio_kwargs(ratio: int) -> dict[str, int]:
 
 def make_config(*, retention_interval: int | None = 0):
     return SimpleNamespace(
+        attention_config=AttentionConfig(),
         model_config=SimpleNamespace(max_model_len=2048, hf_config=SimpleNamespace(model_type="glm_moe_dsa")),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=1,

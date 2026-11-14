@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 import torch
-from vllm.config import CUDAGraphMode, KVTransferConfig
+from vllm.config import AttentionConfig, CUDAGraphMode, KVTransferConfig
 from vllm.sequence import IntermediateTensors
 from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
@@ -436,6 +436,7 @@ def test_mrv2_block_outermost_hybrid_budget_respects_shared_backing(with_kv_tran
     worker.use_v2_model_runner = True
     worker.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="qwen4_exp"))
     worker.vllm_config = SimpleNamespace(
+        attention_config=AttentionConfig(),
         cache_config=SimpleNamespace(get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC),
         kv_transfer_config=(
             KVTransferConfig(kv_connector="MooncakeConnector", kv_role="kv_both") if with_kv_transfer else None

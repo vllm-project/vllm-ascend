@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
-from vllm.config import set_current_vllm_config
+from vllm.config import AttentionConfig, set_current_vllm_config
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 
@@ -45,6 +45,7 @@ from vllm_ascend.utils import vllm_version_is
 class TestAscendSFABackend(TestBase):
     def setUp(self):
         self.mock_config = MagicMock()
+        self.mock_config.attention_config = AttentionConfig()
         mock_parallel_config = MagicMock()
         mock_parallel_config.prefill_context_parallel_size = 1
         mock_parallel_config.decode_context_parallel_size = 1

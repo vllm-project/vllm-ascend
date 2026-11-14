@@ -27,6 +27,32 @@
 # ----------------------------------------------------------------------------------
 
 # What's Patched and how it works:
+# * worker/patch_hisparse.py (MRV2 PCP connector initialization):
+#   Target: Core HiSparseCacheHandle query/write methods and connector mirroring.
+#   Why: PCP queries are local, but Resident/Host writes use gathered KV rows.
+#   How: Install only for direct HiSparse + PCP; carry separate write metadata,
+#        grow pinned slot staging before capture, preserve Core DMA/fences.
+#   Related PR: No upstream HiSparse PCP query/write-layout hook is available.
+#        Ascend foundation #20926 is a prerequisite; #19109 is superseded.
+#   Future plan: Remove when upstream supports separate query/write layouts.
+# --------------------------------
+# --------------------------------
+# * vllm_ascend/hisparse/host_pool.py (HiSparse backend initialization):
+#   Target: vllm.v1.hisparse.runtime.allocate_pinned_host_pool.
+#   Why: AIV mapping alone does not enable DMA to pageable Host storage.
+#   How: Installed only by the HiSparse backend; allocate private pinned storage
+#        before Core builds cache views, retaining Core's release lifecycle.
+#   Related PR: No backend Host-allocation hook exists in the supported Core.
+#   Future plan: Replace this adapter with that upstream hook when available.
+# --------------------------------
+# * vllm_ascend/hisparse/backend.py (HiSparse backend initialization):
+#   Target: HiSparseConnectorWorker._init_dma and invalidate_blocks in vLLM Core.
+#   Why: Ascend uses int32 slot staging and can invalidate recycled slots in one
+#        grouped device operation.
+#   How: Bind the staging buffer and invalidator after Core initializes DMA.
+#        Other backends and unsupported invalidation inputs use Core's methods.
+#   Future plan: Remove the wrappers when Core exposes backend extension points
+#                for slot staging and recycled-block invalidation.
 # --------------------------------
 # * worker/patch_kda_recoverssm.py:
 #   Target: Kimi KDA's KDARecoverSSMCommitContext module binding.
@@ -1462,7 +1488,8 @@
 #       the upstream indexer backend is GPU-specific.
 #    How：
 #       Route SFA indexer cache layers to the existing
-#       `AscendSFAIndexerBackend`.
+#       `AscendSFAIndexerBackend`, or `AscendHiSparseIndexerBackend` when
+#       HiSparse is enabled. The model wrapper uses the cache's backend choice.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm-ascend/pull/13069
 #    Future Plan:
