@@ -239,8 +239,19 @@ def test_kpool_weight_postprocessing_keeps_nd_before_fp32_cast(monkeypatch, weig
     expected_nz_weights = [source.wq_b.weight.data_ptr()] if weight_nz_mode == 2 else []
     assert nz_weights == expected_nz_weights
 
-    # Repeated post-processing must not encounter an NZ source on the next cast.
-    for _ in range(2):
+    with torch.inference_mode():
+        backend.process_weights_after_loading()
+    captured = dict(backend.named_buffers())
+    pointers = {name: buffer.data_ptr() for name, buffer in captured.items()}
+
+    # Reload outside inference mode, as the weight-update RPC does. Refresh
+    # actual values while preserving every graph-captured buffer address.
+    for value in (1.0, 2.0):
+        with torch.no_grad():
+            source.wk_weights_proj.weight.copy_(original_weight + value)
+            source.index_kpool_compress_gate.fill_(value)
+            source.k_norm.weight.fill_(value + 1)
+            source.k_norm.bias.fill_(value + 2)
         backend.process_weights_after_loading()
         # CANN key weights and FP32 head weights must stay in ND, including
         # when post-processing is repeated.
@@ -249,12 +260,13 @@ def test_kpool_weight_postprocessing_keeps_nd_before_fp32_cast(monkeypatch, weig
         assert backend._head_weight_f32.dtype == torch.float32
         assert backend._key_weight.is_contiguous()
         assert backend._head_weight_f32.is_contiguous()
-        torch.testing.assert_close(backend._key_weight, original_weight[: source.head_dim])
-        torch.testing.assert_close(backend._head_weight_f32, original_weight[source.head_dim :].float())
+        torch.testing.assert_close(backend._key_weight, source.wk_weights_proj.weight[: source.head_dim])
+        torch.testing.assert_close(backend._head_weight_f32, source.wk_weights_proj.weight[source.head_dim :].float())
         torch.testing.assert_close(backend._gate_weight, source.index_kpool_compress_gate.detach())
         torch.testing.assert_close(backend._norm_weight_f32, source.k_norm.weight.detach().float())
         torch.testing.assert_close(backend._norm_bias_f32, source.k_norm.bias.detach().float())
-    torch.testing.assert_close(source.wk_weights_proj.weight, original_weight)
+        for name, buffer in captured.items():
+            assert getattr(backend, name).data_ptr() == pointers[name]
 
 
 @pytest.mark.parametrize("device", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
