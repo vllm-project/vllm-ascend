@@ -18,6 +18,16 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 from vllm_ascend.utils import AscendDeviceType
 
 
+def _unpinned_zeros(*args, **kwargs):
+    kwargs["pin_memory"] = False
+    return torch.zeros(*args, **kwargs)
+
+
+def _unpinned_empty(*args, **kwargs):
+    kwargs["pin_memory"] = False
+    return torch.empty(*args, **kwargs)
+
+
 class _FakeKVCacheSpec:
     def __init__(
         self,
@@ -491,7 +501,14 @@ class TestDelayedD2HPlanner(unittest.TestCase):
         manager.block_size = 128
         manager.topk_buffer_size = 8192
         manager.tp_size = 1
-        manager._allocate_d2h_planner_state()
+        # CPU-only runners cannot pin host memory (torch_npu hooks are not
+        # registered); mirror the runner-owned buffers' UT strategy and force
+        # the staging allocations to plain pageable memory.
+        with (
+            patch.object(torch, "zeros", side_effect=_unpinned_zeros),
+            patch.object(torch, "empty", side_effect=_unpinned_empty),
+        ):
+            manager._allocate_d2h_planner_state()
         manager.d2h_host_kv_cache_group_id = 0
         manager.d2h_host_num_blocks = 4096
         manager.d2h_source_token_capacity = (

@@ -62,21 +62,6 @@ D2H_SOURCE_EVENT_COUNT = 2
 D2H_COPY_CHUNK_SIZE = 64
 
 
-def _d2h_pinned(*shape: int, dtype: torch.dtype) -> torch.Tensor:
-    """Allocate host storage pinned when this process can actually pin it.
-
-    UT runners import torch_npu with its ``PrivateUse1HooksInterface``
-    unregistered, where ``pin_memory=True`` raises even though a tiny probe
-    allocation may succeed (the failure is size-dependent in that state).
-    Fall back to an unpinned tensor per allocation instead of probing.
-    """
-    try:
-        return torch.zeros(*shape, dtype=dtype, device="cpu", pin_memory=True)
-    except Exception:
-        logger.debug("delayed D2H host staging allocated unpinned", exc_info=True)
-        return torch.zeros(*shape, dtype=dtype, device="cpu", pin_memory=False)
-
-
 FSA_SELECTION_MEMBERSHIP_MAP_INT16_COUNT = 16376
 FSA_SELECTION_MEMBERSHIP_ALIGNMENT_INT16_COUNT = 16
 FSA_SELECTION_MEMBERSHIP_CONTROL_INT16_COUNT = 8
@@ -1544,7 +1529,12 @@ class SparseKVOffloadManager:
             dtype=np.int64,
         )
         self.d2h_stable_prefixes_cpu = np.zeros(capacity, dtype=np.int64)
-        self.d2h_plan_host = _d2h_pinned(D2H_PLAN_FIELD_COUNT, capacity, dtype=torch.int64)
+        self.d2h_plan_host = torch.zeros(
+            (D2H_PLAN_FIELD_COUNT, capacity),
+            dtype=torch.int64,
+            device="cpu",
+            pin_memory=True,
+        )
         self.d2h_inflight_active_host = self.d2h_plan_host[D2H_PLAN_ACTIVE_ROW]
         self.d2h_inflight_generations_host = self.d2h_plan_host[D2H_PLAN_GENERATION_ROW]
         self.d2h_inflight_source_slots_host = self.d2h_plan_host[D2H_PLAN_SOURCE_SLOT_ROW]
@@ -1556,8 +1546,18 @@ class SparseKVOffloadManager:
         self.d2h_inflight_source_slots_cpu = self.d2h_inflight_source_slots_host.numpy()
         self.d2h_inflight_destination_slots_cpu = self.d2h_inflight_destination_slots_host.numpy()
         self.d2h_inflight_target_prefixes_cpu = self.d2h_inflight_target_prefixes_host.numpy()
-        self.d2h_compact_source_slots_host = _d2h_pinned(capacity, dtype=torch.int64)
-        self.d2h_compact_destination_slots_host = _d2h_pinned(capacity, dtype=torch.int64)
+        self.d2h_compact_source_slots_host = torch.empty(
+            capacity,
+            dtype=torch.int64,
+            device="cpu",
+            pin_memory=True,
+        )
+        self.d2h_compact_destination_slots_host = torch.empty(
+            capacity,
+            dtype=torch.int64,
+            device="cpu",
+            pin_memory=True,
+        )
         self.d2h_compact_source_slots_cpu = self.d2h_compact_source_slots_host.numpy()
         self.d2h_compact_destination_slots_cpu = self.d2h_compact_destination_slots_host.numpy()
         self.d2h_inflight_active_count = 0
