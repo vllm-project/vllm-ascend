@@ -46,10 +46,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  lint-image:
+    # Main and development branches use lint-main without allocating a resolver runner.
+    if: startsWith(github.base_ref || github.ref_name, 'releases/')
+    uses: ./.github/workflows/_resolve_lint_image.yaml
+
   pre-commit:
+    needs: lint-image
+    # Allow the expected skip on main/dev; release resolution must succeed.
+    if: >-
+      ${{
+        !cancelled() &&
+        (
+          (!startsWith(github.base_ref || github.ref_name, 'releases/') && needs.lint-image.result == 'skipped') ||
+          (needs.lint-image.result == 'success' && needs.lint-image.outputs.image != '')
+        )
+      }}
     runs-on: linux-amd64-cpu-8-hk
     container:
-      image: quay.io/ascend-ci/vllm-ascend:lint
+      image: ${{ needs.lint-image.outputs.image || 'quay.io/atlas-ci/vllm-ascend-ci:lint-main' }}
     outputs:
       # Primary vLLM ref for this branch: main / *-dev use the verified vLLM
       # main commit, releases/v* use the pinned release tag.
@@ -306,7 +321,8 @@ jobs:
     # run the release tag (see the pre-commit ref resolution).
     name: cpu-ut (vllm@${{ matrix.vllm }})
     needs: pre-commit
-    if: ${{ needs.pre-commit.result == 'success' }}
+    # The main/dev resolver is intentionally skipped earlier in this chain.
+    if: ${{ !cancelled() && needs.pre-commit.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
@@ -329,6 +345,7 @@ jobs:
     # each NPU entry point separately requires CPU UT to succeed.
     if: >-
       ${{
+        !cancelled() &&
         needs.pre-commit.result == 'success' &&
         contains(github.event.pull_request.labels.*.name, 'ready-precise')
       }}
@@ -489,7 +506,7 @@ jobs:
       }}
     runs-on: linux-amd64-cpu-2-hk
     container:
-      image: quay.io/ascend-ci/vllm-ascend:lint
+      image: quay.io/atlas-ci/vllm-ascend-ci:lite-tools
     outputs:
       has_tests: ${{ steps.scope-rec.outputs.has_tests || steps.scope-all.outputs.has_tests || steps.noop.outputs.has_tests }}
       test_groups: ${{ steps.scope-rec.outputs.test_groups || steps.scope-all.outputs.test_groups || steps.noop.outputs.test_groups }}
@@ -541,7 +558,6 @@ jobs:
 
       - name: Validate test coverage config
         run: |
-          pip install pyyaml
           python3 .github/workflows/scripts/coverage.py
 
       - name: Decide test selection mode
@@ -596,7 +612,6 @@ jobs:
           COVERAGE_PATHS: ${{ needs.recommend-tests.outputs.coverage_paths }}
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          pip install regex pyyaml -q
           LIST_FILE="$RUNNER_TEMP/recommended_from_coverage.txt"
           printf '%s\n' "${COVERAGE_PATHS}" > "$LIST_FILE"
           echo "Recommended paths from coverage:"
@@ -611,7 +626,6 @@ jobs:
         if: steps.decide.outputs.mode == 'all'
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          pip install regex
           python3 .github/workflows/scripts/select_tests.py \
             --all-tests \
             --skip-cpu-ut \
@@ -634,7 +648,6 @@ jobs:
         if: contains(github.event.pull_request.labels.*.name, 'ready-a5') && needs.pre-commit.outputs.src == 'true'
         run: |
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
-          pip install regex
           python3 .github/workflows/scripts/select_tests.py \
             --curated a5 \
             --runner-label-override linux-aarch64-a5-4

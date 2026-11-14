@@ -277,6 +277,20 @@ establish whether a source build actually reused compiled work. See the
 [persistent csrc build cache design](../Design_Documents/persistent_csrc_build_cache.md)
 for the identity and failure contracts.
 
+### Lightweight CI images
+
+Test selection, csrc cache preparation, doctest planning and recipe preview use
+`quay.io/atlas-ci/vllm-ascend-ci:lite-tools`. Built from
+`.github/workflows/dockerfiles/dockerfile.tools`, it includes Python, Git,
+PyYAML, regex and common archive utilities, supporting AMD64 and ARM64.
+
+Build and publish the image with **Image Build Tools**
+(`.github/workflows/tools_image_build.yaml`). Its manual `tag` input defaults to
+`lite-tools`.
+
+See [Lint Images](https://github.com/vllm-project/vllm-ascend/blob/main/.github/TEST_README.md#lint-images)
+for pre-commit images and registry credentials.
+
 ### PR selective testing (CI)
 
 The PR CI workflow ([pr_test.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/pr_test.yaml)) does not run the full suite on every PR. It selects tests with a coverage/AST based precision-testing pipeline and routes them to NPU runners. Tests run when the PR has the `ready-precise` label (recommended subset), the `ready-all` label (full suite), or the `main2main` label (full suite executed against both the verified vLLM main commit and the matched vLLM release tag). PRs targeting a release branch (`releases/v*`) are tested against the matched vLLM release tag only.
@@ -350,7 +364,7 @@ Workflows with a native GitHub cron trigger:
 | `schedule_doc_linkcheck.yaml` | PR path filter, `workflow_dispatch` |
 | `schedule_doc_translate.yaml` | `workflow_dispatch` |
 | `schedule_e2e_upstream_test.yaml` | - |
-| `schedule_lint_image_build.yaml` | `workflow_dispatch`, `push` |
+| `schedule_lint_image_build.yaml` | `pull_request`, `workflow_dispatch`, `push` |
 | `schedule_stale_manage.yaml` | `issue_comment` |
 
 Workflows without a cron trigger, dispatched externally via `workflow_dispatch`:

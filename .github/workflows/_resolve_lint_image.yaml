@@ -1,0 +1,28 @@
+name: Resolve release lint image
+
+on:
+  workflow_call:
+    outputs:
+      image:
+        description: 'Fully qualified lint image for the release branch.'
+        value: ${{ jobs.resolve.outputs.image }}
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - name: Resolve branch image
+        id: image
+        env:
+          LINT_REF: ${{ github.base_ref || github.ref_name }}
+        shell: bash
+        run: |
+          lint_ref="${LINT_REF#refs/heads/}"
+          [[ "$lint_ref" =~ ^releases/v[0-9][0-9A-Za-z._-]*$ ]] || {
+            echo "::error::Unsupported release branch: $lint_ref"
+            exit 1
+          }
+          tag="lint-${lint_ref//\//-}"
+          echo "image=quay.io/atlas-ci/vllm-ascend-ci:$tag" >> "$GITHUB_OUTPUT"

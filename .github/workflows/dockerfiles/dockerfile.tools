@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+
+FROM ascendai/python:3.12-ubuntu22.04
+
+# Common utilities for CI scripts, source checkout and cache archives.
+RUN apt-get update -y && \
+    apt-get install --no-install-recommends -y \
+        ca-certificates curl git jq tar gzip unzip xz-utils zstd && \
+    rm -rf /var/cache/apt/* /var/lib/apt/lists/*
+
+# Test selection, daily test configuration and doctest planning.
+# Keep vLLM, CANN and requirements-dev.txt in their dedicated images.
+RUN python3 -m pip install --no-cache-dir \
+        PyYAML \
+        regex
+
+CMD ["/bin/bash"]
