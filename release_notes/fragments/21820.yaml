@@ -4,4 +4,5 @@ entries:
     text: >-
       Fused Qwen GDN QKVZ and BA projection unpacking with output-buffer
       initialization to remove three Slice launches and one ZerosLike launch
-      from the decode path.
+      from the decode path, and taught gated RMSNorm to consume the strided Z
+      view directly to remove its post-recurrent Slice launch.
