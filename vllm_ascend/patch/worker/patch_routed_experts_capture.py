@@ -20,14 +20,14 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import torch
 import torch.distributed as dist
 from vllm.distributed.parallel_state import get_tp_group
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsCapturer
 
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.ascend_forward_context import MoECommType
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +41,28 @@ _TP_SHARDED_COMM_TYPES = frozenset(
     }
 )
 
+_ORIGINAL_RESTORE_LOCAL_TOPK_IDS = RoutedExpertsCapturer._restore_local_topk_ids
 
-def _padded_batch_rows(tp_size: int) -> int:
+
+def _extra_attr(ctx: Any, name: str) -> Any:
+    """Read a vllm-ascend forward-context extra from the context being restored.
+
+    ``_EXTRA_CTX`` resolves the process-global forward context, which forces a
+    second ``get_forward_context()`` lookup inside a hook that was already handed
+    the context. Reading the same object keeps the two in sync (the V1 runner
+    sets the extra as an attribute, the V2 runner publishes it through
+    ``additional_kwargs``), and keeps the hook usable when only the capture call
+    itself is wired to a context.
+    """
+    additional_kwargs = getattr(ctx, "additional_kwargs", None)
+    if isinstance(additional_kwargs, dict):
+        value = additional_kwargs.get(name)
+        if value is not None:
+            return value
+    return getattr(ctx, name, None)
+
+
+def _padded_batch_rows(ctx: Any, tp_size: int) -> int:
     """Row count the MoE dispatch padded the token dimension to before splitting it.
 
     Taken from the target ``prepare()`` padded to rather than from this rank's
@@ -51,15 +71,16 @@ def _padded_batch_rows(tp_size: int) -> int:
     of the TP size. There is deliberately no ``shard_rows * tp_size`` fallback --
     it would silently bring that rank-dependent length back.
     """
-    prepare_finalize = getattr(_EXTRA_CTX.moe_comm_method, "prepare_finalize", None)
-    padded_num_tokens = getattr(_EXTRA_CTX, "padded_num_tokens", None)
+    comm_type = _extra_attr(ctx, "moe_comm_type")
+    prepare_finalize = getattr(_extra_attr(ctx, "moe_comm_method"), "prepare_finalize", None)
+    padded_num_tokens = _extra_attr(ctx, "padded_num_tokens")
     num_tokens = getattr(prepare_finalize, "num_tokens", None)
 
     if getattr(prepare_finalize, "replace_allreduce", False):
         # Sequence parallel: the model wrapper already chunked the sequence to a
         # multiple of the TP size, so this batch-wide target is the padded length.
         total_rows = padded_num_tokens if isinstance(padded_num_tokens, int) else None
-    elif _EXTRA_CTX.moe_comm_type == MoECommType.ALLTOALL:
+    elif comm_type == MoECommType.ALLTOALL:
         # All2All pads to the TP size, and only when the batch is smaller than it.
         total_rows = max(num_tokens, tp_size) if isinstance(num_tokens, int) else None
     elif isinstance(num_tokens, int) and isinstance(padded_num_tokens, int):
@@ -72,7 +93,7 @@ def _padded_batch_rows(tp_size: int) -> int:
     if total_rows is None:
         raise AssertionError(
             "RoutedExpertsCapturer: cannot rebuild the TP-sharded routing batch, the MoE dispatch "
-            f"metadata is missing (comm_type={_EXTRA_CTX.moe_comm_type}, num_tokens={num_tokens!r}, "
+            f"metadata is missing (comm_type={comm_type}, num_tokens={num_tokens!r}, "
             f"padded_num_tokens={padded_num_tokens!r}). Refusing to infer the length from this rank's "
             "shard, which is only valid when the split is even."
         )
@@ -98,174 +119,86 @@ def _gather_tp_sharded_topk_ids(topk_ids: torch.Tensor, tp_size: int, total_rows
     return gathered
 
 
-def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
-    """Capture expert routing decisions for a specific layer.
+def _restore_ascend_tp_sharded_rows(self, topk_ids: torch.Tensor, ctx: Any) -> torch.Tensor | None:
+    """Rebuild this DP rank's rows from uneven TP shards.
 
-    Under data parallelism, ``topk_ids`` may have four different batch
-    layouts depending on where the DP combine happens and whether
-    Sequence Parallelism (SP) is active for the MoE layer:
-      - ``n == total`` (naive dispatch): all DP ranks' tokens are
-        concatenated before routing; we slice out this rank's span
-        using the cumulative per-rank counts.
-      - ``n == token_num_per_dp`` (modular-kernel path): DP combine
-        happens inside ``quant_method.apply``; ``select_experts`` only
-        ever sees this rank's tokens, so we take the whole tensor.
-      - ``n == total_with_padding`` (padded all-gather path): tokens are
-        padded to max_tokens before all-gather across DP group; each
-        DP rank occupies a contiguous block of size max_tokens, and we
-        extract only the actual tokens for this rank (skip padding).
-        When all DP ranks have equal token counts, ``total == total_with_padding``,
-        so the naive dispatch branch fires instead (equivalent result).
-      - ``n == ceil(token_num_per_dp / tp_size)`` (SP + modular-kernel
-        path): tokens were split along dim=0 across the TP group by
-        ``_sequence_parallel_context``
-        (``moe_runner_base.py:_sequence_parallel_context``), so each
-        TP rank only sees its shard. We all-gather along dim=0 to
-        reconstruct this DP rank's full routing tensor. SP pads with
-        ceil-div (see ``_compute_sp_num_tokens`` in
-        ``forward_context.py``), so the gathered tensor may contain a
-        few trailing padding rows which are trimmed by the downstream
-        ``[:token_num_per_dp]`` slice.
-
-    The TP split also happens with ``DP == 1``: ``ctx.dp_metadata`` does not
-    describe it, but All2All/MC2 still split inside the TP group, so the same
-    all-gather is needed there. ALLGATHER does not split and needs none.
-
-    Args:
-        layer_id: The layer index.
-        topk_ids: Tensor of shape (batch_size, num_routed_experts).
+    Returns ``None`` for every layout upstream already restores correctly, so
+    ``_restore_local_topk_ids`` can defer to it: a cross-DP batch, a local batch
+    and a gathered DP/EP shard group were never split across the TP group, and
+    upstream covers them (including the fail-fast checks for their metadata).
     """
+    tp_size = self.tp_size
+    if tp_size <= 1 or _extra_attr(ctx, "moe_comm_type") not in _TP_SHARDED_COMM_TYPES:
+        return None
 
-    ctx = get_forward_context()
-    if ctx.dp_metadata is None:  # single dp
-        start_loc = 0
-        end_loc = token_num_per_dp = topk_ids.shape[0]
+    n = topk_ids.shape[0]
+    dp_metadata = ctx.dp_metadata
 
+    if dp_metadata is None:
         # All2All/MC2 split the token dimension across the TP group even with
         # DP=1, so ``topk_ids`` only holds this rank's shard. Capturing it as the
         # whole batch leaves the other ``device_buffer`` rows stale, and routing
         # replay then serves wrong expert ids for them. The condition is
         # rank-invariant, so every TP rank gathers in lockstep.
-        if self.tp_size > 1 and _EXTRA_CTX.moe_comm_type in _TP_SHARDED_COMM_TYPES:
-            total_rows = _padded_batch_rows(self.tp_size)
-            topk_ids = _gather_tp_sharded_topk_ids(topk_ids, self.tp_size, total_rows)
-            # Rows past the batch are the padding ``prepare()`` appended, and the
-            # consumer only reads ``device_buffer[:num_tokens]``. Writing the whole
-            # gathered tensor avoids a second token-count estimate; the clamp only
-            # guards an over-padded gather against the buffer size.
-            end_loc = token_num_per_dp = min(topk_ids.shape[0], self.device_buffer.shape[0])
-    else:  # multi dp
-        num_tokens_dp = ctx.dp_metadata.num_tokens_across_dp_cpu
-        token_num_per_dp = int(num_tokens_dp[self.dp_rank].item())
-        total = int(num_tokens_dp.sum().item())
-        n = topk_ids.shape[0]
+        total_rows = _padded_batch_rows(ctx, tp_size)
+        restored = _gather_tp_sharded_topk_ids(topk_ids, tp_size, total_rows)
+        batch_descriptor = getattr(ctx, "batch_descriptor", None)
+        if batch_descriptor is None:
+            # No pre-SP batch size to trim to. Rows past the batch are the padding
+            # ``prepare()`` appended, and the consumer only reads
+            # ``device_buffer[:num_tokens]``.
+            return restored
+        return restored[: batch_descriptor.num_tokens]
 
-        # Calculate total with padding for all-gather scenario.
-        # When tokens are padded to max_tokens before all-gather across DP group,
-        # the total size becomes max_tokens * dp_size.
-        # Example: DP0 has 5 tokens, DP1 has 7 tokens, max_tokens=7.
-        # After padding: DP0 has 7 tokens, DP1 has 7 tokens.
-        # After all-gather: total_with_padding = 7 * 2 = 14.
-        max_tokens = int(num_tokens_dp.max().item())
-        total_with_padding = max_tokens * len(num_tokens_dp)
+    num_tokens_dp = dp_metadata.num_tokens_across_dp_cpu
+    num_local_tokens = int(num_tokens_dp[self.dp_rank].item())
 
-        if n == total:
-            # Naive dispatch: all DP ranks' tokens concatenated
-            # before routing. This rank owns tokens
-            # [end_loc - token_num_per_dp, end_loc).
-            cumsum = torch.cumsum(num_tokens_dp, dim=0)
-            end_loc = int(cumsum[self.dp_rank].item())
-            start_loc = end_loc - token_num_per_dp
-        elif n == token_num_per_dp:
-            # Modular-kernel path: DP combine happens inside
-            # quant_method.apply; select_experts only sees this
-            # rank's tokens, take the whole tensor.
-            start_loc = 0
-            end_loc = token_num_per_dp
-        elif n == total_with_padding:
-            # NOTE(Ronald1995): When all DP ranks have equal token counts,
-            # total == total_with_padding, so the first branch (n == total)
-            # fires instead. This overlap is intentional since both branches
-            # produce equivalent results in that case.
+    if n == int(num_tokens_dp.sum().item()):
+        # Naive dispatch: all DP ranks' tokens are concatenated before routing,
+        # so the rows were never split across the TP group.
+        return None
 
-            # Padded all-gather path: tokens are padded to max_tokens before
-            # all-gather across DP group. Each DP rank occupies a contiguous
-            # block of size max_tokens. Extract only the actual tokens for
-            # this rank (skip padding).
-            # Example: dp_rank=0, max_tokens=7, token_num_per_dp=5.
-            # start_loc = 0 * 7 = 0
-            # end_loc = 0 + 5 = 5 (only first 5 tokens are valid)
+    shard_sizes = dp_metadata.local_sizes
+    if shard_sizes is not None and n == sum(shard_sizes):
+        # Gathered DP/EP shards: already DP-major/TP-minor, so upstream only has
+        # to select this rank's shard group.
+        return None
 
-            start_loc = self.dp_rank * max_tokens
-            end_loc = start_loc + token_num_per_dp
-        elif (
-            self.tp_size > 1
-            and n != token_num_per_dp
-            and (
-                # all2all scenario use tensor split, different tp rank have different
-                # size of tokens.
-                n == (token_num_per_dp + self.tp_size - 1) // self.tp_size
-                or n == token_num_per_dp // self.tp_size
-                # mc2 scenario will pad dp tokens to max_tokens and then ceil-div.
-                or n == (max_tokens + self.tp_size - 1) // self.tp_size
-            )
-        ):
-            # SP + modular-kernel path. All-gather across the TP
-            # group along dim=0 to reconstruct the full per-DP-rank
-            # tensor; keep only the first ``token_num_per_dp`` rows
-            # (trailing rows are SP ceil-div padding). The TP group
-            # is always initialized on real rollout workers, and
-            # every rank in the group reaches this branch in
-            # lockstep (bind is per-FusedMoE layer, SP is a global
-            # condition), so a bare all_gather here will not
-            # deadlock -- let it raise if the precondition is
-            # violated rather than skip silently.
-            #
-            # ``topk_ids`` is already whatever the router produced
-            # (typically int32/int64, both supported by NCCL); the
-            # downstream ``device_buffer[...] = topk_ids[...]``
-            # setitem narrows into int32 automatically.
+    if n == num_local_tokens:
+        # Modular-kernel path: DP combine happens inside ``quant_method.apply``
+        # and ``select_experts`` only sees this rank's tokens.
+        return None
 
-            # NOTE(Ronald1995): if total_num_per_dp == max_tokens,
-            # it will be both all2all and mc2 scenario.
-            # but we fires all2all scenario first.
-            # the result will be the same.
-            # all2all scenario in vllm-ascend.
-            if _EXTRA_CTX.moe_comm_type == MoECommType.ALLTOALL:
-                gather_topk_ids_shape = (
-                    (token_num_per_dp, topk_ids.shape[1])
-                    if token_num_per_dp >= self.tp_size
-                    else (self.tp_size, topk_ids.shape[1])
-                )
-            # mc2 scenario in vllm-ascend
-            else:
-                gather_topk_ids_shape = (n * self.tp_size, topk_ids.shape[1])
+    max_tokens = int(num_tokens_dp.max().item())
+    if n == max_tokens * len(num_tokens_dp):
+        # Padded all-gather across the DP group: each rank occupies a contiguous
+        # block of ``max_tokens`` rows, and only this rank's real tokens are kept.
+        start = self.dp_rank * max_tokens
+        return topk_ids[start : start + num_local_tokens]
 
-            gather_topk_ids = torch.empty(
-                gather_topk_ids_shape,
-                dtype=topk_ids.dtype,
-                device=topk_ids.device,
-            )
-            split_topk_ids = torch.tensor_split(gather_topk_ids, self.tp_size, dim=0)
-            dist.all_gather(list(split_topk_ids), topk_ids, get_tp_group().device_group)
-            topk_ids = gather_topk_ids
-            start_loc = 0
-            end_loc = token_num_per_dp
-        else:
-            sp_expected = (token_num_per_dp + self.tp_size - 1) // self.tp_size if self.tp_size > 0 else -1
-            raise AssertionError(
-                "RoutedExpertsCapturer: unexpected topk_ids batch "
-                f"dim {n} (expected {total}, {token_num_per_dp}, "
-                f"{total_with_padding}, or {sp_expected} for "
-                f"dp_rank={self.dp_rank}, tp_size={self.tp_size})"
-            )
-
-    # Defensive: model may expose more layers than the capture buffer
-    # was sized for (unusual, but guards against miss-config).
-    if layer_id >= self.device_buffer.shape[1]:
-        return
-
-    self.device_buffer[:token_num_per_dp, layer_id, :] = topk_ids[start_loc:end_loc, :]
+    # SP + modular-kernel path: ``prepare()`` split the batch across the TP group
+    # with ``tensor_split``, so this rank only sees its shard. Gather every shard
+    # back into the batch-wide row order and trim the trailing padding. The TP
+    # group is always initialized on real rollout workers, and every rank in the
+    # group reaches this branch in lockstep (bind is per-FusedMoE layer, SP is a
+    # global condition), so a bare all_gather here will not deadlock -- let it
+    # raise if the precondition is violated rather than skip silently.
+    total_rows = _padded_batch_rows(ctx, tp_size)
+    restored = _gather_tp_sharded_topk_ids(topk_ids, tp_size, total_rows)
+    return restored[:num_local_tokens]
 
 
-RoutedExpertsCapturer.capture = capture
+def _restore_local_topk_ids(self, topk_ids: torch.Tensor, ctx: Any) -> torch.Tensor:
+    """Restore this DP rank's token rows, trimming trailing SP padding.
+
+    Only the TP-shard layout needs Ascend-specific handling: ``prepare()`` uses
+    ``tensor_split``, so the local shard length is rank-dependent and the
+    upstream equal-shape ``all_gather`` cannot rebuild the batch.
+    """
+    restored = _restore_ascend_tp_sharded_rows(self, topk_ids, ctx)
+    if restored is None:
+        return _ORIGINAL_RESTORE_LOCAL_TOPK_IDS(self, topk_ids, ctx)
+    return restored
+
+
+RoutedExpertsCapturer._restore_local_topk_ids = _restore_local_topk_ids
