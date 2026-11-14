@@ -1,0 +1,5 @@
+pr: 19773
+entries:
+  - category: feature
+    text: Added configurable DRAM transfer backends for TieringOffloadingSpec, with capability-gated host registration and FFTS SDMA support on A3.
+    hardware: [A3]

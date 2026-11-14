@@ -134,6 +134,46 @@ llm = LLM(
 
 - This feature requires vLLM v1 engine.
 - Adjust `cpu_bytes_to_use` based on available CPU memory. Reserving too much may cause out-of-memory errors on the host.
-- `CPUOffloadingSpec` uses pinned (page-locked) tensors when available. `TieringOffloadingSpec` must use vLLM's shared mmap primary tier; CANN does not provide a memory-copy-compatible equivalent of CUDA's arbitrary mmap host registration, so its NPU↔CPU bandwidth must be benchmarked separately on the target host and CANN version.
+- CPUOffloadingSpec uses pinned tensors when available. TieringOffloadingSpec uses a shared mmap primary tier with capability-gated host registration and an optional A3 SDMA backend; see the DRAM transfer backend settings below.
 - The `gpu_memory_utilization` parameter controls how much NPU memory is reserved for KV cache. Lower values leave less NPU memory for KV cache, making offloading more active.
 - For production workloads, benchmark with realistic request patterns to find the optimal `cpu_bytes_to_use` and `blocks_per_chunk` settings.
+
+## Tiering DRAM transfer backend
+
+The CPU primary tier of TieringOffloadingSpec supports
+dram_transfer_backend in kv_connector_extra_config:
+
+| Value | Behavior |
+|-------|----------|
+| auto (default) | Use mapped DRAM and FFTS SDMA on A3 builds with compatible CANN headers/runtime. Otherwise use pinned mmap with memcpy when supported, falling back to the existing mmap memcpy path if registration is unavailable or fails. |
+| memcpy | Use the existing batched memcpy backend. Register the mmap as pinned when CANN supports it. |
+| sdma | Require mapped DRAM and FFTS SDMA. Fail initialization if the build lacks support or registration fails. Useful for validating that an A3 benchmark actually uses SDMA. |
+
+For example, add the following to a Tiering configuration:
+
+```json
+{
+    "spec_name": "TieringOffloadingSpec",
+    "cpu_bytes_to_use": 8589934592,
+    "blocks_per_chunk": 8,
+    "dram_transfer_backend": "sdma"
+}
+```
+
+The SDMA path registers each worker's CPU mapping with its NPU and copies directly
+between the mapped host addresses and the final KV tensor addresses. FFTS batches
+support up to eight independent ready lanes and split transfers at the 16-bit
+context-count limit. Descriptor storage stays alive until the transfer event
+completes. Shutdown drains both transfer directions before unregistering and
+unmapping the CPU region.
+
+This backend preserves the existing cache format, secondary-tier integration,
+chunk mapping, and asynchronous request scheduling. It does not enable layerwise
+loading. CPUOffloadingSpec continues to use its existing private pinned tensors.
+
+The extension must be rebuilt to enable the new backend. CMake detects compatible
+FFTS headers and libruntime for ascend910_93 targets; other builds retain memcpy.
+Startup logs report the selected backend and any registration fallback. For an A3
+comparison, explicitly select sdma and memcpy, keeping actual DRAM hits, copied
+bytes, prompt lengths, and concurrency identical. The backend changes DMA
+submission and memory registration; TTFT also includes scheduler and compute time.
