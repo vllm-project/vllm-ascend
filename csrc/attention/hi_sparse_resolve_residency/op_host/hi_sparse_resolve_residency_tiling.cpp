@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "hi_sparse_resolve_residency_tiling.h"
 #include "register/op_impl_registry.h"
+#include "log/log.h"
 #include "../op_kernel/resolver_scratch.h"
 
 namespace optiling {
@@ -33,7 +34,7 @@ constexpr size_t kResidentStrideAttr = 10;
 constexpr size_t kHotTableStrideAttr = 11;
 constexpr size_t kAttentionStrideAttr = 12;
 constexpr size_t kCountsStrideAttr = 13;
-constexpr size_t kByteMissMaskAttr = 15;
+constexpr size_t kByteMissMaskAttr = 14;
 
 ge::graphStatus TileHiSparseResolveResidency(gert::TilingContext* context) {
     using namespace vllm_ascend::hisparse;
@@ -50,11 +51,16 @@ ge::graphStatus TileHiSparseResolveResidency(gert::TilingContext* context) {
 
     const auto& logicalShape = logical->GetOriginShape();
     const auto& tagShape = tags->GetOriginShape();
+    const auto& lruShape = lru->GetOriginShape();
     OP_CHECK_IF(logicalShape.GetDimNum() != 2 || tagShape.GetDimNum() != 2,
                 OP_LOGE(context->GetNodeName(),
                         "TopK, hot tags and block table must be two-dimensional."),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(tagShape.GetDims() != lru->GetOriginShape().GetDims(),
+    bool lruMatchesTags = tagShape.GetDimNum() == lruShape.GetDimNum();
+    for (size_t dim = 0; lruMatchesTags && dim < tagShape.GetDimNum(); ++dim) {
+        lruMatchesTags = tagShape.GetDim(dim) == lruShape.GetDim(dim);
+    }
+    OP_CHECK_IF(!lruMatchesTags,
                 OP_LOGE(context->GetNodeName(), "LRU output geometry must match hot tags."),
                 return ge::GRAPH_FAILED);
 
@@ -145,56 +151,57 @@ ge::graphStatus TileHiSparseResolveResidency(gert::TilingContext* context) {
     const auto* swapHost = context->GetOutputShape(kSwapHostOutput);
     const auto* swapDevice = context->GetOutputShape(kSwapDeviceOutput);
     const auto* swapCounts = context->GetOutputShape(kSwapCountsOutput);
-    OP_CHECK_IF(attention == nullptr || swapHost == nullptr || swapDevice == nullptr || swapCounts == nullptr,
-                OP_LOGE(context->GetNodeName(), "failed to query output shapes."),
-                return ge::GRAPH_FAILED);
     OP_CHECK_IF(*attentionCapacity < 0 || *attentionCapacity > INT32_MAX,
                 OP_LOGE(context->GetNodeName(), "compact Attention capacity must fit int32."),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(*attentionCapacity > 0 && attention->GetOriginShape().GetDimNum() == 0,
+    OP_CHECK_IF(*attentionCapacity > 0 && (attention == nullptr || attention->GetOriginShape().GetDimNum() == 0),
                 OP_LOGE(context->GetNodeName(), "compact Attention requires an output tensor."),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF((swapHost->GetOriginShape().GetDimNum() == 0) !=
-                    (swapDevice->GetOriginShape().GetDimNum() == 0) ||
-                    (swapHost->GetOriginShape().GetDimNum() == 0) !=
-                        (swapCounts->GetOriginShape().GetDimNum() == 0),
+    const bool hasSwapHost = swapHost != nullptr && swapHost->GetOriginShape().GetDimNum() != 0;
+    const bool hasSwapDevice = swapDevice != nullptr && swapDevice->GetOriginShape().GetDimNum() != 0;
+    const bool hasSwapCounts = swapCounts != nullptr && swapCounts->GetOriginShape().GetDimNum() != 0;
+    OP_CHECK_IF(hasSwapHost != hasSwapDevice || hasSwapHost != hasSwapCounts,
                 OP_LOGE(context->GetNodeName(), "all compact swap outputs are required together."),
                 return ge::GRAPH_FAILED);
 
-    auto* tiling = context->GetTilingData<HiSparseResolveResidencyTilingData>();
+    HiSparseResolveResidencyTilingData tiling;
+    auto* rawTiling = context->GetRawTilingData();
     auto* workspace = context->GetWorkspaceSizes(1);
-    OP_CHECK_IF(tiling == nullptr || workspace == nullptr,
+    OP_CHECK_IF(rawTiling == nullptr || workspace == nullptr || rawTiling->GetCapacity() < tiling.GetDataSize(),
                 OP_LOGE(context->GetNodeName(), "failed to query tiling or workspace."),
                 return ge::GRAPH_FAILED);
 
     const uint64_t hashSize = resolver_hash_capacity(hot, *unionRows);
-    tiling->set_rows(rows);
-    tiling->set_topk(topk);
-    tiling->set_hotSlots(hot);
-    tiling->set_tagRows(tagShape.GetDim(0));
-    tiling->set_stateIndexCount(states ? states->GetOriginShape().GetDim(0) : 0);
-    tiling->set_sourceRows(source ? source->GetOriginShape().GetDim(0) : 0);
-    tiling->set_sourceColumns(source ? source->GetOriginShape().GetDim(1) : 0);
-    tiling->set_residentRows(resident ? resident->GetOriginShape().GetDim(0) : 0);
-    tiling->set_residentColumns(resident ? resident->GetOriginShape().GetDim(1) : 0);
-    tiling->set_hashSize(hashSize);
-    tiling->set_ubBytes(static_cast<uint32_t>(resolver_scratch_bytes(hot, hashSize)));
+    tiling.set_rows(rows);
+    tiling.set_topk(topk);
+    tiling.set_hotSlots(hot);
+    tiling.set_tagRows(tagShape.GetDim(0));
+    tiling.set_stateIndexCount(states ? states->GetOriginShape().GetDim(0) : 0);
+    tiling.set_sourceRows(source ? source->GetOriginShape().GetDim(0) : 0);
+    tiling.set_sourceColumns(source ? source->GetOriginShape().GetDim(1) : 0);
+    tiling.set_residentRows(resident ? resident->GetOriginShape().GetDim(0) : 0);
+    tiling.set_residentColumns(resident ? resident->GetOriginShape().GetDim(1) : 0);
+    tiling.set_hashSize(hashSize);
+    tiling.set_ubBytes(static_cast<uint32_t>(resolver_scratch_bytes(hot, hashSize)));
 
-    tiling->set_hostRows(*hostRows);
-    tiling->set_hotBlockSize(*hotBlockSize);
-    tiling->set_sourceBlockSize(*sourceBlockSize);
-    tiling->set_residentBlockSize(*residentBlockSize);
-    tiling->set_residentNullBlock(*attrs->GetInt(kResidentNullBlockAttr));
-    tiling->set_attentionBlockStride(*attentionBlockStride);
-    tiling->set_maxUnionRows(*unionRows);
-    tiling->set_attentionCapacity(*attentionCapacity);
-    tiling->set_logicalStride(*logicalStride);
-    tiling->set_sourceStride(*sourceStride);
-    tiling->set_residentStride(*residentStride);
-    tiling->set_hotTableStride(*hotTableStride);
-    tiling->set_attentionStride(*attentionStride);
-    tiling->set_countsStride(*countsStride);
-    tiling->set_byteMissMask(*byteMissMask);
+    tiling.set_hostRows(*hostRows);
+    tiling.set_hotBlockSize(*hotBlockSize);
+    tiling.set_sourceBlockSize(*sourceBlockSize);
+    tiling.set_residentBlockSize(*residentBlockSize);
+    tiling.set_residentNullBlock(*attrs->GetInt(kResidentNullBlockAttr));
+    tiling.set_attentionBlockStride(*attentionBlockStride);
+    tiling.set_maxUnionRows(*unionRows);
+    tiling.set_attentionCapacity(*attentionCapacity);
+    tiling.set_logicalStride(*logicalStride);
+    tiling.set_sourceStride(*sourceStride);
+    tiling.set_residentStride(*residentStride);
+    tiling.set_hotTableStride(*hotTableStride);
+    tiling.set_attentionStride(*attentionStride);
+    tiling.set_countsStride(*countsStride);
+    tiling.set_byteMissMask(*byteMissMask);
+
+    tiling.SaveToBuffer(rawTiling->GetData(), rawTiling->GetCapacity());
+    rawTiling->SetDataSize(tiling.GetDataSize());
 
     context->SetBlockDim(static_cast<uint32_t>(rows));
     workspace[0] = 0;
