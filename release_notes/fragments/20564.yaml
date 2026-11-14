@@ -1,0 +1,7 @@
+pr: 20564
+entries:
+  - category: feature
+    text: Added dense INT8 per-token W8A8 compressed-tensors inference on 310P with FP16 activations. Use Model Runner V1 for log-likelihood evaluation.
+    hardware: [310P]
+  - category: bugfix
+    text: Fixed compressed-tensors scheme detection incorrectly selecting integer kernels for incompatible floating-point or mixed weight and activation types.
