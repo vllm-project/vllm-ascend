@@ -128,6 +128,7 @@ class AscendCompilationConfig:
     fuse_norm_quant: bool = True
     fuse_qknorm_rope: bool = True
     fuse_muls_add: bool = True
+    fuse_swiglu: bool = True
 
     @model_validator(mode="before")
     @classmethod
@@ -544,7 +545,8 @@ class AscendConfig:
                 "enable_static_kernel": false,
                 "fuse_norm_quant": true,
                 "fuse_qknorm_rope": true,
-                "fuse_muls_add": true
+                "fuse_muls_add": true,
+                "fuse_swiglu": true
             },
             "ascend_fusion_config": {
                 "fusion_ops_gmmswigluquant": true
