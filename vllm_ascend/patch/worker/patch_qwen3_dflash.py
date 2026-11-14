@@ -63,11 +63,25 @@ def precompute_and_store_context_kv(
 
     all_k, all_v = self._project_context_kv(context_states, num_ctx, L, nkv, hd)
 
-    # --- Per-layer RMSNorm K (3D: [num_ctx, nkv, hd] per layer) ---
-    all_k_normed = torch.empty_like(all_k)
-    for i in range(L):
-        k_norm_layer = self.layers[i].self_attn.k_norm
-        all_k_normed[i] = k_norm_layer(all_k[i])
+    # --- Batched per-layer K RMSNorm ---
+    # Stack the per-layer k_norm weights once, then apply RMSNorm to all
+    # layers in a single pass instead of one launch per layer.
+    if not hasattr(self, "_stacked_k_norm_weights"):
+        self._stacked_k_norm_weights = torch.stack(
+            [self.layers[i].self_attn.k_norm.weight.detach() for i in range(L)]
+        )  # [L, hd]
+        k_norm0 = self.layers[0].self_attn.k_norm
+        self._k_norm_eps = getattr(k_norm0, "variance_epsilon", None)
+        if self._k_norm_eps is None:
+            self._k_norm_eps = k_norm0.eps
+
+    # RMSNorm: x * rsqrt(mean(x^2) + eps) * weight, with the per-layer
+    # weight broadcast over the nkv heads.
+    k_flat = all_k.reshape(L, num_ctx * nkv, hd).float()
+    variance = k_flat.pow(2).mean(dim=-1, keepdim=True)
+    k_normed = (k_flat * torch.rsqrt(variance + self._k_norm_eps)).to(all_k.dtype)
+    k_norm_weight = self._stacked_k_norm_weights.unsqueeze(1).unsqueeze(1)
+    all_k_normed = k_normed.reshape(L, num_ctx, nkv, hd) * k_norm_weight
 
     # --- Fused RoPE across all layers ---
     # View as [L * num_ctx, kv] so RoPE sees one big batch (no copy).
