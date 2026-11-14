@@ -7,8 +7,8 @@ import pytest
 import torch
 from vllm.forward_context import ForwardContext, override_forward_context
 
-from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
-from vllm_ascend.ops.gdn_attn_builder import (
+from vllm_ascend.attention.gdn import AscendGatedDeltaNetAttention
+from vllm_ascend.attention.gdn_attn_builder import (
     GDNSpecCausalConv1dMetadata,
     GDNSpecDecodeMetadata,
 )
@@ -63,16 +63,16 @@ def test_spec_recurrent_dispatches_by_window_width(window: int, expect_upstream:
     )
     with (
         override_forward_context(context),
-        patch("vllm_ascend.ops.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
+        patch("vllm_ascend.attention.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
         patch(
-            "vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating",
+            "vllm_ascend.attention.gdn.DeviceOperator.fused_gdn_gating",
             return_value=(torch.zeros(1, num_tokens, 1), torch.ones(1, num_tokens, 1)),
         ),
-        patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=lambda x: x),
-        patch("vllm_ascend.ops.gdn.causal_conv1d_update", side_effect=lambda x, *a, **k: x.clone()),
-        patch("vllm_ascend.ops.gdn.recurrent_gated_delta_rule", side_effect=ascendc) as ascendc_mock,
-        patch("vllm_ascend.ops.gdn.fused_recurrent_gated_delta_rule", side_effect=triton) as triton_mock,
-        patch("vllm_ascend.ops.gdn.maybe_save_kv_layer_to_connector"),
+        patch("vllm_ascend.attention.gdn.l2norm_fwd", side_effect=lambda x: x),
+        patch("vllm_ascend.attention.gdn.causal_conv1d_update", side_effect=lambda x, *a, **k: x.clone()),
+        patch("vllm_ascend.attention.gdn.recurrent_gated_delta_rule", side_effect=ascendc) as ascendc_mock,
+        patch("vllm_ascend.attention.gdn.fused_recurrent_gated_delta_rule", side_effect=triton) as triton_mock,
+        patch("vllm_ascend.attention.gdn.maybe_save_kv_layer_to_connector"),
     ):
         AscendGatedDeltaNetAttention._forward_core(
             layer, packed, torch.zeros(num_tokens, 1), torch.zeros(num_tokens, 1), output
