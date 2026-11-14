@@ -19,6 +19,7 @@ _MC2: GroupCoordinator | None = None
 
 # Module specific tensor parallel groups
 _MLP_TP: GroupCoordinator | None = None
+_SHARED_EXPERT_TP: GroupCoordinator | None = None
 _OTP: GroupCoordinator | None = None
 _LMTP: GroupCoordinator | None = None
 _EMBED_TP: GroupCoordinator | None = None
@@ -192,11 +193,12 @@ def init_ascend_model_parallel(
             group_ranks, get_world_group().local_rank, backend, group_name="dynamic_eplb"
         )
 
-    # Initialize fine-grained TP process groups on Ascend for four components:
+    # Initialize fine-grained TP process groups on Ascend for model components:
     # 1. LM Head: output logits projection (`lmhead_tensor_parallel_size`)
     # 2. O Proj: attention output projection (`oproj_tensor_parallel_size`)
     # 3. Embedding: The token embedding table at the input of the model (`embedding_tensor_parallel_size`)
     # 4. MLP: feed-forward network in transformer blocks (`mlp_tensor_parallel_size`)
+    # 5. Shared experts: independent DP-axis MLP weight sharding.
     _group_cache = {}
 
     def _create_or_get_group(group_size: int, group_name: str) -> GroupCoordinator:
@@ -222,7 +224,7 @@ def init_ascend_model_parallel(
     embedding_tp_size = get_ascend_config().finegrained_tp_config.embedding_tensor_parallel_size
     mlp_tp_size = get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size
 
-    global _OTP, _LMTP, _EMBED_TP, _MLP_TP
+    global _OTP, _LMTP, _EMBED_TP, _MLP_TP, _SHARED_EXPERT_TP
 
     if otp_size > 1:
         _OTP = _create_or_get_group(otp_size, "otp")
@@ -232,6 +234,9 @@ def init_ascend_model_parallel(
         _EMBED_TP = _create_or_get_group(embedding_tp_size, "emtp")
     if mlp_tp_size > 1:
         _MLP_TP = _create_or_get_group(mlp_tp_size, "mlptp")
+    shared_tp_size = get_ascend_config().finegrained_tp_config.shared_expert_tensor_parallel_size
+    if shared_tp_size > 1:
+        _SHARED_EXPERT_TP = _create_or_get_group(shared_tp_size, "shared_expert_tp")
 
 
 def model_parallel_initialized():
@@ -246,6 +251,11 @@ def get_mc2_group() -> GroupCoordinator:
 def get_mlp_tp_group() -> GroupCoordinator:
     assert _MLP_TP is not None, "mlp group is not initialized"
     return _MLP_TP
+
+
+def get_shared_expert_tp_group() -> GroupCoordinator:
+    assert _SHARED_EXPERT_TP is not None, "shared-expert TP group is not initialized"
+    return _SHARED_EXPERT_TP
 
 
 def get_otp_group() -> GroupCoordinator:
@@ -293,25 +303,14 @@ def destroy_ascend_model_parallel():
         _MC2.destroy()
     _MC2 = None
 
-    global _MLP_TP
-    if _MLP_TP:
-        _MLP_TP.destroy()
-    _MLP_TP = None
-
-    global _LMTP
-    if _LMTP:
-        _LMTP.destroy()
-    _LMTP = None
-
-    global _EMBED_TP
-    if _EMBED_TP:
-        _EMBED_TP.destroy()
-    _EMBED_TP = None
-
-    global _OTP
-    if _OTP:
-        _OTP.destroy()
-    _OTP = None
+    global _MLP_TP, _LMTP, _EMBED_TP, _OTP, _SHARED_EXPERT_TP
+    # Equal fine-grained sizes share one communicator; destroy each only once.
+    destroyed = set()
+    for group in (_MLP_TP, _LMTP, _EMBED_TP, _OTP, _SHARED_EXPERT_TP):
+        if group is not None and id(group) not in destroyed:
+            group.destroy()
+            destroyed.add(id(group))
+    _MLP_TP = _LMTP = _EMBED_TP = _OTP = _SHARED_EXPERT_TP = None
 
     global _P_TP
     if _P_TP:
