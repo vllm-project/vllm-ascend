@@ -47,6 +47,7 @@ from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAMetadata
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+from vllm_ascend.compilation.updatable_graph import ContextSource, SharedSource
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
@@ -692,6 +693,22 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
                 )
 
             metadata.seq_lens_cpu.copy_(next_seq_lens_cpu)
+
+    def build_param_source(
+        self,
+        num_reqs_padded: int,
+        draft_attn_metadata: dict[str, Any],
+        is_draft_model_prefill: bool,
+        *,
+        num_tokens: int | None = None,
+    ) -> ContextSource | SharedSource:
+        if self.use_dcp and self.attn_architecture == "MLA" and is_draft_model_prefill:
+            return ContextSource(draft_attn_metadata)
+        return SharedSource(
+            self.build_fia_params(
+                num_reqs_padded, draft_attn_metadata, is_draft_model_prefill, num_tokens=num_tokens
+            )
+        )
 
     # TODO: Move build_fia_params and build_fia_params_dcp out of the
     # speculator into the attention backend's graph-parameter helpers.

@@ -26,6 +26,7 @@ from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator import (
 )
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.compilation.updatable_graph import SharedSource
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
@@ -193,6 +194,20 @@ class AscendMultiModuleMTPSpeculator(MultiModuleMTPSpeculator):
             )
         assert attn_metadata is not None
         return [{name: metadata for name, metadata in attn_metadata.items() if name in self.draft_attn_layer_names}]
+
+    def build_param_source(
+        self,
+        num_reqs_padded: int,
+        draft_attn_metadata: dict,
+        is_draft_model_prefill: bool,
+        *,
+        num_tokens: int | None = None,
+    ) -> SharedSource:
+        return SharedSource(
+            self.build_fia_params(
+                num_reqs_padded, draft_attn_metadata, is_draft_model_prefill, num_tokens=num_tokens
+            )
+        )
 
     def build_fia_params(
         self,

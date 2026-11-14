@@ -28,10 +28,7 @@ from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_prefill_params,
     update_full_graph_params,
 )
-from vllm_ascend.compilation.updatable_graph import (
-    SharedSource,
-    UpdatableGraph,
-)
+from vllm_ascend.compilation.updatable_graph import UpdatableGraph
 from vllm_ascend.utils import use_updatable_graph
 from vllm_ascend.worker.v2.aclgraph_utils import (
     collect_sorted_captured_token_sizes,
@@ -225,13 +222,13 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
     def _updatable_graph_replay(self, desc, draft_attn_metadatas):
         graph = self.graphs[desc]
         assert isinstance(graph, UpdatableGraph)
-        fia_params = self.speculator.build_fia_params(
+        source = self.speculator.build_param_source(
             desc.num_reqs,
             draft_attn_metadatas[0],
             self.is_draft_model_prefill,
             num_tokens=desc.num_tokens,
         )
-        resolved_tasks = graph.resolve_tasks(SharedSource(fia_params))
+        resolved_tasks = graph.resolve_tasks(source)
         self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
         graph.update(self.update_stream, resolved_tasks)
