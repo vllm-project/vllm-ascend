@@ -740,29 +740,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         events = t.get_kv_events()
         self.assertEqual(len(events), 1)
 
-    def test_lookup_hits_publish_cpu_events_without_put(self):
-        t, store = self._make_thread([1, 1], enable_kv_event=True)
-        t.token_database.group_cache_families["kv"][0] = "c4"
-        req = ReqMeta(
-            req_id="r1",
-            token_len_chunk=32,
-            block_ids=[0, 1],
-            block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
-            token_ids=list(range(32)),
-            original_block_size=16,
-        )
-        t.add_stored_request(req)
-        t.request_queue.put(req)
-        t._handle_request(req)
-        self.assertEqual(store.put_calls, [])
-        events = t.get_kv_events()
-        self.assertEqual(
-            [event.block_hashes for event in events],
-            [[maybe_convert_block_hash(b"h0")], [maybe_convert_block_hash(b"h1")]],
-        )
-        self.assertEqual([event.block_size for event in events], [16, 16])
-
-    def test_uncompressed_lookup_hits_do_not_publish_cpu_events(self):
+    def test_lookup_hits_do_not_publish_cpu_events(self):
         t, store = self._make_thread([1, 1], enable_kv_event=True)
         req = ReqMeta(
             req_id="r1",
@@ -779,8 +757,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         self.assertEqual(t.get_kv_events(), [])
 
     def test_cpu_events_follow_tp_shard_and_keep_global_parent(self):
-        t, store = self._make_thread([1, 1], enable_kv_event=True, block_size=128)
-        t.token_database.group_cache_families["kv"][0] = "c128"
+        t, store = self._make_thread([0, 0], enable_kv_event=True, block_size=128)
         t.put_step = 2
         t.tp_rank = 0
         req = ReqMeta(
@@ -794,17 +771,44 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t.add_stored_request(req)
         t.request_queue.put(req)
         t._handle_request(req)
-        events = t.get_kv_events()
+        replicated, sharded = t.take_kv_events()
+        self.assertEqual(replicated, [])
         self.assertEqual(
-            [event.block_hashes for event in events],
+            [event.block_hashes for event in sharded],
             [[maybe_convert_block_hash(b"h0")], [maybe_convert_block_hash(b"h2")]],
         )
-        self.assertEqual([event.parent_block_hash for event in events], [None, maybe_convert_block_hash(b"h1")])
+        self.assertEqual([event.parent_block_hash for event in sharded], [None, maybe_convert_block_hash(b"h1")])
         self.assertEqual(
-            [event.token_ids for event in events],
+            [event.token_ids for event in sharded],
             [list(range(128)), list(range(256, 384))],
         )
-        self.assertEqual(store.put_calls, [])
+        self.assertEqual(len(store.put_calls), 1)
+
+    def test_cpu_events_stay_replicated_when_every_tp_rank_owns_the_blocks(self):
+        for dcp_size, align_state in ((2, False), (1, True)):
+            with self.subTest(dcp_size=dcp_size, align_state=align_state):
+                t, store = self._make_thread([0, 0, 0, 0], enable_kv_event=True, block_size=128)
+                t.put_step = 2
+                t.dcp_size = dcp_size
+                t.group_uses_align_state = [align_state]
+                req = ReqMeta(
+                    req_id="r1",
+                    token_len_chunk=512,
+                    block_ids=list(range(4)),
+                    block_hashes=[b"h0", b"h1", b"h2", b"h3"],  # type: ignore[arg-type]
+                    token_ids=list(range(512)),
+                    original_block_size=128,
+                )
+                t.add_stored_request(req)
+                t.request_queue.put(req)
+                t._handle_request(req)
+                replicated, sharded = t.take_kv_events()
+                self.assertEqual(sharded, [])
+                self.assertEqual(
+                    [event.block_hashes for event in replicated],
+                    [[maybe_convert_block_hash(block_hash)] for block_hash in (b"h0", b"h1", b"h2", b"h3")],
+                )
+                self.assertEqual(len(store.put_calls), 1)
 
     def test_cpu_events_not_published_when_put_fails(self):
         t, store = self._make_thread([0], enable_kv_event=True)
@@ -820,7 +824,9 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t.add_stored_request(req)
         t.request_queue.put(req)
         t._handle_request(req)
-        self.assertEqual(t.get_kv_events(), [])
+        replicated, sharded = t.take_kv_events()
+        self.assertEqual(replicated, [])
+        self.assertEqual(sharded, [])
 
     def test_partial_put_publishes_only_successful_grains(self):
         t, store = self._make_thread([0, 0], enable_kv_event=True)
@@ -837,7 +843,9 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t.request_queue.put(req)
         with self.assertLogs("vllm", level="ERROR"):
             t._handle_request(req)
-        self.assertEqual([event.block_hashes for event in t.get_kv_events()], [[maybe_convert_block_hash(b"h0")]])
+        replicated, sharded = t.take_kv_events()
+        self.assertEqual(sharded, [])
+        self.assertEqual([event.block_hashes for event in replicated], [[maybe_convert_block_hash(b"h0")]])
 
     def test_cpu_events_skip_empty_or_partial_grains(self):
         t, _ = self._make_thread(enable_kv_event=True, block_size=128)
@@ -852,12 +860,11 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t.add_stored_request(req)
         for stored_ranges in ([], [(1, 128)], [(0, 64)]):
             with self.subTest(stored_ranges=stored_ranges):
-                self.assertEqual(t._build_cpu_stored_events(req, 0, 128, 1, 128, stored_ranges), [])
+                self.assertEqual(t._build_cpu_stored_events(req, 0, 128, stored_ranges), [])
 
-    def test_cpu_events_publish_each_compression_grain(self):
-        cases = (("c2", 2, 32), ("c4", 4, 64), ("c128", 128, 128))
-        for family, ratio, block_size in cases:
-            with self.subTest(family=family):
+    def test_cpu_events_block_size_matches_token_span(self):
+        for block_size in (32, 64, 128):
+            with self.subTest(block_size=block_size):
                 t, _ = self._make_thread(enable_kv_event=True, block_size=block_size)
                 req = ReqMeta(
                     req_id="r1",
@@ -868,9 +875,10 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
                     original_block_size=16,
                 )
                 t.add_stored_request(req)
-                events = t._build_cpu_stored_events(req, 0, block_size, ratio, block_size, [(0, block_size)])
+                events = t._build_cpu_stored_events(req, 0, block_size, [(0, block_size)])
                 self.assertEqual(len(events), 1)
                 self.assertEqual(events[0].block_size, block_size)
+                self.assertEqual(events[0].token_ids, list(range(block_size)))
                 self.assertEqual(events[0].block_hashes, [maybe_convert_block_hash(b"h0")])
 
     def test_store_job_lifecycle(self):
