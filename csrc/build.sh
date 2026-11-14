@@ -12,6 +12,7 @@
 set -e
 RELEASE_TARGETS=("ophost" "opapi" "opgraph" "onnxplugin")
 UT_TARGETS=()
+
 ########################################################################################################################
 # 预定义变量
 ########################################################################################################################
@@ -64,7 +65,7 @@ ENABLE_GENOP=FALSE
 ENABLE_GENOP_AICPU=FALSE
 GENOP_TYPE=""
 GENOP_NAME=""
-PR_CHANGED_FILES=""  # PR场景, 修改文件清单, 可用于标识是否PR场景
+PR_CHANGED_FILES=""  # PR场景, 修改文件清单,
 
 if [ "${USER_ID}" != "0" ]; then
     DEFAULT_TOOLKIT_INSTALL_DIR="${HOME}/Ascend/ascend-toolkit/latest"
