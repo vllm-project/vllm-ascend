@@ -75,9 +75,11 @@ class RuntimeGuardBusMixin:
         """Re-bind dependents after a successful wave-head config apply.
 
         When hot-reload turns all detectors off (``needs_sample_phase_hooks``
-        True→False), purge RequestGuardStore / wave stamps so finished reqs
-        are not left unreaped after sync stops calling mark_finished/reap.
-        Deferred KV dump jobs already claimed for D2H are kept.
+        True→False), soft-purge detect IO: clear outputs, detector private maps,
+        and wave stamps, but keep Store rows and ``prompt_token_ids`` so a
+        mid-request re-enable can still report the prompt. Finished rows stay
+        for the next sync reap. Deferred KV dump jobs already claimed for D2H
+        are kept.
         """
         self.action_executor.apply_runtime_config()
         self.runtime_config.apply_ascend_log_level()
@@ -91,19 +93,27 @@ class RuntimeGuardBusMixin:
             self._purge_guard_state_after_detectors_off()
 
     def _purge_guard_state_after_detectors_off(self) -> None:
-        """Drop detect-side per-req state after all detectors are disabled."""
+        """Soft-purge detect-side state after all detectors are disabled.
+
+        Keeps ``prompt_token_ids`` and Store entries. Shared cumulative
+        ``output_token_ids`` are cleared so a later re-enable appends only the
+        suffix (same mid-enable contract as never-on-during-prefill).
+        """
         store = RequestGuardStore.get()
-        ids = store.list_req_ids()
         # Unclaimed auto arms will never fire from detectors; refund + drop.
         # Jobs already moved to ``_deferred_kv_dump_jobs`` still D2H this wave.
         if self._kv_dump_jobs:
             self._drop_pending_dump_jobs()
+        ids = store.reset_detect_io_keep_prompts()
+        # Belt-and-suspenders: refresh already called on_disabled for sections
+        # that flipped True→False; clear every detector map in case some were
+        # already off with leftover windows.
+        self.detectors.disable_all()
         if ids:
-            store.clear_many(ids, detectors=self.detectors)
             self.wave_tracker.discard_many(ids)
         RequestIoSnapshotManager.get().clear_wave_cache()
         logger.info(
-            "[runtime_guard] purged %d req state(s) after all detectors disabled",
+            "[runtime_guard] cleared detect IO for %d req(s) after all detectors disabled (prompts kept)",
             len(ids),
         )
 

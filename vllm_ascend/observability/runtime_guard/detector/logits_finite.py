@@ -145,6 +145,9 @@ class LogitsFiniteDetector(ConfigBackedDetector):
     def clear_finished(self, req_id: str) -> None:
         del req_id
 
+    def on_disabled(self) -> None:
+        self._stage_none()
+
     def _stage_none(self) -> None:
         """Drop pending alerts / async gates when the detector is disabled."""
         self._deferred.clear()
