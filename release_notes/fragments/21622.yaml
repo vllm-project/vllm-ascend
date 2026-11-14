@@ -1,0 +1,4 @@
+pr: 21622
+entries:
+  - category: feature
+    text: Added independent prefill and decode DCP support for MLA KV transfer in MooncakePushConnector, including different DCP sizes on the two peers and PCP>1 with DCP=PCP or DCP=PCP*TP. Sequence sharding follows each peer's per-layer dcp_sharded flag, with effective sizes derived from its DCP configuration and cache layout. Mamba caches retain PCP*TP state sharding with DCP enabled, matching the Pull connector.
