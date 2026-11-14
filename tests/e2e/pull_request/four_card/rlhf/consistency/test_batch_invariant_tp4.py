@@ -36,6 +36,12 @@ SMALL_QWEN3_OVERRIDES = {
     "num_hidden_layers": 2,
 }
 
+# Qwen3.5-35B-A3B is a hybrid MoE: 30 gated-delta-net layers plus 10
+# full-attention layers, 256 experts top-8. It adds the GDN kernels and the
+# linear/full interleave to what the Qwen3 case covers; the real checkpoint is
+# already cached on the four-card runners.
+QWEN35_MODEL = "Qwen/Qwen3.5-35B-A3B"
+
 
 @pytest.fixture(autouse=True)
 def enable_batch_invariant_mode(monkeypatch: pytest.MonkeyPatch):
@@ -98,37 +104,13 @@ def _extract_step_logprobs(request_output):
     return None, None
 
 
-@pytest.mark.e2e_model("Qwen/Qwen3-30B-A3B")
-@pytest.mark.e2e_coverage(
-    arch="moe",
-    feature="batch_invariant,logprobs",
-    parallel="TP",
-    deploy="pd_mix",
-    hardware="A2",
-    quantization="BF16",
-    graph_mode="full_and_piecewise",
-)
-@pytest.mark.model(
-    model_name=DEFAULT_MODEL,
-    max_num_seqs=144,
-    gpu_memory_utilization=float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.95")),
-    max_model_len=8192,
-    dtype="bfloat16",
-    tensor_parallel_size=int(os.getenv("VLLM_TEST_TP_SIZE", "4")),
-    enable_prefix_caching=False,
-    distributed_executor_backend="mp",
-    compilation_config={
-        "cudagraph_capture_sizes": [1, 32, 64],
-    },
-    extra_kwargs={
-        "load_format": "dummy",
-        "hf_overrides": SMALL_QWEN3_OVERRIDES,
-        "enable_chunked_prefill": False,
-        "block_size": 128,
-    },
-)
-def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(vllm_runner, monkeypatch: pytest.MonkeyPatch):
-    """Verify bitwise token/logprob invariance across batch sizes with the default graph configuration."""
+def _assert_bitwise_batch_invariance(vllm_runner) -> None:
+    """Compare a BS=1 and a BS=N run of the same prompt set, step by step.
+
+    Both runs share one engine instance, so any difference -- in the sampled
+    token ids or in the float32 logprobs of the sampled tokens -- means a
+    batch-size dependent reduction in the model or in one of the kernels.
+    """
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "4"))
@@ -302,3 +284,55 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(vllm_runner, monkeypatch: 
             f"Batch invariance violated in {len(failed_prompts)}/{len(prompts)} prompts. See output above for details."
         )
         pytest.fail(msg)
+
+
+def _model(model_name: str, *, utilization: float = 0.9, overrides: dict | None = None) -> dict:
+    """Engine kwargs shared by the batch-invariance cases; only the model differs."""
+    extra_kwargs: dict = {"enable_chunked_prefill": False, "block_size": 128}
+    if overrides is not None:
+        extra_kwargs["load_format"] = "dummy"
+        extra_kwargs["hf_overrides"] = overrides
+    return {
+        "model_name": model_name,
+        "max_num_seqs": 144,
+        "max_model_len": 8192,
+        "dtype": "bfloat16",
+        "tensor_parallel_size": int(os.getenv("VLLM_TEST_TP_SIZE", "4")),
+        "enable_prefix_caching": False,
+        "distributed_executor_backend": "mp",
+        "compilation_config": {"cudagraph_capture_sizes": [1, 32, 64]},
+        "gpu_memory_utilization": float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", str(utilization))),
+        "extra_kwargs": extra_kwargs,
+    }
+
+
+@pytest.mark.e2e_model("Qwen/Qwen3-30B-A3B")
+@pytest.mark.e2e_coverage(
+    arch="moe",
+    feature="batch_invariant,logprobs",
+    parallel="TP",
+    deploy="pd_mix",
+    hardware="A3",
+    quantization="BF16",
+    graph_mode="full_and_piecewise",
+)
+@pytest.mark.model(**_model(DEFAULT_MODEL, utilization=0.95, overrides=SMALL_QWEN3_OVERRIDES))
+def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(vllm_runner):
+    """Verify bitwise token/logprob invariance across batch sizes with the default graph configuration."""
+    _assert_bitwise_batch_invariance(vllm_runner)
+
+
+@pytest.mark.e2e_model("Qwen/Qwen3.5-35B-A3B")
+@pytest.mark.e2e_coverage(
+    arch="moe",
+    feature="batch_invariant,logprobs",
+    parallel="TP",
+    deploy="pd_mix",
+    hardware="A3",
+    quantization="BF16",
+    graph_mode="full_and_piecewise",
+)
+@pytest.mark.model(**_model(QWEN35_MODEL, utilization=0.9))
+def test_qwen35_moe_logprobs_bitwise_batch_invariance_bs1_vs_bsN(vllm_runner):
+    """Same bitwise check as above, for the hybrid linear/full attention MoE model."""
+    _assert_bitwise_batch_invariance(vllm_runner)

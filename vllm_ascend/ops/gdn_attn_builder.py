@@ -1115,6 +1115,14 @@ class AscendGDNAttentionBackend(GDNAttentionBackend):
     def get_builder_cls() -> type[AscendGDNAttentionMetadataBuilder]:
         return AscendGDNAttentionMetadataBuilder
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # vLLM #60271 added a check for batch-invariance support within
+        # `init_attn_backend` for both supported vLLM revisions.
+        # And `AscendGatedDeltaNetAttention` has been verified to support
+        # batch-invariance using the Qwen3.5 35B model.
+        return True
+
 
 class AscendGDNHostMetadataBuilder(AscendGDNAttentionMetadataBuilder):
     """Build only the descriptors consumed by AscendC host-metadata paths."""
