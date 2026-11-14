@@ -62,6 +62,23 @@ def test_probe_only_accepts_explicit_fused_abi(monkeypatch):
     ns._supports_recurrent_gdn_fusion.cache_clear()
 
 
+def test_recurrent_parameters_are_materialized_once_in_fp32():
+    layer = torch.nn.Module()
+    layer.A_log = torch.nn.Parameter(torch.tensor([1.5], dtype=torch.bfloat16))
+    layer.dt_bias = torch.nn.Parameter(torch.tensor([-0.25], dtype=torch.bfloat16))
+    a_loader, dt_loader = object(), object()
+    layer.A_log.weight_loader = a_loader
+    layer.dt_bias.weight_loader = dt_loader
+
+    gdn.initialize_recurrent_fp32_parameters(layer)
+
+    assert layer.A_log.dtype == layer.dt_bias.dtype == torch.float32
+    torch.testing.assert_close(layer.A_log, torch.tensor([1.5]))
+    torch.testing.assert_close(layer.dt_bias, torch.tensor([-0.25]))
+    assert layer.A_log.weight_loader is a_loader
+    assert layer.dt_bias.weight_loader is dt_loader
+
+
 @pytest.mark.parametrize(
     "indices,lengths,accepted",
     [
@@ -79,6 +96,8 @@ def test_fused_retains_checkpoint_width_and_zero_length_rows(runtime, indices, l
     a, b = torch.randn(count, 1), torch.randn(count, 1)
     state = torch.zeros(24, 1, 128, 128)
     accepted = None if accepted is None else torch.tensor(accepted, dtype=torch.int32)
+    A_log = torch.zeros(1)
+    dt_bias = torch.zeros(1)
     result = ns._run_recurrent_gdn(
         q,
         q,
@@ -86,8 +105,8 @@ def test_fused_retains_checkpoint_width_and_zero_length_rows(runtime, indices, l
         state,
         a=a,
         b=b,
-        A_log=torch.zeros(1),
-        dt_bias=torch.zeros(1),
+        A_log=A_log,
+        dt_bias=dt_bias,
         actual_seq_lengths=lengths,
         state_indices=table,
         num_accepted_tokens=accepted,
@@ -102,6 +121,7 @@ def test_fused_retains_checkpoint_width_and_zero_length_rows(runtime, indices, l
     assert not kw["allow_neg_eigval"]
     assert kw["scale"] == 128**-0.5
     assert kw["A_log"].dtype == kw["dt_bias"].dtype == torch.float32
+    assert kw["A_log"] is A_log and kw["dt_bias"] is dt_bias
     if accepted is not None:
         assert kw["num_accepted_tokens"].dtype == torch.int32
         assert kw["num_accepted_tokens"].data_ptr() == accepted.data_ptr()
@@ -187,17 +207,17 @@ def test_forward_routes_raw_gate_rows_and_merges_outputs(runtime, mode):
     spec_ids = [1, 3] if spec and (prefill or decode) else ([0, 1] if spec else [])
     non_ids = [0, 2] if spec and (prefill or decode) else ([] if spec else list(range(3 if prefill and decode else 2)))
     count = len(spec_ids) + len(non_ids)
-    nd = (1 if prefill else len(non_ids)) if decode else 0
+    num_decodes = (1 if prefill else len(non_ids)) if decode else 0
     npref = 1 if prefill else 0
     prefix = "gdn"
     qsl = torch.tensor([0, 2], dtype=torch.int32)
     conv = SimpleNamespace(query_start_loc=qsl, cache_indices=torch.tensor([0]), initial_state_mode=None)
-    non_lengths = [0] + [1] * nd
-    non_states = torch.arange(nd + npref, dtype=torch.int32) + 10
+    non_lengths = [0] + [1] * num_decodes
+    non_states = torch.arange(num_decodes + npref, dtype=torch.int32) + 10
     meta = SimpleNamespace(
         num_prefills=npref,
-        num_decodes=nd,
-        num_decode_tokens=nd,
+        num_decodes=num_decodes,
+        num_decode_tokens=num_decodes,
         num_actual_tokens=count,
         spec_sequence_masks=torch.tensor([True]) if spec else None,
         spec_token_indx=torch.tensor(spec_ids, dtype=torch.int64),
@@ -216,8 +236,8 @@ def test_forward_routes_raw_gate_rows_and_merges_outputs(runtime, mode):
             causal_conv1d=conv, actual_seq_lengths=torch.tensor(non_lengths, dtype=torch.int32)
         ),
         non_spec_prefill_metadata=SimpleNamespace(causal_conv1d=conv, chunk=None),
-        prefill_query_start_loc=torch.tensor([0, len(non_ids) - nd], dtype=torch.int32),
-        prefill_state_indices=torch.tensor([10 + nd]),
+        prefill_query_start_loc=torch.tensor([0, len(non_ids) - num_decodes], dtype=torch.int32),
+        prefill_state_indices=torch.tensor([10 + num_decodes]),
         prefill_has_initial_state=torch.tensor([True]),
     )
     layer = SimpleNamespace(
@@ -244,15 +264,15 @@ def test_forward_routes_raw_gate_rows_and_merges_outputs(runtime, mode):
     output = torch.empty(count, 1, 2, dtype=torch.bfloat16)
     ns.AscendGatedDeltaNetAttention._forward_core(layer, packed, b, a, output)
     torch.testing.assert_close(output[:, 0, 0], tokens)
-    expected_groups = ([spec_ids] if spec else []) + ([non_ids[:nd]] if decode else [])
+    expected_groups = ([spec_ids] if spec else []) + ([non_ids[:num_decodes]] if decode else [])
     for call, ids in zip(ns.recurrent_gated_delta_rule.call_args_list, expected_groups, strict=True):
         torch.testing.assert_close(call.kwargs["g"], a[ids])
         torch.testing.assert_close(call.kwargs["beta"], b[ids])
         assert call.kwargs["ssm_state_indices"].ndim == 2
     if prefill:
         gate_args = ns.DeviceOperator.fused_gdn_gating.call_args.args
-        torch.testing.assert_close(gate_args[1], a[non_ids[nd:]])
-        torch.testing.assert_close(gate_args[2], b[non_ids[nd:]])
+        torch.testing.assert_close(gate_args[1], a[non_ids[num_decodes:]])
+        torch.testing.assert_close(gate_args[2], b[non_ids[num_decodes:]])
         ns.DeviceOperator.fused_gdn_gating.assert_called_once()
     else:
         ns.DeviceOperator.fused_gdn_gating.assert_not_called()

@@ -61,6 +61,24 @@ from vllm_ascend.utils import vllm_version_is
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 
 
+@torch.no_grad()
+def initialize_recurrent_fp32_parameters(layer: nn.Module) -> None:
+    """Keep recurrent-only scalar weights in their native FP32 ABI dtype.
+
+    Qwen creates ``dt_bias`` without an explicit dtype, so model construction
+    under the BF16 default-dtype context leaves it in BF16.  The fused
+    recurrent operator requires both ``A_log`` and ``dt_bias`` in FP32; doing
+    the conversion in its per-layer forward path launches a Cast every step.
+    Normalize the parameters once before weight loading instead.  vLLM's
+    parameter replacement preserves their weight loaders, so checkpoint loads
+    continue to write directly into FP32 storage.
+    """
+    for name in ("A_log", "dt_bias"):
+        parameter = getattr(layer, name, None)
+        if parameter is not None and parameter.dtype != torch.float32:
+            replace_parameter(layer, name, parameter.float())
+
+
 @lru_cache(maxsize=1)
 def _get_fla_gdn_prefill_op():
     try:
@@ -342,6 +360,8 @@ def _call_fused_recurrent_gdn(
     state_indices = state_indices[:num_sequences].to(torch.int32)
     if num_accepted_tokens is not None:
         num_accepted_tokens = num_accepted_tokens[:num_sequences]
+    if A_log.dtype != torch.float32 or dt_bias.dtype != torch.float32:
+        raise TypeError("Fused recurrent GDN requires pre-materialized FP32 A_log and dt_bias")
     return recurrent_gated_delta_rule(
         query.squeeze(0),
         key.squeeze(0),
@@ -349,8 +369,8 @@ def _call_fused_recurrent_gdn(
         state,
         g=a,
         beta=b,
-        A_log=A_log.float(),
-        dt_bias=dt_bias.float(),
+        A_log=A_log,
+        dt_bias=dt_bias,
         scale=key.shape[-1] ** -0.5,
         actual_seq_lengths=actual_seq_lengths,
         ssm_state_indices=state_indices,
@@ -397,6 +417,10 @@ def _rearrange_decode_qkv(
 
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        initialize_recurrent_fp32_parameters(self)
+
     @torch.no_grad()
     def _pack_conv_weights(self) -> None:
         """Refresh the kernel-layout convolution parameter in place."""
