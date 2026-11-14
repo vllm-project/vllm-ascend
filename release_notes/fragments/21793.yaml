@@ -1,0 +1,4 @@
+pr: 21793
+entries:
+  - category: bugfix
+    text: AscendStoreConnector(memcache) deployments now fail fast with actionable errors when the NPU driver version.info file is missing or empty, before model weights are loaded.

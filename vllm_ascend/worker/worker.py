@@ -575,6 +575,15 @@ class NPUWorker(WorkerBase):
         return device
 
     def init_device(self):
+        # Fail fast for memcache-backed KV pool deployments: a missing or empty
+        # NPU driver version file is only detected inside memfabric store init,
+        # which previously happened after weights were loaded (~15 minutes on
+        # large models). The check below is a millisecond-level file read.
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
+            precheck_memcache_driver_version,
+        )
+
+        precheck_memcache_driver_version(self.vllm_config)
         # NOTE: KEEP device the member of `NPUWorker`, as it will be checked
         # in ray scenario. see https://github.com/vllm-project/vllm/pull/26845
         # for more details
