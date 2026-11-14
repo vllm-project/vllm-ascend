@@ -79,6 +79,7 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         ``prepare_forward(num_reqs, attn_metadata)``; accept both and forward the
         one the installed vLLM expects.
         """
+
         prepare_kwargs: dict[str, Any] = {"prepare_forward": prepare_forward}
         with communicator_switch(), model_capture_wrapper(self.speculator, False):
             super().capture(
