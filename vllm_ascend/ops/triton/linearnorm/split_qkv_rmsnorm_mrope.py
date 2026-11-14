@@ -441,6 +441,7 @@ def triton_split_qkv_rmsnorm_mrope(
     q_bias: torch.Tensor | None = None,
     k_bias: torch.Tensor | None = None,
     has_gate: bool = False,
+    positions: torch.Tensor | None = None,
     weight_offset: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     return _triton_split_qkv_rmsnorm_mrope(
@@ -478,6 +479,7 @@ def triton_split_qkv_rmsnorm_mrope_with_gate_out(
     rope_dim: int | None = None,
     q_bias: torch.Tensor | None = None,
     k_bias: torch.Tensor | None = None,
+    positions: torch.Tensor | None = None,
     weight_offset: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     q_output, k_output, v_output, _ = _triton_split_qkv_rmsnorm_mrope(
