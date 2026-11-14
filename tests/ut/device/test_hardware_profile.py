@@ -111,6 +111,7 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.GRAPH_NORM_QUANT_FUSION,
             HardwareCapability.LOCAL_KV_COMM_RESOURCE,
             HardwareCapability.LORA_CUSTOM_OPS,
+            HardwareCapability.MC2_HIERARCHY_COMM,
             HardwareCapability.MLA_FLASH,
             HardwareCapability.MLAPO_NATIVE_WEIGHTS,
             HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
