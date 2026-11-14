@@ -35,8 +35,8 @@ os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 from vllm_ascend.ascend_config import (
     KVPPConfig,
     StairConfig,
+    build_ascend_config,
     get_ascend_config,
-    init_ascend_config,
     is_draft_config_context,
 )
 from vllm_ascend.device.hardware_profile import (
@@ -659,7 +659,7 @@ class NPUPlatform(Platform):
         # 5.Initialize Ascend config and validate Ascend-specific options
         # (fused MC2 exclusivity + scheduler extension policies)
         # ascend_config is only used for verification, this object must NOT be modified here
-        ascend_config = init_ascend_config(vllm_config)
+        ascend_config = build_ascend_config(vllm_config)
         _validate_deepseek_v4_tp_config(vllm_config)
         _check_ascend_config(vllm_config, ascend_config)
 

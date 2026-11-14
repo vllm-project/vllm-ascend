@@ -20,6 +20,7 @@ import importlib.util
 import json
 import math
 import os
+import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -43,13 +44,7 @@ _MEGA_MOE_SUPPORTED = None
 
 
 def is_mega_moe_supported() -> bool:
-    """Whether the megamoe op is available at runtime.
-
-    Always read _MEGA_MOE_SUPPORTED through this accessor instead of
-    ``from ascend_config import _MEGA_MOE_SUPPORTED``: the global is rebound
-    during config init (AscendConfig._validate_user_input_ranges rolls back
-    megamoe), and a direct import binds a stale snapshot for the bool.
-    """
+    """Whether the operator package is available, independent of model policy."""
     global _MEGA_MOE_SUPPORTED
     if _MEGA_MOE_SUPPORTED is None:
         _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
@@ -706,6 +701,8 @@ class AscendConfig:
     # the operator instead of the separate shared-expert forward. enable_fused_mc2=2
     # keeps the shared expert separate. Internal flag, not user-settable.
     megamoe_shared_expert_fusion: bool = False
+    # Per-model policy; validating another model must not change package capability.
+    megamoe_enabled: bool = dataclasses.field(default=False, init=False)
     enable_mlapo: bool = True
     # When True, keep MLAPO prefill weights on NPU instead of freeing them
     # on kv_consumer D nodes. Trades NPU memory for stability — D nodes have
@@ -767,16 +764,12 @@ class AscendConfig:
         # We will first roll back the megamoe internally and keep `enable_fused_mc2=2`
         # to enable the megamoe for testing capabilities.
         # These codes will be removed after megamoe is ready.
-        global _MEGA_MOE_SUPPORTED
         if self.enable_fused_mc2 in (0, 1):
-            # When enable_fused_mc2=1, roll back to dispatch_ffn_combine.
-            _MEGA_MOE_SUPPORTED = False
+            self.megamoe_enabled = False
         elif self.enable_fused_mc2 in (2, 3):
-            # =2: MegaMoe with the shared expert kept separate; =3: MegaMoe
-            # with the shared expert fused into the operator.
             self.megamoe_shared_expert_fusion = self.enable_fused_mc2 == 3
-            _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
-            if self.enable_fused_mc2 == 3 and not _MEGA_MOE_SUPPORTED:
+            self.megamoe_enabled = is_mega_moe_supported()
+            if self.enable_fused_mc2 == 3 and not self.megamoe_enabled:
                 logger.warning_once(
                     "enable_fused_mc2=3 requires the cann_ops_transformer package; "
                     "MegaMoe (and its shared-expert fusion) will be disabled."
@@ -934,7 +927,7 @@ class AscendConfig:
         is_minimax_m3 = any(architecture.startswith("MiniMaxM3") for architecture in model_architectures)
         # dispatch_ffn_combine (enable_fused_mc2=1 after MegaMoe rollback) does not
         # support MiniMax M3 SwiGLU-OAI. MegaMoe (enable_fused_mc2=2) is allowed.
-        assert not (self.enable_fused_mc2 == 1 and is_minimax_m3 and not is_mega_moe_supported()), (
+        assert not (self.enable_fused_mc2 == 1 and is_minimax_m3 and not self.megamoe_enabled), (
             "MiniMax M3 does not support enable_fused_mc2=1 (dispatch_ffn_combine). "
             "Set additional_config.enable_fused_mc2 to 2 to enable MegaMoe, or 0 to disable fused MC2."
         )
@@ -944,8 +937,9 @@ class AscendConfig:
                 "enable_fused_mc2 and multistream_overlap_shared_expert "
                 "cannot be enabled at the same time. Setting multistream_overlap_shared_expert to False."
             )
-        if self.enable_fused_mc2 == 1 and is_mega_moe_supported() and not self._is_megamoe_supported_by_config(vc):
+        if self.megamoe_enabled and not self._is_megamoe_supported_by_config(vc):
             self.enable_fused_mc2 = 0
+            self.megamoe_enabled = False
             logger.warning_once(
                 "MegaMoe is not supported for this model config; additional_config.enable_fused_mc2 will be set to 0."
             )
@@ -1944,7 +1938,8 @@ def _is_ascend_config_initialized(config: AscendConfig | None) -> bool:
     return hasattr(config, "ascend_compilation_config") and hasattr(config, "eplb_config")
 
 
-def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
+def build_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
+    """Validate one model without activating process runtime state."""
     additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
     # Upstream EngineArgs injects --gdn-prefill-backend / --kda-prefill-backend
     # into additional_config. The generic GDN/KDA model layers consume them
@@ -1976,15 +1971,6 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         # Do not reuse a cached config: let AscendConfig's normal nested
         # pydantic validation report the invalid sub-config input below.
         refresh = True
-    global _ASCEND_CONFIG, _INIT_VLLM_CONFIG
-    if (
-        _ASCEND_CONFIG is not None
-        and not refresh
-        and _is_ascend_config_initialized(_ASCEND_CONFIG)
-        and _INIT_VLLM_CONFIG is vllm_config
-    ):
-        return _ASCEND_CONFIG
-
     # Pre-construct sub-configs that need precedence resolution or vllm_config.
     sched = SchedulerConfig.from_additional_config(additional_config)
     sparse_kv = SparseKVOffloadConfig.from_additional_config(
@@ -2037,6 +2023,7 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         "enable_sparse_li_c4",
         "enable_sparse_sfa_turboquant",
         "enable_sp_by_pass",
+        "megamoe_enabled",
         "pd_tp_ratio",
         "pd_head_ratio",
         "num_head_replica",
@@ -2087,18 +2074,46 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
     new_config.rl_config.apply(new_config)
     new_config.finegrained_tp_config._validate_preconditions(vllm_config)
     new_config.xlite_graph_config._validate_preconditions(vllm_config)
-    if _is_ascend_config_initialized(new_config):
-        _ASCEND_CONFIG = new_config
+    return new_config
+
+
+def _model_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
+    # Keep derived state off VllmConfig: vLLM replace() accepts only declared
+    # dataclass fields. The owning runtime holds weak model identities instead.
+    owner = _ASCEND_CONFIG
+    additional = vllm_config.additional_config or {}
+    refresh = validate_additional_config_bool(additional.get("refresh", False), "additional_config.refresh")
+    rl = additional.get("rl_config", {})
+    if isinstance(rl, dict):
+        refresh = refresh or validate_additional_config_bool(rl.get("enabled", False), "rl_config.enabled")
+    elif "rl_config" in additional:
+        refresh = True
+    if _is_ascend_config_initialized(owner) and not refresh:
+        if vllm_config is _INIT_VLLM_CONFIG:
+            return owner
+        binding = owner.__dict__.get("_model_runtime_configs", {}).get(id(vllm_config))
+        if binding is not None and binding[0]() is vllm_config:
+            return binding[1]
+    result = build_ascend_config(vllm_config)
+    if _is_ascend_config_initialized(owner) and _is_ascend_config_initialized(result):
+        cache = owner.__dict__.setdefault("_model_runtime_configs", {})
+        for key in [key for key, binding in cache.items() if binding[0]() is None]:
+            del cache[key]
+        cache[id(vllm_config)] = (weakref.ref(vllm_config), result)
+    return result
+
+
+def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
+    """Activate the owning worker/scheduler configuration outside model scopes."""
+    global _ASCEND_CONFIG, _INIT_VLLM_CONFIG
+    result = _model_ascend_config(vllm_config)
+    if _is_ascend_config_initialized(result):
+        _ASCEND_CONFIG = result
         _INIT_VLLM_CONFIG = vllm_config
-        # Publish the fully validated singleton before invalidating derived
-        # process caches. The next runtime read rebuilds them from new_config;
-        # failed construction leaves the previous singleton/cache untouched.
         from vllm_ascend.utils import clear_enable_sp
 
         clear_enable_sp()
-    else:
-        logger.warning("Ascend config instance is not fully initialized. action: skip singleton cache update. ")
-    return new_config
+    return result
 
 
 def clear_ascend_config():
@@ -2110,8 +2125,14 @@ def clear_ascend_config():
     clear_enable_sp()
 
 
-def get_ascend_config():
-    global _ASCEND_CONFIG
+def get_ascend_config(vllm_config: VllmConfig | None = None) -> AscendConfig:
+    # Import lazily: platform discovery can import this module before vllm.config.
+    if vllm_config is None:
+        from vllm.config import get_current_vllm_config_or_none
+
+        vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is not None:
+        return _model_ascend_config(vllm_config)
     if _ASCEND_CONFIG is None or not _is_ascend_config_initialized(_ASCEND_CONFIG):
         raise RuntimeError("Ascend config is not initialized. Please call init_ascend_config first.")
     return _ASCEND_CONFIG

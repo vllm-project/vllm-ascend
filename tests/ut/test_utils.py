@@ -85,7 +85,7 @@ class TestUtils(TestBase):
         from vllm_ascend import platform
 
         importlib.reload(platform)
-        utils.enable_pcp_o_proj_weight_sharding.cache_clear()
+        utils.clear_enable_sp()
 
     def test_nd_to_nz_2d(self):
         # can be divided by 16
