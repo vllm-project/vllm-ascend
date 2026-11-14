@@ -69,6 +69,7 @@ _EXPECTED_CAPABILITIES = {
         HardwareCapability.MC2_FULLMESH_V2_COMM,
         HardwareCapability.RMS_NORM_CAST,
         HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
+        HardwareCapability.MOE_GATING_TOP_K_WITH_MAP,
         HardwareCapability.NPU_TOP_K_TOP_P,
     },
     AscendDeviceType._310P: frozenset(
@@ -116,6 +117,7 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
             HardwareCapability.MM_REDUCE_SCATTER_AI_CPU_INFERENCE,
             HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
+            HardwareCapability.MOE_GATING_TOP_K_WITH_MAP,
             HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
             HardwareCapability.MOE_GATING_TOP_K_HASH_VISION,
             HardwareCapability.NPUGRAPH_EX,
