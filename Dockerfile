@@ -76,6 +76,13 @@ ARG COMPILE_CUSTOM_KERNELS=1
 RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     export VLLM_BATCH_INVARIANT=1 && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
+    if [ -f "${ASCEND_HOME_PATH}/share/info/ascendnpu-ir/bin/set_env.sh" ]; then \
+        chmod a+r,go-w "${ASCEND_HOME_PATH}/share/info/ascendnpu-ir/bin/set_env.sh"; \
+    fi && \
+    if [ -d "${ASCEND_HOME_PATH}/tools/msmemscope/lib64" ]; then \
+        chmod a+rx,go-w "${ASCEND_HOME_PATH}/tools/msmemscope" && \
+        chmod -R a+rX,go-w "${ASCEND_HOME_PATH}/tools/msmemscope/lib64"; \
+    fi && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip install concurrent-log-handler && \
@@ -139,6 +146,10 @@ RUN case "${TARGETPLATFORM:-$(uname -m)}" in \
 # Install memfabric_hybrid kernels (A3/A5)
     case "${SOC_VERSION:-}" in \
         ascend950dt_9582) TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A5 ;; \
+    if [ -d "${ASCEND_OPP_PATH}/vendors/cust" ]; then \
+        chmod a+rx,go-w "${ASCEND_OPP_PATH}/vendors" && \
+        chmod -R a+rX,go-w "${ASCEND_OPP_PATH}/vendors/cust"; \
+    fi && \
         ascend910_9391) TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A3 ;; \
         ascend910b1) TORCH_DEVICE_BACKEND_AUTOLOAD=0 mfcli kernel install --soc-version A2 ;; \
     esac && \
@@ -171,7 +182,5 @@ RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     FLASH_ATTN_BUILD_NPU=910 python3 setup.py install && \
     cd /workspace && \
     rm -rf /tmp/flash-attention-npu
-
-RUN bash /vllm-workspace/vllm-ascend/tools/fix_runtime_permissions.sh
 
 CMD ["/bin/bash"]
