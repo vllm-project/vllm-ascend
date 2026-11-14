@@ -20,10 +20,12 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.cache_config import (
+    infer_cacheable_group_ids,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_keys import (
     block_hash_to_bytes,
     get_block_hashes,
-    infer_cacheable_group_ids,
 )
 
 _CACHE_MISSING = object()

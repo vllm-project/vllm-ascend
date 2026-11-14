@@ -6,6 +6,20 @@ import numpy as np
 import pytest
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.token_database import ChunkedTokenDatabase
+
+
+def _bind_token_database(worker):
+    """Build the token database the layerwise batch builder reads layouts from."""
+    database = ChunkedTokenDatabase(metadata=[], block_size=[16], partitions=None)
+    database.set_group_buffers(
+        group_kv_caches_base_addr=worker.group_kv_caches_base_addr,
+        group_block_len=worker.group_block_len,
+        group_block_stride=worker.group_block_stride,
+        group_num_layers=worker.group_num_layers,
+        group_layer_cache_entry_offsets=worker.group_layer_cache_entry_offsets,
+    )
+    worker.token_database = database
 
 
 def _worker(layer_entries, offset=42, total_layers=78, dcp_size=1, dcp_rank=0, block_key=False):
@@ -31,7 +45,7 @@ def _worker(layer_entries, offset=42, total_layers=78, dcp_size=1, dcp_rank=0, b
     worker.group_block_stride = {0: [size * 2 for size in flat]}
     worker.group_kv_caches_base_addr = {0: [10_000_000 + i * 1_000_000 for i in range(len(flat))]}
     worker.group_layer_cache_entry_offsets = {0: offsets}
-    worker.token_database = worker
+    _bind_token_database(worker)
     worker.page_size_bytes = sum(flat)
     return worker
 
@@ -98,6 +112,7 @@ def test_multigroup_layout_with_sufficient_capacity_is_unchanged():
     worker.group_block_stride[1] = [128] * 16
     worker.group_kv_caches_base_addr[1] = [30_000_000 + i * 1000 for i in range(16)]
     worker.group_layer_cache_entry_offsets[1] = list(range(17))
+    _bind_token_database(worker)
     builders = worker._build_group_layer_builders()
     for group, size in enumerate([32, 64]):
         assert builders[group].page_size_bytes == 61 * size

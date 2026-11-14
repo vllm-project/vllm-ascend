@@ -553,10 +553,10 @@ class TestGLM53Store(unittest.TestCase):
         worker.prepare_layerwise_step(metadata)
         expected = {2: [False, True, False], 3: [True, False, False], 4: [False, False, True]}
         for group_id, mask in expected.items():
-            self.assertEqual(request.store_masks[group_id], mask)
+            self.assertEqual(request.transfer.store_masks[group_id], mask)
             for index, valid in enumerate(mask):
                 key = worker._make_layerwise_full_key(group_id, hashes[index].hex())
-                self.assertEqual(key in request.save_keys, valid)
+                self.assertEqual(key in request.transfer.save_keys, valid)
         for tasks in worker.layer_save_tasks:
             for task in tasks:
                 if task.group_id in expected:
