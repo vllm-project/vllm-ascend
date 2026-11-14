@@ -70,7 +70,7 @@ from vllm_ascend.models.common.ops.sequence_parallel import (
 )
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
-from vllm_ascend.ops.triton.mul_add import muls_add_triton
+from vllm_ascend.ops.triton.muls_add import muls_add_triton
 from vllm_ascend.utils import (
     get_rotation_path,
     normalize_deepseek_v41_config,
