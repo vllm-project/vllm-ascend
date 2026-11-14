@@ -8,9 +8,8 @@ Starting from [PR #9064](https://github.com/vllm-project/vllm-ascend/pull/9064),
 
 ### Important Notice
 
-- **Current Support**: Both environment variables and `--additional-config` are supported during the transition period
-- **Recommendation**: Use `--additional-config` for new deployments and migrate existing configurations
-- **Future Plan**: Environment variables will be **removed** in a future release; only `--additional-config` will be supported
+- **Current Support**: The migration is complete. The legacy environment variables have been removed from the runtime and no longer take effect; only `--additional-config` is supported
+- **Recommendation**: Migrate existing environment variable configurations to the corresponding `--additional-config` keys
 
 ## How to use
 
