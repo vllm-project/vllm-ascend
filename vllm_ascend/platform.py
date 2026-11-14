@@ -682,6 +682,9 @@ class NPUPlatform(Platform):
         # 10.Set pytorch NPU allocator env (vllm_config)
         _set_pytorch_npu_alloc_env(vllm_config)
 
+        # 11.Advise on the CANN ACLNN operator-descriptor cache ceiling (vllm_config)
+        _advise_aclnn_cache_limit(vllm_config)
+
     @classmethod
     def set_additional_forward_context(
         cls,
@@ -1714,6 +1717,66 @@ def _set_pytorch_npu_alloc_env(vllm_config: VllmConfig) -> None:
             npu_alloc_configs += ",expandable_segments:True"
         os.environ["PYTORCH_NPU_ALLOC_CONF"] = npu_alloc_configs
         logger.info("Set PYTORCH_NPU_ALLOC_CONF=%s", npu_alloc_configs)
+
+
+ACLNN_CACHE_LIMIT_ENV = "ACLNN_CACHE_LIMIT"
+# CANN's default ceiling for cached ACLNN operator descriptors, per worker process.
+ACLNN_CACHE_LIMIT_DEFAULT = 10_000
+# Value used by the vLLM-Ascend reference deployment for Qwen3.6 on Model Runner V2.
+ACLNN_CACHE_LIMIT_RECOMMENDED = 100_000
+
+
+def aclnn_cache_limit_advisory(vllm_config: VllmConfig) -> str | None:
+    """Return an advisory string when this config is likely to exhaust the ACLNN cache.
+
+    CANN's ACLNN executor caches at most ``ACLNN_CACHE_LIMIT`` compiled operator
+    descriptors per worker process (default 10000). Model Runner V2 captures the
+    target and the speculative prefill/decode graphs separately, so it browses a
+    larger operator/shape working set than Model Runner V1 did. On
+    Qwen3.6-35B-A3B (TP=2, MTP=3, ``FULL_AND_PIECEWISE``) one worker was observed
+    holding about 9945 entries right after startup - one warmup away from the
+    default ceiling. Once the cache is full the executor stops reusing
+    descriptors and recomputes tiling and workspace on the host for every call,
+    which a profile shows as ``aclnn*GetWorkspaceSize`` / ``*_Tiling`` host time
+    (https://github.com/vllm-project/vllm-ascend/issues/21741).
+
+    The advisory is diagnostic: raising the limit did not change the measured
+    prefill wave time in our own A/B runs, so users should re-measure before and
+    after instead of expecting the regression to disappear.
+
+    CANN reads the variable when the ACLNN executor is created, which happens
+    before ``check_and_update_config`` runs. We therefore only advise here and
+    never set it, because setting it at this point would be too late.
+    """
+    from vllm.config.compilation import CUDAGraphMode
+
+    if os.getenv(ACLNN_CACHE_LIMIT_ENV):
+        return None
+    if getattr(vllm_config, "speculative_config", None) is None:
+        return None
+    graph_mode = getattr(vllm_config.compilation_config, "cudagraph_mode", None)
+    if graph_mode is None or graph_mode == CUDAGraphMode.NONE:
+        return None
+    if not graph_mode.has_full_cudagraphs():
+        return None
+    return (
+        f"{ACLNN_CACHE_LIMIT_ENV} is unset, so CANN caches at most "
+        f"{ACLNN_CACHE_LIMIT_DEFAULT} ACLNN operator descriptors per worker. Speculative "
+        "decoding with ACL Graph captures additional prefill and decode graphs and can exhaust "
+        "that cache; the executor then recomputes tiling/workspace on the host, which shows up "
+        "as host time (aclnn*GetWorkspaceSize / *_Tiling) rather than NPU time. This is a "
+        "diagnostic knob, not a known fix: if a profile of your workload shows that pattern, "
+        "compare with "
+        f"{ACLNN_CACHE_LIMIT_ENV}={ACLNN_CACHE_LIMIT_RECOMMENDED} (export it in the "
+        "environment before startup; raising it increases host memory use) and keep the value "
+        "only if it actually helps."
+    )
+
+
+def _advise_aclnn_cache_limit(vllm_config: VllmConfig) -> None:
+    message = aclnn_cache_limit_advisory(vllm_config)
+    if message:
+        logger.warning(message)
 
 
 def _disable_expandable_segments() -> None:
