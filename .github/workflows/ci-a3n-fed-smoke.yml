@@ -1,0 +1,31 @@
+name: a3-N fed runner smoke
+
+# 验收用：向 a3-N 联邦的 2 卡 scale set 派一个短作业，验证该标签族的新调度策略。
+# 仅手动触发，或在改动本文件时随 PR 触发，不要接入任何自动流程。
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/ci-a3n-fed-smoke.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  a3n-2card:
+    runs-on: linux-aarch64-a3-vllm-ascend-fed-2
+    timeout-minutes: 20
+    steps:
+      - name: Runner info
+        run: |
+          echo "runner: ${RUNNER_NAME:-unknown}"
+          echo "host: $(hostname)"
+          uname -a
+          date
+
+      - name: NPU info
+        run: |
+          npu-smi info || echo "npu-smi unavailable"
+
+      - name: Hold briefly
+        run: sleep 90
