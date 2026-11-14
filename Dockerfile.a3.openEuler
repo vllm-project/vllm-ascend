@@ -171,4 +171,6 @@ RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     cd /workspace && \
     rm -rf /tmp/flash-attention-npu
 
+RUN bash /vllm-workspace/vllm-ascend/tools/fix_runtime_permissions.sh
+
 CMD ["/bin/bash"]

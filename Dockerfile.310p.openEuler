@@ -128,4 +128,6 @@ RUN echo '#!/bin/bash' > /usr/local/bin/entrypoint.sh && \
 # Set entrypoint and default command
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
+RUN bash /vllm-workspace/vllm-ascend/tools/fix_runtime_permissions.sh
+
 CMD ["/bin/bash"]
