@@ -39,6 +39,7 @@ def make_builder(cls, ratio=0):
     )
     builder.use_pcp = True
     builder._device_metadata_enabled = False
+    builder._device_metadata_tasks = ()
     builder.compressor_metadata_buffers = None
     builder._sas_variant_buffers = {}
     builder._step_rope_buffers = {}
@@ -184,6 +185,80 @@ class TestDSAMetadataBuilders(TestCase):
         self.rope_op.assert_not_called()
         self.sas_op.assert_not_called()
         self.qli_op.assert_not_called()
+
+    def test_graph_sas_shares_producer_and_refreshes_device_lengths(self):
+        self.common.causal = True
+        other = make_builder(dsa_v1.AscendDSASWAMetadataBuilder)
+        other.common_ratio_to_sas_metadata = self.builder.common_ratio_to_sas_metadata
+        self.sas_op.side_effect = lambda **kw: kw["seqused_kv"][0].expand(dsa_v1.DSA_METADATA_BUFFER_SIZE).clone()
+        with self.builder.defer_device_metadata(in_graph=True), other.defer_device_metadata(in_graph=True):
+            first = self.build_req(update_cache=False)
+            second = self.build_req(other, update_cache=False)
+            self.assertTrue(self.builder._use_specialized_metadata())
+            self.assertFalse(self.builder._device_metadata_enabled)
+        self.assertFalse(self.builder._device_metadata_in_graph)
+        self.sas_op.assert_not_called()
+        self.assertIs(first.sas_metadata, second.sas_metadata)
+        tasks = self.builder.take_device_metadata_tasks()
+        self.assertEqual(other.take_device_metadata_tasks(), ())
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].group_id, id(first.sas_metadata))
+        for length in (6, 17, 0, 131073):
+            self.builder.seq_lens.fill_(length)
+            tasks[0].run()
+            self.assertTrue(torch.all(first.sas_metadata == length))
+        self.assertEqual(self.sas_op.call_args.kwargs["max_seqlen_q"], 0)
+        self.assertEqual(self.sas_op.call_args.kwargs["max_seqlen_kv"], 0)
+
+    def test_graph_qli_captures_length_preparation_and_shares_all_outputs(self):
+        builders = [make_builder(dsa_v1.AscendDSAIndexerMetadataBuilder, ratio=4) for _ in range(2)]
+        builders[1].common_ratio_to_sas_metadata = builders[0].common_ratio_to_sas_metadata
+        self.qli_op.side_effect = lambda **kw: kw["seqused_k"][0].expand(dsa_v1.DSA_METADATA_BUFFER_SIZE).clone()
+        results = []
+        for builder in builders:
+            with builder.defer_device_metadata(in_graph=True):
+                results.append(self.build_req(builder, update_cache=False))
+        self.qli_op.assert_not_called()
+        self.assertTrue(torch.all(builders[0].qli_seqused_k == -1))
+        self.assertIs(results[0].qli_metadata, results[1].qli_metadata)
+        self.assertIs(results[0].qli_seqused_k, results[1].qli_seqused_k)
+        self.assertIs(results[0].qli_cmp_residual_k, results[1].qli_cmp_residual_k)
+        tasks = builders[0].take_device_metadata_tasks()
+        self.assertEqual(builders[1].take_device_metadata_tasks(), ())
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].stage, DeviceMetadataStage.INDEXER)
+        for length in (6, 7, 8, 0, 131073):
+            builders[0].seq_lens.fill_(length)
+            tasks[0].run()
+            self.assertEqual(results[0].qli_seqused_k.item(), length // 4)
+            self.assertEqual(results[0].qli_cmp_residual_k.item(), length % 4)
+            self.assertTrue(torch.all(results[0].qli_metadata == length // 4))
+
+    def test_graph_repeated_builder_keeps_already_published_tasks(self):
+        self.common.causal = True
+        with self.builder.defer_device_metadata(in_graph=True):
+            first = self.build_req(update_cache=False)
+            second = self.build_req(update_cache=False)
+        self.assertIs(first.sas_metadata, second.sas_metadata)
+        self.assertEqual(len(self.builder.take_device_metadata_tasks()), 1)
+
+    def test_graph_length_limits_do_not_read_cpu_lengths(self):
+        self.builder._prepare_rope = Mock()
+        # No CPU length fields at all: a fallback read would raise.
+        with self.builder.defer_device_metadata(in_graph=True):
+            limits = self.builder._prepare_query_inputs(SimpleNamespace(), SimpleNamespace(), None, True, True)
+        self.assertEqual(limits, (0, 0))
+
+    def test_graph_scope_restores_eager_behavior_after_failure(self):
+        with (
+            self.assertRaisesRegex(ValueError, "build failed"),
+            self.builder.defer_device_metadata(in_graph=True),
+        ):
+            raise ValueError("build failed")
+        self.assertFalse(self.builder._device_metadata_in_graph)
+        self.build_req(update_cache=False)
+        self.sas_op.assert_called_once()
+        self.assertEqual(self.builder.take_device_metadata_tasks(), ())
 
     def test_state_zeros_padding_including_empty_rank(self):
         for actual_reqs in (0, 1):

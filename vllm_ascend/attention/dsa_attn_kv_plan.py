@@ -30,6 +30,25 @@ def _supports_dsv4_compressed_cache() -> bool:
     return get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
 
 
+def supports_dsa_target_metadata_graph(vllm_config) -> bool:
+    """The custom SAS/QLI kernels read changing lengths from device tensors.
+
+    Other metadata implementations, context parallelism and vision need their
+    own capture contract. Draft builders are deliberately outside this scope.
+    """
+    model = vllm_config.model_config
+    parallel = vllm_config.parallel_config
+    return (
+        model.architecture == "DeepseekV4ForCausalLM"
+        and not getattr(model.hf_config, "vision_n_layers", 0)
+        and parallel.prefill_context_parallel_size == 1
+        and parallel.decode_context_parallel_size == 1
+        and vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
+        and not is_turboquant(vllm_config)
+        and not _supports_dsv4_compressed_cache()
+    )
+
+
 def resolve_dsv4_cache_dtype(cache_dtype, model_dtype: str) -> str:
     """Return the KV cache dtype the platform should pin for DeepSeek-V4.
 
