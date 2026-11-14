@@ -128,6 +128,7 @@ class TestMxfp8PipelineRuntime(unittest.TestCase):
             values, scales, original = fixtures[rank]
             torch.testing.assert_close(source, original[start:end], rtol=0, atol=0)
             self.assertEqual(kwargs["block_size"], 32)
+            self.assertEqual(kwargs["scale_alg"], 1)
             return values[start:end], scales[start:end]
 
         def dequantize(values, scales, **kwargs):

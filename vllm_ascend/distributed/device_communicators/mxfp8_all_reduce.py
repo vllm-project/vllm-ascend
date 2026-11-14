@@ -27,6 +27,7 @@ _SCALE_PAIR_SIZE = 2
 _HIDDEN_ALIGNMENT = _MX_BLOCK_SIZE * _SCALE_PAIR_SIZE
 _DTYPE_BF16 = 15
 _DTYPE_E4M3FN = 292
+_SCALE_ALG_CEIL = 1
 _PIPELINE_CHUNKS = 2
 
 
@@ -152,8 +153,15 @@ class Mxfp8AllReduce:
 
     def _pack(self, flat: torch.Tensor) -> tuple[torch.Tensor, torch.dtype]:
         rows, hidden = flat.shape
+        # Round the E8M0 scale up after mapping amax to the E4M3FN range.
+        # The default exponent-only algorithm can leave scaled values above 448.
         values, scales = self.quantize_op(
-            flat, axis=-1, dst_type=torch.float8_e4m3fn, block_size=_MX_BLOCK_SIZE, round_mode="rint"
+            flat,
+            axis=-1,
+            dst_type=torch.float8_e4m3fn,
+            block_size=_MX_BLOCK_SIZE,
+            round_mode="rint",
+            scale_alg=_SCALE_ALG_CEIL,
         )
         if (
             values.dtype != torch.float8_e4m3fn

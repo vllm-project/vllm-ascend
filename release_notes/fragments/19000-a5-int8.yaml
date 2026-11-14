@@ -19,3 +19,9 @@ entries:
       threshold. Eager calls can overlap computation and communication while
       graph capture retains the existing whole-tensor path.
     hardware: [A5]
+  - category: bugfix
+    text: >-
+      MXFP8 communication on Atlas A5 now explicitly uses ceil-rounded
+      E8M0 scales (scale_alg=1) for both whole-tensor and pipelined calls
+      to avoid scaled values exceeding the E4M3FN finite range.
+    hardware: [A5]

@@ -210,6 +210,7 @@ class TestMxfp8AllReduce(unittest.TestCase):
             self.assertEqual(tuple(source.shape), (rows, hidden))
             self.assertEqual(kwargs["dst_type"], torch.float8_e4m3fn)
             self.assertEqual(kwargs["block_size"], 32)
+            self.assertEqual(kwargs["scale_alg"], 1)
             return raw_values[state.rank].view(torch.float8_e4m3fn), raw_scales[state.rank]
 
         def dequantize(values, scales, **kwargs):
