@@ -330,6 +330,7 @@ jobs:
     if: >-
       ${{
         needs.pre-commit.result == 'success' &&
+        needs.pre-commit.outputs.ci_pipeline != 'true' &&
         contains(github.event.pull_request.labels.*.name, 'ready-precise')
       }}
     runs-on: linux-amd64-cpu-4-hk
@@ -474,8 +475,9 @@ jobs:
     # The src/ci_pipeline path categories are computed by the paths-filter step
     # in pre-commit. Modes:
     #   recommended - recommend job succeeded with coverage paths (ready-precise)
-    #   all         - ready-all or main2main forced, or the PR touches the CI
-    #                 pipeline itself
+    #   all         - ready-all or main2main forced
+    #   ops         - the PR touches the CI pipeline; temporarily schedule only
+    #                 two_card/ops instead of the full suite
     #   none        - ready-precise on a PR whose diff recommends no tests
     if: >-
       ${{
@@ -491,9 +493,9 @@ jobs:
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
-      has_tests: ${{ steps.scope-rec.outputs.has_tests || steps.scope-all.outputs.has_tests || steps.noop.outputs.has_tests }}
-      test_groups: ${{ steps.scope-rec.outputs.test_groups || steps.scope-all.outputs.test_groups || steps.noop.outputs.test_groups }}
-      matched_modules: ${{ steps.scope-rec.outputs.matched_modules || steps.scope-all.outputs.matched_modules || steps.noop.outputs.matched_modules }}
+      has_tests: ${{ steps.scope-ops.outputs.has_tests || steps.scope-rec.outputs.has_tests || steps.scope-all.outputs.has_tests || steps.noop.outputs.has_tests }}
+      test_groups: ${{ steps.scope-ops.outputs.test_groups || steps.scope-rec.outputs.test_groups || steps.scope-all.outputs.test_groups || steps.noop.outputs.test_groups }}
+      matched_modules: ${{ steps.scope-ops.outputs.matched_modules || steps.scope-rec.outputs.matched_modules || steps.scope-all.outputs.matched_modules || steps.noop.outputs.matched_modules }}
       csrc_cache_target_ids: ${{ steps.cache-targets.outputs.target_ids }}
       base_sha: ${{ steps.source-snapshot.outputs.base_sha }}
       # source reports which path produced the tests: "recommended", "all", or "none".
@@ -565,12 +567,12 @@ jobs:
             # vLLM main commit and the release tag, so the coverage-based
             # recommendation cannot be used: select the whole suite instead.
             MODE="all"
-          elif [ "${HAS_READY_ALL}" = "true" ]; then
-            MODE="all"
           elif [ "${CI_PIPELINE}" = "true" ]; then
-            # The PR changes the test selection/execution pipeline itself,
-            # so the precise recommendation can no longer be trusted even
-            # though ready-precise was set. Escalate to the full suite.
+            # Temporary: a CI-pipeline change normally escalates to the full
+            # suite. While the operator grouping is being checked, schedule
+            # only two_card/ops. Restore MODE="all" before merging.
+            MODE="ops"
+          elif [ "${HAS_READY_ALL}" = "true" ]; then
             MODE="all"
           elif [ "${HAS_READY_PRECISE}" = "true" ]; then
             if [ "${RECOMMEND_RESULT}" != "success" ]; then
@@ -588,6 +590,17 @@ jobs:
           fi
           echo "mode=${MODE}" >> "$GITHUB_OUTPUT"
           echo "Selection mode: ${MODE} (src=${SRC:-unknown} ci_pipeline=${CI_PIPELINE:-unknown})"
+
+      - name: Select operator grouping tests
+        id: scope-ops
+        if: steps.decide.outputs.mode == 'ops'
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          pip install regex pyyaml -q
+          python3 .github/workflows/scripts/select_tests.py \
+            --explicit-e2e-tests tests/e2e/pull_request/two_card/ops \
+            --skip-cpu-ut \
+            --skip-a5
 
       - name: Select tests from coverage recommendations
         id: scope-rec
@@ -651,7 +664,7 @@ jobs:
       - name: Add upstream test cache target
         id: cache-targets
         env:
-          SELECTED_TARGET_IDS: ${{ steps.scope-rec.outputs.csrc_cache_target_ids || steps.scope-all.outputs.csrc_cache_target_ids || steps.noop.outputs.csrc_cache_target_ids }}
+          SELECTED_TARGET_IDS: ${{ steps.scope-ops.outputs.csrc_cache_target_ids || steps.scope-rec.outputs.csrc_cache_target_ids || steps.scope-all.outputs.csrc_cache_target_ids || steps.noop.outputs.csrc_cache_target_ids }}
         run: |
           python3 - <<'PY'
           import json
@@ -745,6 +758,7 @@ jobs:
         needs.cpu-ut.result == 'success' &&
         needs.select-tests.result == 'success' &&
         needs.prepare-csrc-cache.result == 'success' &&
+        needs.select-tests.outputs.source != 'ops' &&
         contains(github.event.pull_request.labels.*.name, 'ready-precise') &&
         needs.select-tests.outputs.has_tests == 'true'
       }}

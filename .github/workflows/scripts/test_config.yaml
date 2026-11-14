@@ -29,12 +29,13 @@
 # Per-file estimated execution times live in ``estimated_times.yaml`` so
 # timing-only updates do not force the full PR suite.
 #
-# A3 scheduling policy: every A3 E2E test in PR CI runs on the dedicated 560T
-# labels (``linux-aarch64-a3-800i-N``). The generic ``linux-aarch64-a3-N``
-# labels are mixed 560T/752T pools and are no longer referenced here, so the
-# machine class is deterministic. ``accuracy_tests`` and the
-# ``_A3_560T_LABEL_MAP`` remap in ``select_tests.py`` are now no-ops kept as a
-# safety net.
+# A3 scheduling policy: accuracy and model E2E tests run on the dedicated 560T
+# labels (``linux-aarch64-a3-800i-N``). The generic ``linux-aarch64-a3-2``
+# pool is reserved for ``tests/e2e/pull_request/two_card/ops``, whose cases
+# are single-card operator tests packed into one pytest process on one runner.
+# That bucket is not split by estimated time.
+# ``select_tests.py`` keeps that partition on ``linux-aarch64-a3-2`` when a
+# full-suite or accuracy run remaps other A3 labels onto 800i.
 
 # === Curated Test Suites ===
 # Named test lists selected via ``select_tests.py --curated <name>``.
@@ -122,6 +123,10 @@ runner_mapping:
   tests/e2e/pull_request/one_card:
     default: a2-1
     310p: 310p-1
+  # Single-card operator tests. Longer than the two_card pattern so it
+  # wins, and pinned to the generic A3 2-card pool rather than 800i.
+  tests/e2e/pull_request/two_card/ops:
+    default: a3-2-ops
   tests/e2e/pull_request/two_card:
     default: a3-2
     310p: 310p-2
@@ -151,6 +156,11 @@ partition:
   a3-2:
     runner_label: linux-aarch64-a3-800i-2
     count: 5
+  # Every operator file shares one pytest process on one runner, so this
+  # bucket is not split by estimated time.
+  a3-2-ops:
+    runner_label: linux-aarch64-a3-2
+    count: 1
   a3-4:
     runner_label: linux-aarch64-a3-800i-4
     count: 5

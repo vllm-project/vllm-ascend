@@ -221,10 +221,14 @@ run_pytest_target() {
 
 run_pytest_batch() {
   local target="$1"
-  shift
+  local coverage_key="$2"
+  shift 2
   local batch_targets=("$@")
   test_index=$((test_index + 1))
-  local log_file="${pytest_log_dir}/${test_index}-cpu-ut.log"
+  local log_name="${target}"
+  log_name="${log_name//[^a-zA-Z0-9_.-]/_}"
+  local log_file="${pytest_log_dir}/${test_index}-${log_name}.log"
+  echo "::group::${target}"
 
   echo -e "\033[1;34m=== Running target: ${target} ===\033[0m"
   local start_time=0
@@ -233,7 +237,7 @@ run_pytest_batch() {
   fi
   if [ "${enable_coverage}" = "true" ]; then
     echo "DEBUG: Go to the [Coverage Branch] page."
-    setup_coverage "cpu-ut"
+    setup_coverage "${coverage_key}"
     set +e
     run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${batch_targets[@]}"
   else
@@ -250,6 +254,7 @@ run_pytest_batch() {
     local elapsed=$(( elapsed_ns / 1000000000 )).$(( (elapsed_ns % 1000000000) / 100000000 ))
     timing_entries+=("{\"name\":\"${target}\",\"passed\":$([ ${status} -eq 0 ] && echo true || echo false),\"elapsed\":${elapsed}}")
   fi
+  echo "::endgroup::"
   if [ "${status}" -eq 0 ]; then
     test_results+=("${target}|PASSED|${log_file}")
   else
@@ -286,26 +291,55 @@ print_timing_json() {
 print_test_info
 setup_vllm_cache_root
 
+# Operator cases share one pytest process so device init happens once.
+ops_test_prefix="tests/e2e/pull_request/two_card/ops/"
+
+run_packed_ops_and_regular() {
+  local ops_targets=()
+  local regular_targets=()
+  local target
+  for target in "$@"; do
+    case "${target}" in
+      "${ops_test_prefix}"*)
+        ops_targets+=("${target}")
+        ;;
+      *)
+        regular_targets+=("${target}")
+        ;;
+    esac
+  done
+  if [ "${#ops_targets[@]}" -gt 0 ]; then
+    run_pytest_batch "ops (${#ops_targets[@]} targets)" "tests/e2e/pull_request/two_card/ops" "${ops_targets[@]}"
+  fi
+  if [ "${#regular_targets[@]}" -gt 0 ]; then
+    for target in "${regular_targets[@]}"; do
+      run_pytest_target "${target}"
+    done
+  fi
+}
+
 if [ "${npu_type}" = "cpu" ]; then
-  run_pytest_batch "cpu-ut (${#targets[@]} targets)" "${targets[@]}"
+  run_pytest_batch "cpu-ut (${#targets[@]} targets)" "cpu-ut" "${targets[@]}"
 elif [ "${mode}" = "with-device" ]; then
   aclgraph_capture_replay="tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py"
   run_aclgraph_capture_replay=0
+  device_targets=()
   for target in "${targets[@]}"; do
     if [ "${target}" = "${aclgraph_capture_replay}" ]; then
       run_aclgraph_capture_replay=1
       continue
     fi
-    run_pytest_target "${target}"
+    device_targets+=("${target}")
   done
+  if [ "${#device_targets[@]}" -gt 0 ]; then
+    run_packed_ops_and_regular "${device_targets[@]}"
+  fi
   if [ "${run_aclgraph_capture_replay}" = "1" ]; then
     pip uninstall -y triton-ascend triton
     run_pytest_target "${aclgraph_capture_replay}"
   fi
 else
-  for target in "${targets[@]}"; do
-    run_pytest_target "${target}"
-  done
+  run_packed_ops_and_regular "${targets[@]}"
 fi
 
 print_timing_json
