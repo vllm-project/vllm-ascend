@@ -488,6 +488,15 @@ class TestAscendConfig(TestBase):
         ascend_fusion_config = ascend_config.ascend_fusion_config
         self.assertTrue(ascend_fusion_config.fusion_ops_gmmswigluquant)
         self.assertFalse(ascend_config.rl_config.enabled)
+        self.assertEqual(ascend_config.fp8_mode, "mxfp8")
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_accepts_native_fp8_mode(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"fp8_mode": "native"}
+        ascend_config = init_ascend_config(test_vllm_config)
+        self.assertEqual(ascend_config.fp8_mode, "native")
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.ascend_config.logger")

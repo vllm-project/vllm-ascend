@@ -535,6 +535,7 @@ class AscendConfig:
             "msmonitor_use_daemon": false,
             "enable_transpose_kv_cache_by_block": true,
             "weight_nz_mode": 1,
+            "fp8_mode": "mxfp8",
             "enable_shared_expert_dp": false,
             "enable_sparse_sfa_c8": false,
             "enable_sparse_li_c8": false,
@@ -716,6 +717,12 @@ class AscendConfig:
     msmonitor_use_daemon: bool = False
     enable_transpose_kv_cache_by_block: bool = True
     weight_nz_mode: int = 1
+    # How a block-wise FP8 checkpoint (`quant_method: "fp8"`) runs.
+    # "mxfp8" (default) re-quantizes it to MXFP8, the layout every Ascend
+    # generation supports. "native" keeps the float8 weight and its 128x128
+    # block scales for the G-B kernels; it requires Ascend 950 and rejects
+    # everything else at startup.
+    fp8_mode: Literal["mxfp8", "native"] = "mxfp8"
 
     # ---- sub-configs (no vllm_config dep): pydantic dict→dataclass coercion ----
     ascend_compilation_config: AscendCompilationConfig = dataclasses.field(default_factory=AscendCompilationConfig)

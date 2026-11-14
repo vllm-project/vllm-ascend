@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -8,7 +9,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmb
 
 from tests.ut.base import TestBase
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
-from vllm_ascend.quantization.configs.fp8_config import AscendDeepseekV4FP8Config, AscendFp8Config
+from vllm_ascend.quantization.configs.fp8_config import (
+    AscendDeepseekV4FP8Config,
+    AscendFp8Config,
+    _use_native_fp8,
+)
 
 
 class TestAscendDeepseekV4FP8Config(TestBase):
@@ -113,6 +118,18 @@ class TestAscendDeepseekV4FP8Config(TestBase):
 
 class TestAscendFp8Config(TestBase):
     """Native block-wise FP8 checkpoints, e.g. Qwen/Qwen3.8-27B-FP8."""
+
+    def setUp(self):
+        # Only Ascend 950 has an FP8 matmul, so pin the hardware profile instead
+        # of depending on the machine running the tests.
+        self.hardware = MagicMock()
+        self.hardware.supports_weight_format.return_value = True
+        patcher = patch(
+            "vllm_ascend.quantization.configs.fp8_config.get_current_hardware_profile",
+            return_value=self.hardware,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def build_config(self, ignored_layers=None, weight_block_size=(128, 128), activation_scheme="dynamic"):
         config = AscendFp8Config()
@@ -284,6 +301,57 @@ class TestAscendFp8Config(TestBase):
         mock_scheme_class.assert_called_once_with((128, 128), moe_config)
         self.assertIs(method, mock_moe_method)
 
+    def test_native_mode_selects_the_gb_linear_scheme(self):
+        config = self.build_config()
+        mock_scheme_class = MagicMock()
+
+        with (
+            patch(
+                "vllm_ascend.quantization.configs.fp8_config._use_native_fp8",
+                return_value=True,
+            ),
+            patch(
+                "vllm_ascend.quantization.configs.fp8_config.get_scheme_class",
+                return_value=mock_scheme_class,
+            ) as mock_get_scheme,
+            patch(
+                "vllm_ascend.quantization.method_adapters.AscendLinearMethod",
+                return_value="gb-linear",
+            ),
+        ):
+            method = config.get_quant_method(MagicMock(spec=LinearBase), "model.layers.0.mlp.gate_proj")
+
+        mock_get_scheme.assert_called_once_with("fp8", "native_linear")
+        mock_scheme_class.assert_called_once_with((128, 128))
+        self.assertEqual(method, "gb-linear")
+
+    def test_native_mode_selects_the_gb_moe_scheme(self):
+        config = self.build_config()
+        moe_config = MagicMock()
+        moe_layer = MagicMock(spec=MoERunner)
+        moe_layer.moe_config = moe_config
+        mock_scheme_class = MagicMock()
+
+        with (
+            patch(
+                "vllm_ascend.quantization.configs.fp8_config._use_native_fp8",
+                return_value=True,
+            ),
+            patch(
+                "vllm_ascend.quantization.configs.fp8_config.get_scheme_class",
+                return_value=mock_scheme_class,
+            ) as mock_get_scheme,
+            patch(
+                "vllm_ascend.quantization.method_adapters.AscendFusedMoEMethod",
+                return_value="gb-moe",
+            ),
+        ):
+            method = config.get_quant_method(moe_layer, "model.layers.0.mlp.experts")
+
+        mock_get_scheme.assert_called_once_with("fp8", "native_moe")
+        mock_scheme_class.assert_called_once_with((128, 128), moe_config)
+        self.assertEqual(method, "gb-moe")
+
     def test_embedding_is_left_to_the_default_method(self):
         # Returning None makes VocabParallelEmbedding fall back to
         # UnquantizedEmbeddingMethod on its own.
@@ -299,6 +367,15 @@ class TestAscendFp8Config(TestBase):
     def test_static_activation_scheme_reports_an_actionable_error(self):
         config = self.build_config(activation_scheme="static")
         with self.assertRaisesRegex(NotImplementedError, "activation_scheme"):
+            config.get_quant_method(MagicMock(spec=LinearBase), "model.layers.0.mlp.gate_proj")
+
+    def test_rejects_hardware_without_fp8_weight_matmul(self):
+        # Dequantizing the checkpoint into the model dtype is not a fallback:
+        # it doubles the weight footprint to run an unquantized GEMM, so the
+        # checkpoint is refused instead of being served under the FP8 name.
+        self.hardware.supports_weight_format.return_value = False
+        config = self.build_config()
+        with self.assertRaisesRegex(NotImplementedError, "FP8 matmul"):
             config.get_quant_method(MagicMock(spec=LinearBase), "model.layers.0.mlp.gate_proj")
 
     def test_unrelated_layer_returns_none(self):
@@ -322,6 +399,60 @@ class TestAscendFp8Config(TestBase):
         ):
             method = config.get_quant_method(MagicMock(spec=LinearBase), "model.layers.0.mlp.gate_proj")
         self.assertEqual(method, "block-fp8")
+
+
+class TestNativeFp8Gate(TestBase):
+    """`fp8_mode: "native"` is an explicit opt-in: unsupported setups are rejected."""
+
+    @staticmethod
+    def _build(ascend_config=None, vllm_config=None, block_size=(128, 128), is_moe=False):
+        if ascend_config is None:
+            ascend_config = SimpleNamespace(
+                fp8_mode="native", eplb_config=SimpleNamespace(dynamic_eplb=False), enable_fused_mc2=0
+            )
+        if vllm_config is None:
+            vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=False))
+        with (
+            patch("vllm_ascend.quantization.configs.fp8_config.get_ascend_config", return_value=ascend_config),
+            patch("vllm_ascend.quantization.configs.fp8_config.get_current_vllm_config", return_value=vllm_config),
+        ):
+            return _use_native_fp8(block_size, is_moe=is_moe)
+
+    def test_selected_for_a_128x128_checkpoint(self):
+        self.assertTrue(self._build())
+
+    def test_not_selected_unless_the_user_opts_in(self):
+        mxfp8 = SimpleNamespace(fp8_mode="mxfp8", eplb_config=SimpleNamespace(dynamic_eplb=False))
+        self.assertFalse(self._build(ascend_config=mxfp8))
+        # No ascend config yet (e.g. probing during config construction).
+        with patch("vllm_ascend.quantization.configs.fp8_config.get_ascend_config", side_effect=RuntimeError):
+            self.assertFalse(_use_native_fp8((128, 128)))
+
+    def test_rejects_a_block_size_the_gb_kernel_cannot_read(self):
+        for block_size in ((128, 64), None):
+            with self.assertRaisesRegex(ValueError, "weight_block_size"):
+                self._build(block_size=block_size)
+
+    def test_rejects_eplb(self):
+        legacy = SimpleNamespace(fp8_mode="native", eplb_config=SimpleNamespace(dynamic_eplb=True))
+        with self.assertRaisesRegex(ValueError, "EPLB"):
+            self._build(ascend_config=legacy)
+        # --enable-eplb sets parallel_config.enable_eplb instead.
+        enabled = SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=True))
+        with self.assertRaisesRegex(ValueError, "EPLB"):
+            self._build(vllm_config=enabled)
+
+    def test_rejects_fused_mc2_before_it_crashes_on_the_experts(self):
+        # The fused MC2 / MegaMoe quant map has no block-wise FP8 entry, so the
+        # experts would fail at the first forward. Dense layers never reach it.
+        ascend_config = SimpleNamespace(
+            fp8_mode="native",
+            eplb_config=SimpleNamespace(dynamic_eplb=False),
+            enable_fused_mc2=1,
+        )
+        with self.assertRaisesRegex(ValueError, "fused MC2"):
+            self._build(ascend_config=ascend_config, is_moe=True)
+        self.assertTrue(self._build(ascend_config=ascend_config))
 
 
 if __name__ == "__main__":

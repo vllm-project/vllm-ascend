@@ -63,6 +63,8 @@ from .w4a8 import (
 from .w8a8 import (
     AscendFp8BlockFusedMoEMethod,
     AscendFp8BlockLinearMethod,
+    AscendNativeFp8BlockFusedMoEMethod,
+    AscendNativeFp8BlockLinearMethod,
     AscendW8A8DynamicFusedMoEMethod,
     AscendW8A8DynamicLinearMethod,
     AscendW8A8FP8DynamicFusedMoEMethod,
@@ -132,4 +134,6 @@ __all__ = [
     "AscendW4A8MXFPDSDynamicFusedMoEMethod",
     "AscendFp8BlockLinearMethod",
     "AscendFp8BlockFusedMoEMethod",
+    "AscendNativeFp8BlockLinearMethod",
+    "AscendNativeFp8BlockFusedMoEMethod",
 ]

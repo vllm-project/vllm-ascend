@@ -3,6 +3,7 @@ from typing import Optional
 
 import torch
 from compressed_tensors.quantization import QuantizationArgs
+from vllm.config import get_current_vllm_config
 from vllm.logger import logger
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import register_quantization_config
@@ -11,6 +12,8 @@ from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.models.deepseek_v4 import DeepseekV4FP8Config
 
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.device.hardware_profile import WeightFormat, get_current_hardware_profile
 from vllm_ascend.utils import FP8_METHOD
 
 from ..methods import get_scheme_class
@@ -21,6 +24,65 @@ _IS_LAYER_SKIPPED_SUPPORTS_MATCH_MODE = "match_mode" in inspect.signature(is_lay
 
 
 QUANTIZATION_SCHEME_MAP_TYPE = dict[str, dict[str, QuantizationArgs] | None]
+
+
+def _require_fp8_weight_matmul() -> None:
+    """Reject a block-wise FP8 checkpoint on hardware with no FP8 matmul.
+
+    Dequantizing such a checkpoint into the model dtype is not a fallback: the
+    result runs an unquantized GEMM from a checkpoint the device can never
+    execute as published, at twice the weight footprint. Failing here keeps the
+    failure visible instead of serving something else under the FP8 name.
+    """
+    if get_current_hardware_profile().supports_weight_format(WeightFormat.FP8):
+        return
+    raise NotImplementedError(
+        "Block-wise FP8 checkpoints run on Ascend 950 only, and this device has no FP8 "
+        "matmul. Serve the BF16 release of this model instead, or a checkpoint "
+        "re-quantized with ModelSlim or LLM-Compressor."
+    )
+
+
+def _use_native_fp8(weight_block_size: tuple[int, int] | None, *, is_moe: bool = False) -> bool:
+    """Decide whether this checkpoint runs on the native block-wise FP8 path.
+
+    Native needs ``fp8_mode: "native"``, 128x128 blocks, and no dynamic EPLB
+    (whose per-expert weight lists the grouped kernel rejects). Since it is an
+    explicit opt-in, an unsupported combination is a hard error rather than a
+    silent downgrade to different numbers.
+    """
+    try:
+        ascend_config = get_ascend_config()
+    except RuntimeError:
+        # Ascend config not initialized yet: keep the historical path.
+        return False
+    if ascend_config.fp8_mode != "native":
+        return False
+
+    # Delayed import: the scheme package reaches back into the quantization
+    # package, so importing it at module scope would be circular.
+    from vllm_ascend.quantization.methods.w8a8.fp8_block import NATIVE_FP8_BLOCK_SIZE
+
+    if weight_block_size is None or tuple(weight_block_size) != (NATIVE_FP8_BLOCK_SIZE, NATIVE_FP8_BLOCK_SIZE):
+        raise ValueError(
+            f'fp8_mode is "native" but weight_block_size is {weight_block_size}; the native block-wise FP8 '
+            f"path only reads [{NATIVE_FP8_BLOCK_SIZE}, {NATIVE_FP8_BLOCK_SIZE}] tiles. Set "
+            'fp8_mode to "mxfp8" to serve this checkpoint through the dequantize-and-requantize path.'
+        )
+    if ascend_config.eplb_config.dynamic_eplb or get_current_vllm_config().parallel_config.enable_eplb:
+        raise ValueError(
+            'fp8_mode is "native" but dynamic EPLB keeps per-expert weight lists, which the native block-wise '
+            "FP8 grouped matmul does not support. Turn dynamic EPLB off (--enable-eplb, or "
+            'additional_config.eplb_config.dynamic_eplb), or set fp8_mode to "mxfp8" to serve dynamic EPLB '
+            "with this checkpoint."
+        )
+    if is_moe and ascend_config.enable_fused_mc2:
+        raise ValueError(
+            'fp8_mode is "native" but the fused MC2 / MegaMoe path has no block-wise FP8 quant mode, so the '
+            "experts cannot run through it. Set additional_config.enable_fused_mc2 to 0, or set fp8_mode to "
+            '"mxfp8".'
+        )
+    return True
 
 
 @register_quantization_config(FP8_METHOD)
@@ -115,16 +177,23 @@ class AscendFp8Config(Fp8Config):
             return AscendUnquantizedFusedMoEMethod(layer.moe_config)
 
         self._verify_block_quantization()
-        logger.info_once("Using the vLLM Ascend block-wise fp8 Quantization now!")
+        _require_fp8_weight_matmul()
+        native_fp8 = _use_native_fp8(self.weight_block_size, is_moe=is_moe)
+        logger.info_once(
+            "Using the vLLM Ascend block-wise fp8 Quantization now! fp8_mode=%s",
+            "native" if native_fp8 else "mxfp8",
+        )
 
         if is_linear:
-            scheme_class = get_scheme_class(FP8_METHOD, "linear")
-            assert scheme_class is not None, f"No scheme registered for {FP8_METHOD}/linear"
+            scheme = "native_linear" if native_fp8 else "linear"
+            scheme_class = get_scheme_class(FP8_METHOD, scheme)
+            assert scheme_class is not None, f"No scheme registered for {FP8_METHOD}/{scheme}"
             return AscendLinearMethod(scheme_class(self.weight_block_size))
 
         if is_moe:
-            scheme_class = get_scheme_class(FP8_METHOD, "moe")
-            assert scheme_class is not None, f"No scheme registered for {FP8_METHOD}/moe"
+            scheme = "native_moe" if native_fp8 else "moe"
+            scheme_class = get_scheme_class(FP8_METHOD, scheme)
+            assert scheme_class is not None, f"No scheme registered for {FP8_METHOD}/{scheme}"
             return AscendFusedMoEMethod(
                 scheme_class(self.weight_block_size, layer.moe_config),
                 layer.moe_config,
