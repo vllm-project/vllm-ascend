@@ -31,3 +31,24 @@ class LayerwiseKeyBuilder:
             for pcp_rank in range(pcp_size)
             for rank in range(num_ranks)
         ]
+
+    def make_partial_key(
+        self,
+        model_name: str,
+        req_id: str,
+        group_id: int,
+        block_index: int,
+        end_token: int,
+        head_or_tp_rank: int,
+        pp_rank: int = 0,
+    ) -> str:
+        """Address of one in-flight partial save object (GVA plane).
+
+        Partial saves are addressed by request coordinates rather than block
+        hashes: the object is renamed to the full hash key only after the
+        last range write commits, so an interrupted save never satisfies a
+        hit check. The format is the Memcache wire protocol's and must not
+        drift from the scheduler's full-key format.
+        """
+        pp_tag = f"@pp{pp_rank}" if self.pp_size > 1 else ""
+        return f"{model_name}@partial@{req_id}@{group_id}@{block_index}@{end_token}{pp_tag}@{head_or_tp_rank}"

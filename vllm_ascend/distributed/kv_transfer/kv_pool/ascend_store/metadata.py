@@ -805,6 +805,27 @@ class LoadSpec:
     # First block stored under request-scoped keys, including unhashed full blocks.
     layerwise_snapshot_start_block: int | None = None
 
+    @property
+    def pool_hit_tokens(self) -> int:
+        """External pool coverage in tokens.
+
+        Prefers the raw store-skip hit when the store reported one, else the
+        cached hit length. Load-range planning and save-range clamping share
+        this resolution; policies that must ignore the raw hit (eagle drafts,
+        hybrid groups that are not all cacheable) keep guards at call sites.
+        """
+        return self.kvpool_store_skip_tokens if self.kvpool_store_skip_tokens is not None else self.kvpool_cached_tokens
+
+    def clamp_save_start(self, start_block: int, block_size: int) -> int:
+        """Clamp ``start_block`` up past blocks the pool hit already covers.
+
+        No-op unless the hit is loadable (``can_load``): an unloadable hit
+        never trims the save range.
+        """
+        if not self.can_load:
+            return start_block
+        return max(start_block, self.pool_hit_tokens // block_size)
+
 
 @dataclass(init=False)
 class RequestTracker:

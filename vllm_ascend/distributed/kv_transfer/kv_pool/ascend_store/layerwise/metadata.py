@@ -163,9 +163,6 @@ class LayerTransferTask:
     # Publish newly allocated GVA keys after this task completes the final
     # actual layer copy for the batch.
     write_finish_keys: list[str] = field(default_factory=list)
-    # Cache for KVCacheStoreKeyLayerSendingThread:
-    # maps block_range index -> list of (start, end, key_all_layers)
-    cached_process_tokens: dict[int, list[tuple[int, int, list]]] | None = None
     # Block-key backends use one remote object per block/rank with per-layer ranges.
     use_key_major_ranges: bool = False
     # Group-local completion differs from the physical model layer boundary.

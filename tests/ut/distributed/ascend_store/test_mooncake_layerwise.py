@@ -45,6 +45,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
     ReqMeta,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.planes import make_data_plane
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import LayerwiseKVPoolWorker
 
 # isort: on
@@ -223,6 +224,9 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
             grouped_block_size=worker.grouped_block_size,
         )
         worker.use_block_key_layerwise = True
+        worker.layerwise_data_plane = "block_key"
+        worker.block_key_hybrid = False
+        worker._data_plane = make_data_plane(worker)
         worker.layerwise_offload = False
         worker.independent_layers = []
         worker.page_size_bytes = 60
@@ -249,7 +253,7 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
             load_spec=LoadSpec(0, 16, can_load=True),
         )
 
-        worker._prepare_layerwise_put_session(request)
+        worker._data_plane._prepare_single_put_session(request)
 
         worker.m_store.batch_put_start.assert_called_once_with(["model@6831@0"], [60])
         self.assertEqual(request.save_key_block_offset, 1)
@@ -264,7 +268,7 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
             load_spec=LoadSpec(0, 63, can_load=True, kvpool_store_skip_tokens=64),
         )
 
-        slots = worker._prepare_layerwise_get_session(request)
+        slots = worker._data_plane._prepare_single_get_session(request)
 
         self.assertEqual(len(slots), 4)
         self.assertEqual(request.load_block_keys[-1], "model@6833@0")
@@ -286,7 +290,7 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
             is_last_chunk=False,
         )
 
-        slots = worker._prepare_layerwise_get_session(request)
+        slots = worker._data_plane._prepare_single_get_session(request)
         worker.layer_load_tasks = [[]]
         worker._process_load_for_layer_batch([request], 0)
 
@@ -306,7 +310,7 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
             load_spec=LoadSpec(0, 32, can_load=True),
         )
 
-        slots = worker._prepare_layerwise_get_session(request)
+        slots = worker._data_plane._prepare_single_get_session(request)
 
         self.assertEqual(
             request.load_block_keys,

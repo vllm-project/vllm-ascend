@@ -22,7 +22,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     RequestTracker,
     block_hash_to_str,
     get_block_hashes,
-    get_group_block_size,
     get_sharded_mamba_group_ids,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import BaseKVPoolScheduler
@@ -209,35 +208,39 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             hbm_hit_tokens=num_computed_tokens,
         )
 
-    def _lookup_layerwise_contiguous(
+    def _query_contiguous_group_hits(
         self,
         request: "Request",
         token_len: int,
-        num_computed_tokens: int,
-    ) -> int:
-        # Layer reuse can evict earlier layers from HBM. Otherwise, only
-        # probe blocks beyond the complete local prefix to avoid rewarming it.
+        group_block_sizes: Sequence[int],
+        skip_tokens: int,
+    ) -> list[tuple[int, int, int]]:
+        """Contiguous hit scan shared by both layerwise data planes.
+
+        For each participating group, align the request's block hashes to the
+        group's physical block size, skip the blocks below ``skip_tokens``
+        (the local prefix), probe backend readability and count leading hit
+        blocks. Returns one ``(hit_tokens, hit_blocks, probed_blocks)`` tuple
+        per participating group; groups with nothing to probe are omitted.
+
+        Deliberately no cross-request hit cache: in a tiered (DRAM+SSD) pool a
+        cached hit can outlive an eviction and over-report external hits,
+        while a cached miss can hide a freshly saved block. Every lookup
+        re-probes backend readability instead.
+        """
         num_hash_blocks = token_len // self.hash_block_size
         block_hashes_to_check = request.block_hashes[:num_hash_blocks]
-        hits_per_group: list[int] = []
+        results: list[tuple[int, int, int]] = []
 
-        for group_id in range(len(self.grouped_block_size)):
-            effective_block_size = get_group_block_size(self.grouped_block_size, group_id)
+        for group_id, effective_block_size in enumerate(group_block_sizes):
             group_block_hashes = get_block_hashes(block_hashes_to_check, effective_block_size, self.hash_block_size)
-            query_start_block = (
-                0
-                if self.layerwise_offload
-                else min(num_computed_tokens // effective_block_size, len(group_block_hashes))
-            )
+            query_start_block = min(skip_tokens // effective_block_size, len(group_block_hashes))
             group_block_hashes = group_block_hashes[query_start_block:]
             if not group_block_hashes:
-                hits_per_group.append(query_start_block * effective_block_size)
+                # Nothing left to probe: the skipped prefix stands as the hit.
+                results.append((query_start_block * effective_block_size, query_start_block, 0))
                 continue
 
-            # Deliberately no cross-request hit cache: in a tiered (DRAM+SSD)
-            # pool a cached hit can outlive an eviction and over-report
-            # external hits, while a cached miss can hide a freshly saved
-            # block. Every lookup re-probes backend readability instead.
             keys_by_block = [
                 self._make_layerwise_hit_check_keys(group_id, block_hash_to_str(bh)) for bh in group_block_hashes
             ]
@@ -251,7 +254,31 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
                 else:
                     break
 
-            hits_per_group.append((query_start_block + num_hit_blocks) * effective_block_size)
+            results.append(
+                (
+                    (query_start_block + num_hit_blocks) * effective_block_size,
+                    query_start_block + num_hit_blocks,
+                    len(keys_by_block),
+                )
+            )
+
+        return results
+
+    def _lookup_layerwise_contiguous(
+        self,
+        request: "Request",
+        token_len: int,
+        num_computed_tokens: int,
+    ) -> int:
+        # Layer reuse can evict earlier layers from HBM. Otherwise, only
+        # probe blocks beyond the complete local prefix to avoid rewarming it.
+        skip_tokens = 0 if self.layerwise_offload else num_computed_tokens
+        hits_per_group = [
+            hit_tokens
+            for hit_tokens, _, _ in self._query_contiguous_group_hits(
+                request, token_len, self.grouped_block_size, skip_tokens
+            )
+        ]
 
         if not hits_per_group:
             logger.debug(
@@ -276,31 +303,21 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         token_len: int,
         num_computed_tokens: int,
     ) -> int:
+        # The block-key plane stores one hash-addressed object per block and
+        # keeps no per-group local-prefix state: scan the first group only,
+        # with nothing to skip.
         del num_computed_tokens
-        num_hash_blocks = token_len // self.hash_block_size
-        block_hashes = get_block_hashes(
-            request.block_hashes[:num_hash_blocks],
-            self._block_size,
-            self.hash_block_size,
-        )
-        if not block_hashes:
+        results = self._query_contiguous_group_hits(request, token_len, [self._block_size], 0)
+        if not results:
             return 0
-        keys_by_block = [
-            self._make_layerwise_hit_check_keys(0, block_hash_to_str(block_hash)) for block_hash in block_hashes
-        ]
-        block_hits = self._query_layerwise_block_hits(keys_by_block)
-        num_hit_blocks = 0
-        for hit in block_hits:
-            if not hit:
-                break
-            num_hit_blocks += 1
+        hit_tokens, num_hit_blocks, num_probed_blocks = results[0]
         logger.info(
             "Block-key layerwise hit check request=%s hit_blocks=%d/%d",
             request.request_id,
             num_hit_blocks,
-            len(keys_by_block),
+            num_probed_blocks,
         )
-        return num_hit_blocks * self._block_size
+        return hit_tokens
 
     def _make_layerwise_hit_check_keys(self, group_id: int, block_hash_hex: str) -> list[str]:
         """All-rank keys for scheduler-side hit check, built by the
