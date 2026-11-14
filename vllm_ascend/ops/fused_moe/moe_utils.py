@@ -31,10 +31,13 @@ from torch.nn.functional import pad
 from vllm.config import get_current_vllm_config_or_none
 from vllm.logger import logger
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import enable_custom_op
 
 COMM_STREAM = None
+
+_MOE_COUNTS_CUMSUM_MAX_EXPERTS = 4096
 
 _CANN_ACL_INT8 = 258
 _CANN_ACL_INT4 = 285
@@ -321,6 +324,20 @@ def cumsum_group_list(
     if src_list_type == dst_list_type:
         return group_list
     if src_list_type == 1 and dst_list_type == 0:
+        # Counts are nonnegative and their prefix fits INT64. Avoid narrowing
+        # and keep the scan in the NPU stream alongside the grouped matmuls.
+        if (
+            group_list.device.type == "npu"
+            and group_list.dtype == torch.int64
+            and group_list.ndim == 1
+            and group_list.is_contiguous()
+            and 0 < group_list.numel() <= _MOE_COUNTS_CUMSUM_MAX_EXPERTS
+            and get_current_hardware_profile().supports(HardwareCapability.MOE_COUNTS_CUMSUM)
+            # Register custom ops lazily before checking this kernel.
+            and enable_custom_op()
+            and hasattr(torch.ops._C_ascend, "moe_counts_cumsum")
+        ):
+            return torch.ops._C_ascend.moe_counts_cumsum(group_list)
         return group_list.cumsum(dim=0)
     if src_list_type == 0 and dst_list_type == 1:
         group_diff = torch.diff(group_list)
