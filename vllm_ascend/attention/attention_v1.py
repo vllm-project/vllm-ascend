@@ -42,6 +42,7 @@ from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: igno
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend import envs
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.context_parallel.common_cp import (
     get_pcp_num_replicated_tokens,
@@ -92,6 +93,10 @@ class AscendAttentionBackend(AttentionBackend):
             from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionDCPImpl
 
             return AscendAttentionDCPImpl
+        if envs.VLLM_ASCEND_QFA_A3_PREFILL:
+            from vllm_ascend.attention.attention_a3_qfa import AscendQFA3PrefillBackendImpl
+
+            return AscendQFA3PrefillBackendImpl
         return AscendAttentionBackendImpl
 
     @staticmethod
