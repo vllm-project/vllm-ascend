@@ -1,0 +1,85 @@
+
+1. 用vllm启动模型
+nohup Vllm serve /workspace/shared_assets/QuenchingAction/Infer/Model/models/Qwen2.5-Omni-7B \
+--served-model-name Qwen-Omni \
+--host 0.0.0.0 \
+--port 8000 \
+--safetensors-load-strategy eager >qwen25.log &
+
+2. 启动结果：
+(APIServer pid=27089) INFO 07-22 05:19:09 [base.py:216] Multi-modal warmup completed in 2.305s
+(APIServer pid=27089) INFO 07-22 05:19:09 [api_server.py:580] Starting vLLM server on http://0.0.0.0:8000
+(APIServer pid=27089) INFO 07-22 05:19:09 [launcher.py:37] Available routes are:
+(APIServer pid=27089) INFO 07-22 05:19:09 [launcher.py:46] Route: /openapi.json, Methods: GET, HEAD
+(APIServer pid=27089) INFO 07-22 05:19:09 [launcher.py:46] Route: /docs, Methods: GET, HEAD
+(APIServer pid=27089) INFO 07-22 05:19:09 [launcher.py:46] Route: /docs/oauth2-redirect, Methods: GET, HEAD
+(APIServer pid=27089) INFO 07-22 05:19:09 [launcher.py:46] Route: /redoc, Methods: GET, HEAD
+(APIServer pid=27089) INFO 07-22 05:19:09 [launcher.py:46] Route: /tokenize, Methods: POST
+(APIServer pid=27089) INFO 07-22 05:19:09 [launcher.py:46] Route: /detokenize, Methods: POST
+(APIServer pid=27089) INFO 07-22 05:19:09 [launcher.py:46] Route: /load, Methods: GET
+(APIServer pid=27089) INFO 07-22 05:19:09 [launcher.py:46] Route: /version, Methods: GET
+(APIServer pid=27089) INFO 07-22 05:19:09 [launcher.py:46] Route: /health, Methods: GET
+(APIServer pid=27089) INFO 07-22 05:19:09 [launcher.py:46] Route: /metrics, Methods: GET
+(APIServer pid=27089) INFO 07-22 05:19:09 [launcher.py:46] Route: /v1/models, Methods: GET
+(APIServer pid=27089) INFO 07-22 05:19:09 [launcher.py:46] Route: /ping, Methods: GET
+(APIServer pid=27089) INFO 07-22 05:19:09 [launcher.py:46] Route: /ping, Methods: POST
+(APIServer pid=27089) INFO 07-22 05:19:09 [launcher.py:46] Route: /invocations, Methods: POST
+(APIServer pid=27089) INFO 07-22 05:19:09 [launcher.py:46] Route: /v1/chat/completions, Methods: POST
+(APIServer pid=27089) INFO 07-22 05:19:09 [launcher.py:46] Route: /v1/responses, Methods: POST
+(APIServer pid=27089) INFO 07-22 05:19:09 [launcher.py:46] Route: /v1/responses/{response_id}, Methods: GET
+(APIServer pid=27089) INFO 07-22 05:19:09 [launcher.py:46] Route: /v1/responses/{response_id}/cancel, Methods: POST
+(APIServer pid=27089) INFO 07-22 05:19:09 [launcher.py:46] Route: /v1/completions, Methods: POST
+(APIServer pid=27089) INFO 07-22 05:19:09 [launcher.py:46] Route: /v1/messages, Methods: POST
+(APIServer pid=27089) INFO 07-22 05:19:09 [launcher.py:46] Route: /v1/messages/count_tokens, Methods: POST
+(APIServer pid=27089) INFO 07-22 05:19:09 [launcher.py:46] Route: /inference/v1/generate, Methods: POST
+(APIServer pid=27089) INFO 07-22 05:19:09 [launcher.py:46] Route: /scale_elastic_ep, Methods: POST
+(APIServer pid=27089) INFO 07-22 05:19:09 [launcher.py:46] Route: /is_scaling_elastic_ep, Methods: POST
+(APIServer pid=27089) INFO 07-22 05:19:09 [launcher.py:46] Route: /v1/chat/completions/render, Methods: POST
+(APIServer pid=27089) INFO 07-22 05:19:09 [launcher.py:46] Route: /v1/completions/render, Methods: POST
+(APIServer pid=27089) INFO:     Started server process [27089]
+(APIServer pid=27089) INFO:     Waiting for application startup.
+(APIServer pid=27089) INFO:     Application startup complete.
+
+
+
+3. 用vllm bench 测试模型：
+vllm bench serve \
+--backend vllm \
+--model /workspace/shared_assets/QuenchingAction/Infer/Model/models/Qwen2.5-Omni-7B \
+--served-model-name Qwen-Omni \
+--port 8000 \
+--dataset-name random \
+--random-input 3500 \
+--random-output 1500 \
+--max-concurrency 20 \
+--num-prompts 80 \
+--save-result \
+--result-dir ./benchmark_results/
+4. 测试结果：
+============ Serving Benchmark Result ============
+Successful requests:                     80        
+Failed requests:                         0         
+Maximum request concurrency:             20        
+Benchmark duration (s):                  186.08    
+Total input tokens:                      280000    
+Total generated tokens:                  120000    
+Request throughput (req/s):              0.43      
+Output token throughput (tok/s):         644.87    
+Peak output token throughput (tok/s):    760.00    
+Peak concurrent requests:                25.00     
+Total token throughput (tok/s):          2149.56   
+---------------Time to First Token----------------
+Mean TTFT (ms):                          1237.23   
+Median TTFT (ms):                        766.47    
+P99 TTFT (ms):                           5177.58   
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          30.14     
+Median TPOT (ms):                        30.44     
+P99 TPOT (ms):                           30.70     
+---------------Inter-token Latency----------------
+Mean ITL (ms):                           30.14     
+Median ITL (ms):                         27.44     
+P99 ITL (ms):                            152.39    
+==================================================
+sys:1: DeprecationWarning: builtin type swigvarlink has no __module__ attribute
+root@152823282a70:/workspace# 
