@@ -1,0 +1,15 @@
+pr: 17833
+entries:
+  - category: feature
+    text: >-
+      Added disabled-by-default KV Trace monitoring through additional_config.kv_trace
+      (enabled and action) for adapted dense PA and MLA paths in Model Runner V2.
+      Native SchedulerOutput binding deltas are consumed inside MRV2 without
+      patching Scheduler, KVCacheManager or BlockPool. Model Runner V1 is unchanged.
+      Per-group execution plans and public connector inputs/results are recorded;
+      allocation generations, physical release and KV content validity are not inferred.
+  - category: performance
+    text: >-
+      Ordinary async single-worker generation retains one metadata snapshot and
+      immutable binding plan per step, completing its audit at the original result
+      getter or before buffer reuse. It does not copy KV values or add per-layer hooks.
