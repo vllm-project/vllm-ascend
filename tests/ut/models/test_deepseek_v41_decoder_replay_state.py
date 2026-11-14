@@ -226,6 +226,56 @@ def test_replay_metadata_preserves_pcp_layout_contract(state, monkeypatch, actua
     assert result["decoder.swa_cache"] is metadata
 
 
+def test_replay_metadata_isolates_first_swa_floor_and_batch_lifetimes(state, monkeypatch):
+    state.num_tokens = state.num_actual_tokens = 5
+    state.config.model_config = SimpleNamespace(max_model_len=16)
+    state.slots = torch.zeros((2, 32), dtype=torch.int64)
+    offsets = np.array([0, 3, 5], dtype=np.int32)
+    state.offsets[:3] = torch.from_numpy(offsets)
+    state.replay_start[:2].fill_(3)
+    state.layers.first_swa_prefix = "decoder.first_swa"
+    monkeypatch.setattr(replay_mod, "get_cos_and_sin_dsa", lambda *args, **kwargs: None)
+    calls = []
+
+    def build(prefix, common, **kwargs):
+        calls.append((common, kwargs["common_v41_batch_metadata"]))
+        return common
+
+    builder = SimpleNamespace(build=build, take_device_metadata_tasks=lambda: [])
+    state.builders = [(0, ["decoder.first_swa", "decoder.swa_1"], builder), (1, ["decoder.swa_2"], builder)]
+    state.first_swa_builder = (0, ["decoder.first_swa"], builder)
+    batch = SimpleNamespace(
+        num_reqs=2,
+        seq_lens=torch.tensor([6, 5], dtype=torch.int32),
+        seq_lens_np=np.array([6, 5], dtype=np.int32),
+        max_query_len=3,
+        attn_state=None,
+        is_prefilling_np=np.array([True, True]),
+    )
+    replay_inputs = replay_mod.DecoderReplayInputs(
+        batch, (torch.zeros(2, 1), torch.zeros(2, 1)), state.slots, [], torch.zeros(2, dtype=torch.int32)
+    )
+    previous_caches = []
+    for _ in range(2):
+        calls.clear()
+        result = replay_mod.DecoderReplayState._build_metadata(state, replay_inputs, offsets)
+        normal, first, other = calls
+        assert result["decoder.first_swa"] is first[0]
+        assert result["decoder.swa_1"] is normal[0]
+        assert result["decoder.swa_2"] is other[0]
+        assert normal[1] is other[1]
+        assert first[1] is not normal[1]
+        assert all(cache is not previous for _, cache in calls for previous in previous_caches)
+        for common, _ in calls:
+            torch.testing.assert_close(common.query_start_loc, torch.from_numpy(offsets))
+            assert common.seq_lens.data_ptr() == batch.seq_lens.data_ptr()
+            assert common.num_actual_tokens == 5
+        torch.testing.assert_close(first[0].replay_start, torch.zeros(2, dtype=torch.int32))
+        for common, _ in (normal, other):
+            torch.testing.assert_close(common.replay_start, torch.full((2,), 3, dtype=torch.int32))
+        previous_caches = [cache for _, cache in calls]
+
+
 @pytest.mark.parametrize("mode", [CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE])
 def test_graph_step_clears_previous_replay(state, mode):
     state.layers.rows = torch.arange(2)
