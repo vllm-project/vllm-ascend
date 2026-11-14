@@ -33,7 +33,7 @@ from tests.e2e.common.rlhf.weight_transfer.reference_check import (
     weight_transfer_servers,
 )
 from tests.e2e.common.rlhf.weight_transfer.weight_source import (
-    FixedRandomWeightSource,
+    make_weight_source,
     packed_buffer_size_for,
 )
 
@@ -44,8 +44,9 @@ INFERENCE_WORLD_SIZE = 2
 # handles; it is distinct from the inference workers' communication groups.
 TRAINER_WORLD_SIZE = INFERENCE_WORLD_SIZE
 # The trainer is co-located with the server on the same chip, so both models
-# have to fit; keep the budget low enough to leave room for the payload.
-GPU_MEMORY_UTILIZATION = 0.45
+# have to fit; keep the budget low enough to leave room for the payload. Cases
+# whose payload is much heavier than the default lanes raise it from the runner.
+GPU_MEMORY_UTILIZATION = float(os.environ.get("VLLM_RL_TEST_GPU_MEM_UTIL", "0.45"))
 # First parent-process logical device; child-server visibility is mapped to
 # physical IDs through the parent's ASCEND_RT_VISIBLE_DEVICES, when present.
 INFERENCE_DEVICE_INDEX = int(os.environ.get("VLLM_RL_TEST_DEVICE_INDEX", "0"))
@@ -60,7 +61,7 @@ def _ipc_trainer_peer(local_rank: int, case: WeightUpdateModelCase, packed: bool
     rank = local_rank + 1  # Rank 0 runs in the parent; spawn supplies peer-local ranks.
     device_index = INFERENCE_DEVICE_INDEX + rank
     torch.npu.set_device(device_index)
-    source = FixedRandomWeightSource(case, torch.device("npu", device_index))
+    source = make_weight_source(case, torch.device("npu", device_index))
     dist.init_process_group(
         "gloo",
         init_method=rendezvous,
@@ -84,6 +85,13 @@ def _ipc_trainer_peer(local_rank: int, case: WeightUpdateModelCase, packed: bool
                 # Rank 0 releases this barrier after both rollout workers wake.
                 dist.barrier()
                 engine.send_weights()
+                # This rank materialised its own half of the payload, and the NPU
+                # caching allocator keeps those blocks. The caller wakes the KV
+                # cache on this chip after the barrier below, so hand the memory
+                # back here as well, not only on rank 0, and wait there until rank 0
+                # has released its own blocks.
+                torch.npu.empty_cache()
+                dist.barrier()
         finally:
             engine.shutdown()
     finally:
@@ -95,7 +103,7 @@ def run_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed:
         pytest.skip("NPU IPC weight transfer e2e test requires 2 consecutive NPUs for TP=2.")
 
     torch.npu.set_device(INFERENCE_DEVICE_INDEX)
-    source = FixedRandomWeightSource(case, torch.device("npu", INFERENCE_DEVICE_INDEX))
+    source = make_weight_source(case, torch.device("npu", INFERENCE_DEVICE_INDEX))
     os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
     env_dict = {
         "VLLM_SERVER_DEV_MODE": "1",
@@ -162,6 +170,17 @@ def run_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed:
                 # send_weights owns the complete START -> LOAD -> FINISH transaction.
                 dist.barrier()
                 engine.send_weights()
+                # The trainer shares the chip with the rollout engine, and the NPU
+                # caching allocator keeps the transient payload tensors this source
+                # materialised. Device-wide "still in use" after the next sleep went
+                # 1.10 -> 7.66 GiB across rounds and the engine's wake_up then died
+                # in aclrtMallocPhysical with OOM, so hand the memory back
+                # explicitly.
+                torch.npu.empty_cache()
+                # Every trainer rank builds and sends a full payload on its own
+                # chip, so wait until the peer has released its blocks too before
+                # this rank asks the engine to allocate the co-located KV cache.
+                dist.barrier()
                 # The KV cache is re-allocated last, from the updated weights' state.
                 # That wake leaves nothing asleep, so the engine resumes scheduling on
                 # its own and no explicit `/resume` is needed.
