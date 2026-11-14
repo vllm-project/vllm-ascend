@@ -17,7 +17,7 @@
 """Scheduler subclass with profiling-based dynamic chunk sizing.
 
 The ``schedule()`` override originated from the ``Scheduler.schedule()``
-contract of vLLM v0.31.0 and carries subsequent compatibility updates. When
+contract of vLLM v0.33.0 / 24420b7a341af37a9bc3186e6fc6062512e0aa58. When
 the upstream method is refactored, this override must be updated accordingly.
 """
 
@@ -37,15 +37,17 @@ from vllm.v1.core.sched.output import (
     NewRequestData,
     SchedulerOutput,
 )
-from vllm.v1.core.sched.request_queue import SchedulingPolicy
+from vllm.v1.core.sched.request_queue import RequestQueue, SchedulingPolicy
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreEventType
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.metrics.stats import KV_FETCH_IN_PROGRESS, KV_FETCH_WAITING_TO_START
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.core.profiling_chunk_predictor import ProfilingChunkManager
+from vllm_ascend.core.scheduler_utils import should_skip_external_kv
 
 
 class ProfilingChunkScheduler(Scheduler):
@@ -267,7 +269,8 @@ class ProfilingChunkScheduler(Scheduler):
     # Modified sections are marked with ">>> PROFILING CHUNK" comments.
     # ------------------------------------------------------------------
 
-    def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:  # noqa: C901
+    def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
+        # Synced with vLLM v0.33.0 / 24420b7a341af37a9bc3186e6fc6062512e0aa58.
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -287,10 +290,8 @@ class ProfilingChunkScheduler(Scheduler):
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
-        # >>> PROFILING CHUNK >>>
         target_latency = self.profiling_chunk_manager.predictor.target_latency
         time_budget = target_latency if target_latency is not None else float("inf")
-        # <<< PROFILING CHUNK <<<
         token_budget = self.max_num_scheduled_tokens
         spec = self.vllm_config.speculative_config
         draft_slots = spec.max_num_new_slots_for_drafting if spec is not None else 0
@@ -304,8 +305,14 @@ class ProfilingChunkScheduler(Scheduler):
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
+        # Whether a request scheduled this step can use the drafts proposed after
+        # it. Stays set if that request is preempted later in the step.
+        drafts_needed = not self.can_skip_drafts
         # Whether the running batch contains any prefill requests.
         prefill_scheduled = False
+        # Whether a waiting request was admitted with prompt left to compute.
+        # Separate from `prefill_scheduled`, which covers only the running loop.
+        prefill_admitted = False
         # Whether any scheduled request has a synchronous connector KV load.
         has_sync_kv_loads = False
 
@@ -320,11 +327,43 @@ class ProfilingChunkScheduler(Scheduler):
             not r.is_prefill_chunk for r in self.running
         )
 
+        # `long_prefill_token_threshold` exists to stop a long prefill from
+        # starving other requests of the token budget. When it is the only
+        # request there is nobody to starve, so let it use the whole budget.
+        num_running, num_waiting = self.get_request_counts()
+        num_eligible_reqs = num_running + num_waiting
+        long_prefill_token_threshold = (
+            self.scheduler_config.long_prefill_token_threshold if num_eligible_reqs > 1 else 0
+        )
+        if long_prefill_token_threshold > 0 and self.adaptive_long_prefill_threshold:
+            # Floor the cap at a fair share of the input budget so it never
+            # cuts a request below max_num_batched_tokens / num requests.
+            long_prefill_token_threshold = max(long_prefill_token_threshold, input_budget // num_eligible_reqs)
+
+        # Local prefill cadence: hold prefill until the interval since the last
+        # prefill-carrying step has elapsed, so decode runs in longer
+        # uninterrupted stretches. Mirrors the DP gate above, including its
+        # capacity escape: once a release step cannot drain the waiting queue,
+        # throttling stops (#44558, test_throttle_capacity_bound_guard_admits).
+        # Without that escape a backed-up engine holds both admissions and
+        # in-flight chunks for interval-1 of every interval steps, capping
+        # prefill at roughly one budget per interval and growing the waiting
+        # queue without bound.
+        if (
+            not defer_prefills
+            and self.local_prefill_interval > 1
+            and not self.prefill_capacity_bound
+            # This call becomes executed step num_executed_steps + 1 if it
+            # schedules anything, and last_prefill_step is stamped on the same
+            # convention below.
+            and (self.num_executed_steps + 1) - self.last_prefill_step < self.local_prefill_interval
+            and any(not r.is_prefill_chunk for r in self.running)
+        ):
+            defer_prefills = True
+
         # First, schedule the RUNNING requests.
         req_index = 0
-        # >>> PROFILING CHUNK >>>
         while req_index < len(self.running) and token_budget > 0:
-            # <<< PROFILING CHUNK <<<
             request = self.running[req_index]
             if input_budget <= draft_slots:
                 break
@@ -371,8 +410,8 @@ class ProfilingChunkScheduler(Scheduler):
             num_new_tokens = (
                 request.num_tokens_with_spec + request.num_output_placeholders - request.num_computed_tokens
             )
-            if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
-                num_new_tokens = self.scheduler_config.long_prefill_token_threshold
+            if 0 < long_prefill_token_threshold < num_new_tokens:
+                num_new_tokens = long_prefill_token_threshold
             num_new_tokens = min(num_new_tokens, token_budget, input_budget - draft_slots)
 
             # Make sure the input position does not exceed the max model len.
@@ -381,52 +420,6 @@ class ProfilingChunkScheduler(Scheduler):
                 num_new_tokens,
                 self.max_model_len - request.num_computed_tokens - self.num_sampled_tokens_per_step,
             )
-
-            # Apply Mamba alignment before encoder caps.
-            if self.need_mamba_block_aligned_split:
-                num_new_tokens = self._mamba_block_aligned_split(request, num_new_tokens)
-
-            # Schedule encoder inputs.
-            encoder_inputs_to_schedule = None
-            external_load_encoder_input: list[int] = []
-            new_encoder_compute_budget = encoder_compute_budget
-            if request.has_encoder_inputs:
-                (
-                    encoder_inputs_to_schedule,
-                    num_new_tokens,
-                    new_encoder_compute_budget,
-                    external_load_encoder_input,
-                ) = self._try_schedule_encoder_inputs(
-                    request,
-                    request.num_computed_tokens,
-                    num_new_tokens,
-                    encoder_compute_budget,
-                    shift_computed_tokens=self.num_prefill_lookahead,
-                )
-
-            # Multi-module MTP: avoid ending a prefill chunk within
-            # num_prefill_lookahead of the prefill end.
-            num_new_tokens = self._reserve_prefill_lookahead(request, request.num_computed_tokens, num_new_tokens)
-
-            if num_new_tokens == 0:
-                # The request cannot be scheduled because one of the following
-                # reasons:
-                # 1. No new tokens to schedule. This may happen when
-                #    (1) PP>1 and we have already scheduled all prompt tokens
-                #    but they are not finished yet.
-                #    (2) Async scheduling and the request has reached to either
-                #    its max_total_tokens or max_model_len.
-                # 2. The encoder budget is exhausted.
-                # 3. The encoder cache is exhausted.
-                # 4. Insufficient budget for a block-aligned chunk in hybrid
-                #    models with mamba cache mode \"align\".
-                # 5. Insufficient budget to keep a multi-module MTP prefill
-                #    chunk out of the prefill-lookahead window.
-                # NOTE(woosuk): Here, by doing `continue` instead of `break`,
-                # we do not strictly follow the FCFS scheduling policy and
-                # allow the lower-priority requests to be scheduled.
-                req_index += 1
-                continue
 
             # >>> PROFILING CHUNK: dynamic chunk sizing for RUNNING >>>
             if (
@@ -459,6 +452,54 @@ class ProfilingChunkScheduler(Scheduler):
                     break
             # <<< PROFILING CHUNK <<<
 
+            # Apply Mamba alignment before encoder caps.
+            if self.need_mamba_block_aligned_split:
+                num_new_tokens = self._mamba_block_aligned_split(request, num_new_tokens)
+
+            # Schedule encoder inputs.
+            encoder_inputs_to_schedule = None
+            external_load_encoder_input: list[int] = []
+            duplicate_encoder_inputs: list[int] = []
+            new_encoder_compute_budget = encoder_compute_budget
+            if request.has_encoder_inputs:
+                (
+                    encoder_inputs_to_schedule,
+                    num_new_tokens,
+                    new_encoder_compute_budget,
+                    external_load_encoder_input,
+                    duplicate_encoder_inputs,
+                ) = self._try_schedule_encoder_inputs(
+                    request,
+                    request.num_computed_tokens,
+                    num_new_tokens,
+                    encoder_compute_budget,
+                    shift_computed_tokens=self.num_prefill_lookahead,
+                )
+
+            # Multi-module MTP: avoid ending a prefill chunk within
+            # num_prefill_lookahead of the prefill end.
+            num_new_tokens = self._reserve_prefill_lookahead(request, request.num_computed_tokens, num_new_tokens)
+
+            if num_new_tokens == 0:
+                # The request cannot be scheduled because one of the following
+                # reasons:
+                # 1. No new tokens to schedule. This may happen when
+                #    (1) PP>1 and we have already scheduled all prompt tokens
+                #    but they are not finished yet.
+                #    (2) Async scheduling and the request has reached to either
+                #    its max_total_tokens or max_model_len.
+                # 2. The encoder budget is exhausted.
+                # 3. The encoder cache is exhausted.
+                # 4. Insufficient budget for a block-aligned chunk in hybrid
+                #    models with mamba cache mode \"align\".
+                # 5. Insufficient budget to keep a multi-module MTP prefill
+                #    chunk out of the prefill-lookahead window.
+                # NOTE(woosuk): Here, by doing `continue` instead of `break`,
+                # we do not strictly follow the FCFS scheduling policy and
+                # allow the lower-priority requests to be scheduled.
+                req_index += 1
+                continue
+
             # Schedule newly needed KV blocks for the request.
             with record_function_or_nullcontext("schedule: allocate_slots"):
                 while True:
@@ -472,15 +513,7 @@ class ProfilingChunkScheduler(Scheduler):
                         # The request can be scheduled.
                         break
 
-                    # Allocation can temporarily fail while a KV
-                    # connector still owns blocks pending deferred release.
-                    # Preempting another request cannot make progress in that
-                    # state. Use capability detection to retain compatibility
-                    # with older connector implementations.
-                    has_pending_block_frees = (
-                        getattr(self.connector, "has_pending_block_frees", None) if self.connector is not None else None
-                    )
-                    if has_pending_block_frees is not None and has_pending_block_frees():
+                    if self.connector is not None and self.connector.has_pending_block_frees():
                         break
 
                     # The request cannot be scheduled.
@@ -536,8 +569,9 @@ class ProfilingChunkScheduler(Scheduler):
                 if self.policy == SchedulingPolicy.PRIORITY and request.status == RequestStatus.PREEMPTED:
                     # The request was the lowest-priority running request and
                     # preempted itself. The requests after it have higher
-                    # priority and may still fit; it was removed from
-                    # `self.running`, so `req_index` already points at the next.
+                    # priority and may still fit (it just freed its blocks);
+                    # it was removed from `self.running`, so `req_index`
+                    # already points at the next one.
                     continue
                 # Cannot schedule this request.
                 break
@@ -550,8 +584,10 @@ class ProfilingChunkScheduler(Scheduler):
             num_scheduled_tokens[request_id] = num_new_tokens
             token_budget -= num_new_tokens
             input_budget -= num_new_tokens + draft_slots
-
             req_index += 1
+            drafts_needed = drafts_needed or not self._drafts_unused(
+                request, request.num_computed_tokens, num_new_tokens
+            )
 
             # Speculative decode related.
             if request.spec_token_ids:
@@ -571,34 +607,31 @@ class ProfilingChunkScheduler(Scheduler):
             # Encoder-related.
             if encoder_inputs_to_schedule:
                 scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
-                # Allocate the encoder cache.
-                for i in encoder_inputs_to_schedule:
-                    self.encoder_cache_manager.allocate(request, i)
-                    if self.ec_connector is not None:
-                        self.ec_connector.update_state_after_alloc(request, i)
                 encoder_compute_budget = new_encoder_compute_budget
-            if external_load_encoder_input:
-                for i in external_load_encoder_input:
-                    self.encoder_cache_manager.allocate(request, i)
-                    if self.ec_connector is not None:
-                        self.ec_connector.update_state_after_alloc(request, i)
+            if encoder_inputs_to_schedule or external_load_encoder_input:
+                self._allocate_encoder_inputs(
+                    request,
+                    (encoder_inputs_to_schedule or []) + external_load_encoder_input,
+                    duplicate_encoder_inputs,
+                )
 
-        # Record the LoRAs in scheduled_running_reqs
+        # Record the LoRAs of all running requests, including those not
+        # scheduled in this step, which can join a later batch.
         scheduled_loras: set[int] = set()
         if self.lora_config:
             scheduled_loras = set(
                 req.lora_request.lora_int_id
-                for req in scheduled_running_reqs
+                for req in self.running
                 if req.lora_request and req.lora_request.lora_int_id > 0
             )
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
-        if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
+        if not preempted_reqs and self._pause_state != PauseState.PAUSED_ALL:
             step_skipped_waiting: deque[Request] = deque()
             step_skipped_kv_holding: deque[Request] = deque()
 
-            def skip_request(from_queue) -> None:
+            def skip_request(from_queue: RequestQueue) -> None:
                 request_to_skip = from_queue.pop_request()
                 self.deferred_waiting.add(request_to_skip)
                 if self._holds_kv_blocks(request_to_skip):
@@ -606,10 +639,13 @@ class ProfilingChunkScheduler(Scheduler):
                 else:
                     step_skipped_waiting.appendleft(request_to_skip)
 
-            # >>> PROFILING CHUNK >>>
-            while (self.waiting or self.kv_holding_waiting) and token_budget > 0:
-                # <<< PROFILING CHUNK <<<
-                if input_budget <= draft_slots:
+            while token_budget > 0:
+                # vllm-project/vllm#60572: get_num_unfinished_requests() counts
+                # KV holders under PAUSED_NEW; drain them before ordinary waiting.
+                request_queue = self.kv_holding_waiting
+                if not request_queue and self._pause_state == PauseState.UNPAUSED:
+                    request_queue = self.waiting
+                if not request_queue or input_budget <= draft_slots:
                     break
                 # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
                 # in `running` but still hold a model-runner request slot.
@@ -617,31 +653,22 @@ class ProfilingChunkScheduler(Scheduler):
                 if num_running >= self.max_num_active_reqs:
                     break
 
-                request_queue = self.kv_holding_waiting or self.waiting
-                assert request_queue is not None
-
                 request = request_queue.peek_request()
                 request_id = request.request_id
 
-                # try to promote blocked statuses while traversing skipped queue.
-                if not self._handle_blocked_waiting_request(request):
-                    if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
-                        logger.debug(
-                            "%s is still in WAITING_FOR_REMOTE_KVS state.",
-                            request_id,
-                        )
+                ready_to_schedule = self._handle_blocked_waiting_request(request)
+                if not ready_to_schedule:
                     skip_request(request_queue)
                     continue
 
-                if request.num_stale_output_tokens > 0 and not request.drop_stale_output:
+                if request.num_stale_output_tokens and not request.drop_stale_output:
                     # Deliverable stale output still in flight: resuming now
                     # could resample a position that output later delivers.
                     # It drains within the pipeline depth.
                     skip_request(request_queue)
                     continue
 
-                # Check that adding the request still respects the max_loras
-                # constraint.
+                # Check that adding the request still respects the max_loras constraint.
                 if (
                     self.lora_config
                     and request.lora_request
@@ -661,13 +688,23 @@ class ProfilingChunkScheduler(Scheduler):
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
+                    if request.resumable and self.num_hash_lookahead_tokens:
+                        # Resident KV can retain a discarded streaming token's
+                        # hash. Recomputing KV must use the current token sequence.
+                        request.block_hashes.clear()
+                        request.update_block_hashes()
                     did_prefix_cache_lookup = True
+                    max_cache_hit_length = (
+                        self.aux_output_connector.max_cache_hit(request)
+                        if self.aux_output_connector is not None
+                        else None
+                    )
                     (
                         new_computed_blocks,
                         num_new_local_computed_tokens,
                         request.shared_prefix_boundary,
                         hit_diverged,
-                    ) = self._get_local_prefix_cache_hit(request)
+                    ) = self._get_local_prefix_cache_hit(request, max_cache_hit_length)
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -679,6 +716,8 @@ class ProfilingChunkScheduler(Scheduler):
                         ext_tokens, load_kv_async = self.connector.get_num_new_matched_tokens(
                             request, block_aligned_local
                         )
+                        if should_skip_external_kv(request):
+                            ext_tokens, load_kv_async = 0, False
 
                         if ext_tokens is None:
                             # The request cannot be scheduled because
@@ -686,6 +725,20 @@ class ProfilingChunkScheduler(Scheduler):
                             # the number of matched tokens.
                             skip_request(request_queue)
                             continue
+
+                        if self.prefix_replay_tokens and not (
+                            ext_tokens and self._load_restores_replay_window(request)
+                        ):
+                            # DSV41 SWA bounded replay recomputes the hit's last
+                            # window, from the block holding its first
+                            # token; the sliding-window groups retire
+                            # whole blocks below the window of the hit's
+                            # next token. Hits end on a block boundary, or
+                            # a hit ending one token short of one would
+                            # retire the block the replay starts in. A load
+                            # that carries the window replays nothing.
+                            ext_tokens -= ext_tokens % self.block_size
+                            load_kv_async = load_kv_async and ext_tokens > 0
 
                         if partial_tail and ext_tokens > partial_tail:
                             # Remote strictly exceeds the full local hit: drop the
@@ -707,6 +760,14 @@ class ProfilingChunkScheduler(Scheduler):
                         else:
                             num_external_computed_tokens = ext_tokens
 
+                        if self.aux_output_connector is not None:
+                            num_external_computed_tokens = self.aux_output_connector.cap_external_hit(
+                                request,
+                                num_new_local_computed_tokens,
+                                num_external_computed_tokens,
+                            )
+                            load_kv_async &= num_external_computed_tokens > 0
+
                         if hit_diverged and num_external_computed_tokens == 0:
                             # No external tokens back the deeper local hit, so its
                             # resume boundary would have no valid Mamba state.
@@ -715,7 +776,7 @@ class ProfilingChunkScheduler(Scheduler):
                                 new_computed_blocks,
                                 num_new_local_computed_tokens,
                                 request.shared_prefix_boundary,
-                            ) = self.kv_cache_manager.get_computed_blocks(request)
+                            ) = self.kv_cache_manager.get_computed_blocks(request, max_cache_hit_length)
 
                         connector_prefix_cache_queries = request.num_tokens - num_new_local_computed_tokens
                         connector_prefix_cache_hits = num_external_computed_tokens
@@ -723,9 +784,24 @@ class ProfilingChunkScheduler(Scheduler):
                     # Total computed tokens (local + external).
                     num_computed_tokens = num_new_local_computed_tokens + num_external_computed_tokens
                     assert num_computed_tokens <= request.num_tokens
+                    # DSV41 SWA bounded replay: a KV load that carries the
+                    # window is taken as is; any other hit no longer than the
+                    # replayed window would be recomputed in full and save
+                    # nothing.
+                    window_loaded = bool(num_external_computed_tokens) and self._load_restores_replay_window(request)
+                    if not window_loaded and 0 < num_computed_tokens <= self.prefix_replay_tokens:
+                        new_computed_blocks = self.kv_cache_manager.empty_kv_cache_blocks
+                        num_new_local_computed_tokens = 0
+                        num_external_computed_tokens = 0
+                        connector_prefix_cache_hits = 0
+                        num_computed_tokens = 0
+                        load_kv_async = False
 
-                    # Skip request with pending mm encoding prefetches
-                    if self._ec_transfer_pending(request, num_computed_tokens):
+                    # Include encoder inputs needed to replay the prefix tail.
+                    ec_computed_tokens = num_computed_tokens
+                    if not window_loaded:
+                        ec_computed_tokens = max(0, num_computed_tokens - self.prefix_replay_tokens)
+                    if self._ec_transfer_pending(request, ec_computed_tokens):
                         skip_request(request_queue)
                         continue
 
@@ -737,9 +813,12 @@ class ProfilingChunkScheduler(Scheduler):
                             num_local_cached_tokens=num_new_local_computed_tokens,
                             num_external_cached_tokens=num_external_computed_tokens,
                         )
+                    self._set_kv_fetch_stage(request, KV_FETCH_WAITING_TO_START if load_kv_async else None)
                 else:
                     # KVTransfer: WAITING reqs have num_computed_tokens > 0
-                    # after async KV recvs are completed.
+                    # after async KV recvs are completed. A streaming-input
+                    # session resumes here too, carrying whatever media its
+                    # latest chunk added, so this branch needs the same gate.
                     new_computed_blocks = self.kv_cache_manager.empty_kv_cache_blocks
                     num_new_local_computed_tokens = 0
                     num_computed_tokens = request.num_computed_tokens
@@ -750,8 +829,14 @@ class ProfilingChunkScheduler(Scheduler):
 
                 encoder_inputs_to_schedule = None
                 external_load_encoder_input = []
+                duplicate_encoder_inputs = []
                 new_encoder_compute_budget = encoder_compute_budget
                 pad_spec_decode = False
+
+                # SWA bounded replay: recompute the tail of the hit without
+                # rewriting its cached KV. An async load replays once the KV
+                # has arrived (_update_waiting_for_remote_kv).
+                num_replay_tokens = 0
 
                 if load_kv_async:
                     # KVTransfer: loading remote KV, do not allocate for new work.
@@ -763,6 +848,10 @@ class ProfilingChunkScheduler(Scheduler):
                     break
                 else:
                     request_token_budget = min(token_budget, input_budget - draft_slots)
+                    if did_prefix_cache_lookup:
+                        # Fresh admission: local and/or sync external hit.
+                        num_replay_tokens = self._mark_prefix_replay(request, num_computed_tokens, window_loaded)
+                        num_computed_tokens -= num_replay_tokens
                     # Number of tokens to be scheduled.
                     # We use `request.num_tokens` instead of
                     # `request.num_prompt_tokens` to consider the resumed
@@ -791,9 +880,8 @@ class ProfilingChunkScheduler(Scheduler):
                             num_new_tokens = padded_num_tokens
                             pad_spec_decode = True
 
-                    threshold = self.scheduler_config.long_prefill_token_threshold
-                    if 0 < threshold < num_new_tokens:
-                        num_new_tokens = threshold
+                    if 0 < long_prefill_token_threshold < num_new_tokens:
+                        num_new_tokens = long_prefill_token_threshold
 
                     # >>> PROFILING CHUNK: dynamic chunk sizing >>>
                     if (
@@ -860,6 +948,7 @@ class ProfilingChunkScheduler(Scheduler):
                             num_new_tokens,
                             new_encoder_compute_budget,
                             external_load_encoder_input,
+                            duplicate_encoder_inputs,
                         ) = self._try_schedule_encoder_inputs(
                             request,
                             num_computed_tokens,
@@ -873,8 +962,10 @@ class ProfilingChunkScheduler(Scheduler):
                     num_new_tokens = self._reserve_prefill_lookahead(request, num_computed_tokens, num_new_tokens)
 
                     if num_new_tokens == 0:
-                        # The request cannot be scheduled.
-                        break
+                        # The request cannot be scheduled. Requeue it so it does
+                        # not stall the requests behind it.
+                        skip_request(request_queue)
+                        continue
 
                 # During async KV load, no forward pass is run yet.
                 # Allocate speculative lookahead slots later to avoid
@@ -891,13 +982,17 @@ class ProfilingChunkScheduler(Scheduler):
                 if load_kv_async:
                     # An async load holds its blocks for the whole transfer with
                     # no forward progress and isn't preemptible here. Admit it
-                    # only if it fits in (free - other in-flight reservations), to
-                    # avoid deadlock and predictable preemptions.
-                    reserved_blocks = self._inflight_prefill_reserved_blocks()
+                    # only if it fits in (free - other in-flight reservations)
+                    # plus its own spec decode step blocks, to avoid deadlock and
+                    # predictable preemptions.
+                    reserved_blocks = self._inflight_prefill_reserved_blocks() + self._spec_decode_step_blocks
 
+                # Replayed tokens are already counted in the adopted hit; a
+                # chunk that ends inside the replayed range needs no new slots.
+                num_tokens_past_hit = max(num_new_tokens - num_replay_tokens, 0)
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
-                    num_new_tokens,
+                    num_tokens_past_hit,
                     num_new_computed_tokens=num_new_local_computed_tokens,
                     new_computed_blocks=new_computed_blocks,
                     num_lookahead_tokens=effective_lookahead_tokens,
@@ -928,16 +1023,40 @@ class ProfilingChunkScheduler(Scheduler):
                 # This information is used to determine if a load is
                 # needed for this request.
                 if self.connector is not None:
-                    self.connector.update_state_after_alloc(
-                        request,
-                        self.kv_cache_manager.get_blocks(request_id),
-                        num_external_computed_tokens,
+                    defer_load = (
+                        load_kv_async and self.defer_async_loads and self.sched_step_seq > self.processed_step_seq
                     )
-                    if self.connector_prefix_cache_stats is not None and connector_prefix_cache_queries != 0:
+                    if defer_load:
+                        request.last_sched_seq = self.sched_step_seq
+                        self.deferred_loads[request_id] = (
+                            self.sched_step_seq,
+                            num_external_computed_tokens,
+                            connector_prefix_cache_queries,
+                            connector_prefix_cache_hits,
+                        )
+                    else:
+                        self.connector.update_state_after_alloc(
+                            request,
+                            self.kv_cache_manager.get_blocks(request_id),
+                            num_external_computed_tokens,
+                        )
+                    if (
+                        self.connector_prefix_cache_stats is not None
+                        and connector_prefix_cache_queries != 0
+                        and not defer_load
+                    ):
+                        preempted = request.num_preemptions > 0
                         self.connector_prefix_cache_stats.record(
                             num_tokens=connector_prefix_cache_queries,
                             num_hits=connector_prefix_cache_hits,
-                            preempted=request.num_preemptions > 0,
+                            preempted=preempted,
+                            # The connector knows the tier only after the load
+                            # plan above exists.
+                            hits_by_source=(
+                                self.connector.get_external_cache_hit_sources(request, connector_prefix_cache_hits)
+                                if connector_prefix_cache_hits and not preempted
+                                else None
+                            ),
                         )
 
                 # Record at admission so unscheduled lookups are not counted.
@@ -945,6 +1064,12 @@ class ProfilingChunkScheduler(Scheduler):
                     self.kv_cache_manager.record_prefix_cache_stats(request, num_new_local_computed_tokens)
 
                 if load_kv_async:
+                    # This path deliberately does not reach `prefill_admitted`
+                    # below, so it does not restart the prefill cadence:
+                    # `num_new_tokens` was set to 0 above, so the step carries
+                    # no prefill compute for this request. The interval is
+                    # timed from steps that actually prefilled; refreshing it
+                    # here would start the cadence from a step that did none.
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
@@ -962,7 +1087,10 @@ class ProfilingChunkScheduler(Scheduler):
                     # _update_waiting_for_remote_kv will then cache
                     # only the successfully loaded tokens.
                     request.num_computed_tokens = num_computed_tokens
+                    if self.aux_output_connector is not None:
+                        self.aux_output_connector.request_loading(request, num_computed_tokens)
                     self._inflight_prefills.add(request)
+                    self._set_kv_fetch_stage(request, KV_FETCH_IN_PROGRESS)
                     skip_request(request_queue)
                     continue
 
@@ -987,30 +1115,34 @@ class ProfilingChunkScheduler(Scheduler):
                 num_scheduled_tokens[request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 input_budget -= num_new_tokens + draft_slots
-
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
+                self._set_kv_fetch_stage(request, None)
+                drafts_needed = drafts_needed or not self._drafts_unused(request, num_computed_tokens, num_new_tokens)
                 if pad_spec_decode:
                     assert num_new_tokens == 1 + self.num_spec_tokens
                     scheduled_spec_decode_tokens[request_id] = [-1] * self.num_spec_tokens
+                # Must use the SAME predicate as the deferral gate in the
+                # waiting loop (`num_computed_tokens < num_tokens - 1`).
+                # Stamping on `< num_prompt_tokens` instead let a request with
+                # exactly one token left pass the gate on a held step and still
+                # restart the interval -- which is every full prefix-cache hit,
+                # and every remote-KV resume, since those set
+                # num_computed_tokens = num_tokens - 1.
+                prefill_admitted |= num_computed_tokens < request.num_tokens - 1
                 # Only track requests that will still be prefilling after this chunk.
                 if num_computed_tokens + num_new_tokens < request.num_tokens:
                     self._inflight_prefills.add(request)
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
-                    # Allocate the encoder cache.
-                    for i in encoder_inputs_to_schedule:
-                        self.encoder_cache_manager.allocate(request, i)
-                        if self.ec_connector is not None:
-                            self.ec_connector.update_state_after_alloc(request, i)
                     encoder_compute_budget = new_encoder_compute_budget
-                # Allocate for external load encoder cache
-                if external_load_encoder_input:
-                    for i in external_load_encoder_input:
-                        self.encoder_cache_manager.allocate(request, i)
-                        if self.ec_connector is not None:
-                            self.ec_connector.update_state_after_alloc(request, i)
+                if encoder_inputs_to_schedule or external_load_encoder_input:
+                    self._allocate_encoder_inputs(
+                        request,
+                        (encoder_inputs_to_schedule or []) + external_load_encoder_input,
+                        duplicate_encoder_inputs,
+                    )
 
             # re-queue requests skipped in this pass ahead of older skipped items.
             if step_skipped_kv_holding:
@@ -1027,6 +1159,15 @@ class ProfilingChunkScheduler(Scheduler):
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
+        # Count this step before stamping the cadence below, so that
+        # last_prefill_step includes the step that carried the prefill.
+        if total_num_scheduled_tokens > 0:
+            self.num_executed_steps += 1
+
+        # Restart the cadence interval from any step that carried prefill,
+        # whether a new admission or a running chunk.
+        if self.local_prefill_interval > 1 and (prefill_scheduled or prefill_admitted):
+            self.last_prefill_step = self.num_executed_steps
 
         assert token_budget >= 0
         assert input_budget >= 0
@@ -1036,26 +1177,28 @@ class ProfilingChunkScheduler(Scheduler):
         # len(self.running).
         assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs) <= len(self.running)
 
-        # Get the longest common prefix among all requests in the running queue.
-        # This can be potentially used for cascade attention.
-        num_common_prefix_blocks = [0] * len(self.kv_cache_config.kv_cache_groups)
-        with record_function_or_nullcontext("schedule: get_num_common_prefix_blocks"):
-            if self.running:
-                any_request_id = self.running[0].request_id
-                num_common_prefix_blocks = self.kv_cache_manager.get_num_common_prefix_blocks(any_request_id)
-
         # Construct the scheduler output.
-        scheduled_new_reqs.extend(scheduled_resumed_reqs)
-        scheduled_resumed_reqs.clear()
-        new_reqs_data = [
-            NewRequestData.from_request(
-                req,
-                req_to_new_blocks[req.request_id].get_block_ids(),
-                req._all_token_ids,
-                uses_mrope=self.model_uses_mrope,
-            )
-            for req in scheduled_new_reqs
-        ]
+        if self.use_v2_model_runner:
+            scheduled_new_reqs.extend(scheduled_resumed_reqs)
+            scheduled_resumed_reqs.clear()
+            new_reqs_data = [
+                NewRequestData.from_request(
+                    req,
+                    req_to_new_blocks[req.request_id].get_block_ids(),
+                    req._all_token_ids,
+                    uses_mrope=self.model_uses_mrope,
+                )
+                for req in scheduled_new_reqs
+            ]
+        else:
+            new_reqs_data = [
+                NewRequestData.from_request(
+                    req,
+                    req_to_new_blocks[req.request_id].get_block_ids(),
+                    uses_mrope=self.model_uses_mrope,
+                )
+                for req in scheduled_new_reqs
+            ]
 
         with record_function_or_nullcontext("schedule: make_cached_request_data"):
             cached_reqs_data = self._make_cached_request_data(
@@ -1065,6 +1208,11 @@ class ProfilingChunkScheduler(Scheduler):
                 scheduled_spec_decode_tokens,
                 req_to_new_blocks,
             )
+
+        # Record the request ids that were scheduled in this step (MRV1-only).
+        if not self.use_v2_model_runner:
+            self.prev_step_scheduled_req_ids.clear()
+            self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
         # Mamba "align" boundary states must be handed off with exact block ids;
         # they cannot be reconstructed from a connector's append-only block
@@ -1110,7 +1258,6 @@ class ProfilingChunkScheduler(Scheduler):
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
             scheduled_encoder_input_stats=scheduled_encoder_input_stats,
-            num_common_prefix_blocks=num_common_prefix_blocks,
             preempted_req_ids=self.reset_preempted_req_ids,
             # finished_req_ids is an existing state in the scheduler,
             # instead of being newly scheduled in this step.
@@ -1118,11 +1265,15 @@ class ProfilingChunkScheduler(Scheduler):
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
+            encoder_input_updates=self._get_encoder_input_updates(
+                num_scheduled_tokens, new_reqs_data, scheduled_encoder_inputs
+            ),
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
             has_sync_kv_loads=has_sync_kv_loads,
             kv_cache_block_copies=pending_kv_cache_block_copies,
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
+            skip_drafts=not drafts_needed,
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
         )
 
@@ -1133,6 +1284,11 @@ class ProfilingChunkScheduler(Scheduler):
         if self.connector is not None:
             meta = self._build_kv_connector_meta(self.connector, scheduler_output)
             scheduler_output.kv_connector_metadata = meta
+
+        if self.aux_output_connector is not None:
+            scheduler_output.aux_output_connector_metadata = self.aux_output_connector.build_connector_meta(
+                scheduler_output, self.requests
+            )
 
         # Build the connector meta for ECConnector
         if self.ec_connector is not None:
