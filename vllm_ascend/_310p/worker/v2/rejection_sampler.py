@@ -60,9 +60,34 @@ class RejectionSampler310V2(RejectionSampler):
             pin_memory=pin_memory,
         )
         self.num_rejected_cpu = torch.empty_like(self.num_sampled_cpu)
-        self._copy_stream = torch.npu.Stream()
+        # One D2H per step: (sampled | num_sampled | num_rejected) packed into a
+        # single buffer, so the main stream pays one copy and one event instead
+        # of three cross-stream copies on a helper stream.
+        width = self.num_speculative_steps + 1
+        self._packed_width = width + 2
+        self._packed_dev = torch.empty(
+            max_num_reqs * self._packed_width,
+            dtype=torch.int32,
+            device=device,
+        )
+        self._packed_cpu = torch.empty(
+            max_num_reqs * self._packed_width,
+            dtype=torch.int32,
+            device="cpu",
+            pin_memory=pin_memory,
+        )
         self._copy_event = torch.npu.Event()
         self._copy_pending = False
+        self._pending_num_reqs = 0
+        # Pinned staging for the per-step chunked-prefill mask. A numpy source
+        # is pageable, so ``.to(non_blocking=True)`` degenerates into a
+        # stream-wide synchronous H2D.
+        self._chunked_prefill_cpu = torch.empty(
+            max_num_reqs,
+            dtype=torch.bool,
+            device="cpu",
+            pin_memory=pin_memory,
+        )
 
     def _build_logprobs_tensors(
         self,
@@ -226,9 +251,9 @@ class RejectionSampler310V2(RejectionSampler):
 
         num_sampled = (sampled != -1).sum(dim=1).to(torch.int32)
         num_logits = cu_num_logits[1:] - cu_num_logits[:-1]
-        is_chunked_prefill = torch.from_numpy(input_batch.seq_lens_np[:num_reqs] < input_batch.prefill_len_np).to(
-            device=self.device, non_blocking=True
-        )
+        chunked_prefill_np = input_batch.seq_lens_np[:num_reqs] < input_batch.prefill_len_np[:num_reqs]
+        self._chunked_prefill_cpu[:num_reqs].copy_(torch.from_numpy(chunked_prefill_np))
+        is_chunked_prefill = self._chunked_prefill_cpu[:num_reqs].to(device=self.device, non_blocking=True)
         num_sampled = torch.where(is_chunked_prefill, 0, num_sampled)
         num_rejected = torch.where(
             is_chunked_prefill,
@@ -244,14 +269,16 @@ class RejectionSampler310V2(RejectionSampler):
             idx_mapping_np=idx_mapping_np,
         )
 
-        main_stream = torch.npu.current_stream()
-        with torch.npu.stream(self._copy_stream):
-            self._copy_stream.wait_stream(main_stream)
-            self.sampled_tokens_cpu[:num_reqs].copy_(sampled, non_blocking=True)
-            self.num_sampled_cpu[:num_reqs].copy_(num_sampled, non_blocking=True)
-            self.num_rejected_cpu[:num_reqs].copy_(num_rejected, non_blocking=True)
-            self._copy_event.record()
-            self._copy_pending = True
+        width = self.num_speculative_steps + 1
+        head = num_reqs * width
+        packed_len = head + 2 * num_reqs
+        self._packed_dev[:head].copy_(sampled.reshape(-1))
+        self._packed_dev[head : head + num_reqs].copy_(num_sampled)
+        self._packed_dev[head + num_reqs : packed_len].copy_(num_rejected)
+        self._packed_cpu[:packed_len].copy_(self._packed_dev[:packed_len], non_blocking=True)
+        self._copy_event.record()
+        self._copy_pending = True
+        self._pending_num_reqs = num_reqs
         return SamplerOutput(
             sampled_token_ids=sampled,
             logprobs_tensors=logprobs_tensors,
@@ -263,4 +290,10 @@ class RejectionSampler310V2(RejectionSampler):
     def synchronize_cpu(self) -> None:
         if self._copy_pending:
             self._copy_event.synchronize()
+            num_reqs = self._pending_num_reqs
+            width = self.num_speculative_steps + 1
+            head = num_reqs * width
+            self.sampled_tokens_cpu[:num_reqs].copy_(self._packed_cpu[:head].view(num_reqs, width))
+            self.num_sampled_cpu[:num_reqs].copy_(self._packed_cpu[head : head + num_reqs])
+            self.num_rejected_cpu[:num_reqs].copy_(self._packed_cpu[head + num_reqs : head + 2 * num_reqs])
             self._copy_pending = False
