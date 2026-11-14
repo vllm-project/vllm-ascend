@@ -11,9 +11,11 @@ import pytest
 import torch
 from vllm import envs
 from vllm.config import CompilationMode, CUDAGraphMode
+from vllm.config.offload import OffloadConfig, PrefetchOffloadConfig
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
-from vllm.model_executor.offloader.base import NoopOffloader
+from vllm.model_executor.offloader.base import NoopOffloader, get_offloader, set_offloader
+from vllm.model_executor.offloader.base import create_offloader as create_vllm_offloader
 from vllm.sequence import IntermediateTensors
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
@@ -29,6 +31,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAImpl
+from vllm_ascend.model_executor.offloader import AscendPrefetchOffloader
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -1179,6 +1182,72 @@ def _parent_init(self, vllm_config, device, *, full_graph=False, speculative=Fal
 
 
 @pytest.mark.parametrize(
+    ("enforce_eager", "offload_backend", "use_ascend_offloader"),
+    [
+        pytest.param(True, "prefetch", True, id="eager-prefetch"),
+        pytest.param(False, "prefetch", False, id="graph-prefetch"),
+        pytest.param(True, "auto", False, id="eager-auto"),
+    ],
+)
+def test_init_selects_prefetch_offloader(enforce_eager, offload_backend, use_ascend_offloader):
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(enable_eplb=False, pipeline_parallel_size=1),
+        offload_config=OffloadConfig(
+            offload_backend=offload_backend,
+            prefetch=PrefetchOffloadConfig(offload_group_size=2, offload_num_in_group=1),
+        ),
+    )
+    ascend_config = SimpleNamespace(
+        finegrained_tp_config=SimpleNamespace(oproj_tensor_parallel_size=1, mlp_tensor_parallel_size=1),
+        dump_config_path=None,
+    )
+    copy_stream = object()
+    parent_offloader = None
+
+    @contextmanager
+    def cuda_wrapper():
+        # Model the CUDA-to-NPU stream mapping only for the duration of the wrapper.
+        with patch.object(torch.cuda, "Stream", return_value=copy_stream):
+            yield
+
+    def parent_init(self, config, device):
+        nonlocal parent_offloader
+        _parent_init(self, config, device, full_graph=not enforce_eager)
+        parent_offloader = create_vllm_offloader(config.offload_config)
+        set_offloader(parent_offloader)
+
+    previous_offloader = get_offloader()
+    try:
+        with (
+            patch.object(torch.cuda, "Stream"),
+            patch("vllm_ascend.worker.v2.model_runner.get_ascend_config", return_value=ascend_config),
+            patch("vllm_ascend.worker.v2.model_runner.resolve_spec_pp_support", return_value=None),
+            patch("vllm_ascend.worker.v2.model_runner.torch_cuda_wrapper", side_effect=cuda_wrapper),
+            patch.object(GPUModelRunner, "__init__", parent_init),
+            patch("vllm_ascend.worker.v2.model_runner.set_potential_max_tokens"),
+            patch("vllm_ascend.worker.v2.model_runner.AscendEPLBController"),
+            patch("vllm_ascend.worker.v2.model_runner.AscendRequestState"),
+            patch("vllm_ascend.worker.v2.model_runner.AscendInputBuffers"),
+            patch("vllm_ascend.worker.v2.model_runner.set_cos_and_sin"),
+            patch("vllm_ascend.worker.v2.model_runner.set_mc2_tokens_capacity"),
+            patch("vllm_ascend.worker.v2.model_runner.set_mc2_mask"),
+            patch("vllm_ascend.worker.v2.model_runner.RuntimeGuardProcessor.bind"),
+            patch("torch.npu.Event"),
+            patch("torch.npu.Stream"),
+            patch("torch.empty"),
+        ):
+            NPUModelRunner(vllm_config, torch.device("cpu"))
+            offloader = get_offloader()
+            if use_ascend_offloader:
+                assert isinstance(offloader, AscendPrefetchOffloader)
+                assert offloader.copy_stream is copy_stream
+            else:
+                assert offloader is parent_offloader
+    finally:
+        set_offloader(previous_offloader)
+
+
+@pytest.mark.parametrize(
     ("use_pp", "backend_name", "env_buffer_size"),
     [
         pytest.param(False, None, None, id="pp1"),
@@ -1195,7 +1264,8 @@ def test_init_without_speculation(monkeypatch, use_pp, backend_name, env_buffer_
         monkeypatch.setenv("HCCL_BUFFSIZE", env_buffer_size)
 
     vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(enable_eplb=False, pipeline_parallel_size=2 if use_pp else 1)
+        parallel_config=SimpleNamespace(enable_eplb=False, pipeline_parallel_size=2 if use_pp else 1),
+        offload_config=OffloadConfig(),
     )
     ascend_config = SimpleNamespace(eplb_config=SimpleNamespace(load_collection_phase="all"), dump_config_path=None)
 
@@ -1292,7 +1362,10 @@ def test_init_without_speculation(monkeypatch, use_pp, backend_name, env_buffer_
 
 @pytest.mark.parametrize("method", ["mtp", "ngram", "ngram_gpu"])
 def test_init_spec_pp_full_graph_and_speculator(method):
-    vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=True, pipeline_parallel_size=2))
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(enable_eplb=True, pipeline_parallel_size=2),
+        offload_config=OffloadConfig(),
+    )
     ascend_config = SimpleNamespace(eplb_config=SimpleNamespace(load_collection_phase="decode"), dump_config_path=None)
 
     # Complete the fake with the fields NPUModelRunner reads (mirrors FinegrainedTPConfig).
