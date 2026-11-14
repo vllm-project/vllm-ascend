@@ -1425,6 +1425,119 @@ def test_lease_renewal_preserves_initial_deadline_and_reaps_both_queues(monkeypa
     assert not thread.renewed_requests and not thread.delayed_free_requests
 
 
+def test_heartbeat_logs_batch_outcomes_outside_state_lock(monkeypatch) -> None:
+    thread = make_sending_thread()
+    thread.delayed_free_requests.update(expired=10.0, extend=20.0, unchanged=40.0)
+    monkeypatch.setattr(pull_scheduler.time, "monotonic", lambda: 10.0)
+    messages = []
+
+    def record(message, *args):
+        assert not thread.state_lock.locked()
+        messages.append(message % args)
+
+    logger = MagicMock()
+    logger.debug.side_effect = record
+    logger.error.side_effect = record
+    monkeypatch.setattr(pull_scheduler, "logger", logger)
+    thread._handle_heartbeat(("extend", "unchanged", "expired", "missing"))
+
+    assert messages == [
+        "MooncakeHeartbeat event=process engine_id=engine-p received=4 extended=1 unchanged=1 expired=1 unknown=1",
+        "MooncakeHeartbeat event=lease_finish engine_id=engine-p request_id=expired "
+        "reason=expired expired_by_s=0.000 action=queued_for_release",
+    ]
+    assert thread.renewed_requests == {"extend": 30.0}
+    assert thread.delayed_free_requests == {"unchanged": 40.0}
+    assert thread.get_and_clear_finished_requests() == {"expired"}
+    assert len(messages) == 2  # Reaping must not log the same expiry twice.
+    logger.warning.assert_not_called()  # An unknown heartbeat is not an error.
+    thread._handle_heartbeat(())
+    assert messages[-1].endswith("received=0 extended=0 unchanged=0 expired=0 unknown=0")
+
+
+@pytest.mark.parametrize("finish", ["done", "heartbeat", "scan"])
+@pytest.mark.parametrize("renewed", [False, True])
+def test_lease_finish_logs_once_outside_state_lock(monkeypatch, finish, renewed) -> None:
+    thread = make_sending_thread()
+    leases = thread.renewed_requests if renewed else thread.delayed_free_requests
+    leases["request"] = 30.0
+    monkeypatch.setattr(pull_scheduler.time, "monotonic", lambda: 30.5)
+    messages = []
+
+    def record(message, *args):
+        assert not thread.state_lock.locked()
+        messages.append(message % args)
+
+    logger = MagicMock()
+    for level in (logger.debug, logger.error, logger.warning):
+        level.side_effect = record
+    monkeypatch.setattr(pull_scheduler, "logger", logger)
+
+    if finish == "done":
+        thread._handle_finished_request("request")
+    elif finish == "heartbeat":
+        thread._handle_heartbeat(("request",))
+    assert thread.get_and_clear_finished_requests() == {"request"}
+    thread._handle_finished_request("request")
+    thread._handle_heartbeat(("request",))
+    assert thread.get_and_clear_finished_requests() == set()
+    assert not thread.delayed_free_requests and not thread.renewed_requests
+
+    ends = [message for message in messages if "event=lease_finish" in message]
+    reason = "reason=done" if finish == "done" else "reason=expired expired_by_s=0.500"
+    assert ends == [
+        f"MooncakeHeartbeat event=lease_finish engine_id=engine-p request_id=request {reason} action=queued_for_release"
+    ]
+    assert logger.error.call_count == (0 if finish == "done" else 1)
+
+
+def test_heartbeat_logs_only_successfully_sent_batches(monkeypatch) -> None:
+    heartbeat = MooncakeHeartbeatThread(20)
+    for index in range(513):
+        heartbeat.add_request(str(index), "127.0.0.1", 6000, f"remote-{index}")
+    context = MagicMock()
+    socket = MagicMock()
+    poller = MagicMock()
+    socket.recv.return_value = ACK_MSG
+    sent = []
+    messages = []
+
+    def send(payload, **kwargs):
+        if socket.send.call_count == 1:
+            raise zmq.Again()  # type: ignore[attr-defined]
+        sent.append(msgspec.msgpack.decode(payload))
+        if len(sent) == 2:
+            heartbeat.stop_event.set()
+
+    def record(message, *args):
+        assert not heartbeat.state_lock.locked()
+        assert len(sent) == len(messages) + 1
+        messages.append(message % args)
+
+    socket.send.side_effect = send
+    logger = MagicMock()
+    logger.debug.side_effect = record
+    monkeypatch.setattr(heartbeat_module, "logger", logger)
+    monkeypatch.setattr(heartbeat_module.zmq, "Context", lambda: context)
+    monkeypatch.setattr(heartbeat_module.zmq, "Poller", lambda: poller)
+    monkeypatch.setattr(heartbeat_module, "make_zmq_socket", lambda *args, **kwargs: socket)
+    monkeypatch.setattr(heartbeat_module.time, "monotonic", lambda: 10.0)
+    # Bound the loop if a regression prevents a batch from being sent.
+    poller.poll.side_effect = [None, None, None, RuntimeError("heartbeat did not drain its batches")]
+    heartbeat.run()
+
+    assert [len(message[1]) for message in sent] == [512, 1]
+    assert {req for _, ids in sent for req in ids} == {f"remote-{index}" for index in range(513)}
+    assert messages == [
+        "MooncakeHeartbeat event=send producer=127.0.0.1:6000 request_count=512",
+        "MooncakeHeartbeat event=send producer=127.0.0.1:6000 request_count=1",
+    ]
+    assert socket.send.call_count == 3
+    socket.recv.assert_called_once()
+    logger.warning.assert_not_called()
+    logger.exception.assert_not_called()
+
+
 def test_shorter_renewed_lease_is_not_blocked_by_new_initial_lease(monkeypatch) -> None:
     clock = MagicMock(return_value=0.0)
     monkeypatch.setattr(pull_scheduler.time, "monotonic", clock)
