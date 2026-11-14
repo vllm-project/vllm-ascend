@@ -57,9 +57,9 @@ def apply_moe_mlp(
 
     # When LoRA adapter is used in quantized weight, use individual lora impl.
     if mlp_compute_input.quant.is_quant and mlp_compute_input.lora_context is not None:
-        from vllm_ascend.lora.fused_moe import has_lora
+        from vllm_ascend.lora.fused_moe import has_moe_lora
 
-        if has_lora(mlp_compute_input.lora_context):
+        if has_moe_lora(mlp_compute_input.lora_context):
             from vllm_ascend.lora.quant_moe import quant_apply_mlp_with_moe_lora
 
             return quant_apply_mlp_with_moe_lora(

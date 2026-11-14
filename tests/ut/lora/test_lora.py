@@ -14,6 +14,7 @@ from vllm_ascend.lora.fused_moe import (
     _recover_moe_lora_routing_allgather,
     all2all_lora_indices,
     has_lora,
+    has_moe_lora,
     moe_lora_apply_w2,
     moe_lora_apply_w13,
     postprocess_lora_indices,
@@ -198,6 +199,43 @@ def test_has_lora_follows_batch_metadata() -> None:
     assert has_lora(SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=False)))
 
 
+def test_has_moe_lora_narrows_the_batch_flag_to_the_layer() -> None:
+    context = SimpleNamespace(
+        punica_wrapper=SimpleNamespace(no_lora=False),
+        layer_lora_slots=set(),
+    )
+    # The batch still carries adapter tokens, so the dense wrappers must work.
+    assert has_lora(context)
+    # ... but this layer holds no routed-expert weights, so the fused base
+    # kernel has to stay in place.
+    assert not has_moe_lora(context)
+
+    context.layer_lora_slots = {0}
+    assert has_moe_lora(context)
+
+    # A context published by a wrapper that does not track slots keeps the
+    # batch-level answer instead of silently disabling the MoE LoRA path.
+    assert has_moe_lora(SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=False)))
+    assert not has_moe_lora(SimpleNamespace(punica_wrapper=SimpleNamespace(no_lora=True), layer_lora_slots={0}))
+
+
+def test_set_and_reset_lora_track_the_layer_slots(monkeypatch) -> None:
+    layer = AscendFusedMoEWithLoRA.__new__(AscendFusedMoEWithLoRA)
+    layer._lora_slots = set()
+    # The base class buffers are irrelevant for the slot bookkeeping.
+    monkeypatch.setattr(FusedMoEWithLoRA, "set_lora", lambda self, index, lora_a, lora_b: None)
+    monkeypatch.setattr(FusedMoEWithLoRA, "reset_lora", lambda self, index: None)
+
+    layer.set_lora(3, [], [])
+    assert layer._lora_slots == {3}
+    layer.set_lora(5, [], [])
+    assert layer._lora_slots == {3, 5}
+    layer.reset_lora(3)
+    assert layer._lora_slots == {5}
+    layer.reset_lora(5)
+    assert not layer._lora_slots
+
+
 def test_reset_lora_indices_drops_only_present_fields() -> None:
     context = SimpleNamespace(split_lora_indices=1, extra=2)
     reset_lora_indices(context)
@@ -206,15 +244,55 @@ def test_reset_lora_indices_drops_only_present_fields() -> None:
 
 
 def test_prepare_lora_indices_pads_inactive_slots() -> None:
-    context = SimpleNamespace(punica_wrapper=SimpleNamespace(token_lora_indices=torch.tensor([3, 1, 0, 9, 9])))
+    context = SimpleNamespace(
+        punica_wrapper=SimpleNamespace(token_lora_indices=torch.tensor([3, 1, 0, 9, 9]), indices_len=[3, 0, 0, 0])
+    )
     prepare_lora_indices(context, num_tokens=3, pad_size=2, tp_size=1, tp_rank=0)
     assert torch.equal(context.split_lora_indices, torch.tensor([3, 1, 0, -1, -1]))
 
 
 def test_prepare_lora_indices_tp_splits_local_rank() -> None:
-    context = SimpleNamespace(punica_wrapper=SimpleNamespace(token_lora_indices=torch.arange(8)))
+    context = SimpleNamespace(
+        punica_wrapper=SimpleNamespace(token_lora_indices=torch.arange(8), indices_len=[8, 0, 0, 0])
+    )
     prepare_lora_indices(context, num_tokens=8, pad_size=0, tp_size=4, tp_rank=2)
     assert torch.equal(context.split_lora_indices, torch.tensor([4, 5]))
+
+
+def test_prepare_lora_indices_fills_missing_tail() -> None:
+    # indices_len can lag the MoE row count; the send buffer must still hold
+    # every row the AlltoAll split advertises, otherwise peers receive garbage.
+    context = SimpleNamespace(
+        punica_wrapper=SimpleNamespace(token_lora_indices=torch.tensor([1, 0]), indices_len=[2, 0, 0, 0])
+    )
+    prepare_lora_indices(context, num_tokens=4, pad_size=0, tp_size=1, tp_rank=0)
+    assert torch.equal(context.split_lora_indices, torch.tensor([1, 0, -1, -1]))
+
+
+def test_prepare_lora_indices_ignores_metadata_without_mapping() -> None:
+    # An idle/dummy batch can reach the MoE before any LoRA mapping is built.
+    # The wrapper buffers are torch.empty, so they must never be read.
+    garbage = torch.tensor([1496918835068935423, -3, 7, 7])
+    context = SimpleNamespace(
+        punica_wrapper=SimpleNamespace(
+            token_lora_indices=garbage,
+            indices_len=[None, None, None, None],
+            device=torch.device("cpu"),
+        )
+    )
+    prepare_lora_indices(context, num_tokens=2, pad_size=2, tp_size=2, tp_rank=1)
+    assert torch.equal(context.split_lora_indices, torch.tensor([-1, -1]))
+
+
+def test_prepare_lora_indices_without_indices_len_attribute() -> None:
+    context = SimpleNamespace(
+        punica_wrapper=SimpleNamespace(
+            token_lora_indices=torch.tensor([5, 5]),
+            device=torch.device("cpu"),
+        )
+    )
+    prepare_lora_indices(context, num_tokens=2, pad_size=0, tp_size=1, tp_rank=0)
+    assert torch.equal(context.split_lora_indices, torch.tensor([-1, -1]))
 
 
 def test_preprocess_lora_indices_skips_missing_split() -> None:
@@ -234,6 +312,32 @@ def test_preprocess_lora_indices_repeats_and_permutes() -> None:
     assert torch.equal(context.permuted_lora_indices, torch.tensor([0, 1, 0, 1]))
 
 
+def test_preprocess_lora_indices_fills_rows_missing_from_split() -> None:
+    # The dispatch permute is the authority for the routed row count. If the
+    # LoRA split is shorter, gathering with the permutation would read past
+    # the tensor and return garbage adapter ids on device.
+    context = SimpleNamespace(split_lora_indices=torch.tensor([0, 1]))
+    reversed_mapping = torch.arange(5, -1, -1)
+    preprocess_lora_indices(
+        context,
+        topk_ids=torch.zeros(3, 2),
+        reversed_permutation_mapping=reversed_mapping,
+    )
+    assert context.permuted_lora_indices.numel() == 6
+    assert int(context.permuted_lora_indices.min()) >= -1
+
+
+def test_preprocess_lora_indices_truncates_rows_beyond_permutation() -> None:
+    context = SimpleNamespace(split_lora_indices=torch.tensor([0, 1, 0, 1, 0, 1]))
+    reversed_mapping = torch.tensor([1, 0, 3, 2])
+    preprocess_lora_indices(
+        context,
+        topk_ids=torch.zeros(2, 2),
+        reversed_permutation_mapping=reversed_mapping,
+    )
+    assert context.permuted_lora_indices.numel() == 4
+
+
 def test_postprocess_lora_indices_skips_missing_exchange() -> None:
     context = SimpleNamespace()
     postprocess_lora_indices(context, reversed_permutation_mapping=torch.arange(2))
@@ -242,6 +346,12 @@ def test_postprocess_lora_indices_skips_missing_exchange() -> None:
 
 def test_postprocess_lora_indices_reorders_exchanged_slots() -> None:
     context = SimpleNamespace(exchanged_lora_indices=torch.tensor([10, 20, 30, 40]))
+    postprocess_lora_indices(context, reversed_permutation_mapping=torch.tensor([2, 0, 3, 1]))
+    assert torch.equal(context.exchanged_lora_indices, torch.tensor([20, 40, 10, 30]))
+
+
+def test_postprocess_lora_indices_truncates_extra_exchanged_rows() -> None:
+    context = SimpleNamespace(exchanged_lora_indices=torch.tensor([10, 20, 30, 40, 50, 60]))
     postprocess_lora_indices(context, reversed_permutation_mapping=torch.tensor([2, 0, 3, 1]))
     assert torch.equal(context.exchanged_lora_indices, torch.tensor([20, 40, 10, 30]))
 
@@ -256,16 +366,60 @@ def test_all2all_lora_indices_restores_dtype_after_exchange() -> None:
     context = SimpleNamespace(permuted_lora_indices=torch.tensor([1, 2], dtype=torch.int32))
     exchanged = torch.tensor([7, 8], dtype=torch.int64)
     handle = Mock()
+    output_splits = [1, 1]
+    input_splits = [1, 1]
     with patch(
         "vllm_ascend.lora.fused_moe.async_all_to_all",
         return_value=(None, exchanged, handle),
     ) as all_to_all:
-        all2all_lora_indices(context, output_splits="out", input_splits="in", ep_group="ep")
+        all2all_lora_indices(
+            context,
+            output_splits=output_splits,
+            input_splits=input_splits,
+            ep_group="ep",
+        )
 
-    all_to_all.assert_called_once_with(context.permuted_lora_indices, "out", "in", "ep")
+    sent = all_to_all.call_args.args[0]
+    torch.testing.assert_close(sent, torch.tensor([1, 2], dtype=torch.int32))
+    assert all_to_all.call_args.args[1:] == (output_splits, input_splits, "ep")
     handle.wait.assert_called_once()
     assert torch.equal(context.exchanged_lora_indices, torch.tensor([7, 8], dtype=torch.int32))
     assert context.exchanged_lora_indices.dtype == torch.int32
+
+
+def test_all2all_lora_indices_pads_send_buffer_to_send_splits() -> None:
+    # A short send buffer makes HCCL read past the tensor while the peers
+    # still expect the advertised rows, so the tail is filled with -1.
+    context = SimpleNamespace(permuted_lora_indices=torch.tensor([1, 0, 1], dtype=torch.int32))
+    handle = Mock()
+    with patch(
+        "vllm_ascend.lora.fused_moe.async_all_to_all",
+        return_value=(None, torch.tensor([1, 1, 0, -1], dtype=torch.int32), handle),
+    ) as all_to_all:
+        all2all_lora_indices(
+            context,
+            output_splits=[2, 2],
+            input_splits=[2, 2],
+            ep_group="ep",
+        )
+
+    sent = all_to_all.call_args.args[0]
+    torch.testing.assert_close(sent, torch.tensor([1, 0, 1, -1], dtype=torch.int32))
+
+
+def test_all2all_lora_indices_ignores_unusable_splits() -> None:
+    # Callers/tests may pass non-numeric placeholders; alignment must not
+    # raise before the collective is reached.
+    context = SimpleNamespace(permuted_lora_indices=torch.tensor([1, 2], dtype=torch.int32))
+    handle = Mock()
+    with patch(
+        "vllm_ascend.lora.fused_moe.async_all_to_all",
+        return_value=(None, torch.tensor([1, 2], dtype=torch.int32), handle),
+    ) as all_to_all:
+        all2all_lora_indices(context, output_splits="out", input_splits="in", ep_group="ep")
+
+    all_to_all.assert_called_once()
+    assert torch.equal(context.exchanged_lora_indices, torch.tensor([1, 2], dtype=torch.int32))
 
 
 def test_sync_lora_context_updates_available_setters() -> None:
@@ -311,7 +465,7 @@ def test_assert_warns_once_for_shared_experts() -> None:
 
 @pytest.mark.parametrize(
     ("index_mapping", "expected_no_lora"),
-    [((0, 0), True), ((0, 1), False), ((2, 0), False)],
+    [((-1, -1), True), ((0, 0), False), ((0, 1), False), ((2, 0), False)],
 )
 def test_decode_metadata_refreshes_no_lora(index_mapping, expected_no_lora) -> None:
     wrapper = object.__new__(PunicaWrapperNPU)

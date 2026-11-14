@@ -309,6 +309,22 @@ def get_mc2_mask():
     return _reserved_mc2_mask
 
 
+def _lora_ep_keeps_alltoall(vllm_config: VllmConfig) -> bool:
+    """Whether LoRA + expert parallel has to stay on the ALLTOALL dispatcher.
+
+    ALLTOALL derives its per-expert split sizes through a device-to-host copy,
+    which ACL graph capture rejects, so it is only usable when graphs are off.
+    Callers that want ALLTOALL with graphs on must run with ``--enforce-eager``,
+    which clears ``cudagraph_mode`` and lands here as ``True``.
+    """
+    compilation_config = getattr(vllm_config, "compilation_config", None)
+    if compilation_config is None:
+        return True
+    from vllm.config.compilation import CUDAGraphMode
+
+    return compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+
+
 def _select_capacity_and_expert_density_moe_comm_method(
     num_tokens: int,
     vllm_config: VllmConfig,
@@ -417,11 +433,17 @@ def select_moe_comm_method(
     if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group().world_size == 1:
         moe_comm_type = MoECommType.ALLGATHER
     elif lora_config is not None and vllm_config.parallel_config.enable_expert_parallel:
-        # LoRA + EP requires AlltoAll because the MC2/FusedMC2 paths
-        # Ascend MoE LoRA cannot patch FusedMC2 path for dispatch_ffn_combine/mega_moe
-        # is a single fused C++ op. This covers both normal model
-        # forward and _dummy_run during profile_run.
-        moe_comm_type = MoECommType.ALLTOALL
+        # LoRA + EP cannot use MC2/FUSED_MC2: both are single fused C++ ops and
+        # LoRA has to patch the MoE GEMM from Python. ALLTOALL is data
+        # dependent (its split sizes come from a device-to-host copy), so ACL
+        # graph capture rejects it (EE1016) and it is only usable when graphs
+        # are off. ALLGATHER builds every routing tensor on device and stays
+        # capturable, so prefer it whenever ACL graph is enabled. This covers
+        # both the normal model forward and _dummy_run during profile_run.
+        if _lora_ep_keeps_alltoall(vllm_config):
+            moe_comm_type = MoECommType.ALLTOALL
+        else:
+            moe_comm_type = MoECommType.ALLGATHER
     elif moe_comm_policy is MoECommPolicy.ALLGATHER:
         moe_comm_type = MoECommType.ALLGATHER
     else:

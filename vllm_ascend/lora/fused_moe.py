@@ -53,6 +53,26 @@ def has_lora(lora_context) -> bool:
     return lora_context is not None and not lora_context.punica_wrapper.no_lora
 
 
+def has_moe_lora(lora_context) -> bool:
+    """Return whether this MoE layer has a routed-expert LoRA delta to add.
+
+    ``has_lora`` answers a batch-level question and stays true while any
+    adapter carries tokens; that is the right question for the dense wrappers
+    (e.g. the shared-expert projections). The routed expert path needs a
+    tighter one: an attention-only adapter activates no expert slot, so
+    replacing the fused gate/up + activation + quant kernel with three
+    separate ops adds an exact zero, perturbs the base numerics and costs
+    throughput.
+
+    Layers that do not publish ``layer_lora_slots`` (other MoE wrappers, or a
+    context built by a non-LoRA module) fall back to the batch-level answer.
+    """
+    if not has_lora(lora_context):
+        return False
+    slots = getattr(lora_context, "layer_lora_slots", None)
+    return slots is None or bool(slots)
+
+
 def reset_lora_indices(lora_context) -> None:
     for field in _MOE_LORA_INDEX_FIELDS:
         if hasattr(lora_context, field):
@@ -72,15 +92,74 @@ def prepare_lora_indices(
 
     Caller must ensure ``lora_context`` is not ``None``.
     """
-    token_indices = lora_context.punica_wrapper.token_lora_indices
-    token_indices = token_indices[:num_tokens]
-    if pad_size > 0:
-        token_indices = torch.nn.functional.pad(token_indices, (0, pad_size), value=-1)
+    wrapper = lora_context.punica_wrapper
+    target_len = num_tokens + max(pad_size, 0)
+    indices_len = getattr(wrapper, "indices_len", None) or []
+    if not indices_len or indices_len[0] is None:
+        # The wrapper never received a mapping for this step, which happens on
+        # idle/dummy batches that skip metadata setup. Its index buffers are
+        # allocated with ``torch.empty``, so reading them yields arbitrary
+        # int64 values that later get used as adapter slots and trap inside
+        # the gather kernel. Nothing can carry an adapter here, so use -1.
+        token_indices = torch.full((target_len,), -1, dtype=torch.long, device=wrapper.device)
+    else:
+        token_indices = wrapper.token_lora_indices[:num_tokens]
+        # ``num_tokens`` is the MoE input row count while ``token_lora_indices``
+        # is sized by the runner's own token bookkeeping. If the latter is
+        # shorter the dispatch exchange below would advertise more rows than
+        # the send buffer holds and read past it, so fill the gap with the -1
+        # "no adapter" marker.
+        if token_indices.numel() < target_len:
+            token_indices = torch.nn.functional.pad(token_indices, (0, target_len - token_indices.numel()), value=-1)
     if tp_size > 1:
         lora_context.split_lora_indices = torch.tensor_split(token_indices, tp_size, dim=0)[tp_rank]
     else:
         # use ep for dp without tp.
         lora_context.split_lora_indices = token_indices
+
+
+def _align_rows(tensor: torch.Tensor, target: int, fill: int = -1) -> torch.Tensor:
+    """Force ``tensor`` to exactly ``target`` rows, padding with ``fill``.
+
+    The LoRA index tensors must stay aligned with the dispatch metadata that
+    drives the MoE AlltoAll. ``token_lora_indices`` is sized by the runner's
+    own token bookkeeping (``punica_wrapper.indices_len``), while the dispatch
+    splits are sized by the MoE input rows, so the two can disagree by a few
+    rows (dummy/idle steps, padding, a stale mapping). Letting the mismatch
+    through is dangerous: the permutation gather then reads past the index
+    tensor, which on device silently yields garbage instead of an error, and
+    the AlltoAll then advertises more rows than the send buffer holds. Both
+    end up as bogus adapter ids deep inside the MoE LoRA kernel, so the count
+    is normalised here.
+    """
+    current = tensor.numel()
+    if current == target:
+        return tensor
+    if current > target:
+        logger.warning_once(
+            "Ascend MoE LoRA: %d LoRA index rows exceed the %d rows the dispatch "
+            "metadata describes; truncating the tail.",
+            current,
+            target,
+        )
+        return tensor[:target]
+    logger.warning_once(
+        "Ascend MoE LoRA: %d LoRA index rows are fewer than the %d rows the "
+        "dispatch metadata describes; padding the tail with -1 (no adapter).",
+        current,
+        target,
+    )
+    return torch.cat((tensor, torch.full((target - current,), fill, dtype=tensor.dtype, device=tensor.device)))
+
+
+def _split_total(splits) -> int | None:
+    """Return the row count a split list describes, or ``None`` if unusable."""
+    if splits is None:
+        return None
+    try:
+        return int(sum(int(item) for item in splits))
+    except (TypeError, ValueError):
+        return None
 
 
 def preprocess_lora_indices(
@@ -102,8 +181,13 @@ def preprocess_lora_indices(
     split_indices = getattr(lora_context, "split_lora_indices", None)
     if split_indices is None:
         return
-    expanded = split_indices.repeat_interleave(topk_ids.shape[1])
     permutation = torch.argsort(reversed_permutation_mapping.reshape(-1).long())
+    expanded = split_indices.repeat_interleave(topk_ids.shape[1])
+    # ``reversed_permutation_mapping`` comes from the dispatch permute and is
+    # the authority for how many routed rows exist; ``split_indices`` comes
+    # from the runner's LoRA mapping. Align before gathering so ``expanded``
+    # can never be indexed out of bounds (see ``_align_rows``).
+    expanded = _align_rows(expanded, permutation.numel())
     lora_context.permuted_lora_indices = expanded[permutation]
 
 
@@ -126,6 +210,7 @@ def postprocess_lora_indices(
     if exchanged is None:
         return
     permutation = torch.argsort(reversed_permutation_mapping.reshape(-1).long())
+    exchanged = _align_rows(exchanged, permutation.numel())
     lora_context.exchanged_lora_indices = exchanged[permutation]
 
 
@@ -148,6 +233,12 @@ def all2all_lora_indices(
     permuted = getattr(lora_context, "permuted_lora_indices", None)
     if permuted is None:
         return
+    # `input_splits` describes what this rank sends, so it has to match the
+    # send buffer; a short buffer makes HCCL read past the tensor while the
+    # peers still expect the advertised rows.
+    send_total = _split_total(input_splits)
+    if send_total is not None:
+        permuted = _align_rows(permuted, send_total)
     lora_dtype = permuted.dtype
     _, exchanged, handle = async_all_to_all(permuted, output_splits, input_splits, ep_group)
     handle.wait()
@@ -342,15 +433,33 @@ class AscendFusedMoEWithLoRA(FusedMoEWithLoRA):
         # `create_lora_weights`) so `create_dummy_lora`'s n_slices fallback
         # matches `lora_a_stacked` length under EP.
         self.n_slices = self.local_num_experts * (self._w13_slices + 1)
+        # Slots that actually carry expert weights for this layer. Published to
+        # the MoE LoRA context so `has_moe_lora` can keep the fused quantized
+        # base kernel for layers without a routed-expert delta.
+        self._lora_slots: set[int] = set()
         # Preserve the model-manager-visible module path used to discover and
         # wrap shared_experts.{gate_up,down}_proj as ordinary dense LoRA.
         shared_experts = getattr(base_layer, "_shared_experts", None)
         if shared_experts is not None:
             self._shared_experts = shared_experts
 
+    def reset_lora(self, index: int) -> None:
+        super().reset_lora(index)
+        self._lora_slots.discard(index)
+
+    def set_lora(
+        self,
+        index: int,
+        lora_a: torch.Tensor | list[torch.Tensor],
+        lora_b: torch.Tensor | list[torch.Tensor],
+    ) -> None:
+        super().set_lora(index, lora_a, lora_b)
+        self._lora_slots.add(index)
+
     def _build_lora_context(self):
         lora_context = super()._build_lora_context()
         lora_context.use_ep = self.use_ep
+        lora_context.layer_lora_slots = self._lora_slots
         return lora_context
 
     # ------------------------------------------------------------------

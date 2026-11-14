@@ -1,0 +1,15 @@
+pr: 15076
+entries:
+  - category: feature
+    text: >-
+      Added LoRA adapter support for DeepSeek-V4.1-Flash on Ascend, covering the
+      compressed DSA attention projections and the W4A8 quantized MoE experts.
+  - category: performance
+    text: >-
+      Kept the ACL graph for LoRA with expert parallelism by selecting the
+      AllGather MoE dispatcher, which stays capturable, instead of falling back
+      to eager execution.
+  - category: bugfix
+    text: >-
+      Stopped forcing VLLM_USE_BREAKABLE_CUDAGRAPH off on Ascend so architectures
+      that require a breakable graph keep the upstream policy.
