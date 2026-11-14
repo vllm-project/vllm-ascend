@@ -12,13 +12,13 @@ Run specific E2E tests under `tests/e2e/pull_request/`. Tests are automatically 
 
 ```text
 # Run a single test on the default runner (a2 single card)
-/e2e tests/e2e/pull_request/one_card/test_attention.py
+/e2e tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_0_6B_basic.py
 
 # Run multiple tests across different runners
-/e2e tests/e2e/pull_request/one_card/test_attention.py tests/e2e/pull_request/two_card/test_parallel.py
+/e2e tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_0_6B_basic.py tests/e2e/pull_request/two_card/test_data_parallel.py
 
 # Run tests on 310P
-/e2e tests/e2e/pull_request/one_card/_310p/test_310p_ops.py
+/e2e tests/e2e/pull_request/one_card/_310p/test_dense_model_310p.py
 ```
 
 **Routing rules** (matched in order):
