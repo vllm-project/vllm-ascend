@@ -452,6 +452,7 @@ class TestApplyMoeMLPFullChain310(TestBase):
 class TestAllGatherCommImpl310FusedExperts(TestBase):
     def _build_comm_and_input(self):
         comm = AllGatherCommImpl310.__new__(AllGatherCommImpl310)
+        comm._enable_mlp_super_kernel_scopes = False
         comm.moe_config = SimpleNamespace(
             activation=MoEActivation.SILU,
             swiglu_limit=0.0,

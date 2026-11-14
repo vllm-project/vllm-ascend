@@ -95,6 +95,10 @@ class MoECommMethod(ABC):
 
     def __init__(self, moe_config: FusedMoEConfig):
         self.moe_config = moe_config
+        config = get_ascend_config()
+        self._enable_mlp_super_kernel_scopes = (
+            config.ascend_compilation_config.enable_super_kernel and config.multistream_overlap_shared_expert
+        )
 
         self.token_dispatcher = self._get_token_dispatcher()
         self.prepare_finalize = self._get_prepare_finalize()
@@ -163,7 +167,11 @@ class MoECommMethod(ABC):
             # its own MLP implementation.
             mlp_output, before_gmm2_evt = self._apply_mlp(mlp_compute_input)
         else:
-            mlp_output, before_gmm2_evt = apply_moe_mlp(mlp_compute_input, quant_method)
+            mlp_output, before_gmm2_evt = apply_moe_mlp(
+                mlp_compute_input,
+                quant_method,
+                enable_super_kernel_scopes=self._enable_mlp_super_kernel_scopes,
+            )
 
         before_combine_evt = maybe_record_event()
         routed_out = self.token_dispatcher.token_combine(

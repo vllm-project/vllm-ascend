@@ -62,6 +62,7 @@ class TestSharedMXFPActivation(unittest.TestCase):
             ops=SimpleNamespace(_C_ascend=SimpleNamespace(npu_swiglu_group_quant=self.fused)),
         )
         self.namespace: dict[str, Any] = {
+            "super_kernel_scope": lambda *args, **kwargs: nullcontext(),
             "torch": self.torch,
             "QuantType": self.quant,
             "Enum": Enum,
@@ -79,6 +80,7 @@ class TestSharedMXFPActivation(unittest.TestCase):
         self.paths = self.namespace["SharedExpertMLPPath"]
         executor_cls = type("Executor", (), {name: self.namespace[name] for name in names})
         self.executor = executor_cls()
+        self.executor._enable_moe_super_kernel_scopes = False
         scheme = self.scheme_cls()
         scheme.dynamic_mx_quant_scale_alg = 0
         scheme.group_size = 32
