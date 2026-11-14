@@ -216,25 +216,30 @@ For text-only deployment, `--limit-mm-per-prompt` can be omitted. For multimodal
 
 ### 5.1 Single-Node Online Deployment
 
-On 950DT products, MiniMax-M3 sparse attention automatically uses Union when
+On A3 series and 950DT products, MiniMax-M3 sparse attention automatically uses Union when
 the optional, matched `cann_ops_nn_custom` UnionSparseGen and
 `cann_ops_transformer_custom` GBSA exact-mask extensions are installed. The
 supported geometry is 128-token pages, head dimension 128, one local KV head,
 and up to 16 local query heads. Other hardware, unsupported geometry, or missing
-extensions retain native attention. Native prefill uses KV-gather-Q when its
-SplitKv operator is available and otherwise falls back to GBSA Q-gather-KV.
+extensions retain native attention. On A3, native prefill always uses GBSA
+Q-gather-KV, even when the optional SplitKv/KV-gather-Q operator is installed.
+Other devices retain native prefill selection by SplitKv availability:
+KV-gather-Q when available, otherwise GBSA Q-gather-KV.
 
 Union uses the existing `--kv-cache-dtype` and `--kv-cache-dtype-skip-layers`
-settings: `auto` keeps the model dtype, while `fp8`/`fp8_e4m3` uses E4M3 KV and
-casts Q through the native FP8 helper. No routing policy or separate quantization
+settings: `auto` keeps the model dtype. A3 supports BF16/FP16 attention only;
+FP8 KV cache settings are rejected during initialization, whether or not the
+Union extensions are installed. On 950DT products, `fp8`/`fp8_e4m3` uses E4M3 KV
+and casts Q through the native FP8 helper; FP8 Union requires BF16 Q and output.
+No routing policy or separate quantization
 switch is needed. Groups contain up to eight adjacent queries within each
 request; the exact mask preserves each query's selected KV blocks and causality.
 The optional extensions must provide matching UnionSparseGen and GBSA exact-mask
 kernels; package names alone do not establish binary compatibility.
 
 Build and install both the `.run` operator package and Python wheel from each
-of these matching source revisions, using `--soc=ascend950` for the operator
-packages:
+of these matching source revisions, using `--soc=ascend910_93` on A3 or
+`--soc=ascend950` on 950DT products for the operator packages:
 
 | Package | Operator PR | Source revision |
 | --- | --- | --- |

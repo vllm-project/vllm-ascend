@@ -106,6 +106,9 @@ class HardwareCapability(Enum):
     # Prepare and reuse the fixed CANN GBSA schedule across supported M3 decode layers.
     # Callers must also check block size, dtype, and uniform query length.
     MINIMAX_M3_GBSA_METADATA_REUSE = auto()
+    # MiniMax-M3 UnionSparseGen + exact-mask GBSA ABI. Matching optional
+    # extensions, geometry, and dtype support must still be checked at runtime.
+    MINIMAX_M3_UNION_ATTENTION = auto()
     # Select the compatibility grouped-top-k router used by the fused-MoE path.
     FUSED_MOE_COMPATIBILITY = auto()
     # Use npu_rotary_mul with adjacent pairs (rotary_mode="interleave").
@@ -294,6 +297,9 @@ class HardwareProfile:
     # A5 uses mixed softmax for compatibility with CANN GBSA packages that
     # reject BF16 precision 0. A3 retains FP32 online softmax.
     minimax_m3_gbsa_bf16_softmax_precision: int = 0
+    # Native prefill may select SplitKv/KV-gather-Q by operator availability.
+    # A3 instead keeps Q-gather-KV as the fallback when Union is unavailable.
+    minimax_m3_prefill_allow_kv_gather_q: bool = True
     # Fixed GDN verification uses the strided recurrent kernel at/above this
     # query length to work around native operator numerical failures. None
     # retains native dispatch; this is a stack workaround, not a silicon limit.
@@ -362,6 +368,7 @@ _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
     HardwareCapability.KDA_INT8_QUANT_OVERLAP,
     HardwareCapability.NATIVE_INT8_SPARSE,
     HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
+    HardwareCapability.MINIMAX_M3_UNION_ATTENTION,
     HardwareCapability.RMS_NORM_DYNAMIC_QUANT,
     HardwareCapability.MC2_FULLMESH_V2_COMM,
     HardwareCapability.RMS_NORM_CAST,
@@ -390,6 +397,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
         ),
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
+            minimax_m3_prefill_allow_kv_gather_q=False,
             attention_backend_family=AttentionBackendFamily.STANDARD,
             cpu_binding_mode=CPUBindingMode.GLOBAL_SLICE,
             default_worker_cls=_DEFAULT_WORKER_CLS,
@@ -474,6 +482,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.MLA_FLASH,
                     HardwareCapability.MLAPO_NATIVE_WEIGHTS,
                     HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
+                    HardwareCapability.MINIMAX_M3_UNION_ATTENTION,
                     HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
                     HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
                     HardwareCapability.MM_REDUCE_SCATTER_AI_CPU_INFERENCE,

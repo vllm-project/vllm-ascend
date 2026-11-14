@@ -130,19 +130,16 @@ def _use_union_attention(
     head_size: int,
     block_size: int,
 ) -> bool:
-    """Select Union for its supported A5 geometry and KV dtypes."""
+    """Select Union for supported geometry and device-specific KV dtypes."""
+    hardware_profile = get_current_hardware_profile()
     return (
-        get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
-        and kv_cache_dtype
-        in (
-            "auto",
-            "bfloat16",
-            "float16",
-            "fp8",
-            "fp8_e4m3",
-            torch.bfloat16,
-            torch.float16,
-            torch.float8_e4m3fn,
+        hardware_profile.supports(HardwareCapability.MINIMAX_M3_UNION_ATTENTION)
+        and (
+            kv_cache_dtype in ("auto", "bfloat16", "float16", torch.bfloat16, torch.float16)
+            or (
+                hardware_profile.supports(HardwareCapability.FP8_ATTENTION)
+                and kv_cache_dtype in ("fp8", "fp8_e4m3", torch.float8_e4m3fn)
+            )
         )
         and num_kv_heads == 1
         and 1 <= num_heads <= 16
@@ -1079,6 +1076,10 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
         topk_blocks: int,
         sparse_block_size: int,
     ) -> None:
+        if kv_cache_dtype.startswith("fp8") and not get_current_hardware_profile().supports(
+            HardwareCapability.FP8_ATTENTION
+        ):
+            raise TypeError("MiniMax-M3 FP8 sparse attention is not supported on this device")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = scale
@@ -1093,6 +1094,8 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
         )
         if self.use_union:
             logger.info_once("MiniMax-M3 Union enabled: UnionSparseGen + GBSA exactMask, union_size=8")
+        elif not get_current_hardware_profile().minimax_m3_prefill_allow_kv_gather_q:
+            logger.info_once("MiniMax-M3 Union not selected; using native GBSA Q-gather-KV")
 
     def forward(
         self,

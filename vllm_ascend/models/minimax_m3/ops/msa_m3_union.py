@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Optional Union sparse attention for MiniMax-M3 on Ascend 950."""
+"""Optional Union sparse attention for MiniMax-M3 on Ascend A3 and 950."""
 
 from functools import lru_cache
 from importlib import import_module

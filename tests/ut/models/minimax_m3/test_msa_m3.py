@@ -622,17 +622,49 @@ def test_sparse_metadata_builder(batch_spec: BatchSpec, mock_gbsa_ops) -> None:
         assert rebuilt.prefill.cu_seqlens_q.data_ptr() == metadata.prefill.cu_seqlens_q.data_ptr()
 
 
-def test_union_missing_extensions_preserves_native_metadata(monkeypatch):
-    monkeypatch.setattr(
-        msa_m3_module, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A5)
-    )
+@pytest.mark.parametrize(
+    "device_type,cache_dtype,kv_dtype",
+    [
+        (AscendDeviceType.A3, "auto", torch.bfloat16),
+        (AscendDeviceType.A3, "float16", torch.float16),
+        (AscendDeviceType.A5, "fp8_e4m3", torch.float8_e4m3fn),
+    ],
+)
+def test_union_missing_extensions_preserves_native_metadata(monkeypatch, device_type, cache_dtype, kv_dtype):
+    monkeypatch.setattr(msa_m3_module, "get_current_hardware_profile", lambda: get_hardware_profile(device_type))
     monkeypatch.setattr(msa_m3_module, "load_union_extensions", lambda: None)
-    impl = AscendMiniMaxM3SparseImpl(16, 128, 0.5, 1, "fp8_e4m3", topk_blocks=16, sparse_block_size=128)
+    impl = AscendMiniMaxM3SparseImpl(16, 128, 0.5, 1, cache_dtype, topk_blocks=16, sparse_block_size=128)
     assert not impl.use_union
-    builder = _make_sparse_builder(torch.device("cpu"), torch.float8_e4m3fn, impl=impl)
+    builder = _make_sparse_builder(torch.device("cpu"), kv_dtype, impl=impl)
     assert not builder.use_union
     assert builder.reuse_decode_gbsa_metadata
-    assert builder.decode_gbsa_metadata_buffers
+    assert bool(builder.decode_gbsa_metadata_buffers) is (kv_dtype != torch.float16)
+
+
+@pytest.mark.parametrize("device_type", list(AscendDeviceType))
+@pytest.mark.parametrize("cache_dtype", ["auto", "bfloat16", "float16"])
+@pytest.mark.parametrize("extensions_available", [False, True])
+def test_union_selection_respects_hardware_and_extensions(monkeypatch, device_type, cache_dtype, extensions_available):
+    monkeypatch.setattr(msa_m3_module, "get_current_hardware_profile", lambda: get_hardware_profile(device_type))
+    loader = MagicMock(return_value=(MagicMock(), MagicMock()) if extensions_available else None)
+    monkeypatch.setattr(msa_m3_module, "load_union_extensions", loader)
+    impl = AscendMiniMaxM3SparseImpl(16, 128, 0.5, 1, cache_dtype, topk_blocks=16, sparse_block_size=128)
+    supports_union = device_type in (AscendDeviceType.A3, AscendDeviceType.A5)
+    assert impl.use_union is (supports_union and extensions_available)
+    assert loader.call_count == int(supports_union)
+
+
+@pytest.mark.parametrize("cache_dtype", ["fp8", "fp8_e4m3", "fp8_e5m2"])
+@pytest.mark.parametrize("extensions_available", [False, True])
+def test_a3_rejects_fp8_cache_before_union_loading(monkeypatch, cache_dtype, extensions_available):
+    monkeypatch.setattr(
+        msa_m3_module, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A3)
+    )
+    loader = MagicMock(return_value=(MagicMock(), MagicMock()) if extensions_available else None)
+    monkeypatch.setattr(msa_m3_module, "load_union_extensions", loader)
+    with pytest.raises(TypeError, match="FP8 sparse attention is not supported on this device"):
+        AscendMiniMaxM3SparseImpl(16, 128, 0.5, 1, cache_dtype, topk_blocks=16, sparse_block_size=128)
+    loader.assert_not_called()
 
 
 @pytest.mark.parametrize("kv_dtype", [torch.bfloat16, torch.float16, torch.float8_e4m3fn])
@@ -2638,7 +2670,7 @@ def test_sparse_attn_prefill_fallback_rejects_mismatched_fp8_cache() -> None:
     [
         (AscendDeviceType.A5, True, "kv_gather_q"),
         (AscendDeviceType.A5, False, "gbsa"),
-        (AscendDeviceType.A3, True, "kv_gather_q"),
+        (AscendDeviceType.A3, True, "gbsa"),
         (AscendDeviceType.A3, False, "gbsa"),
         (AscendDeviceType.A2, True, "kv_gather_q"),
         (AscendDeviceType.A2, False, "gbsa"),
@@ -2696,7 +2728,10 @@ def test_sparse_attn_prefill_dispatches_by_operator_availability(
             "max_query_len": 0,
         }
 
-    mock_is_available.assert_called_once_with()
+    if device_type == AscendDeviceType.A3:
+        mock_is_available.assert_not_called()
+    else:
+        mock_is_available.assert_called_once_with()
 
 
 @pytest.mark.parametrize("tp_size", [1, 4, 8])

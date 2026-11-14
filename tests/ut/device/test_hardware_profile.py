@@ -64,6 +64,7 @@ _EXPECTED_CAPABILITIES = {
         HardwareCapability.KDA_INT8_QUANT_OVERLAP,
         HardwareCapability.NATIVE_INT8_SPARSE,
         HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
+        HardwareCapability.MINIMAX_M3_UNION_ATTENTION,
         HardwareCapability.RMS_NORM_DYNAMIC_QUANT,
         HardwareCapability.CANN_MEGAMOE,
         HardwareCapability.MC2_FULLMESH_V2_COMM,
@@ -114,6 +115,7 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.MLA_FLASH,
             HardwareCapability.MLAPO_NATIVE_WEIGHTS,
             HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
+            HardwareCapability.MINIMAX_M3_UNION_ATTENTION,
             HardwareCapability.MM_REDUCE_SCATTER_AI_CPU_INFERENCE,
             HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
             HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
@@ -235,6 +237,7 @@ def test_hardware_profile_implementation_matrix(
     assert profile.moe_comm_policy is moe_comm_policy
     assert profile.quantization_backend_family is quantization_backend_family
     assert profile.native_weight_formats == native_weight_formats
+    assert profile.minimax_m3_prefill_allow_kv_gather_q is (device_type != AscendDeviceType.A3)
 
 
 @pytest.mark.parametrize("device_type", list(AscendDeviceType))
