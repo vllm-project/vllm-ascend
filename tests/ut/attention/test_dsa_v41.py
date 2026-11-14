@@ -190,6 +190,84 @@ def test_a5_qli_preserves_graph_mode_after_defer_scope(monkeypatch, in_graph, nu
     assert builder._qli_metadata is buffer
 
 
+@pytest.mark.parametrize(
+    ("in_graph", "num_actual_tokens", "ori_topk_ndim"),
+    [
+        (False, 0, None),
+        (True, 0, None),
+        (False, 2, 1),
+        (False, 2, 2),
+        (True, 2, 1),
+        (True, 2, 2),
+    ],
+)
+def test_a5_smla_length_rows_initialized_for_deferred_task(monkeypatch, in_graph, num_actual_tokens, ori_topk_ndim):
+    builder_cls = dsa_v41.AscendDSAV41AttentionMetadataBuilder
+    builder = builder_cls.__new__(builder_cls)
+    builder._device_metadata_enabled = False
+    builder._device_metadata_in_graph = False
+    builder._device_metadata_tasks = ()
+    builder._supports_device_ops = True
+    builder._uses_a5_packed_cache = True
+    builder.common_v41_batch_metadata = {}
+    builder.common_v41_smla_metadata = {}
+    builder._a5_smla_length_rows = torch.full((8, 1), -1, dtype=torch.int32)
+    builder._a5_smla_metadata = torch.zeros(dsa_v41.V41_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    metadata_op = Mock(return_value=torch.ones_like(builder._a5_smla_metadata))
+    builder._device_backend = SimpleNamespace(mixed_quant_sparse_flash_mla_metadata=metadata_op)
+    builder.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(num_attention_heads=64, head_dim=512, index_topk=512)
+        ),
+        parallel_config=SimpleNamespace(tensor_parallel_size=1),
+    )
+    monkeypatch.setattr(builder, "prepare_source_rope", lambda: None)
+    num_input_tokens = 6 if in_graph else num_actual_tokens
+    if num_actual_tokens:
+        ori_topk_length = torch.tensor([3, 7], dtype=torch.int32)
+        if ori_topk_ndim == 2:
+            ori_topk_length = ori_topk_length.unsqueeze(1)
+    else:
+        ori_topk_length = None
+    req = dsa_v41.AscendDSAV41Metadata(
+        block_table=torch.zeros((1, 1), dtype=torch.int32),
+        query_start_loc=torch.tensor([0, num_actual_tokens], dtype=torch.int32),
+        seq_lens=torch.tensor([num_actual_tokens], dtype=torch.int32),
+        slot_mapping=torch.full((num_input_tokens,), -1, dtype=torch.int64),
+        compress_ratio=1,
+        storage_block_size=16,
+        is_compressor_state=False,
+        cache_kind="swa",
+        num_actual_tokens=num_actual_tokens,
+        num_input_tokens=num_input_tokens,
+        num_reqs=1,
+        ori_topk_length=ori_topk_length,
+    )
+    with builder.defer_device_metadata(in_graph=in_graph):
+        builder._build_smla_metadata(SimpleNamespace(query_start_loc=req.query_start_loc), req, max_ori_seq_len=0)
+        tasks = builder.take_device_metadata_tasks()
+        metadata_op.assert_not_called()
+
+    metadata_tokens = num_input_tokens if in_graph else num_actual_tokens
+    if metadata_tokens:
+        expected = torch.zeros((metadata_tokens, 1), dtype=torch.int32)
+        if num_actual_tokens:
+            expected[:num_actual_tokens, 0] = torch.tensor([3, 7], dtype=torch.int32)
+        torch.testing.assert_close(builder._a5_smla_length_rows[:metadata_tokens], expected)
+    assert len(tasks) == 1
+    assert tasks[0].stage == dsa_v41.DeviceMetadataStage.ATTENTION
+    tasks[0].run()
+    if metadata_tokens:
+        metadata_op.assert_called_once()
+        passed_rows = metadata_op.call_args.args
+        torch.testing.assert_close(passed_rows[0], expected)
+        torch.testing.assert_close(passed_rows[1], expected)
+        torch.testing.assert_close(req.smla_metadata, torch.ones_like(builder._a5_smla_metadata))
+    else:
+        metadata_op.assert_not_called()
+        torch.testing.assert_close(req.smla_metadata, torch.zeros_like(builder._a5_smla_metadata))
+
+
 def _impl(role):
     impl = AscendDSAV41Impl.__new__(AscendDSAV41Impl)
     impl.role = role
