@@ -83,6 +83,7 @@ configuration rather than the runner input or sampling interface.
 | [compressor/compressor_triton.py](compressor/compressor_triton.py) | Model compression |
 | [dcp/dcp_a2a.py](dcp/dcp_a2a.py) | Distributed attention |
 | [dcp/dcp_a2a_batched.py](dcp/dcp_a2a_batched.py) | Distributed attention |
+| [dcp/dcp_a2a_rank_tiled.py](dcp/dcp_a2a_rank_tiled.py) | Distributed attention |
 | [dcp/sfa_dcp_exchange.py](dcp/sfa_dcp_exchange.py) | Model/attention primitive or shared utility |
 | [dcp/sfa_dcp_merge.py](dcp/sfa_dcp_merge.py) | Model/attention primitive or shared utility |
 | [sharded_indexer.py](sharded_indexer.py) | DCP candidate transport and causal metadata |
