@@ -46,7 +46,7 @@ The following table lists individual feature combinations with KVPP. It does not
 | DCP | ❌ Not supported | Cannot currently be combined with KVPP. |
 | P/D disaggregation | ✅ Supported | Uses `MooncakeConnectorV2` (Experimental); enable KVPP only on the prefill node. |
 | KV pooling | ✅ Supported | Memcache with `AscendStoreConnector`, `kv_producer` or `kv_both`, and whole-block loading. |
-| Mooncake layerwise KV pooling | 🟠 Experimental | `AscendStoreConnector` with `backend="mooncake"`, `use_layerwise=true`, and `load_async=false`. GLM-5.2 validation pending. |
+| Mooncake layerwise KV pooling | 🟠 Experimental | `AscendStoreConnector` with `backend="mooncake"`, `use_layerwise=true`, and `load_async=false`. GLM-5.2 validation pending; PCP is supported with one writer per TP x PCP owner. |
 
 - ✅ **Supported**: The feature combination is supported under the stated conditions.
 - 🟠 **Experimental**: The implementation is available, but the model-specific validation listed in the table is incomplete.
@@ -130,7 +130,7 @@ The example uses `kv_producer`; you can also set `kv_role` to `kv_both`. Both ro
 
 ### Mooncake Layerwise Pooling
 
-Experimental layerwise pooling is available with KVPP for the Mooncake block-key data plane. Each TP rank owns a contiguous share of the layers, loads only those layers from the pool, and the KVPP broadcast supplies the other ranks when a layer executes. `layerwise_prefetch_layers` sets the prefetch distance: the load of layer `L` is submitted at model layer `max(0, L - layerwise_prefetch_layers)`.
+Experimental layerwise pooling is available with KVPP for the Mooncake block-key data plane. Each KVPP owner (TP x PCP rank) owns a contiguous share of the layers, loads only those layers from the pool, and the KVPP broadcast supplies the other ranks when a layer executes. Every owner persists its layer shard, including owners on PCP ranks greater than zero. `layerwise_prefetch_layers` sets the prefetch distance: the load of layer `L` is submitted at model layer `max(0, L - layerwise_prefetch_layers)`.
 
 Configure Mooncake as described in the [Mooncake layerwise guide](mooncake_layerwise_adaptation_and_optimization.md), then add:
 
@@ -138,11 +138,11 @@ Configure Mooncake as described in the [Mooncake layerwise guide](mooncake_layer
 --kv-transfer-config '{"kv_connector":"AscendStoreConnector","kv_role":"kv_both","kv_connector_extra_config":{"backend":"mooncake","use_layerwise":true,"load_async":false}}'
 ```
 
-Mooncake layerwise pooling requires `load_async=false` (loads are submitted layer by layer) and does not enable cross-layer reuse of persistent owner caches. It was validated on a single node with TP8 and eager execution; PP, PCP, and DCP were not part of that validation.
+Mooncake layerwise pooling requires `load_async=false` (loads are submitted layer by layer) and does not enable cross-layer reuse of persistent owner caches. PCP is supported. It was validated on a single node with TP8 and eager execution; PP and DCP were not part of that validation.
 
 Each owner waits for the layer's pool load to complete before starting its KVPP broadcast. Attention and the broadcast worker share the completion signal until the next step binds metadata. This ordering also applies when the store is a child of `MultiConnector`.
 
-KVPP Mooncake objects use a separate topology namespace: ordinary replicated cache objects have different layer ranges and cannot be reused by KVPP. Enabling KVPP therefore starts a separate pool cache. Existing Mooncake restrictions on PCP, DCP, and producer/consumer topology mismatch still apply.
+KVPP Mooncake objects use a separate topology namespace: ordinary replicated cache objects have different layer ranges and cannot be reused by KVPP. Enabling KVPP therefore starts a separate pool cache. Existing Mooncake restrictions on DCP and producer/consumer topology mismatch still apply.
 
 ### Combining Connectors
 
