@@ -1,7 +1,9 @@
 # K3.1 A3 MLA tiling 下沉：接口 mock 与框架接入方案
 
-日期：2026-11-13。基线：vllm-ascend `5ccd0e767`，包含 #21542。
+初版日期：2026-11-13；PR 整理日期：2026-11-14。当前基线：vllm-ascend `76ea9d24f`，包含 #21542。
 开发分支：`codex/a3-mla-tiling-mock`。
+
+面向同事的简版说明见 [当前方案同步说明](a3_mla_tiling_sink_summary.md)。
 
 ## 1. 目标与交付
 
@@ -55,6 +57,8 @@ DSpark 设备输入准备（已有代码）
 | `a3_mla_sink_mode` | `disabled` | `disabled` / `mock` / `external` |
 | `a3_mla_sink_module` | `flash_attn_npu_3.flash_attn_npu_interface` | external 模式导入的模块 |
 | `a3_mla_sink_allow_graph` | `false` | 明确允许实验性的 graph 路径；不代表已经完成硬件验收 |
+
+这些是 mock 和真实算子初期联调的临时入口。正式接入完成后，计划把 mock 限定在测试代码中，固定真实算子导入，并按硬件/模型/算子能力选择路径；graph 也纳入正常能力判断。当前代码仍依赖这些配置，不能直接删除配置字段而不调整选择逻辑。
 
 - disabled：默认，使用原后端。
 - mock：显式使用内置数值实现，供开发和测试；不可当成性能算子。
