@@ -17,15 +17,20 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.utils import AscendDeviceType
 
+# Captured before any patching: the patched torch.zeros/empty must call the
+# originals, otherwise the wrapper re-enters itself infinitely.
+_original_torch_zeros = torch.zeros
+_original_torch_empty = torch.empty
+
 
 def _unpinned_zeros(*args, **kwargs):
     kwargs["pin_memory"] = False
-    return torch.zeros(*args, **kwargs)
+    return _original_torch_zeros(*args, **kwargs)
 
 
 def _unpinned_empty(*args, **kwargs):
     kwargs["pin_memory"] = False
-    return torch.empty(*args, **kwargs)
+    return _original_torch_empty(*args, **kwargs)
 
 
 class _FakeKVCacheSpec:
