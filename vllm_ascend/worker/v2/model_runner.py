@@ -96,6 +96,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     allocate_kv_offload_topk_profile_buffers,
     init_sparse_kv_offload_manager,
 )
+from vllm_ascend.hisparse.host_mirror import HostMirrorConnector, overlap_target_host_mirror
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
 from vllm_ascend.observability.runtime_guard.hooks import (
     runtime_guard_sample_tokens,
@@ -363,6 +364,8 @@ class NPUModelRunner(GPUModelRunner):
         # Close the per-step msprobe dump cycle on the normal last-PP-rank
         # path (v1 parity: v1 finalizes at the end of sample_tokens).
         self._finalize_dump_data()
+        if isinstance(mirror := getattr(self, "kv_connector", None), HostMirrorConnector):
+            mirror.join_pending()
         return output
 
     def pool(self):
@@ -557,6 +560,8 @@ class NPUModelRunner(GPUModelRunner):
         self.model_state.kvpp_runtime = self.kvpp
 
         self._fill_c8_mxfp_v_scale_caches()
+        if self.vllm_config.attention_config.hisparse_config is not None:
+            self.kv_connector = overlap_target_host_mirror(self)
 
     def _fill_c8_mxfp_v_scale_caches(self) -> None:
         """Initialize C8 V scales and retain views for page reassignment."""
@@ -667,6 +672,8 @@ class NPUModelRunner(GPUModelRunner):
         valid_dummy_state_slots: bool = False,
         randomize_inputs: bool = False,
     ):
+        if isinstance(mirror := getattr(self, "kv_connector", None), HostMirrorConnector):
+            mirror.begin_execution(not dummy_run and not is_profile)
         self._cpp_execution_time_ms = None
         profiling_config = self.ascend_config.scheduler_config.profiling_chunk_config
         execution_start_time = _start_profiling_chunk_timing(

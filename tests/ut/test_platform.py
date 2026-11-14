@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
+from vllm.config.attention import AttentionConfig, HiSparseConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.platforms import PlatformEnum
 from vllm.platforms.interface import Platform
@@ -450,6 +451,7 @@ class TestNPUPlatform(TestBase):
             communicator=None,
         )
         mock_vllm_config.cache_config = MagicMock()
+        mock_vllm_config.attention_config.hisparse_config = None
         mock_vllm_config.scheduler_config = MagicMock()
         mock_vllm_config.scheduler_config.max_num_seqs = None
         mock_vllm_config.scheduler_config.policy = "fcfs"
@@ -1015,6 +1017,23 @@ class TestNPUPlatform(TestBase):
                     self.platform.apply_config_platform_defaults(vllm_config)
 
                 self.assertEqual(pass_config.sp_min_token_num, 512)
+
+    def test_check_ascend_config_rejects_combining_hisparse_and_sparse_offload(self):
+        from vllm_ascend.platform import _check_ascend_config
+
+        vllm_config = self.mock_vllm_config()
+        ascend_config = self.mock_vllm_ascend_config()
+        vllm_config.attention_config = AttentionConfig(hisparse_config=HiSparseConfig())
+        ascend_config.sparse_kv_offload_config.enabled = True
+
+        with pytest.raises(ValueError, match="cannot be combined with HiSparse"):
+            _check_ascend_config(vllm_config, ascend_config)
+
+        ascend_config.sparse_kv_offload_config.enabled = False
+        _check_ascend_config(vllm_config, ascend_config)
+        vllm_config.attention_config = AttentionConfig()
+        ascend_config.sparse_kv_offload_config.enabled = True
+        _check_ascend_config(vllm_config, ascend_config)
 
     def test_check_ascend_config_oproj_tp_requires_offload_connector(self):
         from vllm_ascend.platform import _check_ascend_config
