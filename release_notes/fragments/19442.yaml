@@ -1,6 +1,0 @@
-pr: 19442
-entries:
-  - category: bugfix
-    text: Qwen3.5-35B-A3B can start and run with batch invariance enabled on Ascend again; the GDN attention backend now declares batch-invariant support, which vLLM #60271 requires before the engine will start in batch-invariant mode.
-    model: Qwen3.5-35B-A3B
-    hardware: [A2, A3]
