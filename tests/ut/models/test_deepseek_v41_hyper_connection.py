@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # ruff: noqa: E402
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -105,6 +106,7 @@ def test_v41_forward_threads_pre_mix_through_fused_hc_pre():
         input_ids=input_ids,
         hidden_states_fp32=normalized_fp32,
         already_sequence_parallel=False,
+        image_mask=None,
     )
 
 
@@ -245,6 +247,7 @@ def test_v41_dspark_propagates_delayed_mix_and_collapses_final_stream():
 
     model = DeepseekV41DSparkModel.__new__(DeepseekV41DSparkModel)
     torch.nn.Module.__init__(model)
+    model.config = SimpleNamespace()
     model.hc_mult = 2
     model.needs_moe_input_ids = False
     model.decoder_replay_layers = None
@@ -255,7 +258,7 @@ def test_v41_dspark_propagates_delayed_mix_and_collapses_final_stream():
     class Layer(torch.nn.Module):
         hc_collapse = staticmethod(DeepseekV41DecoderLayer.hc_collapse)
 
-        def forward(self, positions, hidden, pre_mix, llama_4_scaling=None, input_ids=None):
+        def forward(self, positions, hidden, pre_mix, llama_4_scaling=None, input_ids=None, image_mask=None):
             seen.append(pre_mix.clone())
             return hidden + 1, pre_mix.flip(-1)
 
@@ -271,6 +274,7 @@ def test_v41_target_emits_input_residual_for_selected_aux_layers():
 
     model = DeepseekV41Model.__new__(DeepseekV41Model)
     torch.nn.Module.__init__(model)
+    model.config = SimpleNamespace()
     model.decoder_replay_layers = None
     model.hc_mult = 2
     model.start_layer = 0
@@ -295,7 +299,7 @@ def test_v41_target_emits_input_residual_for_selected_aux_layers():
             self.layer_idx = idx
             self.engram = None
 
-        def forward(self, positions, hidden, pre_mix, scaling, input_ids=None):
+        def forward(self, positions, hidden, pre_mix, scaling, input_ids=None, image_mask=None):
             return hidden + 1, pre_mix
 
     model.layers = torch.nn.ModuleList([Layer(i) for i in range(3)])
