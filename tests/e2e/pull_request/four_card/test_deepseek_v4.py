@@ -17,13 +17,93 @@
 # Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
 #
 import os
+from contextlib import ExitStack, contextmanager
+from unittest.mock import patch
 
 import pytest
+from transformers import AutoTokenizer
+from vllm.utils.network_utils import get_open_port
 
+from tests.e2e.common.kv_pool.config import MooncakeKVPoolConfig
+from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMooncakeManager
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+from tests.e2e.pull_request.kv_pool_watch import (
+    POOL_SECRET,
+    build_pool_accuracy_prompt,
+    run_pool_ab,
+    run_pool_hit_sequence,
+)
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+# P1 runner uses the RoCE path; fabric-mem is unavailable on this runner.
+os.environ["ASCEND_ENABLE_USE_FABRIC_MEM"] = "0"
+os.environ["HCCL_INTRA_ROCE_ENABLE"] = "1"
+
+POOL_MODEL = os.environ.get("DEEPSEEK_V4_MTP_MODEL_PATH", "gdydems/DeepSeek-V4-Flash-w4a8-mtp")
+
+# 16,388 = lcm(16,384) + 4. MTP trims the final lcm block, so a 16,384-token
+# prompt would hit 0; the 4-token tail keeps 16,384 hit tokens.
+POOL_LCM_BLOCK_SIZE = 16384
+POOL_PROMPT_TOKENS = POOL_LCM_BLOCK_SIZE + 4
+POOL_MAX_MODEL_LEN = POOL_PROMPT_TOKENS + 128
+
+# DSV4-Flash is the only block-key layerwise mooncake case in this PR.
+POOL_KV_TRANSFER_CONFIG = {
+    "kv_connector": "AscendStoreConnector",
+    "kv_role": "kv_both",
+    "kv_connector_extra_config": {
+        "backend": "mooncake",
+        "lookup_rpc_port": "1",
+        "use_layerwise": True,
+    },
+}
+
+
+def _build_mooncake_pool_config() -> MooncakeKVPoolConfig:
+    return MooncakeKVPoolConfig(
+        config={
+            "metadata_server": "P2PHANDSHAKE",
+            "protocol": "ascend",
+            "global_segment_size": "2GB",  # Not final; tune after measurement.
+            "local_buffer_size": "5GB",
+            "preferred_segment": False,
+            "prefer_alloc_in_same_node": True,
+        },
+        master_port=get_open_port(),
+        metrics_port=get_open_port(),
+    )
+
+
+CASE_NAME = "dsv4_tp4_pool_watch"
+
+
+@contextmanager
+def _leg(use_pool: bool, case_name: str):
+    """Leg A enables the mooncake pool; leg B keeps everything else identical."""
+    with ExitStack() as stack:
+        kwargs = dict(
+            max_model_len=POOL_MAX_MODEL_LEN,
+            max_num_seqs=16,
+            max_num_batched_tokens=POOL_MAX_MODEL_LEN,
+            dtype="auto",
+            tensor_parallel_size=4,
+            enable_expert_parallel=True,
+            gpu_memory_utilization=0.9,
+            quantization="ascend",
+            tokenizer_mode="deepseek_v4",
+            block_size=128,
+            enable_prefix_caching=not use_pool,
+            disable_log_stats=False,
+            attention_config={"indexer_kv_dtype": "int8"},
+            compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
+            speculative_config={"num_speculative_tokens": 1, "method": "mtp"},
+        )
+        if use_pool:
+            pool = stack.enter_context(SingleNodeMooncakeManager(_build_mooncake_pool_config(), case_name))
+            stack.enter_context(patch.dict(os.environ, pool.server_envs))
+            kwargs["kv_transfer_config"] = POOL_KV_TRANSFER_CONFIG
+        yield stack.enter_context(VllmRunner(POOL_MODEL, **kwargs))
 
 
 @pytest.mark.e2e_model("gdydems/DeepSeek-V4-Flash-w4a8-mtp")
@@ -44,35 +124,39 @@ def test_deepseek_v4_w4a8_tp4_basic_greedy():
         "What is the meaning of life?",
     ]
     max_tokens = 5
+    expected_token_ids = [
+        [19923, 14, 1026, 2329, 344, 680, 2852, 95, 305, 342],
+        [3085, 344, 270, 5281, 294, 1988, 33, 3955, 361, 582, 3085, 344],
+    ]
+    tokenizer = AutoTokenizer.from_pretrained(POOL_MODEL, trust_remote_code=True)
+    prompt_ids = build_pool_accuracy_prompt(tokenizer, POOL_PROMPT_TOKENS, POOL_MAX_MODEL_LEN)
 
-    with VllmRunner(
-        "gdydems/DeepSeek-V4-Flash-w4a8-mtp",
-        max_model_len=8192,
-        max_num_seqs=16,
-        max_num_batched_tokens=4096,
-        dtype="auto",
-        tensor_parallel_size=4,
-        enable_expert_parallel=True,
-        gpu_memory_utilization=0.9,
-        quantization="ascend",
-        tokenizer_mode="deepseek_v4",
-        block_size=128,
-        attention_config={"indexer_kv_dtype": "int8"},
-        compilation_config={
-            "cudagraph_mode": "FULL_DECODE_ONLY",
-        },
-        speculative_config={"num_speculative_tokens": 1, "method": "mtp"},
-    ) as vllm_model:
-        outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
-        expected_token_ids = [
-            [19923, 14, 1026, 2329, 344, 680, 2852, 95, 305, 342],
-            [3085, 344, 270, 5281, 294, 1988, 33, 3955, 361, 582, 3085, 344],
-        ]
+    def _accuracy(runner) -> None:
+        outputs = runner.generate_greedy(example_prompts, max_tokens)
         assert len(outputs) == len(example_prompts)
         for i, (output_ids, output_str) in enumerate(outputs):
             assert len(output_str) > 0
             assert len(output_ids) > 0
             assert output_ids == expected_token_ids[i]
+
+    def _hit(runner) -> dict:
+        return run_pool_hit_sequence(
+            runner,
+            block_size=128,
+            prompt_tokens=POOL_PROMPT_TOKENS,
+            prompt_ids=prompt_ids,
+            lcm_block_size=POOL_LCM_BLOCK_SIZE,
+            answer_secret=POOL_SECRET,
+            tag="dsv4-tp4-layerwise",
+        )
+
+    run_pool_ab(
+        case_name=CASE_NAME,
+        build_leg=_leg,
+        accuracy=_accuracy,
+        hit=_hit,
+        prompt_ids=prompt_ids,
+    )
 
 
 @pytest.mark.e2e_model("gdydems/DeepSeek-V4-Flash-w4a8-mtp")

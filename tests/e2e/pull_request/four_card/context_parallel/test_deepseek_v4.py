@@ -20,18 +20,29 @@ Run `pytest tests/e2e/pull_request/four_card/context_parallel/test_deepseek_v4.p
 """
 
 import os
+from contextlib import ExitStack, contextmanager
 from unittest.mock import patch
 
 import pytest
+from transformers import AutoTokenizer
 from vllm import SamplingParams
+from vllm.utils.network_utils import get_open_port
 from vllm.v1.metrics.reader import Counter, Vector
 
+from tests.e2e.common.kv_pool.config import MemcacheKVPoolConfig
+from tests.e2e.common.single_node.kv_pool_runtime import SingleNodeMemcacheManager
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+from tests.e2e.pull_request.kv_pool_watch import (
+    POOL_SECRET,
+    build_pool_accuracy_prompt,
+    run_pool_ab,
+    run_pool_hit_sequence,
+)
 from tests.e2e.pull_request.one_card.model_runner_v2.utils import calculate_acceptance_per_pos
 from tests.e2e.pull_request.utils import PROMPTS_SHORT
 
-MTP_MODEL = "gdydems/DeepSeek-V4-Flash-w4a8-mtp"
-DSPARK_MODEL = "UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test"
+MTP_MODEL = os.environ.get("DEEPSEEK_V4_MTP_MODEL_PATH", "gdydems/DeepSeek-V4-Flash-w4a8-mtp")
+DSPARK_MODEL = os.environ.get("DEEPSEEK_V4_DSPARK_MODEL_PATH", "UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test")
 
 MAX_NUM_SEQS = 4
 MAX_TOKENS = 1024
@@ -60,6 +71,42 @@ MTP_MIN_ACCEPTANCE_RATES = [0.85, 0.65, 0.35]
 DSPARK_MIN_ACCEPTANCE_RATES = [0.73, 0.64, 0.55, 0.49, 0.42]
 ACCEPTANCE_RATE_TOLERANCE = 0.03
 
+# 16,388 = lcm(16,384) + 4. MTP / DSpark trim the final lcm block, so a
+# 16,384-token prompt would hit 0; the 4-token tail keeps 16,384 hit tokens.
+POOL_LCM_BLOCK_SIZE = 16384
+POOL_PROMPT_TOKENS = POOL_LCM_BLOCK_SIZE + 4
+# A 16K budget does not fit TP2xPCP2 at gpu_memory_utilization=0.9
+# (8.72 GiB required vs 4.53 GiB available); 4,096 keeps chunked prefill and
+# still produces bitwise-identical H3 outputs.
+POOL_BATCHED_TOKENS = 4096
+POOL_MAX_MODEL_LEN = POOL_PROMPT_TOKENS + 128
+
+POOL_KV_TRANSFER_CONFIG = {
+    "kv_connector": "AscendStoreConnector",
+    "kv_role": "kv_both",
+    "kv_connector_extra_config": {
+        "backend": "memcache",
+        "lookup_rpc_port": "1",
+        "use_layerwise": False,
+    },
+}
+
+
+def _build_memcache_pool_config() -> MemcacheKVPoolConfig:
+    return MemcacheKVPoolConfig(
+        meta_service_port=get_open_port(),
+        config_store_port=get_open_port(),
+        config={
+            "meta": {"ock.mmc.log_level": "error"},
+            "local": {
+                "ock.mmc.log_level": "error",
+                "ock.mmc.local_service.world_size": 256,
+                "ock.mmc.local_service.protocol": "device_sdma",
+                "ock.mmc.local_service.dram.size": "10GB",
+            },
+        },
+    )
+
 
 def _run_test(
     model: str,
@@ -69,62 +116,89 @@ def _run_test(
     expected_output_prefixes: dict[str, str],
 ) -> None:
     sampling_params = SamplingParams(max_tokens=MAX_TOKENS, temperature=0.0, seed=0)
-    with VllmRunner(
-        model,
-        max_model_len=8192,
-        max_num_seqs=MAX_NUM_SEQS,
-        max_num_batched_tokens=1024,
-        dtype="auto",
-        tensor_parallel_size=2,
-        prefill_context_parallel_size=2,
-        enable_expert_parallel=True,
-        gpu_memory_utilization=0.9,
-        quantization="ascend",
-        tokenizer_mode="deepseek_v4",
-        block_size=128,
-        enforce_eager=False,
-        compilation_config=compilation_config,
-        disable_log_stats=False,
-        speculative_config=speculative_config,
-        attention_config={"indexer_kv_dtype": "int8"},
-        additional_config={
-            "enable_prefill_mc2": True,
-            # TODO: Re-enable after PCP decode sharding lands; DSV4 results are unstable.
-            "enable_pcp_o_proj_weight_sharding": False,
-        },
-    ) as runner:
+    case_name = f"dsv4_cp_{model.split('/')[-1]}"
+    tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
+    prompt_ids = build_pool_accuracy_prompt(tokenizer, POOL_PROMPT_TOKENS, POOL_MAX_MODEL_LEN)
+
+    @contextmanager
+    def _leg(use_pool: bool, leg_case_name: str):
+        """Leg A enables the memcache pool; leg B keeps everything else identical."""
+        with ExitStack() as stack:
+            kwargs = dict(
+                max_model_len=POOL_MAX_MODEL_LEN,
+                max_num_seqs=MAX_NUM_SEQS,
+                max_num_batched_tokens=POOL_BATCHED_TOKENS,
+                dtype="auto",
+                tensor_parallel_size=2,
+                prefill_context_parallel_size=2,
+                enable_expert_parallel=True,
+                gpu_memory_utilization=0.9,
+                quantization="ascend",
+                tokenizer_mode="deepseek_v4",
+                block_size=128,
+                enforce_eager=False,
+                compilation_config=compilation_config,
+                enable_prefix_caching=not use_pool,
+                disable_log_stats=False,  # required by LLM.get_metrics()
+                speculative_config=speculative_config,
+                attention_config={"indexer_kv_dtype": "int8"},
+                additional_config={
+                    "enable_prefill_mc2": True,
+                    # TODO: Re-enable after PCP decode sharding lands; DSV4 results are unstable.
+                    "enable_pcp_o_proj_weight_sharding": False,
+                },
+            )
+            if use_pool:
+                pool = stack.enter_context(SingleNodeMemcacheManager(_build_memcache_pool_config(), leg_case_name))
+                stack.enter_context(patch.dict(os.environ, pool.server_envs))
+                kwargs["kv_transfer_config"] = POOL_KV_TRANSFER_CONFIG
+            yield stack.enter_context(VllmRunner(model, **kwargs))
+
+    def _accuracy(runner) -> None:
         outputs = runner.generate(PROMPTS_SHORT, sampling_params)
+        metrics = runner.model.get_metrics()
         for prompt, (_, texts) in zip(PROMPTS_SHORT, outputs, strict=True):
             print(f"Model: {model}, Prompt: {prompt!r}, Outputs: {texts!r}", flush=True)
-        metrics = runner.model.get_metrics()
 
-    assert len(outputs) == len(PROMPTS_SHORT), f"Expected {len(PROMPTS_SHORT)} outputs, got {len(outputs)}"
-    for prompt, (_, texts) in zip(PROMPTS_SHORT, outputs, strict=True):
-        assert len(texts) == 1, f"Expected one completion for prompt {prompt!r}, got {len(texts)}"
-        expected_prefix = expected_output_prefixes.get(prompt)
-        if expected_prefix is not None:
-            assert texts[0].startswith(expected_prefix), (
-                f"Unexpected output prefix for prompt {prompt!r}: "
-                f"got {texts[0][: len(expected_prefix)]!r}, expected {expected_prefix!r}"
+        assert len(outputs) == len(PROMPTS_SHORT), f"Expected {len(PROMPTS_SHORT)} outputs, got {len(outputs)}"
+        for prompt, (_, texts) in zip(PROMPTS_SHORT, outputs, strict=True):
+            assert len(texts) == 1, f"Expected one completion for prompt {prompt!r}, got {len(texts)}"
+            expected_prefix = expected_output_prefixes.get(prompt)
+            if expected_prefix is not None:
+                assert texts[0].startswith(expected_prefix), (
+                    f"Unexpected output prefix for prompt {prompt!r}: "
+                    f"got {texts[0][: len(expected_prefix)]!r}, expected {expected_prefix!r}"
+                )
+
+        acceptance_rates = calculate_acceptance_per_pos(
+            metrics,
+            speculative_config["num_speculative_tokens"],
+            Counter,
+            Vector,
+        )
+        print(f"Model: {model}, Acceptance rates per draft position: {acceptance_rates}", flush=True)
+        if minimum_rates is None:
+            return
+        assert len(acceptance_rates) == len(minimum_rates), (
+            f"Expected {len(minimum_rates)} acceptance rates, got {len(acceptance_rates)}"
+        )
+        for position, (actual, minimum) in enumerate(zip(acceptance_rates, minimum_rates, strict=True)):
+            assert actual >= minimum or minimum - actual < ACCEPTANCE_RATE_TOLERANCE, (
+                f"Acceptance rate at draft position {position} is {actual}, below minimum {minimum}"
             )
 
-    acceptance_rates = calculate_acceptance_per_pos(
-        metrics,
-        speculative_config["num_speculative_tokens"],
-        Counter,
-        Vector,
-    )
-    print(f"Model: {model}, Acceptance rates per draft position: {acceptance_rates}", flush=True)
-    if minimum_rates is None:
-        return
-
-    assert len(acceptance_rates) == len(minimum_rates), (
-        f"Expected {len(minimum_rates)} acceptance rates, got {len(acceptance_rates)}"
-    )
-    for position, (actual, minimum) in enumerate(zip(acceptance_rates, minimum_rates, strict=True)):
-        assert actual >= minimum or minimum - actual < ACCEPTANCE_RATE_TOLERANCE, (
-            f"Acceptance rate at draft position {position} is {actual}, below minimum {minimum}"
+    def _hit(runner) -> dict:
+        return run_pool_hit_sequence(
+            runner,
+            block_size=128,
+            prompt_tokens=POOL_PROMPT_TOKENS,
+            prompt_ids=prompt_ids,
+            lcm_block_size=POOL_LCM_BLOCK_SIZE,
+            answer_secret=POOL_SECRET,
+            tag=f"dsv4-cp-{model.split('/')[-1]}",
         )
+
+    run_pool_ab(case_name=case_name, build_leg=_leg, accuracy=_accuracy, hit=_hit, prompt_ids=prompt_ids)
 
 
 @pytest.mark.e2e_model(MTP_MODEL)
