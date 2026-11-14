@@ -812,6 +812,10 @@ class AscendConfig:
             engram_config is not None
             and getattr(engram_config, "cpu_offload", False)
             and not engram_config.dp_shared_memory
+            # Qwen PLE owns private host tables; shared memory is opt-in via
+            # dp_shared_memory and off by default for Qwen4Exp.
+            and getattr(vc.model_config, "architecture", None)
+            not in ("Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration", "Qwen4ExpMTP")
             and vc.use_v2_model_runner
             and (vc.parallel_config.data_parallel_size > 1 or vc.parallel_config.prefill_context_parallel_size > 1)
         ):
