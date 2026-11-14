@@ -1,0 +1,63 @@
+{
+  "name": "vLLM Ascend 310P (Atlas 300I Dev Container)",
+  "image": "quay.io/ascend/cann:9.1.0-310p-ubuntu22.04-py3.12",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace/vllm-ascend,type=bind,consistency=cached",
+  "workspaceFolder": "/workspace/vllm-ascend",
+  "containerEnv": {
+    "PYTHONUNBUFFERED": "1",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "SOC_VERSION": "ascend310p1",
+    "COMPILE_CUSTOM_KERNELS": "1",
+    "CCACHE_DIR": "/root/.cache/ccache",
+    "CCACHE_MAXSIZE": "10G",
+    "CMAKE_CXX_COMPILER_LAUNCHER": "ccache",
+    "CMAKE_C_COMPILER_LAUNCHER": "ccache",
+    "TORCH_DEVICE_BACKEND_AUTOLOAD": "0",
+    "TASK_QUEUE_ENABLE": "1",
+    "OMP_NUM_THREADS": "1"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff",
+        "eamodio.gitlens",
+        "editorconfig.editorconfig",
+        "streetsidesoftware.code-spell-checker",
+        "tamasfe.even-better-toml",
+        "redhat.vscode-yaml"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/bin/python3",
+        "python.linting.enabled": true,
+        "python.linting.pylintEnabled": false,
+        "python.linting.flake8Enabled": false,
+        "python.formatting.provider": "none",
+        "[python]": {
+          "editor.formatOnSave": true,
+          "editor.defaultFormatter": "charliermarsh.ruff",
+          "editor.codeActionsOnSave": {
+            "source.fixAll": "explicit",
+            "source.organizeImports": "explicit"
+          }
+        },
+        "editor.formatOnSave": true,
+        "files.eol": "\n",
+        "files.trimTrailingWhitespace": true,
+        "files.insertFinalNewline": true,
+        "ruff.lint.enable": true,
+        "ruff.format.enable": true
+      }
+    }
+  },
+  "forwardPorts": [
+    8000,
+    8080
+  ],
+  "mounts": [
+    "source=vllm-ascend-310p-pip-cache,target=/root/.cache/pip,type=volume",
+    "source=vllm-ascend-310p-ccache,target=/root/.cache/ccache,type=volume"
+  ],
+  "postCreateCommand": "apt-get update && apt-get install -y ccache dos2unix && ccache --set-config=max_size=10G && find /workspace/vllm-ascend -name '*.sh' -exec dos2unix {} \\; && echo 'source /usr/local/Ascend/ascend-toolkit/set_env.sh' >> /root/.bashrc && echo 'export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib:/usr/local/Ascend/driver/lib64:/usr/lib64' >> /root/.bashrc && pip3 install --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi --extra-index-url https://download.pytorch.org/whl/cpu -r requirements-dev.txt && pip3 install --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi --extra-index-url https://download.pytorch.org/whl/cpu -e . && pip3 install coverage"
+}

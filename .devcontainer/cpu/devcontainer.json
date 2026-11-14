@@ -1,0 +1,58 @@
+{
+  "name": "vLLM Ascend CPU (Lint & UT Dev Container)",
+  "image": "ascendai/python:3.12-ubuntu22.04",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace/vllm-ascend,type=bind,consistency=cached",
+  "workspaceFolder": "/workspace/vllm-ascend",
+  "containerEnv": {
+    "PYTHONUNBUFFERED": "1",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "COMPILE_CUSTOM_KERNELS": "0",
+    "CCACHE_DIR": "/root/.cache/ccache",
+    "CCACHE_MAXSIZE": "10G",
+    "CMAKE_CXX_COMPILER_LAUNCHER": "ccache",
+    "CMAKE_C_COMPILER_LAUNCHER": "ccache",
+    "PIP_BUILD_SYSTEM_CHECK": "0",
+    "TORCH_DEVICE_BACKEND_AUTOLOAD": "0",
+    "SOC_VERSION": "ascend910b1"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff",
+        "eamodio.gitlens",
+        "editorconfig.editorconfig",
+        "streetsidesoftware.code-spell-checker",
+        "tamasfe.even-better-toml",
+        "redhat.vscode-yaml"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/bin/python3",
+        "python.linting.enabled": true,
+        "python.linting.pylintEnabled": false,
+        "python.linting.flake8Enabled": false,
+        "python.formatting.provider": "none",
+        "[python]": {
+          "editor.formatOnSave": true,
+          "editor.defaultFormatter": "charliermarsh.ruff",
+          "editor.codeActionsOnSave": {
+            "source.fixAll": "explicit",
+            "source.organizeImports": "explicit"
+          }
+        },
+        "editor.formatOnSave": true,
+        "files.eol": "\n",
+        "files.trimTrailingWhitespace": true,
+        "files.insertFinalNewline": true,
+        "ruff.lint.enable": true,
+        "ruff.format.enable": true
+      }
+    }
+  },
+  "mounts": [
+    "source=vllm-ascend-pip-cache,target=/root/.cache/pip,type=volume",
+    "source=vllm-ascend-ccache,target=/root/.cache/ccache,type=volume"
+  ],
+  "postCreateCommand": "apt-get update && apt-get install -y ccache dos2unix gcc g++ cmake make && ccache --set-config=max_size=10G && find /workspace/vllm-ascend -name '*.sh' -exec dos2unix {} \\; && pip3 install --root-user-action=ignore --extra-index-url https://download.pytorch.org/whl/cpu --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi -r requirements-dev.txt && pip3 install --root-user-action=ignore torch==2.10.0 torchvision==0.25.0 setuptools-scm pybind11 cmake --index-url https://download.pytorch.org/whl/cpu && pip3 install --root-user-action=ignore vllm --extra-index-url https://download.pytorch.org/whl/cpu && pip3 install --root-user-action=ignore --no-build-isolation -e . && pip3 install --root-user-action=ignore coverage && SITE_PACKAGES=\"$(python3 -c 'import site;print(site.getsitepackages()[0])')\" && echo aW1wb3J0IHN5cwpmcm9tIHVuaXR0ZXN0Lm1vY2sgaW1wb3J0IE1vY2sKc3lzLm1vZHVsZXMuc2V0ZGVmYXVsdCgidmxsbS5jdW1lbV9hbGxvY2F0b3IiLCBNb2NrKCkpCnN5cy5tb2R1bGVzLnNldGRlZmF1bHQoInZsbG0uZGV2aWNlX2FsbG9jYXRvci5jdW1lbSIsIE1vY2soKSkK | base64 -d > \"$SITE_PACKAGES/sitecustomize.py\""
+}
