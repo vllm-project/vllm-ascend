@@ -2080,3 +2080,25 @@ def test_checkpoint_rows_match_non_spec_prefill_inputs(speculative):
     assert metadata.num_prefills == len(expected_rows)
     assert metadata.prefill_state_indices.numel() == len(expected_rows)
     assert metadata.prefill_query_start_loc.tolist() == expected_starts
+
+
+def test_mixed_spec_query_start_loc_cpu_staging():
+    device = torch.device("cpu")
+    query_start_loc_cpu = torch.tensor([0, 1, 4, 5, 8], dtype=torch.int32)
+    spec_sequence_masks_cpu = torch.tensor([True, False, True, False], dtype=torch.bool)
+    num_spec_decodes = 2
+
+    query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+    spec_query_lens_cpu = query_lens_cpu[spec_sequence_masks_cpu]
+    non_spec_query_lens_cpu = query_lens_cpu[~spec_sequence_masks_cpu]
+
+    spec_query_start_loc = torch.zeros(num_spec_decodes + 1, dtype=torch.int32, device=device)
+    spec_query_start_loc[1:].copy_(torch.cumsum(spec_query_lens_cpu, dim=0), non_blocking=True)
+
+    non_spec_query_start_loc = torch.zeros(
+        query_lens_cpu.size(0) - num_spec_decodes + 1, dtype=torch.int32, device=device
+    )
+    non_spec_query_start_loc[1:].copy_(torch.cumsum(non_spec_query_lens_cpu, dim=0), non_blocking=True)
+
+    assert torch.equal(spec_query_start_loc, torch.tensor([0, 1, 2], dtype=torch.int32))
+    assert torch.equal(non_spec_query_start_loc, torch.tensor([0, 3, 6], dtype=torch.int32))
