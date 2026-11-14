@@ -217,8 +217,10 @@ class MooncakeSchedulerSendingThread(MooncakeMetadataThread):
             )
         else:
             logger.error(
+                "Force freed expired Mooncake request %s after KV lease expired; "
                 "MooncakeHeartbeat event=lease_finish engine_id=%s request_id=%s "
                 "reason=expired expired_by_s=%.3f action=queued_for_release",
+                request_id,
                 self.engine_id,
                 request_id,
                 expired_by,
