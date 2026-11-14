@@ -72,13 +72,6 @@ ARG COMPILE_CUSTOM_KERNELS=1
 RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     export VLLM_BATCH_INVARIANT=1 && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
-    if [ -f "${ASCEND_HOME_PATH}/share/info/ascendnpu-ir/bin/set_env.sh" ]; then \
-        chmod a+r,go-w "${ASCEND_HOME_PATH}/share/info/ascendnpu-ir/bin/set_env.sh"; \
-    fi && \
-    if [ -d "${ASCEND_HOME_PATH}/tools/msmemscope/lib64" ]; then \
-        chmod a+rx,go-w "${ASCEND_HOME_PATH}/tools/msmemscope" && \
-        chmod -R a+rX,go-w "${ASCEND_HOME_PATH}/tools/msmemscope/lib64"; \
-    fi && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip install concurrent-log-handler && \
