@@ -2,19 +2,17 @@ pr: 20470
 entries:
   - category: bugfix
     text: >-
-      Fixed wait-mode pauses and sleeps hanging when Ascend-specific schedulers
-      had requests holding KV blocks for asynchronous loads.
+      Fixed wait-mode pause and sleep hangs while draining requests
+      with asynchronous KV loads.
   - category: bugfix
     text: >-
-      Fixed DyntraLB and Balance scheduling exceeding the batch input limit
-      when speculative decoding requires additional drafting slots.
+      Fixed DyntraLB and Balance exceeding the batch input limit
+      when drafting requires extra slots.
   - category: bugfix
     text: >-
-      Fixed Balance scheduling failing to freeze admission across DP ranks
-      when max_num_active_seqs is lower than max_num_seqs, including during
-      wait-mode pause draining.
+      Fixed Balance failing to freeze admission across DP ranks
+      when max_num_active_seqs is lower than max_num_seqs.
   - category: bugfix
     text: >-
-      Aligned Ascend scheduler overrides with vLLM v0.33.0 and the verified
-      main revision, including asynchronous KV-load admission, encoder cache
-      handling, speculative decoding boundaries, and model-runner metadata.
+      Aligned Ascend scheduler overrides with vLLM v0.33.0
+      and upstream revision 24420b7a.
