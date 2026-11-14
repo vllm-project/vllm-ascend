@@ -589,21 +589,25 @@ def split_decodes_and_prefills(
     return (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens)
 
 
-def _kv_layer_transfer_connectors(connector: Any, layer: Any) -> Iterator[Any]:
-    """Keep composite shared-KV boundaries out of unrelated connectors.
-
-    Ordinary cache owners retain the root connector's standard forwarding.
-    Composite owners notify only shared-KV children, including nested MultiConnector.
-    """
+def _kv_layer_transfer_connectors(
+    connector: Any,
+    layer: Any,
+    *,
+    for_save: bool = False,
+) -> Iterator[Any]:
+    """Route model boundaries only to children that understand their layout."""
     if getattr(layer, "supports_cross_layer_transfer_hooks", False) is not True:
         yield connector
         return
-    if getattr(connector, "use_cross_layer", False) is True:
+    accepts_boundary = getattr(connector, "use_cross_layer", False) is True or (
+        for_save and getattr(connector, "supports_composite_kv_saves", False) is True
+    )
+    if accepts_boundary:
         if connector.has_connector_metadata():
             yield connector
         return
     for child in getattr(connector, "sub_connectors", ()):
-        yield from _kv_layer_transfer_connectors(child, layer)
+        yield from _kv_layer_transfer_connectors(child, layer, for_save=for_save)
 
 
 def wait_for_kv_layer_from_connector(layer_name: str):
@@ -635,7 +639,9 @@ def maybe_save_kv_layer_to_connector(
     if attn_metadata is None or not connector.has_connector_metadata():
         return
     # TODO: assert ascendMetadata
-    for layer_connector in _kv_layer_transfer_connectors(connector, forward_context.no_compile_layers.get(layer_name)):
+    for layer_connector in _kv_layer_transfer_connectors(
+        connector, forward_context.no_compile_layers.get(layer_name), for_save=True
+    ):
         layer_connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata)
 
 
