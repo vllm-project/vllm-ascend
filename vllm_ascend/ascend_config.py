@@ -664,6 +664,7 @@ class AscendConfig:
             get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
         )
     )
+    engram_prefill_uva_aiv_limit: bool = False
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False

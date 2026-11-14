@@ -1,0 +1,4 @@
+pr: 21827
+entries:
+  - category: performance
+    text: Allow A5 prefill workers to reserve vector cores during host-offloaded Engram lookup.

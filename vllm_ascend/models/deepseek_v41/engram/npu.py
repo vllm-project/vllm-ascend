@@ -20,6 +20,7 @@ import torch
 import torch.distributed as dist
 from vllm.logger import logger
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.device.device_op import DeviceOperator
 
 SCALE_GROUP = 32
@@ -228,7 +229,7 @@ def gather_dequantize_host_uva(
     ``[tokens, pad_heads, width]``.
     """
 
-    from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+    from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
     pad_heads = local_heads if pad_heads is None else pad_heads
     width = codes.tensor.shape[-1]
@@ -243,7 +244,11 @@ def gather_dequantize_host_uva(
     # The kernel widens loaded IDs to int64; no extra cast/copy is needed here.
     from vllm_ascend.ops.triton.engram_lookup import _engram_host_uva_gather_dequant_kernel
 
-    _engram_host_uva_gather_dequant_kernel[(rows,)](
+    blocks = rows
+    if get_ascend_config().engram_prefill_uva_aiv_limit:
+        # Leave vector cores available for the main stream while UVA overlaps it.
+        blocks = min(rows, max(1, get_vectorcore_num() * 3 // 4))
+    _engram_host_uva_gather_dequant_kernel[(blocks,)](
         codes.ptrs,
         scales.ptrs if scales is not None else None,
         ids,
