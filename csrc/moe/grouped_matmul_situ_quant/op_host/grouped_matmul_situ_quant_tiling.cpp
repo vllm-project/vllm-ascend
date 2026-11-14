@@ -1,9 +1,13 @@
 #include <algorithm>
 #include <cstring>
+#include <string>
+#include <vector>
 #include <register/op_impl_registry.h>
 
 #include "log/log.h"
 #include "tiling/platform/platform_ascendc.h"
+#include "tiling_base/tiling_templates_registry.h"
+#include "grouped_matmul_situ_quant_a8w4_base_tiling.h"
 #include "../op_kernel/grouped_matmul_situ_quant_tiling.h"
 
 namespace optiling {
@@ -20,12 +24,20 @@ constexpr uint32_t MAIN_BLOCK_N2 = 64;
 constexpr uint32_t MAIN_BLOCK_N2_WIDE = 128; // nk_tile: N/K 联合 tile（nL1=256×kbL1=256 对照）
 constexpr uint32_t TENSOR_LIST_FLAG = 1U << 1;
 
-struct GroupedMatmulSituQuantCompileInfo {};
+constexpr int32_t MSD_TILING_TEMPLATE = 1;
 
 } // namespace
 
+using SituMsdTiling = GroupedMatmulSituQuantTiling::GroupedMatmulSituQuantBaseTiling;
+REGISTER_OPS_TILING_TEMPLATE(GroupedMatmulSituQuant, SituMsdTiling, MSD_TILING_TEMPLATE);
+
 ge::graphStatus Tiling4GroupedMatmulSituQuant(gert::TilingContext *context)
 {
+    const auto *xDesc = context->GetRequiredInputDesc(INPUT_X_INDEX);
+    if (xDesc != nullptr && xDesc->GetDataType() == ge::DT_INT8) {
+        const std::vector<int32_t> templates = {MSD_TILING_TEMPLATE};
+        return Ops::Transformer::OpTiling::TilingRegistry::GetInstance().DoTilingImpl(context, templates);
+    }
     const auto *xShape = context->GetDynamicInputShape(INPUT_X_INDEX, 0);
     const auto *weightShape = context->GetDynamicInputShape(INPUT_WEIGHT_INDEX, 0);
     const auto *groupListShape = context->GetDynamicInputShape(INPUT_GROUP_LIST_INDEX, 0);
@@ -148,12 +160,25 @@ ge::graphStatus Tiling4GroupedMatmulSituQuant(gert::TilingContext *context)
 
 ge::graphStatus TilingPrepare4GroupedMatmulSituQuant(gert::TilingParseContext *context)
 {
-    (void)context;
+    auto *platformInfo = context->GetPlatformInfo();
+    auto *compileInfo = context->GetCompiledInfo<GMMSituCompileInfo>();
+    if (platformInfo == nullptr || compileInfo == nullptr) {
+        return ge::GRAPH_FAILED;
+    }
+    const auto platform = platform_ascendc::PlatformAscendC(platformInfo);
+    compileInfo->aicNum_ = platform.GetCoreNumAic();
+    compileInfo->aivNum_ = platform.GetCoreNumAiv();
+    platform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, compileInfo->ubSize_);
+    platform.GetCoreMemSize(platform_ascendc::CoreMemType::L1, compileInfo->l1Size_);
+    platform.GetCoreMemSize(platform_ascendc::CoreMemType::L0_C, compileInfo->l0CSize_);
+    std::string platformRes;
+    platformInfo->GetPlatformRes("AICoreintrinsicDtypeMap", "Intrinsic_data_move_l12bt", platformRes);
+    compileInfo->supportL12BtBf16 = platformRes.find("bf16") != std::string::npos;
     return ge::GRAPH_SUCCESS;
 }
 
 IMPL_OP_OPTILING(GroupedMatmulSituQuant)
     .Tiling(Tiling4GroupedMatmulSituQuant)
-    .TilingParse<GroupedMatmulSituQuantCompileInfo>(TilingPrepare4GroupedMatmulSituQuant);
+    .TilingParse<GMMSituCompileInfo>(TilingPrepare4GroupedMatmulSituQuant);
 
 } // namespace optiling

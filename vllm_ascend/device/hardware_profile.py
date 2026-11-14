@@ -181,6 +181,8 @@ class HardwareCapability(Enum):
     TURBOQUANT_4BIT_NC_CACHE = auto()
     # Honor MLAPO enablement on any pipeline role; other profiles limit it to decode consumers.
     UNRESTRICTED_MLAPO = auto()
+    # INT8/INT4 GMM, SiTU activation and per-token quantization on A3.
+    GROUPED_MATMUL_SITU_QUANT = auto()
 
 
 class WeightFormat(Enum):
@@ -359,6 +361,7 @@ _STANDARD_CAPABILITIES = frozenset(
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
+    HardwareCapability.GROUPED_MATMUL_SITU_QUANT,
     HardwareCapability.KDA_INT8_QUANT_OVERLAP,
     HardwareCapability.NATIVE_INT8_SPARSE,
     HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,

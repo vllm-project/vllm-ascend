@@ -1,0 +1,5 @@
+pr: 21885
+entries:
+  - category: hardware
+    text: Added A3 per-channel INT W4A8 SiTU support through the shared grouped matmul operator, including tensor-list and graph execution. Rebuild the custom OPP and framework extension together; compact expert batches may still be slower than the split path.
+    hardware: [A3]
