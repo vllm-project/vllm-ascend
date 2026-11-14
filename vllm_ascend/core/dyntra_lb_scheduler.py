@@ -45,10 +45,14 @@ def get_dyntra_lb_block_size(scheduler: Any) -> int:
     return block_size
 
 
+def _dyntra_lb_request_block_num(request: Any, block_size: int) -> int:
+    """Turn an already validated block size into a request's block estimate."""
+    return (len(request.all_token_ids) + block_size - 1) // block_size
+
+
 def get_dyntra_lb_request_block_num(scheduler: Any, request: Any) -> int:
     """Estimate a request's attention KV-cache blocks for load balancing."""
-    block_size = get_dyntra_lb_block_size(scheduler)
-    return (len(request.all_token_ids) + block_size - 1) // block_size
+    return _dyntra_lb_request_block_num(request, get_dyntra_lb_block_size(scheduler))
 
 
 def diagnostics_enabled(vllm_config: Any) -> bool:
@@ -69,31 +73,43 @@ def diagnostics_enabled(vllm_config: Any) -> bool:
 
 
 def print_scheduler_summary(scheduler: Any, scheduler_output: Any) -> None:
+    """Log one diagnostics line for the current scheduling step.
+
+    The counters are accumulated in a single pass over the waiting queues: each
+    block estimate walks the request's token ids, so counting every counter with
+    its own ``sum()`` re-walked the whole queue several times per step while
+    diagnostics were enabled.
+    """
     waiting_reqs = list(itertools.chain(scheduler.waiting, scheduler.kv_holding_waiting))
     lb_paused_req_ids: set[str] = getattr(
         scheduler,
         "_lb_paused_req_ids",
         set(),
     )
-
-    def is_schedulable_waiting(request: Any) -> bool:
-        return request.status == RequestStatus.WAITING or request.request_id in lb_paused_req_ids
-
-    waiting_num = sum(is_schedulable_waiting(request) for request in waiting_reqs)
-    waiting_for_remote_kvs_num = sum(request.status == RequestStatus.WAITING_FOR_REMOTE_KVS for request in waiting_reqs)
+    block_size = get_dyntra_lb_block_size(scheduler)
     structured_output_waiting_status = RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
-    waiting_for_fsm_num = sum(request.status == structured_output_waiting_status for request in waiting_reqs)
-    preempted_num = sum(
-        request.status == RequestStatus.PREEMPTED and request.request_id not in lb_paused_req_ids
-        for request in waiting_reqs
-    )
-    running_block_num = sum(get_dyntra_lb_request_block_num(scheduler, request) for request in scheduler.running)
-    waiting_queue_block_num = sum(get_dyntra_lb_request_block_num(scheduler, request) for request in waiting_reqs)
-    waiting_block_num = sum(
-        get_dyntra_lb_request_block_num(scheduler, request)
-        for request in waiting_reqs
-        if is_schedulable_waiting(request)
-    )
+
+    waiting_num = 0
+    waiting_for_remote_kvs_num = 0
+    waiting_for_fsm_num = 0
+    preempted_num = 0
+    waiting_queue_block_num = 0
+    waiting_block_num = 0
+    for request in waiting_reqs:
+        request_block_num = _dyntra_lb_request_block_num(request, block_size)
+        waiting_queue_block_num += request_block_num
+        is_lb_paused = request.request_id in lb_paused_req_ids
+        if request.status == RequestStatus.WAITING or is_lb_paused:
+            waiting_num += 1
+            waiting_block_num += request_block_num
+        if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+            waiting_for_remote_kvs_num += 1
+        if request.status == structured_output_waiting_status:
+            waiting_for_fsm_num += 1
+        if request.status == RequestStatus.PREEMPTED and not is_lb_paused:
+            preempted_num += 1
+
+    running_block_num = sum(_dyntra_lb_request_block_num(request, block_size) for request in scheduler.running)
     logger.info(
         "schedule() | scheduler req num: [%d, %d, %d, %d, %d, %d] | "
         "blk num [%d, %d, %d] | block size [scheduler=%d, dyntra_lb=%d]",
@@ -107,7 +123,7 @@ def print_scheduler_summary(scheduler: Any, scheduler_output: Any) -> None:
         waiting_queue_block_num,
         waiting_block_num,
         scheduler.block_size,
-        get_dyntra_lb_block_size(scheduler),
+        block_size,
     )
 
 
