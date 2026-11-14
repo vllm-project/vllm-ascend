@@ -23,10 +23,8 @@ if TYPE_CHECKING:
 def write_target(self, num_input_rows: int, num_slot_rows: int) -> tuple[torch.Tensor, torch.Tensor, int]:
     assert self.view is not None and self.slot_mapping is not None
     num_rows = min(num_input_rows, num_slot_rows, self.num_write_tokens)
-    if self.decode_batch and not self.write_has_prefill:
-        # Gathered decode includes rank padding masked by negative slots.
-        if self.num_write_tokens != self.num_actual_tokens:
-            return self.view.cache, self.slot_mapping[:num_rows], num_rows
+    # Gathered decode includes rank padding masked by negative slots.
+    if self.decode_batch and not self.write_has_prefill and self.num_write_tokens == self.num_actual_tokens:
         num_rows = min(num_rows, self.runtime.max_num_reqs)
     return self.view.cache, self.slot_mapping[:num_rows], num_rows
 

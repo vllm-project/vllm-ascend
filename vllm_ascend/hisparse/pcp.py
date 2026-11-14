@@ -26,13 +26,13 @@ def prepare_pcp_query_metadata(metadata, states, valid_rows, local_states, world
     metadata.hisparse_write_has_prefill = metadata.pcp_has_global_prefill
 
 
-def prepare_pcp_metadata(metadata, global_batch, gather_indices, write_mask):
-    """Map gathered KV writes to canonical requests; query layout comes from the builder."""
+def get_pcp_write_request_ids(global_batch, gather_indices, write_mask):
+    """Map gathered KV writes to canonical requests, shared by all layers."""
     rows = torch.bucketize(gather_indices.contiguous(), global_batch.query_start_loc[1:].contiguous(), right=True).to(
         torch.int32
     )
     rows.masked_fill_(~write_mask, -1)
-    metadata.hisparse_write_req_id_per_token = rows
+    return rows
 
 
 class PCPHiSparseConnector(ActiveKVConnector):
@@ -121,12 +121,9 @@ class PCPHiSparseConnector(ActiveKVConnector):
             # residency is indexed by persistent state slot and must stay intact.
             cache.source_block_table = local_tables[self._pcp_host_group_id]
             cache.runtime.hot_block_table = local_tables[hot_group_id]
-        seen = set()
+        write_request_ids = get_pcp_write_request_ids(global_batch, indices, mask)
         for metadata in (attn_metadata or {}).values():
-            if id(metadata) in seen:
-                continue
-            seen.add(id(metadata))
-            prepare_pcp_metadata(metadata, global_batch, indices, mask)
+            metadata.hisparse_write_req_id_per_token = write_request_ids
         # Core's canonical state table has max_num_seqs entries. PCP dual chunks
         # may repeat a request locally, so they must never be supplied here.
         # num_tokens also controls the Resident slot snapshot used by row DMA.
