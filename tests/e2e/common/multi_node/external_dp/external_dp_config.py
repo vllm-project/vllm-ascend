@@ -216,7 +216,9 @@ class ExternalDPConfigLoader:
         routing = cls._parse_routing(raw_config["routing"], resolved_cluster_ips)
         nodes = cls._parse_nodes(raw_config, resolved_cluster_ips)
         launch_templates = cls._parse_templates(raw_config)
-        benchmark_cases = cls._parse_benchmarks(raw_config)
+        benchmark_cases = replace_cluster_placeholders(
+            cls._parse_benchmarks(raw_config), cluster_ips=resolved_cluster_ips
+        )
         kv_pool = cls._parse_kv_pool(raw_config)
 
         config = ExternalDPConfig(
