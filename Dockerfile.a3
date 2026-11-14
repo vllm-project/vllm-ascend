@@ -60,9 +60,16 @@ RUN if [ -n "$VLLM_COMMIT" ]; then \
 # Dependency versions used by the vllm-ascend build.
 ARG SOC_VERSION="ascend910_9391"
 ENV DEBIAN_FRONTEND=noninteractive
+# Cap opc/c++/rust build parallelism to bound memory on shared buildkitd nodes:
+# the heavy vllm-ascend compile otherwise spawns unbounded jobs and can exhaust
+# a 128Gi node (OOM-killing kubelet). Overridable via --build-arg MAX_JOBS=N.
+ARG MAX_JOBS=32
+ARG CARGO_BUILD_JOBS=32
 ENV SOC_VERSION=$SOC_VERSION \
     TASK_QUEUE_ENABLE=1 \
-    OMP_NUM_THREADS=1
+    OMP_NUM_THREADS=1 \
+    MAX_JOBS=$MAX_JOBS \
+    CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS
 COPY . /vllm-workspace/vllm-ascend/
 
 ARG ASCEND_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi \
