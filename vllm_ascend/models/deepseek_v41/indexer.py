@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """V4.1 index projections, quantized QLI and cross-layer candidate selection."""
 
+from collections.abc import Callable
+from typing import cast
+
 import torch
 import torch_npu
 from torch import nn
@@ -194,7 +197,8 @@ class DeepseekV41Indexer(nn.Module):
 
     def project_fused(self, hidden_states, quantized_qr, qr_scale, cos, sin):
         """Reuse the main Q projection's MXFP8 inputs, with no second quantize."""
-        return self.fused_prologue_qw(
+        prologue = cast(Callable[..., tuple[torch.Tensor, ...]], self.fused_prologue_qw)
+        return prologue(
             hidden_states,
             quantized_qr,
             self.wq_b.weight.data,
