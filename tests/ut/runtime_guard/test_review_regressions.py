@@ -1108,8 +1108,8 @@ def test_v18b_kv_drain_dumps_on_tp_ranks(tmp_path: Path, tp_rank: int):
     assert list(shard.glob("*.pt"))
 
 
-def test_v18e_file_mode_claim_skips_tp_bus_when_dump_inactive():
-    """dump_enabled=False: all ranks skip TP due-AR (lockstep via shared gate)."""
+def test_v18e_local_stash_drops_when_dump_inactive():
+    """dump_enabled=False: local stash drops pending jobs (no TP collective)."""
     from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
 
     proc = _bare_processor()
@@ -1118,60 +1118,37 @@ def test_v18e_file_mode_claim_skips_tp_bus_when_dump_inactive():
     proc._kv_dump_jobs = [{"req_id": "stray", "consume_quota": False}]
     proc._deferred_kv_dump_jobs = []
     proc.quota = MagicMock()
-    tp = MagicMock()
-    tp.world_size = 2
-    tp.rank_in_group = 0
-    with (
-        patch(
-            "vllm_ascend.observability.runtime_guard.processor_dump.should_dump_kv_on_rank",
-            return_value=True,
-        ),
-        patch(
-            "vllm_ascend.observability.runtime_guard.processor_dump.get_tp_group",
-            return_value=tp,
-        ),
-        patch(
-            "vllm_ascend.observability.runtime_guard.processor_dump.sync_task_bus",
-        ) as bus,
-        patch("torch.distributed.all_reduce") as ar,
+    with patch(
+        "vllm_ascend.observability.runtime_guard.processor_dump.should_dump_kv_on_rank",
+        return_value=True,
     ):
-        RuntimeGuardProcessor._claim_dump_jobs_to_deferred_via_tp(proc)
-    bus.assert_not_called()
-    ar.assert_not_called()
+        RuntimeGuardProcessor._stash_local_dump_jobs_to_deferred(proc)
     assert proc._kv_dump_jobs == []
     assert proc._deferred_kv_dump_jobs == []
 
 
-def test_v18e2_file_mode_claim_empty_still_joins_due_ar_when_dump_on():
-    """dump_enabled=True + empty queue: still due-AR (non-TP0 cannot see TP0 jobs)."""
+def test_v18e2_local_stash_moves_jobs_when_dump_on():
+    """dump_enabled=True: local stash moves jobs into deferred with no collective."""
     from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
 
+    job = {"req_id": "r1", "consume_quota": False}
     proc = SimpleNamespace(
         runner=SimpleNamespace(),
         runtime_config=SimpleNamespace(dump_enabled=lambda: True),
-        _kv_dump_jobs=[],
+        _kv_dump_jobs=[job],
         _deferred_kv_dump_jobs=[],
     )
-    tp = MagicMock()
-    tp.world_size = 2
-    tp.rank_in_group = 0
-    tp.cpu_group = object()
-    tp.broadcast_object = MagicMock()
     with (
         patch(
             "vllm_ascend.observability.runtime_guard.processor_dump.should_dump_kv_on_rank",
             return_value=True,
         ),
-        patch(
-            "vllm_ascend.observability.runtime_guard.processor_dump.get_tp_group",
-            return_value=tp,
-        ),
         patch("torch.distributed.all_reduce") as ar,
     ):
-        RuntimeGuardProcessor._claim_dump_jobs_to_deferred_via_tp(proc)
-    ar.assert_called_once()
-    tp.broadcast_object.assert_not_called()
-    assert proc._deferred_kv_dump_jobs == []
+        RuntimeGuardProcessor._stash_local_dump_jobs_to_deferred(proc)
+    ar.assert_not_called()
+    assert proc._kv_dump_jobs == []
+    assert proc._deferred_kv_dump_jobs == [job]
 
 
 def test_v18h_apply_config_payload_bumps_follower_reload_ts(tmp_path: Path):
@@ -1196,6 +1173,31 @@ def test_v18h_apply_config_payload_bumps_follower_reload_ts(tmp_path: Path):
     assert changed is False
     assert cfg._last_reload_ts >= before
     assert cfg.config_due_local() is False
+
+
+def test_v18e_wave_head_uses_merged_bus_when_hot_reload_off():
+    """last-PP TP>1 uses merged due bus even with hot-reload off (config_due stays false)."""
+    from vllm_ascend.observability.runtime_guard.processor_bus import RuntimeGuardBusMixin
+
+    cfg = MagicMock()
+    cfg.hot_reload_enabled = False
+    group = MagicMock()
+    group.world_size = 2
+    proc = SimpleNamespace(
+        runtime_config=cfg,
+        _wave_head_merged_bus=MagicMock(return_value=False),
+        _stash_local_dump_jobs_to_deferred=MagicMock(),
+        _apply_config_cascade=MagicMock(),
+        needs_sample_phase_hooks=lambda: False,
+    )
+    with patch(
+        "vllm_ascend.observability.runtime_guard.processor_bus._runtime_config_sync_group_or_none",
+        return_value=group,
+    ):
+        assert RuntimeGuardBusMixin._wave_head_task_bus(proc) is False
+    proc._wave_head_merged_bus.assert_called_once_with(group)
+    proc._stash_local_dump_jobs_to_deferred.assert_not_called()
+    cfg.sync_runtime_config.assert_not_called()
 
 
 def test_v18f_merged_bus_idle_one_bcast_zero_obj():
@@ -1309,7 +1311,7 @@ def test_v18g_merged_bus_both_lanes_two_bcasts():
 
 
 class _ConsumeRecorder:
-    """runtime_config stand-in recording consume_manual_trigger calls."""
+    """runtime_config stand-in recording consume_manual_dump calls."""
 
     def __init__(self, remaining: int = 2) -> None:
         self.remaining = remaining
@@ -1317,7 +1319,7 @@ class _ConsumeRecorder:
         self.target = remaining
         self.consume_calls = 0
 
-    def consume_manual_trigger(self) -> bool:
+    def consume_manual_dump(self) -> bool:
         self.consume_calls += 1
         if self.remaining > 0:
             self.remaining -= 1
@@ -1325,7 +1327,7 @@ class _ConsumeRecorder:
             return True
         return False
 
-    def manual_trigger_count(self) -> int:
+    def manual_dump_remaining(self) -> int:
         return self.remaining
 
     def manual_dumps_done(self) -> int:
@@ -1334,7 +1336,7 @@ class _ConsumeRecorder:
     def manual_dump_target(self) -> int:
         return self.target
 
-    def manual_trigger_continuous(self) -> bool:
+    def manual_dump_continuous(self) -> bool:
         return False
 
     def dump_root(self):
@@ -1448,7 +1450,7 @@ def test_v19a_manual_dump_forces_all_requests_no_consume_in_prepare(monkeypatch)
         "vllm_ascend.observability.runtime_guard.dump.block_ids_for_request",
         lambda _runner, req_id, req_idx=None, **kw: [0] if req_id == "r1" else [1],
     )
-    DumpKvAction().run(ctx)  # arm only; D2H is end_of_wave_sync at sample end
+    DumpKvAction().run(ctx)  # arm only; D2H is end_of_wave at sample end
     assert rc.consume_calls == 0  # consume moved to _handle_manual_trigger
     assert ctx.runner.runtime_guard.queue_kv_dump.call_count == 2
     queued = [c.args[0]["req_id"] for c in ctx.runner.runtime_guard.queue_kv_dump.call_args_list]
@@ -1702,7 +1704,7 @@ def test_v21_bootstrap_overwrites_existing_file_with_defaults(tmp_path: Path, mo
 
     rc = cfg.RuntimeConfig(config_path=None)
     assert rc.detector_get("token_repeat", "enabled", True) is False
-    assert rc.ensure_persisted() is True
+    assert rc.persist_bootstrap_config() is True
     on_disk = json.loads(cfg_file.read_text(encoding="utf-8"))
     assert on_disk["detector"]["token_repeat"]["enabled"] is False
     assert rc.detector_get("token_repeat", "window", 0) == int(cfg._DEFAULTS["detector"]["token_repeat"]["window"])
@@ -1721,7 +1723,7 @@ def test_v21b_default_path_missing_file_pure_defaults(tmp_path: Path, monkeypatc
 def test_v21c_pre_bootstrap_file_ignored_on_reload(tmp_path: Path):
     """A JSON written before this process's bootstrap must not leak in via the
     first hot-reload (the race where the background reloader reads the stale
-    file before ``ensure_persisted`` overwrites it)."""
+    file before ``persist_bootstrap_config`` overwrites it)."""
     import vllm_ascend.observability.runtime_config.config as cfg
 
     cfg_file = tmp_path / "runtime_config.json"
@@ -1733,7 +1735,7 @@ def test_v21c_pre_bootstrap_file_ignored_on_reload(tmp_path: Path):
     rc = cfg.RuntimeConfig(
         config_path=str(cfg_file),
         report_dir=tmp_path / "report",
-        ensure_file=False,  # production: persist deferred to ensure_persisted
+        ensure_file=False,  # production: persist deferred to persist_bootstrap_config
         hot_reload=True,
     )
     # Bootstrap ignores the stale file: detector stays at its default (off).
@@ -1743,7 +1745,7 @@ def test_v21c_pre_bootstrap_file_ignored_on_reload(tmp_path: Path):
     assert rc.detector_get("token_repeat", "enabled", True) is False
 
     # Writer persists the effective startup config (defaults), overwriting stale.
-    assert rc.ensure_persisted() is True
+    assert rc.persist_bootstrap_config() is True
     on_disk = json.loads(cfg_file.read_text(encoding="utf-8"))
     assert on_disk["detector"]["token_repeat"]["enabled"] is False
 
@@ -2100,7 +2102,7 @@ def test_v27c_zombie_with_stuck_cpu_jobs_force_reaps():
 # discards pending jobs without a D2H must give the unit back (once per arm).
 
 
-def _claim_drop_processor(*, dump_enabled: bool, tp_rank: int, jobs: list) -> RuntimeGuardProcessor:
+def _stash_drop_processor(*, dump_enabled: bool, tp_rank: int, jobs: list) -> RuntimeGuardProcessor:
     p = _bare_processor()
     p.runner = SimpleNamespace()
     p.runtime_config = MagicMock()
@@ -2118,7 +2120,7 @@ def test_v28a_dump_disabled_drop_refunds_once_per_arm(monkeypatch):
     monkeypatch.setattr(processor_dump, "should_dump_kv_on_rank", lambda: True)
     monkeypatch.setattr(processor_dump, "runner_tp_rank", lambda _r: 0)
 
-    p = _claim_drop_processor(
+    p = _stash_drop_processor(
         dump_enabled=False,
         tp_rank=0,
         jobs=[
@@ -2127,7 +2129,7 @@ def test_v28a_dump_disabled_drop_refunds_once_per_arm(monkeypatch):
             {"req_id": "r3", "consume_quota": False, "arm_id": "arm-2", "wave": 3},
         ],
     )
-    RuntimeGuardProcessor._claim_dump_jobs_to_deferred_via_tp(p)
+    RuntimeGuardProcessor._stash_local_dump_jobs_to_deferred(p)
     # One arm = one try_consume → exactly one refund (not per job, not for free jobs).
     p.quota.refund.assert_called_once_with(consume_quota=True)
     assert p._kv_dump_jobs == []
@@ -2141,42 +2143,29 @@ def test_v28b_dump_disabled_non_tp0_drops_without_refund(monkeypatch):
     monkeypatch.setattr(processor_dump, "should_dump_kv_on_rank", lambda: True)
     monkeypatch.setattr(processor_dump, "runner_tp_rank", lambda _r: 1)
 
-    p = _claim_drop_processor(
+    p = _stash_drop_processor(
         dump_enabled=False,
         tp_rank=1,
         jobs=[{"req_id": "r1", "consume_quota": True, "arm_id": "arm-1"}],
     )
-    RuntimeGuardProcessor._claim_dump_jobs_to_deferred_via_tp(p)
+    RuntimeGuardProcessor._stash_local_dump_jobs_to_deferred(p)
     p.quota.refund.assert_not_called()
     assert p._kv_dump_jobs == []
 
 
-def test_v28c_claim_bus_failure_refunds_and_raises(monkeypatch):
+def test_v28c_local_stash_when_dump_on_keeps_jobs(monkeypatch):
+    """tp<=1 fallback: dump on moves jobs to deferred (no TP collective to fail)."""
     from vllm_ascend.observability.runtime_guard import processor_dump
 
     monkeypatch.setattr(processor_dump, "should_dump_kv_on_rank", lambda: True)
     monkeypatch.setattr(processor_dump, "runner_tp_rank", lambda _r: 0)
-    monkeypatch.setattr(
-        processor_dump,
-        "get_tp_group",
-        lambda: SimpleNamespace(world_size=2, rank_in_group=0),
-    )
-    monkeypatch.setattr(
-        processor_dump,
-        "sync_task_bus",
-        MagicMock(side_effect=RuntimeError("hccl down")),
-    )
 
-    p = _claim_drop_processor(
-        dump_enabled=True,
-        tp_rank=0,
-        jobs=[{"req_id": "r1", "consume_quota": True, "arm_id": "arm-1"}],
-    )
-    with pytest.raises(RuntimeError, match="hccl down"):
-        RuntimeGuardProcessor._claim_dump_jobs_to_deferred_via_tp(p)
-    p.quota.refund.assert_called_once_with(consume_quota=True)
+    job = {"req_id": "r1", "consume_quota": True, "arm_id": "arm-1"}
+    p = _stash_drop_processor(dump_enabled=True, tp_rank=0, jobs=[job])
+    RuntimeGuardProcessor._stash_local_dump_jobs_to_deferred(p)
+    p.quota.refund.assert_not_called()
     assert p._kv_dump_jobs == []
-    assert p._deferred_kv_dump_jobs == []
+    assert p._deferred_kv_dump_jobs == [job]
 
 
 def test_v28d_merged_bus_collective_failure_refunds_handed_off_jobs():
@@ -2207,7 +2196,7 @@ def test_v28d_merged_bus_collective_failure_refunds_handed_off_jobs():
                 return_value=True,
             ),
             patch(
-                "vllm_ascend.observability.runtime_config.dist.sync_due_bits_from_src",
+                "vllm_ascend.observability.runtime_config.dist.broadcast_due_bits_from_src",
                 side_effect=RuntimeError("bus down"),
             ),
         ):
@@ -2225,8 +2214,8 @@ def test_v28d_merged_bus_collective_failure_refunds_handed_off_jobs():
         worker.stop()
 
 
-def test_v28e_dump_only_dump_off_drops_pending(monkeypatch):
-    """skip_config_bus path with dump inactive refunds unclaimed arms (not fully off)."""
+def test_v28e_dump_inactive_skip_wave_head_drops_pending(monkeypatch):
+    """skip_wave_head_bus (dump off) refunds unclaimed arms."""
     from vllm_ascend.observability.runtime_guard import processor_dump
 
     monkeypatch.setattr(processor_dump, "runner_tp_rank", lambda _r: 0)
@@ -2235,7 +2224,7 @@ def test_v28e_dump_only_dump_off_drops_pending(monkeypatch):
     p.runner = SimpleNamespace()
     p.wave_tracker = MagicMock()
     p.runtime_config = MagicMock()
-    # Sync enters skip_config_bus (no detectors, no manual, hot-reload off).
+    # Sync enters skip_wave_head_bus (no detectors, no manual, no dump, hot-reload off).
     p.runtime_config.manual_trigger.return_value = False
     p.runtime_config.needs_sample_phase_hooks.return_value = False
     p.runtime_config.hot_reload_enabled = False
@@ -2243,16 +2232,16 @@ def test_v28e_dump_only_dump_off_drops_pending(monkeypatch):
     p.quota = MagicMock()
     p._kv_dump_jobs = [{"req_id": "r1", "consume_quota": True, "arm_id": "arm-1"}]
     p._deferred_kv_dump_jobs = []
-    p._end_of_wave_sync_if_no_sample = MagicMock()
+    p._end_of_wave_if_no_sample = MagicMock()
 
-    RuntimeGuardProcessor.sync_for_step(p, has_scheduled_tokens=True)
+    RuntimeGuardProcessor.begin_wave(p, has_scheduled_tokens=True)
     p.wave_tracker.advance.assert_called_once_with(has_scheduled_tokens=True)
     p.quota.refund.assert_called_once_with(consume_quota=True)
     assert p._kv_dump_jobs == []
 
 
 def test_v28f_non_last_pp_skips_wave_sync_and_end_of_wave(monkeypatch):
-    """Early PP: sync_for_step / end_of_wave_sync return at the entrance gate."""
+    """Early PP: begin_wave / end_of_wave return at the entrance gate."""
     from vllm_ascend.observability.runtime_guard import processor as processor_mod
     from vllm_ascend.observability.runtime_guard import processor_dump
 
@@ -2262,17 +2251,17 @@ def test_v28f_non_last_pp_skips_wave_sync_and_end_of_wave(monkeypatch):
     p = _bare_processor()
     p.wave_tracker = MagicMock()
     p.runtime_config = MagicMock()
-    p.refresh_config = MagicMock()  # type: ignore[method-assign]
+    p.wave_head_sync = MagicMock()  # type: ignore[method-assign]
     p._drain_merged_bus = MagicMock()  # type: ignore[method-assign]
     p._maybe_fire_manual_local = MagicMock()  # type: ignore[method-assign]
-    # Restore real end_of_wave_sync (bare_processor stubs it).
-    p.end_of_wave_sync = RuntimeGuardProcessor.end_of_wave_sync.__get__(p)  # type: ignore[method-assign]
+    # Restore real end_of_wave (bare_processor stubs it).
+    p.end_of_wave = RuntimeGuardProcessor.end_of_wave.__get__(p)  # type: ignore[method-assign]
 
-    RuntimeGuardProcessor.sync_for_step(p, has_scheduled_tokens=True)
+    RuntimeGuardProcessor.begin_wave(p, has_scheduled_tokens=True)
     p.wave_tracker.advance.assert_not_called()
-    p.refresh_config.assert_not_called()
+    p.wave_head_sync.assert_not_called()
 
-    RuntimeGuardProcessor.end_of_wave_sync(p, has_scheduled_tokens=True)
+    RuntimeGuardProcessor.end_of_wave(p, has_scheduled_tokens=True)
     p._drain_merged_bus.assert_not_called()
     p._maybe_fire_manual_local.assert_not_called()
 

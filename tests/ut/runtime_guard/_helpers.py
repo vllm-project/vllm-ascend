@@ -64,7 +64,7 @@ def bare_processor(*, boom_detectors: bool = False) -> RuntimeGuardProcessor:
     # Default MagicMock.is_fully_off() is truthy — force False so hook
     # shells still run unless a test opts into the fully-off fast path.
     p.runtime_config.is_fully_off.return_value = False
-    p.end_of_wave_sync = MagicMock()  # type: ignore[method-assign]
+    p.end_of_wave = MagicMock()  # type: ignore[method-assign]
     return p
 
 

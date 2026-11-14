@@ -18,7 +18,7 @@
 Design (multi-DP safe — avoid full-world / cross-PP collectives):
 
 1. **One writer / monitor per EngineCore (per DP replica)**
-   Materializes JSON via ``ensure_persisted`` at bind (overwrite).
+   Materializes JSON via ``persist_bootstrap_config`` at bind (overwrite).
    ``dump.manual_dump`` is a read-only watermark — never rewritten by consume.
    Prefer ``inner_dp_world`` first rank; else TP0∧PP0 when ``dp_size>1``; else
    global world rank0 / ``RANK==0``.
@@ -26,7 +26,7 @@ Design (multi-DP safe — avoid full-world / cross-PP collectives):
 2. **Fixed sync transport** (no JSON ``sync_mode`` knob)
    - last-PP × ``tp_size>1``: wave-head submits TP0-sourced due
      ``broadcast([wave_idx, config_due, dump_due])`` on ``DueBitsBusWorker``
-     (``sync_due_bits_from_src``); end-of-wave drains / applies.
+     (``broadcast_due_bits_from_src``); end-of-wave drains / applies.
    - everyone else (non-last PP, API, ``tp_size<=1``): **local file poll**.
 
 3. **Cross-DP config is not synchronized**
@@ -34,7 +34,7 @@ Design (multi-DP safe — avoid full-world / cross-PP collectives):
    replica can see). Do **not** use full EP ``world_size`` for hot-reload.
 
 Production: ``AscendConfig`` uses ``ensure_file=False``; worker
-:meth:`RuntimeConfig.ensure_persisted` materializes JSON on the writer.
+:meth:`RuntimeConfig.persist_bootstrap_config` materializes JSON on the writer.
 
 Payload helpers (JSONC load, deep-merge, validate) live in this module.
 Defaults stay in ``_defaults`` (detector-cycle leaf); distributed roles /
@@ -524,7 +524,7 @@ class RuntimeConfig:
 
         # In-memory merge always. ``ensure_file=True`` persists immediately (tests /
         # rare callers). Production AscendConfig uses False; worker leader calls
-        # :meth:`ensure_persisted` once from ``RuntimeGuardProcessor``.
+        # :meth:`persist_bootstrap_config` once from ``RuntimeGuardProcessor``.
         self._bootstrap(persist=ensure_file)
         logger.info(
             "[runtime_config] path=%s explicit_path=%s report_dir=%s hot_reload=%s persisted=%s",
@@ -681,7 +681,7 @@ class RuntimeConfig:
             self._warn_interaction_quirks()
         self._last_reload_ts = time.time()
 
-    def ensure_persisted(self) -> bool:
+    def persist_bootstrap_config(self) -> bool:
         """Materialize bootstrap defaults to disk once (worker leader / single-process).
 
         Safe to call from every worker: non-leaders no-op; leaders act at most once
@@ -694,7 +694,7 @@ class RuntimeConfig:
             return True
         if not _is_json_writer():
             logger.debug(
-                "[runtime_config] ensure_persisted skip (non-leader) path=%s",
+                "[runtime_config] persist_bootstrap_config skip (non-leader) path=%s",
                 self.config_path,
             )
             return False
@@ -714,7 +714,7 @@ class RuntimeConfig:
             return True
         except Exception as exc:
             logger.warning(
-                "[runtime_config] ensure_persisted failed path=%s error=%s",
+                "[runtime_config] persist_bootstrap_config failed path=%s error=%s",
                 self.config_path,
                 exc,
             )
@@ -777,7 +777,7 @@ class RuntimeConfig:
             "dump_enabled": dump_on,
             "needs_cumulative_io": needs_io,
             "needs_sample_phase_hooks": needs_sample,
-            "manual_trigger_count": remaining,
+            "manual_dump_remaining": remaining,
         }
         self._hot_path_gates = cached
         return cached
@@ -825,7 +825,7 @@ class RuntimeConfig:
         return (
             not gates["needs_sample_phase_hooks"]
             and not gates["dump_enabled"]
-            and int(gates["manual_trigger_count"]) <= 0
+            and int(gates["manual_dump_remaining"]) <= 0
         )
 
     # Detector section order comes from ``detector_catalog``.
@@ -895,7 +895,7 @@ class RuntimeConfig:
         """``dump.auto_cooldown_seconds`` between auto-dump arms."""
         return int(self.dump.get("auto_cooldown_seconds", 300))
 
-    def manual_trigger_continuous(self) -> bool:
+    def manual_dump_continuous(self) -> bool:
         """True when ``dump.manual_dump`` is bool ``true`` (always-on dump)."""
         return self.dump.get("manual_dump", False) is True
 
@@ -907,20 +907,20 @@ class RuntimeConfig:
         """How many watermark manual dumps this process has completed."""
         return int(self._manual_dumps_done)
 
-    def manual_trigger_count(self) -> int:
+    def manual_dump_remaining(self) -> int:
         """Remaining catch-up dumps: ``max(0, target - done)``; continuous → 1.
 
         Int ``N`` is a watermark: fire while ``done < N``. Disk value is never
         mutated by the process — raise ``N`` (e.g. 1→2) for another dump.
         If the value on disk is ≤ ``done``, skip. Requires hot-reload.
         """
-        return int(self._hot_path_gates_cached()["manual_trigger_count"])
+        return int(self._hot_path_gates_cached()["manual_dump_remaining"])
 
-    def manual_trigger(self) -> bool:
+    def manual_dump_armed(self) -> bool:
         """True when manual dump is armed (continuous or ``target > done``)."""
-        return self.manual_trigger_count() > 0
+        return self.manual_dump_remaining() > 0
 
-    def consume_manual_trigger(self) -> bool:
+    def consume_manual_dump(self) -> bool:
         """Record one completed manual dump wave; return True if armed.
 
         - ``true`` (bool): continuous — always armed; do not bump watermark;
@@ -930,9 +930,9 @@ class RuntimeConfig:
 
         Multi-DP sharing one file: each replica tracks its own ``done``.
         """
-        if self.manual_trigger_continuous():
+        if self.manual_dump_continuous():
             logger.debug(
-                "[runtime_config] manual_trigger continuous (true); watermark unused %s",
+                "[runtime_config] manual_dump continuous (true); watermark unused %s",
                 _process_role_tag(),
             )
             return True
@@ -1085,7 +1085,7 @@ class RuntimeConfig:
                 time.sleep(interval)
                 # AscendConfig may start this thread before Worker sets RANK /
                 # world group; stop as soon as we are clearly a Worker so we
-                # do not dual-reload alongside sync_for_step broadcast.
+                # do not dual-reload alongside begin_wave broadcast.
                 if _is_distributed_worker_process():
                     _bg_reload_paths.discard(path_key)
                     logger.info(
@@ -1103,7 +1103,7 @@ class RuntimeConfig:
                     # Content diffs are logged inside ``_apply_loaded``.
                     if self._maybe_reload_local():
                         self.apply_ascend_log_level()
-                        if self.manual_trigger():
+                        if self.manual_dump_armed():
                             logger.info(
                                 "[runtime_config] dump.manual_dump=true seen on "
                                 "non-worker reload — dump arms only on worker "
@@ -1318,7 +1318,7 @@ class RuntimeConfig:
                 self.interaction_mode_summary(),
             )
             self._warn_interaction_quirks()
-            if self.manual_trigger() and self.dump_enabled():
+            if self.manual_dump_armed() and self.dump_enabled():
                 logger.info(
                     "[runtime_config] dump.manual_dump active — next worker execute_model will consume and arm dump %s",
                     _process_role_tag(),
