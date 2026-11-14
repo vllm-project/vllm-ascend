@@ -100,7 +100,7 @@ python3 w8a8_int8_dynamic_moe.py
 
 For more content, refer to the [official examples](https://github.com/vllm-project/llm-compressor/tree/main/examples).
 
-The quantization types currently supported by LLM-Compressor can be viewed in the `vllm_ascend/quantization/compressed_tensors_config.py` file.
+The quantization types currently supported by LLM-Compressor can be viewed in the `vllm_ascend/quantization/configs/compressed_tensors_config.py` file.
 
 ### 3. Native FP8 checkpoints (no quantization step needed)
 
