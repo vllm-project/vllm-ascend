@@ -28,7 +28,6 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
-from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculator
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
@@ -48,10 +47,7 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
 )
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
-from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
-    draft_metadata_request_count,
-    prepare_dflash_inputs,
-)
+from vllm_ascend.worker.v2.spec_decode.dflash.speculator import draft_metadata_request_count
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     build_dspark_draft_config,
@@ -271,7 +267,6 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
                 self.attn_architecture = "GQA"
             else:
                 self.attn_architecture = None
-            dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs
 
     @contextmanager
     def _proposal_metadata(self, num_reqs: int) -> Iterator[None]:
