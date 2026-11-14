@@ -81,7 +81,7 @@ def test_shared_engram_config_schema():
     for values in (
         {"endpoint": "owner:29500"},
         {"backend": "a3"},
-        {"backend": "a2", "endpoint": "owner:29500"},
+        {"backend": "unknown", "endpoint": "owner:29500"},
         {"backend": "a3", "endpoint": "owner:0"},
         {"backend": "a3", "endpoint": "owner:29500", "unexpected": True},
     ):

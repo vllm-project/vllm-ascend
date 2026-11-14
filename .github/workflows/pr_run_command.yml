@@ -1,0 +1,373 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: Handle /run Command
+
+# /run re-runs the PR gate (pr_test.yaml) on the *latest* commit of a PR.
+# pr_test.yaml deliberately no longer triggers on `synchronize`, so a commit is
+# only tested when someone asks for it. Rather than duplicating the whole job
+# graph here, this handler re-emits a `pull_request: labeled` event for the PR,
+# which lets pr_test run with its normal event payload: ci-gate therefore lands
+# on the PR head SHA exactly as it did for an automatically triggered run.
+on:
+  repository_dispatch:
+    types: [run-command]
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  run:
+    name: Trigger E2E on the latest commit
+    runs-on: linux-amd64-cpu-4-hk
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
+    steps:
+      - name: Preflight
+        run: |
+          # curl is mandatory: every step below talks to the GitHub API.
+          command -v curl >/dev/null || { echo "::error::curl is missing from the runner image"; exit 1; }
+
+          # jq is expected to ship with act-environments-ubuntu. When it is gone
+          # the image contract has drifted, and without this check the failure
+          # surfaces as an opaque "jq: command not found" inside a command
+          # substitution, after which no step output is written and the run is
+          # reported as the generic "trigger did not happen" error. Install it
+          # once and keep a visible warning instead of failing the command.
+          if ! command -v jq >/dev/null; then
+            echo "::warning::jq is missing from the runner image; installing it on the fly."
+            if ! sudo apt-get install -y --no-install-recommends jq; then
+              sudo apt-get update -y
+              sudo apt-get install -y --no-install-recommends jq
+            fi
+            command -v jq >/dev/null || { echo "::error::failed to install jq"; exit 1; }
+          fi
+
+      - name: Check user authorization
+        id: auth
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+          ACTOR: ${{ github.event.client_payload.github.payload.comment.user.login }}
+          PR_AUTHOR: ${{ github.event.client_payload.pull_request.user.login }}
+          REPO: ${{ github.event.client_payload.github.payload.repository.full_name }}
+        run: |
+          if [ "$ACTOR" = "$PR_AUTHOR" ]; then
+            echo "User $ACTOR is the PR author, authorized."
+            echo "authorized=true" >> "$GITHUB_OUTPUT"
+          else
+            ROLE_NAME=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+              "https://api.github.com/repos/$REPO/collaborators/$ACTOR/permission" | jq -r '.role_name // empty')
+            case "$ROLE_NAME" in
+              triage|write|maintain|admin)
+                echo "User $ACTOR has $ROLE_NAME role, authorized."
+                echo "authorized=true" >> "$GITHUB_OUTPUT"
+                ;;
+              *)
+                echo "::error::User $ACTOR is not the PR author and does not have triage+ permission."
+                echo "authorized=false" >> "$GITHUB_OUTPUT"
+                ;;
+            esac
+          fi
+
+      - name: Post unauthorized comment
+        if: steps.auth.outputs.authorized == 'false'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: run command failed: you do not have permission. Only the PR author or users with triage+ permission can trigger /run.
+          reactions: confused
+
+      - name: Fail if unauthorized
+        if: steps.auth.outputs.authorized == 'false'
+        run: exit 1
+
+      - name: Check that the pull request can still be tested
+        id: eligible
+        env:
+          PR_STATE: ${{ github.event.client_payload.pull_request.state }}
+          PR_MERGED: ${{ github.event.client_payload.pull_request.merged }}
+          PR_BASE: ${{ github.event.client_payload.pull_request.base.ref }}
+        run: |
+          # pr_test only listens on open pull requests whose base is main, *-dev
+          # or releases/v*. Re-adding the label anywhere else emits a labeled
+          # event that matches nothing, which is indistinguishable from a silent
+          # failure, so refuse up front and say why.
+          if [ "$PR_MERGED" = "true" ]; then
+            echo "::error::Pull request has already been merged."
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            echo "reason=this pull request has already been merged" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$PR_STATE" != "open" ]; then
+            echo "::error::Pull request is not open (state: $PR_STATE)."
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            echo "reason=this pull request is no longer open (state: $PR_STATE)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case "$PR_BASE" in
+            main|*-dev|releases/v*)
+              echo "eligible=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::Base branch '$PR_BASE' is not covered by pr_test.yaml."
+              echo "eligible=false" >> "$GITHUB_OUTPUT"
+              echo "reason=its base branch ($PR_BASE) is not covered by the E2E workflow, which only runs for main, *-dev and releases/v*" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: Post not-testable comment
+        if: steps.eligible.outputs.eligible == 'false'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: run command skipped because ${{ steps.eligible.outputs.reason }}, so re-adding the label would not start any E2E run.
+          reactions: confused
+
+      - name: Fail if the pull request cannot be tested
+        if: steps.eligible.outputs.eligible == 'false'
+        run: exit 1
+
+      - name: Check for a run already in flight on this commit
+        id: inflight
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+          PR_SHA: ${{ github.event.client_payload.pull_request.head.sha }}
+          REPO: ${{ github.event.client_payload.github.payload.repository.full_name }}
+        run: |
+          # Report a lookup failure through step outputs instead of exiting, so the
+          # following steps can still explain it on the PR. Guessing (0 = idle, or
+          # >0 = busy) would either duplicate a run or silently block the command.
+          fail_lookup() {
+            echo "::error::$1"
+            echo "lookup_failed=true" >> "$GITHUB_OUTPUT"
+            echo "lookup_reason=$1" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          # Query by head_sha on purpose: only a run for *this* commit makes the
+          # command redundant. A run for an older commit is left alone, because
+          # triggering pr_test again cancels it via cancel-in-progress anyway.
+          #
+          # One request, classified client-side. `?status=` accepts a single value
+          # only and `total_count` is post-filter, so polling status by status
+          # cannot reconstruct this picture without extra unfiltered calls.
+          # --compressed keeps the ~1MB page from stalling on the shared proxy.
+          if ! RUNS=$(curl -sS --compressed -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/$REPO/actions/runs?head_sha=$PR_SHA&per_page=100"); then
+            fail_lookup "could not reach the runs API for $PR_SHA"
+          fi
+
+          TOTAL=$(printf '%s' "$RUNS" | jq -r '.total_count // empty') \
+            || fail_lookup "unexpected response while listing runs for $PR_SHA"
+          case "$TOTAL" in
+            ''|*[!0-9]*) fail_lookup "unexpected response while listing runs for $PR_SHA" ;;
+          esac
+          # One page holds at most 100 runs. Above that an active run could sit on
+          # a later page and be missed, so refuse instead of guessing.
+          if [ "$TOTAL" -gt 100 ]; then
+            fail_lookup "found $TOTAL runs on $PR_SHA, more than one page; refusing to guess which are still active"
+          fi
+
+          # action_required is counted separately: such a run already exists and is
+          # only waiting for a maintainer to approve it, so re-triggering cannot
+          # make it start any sooner. Folding it into "busy" would turn /run into a
+          # no-op that looks exactly like a stuck queue.
+          ACTIVE=$(printf '%s' "$RUNS" | jq '[.workflow_runs[]
+            | select(.name == "E2E" and .status != "completed" and .status != "action_required")] | length') \
+            || fail_lookup "could not classify runs for $PR_SHA"
+          AWAITING=$(printf '%s' "$RUNS" | jq '[.workflow_runs[]
+            | select(.name == "E2E" and .status == "action_required")] | length') \
+            || fail_lookup "could not classify runs for $PR_SHA"
+
+          # A previously successful E2E on this exact commit does not block /run,
+          # but the reply should say so instead of implying a first run. Blocking
+          # would push people back to the "push an empty commit" workaround, which
+          # this whole command exists to replace.
+          PREV_SUCCESS=$(printf '%s' "$RUNS" | jq '[.workflow_runs[]
+            | select(.name == "E2E" and .status == "completed" and .conclusion == "success")] | length') \
+            || fail_lookup "could not classify runs for $PR_SHA"
+
+          for VALUE in "$ACTIVE" "$AWAITING" "$PREV_SUCCESS"; do
+            case "$VALUE" in
+              ''|*[!0-9]*) fail_lookup "unexpected jq output while classifying runs for $PR_SHA" ;;
+            esac
+          done
+
+          echo "active_runs=$ACTIVE" >> "$GITHUB_OUTPUT"
+          echo "awaiting_approval=$AWAITING" >> "$GITHUB_OUTPUT"
+          if [ "$PREV_SUCCESS" -gt 0 ]; then
+            echo "prev_success=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prev_success=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ "$ACTIVE" -gt 0 ]; then
+            echo "state=busy" >> "$GITHUB_OUTPUT"
+          elif [ "$AWAITING" -gt 0 ]; then
+            echo "state=awaiting" >> "$GITHUB_OUTPUT"
+          else
+            echo "state=idle" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post already-running comment
+        if: steps.inflight.outputs.state == 'busy'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: run command skipped. E2E is already queued or running for commit `${{ github.event.client_payload.pull_request.head.sha }}`. Comment `/rerun` instead if you only want to retry failed jobs.
+          reactions: confused
+
+      - name: Post awaiting-approval comment
+        if: steps.inflight.outputs.state == 'awaiting'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: run command skipped. An E2E run for commit `${{ github.event.client_payload.pull_request.head.sha }}` has already been created and is waiting for a maintainer to approve it, so triggering another one would not make it start any sooner.
+
+            Someone with write access can approve it from the Actions page ("Approve and run"). If you are the PR author and this is your first contribution here, that approval is expected and only needs to happen once.
+          reactions: confused
+
+      - name: Post lookup-failure comment
+        if: steps.inflight.outputs.lookup_failed == 'true'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: run command failed before triggering anything, so **no new E2E run was started**. Reason: ${{ steps.inflight.outputs.lookup_reason }}
+
+            Please retry `/run` in a moment.
+          reactions: confused
+
+      - name: Fail if the lookup failed
+        if: steps.inflight.outputs.lookup_failed == 'true'
+        run: exit 1
+
+      - name: Re-arm ci-run label to emit a labeled event
+        id: trigger
+        if: steps.inflight.outputs.state == 'idle'
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+          PR_NUMBER: ${{ github.event.client_payload.pull_request.number }}
+          REPO: ${{ github.event.client_payload.github.payload.repository.full_name }}
+        run: |
+          # Report the failure through step outputs instead of exiting here, so the
+          # following steps can post an explanatory comment on the PR. Exiting
+          # directly would leave the requester with no feedback at all.
+          fail_trigger() {
+            echo "::error::$1"
+            echo "failed=true" >> "$GITHUB_OUTPUT"
+            echo "fail_reason=$1" >> "$GITHUB_OUTPUT"
+          }
+
+          # Returns 422 when the label already exists; either way is fine.
+          curl -s -o /dev/null -X POST \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/labels" \
+            -d '{"name":"ci-run","color":"1d76db","description":"E2E requested manually on the latest commit"}'
+
+          # Remove first: adding a label that is already present returns 200 but
+          # emits no event, so a plain add would silently do nothing on the second
+          # /run. Only 200 (removed) and 404 (was not there) are acceptable.
+          DEL_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/$REPO/issues/$PR_NUMBER/labels/ci-run")
+          if [ "$DEL_CODE" != "200" ] && [ "$DEL_CODE" != "404" ]; then
+            fail_trigger "Could not clear the ci-run label (HTTP $DEL_CODE). It must be cleared first, otherwise re-adding it is a silent no-op and no E2E run starts."
+            exit 0
+          fi
+
+          sleep 2
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/issues/$PR_NUMBER/labels" \
+            -d '{"labels":["ci-run"]}')
+          if [ "$CODE" != "200" ]; then
+            fail_trigger "Failed to add the ci-run label (HTTP $CODE), so no labeled event was emitted and E2E was not triggered."
+            exit 0
+          fi
+          echo "triggered=true" >> "$GITHUB_OUTPUT"
+
+      - name: Comment result on PR (previous run on this commit passed)
+        if: steps.trigger.outputs.triggered == 'true' && steps.inflight.outputs.prev_success == 'true'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: run command accepted, but E2E had **already passed** on commit `${{ github.event.client_payload.pull_request.head.sha }}`. A fresh run has been queued anyway, using whatever test-scope labels the PR currently carries.
+
+            If you are only re-verifying a suspected false pass, this is the right call. If you just wanted to look at the previous result, /run was unnecessary — track the new run in [PR checks](https://github.com/${{ github.event.client_payload.github.payload.repository.full_name }}/pull/${{ github.event.client_payload.pull_request.number }}/checks).
+          reactions: rocket
+
+      - name: Comment result on PR
+        if: steps.trigger.outputs.triggered == 'true' && steps.inflight.outputs.prev_success != 'true'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: run command accepted. E2E has been queued on the latest commit `${{ github.event.client_payload.pull_request.head.sha }}` of this PR, with whatever test-scope labels the PR currently carries. Track progress in [PR checks](https://github.com/${{ github.event.client_payload.github.payload.repository.full_name }}/pull/${{ github.event.client_payload.pull_request.number }}/checks).
+          reactions: rocket
+
+      - name: Comment trigger failure on PR
+        if: steps.trigger.outputs.failed == 'true'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: run command could not start E2E on commit `${{ github.event.client_payload.pull_request.head.sha }}`. Reason: ${{ steps.trigger.outputs.fail_reason }}
+
+            Nothing has been queued for this PR. Please retry `/run` in a moment. If it keeps failing, a maintainer can add the `ci-run` label to this PR manually to trigger the same E2E run.
+          reactions: confused
+
+      - name: Fail the job after a failed trigger
+        if: steps.trigger.outputs.failed == 'true'
+        run: |
+          echo "::error::Trigger failed; see the bot comment for details."
+          exit 1
+
+      - name: Fail if the trigger did not happen
+        if: steps.inflight.outputs.state == 'idle' && steps.trigger.outputs.triggered != 'true' && steps.trigger.outputs.failed != 'true'
+        run: |
+          echo "::error::The ci-run label was re-armed but no trigger output was produced."
+          exit 1

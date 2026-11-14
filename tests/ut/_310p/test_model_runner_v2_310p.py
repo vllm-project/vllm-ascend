@@ -64,6 +64,25 @@ def _make_vllm_config(**overrides):
     return config
 
 
+def test_runner_binds_materialized_kv_cache() -> None:
+    from vllm.v1.worker import utils as worker_utils
+
+    from vllm_ascend.patch.worker import patch_attn_utils
+
+    names = ["model.layers.2.self_attn", "model.layers.0.self_attn"]
+    caches = {name: (torch.zeros(2, 4), torch.zeros(2, 4)) for name in names}
+    layers = {name: SimpleNamespace(kv_cache=None) for name in names}
+    runner_caches: list[tuple[torch.Tensor, torch.Tensor]] = []
+
+    assert model_runner_module.bind_kv_cache is worker_utils.bind_kv_cache
+    assert model_runner_module.bind_kv_cache is patch_attn_utils.bind_kv_cache
+    model_runner_module.bind_kv_cache(caches, layers, runner_caches)
+
+    assert runner_caches[0] is caches[names[1]]
+    assert runner_caches[1] is caches[names[0]]
+    assert all(layers[name].kv_cache is cache for name, cache in caches.items())
+
+
 def test_config_accepts_prefix_caching() -> None:
     """310P MRv2 supports APC; gate must not reject enable_prefix_caching."""
     config = _make_vllm_config()
