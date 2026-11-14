@@ -387,6 +387,62 @@ A few important things to consider when using DFlash2 draft models:
 5. The selector parameters (`selector_top_k`, `selector_rank`, ...) come from
    the draft checkpoint's `dflash_config` and need no user configuration.
 
+6. **A2/A3 device-side target and draft lengths**: on model runner V2, installing the
+   optional `flash_attn_npu` distribution exposing `flash_attn_npu_3` with the
+   `get_scheduler_metadata` and `flash_attn_with_kvcache` APIs (the 0.4.2.post2
+   scheduler ABI, also available in 0.5.0) enables the device-length FA3
+   backend for `DFlash2DraftModel` draft layers and their
+   `Qwen3_5ForConditionalGeneration` target, as declared by the verified
+   Qwen3.8-27B checkpoint. Selection checks the target architecture, not the
+   model directory name or the draft's `model_type`. Other target architectures,
+   including Qwen MoE, retain their existing backend. This is a
+   different package from the training-consistency `flash_attn_npu_v3` backend.
+   It consumes exact device lengths after rejection without the draft
+   attention builder's `seq_lens.tolist()` synchronization. Identical layers
+   share device tiling, refreshed before ACL graph replay at stable addresses.
+   Queries use packed TND layout with device query offsets. With
+   `flash_attn_npu` 0.5.0, non-local paged attention at KV capacities of 1024
+   tokens or more still reads lengths on the host inside forward and cannot
+   be graph-captured. For short draft queries, a sliding window smaller than
+   the page-table token capacity avoids that branch; a window covering the
+   entire capacity does not.
+
+   The Qwen target uses a full-context window covering the original page-table
+   capacity and appends one unused page-table column. Exact device KV lengths
+   prevent reads from that column. This is equivalent to full attention while
+   keeping FA3 0.5.0 on its device-length window branch, including long-context
+   prefill and multi-token verification. It avoids both the FIA builder's
+   `seq_lens.tolist()` and FA3's internal global-attention length reads.
+   The extra column allocates only page-table entries, not extra KV pages.
+   The builder refreshes the table and tiling at stable addresses before replay.
+   Eager prefill and decode use the same packed TND layout as FULL graph
+   capture/replay, including variable-width queries. FA3 0.5.0's eager TND
+   boundary check still reads the last device query offset once per attention
+   call, introducing a scalar D2H synchronization even with device tiling.
+   Graph capture skips this check, and replay does not rerun the host check.
+
+   Selection requires FP16/BF16 queries, draft KV with the same dtype, head
+   sizes up to 256, and PP/PCP/DCP sizes of 1. Causal and non-causal sliding windows
+   are preserved. Missing APIs, attention sinks, adaptive verification,
+   multimodal prefixes, batch invariance, and unsupported configurations
+   retain the existing backend. The target backend is selected independently,
+   so a quantized target cache can retain FIA while its unquantized draft uses
+   FA3. With the supported Qwen target using FA3 (or fallback FIA) and fused
+   GDN, the FA3 DFlash2 path also skips the runner's
+   post-sampling length D2H snapshot and its next-step Event wait. Exact
+   rejection-corrected lengths remain on device; CPU lengths remain upper
+   bounds. This requires PP/PCP/DCP and KV parallel sizes of 1, without KV
+   transfer, sparse KV offload, or adaptive verification. A target falling back
+   to FIA still performs its own exact length `tolist()`. Asynchronous output
+   completion events remain necessary to consume generated tokens on the CPU.
+   A5 retains its existing CANN path. Check the backend's numerical and graph
+   replay behavior on A2/A3 with:
+
+    ```shell
+    pytest -sv tests/e2e/pull_request/one_card/test_dflash2_fa3_precision.py
+    pytest -sv tests/e2e/pull_request/one_card/test_qwen_dflash2_fa3_precision.py
+    ```
+
 ## Speculating using LiLiCorr
 
 LiLiCorr is a DFlash variant that reranks the per-position top-k candidate

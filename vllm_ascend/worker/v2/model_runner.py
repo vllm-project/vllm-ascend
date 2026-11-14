@@ -70,6 +70,8 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
+from vllm_ascend.attention.flash_attention_v3 import AscendFlashAttentionBackend as AscendFA3Backend
+from vllm_ascend.attention.flash_attention_v3 import AscendQwenFlashAttentionBackend
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
@@ -102,6 +104,7 @@ from vllm_ascend.observability.runtime_guard.hooks import (
     runtime_guard_step,
 )
 from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
+from vllm_ascend.ops.gdn_attn_builder import AscendGDNFusedAttentionBackend
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
     create_hccl_pg_options,
@@ -1364,6 +1367,48 @@ class NPUModelRunner(GPUModelRunner):
             and "DFlash2DraftModel" in (spec.draft_model_config.architectures or [])
         ):
             return True
+
+        if (
+            spec is not None
+            and self.speculator is not None
+            and spec.method == "dflash"
+            and getattr(self.model_config, "architecture", None) == "Qwen3_5ForConditionalGeneration"
+            and spec.draft_model_config is not None
+            and "DFlash2DraftModel" in (spec.draft_model_config.architectures or ())
+        ):
+            # Qwen's GDN state updates use device counts; its host metadata
+            # needs only length upper bounds. FA3 consumes device lengths;
+            # fallback FIA materializes its own exact device seq_lens.
+            # Require the initialized FA3 draft and audited target backends,
+            # so both the snapshot producer and consumer can skip together.
+            draft_backends = getattr(self.speculator, "attn_backends", {})
+            backends = [group.backend for groups in getattr(self, "attn_groups", []) for group in groups]
+            parallel = self.parallel_config
+            return (
+                spec.parallel_drafting
+                and isinstance(self.model_state, MambaHybridModelState)
+                and bool(draft_backends)
+                and all(backend is AscendFA3Backend for backend in draft_backends.values())
+                and any(backend in (AscendAttentionBackend, AscendQwenFlashAttentionBackend) for backend in backends)
+                and AscendGDNFusedAttentionBackend in backends
+                and all(
+                    backend
+                    in (
+                        AscendAttentionBackend,
+                        AscendQwenFlashAttentionBackend,
+                        AscendGDNFusedAttentionBackend,
+                        AscendFA3Backend,
+                    )
+                    for backend in backends
+                )
+                and parallel.pipeline_parallel_size == 1
+                and parallel.prefill_context_parallel_size == 1
+                and parallel.decode_context_parallel_size == 1
+                and self.ascend_config.kvpp_config.size == 1
+                and self.vllm_config.kv_transfer_config is None
+                and not self.ascend_config.sparse_kv_offload_config.enabled
+                and not spec.enable_adaptive_verification
+            )
 
         if spec is None or self.speculator is None or spec.method != "dspark" or spec.draft_model_config is None:
             return False
