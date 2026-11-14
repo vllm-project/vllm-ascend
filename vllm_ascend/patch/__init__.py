@@ -37,13 +37,15 @@
 # --------------------------------
 # * platform/patch_replayssm_config.py:
 #   Target: VllmConfig.validate_mamba_cached_kernel and its Pydantic validator.
-#   Why: The paired upstream validator selects KDA RecoverSSM only for Kimi,
-#        while Ascend also implements it for GLM-Next.
-#   How: Validate GLM's supported execution/cache/PD contract and derive
-#        use_kda_recoverssm from the existing use_replayssm flag. Other models
-#        and disabled configurations retain the upstream validator.
-#   Related PR: No upstream GLM ReplaySSM configuration extension exists yet.
-#   Future plan: Remove this patch when upstream supports GLM KDA selection.
+#   Why: Ascend's GLM and Kimi KDA RecoverSSM paths have platform-specific
+#        cache and parallelism restrictions, and upstream does not recognize
+#        all Kimi K3.1 architecture aliases.
+#   How: Select the request-indexed KDA path from its text-config contract,
+#        validate its execution constraints and derive use_kda_recoverssm from
+#        use_replayssm. Other models and disabled configurations retain the
+#        upstream validator.
+#   Related PR: No upstream platform-specific ReplaySSM selector exists yet.
+#   Future plan: Remove when upstream supports the Ascend KDA configuration contract.
 # --------------------------------
 # * Platform Patch:
 # ==========#

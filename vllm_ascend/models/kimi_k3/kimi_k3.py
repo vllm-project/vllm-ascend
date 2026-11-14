@@ -11,7 +11,7 @@ import math
 from bisect import bisect_left
 from collections.abc import Callable, Iterable, Sequence
 from copy import copy
-from typing import Any, TypeVar, cast
+from typing import Any, ClassVar, Literal, TypeVar, cast
 
 import torch
 import vllm.envs as envs
@@ -1318,6 +1318,7 @@ class KimiMixtureOfExperts(MixtureOfExperts):
 class AscendKimiLinearForCausalLM(UpstreamKimiLinearForCausalLM, KimiMixtureOfExperts):
     """Causal-LM wrapper retaining vLLM 0.27 state/cache interfaces."""
 
+    supports_replayssm: ClassVar[Literal[True]] = True
     packed_modules_mapping = AscendKimiLinearModel.packed_modules_mapping
 
     @classmethod
@@ -1419,6 +1420,8 @@ class AscendKimiK3MultiModalProjector(KimiK25MultiModalProjector):
 )
 class AscendKimiK3ForConditionalGeneration(UpstreamKimiK3ForConditionalGeneration):
     """Upstream Kimi K3 multimodal wrapper with Ascend text/projector layers."""
+
+    supports_replayssm: ClassVar[Literal[True]] = True
 
     @classmethod
     def get_mamba_state_shape_from_config(cls, vllm_config):

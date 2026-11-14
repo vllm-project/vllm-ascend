@@ -8,6 +8,7 @@ import pytest
 import torch
 from torch import nn
 
+from vllm_ascend.ops.kda_pcp import KimiKDAHostMetadataBackend, KimiKDARecoverSSMMetadataBackend
 from vllm_ascend.ops.kimi_kda import (
     _PACKED_CONV_WEIGHT_NAME,
     AscendKimiK3DeltaAttention,
@@ -29,6 +30,17 @@ class _RecordingLinear(nn.Module):
 
     def forward(self, _input: torch.Tensor):
         return self.output, None
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_kda_backend_selection_is_bound_to_layer_not_ambient_config(enabled):
+    from vllm_ascend.models.kimi_k3.recoverssm_metadata import AscendKimiKDARecoverSSMMetadataBuilder
+
+    attention = SimpleNamespace(use_recoverssm=enabled)
+    backend = AscendKimiK3DeltaAttention.get_attn_backend(attention)
+    assert backend is (KimiKDARecoverSSMMetadataBackend if enabled else KimiKDAHostMetadataBackend)
+    if enabled:
+        assert backend.get_builder_cls() is AscendKimiKDARecoverSSMMetadataBuilder
 
 
 class _RecordingStream:
@@ -196,10 +208,12 @@ def test_fused_bfg_linear_recomposes_f_after_source_reload():
     torch.testing.assert_close(linear.weight[2:6], reloaded_f_b.float() @ reloaded_f_a.float())
 
 
-def test_fused_bfg_projection_preserves_staged_outputs():
+@pytest.mark.parametrize("recover", [False, True])
+def test_fused_bfg_projection_preserves_staged_outputs(recover):
     attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
     nn.Module.__init__(attention)
     attention.head_dim = 3
+    attention.use_recoverssm = recover
     attention._fused_bfg_output_sizes = (2, 6, 6)
     hidden_states = torch.randn(4, 5)
     fused_output = torch.arange(56, dtype=torch.float32).reshape(4, 14).to(torch.bfloat16)
@@ -209,16 +223,18 @@ def test_fused_bfg_projection_preserves_staged_outputs():
     assert projected_bfg is fused_output
 
     beta, raw_gate, output_gate = attention._postprocess_bfg(projected_bfg)
-    assert beta.dtype == torch.float32
-    torch.testing.assert_close(beta, fused_output[:, :2].float().sigmoid().unsqueeze(0))
+    expected_beta = fused_output[:, :2] if recover else fused_output[:, :2].float().sigmoid()
+    torch.testing.assert_close(beta, expected_beta.unsqueeze(0))
     torch.testing.assert_close(raw_gate, fused_output[:, 2:8].reshape(4, 2, 3).unsqueeze(0))
     torch.testing.assert_close(output_gate, fused_output[:, 8:].reshape(4, 2, 3))
 
 
-def test_mixed_forward_marks_auxiliary_beta_as_preprocessed():
+@pytest.mark.parametrize("recover", [False, True])
+def test_mixed_forward_marks_auxiliary_beta_as_preprocessed(recover):
     attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
     nn.Module.__init__(attention)
     attention.uses_mixed_projection = True
+    attention.use_recoverssm = recover
     attention.pcp_size = 1
     attention.local_num_heads = 2
     attention.head_dim = 3
@@ -237,7 +253,7 @@ def test_mixed_forward_marks_auxiliary_beta_as_preprocessed():
 
     assert actual is projected
     assert attention._forward.call_args.kwargs["beta"] is beta
-    assert attention._forward.call_args.kwargs["beta_is_preprocessed"] is True
+    assert attention._forward.call_args.kwargs["beta_is_preprocessed"] is (not recover)
 
 
 def test_overlapped_qkv_bfg_keeps_two_stage_vector_cube_overlap():
@@ -569,6 +585,7 @@ def test_kda_forward_preserves_live_rows_with_nan_padding(mode, source_layout):
         prefix="kda",
         head_dim=2,
         num_spec=3,
+        use_recoverssm=False,
         kv_cache=(torch.zeros(1), state),
         get_parameter=lambda name: torch.empty(1),
         _run_causal_conv1d=lambda x, *args, **kwargs: x,
@@ -600,8 +617,90 @@ def test_kda_forward_preserves_live_rows_with_nan_padding(mode, source_layout):
     assert len(norm_inputs) == 1
 
 
+@pytest.mark.parametrize("mixed", [False, True])
+def test_recoverssm_dispatches_without_spec_mask_and_sigmoids_beta_once(mixed):
+    num_tokens, dim = 4, 2
+    spec_tokens = torch.tensor([0, 2]) if mixed else None
+    non_spec_tokens = torch.tensor([1, 3]) if mixed else None
+    spec_count = 2 if mixed else num_tokens
+    conv_meta = SimpleNamespace(
+        query_start_loc=torch.tensor([0, spec_count]),
+        cache_indices=torch.tensor([7]),
+        num_accepted_tokens=torch.ones(1, dtype=torch.int32),
+    )
+    metadata = SimpleNamespace(
+        num_actual_tokens=num_tokens,
+        num_prefills=0,
+        num_decodes=int(mixed),
+        num_decode_tokens=2 if mixed else 0,
+        num_spec_decodes=1,
+        spec_sequence_masks=None,
+        spec_token_indx=spec_tokens,
+        non_spec_token_indx=non_spec_tokens,
+        spec_decode_metadata=SimpleNamespace(spec_causal_conv1d=conv_meta),
+        non_spec_decode_metadata=SimpleNamespace(causal_conv1d=conv_meta),
+        spec_query_start_loc=torch.tensor([0, spec_count]),
+        non_spec_query_start_loc=torch.tensor([0, 1, 2]),
+        spec_state_indices_tensor=torch.tensor([[7]], dtype=torch.int32),
+        non_spec_state_indices_tensor=torch.tensor([1, 2], dtype=torch.int32),
+    )
+    qkv = torch.arange(num_tokens * dim * 3, dtype=torch.float32).reshape(num_tokens, dim * 3)
+    raw_beta = torch.linspace(-2, 2, num_tokens).reshape(1, num_tokens, 1)
+    records = SimpleNamespace(correction=torch.empty(1), key_gate=torch.empty(1))
+
+    def verify(*args, **kwargs):
+        expected_beta = raw_beta if spec_tokens is None else raw_beta.index_select(1, spec_tokens)
+        torch.testing.assert_close(args[4], expected_beta)
+        torch.testing.assert_close(args[12], torch.tensor([7], dtype=torch.int32))
+        return args[2] * 2
+
+    def norm_into(x, _gate, *, out):
+        out.copy_(x)
+
+    def native_fn(_q, _k, v, _gate, beta, *_args, **_kwargs):
+        torch.testing.assert_close(beta, raw_beta.sigmoid().index_select(1, non_spec_tokens))
+        return v * 3
+
+    native = MagicMock(side_effect=native_fn)
+    attention = SimpleNamespace(
+        prefix="kda",
+        head_dim=dim,
+        num_spec=3,
+        use_recoverssm=True,
+        recoverssm_records=records,
+        A_log=torch.zeros(1),
+        dt_bias=torch.zeros(dim),
+        gate_lower_bound=-5.0,
+        kv_cache=(torch.empty(1), torch.empty(1)),
+        get_parameter=lambda _name: torch.empty(1),
+        _run_causal_conv1d=lambda x, *_args, **_kwargs: x,
+        _run_recurrent=native,
+        o_norm=SimpleNamespace(forward_oot=norm_into),
+    )
+    output = torch.empty(1, num_tokens, 1, dim)
+    with (
+        patch("vllm_ascend.ops.kimi_kda.GDNAttentionMetadata", SimpleNamespace),
+        patch(
+            "vllm_ascend.ops.kimi_kda.get_forward_context",
+            return_value=SimpleNamespace(attn_metadata={"kda": metadata}),
+        ),
+        patch("vllm_ascend.ops.kimi_kda.kda_recoverssm_verify", side_effect=verify) as recover,
+    ):
+        AscendKimiK3DeltaAttention._forward(
+            attention, qkv, torch.zeros(1, num_tokens, 1, dim), torch.zeros(num_tokens, 1, dim), raw_beta, output
+        )
+    assert recover.call_count == 1
+    assert native.call_count == int(mixed)
+    v = qkv[:, 2 * dim :].reshape(1, num_tokens, 1, dim)
+    expected = v * 2
+    if mixed:
+        expected[:, non_spec_tokens] = v[:, non_spec_tokens] * 3
+    torch.testing.assert_close(output, expected)
+
+
+@pytest.mark.parametrize("recover", [False, True])
 @pytest.mark.parametrize("mode", ["prefill", "idle"])
-def test_kda_prefill_direct_norm_and_idle_output(mode):
+def test_kda_prefill_direct_norm_and_idle_output(mode, recover):
     tokens, capacity, heads, dim = 3, 4, 2, 128
     core = torch.randn(1, tokens, heads, dim)
     before = core.clone()
@@ -613,6 +712,8 @@ def test_kda_prefill_direct_norm_and_idle_output(mode):
         num_prefills=int(mode == "prefill"),
         num_decodes=0,
         num_decode_tokens=0,
+        num_spec_decodes=0,
+        spec_state_indices_tensor=None,
         spec_sequence_masks=None,
         spec_token_indx=None,
         non_spec_token_indx=None,
@@ -632,6 +733,7 @@ def test_kda_prefill_direct_norm_and_idle_output(mode):
     norm.side_effect = norm_into
     attention = SimpleNamespace(
         prefix="kda",
+        use_recoverssm=recover,
         head_dim=dim,
         kv_cache=(torch.empty(1), torch.empty(1)),
         get_parameter=lambda name: torch.empty(1),
@@ -646,12 +748,13 @@ def test_kda_prefill_direct_norm_and_idle_output(mode):
             return_value=SimpleNamespace(attn_metadata={"kda": metadata}),
         ),
     ):
+        raw_beta = torch.linspace(-2, 2, tokens).reshape(1, tokens, 1).expand(-1, -1, heads)
         AscendKimiK3DeltaAttention._forward(
             attention,
             torch.randn(tokens, 3 * heads * dim),
             torch.randn(1, tokens, heads, dim),
             gate,
-            torch.zeros(1, tokens, heads),
+            raw_beta,
             output,
         )
     if mode == "idle":
@@ -660,6 +763,7 @@ def test_kda_prefill_direct_norm_and_idle_output(mode):
         torch.testing.assert_close(output, torch.zeros_like(output))
     else:
         norm.assert_called_once()
+        torch.testing.assert_close(attention._run_prefill.call_args.args[4], raw_beta.sigmoid())
         torch.testing.assert_close(output[:, :tokens], before * gate[:tokens].sigmoid())
         torch.testing.assert_close(output[:, tokens:], torch.zeros_like(output[:, tokens:]))
         torch.testing.assert_close(core, before)

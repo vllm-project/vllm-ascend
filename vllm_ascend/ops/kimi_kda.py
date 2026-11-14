@@ -44,7 +44,8 @@ from vllm_ascend.ops.kda_parallel import (
     get_kda_parallel_rank,
     get_kda_parallel_size,
 )
-from vllm_ascend.ops.kda_pcp import KimiKDAHostMetadataBackend
+from vllm_ascend.ops.kda_pcp import KimiKDAHostMetadataBackend, KimiKDARecoverSSMMetadataBackend
+from vllm_ascend.ops.triton.kda.recoverssm import kda_recoverssm_verify
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDynamicLinearMethod,
 )
@@ -351,6 +352,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         default_weight_loader(param, loaded_weight.narrow(0, self.tp_rank * param.numel(), param.numel()))
 
     def get_attn_backend(self) -> type[AttentionBackend]:
+        if self.use_recoverssm:
+            return KimiKDARecoverSSMMetadataBackend
         return KimiKDAHostMetadataBackend
 
     def forward(
@@ -380,7 +383,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 g2=g2,
                 beta=beta,
                 core_attn_out=core_attn_out,
-                beta_is_preprocessed=True,
+                beta_is_preprocessed=not self.use_recoverssm,
             )
             core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
             return self.o_proj(core_attn_out)[0]
@@ -411,8 +414,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
 
         with npu_stream_switch(bfg_stream):
             # Stage 2: after both first-stage branches complete, overlap the
-            # QKV Cube matmul with beta's FP32 conversion, sigmoid and raw-gate
-            # packing. Split and reshape the F/output gates here as well so all
+            # QKV Cube matmul with raw-gate packing and, on the native path,
+            # beta's FP32 conversion and sigmoid. Pack the F/output gates so all
             # BFG output handling occurs after the QKV matmul is enqueued.
             bfg_stream.wait_event(quant_ready)
             beta, g1, g2 = self._postprocess_bfg(fused_bfg)
@@ -439,8 +442,10 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             self._fused_bfg_output_sizes,
             dim=-1,
         )
-        beta = beta.float().sigmoid().unsqueeze(0)
-        # Keep packing beside sigmoid on the auxiliary stream. This also
+        if not self.use_recoverssm:
+            beta = beta.float().sigmoid()
+        beta = beta.unsqueeze(0)
+        # Pack the raw gate on the auxiliary stream. This also
         # copies graph padding and precedes any mixed-token index_select.
         raw_gate = rearrange(raw_gate, "n (h d) -> 1 n h d", d=self.head_dim).contiguous()
         output_gate = rearrange(output_gate, "n (h d) -> n h d", d=self.head_dim)
@@ -673,11 +678,15 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         g1 = g1[:, :num_actual_tokens]
         g2 = g2[:num_actual_tokens]
-        beta = _prepare_beta(
-            beta,
-            num_actual_tokens,
-            is_preprocessed=beta_is_preprocessed,
-        )
+        use_recoverssm = self.use_recoverssm
+        if use_recoverssm:
+            beta = beta[:, :num_actual_tokens]
+        else:
+            beta = _prepare_beta(
+                beta,
+                num_actual_tokens,
+                is_preprocessed=beta_is_preprocessed,
+            )
 
         conv_state, recurrent_state = self.kv_cache
         conv_weights_t = self.get_parameter(_PACKED_CONV_WEIGHT_NAME)
@@ -685,7 +694,12 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         spec_token_indices = attn_metadata.spec_token_indx
         non_spec_token_indices = attn_metadata.non_spec_token_indx
 
-        if spec_masks is not None:
+        use_spec = (
+            attn_metadata.num_spec_decodes > 0 and attn_metadata.spec_state_indices_tensor is not None
+            if use_recoverssm
+            else spec_masks is not None
+        )
+        if use_spec:
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
                 mixed_spec = mixed_qkv
                 raw_gate_spec = g1
@@ -728,17 +742,38 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             assert raw_gate_spec is not None and beta_spec is not None
             assert attn_metadata.spec_query_start_loc is not None
             assert attn_metadata.spec_state_indices_tensor is not None
-            core_spec = self._run_recurrent(
-                q_spec,
-                k_spec,
-                v_spec,
-                raw_gate_spec,
-                beta_spec,
-                recurrent_state,
-                attn_metadata.spec_query_start_loc,
-                attn_metadata.spec_state_indices_tensor,
-                num_accepted_tokens=spec_conv_meta.num_accepted_tokens,
-            )
+            if use_recoverssm:
+                records = self.recoverssm_records
+                if records is None:
+                    raise RuntimeError("Kimi RecoverSSM verify records are not initialized")
+                core_spec = kda_recoverssm_verify(
+                    q_spec,
+                    k_spec,
+                    v_spec,
+                    raw_gate_spec,
+                    beta_spec,
+                    self.A_log.reshape(-1),
+                    self.dt_bias,
+                    self.gate_lower_bound,
+                    recurrent_state,
+                    records.correction,
+                    records.key_gate,
+                    attn_metadata.spec_query_start_loc,
+                    attn_metadata.spec_state_indices_tensor[:, 0],
+                    self.num_spec + 1,
+                )
+            else:
+                core_spec = self._run_recurrent(
+                    q_spec,
+                    k_spec,
+                    v_spec,
+                    raw_gate_spec,
+                    beta_spec,
+                    recurrent_state,
+                    attn_metadata.spec_query_start_loc,
+                    attn_metadata.spec_state_indices_tensor,
+                    num_accepted_tokens=spec_conv_meta.num_accepted_tokens,
+                )
 
         core_non_spec = None
         if mixed_non_spec is not None and mixed_non_spec.shape[0] > 0:
@@ -773,8 +808,10 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             )
             assert raw_gate_non_spec is not None
             assert beta_non_spec is not None
+            if use_recoverssm:
+                beta_non_spec = beta_non_spec.float().sigmoid()
 
-            split_non_spec = spec_masks is None and attn_metadata.num_prefills > 0 and attn_metadata.num_decodes > 0
+            split_non_spec = not use_spec and attn_metadata.num_prefills > 0 and attn_metadata.num_decodes > 0
             num_decode_tokens = attn_metadata.num_decode_tokens
             core_decode = None
             if split_non_spec:
