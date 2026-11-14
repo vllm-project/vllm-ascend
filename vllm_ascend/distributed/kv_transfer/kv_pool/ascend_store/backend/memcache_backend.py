@@ -21,20 +21,34 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import get_sharded_mamba_group_ids
 
+_MEMCACHE_PROTOCOL_KEY = "ock.mmc.local_service.protocol"
 
-def _is_device_sdma() -> bool:
+
+def _get_memcache_protocol() -> str | None:
     config_path = os.getenv("MMC_LOCAL_CONFIG_PATH")
     if not config_path:
         raise ValueError("The environment variable 'MMC_LOCAL_CONFIG_PATH' is not set.")
+    protocol = None
     with open(config_path, encoding="utf-8") as config_file:
         for line in config_file:
             line = line.strip()
             if not line or line.startswith(("#", ";")):
                 continue
             key, separator, value = line.partition("=")
-            if separator and key.strip() == "ock.mmc.local_service.protocol":
-                return value.strip() == "device_sdma"
-    return False
+            if separator and key.strip() == _MEMCACHE_PROTOCOL_KEY:
+                if protocol is not None:
+                    raise ValueError(f"MMC_LOCAL_CONFIG_PATH contains duplicate {_MEMCACHE_PROTOCOL_KEY} entries.")
+                protocol = value.strip()
+    return protocol
+
+
+def require_hisparse_host_tcp() -> None:
+    protocol = _get_memcache_protocol()
+    if protocol != "host_tcp":
+        raise ValueError(
+            f"HiSparse with AscendStore requires {_MEMCACHE_PROTOCOL_KEY}=host_tcp "
+            f"in MMC_LOCAL_CONFIG_PATH, got {protocol!r}."
+        )
 
 
 MEMCACHE_THREAD_START_WAIT_S = 0.1
@@ -160,12 +174,12 @@ class MemcacheBackend(Backend):
         _validate_device_ub_qos()
         self.device_id = torch.npu.current_device() if device_id is None else device_id
         self._init_bm = init_bm
-        self._lazy_init = lazy_init and _is_device_sdma()
+        self._lazy_init = lazy_init and _get_memcache_protocol() == "device_sdma"
 
         self.store: Any | None = None
         self._store_initialized = False
         self._store_init_lock = threading.Lock()
-        self._pending_buffers: tuple[list[int], list[int]] | None = None
+        self._pending_buffers: tuple[list[int], list[int], bool] | None = None
 
         if not self._lazy_init:
             self.store = self._setup_store()
@@ -238,8 +252,10 @@ class MemcacheBackend(Backend):
     def set_device(self):
         torch.npu.set_device(self.device_id)
 
-    def register_buffer(self, ptrs: list[int], sizes: list[int]):
-        self._pending_buffers = (list(ptrs), list(sizes))
+    def register_buffer(self, ptrs: list[int], sizes: list[int], *, check_result: bool = False):
+        if check_result and len(ptrs) != len(sizes):
+            raise ValueError("HiSparse MemCache buffer pointers and sizes must have the same length.")
+        self._pending_buffers = (list(ptrs), list(sizes), check_result)
         self._register_buffers_if_needed()
 
     def _get_hisparse(
@@ -302,9 +318,30 @@ class MemcacheBackend(Backend):
         if self._pending_buffers is None or not self._store_initialized:
             return
         assert self.store is not None
-        ptrs, sizes = self._pending_buffers
-        for ptr, size in zip(ptrs, sizes):
-            self.store.register_buffer(ptr, size)
+        ptrs, sizes, check_result = self._pending_buffers
+        if not check_result:
+            for ptr, size in zip(ptrs, sizes):
+                self.store.register_buffer(ptr, size)
+            self._pending_buffers = None
+            return
+
+        registered: list[tuple[int, int]] = []
+        try:
+            for ptr, size in zip(ptrs, sizes, strict=True):
+                result = self.store.register_buffer(ptr, size)
+                if result != 0:
+                    raise RuntimeError(f"HiSparse MemCache buffer registration failed: size={size}, result={result}.")
+                registered.append((ptr, size))
+        except Exception:
+            for ptr, size in reversed(registered):
+                try:
+                    result = self.store.unregister_buffer(ptr, size)
+                    if result != 0:
+                        logger.error("HiSparse MemCache buffer rollback failed: size=%s, result=%s", size, result)
+                except Exception:
+                    logger.exception("HiSparse MemCache buffer rollback failed: size=%s", size)
+            self._pending_buffers = None
+            raise
         self._pending_buffers = None
 
     def exists(self, keys: list[str]) -> list[int]:
