@@ -551,7 +551,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                 common_attn_metadata,
                 decode_threshold=self.decode_threshold,
                 treat_short_extends_as_decodes=(
-                    not (self.use_pcp or self.use_dcp)
+                    not self.use_dcp
                     # Only DCP needs the PD last-token recompute override.
                     # Use the builder's config outside the current-config context.
                     or (self.use_dcp and is_pd_decode_recompute_scheduler_enabled(self.vllm_config))
@@ -640,10 +640,9 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             prefill_metadata = metadata.prefill
             assert prefill_metadata is not None
             prefill_metadata.pcp_local_num_input_tokens = local_num_input_tokens
-            # PCP partitions prefill tokens into rank-local chunks, including
-            # continued prefills whose uncached suffix contains only one token.
-            # Keep decode-only batches on their graph path, but route every batch
-            # containing prefill work through the chunked-prefill implementation.
+            # Keep decode-only batches, including short prefills classified as
+            # decodes, on the decode path. A mixed batch with remaining long
+            # prefill work still uses the chunked-prefill implementation.
             metadata.attn_state = AscendAttentionState.ChunkedPrefill
 
     def build_chunked_metadata(

@@ -35,6 +35,7 @@ from vllm_ascend.attention.sfa_v1 import (
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     PreprocessType,
+    has_effective_prefill,
     is_dcp_enabled,
     split_decodes_and_prefills,
 )
@@ -504,7 +505,7 @@ class AscendSFAPCPDCPMetadataBuilder(AscendSFADCPMetadataBuilder):
                 **kwargs,
             )
         pcp_ordered_indexer_slot_mapping = None
-        if bool(pcp_context.global_batch.is_prefilling_np.any()):
+        if has_effective_prefill(pcp_context.global_batch):
             if pcp_cache_group_idx is None:
                 raise RuntimeError("PCP+DCP prefill requires the PCP cache-group index.")
             pcp_ordered_indexer_slot_mapping = self._build_pcp_ordered_indexer_slot_mapping(

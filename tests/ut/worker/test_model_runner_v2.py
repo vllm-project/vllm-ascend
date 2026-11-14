@@ -260,7 +260,9 @@ def test_flashmla_target_graph_gate_preserves_batch_semantics(group_specs, expec
     with patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, upstream_uniform)):
         gathered, uniform = runner.gather_batch_req_state(SimpleNamespace(), False)
 
-    target_prefill = expected_target_flashmla and batch_state.has_prefill
+    # Cached PD tails carry an explicit decode override. Fresh prefill still
+    # uses FIA, and draft-only FlashMLA must not reorder target requests.
+    target_prefill = expected_target_flashmla and batch_kind == "prefill"
     order = [1, 0] if target_prefill else [0, 1]
     assert gathered.req_ids == [batch_state.req_ids[index] for index in order]
     for field in batch_state._fields:
@@ -290,18 +292,109 @@ def test_gather_batch_preserves_pd_tail_and_flashmla_request_order(uses_flashmla
         gathered, uniform = runner.gather_batch_req_state(scheduler_output, False)
 
     parent.assert_called_once_with(scheduler_output, False)
-    order = [1, 0] if uses_flashmla else [0, 1]
+    order = [0, 1]
     assert gathered.req_ids == [batch_state.req_ids[index] for index in order]
     for field in batch_state._fields:
         values = getattr(batch_state, field)
         if isinstance(values, np.ndarray):
             np.testing.assert_array_equal(getattr(gathered, field), values[order])
     assert gathered.has_prefill is True
-    assert gathered.decode_graph_eligible is (not uses_flashmla)
-    assert uniform == (None if uses_flashmla else runner.decode_query_len)
+    assert gathered.decode_graph_eligible is True
+    assert uniform == runner.decode_query_len
     np.testing.assert_array_equal(batch_state.is_prefilling_np, [True, False])
     if not uses_flashmla:
         assert gathered is batch_state
+
+
+@pytest.mark.parametrize(
+    "computed_prefill,draft_tokens,expected_mask,expected_graph_eligible,expected_dispatch_tokens",
+    [
+        (127, 0, [True, False], True, 1),
+        (127, 3, [True, False], True, 4),
+        (0, 0, [False, False], False, 2),
+        (0, 3, [False, False], False, 6),
+    ],
+)
+@pytest.mark.parametrize("backend", ["mla", "flashmla", "other"])
+def test_gather_pcp_classifies_only_cached_one_token_prefill_as_decode(
+    computed_prefill,
+    expected_mask,
+    expected_graph_eligible,
+    expected_dispatch_tokens,
+    backend,
+    draft_tokens,
+):
+    runner = _make_runner()
+    runner.model_config.use_mla = backend != "other"
+    runner._target_uses_flashmla = backend == "flashmla"
+    runner.vllm_config = SimpleNamespace(
+        model_config=runner.model_config,
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=2,
+            decode_context_parallel_size=1,
+        ),
+    )
+    runner.pcp_manager = AscendPCPManager(
+        2,
+        0,
+        torch.device("cpu"),
+        shard_decode_requests=True,
+    )
+    runner.pcp_manager.bind_config(runner.vllm_config)
+    batch_state = _make_batch_state(
+        [computed_prefill, 128],
+        [1 + draft_tokens] * 2,
+        [128 if computed_prefill else 1, 128],
+        draft_tokens,
+    )._replace(
+        prefill_runs_as_decode_np=None,
+        decode_graph_eligible=False,
+    )
+
+    with patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, None)):
+        gathered, uniform = runner.gather_batch_req_state(SimpleNamespace(), False)
+
+    order = [1, 0] if backend == "flashmla" and computed_prefill == 0 else [0, 1]
+    np.testing.assert_array_equal(gathered.is_prefilling_np, batch_state.is_prefilling_np[order])
+    np.testing.assert_array_equal(gathered.prefill_runs_as_decode_np, np.array(expected_mask)[order])
+    assert gathered.decode_graph_eligible is expected_graph_eligible
+    assert uniform == (1 + draft_tokens if expected_graph_eligible else None)
+    assert (
+        runner.pcp_manager.get_num_tokens_for_dispatch(
+            gathered.num_scheduled_tokens,
+            gathered.is_prefilling_np,
+        )
+        == expected_dispatch_tokens
+    )
+
+
+def test_gather_pcp_flashmla_keeps_dispatch_mask_in_final_request_order():
+    runner = _make_runner()
+    runner._target_uses_flashmla = True
+    runner.vllm_config = SimpleNamespace(
+        model_config=runner.model_config,
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=2, decode_context_parallel_size=1),
+    )
+    manager = AscendPCPManager(2, 0, torch.device("cpu"), shard_decode_requests=True)
+    manager.bind_config(runner.vllm_config)
+    runner.pcp_manager = manager
+    batch_state = _make_batch_state([0, 64, 127, 128], [1, 9, 4, 4], [1, 73, 128, 128])._replace(
+        num_draft_tokens_np=np.array([0, 0, 3, 3], dtype=np.int32),
+        prefill_runs_as_decode_np=None,
+        decode_graph_eligible=False,
+    )
+
+    with patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, None)):
+        gathered, uniform = runner.gather_batch_req_state(SimpleNamespace(), False)
+
+    assert gathered.req_ids == ["req-2", "req-3", "req-0", "req-1"]
+    np.testing.assert_array_equal(gathered.prefill_runs_as_decode_np, [True, False, False, False])
+    np.testing.assert_array_equal(batch_state.is_prefilling_np, [True, True, True, False])
+    assert uniform is None
+    assert not gathered.decode_graph_eligible
+    # Rank 0 owns four decode tokens plus 1+3 prefill tokens; rank 1 owns
+    # four decode tokens plus six prefill tokens. The stale mask sizes to 9.
+    assert manager.get_num_tokens_for_dispatch(gathered.num_scheduled_tokens, gathered.is_prefilling_np) == 10
 
 
 @pytest.mark.parametrize("uses_flashmla", [False, True])
@@ -1093,7 +1186,10 @@ def test_prepare_dummy_attn_without_pcp_uses_upstream(valid_state_slots):
         ([0, 4, 0, 0], False, True, False),
     ],
 )
-def test_kvpp_history_ignores_padding_and_dummy_work(monkeypatch, computed, dummy_run, is_profile, expected, enabled):
+@pytest.mark.parametrize("prefill_as_decode", [False, True])
+def test_kvpp_history_ignores_padding_and_dummy_work(
+    monkeypatch, computed, dummy_run, is_profile, expected, enabled, prefill_as_decode
+):
     from vllm_ascend.worker.v2.model_states import default
 
     runner = _make_runner(need_timing=False)
@@ -1121,6 +1217,7 @@ def test_kvpp_history_ignores_padding_and_dummy_work(monkeypatch, computed, dumm
         query_start_loc=torch.tensor([0, 1, 2, 2, 2]),
         num_scheduled_tokens=torch.tensor([1, 1]),
         is_prefilling_np=np.array([True, False, False, False]),
+        prefill_runs_as_decode_np=np.array([True, False, False, False]) if prefill_as_decode else None,
         seq_lens=torch.tensor([1, 5]),
         seq_lens_np=np.array([1, 5]),
         dcp_local_seq_lens=None,
@@ -1130,7 +1227,13 @@ def test_kvpp_history_ignores_padding_and_dummy_work(monkeypatch, computed, dumm
     if not enabled:
         batch.num_computed_tokens_np = None  # Disabled KVPP must not inspect history.
     metadata = object()
-    monkeypatch.setattr(default, "build_attn_metadata", lambda **_kwargs: metadata)
+
+    def build_attn_metadata(**kwargs):
+        assert kwargs["is_prefilling"].tolist() == [not prefill_as_decode, False, False, False]
+        np.testing.assert_array_equal(batch.is_prefilling_np, [True, False, False, False])
+        return metadata
+
+    monkeypatch.setattr(default, "build_attn_metadata", build_attn_metadata)
 
     def forward(_self, _scheduler_output, **_kwargs):
         assert state.kvpp_is_dummy_run is (dummy_run or is_profile)

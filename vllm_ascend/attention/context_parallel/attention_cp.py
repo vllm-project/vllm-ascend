@@ -39,6 +39,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    get_effective_prefill_flags,
     is_dcp_enabled,
     split_decodes_and_prefills,
 )
@@ -193,7 +194,7 @@ class AscendAttentionDCPMetadataBuilder(
         if context is None or context.local_to_global_req_indices is None:
             raise RuntimeError("GQA PCP+DCP prefill requires the global request view and local request mapping.")
         batch = context.global_batch
-        global_num_decodes = int((~batch.is_prefilling_np[: batch.num_reqs]).sum())
+        global_num_decodes = int((~get_effective_prefill_flags(batch)[: batch.num_reqs]).sum())
         global_decode_tokens = int(batch.query_start_loc_np[global_num_decodes])
         global_num_tokens = int(batch.query_start_loc_np[batch.num_reqs])
         local_tokens = common_attn_metadata.slot_mapping.numel() // self.pcp_group.world_size
