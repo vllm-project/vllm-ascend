@@ -9,9 +9,12 @@ import scipy.linalg  # type: ignore
 import torch
 import torch_npu
 from torch import nn
+from vllm import envs
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed import get_dcp_group, get_pcp_group
+from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
@@ -78,6 +81,88 @@ def _indexer_qk_stream() -> torch.npu.Stream:
 # tuple (the scale slot exists only when LI C8 is enabled).
 INDEXER_K_CACHE_SLOT = 0
 INDEXER_SCALE_CACHE_SLOT = 1
+INDEXER_MIN_QUERY_ROWS_PER_RANK = 128
+INDEXER_QUERY_SHARD_ALIGNMENT = 128
+INDEXER_DEFAULT_MIN_QUERY_ROWS = 65536
+
+
+def _balanced_query_shard_sizes(
+    seq_lens_cpu: torch.Tensor, query_lens_cpu: torch.Tensor, tp_size: int
+) -> list[int] | None:
+    # Ordinary SFA has one candidate key per causal position. Plan on host
+    # arrays: vLLM v0.32's CUDA planner has a fixed 16K-row floor per rank,
+    # whereas PCP-local Ascend batches can be much smaller.
+    query_lens = query_lens_cpu.numpy().astype(np.int64, copy=False)
+    seq_lens = seq_lens_cpu.numpy().astype(np.int64, copy=False)
+    num_rows = int(query_lens.sum())
+    if tp_size < 2 or num_rows < tp_size:
+        return None
+    first_key: np.ndarray = np.repeat(seq_lens - query_lens + 1, query_lens)
+    row_in_request = np.arange(num_rows) - np.repeat(np.cumsum(query_lens) - query_lens, query_lens)
+    cost = np.cumsum(first_key + row_in_request)
+    total = int(cost[-1])
+    if total <= 0:
+        return None
+    targets: np.ndarray = np.arange(1, tp_size) * total // tp_size
+    # targets is a 1-D array; NumPy's return stub also permits a scalar.
+    bounds = [0, *np.searchsorted(cost, targets).tolist(), num_rows]  # type: ignore[misc]
+    for i in range(1, tp_size):
+        bounds[i] = max(bounds[i], bounds[i - 1] + 1)
+    for i in range(tp_size - 1, 0, -1):
+        bounds[i] = min(bounds[i], bounds[i + 1] - 1)
+    return [bounds[i + 1] - bounds[i] for i in range(tp_size)]
+
+
+def _align_query_shard_sizes(sizes: list[int], query_starts: np.ndarray) -> list[int]:
+    # Keep internal cuts on request-local query tiles. On 950/CANN 9.2.1,
+    # arbitrary cuts changed TopK selections in the final rows of FP8 shards
+    # with real GLM inputs. Preserve the original request tail on its last rank.
+    bounds = np.concatenate(([0], np.cumsum(sizes)))
+    cuts = bounds[1:-1]
+    owners = np.searchsorted(query_starts, cuts, side="right") - 1
+    cuts -= (cuts - query_starts[owners]) % INDEXER_QUERY_SHARD_ALIGNMENT
+    return np.diff(bounds).tolist()
+
+
+def _query_parallel_supported(vllm_config: VllmConfig) -> bool:
+    parallel = vllm_config.parallel_config
+    mode = vllm_config.compilation_config.cudagraph_mode or CUDAGraphMode.NONE
+    # SFA DCP keeps the complete indexer K/scale cache on every rank.
+    # With PCP, each TP group repeats only its own DualChunkSwap segments;
+    # exchange TopK within TP while retaining PCP's existing K gather.
+    pcp_size = parallel.prefill_context_parallel_size
+    dcp_supported = (pcp_size == 1 and parallel.decode_context_parallel_size == 1) or (
+        parallel.decode_context_parallel_size == parallel.tensor_parallel_size * pcp_size
+        and enable_sfa_dcp_replicated_indexer(vllm_config)
+        and not enable_sfa_dcp_sharded_indexer(vllm_config)
+    )
+    return (
+        get_ascend_config().enable_indexer_query_parallel is True
+        and parallel.tensor_parallel_size > 1
+        and dcp_supported
+        and vllm_config.attention_config.indexer_kv_dtype != "mxfp4"
+        and not get_ascend_config().sparse_kv_offload_config.enabled
+        and not envs.VLLM_BATCH_INVARIANT
+        and mode.mixed_mode() != CUDAGraphMode.FULL
+    )
+
+
+@dataclass
+class IndexerQueryShard:
+    sizes: list[int]
+    start: int
+    end: int
+    query_lens: torch.Tensor
+    key_lens: torch.Tensor
+
+    def gather(self, indices: torch.Tensor) -> torch.Tensor:
+        # HCCL requires equal-size inputs. Padding is transport-only: never
+        # pass extra query rows to the indexer kernel.
+        max_rows = max(self.sizes)
+        local = indices.new_full((max_rows, *indices.shape[1:]), -1)
+        local[: self.end - self.start].copy_(indices)
+        gathered = get_tp_group().all_gather(local, dim=0)
+        return torch.cat([part[:size] for part, size in zip(gathered.split(max_rows), self.sizes)])
 
 
 @dataclass
@@ -118,6 +203,7 @@ class AscendSFAIndexerMetadata:
     # The selector receives ``(q_li, weights, indexer, metadata, q_li_scale)``;
     # ``q_li_scale`` is set only when LI C8 has already quantized ``q_li``.
     topk_selector: Any | None = None
+    query_shard: IndexerQueryShard | None = None
     local_visible_lengths: torch.Tensor | None = None
     # Shared verbatim by the A5 metadata producer and QLI consumer.
     qli_dcp_args: dict[str, Any] | None = None
@@ -379,6 +465,21 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         """Number of tensors this indexer's cache occupies in the composed
         ``kv_cache`` tuple (k cache only, or k cache plus scale cache)."""
         return 2 if self.enable_sparse_li_quant else 1
+
+    def reserve_query_parallel_workspace(self, device: torch.device) -> None:
+        """Account for the exchange skipped by the attention profiling path."""
+        config = get_current_vllm_config()
+        if not _query_parallel_supported(config):
+            return
+        tp_size = config.parallel_config.tensor_parallel_size
+        rows = config.scheduler_config.max_num_batched_tokens
+        if rows < max(config.attention_config.indexer_tp_shard_min_rows, tp_size * INDEXER_MIN_QUERY_ROWS_PER_RANK):
+            return
+        # The planner caps each rank at twice the equal-row partition. Live
+        # tensors are local TopK, padded send, padded gather and packed output.
+        max_local_rows = 2 * ((rows + tp_size - 1) // tp_size)
+        exchange_rows = (tp_size + 2) * max_local_rows + rows
+        torch.empty((exchange_rows, self.topk_tokens), dtype=torch.int32, device=device)
 
     def _quantize_li_tensor(
         self, x: torch.Tensor, *, defer_scale_cast: bool = False
@@ -832,6 +933,16 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             q_result = self._forward_q(hidden_states, q_c, cos, sin)
         q_li, q_li_scale, q_li_shape_ori = q_result
 
+        return self.select_topk(q_li, q_li_scale, q_li_shape_ori, weights, indexer_metadata)
+
+    def select_topk(
+        self,
+        q_li: torch.Tensor,
+        q_li_scale: torch.Tensor | None,
+        q_li_shape_ori: tuple[Any, ...] | None,
+        weights: torch.Tensor,
+        indexer_metadata: AscendSFAIndexerMetadata,
+    ) -> torch.Tensor:
         topk_selector = getattr(indexer_metadata, "topk_selector", None)
         if topk_selector is not None:
             return topk_selector(q_li, weights, self, indexer_metadata, q_li_scale)
@@ -840,6 +951,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
 
             if not self.enable_sparse_li_c8 or self.enable_sparse_li_c4:
                 raise NotImplementedError("Sharded Kimi indexer requires the native C8 QLI path.")
+            assert q_li_shape_ori is not None
             cu_seqlens_q, seqused_k, qli_metadata = self._get_local_qli_inputs(indexer_metadata)
             if indexer_metadata.qli_dcp_args is not None:
                 indices, scores = DeviceOperator.indexer_select_dcp_candidates(
@@ -895,7 +1007,21 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 self._dcp_interleave,
                 return_local=self._local_topk,
             )
-        return DeviceOperator.indexer_select_post_process(
+        shard = getattr(indexer_metadata, "query_shard", None)
+        if type(self) is not AscendSFAIndexerBackend or self.enable_sparse_li_c4:
+            shard = None
+        query_lens = indexer_metadata.actual_seq_lengths_query
+        key_lens = indexer_metadata.actual_seq_lengths_key
+        if shard is not None:
+            if q_li_shape_ori is not None:
+                q_li = q_li.view(q_li_shape_ori)
+                assert q_li_scale is not None
+                q_li_scale = q_li_scale.view(q_li_shape_ori[:-1])[shard.start : shard.end]
+                q_li_shape_ori = (shard.end - shard.start, *q_li_shape_ori[1:])
+            q_li = q_li[shard.start : shard.end]
+            weights = weights[shard.start : shard.end].contiguous()
+            query_lens, key_lens = shard.query_lens, shard.key_lens
+        indices = DeviceOperator.indexer_select_post_process(
             q_li,
             q_li_scale,
             q_li_shape_ori,
@@ -904,12 +1030,13 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             INDEXER_K_CACHE_SLOT,
             INDEXER_SCALE_CACHE_SLOT,
             indexer_metadata,
-            indexer_metadata.actual_seq_lengths_query,
-            indexer_metadata.actual_seq_lengths_key,
+            query_lens,
+            key_lens,
             self.enable_sparse_li_c8,
             self.enable_sparse_li_c4,
             self.use_torch_npu_lightning_indexer,
         )
+        return shard.gather(indices) if shard is not None else indices
 
 
 class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerMetadata]):
@@ -944,6 +1071,8 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             self.decode_threshold += speculative_config.num_speculative_tokens
 
         self.use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
+        self.query_parallel_enabled = _query_parallel_supported(vllm_config)
+        self._warn_if_query_parallel_inactive(vllm_config)
         self._is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)
         self._group_metadata_buffers: dict[
             object,
@@ -1278,7 +1407,8 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         **kwargs,
     ) -> AscendSFAIndexerMetadata:
         # common_prefix_len / fast_build are unused; kept for API compatibility.
-        return self._build(
+        graph_capture = kwargs.pop("_graph_capture", False)
+        metadata = self._build(
             common_attn_metadata,
             buffer_key=self._metadata_buffer_key(common_attn_metadata),
             use_cached_rope=True,
@@ -1289,6 +1419,99 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             pcp_cache_group_idx=common_attn_metadata.pcp_cache_group_idx,
             **kwargs,
         )
+        if self.query_parallel_enabled and not graph_capture:
+            # Only native PCP partitions carry the virtual-request boundaries
+            # used by this planner. Legacy/replicated draft layouts fall back.
+            if not self.use_pcp or (metadata.uses_pcp_sharded_layout and common_attn_metadata.pcp_context is not None):
+                metadata.query_shard = self._build_query_shard(common_attn_metadata)
+        return metadata
+
+    def build_for_cudagraph_capture(self, common_attn_metadata: CommonAttentionMetadata) -> AscendSFAIndexerMetadata:
+        return self.build(0, common_attn_metadata, _graph_capture=True)
+
+    def _warn_if_query_parallel_inactive(self, config: VllmConfig) -> None:
+        if get_ascend_config().enable_indexer_query_parallel is not True:
+            return
+        parallel = config.parallel_config
+        if not self.query_parallel_enabled:
+            logger.warning_once(
+                "SFA indexer query parallel is inactive for this configuration (TP=%d, PCP=%d, DCP=%d). "
+                "It requires TP > 1, ordinary TP or full-world SFA replicated-indexer DCP (DCP = TP * PCP), "
+                "no FULL mixed graph mode, non-C4 storage, "
+                "and no batch invariance or sparse KV offload.",
+                parallel.tensor_parallel_size,
+                parallel.prefill_context_parallel_size,
+                parallel.decode_context_parallel_size,
+            )
+            return
+        min_rows = max(
+            getattr(config.attention_config, "indexer_tp_shard_min_rows", INDEXER_DEFAULT_MIN_QUERY_ROWS),
+            parallel.tensor_parallel_size * INDEXER_MIN_QUERY_ROWS_PER_RANK,
+        )
+        budget = config.scheduler_config.max_num_batched_tokens
+        local_budget = budget // parallel.prefill_context_parallel_size
+        if local_budget < min_rows:
+            logger.warning_once(
+                "SFA indexer query parallel: max_num_batched_tokens=%d gives approximately %d query rows "
+                "per PCP rank, below the minimum %d (indexer_tp_shard_min_rows and at least 128 rows "
+                "per TP rank). Activation depends on the actual local batch, including short replicated requests.",
+                budget,
+                local_budget,
+                min_rows,
+            )
+
+    def _build_query_shard(self, common: CommonAttentionMetadata) -> IndexerQueryShard | None:
+        # Only ordinary, unpadded pure prefill is eligible. PCP's two separated
+        # segments are separate virtual requests here: keep their own query
+        # starts (including FP8 tile alignment) and absolute causal key ends.
+        # These are full-history indexer lengths, never DCP-local main-KV
+        # lengths. Drafting and graph capture do not publish a shard plan.
+        rows = common.num_actual_tokens
+        config = self.vllm_config
+        tp_size = config.parallel_config.tensor_parallel_size
+        min_rows = max(
+            getattr(config.attention_config, "indexer_tp_shard_min_rows", INDEXER_DEFAULT_MIN_QUERY_ROWS),
+            tp_size * INDEXER_MIN_QUERY_ROWS_PER_RANK,
+        )
+        if rows != common.num_input_tokens or rows < min_rows:
+            return None
+        query_lens_cpu = common.query_start_loc_cpu[1 : common.num_reqs + 1].diff(
+            prepend=common.query_start_loc_cpu[:1]
+        )
+        if bool((query_lens_cpu <= self.decode_threshold).any()):
+            return None
+        seq_lens_cpu = common.seq_lens_cpu_upper_bound
+        if seq_lens_cpu is None:
+            return None
+        sizes = _balanced_query_shard_sizes(
+            seq_lens_cpu[: common.num_reqs],
+            query_lens_cpu,
+            tp_size,
+        )
+        if sizes is None or sum(sizes) != rows:
+            return None
+        query_starts = common.query_start_loc_cpu[: common.num_reqs].numpy()
+        sizes = _align_query_shard_sizes(sizes, query_starts)
+        # Bound padded HCCL traffic and profiling memory for highly skewed
+        # histories. Equal rows remain exact when cost balancing is too skewed.
+        if min(sizes) < INDEXER_MIN_QUERY_ROWS_PER_RANK or max(sizes) > 2 * ((rows + tp_size - 1) // tp_size):
+            sizes = _align_query_shard_sizes(
+                [rows // tp_size + (rank < rows % tp_size) for rank in range(tp_size)], query_starts
+            )
+        if min(sizes) < INDEXER_MIN_QUERY_ROWS_PER_RANK:
+            return None
+        rank = get_tp_group().rank_in_group
+        start = sum(sizes[:rank])
+        end = start + sizes[rank]
+        starts = common.query_start_loc[: common.num_reqs]
+        ends = common.query_start_loc[1 : common.num_reqs + 1]
+        local_ends = ends.clamp(max=end)
+        counts = (local_ends - starts.clamp(min=start)).clamp(min=0)
+        query_lens = counts.cumsum(0).to(ends.dtype)
+        # Derive causal bounds from live device lengths, not the host cost
+        # estimates. Requests absent from this slice have zero K length.
+        key_lens = torch.where(counts > 0, common.seq_lens[: common.num_reqs] - (ends - local_ends), 0)
+        return IndexerQueryShard(sizes, start, end, query_lens, key_lens)
 
     def build_for_drafting(
         self,
