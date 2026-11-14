@@ -1,0 +1,7 @@
+pr: 21828
+entries:
+  - category: performance
+    text: >-
+      Share bounded replay masks and A5 plans across compatible cache groups,
+      overlap compact metadata preparation on the producer stream, and explicitly
+      select row-only planning for shared shape-only metadata.

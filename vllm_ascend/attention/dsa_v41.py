@@ -1093,7 +1093,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         separate_smla = (
             kwargs.get("v41_smla_override", False)
             or getattr(common, "causal", True) is not True
-            or getattr(common, "replay_start", None) is not None
+            or (getattr(common, "replay_start", None) is not None and not self._uses_a5_packed_cache)
             or kwargs.get("replay_start") is not None
             or kwargs.get("ori_sparse_indices") is not None
             or kwargs.get("num_query_heads") is not None
@@ -1313,13 +1313,37 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         replay_start = getattr(common, "replay_start", None)
         replay_visible_lens = None
         if replay_start is not None and req.cache_kind == "swa":
-            replay_visible_lens = build_replay_swa_visible_lens(
+            # Physical cache groups can share query coordinates and a replay
+            # floor. Cache only within this build; distinct floors retain
+            # distinct masks and therefore distinct A5 execution plans.
+            replay_key = (
                 window_size,
-                common.query_start_loc[: req.num_reqs + 1],
-                req.seq_lens,
-                replay_start,
+                req.num_reqs,
                 req.num_actual_tokens,
+                common.query_start_loc.data_ptr(),
+                req.seq_lens.data_ptr(),
+                replay_start.data_ptr(),
             )
+            replay_masks = self.common_v41_batch_metadata.setdefault("replay_swa_visible_lens", {})
+            cached_replay = replay_masks.get(replay_key)
+            if cached_replay is None:
+                replay_visible_lens = build_replay_swa_visible_lens(
+                    window_size,
+                    common.query_start_loc[: req.num_reqs + 1],
+                    req.seq_lens,
+                    replay_start,
+                    req.num_actual_tokens,
+                )
+                # Retain the inputs so allocator reuse cannot alias a later
+                # group's pointer key within this batch.
+                replay_masks[replay_key] = (replay_visible_lens, common.query_start_loc, req.seq_lens, replay_start)
+            else:
+                replay_visible_lens = cached_replay[0]
+            if self._uses_a5_packed_cache and self.common_v41_smla_metadata is self.common_v41_batch_metadata:
+                # Isolate different replay contracts independently of the
+                # planner's own cache keys (row-only or per-ratio FD plans).
+                replay_plans = self.common_v41_batch_metadata.setdefault("replay_smla_plans", {})
+                self.common_v41_smla_metadata = replay_plans.setdefault(replay_key, {})
         # In band mode this tensor is the per-token visible length; the sparse
         # path above is its other producer, and that one pairs it with an index
         # list. The operator's mask mode is therefore the band in both cases.
@@ -1343,6 +1367,7 @@ class AscendDSAV41StateMetadataBuilder(AscendDSAV41MetadataBuilder):
         return req
 
     def _build_compressor_cache(self, common, req: AscendDSAV41Metadata, **kwargs) -> None:
+        """Prepare ring writes and source RoPE only for the state-cache owner."""
         req.c2_ring_metadata = None
         req.c2_complete_mask = None
         req.c2_source_positions = None
@@ -1522,6 +1547,9 @@ class AscendDSAV41AttentionMetadataBuilder(AscendDSAV41MetadataBuilder):
                     layout_kv="PA_BBND",
                     has_ori_kv=True,
                     has_cmp_kv=True,
+                    # These buffers supply row shapes, not layer-specific
+                    # visibility. The shared plan must not read their values.
+                    split_kv=False,
                 )
                 self._a5_smla_metadata.copy_(value)
 

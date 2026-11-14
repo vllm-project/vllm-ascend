@@ -1,0 +1,4 @@
+pr: 21824
+entries:
+  - category: bugfix
+    text: Serialize V4.1 metadata planners that share scratch storage during bounded replay.

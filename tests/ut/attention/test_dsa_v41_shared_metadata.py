@@ -151,6 +151,7 @@ class TestSharedPCPMetadata:
         metadata = []
         for group, owner in enumerate(owners):
             owner._supports_device_ops = True
+            owner._uses_a5_packed_cache = False
             replay_start = torch.zeros_like(batch.local.seq_lens)
             if group:
                 query_lens = batch.local.query_start_loc[1:] - batch.local.query_start_loc[:-1]

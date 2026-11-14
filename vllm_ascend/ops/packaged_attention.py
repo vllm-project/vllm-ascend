@@ -430,7 +430,7 @@ torch.library.define(
     "Tensor? seqused_ori_kv=None, Tensor? seqused_cmp_kv=None, int? batch_size=None, int? max_seqlen_q=None, "
     "int? max_seqlen_ori_kv=None, int? max_seqlen_cmp_kv=None, int num_heads_q, int num_heads_kv, int "
     'head_dim, int quant_mode, str layout_q="TND", str layout_kv="PA_BBND", bool has_ori_kv=True, bool '
-    "has_cmp_kv=True) -> Tensor",
+    "has_cmp_kv=True, bool split_kv=True) -> Tensor",
 )
 
 
@@ -466,6 +466,7 @@ def _mixed_quant_sparse_flash_mla_metadata_fake(
     layout_kv: str = "PA_BBND",
     has_ori_kv: bool = True,
     has_cmp_kv: bool = True,
+    split_kv: bool = True,
 ):
     return torch.empty((1024,), dtype=torch.int32, device=ori_topk_length.device)
 
@@ -529,8 +530,9 @@ def _mixed_quant_sparse_flash_mla_metadata_impl(
     layout_kv: str = "PA_BBND",
     has_ori_kv: bool = True,
     has_cmp_kv: bool = True,
+    split_kv: bool = True,
 ):
-    """Generate the core task table through the external operator package."""
+    """Preserve the planner policy selected by the metadata producer."""
     _, dsl_metadata = _get_dsl_ops("mixed_quant_sparse_flash_mla")
 
     return dsl_metadata(
@@ -552,6 +554,7 @@ def _mixed_quant_sparse_flash_mla_metadata_impl(
         layout_kv=layout_kv,
         has_ori_kv=has_ori_kv,
         has_cmp_kv=has_cmp_kv,
+        split_kv=split_kv,
     )
 
 

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -25,6 +25,7 @@ from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.ops.triton.decoder_replay import gather_replay_batch
 from vllm_ascend.utils import should_skip_allreduce_across_dp_group
+from vllm_ascend.worker.device_metadata import DeviceMetadataTask
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
 from .decoder_replay_layers import AscendDecoderReplayLayers
@@ -41,6 +42,7 @@ class DecoderReplayInputs:
     attn_groups: list[list[AttentionGroup]]
     encoder_replay_start: torch.Tensor
     pcp_context: "AscendPCPAttentionContext | None" = None
+    metadata_producer_stream: torch.npu.Stream | None = None
 
 
 @dataclass(frozen=True)
@@ -76,6 +78,7 @@ class DecoderReplayState:
         self.builders: list[tuple[int, list[str], AscendDSAV41MetadataBuilder]] = []
         self.first_swa_builder: tuple[int, list[str], AscendDSAV41MetadataBuilder] | None = None
         self.metadata: dict[str, AscendDSAV41Metadata] = {}
+        self.metadata_ready: torch.npu.Event | None = None
         self.num_tokens = 0
         self.num_actual_tokens = 0
         self.dp_tokens: torch.Tensor | None = None
@@ -264,7 +267,9 @@ class DecoderReplayState:
             self.layers.context_factory = self.forward_context
             return
 
-        # This rank needs a compact batch and matching attention metadata.
+        # PCP retains its existing order because compaction performs device collectives.
+        if plan.uses_pcp_replay and inputs.metadata_producer_stream is not None:
+            torch.npu.current_stream().wait_stream(inputs.metadata_producer_stream)
         self._prepare_compact_replay(inputs, plan)
 
     def _build_replay_plan(self, inputs: DecoderReplayInputs) -> _DecoderReplayPlan:
@@ -348,14 +353,55 @@ class DecoderReplayState:
             self.replay_pcp_context = self._build_replay_pcp_context(inputs, global_kept)
             self.layers.num_padded_rows = plan.num_tokens
 
-        self.metadata = self._build_metadata(plan.replay_inputs, offsets)
+        producer = None if plan.uses_pcp_replay else inputs.metadata_producer_stream
+        if producer is None:
+            self.metadata = self._build_metadata(plan.replay_inputs, offsets)
+        else:
+            self._submit_compact_metadata(plan.replay_inputs, offsets, producer)
         # PCP selects valid rows and pads downstream; other paths may include padding row indices.
         num_selected_rows = self.num_actual_tokens if plan.uses_pcp_replay else plan.num_tokens
         self.layers.rows = self.rows[:num_selected_rows]
         self.layers.num_actual_rows = self.num_actual_tokens
         self.layers.context_factory = self.forward_context
 
-    def _build_metadata(self, inputs: DecoderReplayInputs, offsets: np.ndarray) -> dict[str, AscendDSAV41Metadata]:
+    def _submit_compact_metadata(
+        self, inputs: DecoderReplayInputs, offsets: np.ndarray, producer: torch.npu.Stream
+    ) -> None:
+        tasks: list[DeviceMetadataTask] = []
+        builders = [builder for _, _, builder in self.builders]
+        if self.first_swa_builder is not None:
+            builders.append(self.first_swa_builder[2])
+        with ExitStack() as stack:
+            for builder in builders:
+                stack.enter_context(builder.defer_device_metadata())
+            try:
+                self.metadata = self._build_metadata(inputs, offsets, tasks=tasks)
+            except BaseException:
+                for builder in builders:
+                    builder.take_device_metadata_tasks()
+                raise
+        if tasks:
+            main = torch.npu.current_stream()
+            # Target planners are already on this stream. The wait orders
+            # compact input tensors, and stream order serializes AICPU scratch.
+            producer.wait_stream(main)
+            try:
+                with torch.npu.stream(producer):
+                    for task in tasks:
+                        task.run()
+                self.metadata_ready = producer.record_event()
+            except BaseException:
+                main.wait_stream(producer)
+                raise
+
+    def wait_for_metadata(self) -> None:
+        if self.metadata_ready is not None:
+            torch.npu.current_stream().wait_event(self.metadata_ready)
+            self.metadata_ready = None
+
+    def _build_metadata(
+        self, inputs: DecoderReplayInputs, offsets: np.ndarray, *, tasks: list[DeviceMetadataTask] | None = None
+    ) -> dict[str, AscendDSAV41Metadata]:
         batch = inputs.batch
         num_reqs = batch.num_reqs
         assert self.slots is not None
@@ -367,22 +413,26 @@ class DecoderReplayState:
         batch_shared: dict[str, Any] = {}
         group_shared: dict[int, dict[str, Any]] = {}
         metadata: dict[str, AscendDSAV41Metadata] = {}
+        query_start_loc_cpu = torch.from_numpy(offsets)
+        seq_lens_cpu = torch.from_numpy(batch.seq_lens_np[:num_reqs])
+        is_prefilling = torch.from_numpy(batch.is_prefilling_np[:num_reqs])
+        max_query_len = max(int(np.diff(offsets).max(initial=0)), batch.max_query_len or 0)
         for group_id, layer_names, builder in self.builders:
             common = AscendCommonAttentionMetadata(
                 query_start_loc=self.offsets[: num_reqs + 1],
-                query_start_loc_cpu=torch.from_numpy(offsets),
+                query_start_loc_cpu=query_start_loc_cpu,
                 seq_lens=batch.seq_lens[:num_reqs],
-                seq_lens_cpu=torch.from_numpy(batch.seq_lens_np[:num_reqs]),
+                seq_lens_cpu=seq_lens_cpu,
                 num_reqs=num_reqs,
                 num_actual_tokens=self.num_actual_tokens,
                 num_input_tokens=self.num_tokens,
-                max_query_len=max(int(np.diff(offsets).max()), batch.max_query_len or 0),
+                max_query_len=max_query_len,
                 max_seq_len=self.config.model_config.max_model_len,
                 block_table_tensor=inputs.block_tables[group_id][:num_reqs],
                 slot_mapping=slot_mappings[group_id],
                 positions=positions,
                 attn_state=batch.attn_state,
-                is_prefilling=torch.from_numpy(batch.is_prefilling_np[:num_reqs]),
+                is_prefilling=is_prefilling,
                 replay_start=self.replay_start[:num_reqs],
                 pcp_context=self.replay_pcp_context,
                 pcp_cache_group_idx=group_id if self.replay_pcp_context is not None else None,
@@ -395,8 +445,12 @@ class DecoderReplayState:
                 common_v41_metadata=group_shared.setdefault(group_id, {}),
                 rope_views=rope,
             )
-            for task in builder.take_device_metadata_tasks():
-                task.run()
+            build_tasks = builder.take_device_metadata_tasks()
+            if tasks is None:
+                for task in build_tasks:
+                    task.run()
+            else:
+                tasks.extend(build_tasks)
             for name in layer_names:
                 metadata[name] = value
             if self.first_swa_builder is not None:
@@ -415,14 +469,19 @@ class DecoderReplayState:
                         common_v41_metadata={},
                         rope_views=rope,
                     )
-                    for task in first_builder.take_device_metadata_tasks():
-                        task.run()
+                    build_tasks = first_builder.take_device_metadata_tasks()
+                    if tasks is None:
+                        for task in build_tasks:
+                            task.run()
+                    else:
+                        tasks.extend(build_tasks)
                     assert first_swa_prefix is not None
                     metadata[first_swa_prefix] = first_value
         return metadata
 
     @contextmanager
     def forward_context(self) -> Iterator[None]:
+        self.wait_for_metadata()
         outer = get_forward_context()
         compact = self.layers.rows is not None
         padding = outer.is_padding

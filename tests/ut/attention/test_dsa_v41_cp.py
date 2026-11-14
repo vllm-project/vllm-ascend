@@ -776,6 +776,7 @@ class TestPCPMetadata:
             owner._a5_smla_length_rows = torch.empty(64, 1, dtype=torch.int32)
 
             def metadata(*args, **kwargs):
+                assert kwargs["split_kv"] is False
                 calls.append(kwargs["cu_seqlens_q"].clone())
                 return torch.ones(dsa_v41.V41_METADATA_BUFFER_SIZE, dtype=torch.int32)
 
