@@ -102,9 +102,10 @@ MAX_REQUESTS_PER_PEER_HANDLER = 5
 KV_CACHE_BUFFER_ALIGNMENT = 2 * 1024 * 1024
 
 
-class RemotePortInfo(TypedDict):
+class RemotePortInfo(TypedDict, total=False):
     num: int
     host: str
+    handshake_port: int
 
 
 class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
@@ -119,6 +120,13 @@ class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
     block_strides: list[list[int]]
     local_ip: str = ""
     handshake_port: int = 0
+
+
+def get_mooncake_handshake_logical_rank(
+    pp_rank: int, tp_size: int, tp_rank: int, pcp_rank: int, pcp_size: int = 1
+) -> int:
+    """Return the stable rank used by Mooncake's KV shard routing."""
+    return (pp_rank * pcp_size + pcp_rank) * tp_size + tp_rank
 
 
 @dataclass
@@ -292,6 +300,11 @@ class KVCacheSendingThread(threading.Thread):
         self.kv_caches = kv_caches
         self.pcp_rank = pcp_rank
         self.port_send_num: dict[str, int] = {}
+        self.logical_handshake_port = self.side_channel_port + get_mooncake_handshake_logical_rank(
+            self.pp_rank, self.tp_size, self.tp_rank, self.pcp_rank, self.pcp_size
+        )
+        self.handshake_port: int | None = None
+        self._stop_event = threading.Event()
 
         self.task_tracker = KVCacheTaskTracker()
 
@@ -309,34 +322,36 @@ class KVCacheSendingThread(threading.Thread):
     def add_delayed_request(self, request_id: str, delay_start_time: float):
         return self.task_tracker.add_delayed_request(request_id, delay_start_time)
 
+    def close(self) -> None:
+        """Stop the listener and release its bound port; safe to call again."""
+        self._stop_event.set()
+        if self.is_alive() and threading.current_thread() is not self:
+            self.join(timeout=5)
+
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
         try:
-            # Listen for new requests for metadata. NOTE(rob): we need each rank
-            # to have a unique port. This hack to keeps us moving. We will
-            # switch when moving to etcd or where we have a single ZMQ socket in
-            # the scheduler.
-            device_index = (self.pp_rank * self.pcp_size + self.pcp_rank) * self.tp_size + self.tp_rank
-            handshake_port = self.side_channel_port + device_index
-            path = make_zmq_path("tcp", self.side_channel_host, handshake_port)
-            logger.info(
-                "KVCacheSendingThread started listening on path: %s. Thread: tp_rank=%d, pp_rank=%d, pcp_rank=%d",
-                path,
-                self.tp_rank,
-                self.pp_rank,
-                self.pcp_rank,
-            )
-            with zmq_ctx(zmq.ROUTER, path) as sock:  # type: ignore
+            with bind_handshake_zmq_ctx(self.side_channel_host) as (sock, handshake_port):
+                self.handshake_port = handshake_port
+                self.metadata.handshake_port = handshake_port
+                logger.info(
+                    "KVCacheSendingThread listening on %s (logical port %d), tp_rank=%d, pp_rank=%d, pcp_rank=%d",
+                    make_zmq_path("tcp", self.side_channel_host, handshake_port),
+                    self.logical_handshake_port,
+                    self.tp_rank,
+                    self.pp_rank,
+                    self.pcp_rank,
+                )
                 self.ready_event.set()
                 self.run_busy_loop(sock)
         except Exception as e:
             logger.exception(
                 "Mooncake KVCacheSendingThread encountered exception. "
-                "Thread: tp_rank=%d, pp_rank=%d, listening_path=%s. "
+                "Thread: tp_rank=%d, pp_rank=%d, logical_port=%d. "
                 "Error: %s",
                 self.tp_rank,
                 self.pp_rank,
-                path,
+                self.logical_handshake_port,
                 e,
             )
 
@@ -348,8 +363,10 @@ class KVCacheSendingThread(threading.Thread):
             logger.debug("Size of encoded MooncakeAgentMetadata: %s bytes", str(size_in_bytes))
 
         decoder = msgspec.msgpack.Decoder(type=tuple)
-        while True:
+        while not self._stop_event.is_set():
             try:
+                if not sock.poll(100):
+                    continue
                 frames = sock.recv_multipart()
                 if len(frames) < 2:
                     logger.error(
@@ -388,15 +405,13 @@ class KVCacheSendingThread(threading.Thread):
                         if request_id not in self.port_send_num:
                             self.port_send_num[request_id] = 0
                         self.port_send_num[request_id] += 1
-                        device_index = (self.pp_rank * self.pcp_size + self.pcp_rank) * self.tp_size + self.tp_rank
-                        handshake_port = self.side_channel_port + device_index
-                        if self.port_send_num[request_id] >= remote_port_send_num[handshake_port]["num"]:
+                        if self.port_send_num[request_id] >= remote_port_send_num[self.logical_handshake_port]["num"]:
                             self.task_tracker.update_done_task_count(request_id)
                             del self.port_send_num[request_id]
                     else:
                         self.task_tracker.update_done_task_count(request_id)
                     # Acknowledge the request completion.
-                    while True:
+                    while not self._stop_event.is_set():
                         try:
                             # Send ACK to the sender.
                             sock.send_multipart((identity, b"", b"ACK"), flags=zmq.NOBLOCK)  # type: ignore
@@ -802,10 +817,14 @@ class KVCacheRecvingThread(threading.Thread):
             if should_send:
                 self.proc_not_transfer_request[request_id] = False
         if should_send:
-            for remote_port in remote_port_send_num:
-                if remote_port_send_num[remote_port]["num"] == 0:
-                    remote_host_ = remote_port_send_num[remote_port]["host"]
-                    self._send_done_recv_signal(request_id, remote_host_, remote_port, remote_port_send_num)
+            for remote_logical_port, port_info in remote_port_send_num.items():
+                if port_info["num"] == 0:
+                    self._send_done_recv_signal(
+                        request_id,
+                        port_info["host"],
+                        port_info.get("handshake_port", remote_logical_port),
+                        remote_port_send_num,
+                    )
 
     def _transfer_kv_cache_all_groups(self, req_meta: dict[str, Any]):
         """Handle a KV cache transfer request."""
@@ -1648,6 +1667,12 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
             self.connector_scheduler = None
             self.connector_worker = MooncakeConnectorWorker(vllm_config, str(self.engine_id), kv_cache_config)
 
+    def shutdown(self) -> None:
+        sender = getattr(self.connector_worker, "kv_send_thread", None)
+        if sender is not None:
+            sender.close()
+        super().shutdown()
+
     def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
         # vLLM main's scheduler uses this for skip_zeroing_group_ids.
         # Mooncake restores the request's own transfer blocks.
@@ -2102,16 +2127,17 @@ class MooncakeConnectorScheduler:
 
     def _port_offset_from_handshake_metadata(
         self,
-        rank_metadata: KVConnectorHandshakeMetadata,
         metadata_key: int | tuple[int, ...],
     ) -> int:
-        kv_port = self.vllm_config.kv_transfer_config.kv_port
-        handshake_port = getattr(rank_metadata, "handshake_port", 0)
-        if handshake_port > 0:
-            return handshake_port - kv_port
         if isinstance(metadata_key, int):
             return metadata_key
-        raise ValueError(f"Mooncake handshake metadata missing handshake_port for worker key {metadata_key}")
+        if len(metadata_key) == 3:
+            pp_rank, pcp_rank, tp_rank = metadata_key
+            return get_mooncake_handshake_logical_rank(pp_rank, self.tp_size, tp_rank, pcp_rank, self.pcp_size)
+        if len(metadata_key) == 2 and self.pcp_size == 1:
+            pp_rank, tp_rank = metadata_key
+            return get_mooncake_handshake_logical_rank(pp_rank, self.tp_size, tp_rank, 0)
+        raise ValueError(f"Unsupported Mooncake handshake metadata worker key {metadata_key}")
 
     def set_xfer_handshake_metadata_from_workers(
         self,
@@ -2122,13 +2148,15 @@ class MooncakeConnectorScheduler:
             return
 
         updated_mapping: dict[str, dict[str, Any]] = {}
-        kv_port = self.vllm_config.kv_transfer_config.kv_port
         for metadata_key, rank_metadata in metadata.items():
-            port_offset = self._port_offset_from_handshake_metadata(rank_metadata, metadata_key)
+            port_offset = self._port_offset_from_handshake_metadata(metadata_key)
+            handshake_port = getattr(rank_metadata, "handshake_port", 0)
+            if not isinstance(handshake_port, int) or not 0 < handshake_port <= 65535:
+                raise ValueError(f"Missing actual Mooncake handshake port for logical rank {port_offset}.")
             updated_mapping[str(port_offset)] = {
                 "host": rank_metadata.local_ip,
                 "engine_id": rank_metadata.engine_id,
-                "handshake_port": kv_port + port_offset,
+                "handshake_port": handshake_port,
             }
 
         self.multi_nodes_meta_mapping.update(updated_mapping)
@@ -2226,7 +2254,8 @@ class MooncakeConnectorWorker:
             * self.pcp_size
         )
         device_index = (self.pp_rank * self.pcp_size + self.pcp_rank) * self.tp_size + self.tp_rank
-        self.handshake_port = self.side_channel_port + device_index
+        self.logical_handshake_port = self.side_channel_port + device_index
+        self.handshake_port = self.logical_handshake_port
         self.sockets: dict = {}
         device_name = str(torch.npu.current_device()) if self.pp_size > 1 else None
         inject_qos(vllm_config.kv_transfer_config.get_from_extra_config("qos_priority", PD_QOS_DEFAULT))
@@ -2793,6 +2822,13 @@ class MooncakeConnectorWorker:
             if time.time() - start_wait_time > 5 * 60:
                 raise RuntimeError("Timeout waiting for KV Cache thread to be ready.")
             time.sleep(3)
+        if self.kv_role == "kv_producer":
+            assert self.kv_send_thread is not None
+            actual_port = self.kv_send_thread.handshake_port
+            if actual_port is None:
+                raise RuntimeError("Mooncake handshake listener has no bound port.")
+            self.handshake_port = actual_port
+            metadata.handshake_port = actual_port
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         results = self.get_transfer_results()
@@ -3295,22 +3331,22 @@ class MooncakeConnectorWorker:
                 range(meta.remote_port, meta.remote_port + prefill_tp_size * meta.remote_pcp_size)
             )
             kv_port = self.vllm_config.kv_transfer_config.kv_port
-            for key, remote_host_info in meta.remote_multi_nodes_meta_mapping.items():
-                remote_ports.add(int(remote_host_info.get("handshake_port", kv_port + int(key))))
+            for key in meta.remote_multi_nodes_meta_mapping:
+                remote_ports.add(kv_port + int(key))
             for remote_port_head_list in local_remote_block_port_mappings.values():
                 for remote_port_list in remote_port_head_list:
                     for remote_port in remote_port_list:
                         remote_ports.add(remote_port)
 
             for remote_port in remote_ports:
-                remote_host, _ = self._get_remote_host_info_by_port(
+                remote_host, _, actual_port = self._get_remote_endpoint_info_by_port(
                     meta.remote_port,
                     remote_port,
                     meta.remote_host,
                     meta.remote_engine_id,
                     meta.remote_multi_nodes_meta_mapping,
                 )
-                remote_port_send_num[remote_port] = {"num": 0, "host": remote_host}
+                remote_port_send_num[remote_port] = {"num": 0, "host": remote_host, "handshake_port": actual_port}
 
             for remote_port_head_list in local_remote_block_port_mappings.values():
                 for remote_port_list in remote_port_head_list:
@@ -3378,9 +3414,10 @@ class MooncakeConnectorWorker:
             local_remote_block_port_mappings = get_local_remote_block_port_mappings()
             if has_replicated_attention:
                 self._add_group_source_ports(req_id, meta, local_remote_block_port_mappings)
-            self.local_remote_block_port_mapping[meta.remote_engine_id] = local_remote_block_port_mappings[
-                self.handshake_port
-            ]
+            logical_port = self.side_channel_port + get_mooncake_handshake_logical_rank(
+                self.pp_rank, self.tp_size, self.tp_rank, self.pcp_rank, self.pcp_size
+            )
+            self.local_remote_block_port_mapping[meta.remote_engine_id] = local_remote_block_port_mappings[logical_port]
             self.remote_port_send_num[meta.remote_engine_id] = get_remote_port_send_num(
                 local_remote_block_port_mappings
             )
@@ -3837,14 +3874,14 @@ class MooncakeConnectorWorker:
         num_prefill_workers = prefill_tp_size * self._prefill_pp_size
         for remote_rank in range(num_prefill_workers):
             remote_port = meta.remote_port + remote_rank
-            remote_host, _ = self._get_remote_host_info_by_port(
+            remote_host, _, actual_port = self._get_remote_endpoint_info_by_port(
                 meta.remote_port,
                 remote_port,
                 meta.remote_host,
                 meta.remote_engine_id,
                 meta.remote_multi_nodes_meta_mapping,
             )
-            remote_port_send_num[remote_port] = {"num": 0, "host": remote_host}
+            remote_port_send_num[remote_port] = {"num": 0, "host": remote_host, "handshake_port": actual_port}
 
         for decode_tp_rank in range(self.tp_size):
             remote_ranks, _ = self._get_hybrid_remote_rank_group_pulls(
@@ -4100,7 +4137,7 @@ class MooncakeConnectorWorker:
             for shard_idx, remote_ports in enumerate(remote_handshake_port_list):
                 for remote_tp_offset, remote_handshake_port in enumerate(remote_ports):
                     assert self.kv_recv_thread is not None
-                    remote_host, remote_engine_id = self._get_remote_host_info_by_port(
+                    remote_host, remote_engine_id, actual_port = self._get_remote_endpoint_info_by_port(
                         meta.remote_port,
                         remote_handshake_port,
                         meta.remote_host,
@@ -4135,7 +4172,7 @@ class MooncakeConnectorWorker:
                         group_pulls=group_pulls,
                         remote_engine_id=remote_engine_id,
                         remote_host=remote_host,
-                        remote_handshake_port=remote_handshake_port,
+                        remote_handshake_port=actual_port,
                         remote_port_send_num=remote_port_send_num,
                         num_computed_tokens=meta.num_computed_tokens,
                         all_task_done=(
@@ -4186,6 +4223,31 @@ class MooncakeConnectorWorker:
         # of TP routing.
         return random.Random(string_to_int64_hash(f"pcp:{req_id}")).randrange(pcp_size)
 
+    def _get_remote_endpoint_info_by_port(
+        self,
+        base_port: int,
+        remote_logical_port: int,
+        remote_host: str,
+        remote_engine_id: str,
+        remote_multi_nodes_meta_mapping: dict | None,
+    ) -> tuple[str, str, int]:
+        """Resolve a stable rank port to the peer's actual listener endpoint."""
+        if not remote_multi_nodes_meta_mapping:
+            # Compatibility with peers that still advertise fixed ports.
+            return remote_host, remote_engine_id, remote_logical_port
+        kv_port = self.vllm_config.kv_transfer_config.kv_port
+        rank = str(remote_logical_port - kv_port)
+        info = remote_multi_nodes_meta_mapping.get(rank)
+        if info is None:
+            rank = str(remote_logical_port - base_port)
+            info = remote_multi_nodes_meta_mapping.get(rank)
+        if info is None:
+            raise RuntimeError(f"Missing Mooncake handshake metadata for logical rank {rank}.")
+        actual_port = info.get("handshake_port")
+        if not isinstance(actual_port, int) or not 0 < actual_port <= 65535:
+            raise RuntimeError(f"Invalid Mooncake handshake port for logical rank {rank}.")
+        return info.get("host", remote_host), info.get("engine_id", remote_engine_id), actual_port
+
     def _get_remote_host_info_by_port(
         self,
         base_port: int,
@@ -4193,19 +4255,11 @@ class MooncakeConnectorWorker:
         remote_host: str,
         remote_engine_id: str,
         remote_multi_nodes_meta_mapping: dict,
-    ):
-        if remote_multi_nodes_meta_mapping is None:
-            return remote_host, remote_engine_id
-
-        kv_port = self.vllm_config.kv_transfer_config.kv_port
-        rank = str(remote_handshake_port - kv_port)
-        info = remote_multi_nodes_meta_mapping.get(rank)
-        if info is None:
-            rank = str(remote_handshake_port - base_port)
-            info = remote_multi_nodes_meta_mapping.get(rank)
-        if info is None:
-            return remote_host, remote_engine_id
-        return info.get("host", remote_host), info.get("engine_id", remote_engine_id)
+    ) -> tuple[str, str]:
+        host, engine_id, _ = self._get_remote_endpoint_info_by_port(
+            base_port, remote_handshake_port, remote_host, remote_engine_id, remote_multi_nodes_meta_mapping
+        )
+        return host, engine_id
 
     def _prefill_get_remote_rank(self, req_id: str) -> list[int]:
         if self._is_hma_required:
@@ -4329,6 +4383,23 @@ class MooncakeConnectorWorker:
                 group.extend(all_results[pp_index][group_index])
             sampled_nums.append(group)
         return sampled_nums
+
+
+@contextlib.contextmanager
+def bind_handshake_zmq_ctx(host: str) -> Iterator[tuple[zmq.Socket, int]]:  # type: ignore
+    """Bind once on a free port and keep ownership until the listener exits."""
+    ctx: zmq.Context | None = None  # type: ignore
+    sock: zmq.Socket | None = None  # type: ignore
+    try:
+        ctx = zmq.Context()  # type: ignore
+        sock = ctx.socket(zmq.ROUTER)  # type: ignore
+        port = sock.bind_to_random_port(f"tcp://{host}")  # type: ignore[attr-defined]
+        yield sock, port
+    finally:
+        if sock is not None:
+            sock.close(linger=0)
+        if ctx is not None:
+            ctx.destroy(linger=0)
 
 
 @contextlib.contextmanager
