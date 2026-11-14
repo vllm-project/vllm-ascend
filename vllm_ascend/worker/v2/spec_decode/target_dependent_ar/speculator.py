@@ -27,6 +27,7 @@ import torch
 from vllm.config import VllmConfig, replace, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import get_dcp_group
+from vllm.transformers_utils.config import iter_rope_parameters
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -65,6 +66,29 @@ if TYPE_CHECKING:
     from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
 logger = logging.getLogger(__name__)
+
+_CACHE_ONLY_ROPE_TYPES = frozenset({"default", "linear", "llama3", "ntk", "proportional"})
+
+
+def _align_mtp_draft_position_cache(target_model_config: Any, draft_model_config: Any) -> None:
+    """Safely size a nested MTP draft's rotary cache for target positions."""
+    draft_text_config = draft_model_config.hf_text_config
+    target_max_model_len = target_model_config.max_model_len
+    draft_max_position_embeddings = getattr(draft_text_config, "max_position_embeddings", None)
+    if draft_max_position_embeddings is None or draft_max_position_embeddings >= target_max_model_len:
+        return
+
+    # Match vLLM's cache-only safety rule. Its current pinned implementation
+    # applies this check to hf_config, so nested text configs are missed. Remove
+    # this compatibility path once vllm-project/vllm#63432 is available.
+    if not all(
+        params.get("rope_type", "default") in _CACHE_ONLY_ROPE_TYPES
+        for params in iter_rope_parameters(draft_text_config)
+    ):
+        return
+
+    draft_text_config.max_position_embeddings = target_max_model_len
+    draft_model_config.max_model_len = target_max_model_len
 
 
 class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDependentARSpeculator):

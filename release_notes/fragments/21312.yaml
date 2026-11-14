@@ -1,0 +1,7 @@
+pr: 21312
+entries:
+  - category: bugfix
+    text: >-
+      Fixed long-context MTP failures for models with nested text
+      configurations by safely sizing the draft rotary cache for the target
+      model's positional range.
