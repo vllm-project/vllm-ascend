@@ -431,6 +431,20 @@ completion is reported. If the entire D process stops running or the control
 network is disconnected, heartbeats stop and the lease expires. Heartbeats
 do not replace transport completion or cancellation synchronization.
 
+### Hybrid connector receive failures
+
+`MooncakeHybridConnector` reports failed KV reads or cache reformatting by
+request ID through `KVConnectorTransferResults.failed_recving`. Completion and
+failure are published together, after all submitted local receive tasks for
+that request finish. Other requests continue normally. Cache-group block IDs
+are not flattened into a single invalid-block list.
+
+The scheduler applies `kv_load_failure_policy` from `--kv-transfer-config`:
+`fail` terminates the request; `recompute` discards the failed external cache
+and recomputes locally. This is failure reporting, not automatic transport
+retry. Handling connection loss in the remote cleanup/acknowledgement path
+remains subject to that transport's timeout behavior.
+
 ### QoS Configuration
 
 Set `qos_priority` in the transfer initiator's `kv_connector_extra_config`.
