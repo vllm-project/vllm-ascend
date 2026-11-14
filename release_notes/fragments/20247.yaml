@@ -1,0 +1,6 @@
+pr: 20247
+entries:
+  - category: performance
+    text: >-
+      Reduced P/D request-admission CPU overhead by skipping repeated deep
+      validation of transfer-only KV metadata with large block-ID lists.
