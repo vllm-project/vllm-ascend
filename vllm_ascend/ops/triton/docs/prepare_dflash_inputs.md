@@ -51,7 +51,7 @@
   5. Independently split `num_query_per_req` across the same workers. Worker 0 owns query offset 0 and loads the bonus token; all other query rows use `parallel_drafting_token_id`.
   6. Independently split `num_speculative_steps` across the same workers and write `sample_indices`, `sample_pos`, and `sample_idx_mapping`.
   7. Worker 0 writes the per-request scalar outputs `query_start_loc`, `seq_lens`, `temperature`, and `seeds`.
-  8. Flatten the complete launch grid and quotient/remainder-balance graph-safety padding for `query_start_loc`, `seq_lens`, sample buffers, and `query_slot_mapping`.
+  8. Flatten the complete launch grid and quotient/remainder-balance graph-safety padding for `query_start_loc`, `seq_lens`, sample buffers, and `query_slot_mapping`. Also zero padded query IDs and positions, and set `is_padding` when that buffer is provided by vLLM; active query rows clear it.
 - **Supported modes**: Atlas A2, Atlas A3, and Ascend 950
 
 ## Parameters
