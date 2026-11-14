@@ -8,8 +8,8 @@
 - **Implementation**:
     - `vllm_ascend/ops/triton/spec_decode/prepare_dflash_inputs.py` contains
       the 2-D Triton kernel and launcher `prepare_dflash_inputs_triton`.
-    - `vllm_ascend/worker/v2/spec_decode/dflash/speculator.py` provides the
-      vLLM 0.33.0 `prepare_dflash_inputs` wrapper.
+    - The DFlash and DSpark workers use the upstream vLLM
+      `prepare_dflash_inputs` entry point with manager block tables.
 - **Formula**:
     - Request context range:
       `ctx_start = query_start_loc[req]`,
@@ -58,8 +58,8 @@
 
 > [!NOTE]
 >
-> The wrapper forwards `cp_rank`, `cp_size`, and `cp_interleave` to the optimized
-> kernel. The supplied manager `block_size` is used consistently for DCP
+> The launcher receives `cp_rank`, `cp_size`, and `cp_interleave` directly.
+> The supplied manager `block_size` is used consistently for DCP
 > ownership, rank-local positions, and public block-table lookup.
 
 | Parameter | Input/Output/Attribute | Description | Data type | Data format |
@@ -117,9 +117,9 @@
 
 ## Upstream Compatibility
 
-The worker wrapper preserves the vLLM 0.33.0 positional signature and forwards
-DFlash and DCP inputs to the optimized 2-D launcher. Each draft cache group
-supplies its public manager block table and matching `block_size`. Multimodal
+The optimized 2-D launcher accepts the vLLM 0.33.0 positional signature.
+Each draft cache group supplies its public manager block table and matching
+`block_size`. Multimodal
 input positions are unsupported because KV slots currently derive from scalar
 position IDs.
 
@@ -131,12 +131,11 @@ position IDs.
     - Context, Query, and Sample domains are independently partitioned with quotient/remainder balancing.
     - Graph-padding work is distributed across the complete launch grid instead of being serialized by a single request/program.
     - `workers_per_req` is derived from the detected VectorCore count and the Context/Query/Sample vector-width requirements rather than a hard-coded device core count.
-    - The worker wrapper follows the current-main signature and forwards DCP parameters.
-    - CP-aware rank ownership uses physical KV blocks, while slot lookup indexes the attention kernel's block table.
+    - CP-aware rank ownership and slot lookup both use manager blocks.
 
 ## Test Cases
 
-The accuracy test is a single-operator correctness guard for `prepare_dflash_inputs_triton`. It validates the optimized Triton implementation directly; wrapper and monkey-patch integration require separate validation.
+The accuracy tests check the optimized Triton launcher directly and exercise the upstream entry point for DCP and null manager blocks.
 
 The cases cover the captured DFlash inference shapes plus branch-specific cases:
 
