@@ -1,10 +1,10 @@
 import contextlib
 import gc
-import re
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+import regex as re
 import torch
 import torch.nn.functional as F
 
