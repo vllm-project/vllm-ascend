@@ -18,23 +18,22 @@
 
 Official FP8 releases such as ``Qwen/Qwen3.8-27B-FP8`` store each quantized
 matrix as a ``float8_e4m3fn`` tensor plus a ``weight_scale_inv`` tensor holding
-one ``float32`` scale per ``weight_block_size`` tile. No Ascend matmul consumes
-that layout directly, so the tiles are resolved once, after loading, and the
-result is handed to a layout the hardware does support:
+one ``float32`` scale per ``weight_block_size`` tile. ``fp8_mode`` decides how
+that layout reaches the hardware:
 
-* On Ascend 950 the resolved matrix is re-quantized to MXFP8 (one E8M0 scale per
-  32 elements along the reduction dim). The native ``npu_quant_matmul`` path then
-  runs and weights stay at one byte per element, which is what makes a 27B FP8
-  checkpoint fit on a single card.
-* A few matrices stay dense in the model dtype even there: the ones the attention
-  backend absorbs (``kv_b_proj``) and the ones whose reduction dim is not a
-  multiple of the MXFP8 group size. Those never reach the FP8 matmul.
+* ``"native"``: the float8 weight and its 128x128 block scales are kept and
+  consumed by the G-B (group-blockwise) matmul kernels, with dynamically
+  block-quantized activations.
+* ``"mxfp8"`` (default): the tiles are resolved after loading and re-quantized
+  to MXFP8 (one E8M0 scale per 32 elements along the reduction dim).
 
-Any other Ascend generation is rejected instead. A2/A3 and Atlas 300I DUO have no
-FP8 matmul, so the only way to serve such a checkpoint there is to rewrite it
-into the model dtype, which doubles the weight footprint to run an unquantized
-GEMM. That is silent dequantization rather than a fallback, so it is refused up
-front.
+A few matrices stay dense in the model dtype either way: the ones the attention
+backend absorbs (``kv_b_proj``) and, under ``"mxfp8"``, the ones whose reduction
+dim is not a multiple of the MXFP8 group size.
+
+Ascend generations without an FP8 matmul are rejected instead of served: rewriting
+such a checkpoint into the model dtype doubles the weight footprint to run an
+unquantized GEMM, which is silent dequantization rather than a fallback.
 """
 
 from typing import Any
@@ -47,9 +46,11 @@ from vllm.logger import logger
 from vllm.model_executor.utils import replace_parameter
 from vllm.utils.math_utils import cdiv
 
-from vllm_ascend.device.hardware_profile import WeightFormat, get_current_hardware_profile
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
+from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
-from vllm_ascend.utils import FP8_METHOD, maybe_trans_nz
+from vllm_ascend.utils import FP8_METHOD, dispose_tensor, maybe_trans_nz
 
 from ..base import (
     AscendLinearScheme,
@@ -65,9 +66,39 @@ from .w8a8_mxfp8 import AscendW8A8MXFP8DynamicFusedMoEMethod, AscendW8A8MXFP8Dyn
 
 BLOCK_FP8_WEIGHT_DTYPE = torch.float8_e4m3fn
 
+# Only this block layout is accepted by the G-B matmul kernels.
+NATIVE_FP8_BLOCK_SIZE = 128
+
+# ``group_sizes`` of the G-B ``npu_quant_matmul``: one row per group, then one
+# 128-wide group along the reduction dim and one along the output dim.
+_NATIVE_BLOCK_GROUP_SIZES = [1, NATIVE_FP8_BLOCK_SIZE, NATIVE_FP8_BLOCK_SIZE]
+
 # Output rows resolved per step. Bounds the float32 staging buffer to
 # ``_ROWS_PER_DEQUANT_STEP * in_features * 4`` bytes regardless of layer size.
 _ROWS_PER_DEQUANT_STEP = 1024
+
+
+def _swap_block_axes(tensor: torch.Tensor) -> torch.Tensor:
+    """Swap the last two axes of tensor into canonical contiguous strides.
+
+    ``.contiguous()`` keeps the strides a size-one axis arrived with, and the
+    G-B kernels read the weight/scale orientation from them: a reduction dim
+    holding a single 128-element block (a typical TP shard) would otherwise read
+    as a transposed scale. Copying into a fresh tensor fixes the strides.
+    """
+    transposed = tensor.transpose(-1, -2)
+    swapped = torch.empty(transposed.shape, dtype=tensor.dtype, device=tensor.device)
+    swapped.copy_(transposed)
+    return swapped
+
+
+def _block_quantize_activation(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize activations to FP8 per 128x128 block along the reduction dim.
+
+    Returns the ``float8_e4m3fn`` activation and its ``float32`` per-token,
+    per-block scale, the exact pair the G-B kernels consume.
+    """
+    return torch_npu.npu_dynamic_block_quant(x, dst_type=BLOCK_FP8_WEIGHT_DTYPE)
 
 
 def resolve_block_scales(
@@ -109,23 +140,6 @@ def resolve_block_scales(
         row_scales = row_scales.repeat_interleave(block_k, dim=1)[:, :in_features]
         resolved[row_start:row_end] = weight[row_start:row_end].to(torch.float32) * row_scales
     return resolved
-
-
-def _require_fp8_weight_matmul() -> None:
-    """Reject a block-wise FP8 checkpoint on hardware with no FP8 matmul.
-
-    Dequantizing such a checkpoint into the model dtype is not a fallback: the
-    result runs an unquantized GEMM from a checkpoint the device can never
-    execute as published, at twice the weight footprint. Failing here keeps the
-    failure visible instead of serving something else under the FP8 name.
-    """
-    if get_current_hardware_profile().supports_weight_format(WeightFormat.FP8):
-        return
-    raise NotImplementedError(
-        "Native block-wise FP8 checkpoints run on Ascend 950 only, and this device has no "
-        "FP8 matmul. Serve the BF16 release of this model instead, or a checkpoint "
-        "re-quantized with ModelSlim or LLM-Compressor."
-    )
 
 
 def _mx_quantize(resolved: torch.Tensor, scale_alg: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -205,7 +219,6 @@ class AscendFp8BlockLinearMethod(AscendLinearScheme):
         )
 
     def __init__(self, weight_block_size: tuple[int, int]):
-        _require_fp8_weight_matmul()
         self.block_n, self.block_k = weight_block_size
         self.model_dtype = get_current_vllm_config().model_config.dtype
         self.mxfp8_method = AscendW8A8MXFP8DynamicLinearMethod()
@@ -337,7 +350,6 @@ class AscendFp8BlockFusedMoEMethod(AscendMoEScheme):
     quant_type: QuantType = QuantType.NONE
 
     def __init__(self, weight_block_size: tuple[int, int], moe_config):
-        _require_fp8_weight_matmul()
         self.block_n, self.block_k = weight_block_size
         # AscendFusedMoEMethod tags a scale as group-wise when the scheme reports
         # a group size, which is how the upstream loader learns to narrow
@@ -490,4 +502,320 @@ class AscendFp8BlockFusedMoEMethod(AscendMoEScheme):
             topk_ids=topk_ids,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
+        )
+
+
+@register_scheme(FP8_METHOD, "native_linear")
+class AscendNativeFp8BlockLinearMethod(AscendLinearScheme):
+    """Linear method that runs block-wise FP8 weights on the G-B matmul.
+
+    The ``fp8_mode: "native"`` counterpart of
+    :class:`AscendFp8BlockLinearMethod`: nothing is requantized, the
+    checkpoint's own float8 weight and 128x128 block scales are re-laid-out for
+    the kernel, and the activations are block-quantized at run time.
+
+    NOTE: the parameter builders mirror the fallback scheme because both read
+    the same checkpoint. They must stay in sync until the two schemes share a
+    common base.
+    """
+
+    # A transposed weight no longer follows the [output, input] axis that
+    # weight switching rebuilds.
+    supports_weight_switch = False
+
+    def __init__(self, weight_block_size: tuple[int, int]):
+        self.block_n, self.block_k = weight_block_size
+        self.model_dtype = get_current_vllm_config().model_config.dtype
+
+    def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
+        return {"weight": torch.empty(output_size, input_size, dtype=BLOCK_FP8_WEIGHT_DTYPE)}
+
+    def get_pergroup_param(
+        self, input_size: int, output_size: int, params_dtype: torch.dtype, layer_type: str | None = None
+    ) -> dict[str, Any]:
+        return {
+            "weight_scale_inv": torch.empty(
+                cdiv(output_size, self.block_n), cdiv(input_size, self.block_k), dtype=torch.float32
+            ),
+            # Loaders convert a shard's weight extent into scale entries and
+            # round up: a sub-tile shard still owns the tile over its tail.
+            "_block_quant_scale": (self.block_n, self.block_k),
+        }
+
+    def validate_weight_shapes(
+        self,
+        layer: torch.nn.Module,
+        input_size: int,
+        output_size: int,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+    ) -> None:
+        """Reject layouts whose per-rank tiles the G-B kernels cannot describe.
+
+        A block scale cannot describe a rank that owns only part of a
+        ``[128, 128]`` tile, and this path has no dense matrix to fall back to.
+        Sharded dimensions are therefore checked per rank, replicated ones
+        against the full extent the checkpoint's scale covers.
+        """
+        # Upstream lets fused projections with sub-matrices that do not span
+        # whole tiles load with padded block scales, but G-B addresses one scale
+        # per tile of real rows and would silently misread those layers.
+        if getattr(layer, "allow_fp8_block_shape_mismatch", False):
+            raise ValueError(
+                f"Native block-wise FP8 cannot serve {getattr(layer, 'prefix', 'linear')}: its fused output "
+                f"partitions {output_partition_sizes} do not span whole {self.block_n}-wide blocks, so the "
+                "checkpoint's per-sub-matrix scales cannot be mapped onto the G-B kernel. Set fp8_mode to "
+                '"mxfp8" to serve this checkpoint through the dequantize-and-requantize path.'
+            )
+
+        tp_size = _get_layer_tp_size(layer)
+        logical_sizes = getattr(layer, "output_sizes", [output_size])
+        if tp_size > 1 and input_size == input_size_per_partition * tp_size:
+            reduction_dim = input_size_per_partition
+        else:
+            reduction_dim = input_size
+        if reduction_dim % self.block_k:
+            raise ValueError(
+                f"Native block-wise FP8 cannot describe a {self.block_k}-wide tile on a rank that owns "
+                f"only {reduction_dim} elements along the reduction dim of "
+                f"{getattr(layer, 'prefix', 'linear')}. Use a smaller --tensor-parallel-size, or "
+                f'fp8_mode: "mxfp8" to requantize instead.'
+            )
+        for index, packed_size in enumerate(output_partition_sizes):
+            logical_size = logical_sizes[index] if index < len(logical_sizes) else packed_size
+            sharded = tp_size > 1 and logical_size == packed_size * tp_size
+            output_dim = packed_size if sharded else logical_size
+            if output_dim % self.block_n:
+                raise ValueError(
+                    f"Native block-wise FP8 cannot describe a {self.block_n}-wide tile on a rank that owns "
+                    f"only {output_dim} elements along the output dim of "
+                    f"{getattr(layer, 'prefix', 'linear')}. Use a smaller --tensor-parallel-size, or "
+                    f'fp8_mode: "mxfp8" to requantize instead.'
+                )
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # kv_b_proj is split into W_UK/W_UV by the attention backend instead of
+        # matmul'ing, so it always stays dense in the model dtype:
+        # resolve_block_scales folds the block scales into the weight, which is
+        # why no scale survives this branch and why this single layer doubles.
+        if _is_absorbed_by_attention(layer):
+            resolved = resolve_block_scales(
+                layer.weight.data,
+                layer.weight_scale_inv.data,
+                self.block_n,
+                self.block_k,
+                self.model_dtype,
+            )
+            delattr(layer, "weight_scale_inv")
+            layer.weight = torch.nn.Parameter(maybe_trans_nz(resolved), requires_grad=False)
+            return
+
+        # G-B ``npu_quant_matmul`` consumes a [in, out] weight with an
+        # [in / block, out / block] scale, so transpose both. The weight is
+        # stored in NZ when ``weight_nz_mode`` allows it; the scale stays ND.
+        layer.weight.data = maybe_trans_nz(_swap_block_axes(layer.weight.data))
+        layer.register_parameter(
+            "weight_scale",
+            torch.nn.Parameter(_swap_block_axes(layer.weight_scale_inv.data), requires_grad=False),
+        )
+        delattr(layer, "weight_scale_inv")
+
+    def prepare_input_for_overlap(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+    ) -> PreparedLinearInput | None:
+        if x.dim() != 2:
+            return None
+        quantized_x, block_scale = _block_quantize_activation(x)
+        return PreparedLinearInput(quantized_x, block_scale, x.dtype)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor | PreparedLinearInput,
+        bias: torch.Tensor | None = None,
+        tp_rank: int | None = 0,
+    ) -> torch.Tensor:
+        if isinstance(x, PreparedLinearInput):
+            assert x.scale is not None
+            quantized_x, block_scale, output_dtype = x.quantized, x.scale, x.output_dtype
+            leading_shape = quantized_x.shape[:-1]
+        else:
+            leading_shape = x.shape[:-1]
+            output_dtype = x.dtype
+            quantized_x, block_scale = _block_quantize_activation(x.reshape(-1, x.shape[-1]))
+
+        output = torch_npu.npu_quant_matmul(
+            quantized_x,
+            layer.weight,
+            layer.weight_scale,
+            pertoken_scale=block_scale,
+            group_sizes=_NATIVE_BLOCK_GROUP_SIZES,
+            output_dtype=output_dtype,
+        )
+        # G-B has no bias epilogue on this kernel, so the bias is applied here.
+        if bias is not None:
+            output = output + bias
+        return output.reshape(*leading_shape, -1)
+
+
+@register_scheme(FP8_METHOD, "native_moe")
+class AscendNativeFp8BlockFusedMoEMethod(AscendMoEScheme):
+    """FusedMoE method that runs block-wise FP8 experts on the grouped matmul.
+
+    The ``fp8_mode: "native"`` counterpart of
+    :class:`AscendFp8BlockFusedMoEMethod`: the experts stay exactly the values
+    the checkpoint shipped.
+
+    NOTE: like the native linear scheme, the parameter builders mirror the
+    fallback scheme and must stay in sync until both share a common base.
+    """
+
+    quant_type: QuantType = QuantType.W8A8FP8_BLOCK
+    act_quant_type: torch.dtype = BLOCK_FP8_WEIGHT_DTYPE
+
+    def __init__(self, weight_block_size: tuple[int, int], moe_config):
+        self.block_n, self.block_k = weight_block_size
+        # Reporting a group size is how the loader learns to shard the
+        # ``*_weight_scale_inv`` tensors along the reduction dim.
+        self.group_size = self.block_k
+        self.model_dtype = get_current_vllm_config().model_config.dtype
+        self.moe_config = moe_config
+
+    def validate_weight_shapes(self, layer: torch.nn.Module, intermediate_size_per_partition: int) -> None:
+        if intermediate_size_per_partition % self.block_n:
+            raise ValueError(
+                f"The per-partition intermediate size = {intermediate_size_per_partition} is not "
+                f"divisible by weight quantization block_n = {self.block_n}."
+            )
+        if _get_layer_tp_size(layer) > 1 and intermediate_size_per_partition % self.block_k:
+            raise ValueError(
+                f"The per-partition intermediate size = {intermediate_size_per_partition} is not "
+                f"divisible by weight quantization block_k = {self.block_k}."
+            )
+
+    def get_weight(
+        self, num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
+    ) -> dict[str, Any]:
+        return {
+            "w13_weight": torch.empty(
+                num_experts, 2 * intermediate_size_per_partition, hidden_sizes, dtype=BLOCK_FP8_WEIGHT_DTYPE
+            ),
+            "w2_weight": torch.empty(
+                num_experts, hidden_sizes, intermediate_size_per_partition, dtype=BLOCK_FP8_WEIGHT_DTYPE
+            ),
+        }
+
+    def get_dynamic_quant_param(
+        self, num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
+    ) -> dict[str, Any]:
+        return {
+            "w13_weight_scale_inv": torch.empty(
+                num_experts,
+                cdiv(2 * intermediate_size_per_partition, self.block_n),
+                cdiv(hidden_sizes, self.block_k),
+                dtype=torch.float32,
+            ),
+            "w2_weight_scale_inv": torch.empty(
+                num_experts,
+                cdiv(hidden_sizes, self.block_n),
+                cdiv(intermediate_size_per_partition, self.block_k),
+                dtype=torch.float32,
+            ),
+        }
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        """Keep the checkpoint's float8 experts and lay them out for G-B.
+
+        ``npu_grouped_matmul`` consumes [E, K, N] weights with a
+        [E, K / block, N / block] scale, the checkpoint stores [E, N, K] with a
+        [E, N / block, K / block] scale, so both are transposed. No data is
+        requantized, and the grouped matmul takes no NZ weights alongside the
+        block scales, so they stay ND.
+        """
+        for weight_name in ("w13_weight", "w2_weight"):
+            scale_name = f"{weight_name}_scale_inv"
+            weight = getattr(layer, weight_name)
+            scale = getattr(layer, scale_name).data
+            weight.data = _swap_block_axes(weight.data)
+            layer.register_parameter(
+                f"{weight_name}_scale",
+                torch.nn.Parameter(_swap_block_axes(scale), requires_grad=False),
+            )
+            delattr(layer, scale_name)
+
+    def apply_gmm1(self, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
+        # Block-wise FP8 is not a dispatch-quantized type, so the tokens arrive in
+        # the model dtype; MC2 still reports a scale for its unquantized dispatch,
+        # so quantize here rather than trusting that scale.
+        hidden_states, pertoken_scale = _block_quantize_activation(mlp_compute_input.hidden_states)
+        layer = mlp_compute_input.layer
+        assert layer is not None
+        output = torch_npu.npu_grouped_matmul(
+            x=[hidden_states],
+            weight=[layer.w13_weight],
+            scale=[layer.w13_weight_scale],
+            bias=None,
+            per_token_scale=[pertoken_scale],
+            split_item=2,
+            group_type=0,
+            group_list=mlp_compute_input.group_list,
+            group_list_type=mlp_compute_input.group_list_type,
+            output_dtype=self.model_dtype,
+        )[0]
+        dispose_tensor(mlp_compute_input.hidden_states)
+        return output
+
+    def apply_act_quant(
+        self, mlp_compute_input: MoEMlpComputeInput, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return _block_quantize_activation(hidden_states)
+
+    def apply_gmm2(
+        self, mlp_compute_input: MoEMlpComputeInput, hidden_states: torch.Tensor, act_out_scale: torch.Tensor
+    ) -> torch.Tensor:
+        layer = mlp_compute_input.layer
+        assert layer is not None
+        return torch_npu.npu_grouped_matmul(
+            x=[hidden_states],
+            weight=[layer.w2_weight],
+            scale=[layer.w2_weight_scale],
+            bias=None,
+            per_token_scale=[act_out_scale],
+            split_item=2,
+            group_list_type=mlp_compute_input.group_list_type,
+            group_type=0,
+            group_list=mlp_compute_input.group_list,
+            output_dtype=self.model_dtype,
+        )[0]
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts: Any | None,
+        shared_experts_input: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if topk_weights is None or topk_ids is None:
+            raise RuntimeError("topk_weights and topk_ids must be set before fused MoE execution.")
+        return _EXTRA_CTX.moe_comm_method.fused_experts(
+            fused_experts_input=build_fused_experts_input(
+                hidden_states=x,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                layer=layer,
+                quant_type=self.quant_type,
+                # G-B grouped matmul only accepts one stacked weight tensor.
+                dynamic_eplb=False,
+                expert_map=layer.ascend_expert_map,
+                global_redundant_expert_num=layer.global_redundant_expert_num,
+                mc2_mask=layer.ascend_mc2_mask,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                pertoken_scale=layer.ascend_pertoken_scale,
+                activation=layer.activation,
+            ),
+            quant_method=self,
         )
