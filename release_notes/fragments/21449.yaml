@@ -1,0 +1,4 @@
+pr: 21449
+entries:
+  - category: performance
+    text: Reused precomputed unit-offset weights in Gemma RMSNorm residual paths, the A5 RMSNorm adaptor, and Qwen3.5/MiniMax M3 fused Q/K normalization to avoid repeated weight additions during inference.

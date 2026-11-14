@@ -116,6 +116,7 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
     _register_m3_sparse_packed_modules,
     _use_fused_qkv_indexer,
 )
+from vllm_ascend.ops.layernorm import get_gemma_rms_norm_weight
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
@@ -441,8 +442,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         else:
             q, k, v = torch.ops.vllm.qkv_rmsnorm_rope(
                 input=main_qkv.contiguous(),
-                q_weight=1.0 + self.q_norm.weight,
-                k_weight=1.0 + self.k_norm.weight,
+                q_weight=get_gemma_rms_norm_weight(self.q_norm),
+                k_weight=get_gemma_rms_norm_weight(self.k_norm),
                 q_hidden_size=self.q_size,
                 kv_hidden_size=self.kv_size,
                 head_dim=self.head_dim,
