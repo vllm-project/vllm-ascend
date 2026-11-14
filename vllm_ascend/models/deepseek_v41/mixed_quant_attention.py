@@ -246,6 +246,7 @@ def build_smla_metadata(length_rows: torch.Tensor, cu_seqlens_q: torch.Tensor) -
         layout_kv="PA_BBND",
         has_ori_kv=True,
         has_cmp_kv=True,
+        split_kv=False,
     )
 
 
