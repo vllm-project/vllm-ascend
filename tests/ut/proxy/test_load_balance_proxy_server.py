@@ -64,6 +64,22 @@ def _sse(content: str = "hi", stop_reason: str | None = None) -> bytes:
 DONE = b"data: [DONE]\n\n"
 
 
+def _completion_body(content: str = "hi", stop_reason: str | None = None) -> dict:
+    """A realistic non-streaming completion JSON body (decode backend output)."""
+    return {
+        "id": "x",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"content": content},
+                "finish_reason": "stop",
+                "stop_reason": stop_reason,
+            }
+        ],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+    }
+
+
 def _set_script(port: int, items: list[dict]) -> None:
     httpx.post(
         f"http://127.0.0.1:{port}/__set_script__",
@@ -311,7 +327,7 @@ def proxy_server():
 # --------------------------------------------------------------------------- #
 def test_normal_nonstream(proxy_server):
     """Normal non-streaming request returns 200 + content."""
-    _set_script(MOCK_DECODE_PORT, [{"kind": "stream", "status": 200, "chunks": [_sse("hello"), DONE]}])
+    _set_script(MOCK_DECODE_PORT, [{"kind": "json", "status": 200, "body": _completion_body("hello")}])
     st, body = _post(proxy_server, _chat_req(stream=False))
     assert st == 200
     assert b"hello" in body
@@ -415,7 +431,7 @@ def test_decode_connection_failure(proxy_server):
 
 def test_completions_prompt_endpoint(proxy_server):
     """/v1/completions (prompt) endpoint works."""
-    _set_script(MOCK_DECODE_PORT, [{"kind": "stream", "status": 200, "chunks": [_sse("hello"), DONE]}])
+    _set_script(MOCK_DECODE_PORT, [{"kind": "json", "status": 200, "body": _completion_body("hello")}])
     with httpx.Client(timeout=30) as c:
         r = c.post(
             f"{proxy_server}/v1/completions",
@@ -482,9 +498,9 @@ def test_concurrent_requests(proxy_server):
     _set_script(
         MOCK_DECODE_PORT,
         [
-            {"kind": "stream", "status": 200, "chunks": [_sse("r1"), DONE]},
-            {"kind": "stream", "status": 200, "chunks": [_sse("r2"), DONE]},
-            {"kind": "stream", "status": 200, "chunks": [_sse("r3"), DONE]},
+            {"kind": "json", "status": 200, "body": _completion_body("r1")},
+            {"kind": "json", "status": 200, "body": _completion_body("r2")},
+            {"kind": "json", "status": 200, "body": _completion_body("r3")},
         ],
     )
     import concurrent.futures
@@ -550,3 +566,83 @@ def test_usage_cached_tokens(proxy_server):
     assert st == 200
     # The proxy should have added cached_tokens to the usage chunk
     assert b"cached_tokens" in body
+
+
+# --------------------------------------------------------------------------- #
+# Tests — non-streaming response shape (Content-Length, single JSON)
+# --------------------------------------------------------------------------- #
+def test_nonstream_response_has_content_length(proxy_server):
+    """Non-streaming returns a complete Response with Content-Length (not chunked).
+
+    Regression test: previously non-streaming used StreamingResponse, sending the
+    body with chunked transfer-encoding and no Content-Length. The fix collects all
+    chunks and returns a single ``Response`` with ``application/json`` + Content-Length.
+    """
+    _set_script(MOCK_DECODE_PORT, [{"kind": "json", "status": 200, "body": _completion_body("hello")}])
+    with httpx.Client(timeout=30) as c:
+        r = c.post(
+            f"{proxy_server}/v1/chat/completions",
+            json=_chat_req(stream=False),
+            headers={"Content-Type": "application/json"},
+        )
+    assert r.status_code == 200
+    assert "content-length" in r.headers
+    assert "chunked" not in r.headers.get("transfer-encoding", "").lower()
+    assert r.headers["content-type"].startswith("application/json")
+    body = r.json()
+    assert "choices" in body
+    assert body["choices"][0]["message"]["content"] == "hello"
+
+
+def test_nonstream_assembles_fragmented_json(proxy_server):
+    """Non-streaming accumulates a JSON body split across chunks before parsing.
+
+    Regression test for the bug where each byte chunk was parsed individually: a
+    partial JSON chunk raised ``json.JSONDecodeError`` and was dropped, skipping the
+    recomputed/retry logic. The fix accumulates chunks until the JSON is complete.
+    """
+    full = json.dumps(_completion_body("hi")).encode("utf-8")
+    half = len(full) // 2
+    _set_script(
+        MOCK_DECODE_PORT,
+        [{"kind": "stream", "status": 200, "chunks": [full[:half], full[half:]], "chunk_delay": 0.05}],
+    )
+    with httpx.Client(timeout=30) as c:
+        r = c.post(
+            f"{proxy_server}/v1/chat/completions",
+            json=_chat_req(stream=False),
+            headers={"Content-Type": "application/json"},
+        )
+    assert r.status_code == 200
+    assert "content-length" in r.headers
+    body = r.json()
+    assert "choices" in body
+    assert body["choices"][0]["message"]["content"] == "hi"
+
+
+def test_nonstream_4xx_has_content_length(proxy_server):
+    """Non-streaming decode 4xx returns the real status with Content-Length.
+
+    Validates the pre-open error-propagation path is preserved: an initial decode
+    4xx is returned with the real status code (not an empty 200) in a Response that
+    carries Content-Length.
+    """
+    _set_script(
+        MOCK_DECODE_PORT,
+        [
+            {
+                "kind": "json",
+                "status": 400,
+                "body": {"error": {"message": "max_tokens too long", "type": "BadRequestError"}},
+            }
+        ],
+    )
+    with httpx.Client(timeout=30) as c:
+        r = c.post(
+            f"{proxy_server}/v1/chat/completions",
+            json=_chat_req(max_tokens=99999, stream=False),
+            headers={"Content-Type": "application/json"},
+        )
+    assert r.status_code == 400
+    assert "content-length" in r.headers
+    assert b"max_tokens" in r.content
