@@ -9,7 +9,7 @@ metadata and payload size, including for mixed prefill/decode batches.
 
 import logging
 from collections import deque
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import torch
 import torch.distributed as dist
@@ -27,21 +27,16 @@ _SCALE_PAIR_SIZE = 2
 _HIDDEN_ALIGNMENT = _MX_BLOCK_SIZE * _SCALE_PAIR_SIZE
 _DTYPE_BF16 = 15
 _DTYPE_E4M3FN = 292
-_PIPELINE_LOOKAHEAD = 2
+_PIPELINE_CHUNKS = 2
 
 
-def _chunk_ranges(rows: int, world_size: int, chunks: int) -> list[tuple[int, int]]:
-    """Partition rows in TP-sized units, including an uneven final partition."""
-    if rows % world_size or not 1 <= chunks <= rows // world_size:
+def _chunk_ranges(rows: int, world_size: int) -> list[tuple[int, int]]:
+    """Split rows into two nonempty chunks in group-sized units."""
+    if rows % world_size or rows // world_size < _PIPELINE_CHUNKS:
         raise ValueError("MXFP8 chunks require at least one group-sized row unit per chunk.")
-    units, remainder = divmod(rows // world_size, chunks)
-    ranges = []
-    start = 0
-    for index in range(chunks):
-        end = start + (units + int(index < remainder)) * world_size
-        ranges.append((start, end))
-        start = end
-    return ranges
+    units, remainder = divmod(rows // world_size, _PIPELINE_CHUNKS)
+    split = (units + remainder) * world_size
+    return [(0, split), (split, rows)]
 
 
 class _Exchange(NamedTuple):
@@ -62,27 +57,25 @@ class Mxfp8AllReduce:
         min_numel: int,
         group_name: str = "",
         *,
-        pipeline_chunks: int = 1,
+        enable_pipeline: bool = False,
         pipeline_min_numel: int | None = None,
     ) -> None:
-        if pipeline_chunks not in (1, 2, 4):
-            raise ValueError("MXFP8 pipeline_chunks must be 1, 2 or 4.")
+        if not isinstance(enable_pipeline, bool):
+            raise ValueError("MXFP8 enable_pipeline must be a bool.")
         if pipeline_min_numel is not None and pipeline_min_numel < 1:
             raise ValueError("MXFP8 pipeline_min_numel must be >= 1.")
         self.group = group
         self.group_name = group_name
         self.min_numel = min_numel
-        self.pipeline_chunks = pipeline_chunks
+        self.enable_pipeline = enable_pipeline
         self.pipeline_min_numel = min_numel if pipeline_min_numel is None else pipeline_min_numel
         self.world_size = dist.get_world_size(group)
         device_type = get_ascend_device_type()
         if device_type != AscendDeviceType.A5:
             raise RuntimeError("MXFP8 AllToAll quantized all-reduce requires Atlas A5.")
         self.supported = self.world_size in _SUPPORTED_WORLD_SIZES
-        self.quantize_op = getattr(torch_npu, "npu_dynamic_mx_quant", None)
-        self.dequantize_op = getattr(torch_npu, "npu_anti_mx_quant", None)
-        if not callable(self.dequantize_op):
-            self.dequantize_op = getattr(torch.ops.npu, "npu_anti_mx_quant", None)
+        self.quantize_op: Any = getattr(torch_npu, "npu_dynamic_mx_quant", None)
+        self.dequantize_op: Any = getattr(torch_npu, "npu_anti_mx_quant", None)
         if self.supported and (not callable(self.quantize_op) or not callable(self.dequantize_op)):
             raise RuntimeError(
                 "MXFP8 AllToAll quantized all-reduce requires npu_dynamic_mx_quant and npu_anti_mx_quant. "
@@ -106,12 +99,12 @@ class Mxfp8AllReduce:
         return None
 
     def _pipeline_skip_reason(self, input_: torch.Tensor) -> str | None:
-        if self.pipeline_chunks == 1:
+        if not self.enable_pipeline:
             return "disabled"
         if input_.numel() < self.pipeline_min_numel:
             return "below_pipeline_threshold"
         rows = input_.numel() // input_.shape[-1]
-        if rows // self.world_size < self.pipeline_chunks:
+        if rows // self.world_size < _PIPELINE_CHUNKS:
             return "insufficient_rows"
         # Async Work joins are validated in Eager only. Preserve the existing
         # full-tensor path during capture, including for unusually large graphs.
@@ -148,7 +141,7 @@ class Mxfp8AllReduce:
                 input_.numel() * input_.element_size(),
                 self.min_numel,
                 "pipeline" if pipeline_reason is None else "full",
-                self.pipeline_chunks if pipeline_reason is None else 1,
+                _PIPELINE_CHUNKS if pipeline_reason is None else 1,
                 self.pipeline_min_numel,
                 pipeline_reason or "eligible",
             )
@@ -209,20 +202,16 @@ class Mxfp8AllReduce:
         flat = input_.reshape(rows, hidden)
         output = torch.empty_like(input_, memory_format=torch.contiguous_format)
         flat_output = output.view(rows, hidden)
-        ranges = iter(_chunk_ranges(rows, self.world_size, self.pipeline_chunks))
-
-        def submit(start: int, end: int) -> _Exchange:
+        pending: deque[_Exchange] = deque()
+        # Submit both AllToAll calls before waiting, in the same order on all ranks.
+        for start, end in _chunk_ranges(rows, self.world_size):
             send, scale_dtype = self._pack(flat[start:end])
             received = torch.empty_like(send)
             work = dist.all_to_all_single(received, send, group=self.group, async_op=True)
-            return _Exchange(start, end, send, received, scale_dtype, work)
+            pending.append(_Exchange(start, end, send, received, scale_dtype, work))
+        del send, received, work
 
-        pending = deque()
         gathers = []
-        # Match the measured benchmark: Q0/A0, Q1/A1, wait(A0), D0/G0,
-        # Q2/A2, ... . All ranks enqueue collectives in the same order.
-        for _ in range(min(_PIPELINE_LOOKAHEAD, self.pipeline_chunks)):
-            pending.append(submit(*next(ranges)))
         while pending:
             exchange = pending.popleft()
             exchange.work.wait()
@@ -233,9 +222,6 @@ class Mxfp8AllReduce:
             # joins; do not recycle a shard while HCCL may still access it.
             gathers.append((partial, target, work))
             del exchange
-            next_range = next(ranges, None)
-            if next_range is not None:
-                pending.append(submit(*next_range))
         for partial, target, work in gathers:
             work.wait()
         # Work.wait joins every output onto the caller's stream. No device

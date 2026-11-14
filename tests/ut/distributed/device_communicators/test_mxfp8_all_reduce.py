@@ -6,11 +6,13 @@ import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import torch
 import torch_npu
 
+from vllm_ascend.ascend_config import QuantizedAllReduceConfig
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.distributed.device_communicators import mxfp8_all_reduce as mx
 from vllm_ascend.distributed.device_communicators import npu_communicator as comm_module
@@ -43,12 +45,11 @@ class TestMxfp8AllReduce(unittest.TestCase):
             patch.object(mx.dist, "get_world_size", return_value=2),
             patch.object(torch_npu, "npu_dynamic_mx_quant", None, create=True),
             patch.object(torch_npu, "npu_anti_mx_quant", None, create=True),
-            patch.object(torch.ops.npu, "npu_anti_mx_quant", None, create=True),
             self.assertRaisesRegex(RuntimeError, "requires npu_dynamic_mx_quant and npu_anti_mx_quant"),
         ):
             mx.Mxfp8AllReduce(MagicMock(), min_numel=1)
 
-    def test_registered_anti_quant_entry_is_supported(self):
+    def test_requires_public_anti_quant_entry_even_when_raw_op_is_registered(self):
         registered_op = MagicMock()
         with (
             patch.object(mx, "get_ascend_device_type", return_value=AscendDeviceType.A5),
@@ -56,9 +57,9 @@ class TestMxfp8AllReduce(unittest.TestCase):
             patch.object(torch_npu, "npu_dynamic_mx_quant", MagicMock(), create=True),
             patch.object(torch_npu, "npu_anti_mx_quant", None, create=True),
             patch.object(torch.ops.npu, "npu_anti_mx_quant", registered_op, create=True),
+            self.assertRaisesRegex(RuntimeError, "requires npu_dynamic_mx_quant and npu_anti_mx_quant"),
         ):
-            wrapper = mx.Mxfp8AllReduce(MagicMock(), min_numel=1)
-        self.assertIs(wrapper.dequantize_op, registered_op)
+            mx.Mxfp8AllReduce(MagicMock(), min_numel=1)
 
     def test_fallbacks_use_only_ordinary_all_reduce(self):
         cases = (
@@ -94,31 +95,31 @@ class TestMxfp8AllReduce(unittest.TestCase):
 
     def test_pipeline_selection_threshold_rows_and_graph_capture(self):
         source = torch.ones(8, 128, dtype=torch.bfloat16)
-        cases = (
+        cases: tuple[tuple[dict[str, Any], bool, str | None], ...] = (
             ({}, False, "disabled"),
-            ({"pipeline_chunks": 2, "pipeline_min_numel": 1025}, False, "below_pipeline_threshold"),
-            ({"pipeline_chunks": 2, "pipeline_min_numel": 1024}, False, None),
-            ({"pipeline_chunks": 4}, False, None),
-            ({"pipeline_chunks": 2}, True, "graph_capture"),
+            ({"enable_pipeline": False}, False, "disabled"),
+            ({"enable_pipeline": True, "pipeline_min_numel": 1025}, False, "below_pipeline_threshold"),
+            ({"enable_pipeline": True, "pipeline_min_numel": 1024}, False, None),
+            ({"enable_pipeline": True}, True, "graph_capture"),
         )
         for kwargs, capturing, expected in cases:
             with self.subTest(kwargs=kwargs, capturing=capturing):
                 wrapper = _make(**kwargs)
                 with patch.object(torch.npu, "is_current_stream_capturing", return_value=capturing):
                     self.assertEqual(wrapper._pipeline_skip_reason(source), expected)
-        wrapper = _make(world_size=4, pipeline_chunks=4)
-        self.assertEqual(wrapper._pipeline_skip_reason(source), "insufficient_rows")
+        wrapper = _make(world_size=4, enable_pipeline=True)
+        self.assertEqual(wrapper._pipeline_skip_reason(source[:4]), "insufficient_rows")
         self.assertEqual(_make(min_numel=512).pipeline_min_numel, 512)
 
     def test_rejects_invalid_pipeline_arguments(self):
-        for chunks in (0, -1, 3, 8):
-            with self.subTest(chunks=chunks), self.assertRaisesRegex(ValueError, "pipeline_chunks"):
-                _make(pipeline_chunks=chunks)
+        for value in (2, 4, "true", None):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "enable_pipeline"):
+                _make(enable_pipeline=value)
         with self.assertRaisesRegex(ValueError, "pipeline_min_numel"):
             _make(pipeline_min_numel=0)
 
     def test_pipeline_routing_keeps_decode_bf16_and_capture_full_tensor(self):
-        wrapper = _make(min_numel=512, pipeline_chunks=2, pipeline_min_numel=1024)
+        wrapper = _make(min_numel=512, enable_pipeline=True, pipeline_min_numel=1024)
         cases = ((1, True, "bf16"), (4, False, "full"), (8, True, "full"), (8, False, "pipeline"))
         for rows, capturing, route in cases:
             with self.subTest(rows=rows, capturing=capturing, route=route):
@@ -136,13 +137,13 @@ class TestMxfp8AllReduce(unittest.TestCase):
                 self.assertEqual(pipelined.call_count, int(route == "pipeline"))
 
     def test_pipeline_debug_logs_show_actual_mode_and_fallback_reason(self):
-        wrapper = _make(pipeline_chunks=2, pipeline_min_numel=1024)
+        wrapper = _make(enable_pipeline=True, pipeline_min_numel=1024)
         cases = (
-            (4, False, "mode=full", "below_pipeline_threshold"),
-            (8, True, "mode=full", "graph_capture"),
-            (8, False, "mode=pipeline", "eligible"),
+            (4, False, "mode=full", 1, "below_pipeline_threshold"),
+            (8, True, "mode=full", 1, "graph_capture"),
+            (8, False, "mode=pipeline", 2, "eligible"),
         )
-        for rows, capturing, mode, reason in cases:
+        for rows, capturing, mode, chunks, reason in cases:
             with self.subTest(rows=rows, capturing=capturing):
                 source = torch.ones(rows, 128, dtype=torch.bfloat16)
                 with (
@@ -157,6 +158,7 @@ class TestMxfp8AllReduce(unittest.TestCase):
                 message = args[0] % args[1:]
                 self.assertIn("[MXFP8-AR-HIT]", message)
                 self.assertIn(mode, message)
+                self.assertIn(f"chunks={chunks}", message)
                 self.assertIn(f"pipeline_reason={reason}", message)
 
     def test_incompatible_quantization_result_fails_before_payload_exchange(self):
@@ -172,11 +174,11 @@ class TestMxfp8AllReduce(unittest.TestCase):
 
     def test_distinct_rank_scales_and_out_of_place_result_on_tp2_tp4_tp8(self):
         for size in (2, 4, 8):
-            for chunks, capturing in ((1, False), (2, True)):
-                with self.subTest(world_size=size, chunks=chunks, capturing=capturing):
-                    self._run_ranks(size, chunks, capturing)
+            for enabled, capturing in ((False, False), (True, True)):
+                with self.subTest(world_size=size, enabled=enabled, capturing=capturing):
+                    self._run_ranks(size, enabled, capturing)
 
-    def _run_ranks(self, size, chunks, capturing):
+    def _run_ranks(self, size, enabled, capturing):
         rows, hidden = 2 * size, 128
         raw_values = [torch.full((rows, hidden), 0x38 + rank, dtype=torch.uint8) for rank in range(size)]
         scale_indices = torch.arange(rows * hidden // 32).reshape(rows, hidden // 64, 2)
@@ -184,17 +186,20 @@ class TestMxfp8AllReduce(unittest.TestCase):
         decoded = [_decode(values.view(torch.float8_e4m3fn), scales) for values, scales in zip(raw_values, raw_scales)]
         expected = torch.stack(decoded).sum(0).to(torch.bfloat16).reshape(2, size, hidden)
         state = threading.local()
-        exchange_slots = [None] * size
-        gather_slots = [None] * size
+        exchange_slots: list[tuple[torch.Tensor, torch.Tensor] | None] = [None] * size
+        gather_slots: list[tuple[torch.Tensor, torch.Tensor] | None] = [None] * size
 
         def complete_exchange():
-            sends = [send.clone() for _, send in exchange_slots]
-            for owner, (received, _) in enumerate(exchange_slots):
+            # The barrier action runs after every rank has filled its slot.
+            slots = cast(list[tuple[torch.Tensor, torch.Tensor]], exchange_slots)
+            sends = [send.clone() for _, send in slots]
+            for owner, (received, _) in enumerate(slots):
                 received.copy_(torch.cat([send.chunk(size, dim=0)[owner] for send in sends]))
 
         def complete_gather():
-            result = torch.cat([partial.clone() for _, partial in gather_slots])
-            for output, _ in gather_slots:
+            slots = cast(list[tuple[torch.Tensor, torch.Tensor]], gather_slots)
+            result = torch.cat([partial.clone() for _, partial in slots])
+            for output, _ in slots:
                 output.copy_(result)
 
         exchange_barrier = threading.Barrier(size, action=complete_exchange, timeout=20)
@@ -213,7 +218,7 @@ class TestMxfp8AllReduce(unittest.TestCase):
             return _decode(values, scales).to(torch.bfloat16)
 
         wrappers = [
-            _make(world_size=size, pipeline_chunks=chunks, quantize=quantize, dequantize=dequantize)
+            _make(world_size=size, enable_pipeline=enabled, quantize=quantize, dequantize=dequantize)
             for _ in range(size)
         ]
 
@@ -255,18 +260,28 @@ class TestQuantizedBackendSelection(unittest.TestCase):
             comm.unique_name = unique_name
             comm.world_size = 2
 
-        for dtype, chunks in (("int8", 1), ("mxfp8", 1), ("mxfp8", 2), ("mxfp8", 4)):
-            with self.subTest(quant_dtype=dtype, chunks=chunks):
-                config = SimpleNamespace(
-                    enable=True, min_numel=512, quant_dtype=dtype, pipeline_chunks=chunks, pipeline_min_numel=1024
-                )
+        cases: tuple[tuple[bool, dict[str, Any], str], ...] = (
+            (False, {}, "int8"),
+            (True, {}, "mxfp8"),
+            (False, {"quant_dtype": "int8"}, "int8"),
+            (True, {"quant_dtype": "int8"}, "int8"),
+            (True, {"quant_dtype": "mxfp8"}, "mxfp8"),
+            (True, {"enable_pipeline": True, "pipeline_min_numel": 1024}, "mxfp8"),
+            (True, {"enable_pipeline": False}, "mxfp8"),
+        )
+        for is_a5, options, dtype in cases:
+            with (
+                self.subTest(is_a5=is_a5, options=options),
+                patch("vllm_ascend.ascend_config.is_950", return_value=is_a5),
+            ):
+                config = QuantizedAllReduceConfig(enable=True, min_numel=512, **options)
                 wrapper = SimpleNamespace(
                     supported=True,
                     min_numel=512,
                     max_q=63,
                     all_reduce=MagicMock(),
-                    pipeline_chunks=chunks,
-                    pipeline_min_numel=1024,
+                    enable_pipeline=config.enable_pipeline,
+                    pipeline_min_numel=config.pipeline_min_numel or config.min_numel,
                 )
                 group = MagicMock()
                 with (
@@ -284,7 +299,14 @@ class TestQuantizedBackendSelection(unittest.TestCase):
                     source = torch.ones(4, 128, dtype=torch.bfloat16)
                     comm.all_reduce(source)
                 selected, other = (int8, mxfp8) if dtype == "int8" else (mxfp8, int8)
-                kwargs = {} if dtype == "int8" else {"pipeline_chunks": chunks, "pipeline_min_numel": 1024}
+                kwargs = (
+                    {}
+                    if dtype == "int8"
+                    else {
+                        "enable_pipeline": config.enable_pipeline,
+                        "pipeline_min_numel": config.pipeline_min_numel,
+                    }
+                )
                 selected.assert_called_once_with(group, min_numel=512, group_name="tp:0", **kwargs)
                 other.assert_not_called()
                 wrapper.all_reduce.assert_called_once_with(source)

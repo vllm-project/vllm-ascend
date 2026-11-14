@@ -67,7 +67,7 @@ class NPUCommunicator(DeviceCommunicatorBase):
         # FlashInfer PCIe IPC backend on NPU.
         self.fi_pcie_ipc_ar_comm = None
         self.all2all_manager = _NpuAll2AllManager()
-        # Select one opt-in backend; existing configs retain the INT8 path.
+        # Select the configured backend; defaults are MXFP8 on A5, INT8 on A2.
         # Both wrappers use payload/shape gates and the existing process group.
         quantized_cfg = get_ascend_config().quantized_all_reduce_config
         self.quantized_ar: QuantizedAllReduce | Mxfp8AllReduce | None = None
@@ -76,30 +76,29 @@ class NPUCommunicator(DeviceCommunicatorBase):
                 self.quantized_ar = QuantizedAllReduce(
                     self.device_group, min_numel=quantized_cfg.min_numel, group_name=self.unique_name
                 )
-            else:
-                self.quantized_ar = Mxfp8AllReduce(
-                    self.device_group,
-                    min_numel=quantized_cfg.min_numel,
-                    group_name=self.unique_name,
-                    pipeline_chunks=quantized_cfg.pipeline_chunks,
-                    pipeline_min_numel=quantized_cfg.pipeline_min_numel,
-                )
-            if self.quantized_ar.supported:
-                if quantized_cfg.quant_dtype == "int8":
+                if self.quantized_ar.supported:
                     logger.info_once(
                         "INT8 quantized all-reduce enabled (group=%s, min_numel=%d, max_q=%d).",
                         self.unique_name,
                         self.quantized_ar.min_numel,
                         self.quantized_ar.max_q,
                     )
-                else:
+            else:
+                self.quantized_ar = Mxfp8AllReduce(
+                    self.device_group,
+                    min_numel=quantized_cfg.min_numel,
+                    group_name=self.unique_name,
+                    enable_pipeline=quantized_cfg.enable_pipeline,
+                    pipeline_min_numel=quantized_cfg.pipeline_min_numel,
+                )
+                if self.quantized_ar.supported:
                     logger.info_once(
                         "MXFP8 AllToAll quantized all-reduce enabled "
-                        "(group=%s, min_numel=%d, pipeline_chunks=%d, pipeline_min_numel=%d, "
+                        "(group=%s, min_numel=%d, enable_pipeline=%s, pipeline_min_numel=%d, "
                         "dequant_dtype=bf16, sum_output_dtype=bf16; pipeline is Eager-only).",
                         self.unique_name,
                         self.quantized_ar.min_numel,
-                        self.quantized_ar.pipeline_chunks,
+                        self.quantized_ar.enable_pipeline,
                         self.quantized_ar.pipeline_min_numel,
                     )
 

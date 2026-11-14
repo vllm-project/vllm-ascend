@@ -116,13 +116,18 @@ class TestRlConfig(TestBase):
 
 
 class TestQuantizedAllReduceConfig(TestBase):
+    """Validate communication settings without initializing the upstream runtime."""
+
     def test_defaults(self):
-        config = QuantizedAllReduceConfig()
-        self.assertFalse(config.enable)
-        self.assertEqual(config.min_numel, 16777216)
-        self.assertEqual(config.quant_dtype, "int8")
-        self.assertEqual(config.pipeline_chunks, 1)
-        self.assertIsNone(config.pipeline_min_numel)
+        for is_a5, expected_dtype in ((False, "int8"), (True, "mxfp8")):
+            with self.subTest(is_a5=is_a5), patch("vllm_ascend.ascend_config.is_950", return_value=is_a5):
+                config = QuantizedAllReduceConfig()
+                self.assertFalse(config.enable)
+                self.assertEqual(config.min_numel, 16777216)
+                self.assertEqual(config.quant_dtype, expected_dtype)
+                self.assertFalse(config.enable_pipeline)
+                self.assertIsNone(config.pipeline_min_numel)
+                self.assertEqual(dataclasses.asdict(config)["quant_dtype"], expected_dtype)
 
     def test_explicit_values_and_lax_bool(self):
         config = QuantizedAllReduceConfig(enable="true", min_numel="2097152")  # type: ignore[arg-type]
@@ -139,44 +144,68 @@ class TestQuantizedAllReduceConfig(TestBase):
                 QuantizedAllReduceConfig(min_numel=value)
 
     def test_quant_dtype_selection(self):
-        self.assertEqual(QuantizedAllReduceConfig(quant_dtype="mxfp8").quant_dtype, "mxfp8")
+        for is_a5 in (False, True):
+            for quant_dtype in ("int8", "mxfp8"):
+                with (
+                    self.subTest(is_a5=is_a5, quant_dtype=quant_dtype),
+                    patch("vllm_ascend.ascend_config.is_950", return_value=is_a5),
+                ):
+                    config = QuantizedAllReduceConfig(quant_dtype=quant_dtype)
+                    self.assertEqual(config.quant_dtype, quant_dtype)
         for value in ("fp16", "alltoall", "auto"):
             with self.subTest(quant_dtype=value), self.assertRaises(ValueError):
                 QuantizedAllReduceConfig(quant_dtype=value)
 
     def test_mxfp8_requires_a5(self):
         config = QuantizedAllReduceConfig(enable=True, quant_dtype="mxfp8")
-        vllm_config = VllmConfig()
-        vllm_config.parallel_config.tensor_parallel_size = 2
+        vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(tensor_parallel_size=2))
         with (
             patch("vllm_ascend.ascend_config.is_950", return_value=False),
             self.assertRaisesRegex(ValueError, "requires Atlas A5"),
         ):
             config._validate_preconditions(vllm_config)
 
-    def test_mxfp8_pipeline_values_and_lax_integer_coercion(self):
-        for chunks in (1, 2, 4):
-            config = QuantizedAllReduceConfig(quant_dtype="mxfp8", pipeline_chunks=chunks, pipeline_min_numel=83886080)
-            self.assertEqual(config.pipeline_chunks, chunks)
+    def test_mxfp8_pipeline_values_and_lax_coercion(self):
+        for enabled in (False, True):
+            config = QuantizedAllReduceConfig(quant_dtype="mxfp8", enable_pipeline=enabled, pipeline_min_numel=83886080)
+            self.assertIs(config.enable_pipeline, enabled)
             self.assertEqual(config.pipeline_min_numel, 83886080)
-        config = QuantizedAllReduceConfig(quant_dtype="mxfp8", pipeline_chunks="2", pipeline_min_numel="41943040")  # type: ignore[arg-type]
-        self.assertEqual(config.pipeline_chunks, 2)
+        config = QuantizedAllReduceConfig(quant_dtype="mxfp8", enable_pipeline="true", pipeline_min_numel="41943040")  # type: ignore[arg-type]
+        self.assertTrue(config.enable_pipeline)
         self.assertEqual(config.pipeline_min_numel, 41943040)
+        config = QuantizedAllReduceConfig(quant_dtype="mxfp8", enable_pipeline="false")  # type: ignore[arg-type]
+        self.assertFalse(config.enable_pipeline)
 
     def test_rejects_invalid_pipeline_settings(self):
-        for chunks in (0, -1, 3, 8):
-            with self.subTest(chunks=chunks), self.assertRaisesRegex(ValueError, "pipeline_chunks"):
-                QuantizedAllReduceConfig(quant_dtype="mxfp8", pipeline_chunks=chunks)
+        for value in (2, 4, -1, "invalid", None):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "enable_pipeline"):
+                QuantizedAllReduceConfig(quant_dtype="mxfp8", enable_pipeline=value)  # type: ignore[arg-type]
         for threshold in (0, -1):
             with self.subTest(threshold=threshold), self.assertRaisesRegex(ValueError, "pipeline_min_numel"):
                 QuantizedAllReduceConfig(quant_dtype="mxfp8", pipeline_min_numel=threshold)
-        for kwargs in ({"pipeline_chunks": 2}, {"pipeline_min_numel": 1024}):
+        for kwargs in ({"enable_pipeline": True}, {"pipeline_min_numel": 1024}):
             with self.subTest(kwargs=kwargs), self.assertRaisesRegex(ValueError, "quant_dtype='mxfp8'"):
-                QuantizedAllReduceConfig(**kwargs)
+                QuantizedAllReduceConfig(quant_dtype="int8", **kwargs)
+
+    def test_rejects_removed_pipeline_chunks_option(self):
+        for chunks in (1, 2, 4):
+            with self.subTest(chunks=chunks), self.assertRaisesRegex(ValueError, "pipeline_chunks"):
+                QuantizedAllReduceConfig(quant_dtype="mxfp8", pipeline_chunks=chunks)  # type: ignore[call-arg]
+
+    def test_pipeline_uses_hardware_default_backend(self):
+        for is_a5 in (False, True):
+            with self.subTest(is_a5=is_a5), patch("vllm_ascend.ascend_config.is_950", return_value=is_a5):
+                if is_a5:
+                    config = QuantizedAllReduceConfig(enable_pipeline=True)
+                    self.assertEqual(config.quant_dtype, "mxfp8")
+                    self.assertTrue(config.enable_pipeline)
+                else:
+                    with self.assertRaisesRegex(ValueError, "quant_dtype='mxfp8'"):
+                        QuantizedAllReduceConfig(enable_pipeline=True)
 
     def test_mxfp8_tp_validation(self):
         config = QuantizedAllReduceConfig(enable=True, quant_dtype="mxfp8")
-        vllm_config = VllmConfig()
+        vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(tensor_parallel_size=1))
         with patch("vllm_ascend.ascend_config.is_950", return_value=True):
             for tp_size in (1, 2, 4, 8):
                 vllm_config.parallel_config.tensor_parallel_size = tp_size
@@ -186,18 +215,27 @@ class TestQuantizedAllReduceConfig(TestBase):
                 config._validate_preconditions(vllm_config)
 
     def test_rejects_tp_above_common_limit(self):
-        config = QuantizedAllReduceConfig(enable=True)
-        vllm_config = VllmConfig()
-        vllm_config.parallel_config.tensor_parallel_size = 16
+        config = QuantizedAllReduceConfig(enable=True, quant_dtype="int8")
+        vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(tensor_parallel_size=16))
         with self.assertRaisesRegex(ValueError, "tensor_parallel_size <= 8"):
             config._validate_preconditions(vllm_config)
 
     def test_accepts_same_tp_sizes_on_a5(self):
-        config = QuantizedAllReduceConfig(enable=True)
         with patch("vllm_ascend.ascend_config.is_950", return_value=True):
+            config = QuantizedAllReduceConfig(enable=True)
+            self.assertEqual(config.quant_dtype, "mxfp8")
             for tp_size in (1, 2, 4, 8):
-                vllm_config = VllmConfig()
-                vllm_config.parallel_config.tensor_parallel_size = tp_size
+                vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(tensor_parallel_size=tp_size))
+                config._validate_preconditions(vllm_config)
+            vllm_config.parallel_config.tensor_parallel_size = 3
+            with self.assertRaisesRegex(ValueError, "TP=2/4/8"):
+                config._validate_preconditions(vllm_config)
+
+    def test_disabled_defaults_bypass_tp_validation(self):
+        for is_a5 in (False, True):
+            with self.subTest(is_a5=is_a5), patch("vllm_ascend.ascend_config.is_950", return_value=is_a5):
+                config = QuantizedAllReduceConfig()
+                vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(tensor_parallel_size=16))
                 config._validate_preconditions(vllm_config)
 
 

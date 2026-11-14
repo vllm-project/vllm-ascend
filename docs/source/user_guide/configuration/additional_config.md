@@ -389,103 +389,57 @@ PCP gathers prefill KV before cache writes. KVPP layer broadcasts restore prior-
 
 ### Quantized all-reduce
 
-`quantized_all_reduce_config` selects an opt-in communication backend for large BF16 collectives. `quant_dtype="int8"` is the default on A2/A3/A5; `quant_dtype="mxfp8"` selects the experimental MXFP8 AllToAll/AllGather path on A5. The feature is disabled by default and the default threshold is 32 MiB. Existing configurations without `quant_dtype` retain INT8 behavior.
+Configure `quantized_all_reduce_config` to enable quantized communication for large BF16 inputs. The feature is disabled by default. A2 supports INT8; A5 supports INT8 and MXFP8. A3 is unsupported.
 
-#### INT8 (default)
+#### Recommended parameter values
 
-```json
-{
-    "quantized_all_reduce_config": {
-        "enable": true,
-        "min_numel": 16777216,
-        "quant_dtype": "int8"
-    }
-}
-```
+A5 MXFP8 and two-chunk pipelining have been tested end-to-end with vLLM.
 
-`min_numel` counts BF16 elements, so `16777216` corresponds to a 32 MiB input. All workers must use the same configuration.
+| Parameter | Valid values and default | Recommendation |
+| --- | --- | --- |
+| `enable` | `true` or `false`; default `false` | Set `true` to enable quantized all-reduce. |
+| `quant_dtype` | `"int8"` or `"mxfp8"`; defaults to `"int8"` on A2 and `"mxfp8"` on A5 | Use INT8 on A2 and MXFP8 on A5. A5 can explicitly select `"int8"`. |
+| `min_numel` | Positive integer; default `16777216` | Start with `16777216` (32 MiB BF16) for both INT8 and MXFP8. If enabling quantized communication degrades performance, raise it to `41943040` (80 MiB) or `83886080` (160 MiB) and compare again. |
+| `enable_pipeline` | `true` or `false`; default `false` | Recommended for A5 MXFP8 with large prefill or mixed batches in Eager mode: TP=2 at 80 MiB or above, and TP=4 at 160 MiB or above. For TP=8, try 160 MiB or above and enable only if a vLLM end-to-end comparison with `false` confirms a benefit. Keep `false` for workloads dominated by small messages or graph capture. |
+| `pipeline_min_numel` | Positive integer or `null`; omitted/`null` follows `min_numel` | Start with `41943040` (80 MiB BF16) at TP=2 or `83886080` (160 MiB BF16) at TP=4/8. Use a value no smaller than `min_numel`. |
 
-A2, A3 and A5 use the same routing conditions:
+Thresholds count elements in each rank's original full BF16 tensor, before splitting. Quantized communication requires `numel >= min_numel`; pipelining additionally requires `numel >= pipeline_min_numel`. Use the same configuration on every worker. For INT8, leave `enable_pipeline=false` and `pipeline_min_numel` omitted or `null`.
 
-- a communication group with 2 to 8 ranks;
-- BF16 input with at least two dimensions and a last dimension of at least 64;
-- `numel >= min_numel`.
+#### Supported configurations
 
-The wrapper is created for every parallel group, including non-TP groups. Groups larger than 8 ranks use ordinary BF16 all-reduce; configuring TP greater than 8 while enabling the feature raises an error at startup. A single-rank communicator bypasses quantization.
+- INT8: TP=2 to 8; BF16 inputs with at least two dimensions and a last dimension of at least 64.
+- MXFP8: TP=2/4/8; BF16 inputs with at least two dimensions, a last dimension divisible by 64, and a flattened row count divisible by the communication group size.
+- TP=1 bypasses communication. Inputs outside the supported tensor conditions use ordinary all-reduce.
+- MXFP8 requires matching `torch_npu`/CANN versions providing `torch_npu.npu_dynamic_mx_quant` and `torch_npu.npu_anti_mx_quant`.
 
-Routing does not inspect attention metadata, prefill/decode phase, draft-model flags, profiling, graph mode or input contiguity. A mixed prefill/decode batch meeting the same payload and shape conditions takes the INT8 path for its entire tensor. Decode and draft-model calls below the size threshold keep ordinary all-reduce. ReduceScatter and fused communication paths are not intercepted.
-
-There is no A5-specific Eager restriction. During graph capture, the path is selected for the captured input shape and recorded in the graph; graph replay does not rerun the Python routing conditions.
-
-Each rank computes a per-channel maximum. An FP32 MAX all-reduce creates a shared scale, with `max_q = 127 // TP`; the activations are quantized, summed through ordinary INT8 HCCL all-reduce, then dequantized directly to a BF16 result. The bound guarantees `TP * max_q <= 127`, so same-sign INT8 sums do not wrap. This path uses `npu_quantize`, `npu_anti_quant` and ordinary HCCL; it does not require `ops-transformer`, native QuantAllReduce or a separate communication domain.
-
-The effective INT8 range decreases as TP grows. A5 synthetic-input measurements showed approximately 1.59%–1.98% relative L2 error at TP=2 and 3.40%–4.15% at TP=4. These values are diagnostic results rather than model-accuracy guarantees. Validate the target model before deployment.
-
-Use the standalone benchmark to check the installed operators, numerical behavior and complete-path crossover:
-
-```bash
-python3 -m torch.distributed.run --standalone --nproc-per-node 2 \
-    benchmarks/benchmark_int8_all_reduce.py \
-    --tokens 512 2048 4096 8192 16384 \
-    --hidden-sizes 2048 5120 \
-    --warmup 10 --iterations 50 --rounds 4 --breakdown \
-    --output int8_tp2.json
-```
-
-For routing diagnostics, enable debug logging for `distributed.device_communicators.quantized_all_reduce` through `runtime_config.ascend_log.debug` and inspect `QAR-HIT` / `QAR-SKIP`. Disable debug logging for performance measurements. A microbenchmark gain does not establish model-level accuracy, TTFT or throughput improvement.
-
-INT8 chunked pipelining has been withdrawn following user-reported runtime tests without a measured gain. INT8 uses the whole-tensor algorithm; remove `pipeline_chunks` and `pipeline_min_numel` from INT8 serving configurations. The standalone INT8 pipeline benchmark remains available for experiments. Pipeline configuration applies only to the MXFP8 backend below.
-
-#### MXFP8 AllToAll/AllGather (A5)
-
-Select this backend explicitly while keeping INT8 available through the same configuration:
+#### INT8 example
 
 ```json
 {
     "quantized_all_reduce_config": {
         "enable": true,
-        "min_numel": 16777216,
-        "quant_dtype": "mxfp8"
+        "quant_dtype": "int8",
+        "min_numel": 16777216
     }
 }
 ```
 
-This mode uses ordinary collectives on the existing process group:
+#### MXFP8 example (A5)
 
-```text
-BF16 activation -> dynamic MXFP8 E4M3FN + E8M0 scales
-  -> pack raw data/scales -> AllToAll to row-shard owners
-  -> BF16 dequantization -> local SUM with BF16 output
-  -> BF16 AllGather -> BF16 result with the original shape
+Omitting `quant_dtype` selects MXFP8 on A5:
+
+```json
+{
+    "quantized_all_reduce_config": {
+        "enable": true,
+        "min_numel": 16777216
+    }
+}
 ```
 
-No `ops-transformer`, native QuantAllReduce or dedicated HCCL group is required. The installed `torch_npu`/CANN must expose `npu_dynamic_mx_quant` and `npu_anti_mx_quant` (through the facade or registered NPU anti-quant operator). Unsupported hardware or missing operators fails at startup for eligible groups. A backend does not switch to the other quantization method automatically.
+#### MXFP8 pipeline example (A5, Eager)
 
-The MXFP8 wrapper is created for all parallel groups. It requires group size 2/4/8, BF16 input with at least two dimensions, `numel >= min_numel`, a last dimension divisible by 64, and a flattened row count divisible by the group size. Calls outside these tensor/group conditions use ordinary all-reduce. TP=1 bypasses communication; configuring other TP sizes for MXFP8 raises an error. The threshold counts original BF16 elements, just as for INT8.
-
-Routing does not require pure prefill or Eager mode. Mixed prefill/decode batches meeting these conditions use MXFP8 for the entire tensor, including their decode rows. Decode graphs below the threshold retain ordinary BF16 communication. Captured paths are fixed for their captured shapes and are not reevaluated during replay. Validate graph capture and model accuracy on the intended A5 stack before deployment.
-
-`npu_anti_mx_quant` uses `dst_type=15` to produce BF16 directly. The local SUM also returns BF16; its internal accumulator and workspace are backend-defined. The implementation does not explicitly materialize a full FP32 dequantization tensor. It releases temporary payload/staging references before allocating the full result, which is returned out of place like the INT8 path. Peak memory still includes packing, unpacking, communication buffers and the result; measure total process HBM as well as allocator peaks.
-
-Use the BF16 variant of the standalone benchmark to validate the selected numerical path:
-
-```bash
-export HCCL_NPU_SOCKET_PORT_RANGE="61000-61050"
-python3 -m torch.distributed.run --standalone --nproc-per-node 2 \
-    benchmarks/benchmark_mxfp8_all_reduce.py \
-    --tokens 2048 4096 8192 16384 --hidden-sizes 5120 \
-    --dequant-dtype bf16 \
-    --warmup 10 --iterations 50 --rounds 4 --breakdown \
-    --output mxfp8_alltoall_tp2_bf16.json
-```
-
-The benchmark writes its result in place; the runtime wrapper returns a separate result to satisfy the communicator contract, so their memory peaks need not match. Both should be compared against independent FP32 references and ordinary BF16 all-reduce, then validated with the actual mixed workload and MTP acceptance metrics.
-
-For runtime routing diagnostics, add `distributed.device_communicators.mxfp8_all_reduce` to `runtime_config.ascend_log.debug` and inspect `MXFP8-AR-HIT` / `MXFP8-AR-SKIP`. Disable debug logging during performance measurements.
-
-##### Chunked MXFP8 pipeline (A5, Eager)
-
-Set `pipeline_chunks` to `2` or `4` to overlap different row chunks' quantization, communication and local reduction. The default `1` preserves whole-tensor MXFP8. These settings require `quant_dtype="mxfp8"`; INT8 remains available with its existing configuration.
+For TP=4/8, start with a 160 MiB pipeline threshold. For TP=2, use `41943040` for an 80 MiB threshold.
 
 ```json
 {
@@ -493,33 +447,8 @@ Set `pipeline_chunks` to `2` or `4` to overlap different row chunks' quantizatio
         "enable": true,
         "quant_dtype": "mxfp8",
         "min_numel": 16777216,
-        "pipeline_chunks": 2,
+        "enable_pipeline": true,
         "pipeline_min_numel": 83886080
     }
 }
 ```
-
-`pipeline_min_numel` is a separate threshold on the **original full BF16 tensor**, before splitting. It must be positive when provided; omitted or `null` uses `min_numel`. The example quantizes eligible tensors at 32 MiB and enables the pipeline at 160 MiB (`83886080 * 2` bytes). It leaves smaller eligible messages on whole-tensor MXFP8. Both thresholds must be met for pipelining.
-
-The wrapper uses these routes, with the existing group, dtype, hidden alignment and row-sharding requirements:
-
-| Condition | Route |
-| --- | --- |
-| Below `min_numel` or ineligible tensor/group | Ordinary all-reduce |
-| Eligible, `pipeline_chunks=1` | Whole-tensor MXFP8 |
-| Eligible, below `pipeline_min_numel` | Whole-tensor MXFP8 |
-| Eligible, insufficient rows to give each chunk at least one row per rank | Whole-tensor MXFP8 |
-| Eligible, during graph capture | Whole-tensor MXFP8 |
-| Eligible, enough rows, both thresholds met, Eager execution | Chunked MXFP8 pipeline |
-
-Decode calls below `min_numel` keep their existing BF16 graph path. Eligible graph-captured calls retain the original synchronous whole-tensor MXFP8 algorithm; asynchronous chunked communication is not captured. Replay executes the recorded path. Prefill and mixed prefill/decode batches in Eager mode can use the pipeline under the same metadata/size gates; no pure-prefill requirement is added.
-
-The pipeline uses a two-chunk lookahead, ordinary asynchronous AllToAll and BF16 AllGather, and `Work.wait()` dependencies on the existing HCCL group. There are no additional groups, manually created streams or device-wide synchronizations. All output shards are joined onto the caller's stream before return. Like the original runtime wrapper, it returns a separate BF16 tensor with the original shape and preserves the input.
-
-Rows are partitioned in group-sized units, preserving each hidden-axis MX block and its scale. Uneven partitions are supported. Send/receive buffers for at most two chunks remain in the queue; AllGather inputs and output views are kept alive through their joins. Temporary payloads are scoped to each call, with no cross-call payload cache. The full output tensor, in-flight payloads, local reductions and external HCCL resources still contribute to peak memory.
-
-On the measured `[tokens,5120]` A5 workloads, TP2 benefited from 2 chunks at 8192/16384/32768 tokens. TP4 favored whole-tensor MXFP8 at 8192 tokens, 2 chunks at 16384, and 4 chunks at 32768 when considering both latency and memory. The example's 160 MiB pipeline threshold is a conservative starting point for TP4; for the measured TP2 case, 80 MiB corresponds to `pipeline_min_numel=41943040`. These measurements do not establish a universal crossover or model TTFT improvement. Tune thresholds and chunk count with the intended TP, topology, HCCL mode and model workload.
-
-For route diagnosis, the existing `MXFP8-AR-HIT` debug record now includes `mode=full|pipeline`, actual `chunks`, `pipeline_min_numel` and `pipeline_reason`. A whole-tensor fallback reports `disabled`, `below_pipeline_threshold`, `insufficient_rows` or `graph_capture`. `MXFP8-AR-SKIP` continues to identify ordinary all-reduce fallbacks. Disable debug logs during performance runs.
-
-Validate the model's accuracy, MTP acceptance, TTFT/throughput and actual decode graph capture on the target A5 stack. The standalone `benchmarks/benchmark_mxfp8_pipeline.py` compares the algorithms in place; runtime output is out of place, so its memory peaks can differ. `benchmarks/profile_mxfp8_pipeline.py` captures the three algorithm families together for overlap analysis.

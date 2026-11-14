@@ -13,14 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
-"""Quantized all-reduce for large bf16 TP collectives on Atlas A2/A3/A5.
+"""Quantized all-reduce for large bf16 TP collectives on Atlas A2/A5.
 
 Halves the all-reduce payload (bf16 -> int8 -> reduce -> bf16). Opt-in, and it
 only pays off for large messages, so it is gated by a payload threshold.
 
+A3 (910C) is rejected. Its bf16 HCCS bandwidth is about 2.6x that of A2 while
+the fixed per-collective cost of the int8 path is unchanged, so the quantized
+path is a net loss at every payload size (measured 5-320 MiB across four
+different groups of 910C cards).
+
 Group scope
 -----------
-The wrapper uses the same routing rules on A2, A3 and A5. It is constructed
+The wrapper uses the same routing rules on A2 and A5. It is constructed
 for every parallel group, and groups with at most 8 ranks can take the int8
 path. Larger EP/MC2 groups keep bf16. Eligible bf16 tensors are selected by
 shape and payload size, without inspecting the forward phase or graph mode.
@@ -29,7 +34,7 @@ Configuration
 -------------
 Enable it through ``--additional-config`` (see vllm_ascend.ascend_config):
 
-    --additional-config '{"quantized_all_reduce_config": {"enable": true, "min_numel": 16777216}}'
+    --additional-config '{"quantized_all_reduce_config": {"enable": true, "quant_dtype": "int8"}}'
 
   enable     bool, default false.
   min_numel  Payload threshold in elements: a collective is quantized only when
@@ -39,7 +44,7 @@ Enable it through ``--additional-config`` (see vllm_ascend.ascend_config):
              matters only through the collective payload. Mixed batches and
              decode take the int8 path if they meet the same size/shape gates.
 
-  The optimized A2/A3 implementation breaks even at ~20-24 MiB: 16 MiB +13%,
+  The optimized A2 implementation breaks even at ~20-24 MiB: 16 MiB +13%,
   32 MiB -29%, 42 MiB -32%, 64 MiB -37%, 128 MiB -37% versus BF16 on
   4x910B3. A5 TP=2/4 measurements also support a conservative 32 MiB gate.
   Do not lower min_numel without target-hardware and model validation.
@@ -56,7 +61,6 @@ Enable it through ``--additional-config`` (see vllm_ascend.ascend_config):
 """
 
 import logging
-import math
 
 import torch
 import torch.distributed as dist
@@ -68,9 +72,9 @@ from vllm_ascend.logger import init_logger_ascend
 
 logger = init_logger_ascend(__name__)
 
-# A2 is measured end to end; A3 supports the kernels; A5 TP=2/4 has standalone
-# numerical and performance evidence. All families share the A2 routing rules.
-_VALID_DEVICE_TYPES = (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5)
+# A2 is validated end to end; A5 TP=2/4 has standalone numerical and
+# performance evidence. A3 remains disabled due to its measured regression.
+_VALID_DEVICE_TYPES = (AscendDeviceType.A2, AscendDeviceType.A5)
 # Groups larger than 8 ranks leave too few int8 levels (ws=16 -> max_q=7), so
 # they keep bf16 instead of failing. The TP degree is rejected at config time.
 _MAX_VALID_WORLD_SIZE = 8
@@ -172,9 +176,9 @@ class QuantizedAllReduce:
         flat = input_.reshape(-1, input_.shape[-1])
 
         # 1. per-channel global amax (tiny fp32 all-reduce, [C] elements).
-        # vector_norm(ord=inf) fuses abs+max and avoids a payload-sized
-        # temporary tensor. This is the optimized PR #19000 implementation.
-        amax = torch.linalg.vector_norm(flat, ord=math.inf, dim=0).float()
+        # vector_norm(ord=inf) is abs+max fused into one kernel: it avoids the
+        # transient abs tensor (80 MiB at an 84 MiB payload) and is ~30% faster.
+        amax = torch.linalg.vector_norm(flat, dim=0, ord=float("inf")).float()
         dist.all_reduce(amax, op=dist.ReduceOp.MAX, group=self.group)
         # Exact-bound scale: rounding a value <= max_q cannot exceed max_q, so
         # the int8 sum over TP ranks stays in range and no clamp is needed.
@@ -184,8 +188,10 @@ class QuantizedAllReduce:
         q = torch_npu.npu_quantize(flat, scale, None, torch.int8, 1, True)
         dist.all_reduce(q, group=self.group)
 
-        # 3. Dequantize to the original dtype and return out of place. The
-        # GroupCoordinator all-reduce contract requires callers to consume the
-        # returned tensor, so copying the full payload back is unnecessary.
+        # 3. dequantize back to the original dtype/shape and return out-of-place:
+        # GroupCoordinator.all_reduce treats the device communicator as
+        # out-of-place by contract (vLLM custom ops cannot mutate and return in
+        # the same op), so callers always consume the returned tensor. This
+        # skips an 80 MiB read+write copy per collective.
         out = torch_npu.npu_anti_quant(q, scale, dst_dtype=input_.dtype)
         return out.reshape(input_.shape)

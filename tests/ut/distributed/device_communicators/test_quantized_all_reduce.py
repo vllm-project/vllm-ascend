@@ -26,10 +26,10 @@ rounding can never exceed max_q and ws * max_q <= 127 holds for any input.
 This needs no clamp kernel at all (int8 clamp_/clamp/hardtanh are ~250x
 slower than minimum/maximum on Ascend).
 
-On A2/A3/A5 the wrapper is also built for non-TP groups (ep/mc2 = DP x PCP x TP).
+On A2/A5 the wrapper is also built for non-TP groups (ep/mc2 = DP x PCP x TP).
 Those can exceed the supported group size, so an oversized group must fall back
 to bf16 instead of raising: the review reported a 16-rank EP/MC2 group aborting
-start-up while a supported TP=4 was configured. All three device families
+start-up while a supported TP=4 was configured. Both device families
 share the same routing without checking the forward phase or graph mode.
 """
 
@@ -77,14 +77,15 @@ class TestQuantizedAllReduce(unittest.TestCase):
         self.assertEqual(wrapper.min_numel, 12345)
 
     def test_accepted_on_validated_device_families(self):
-        for dt in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5):
+        for dt in (AscendDeviceType.A2, AscendDeviceType.A5):
             wrapper = _make(world_size=4, device_type=dt)
             self.assertTrue(wrapper.supported)
             self.assertEqual(wrapper.max_q, 31)
 
     def test_raises_on_unvalidated_device_families(self):
-        with self.assertRaisesRegex(RuntimeError, "only validated on"):
-            _make(world_size=4, device_type=AscendDeviceType._310P)
+        for device_type in (AscendDeviceType.A3, AscendDeviceType._310P):
+            with self.subTest(device_type=device_type), self.assertRaisesRegex(RuntimeError, "only validated on"):
+                _make(world_size=4, device_type=device_type)
 
     def test_supported_flag_only_up_to_max_group_size(self):
         for ws in (2, 4, 8):
@@ -98,7 +99,7 @@ class TestQuantizedAllReduce(unittest.TestCase):
             self.assertEqual(wrapper.max_q, 0)
 
     def test_device_families_share_group_routing(self):
-        for dt in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5):
+        for dt in (AscendDeviceType.A2, AscendDeviceType.A5):
             for group_name in ("tp:0", "dp:0", "ep:0", ""):
                 for ws in (2, 4, 8, 16):
                     with self.subTest(device=dt, group=group_name, world_size=ws):
@@ -280,7 +281,7 @@ class TestQuantizedAllReduce(unittest.TestCase):
             (torch.randn(128, dtype=torch.bfloat16), 1, False),
             (torch.randn(4, 32, dtype=torch.bfloat16), 1, False),
         )
-        for dt in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5):
+        for dt in (AscendDeviceType.A2, AscendDeviceType.A5):
             for x, min_numel, quantized in cases:
                 with self.subTest(device=dt, shape=tuple(x.shape), dtype=x.dtype, min_numel=min_numel):
                     wrapper = _make(min_numel=min_numel, device_type=dt)

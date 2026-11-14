@@ -402,9 +402,10 @@ class QuantizedAllReduceConfig:
     """Configuration Object for ``additional_config["quantized_all_reduce_config"]``.
 
     Opt-in quantized all-reduce for large bf16 collectives. ``quant_dtype``
-    selects shared-scale int8 (default, A2/A3/A5) or MXFP8 AllToAll/AllGather
-    with BF16 dequantization and local SUM output (A5 only). Both select calls
-    by group size, dtype, shape and payload rather than forward phase.
+    selects shared-scale int8 (default on A2) or MXFP8 AllToAll/AllGather
+    with BF16 dequantization and local SUM output (default on A5). An explicit
+    value overrides the hardware default. Both select calls by group size,
+    dtype, shape and payload rather than forward phase.
     A collective takes the selected path only when its payload reaches
     ``min_numel`` elements, i.e. ``min_numel * 2`` bytes of bf16 data. The
     default is 16,777,216 elements (32 MiB), retained from the INT8 crossover
@@ -414,16 +415,16 @@ class QuantizedAllReduceConfig:
     keep bf16. MXFP8 supports groups of 2/4/8 ranks, while INT8 supports up to
     8 ranks. The TP degree itself is validated here before group construction.
 
-    For MXFP8, ``pipeline_chunks`` selects 1 (whole tensor, default), 2 or 4
-    chunks. The pipeline additionally requires ``pipeline_min_numel`` elements
+    For MXFP8, ``enable_pipeline`` enables two-chunk pipelining (default false).
+    The pipeline additionally requires ``pipeline_min_numel`` elements
     (defaults to ``min_numel``) and Eager execution. Graph capture retains the
     original whole-tensor path. No prefill/decode phase gate is added.
     """
 
     enable: bool = False
     min_numel: int = 16777216
-    quant_dtype: Literal["int8", "mxfp8"] = "int8"
-    pipeline_chunks: int = 1
+    quant_dtype: Literal["int8", "mxfp8"] = dataclasses.field(default_factory=lambda: "mxfp8" if is_950() else "int8")
+    enable_pipeline: bool = False
     pipeline_min_numel: int | None = None
 
     @field_validator("min_numel")
@@ -431,13 +432,6 @@ class QuantizedAllReduceConfig:
     def _check_min_numel(cls, value: int) -> int:
         if value < 1:
             raise ValueError("additional_config.quantized_all_reduce_config.min_numel must be >= 1")
-        return value
-
-    @field_validator("pipeline_chunks")
-    @classmethod
-    def _check_pipeline_chunks(cls, value: int) -> int:
-        if value not in (1, 2, 4):
-            raise ValueError("additional_config.quantized_all_reduce_config.pipeline_chunks must be 1, 2 or 4")
         return value
 
     @field_validator("pipeline_min_numel")
@@ -449,7 +443,7 @@ class QuantizedAllReduceConfig:
 
     @model_validator(mode="after")
     def _check_pipeline_backend(self) -> QuantizedAllReduceConfig:
-        if self.quant_dtype != "mxfp8" and (self.pipeline_chunks != 1 or self.pipeline_min_numel is not None):
+        if self.quant_dtype != "mxfp8" and (self.enable_pipeline or self.pipeline_min_numel is not None):
             raise ValueError("MXFP8 pipeline settings require quantized_all_reduce_config.quant_dtype='mxfp8'.")
         return self
 
@@ -505,6 +499,9 @@ class AscendConfig:
     Example: pass this dict via ``--additional-config '<json>'``. All keys
     are optional; the values below show every supported key with its default
     value (see the mutex/validation notes below before copying).
+
+    ``quantized_all_reduce_config.quant_dtype`` is omitted below because its
+    default depends on the hardware: ``mxfp8`` on A5 and ``int8`` on A2.
 
         {
             "refresh": false,
@@ -577,8 +574,7 @@ class AscendConfig:
             "quantized_all_reduce_config": {
                 "enable": false,
                 "min_numel": 16777216,
-                "quant_dtype": "int8",
-                "pipeline_chunks": 1,
+                "enable_pipeline": false,
                 "pipeline_min_numel": null
             },
             "xlite_graph_config": {
