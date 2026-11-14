@@ -85,9 +85,6 @@ def test_unrelated_model_is_not_selected():
         ("mamba_config", "enable_stochastic_rounding", True, "stochastic rounding"),
         ("cache_config", "enable_prefix_caching", True, "Mamba cache mode align"),
         ("cache_config", "mamba_cache_mode", "align", "Mamba cache mode none"),
-        ("parallel_config", "pipeline_parallel_size", 2, "PP=PCP=DCP=1"),
-        ("parallel_config", "prefill_context_parallel_size", 2, "PP=PCP=DCP=1"),
-        ("parallel_config", "decode_context_parallel_size", 2, "PP=PCP=DCP=1"),
     ],
 )
 def test_unsupported_configuration_is_rejected_before_enabling(section, field, value, message):
@@ -96,6 +93,15 @@ def test_unsupported_configuration_is_rejected_before_enabling(section, field, v
     with pytest.raises(ValueError, match=message):
         validate_request_indexed_kda_recoverssm(config)
     assert not config.cache_config.use_kda_recoverssm
+
+
+@pytest.mark.parametrize(("pp", "pcp", "dcp"), [(2, 1, 1), (1, 2, 1), (1, 1, 2), (2, 2, 2)])
+def test_parallel_sizes_are_not_rejected_by_kimi_validator(pp, pcp, dcp):
+    config = make_config()
+    config.parallel_config.pipeline_parallel_size = pp
+    config.parallel_config.prefill_context_parallel_size = pcp
+    config.parallel_config.decode_context_parallel_size = dcp
+    validate_request_indexed_kda_recoverssm(config)
 
 
 @pytest.mark.parametrize("connector", ["MooncakeConnectorV2", "MooncakePullConnector"])

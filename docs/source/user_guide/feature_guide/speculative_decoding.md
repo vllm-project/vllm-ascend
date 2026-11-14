@@ -970,8 +970,7 @@ Requirements:
 - Model Runner V2 and a compatible DSpark draft model are required.
 - With prefix caching, use `--enable-prefix-caching --mamba-cache-mode align`;
   without prefix caching, use `--mamba-cache-mode none`.
-- PP, PCP and DCP must each be 1. Adaptive verification and stochastic rounding
-  are unsupported.
+- Adaptive verification and stochastic rounding are unsupported.
 
 For experimental prefill/decode separation, use `MooncakeConnectorV2` or
 `MooncakePullConnector` and enable `--use-replayssm` on both Prefill and Decode.
@@ -985,9 +984,11 @@ settings. The deployment must align both sides.
 !!! warning
 
     This feature is experimental. End-to-end P/D output equivalence remains
-    unverified, including when prefix caching is enabled. Validate eager and
-    graph execution, model accuracy, acceptance rates, memory and performance on
-    the intended Ascend hardware and checkpoints before use.
+    unverified, including when prefix caching is enabled. PP, PCP and DCP sizes
+    greater than 1 are not rejected by the Kimi RecoverSSM validator, but their
+    correctness is unverified and other parallelism constraints may still apply.
+    Validate eager and graph execution, model accuracy, acceptance rates, memory
+    and performance on the intended Ascend hardware and checkpoints before use.
 
 Removing `--use-replayssm` selects the existing KDA path.
 

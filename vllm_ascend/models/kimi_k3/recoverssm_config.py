@@ -50,13 +50,6 @@ def validate_request_indexed_kda_recoverssm(vllm_config: VllmConfig) -> None:
         raise ValueError(
             f"Kimi RecoverSSM requires Mamba cache mode {expected_cache_mode} with this prefix caching setting"
         )
-    parallel = vllm_config.parallel_config
-    if (
-        parallel.pipeline_parallel_size != 1
-        or parallel.prefill_context_parallel_size != 1
-        or parallel.decode_context_parallel_size != 1
-    ):
-        raise ValueError("Kimi RecoverSSM currently requires PP=PCP=DCP=1")
     transfer = vllm_config.kv_transfer_config
     if transfer is not None and transfer.kv_connector not in ("MooncakeConnectorV2", "MooncakePullConnector"):
         raise ValueError("KDA RecoverSSM KV transfer requires MooncakeConnectorV2 or MooncakePullConnector")
