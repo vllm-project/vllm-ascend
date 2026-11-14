@@ -16,6 +16,7 @@
 #
 
 from functools import lru_cache, wraps
+from importlib import metadata
 
 import torch
 import torch_npu
@@ -53,16 +54,31 @@ from vllm_ascend.ops.triton.mamba.state_index import gather_ssm_states, scatter_
 from vllm_ascend.utils import vllm_version_is
 
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
+# FLA has no chunk32 launcher capability query yet. This revision includes
+# the stable launcher's inference-only optional-output adaptation (FLA #1018).
+# Git-hash version suffixes are not ordered: unknown builds must fall back until
+# their launcher contract is verified, rather than passing a version >= check.
+_FLA_GDN_CHUNK32_VERSIONS = frozenset({"26.9.1+dev153268a"})
 
 
 @lru_cache(maxsize=1)
 def _get_fla_gdn_prefill_op():
-    # The stable launcher supports chunk32's inference-only output contract.
-    # Keep chunk prefill on the public queued path, like conv and recurrent.
+    # Cache both availability and package inspection once per worker. The same
+    # result selects metadata construction and execution, so a rejected FLA
+    # build gets the device metadata and processed beta needed by the fallback.
     try:
         from fla_npu.ops.ascendc import chunk_gated_delta_rule_fwd  # type: ignore[import-not-found]
     except ImportError:
         return None
+    if get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL_CHUNK32):
+        try:
+            fla_version = metadata.version("flash-linear-attention-npu-a5")
+        except (metadata.PackageNotFoundError, OSError):
+            return None
+        if fla_version not in _FLA_GDN_CHUNK32_VERSIONS:
+            return None
+    # A2/A3 retain the existing chunk64 FLA contract. Compatible A5 wheels use
+    # the public queued entry point; importability alone cannot establish ABI.
     return chunk_gated_delta_rule_fwd
 
 

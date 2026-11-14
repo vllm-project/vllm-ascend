@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import sys
 from contextlib import ExitStack
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
@@ -14,6 +15,7 @@ from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.ops.gdn import (
     AscendGatedDeltaNetAttention,
+    _get_fla_gdn_prefill_op,
     _pack_conv_weights,
     initialize_packed_conv_weight,
 )
@@ -27,7 +29,7 @@ from vllm_ascend.ops.gdn_attn_builder import (
 
 
 @pytest.mark.parametrize("batch_kind", ["prefill", "mixed", "spec"])
-@pytest.mark.parametrize("backend", ["a5", "a2", "a3", "missing_fla", "other_device", "fp16"])
+@pytest.mark.parametrize("backend", ["a5", "a2", "a3", "legacy_fla", "missing_fla", "other_device", "fp16"])
 def test_chunk32_raw_beta_routing(batch_kind, backend):
     """Only A5 chunk32 prefill consumes raw b; dt_bias belongs to g."""
     layer = _make_layer()
@@ -93,12 +95,23 @@ def test_chunk32_raw_beta_routing(batch_kind, backend):
         "other_device": AscendDeviceType._310P,
     }.get(backend, AscendDeviceType.A5)
     with ExitStack() as stack:
+        _get_fla_gdn_prefill_op.cache_clear()
+        stack.callback(_get_fla_gdn_prefill_op.cache_clear)
+        fla_module = ModuleType("fla_npu.ops.ascendc")
+        if backend != "missing_fla":
+            fla_module.chunk_gated_delta_rule_fwd = Mock()
+        stack.enter_context(patch.dict(sys.modules, {fla_module.__name__: fla_module}))
+        stack.enter_context(
+            patch(
+                "importlib.metadata.version",
+                return_value="26.9.1+dev5cc6990" if backend == "legacy_fla" else "26.9.1+dev153268a",
+            )
+        )
         stack.enter_context(override_forward_context(context))
         mocks = {}
         replacements = {
             "get_pcp_group": {"return_value": SimpleNamespace(world_size=1)},
             "get_current_hardware_profile": {"return_value": get_hardware_profile(device_type)},
-            "_get_fla_gdn_prefill_op": {"return_value": None if backend == "missing_fla" else Mock()},
             "DeviceOperator.fused_gdn_gating": {"side_effect": gating},
             "DeviceOperator.fla_gdn_prefill": {"side_effect": prefill},
             "chunk_gated_delta_rule": {"side_effect": prefill},
