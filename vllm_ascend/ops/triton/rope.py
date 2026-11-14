@@ -673,8 +673,6 @@ def rope_forward_triton_siso(
         qk = qk.contiguous()
 
     num_tokens, n_head, head_dim = qk.shape
-    assert rope_dim <= head_dim
-    pad_rope_dim = triton.next_power_of_2(rope_dim)
     pad_n_head = triton.next_power_of_2(n_head)
     BLOCK_SIZE = pad_n_head
     num_vectorcore = get_vectorcore_num()
@@ -682,6 +680,8 @@ def rope_forward_triton_siso(
 
     if cos_sin_cache is not None and positions is not None:
         assert positions.shape[0] == num_tokens
+        assert rope_dim <= head_dim
+        pad_rope_dim = triton.next_power_of_2(rope_dim)
         _triton_rope_siso[(n_row,)](
             qk,
             qk.stride(0),
@@ -710,6 +710,8 @@ def rope_forward_triton_siso(
             # If rope_dim is not specified, we assume that input cos/sin is not
             # duplicated to rope_dim, which means rope_dim == cos.shape[-1] * 2
             rope_dim = cos.shape[-1] * 2
+        assert rope_dim <= head_dim
+        pad_rope_dim = triton.next_power_of_2(rope_dim)
         _triton_rope_siso[(n_row,)](
             qk,
             qk.stride(0),
