@@ -6,7 +6,7 @@ Keep the first nine Flash layers and production widths/experts. No checkpoint,
 tokenizer download, C8, multimodal input or runtime patch is installed here.
 Use the production multimodal model wrapper even for text-only requests: its
 vision tower initializes before the language model, as in full-model serving.
-Parallel coverage is TP4+EP with PCP=1 and DCP=1.
+Parallel coverage is TP4+EP with PCP=1 and DCP=1/2/4.
 """
 
 import hashlib
@@ -128,13 +128,18 @@ class FlashWorker:
         ]
         assert len(draft_layers) == NUM_MTP_LAYERS
         assert all(layer.is_sequence_parallel and not layer.self_attn.o_proj.reduce_results for layer in draft_layers)
+        if self.model_runner.vllm_config.parallel_config.decode_context_parallel_size > 1:
+            impls = [getattr(module, "impl", None) for module in modules]
+            assert any(type(impl).__name__ == "AscendSFADCPImpl" for impl in impls)
+            indexers = [module for module in modules if type(module).__name__ == "Glm5NextKPoolIndexerBackend"]
+            assert indexers and all(indexer._use_dcp for indexer in indexers)
         return True
 
 
 @pytest.mark.parametrize("enforce_eager", [True, False], ids=["eager", "graph"])
 @pytest.mark.parametrize("use_replayssm", [False, True], ids=["no_recover", "recover"])
 @pytest.mark.parametrize("prefix_caching", [False, True], ids=["no_prefix", "prefix"])
-def test_glm53flash_tp4(tmp_path, monkeypatch, enforce_eager, use_replayssm, prefix_caching):
+def test_glm53flash_tp4(tmp_path, monkeypatch, enforce_eager, use_replayssm, prefix_caching, dcp_size=1):
     for name, value in {
         "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
@@ -153,7 +158,8 @@ def test_glm53flash_tp4(tmp_path, monkeypatch, enforce_eager, use_replayssm, pre
         # TODO: Add PCP coverage once GLM-Flash supports PCP, including MTP
         # and RecoverSSM in eager and graph modes within the four-card budget.
         prefill_context_parallel_size=1,
-        decode_context_parallel_size=1,
+        decode_context_parallel_size=dcp_size,
+        cp_kv_cache_interleave_size=128,
         enable_expert_parallel=True,
         quantization="ascend",
         distributed_executor_backend="mp",
@@ -204,10 +210,24 @@ def test_glm53flash_tp4(tmp_path, monkeypatch, enforce_eager, use_replayssm, pre
                 assert all(0 <= token < config["text_config"]["vocab_size"] for token in tokens)
         if prefix_caching:
             block_size = runner.model.llm_engine.vllm_config.cache_config.block_size
-            prefix_length = 2 * block_size + 17
+            # A sharded MLA block covers DCP times as many logical tokens.
+            prefix_length = 2 * block_size * dcp_size + 17
             assert prefix_length + OUTPUT_TOKENS < settings["max_model_len"]
             prompt = [{"prompt_token_ids": [10 + i % 1000 for i in range(prefix_length)]}]
             cold = runner.model.generate(prompt, params, use_tqdm=False)[0]
             warm = runner.model.generate(prompt, params, use_tqdm=False)[0]
             assert warm.num_cached_tokens >= block_size
             assert warm.outputs[0].token_ids == cold.outputs[0].token_ids
+
+
+@pytest.mark.parametrize("dcp_size", [2, 4])
+@pytest.mark.parametrize("enforce_eager,use_replayssm", [(True, False), (False, True)])
+def test_glm53flash_dcp_mtp_flashcomm_prefix(tmp_path, monkeypatch, dcp_size, enforce_eager, use_replayssm):
+    test_glm53flash_tp4(
+        tmp_path,
+        monkeypatch,
+        enforce_eager=enforce_eager,
+        use_replayssm=use_replayssm,
+        prefix_caching=True,
+        dcp_size=dcp_size,
+    )
