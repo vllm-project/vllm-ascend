@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import torch
 
+from tests.ut.attention.utils import _update_out_and_lse
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackendImpl,
     AscendAttentionMetadataBuilder,
@@ -20,7 +21,6 @@ from vllm_ascend.attention.context_parallel.attention_cp import (
     AscendMetadataForDecode,
     AscendMetadataForPrefill,
 )
-from vllm_ascend.attention.context_parallel.common_cp import _update_out_and_lse
 
 
 def test_gqa_dcp_extends_v1_backend_without_polluting_base_metadata() -> None:
@@ -502,7 +502,6 @@ def test_dcp_split_uses_builder_config_without_current_context(
     builder.speculative_config = None
     query_start_loc = torch.tensor([0, query_lens[0], sum(query_lens)], dtype=torch.int32)
     common = SimpleNamespace(
-        context_parallel_metadata=None,
         max_query_len=max(query_lens),
         num_reqs=2,
         num_actual_tokens=sum(query_lens),

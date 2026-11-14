@@ -74,6 +74,11 @@ on:
         description: 'JSON profiling options: enabled, start_after or start_after_requests, duration, with_stack, output, benchmark_names'
         type: string
         default: '{}'
+      drain_pr_runs:
+        description: 'Cancel in-flight PR runs of this workflow before starting (set by the external scheduler)'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -145,12 +150,15 @@ jobs:
       single_node: ${{ steps.set-matrix.outputs.single_node }}
       multi_card: ${{ steps.set-matrix.outputs.multi_card }}
     steps:
-      # Scheduled runs have request_id empty and test_cases=all. Force-cancel
-      # PR-triggered runs of this workflow before the tests start, otherwise
-      # their pending LWS pods stay ahead of this run in the npu-scheduler
-      # FIFO queue.
+      # The external scheduler dispatches scheduled runs with request_id empty,
+      # test_cases=all and drain_pr_runs=true. Force-cancel PR-triggered runs
+      # of this workflow before the tests start, otherwise their pending LWS
+      # pods stay ahead of this run in the npu-scheduler FIFO queue. Requiring
+      # the explicit opt-in keeps a manual dispatch (request_id also defaults
+      # to empty) from cancelling unrelated PR runs. The run-name carries (PR)
+      # so the display title can be used for matching.
       - name: Cancel PR nightly runs before scheduled test
-        if: ${{ inputs.request_id == '' }}
+        if: ${{ inputs.request_id == '' && inputs.drain_pr_runs }}
         continue-on-error: true
         uses: actions/github-script@v9
         with:
