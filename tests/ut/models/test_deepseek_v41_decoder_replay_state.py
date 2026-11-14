@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import contextmanager
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -76,6 +77,21 @@ def test_prefill_trims_but_decode_and_prompt_logprobs_keep_rows(state):
     assert state.num_actual_tokens == 9
     assert state.dropped_before.np[:4].tolist() == [0, 0, 0, 4]
     assert state._build_metadata.call_args.args[1].tolist() == [0, 1, 7, 9]
+
+
+def test_compact_metadata_waits_for_batch_producer(state, monkeypatch):
+    producer = object()
+    calls = Mock()
+    monkeypatch.setattr(torch.npu, "current_stream", lambda: calls.stream)
+    monkeypatch.setattr(state, "_prepare_compact_replay", calls.prepare_compact_replay)
+    replay_inputs = replace(inputs(), metadata_producer_stream=producer)
+
+    state.prepare(replay_inputs, CUDAGraphMode.NONE)
+
+    assert len(calls.mock_calls) == 2
+    calls.stream.wait_stream.assert_called_once_with(producer)
+    calls.prepare_compact_replay.assert_called_once()
+    assert calls.mock_calls[0][0] == "stream.wait_stream"
 
 
 @pytest.mark.parametrize(

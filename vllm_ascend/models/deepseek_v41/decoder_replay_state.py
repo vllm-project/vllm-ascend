@@ -41,6 +41,7 @@ class DecoderReplayInputs:
     attn_groups: list[list[AttentionGroup]]
     encoder_replay_start: torch.Tensor
     pcp_context: "AscendPCPAttentionContext | None" = None
+    metadata_producer_stream: torch.npu.Stream | None = None
 
 
 @dataclass(frozen=True)
@@ -265,6 +266,12 @@ class DecoderReplayState:
             return
 
         # This rank needs a compact batch and matching attention metadata.
+        # The ordinary batch's planners may still run on the target producer
+        # stream. Their AICPU temporary storage is shared with compact planners;
+        # join before launching another planner, while keeping retirement with
+        # the target's existing metadata lifecycle.
+        if inputs.metadata_producer_stream is not None:
+            torch.npu.current_stream().wait_stream(inputs.metadata_producer_stream)
         self._prepare_compact_replay(inputs, plan)
 
     def _build_replay_plan(self, inputs: DecoderReplayInputs) -> _DecoderReplayPlan:
