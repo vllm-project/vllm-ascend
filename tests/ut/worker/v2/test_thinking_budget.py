@@ -65,7 +65,9 @@ def add_request(pair, name, budget, history=(1, START)):
     return index
 
 
-@pytest.mark.parametrize("budget,stored", [(None, -1), (-1, -1), (0, 0), (1, 1), (64, 64), (2**40, 2**31 - 1)])
+@pytest.mark.parametrize(
+    "budget,stored", [(None, -1), (-1, -1), (0, 0), (1, 1), (64, 64), (2**40, 2**31 - 1), (2**64 - 1, 2**31 - 1)]
+)
 def test_budget_registration_and_device_staging(state_pair, budget, stored):
     _, state = state_pair
     index = add_request(state_pair, "req", budget)
@@ -143,9 +145,10 @@ def test_batch_reorder_passes_request_slots_to_budget_kernel(state_pair, monkeyp
     assert args[7] is local_pos
 
 
-def test_empty_or_unlimited_batch_bypasses_kernel(state_pair, monkeypatch):
+@pytest.mark.parametrize("budget", [None, -1])
+def test_empty_or_unlimited_batch_bypasses_kernel(state_pair, monkeypatch, budget):
     _, state = state_pair
-    slot = add_request(state_pair, "plain", None)
+    slot = add_request(state_pair, "plain", budget)
     launch = Mock()
     monkeypatch.setattr(thinking_budget, "apply_thinking_budget", launch)
     for indices in ([], [slot]):

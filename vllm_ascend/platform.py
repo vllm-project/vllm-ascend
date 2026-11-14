@@ -26,6 +26,7 @@ from uuid import uuid4
 
 import torch
 import vllm.envs as envs_vllm
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
@@ -69,6 +70,9 @@ from vllm_ascend.utils import (
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, SpeculativeConfig, VllmConfig
+    from vllm.inputs import EngineInput
+    from vllm.pooling_params import PoolingParams
+    from vllm.sampling_params import SamplingParams
     from vllm.utils import FlexibleArgumentParser
     from vllm_ascend.ascend_config import AscendConfig
 else:
@@ -86,6 +90,9 @@ logger.info_once(
     value,
     scope="process",
 )
+
+# Engine requests use MessagePack, whose largest integer is uint64.
+_MAX_THINKING_TOKEN_BUDGET = (1 << 64) - 1
 
 _CUSTOM_OP_REGISTERED = False
 _MINIMAX_M3_ARCHITECTURES = frozenset(
@@ -118,6 +125,18 @@ class NPUPlatform(Platform):
         "modelopt_mxfp8",
         "mxfp8",
     ]
+
+    @classmethod
+    def validate_request(cls, processed_inputs: EngineInput, params: SamplingParams | PoolingParams) -> None:
+        super().validate_request(processed_inputs, params)
+        budget = getattr(params, "thinking_token_budget", None)
+        if budget is not None and budget > _MAX_THINKING_TOKEN_BUDGET:
+            # Formatting an arbitrarily large integer can itself raise ValueError.
+            raise VLLMValidationError(
+                f"thinking_token_budget must be at most {_MAX_THINKING_TOKEN_BUDGET} "
+                "to fit the engine request transport.",
+                parameter="thinking_token_budget",
+            )
 
     @classmethod
     def get_kv_cache_config_builder_cls(cls, vllm_config: VllmConfig) -> str:

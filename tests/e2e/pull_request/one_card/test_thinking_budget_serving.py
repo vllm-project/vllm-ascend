@@ -15,12 +15,13 @@ from tests.e2e.conftest import RemoteOpenAIServer
 
 MODEL = "Qwen/Qwen3-1.7B"
 BUDGETS = [None, -1, 0, 1, 2, 3, 4, 16, 64, 128]
-REQUEST_TIMEOUT = 120
+REQUEST_TIMEOUT = 300
+PROBABILISTIC_MAX_OUTPUT_TOKENS = 2048
 KV_CACHE_BYTES = 2 * 1024**3
 
 
 @pytest.mark.parametrize("enforce_eager", [True, False])
-@pytest.mark.parametrize("speculative", [None, "ngram_gpu", "draft_model"])
+@pytest.mark.parametrize("speculative", [None, "ngram_gpu", "draft_model", "draft_model_probabilistic"])
 def test_thinking_budget_serving(enforce_eager, speculative, tmp_path):
     response_index = itertools.count()
     port = get_open_port()
@@ -45,11 +46,16 @@ def test_thinking_budget_serving(enforce_eager, speculative, tmp_path):
     if enforce_eager:
         args.append("--enforce-eager")
     if speculative:
-        spec = {"method": speculative, "num_speculative_tokens": 3}
+        spec = {
+            "method": "draft_model" if speculative == "draft_model_probabilistic" else speculative,
+            "num_speculative_tokens": 3,
+        }
         if speculative == "ngram_gpu":
             spec.update(prompt_lookup_min=2, prompt_lookup_max=5)
         else:
             spec["model"] = "Qwen/Qwen3-0.6B"
+            if speculative == "draft_model_probabilistic":
+                spec["draft_sample_method"] = "probabilistic"
         args.extend(["--speculative-config", json.dumps(spec)])
     tokenizer = get_tokenizer(MODEL)
     start_id = tokenizer.encode("<think>", add_special_tokens=False)[0]
@@ -72,11 +78,14 @@ def test_thinking_budget_serving(enforce_eager, speculative, tmp_path):
         base = {
             "model": MODEL,
             "messages": [{"role": "user", "content": "What is 2 + 3? Answer with the number."}],
-            "max_tokens": 512,
+            "max_tokens": PROBABILISTIC_MAX_OUTPUT_TOKENS if speculative == "draft_model_probabilistic" else 512,
             "seed": 42,
             "return_token_ids": True,
             "chat_template_kwargs": {"enable_thinking": True},
         }
+        if speculative == "draft_model_probabilistic":
+            base.update(top_p=0.95, top_k=20, presence_penalty=1.0)
+        print(json.dumps({"sampling_settings": base, "eager": enforce_eager, "speculative": speculative}))
         for temperature in [0.0, 0.6]:
 
             def run(budget, current_temperature=temperature):
@@ -123,7 +132,7 @@ def test_thinking_budget_serving(enforce_eager, speculative, tmp_path):
 
             with ThreadPoolExecutor(max_workers=4) as executor:
                 list(executor.map(run, BUDGETS))
-        for invalid in [-2, True, 1.5, "3"]:
+        for invalid in [-2, True, 1.5, "3", 2**64, 2**80]:
             response = requests.post(url, json={**base, "thinking_token_budget": invalid}, timeout=REQUEST_TIMEOUT)
             assert response.status_code == 400, response.text
             assert "thinking_token_budget" in response.text
@@ -135,13 +144,23 @@ def test_thinking_budget_serving(enforce_eager, speculative, tmp_path):
             {},
             {"thinking_token_budget": None},
             {"thinking_token_budget": -1},
+            {"thinking_token_budget": 2**64 - 1},
         ]
         for extra in unlimited_overrides:
             response = requests.post(url, json={**base, "temperature": 0, **extra}, timeout=REQUEST_TIMEOUT)
             assert response.status_code == 200, response.text
             unlimited.append(response.json()["choices"][0]["token_ids"])
-        assert unlimited[0] == unlimited[1] == unlimited[2]
-        print(json.dumps({"unlimited_equal": True, "eager": enforce_eager, "speculative": speculative}))
+        assert all(ids == unlimited[0] for ids in unlimited[1:])
+        print(
+            json.dumps(
+                {
+                    "unlimited_equal": True,
+                    "transport_upper_bound_equal": True,
+                    "eager": enforce_eager,
+                    "speculative": speculative,
+                }
+            )
+        )
 
         stream_ids: list[int] = []
         answer_parts = []

@@ -12,9 +12,19 @@ output: leave room for the end sequence and the final answer.
 | --- | --- |
 | Omitted, `None` / JSON `null`, or `-1` | Disable the reasoning budget. |
 | `0` | End an active reasoning phase immediately. |
-| Nonnegative integer | Limit reasoning to that many tokens. |
-| Integer above `2147483647` | Accepted; V2 clamps device storage to the int32 maximum. |
-| Below `-1`, boolean, float, string, list, or object | Rejected during request validation. |
+| Integer from `0` through `2**64 - 1` | Limit reasoning to that many tokens. |
+| Integer from `2147483648` through `2**64 - 1` | Accepted; V2 clamps device storage to the int32 maximum. |
+| Above `2**64 - 1`, below `-1`, boolean, float, string, list, or object | Rejected during request validation. |
+
+`-1` is normalized to `None` during request validation. A batch containing
+only disabled budgets bypasses the budget kernels. In a mixed batch, disabled
+requests retain their logits while finite budgets are applied.
+
+Budgets above `2**64 - 1` cannot be serialized by the engine request
+transport. Ascend rejects them through the platform request-validation hook
+before engine submission, with an error naming `thinking_token_budget`.
+This check applies to both offline generation and OpenAI requests; constructing
+`SamplingParams` alone does not perform the platform check.
 
 Budgets are independent within a batch. V2 tracks committed token history by
 request slot, including when a request resumes after preemption. Rejected
@@ -57,7 +67,10 @@ prompt = tokenizer.apply_chat_template(
     enable_thinking=True,
 )
 params = [
-    SamplingParams(temperature=0, max_tokens=512, thinking_token_budget=budget)
+    SamplingParams(
+        temperature=0.6, top_p=0.95, top_k=20, presence_penalty=1.0,
+        max_tokens=2048, thinking_token_budget=budget,
+    )
     for budget in [None, 0, 16, 64]
 ]
 for output in llm.generate([prompt] * len(params), params):
@@ -80,9 +93,12 @@ client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
 response = client.chat.completions.create(
     model="Qwen/Qwen3-1.7B",
     messages=[{"role": "user", "content": "What is 2 + 3?"}],
-    temperature=0,
-    max_tokens=512,
+    temperature=0.6,
+    top_p=0.95,
+    presence_penalty=1.0,
+    max_tokens=2048,
     extra_body={
+        "top_k": 20,
         "thinking_token_budget": 16,
         "chat_template_kwargs": {"enable_thinking": True},
         "return_token_ids": True,
@@ -99,6 +115,10 @@ produce HTTP 400 with `thinking_token_budget` in the error.
 Use `--enforce-eager` for eager execution, or the default compilation settings
 for ACL Graph. Save the graph capture/replay logs with validation results.
 Both greedy (`temperature=0`) and random sampling support budgets.
+Choose sampling parameters for the model as well as the budget. Qwen3's model
+card recommends random sampling for thinking mode and notes repetition risks
+with greedy decoding; greedy is still covered by the Ascend functional tests.
+The examples use explicit sampling settings and leave room for the answer.
 
 For n-gram speculative decoding, add:
 
@@ -112,6 +132,12 @@ model explicitly. For example, with the Qwen3-1.7B target above:
 ```bash
 --speculative-config '{"method":"draft_model","model":"Qwen/Qwen3-0.6B","num_speculative_tokens":3}'
 ```
+
+For probabilistic drafting with full draft logits, add
+`"draft_sample_method":"probabilistic"` to the draft-model configuration.
+The default `"greedy"` draft method uses one-hot draft probabilities; this
+is independent of whether target sampling uses `temperature=0` or a positive
+temperature. The validation matrix covers both draft sampling methods.
 
 Verify the draft and accepted-token counters: enabling a speculative method
 does not prove that a particular prompt actually exercises rejection sampling.
@@ -144,6 +170,11 @@ Qwen2.5-0.5B-Instruct. The constrained-cache tests assert that scheduler preempt
 with no speculation, n-gram speculation, and a draft model. Restricted-token
 cases compare exact output against an unconstrained run; unrestricted cases
 check the reasoning budget and final answer while recording token differences.
+Probabilistic-draft natural preemption and serving tests use `top_p=0.95`, `top_k=20`,
+and `presence_penalty=1.0`, with both greedy and random target sampling.
+These explicit sampling settings reduce model repetition; the budget controls
+the marked reasoning phase and does not guarantee answer quality or EOS under
+arbitrary sampling settings and total-output limits.
 Mixed-batch kernel tests also verify that unlimited requests retain their
 logits bit-for-bit in both single-token and speculative verification rows.
 
