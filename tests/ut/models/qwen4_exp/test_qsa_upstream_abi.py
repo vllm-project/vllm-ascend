@@ -44,6 +44,37 @@ def test_indexer_projection_runs_on_auxiliary_stream(monkeypatch) -> None:
     token_k.record_stream.assert_called_once_with(main_stream)
 
 
+def test_qsa_projections_stagger_main_cube_before_indexer() -> None:
+    launches: list[str] = []
+    qkv = Mock()
+    index_query = Mock()
+    index_token_k = Mock()
+
+    def project_main(_hidden_states):
+        launches.append("main_qkv")
+        return qkv, None
+
+    def project_indexer(_hidden_states, _positions):
+        launches.append("indexer")
+        return index_query, index_token_k
+
+    layer = SimpleNamespace(
+        qkv_proj=Mock(side_effect=project_main),
+        _start_indexer_projection=Mock(side_effect=project_indexer),
+    )
+    hidden_states = Mock()
+    positions = Mock()
+
+    actual = qsa.AscendQwen4ExpQSAAttention._start_staggered_projections(
+        layer,
+        hidden_states,
+        positions,
+    )
+
+    assert actual == (qkv, index_query, index_token_k)
+    assert launches == ["main_qkv", "indexer"]
+
+
 def test_qsa_forward_side_effect_op_copies_into_stable_output(monkeypatch) -> None:
     hidden_states = torch.empty((2, 8))
     positions = torch.arange(2)
