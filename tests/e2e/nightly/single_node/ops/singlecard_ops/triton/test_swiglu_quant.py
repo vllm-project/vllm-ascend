@@ -1,5 +1,6 @@
 import contextlib
 import gc
+import re
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -17,7 +18,7 @@ from vllm_ascend.ops.fused_moe.dataclass.router_input import MoeRouterInput
 from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import MoETokenDispatchInput
 from vllm_ascend.ops.fused_moe.moe_mlp import apply_moe_mlp
 from vllm_ascend.ops.fused_moe.token_dispatcher import TokenDispatcherWithAllGather
-from vllm_ascend.ops.triton.activation.swiglu_quant import swiglu_quant
+from vllm_ascend.ops.triton.activation.swiglu_quant import _swiglu_quant_kernel, swiglu_quant
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod
 from vllm_ascend.quantization.quant_type import QuantType
@@ -119,6 +120,97 @@ def test_swiglu_quant_moe_routed_shapes(shape, group_counts):
 
     actual, actual_scale = swiglu_quant(x, group_list, group_list_type=1)
     _assert_quantized_result(x, actual, actual_scale)
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    ("shape", "group_counts"),
+    [
+        pytest.param((4, 3072), [4], id="single-tile-no-remainder"),
+        pytest.param((4, 6144), [1, 3], id="two-tiles-no-remainder"),
+        pytest.param((4, 2048), [4], id="row-narrower-than-one-tile"),
+        pytest.param((4, 3104), [1, 0, 3], id="narrowest-remainder"),
+        pytest.param((97, 4096), [40, 0, 57], id="remainder-with-several-rows-per-core"),
+    ],
+)
+@torch.inference_mode()
+def test_swiglu_quant_column_tile_boundaries(shape, group_counts, dtype):
+    # The quantized store path walks each row in 1536-column tiles, so the remainder
+    # tile follows from `h // 2 % 1536`. These widths are chosen for that tiling
+    # rather than for a particular model, and `[4, 3104]` leaves the narrowest
+    # remainder the operator supports.
+    torch.manual_seed(42)
+    x = torch.randn(shape, dtype=dtype, device=DEVICE)
+    group_list = torch.tensor(group_counts, dtype=torch.int64, device=DEVICE)
+
+    actual, actual_scale = swiglu_quant(x, group_list, group_list_type=1)
+    # Every row is compared, so a tile that writes past its own row shows up as a
+    # corrupted neighbour: the quantized stores carry no mask.
+    _assert_quantized_result(x, actual, actual_scale)
+
+
+# Matches a one-dimensional `tensor.extract_slice %v[offset] [size] [stride]`
+# together with the extent of the value it slices. Multi-dimensional slices
+# contain commas inside the brackets and are not matched.
+_EXTRACT_SLICE_1D = re.compile(
+    r"tensor\.extract_slice\s+%\S+\[([^\],]*)\]\s*\[([^\],]*)\]\s*\[[^\],]*\]\s*:\s*tensor<(\d+)x"
+)
+
+
+def _compile_and_get_ttir(x, group_list):
+    device = torch.npu.current_device()
+    # Isolate the in-memory cache so an earlier variant cannot be returned instead.
+    if hasattr(_swiglu_quant_kernel, "device_caches"):
+        kernel_cache = _swiglu_quant_kernel.device_caches[device][0]
+    else:
+        kernel_cache = _swiglu_quant_kernel.cache[device]
+    with patch.dict(kernel_cache, clear=True):
+        swiglu_quant(x, group_list, group_list_type=1)
+        compiled = list(kernel_cache.values())
+        assert len(compiled) == 1
+        return compiled[0].asm.get("ttir")
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
+@pytest.mark.parametrize(
+    "shape",
+    [
+        pytest.param((4, 2048), id="row-narrower-than-one-tile"),
+        pytest.param((4, 3104), id="narrowest-remainder"),
+        pytest.param((4, 4096), id="remainder-after-one-tile"),
+    ],
+)
+@torch.inference_mode()
+def test_swiglu_quant_slices_stay_inside_the_row(shape):
+    """No slice of the activation row may reach past the row itself.
+
+    The store mask keeps the results correct even when a tile is sliced out of
+    range, so this boundary only shows up in the generated IR: a row narrower
+    than one tile used to be sliced as a full `COL_BLOCK_SIZE` tile.
+    """
+    x = torch.randn(shape, dtype=torch.bfloat16, device=DEVICE)
+    group_list = torch.tensor([shape[0]], dtype=torch.int64, device=DEVICE)
+
+    ttir = _compile_and_get_ttir(x, group_list)
+    if not ttir:
+        pytest.skip("Triton did not expose TTIR for the compiled kernel")
+
+    slices = _EXTRACT_SLICE_1D.findall(ttir)
+    assert slices, "no one-dimensional extract_slice found in the generated TTIR"
+    for offset, size, extent in slices:
+        assert int(size) <= int(extent), f"slice of {size} elements is wider than tensor<{extent}x...>"
+        # Loop-carried offsets stay dynamic in the IR; only the size can be checked for those.
+        if "%" not in offset:
+            assert int(offset) + int(size) <= int(extent), (
+                f"slice [{offset}] [{size}] reaches past tensor<{extent}x...>"
+            )
 
 
 @pytest.mark.skipif(

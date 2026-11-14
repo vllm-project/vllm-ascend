@@ -1,0 +1,4 @@
+pr: 21473
+entries:
+  - category: bugfix
+    text: Fixed an out-of-bounds activation row read in the Triton SwiGLU quantization operator for hidden sizes whose half width is not a multiple of its 1536-column tile, such as 2048, 4096 and 14336. Outputs are unchanged and the affected shapes are slightly faster.

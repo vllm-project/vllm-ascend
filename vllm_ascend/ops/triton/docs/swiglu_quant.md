@@ -33,6 +33,7 @@
 
 - All input tensors must be on the same NPU. The kernel uses flat row-major indexing; the wrapper does not make non-contiguous inputs contiguous.
 - `x` must be two-dimensional with an even last dimension. The validated floating-point input types are FP16 and BF16; INT8 is the quantized output type, not a validated input type for this operator.
+- Half-row widths that are not 32-byte aligned, such as `2N = 3080` or `2N = 3088` for FP16 and BF16, abort on device with a vector core exception. This is a pre-existing limitation of the row load and slice path, observed identically before and after the column tiling fix, and it is independent of the remainder tile.
 - `group_list` must be one-dimensional and non-empty. Individual expert counts must be non-negative; cumulative counts must be non-negative and non-decreasing. Zero-token experts are allowed.
 - For all allocated output rows to be valid, the last cumulative count or the sum of individual counts must equal `S`. The wrapper validates the metadata dtype and `group_list_type`, but does not validate these count values or initialize unused output rows.
 - Quantization uses the row maximum directly as the scale numerator; the implementation has no explicit zero-scale guard for an all-zero activation row.
@@ -63,17 +64,19 @@ Final output dtypes are unchanged: quantized output is INT8 with FP32 scales, an
 
 ## Test Cases
 
-[`test_swiglu_quant.py`](../../../../tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_swiglu_quant.py) contains sixteen cases:
+[`test_swiglu_quant.py`](../../../../tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_swiglu_quant.py) contains twenty-nine cases:
 
 - Quantized correctness: FP16 `[1, 4096]` and BF16 `[65, 14336]`, each with both group-list modes. The BF16 case includes zero-token experts and multiple token rows.
 - MoE-derived correctness: four BF16 inputs `[2, 256]`, `[384, 4096]`, `[198, 4096]`, and `[2, 2048]`, using INT64 expert counts in count mode. These preserve the SwiGLU input shapes from the former W8A8 AllGather tests, with deterministic valid routing counts and empty experts. They directly test this kernel rather than the dispatcher/GMM/combine pipeline.
 - Caller contracts: four restored BF16 W8A8 AllGather combinations retain the original shapes, routing parameters, hardware marker, and final output-shape assertion. Integer weights and positive initialized scales provide valid quantized inputs. The test disables GMM/activation fusion and verifies that the MLP actually calls this local Triton implementation once, with contiguous BF16 activations, INT64 count-mode expert metadata, and counts covering every routed row. Its activation output and scales use the same numerical reference as the direct tests. This does not establish numerical accuracy of the full MoE pipeline.
 - Non-quantized correctness: FP16 and BF16 `[9, 4096]`, including a zero-token expert.
+- Column tiling boundaries: five shapes in FP16 and BF16 covering a row that holds exactly one 1536-column tile `[4, 3072]`, two tiles `[4, 6144]`, a row narrower than one tile `[4, 2048]`, the narrowest remainder the operator supports `[4, 3104]`, and a remainder with several rows per vector core `[97, 4096]`. Every row is compared, so a tile that writes outside its own row appears as a corrupted neighbour.
+- Column slice bounds: for `[4, 2048]`, `[4, 3104]` and `[4, 4096]`, the generated TTIR is checked so that no one-dimensional `tensor.extract_slice` is wider than, or reaches past, the value it slices. The store mask keeps results correct when a tile is sliced out of range, so this boundary is only visible in the IR.
 - Invalid metadata: unsupported `group_list_type` and unsupported group-list dtype.
 
 The numerical reference computes SwiGLU in FP32. Quantized output is checked with `rtol=0, atol=1`; scale tolerances are `(rtol=5e-3, atol=1e-5)` for FP16 and `(rtol=2e-2, atol=1e-4)` for BF16. Non-quantized output uses `rtol=atol=5e-3` for FP16 and `rtol=atol=2e-2` for BF16. Output shapes and dtypes are also checked.
 
-Targeted validation of all sixteen cases, including the four restored caller combinations, passed on Ascend910B4-1 (A2) and Ascend950PR (A5), using Python 3.11.10, torch-npu 2.10.0.post7, and Triton Ascend 3.6.0. These results cover this test file; they do not establish full-model correctness or performance.
+Targeted validation of the first sixteen cases, including the four restored caller combinations, passed on Ascend910B4-1 (A2) and Ascend950PR (A5), using Python 3.11.10, torch-npu 2.10.0.post7, and Triton Ascend 3.6.0. The thirteen column tiling cases were validated separately on Ascend910B3 (A2) with Python 3.12.13, torch-npu 2.10.0.post2, CANN 9.0.1, and triton-ascend 3.2.1, by running the operator module against the same reference outside the package. These results cover this test file; they do not establish full-model correctness or performance.
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_swiglu_quant.py
