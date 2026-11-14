@@ -123,6 +123,7 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_state,
     skip_ring_state_update,
 )
+from vllm_ascend.worker.v2.draft_tokens import AscendDraftTokensHandler
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.kv_connector import MambaCopyKVConnector
@@ -171,6 +172,9 @@ class NPUModelRunner(GPUModelRunner):
         spec_pp_support = resolve_spec_pp_support(vllm_config)
         with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
+        # Remove this backport once the supported baseline includes vLLM #64531.
+        if hasattr(self.draft_tokens_handler, "copy_event"):
+            self.draft_tokens_handler = AscendDraftTokensHandler(device)
         if self.use_pp:
             assert self.pp_handler is not None
             old_broadcast_group = self.pp_handler.broadcast_group
