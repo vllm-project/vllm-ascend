@@ -55,6 +55,7 @@
 #include "attention/kda_layout_swap12/kda_layout_swap12_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "attention/k2q_csr/k2q_csr_torch_adpt.h"
+#include "attention/hi_sparse_resolve_residency/hi_sparse_resolve_residency_torch_adpt.h"
 #include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
 #include "moe/situ_mx_quant/situ_mx_quant_torch_adpt.h"
 #include "moe/grouped_matmul_situ_quant/grouped_matmul_situ_quant_torch_adpt.h"
@@ -2811,6 +2812,17 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 // Pybind on other platform
 TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 {
+    ops.def("hisparse_resolve_residency(Tensor logical, Tensor hot_table, Tensor? requests, Tensor? states, Tensor? source, "
+            "Tensor? resident, Tensor? valid_rows, Tensor(a!) dgi, Tensor(a!) lru, Tensor(a!) output, "
+            "Tensor(a!) resolved, Tensor(a!) errors, Tensor(a!)? attention, Tensor(a!)? counts, "
+            "Tensor(a!)? swap_host, Tensor(a!)? swap_device, Tensor(a!)? swap_counts, Tensor(a!)? miss_mask, "
+            "Tensor(a!)? stats, int host_rows, int hot_block_size, int source_block_size, int resident_block_size, "
+            "int resident_null_block, int attention_block_stride, int union_rows, int attention_capacity=0) -> ()");
+    ops.impl("hisparse_resolve_residency", torch::kPrivateUse1, &vllm_ascend::hisparse::resolve_residency);
+    ops.def("hisparse_resolver_validate_scratch(int hot, int union_rows) -> ()",
+            [](int64_t hot, int64_t union_rows) {
+                vllm_ascend::hisparse::validate_resolver_scratch(hot, union_rows);
+            });
     ops.def("get_npu_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor?");
     ops.impl("get_npu_view_from_cpu_tensor", c10::DispatchKey::CompositeExplicitAutograd,
              &vllm_ascend::get_npu_view_from_cpu_tensor);
