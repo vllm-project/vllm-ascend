@@ -4,14 +4,15 @@
 
 Reload lifecycle, ``send_weights`` orchestration, metadata checks and the worker
 init payload stay upstream. Only NPU operations, the HCCL rendezvous and the
-legacy per-update packed wire parameters are local. The packed producer/consumer
-and the layerwise cross-chunk behaviour are unchanged.
+legacy per-update packed wire parameters are local. Bounded packing is an
+initialization-time option that limits collective size while preserving native
+parameter loading and independent loader ownership.
 """
 
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import torch
 from typing_extensions import Self
@@ -29,9 +30,14 @@ from vllm.distributed.weight_transfer.nccl_engine import (
 )
 
 from vllm_ascend.distributed.weight_transfer import hccl_common
+from vllm_ascend.distributed.weight_transfer.bounded_tensor import (
+    bounded_broadcast_consumer,
+    bounded_broadcast_producer,
+)
 from vllm_ascend.distributed.weight_transfer.hccl_common import (
     HCCLWeightTransferInitInfo,
     _validate_packed_params,
+    _validate_transfer_mode,
 )
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
@@ -50,9 +56,11 @@ class HCCLTrainerInitInfo(NCCLTrainerInitInfo):
     """Upstream trainer contract, including packed transfers by default."""
 
     backend: ClassVar[str] = "hccl"
+    packed_transfer_mode: Literal["legacy", "bounded"] = "legacy"
 
     def __post_init__(self) -> None:
         _validate_packed_params(self)
+        _validate_transfer_mode(self.packed_transfer_mode, self.packed)
 
 
 @dataclass
@@ -76,6 +84,7 @@ class HCCLWeightTransferEngine(NCCLWeightTransferEngine):
 
     if TYPE_CHECKING:
         model_update_group: PyHcclCommunicator | None  # type: ignore[assignment]
+        _bounded_streams: tuple[Any, ...] | None
 
     init_info_cls = HCCLWeightTransferInitInfo
     update_info_cls = HCCLWeightTransferUpdateInfo
@@ -94,6 +103,8 @@ class HCCLWeightTransferEngine(NCCLWeightTransferEngine):
         self._last_hccl_update_info: dict[torch.nn.Module, HCCLWeightTransferUpdateInfo] = {}
         if init_info.world_size < 2:
             raise ValueError("HCCL weight transfer requires at least one trainer and one worker")
+        if init_info.packed_transfer_mode == "bounded" and self.model_config.quantization is not None:
+            raise ValueError("bounded transfers support non-quantized models")
         self._init_info = init_info
         # Preserve the parent's handshake attributes, resetting omitted values
         # on re-init. _wire_params still supports legacy per-update overrides.
@@ -133,6 +144,8 @@ class HCCLWeightTransferEngine(NCCLWeightTransferEngine):
         )
         for name in params:
             fixed, requested = getattr(self._init_info, name), getattr(update, name)
+            if fixed is None and self._init_info.packed_transfer_mode == "bounded":
+                fixed = params[name]
             if fixed is not None and requested is not None and fixed != requested:
                 raise ValueError(
                     f"HCCL update `{name}` conflicts with the value fixed at init: init={fixed!r}, update={requested!r}"
@@ -162,7 +175,24 @@ class HCCLWeightTransferEngine(NCCLWeightTransferEngine):
         # any stream: the packed helpers resolve the ambient device.
         with torch.npu.device(self.device), disable_mtp_completeness_check():
             metadata = zip(update_info.names, update_info.shapes, update_info.dtype_names)
-            if params["packed"]:
+            if self._init_info.packed_transfer_mode == "bounded":
+                if self.model_config.quantization is not None:
+                    raise ValueError("bounded transfers support non-quantized models")
+                if self._bounded_streams is None:
+                    # Allocator caches are stream-specific. Reuse this session's
+                    # streams so repeated updates can reuse freed weight storage.
+                    self._bounded_streams = tuple(torch.npu.Stream() for _ in range(params["packed_num_buffers"] + 1))
+                bounded_broadcast_consumer(
+                    metadata=((name, (shape, getattr(torch, dtype))) for name, shape, dtype in metadata),
+                    group=self.model_update_group,
+                    src=0,
+                    post_unpack_func=self.model.load_weights,
+                    buffer_size_bytes=params["packed_buffer_size_bytes"],
+                    num_buffers=params["packed_num_buffers"],
+                    streams=self._bounded_streams[:-1],
+                    copy_stream=self._bounded_streams[-1],
+                )
+            elif params["packed"]:
                 packed_broadcast_consumer(
                     iterator=((name, (shape, getattr(torch, dtype))) for name, shape, dtype in metadata),
                     group=self.model_update_group,
@@ -181,13 +211,20 @@ class HCCLWeightTransferEngine(NCCLWeightTransferEngine):
         """Run the inherited wrapper on the worker's assigned NPU."""
         # The inherited wrapper synchronizes the ambient device at the end.
         with torch.npu.device(self.device):
-            super().update_weights(update_info)
+            try:
+                super().update_weights(update_info)
+            except BaseException:
+                if self.model_update_group is not None and self._init_info.packed_transfer_mode == "bounded":
+                    with suppress(Exception):
+                        self.shutdown()
+                raise
 
     def shutdown(self) -> None:
         # PyHcclCommunicator releases its comm through `close()`, not `destroy()`.
         group, self.model_update_group = getattr(self, "model_update_group", None), None
         if group is not None:
             group.close()
+        self._bounded_streams = None
 
 
 class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
@@ -208,7 +245,9 @@ class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
         packed: bool = True,
         packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
         packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
+        packed_transfer_mode: Literal["legacy", "bounded"] = "legacy",
     ) -> None:
+        _validate_transfer_mode(packed_transfer_mode, packed)
         super().__init__(
             client=client,
             source=source,
@@ -223,6 +262,8 @@ class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
                 raise ValueError("HCCL trainer requires a current NPU device")
             device = torch.device("npu", index)
         self.device = device
+        self.packed_transfer_mode = packed_transfer_mode
+        self._bounded_streams: tuple[Any, ...] | None = None
         self.model_update_group = None
         self._state = "ready"
 
@@ -247,6 +288,7 @@ class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
             packed=init_info.packed,
             packed_buffer_size_bytes=init_info.packed_buffer_size_bytes,
             packed_num_buffers=init_info.packed_num_buffers,
+            packed_transfer_mode=init_info.packed_transfer_mode,
         )
         # Only the sender joins the trainer-to-worker group and drives the
         # inference side; the other trainer ranks just join the trainer-side
@@ -263,12 +305,18 @@ class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
             packed=init_info.packed,
             packed_buffer_size_bytes=init_info.packed_buffer_size_bytes,
             packed_num_buffers=init_info.packed_num_buffers,
+            packed_transfer_mode=init_info.packed_transfer_mode,
         )
+        payload = worker_init_payload(worker_init_info)
+        if init_info.packed_transfer_mode == "legacy":
+            # Preserve the existing wire contract for legacy peers. Bounded
+            # peers must parse the new field; an older worker rejects it.
+            payload.pop("packed_transfer_mode")
         # The worker-side init blocks inside the HCCL rendezvous, so drive the
         # RPC on a side thread while this rank opens rank 0.
         executor = ThreadPoolExecutor(max_workers=1)
         try:
-            future = executor.submit(client.init_weight_transfer_engine, worker_init_payload(worker_init_info))
+            future = executor.submit(client.init_weight_transfer_engine, payload)
             engine.model_update_group = hccl_common.trainer_init(init_info, rank=init_info.rank)
             future.result()
         except BaseException:
@@ -307,7 +355,19 @@ class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
                 if self.model_update_group is None:
                     raise RuntimeError("HCCL trainer communicator is not initialized")
                 pairs = self._checked_iter(source, meta)
-                if self.packed:
+                if self.packed_transfer_mode == "bounded":
+                    if self._bounded_streams is None:
+                        self._bounded_streams = tuple(torch.npu.Stream() for _ in range(self.packed_num_buffers))
+                    bounded_broadcast_producer(
+                        iterator=pairs,
+                        metadata=iter((item.name, (item.shape, item.dtype)) for item in meta),
+                        group=self.model_update_group,
+                        src=0,
+                        buffer_size_bytes=self.packed_buffer_size_bytes,
+                        num_buffers=self.packed_num_buffers,
+                        streams=self._bounded_streams,
+                    )
+                elif self.packed:
                     packed_broadcast_producer(
                         iterator=pairs,
                         group=self.model_update_group,
@@ -350,7 +410,19 @@ class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
                     raise RuntimeError(f"HCCL weight transfer has a single trainer sender at group rank 0, got {src}.")
                 assert self.source is not None
                 pairs = self._checked_iter(self.source, meta)
-                if self.packed:
+                if self.packed_transfer_mode == "bounded":
+                    if self._bounded_streams is None:
+                        self._bounded_streams = tuple(torch.npu.Stream() for _ in range(self.packed_num_buffers))
+                    bounded_broadcast_producer(
+                        iterator=pairs,
+                        metadata=iter((item.name, (item.shape, item.dtype)) for item in meta),
+                        group=self.model_update_group,
+                        src=0,
+                        buffer_size_bytes=self.packed_buffer_size_bytes,
+                        num_buffers=self.packed_num_buffers,
+                        streams=self._bounded_streams,
+                    )
+                elif self.packed:
                     packed_broadcast_producer(
                         iterator=pairs,
                         group=self.model_update_group,
@@ -379,6 +451,7 @@ class HCCLTrainerWeightTransferEngine(NCCLTrainerWeightTransferEngine):
         group, self.model_update_group = getattr(self, "model_update_group", None), None
         if group is not None:
             group.close()
+        self._bounded_streams = None
 
     def shutdown(self) -> None:
         self._state = "closed"

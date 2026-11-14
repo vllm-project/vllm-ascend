@@ -192,6 +192,56 @@ EPLB disabled. FRACTAL_NZ, fused MC2 expert weight lists, draft models, and pack
 sparse updates are unsupported. Updates apply in place: after a failed update,
 keep generation paused until the baseline is restored or the engine restarts.
 
+#### Bounded HCCL packing
+
+Set `packed_transfer_mode="bounded"` in the trainer's `HCCLTrainerInitInfo`
+to split parameters across fixed-capacity communication buffers. The default
+mode is `"legacy"`. For example, adapt the HCCL example's initialization to:
+
+```python
+HCCLTrainerInitInfo(
+    rank=0,
+    master_address=get_ip(),
+    master_port=get_open_port(),
+    world_size=inference_world_size + 1,
+    packed=True,
+    packed_transfer_mode="bounded",
+    packed_buffer_size_bytes=128 * 2**20,
+    packed_num_buffers=2,
+)
+```
+
+Every collective carries at most `packed_buffer_size_bytes` bytes, including
+when a parameter is larger than a buffer. One buffer performs a serial
+transfer; two buffers allow receiving the next chunk while copying and loading
+the current chunk. Complete parameters are passed to the model's native
+`load_weights()` with independent storage that the loader may retain or modify.
+Complete small parameters share a loader call when their combined storage fits
+within the largest parameter's size. At most one parameter is incomplete.
+If the entire update is smaller than a bucket, slots shrink to the payload size
+and unused slot capacity can hold additional complete loader inputs within the
+same storage budget.
+
+Each bounded transfer session reuses its NPU streams across updates so the
+allocator can reuse storage on those streams. Concurrent updates must use
+separate transfer engines and communicators.
+
+The mode is fixed at initialization and requires supporting versions on both
+trainer and workers. An older worker rejects the bounded initialization
+payload; there is no fallback to legacy packing. Supervise the trainer and
+workers with a process timeout when initializing a transfer group, including
+when testing mixed versions. Failed updates close the bounded transfer session;
+restart the workers or complete a full reload before resuming generation.
+
+Limitations: bounded mode supports a single sender root and non-quantized dense,
+contiguous weights in ND or NCHW storage already on the sender's current NPU.
+Convert internal NPU formats before entering the transfer. Transport-held tensor
+storage is bounded by `K * B + Lmax`, where `K` is the buffer count, `B` is buffer
+capacity, and `Lmax` is the largest parameter. Source weights, model weights,
+loader-retained tensors, runtime workspaces, allocator rounding and reserved
+memory are accounted for separately. A receiver must still have enough memory
+to reconstruct one complete parameter.
+
 ### Pause and resume generation
 
 With `rl_config.enabled=true`, the server exposes `/pause` and `/resume`.
