@@ -112,7 +112,8 @@ def override_envs_for_invariance():
     # (torch-npu >= 2.10.0.post7 with CANN 9.2.0) deterministic level 3 guarantees
     # batch consistency for the operators. Set the torch flag first so that
     # set_deterministic_level() keeps warn_only=True instead of forcing strict mode.
-    torch.use_deterministic_algorithms(True, warn_only=True)
+    # Do not use `torch.use_deterministic_algorithms` after `torch_npu.npu.set_deterministic_level`
+    # because the latter is already implicitly invoked when calling the former.
     torch_npu.npu.set_deterministic_level(3)
 
     logger.debug(
