@@ -54,11 +54,10 @@ from vllm_ascend.ops.triton.mamba.state_index import gather_ssm_states, scatter_
 from vllm_ascend.utils import vllm_version_is
 
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
-# FLA has no chunk32 launcher capability query yet. This revision includes
-# the stable launcher's inference-only optional-output adaptation (FLA #1018).
-# Git-hash version suffixes are not ordered: unknown builds must fall back until
-# their launcher contract is verified, rather than passing a version >= check.
-_FLA_GDN_CHUNK32_VERSIONS = frozenset({"26.9.1+dev153268a"})
+# No supported FLA wheel provides the required chunk32 contract yet, including
+# 26.9.1+dev153268a. Keep all A5 installations on the compatible fallback until
+# a supporting wheel is available and validated. Git-hash suffixes are not ordered.
+_FLA_GDN_CHUNK32_VERSIONS: frozenset[str] = frozenset()
 
 
 @lru_cache(maxsize=1)

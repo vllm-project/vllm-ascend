@@ -22,7 +22,8 @@ def clear_prefill_probe():
 @pytest.mark.parametrize(
     "version_result,expected",
     [
-        ("26.9.1+dev153268a", True),
+        ("26.9.1+dev153268a", False),
+        ("26.9.1", False),
         ("26.9.1+dev5cc6990", False),
         ("26.9.1+devffffffff", False),
         ("27.0.0", False),

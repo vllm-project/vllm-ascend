@@ -31,7 +31,7 @@ from vllm_ascend.ops.gdn_attn_builder import (
 @pytest.mark.parametrize("batch_kind", ["prefill", "mixed", "spec"])
 @pytest.mark.parametrize("backend", ["a5", "a2", "a3", "legacy_fla", "missing_fla", "other_device", "fp16"])
 def test_chunk32_raw_beta_routing(batch_kind, backend):
-    """Only A5 chunk32 prefill consumes raw b; dt_bias belongs to g."""
+    """Unapproved A5 FLA builds fall back with processed beta, including mixed/spec tokens."""
     layer = _make_layer()
     layer.dt_bias.fill_(1.75)
     layer.A_log.fill_(0.5)
@@ -130,13 +130,13 @@ def test_chunk32_raw_beta_routing(batch_kind, backend):
             mocks[name] = stack.enter_context(patch(f"vllm_ascend.ops.gdn.{name}", **kwargs))
         AscendGatedDeltaNetAttention._forward_core(layer, packed, b, a, output)
 
-    use_fla = backend in ("a5", "a2", "a3")
+    use_fla = backend in ("a2", "a3")
     selected = "DeviceOperator.fla_gdn_prefill" if use_fla else "chunk_gated_delta_rule"
     unused = "chunk_gated_delta_rule" if use_fla else "DeviceOperator.fla_gdn_prefill"
     mocks[selected].assert_called_once()
     mocks[unused].assert_not_called()
     call = mocks[selected].call_args.kwargs
-    beta = b[:total] if backend == "a5" else expected_beta
+    beta = expected_beta
     torch.testing.assert_close(call["beta"], beta[prefill_tokens].unsqueeze(0))
     torch.testing.assert_close(call["g"], expected_g[prefill_tokens].unsqueeze(0))
     if decode_tokens is None:
