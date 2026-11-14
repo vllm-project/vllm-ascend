@@ -16,6 +16,9 @@ class TestAscendW4A8MXFP4LinearMethod(TestBase):
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_current_vllm_config")
     def setUp(self, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
+        mx_profile = patch("vllm_ascend.quantization.methods.base.get_current_hardware_profile")
+        mx_profile.start().return_value.supports_weight_format.return_value = True
+        self.addCleanup(mx_profile.stop)
         self.scheme = AscendW4A8MXFPDynamicLinearMethod()
 
     def test_get_weight_various_input_sizes(self):
@@ -152,6 +155,9 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
     def setUp(self, mock_ascend, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
         mock_ascend.return_value = create_mock_ascend_config()
+        mx_profile = patch("vllm_ascend.quantization.methods.base.get_current_hardware_profile")
+        mx_profile.start().return_value.supports_weight_format.return_value = True
+        self.addCleanup(mx_profile.stop)
         self.scheme = AscendW4A8MXFPDynamicFusedMoEMethod()
         # The recipes read torch_npu's FP4 enum and perform the cast in their
         # own module, which environments without the NPU extension do not
@@ -175,7 +181,9 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
                 "vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_ascend_config",
                 return_value=create_mock_ascend_config(),
             ),
+            patch("vllm_ascend.quantization.methods.base.get_current_hardware_profile") as mx_profile,
         ):
+            mx_profile.return_value.supports_weight_format.return_value = True
             scheme = AscendW4A8MXFPDynamicFusedMoEMethod()
 
         self.assertTrue(scheme.supports_eplb)

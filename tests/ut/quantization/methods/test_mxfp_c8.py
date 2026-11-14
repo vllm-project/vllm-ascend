@@ -250,6 +250,13 @@ class TestMXFPKScaleSlotIndex(TestBase):
 class TestAscendC8MXFPKVCacheAttentionMethod(TestBase):
     """Quant-method wiring: V scale loading and backend installation."""
 
+    def setUp(self):
+        # The C8-MXFP method gates on the FP8 attention capability at
+        # construction; pin a supporting profile for these wiring tests.
+        profile = patch("vllm_ascend.quantization.methods.kv_cache.mxfp_c8.get_current_hardware_profile")
+        profile.start().return_value.supports.return_value = True
+        self.addCleanup(profile.stop)
+
     def _make_layer(self, with_impl: bool = False):
         from vllm_ascend.attention.attention_c8_mxfp import AscendC8MXFPAttentionBackendImpl
 
