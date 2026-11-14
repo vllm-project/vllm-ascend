@@ -1350,6 +1350,16 @@ Both proxies share the following backend options.
 
 You can get the proxy program in the repository's examples, [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
+### Cache usage in proxy responses
+
+Start the prefiller with `--enable-prompt-tokens-details` to report its prefix-cache
+hits. For streaming Chat Completions or Completions requests, set
+`stream_options.include_usage` to `true`; `stream_options.continuous_usage_stats`
+also enables usage on generation chunks. The proxy copies the prefiller's
+`usage.prompt_tokens_details.cached_tokens` into every response carrying usage,
+including the final usage event and non-streaming JSON responses. Network
+splitting or coalescing of SSE events does not change this accounting.
+
 ## Benchmark
 
 We recommend use aisbench tool to assess performance. [aisbench](https://github.com/AISBench/benchmark) Execute the following commands to install aisbench

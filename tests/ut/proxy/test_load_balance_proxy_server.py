@@ -550,3 +550,63 @@ def test_usage_cached_tokens(proxy_server):
     assert st == 200
     # The proxy should have added cached_tokens to the usage chunk
     assert b"cached_tokens" in body
+
+
+@pytest.mark.parametrize("endpoint", ["chat/completions", "completions"])
+@pytest.mark.parametrize("mode", ["final", "continuous", "json"])
+@pytest.mark.parametrize("layout", ["coalesced", "fragmented"])
+@pytest.mark.parametrize("cached", [0, 2304])
+def test_usage_survives_http_chunk_boundaries(proxy_server, endpoint, mode, layout, cached):
+    """Real HTTP proxy: every usage frame must contain this request's P count."""
+    stream = mode != "json"
+    content = '中文🙂\\"\nanswer'
+    if endpoint == "completions":
+        choice = {"index": 0, "text": content, "finish_reason": "stop"}
+    elif stream:
+        choice = {"index": 0, "delta": {"content": content}, "finish_reason": "stop"}
+    else:
+        choice = {"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}
+    usage = {
+        "prompt_tokens": 2411,
+        "completion_tokens": 2,
+        "total_tokens": 2413,
+        "prompt_tokens_details": {"cached_tokens": 2410, "other_detail": 7},
+    }
+    objects = [{"id": "usage-test", "choices": [choice]}]
+    if mode in ("continuous", "json"):
+        objects[0]["usage"] = usage
+    if stream:
+        objects.append({"id": "usage-test", "choices": [], "usage": usage})
+        raw = b"".join(b"data: " + json.dumps(obj, ensure_ascii=False).encode() + b"\n\n" for obj in objects) + DONE
+    else:
+        raw = json.dumps(objects[0], ensure_ascii=False).encode()
+    # Split inside a multibyte character and JSON; never rely on TCP preserving writes.
+    split = raw.index("中".encode()) + 1
+    chunks = [raw] if layout == "coalesced" else [raw[:7], raw[7:split], raw[split : split + 1], raw[split + 1 :]]
+    _set_script(
+        MOCK_PREFILL_PORT,
+        [{"kind": "json", "body": {"usage": {"prompt_tokens_details": {"cached_tokens": cached}}}}],
+    )
+    _set_script(MOCK_DECODE_PORT, [{"kind": "stream", "chunks": chunks, "chunk_delay": 0.01}])
+    payload = {"model": MODEL, "max_tokens": 16, "stream": stream}
+    if endpoint == "completions":
+        payload["prompt"] = "hello"
+    else:
+        payload["messages"] = [{"role": "user", "content": "hello"}]
+    if stream:
+        payload["stream_options"] = {"include_usage": True, "continuous_usage_stats": mode == "continuous"}
+    response = httpx.post(f"{proxy_server}/v1/{endpoint}", json=payload, timeout=10)
+    assert response.status_code == 200
+    if stream:
+        assert response.content.endswith(DONE)
+        received = [
+            json.loads(frame[6:]) for frame in response.content.split(b"\n\n") if frame and frame != DONE.strip()
+        ]
+    else:
+        received = [response.json()]
+    expected = json.loads(json.dumps(objects))
+    for obj in expected:
+        if "usage" in obj:
+            obj["usage"]["prompt_tokens_details"]["cached_tokens"] = cached
+    assert received == expected
+    assert httpx.get(f"{proxy_server}/healthcheck").json()["request_num"] == 0

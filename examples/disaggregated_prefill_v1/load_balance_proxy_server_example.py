@@ -127,6 +127,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from enum import Enum
@@ -190,9 +191,71 @@ def update_cached_tokens_in_chunk(chunk_json: dict, cached_tokens: int | None) -
     return True
 
 
-def encode_response_chunk(chunk_json: dict, is_sse: bool) -> bytes:
+async def iter_response_frames(chunks: AsyncIterator[bytes], is_sse: bool) -> AsyncIterator[bytes]:
+    """Frame bytes before decoding UTF-8/JSON; HTTP chunks are not SSE events."""
+    if not is_sse:
+        body = bytearray()
+        async for chunk in chunks:
+            body.extend(chunk)
+        if body:
+            yield bytes(body)
+        return
+
+    buffer = bytearray()
+    position = line_start = 0
+    async for chunk in chunks:
+        buffer.extend(chunk)
+        while position < len(buffer):
+            char = buffer[position]
+            if char not in (10, 13):
+                position += 1
+                continue
+            # A CR at the chunk boundary may be the first half of CRLF.
+            if char == 13 and position + 1 == len(buffer):
+                break
+            end = position + 1
+            if char == 13 and buffer[end] == 10:
+                end += 1
+            if position == line_start:
+                yield bytes(buffer[:end])
+                del buffer[:end]
+                position = line_start = 0
+            else:
+                position = line_start = end
+    # Preserve the previous pass-through behavior for an unterminated tail.
+    if buffer:
+        yield bytes(buffer)
+
+
+def response_chunk_payload(chunk: bytes, is_sse: bool) -> bytes:
+    if not is_sse:
+        return chunk
+    data = []
+    for line in chunk.splitlines():
+        if line.startswith(b"data:"):
+            value = line[5:]
+            data.append(value[1:] if value.startswith(b" ") else value)
+    return b"\n".join(data)
+
+
+def encode_response_chunk(chunk_json: dict, is_sse: bool, original: bytes | None = None) -> bytes:
     chunk = json.dumps(chunk_json, ensure_ascii=False).encode("utf-8")
-    return b"data: " + chunk + b"\n\n" if is_sse else chunk
+    if not is_sse:
+        return chunk
+    if original is None:
+        return b"data: " + chunk + b"\n\n"
+    lines = []
+    replaced = False
+    for line in original.splitlines(keepends=True):
+        if line.startswith(b"data:"):
+            if replaced:
+                continue
+            ending = line[len(line.rstrip(b"\r\n")) :]
+            lines.append(b"data: " + chunk + ending)
+            replaced = True
+        else:
+            lines.append(line)
+    return b"".join(lines)
 
 
 global_args: argparse.Namespace | None = None
@@ -1158,6 +1221,13 @@ async def handle_completions_impl(api: str, request: Request):
                     )
                     released_kv = True
 
+            async def release_on_first_chunk(chunks):
+                # Keep KV release tied to the first raw bytes, not frame completion.
+                async for chunk in chunks:
+                    if chunk:
+                        await release_prefill_kv_once()
+                    yield chunk
+
             try:
                 while retry:
                     retry = False
@@ -1176,33 +1246,23 @@ async def handle_completions_impl(api: str, request: Request):
                             max_retries=args.max_retries,
                             base_delay=args.retry_delay,
                         )
-                    async for chunk in gen:
-                        if not released_kv and chunk:
-                            await release_prefill_kv_once()
+                    async for chunk in iter_response_frames(release_on_first_chunk(gen), stream_flag):
+                        is_sse = stream_flag
                         try:
-                            chunk_str = chunk.decode("utf-8").strip()
-                        except UnicodeDecodeError:
-                            logger.debug("Skipping chunk: %s", chunk)
+                            chunk_json = json.loads(response_chunk_payload(chunk, is_sse))
+                        except (UnicodeDecodeError, json.JSONDecodeError):
                             yield chunk
                             continue
-                        if not chunk_str:
-                            continue
-                        is_sse = chunk_str.startswith("data: ")
-                        if is_sse:
-                            chunk_str = chunk_str[len("data: ") :]
-                        try:
-                            chunk_json = json.loads(chunk_str)
-                        except json.JSONDecodeError:
-                            logger.debug("Skipping chunk: %s", chunk_str)
+                        if not isinstance(chunk_json, dict):
                             yield chunk
                             continue
+                        # continuous_usage_stats also puts usage on chunks with choices.
+                        if update_cached_tokens_in_chunk(chunk_json, reported_prefiller_cached_tokens):
+                            chunk = encode_response_chunk(chunk_json, is_sse, chunk)
                         choices = chunk_json.get("choices", [])
-                        if not choices or not stream_flag:
-                            if update_cached_tokens_in_chunk(chunk_json, reported_prefiller_cached_tokens):
-                                chunk = encode_response_chunk(chunk_json, is_sse)
-                                if not choices:
-                                    yield chunk
-                                    continue
+                        if not choices:
+                            yield chunk
+                            continue
 
                         choice = choices[0]
                         delta = choice.get("delta") or {}
@@ -1245,7 +1305,7 @@ async def handle_completions_impl(api: str, request: Request):
                                 choice["message"]["content"] = generated_token
                             else:
                                 choice["text"] = generated_token
-                            chunk = encode_response_chunk(chunk_json, is_sse)
+                            chunk = encode_response_chunk(chunk_json, is_sse, chunk)
                         yield chunk
             except asyncio.CancelledError:
                 logger.warning(
