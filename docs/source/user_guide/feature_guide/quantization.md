@@ -111,10 +111,24 @@ vllm serve /path/to/Qwen3.8-27B-FP8 --trust-remote-code
 vllm serve /path/to/GLM-5.3-Flash --tensor-parallel-size 8 --trust-remote-code
 ```
 
-How the weights are executed depends on the hardware:
+How the weights are executed is selected by `fp8_mode` in `--additional-config`:
 
-- **950PR&950DT Products**: the block scales are re-grouped into MXFP8 at load time, so weights stay at one byte per element and the native FP8 matmul is used.
-- **Other Ascend generations**: A2/A3 and Atlas 300I DUO have no FP8 matmul, so such a checkpoint is rejected at startup. Dequantizing it into the model dtype instead would double the weight footprint to run an unquantized GEMM, which is not what the checkpoint promises. Serve the BF16 release of the model there, or re-quantize it with ModelSlim or LLM-Compressor.
+| `fp8_mode` | Weight layout kept on device | Matmul used on 950PR&950DT |
+| --- | --- | --- |
+| `mxfp8` (default) | re-quantized to MXFP8, one E8M0 scale per 32 elements | MXFP8 matmul / grouped matmul |
+| `native` | checkpoint values kept, one `float32` scale per 128x128 tile | block-wise FP8 (G-B) matmul / grouped matmul |
+
+```bash
+# Keep the checkpoint layout: no re-quantization of the weights at load time.
+vllm serve /path/to/Qwen3.8-27B-FP8 --trust-remote-code \
+    --additional-config '{"fp8_mode": "native"}'
+```
+
+`native` skips the scale re-grouping pass and feeds the checkpoint's own FP8 weights to the block-wise FP8 operators, so its weight footprint matches `mxfp8`.
+
+`native` needs `weight_block_size` `[128, 128]` and an Ascend 950PR/950DT device. A block scale cannot describe a shard smaller than one 128x128 tile, so every per-rank (and every replicated) dimension must span whole 128-wide tiles: checkpoints with narrow fused layers, such as a shared-expert `gate_up_proj`, must use a smaller `--tensor-parallel-size`. Dynamic EPLB and the fused MC2 / MegaMoe path have no block-wise FP8 support. Since `native` is an explicit opt-in, any of these conditions fails at startup with an explanatory error instead of silently changing the numbers.
+
+Either mode needs an FP8 matmul, so A2/A3 and Atlas 300I DUO reject such a checkpoint at startup. Dequantizing it into the model dtype there would double the weight footprint to run an unquantized GEMM, which is not what the checkpoint promises: serve the BF16 release of the model on those devices, or re-quantize it with ModelSlim or LLM-Compressor.
 
 Layers the checkpoint left unquantized, such as `visual.merger.*` on multimodal models, are listed in `ignored_layers` or `modules_to_not_convert` and are served unquantized.
 

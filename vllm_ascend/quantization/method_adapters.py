@@ -157,6 +157,10 @@ class AscendLinearMethod(LinearMethodBase):
         # tile covering a shard's tail. vLLM rounds up for this parameter type.
         block_quant_scale = pergroup_dict.pop("_block_quant_scale", None)
         if block_quant_scale is not None:
+            # Only the v2 loaders round a block-scale shard up to whole tiles;
+            # the plain ones narrow the scale by the weight shard size and read
+            # past the end of the scale for a shard smaller than one tile.
+            weight_loader = getattr(layer, "weight_loader_v2", weight_loader)
             layer.weight_block_size = block_quant_scale
         for pergroup_name, pergroup_param in pergroup_dict.items():
             if block_quant_scale is not None:

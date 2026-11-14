@@ -150,6 +150,36 @@ class TestAscendLinearMethod(TestBase):
         self.assertEqual(layer.weight_scale_inv.input_dim, 1)
         self.assertNotIn("_block_quant_scale", dict(layer.named_parameters()))
 
+    def test_block_quant_scale_prefers_the_v2_weight_loader(self):
+        # The plain loaders narrow a scale by the weight shard size and would
+        # read past its end for a shard smaller than one tile; the v2 loaders
+        # round the bound up to whole tiles.
+        self.mock_scheme.get_pergroup_param.return_value = {
+            "weight_scale_inv": torch.empty(1, 1, dtype=torch.float32),
+            "_block_quant_scale": (128, 128),
+        }
+        layer = torch.nn.Module()
+        v2_loader = MagicMock()
+        layer.weight_loader_v2 = v2_loader
+        plain_loader = MagicMock()
+
+        with (
+            patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=0),
+            patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=1),
+        ):
+            self.method.create_weights(
+                layer,
+                input_size_per_partition=64,
+                output_partition_sizes=[64],
+                input_size=512,
+                output_size=512,
+                params_dtype=torch.bfloat16,
+                weight_loader=plain_loader,
+            )
+
+        self.assertEqual(layer.weight_scale_inv.weight_loader, v2_loader)
+        self.assertEqual(layer.weight.weight_loader, plain_loader)
+
     def test_process_weights_after_loading_delegates(self):
         layer = torch.nn.Module()
         self.mock_scheme.process_weights_after_loading.return_value = None
