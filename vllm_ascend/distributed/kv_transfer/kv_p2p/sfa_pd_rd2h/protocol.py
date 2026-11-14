@@ -26,7 +26,30 @@ DSPARK_DRAFT_KV_ACK = b"dspark_draft_kv_ack"
 # PP-aware MF_META handshake.  A bare ACK is the legacy PP=1 response;
 # producers with PP>1 require the structured acknowledgement below.
 SFAPD_PROTOCOL_VERSION = 1
+# DCP adds layout metadata and exact token intervals; old receivers must reject it.
+SFAPD_DCP_PROTOCOL_VERSION = 2
 MF_META_ACK = b"mf_meta_ack"
+
+
+# Legacy descriptors identify complete blocks. DCP descriptors additionally
+# delimit the valid token interval in possibly partial source stripes.
+ReadRequest = tuple[str, list[int], list[int], int, int] | tuple[str, list[int], list[int], int, int, int, int]
+
+
+def parse_read_request(entry: Any) -> ReadRequest:
+    """Normalize legacy descriptors and preserve exact DCP token intervals."""
+    if not isinstance(entry, (tuple, list)) or len(entry) not in (2, 3, 4, 5, 7):
+        raise ValueError("Read descriptor must have 2-5 legacy fields or 7 DCP fields")
+    request_id = entry[0]
+    if not isinstance(request_id, str):
+        raise ValueError("Read descriptor request ID must be a string")
+    main_ids = list(entry[1])
+    indexer_ids = list(entry[2] if len(entry) > 2 else entry[1])
+    main_start = int(entry[3]) if len(entry) > 3 else 0
+    indexer_start = int(entry[4]) if len(entry) > 4 else 0
+    if len(entry) == 7:
+        return request_id, main_ids, indexer_ids, main_start, indexer_start, int(entry[5]), int(entry[6])
+    return request_id, main_ids, indexer_ids, main_start, indexer_start
 
 
 class DSparkDraftKVStatus(Enum):
