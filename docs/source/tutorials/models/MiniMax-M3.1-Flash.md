@@ -232,6 +232,20 @@ request; the exact mask preserves each query's selected KV blocks and causality.
 The optional extensions must provide matching UnionSparseGen and GBSA exact-mask
 kernels; package names alone do not establish binary compatibility.
 
+Build and install both the `.run` operator package and Python wheel from each
+of these matching source revisions, using `--soc=ascend950` for the operator
+packages:
+
+| Package | Operator PR | Source revision |
+| --- | --- | --- |
+| `cann_ops_nn_custom` | [ops-nn #14010](https://gitcode.com/cann/ops-nn/pull/14010) | `2e5eb4f6f0142936bb7d46df5f43b2f1c02fa427` |
+| `cann_ops_transformer_custom` | [ops-transformer #15473](https://gitcode.com/cann/ops-transformer/pull/15473) | `bff6fe527aeea743473177c671d8e4b674624108` |
+
+The UnionSparseGen interface requires INT64 Q/KV prefix tensors,
+`block_shape=[1,128]`, `union_size=8`, and `mask_type=1` for right-aligned
+causality. Earlier packages using separate block dimensions and `is_causal`
+are incompatible with this interface.
+
 Single-node deployment runs Prefill and Decode on the same host. The A3 example uses W8A8 weights on all 16 NPUs, and the 950DT products example uses W8A8-MXFP8 weights on all eight NPUs. Both use [DSpark speculative decoding](../../user_guide/feature_guide/speculative_decoding.md#speculating-using-dspark), which generates draft tokens and verifies them with the target model.
 
 === "A3 series (W8A8)"

@@ -687,6 +687,12 @@ def test_union_dispatches_mixed_batch_with_native_cache_quantization(monkeypatch
     assert dec_args[2] is selections[0] and pre_args[2] is selections[1]
     assert union.call_args_list[0].kwargs["select_num_idx"] is selections[2]
     assert impl._dequant_scale is None
+    for call in nn_ops.union_sparse_gen_launch.call_args_list:
+        assert call.args[2].dtype == torch.int64
+        assert call.args[3] is None or call.args[3].dtype == torch.int64
+        assert call.kwargs["block_shape"] == [1, 128]
+        assert call.kwargs["union_size"] == 8
+        assert call.kwargs["mask_type"] == 1
     for call in attention_ops.generic_block_sparse_attention.call_args_list:
         assert call.args[0].dtype == kv_dtype
         assert call.kwargs["quant_mode"] == (5 if kv_dtype == torch.float8_e4m3fn else 0)
