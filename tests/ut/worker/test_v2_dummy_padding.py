@@ -400,3 +400,56 @@ def test_attention_keeps_actual_queries_and_padded_dummy_inputs(
     assert kwargs["max_query_len"] == 2
     assert kwargs["query_start_loc_cpu"].tolist() == [0, 2]
     assert kwargs["seq_lens_np"].tolist() == [2]
+
+
+@pytest.mark.parametrize("num_tokens,expected", [(1, 8), (2, 8), (4, 8), (8, 8), (9, 16), (16, 16)])
+def test_dispatch_pads_tokens_for_sequence_parallel(num_tokens, expected):
+    from vllm_ascend.patch.worker import patch_model_runner as patched
+
+    parallel_config = SimpleNamespace(tensor_parallel_size=8, use_sequence_parallel_moe=True)
+    manager = SimpleNamespace(vllm_config=SimpleNamespace(parallel_config=parallel_config))
+    with (
+        patch.object(patched, "is_pcp_decode_sharding_enabled", return_value=False),
+        patch.object(patched, "_dispatch_cg_and_sync_dp", side_effect=lambda *a, **k: a[2]),
+    ):
+        assert patched.dispatch_cg_and_sync_dp(manager, 1, num_tokens, 1) == expected
+
+
+def test_dispatch_leaves_tokens_untouched_without_sequence_parallel():
+    from vllm_ascend.patch.worker import patch_model_runner as patched
+
+    parallel_config = SimpleNamespace(tensor_parallel_size=8, use_sequence_parallel_moe=False)
+    manager = SimpleNamespace(vllm_config=SimpleNamespace(parallel_config=parallel_config))
+    with (
+        patch.object(patched, "is_pcp_decode_sharding_enabled", return_value=False),
+        patch.object(patched, "enable_sp", return_value=False),
+        patch.object(patched, "_dispatch_cg_and_sync_dp", side_effect=lambda *a, **k: a[2]),
+    ):
+        assert patched.dispatch_cg_and_sync_dp(manager, 1, 7, 1) == 7
+
+
+def test_dispatch_recovers_parallel_config_for_draft_calls():
+    from vllm_ascend.patch.worker import patch_model_runner as patched
+
+    parallel_config = SimpleNamespace(tensor_parallel_size=8, use_sequence_parallel_moe=True)
+    manager = SimpleNamespace(vllm_config=SimpleNamespace(parallel_config=parallel_config))
+    # draft dispatch calls do not pass ``parallel_config`` explicitly
+    with (
+        patch.object(patched, "is_pcp_decode_sharding_enabled", return_value=False),
+        patch.object(patched, "_dispatch_cg_and_sync_dp", side_effect=lambda *a, **k: a[2]),
+    ):
+        assert patched.dispatch_cg_and_sync_dp(manager, 1, 2, 1) == 8
+
+
+def test_all_dispatch_namespaces_are_rebound():
+    import importlib
+
+    from vllm_ascend.patch.worker import patch_model_runner as patched
+
+    for module_name in patched._DISPATCH_MODULES:
+        try:
+            module = importlib.import_module(module_name)
+        except ModuleNotFoundError:
+            continue
+        if getattr(module, "dispatch_cg_and_sync_dp", None) is not None:
+            assert module.dispatch_cg_and_sync_dp is patched.dispatch_cg_and_sync_dp, module_name
