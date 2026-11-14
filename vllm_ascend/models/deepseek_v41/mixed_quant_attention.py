@@ -10,7 +10,6 @@ from vllm_ascend.ops import packaged_attention as ops
 from vllm_ascend.ops.triton.build_window_indices import (
     build_window_indices_triton,
 )
-from vllm_ascend.ops.triton.packed_cache_slot_mapping import build_packed_cache_slot_mapping
 from vllm_ascend.ops.triton.prepare_indexer_indices import (
     prepare_indexer_indices,
 )
@@ -345,7 +344,6 @@ def write_index_cache(
 class MixedQuantPackedCacheOps:
     """Packed mixed-quant cache ABI selected by the hardware adaptor."""
 
-    build_packed_cache_slot_mapping = staticmethod(build_packed_cache_slot_mapping)
     build_window_indices = staticmethod(build_window_indices_triton)
     build_smla_metadata = staticmethod(build_smla_metadata)
     qsmla = staticmethod(qsmla)
