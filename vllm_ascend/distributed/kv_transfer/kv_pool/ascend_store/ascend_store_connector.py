@@ -440,6 +440,24 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         cast(LayerwiseKVPoolWorker, self.connector_worker).save_kv_layer(self._get_connector_metadata())
 
+    def on_dsv41_cache_written(
+        self, cache_name: str, swa_slots: torch.Tensor | None, *, cache_only: bool = False
+    ) -> None:
+        # The decoder cut layer writes shared KV for the full batch before
+        # entering its normal compact forward. Publish only after both writes.
+        if cache_only or not self.use_layerwise or not self.can_put or not self.has_connector_metadata():
+            return
+        assert self.connector_worker is not None
+        worker = cast(LayerwiseKVPoolWorker, self.connector_worker)
+        physical_layer = worker._extract_physical_layer_index(cache_name)
+        local_layer = worker._global_to_local_layer[physical_layer]
+        if local_layer != worker.current_layer:
+            raise RuntimeError(
+                f"V4.1 layerwise store received {cache_name} at local layer {worker.current_layer}, "
+                f"expected {local_layer}"
+            )
+        worker.save_kv_layer(self._get_connector_metadata())
+
     def wait_for_save(self):
         if not self.can_put:
             # A load-only consumer has no store thread to wait for.

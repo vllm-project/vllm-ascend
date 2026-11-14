@@ -187,7 +187,7 @@ class MooncakeMetadataThread(threading.Thread):
                 for tp_rank, worker_metadata in workers_by_tp_rank.items():
                     mismatched_fields = [
                         field_name
-                        for field_name in ("block_size", "num_blocks", "cp_kv_cache_interleave_size")
+                        for field_name in ("block_size", "num_blocks", "cp_kv_cache_interleave_size", "dsv41_layout")
                         if getattr(worker_metadata, field_name) != getattr(reference, field_name)
                     ]
                     if mismatched_fields:
@@ -314,6 +314,7 @@ class MooncakeMetadataThread(threading.Thread):
                 block_size_scales=block_size_scales,
                 metadata_by_pcp_rank=metadata_by_pcp_rank,
                 indexer_replication_sizes=indexer_replication_sizes,
+                dsv41_layout=reference.dsv41_layout,
             )
         return merged
 

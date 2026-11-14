@@ -255,6 +255,20 @@ def test_update_state_after_alloc_forwards_full_blocks_to_observer():
     unrelated.update_state_after_alloc.assert_called_once_with(request, blocks.empty, 0)
 
 
+def test_dsv41_write_notifications_preserve_provider_order_and_replay_flag():
+    calls = []
+    provider = SimpleNamespace(on_dsv41_cache_written=MagicMock(side_effect=lambda *a, **k: calls.append("provider")))
+    observer = SimpleNamespace(on_dsv41_cache_written=MagicMock(side_effect=lambda *a, **k: calls.append("observer")))
+    connector = AscendMultiConnector.__new__(AscendMultiConnector)
+    connector._layerwise_slot_release_providers = [provider]
+    connector._non_slot_release_connectors = [object(), observer]
+    slots = object()
+    connector.on_dsv41_cache_written("swa", slots, cache_only=True)
+    assert calls == ["provider", "observer"]
+    for child in (provider, observer):
+        child.on_dsv41_cache_written.assert_called_once_with("swa", slots, cache_only=True)
+
+
 def test_update_state_after_alloc_forwards_observer_without_chosen_connector():
     full_blocks_observer = _make_connector(requires_full_blocks=True)
     connector = AscendMultiConnector.__new__(AscendMultiConnector)

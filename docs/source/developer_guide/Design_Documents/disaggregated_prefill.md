@@ -64,11 +64,32 @@ This transfer path still requires end-to-end validation on Ascend hardware, incl
 
 #### Mooncake V2 Layerwise Push Connector
 
-Set `kv_connector` to `MooncakePushConnector` on P and D, with `kv_role` set to
-`kv_producer` and `kv_consumer`, respectively. Use
+Set `kv_connector` to `MooncakeConnectorV2` and
+`kv_connector_extra_config.use_layerwise` to `true` on both P and D, with
+`kv_role` set to `kv_producer` and `kv_consumer`, respectively. For example, on P:
+
+```json
+{
+  "kv_connector": "MooncakeConnectorV2",
+  "kv_role": "kv_producer",
+  "kv_connector_extra_config": {"use_layerwise": true}
+}
+```
+
+`use_layerwise` defaults to `false`, which keeps the pull-based behavior.
+Explicit `MooncakePushConnector` and `MooncakePullConnector` names remain
+supported and always select their respective modes. When using `MultiConnector`,
+set `use_layerwise` in the Mooncake child's `kv_connector_extra_config`.
+
+Use
 `examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py`
 as the proxy. This experimental path supports PCP/TP routing and PP layer
 lookup; workers currently require DCP=1 and do not support KVPP.
+
+DeepSeek V4.1 has an experimental explicit-cache-write path with matching P/D
+layouts and PP=PCP=DCP=1. See the
+[V4.1 V2 Push design and validation plan](deepseek_v41_mooncake_v2.md) for
+SWA bounded replay, supported configurations and required hardware validation.
 
 The proxy sends the request to D first. After allocating blocks, D's scheduler
 submits an immutable destination snapshot to a 32-worker HTTP thread pool,
@@ -84,9 +105,9 @@ ranks, including ranks with no data to send, before reporting receive completion
 Completions that arrive before D's worker allocation metadata are buffered.
 P waits for this step's metadata queries, WRITEs and terminal DONE callbacks
 before returning worker results. Normal prefill completion releases KV without
-delay-free; asynchronous scheduling remains enabled. This path currently assumes
-successful transfer; request-level transfer failure reporting is TODO. Early
-cancellation still retains the existing delayed-release protection.
+delay-free; asynchronous scheduling remains enabled. WRITE failures are reported
+through DONE status and request-level receive results. Early cancellation still
+retains the existing delayed-release protection.
 
 P follows this lifecycle:
 

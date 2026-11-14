@@ -10,6 +10,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import connector as con
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import (
     MooncakeBaseConnector,
     MooncakeConnector,
+    MooncakeConnectorV2,
     MooncakePullConnector,
     MooncakePushConnector,
 )
@@ -26,6 +27,34 @@ def make_facade() -> MooncakeBaseConnector:
 
 def test_mooncake_connector_aliases_pull_connector() -> None:
     assert MooncakeConnector is MooncakePullConnector
+
+
+@pytest.mark.parametrize(
+    "extra,push", [({}, False), ({"use_layerwise": False}, False), ({"use_layerwise": True}, True)]
+)
+def test_v2_factory_returns_the_concrete_connector(extra, push):
+    config = SimpleNamespace(kv_transfer_config=SimpleNamespace(kv_connector_extra_config=extra))
+    with (
+        patch.object(connector_module, "MooncakePushConnector") as push_cls,
+        patch.object(connector_module, "MooncakePullConnector") as pull_cls,
+    ):
+        result = MooncakeConnectorV2(config, KVConnectorRole.WORKER, None)
+        chosen, other = (push_cls, pull_cls) if push else (pull_cls, push_cls)
+        assert result is chosen.return_value
+        chosen.assert_called_once_with(config, KVConnectorRole.WORKER, None)
+        other.assert_not_called()
+
+
+def test_push_facade_forwards_dsv41_writes_only_with_metadata():
+    connector = MooncakePushConnector.__new__(MooncakePushConnector)
+    connector.kv_transfer_config = SimpleNamespace(is_kv_producer=True)
+    connector.connector_worker = MagicMock(spec=connector_module.MooncakePushConnectorWorker)
+    connector._connector_metadata = None
+    connector.on_dsv41_cache_written("swa", None, cache_only=True)
+    connector.connector_worker.on_dsv41_cache_written.assert_not_called()
+    connector._connector_metadata = MooncakeConnectorMetadata()
+    connector.on_dsv41_cache_written("swa", None, cache_only=True)
+    connector.connector_worker.on_dsv41_cache_written.assert_called_once_with("swa", None, cache_only=True)
 
 
 def test_loaded_group_ids_hook_is_version_gated() -> None:

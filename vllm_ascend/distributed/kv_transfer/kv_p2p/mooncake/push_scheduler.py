@@ -19,6 +19,10 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
     MooncakeBaseConnectorScheduler,
     MooncakeMetadataThread,
 )
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.dsv41 import (
+    is_deepseek_v41,
+    validate_deepseek_v41_config,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
     MooncakeTransferMetadataGroups,
@@ -54,7 +58,11 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
     """Publish D allocations through the layerwise proxy; track P sends."""
 
     def __init__(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: "KVCacheConfig") -> None:
+        if is_deepseek_v41(vllm_config):
+            validate_deepseek_v41_config(vllm_config)
         super().__init__(vllm_config, engine_id, kv_cache_config)
+        if is_deepseek_v41(vllm_config):
+            self.need_truncate = True
         self._metadata_thread: MooncakePushMetadataThread | None = None
         self._reqs_pending_recv: dict[str, tuple[Request, BlockIds, int]] = {}
         self._reqs_need_send_layerwise: dict[str, tuple[Request, BlockIds]] = {}
@@ -135,6 +143,10 @@ class MooncakePushConnectorScheduler(MooncakeBaseConnectorScheduler):
             # Ordinary request cancellation is handled by request_finished below.
             # The current deployment assumes P requests are not preempted.
             cached_reqs = scheduler_output.scheduled_cached_reqs
+            if is_deepseek_v41(self.vllm_config):
+                restarted = set(cached_reqs.resumed_req_ids) | set(scheduler_output.preempted_req_ids)
+                if self._reqs_need_send_layerwise.keys() & restarted:
+                    raise RuntimeError("Mooncake Push V4.1 does not support producer preemption/resumption")
             num_computed_tokens = dict(zip(cached_reqs.req_ids, cached_reqs.num_computed_tokens))
             for req in scheduler_output.scheduled_new_reqs:
                 num_computed_tokens[req.req_id] = req.num_computed_tokens

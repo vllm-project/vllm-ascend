@@ -1,0 +1,9 @@
+pr: 21690
+entries:
+  - category: bugfix
+    text: Fixed missing KV block information when using MooncakePushConnector with AscendMultiConnector.
+  - category: feature
+    text: MooncakeConnectorV2 now selects layerwise push when kv_connector_extra_config.use_layerwise is true. Pull remains the default.
+  - category: feature
+    text: Added an experimental DeepSeek V4.1 Mooncake V2 push path with explicit cache readiness and SWA bounded replay coverage checks. Requires matching P/D layouts and TP sizes, PP/PCP/DCP size 1, and speculative decoding disabled.
+    model: deepseek-v4.1

@@ -736,7 +736,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 return [(0, local_layer)]
             groups = self.physical_layer_to_group_layers.get(local_layer)
             if groups is None:
-                if getattr(self, "use_kvpp", False):
+                # A physical layer can own only private caches (for example
+                # V4.1 SWA with replay enabled) and still needs to advance hooks.
+                if getattr(self, "use_kvpp", False) or local_layer in self._global_to_local_layer.values():
                     return []
                 raise RuntimeError(f"Mooncake layerwise: no KV cache group for local layer {local_layer}")
             return [(group_id, layer_idx) for group_id, layer_idx in groups if group_id in self.cacheable_group_ids]
