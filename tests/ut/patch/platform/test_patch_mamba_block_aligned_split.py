@@ -44,6 +44,7 @@ def _scheduler(
     return SimpleNamespace(
         vllm_config=SimpleNamespace(
             kv_transfer_config=kv_transfer_config,
+            speculative_config=None,
             model_config=SimpleNamespace(
                 hf_config=SimpleNamespace(),
                 hf_text_config=SimpleNamespace(**indexer_config),
@@ -132,6 +133,132 @@ def test_kv_both_cold_prefill_retains_mamba_boundary_split():
     assert result == 4224
 
 
+@pytest.mark.parametrize("uses_sparse_index_kpool", [False, True])
+@pytest.mark.parametrize(
+    ("num_computed_tokens", "num_new_local_computed_tokens", "num_external_computed_tokens"),
+    [(1152, 0, 0), (0, 1152, 0), (0, 0, 1152)],
+)
+def test_kv_both_prefill_prefix_still_splits_at_checkpoint(
+    uses_sparse_index_kpool,
+    num_computed_tokens,
+    num_new_local_computed_tokens,
+    num_external_computed_tokens,
+):
+    scheduler = _scheduler(
+        is_kv_consumer=True,
+        is_kv_producer=True,
+        uses_sparse_index_kpool=uses_sparse_index_kpool,
+    )
+    scheduler.block_size = scheduler.cache_config.block_size = 1152
+    scheduler.use_eagle = scheduler.use_eagle_block_drop = False
+    request = _request(num_computed_tokens=num_computed_tokens, num_prompt_tokens=2305, num_tokens=2305)
+
+    result = _mamba_block_aligned_split(
+        scheduler,
+        request,
+        num_new_tokens=1153,
+        num_new_local_computed_tokens=num_new_local_computed_tokens,
+        num_external_computed_tokens=num_external_computed_tokens,
+    )
+
+    assert result == 1152
+
+
+@pytest.mark.parametrize(
+    ("uses_sparse_index_kpool", "prefill_budget", "expected_chunks"),
+    [
+        (False, 2048, [1152, 1152, 1]),
+        (True, 1024, [1024, 1024, 256, 1]),
+        (True, 2048, [1152, 1152, 1]),
+        (True, 4608, [2304, 1]),
+    ],
+)
+def test_kv_both_chunked_prefill_materializes_last_checkpoint(uses_sparse_index_kpool, prefill_budget, expected_chunks):
+    chunks_by_role = []
+    for is_kv_consumer in (True, None):
+        scheduler = _scheduler(
+            is_kv_consumer=is_kv_consumer,
+            is_kv_producer=True if is_kv_consumer else None,
+            uses_sparse_index_kpool=uses_sparse_index_kpool,
+        )
+        scheduler.block_size = scheduler.cache_config.block_size = 1152
+        scheduler.use_eagle = scheduler.use_eagle_block_drop = False
+        scheduler.max_num_scheduled_tokens = prefill_budget
+        request = _request(num_computed_tokens=0, num_prompt_tokens=2305, num_tokens=2305)
+        chunks = []
+        positions = [request.num_computed_tokens]
+        while request.num_computed_tokens < request.num_tokens:
+            start = request.num_computed_tokens
+            assert positions[-1] == start
+            remaining = request.num_tokens - start
+            scheduled = _mamba_block_aligned_split(scheduler, request, min(prefill_budget, remaining))
+            assert request.num_computed_tokens == start
+            assert 0 < scheduled <= min(prefill_budget, remaining)
+            end = start + scheduled
+            assert start < end <= request.num_tokens
+            chunks.append(scheduled)
+            request.num_computed_tokens = end
+            positions.append(end)
+
+        assert sum(chunks) == request.num_tokens == 2305
+        assert positions[-2:] == [2304, 2305]
+        chunks_by_role.append(chunks)
+
+    assert chunks_by_role == [expected_chunks, expected_chunks]
+
+
+@pytest.mark.parametrize("uses_sparse_index_kpool", [False, True])
+def test_kv_both_mixed_prefix_matches_async_completed_load(uses_sparse_index_kpool):
+    scheduler = _scheduler(
+        is_kv_consumer=True,
+        is_kv_producer=True,
+        uses_sparse_index_kpool=uses_sparse_index_kpool,
+    )
+    scheduler.block_size = scheduler.cache_config.block_size = 1152
+    scheduler.use_eagle = scheduler.use_eagle_block_drop = False
+    waiting_request = _request(num_computed_tokens=0, num_prompt_tokens=3457, num_tokens=3457)
+    waiting_result = _mamba_block_aligned_split(
+        scheduler,
+        waiting_request,
+        num_new_tokens=1153,
+        num_new_local_computed_tokens=1152,
+        num_external_computed_tokens=1152,
+    )
+
+    # After async loading, the prefix is already in the request counter;
+    # the waiting scheduler passes no additional local or external hit.
+    loaded_request = _request(num_computed_tokens=2304, num_prompt_tokens=3457, num_tokens=3457)
+    loaded_result = _mamba_block_aligned_split(scheduler, loaded_request, num_new_tokens=1153)
+
+    assert waiting_result == loaded_result == 1152
+
+
+@pytest.mark.parametrize("uses_sparse_index_kpool", [False, True])
+def test_pd_consumer_preserves_async_output_placeholder_window(uses_sparse_index_kpool):
+    scheduler = _scheduler(is_kv_consumer=True, uses_sparse_index_kpool=uses_sparse_index_kpool)
+    scheduler.num_spec_tokens = 0
+    request = _request(num_computed_tokens=379, num_prompt_tokens=128, num_tokens=380)
+    request.spec_token_ids = []
+    request.num_tokens_with_spec = request.num_tokens + len(request.spec_token_ids)
+    request.num_output_placeholders = 7
+    # The running scheduler includes in-flight output even without spec tokens.
+    num_new_tokens = request.num_tokens_with_spec + request.num_output_placeholders - request.num_computed_tokens
+
+    assert num_new_tokens == 8
+    assert _mamba_block_aligned_split(scheduler, request, num_new_tokens) == 8
+
+
+def test_pd_consumer_preserves_window_after_local_cache_hit():
+    result = _mamba_block_aligned_split(
+        _scheduler(is_kv_consumer=True),
+        _request(num_computed_tokens=0),
+        num_new_tokens=8,
+        num_new_local_computed_tokens=379,
+    )
+
+    assert result == 8
+
+
 def test_producer_splits_window_after_external_cache_hit():
     result = _mamba_block_aligned_split(
         _scheduler(is_kv_consumer=False),
@@ -216,6 +343,25 @@ def test_sparse_index_kpool_pd_consumer_still_preserves_verifier_window():
     )
 
     assert result == 8
+
+
+@pytest.mark.parametrize(
+    ("has_internal_checkpoint", "checkpoint_alignment", "expected_tokens"),
+    [(False, 1, 32), (True, 1, 33), (True, 64, 32)],
+)
+def test_consumer_uses_internal_checkpoint_only_when_export_is_valid(
+    has_internal_checkpoint, checkpoint_alignment, expected_tokens
+):
+    scheduler = _scheduler(is_kv_consumer=True)
+    scheduler.block_size = scheduler.cache_config.block_size = scheduler.hash_block_size = 16
+    scheduler.use_eagle = scheduler.use_eagle_block_drop = False
+    scheduler.mamba_has_prefill_checkpoint_blocks = has_internal_checkpoint
+    scheduler.mamba_prefill_checkpoint_alignment = checkpoint_alignment
+    request = _request(num_computed_tokens=16, num_prompt_tokens=49, num_tokens=49)
+
+    # A valid backend checkpoint exports state at 48 inside this final query.
+    # Without that export, scheduling must stop at 48 before the final token.
+    assert _mamba_block_aligned_split(scheduler, request, num_new_tokens=33) == expected_tokens
 
 
 def test_patch_is_registered_with_upstream_signature():
@@ -312,3 +458,37 @@ def test_producer_handles_missing_drop_attributes(monkeypatch):
     assert result == 42
     assert not hasattr(scheduler, "use_eagle")
     assert not hasattr(scheduler, "use_eagle_block_drop")
+
+
+@pytest.mark.parametrize("uses_sparse_index_kpool", [False, True])
+@pytest.mark.parametrize(("computed", "local", "external"), [(1152, 0, 0), (0, 1152, 0), (0, 0, 1152)])
+def test_mtp_consumer_preserves_legacy_window_after_any_prefix(uses_sparse_index_kpool, computed, local, external):
+    scheduler = _scheduler(is_kv_consumer=True, uses_sparse_index_kpool=uses_sparse_index_kpool)
+    scheduler.vllm_config.speculative_config = SimpleNamespace(method="mtp")
+    scheduler.block_size = scheduler.cache_config.block_size = 1152
+    scheduler.use_eagle = scheduler.use_eagle_block_drop = False
+    request = _request(num_computed_tokens=computed, num_prompt_tokens=2305, num_tokens=2305)
+
+    assert _mamba_block_aligned_split(scheduler, request, 1153, local, external) == 1153
+
+
+@pytest.mark.parametrize("uses_sparse_index_kpool", [False, True])
+def test_mtp_consumer_without_computed_prefix_keeps_original_split(uses_sparse_index_kpool):
+    scheduler = _scheduler(is_kv_consumer=True, uses_sparse_index_kpool=uses_sparse_index_kpool)
+    scheduler.vllm_config.speculative_config = SimpleNamespace(method="mtp")
+    scheduler.block_size = scheduler.cache_config.block_size = 1152
+    scheduler.use_eagle = scheduler.use_eagle_block_drop = False
+    request = _request(num_computed_tokens=0, num_prompt_tokens=2305, num_tokens=2305)
+
+    assert _mamba_block_aligned_split(scheduler, request, 2305) == 2304
+
+
+@pytest.mark.parametrize("method", ["eagle", "eagle3"])
+def test_mtp_consumer_bypass_does_not_apply_to_other_eagle_methods(method):
+    scheduler = _scheduler(is_kv_consumer=True)
+    scheduler.vllm_config.speculative_config = SimpleNamespace(method=method)
+    scheduler.block_size = scheduler.cache_config.block_size = 16
+    scheduler.use_eagle, scheduler.use_eagle_block_drop = True, False
+    request = _request(num_computed_tokens=32, num_prompt_tokens=49, num_tokens=49)
+
+    assert _mamba_block_aligned_split(scheduler, request, 17) == 16
