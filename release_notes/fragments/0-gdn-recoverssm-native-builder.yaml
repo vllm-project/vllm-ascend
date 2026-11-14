@@ -1,0 +1,9 @@
+pr: 0
+entries:
+  - category: performance
+    text: >-
+      Replace the KDA-inherited GDN RecoverSSM metadata builder with a
+      GDN-native builder that extends the standard GDN attention metadata
+      builder directly. This removes the Kimi K3 KDA scheduling assumptions
+      that caused DSpark speculative decoding to hang on Qwen GDN hybrid
+      models, and enables RecoverSSM for both MTP and DSpark methods.
