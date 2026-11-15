@@ -108,3 +108,21 @@ hybrid, PCP, pipeline and cache-layout tests cover the corresponding paths.
 Representative hardware evidence must identify NPU model/card count, software
 versions, TP/CP/PP topology, backend, model and command, and distinguish actual
 backend/model execution from mocked tests run on an NPU host.
+
+For real service range I/O, start a Memcache or Mooncake service with the normal
+backend configuration, then opt in explicitly:
+
+```bash
+export VLLM_ASCEND_LAYERWISE_TEST_BACKEND=mooncake  # or memcache
+# Set MOONCAKE_CONFIG_PATH, or MMC_LOCAL_CONFIG_PATH / MMC_META_CONFIG_PATH.
+python -m pytest --confcutdir=tests/e2e/pull_request/one_card -q \
+  tests/e2e/pull_request/one_card/test_layerwise_backend_contract.py
+```
+
+The service test exercises production backend clients and address builders
+against real NPU memory: dense and strided physical pages, multiple groups,
+multiple components in one physical layer, MTP layers, two dtypes and three
+prefetch distances. It verifies untouched blocks and padding as well as copied
+bytes. It skips unless a backend is selected; an explicitly selected backend
+must initialize and complete the transfers successfully. This is range/layout
+evidence, not attention-kernel, worker scheduling or multi-rank model evidence.
