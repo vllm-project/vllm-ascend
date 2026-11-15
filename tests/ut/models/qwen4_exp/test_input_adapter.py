@@ -303,3 +303,68 @@ def test_persistent_metadata_shape_error_names_operator_kind():
     adapter._persistent_metadata(("gbsa", "signature"), torch.zeros(2, dtype=torch.int32))
     with pytest.raises(RuntimeError, match="QSA gbsa metadata shape changed"):
         adapter._persistent_metadata(("gbsa", "signature"), torch.zeros(3, dtype=torch.int32))
+
+
+def _load_model_state_prepare_inputs(base_cls):
+    source = Path(__file__).resolve().parents[4] / "vllm_ascend/models/qwen4_exp/model_state.py"
+    module = ast.parse(source.read_text())
+    state = next(
+        node for node in module.body if isinstance(node, ast.ClassDef) and node.name == "AscendQwen4ExpModelState"
+    )
+    method = next(node for node in state.body if isinstance(node, ast.FunctionDef) and node.name == "prepare_inputs")
+    wrapper = ast.parse("class _TestState(_Base):\n    pass\n").body[0]
+    assert isinstance(wrapper, ast.ClassDef)
+    wrapper.body = [method]
+    namespace = {"_Base": base_cls, "Any": object}
+    compiled = ast.fix_missing_locations(ast.Module(body=[wrapper], type_ignores=[]))
+    exec(compile(compiled, str(source), "exec"), namespace)
+    return namespace["_TestState"]
+
+
+class _PreparedPositionRecorder:
+    def __init__(self):
+        self.call = None
+
+    def prepare_positions(self, positions, num_tokens):
+        self.call = (positions, num_tokens)
+
+
+def test_model_state_prepares_forward_mrope_positions():
+    model_positions = torch.arange(12).reshape(3, 4)
+
+    class _Base:
+        def prepare_inputs(self, input_batch, req_states):
+            del input_batch, req_states
+            return {"positions": model_positions}
+
+    state = _load_model_state_prepare_inputs(_Base)()
+    state.qsa_prepared_input_adapter = _PreparedPositionRecorder()
+    raw_positions = torch.arange(4)
+    input_batch = SimpleNamespace(positions=raw_positions, num_tokens_after_padding=2)
+
+    result = state.prepare_inputs(input_batch, object())
+
+    assert result["positions"] is model_positions
+    assert state.qsa_prepared_input_adapter.call == (
+        model_positions,
+        2,
+    )
+
+
+def test_model_state_falls_back_to_scheduler_positions():
+    class _Base:
+        def prepare_inputs(self, input_batch, req_states):
+            del input_batch, req_states
+            return {}
+
+    state = _load_model_state_prepare_inputs(_Base)()
+    state.qsa_prepared_input_adapter = _PreparedPositionRecorder()
+    raw_positions = torch.arange(4)
+    input_batch = SimpleNamespace(positions=raw_positions, num_tokens_after_padding=2)
+
+    state.prepare_inputs(input_batch, object())
+
+    assert state.qsa_prepared_input_adapter.call == (
+        raw_positions,
+        2,
+    )
