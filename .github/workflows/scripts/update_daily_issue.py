@@ -13,12 +13,14 @@ import json
 import os
 import re
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 DAILY_WORKFLOW = "schedule_daily_test.yaml"
+ISSUE_TIMEZONE = timezone(timedelta(hours=8))
 HTTP_TIMEOUT_SECONDS = 10
 HTTP_ATTEMPTS = 3
 MAX_BODY_LENGTH = 60000
@@ -129,6 +131,8 @@ def publish_failure(client: GitHubClient, inputs: dict, server_url: str) -> int:
         raise ValueError("Multiple Issues already belong to this Daily round; resolve duplicates before retrying")
     entry = failure_entry(inputs)
     if not matches:
+        started_at = datetime.fromisoformat(root["run_started_at"]).astimezone(ISSUE_TIMEZONE)
+        title = f"Daily test failure on {started_at:%Y-%m-%d %H:%M} - please check"
         run_url = f"{server_url}/{client.repository}/actions/runs/{run_id}/attempts/{attempt}"
         body = f"{marker}\n# Daily test failures\n\n[Daily run]({run_url})\n\n{entry}"
         # Creation is not blindly retried: a timeout may have created the Issue.
@@ -136,7 +140,7 @@ def publish_failure(client: GitHubClient, inputs: dict, server_url: str) -> int:
         issue = client.request(
             "POST",
             "issues",
-            {"title": f"[Daily] Test failures — run {run_id}, attempt {attempt}", "body": body},
+            {"title": title, "body": body},
             retry=False,
         )
         return issue["number"]
