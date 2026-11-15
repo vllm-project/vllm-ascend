@@ -196,13 +196,6 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
                 num_external_tokens if needs_full_blocks else 0,
             )
 
-    def get_local_prefix_cache_limit(self, request: "Request") -> int | None:
-        for connector in self._connectors:
-            get_limit = getattr(connector, "get_local_prefix_cache_limit", None)
-            if get_limit is not None and (limit := get_limit(request)) is not None:
-                return limit
-        return None
-
     def get_num_new_matched_tokens(
         self,
         request: "Request",

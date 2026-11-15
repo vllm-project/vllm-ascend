@@ -4,8 +4,6 @@ import sys
 from collections.abc import Mapping
 from copy import copy
 from dataclasses import replace
-from functools import wraps
-from inspect import signature
 from math import lcm
 
 import vllm
@@ -23,7 +21,6 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHashList,
     KVCacheBlock,
 )
-from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import (
     MambaManager,
     get_manager_for_kv_cache_spec,
@@ -40,32 +37,6 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
-_original_get_local_prefix_cache_hit = Scheduler._get_local_prefix_cache_hit
-_supports_prefix_hit_limit = "max_cache_hit_length" in signature(_original_get_local_prefix_cache_hit).parameters
-
-
-@wraps(_original_get_local_prefix_cache_hit)
-def _get_local_prefix_cache_hit(self, request, max_cache_hit_length=None):
-    get_limit = getattr(self.connector, "get_local_prefix_cache_limit", None)
-    if get_limit is not None and self.kv_cache_manager.prefix_cache_lookup_enabled(request):
-        limit = get_limit(request)
-        if limit is not None:
-            max_cache_hit_length = limit if max_cache_hit_length is None else min(limit, max_cache_hit_length)
-    if _supports_prefix_hit_limit:
-        return _original_get_local_prefix_cache_hit(self, request, max_cache_hit_length)
-    if max_cache_hit_length is None:
-        return _original_get_local_prefix_cache_hit(self, request)
-    # v0.32 has no upper-bound argument on KVCacheManager. Query its
-    # coordinator with the verified limit and keep the common boundary.
-    manager = self.kv_cache_manager
-    coordinator = manager.coordinator
-    cached, hit, unmatched = coordinator.find_longest_cache_hit(request.block_hashes, max_cache_hit_length)
-    if hit > 0 and manager.enable_kv_cache_events and request.kv_cache_report_mode == "full":
-        coordinator.emit_cached_block_events(request, cached)
-    return manager.create_kv_cache_blocks(cached), hit, (hit + unmatched if unmatched else 0), False
-
-
-Scheduler._get_local_prefix_cache_hit = _get_local_prefix_cache_hit
 
 
 def _skips_eagle_block_drop(kv_transfer_config) -> bool:

@@ -294,15 +294,6 @@
 #    Future Plan:
 #       Remove once upstream exposes the PD role to the coordinator or
 #       removes the EAGLE last-block drop for verified prompt blocks.
-#   3. `vllm.v1.core.sched.scheduler.Scheduler._get_local_prefix_cache_hit`
-#    Why:
-#       A prefix hash can outlive its KV in a reused buffer.
-#    How:
-#       Cap local hits at the prefix AscendStore can restore.
-#    Related PR:
-#       No upstream PR for this AscendStore lookup limit.
-#    Future Plan:
-#       Remove when upstream lets connectors limit local prefix hits.
 #
 # ** 10. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

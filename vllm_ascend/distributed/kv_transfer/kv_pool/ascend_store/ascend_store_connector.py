@@ -266,11 +266,6 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         """Ignore P/D handshake metadata because AscendStore handles PP via pool keys."""
         pass
 
-    def get_local_prefix_cache_limit(self, request: "Request") -> int | None:
-        if isinstance(self.connector_scheduler, LayerwiseKVPoolScheduler):
-            return self.connector_scheduler.get_local_prefix_cache_limit(request)
-        return None
-
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(request, num_computed_tokens)
