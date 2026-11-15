@@ -290,16 +290,13 @@ def plan_layerwise_cache_reuse(
     if not layout.has_layer_reuse:
         return None
 
-    # Draft names discovered only on the worker must agree with Core's plan.
-    if not layout.reused_cache_names.isdisjoint(getattr(kv_cache_config, "dspark_draft_layer_names", ())):
-        raise ValueError("Resident DSpark draft caches cannot rotate through target layerwise slots.")
     for name in layout.reused_cache_names:
         spec = planner.spec_by_entry[name]
         if isinstance(spec, MambaSpec) and (
-            spec.mamba_cache_mode != "align" or getattr(spec, "num_prefill_checkpoint_blocks", 0) != 0
+            spec.mamba_cache_mode != "align" or spec.num_prefill_checkpoint_blocks != 0
         ):
             raise NotImplementedError(f"Reusable cache {name} has unsupported state semantics: {type(spec).__name__}")
-    if getattr(getattr(vllm_config, "cache_config", None), "num_gpu_blocks_override", None) is not None:
+    if vllm_config.cache_config.num_gpu_blocks_override is not None:
         raise ValueError("Layerwise offload does not support num_gpu_blocks_override; use automatic block sizing.")
     if any(tensor.host_resident for tensor in kv_cache_config.kv_cache_tensors) or any(
         getattr(spec, "store_on_host", False) for spec in planner.spec_by_entry.values()
