@@ -3639,7 +3639,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
       --enforce-eager \
       --kv-cache-dtype int8 \
       --attention_config.indexer_kv_dtype int8 \
-      --additional-config '{"enable_flashcomm1":true,"enable_shared_expert_dp":true,"scheduler_config":{"profiling_chunk_config":{"enabled":true}}}' \
+      --additional-config '{"enable_flashcomm1":true,"enable_shared_expert_dp":true}' \
       --speculative-config '{"num_speculative_tokens":1,"method":"deepseek_mtp","enforce_eager":true}' \
       --kv-transfer-config '{
         "kv_connector": "MultiConnector",
@@ -3674,7 +3674,7 @@ Select the tab that matches the deployment hardware and its Prefill topology.
     ```
 
     The Prefill script keeps `--no-async-scheduling` together with the V2
-    runner and `profiling_chunk_config.enabled=true`.
+    runner.
 
     PP headless workers may fail with
     `Mooncake worker requires a local DP rank`. The pooled Prefill instance

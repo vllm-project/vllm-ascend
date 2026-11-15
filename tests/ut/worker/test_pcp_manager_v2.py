@@ -159,7 +159,6 @@ def test_decode_sharding_does_not_add_a_parallel_config_field():
     ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(
             dyntra_lb_config=SimpleNamespace(enabled=False),
-            profiling_chunk_config=SimpleNamespace(enabled=False),
             batch_job_sched_config=SimpleNamespace(enabled=False),
         )
     )
@@ -1208,34 +1207,9 @@ def test_dummy_attention_context_uses_current_batch(pcp_rank, has_stale_batch):
     manager._block_tables.gather_block_tables.assert_not_called()
 
 
-def test_cpp_dummy_is_partitioned_instead_of_staged():
+def test_capture_input_uses_upstream_staging_path():
     manager = AscendPCPManager(2, 0, torch.device("cpu"))
-    dummy = _make_global_pcp_batch()
-    dummy.is_dummy = True
-    dummy.is_cpp_profile = True
-    local_batch = _make_local_pcp_batch()
-
-    # vLLM main renamed the upstream staging hook; patch and call the live name.
-    stage_name = "prepare_inputs_for_capture_or_profile"
-    with (
-        patch.object(PCPManager, stage_name) as stage,
-        patch.object(manager, "partition_batch", return_value=local_batch) as partition,
-    ):
-        result = getattr(manager, stage_name)(dummy)
-
-    assert result is local_batch
-    stage.assert_not_called()
-    partition.assert_called_once()
-    args = partition.call_args.args
-    assert len(args) == 2
-    assert args[0] is dummy
-    assert args[1].cg_mode == CUDAGraphMode.NONE
-    assert args[1].num_tokens == dummy.num_tokens
-
-
-def test_capture_input_without_cpp_marker_uses_staging_path():
-    manager = AscendPCPManager(2, 0, torch.device("cpu"))
-    legacy_batch = SimpleNamespace()
+    input_batch = SimpleNamespace()
     staged_batch = _make_local_pcp_batch()
 
     stage_name = "prepare_inputs_for_capture_or_profile"
@@ -1243,10 +1217,10 @@ def test_capture_input_without_cpp_marker_uses_staging_path():
         patch.object(PCPManager, stage_name, return_value=staged_batch) as stage,
         patch.object(manager, "partition_batch") as partition,
     ):
-        result = getattr(manager, stage_name)(legacy_batch)
+        result = getattr(manager, stage_name)(input_batch)
 
     assert result is staged_batch
-    stage.assert_called_once_with(legacy_batch)
+    stage.assert_called_once_with(input_batch)
     partition.assert_not_called()
 
 
