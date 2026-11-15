@@ -375,6 +375,13 @@ jobs:
         working-directory: /vllm-workspace/vllm-ascend
         run: python3 -m tools.profiling.capture initialize --root "$ASCEND_PROFILE_ROOT"
 
+      - name: Clear Ascend logs before tests
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          rm -rf /root/ascend/log
+          mkdir -p /root/ascend/log
+
       - name: Run Pytest (py-driven)
         id: pytest-driven
         if: ${{ inputs.tests != '' }}
@@ -392,7 +399,7 @@ jobs:
 
       - name: Run Pytest (YAML-driven)
         id: yaml-test
-        if: ${{ always() && inputs.config_file_path != '' }}
+        if: ${{ !cancelled() && inputs.config_file_path != '' }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
@@ -409,6 +416,28 @@ jobs:
           set -o pipefail
           pytest -sv tests/e2e/common/single_node/test_single_node.py \
             2>&1 | tee /tmp/test-logs/yaml-test.log
+
+      - name: Collect Ascend logs
+        id: collect_ascend_logs
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          ARTIFACT_LABEL: ${{ inputs.soc_version }}-${{ inputs.vllm_ascend_branch }}-${{ inputs.name || inputs.config_file_path || inputs.tests }}
+        run: |
+          safe_label=$(printf '%s' "$ARTIFACT_LABEL" | tr -c 'A-Za-z0-9_.-' '-')
+          echo "name=single-node-${safe_label}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-ascend-logs" >> "$GITHUB_OUTPUT"
+          tar -czf /tmp/single-node-ascend-logs.tar.gz -C / root/ascend/log tmp/test-logs
+
+      - name: Upload Ascend logs (GitHub Artifacts)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.collect_ascend_logs.outputs.name }}
+          path: /tmp/single-node-ascend-logs.tar.gz
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0
 
       - name: Update good_table.csv on success
         if: >-

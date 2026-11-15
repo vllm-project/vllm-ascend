@@ -10,6 +10,7 @@ from typing import Any, ClassVar
 import torch
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
+from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 from vllm_ascend.attention import dsa_v41 as v41
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
@@ -26,7 +27,9 @@ from vllm_ascend.attention.dsa_v41 import (
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, is_pcp_enabled, uses_pcp_sharded_layout
 from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio, get_storage_block_size
-from vllm_ascend.ops.rope_dsv4 import get_full_cos_and_sin_dsa_for_layer
+from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
+from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa, get_full_cos_and_sin_dsa_for_layer
+from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_device_metadata
 
 
 def get_v41_cp_classes():
@@ -108,6 +111,115 @@ class _ReplicatedCacheImpl(AscendDSAV41Impl):
         return self._get_layer_metadata(global_by_prefix)
 
 
+@dataclass(frozen=True)
+class V41PCPC2Metadata:
+    """Rows exchanged for C2 pairing and per-request ring updates."""
+
+    # Token rows in this rank's local projections.
+    send_token_indices: torch.Tensor
+    send_valid_mask: torch.Tensor
+    # One predecessor per local chunk: gathered row or -1 to keep the old ring row.
+    prev_token_row_indices: torch.Tensor
+    # Gathered rows to write into each global request's persistent ring.
+    ring_source_row_indices: torch.Tensor
+    ring_request_indices: torch.Tensor
+    # Request-relative offsets; the writer resolves slots from device positions.
+    ring_token_offsets: torch.Tensor
+
+
+def build_v41_pcp_c2_metadata(
+    batch,
+    world,
+    rank,
+    device,
+    *,
+    decode_sharded,
+    min_send_rows,
+    num_local_reqs,
+    num_ring_rows,
+    buffers,
+    buffer_capacity,
+):
+    """Use upstream segment ownership; send chunk ends and each request's ring tail."""
+    query_lens = batch.num_scheduled_tokens[: batch.num_reqs]
+    query_start_rows = batch.query_start_loc_np[: batch.num_reqs + 1]
+    is_prefilling = batch.is_prefilling_np[: batch.num_reqs]
+    manager = PCPManager.__new__(PCPManager)
+    manager.pcp_world_size, manager.dcp_world_size = world, 1
+    manager.shard_decode_requests = decode_sharded
+    rank_segments = [manager._get_rank_segments(r, query_lens, is_prefilling, query_start_rows) for r in range(world)]
+    rank_send_rows = []
+    for peer_segments in rank_segments:
+        global_to_local_rows = {}
+        for segment in peer_segments:
+            req_idx = segment.global_batch_req_idx
+            chunk_start_row = segment.global_batch_slice.start
+            chunk_end_row = min(segment.global_batch_slice.stop, batch.num_tokens)
+            if chunk_end_row <= chunk_start_row:
+                continue
+            ring_tail_start_row = max(
+                chunk_start_row, min(int(query_start_rows[req_idx + 1]), batch.num_tokens) - STATE_RING_ROWS
+            )
+            for global_row in {*range(ring_tail_start_row, chunk_end_row), chunk_end_row - 1}:
+                global_to_local_rows[global_row] = segment.rank_local_batch_slice.start + global_row - chunk_start_row
+        rank_send_rows.append(sorted(global_to_local_rows.items()))
+    num_send_rows = max(1, min_send_rows, *(len(rows) for rows in rank_send_rows))
+    global_to_gathered_rows: dict[int, int] = {}
+    for peer_rank, row_pairs in enumerate(rank_send_rows):
+        for send_row_idx, (global_row, _) in enumerate(row_pairs):
+            # Replicated tokens use the first copy in the rank-major gather.
+            global_to_gathered_rows.setdefault(global_row, peer_rank * num_send_rows + send_row_idx)
+    prev_token_row_indices = []
+    for segment in rank_segments[rank]:
+        req_idx, chunk_start_row = segment.global_batch_req_idx, segment.global_batch_slice.start
+        # CPU lengths can be optimistic after draft rejection. The pooling
+        # kernel uses the exact device start to decide whether it needs this row.
+        prev_token_row_indices.append(
+            global_to_gathered_rows[chunk_start_row - 1]
+            if query_start_rows[req_idx] < chunk_start_row < batch.num_tokens
+            else -1
+        )
+    ring_source_row_indices, ring_request_indices, ring_token_offsets = [], [], []
+    for req_idx in range(len(query_lens)):
+        request_end_row = min(int(query_start_rows[req_idx + 1]), batch.num_tokens)
+        for global_row in range(
+            max(int(query_start_rows[req_idx]), request_end_row - STATE_RING_ROWS), request_end_row
+        ):
+            ring_source_row_indices.append(global_to_gathered_rows[global_row])
+            ring_request_indices.append(req_idx)
+            ring_token_offsets.append(global_row - int(query_start_rows[req_idx]))
+    send_token_indices = [local_row for _, local_row in rank_send_rows[rank]]
+
+    def to_device_tensor(name, values, size, fill, dtype):
+        value = torch.tensor(values + [fill] * (size - len(values)), dtype=dtype)
+        if device.type != "cpu":
+            value = value.pin_memory()
+        if buffers is None:
+            return value.to(device=device, non_blocking=True)
+        if name not in buffers:
+            buffers[name] = torch.empty(buffer_capacity, dtype=dtype, device=device)
+        result = buffers[name][:size]
+        result.copy_(value, non_blocking=True)
+        return result
+
+    # Pad on the host and copy directly into the final graph-stable buffers.
+    ring_rows = num_ring_rows or len(ring_source_row_indices)
+    return V41PCPC2Metadata(
+        send_token_indices=to_device_tensor("send_token_indices", send_token_indices, num_send_rows, 0, torch.int64),
+        send_valid_mask=to_device_tensor(
+            "send_valid_mask", [True] * len(send_token_indices), num_send_rows, False, torch.bool
+        ),
+        prev_token_row_indices=to_device_tensor(
+            "prev_token_row_indices", prev_token_row_indices, num_local_reqs, -1, torch.int64
+        ),
+        ring_source_row_indices=to_device_tensor(
+            "ring_source_row_indices", ring_source_row_indices, ring_rows, 0, torch.int64
+        ),
+        ring_request_indices=to_device_tensor("ring_request_indices", ring_request_indices, ring_rows, -1, torch.int64),
+        ring_token_offsets=to_device_tensor("ring_token_offsets", ring_token_offsets, ring_rows, 0, torch.int64),
+    )
+
+
 @dataclass(kw_only=True)
 class AscendDSAV41PCPMetadata(AscendDSAV41Metadata):
     """Rank-local query metadata with a canonical replicated-cache view."""
@@ -115,6 +227,7 @@ class AscendDSAV41PCPMetadata(AscendDSAV41Metadata):
     local_num_tokens_after_padding: int
     # Maps scheduler token order to the rank-major gathered layout.
     hidden_restore_idx: torch.Tensor
+    c2_metadata: V41PCPC2Metadata
 
     @classmethod
     def from_local_metadata(
@@ -123,6 +236,7 @@ class AscendDSAV41PCPMetadata(AscendDSAV41Metadata):
         global_metadata: AscendDSAV41Metadata,
         local_num_tokens_after_padding: int,
         hidden_restore_idx: torch.Tensor,
+        c2_metadata: V41PCPC2Metadata,
     ) -> "AscendDSAV41PCPMetadata":
         values = {field.name: getattr(local, field.name) for field in fields(AscendDSAV41Metadata)}
         values["global_metadata"] = global_metadata
@@ -130,6 +244,7 @@ class AscendDSAV41PCPMetadata(AscendDSAV41Metadata):
             **values,
             local_num_tokens_after_padding=local_num_tokens_after_padding,
             hidden_restore_idx=hidden_restore_idx,
+            c2_metadata=c2_metadata,
         )
 
 
@@ -158,6 +273,7 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
 
         self._pcp_context_owner = self
         self._pcp_rope_buffers: dict[str, tuple[torch.Tensor, ...]] = {}
+        self._c2_metadata_buffers: dict[str, torch.Tensor] = {}
 
     @staticmethod
     def prepare_shared_buffers(builders) -> None:
@@ -246,10 +362,11 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
         return cos_views, sin_views
 
     def _build_empty_local_metadata(self, common: AscendCommonAttentionMetadata) -> AscendDSAV41Metadata:
-        # Skip SMLA/QLI metadata ops on ranks with no queries.
+        # Clear controls retained by captured graphs, including local C2 pooling.
         self._device_metadata_tasks = ()
         self._smla_metadata.zero_()
         self._qli_metadata.zero_()
+        self._c2_ring_metadata.zero_()
         if self._a5_smla_metadata is not None:
             self._a5_smla_metadata.zero_()
         num_tokens, num_reqs = common.num_input_tokens, common.num_reqs
@@ -447,8 +564,10 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
             local_kwargs.update(
                 num_actual_reqs=local_common.num_reqs if num_actual_reqs is None else num_actual_reqs,
                 build_query=True,
-                update_cache=not needs_global_metadata,
-                build_compressor_metadata=not needs_global_metadata,
+                # C2 needs each local chunk's start, length and ring page;
+                # token cache writes still use the global metadata.
+                update_cache=not needs_global_metadata or self._cache_kind == "compressor_state",
+                build_compressor_metadata=True,
             )
             for name in ("common_v41_metadata", "common_v41_batch_metadata"):
                 cache = kwargs.get(name)
@@ -463,8 +582,24 @@ class AscendDSAV41PCPMetadataBuilder(_ReplicatedCacheMetadataBuilder):
 
         if not needs_global_metadata:
             return local_metadata
+        c2_metadata = shared.get("c2_metadata")
+        if c2_metadata is None:
+            batch = pcp_context.global_batch
+            c2_metadata = build_v41_pcp_c2_metadata(
+                batch,
+                self._pcp_world_size,
+                self._pcp_rank,
+                self._seq_lens.device,
+                decode_sharded=self._is_decode_sharded,
+                min_send_rows=local_common.num_input_tokens if full_graph_mode else 0,
+                num_local_reqs=local_common.num_reqs,
+                num_ring_rows=global_common.num_input_tokens if full_graph_mode else 0,
+                buffers=self._pcp_context_owner._c2_metadata_buffers if full_graph_mode else None,
+                buffer_capacity=max(self._max_tokens, self._seq_lens.numel()),
+            )
+            shared["c2_metadata"] = c2_metadata
         return AscendDSAV41PCPMetadata.from_local_metadata(
-            local_metadata, global_metadata, local_common.num_input_tokens, pcp_context.hidden_restore_idx
+            local_metadata, global_metadata, local_common.num_input_tokens, pcp_context.hidden_restore_idx, c2_metadata
         )
 
 
@@ -508,24 +643,104 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
 
     supports_pcp: ClassVar[bool] = True
 
-    @staticmethod
-    def _gather_and_restore_hidden_states(
-        hidden_states: torch.Tensor,
-        metadata: AscendDSAV41PCPMetadata,
-    ) -> torch.Tensor:
-        assert hidden_states.shape[0] == metadata.local_num_tokens_after_padding
-        gathered = get_pcp_group().all_gather(hidden_states.contiguous(), dim=0)
-        return torch.index_select(gathered, 0, metadata.hidden_restore_idx)
-
     def _prepare_inputs_and_caches(self, attn, hidden_states, metadata, metadata_by_prefix):
         if not isinstance(metadata.swa, AscendDSAV41PCPMetadata):
             return super()._prepare_inputs_and_caches(attn, hidden_states, metadata, metadata_by_prefix)
-        # Empty query ranks also join hidden and weight collectives.
-        global_hidden_states = self._gather_and_restore_hidden_states(hidden_states, metadata.swa)
         projector = attn.dsa_attn.dsa_attn.impl
-        projector._parallel_o_proj.all_gather_weights()
         global_metadata = self._global_layer_metadata(metadata_by_prefix)
-        return self._preprocess(attn, hidden_states, global_hidden_states, metadata, global_metadata)
+        prepared = self._preprocess(attn, hidden_states, metadata, global_metadata)
+        projector._parallel_o_proj.all_gather_weights()
+        return prepared
+
+    @staticmethod
+    def _gather_cache_rows(rows, metadata):
+        padded = rows.new_zeros((metadata.local_num_tokens_after_padding, *rows.shape[1:]))
+        padded[: rows.shape[0]].copy_(rows)
+        gathered = get_pcp_group().all_gather(padded, dim=0)
+        return torch.index_select(gathered, 0, metadata.hidden_restore_idx)
+
+    def _compress_local_c2(self, attn, hidden_states, local_metadata, global_metadata):
+        """Pool each local chunk with its predecessor, then update the persistent request rings."""
+        from vllm_ascend.ops.triton.compressor.compressor_triton import write_pcp_ring_rows
+
+        c2_metadata = local_metadata.swa.c2_metadata
+        compressor = attn.compressor
+        hidden_states_fp32 = hidden_states.float()
+        kv, scores = compressor.wkv(hidden_states_fp32), compressor.wgate(hidden_states_fp32)
+        send_kv_scores = kv.new_zeros((c2_metadata.send_token_indices.numel(), 2 * compressor.width))
+        if hidden_states.shape[0]:
+            send_kv_scores.copy_(
+                torch.cat((kv, scores), dim=-1).index_select(
+                    0, c2_metadata.send_token_indices.clamp_max(hidden_states.shape[0] - 1)
+                )
+            )
+            valid_send_rows = c2_metadata.send_valid_mask & (c2_metadata.send_token_indices < hidden_states.shape[0])
+            send_kv_scores.masked_fill_(~valid_send_rows[:, None], 0)
+        gathered_kv_scores = get_pcp_group().all_gather(send_kv_scores, dim=0)
+        ring_state = compressor.state_cache.kv_cache[0].squeeze(-2)
+        if hidden_states.shape[0]:
+            local_state_metadata = local_metadata.compressor.state
+            if local_state_metadata.c2_metadata_group_id is not None:
+                wait_for_device_metadata(DeviceMetadataStage.COMPRESSOR, local_state_metadata.c2_metadata_group_id)
+            latent = compressor.pool_projected(
+                kv,
+                scores,
+                local_state_metadata,
+                prev_rows=gathered_kv_scores,
+                prev_row_indices=c2_metadata.prev_token_row_indices,
+            )
+        else:
+            latent = hidden_states.new_empty((0, compressor.width), dtype=torch.bfloat16)
+        global_state_metadata = global_metadata.compressor.state
+        if global_state_metadata.c2_metadata_group_id is not None:
+            wait_for_device_metadata(DeviceMetadataStage.COMPRESSOR, global_state_metadata.c2_metadata_group_id)
+        # Write the latest request tails to the persistent rings after local reads.
+        write_pcp_ring_rows(
+            gathered_kv_scores,
+            ring_state,
+            global_state_metadata.c2_ring_metadata,
+            c2_metadata.ring_source_row_indices,
+            c2_metadata.ring_request_indices,
+            c2_metadata.ring_token_offsets,
+        )
+        return latent
+
+    @staticmethod
+    def _write_swa_cache(attn, metadata, value):
+        if isinstance(metadata, AscendDSAV41PCPMetadata):
+            value = AscendDSAV41PCPImpl._gather_cache_rows(value, metadata)
+            metadata = metadata.global_metadata
+        AscendDSAV41Impl._write_swa_cache(attn, metadata, value)
+
+    def _compress_and_write_caches(
+        self, attn, hidden_states, cos, sin, local_metadata, global_metadata, *, prepared_indexer=None
+    ):
+        if not isinstance(local_metadata.swa, AscendDSAV41PCPMetadata):
+            return super()._compress_and_write_caches(
+                attn,
+                hidden_states,
+                cos,
+                sin,
+                local_metadata,
+                global_metadata,
+                prepared_indexer=prepared_indexer,
+            )
+        self._quantize_indexer_query(attn, prepared_indexer, local_metadata)
+        if self.role.compress_ratio == 2:
+            latent = self._compress_local_c2(attn, hidden_states, local_metadata, global_metadata)
+            source_state_metadata = global_metadata.compressor.state
+            source_cos, source_sin = source_state_metadata.c2_source_cos, source_state_metadata.c2_source_sin
+            if source_cos is None or source_sin is None:
+                source_cos, source_sin = get_cos_and_sin_dsa(source_state_metadata.c2_source_positions)
+                source_cos = source_cos[attn.rotary_emb.layername]
+                source_sin = source_sin[attn.rotary_emb.layername]
+        else:
+            latent = attn.compressor(hidden_states)
+            source_cos, source_sin = global_metadata.rope(
+                attn.rotary_emb.layername, global_metadata.swa.num_input_tokens
+            )
+        latent = self._gather_cache_rows(latent, local_metadata.swa)
+        self._write_compressed_caches(attn, latent, source_cos, source_sin, global_metadata)
 
     def forward(self, attn, positions, hidden_states, output=None):
         # Every layer has SWA metadata carrying the batch's PCP and prefill state.

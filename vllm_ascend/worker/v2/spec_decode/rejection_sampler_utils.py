@@ -352,7 +352,7 @@ def rejection_sample(
     # An explicit flag bypasses configuration lookup for standalone callers.
     if use_fp64:
         raise NotImplementedError("FP64 rejection sampling is not supported on NPU.")
-    if vllm_version_is("0.32.0"):
+    if vllm_version_is("0.33.0"):
         draft_logits_row_mapping = None
         if draft_logits_num_shards != 1:
             # vLLM main (#63554) can shard the draft logits cache across TP ranks;
@@ -403,14 +403,8 @@ def rejection_sample(
     num_logits, vocab_size = target_logits.shape
     has_draft_logits = draft_logits is not None
 
-    # vLLM main renamed the `num_speculative_steps` argument of the logits-stats
-    # kernels to `num_logits` and moved bonus-token detection into
-    # `_is_bonus_logit`, which masks its look-ahead load with the total logit
-    # count. Passing `num_speculative_steps` there makes the kernels treat every
-    # logit after the first one as a bonus token and return early, leaving the
-    # `new_empty` block-statistics buffers uninitialized. v0.32.0 still expects
-    # `num_speculative_steps`.
-    stats_num_logits = num_speculative_steps if vllm_version_is("0.32.0") else num_logits
+    # Both upstream kernels detect bonus rows using the total logit count.
+    stats_num_logits = num_logits
 
     if draft_logits is None:
         # When draft_logits is None, create a dummy tensor so that Triton
@@ -433,7 +427,7 @@ def rejection_sample(
     target_local_sumexp = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
     draft_local_max = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
     draft_local_sumexp = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
-    if vllm_version_is("0.32.0"):
+    if vllm_version_is("0.33.0"):
         _compute_block_stats_kernel[(num_logits, vocab_num_blocks)](
             target_local_argmax,
             target_local_argmax.stride(0),
@@ -515,7 +509,7 @@ def rejection_sample(
 
     if use_block_verification:
         cumulative_log_p = target_logits.new_empty(num_logits, dtype=torch.float32)
-        if vllm_version_is("0.32.0"):
+        if vllm_version_is("0.33.0"):
             _compute_cumulative_log_p_kernel[(num_reqs,)](
                 cumulative_log_p,
                 target_logits,
@@ -569,7 +563,7 @@ def rejection_sample(
         if has_draft_logits:
             local_residual_mass = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
             if num_logits > 1:
-                if vllm_version_is("0.32.0"):
+                if vllm_version_is("0.33.0"):
                     _compute_local_residual_mass_kernel[(num_logits - 1, vocab_num_blocks)](
                         local_residual_mass,
                         local_residual_mass.stride(0),

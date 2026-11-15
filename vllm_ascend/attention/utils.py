@@ -325,18 +325,6 @@ def uses_pcp_sharded_layout(common_attn_metadata: "AscendCommonAttentionMetadata
 
 
 @dataclass
-class AscendDCPMetadata:
-    """Per-batch metadata required by decode context parallelism."""
-
-    num_computed_tokens_of_dcp: list[list[int]] | torch.Tensor | None = None
-    query_lens_cpu: torch.Tensor = None
-    max_query_len: int = 0
-    dcp_mtp_attn_mask: torch.Tensor = None
-    draft_cp_seq_len: torch.Tensor | None = None
-    draft_base_seq_lens: torch.Tensor | None = None
-
-
-@dataclass
 class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     """
     Per-batch attention metadata, shared across layers and backends.
@@ -377,8 +365,6 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # Total number of tokens including padding, used for padding operations.
     num_input_tokens: int = 0
 
-    # Metadata for Decode Context Parallelism (DCP) operations.
-    context_parallel_metadata: AscendDCPMetadata | None = None
     # Per-request / per-token request identity used by the Sparse KV offload
     # resident LRU (adler32-hashed request ids and token->request mapping).
     req_ids_tensor: torch.Tensor | None = None
@@ -441,7 +427,6 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             attn_state=self.attn_state,
             graph_pad_size=-1,  # It should be -1 when not run in fullgraph mode.
             num_input_tokens=self.num_input_tokens,
-            context_parallel_metadata=self.context_parallel_metadata,
             seq_lens_cpu_upper_bound=self.seq_lens_cpu_upper_bound[:num_actual_reqs]
             if self.seq_lens_cpu_upper_bound is not None
             else None,
@@ -507,8 +492,6 @@ def split_decodes_and_prefills(
     """
     Assuming a reordered batch, finds the boundary between prefill and decode
     requests.
-    DCP metadata may carry a stable CPU copy of query lengths for asynchronous
-    speculative-decoding updates.
 
     The batch is expected to be ordered as:
     decode -> short_extend -> long_extend -> prefill
@@ -531,10 +514,7 @@ def split_decodes_and_prefills(
         num_decode_tokens: The number of tokens in the decode requests.
         num_prefill_tokens: The number of tokens in the prefill requests.
     """
-    dcp_metadata = common_attn_metadata.context_parallel_metadata
-    query_lens_dcp = dcp_metadata.query_lens_cpu if dcp_metadata else None
-    max_query_len_dcp = dcp_metadata.max_query_len if dcp_metadata else 0
-    max_query_len = common_attn_metadata.max_query_len if max_query_len_dcp == 0 else max_query_len_dcp
+    max_query_len = common_attn_metadata.max_query_len
     num_reqs = common_attn_metadata.num_reqs
     if num_reqs == 0:
         return 0, 0, 0, 0
@@ -554,8 +534,7 @@ def split_decodes_and_prefills(
     ):
         return num_reqs, 0, num_tokens, 0
 
-    query_lens_sharded = query_start_loc[1:] - query_start_loc[:-1]
-    query_lens = query_lens_sharded if query_lens_dcp is None else query_lens_dcp
+    query_lens = query_start_loc[1:] - query_start_loc[:-1]
     if query_lens[0].item() > decode_threshold:
         return 0, num_reqs, 0, num_tokens
 

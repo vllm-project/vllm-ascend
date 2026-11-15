@@ -23,7 +23,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.simple.worker import
     SimpleCPUOffloadNPUWorker,
     _flatten_kv_value,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 def test_factory_registration_uses_consolidated_package(
@@ -235,10 +234,6 @@ def test_get_finished_records_store_barrier_on_npu(
     assert store_event.recorded_stream is current_stream
 
 
-@pytest.mark.skipif(
-    vllm_version_is("0.32.0"),
-    reason="get_simple_cpu_offload_num_cpu_blocks is a main-only RPC",
-)
 def test_npu_worker_reports_aligned_cpu_blocks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -262,10 +257,6 @@ def test_npu_worker_reports_aligned_cpu_blocks(
     assert worker.get_simple_cpu_offload_num_cpu_blocks() == 8
 
 
-@pytest.mark.skipif(
-    vllm_version_is("0.32.0"),
-    reason="get_simple_cpu_offload_num_cpu_blocks is a main-only RPC",
-)
 def test_npu_worker_reports_no_cpu_blocks_without_transfer_group(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -278,10 +269,6 @@ def test_npu_worker_reports_no_cpu_blocks_without_transfer_group(
     assert worker.get_simple_cpu_offload_num_cpu_blocks() is None
 
 
-@pytest.mark.skipif(
-    vllm_version_is("0.32.0"),
-    reason="get_simple_cpu_offload_num_cpu_blocks is a main-only RPC",
-)
 def test_npu_worker_reports_no_cpu_blocks_without_connector(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

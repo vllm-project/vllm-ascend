@@ -6,7 +6,7 @@ import pytest
 import torch
 from torch import nn
 
-from vllm_ascend.models import kimi_k3
+from vllm_ascend.models.kimi_k3 import kimi_k3
 
 
 @pytest.mark.parametrize("rank", range(16))

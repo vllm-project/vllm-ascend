@@ -1,0 +1,4 @@
+pr: 21445
+entries:
+  - category: feature
+    text: Added support for Cloudflare CLEF and CLEF Flash structured decisions on Ascend with Qwen3.5 multimodal preprocessing.

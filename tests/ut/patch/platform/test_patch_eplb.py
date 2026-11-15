@@ -248,16 +248,22 @@ def test_communicator_factory_creates_ascend_gloo_communicator(monkeypatch):
     gloo_cls = MagicMock(return_value=communicator)
     monkeypatch.setattr(patch_eplb, "AscendGlooEplbCommunicator", gloo_cls)
     coordinator = MagicMock()
+    weights = [[object()]]
+    buffer = [object()]
 
     result = patch_eplb._eplb_communicator.create_eplb_communicator(
         coordinator,
         "torch_gloo",
-        [[object()]],
-        [object()],
+        weights,
+        buffer,
     )
 
     assert result is communicator
-    gloo_cls.assert_called_once_with(cpu_group=coordinator.cpu_group)
+    gloo_cls.assert_called_once_with(
+        cpu_group=coordinator.cpu_group,
+        expert_buffer=buffer,
+        all_expert_weights=weights,
+    )
 
 
 def test_communicator_factory_creates_ascend_hixl_communicator(monkeypatch):
@@ -300,16 +306,22 @@ def test_communicator_factory_accepts_additive_parameters(monkeypatch):
 
     wrapped_factory = patch_eplb._wrap_communicator_factory(original_factory)
     coordinator = MagicMock()
+    weights = [[object()]]
+    buffer = [object()]
     result = wrapped_factory(
         group_coordinator=coordinator,
         backend="torch_gloo",
-        expert_weights=[[object()]],
-        expert_buffer=[object()],
+        expert_weights=weights,
+        expert_buffer=buffer,
         transport_options={"mode": "future"},
     )
 
     assert result is communicator
-    gloo_cls.assert_called_once_with(cpu_group=coordinator.cpu_group)
+    gloo_cls.assert_called_once_with(
+        cpu_group=coordinator.cpu_group,
+        expert_buffer=buffer,
+        all_expert_weights=weights,
+    )
 
 
 def test_communicator_factory_requires_group_coordinator_parameter():
@@ -538,6 +550,108 @@ def test_async_worker_only_publishes_changed_layers(monkeypatch, changed_layer):
     assert published[0].layer_idx == changed_layer
     assert published[0].is_last_result
     assert patch_eplb._async_worker.transfer_layer.call_count == int(changed_layer is not None)
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+@pytest.mark.parametrize("scenario", ["complete", "counts", "missing_topology", "plain", "noop", "canceled", "failed"])
+def test_async_worker_logs_cycle_statistics_after_consumption(monkeypatch, rank, scenario):
+    old_mapping = torch.tensor([[0, 1], [0, 1], [0, 1]])
+    communicator = SimpleNamespace(set_stream=MagicMock())
+    model_state = SimpleNamespace(
+        communicator=communicator,
+        physical_to_logical_map=old_mapping,
+        logical_to_physical_map=torch.empty((3, 2, 1), dtype=torch.int32),
+        model=SimpleNamespace(expert_weights=[[object()] for _ in range(3)]),
+        model_name="model",
+        expert_buffer=[object()],
+        rebalanced=True,
+        pending_result=None,
+    )
+    state = AscendEplbState.__new__(AscendEplbState)
+    state._hixl_session = None
+    state.model_states = {"model": model_state}
+    cycles = iter(
+        [True, True, False] if scenario in ("complete", "counts", "missing_topology", "plain") else [True, False]
+    )
+    state.wait_for_rearrangement = lambda _stream: next(cycles)
+    call_order: list[int | str | None] = []
+    log_info = MagicMock(side_effect=lambda *_args: call_order.append("log"))
+    monkeypatch.setattr(patch_eplb.logger, "info", log_info)
+    planned: list[torch.Tensor] = []
+
+    def rebalance(_model_state, _state, current_mapping, _stream):
+        target = current_mapping.clone()
+        if scenario != "noop":
+            target[:2] = target[:2].flip(1)
+        # A second plain-policy cycle must not reuse the first cycle's metrics.
+        if not planned and scenario in ("complete", "counts", "missing_topology"):
+            target.source_rank_ids = np.array([[[1], [0]], [[1], [0]], [[0], [1]]])
+            target.source_slot_ids = np.zeros((3, 2, 1), dtype=np.int64)
+            if scenario != "counts":
+                target.predicted_imbalance_summary = (1.4, 1.6, 1.1, 1.2)
+            if scenario != "missing_topology":
+                target.rank_node_ids = np.array([0, 1])
+            setattr(communicator, patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR, target)
+        planned.append(target)
+        model_state.rebalanced = scenario != "canceled"
+        return target
+
+    def consume_result(*, stream):
+        result = model_state.pending_result
+        call_order.append(result.layer_idx)
+        if result.layer_idx is not None:
+            model_state.physical_to_logical_map[result.layer_idx].copy_(result.new_physical_to_logical_map)
+        if result.is_last_result:
+            model_state.rebalanced = False
+            # Emulate the foreground cleanup before the worker resumes.
+            patch_eplb._clear_transfer_target(communicator)
+        model_state.pending_result = None
+
+    def transfer_layer(**kwargs):
+        if scenario == "failed" and kwargs["layer_idx"] == 1:
+            raise RuntimeError("layer transfer failed")
+        return object()
+
+    monkeypatch.setattr(
+        patch_eplb._async_worker,
+        "get_eplb_group",
+        lambda: SimpleNamespace(
+            device_group=SimpleNamespace(rank=lambda: rank),
+            cpu_group=SimpleNamespace(size=lambda: 2),
+        ),
+    )
+    monkeypatch.setattr(patch_eplb._async_worker, "run_rebalance_experts", rebalance)
+    monkeypatch.setattr(patch_eplb._async_worker, "CpuGpuEvent", lambda: SimpleNamespace(wait=consume_result))
+    monkeypatch.setattr(patch_eplb._async_worker, "transfer_layer", transfer_layer)
+    monkeypatch.setattr(torch.distributed, "all_reduce", lambda flag, **_kwargs: flag.mul_(2))
+    # Exercise replacement of all host maps without requiring pinned-memory support.
+    monkeypatch.setattr(patch_eplb, "_pin_host_map", lambda tensor: tensor.clone())
+
+    def original_worker(state, stream, is_profile=False):
+        raise AssertionError("Ascend state must use the patched worker")
+
+    worker = patch_eplb._wrap_async_worker(original_worker)
+    if scenario == "failed":
+        with pytest.raises(RuntimeError, match="layer transfer failed"):
+            worker(state, MagicMock())
+    else:
+        worker(state, MagicMock())
+
+    messages = [args[0] % args[1:] for args, _kwargs in log_info.call_args_list]
+    if rank != 0 or scenario in ("noop", "canceled", "failed"):
+        assert messages == []
+    else:
+        prefix = "Ascend async EPLB cycle committed: model=model"
+        first_message = prefix
+        if scenario == "complete":
+            first_message += (
+                " mean=1.4000->1.1000 p95=1.6000->1.2000 changed_layers=2 rank_transfers=4 cross_node_transfers=4"
+            )
+        elif scenario in ("counts", "missing_topology"):
+            first_message += " rank_transfers=4"
+        assert messages == [first_message, prefix]
+        assert call_order == [0, 1, "log", 0, 1, "log"]
+    assert not hasattr(communicator, patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR)
 
 
 @pytest.mark.parametrize("fail_transfer", [False, True])

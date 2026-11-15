@@ -305,7 +305,7 @@ sender thread remains alive, Prefill may continue waiting.
   build's device metadata before offload allocation; it does not require NPU
   initialization or a runtime SoC query.
 - Layerwise shared-buffer offload requires the Memcache backend and eager mode.
-- Sparse Decode Offload supports Model Runner V1 and V2 with an SFA/MLA
+- Sparse Decode Offload supports an SFA/MLA
   sparse-attention model. The main KV cache must use BF16; packed main caches
   (C8 or TQ4) are rejected. LIC8 quantization is supported separately for the
   device-resident indexer cache.
