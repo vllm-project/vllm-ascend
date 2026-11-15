@@ -1,0 +1,4 @@
+pr: 21261
+entries:
+  - category: bugfix
+    text: STAIR now checks the original load window before migrating experts and rejects placements that regress mean or P95 load imbalance.
