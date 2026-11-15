@@ -2,6 +2,11 @@
 
 Additional configuration is a mechanism provided by vLLM to allow plugins to control internal behavior by themselves. VLLM Ascend uses this mechanism to make the project more flexible.
 
+KV pool options such as `use_layerwise`, `layerwise_prefetch_layers` and
+`discard_partial_chunks` belong to `--kv-transfer-config` under
+`kv_connector_extra_config`. See the [layerwise parameter contract](../feature_guide/layerwise_kv_pool.md#parameters-and-defaults)
+for their types and backend-specific defaults.
+
 ## Migration Guide
 
 Starting from [PR #9064](https://github.com/vllm-project/vllm-ascend/pull/9064), vLLM Ascend is migrating supported environment variables to `--additional-config`.

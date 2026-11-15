@@ -245,3 +245,14 @@ msgid ""
 msgstr ""
 "使用上述配置启动 Prefill 和 Decode。两个节点就绪后，\n"
 "启动分层代理："
+
+msgid "For the Store connector's backend, KV role, attention and parallelism contract,\nsee the [layerwise support matrix](layerwise_kv_pool.md#support-matrix).\nThis page describes the additional restrictions of the combined offload deployment."
+msgstr "Store 连接器的后端、KV 角色、attention 和并行契约见[逐层支持矩阵](layerwise_kv_pool.md#support-matrix)。本页描述组合卸载部署的额外限制。"
+
+
+msgid "| `layerwise_prefetch_layers` | Defaults to `min(layerwise_num_shared_buffers, 8)` for GVA. Accepts positive integers or decimal integer strings; controls submission timing rather than allocating more NPU buffers. |"
+msgstr "| `layerwise_prefetch_layers` | GVA 默认为 `min(layerwise_num_shared_buffers, 8)`。接受正整数或十进制整数字符串；控制提交时机，本身不会分配更多 NPU 缓冲区。 |"
+
+
+msgid "| `discard_partial_chunks` | Defaults to `true`, as in ordinary pooling. |"
+msgstr "| `discard_partial_chunks` | 默认为 `true`，与普通池化一致。 |"

@@ -21,12 +21,14 @@ from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_backend_class,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.config import (
+    MAX_DEFAULT_GVA_PREFETCH_LAYERS,
+    parse_layerwise_prefetch_layers,
+)
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 _NUM_SHARED_BUFFERS = "layerwise_num_shared_buffers"
-_PREFETCH_LAYERS = "layerwise_prefetch_layers"
 _INDEPENDENT_LAYERS = "layerwise_independent_layers"
-_DEFAULT_MAX_PREFETCH_LAYERS = 8
 _INDEXER_CACHE_SUFFIX = ".indexer.k_cache"
 
 
@@ -174,13 +176,9 @@ def build_layerwise_cache_layout(
         if num_shared_buffers < 1:
             raise ValueError(f"{_NUM_SHARED_BUFFERS} must be at least 1")
 
-    prefetch_value = extra_config.get(_PREFETCH_LAYERS) if extra_config else None
-    if prefetch_value is None:
-        num_prefetch_layers = min(num_shared_buffers, _DEFAULT_MAX_PREFETCH_LAYERS)
-    else:
-        num_prefetch_layers = _parse_int_config(prefetch_value, _PREFETCH_LAYERS)
-        if num_prefetch_layers < 1:
-            raise ValueError(f"{_PREFETCH_LAYERS} must be at least 1")
+    num_prefetch_layers = parse_layerwise_prefetch_layers(
+        extra_config or {}, min(num_shared_buffers, MAX_DEFAULT_GVA_PREFETCH_LAYERS)
+    )
 
     independent_value = extra_config.get(_INDEPENDENT_LAYERS) if extra_config else None
     if independent_value is None:

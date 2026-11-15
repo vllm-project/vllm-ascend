@@ -1199,3 +1199,6 @@ msgid ""
 "Validate correctness, quality and performance on the deployment hardware "
 "before deploying in production."
 msgstr "在生产环境部署前，请在部署硬件上验证正确性、质量和性能。"
+
+msgid "KV pool options such as `use_layerwise`, `layerwise_prefetch_layers` and\n`discard_partial_chunks` belong to `--kv-transfer-config` under\n`kv_connector_extra_config`. See the [layerwise parameter contract](../feature_guide/layerwise_kv_pool.md#parameters-and-defaults)\nfor their types and backend-specific defaults."
+msgstr "`use_layerwise`、`layerwise_prefetch_layers` 和 `discard_partial_chunks` 等 KV 池选项应设置在 `--kv-transfer-config` 的 `kv_connector_extra_config` 中。参数类型及各后端默认值见[逐层参数契约](../feature_guide/layerwise_kv_pool.md#parameters-and-defaults)。"
