@@ -27,7 +27,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_wor
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import KVPoolScheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import BaseKVPoolWorker
 
-INVALID_PREFETCH_VALUES = (
+INVALID_PREFETCH_VALUES: tuple[object, ...] = (
     True,
     False,
     1.0,
@@ -41,6 +41,10 @@ INVALID_PREFETCH_VALUES = (
     "1e1",
     "1_0",
     "0x10",
+    "+",
+    "++1",
+    "１２",
+    "-0",
     0,
     -1,
     "0",
@@ -172,6 +176,21 @@ def test_mooncake_rejects_gva_only_options_before_client_creation(case, option, 
 def test_absent_prefetch_uses_the_path_default():
     assert parse_layerwise_prefetch_layers({}, 1) == 1
     assert parse_layerwise_prefetch_layers({}, 8) == 8
+
+
+def test_disabled_layerwise_worker_ignores_unused_block_key_prefetch_config(case):
+    # The factory selects the ordinary worker when disabled. Exercise direct
+    # construction as well, retaining the existing subclass constructor behavior.
+    with patch(
+        "tests.ut.distributed.ascend_store.test_pool_worker.create_kv_pool_worker",
+        side_effect=LayerwiseKVPoolWorker,
+    ):
+        worker = make_worker(
+            case,
+            use_layerwise=False,
+            extra_config={"backend": "mooncake", "layerwise_prefetch_layers": 0},
+        )
+    assert worker.num_prefetch_layers == DEFAULT_KEY_PREFETCH_LAYERS
 
 
 @pytest.mark.parametrize("backend", ["memcache", "mooncake"])

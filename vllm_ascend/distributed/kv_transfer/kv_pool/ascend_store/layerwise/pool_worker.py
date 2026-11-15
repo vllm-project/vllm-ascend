@@ -134,7 +134,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self.layerwise_data_plane = (
             self.layerwise_backend.layerwise_data_plane if self.layerwise_backend is not None else None
         )
-        validate_layerwise_config(extra_config, backend_name, self.layerwise_data_plane)
+        if use_layerwise:
+            validate_layerwise_config(extra_config, backend_name, self.layerwise_data_plane)
         self.use_block_key_layerwise = self.layerwise_data_plane == "block_key"
         self.use_layerwise_transfer = self.layerwise_data_plane == "gva"
         self._step_load_keys: set[str] = set()
@@ -336,7 +337,11 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 self.layerwise_offload = layout.has_layer_reuse
                 self.num_prefetch_layers = layout.num_prefetch_layers
         else:
-            self.num_prefetch_layers = parse_layerwise_prefetch_layers(self._extra_config, DEFAULT_KEY_PREFETCH_LAYERS)
+            self.num_prefetch_layers = (
+                parse_layerwise_prefetch_layers(self._extra_config, DEFAULT_KEY_PREFETCH_LAYERS)
+                if self.use_layerwise
+                else DEFAULT_KEY_PREFETCH_LAYERS
+            )
         self.sync_save_events: list[torch.npu.Event] | None = None
 
         logger.info(

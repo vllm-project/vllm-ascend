@@ -6,8 +6,6 @@
 from collections.abc import Mapping
 from typing import Any
 
-import regex as re
-
 DEFAULT_KEY_PREFETCH_LAYERS = 2
 MAX_DEFAULT_GVA_PREFETCH_LAYERS = 8
 PREFETCH_LAYERS = "layerwise_prefetch_layers"
@@ -21,11 +19,13 @@ def parse_layerwise_prefetch_layers(extra_config: Mapping[str, Any], default: in
     cannot reach a transfer thread or leave layer zero waiting indefinitely.
     """
     value = extra_config.get(PREFETCH_LAYERS, default)
-    if isinstance(value, str) and re.fullmatch(r"\+?[0-9]+", value.strip()):
-        try:
-            value = int(value.strip(), 10)
-        except ValueError as exc:
-            raise ValueError(f"{PREFETCH_LAYERS} must be a positive integer; got {value!r}") from exc
+    if isinstance(value, str):
+        decimal = value.strip().removeprefix("+")
+        if decimal.isascii() and decimal.isdecimal():
+            try:
+                value = int(decimal, 10)
+            except ValueError as exc:
+                raise ValueError(f"{PREFETCH_LAYERS} must be a positive integer; got {value!r}") from exc
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"{PREFETCH_LAYERS} must be a positive integer; got {value!r}")
     return value

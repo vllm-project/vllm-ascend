@@ -9,7 +9,7 @@ do not substitute for model inference against real Memcache/Mooncake services.
 
 import ctypes
 
-import acl
+import acl  # type: ignore[import-not-found]  # Provided by CANN on the NPU host.
 import pytest
 import torch
 import torch_npu  # noqa: F401
