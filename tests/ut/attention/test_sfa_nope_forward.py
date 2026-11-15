@@ -307,6 +307,7 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
         enable_sparse_sfa_turboquant=False,
         enable_mlapo=False,
         rl_config=SimpleNamespace(enabled=False),
+        sparse_kv_offload_config=SimpleNamespace(enabled=False),
     )
     kv_norm = SimpleNamespace(weight=torch.ones(latent_dim), variance_epsilon=1e-6) if enable_c8 else _rms_norm
     with (
