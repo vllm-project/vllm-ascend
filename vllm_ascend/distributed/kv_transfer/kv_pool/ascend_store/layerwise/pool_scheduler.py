@@ -46,6 +46,8 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         vllm_config: VllmConfig,
         use_layerwise: bool,
         kv_cache_config: KVCacheConfig | None = None,
+        *,
+        layerwise_offload: bool = False,
     ) -> None:
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         backend_name, self.layerwise_backend = resolve_backend(extra_config)
@@ -64,9 +66,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
         self.sharded_mamba_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
         self.load_async = False
-        self._prefix_probe: tuple[str, int] | None = None
-        if self.use_layerwise_transfer:
-            self._init_layerwise_offload(kv_cache_config)
+        self.layerwise_offload = self.use_layerwise_transfer and layerwise_offload
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
         self.layerwise_keys = (
             self.layerwise_backend.bind_layerwise_keys(
@@ -97,27 +97,6 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
     def _async_load_enabled(self) -> bool:
         return False
 
-    def get_local_prefix_cache_limit(self, request: Request) -> int | None:
-        if not self.layerwise_offload or not self.use_layerwise_transfer:
-            return None
-        # A rotating cache's block hashes do not imply that the layer data
-        # is still in HBM. Only adopt local blocks the store can restore.
-        prompt_token_len = len(request.prompt_token_ids)
-        pool_hit = self._get_layerwise_hit_tokens(request, prompt_token_len, 0)
-        self._prefix_probe = (request.request_id, pool_hit)
-        local_limit = self._floor_to_cache_transfer_granularity(request.num_tokens - 1)
-        if pool_hit > local_limit:
-            # A complete prompt hit does not prove that the preceding state
-            # checkpoint exists. Keep the full hit for the external lookup.
-            return self._get_layerwise_hit_tokens(request, local_limit, 0)
-        return pool_hit
-
-    def _init_layerwise_offload(self, kv_cache_config: KVCacheConfig | None) -> None:
-        reuse_layout = getattr(kv_cache_config, "layerwise_reuse_layout", None)
-        self.layerwise_offload = reuse_layout is not None and reuse_layout.has_layer_reuse
-        if self.layerwise_offload and reuse_layout.layers:
-            self.num_layers = max(self.num_layers, max(reuse_layout.layers) + 1)
-
     def get_running_target_token_len(self, request: Request, num_new_tokens: int) -> int:
         target_token_len = request.num_computed_tokens + num_new_tokens
         if self.layerwise_offload:
@@ -140,11 +119,6 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         )
 
     def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> int | None:
-        if self._prefix_probe is not None:
-            request_id, hit = self._prefix_probe
-            self._prefix_probe = None
-            if request_id == request.request_id:
-                return hit
         prompt_token_len = len(request.prompt_token_ids)
         if self.use_block_key_layerwise:
             token_len = self._floor_to_cache_transfer_granularity(prompt_token_len)

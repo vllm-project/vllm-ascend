@@ -8,8 +8,6 @@ from types import MappingProxyType
 from typing import Any
 
 from vllm.config import VllmConfig
-from vllm.distributed.utils import get_pp_indices
-from vllm.logger import logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.math_utils import round_up
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec, KVCacheTensor, MambaSpec
@@ -93,12 +91,10 @@ class LayerwiseCachePlanner:
         config: KVCacheConfig,
         vllm_config: VllmConfig,
         extra_config: dict[str, Any],
-        excluded_layer_names: set[str] | None = None,
         *,
         spec_reuse_rules: SpecReuseRules,
     ) -> None:
         self.config = config
-        self.vllm_config = vllm_config
         self.extra_config = extra_config
         self.spec_reuse_rules = spec_reuse_rules
         self.spec_by_entry = get_layerwise_kv_cache_specs(config)
@@ -111,19 +107,13 @@ class LayerwiseCachePlanner:
         self.layer_id_by_entry = {
             entry_name: get_physical_layer_index(entry_name, self.total_layers) for entry_name in self.spec_by_entry
         }
-        dspark_draft_names = set(getattr(config, "dspark_draft_layer_names", ()))
         self.draft_names = {
             name
             for name, spec in self.spec_by_entry.items()
-            if name in dspark_draft_names
-            or getattr(spec, "is_draft", False)
-            or self.layer_id_by_entry[name] >= self.total_layers
+            if getattr(spec, "is_draft", False) or self.layer_id_by_entry[name] >= self.total_layers
         }
         self.target_layer_ids = tuple(
             sorted({index for name, index in self.layer_id_by_entry.items() if name not in self.draft_names})
-        )
-        self.excluded_layer_names = self.draft_names | (
-            frozenset(excluded_layer_names or ()) & self.spec_by_entry.keys()
         )
 
     def build(self) -> LayerwiseReuseLayout:
@@ -146,7 +136,7 @@ class LayerwiseCachePlanner:
                 for group in self.config.kv_cache_groups
                 if is_prefix_cacheable(group.kv_cache_spec)
                 for entry_name in group.layer_names
-                if entry_name not in self.excluded_layer_names
+                if entry_name not in self.draft_names
                 and self.layer_id_by_entry[entry_name] not in independent
                 and self.can_reuse_spec(self.spec_by_entry[entry_name], self.spec_reuse_rules)
             }
@@ -270,79 +260,46 @@ class LayerwiseCachePlanner:
             independent_layers=independent,
             num_prefetch_layers=settings.num_prefetch_layers,
             reused_cache_names=frozenset(rotated_entry_names),
+            draft_entry_names=frozenset(self.draft_names),
         )
 
-    def apply(self) -> None:
-        layout = self.build()
-        for name in layout.reused_cache_names:
-            spec = self.spec_by_entry[name]
-            if isinstance(spec, MambaSpec) and (
-                spec.mamba_cache_mode != "align" or getattr(spec, "num_prefill_checkpoint_blocks", 0) != 0
-            ):
-                raise NotImplementedError(
-                    f"Reusable cache {name} has unsupported state semantics: {type(spec).__name__}"
-                )
-        if layout.has_layer_reuse:
-            if getattr(getattr(self.vllm_config, "cache_config", None), "num_gpu_blocks_override", None) is not None:
-                raise ValueError(
-                    "Layerwise offload does not support num_gpu_blocks_override; use automatic block sizing."
-                )
-            if any(tensor.host_resident for tensor in self.config.kv_cache_tensors) or any(
-                getattr(spec, "store_on_host", False) for spec in self.spec_by_entry.values()
-            ):
-                raise ValueError("Layerwise offload requires device-resident cache tensors.")
-            logger.info(
-                "Layerwise reuse uses one %d-byte device backing; independent layers=%s.",
-                next(tensor.size for tensor in layout.kv_cache_tensors if not tensor.host_resident),
-                layout.independent_layers,
-            )
-            self.config.kv_cache_tensors = list(layout.kv_cache_tensors)
-            self.config.layerwise_kv_cache_reuse = True
-        self.config.layerwise_reuse_layout = layout
-        if layout.has_layer_reuse and self.draft_names:
-            self.config.layerwise_draft_layer_names = tuple(sorted(self.draft_names))
 
-
-def apply_layerwise_kv_cache_plan(
+def plan_layerwise_cache_reuse(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,
-    *,
-    excluded_layer_names: set[str] | None = None,
-) -> None:
-    """Apply whole-pack reuse when the model and stage request it."""
-    layout = getattr(kv_cache_config, "layerwise_reuse_layout", None)
-    if layout is not None:
-        if excluded_layer_names and layout.reused_cache_names.intersection(excluded_layer_names):
-            raise ValueError("Reuse exclusions must be supplied before the cache layout is planned.")
-        return
-    # An empty device pool has no byte views to reuse.
-    if not kv_cache_config.kv_cache_tensors or kv_cache_config.num_blocks == 0 or not kv_cache_config.kv_cache_groups:
-        return
+) -> LayerwiseReuseLayout | None:
+    """Build the KV buffer layout for prefill offload on one worker rank."""
     extra_config = get_layerwise_offload_config(getattr(vllm_config, "kv_transfer_config", None))
     if extra_config is None:
-        return
+        return None
+    # An empty device pool has no byte views to reuse.
+    if not kv_cache_config.kv_cache_tensors or kv_cache_config.num_blocks == 0 or not kv_cache_config.kv_cache_groups:
+        return None
+    if vllm_config.parallel_config.pipeline_parallel_size > 1:
+        return None
     rules = get_spec_reuse_rules(vllm_config)
     if rules is None:
-        return
-    model_config = vllm_config.model_config
+        return None
     planner = LayerwiseCachePlanner(
         kv_cache_config,
         vllm_config,
         extra_config,
-        excluded_layer_names,
         spec_reuse_rules=rules,
     )
-    parallel_config = vllm_config.parallel_config
-    pp_size = getattr(parallel_config, "pipeline_parallel_size", 1)
-    if pp_size > 1:
-        # Core plans every worker's groups with the same parallel config.
-        complete_stage = any(
-            planner.target_layer_ids == tuple(range(*get_pp_indices(planner.total_layers, rank, pp_size)))
-            for rank in range(pp_size)
-        )
-    else:
-        complete_stage = len(planner.target_layer_ids) >= model_config.get_num_layers(parallel_config)
-    if not complete_stage:
-        # The hook cursor requires the complete local set of cache-bearing layers.
-        planner.extra_config = {**extra_config, "layerwise_independent_layers": "all"}
-    planner.apply()
+    layout = planner.build()
+    if not layout.has_layer_reuse:
+        return None
+
+    for name in layout.reused_cache_names:
+        spec = planner.spec_by_entry[name]
+        if isinstance(spec, MambaSpec) and (
+            spec.mamba_cache_mode != "align" or spec.num_prefill_checkpoint_blocks != 0
+        ):
+            raise NotImplementedError(f"Reusable cache {name} has unsupported state semantics: {type(spec).__name__}")
+    if vllm_config.cache_config.num_gpu_blocks_override is not None:
+        raise ValueError("Layerwise offload does not support num_gpu_blocks_override; use automatic block sizing.")
+    if any(tensor.host_resident for tensor in kv_cache_config.kv_cache_tensors) or any(
+        getattr(spec, "store_on_host", False) for spec in planner.spec_by_entry.values()
+    ):
+        raise ValueError("Layerwise offload requires device-resident cache tensors.")
+    return layout

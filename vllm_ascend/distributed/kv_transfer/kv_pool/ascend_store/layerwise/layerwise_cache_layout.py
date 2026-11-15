@@ -5,12 +5,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Mapping
-from dataclasses import dataclass
+from copy import copy
+from dataclasses import dataclass, replace
 from math import lcm
 from typing import Any
 
 import regex as re
 import torch
+from vllm.config import KVTransferConfig
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -39,10 +41,41 @@ class LayerwiseReuseLayout:
     independent_layers: list[int]
     num_prefetch_layers: int
     reused_cache_names: frozenset[str]
+    draft_entry_names: frozenset[str]
 
     @property
     def has_layer_reuse(self) -> bool:
         return bool(self.prefetch_layer_map)
+
+
+LAYERWISE_REUSE_BACKING_BYTES = "_layerwise_reuse_backing_bytes"
+_LAYERWISE_REUSE_LAYOUT = "_layerwise_reuse_layout"
+
+
+def get_layerwise_reuse_backing_bytes(config: KVCacheConfig | None) -> int | None:
+    transfer_config = getattr(config, "kv_transfer_config", None)
+    if transfer_config is None:
+        return None
+    return transfer_config.kv_connector_extra_config.get(LAYERWISE_REUSE_BACKING_BYTES)
+
+
+def get_layerwise_reuse_layout(config: KVCacheConfig | None) -> LayerwiseReuseLayout | None:
+    transfer_config = getattr(config, "kv_transfer_config", None)
+    if transfer_config is None:
+        return None
+    return transfer_config.kv_connector_extra_config.get(_LAYERWISE_REUSE_LAYOUT)
+
+
+def apply_layerwise_kv_cache_plan(
+    config: KVCacheConfig, transfer_config: KVTransferConfig, reuse_layout: LayerwiseReuseLayout
+) -> KVCacheConfig:
+    worker_config = copy(config)
+    worker_config.kv_cache_tensors = list(reuse_layout.kv_cache_tensors)
+    worker_config.kv_transfer_config = replace(
+        transfer_config,
+        kv_connector_extra_config={**transfer_config.kv_connector_extra_config, _LAYERWISE_REUSE_LAYOUT: reuse_layout},
+    )
+    return worker_config
 
 
 _NUM_SHARED_BUFFERS = "layerwise_num_shared_buffers"
@@ -94,12 +127,12 @@ def cache_view_alignment(spec: KVCacheSpec) -> int:
     return alignment
 
 
-def get_cache_views(config: KVCacheConfig, specs: dict[str, KVCacheSpec]) -> dict[str, tuple[int, int, int]]:
+def get_cache_views(
+    config: KVCacheConfig, specs: dict[str, KVCacheSpec], view_sizes: dict[str, int] | None = None
+) -> dict[str, tuple[int, int, int]]:
     """Validate physical byte windows without collecting packs or planning reuse."""
     if config.num_blocks <= 0:
         raise ValueError("Cache views require at least one block")
-    layout = getattr(config, "layerwise_reuse_layout", None)
-    view_sizes = layout.cache_view_sizes if getattr(config, "layerwise_kv_cache_reuse", False) else None
     # Cache name -> (descriptor index, byte start, byte end).
     views = {}
     for index, tensor in enumerate(config.kv_cache_tensors):
@@ -132,12 +165,15 @@ def get_cache_views(config: KVCacheConfig, specs: dict[str, KVCacheSpec]) -> dic
 
 
 def allocate_cache_backing(
-    config: KVCacheConfig, specs: dict[str, KVCacheSpec], allocate: Callable[[int], torch.Tensor]
+    config: KVCacheConfig,
+    specs: dict[str, KVCacheSpec],
+    allocate: Callable[[int], torch.Tensor],
+    view_sizes: dict[str, int],
 ) -> dict[str, torch.Tensor]:
     """Allocate one backing and preserve identical byte views for aliased layers."""
     if any(tensor.host_resident for tensor in config.kv_cache_tensors):
         raise NotImplementedError("Explicit cache backing allocation requires device-resident tensors")
-    views = get_cache_views(config, specs)
+    views = get_cache_views(config, specs, view_sizes)
     sizes = {tensor.size for tensor in config.kv_cache_tensors}
     if len(sizes) != 1:
         raise ValueError("Layerwise cache descriptors must share one backing capacity")

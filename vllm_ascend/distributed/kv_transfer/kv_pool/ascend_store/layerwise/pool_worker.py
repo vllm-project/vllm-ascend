@@ -54,8 +54,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_trans
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     LayerwiseCacheConfig,
-    LayerwiseReuseLayout,
     get_layerwise_kv_cache_specs,
+    get_layerwise_reuse_layout,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
     LayerBlockRange,
@@ -139,12 +139,14 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self._snapshot_keys: dict[str, dict[int, dict[int, tuple[int, str]]]] = {}
         super()._init_kv_transfer_config(vllm_config, extra_config, use_layerwise, kv_cache_config)
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
-        self._dspark_draft_layer_names = (
-            set(getattr(kv_cache_config, "dspark_draft_layer_names", ()))
-            | set(getattr(kv_cache_config, "layerwise_draft_layer_names", ()))
-            if self.use_layerwise_transfer
-            else set()
+        self._layerwise_reuse_layout = (
+            get_layerwise_reuse_layout(kv_cache_config) if self.use_layerwise_transfer else None
         )
+        self._dspark_draft_layer_names = (
+            set(getattr(kv_cache_config, "dspark_draft_layer_names", ())) if self.use_layerwise_transfer else set()
+        )
+        if self._layerwise_reuse_layout is not None:
+            self._dspark_draft_layer_names.update(self._layerwise_reuse_layout.draft_entry_names)
         if (
             self.backend_name != "memcache"
             and not self.use_block_key_layerwise
@@ -198,7 +200,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         # same physical layer are treated as entries of one layer.
         self.physical_layer_to_group_layers: dict[int, list[tuple[int, int]]] = {}
         self._global_to_local_layer: dict[int, int] = {}
-        self._layerwise_reuse_layout: LayerwiseReuseLayout | None = None
+        layout = getattr(self, "_layerwise_reuse_layout", None)
         self._reused_layers_by_group: dict[int, set[int]] = {}
         self._recurrent_layers: set[int] = set()
         stage_num_layers = self.num_layers
@@ -234,17 +236,11 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             draft_names = getattr(self, "_dspark_draft_layer_names", ())
             layer_specs = get_layerwise_kv_cache_specs(self.kv_cache_config)
             target_specs = {name: spec for name, spec in layer_specs.items() if name not in draft_names}
-            if getattr(self.kv_cache_config, "layerwise_draft_layer_names", ()):
+            if layout is not None and layout.draft_entry_names:
                 self.num_layers = base_layers
                 self.layerwise_key_layers = base_layers
             if self.use_layerwise_transfer:
-                self._layerwise_reuse_layout = getattr(self.kv_cache_config, "layerwise_reuse_layout", None)
-                if (
-                    draft_names
-                    and (self._layerwise_reuse_layout is None or not self._layerwise_reuse_layout.has_layer_reuse)
-                    and not getattr(self.kv_cache_config, "layerwise_draft_layer_names", ())
-                    and getattr(self, "_dspark_prefix_keys", None) is None
-                ):
+                if draft_names and layout is None and getattr(self, "_dspark_prefix_keys", None) is None:
                     # Without scratch reuse, retain the original target+draft
                     # pool for prefix storage and load/save addressing.
                     self._dspark_draft_layer_names = draft_names = set()
@@ -307,8 +303,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self.independent_layers: list[int] = []
         self.prefetch_layer_map: dict[int, tuple[int, ...]] = {}
         if self.use_layerwise_transfer:
-            layout = self._layerwise_reuse_layout
-            if layout is None or not layout.has_layer_reuse:
+            if layout is None:
                 stage_start = self.layerwise_key_layer_offset
                 stage_layers = range(stage_start, stage_start + stage_num_layers)
                 total_layers = getattr(self, "total_layers", None)
@@ -370,7 +365,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         )
 
     def _extract_physical_layer_index(self, layer_name: str) -> int:
-        layout = getattr(getattr(self, "kv_cache_config", None), "layerwise_reuse_layout", None)
+        layout = getattr(self, "_layerwise_reuse_layout", None)
         if layout is not None and layer_name in layout.cache_layer_indices:
             return layout.cache_layer_indices[layer_name]
         return super()._extract_physical_layer_index(layer_name)
@@ -448,6 +443,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
     def configure_dspark_prefix_cache(self, keys: DSparkPrefixKeys) -> None:
         self._dspark_prefix_keys = keys
         self._dspark_draft_layer_names = set(getattr(self.kv_cache_config, "dspark_draft_layer_names", ()))
+        if self._layerwise_reuse_layout is not None:
+            self._dspark_draft_layer_names.update(self._layerwise_reuse_layout.draft_entry_names)
         assert self.kv_cache_config is not None
         # Companion objects own draft-only groups; retain original group IDs
         # and the existing cacheability policy for the ordinary target pool.

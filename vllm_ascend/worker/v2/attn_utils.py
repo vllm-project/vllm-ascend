@@ -91,7 +91,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import KV_CACHE_BUFFER_ALIGNMENT
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     allocate_cache_backing,
-    get_cache_views,
+    get_layerwise_reuse_layout,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     allocate_kv_cache_tensors_for_sparse_kv_offload,
@@ -257,6 +257,17 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             mamba_specs[layer_name] = spec
             continue
 
+        if isinstance(attn_module, MLAAttention) and vllm_config.attention_config.hisparse_config is not None:
+            # Keep Core's row-packed source spec and actual index-group ownership.
+            source_layout: dict[str, Any] = {}
+            if getattr(attn_module.impl, "enable_sparse_sfa_c8", False):
+                from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
+
+                source_layout.update(head_size=C8_ROW_BYTES, dtype=attn_module.impl.c8_cache_dtype)
+            kv_cache_spec[layer_name] = replace(
+                spec, is_index_group_leader=attn_module.hisparse_cache.runtime.is_group_leader, **source_layout
+            )
+            continue
         if isinstance(attn_module, MLAAttention):
             cache_sparse_sfa_c8 = False
             cache_sparse_sfa_turboquant = False
@@ -332,6 +343,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 block_size=vllm_config.cache_config.block_size,
                 dcp_sharded=spec.dcp_sharded,
                 num_kv_heads=1,
+                cache_role=spec.cache_role,
                 head_size=head_dim // 2 if cache_sparse_li_c4 else head_dim,
                 dtype=torch.uint8
                 if cache_sparse_li_c4
@@ -407,6 +419,19 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                     mamba_specs[layer_name] = replace(spec, page_size_padded=common_page_size)
             kv_cache_spec.update(mamba_specs)
 
+    if vllm_config.attention_config.hisparse_config is not None:
+        from vllm.v1.hisparse.binding import resolve_hisparse_specs
+
+        from vllm_ascend.hisparse.binding import align_hisparse_indexer_specs
+
+        packed_row_bytes = None
+        if get_ascend_config().enable_sparse_sfa_c8:
+            from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
+
+            packed_row_bytes = C8_ROW_BYTES
+        return align_hisparse_indexer_specs(
+            resolve_hisparse_specs(vllm_config, kv_cache_spec, attn_layers), packed_row_bytes=packed_row_bytes
+        )
     return kv_cache_spec
 
 
@@ -552,6 +577,9 @@ def build_attn_metadata(
             plan = get_dsa_attn_kv_plan(dsa_builder.vllm_config, dsa_builder.compressor_ratio)
             formatted_slot_mappings = plan.format_dsa_slot_mapping(slot_mappings[:, :num_input_tokens], block_sizes)
     for i, kv_cache_spec in enumerate(kv_cache_groups):
+        # Resident/hot storage groups have no Attention metadata consumer.
+        if not attn_groups[i]:
+            continue
         block_table = block_tables[i]
         slot_mapping = slot_mappings[i]
         # Hybrid drafters can configure causality per KV cache group.
@@ -1165,9 +1193,13 @@ def _allocate_kv_cache(
     # prefill disaggregation need the addr of cache tensor be aligned with 2M
     alignment = KV_CACHE_BUFFER_ALIGNMENT
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
-    if getattr(kv_cache_config, "layerwise_kv_cache_reuse", False):
+    reuse_layout = get_layerwise_reuse_layout(kv_cache_config)
+    if reuse_layout is not None:
         return allocate_cache_backing(
-            kv_cache_config, layer_kv_cache_spec, lambda size: _allocate_int8_cache_tensor(size, alignment, device)
+            kv_cache_config,
+            layer_kv_cache_spec,
+            lambda size: _allocate_int8_cache_tensor(size, alignment, device),
+            reuse_layout.cache_view_sizes,
         )
 
     attn_layers: dict[str, AttentionLayerBase] | None = None
@@ -1232,9 +1264,6 @@ def _allocate_kv_cache(
         kv_cache_config.num_blocks,
     )
     if qwen4_cache_layout is not None:
-        # Raw tensors always start at their owner's descriptor origin, for
-        # native placement and relocated packs alike. Reshape uses local offsets.
-        cache_views = get_cache_views(kv_cache_config, layer_kv_cache_spec)
         backing = _allocate_int8_cache_tensor(
             qwen4_cache_layout.slot_count * qwen4_cache_layout.slot_backing_size,
             alignment,
@@ -1253,8 +1282,7 @@ def _allocate_kv_cache(
                     kv_cache_config.num_blocks * size, alignment, device
                 )
             else:
-                _, start, end = cache_views[cache_owner.layer_name]
-                kv_cache_raw_tensors[cache_owner.layer_name] = backing[start:end]
+                kv_cache_raw_tensors[cache_owner.layer_name] = backing
         return kv_cache_raw_tensors
 
     # The restored DeepSeek-V4 planner on main computes capacity for one
@@ -1563,6 +1591,8 @@ def allocate_kv_cache_main(
     device: torch.device,
     layout: Any,
     kernel_block_sizes: list[int],
+    *,
+    allocate: Callable[[int], torch.Tensor] | None = None,
 ) -> dict[str, Any]:
     """Allocate Ascend KV cache through vLLM main's #51718 entry point.
 
@@ -1571,6 +1601,8 @@ def allocate_kv_cache_main(
     still consumes separate K/V (and backend-specific state) tensors, so keep
     the Ascend allocation/reshape contract behind the new entry point.
     """
+    if allocate is not None:
+        raise NotImplementedError("Extensible KV cache allocation is not supported on Ascend.")
     del layout
     vllm_config = get_current_vllm_config()
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
@@ -1656,18 +1688,30 @@ def _reshape_kv_cache_v2(
     is_dsv4_model = _is_dsv4_model(vllm_config)
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
     kv_caches: dict[str, Any] = {}
-    # Native layouts define component offsets inside an owner. Descriptors
-    # define that owner's final placement and physical block stride.
+    # Qwen4 QSA hybrids (Qwen3.8 Flash Next) reconstruct every owner's
+    # view from the same deterministic layout that _allocate_kv_cache used:
+    # Shared slabs hold QSA/GDN slots and indexer regions; PLE/hidden banks are private.
     qwen4_cache_layout = build_qwen4_kv_cache_layout(
         kv_cache_config.kv_cache_groups,
         kv_cache_config.num_blocks,
     )
-    cache_block_strides = {
-        name: descriptor.block_stride
-        for descriptor in kv_cache_config.kv_cache_tensors
-        for name in get_kv_cache_tensor_layers(descriptor)
-    }
-    layer_tuple_strides = cache_block_strides if is_deepseek_v41_cache(layer_kv_cache_spec) else {}
+    layer_tuple_strides: dict[str, int] = {}
+    if is_deepseek_v41_cache(layer_kv_cache_spec):
+        layer_tuple_strides = {
+            name: descriptor.block_stride
+            for descriptor in kv_cache_config.kv_cache_tensors
+            for name in get_kv_cache_tensor_layers(descriptor)
+        }
+
+    dsv4_page_strides = (
+        {
+            name: descriptor.block_stride
+            for descriptor in kv_cache_config.kv_cache_tensors
+            for name in get_kv_cache_tensor_layers(descriptor)
+        }
+        if is_dsv4_model and uses_turboquant_groups(kv_cache_config.kv_cache_groups)
+        else {}
+    )
 
     for group in attn_groups:
         if group.kv_cache_group_id >= len(kernel_block_sizes):
@@ -1700,14 +1744,17 @@ def _reshape_kv_cache_v2(
                 continue
 
             if qwen4_cache_layout is not None:
-                # The raw window begins at the owner's final origin, so only
-                # component-relative offsets belong here, never native slot IDs.
+                # Model-owned Qwen4 hybrid view construction: each
+                # owner addresses its role's regions inside its own slot of
+                # the shared contiguous backing.
                 owner = qwen4_cache_layout.owner(layer_name)
                 raw_slab = kv_cache_raw_tensors[layer_name]
                 if not isinstance(raw_slab, torch.Tensor):
                     raise ValueError(f"Qwen4 hybrid cache for {layer_name} must use one raw tensor.")
+                slot_offset = owner.slot * qwen4_cache_layout.slot_backing_size
                 if owner.role == QSA_MAIN:
                     assert isinstance(kv_cache_spec, FullAttentionSpec)
+                    region = qwen4_cache_layout.region("r0")
                     kv_caches[layer_name] = make_qsa_kernel_page_cache(
                         raw_slab,
                         dtype=kv_cache_spec.dtype,
@@ -1717,8 +1764,8 @@ def _reshape_kv_cache_v2(
                         num_kv_heads=kv_cache_spec.num_kv_heads,
                         head_size=kv_cache_spec.head_size,
                         head_size_v=kv_cache_spec.head_size_v,
-                        storage_offset=0,
-                        block_stride=cache_block_strides[layer_name],
+                        storage_offset=slot_offset + region.offset,
+                        block_stride=region.block_stride,
                     )
                     continue
                 if owner.role in (QSA_RAW, QSA_COMPRESSED):
@@ -1742,7 +1789,6 @@ def _reshape_kv_cache_v2(
                             f"region={region.page_size_bytes}."
                         )
                     num_view_blocks = kv_cache_config.num_blocks
-                    kernel_pages = 1
                     if owner.role == QSA_COMPRESSED:
                         # Match MRV2's virtual block table and builder spec:
                         # each kernel page owns kernel_block_size / ratio keys.
@@ -1758,8 +1804,7 @@ def _reshape_kv_cache_v2(
                             storage_block_size,
                             kv_cache_spec.head_size,
                         ),
-                        storage_offset=0,
-                        block_stride=cache_block_strides[layer_name] // kernel_pages,
+                        storage_offset=slot_offset + region.offset,
                     ).transpose(1, 2)
                     continue
                 if owner.role == PLE:
@@ -1788,10 +1833,8 @@ def _reshape_kv_cache_v2(
                             dtype=dtype,
                             num_blocks=kv_cache_config.num_blocks,
                             item_shape=tuple(shape),
-                            storage_offset=(
-                                qwen4_cache_layout.region(region_name).offset - qwen4_cache_layout.region("r1").offset
-                            ),
-                            block_stride=cache_block_strides[layer_name],
+                            storage_offset=slot_offset + qwen4_cache_layout.region(region_name).offset,
+                            block_stride=qwen4_cache_layout.region(region_name).block_stride,
                         )
                         for shape, dtype, region_name in zip(
                             kv_cache_spec.shapes,
@@ -2003,7 +2046,7 @@ def _reshape_kv_cache_v2(
                     kv_cache_spec,
                     group.backend,
                     kv_cache_config,
-                    cache_block_strides.get(layer_name),
+                    dsv4_page_strides.get(layer_name),
                 )
                 continue
 

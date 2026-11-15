@@ -11,7 +11,7 @@ import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
     OffloadingConnectorWorker,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
 import vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.cpu_npu as cpu_npu_mod
@@ -305,7 +305,7 @@ def test_split_attention_cache_is_zero_copy(
     worker, captured = _make_layout_worker(
         SimpleNamespace(
             num_blocks=4,
-            kv_cache_groups=[SimpleNamespace(layer_names=[layer_name], kv_cache_spec=spec)],
+            kv_cache_groups=[KVCacheGroupSpec([layer_name], spec)],
             kv_cache_tensors=[],
             # The connector offloads the groups vLLM selects, not all of them.
             prefix_cacheable_group_ids=(0,),

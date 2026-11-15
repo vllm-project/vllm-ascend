@@ -35,6 +35,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_backend_class,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    get_layerwise_reuse_backing_bytes,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_scheduler import (
     LayerwiseKVPoolScheduler,
 )
@@ -63,8 +66,14 @@ if TYPE_CHECKING:
 def create_kv_pool_scheduler(
     vllm_config: VllmConfig, use_layerwise: bool, kv_cache_config: KVCacheConfig | None = None
 ) -> BaseKVPoolScheduler:
-    scheduler_class = LayerwiseKVPoolScheduler if use_layerwise else KVPoolScheduler
-    return scheduler_class(vllm_config, use_layerwise, kv_cache_config)
+    if use_layerwise:
+        return LayerwiseKVPoolScheduler(
+            vllm_config,
+            use_layerwise,
+            kv_cache_config,
+            layerwise_offload=get_layerwise_reuse_backing_bytes(kv_cache_config) is not None,
+        )
+    return KVPoolScheduler(vllm_config, use_layerwise, kv_cache_config)
 
 
 def create_kv_pool_worker(
@@ -256,11 +265,6 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> None:
         """Ignore P/D handshake metadata because AscendStore handles PP via pool keys."""
         pass
-
-    def get_local_prefix_cache_limit(self, request: "Request") -> int | None:
-        if isinstance(self.connector_scheduler, LayerwiseKVPoolScheduler):
-            return self.connector_scheduler.get_local_prefix_cache_limit(request)
-        return None
 
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         assert self.connector_scheduler is not None

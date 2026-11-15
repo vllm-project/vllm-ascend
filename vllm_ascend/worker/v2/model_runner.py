@@ -73,10 +73,6 @@ from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
-from vllm_ascend.core.profiling_chunk_predictor import (
-    _finish_profiling_chunk_timing,
-    _start_profiling_chunk_timing,
-)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     bind_dspark_context_receiver,
     configure_dspark_kv_transfer,
@@ -89,13 +85,14 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_kv import (
     apply_dspark_resident_kv_specs,
     get_resident_dspark_layer_names,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
-    apply_layerwise_kv_cache_plan,
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    get_layerwise_reuse_layout,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     allocate_kv_offload_topk_profile_buffers,
     init_sparse_kv_offload_manager,
 )
+from vllm_ascend.hisparse.host_mirror import HostMirrorConnector, overlap_target_host_mirror
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
 from vllm_ascend.observability.runtime_guard.hooks import (
     runtime_guard_sample_tokens,
@@ -363,6 +360,8 @@ class NPUModelRunner(GPUModelRunner):
         # Close the per-step msprobe dump cycle on the normal last-PP-rank
         # path (v1 parity: v1 finalizes at the end of sample_tokens).
         self._finalize_dump_data()
+        if isinstance(mirror := getattr(self, "kv_connector", None), HostMirrorConnector):
+            mirror.join_pending()
         return output
 
     def pool(self):
@@ -459,10 +458,9 @@ class NPUModelRunner(GPUModelRunner):
             is_last_pp_rank=self.is_last_pp_rank,
             shared_kv_cache_layers=getattr(self, "shared_kv_cache_layers", None),
         )
-        # P also needs persistent prompt draft KV until D acknowledges its
-        # transfer. It must never alias target layerwise scratch buffers.
-        persistent_draft_names = resident_draft_names | set(getattr(kv_cache_config, "dspark_draft_layer_names", ()))
-        apply_layerwise_kv_cache_plan(kv_cache_config, self.vllm_config, excluded_layer_names=persistent_draft_names)
+        reuse_layout = get_layerwise_reuse_layout(kv_cache_config)
+        if reuse_layout is not None and not reuse_layout.reused_cache_names.isdisjoint(resident_draft_names):
+            raise ValueError("Resident DSpark draft caches cannot rotate through target layerwise slots.")
         if sparse_cfg.enabled:
             self.sparse_kv_offload_manager = init_sparse_kv_offload_manager(
                 self.vllm_config, kv_cache_config, sparse_cfg
@@ -557,6 +555,8 @@ class NPUModelRunner(GPUModelRunner):
         self.model_state.kvpp_runtime = self.kvpp
 
         self._fill_c8_mxfp_v_scale_caches()
+        if self.vllm_config.attention_config.hisparse_config is not None:
+            self.kv_connector = overlap_target_host_mirror(self)
 
     def _fill_c8_mxfp_v_scale_caches(self) -> None:
         """Initialize C8 V scales and retain views for page reassignment."""
@@ -667,12 +667,8 @@ class NPUModelRunner(GPUModelRunner):
         valid_dummy_state_slots: bool = False,
         randomize_inputs: bool = False,
     ):
-        self._cpp_execution_time_ms = None
-        profiling_config = self.ascend_config.scheduler_config.profiling_chunk_config
-        execution_start_time = _start_profiling_chunk_timing(
-            profiling_config,
-            scheduler_output,
-        )
+        if isinstance(mirror := getattr(self, "kv_connector", None), HostMirrorConnector):
+            mirror.begin_execution(not dummy_run and not is_profile)
 
         # Preemption stores must complete before the parent updates states and
         # reuses or zeroes the preempted requests' physical KV cache blocks.
@@ -741,11 +737,6 @@ class NPUModelRunner(GPUModelRunner):
                 # Non-last pooling ranks do not reach pool(). Decoding ranks
                 # finalize after sample_tokens(), including non-last PP ranks.
                 self._finalize_dump_data()
-
-        self._cpp_execution_time_ms = _finish_profiling_chunk_timing(
-            profiling_config,
-            execution_start_time,
-        )
 
         return output
 
@@ -1246,28 +1237,6 @@ class NPUModelRunner(GPUModelRunner):
         finally:
             self.input_buffers.dummy_num_tokens = previous_dummy_tokens
 
-    @contextmanager
-    def _cpp_profile_dummy(self, enabled: bool):
-        """Scope the target-only prefill semantics used by CPP profiling."""
-        if not enabled:
-            yield
-            return
-
-        previous_profile_cpp = getattr(self.input_buffers, "profile_cpp", False)
-        previous_speculator = self.speculator
-        previous_max_num_reqs = self.max_num_reqs
-        try:
-            self.input_buffers.profile_cpp = True
-            # CPP profiles only the target prefill, so skip the drafter dummy
-            # run while the profiling marker is active.
-            self.speculator = None
-            self.max_num_reqs = 1
-            yield
-        finally:
-            self.input_buffers.profile_cpp = previous_profile_cpp
-            self.speculator = previous_speculator
-            self.max_num_reqs = previous_max_num_reqs
-
     def _get_pcp_profile_num_tokens(self) -> int:
         """Keep replicated draft requests when profiling PCP-local prefill.
 
@@ -1299,7 +1268,6 @@ class NPUModelRunner(GPUModelRunner):
         context_len: int = 0,
         skip_eplb: bool = False,
         is_profile: bool = False,
-        profile_cpp: bool = False,
         **kwargs,
     ):
         """Balanced dummy routing for adaptive-verification profiling; EPLB
@@ -1318,8 +1286,6 @@ class NPUModelRunner(GPUModelRunner):
             )
         load_balance_ctx = override_mrv2_in_profile_run(True) if profile_adaptive_tail else nullcontext()
         with (
-            # Disable the CPP drafter before entering contexts that inspect it.
-            self._cpp_profile_dummy(profile_cpp),
             # Preserve scheduled query tokens before PIECEWISE graph padding.
             self._preserve_dummy_query_tokens(num_tokens, uniform_decode),
             skip_ring_state_update(skip_ring),

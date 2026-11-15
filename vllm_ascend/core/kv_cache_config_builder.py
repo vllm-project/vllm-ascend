@@ -32,6 +32,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_pl
     get_layerwise_offload_config,
     get_spec_reuse_rules,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    get_layerwise_reuse_backing_bytes,
+)
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_pool_bytes_per_block,
     group_cache_specs,
@@ -104,11 +107,10 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         """
         extra_config = get_layerwise_offload_config(getattr(vllm_config, "kv_transfer_config", None))
         if extra_config is not None and kv_cache_groups and get_spec_reuse_rules(vllm_config) is not None:
-            plan = self.get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks=1)
-            if getattr(plan, "layerwise_kv_cache_reuse", False):
-                # Each reuse descriptor reports the size of the same device backing.
-                # This plan has one block, so that size is the cost per block.
-                return next(tensor.size for tensor in plan.kv_cache_tensors if not tensor.host_resident)
+            probe = self.get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks=1)
+            backing_bytes = get_layerwise_reuse_backing_bytes(probe)
+            if backing_bytes is not None:
+                return backing_bytes
         if vllm_config.model_config.hf_config.model_type == "kimi_k31":
             return paired_sfa_pool_bytes(kv_cache_groups)
         if is_deepseek_v41_cache(kv_cache_groups):
