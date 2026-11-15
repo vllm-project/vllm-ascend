@@ -1400,23 +1400,11 @@ def create_runtime_component_views(
     dtypes: tuple[torch.dtype, ...],
     page_bytes: int,
     block_stride: int,
-    *,
-    manager_blocks: int | None = None,
 ) -> list[torch.Tensor]:
-    """Interpret backend byte shapes [B,H,N,C] using the existing NHD ABI."""
+    """Build NHD views from backend byte shapes and runtime block sizes in bytes."""
     if not shapes or len(shapes) != len(dtypes):
         raise ValueError("Each runtime cache component requires a shape and dtype.")
     num_blocks = shapes[0][0]
-    if manager_blocks is not None:
-        if manager_blocks <= 0 or num_blocks < manager_blocks or num_blocks % manager_blocks:
-            raise ValueError("Runtime blocks must be a positive multiple of manager blocks.")
-        kernel_blocks_per_manager = num_blocks // manager_blocks
-        if kernel_blocks_per_manager > 1 and block_stride != page_bytes:
-            raise ValueError("Splitting manager pages requires adjacent physical kernel slots.")
-        if page_bytes % kernel_blocks_per_manager:
-            raise ValueError("Physical pages must split into whole kernel slots.")
-        page_bytes //= kernel_blocks_per_manager
-        block_stride //= kernel_blocks_per_manager
     if block_stride == page_bytes:
         if raw.nbytes % page_bytes:
             raise ValueError("Cache allocation is not a whole number of physical pages.")
@@ -1503,13 +1491,27 @@ def create_kv_cache_runtime_views(
                 kernel_block_size=kernel_block_sizes[group.kv_cache_group_id],
             )
             dtypes = group.backend.get_runtime_dtypes(spec)
+            page_bytes = spec.page_size_bytes
+            block_stride = descriptor.block_stride
+            if shapes:
+                runtime_blocks = shapes[0][0]
+                if num_blocks <= 0 or runtime_blocks < num_blocks or runtime_blocks % num_blocks:
+                    raise ValueError("Runtime blocks must be a positive multiple of manager blocks.")
+                kernel_blocks_per_manager = runtime_blocks // num_blocks
+                if kernel_blocks_per_manager > 1:
+                    # The view uses one stride for both within-page and cross-page steps.
+                    if block_stride != page_bytes:
+                        raise ValueError("Splitting manager pages requires adjacent physical kernel slots.")
+                    if page_bytes % kernel_blocks_per_manager:
+                        raise ValueError("Physical pages must split into whole kernel slots.")
+                    page_bytes //= kernel_blocks_per_manager
+                    block_stride = page_bytes
             components = create_runtime_component_views(
                 raw_tensors[name],
                 shapes,
                 dtypes,
-                spec.page_size_bytes,
-                descriptor.block_stride,
-                manager_blocks=num_blocks,
+                page_bytes,
+                block_stride,
             )
             # MLA returns a (NoPE, RoPE) tuple for FIA or a single fused Tensor for FlashMLA.
             format_views = getattr(group.backend, "format_runtime_views", None)
