@@ -76,6 +76,7 @@ _EXPECTED_CAPABILITIES = {
         HardwareCapability.FLASH_ATTN_NPU_3,
         HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
         HardwareCapability.NPU_TOP_K_TOP_P,
+        HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
     },
     AscendDeviceType._310P: frozenset(
         {

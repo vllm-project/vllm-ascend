@@ -171,6 +171,10 @@ class HardwareCapability(Enum):
     NPU_TOP_K_TOP_P = auto()
     # Allow shared paged-attention decode when graph mode, shape, and model checks pass.
     PAGED_ATTENTION = auto()
+    # Use eight-row Qwen4Exp HC gate-mix tiles for large prefill batches.
+    # A3 measured a performance benefit; other profiles retain one-row dispatch
+    # until their row-block settings are profiled.
+    QWEN4EXP_HC_GATE_MIX_ROW_BLOCK = auto()
     # Inspect PCIe topology to distinguish 310P Root-Complex and endpoint deployments.
     RC_DEVICE_DISCOVERY = auto()
     # Fused RMSNorm+cast is available for the A2/A3 (CANN 9.1) path.
@@ -390,6 +394,7 @@ _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
     HardwareCapability.RMS_NORM_DYNAMIC_QUANT,
     HardwareCapability.MC2_FULLMESH_V2_COMM,
     HardwareCapability.MM_REDUCE_SCATTER_BF16,
+    HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
     HardwareCapability.RMS_NORM_CAST,
 }
 _DEFAULT_WORKER_CLS = "vllm_ascend.worker.worker.NPUWorker"

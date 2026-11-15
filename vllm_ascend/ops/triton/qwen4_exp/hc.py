@@ -14,6 +14,8 @@ import torch.nn.functional as F
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+
 
 @triton.jit
 def _grouped_gemma_rmsnorm_kernel(
@@ -247,7 +249,9 @@ def _hc_gate_mix(
     group_dim = dim // hc_count
     output = x.new_empty((rows, group_dim))
     block_size = _HC_GATE_MIX_BLOCK_SIZE
-    if rows >= _HC_GATE_MIX_ROW_BLOCK_MIN_ROWS:
+    if rows >= _HC_GATE_MIX_ROW_BLOCK_MIN_ROWS and get_current_hardware_profile().supports(
+        HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK
+    ):
         _hc_gate_mix_row_block_kernel[
             (
                 triton.cdiv(rows, _HC_GATE_MIX_ROWS_PER_BLOCK),
