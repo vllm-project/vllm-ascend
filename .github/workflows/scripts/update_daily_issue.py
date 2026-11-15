@@ -117,13 +117,14 @@ def failure_entry(inputs: dict) -> str:
 
 
 def append_grouped_failure(body: str, inputs: dict, daily_run_url: str) -> str:
+    daily_run_url = daily_run_url.rsplit("/attempts/", 1)[0]
     sections = ("UT", "Nightly")
     section_ends = {name: f"<!-- daily-section:{name}:end -->" for name in sections}
     if not all(marker in body for marker in section_ends.values()):
         # Move entries from the previous flat format into their sections.
         entries = {name: [] for name in sections}
         for match in FAILURE_ENTRY_PATTERN.finditer(body):
-            name = "UT" if match[1] == daily_run_url else "Nightly"
+            name = "UT" if match[1].rsplit("/attempts/", 1)[0] == daily_run_url else "Nightly"
             entries[name].append(match[0].rstrip() + "\n")
         body = FAILURE_ENTRY_PATTERN.sub("", body).rstrip()
         for name in sections:
@@ -133,7 +134,7 @@ def append_grouped_failure(body: str, inputs: dict, daily_run_url: str) -> str:
     # Selected tests execute in the Daily run; Nightly runs are dispatched separately.
     if f"<!-- daily-failure:{event_id(inputs)} -->" in body:
         return body
-    name = "UT" if inputs["run_url"] == daily_run_url else "Nightly"
+    name = "UT" if inputs["run_url"].rsplit("/attempts/", 1)[0] == daily_run_url else "Nightly"
     marker = section_ends[name]
     entry = failure_entry(inputs)
     if f"## {name}\n" not in body:
@@ -143,19 +144,20 @@ def append_grouped_failure(body: str, inputs: dict, daily_run_url: str) -> str:
 
 def publish_failure(client: GitHubClient, inputs: dict, server_url: str) -> int:
     """Called only inside the update workflow's round-scoped concurrency group."""
-    run_id, attempt = validate_inputs(inputs, client.repository, server_url)
-    root = client.request("GET", f"actions/runs/{run_id}/attempts/{attempt}")
+    run_id, _ = validate_inputs(inputs, client.repository, server_url)
+    root = client.request("GET", f"actions/runs/{run_id}/attempts/1")
     if root.get("path", "").split("@")[0] != f".github/workflows/{DAILY_WORKFLOW}":
         raise ValueError("Run is not a Daily main workflow")
-    marker = f"<!-- vllm-ascend-daily:{run_id}:{attempt} -->"
+    marker = f"<!-- vllm-ascend-daily:{run_id} -->"
+    marker_pattern = re.compile(rf"<!-- vllm-ascend-daily:{run_id}(?::[1-9][0-9]*)? -->")
     matches = [
         issue
         for issue in client.pages("issues", state="all", since=root["created_at"])
-        if "pull_request" not in issue and marker in (issue.get("body") or "")
+        if "pull_request" not in issue and marker_pattern.search(issue.get("body") or "")
     ]
     if len(matches) > 1:
         raise ValueError("Multiple Issues already belong to this Daily round; resolve duplicates before retrying")
-    run_url = f"{server_url}/{client.repository}/actions/runs/{run_id}/attempts/{attempt}"
+    run_url = f"{server_url}/{client.repository}/actions/runs/{run_id}"
     if not matches:
         started_at = datetime.fromisoformat(root["run_started_at"]).astimezone(ISSUE_TIMEZONE)
         title = f"Daily test failure on {started_at:%Y-%m-%d %H:%M} - please check"
@@ -171,7 +173,7 @@ def publish_failure(client: GitHubClient, inputs: dict, server_url: str) -> int:
         return issue["number"]
     issue = matches[0]
     previous_body = issue.get("body") or ""
-    body = append_grouped_failure(previous_body, inputs, run_url)
+    body = append_grouped_failure(marker_pattern.sub(marker, previous_body, count=1), inputs, run_url)
     if body == previous_body:
         return issue["number"]
     if len(body) > MAX_BODY_LENGTH:

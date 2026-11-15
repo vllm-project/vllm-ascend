@@ -21,15 +21,32 @@ permissions:
   actions: read
   issues: write
 
-# The whole lookup/create/read/merge/write operation is serialized. The default
-# pending queue replaces older events; max retains up to 100 pending updates.
-concurrency:
-  group: daily-issue-${{ inputs.request_id }}
-  cancel-in-progress: false
-  queue: max
-
 jobs:
+  resolve-daily-run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run_id: ${{ steps.identity.outputs.run_id }}
+    steps:
+      - name: Resolve the Daily run identity
+        id: identity
+        shell: bash
+        env:
+          REQUEST_ID: ${{ inputs.request_id }}
+        run: |
+          if [[ ! "$REQUEST_ID" =~ ^daily-([1-9][0-9]*)-([1-9][0-9]*)$ ]]; then
+            echo "::error::Invalid Daily round identity"
+            exit 1
+          fi
+          echo "run_id=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+
   update-issue:
+    needs: resolve-daily-run
+    # Serialize lookup/create/append across every attempt of the same Daily run.
+    concurrency:
+      group: daily-issue-${{ needs.resolve-daily-run.outputs.run_id }}
+      cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
