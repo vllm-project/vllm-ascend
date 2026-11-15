@@ -127,8 +127,6 @@
 #      wrapper)
 #   3. `vllm.v1.engine.core.EngineCore.post_step` (pp-mtp patch, invocation
 #      moved here from patch_pp_mtp.py)
-#   4. `vllm.v1.engine.core.EngineCore._initialize_kv_caches`
-#      `vllm.v1.engine.core.generate_scheduler_kv_cache_config`
 #    Why:
 #       Previously patch_balance_schedule and patch_dyntra_lb_core
 #       each wrapped `EngineCoreProc.run_engine_core` independently, forming
@@ -141,15 +139,12 @@
 #       import. In `spawn` children, unpickling this wrapper imports this
 #       module, deterministically re-applying all engine-core-level patches
 #       before any `EngineCore` is instantiated.
-#       For layerwise offload, plan from rank-local specs before vLLM
-#       reduces each group to its representative spec.
 #    Related PR (if no, explain why):
 #       No, vllm-ascend internal refactor of its own platform patches.
 #    Future Plan:
 #       Remove this patch once upstream exposes stable extension points for
 #       engine-core-level customization, or when the feature modules no longer
-#       need an entry-point hook. Drop the offload hooks when upstream
-#       exposes rank-local planning to scheduler configuration builders.
+#       need an entry-point hook.
 #
 # ** 6. File: platform/patch_engram_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -323,8 +318,8 @@
 #    How:
 #       Both supported versions select AscendKVCacheConfigBuilder through
 #       NPUPlatform. Its inherited materialization calls the patched planning
-#       function to build the native descriptors. The builder probes the
-#       offload planner for device cost. Offload admission uses Core's
+#       function to build the native descriptors. The builder carries the reuse
+#       result to the scheduler and probes device cost. Offload admission uses Core's
 #       group-lifetime calculation with that cost; ordinary layouts retain
 #       their native admission paths.
 #    Related PR:

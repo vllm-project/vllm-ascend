@@ -26,7 +26,9 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
     get_layerwise_offload_config,
     get_spec_reuse_rules,
-    plan_layerwise_cache_reuse,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    AscendLayerwiseKVCacheConfig,
 )
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
@@ -510,8 +512,8 @@ def _ascend_max_memory_usage_bytes_from_groups(
     """Keep Ascend admission accounting with the upstream builder API."""
     extra_config = get_layerwise_offload_config(getattr(vllm_config, "kv_transfer_config", None))
     if extra_config is not None and kv_cache_groups and get_spec_reuse_rules(vllm_config) is not None:
-        native_config = builder.get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks=1)
-        if plan_layerwise_cache_reuse(native_config, vllm_config) is not None:
+        probe = builder.get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks=1)
+        if isinstance(probe, AscendLayerwiseKVCacheConfig):
             return _orig_max_memory_usage_bytes_from_groups(builder, vllm_config, kv_cache_groups)
     if vllm_config.model_config.hf_config.model_type == "kimi_k31":
         return paired_sfa_max_memory(vllm_config, kv_cache_groups)

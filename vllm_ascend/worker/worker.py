@@ -1233,6 +1233,8 @@ class NPUWorker(WorkerBase):
                 reuse_layout.kv_cache_tensors[0].size,
                 reuse_layout.independent_layers,
             )
+        elif isinstance(kv_cache_config, AscendLayerwiseKVCacheConfig):
+            raise RuntimeError("Worker could not rebuild the KV offload layout budgeted by Core.")
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
         # Restrict the discardable kv_cache pool to backing cache allocations.
         # Persistent metadata created during initialize_kv_cache must stay
