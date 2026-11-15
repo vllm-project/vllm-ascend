@@ -27,6 +27,7 @@ MAX_BODY_LENGTH = 60000
 MAX_FIELD_LENGTH = 1000
 PAGE_SIZE = 100
 RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+FAILURE_ENTRY_PATTERN = re.compile(r"<!-- daily-failure:[0-9a-f]{64} -->\n- \[[^\n]*\]\((https?://[^\s)]+)\)\n?")
 
 
 class GitHubClient:
@@ -115,6 +116,26 @@ def failure_entry(inputs: dict) -> str:
     return f"<!-- daily-failure:{event_id(inputs)} -->\n- [{label}]({inputs['run_url']})\n"
 
 
+def append_grouped_failure(body: str, inputs: dict, daily_run_url: str) -> str:
+    sections = ("UT", "Nightly")
+    section_ends = {name: f"<!-- daily-section:{name}:end -->" for name in sections}
+    if not all(marker in body for marker in section_ends.values()):
+        # Move entries from the previous flat format into their sections.
+        entries = {name: [] for name in sections}
+        for match in FAILURE_ENTRY_PATTERN.finditer(body):
+            name = "UT" if match[1] == daily_run_url else "Nightly"
+            entries[name].append(match[0].rstrip() + "\n")
+        body = FAILURE_ENTRY_PATTERN.sub("", body).rstrip()
+        for name in sections:
+            body += f"\n\n## {name}\n\n" + "".join(entries[name]) + "\n" + section_ends[name]
+    # Selected tests execute in the Daily run; Nightly runs are dispatched separately.
+    if f"<!-- daily-failure:{event_id(inputs)} -->" in body:
+        return body
+    name = "UT" if inputs["run_url"] == daily_run_url else "Nightly"
+    marker = section_ends[name]
+    return body.replace(marker, failure_entry(inputs) + "\n" + marker, 1)
+
+
 def publish_failure(client: GitHubClient, inputs: dict, server_url: str) -> int:
     """Called only inside the update workflow's round-scoped concurrency group."""
     run_id, attempt = validate_inputs(inputs, client.repository, server_url)
@@ -129,12 +150,11 @@ def publish_failure(client: GitHubClient, inputs: dict, server_url: str) -> int:
     ]
     if len(matches) > 1:
         raise ValueError("Multiple Issues already belong to this Daily round; resolve duplicates before retrying")
-    entry = failure_entry(inputs)
+    run_url = f"{server_url}/{client.repository}/actions/runs/{run_id}/attempts/{attempt}"
     if not matches:
         started_at = datetime.fromisoformat(root["run_started_at"]).astimezone(ISSUE_TIMEZONE)
         title = f"Daily test failure on {started_at:%Y-%m-%d %H:%M} - please check"
-        run_url = f"{server_url}/{client.repository}/actions/runs/{run_id}/attempts/{attempt}"
-        body = f"{marker}\n# Daily test failures\n\n[Daily run]({run_url})\n\n{entry}"
+        body = append_grouped_failure(f"{marker}\n[Daily run]({run_url})", inputs, run_url)
         # Creation is not blindly retried: a timeout may have created the Issue.
         # Re-running this writer first lists Issues again to discover that write.
         issue = client.request(
@@ -145,13 +165,13 @@ def publish_failure(client: GitHubClient, inputs: dict, server_url: str) -> int:
         )
         return issue["number"]
     issue = matches[0]
-    body = issue.get("body") or ""
-    failure_marker = f"<!-- daily-failure:{event_id(inputs)} -->"
-    if failure_marker in body:
+    previous_body = issue.get("body") or ""
+    body = append_grouped_failure(previous_body, inputs, run_url)
+    if body == previous_body:
         return issue["number"]
-    if len(body) + len(entry) + 2 > MAX_BODY_LENGTH:
+    if len(body) > MAX_BODY_LENGTH:
         raise ValueError("Daily Issue body limit reached")
-    client.request("PATCH", f"issues/{issue['number']}", {"body": body + "\n\n" + entry})
+    client.request("PATCH", f"issues/{issue['number']}", {"body": body})
     return issue["number"]
 
 
