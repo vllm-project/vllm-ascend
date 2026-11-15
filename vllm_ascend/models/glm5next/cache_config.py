@@ -36,6 +36,7 @@ from vllm_ascend.core.kv_cache_interface import (
     get_kv_cache_compression_ratio,
     get_storage_block_size,
 )
+from vllm_ascend.core.kv_cache_planning import align_hybrid_cache_pages
 
 
 @dataclass(frozen=True)
@@ -381,6 +382,12 @@ def get_glm5_next_kv_cache_groups(
     if getattr(scheduler_config, "disable_hybrid_kv_cache_manager", False):
         raise ValueError("GLM-Next's paired MLA/indexer and fixed tail layout requires the hybrid KV cache manager.")
 
+    auxiliary_layers = {
+        name
+        for name, spec in kv_cache_spec.items()
+        if _is_glm5_next_indexer_spec(spec) or _is_glm5_next_tail_spec(spec)
+    }
+    kv_cache_spec = align_hybrid_cache_pages(kv_cache_spec, excluded_attention_layers=auxiliary_layers)
     _align_glm5_next_cache_specs(kv_cache_spec)
     mamba_specs = {name: spec for name, spec in kv_cache_spec.items() if isinstance(spec, MambaSpec)}
     attention_specs = {name: spec for name, spec in kv_cache_spec.items() if not isinstance(spec, MambaSpec)}
