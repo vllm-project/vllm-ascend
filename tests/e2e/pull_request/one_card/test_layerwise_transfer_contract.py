@@ -10,7 +10,7 @@ do not substitute for model inference against real Memcache/Mooncake services.
 import ctypes
 from types import SimpleNamespace
 
-import acl  # type: ignore[import-not-found]  # Provided by CANN on the NPU host.
+import acl  # type: ignore[import-not-found, import-untyped]  # CANN provides no typing metadata.
 import numpy as np
 import pytest
 import torch
