@@ -1,0 +1,6 @@
+pr: 21659
+entries:
+  - category: performance
+    text: Enabled worker metadata-stream execution for DeepSeek-V4.1-Flash on A3 in eager and graph modes, reusing persistent SMLA and QLI buffers and existing consumer synchronization.
+    model: deepseek-v4.1
+    hardware: [A3]
