@@ -111,6 +111,10 @@ a3:
         config_file_path: Kimi-K3-MRV2-A3.yaml
         config_base_path: tests/SIT/cases/models/configs/Kimi
         size: 4
+      - name: Kimi-K3-MRV2-A3
+        config_file_path: Kimi-K3-MRV2-A3.yaml
+        config_base_path: tests/e2e/cases/models/configs/Kimi
+        size: 4
       - name: DeepSeek-V4-Pro-w4a8-prefix-cache-PD
         config_file_path: DeepSeek-V4-Pro-w4a8-prefix-cache-PD.yaml
         config_base_path: tests/SIT/cases/models/configs/DeepSeek
