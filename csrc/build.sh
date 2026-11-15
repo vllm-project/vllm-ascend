@@ -521,7 +521,7 @@ function gen_bisheng(){
     fi
 
     pushd ${gen_bisheng_dir}
-    $(> bisheng)
+    : > bisheng
     echo "#!/bin/bash" >> bisheng
     echo "ccache_args=""\"""${ccache_program} ${BISHENG_REAL_PATH}""\"" >> bisheng
     echo "args=""$""@" >> bisheng

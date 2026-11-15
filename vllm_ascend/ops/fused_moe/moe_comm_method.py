@@ -78,7 +78,7 @@ def setup_moe_comm_method(
         methods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
     # Keep the existing global lookup for forward-context setup and non-0.23
     # callers. The v0.23 runner binds its own layer's instance for execution.
-    _MoECommMethods.update(methods)
+    _MoECommMethods.update(methods.items())
     return methods
 
 
