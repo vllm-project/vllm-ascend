@@ -60,6 +60,7 @@
 #include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
 #include "moe/situ_mx_quant/situ_mx_quant_torch_adpt.h"
 #include "moe/grouped_matmul_situ_quant/grouped_matmul_situ_quant_torch_adpt.h"
+#include "attention/top_k_per_row/top_k_per_row_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -2879,6 +2880,17 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "-> (Tensor y ,Tensor rstd)"
         );
     ops.impl("npu_gemma_rms_norm", torch::kPrivateUse1, &vllm_ascend::npu_gemma_rms_norm);
+
+    // TopKPerRow: ragged per-row top-k over a column window. Mirrors the two
+    // CUDA-only entry points of vLLM's sparse-attention indexer.
+    ops.def(
+        "top_k_per_row_prefill(Tensor logits, Tensor cu_seqlen_ks, Tensor cu_seqlen_ke, "
+        "Tensor(a!) indices, int num_rows, int stride0, int stride1, int topk) -> ()");
+    ops.impl("top_k_per_row_prefill", torch::kPrivateUse1, &vllm_ascend::top_k_per_row_prefill);
+    ops.def(
+        "top_k_per_row_decode(Tensor logits, int next_n, Tensor seq_lens, "
+        "Tensor(a!) indices, int num_rows, int stride0, int stride1, int topk) -> ()");
+    ops.impl("top_k_per_row_decode", torch::kPrivateUse1, &vllm_ascend::top_k_per_row_decode);
 
     ops.def(
         "attn_res_fwd(Tensor(b) prefix_sum, Tensor? addend, Tensor(a!) block_residual, "

@@ -1,0 +1,10 @@
+pr: 21917
+entries:
+  - category: feature
+    text: >-
+      Added the TopKPerRow aclnn operator (ragged per-row top-k over a column
+      window), exposed as `torch.ops._C_ascend.top_k_per_row_prefill` and
+      `.top_k_per_row_decode`. It provides the NPU counterpart of vLLM's
+      CUDA-only sparse-attention indexer top-k; callers are wired up in a
+      follow-up PR.
+    model: deepseek-v3.2

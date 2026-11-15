@@ -1774,6 +1774,20 @@ void hisparse_resolve_residency_meta(
     const std::optional<at::Tensor>&, const std::optional<at::Tensor>&, const std::optional<at::Tensor>&,
     int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {}
 
+// TopKPerRow: the caller pre-allocates `indices` and the kernel only writes
+// into it, so the meta path has no shape/dtype inference to do.
+void top_k_per_row_prefill_meta(
+    const at::Tensor&, const at::Tensor&, const at::Tensor&, at::Tensor&,
+    int64_t, int64_t, int64_t, int64_t)
+{
+}
+
+void top_k_per_row_decode_meta(
+    const at::Tensor&, int64_t, const at::Tensor&, at::Tensor&,
+    int64_t, int64_t, int64_t, int64_t)
+{
+}
+
 void npu_indexer_region_score_ids_out_meta(
     const at::Tensor &query, const at::Tensor &weights, const at::Tensor &keySummary,
     const at::Tensor &actualKvLengths, const at::Tensor &blockTable, const at::Tensor &cuSeqLens,
@@ -1888,6 +1902,9 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     // Add_Rms_Norm_Bias
     ops.impl("npu_add_rms_norm_bias", &vllm_ascend::meta::npu_add_rms_norm_bias_meta);
     ops.impl("npu_rms_norm_cast", &vllm_ascend::meta::npu_rms_norm_cast_meta);
+    // TopKPerRow
+    ops.impl("top_k_per_row_prefill", &vllm_ascend::meta::top_k_per_row_prefill_meta);
+    ops.impl("top_k_per_row_decode", &vllm_ascend::meta::top_k_per_row_decode_meta);
     // transpose_kv_cache_by_block
     ops.impl("transpose_kv_cache_by_block", &vllm_ascend::meta::transpose_kv_cache_by_block_meta);
     // npu_sign_bits_pack
