@@ -1,0 +1,9 @@
+pr: 21906
+entries:
+  - category: bugfix
+    text: >-
+      Fixed Model Runner V2 thinking-budget sampling on Ascend when token-history
+      row offsets exceed the signed 32-bit range, preventing invalid NPU memory
+      accesses with large history buffers. Requests with thinking_token_budget
+      above 18446744073709551615 now fail clearly during request validation
+      instead of overflowing engine transport serialization.
