@@ -4,11 +4,17 @@
 """Configuration regressions exercised through the real initialization paths."""
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
+
+# isort: split
+import torch
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
+
 from tests.ut.distributed.ascend_store.test_pool_scheduler import make_config
 from tests.ut.distributed.ascend_store.test_pool_worker import make_worker
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
@@ -228,5 +234,39 @@ def test_layerwise_cp_layout_mismatch_fails_before_threads(case, backend, role, 
             kv_role=role,
             extra_config={"backend": backend, f"{peer}_{parallelism}_size": 2},
         )
+    backend_init.assert_not_called()
+    start.assert_not_called()
+
+
+@pytest.mark.parametrize("role", ["kv_producer", "kv_consumer", "kv_both"])
+@pytest.mark.parametrize(
+    "options, expected",
+    [
+        ({"dcp_size": 2}, "decode_context_parallel_size=2"),
+        ({"pcp_size": 2, "use_kvpp": True}, "PCP does not support enable_kvpp"),
+    ],
+)
+def test_mooncake_unsupported_topology_fails_before_backend_or_threads(case, role, options, expected):
+    with (
+        patch.object(BaseKVPoolWorker, "_init_backend") as backend_init,
+        patch("threading.Thread.start") as start,
+        pytest.raises(ValueError, match=expected),
+    ):
+        make_worker(case, use_layerwise=True, kv_role=role, **options)
+    backend_init.assert_not_called()
+    start.assert_not_called()
+
+
+def test_mooncake_empty_pp_group_fails_during_worker_initialization(case):
+    # The group is present in the global plan but owns no cache on this stage.
+    # Reject it before namespace construction, backend creation or lane startup.
+    spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=16, dtype=torch.float16)
+    plan = SimpleNamespace(kv_cache_groups=[KVCacheGroupSpec([], spec)])
+    with (
+        patch.object(BaseKVPoolWorker, "_init_backend") as backend_init,
+        patch("threading.Thread.start") as start,
+        pytest.raises(ValueError, match=r"empty groups: \[0\]"),
+    ):
+        make_worker(case, use_layerwise=True, pp_partition=(2, 2), kv_cache_config=plan)
     backend_init.assert_not_called()
     start.assert_not_called()
