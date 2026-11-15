@@ -15,7 +15,10 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import math
+
 import torch
+import torch.nn.functional as F
 import torch_npu
 from vllm.model_executor.layers.activation import (
     QuickGELU,
@@ -54,6 +57,20 @@ class AscendSiluAndMulWithClamp(SiluAndMulWithClamp):
         out = torch_npu.npu_swiglu(x)
         weight_prefetch_method.maybe_prefetch_mlp_weight_postprocess(out)
         return out
+
+
+def swiglu_clamp_and_mxfp8_quant(x: torch.Tensor, clamp_limit: float) -> tuple[torch.Tensor, torch.Tensor]:
+    if x.ndim < 1 or x.shape[-1] % 2:
+        raise ValueError(f"SwiGLU input last dimension must be even, got {tuple(x.shape)}")
+    if not math.isfinite(clamp_limit) or clamp_limit < 0:
+        raise ValueError(f"SwiGLU clamp limit must be finite and nonnegative, got {clamp_limit}")
+
+    gate, up = x.chunk(2, dim=-1)
+    if clamp_limit > 0:
+        gate = gate.clamp(max=clamp_limit)
+        up = up.clamp(min=-clamp_limit, max=clamp_limit)
+    activation = F.silu(gate) * up
+    return torch_npu.npu_dynamic_mx_quant(activation.contiguous(), dst_type=torch.float8_e4m3fn)
 
 
 class AscendSwigluOAIAndMul:

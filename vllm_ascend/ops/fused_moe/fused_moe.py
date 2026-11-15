@@ -38,9 +38,18 @@ from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.flash_common3_context import get_flash_common3_context, set_flash_common3_context
+from vllm_ascend.ops.activation import swiglu_clamp_and_mxfp8_quant
+from vllm_ascend.ops.fused_moe.catccos_adapter import (
+    catccos_backend_enabled,
+    prepare_catccos_weights,
+)
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult, setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
+from vllm_ascend.profiler.moe_profile import (
+    moe_profile_range,
+    moe_profile_sync_boundaries_enabled,
+)
 from vllm_ascend.quantization.methods.base import get_moe_num_logical_experts
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
@@ -118,14 +127,15 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2).contiguous()
         layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
 
-        # TODO: Current dispatch_ffn_combine fusion operator ONLY supports NZ format.
-        # Therefore, we must cast weights to NZ when fusion is enabled.
-        # Once the underlying dispatch_ffn_combine operator is updated to support
-        # ND format (or other formats), remove this specific 'if' check and the forced
-        # npu_format_cast. At that point, the operator should be able to handle weights
-        # in their native format without explicit casting here.
+        # CANN dispatch_ffn_combine requires NZ weights. CatCCOS uses separate
+        # MXFP8 weights, so its BF16 fallback follows the native format policy.
+        # TODO: Remove the forced NZ cast when CANN fused MC2 supports ND weights.
         enable_fused_mc2 = get_ascend_config().enable_fused_mc2
-        if enable_fused_mc2:
+        if catccos_backend_enabled():
+            prepare_catccos_weights(layer)
+            layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
+            layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
+        elif enable_fused_mc2:
             layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
             layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
             if enable_fused_mc2 == 1 and self.dynamic_eplb:
@@ -235,17 +245,26 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         w2_weight_list = getattr(layer, "w2_weight_list", None)
         has_split_weight_lists = isinstance(w13_weight_list, list) and isinstance(w2_weight_list, list)
         if _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2:
-            if self.dynamic_eplb and not has_split_weight_lists:
-                logger.warning_once(
-                    "FUSED_MC2 is enabled with dynamic EPLB, but unquantized MoE weights are not split into "
-                    "tensor lists. This may cause accuracy issues or communication hangs."
-                )
-            w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
-            w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
-            w1_scale = [torch.tensor([], dtype=torch.int64)]
-            w2_scale = [torch.tensor([], dtype=torch.int64)]
-            w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
-            w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
+            if catccos_backend_enabled():
+                w1 = layer.catccos_w1
+                w2 = layer.catccos_w2
+                w1_scale = layer.catccos_w1_scale
+                w2_scale = layer.catccos_w2_scale
+                w1_scale_bias = None
+                w2_scale_bias = None
+            else:
+                if self.dynamic_eplb and not has_split_weight_lists:
+                    logger.warning_once(
+                        "FUSED_MC2 is enabled with dynamic EPLB, but unquantized "
+                        "MoE weights are not split into tensor lists. This may "
+                        "cause accuracy issues or communication hangs."
+                    )
+                w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
+                w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
+                w1_scale = [torch.tensor([], dtype=torch.int64)]
+                w2_scale = [torch.tensor([], dtype=torch.int64)]
+                w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
+                w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
         else:
             w1 = w13_weight_list if isinstance(w13_weight_list, list) else layer.w13_weight
             w1_scale = None
@@ -254,34 +273,44 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w1_scale_bias = None
             w2_scale_bias = None
 
-        final_hidden_states = moe_comm_method.fused_experts(
-            fused_experts_input=build_fused_experts_input(
-                hidden_states=x,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                w1=w1,
-                w2=w2,
-                w1_bias=layer.w13_bias if self.moe.has_bias else None,
-                w2_bias=layer.w2_bias if self.moe.has_bias else None,
-                quant_type=QuantType.NONE,
-                dynamic_eplb=self.dynamic_eplb,
-                expert_map=expert_map,
-                global_redundant_expert_num=global_redundant_expert_num,
-                mc2_mask=mc2_mask,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                log2phy=log2phy,
-                pertoken_scale=pertoken_scale,
-                activation=activation,
-                w1_scale=w1_scale,
-                w2_scale=w2_scale,
-                w1_scale_bias=w1_scale_bias,
-                w2_scale_bias=w2_scale_bias,
-                swiglu_limit=layer.swiglu_limit,
-                # Per-layer MoE LoRA state, set once by AscendFusedMoEWithLoRA
-                # when an adapter wraps this layer; None for non-LoRA layers.
-                lora_context=getattr(layer, "_ascend_moe_lora_context", None),
-            )
+        fused_experts_input = build_fused_experts_input(
+            hidden_states=x,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            w1=w1,
+            w2=w2,
+            w1_bias=layer.w13_bias if self.moe.has_bias else None,
+            w2_bias=layer.w2_bias if self.moe.has_bias else None,
+            quant_type=QuantType.NONE,
+            dynamic_eplb=self.dynamic_eplb,
+            expert_map=expert_map,
+            global_redundant_expert_num=global_redundant_expert_num,
+            mc2_mask=mc2_mask,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            log2phy=log2phy,
+            pertoken_scale=pertoken_scale,
+            activation=activation,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            w1_scale_bias=w1_scale_bias,
+            w2_scale_bias=w2_scale_bias,
+            swiglu_limit=layer.swiglu_limit,
+            # Per-layer MoE LoRA state, set once by AscendFusedMoEWithLoRA
+            # when an adapter wraps this layer; None for non-LoRA layers.
+            lora_context=getattr(layer, "_ascend_moe_lora_context", None),
         )
+        moe_comm_type = _EXTRA_CTX.moe_comm_type
+        assert moe_comm_type is not None, "Missing communication type"
+        uses_catccos = catccos_backend_enabled() and moe_comm_type == MoECommType.FUSED_MC2
+        profile_backend = "catccos" if uses_catccos else f"native_{moe_comm_type.name.lower()}"
+        sync_boundaries = moe_profile_sync_boundaries_enabled()
+        profile_stage = "synchronized_moe_body" if sync_boundaries else "host_moe_body"
+        if sync_boundaries:
+            torch.npu.synchronize()
+        with moe_profile_range(profile_backend, profile_stage, x, topk_ids):
+            final_hidden_states = moe_comm_method.fused_experts(fused_experts_input=fused_experts_input)
+            if sync_boundaries:
+                torch.npu.synchronize()
         if zero_expert_num > 0 and zero_expert_type is not None:
             final_hidden_states += zero_expert_result
         return final_hidden_states
@@ -792,13 +821,8 @@ else:
                     hidden_states = self._shared_experts.gate_up_proj((quantized_x, pertoken_scale))[0]
                     # Execute activation concurrently with gmm2.
                     maybe_wait_event(fused_moe_evts.before_gmm2)
-                    quantized_x, swiglu_out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
-                        hidden_states,
-                        topk_weight=None,
-                        group_index=None,
-                        dst_type=torch.float8_e4m3fn,
-                        quant_mode=2,
-                        clamp_value=fused_moe_evts.swiglu_limit,
+                    quantized_x, swiglu_out_scale = swiglu_clamp_and_mxfp8_quant(
+                        hidden_states, fused_moe_evts.swiglu_limit
                     )
                     # Execute the down projection concurrently with the combine
                     # communication.

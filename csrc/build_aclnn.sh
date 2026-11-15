@@ -223,6 +223,20 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "store_kv_block_metadata"
     )
 
+    # CANN 9.1 has a conflicting built-in schema for SwigluGroupQuant.
+    cann_version_file="${ASCEND_HOME_PATH:-}/opp/version.info"
+    if [[ -f "$cann_version_file" ]] && grep -qE '^Version=9\.1(\.|$)' "$cann_version_file"; then
+        filtered_custom_ops=()
+        for op_name in "${CUSTOM_OPS_ARRAY[@]}"; do
+            if [[ "$op_name" == "swiglu_group_quant" ]]; then
+                log "skip custom swiglu_group_quant: provided by CANN $(grep -m1 '^Version=' "$cann_version_file" | cut -d= -f2)"
+                continue
+            fi
+            filtered_custom_ops+=("$op_name")
+        done
+        CUSTOM_OPS_ARRAY=("${filtered_custom_ops[@]}")
+    fi
+
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend950"
 else
@@ -289,6 +303,17 @@ log_selected_ops
   chmod +x -- "${installer_candidates[0]}" || true
   log "running installer: ${installer_candidates[0]}"
   "${installer_candidates[0]}" --install-path="${custom_ops_install_dir}"
+  if [[ "$SOC_ARG" == "ascend950" ]]; then
+    custom_vendor_package="$custom_ops_install_dir/vendors/custom_transformer_transformer"
+    custom_kernel_dir="$custom_vendor_package/op_impl/ai_core/tbe/kernel/$SOC_ARG"
+    custom_kernel_config_dir="$custom_vendor_package/op_impl/ai_core/tbe/kernel/config/$SOC_ARG"
+    test -d "$custom_kernel_dir" || { echo "ERROR: Ascend950 kernel package missing: $custom_kernel_dir" >&2; exit 1; }
+    python3 "$ROOT_DIR/csrc/cmake/scripts/util/ascendc_ops_config.py" \
+      --path "$custom_kernel_dir" --soc "$SOC_ARG" --out "$custom_kernel_config_dir"
+    python3 -c 'import json,sys; data=json.load(open(sys.argv[1])); assert "InplacePartialRotaryMul" in data, "Ascend950 rotary binary metadata missing"' \
+      "$custom_kernel_config_dir/binary_info_config.json"
+    log "generated Ascend950 binary metadata including InplacePartialRotaryMul"
+  fi
   # CANN leaves generated vendor script dirs owner-read-only; keep repo-local
   # editable-build artifacts removable by the non-root user who built them.
   if [[ -d "${custom_ops_install_dir}/vendors/custom_transformer/scripts" ]]; then

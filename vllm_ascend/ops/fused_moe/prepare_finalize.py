@@ -30,9 +30,11 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.utils import fc3_all_gather_and_maybe_unpad_impl
+from vllm_ascend.ops.fused_moe.catccos_adapter import catccos_backend_enabled
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEPrepareOutput
+from vllm_ascend.profiler.moe_profile import moe_profile_component
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import enable_sp, enable_sp_by_pass, npu_stream_switch
 
@@ -57,6 +59,21 @@ class PrepareAndFinalize(ABC):
         self.multistream_overlap_gate = ascend_config.multistream_overlap_gate
         if self.multistream_overlap_gate and PrepareAndFinalize.quant_stream is None:
             PrepareAndFinalize.quant_stream = torch.npu.Stream()
+
+    def _profile_backend(self) -> str:
+        moe_comm_type = getattr(_EXTRA_CTX, "moe_comm_type", None)
+        if catccos_backend_enabled() and moe_comm_type == MoECommType.FUSED_MC2:
+            return "catccos"
+        if isinstance(moe_comm_type, MoECommType):
+            return f"native_{moe_comm_type.name.lower()}"
+        return "moe"
+
+    def _profile_shape(self, hidden_states: torch.Tensor) -> tuple[int, int, int, int]:
+        global_tokens = int(getattr(self, "num_tokens", hidden_states.shape[0]))
+        tp_size = max(1, int(getattr(self, "tp_size", 1)))
+        rank_local_tokens = (global_tokens + tp_size - 1) // tp_size
+        top_k = int(getattr(self.moe_config, "experts_per_token", 0) or 0)
+        return global_tokens, rank_local_tokens, hidden_states.shape[-1], top_k
 
     @abstractmethod
     def prepare(
@@ -157,13 +174,33 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
             pad_size = self.tp_size - self.num_tokens  # Pad to TP size (cyclic)
 
             if pad_size > 0:
-                hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
-                router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
+                global_tokens = self.num_tokens
+                rank_local_tokens = (global_tokens + self.tp_size - 1) // self.tp_size
+                with moe_profile_component(
+                    self._profile_backend(),
+                    "prepare.padding",
+                    global_tokens=global_tokens,
+                    rank_local_tokens=rank_local_tokens,
+                    hidden_size=hidden_states.shape[-1],
+                    top_k=int(getattr(self.moe_config, "experts_per_token", 0) or 0),
+                ):
+                    hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
+                    router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
                 padded_hidden_states_shape = hidden_states.shape
 
             if self.tp_size > 1:
-                split_hidden_states = torch.tensor_split(hidden_states, self.tp_size, dim=0)
-                split_router_logits = torch.tensor_split(router_logits, self.tp_size, dim=0)
+                global_tokens = self.num_tokens
+                rank_local_tokens = (global_tokens + self.tp_size - 1) // self.tp_size
+                with moe_profile_component(
+                    self._profile_backend(),
+                    "prepare.tensor_split",
+                    global_tokens=global_tokens,
+                    rank_local_tokens=rank_local_tokens,
+                    hidden_size=hidden_states.shape[-1],
+                    top_k=int(getattr(self.moe_config, "experts_per_token", 0) or 0),
+                ):
+                    split_hidden_states = torch.tensor_split(hidden_states, self.tp_size, dim=0)
+                    split_router_logits = torch.tensor_split(router_logits, self.tp_size, dim=0)
 
                 hidden_states = split_hidden_states[self.tp_rank]
                 router_logits = split_router_logits[self.tp_rank]
@@ -212,15 +249,50 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
                 # may share memory with original hidden_states. Since shared
                 # experts may use the original tensor, reusing it would cause
                 # in-place modification during all_gather, corrupting the data.
-                gathered_hidden_states = torch.empty(
-                    padded_hidden_states_shape, device=hidden_states.device, dtype=hidden_states.dtype
-                )
-                split_hidden_states = torch.tensor_split(gathered_hidden_states, self.tp_size, dim=0)
-                dist.all_gather(list(split_hidden_states), hidden_states, self.moe_config.tp_group.device_group)
+                global_tokens, rank_local_tokens, hidden_size, top_k = self._profile_shape(hidden_states)
+                backend = self._profile_backend()
+                with moe_profile_component(
+                    backend,
+                    "finalize.output_alloc",
+                    global_tokens=global_tokens,
+                    rank_local_tokens=rank_local_tokens,
+                    hidden_size=hidden_size,
+                    top_k=top_k,
+                ):
+                    gathered_hidden_states = torch.empty(
+                        padded_hidden_states_shape, device=hidden_states.device, dtype=hidden_states.dtype
+                    )
+                with moe_profile_component(
+                    backend,
+                    "finalize.tensor_split",
+                    global_tokens=global_tokens,
+                    rank_local_tokens=rank_local_tokens,
+                    hidden_size=hidden_size,
+                    top_k=top_k,
+                ):
+                    split_hidden_states = torch.tensor_split(gathered_hidden_states, self.tp_size, dim=0)
+                with moe_profile_component(
+                    backend,
+                    "finalize.tp_all_gather",
+                    global_tokens=global_tokens,
+                    rank_local_tokens=rank_local_tokens,
+                    hidden_size=hidden_size,
+                    top_k=top_k,
+                ):
+                    dist.all_gather(list(split_hidden_states), hidden_states, self.moe_config.tp_group.device_group)
                 hidden_states = gathered_hidden_states
 
             if self.num_tokens < hidden_states.shape[0]:
-                hidden_states = hidden_states[: self.num_tokens]
+                global_tokens, rank_local_tokens, hidden_size, top_k = self._profile_shape(hidden_states)
+                with moe_profile_component(
+                    self._profile_backend(),
+                    "finalize.unpad",
+                    global_tokens=global_tokens,
+                    rank_local_tokens=rank_local_tokens,
+                    hidden_size=hidden_size,
+                    top_k=top_k,
+                ):
+                    hidden_states = hidden_states[: self.num_tokens]
 
         return hidden_states
 
@@ -271,8 +343,16 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
         mc2_mask = _EXTRA_CTX.mc2_mask
         if self.tp_size > 1:
             # Also slice mc2_mask
-            split_mc2_mask = torch.tensor_split(mc2_mask, self.tp_size, dim=0)
-            mc2_mask = split_mc2_mask[self.tp_rank]
+            with moe_profile_component(
+                self._profile_backend(),
+                "prepare.mc2_mask_split",
+                global_tokens=hidden_states.shape[0],
+                rank_local_tokens=(hidden_states.shape[0] + self.tp_size - 1) // self.tp_size,
+                hidden_size=hidden_states.shape[-1],
+                top_k=int(getattr(self.moe_config, "experts_per_token", 0) or 0),
+            ):
+                split_mc2_mask = torch.tensor_split(mc2_mask, self.tp_size, dim=0)
+                mc2_mask = split_mc2_mask[self.tp_rank]
 
         padded_hidden_states_shape = hidden_states.shape
         if not self.replace_allreduce:
@@ -282,14 +362,30 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
 
             # Pad if necessary (unless shared expert DP is enabled)
             if pad_size > 0 and not self.enable_shared_expert_dp:
-                hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
-                router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
+                with moe_profile_component(
+                    self._profile_backend(),
+                    "prepare.padding",
+                    global_tokens=self.num_tokens,
+                    rank_local_tokens=(self.num_tokens + self.tp_size - 1) // self.tp_size,
+                    hidden_size=hidden_states.shape[-1],
+                    top_k=int(getattr(self.moe_config, "experts_per_token", 0) or 0),
+                ):
+                    hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
+                    router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
                 padded_hidden_states_shape = hidden_states.shape
 
             # Slice across TP ranks
             if self.tp_size > 1 and not self.enable_shared_expert_dp:
-                split_hidden_states = torch.tensor_split(hidden_states, self.tp_size, dim=0)
-                split_router_logits = torch.tensor_split(router_logits, self.tp_size, dim=0)
+                with moe_profile_component(
+                    self._profile_backend(),
+                    "prepare.tensor_split",
+                    global_tokens=self.num_tokens,
+                    rank_local_tokens=(self.num_tokens + self.tp_size - 1) // self.tp_size,
+                    hidden_size=hidden_states.shape[-1],
+                    top_k=int(getattr(self.moe_config, "experts_per_token", 0) or 0),
+                ):
+                    split_hidden_states = torch.tensor_split(hidden_states, self.tp_size, dim=0)
+                    split_router_logits = torch.tensor_split(router_logits, self.tp_size, dim=0)
                 hidden_states = split_hidden_states[self.tp_rank]
                 router_logits = split_router_logits[self.tp_rank]
 
