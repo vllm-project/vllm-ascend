@@ -979,10 +979,12 @@ settings.
 
 !!! warning
 
-    This feature is experimental. End-to-end P/D output equivalence remains
-    unverified, including when prefix caching is enabled. Configurations with
-    PP, PCP or DCP greater than 1 are also unverified and may be subject to other
-    parallelism constraints.
+    This feature is experimental. An A5 P/D functional test with PP4/TP8 on
+    Prefill and DP4/TP8/DCP8 on Decode passed with PCP=1, using an experimental
+    image with modified parallelism checks. This does not establish correctness
+    for the unmodified PR, PCP greater than 1, or other parallel configurations.
+    End-to-end P/D output equivalence remains unverified, including when prefix
+    caching is enabled.
 
 ## Synthetic Rejection Sampling
 
