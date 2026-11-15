@@ -1,0 +1,6 @@
+pr: 21901
+entries:
+  - category: performance
+    text: Improved Qwen4Exp HyperConnection gate-mix latency for large prefill batches on Ascend A3.
+    model: qwen4exp
+    hardware: [A3]
