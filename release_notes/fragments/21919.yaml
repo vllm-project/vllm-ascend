@@ -1,0 +1,5 @@
+pr: 21919
+entries:
+  - category: performance
+    text: Ordinary pure GQA models now keep K and V caches contiguous by default, removing avoidable full-cache materialization during Ascend decode.
+    highlight: true
