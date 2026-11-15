@@ -128,12 +128,17 @@ def append_grouped_failure(body: str, inputs: dict, daily_run_url: str) -> str:
         body = FAILURE_ENTRY_PATTERN.sub("", body).rstrip()
         for name in sections:
             body += f"\n\n## {name}\n\n" + "".join(entries[name]) + "\n" + section_ends[name]
+    for name, marker in section_ends.items():
+        body = re.sub(rf"(?m)^## {name}\n\s*(?={re.escape(marker)})", "", body)
     # Selected tests execute in the Daily run; Nightly runs are dispatched separately.
     if f"<!-- daily-failure:{event_id(inputs)} -->" in body:
         return body
     name = "UT" if inputs["run_url"] == daily_run_url else "Nightly"
     marker = section_ends[name]
-    return body.replace(marker, failure_entry(inputs) + "\n" + marker, 1)
+    entry = failure_entry(inputs)
+    if f"## {name}\n" not in body:
+        entry = f"## {name}\n\n" + entry
+    return body.replace(marker, entry + "\n" + marker, 1)
 
 
 def publish_failure(client: GitHubClient, inputs: dict, server_url: str) -> int:
