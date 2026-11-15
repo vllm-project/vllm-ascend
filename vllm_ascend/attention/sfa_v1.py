@@ -371,7 +371,8 @@ class AscendSFABackend(AttentionBackend):
             width = get_tq_fused_slot_bytes(spec.kv_lora_rank, spec.qk_rope_head_dim)
         else:
             width = get_sfa_qsfa_packed_head_dim(spec.kv_lora_rank, spec.qk_rope_head_dim, SFA_QSFA_TILE_SIZE)
-        return replace(spec, head_size=width)
+        # mypy --follow-imports skip cannot see the upstream dataclass fields.
+        return replace(spec, head_size=width)  # type: ignore[call-arg]
 
     accept_output_buffer: bool = True
 

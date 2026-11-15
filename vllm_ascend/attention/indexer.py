@@ -150,7 +150,8 @@ class AscendSFAIndexerCache(DeepseekV32IndexerCache):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> AscendSFAIndexerCacheSpec | None:
         if not self.cache_enabled:
             return None
-        return replace(self.cache_spec, block_size=vllm_config.cache_config.block_size)
+        # mypy --follow-imports skip cannot see the upstream dataclass fields.
+        return replace(self.cache_spec, block_size=vllm_config.cache_config.block_size)  # type: ignore[call-arg]
 
     def get_attn_backend(self):
         return AscendSFAIndexerBackend
