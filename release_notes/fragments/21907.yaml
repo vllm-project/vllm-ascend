@@ -1,0 +1,6 @@
+pr: 21907
+entries:
+  - category: performance
+    text: Reduced All2AllV MoE dispatch host synchronization on Ascend by using pinned asynchronous split copies and a single event wait.
+    model: Qwen3.8-Flash-Next
+    hardware: [A3]
