@@ -41,9 +41,12 @@ def test_hc_gate_mix_row_block_dispatch_is_scoped_by_capability(
     legacy = _KernelRecorder()
     row_block = _KernelRecorder()
     requested_capabilities: list[HardwareCapability] = []
-    profile = SimpleNamespace(
-        supports=lambda capability: requested_capabilities.append(capability) or row_block_supported,
-    )
+
+    def supports(capability: HardwareCapability) -> bool:
+        requested_capabilities.append(capability)
+        return row_block_supported
+
+    profile = SimpleNamespace(supports=supports)
     monkeypatch.setattr(hc, "_hc_gate_mix_kernel", legacy)
     monkeypatch.setattr(hc, "_hc_gate_mix_row_block_kernel", row_block)
     monkeypatch.setattr(hc, "get_current_hardware_profile", lambda: profile)
