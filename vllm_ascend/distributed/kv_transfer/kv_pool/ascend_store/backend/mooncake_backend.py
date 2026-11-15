@@ -337,8 +337,6 @@ class MooncakeBackend(Backend):
         pp_size = parallel.pipeline_parallel_size
         pcp_size = parallel_size("prefill_context_parallel_size")
         pcp_sharded_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
-        if pcp_size > 1 and (getattr(vllm_config, "additional_config", None) or {}).get("enable_kvpp", False):
-            raise ValueError("Mooncake layerwise PCP does not support enable_kvpp layer-sharded caches")
         if pp_size > 1:
             logger.info(
                 "Mooncake PP namespace=%s rank=%d pp_size=%d config_block_size=%s group_block_sizes=%s",

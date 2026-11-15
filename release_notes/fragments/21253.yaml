@@ -1,0 +1,8 @@
+pr: 21253
+entries:
+  - category: feature
+    text: >-
+      Mooncake layerwise KV pooling now supports PCP together with KVPP for
+      non-hybrid MLA/SFA models. Each target layer is persisted by a single
+      TP x PCP owner, so pool capacity and read traffic no longer scale with
+      PCP. Producer and consumer must use matching TP, PP, and PCP sizes.
