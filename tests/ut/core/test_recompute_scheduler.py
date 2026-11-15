@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 import pytest
+from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.sched.request_queue import SchedulingPolicy
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
@@ -392,6 +393,59 @@ def _make_mm_recompute_scheduler():
     scheduler.encoder_cache_manager = ScoreEncoderCacheManager(8, config)
     scheduler.max_num_encoder_input_tokens = 32
     return scheduler
+
+
+@pytest.mark.parametrize("stall_reason", ["encoder-budget", "encoder-cache"])
+@pytest.mark.parametrize("queue_state", ["waiting", "kv-holder", "all-stalled"])
+def test_waiting_encoder_stall_allows_later_request(stall_reason, queue_state):
+    config = make_dyntra_test_config(block_size=16)
+    config.kv_transfer_config = None
+    config.cache_config.enable_prefix_caching = False
+    scheduler = create_dyntra_lb_scheduler(config, scheduler_cls=RecomputeScheduler)
+    scheduler.encoder_cache_manager = EncoderCacheManager(1 if stall_reason == "encoder-cache" else 256)
+    scheduler.max_num_encoder_input_tokens = 0 if stall_reason == "encoder-budget" else 256
+
+    stalled = make_mm_request("stalled", [("image", [True] * 50)])
+    if queue_state == "kv-holder":
+        assert scheduler.kv_cache_manager.allocate_slots(stalled, 10) is not None
+        stalled.num_computed_tokens = 10
+    held_blocks = scheduler.kv_cache_manager.get_block_ids(stalled.request_id)
+    scheduler.add_request(stalled)
+    if queue_state == "all-stalled":
+        second_stalled = make_mm_request("second-stalled", [("second-image", [True] * 50)])
+        scheduler.add_request(second_stalled)
+    else:
+        ready = create_request(request_id=1)
+        scheduler.add_request(ready)
+
+    output = scheduler.schedule()
+
+    if queue_state == "all-stalled":
+        assert not output.num_scheduled_tokens
+        assert list(scheduler.waiting) == [stalled, second_stalled]
+        assert scheduler.deferred_waiting == {stalled, second_stalled}
+        # Repeated stalls must neither drop requests nor enqueue them twice.
+        assert not scheduler.schedule().num_scheduled_tokens
+        assert list(scheduler.waiting) == [stalled, second_stalled]
+        scheduler.encoder_cache_manager = EncoderCacheManager(256)
+        scheduler.max_num_encoder_input_tokens = 256
+        resumed = scheduler.schedule()
+        assert stalled.request_id in resumed.num_scheduled_tokens
+        assert second_stalled.request_id in resumed.num_scheduled_tokens
+        assert stalled not in scheduler.deferred_waiting
+        assert second_stalled not in scheduler.deferred_waiting
+        return
+
+    assert output.num_scheduled_tokens[ready.request_id] > 0
+    assert stalled.request_id not in output.num_scheduled_tokens
+    assert stalled in scheduler.deferred_waiting
+    if queue_state == "kv-holder":
+        assert list(scheduler.kv_holding_waiting) == [stalled]
+        assert stalled not in scheduler.waiting
+        assert scheduler.kv_cache_manager.get_block_ids(stalled.request_id) == held_blocks
+    else:
+        assert list(scheduler.waiting) == [stalled]
+        assert stalled not in scheduler.kv_holding_waiting
 
 
 @pytest.mark.skipif(

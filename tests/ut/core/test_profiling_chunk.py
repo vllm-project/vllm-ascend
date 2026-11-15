@@ -17,10 +17,12 @@
 from contextlib import ExitStack
 from unittest.mock import MagicMock, PropertyMock, patch
 
+import pytest
 import torch
 from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
+from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.interface import PauseState
@@ -31,6 +33,7 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
 from tests.ut.base import TestBase
+from tests.ut.core.test_score_encoder_cache_scheduler import _request as make_mm_request
 from vllm_ascend.ascend_config import ProfilingChunkConfig, clear_ascend_config, init_ascend_config
 from vllm_ascend.core.profiling_chunk_predictor import ChunkSizePredictor, ProfilingChunkManager
 from vllm_ascend.core.scheduler_profiling_chunk import ProfilingChunkAsyncScheduler, ProfilingChunkScheduler
@@ -299,6 +302,7 @@ class TestProfilingChunkScheduler(TestBase):
         _mock_profiling_init_ascend_config,
         mock_balance_init_ascend_config,
         srf_enabled=False,
+        enable_prefix_caching=True,
     ):
         profiling_cfg = MagicMock()
         profiling_cfg.enabled = True
@@ -346,6 +350,7 @@ class TestProfilingChunkScheduler(TestBase):
             block_size=BLOCK_SIZE,
             gpu_memory_utilization=0.9,
             cache_dtype="auto",
+            enable_prefix_caching=enable_prefix_caching,
         )
 
         vllm_config = VllmConfig(
@@ -737,6 +742,7 @@ class TestProfilingChunkAsyncScheduler(TestBase):
         _mock_profiling_init_ascend_config,
         mock_balance_init_ascend_config,
         srf_enabled=False,
+        enable_prefix_caching=True,
         async_scheduling=True,
         pipeline_parallel_size=1,
     ):
@@ -1000,3 +1006,62 @@ class TestProfilingChunkAsyncScheduler(TestBase):
             scheduler.waiting,
             ShortRequestFirstRequestQueue,
         )
+
+
+@pytest.mark.parametrize("stall_reason", ["encoder-budget", "encoder-cache"])
+@pytest.mark.parametrize("queue_state", ["waiting", "kv-holder", "all-stalled"])
+def test_waiting_encoder_stall_allows_later_request(stall_reason, queue_state, monkeypatch):
+    scheduler = TestProfilingChunkScheduler().create_scheduler(enable_prefix_caching=False)
+    scheduler.encoder_cache_manager = EncoderCacheManager(1 if stall_reason == "encoder-cache" else 256)
+    scheduler.max_num_encoder_input_tokens = 0 if stall_reason == "encoder-budget" else 256
+
+    original = scheduler._try_schedule_encoder_inputs
+
+    def schedule_encoder_inputs(*args, **kwargs):
+        result = original(*args, **kwargs)
+        # Isolate the legacy four-item caller from the upstream API change.
+        assert len(result) == 4 or result[4] == []
+        return result[:4]
+
+    monkeypatch.setattr(scheduler, "_try_schedule_encoder_inputs", schedule_encoder_inputs)
+    stalled = make_mm_request("stalled", [("image", [True] * 50)])
+    if queue_state == "kv-holder":
+        assert scheduler.kv_cache_manager.allocate_slots(stalled, 10) is not None
+        stalled.num_computed_tokens = 10
+    held_blocks = scheduler.kv_cache_manager.get_block_ids(stalled.request_id)
+    scheduler.add_request(stalled)
+    if queue_state == "all-stalled":
+        second_stalled = make_mm_request("second-stalled", [("second-image", [True] * 50)])
+        scheduler.add_request(second_stalled)
+    else:
+        ready = create_requests(1, request_id_prefix="ready-")[0]
+        scheduler.add_request(ready)
+
+    output = scheduler.schedule()
+
+    if queue_state == "all-stalled":
+        assert not output.num_scheduled_tokens
+        assert list(scheduler.waiting) == [stalled, second_stalled]
+        assert scheduler.deferred_waiting == {stalled, second_stalled}
+        # Repeated stalls must neither drop requests nor enqueue them twice.
+        assert not scheduler.schedule().num_scheduled_tokens
+        assert list(scheduler.waiting) == [stalled, second_stalled]
+        scheduler.encoder_cache_manager = EncoderCacheManager(256)
+        scheduler.max_num_encoder_input_tokens = 256
+        resumed = scheduler.schedule()
+        assert stalled.request_id in resumed.num_scheduled_tokens
+        assert second_stalled.request_id in resumed.num_scheduled_tokens
+        assert stalled not in scheduler.deferred_waiting
+        assert second_stalled not in scheduler.deferred_waiting
+        return
+
+    assert output.num_scheduled_tokens[ready.request_id] > 0
+    assert stalled.request_id not in output.num_scheduled_tokens
+    assert stalled in scheduler.deferred_waiting
+    if queue_state == "kv-holder":
+        assert list(scheduler.kv_holding_waiting) == [stalled]
+        assert stalled not in scheduler.waiting
+        assert scheduler.kv_cache_manager.get_block_ids(stalled.request_id) == held_blocks
+    else:
+        assert list(scheduler.waiting) == [stalled]
+        assert stalled not in scheduler.kv_holding_waiting
