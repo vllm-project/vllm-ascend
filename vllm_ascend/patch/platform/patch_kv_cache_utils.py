@@ -37,7 +37,9 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_pool_bytes_per_block,
 )
 from vllm_ascend.models.kimi_k3.paired_sfa_cache import (
-    paired_sfa_cache_config, paired_sfa_max_memory, paired_sfa_pool_bytes,
+    paired_sfa_cache_config,
+    paired_sfa_max_memory,
+    paired_sfa_pool_bytes,
 )
 from vllm_ascend.models.qwen4_exp.cache_config import (
     get_qwen4_exp_kv_cache_config,
@@ -55,7 +57,6 @@ from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACH
 from vllm_ascend.quantization.methods.kv_cache.turboquant import cache as tq_cache
 from vllm_ascend.utils import vllm_version_is
 
-_orig_get_kv_cache_groups_uniform_page_size = _kv_cache_planning._get_kv_cache_groups_uniform_page_size
 _orig_get_packed_kv_cache_groups = _kv_cache_planning._get_packed_kv_cache_groups
 _orig_annotate_eagle_groups = getattr(_kv_cache_planning, "_annotate_eagle_groups", None)
 _orig_get_kv_cache_config_from_groups = _kv_cache_planning.get_kv_cache_config_from_groups
@@ -71,15 +72,6 @@ def _page_sizes(spec: UniformTypeKVCacheSpecs) -> set[int]:
     lanes, so compute it inline.
     """
     return {s.page_size_bytes for s in spec.kv_cache_specs.values()}
-
-
-def _get_kv_cache_groups_uniform_page_size(
-    kv_cache_spec: dict[str, KVCacheSpec],
-) -> list[KVCacheGroupSpec]:
-    kimi_k3_groups = _get_kimi_k3_dspark_mixed_kv_cache_groups(kv_cache_spec)
-    if kimi_k3_groups is not None:
-        return kimi_k3_groups
-    return _orig_get_kv_cache_groups_uniform_page_size(kv_cache_spec)
 
 
 def group_and_unify_kv_cache_specs(
@@ -624,7 +616,6 @@ assert _orig_get_packed_kv_cache_groups is not None
 if _orig_annotate_eagle_groups is not None:
     _kv_cache_planning._annotate_eagle_groups = _ascend_annotate_eagle_groups
 _kv_cache_planning._get_packed_kv_cache_groups = _ascend_get_packed_kv_cache_groups
-_kv_cache_planning._get_kv_cache_groups_uniform_page_size = _get_kv_cache_groups_uniform_page_size
 _kv_cache_planning.get_kv_cache_config_from_groups = _ascend_get_kv_cache_config_from_groups
 _kv_cache_planning._max_memory_usage_bytes_from_groups = _ascend_max_memory_usage_bytes_from_groups
 _kv_cache_planning._pool_bytes_per_block = _ascend_pool_bytes_per_block

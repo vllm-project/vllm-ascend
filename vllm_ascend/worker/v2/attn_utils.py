@@ -153,8 +153,6 @@ def ring_state_update_skipped() -> bool:
     return _SKIP_RING_STATE_UPDATE.get()
 
 
-
-
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     """Build Ascend-specific KV cache specs for v2 worker patching."""
     kv_cache_spec: dict[str, KVCacheSpec] = {}
