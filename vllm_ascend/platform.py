@@ -1503,9 +1503,9 @@ def _setup_compile_backend(
                 "vllm::glm5next_kda_forward_with_output",
             ]
         )
-        additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
-        additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
-        additional_config["ascend_compilation_config"]["enable_super_kernel"] = False
+        # npugraph_ex compiles each piece (force_eager) and runs the static/
+        # super kernel passes per piece; keep the user's
+        # ascend_compilation_config flags untouched for PIECEWISE.
     elif compilation_config.cudagraph_mode.has_full_cudagraphs():
         # Don't split the FX graph for static kernel; it would compile multiple times.
         compilation_config.splitting_ops = []

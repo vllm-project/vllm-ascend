@@ -161,7 +161,14 @@ def _configure_backend(
 
             options["static_kernel_compile"] = True
             # Set sym_range to limit static kernel compilation to specified batch sizes.
-            options["_vllm_aclnn_static_kernel_sym_range"] = _compute_decode_cudagraph_batch_sizes(vllm_config)
+            # PIECEWISE graphs capture and replay exactly at the cudagraph capture
+            # sizes, so compile those shapes; other routes use decode batch sizes.
+            if vllm_config.compilation_config.cudagraph_mode.requires_piecewise_compilation():
+                options["_vllm_aclnn_static_kernel_sym_range"] = list(
+                    vllm_config.compilation_config.cudagraph_capture_sizes or []
+                )
+            else:
+                options["_vllm_aclnn_static_kernel_sym_range"] = _compute_decode_cudagraph_batch_sizes(vllm_config)
             if ascend_compilation_config.enable_super_kernel:
                 options["super_kernel_optimize"] = True
                 options["super_kernel_optimize_options"] = {
