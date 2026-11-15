@@ -144,7 +144,8 @@ Both warmups run on a background thread during weight loading. The worker waits 
 
 **eplb_config**
 
-Accepts `load_collection_phase` and `stair_config`. Configure upstream EPLB
+Accepts `load_collection_phase`, `mrv2_placement_export_path`, and
+`stair_config`. Configure upstream EPLB
 through `--enable-eplb` and `--eplb-config`. Ascend uses the STAIR policy by
 default and moves expert weights asynchronously over HIXL when it is available
 on every EPLB rank, falling back to Gloo CPU staging otherwise. Select
@@ -162,7 +163,14 @@ removed. They no longer take effect.
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `load_collection_phase` | str | `"all"` | Select `"all"`, `"prefill"`, or `"decode"` load submission. Only effective with the STAIR policy; a value other than `"all"` requires `--enable-eplb`. Any batch containing a prefill request is classified entirely as prefill. |
+| `mrv2_placement_export_path` | str | `None` | Atomically export the active physical-to-logical expert map and model metadata after asynchronous EPLB commits. Requires EPLB enabled, PP=1, elastic EP disabled, and a single EP group covering all worker ranks. |
 | `stair_config` | dict | `{}` | Advanced STAIR policy tuning. See the [tuning suggestions table](../feature_guide/expert_parallelism_load_balancer.md#tuning-suggestions) for all fields, defaults, and ranges. |
+
+For example, with EPLB enabled in MRV2, pass
+`--additional-config '{"eplb_config":{"mrv2_placement_export_path":"/tmp/eplb-placement.json"}}'`.
+EP rank 0 replaces this file after each committed rearrangement. Use a distinct path
+per engine. Each model entry stores one map row per MoE layer in execution order.
+Set the model revision explicitly to record it in the snapshot.
 
 **scheduler_config**
 

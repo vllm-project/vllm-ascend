@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
+import json
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -18,6 +20,7 @@ from vllm_ascend.distributed.eplb.eplb_state import (
     AscendEplbLayerState,
     AscendEplbState,
 )
+from vllm_ascend.distributed.eplb.placement import write_placement_snapshot
 from vllm_ascend.distributed.eplb.policy.stair import StairEplbPolicy
 
 
@@ -334,6 +337,77 @@ def test_sync_rearrange_refreshes_all_model_routing_tables(monkeypatch):
 
     assert result is sentinel
     refresh.assert_called_once_with(model_states["model"])
+
+
+@pytest.mark.parametrize("in_progress,ep_rank", [(False, 0), (True, 0), (False, 1)])
+def test_exports_placement_only_on_writer_after_all_models_commit(monkeypatch, tmp_path, in_progress, ep_rank):
+    path = tmp_path / "placement.json"
+    committed = torch.tensor([[1, 0, 0, 1]])
+    model_state = SimpleNamespace(
+        model=SimpleNamespace(num_logical_experts=2, num_physical_experts=4),
+        physical_to_logical_map=committed,
+        rebalanced=in_progress,
+    )
+
+    monkeypatch.setattr(eplb_state, "get_ep_group", lambda: SimpleNamespace(rank_in_group=ep_rank, world_size=2))
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 2)
+    state = AscendEplbState.__new__(AscendEplbState)
+    state.model_states = {}
+    state._placement_export = None
+    state.enable_placement_export(str(path))
+    state.model_states["target"] = model_state
+    state._placement_models = {"target": {"model": "test-moe", "revision": "r1"}}
+    state._export_committed_placement()
+
+    if in_progress or ep_rank != 0:
+        assert not path.exists()
+    else:
+        assert json.loads(path.read_text(encoding="utf-8")) == {
+            "version": 1,
+            "ep_size": 2,
+            "models": {
+                "target": {
+                    "model": "test-moe",
+                    "revision": "r1",
+                    "num_logical_experts": 2,
+                    "num_redundant_experts": 2,
+                    "physical_to_logical_map": committed.tolist(),
+                }
+            },
+        }
+
+
+def test_placement_export_rejects_invalid_setup(monkeypatch, tmp_path):
+    path = str(tmp_path / "placement.json")
+    state = AscendEplbState.__new__(AscendEplbState)
+    state.model_states = {}
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
+    with pytest.raises(RuntimeError, match="initialized distributed worker groups"):
+        state.enable_placement_export(path)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 4)
+    monkeypatch.setattr(eplb_state, "get_ep_group", lambda: SimpleNamespace(world_size=2))
+    with pytest.raises(ValueError, match="single EP group"):
+        state.enable_placement_export(path)
+    state.model_states["target"] = object()
+    with pytest.raises(RuntimeError, match="before registering EPLB models"):
+        state.enable_placement_export(path)
+
+
+def test_placement_snapshot_keeps_previous_file_if_replace_fails(monkeypatch, tmp_path):
+    path = tmp_path / "placement.json"
+    path.write_text('{"version": 1}', encoding="utf-8")
+
+    def fail_replace(self, target):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+    with pytest.raises(OSError, match="replace failed"):
+        write_placement_snapshot(str(path), {"version": 2})
+
+    assert json.loads(path.read_text(encoding="utf-8")) == {"version": 1}
+    assert list(tmp_path.iterdir()) == [path]
 
 
 def test_async_rearrange_defers_routing_refresh_to_workspace_hook(monkeypatch):

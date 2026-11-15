@@ -94,7 +94,7 @@ _MINIMAX_M3_ARCHITECTURES = frozenset(
         "MiniMaxM3SparseForConditionalGeneration",
     }
 )
-_V2_EPLB_CONFIG_FIELDS = frozenset({"load_collection_phase", "stair_config"})
+_V2_EPLB_CONFIG_FIELDS = frozenset({"load_collection_phase", "mrv2_placement_export_path", "stair_config"})
 _V2_STAIR_CONFIG_FIELDS = frozenset(StairConfig.__dataclass_fields__)
 
 
