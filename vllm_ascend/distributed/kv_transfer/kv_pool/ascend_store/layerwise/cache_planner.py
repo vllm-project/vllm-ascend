@@ -274,9 +274,6 @@ def plan_layerwise_cache_reuse(
         return None
     if vllm_config.parallel_config.pipeline_parallel_size > 1:
         return None
-    # Rotating buffers need a separate admission path for HBM prefix hits.
-    if vllm_config.cache_config.enable_prefix_caching:
-        return None
     extra_config = get_layerwise_offload_config(getattr(vllm_config, "kv_transfer_config", None))
     if extra_config is None:
         return None
