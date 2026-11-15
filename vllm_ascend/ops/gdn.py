@@ -63,6 +63,18 @@ def _get_fla_gdn_prefill_op():
     return chunk_gated_delta_rule_fwd
 
 
+def _is_padded_state_cache(ssm_state: torch.Tensor) -> bool:
+    """Report whether ``ssm_state`` is a view over padded physical pages.
+
+    Under the hybrid KV-cache manager the recurrent state cache is a strided view
+    whose leading stride exceeds one state row. Generic advanced indexing
+    (``ssm_state[indices]``) copies the whole cache before gathering on NPU, which
+    costs one full-cache allocation per prefill step, so such views are read and
+    written row by row instead.
+    """
+    return ssm_state.stride(0) != ssm_state[0].numel()
+
+
 def _get_base_conv1d(layer: nn.Module) -> nn.Module:
     """Return the convolution module owning the base weight.
 
@@ -836,8 +848,23 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     last_recurrent_state,
                 )
             else:
-                initial_state = ssm_state[prefill_state_indices].transpose(-1, -2).contiguous()
-                clear_ssm_states(initial_state, prefill_has_initial_state)
+                # Read and write only the selected rows when the cache is a view over
+                # padded physical pages: advanced indexing would materialize the whole
+                # cache first, which is one ~full-cache allocation per prefill step.
+                padded_state = _is_padded_state_cache(ssm_state)
+                if padded_state:
+                    initial_state = (
+                        gather_ssm_states(
+                            ssm_state,
+                            prefill_state_indices,
+                            prefill_has_initial_state,
+                        )
+                        .transpose(-1, -2)
+                        .contiguous()
+                    )
+                else:
+                    initial_state = ssm_state[prefill_state_indices].transpose(-1, -2).contiguous()
+                    clear_ssm_states(initial_state, prefill_has_initial_state)
                 (core_attn_out_non_spec, last_recurrent_state) = chunk_gated_delta_rule(
                     q=query_non_spec,
                     k=key_non_spec,
@@ -851,9 +878,11 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     head_first=False,
                     use_qk_l2norm_in_kernel=True,
                 )
-                ssm_state[prefill_state_indices] = (
-                    last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
-                )
+                final_state = last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
+                if padded_state:
+                    scatter_ssm_states_(ssm_state, prefill_state_indices, final_state)
+                else:
+                    ssm_state[prefill_state_indices] = final_state
             if split_non_spec:
                 core_attn_out_non_spec = torch.cat(
                     [core_attn_out_decode, core_attn_out_non_spec],
