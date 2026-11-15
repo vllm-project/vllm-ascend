@@ -98,7 +98,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_pl
     plan_layerwise_cache_reuse,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    get_layerwise_reuse_backing_bytes,
     with_layerwise_reuse_layout,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
@@ -1235,8 +1234,6 @@ class NPUWorker(WorkerBase):
                 reuse_layout.kv_cache_tensors[0].size,
                 reuse_layout.independent_layers,
             )
-        elif get_layerwise_reuse_backing_bytes(kv_cache_config) is not None:
-            raise RuntimeError("Worker could not rebuild the KV offload layout budgeted by Core.")
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
         # Restrict the discardable kv_cache pool to backing cache allocations.
         # Persistent metadata created during initialize_kv_cache must stay
