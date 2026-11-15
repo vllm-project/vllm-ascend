@@ -30,6 +30,13 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_mod
 
 Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
+The deployment commands on this page use MTP for speculative decoding. On
+A3, GLM-5.3-Flash also supports DFlash2 speculative decoding with
+Model Runner V2: configure `"method": "dflash"` and use a matching
+`DFlash2DraftModel` checkpoint. See
+the [speculative decoding guide](../../user_guide/feature_guide/speculative_decoding.md)
+for details.
+
 All deployment examples on this page use Model Runner V2 with
 `VLLM_USE_V2_MODEL_RUNNER=1`. Every PD Prefill role uses PCP8 with TP1;
 Decode keeps PCP1.
