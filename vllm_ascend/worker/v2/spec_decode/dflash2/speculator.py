@@ -312,7 +312,6 @@ class AscendDFlash2Speculator(DFlash2Speculator, AscendDFlashSpeculator):
                 local_slots = build_slot_mappings_by_layer(
                     self.block_tables.slot_mappings[:, :local_tokens],
                     self.kv_cache_config,
-                    self.attn_groups,
                 )
                 super()._generate_draft(
                     local_count, local_tokens, local_metadata, local_slots, None, CUDAGraphMode.NONE

@@ -29,6 +29,7 @@ def buffers_cls():
 
 
 def make_spec(num_reqs, steps=2, capacity=40):
+    capacity = max(capacity, num_reqs)
     width = steps + 1
     tokens = capacity * width
     # Deliberately non-contiguous persistent request slots.
@@ -61,8 +62,8 @@ def make_spec(num_reqs, steps=2, capacity=40):
     )
 
 
-@pytest.mark.parametrize("num_reqs", [0, 1, 7, 8, 9, 32])
-@pytest.mark.parametrize("steps", [1, 2, 4])
+@pytest.mark.parametrize("num_reqs", [0, 1, 7, 8, 9, 32, 64])
+@pytest.mark.parametrize("steps", [1, 2, 4, 7])
 def test_query_blocks_preserve_request_state_and_shared_inputs(buffers_cls, num_reqs, steps):
     spec = make_spec(num_reqs, steps)
     width = spec.num_query_per_req
@@ -100,7 +101,7 @@ def test_query_blocks_preserve_request_state_and_shared_inputs(buffers_cls, num_
         torch.testing.assert_close(table, original)
 
 
-@pytest.mark.parametrize("num_reqs", [0, 1, 7, 8, 9, 32])
+@pytest.mark.parametrize("num_reqs", [0, 1, 7, 8, 9, 32, 64])
 def test_all_ranks_collect_disjoint_proposals_in_global_order(buffers_cls, num_reqs):
     world_size = 8
     barrier = Barrier(world_size, timeout=30)
@@ -217,7 +218,8 @@ def worker_module(monkeypatch, buffers_cls):
     vocab = SimpleNamespace(STANDARD="standard", REPLICATED="replicated", PCP_X_TP="pcp", FINE_GRAINED="fine")
     cg = SimpleNamespace(NONE="none", FULL="full")
 
-    def slots_by_layer(slots, config, groups):
+    # Both v0.33.0 and the verified upstream main helper take two arguments.
+    def slots_by_layer(slots, config):
         return {"draft": slots[1]}
 
     stubs = {
