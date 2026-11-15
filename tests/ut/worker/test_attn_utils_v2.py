@@ -1216,6 +1216,9 @@ def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(
     layer.impl.fa_quant_layer = False
     layer.impl.store_kv_cache_on_host = True
     layer.num_heads = 12
+    layer.kv_lora_rank = 512
+    layer.qk_rope_head_dim = 64
+    layer.attn_backend = AscendMLABackend
     layer.model_version = None
     layer.indexes_kv_by_block_stride = False
     layer.is_draft_layer = is_draft_layer
