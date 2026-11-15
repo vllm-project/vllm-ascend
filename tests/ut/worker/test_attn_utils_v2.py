@@ -27,7 +27,11 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention import dsa_attn_kv_plan, dsa_v1
 from vllm_ascend.attention import utils as attention_utils
-from vllm_ascend.attention.attention_c8_mxfp import mxfp_cache_spec, mxfp_paged_cache_views
+from vllm_ascend.attention.attention_c8_mxfp import (
+    AscendC8MXFPAttentionBackendImpl,
+    mxfp_cache_spec,
+    mxfp_paged_cache_views,
+)
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackend,
     AscendAttentionBackendImpl,
@@ -123,16 +127,39 @@ def _configure_pa_allocation_check(monkeypatch, vllm_config, pa_enabled):
     )
 
 
+@pytest.mark.parametrize(
+    ("is_hybrid", "use_mla", "padded", "cache_dtype", "expected"),
+    [
+        (False, False, False, "auto", True),
+        (True, False, False, "auto", False),
+        (False, True, False, "auto", False),
+        (False, False, True, "auto", False),
+        (None, False, False, "auto", False),
+        (False, False, False, "mxfp8", False),
+    ],
+)
+def test_uses_contiguous_gqa_kv_cache(is_hybrid, use_mla, padded, cache_dtype, expected):
+    spec = FullAttentionSpec(block_size=8, num_kv_heads=2, head_size=128, dtype=torch.bfloat16)
+    if padded:
+        spec = replace(spec, page_size_padded=spec.real_page_size_bytes + 64)
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(cache_dtype=cache_dtype),
+        model_config=SimpleNamespace(is_hybrid=is_hybrid, use_mla=use_mla),
+    )
+
+    assert attn_utils.uses_contiguous_gqa_kv_cache(vllm_config, spec) is expected
+
+
 @pytest.mark.parametrize(("block_size", "kernel_block_size"), [(128, 128), (1152, 128), (2048, 128)])
 @pytest.mark.parametrize("kv_transfer", [False, True])
 @pytest.mark.parametrize(
     ("cache_kind", "pa_enabled"),
     [
         (cache_kind, pa_enabled)
-        for cache_kind in ("full", "sliding_window", "sparse", "full_sparse", "mixed")
+        for cache_kind in ("full", "sliding_window", "sparse", "full_sparse", "mixed", "stage_hybrid", "mla")
         for pa_enabled in (False, True)
     ]
-    + [("c8", True), ("dcp", True)],
+    + [("c8", True), ("c8_mxfp", False), ("c8_mxfp", True), ("dcp", True)],
 )
 def test_main_allocator_attention_layout(
     monkeypatch, block_size, kernel_block_size, kv_transfer, cache_kind, pa_enabled
@@ -164,6 +191,7 @@ def test_main_allocator_attention_layout(
     )
     impl_cls = {
         "c8": AscendC8AttentionBackendImpl,
+        "c8_mxfp": AscendC8MXFPAttentionBackendImpl,
         "dcp": AscendAttentionDCPImpl,
     }.get(cache_kind, AscendAttentionBackendImpl)
     impl = impl_cls.__new__(impl_cls)
@@ -182,9 +210,13 @@ def test_main_allocator_attention_layout(
     )
     vllm_config = SimpleNamespace(
         additional_config={},
-        cache_config=SimpleNamespace(cache_dtype="auto"),
+        cache_config=SimpleNamespace(cache_dtype="mxfp8" if cache_kind == "c8_mxfp" else "auto"),
         kv_transfer_config=object() if kv_transfer else None,
-        model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(),
+            is_hybrid=cache_kind == "stage_hybrid",
+            use_mla=cache_kind == "mla",
+        ),
         parallel_config=SimpleNamespace(decode_context_parallel_size=2 if cache_kind == "dcp" else 1),
         quant_config=None,
     )
@@ -205,6 +237,26 @@ def test_main_allocator_attention_layout(
         kernel_block_sizes=[kernel_block_size],
     )
 
+    if cache_kind == "c8_mxfp":
+        key_cache, value_cache, key_scale_cache, value_scale_cache = kv_caches[layer_name]
+        second_key, second_value, second_key_scale, second_value_scale = kv_caches[second_layer_name]
+        expected_packet_shape = (
+            num_blocks * block_size // kernel_block_size,
+            spec.num_kv_heads,
+            spec.head_size // 32,
+            kernel_block_size,
+            32,
+        )
+        assert key_cache.shape == value_cache.shape == expected_packet_shape
+        assert second_key.shape == second_value.shape == expected_packet_shape
+        assert key_scale_cache.shape == second_key_scale.shape
+        assert value_scale_cache.shape == second_value_scale.shape
+        assert not key_cache.is_contiguous() and not value_cache.is_contiguous()
+        assert key_cache.untyped_storage().data_ptr() == value_cache.untyped_storage().data_ptr()
+        assert key_cache.untyped_storage().data_ptr() == key_scale_cache.untyped_storage().data_ptr()
+        assert key_cache.untyped_storage().data_ptr() != second_key.untyped_storage().data_ptr()
+        return
+
     key_cache, value_cache = kv_caches[layer_name]
     expected_shape = (
         num_blocks * block_size // kernel_block_size,
@@ -218,7 +270,7 @@ def test_main_allocator_attention_layout(
     assert second_key.shape == expected_shape
     assert second_value.shape == expected_shape
     block_elements = kernel_block_size * spec.num_kv_heads * spec.head_size
-    if cache_kind == "c8" or (cache_kind in ("full", "mixed") and not pa_enabled):
+    if cache_kind in ("stage_hybrid", "mla") and not pa_enabled:
         assert not key_cache.is_contiguous()
         assert not value_cache.is_contiguous()
         assert key_cache.stride(0) == value_cache.stride(0) == 2 * block_elements
@@ -233,6 +285,14 @@ def test_main_allocator_attention_layout(
         assert key_cache.is_contiguous()
         assert value_cache.is_contiguous()
         assert key_cache.untyped_storage().data_ptr() != value_cache.untyped_storage().data_ptr()
+        expected_bytes = key_cache.numel() * key_cache.element_size() + (2 * 1024 * 1024 if kv_transfer else 0)
+        assert key_cache.untyped_storage().nbytes() == expected_bytes
+        assert value_cache.untyped_storage().nbytes() == expected_bytes
+        if kv_transfer:
+            assert all(
+                cache.data_ptr() % (2 * 1024 * 1024) == 0
+                for cache in (key_cache, value_cache, second_key, second_value)
+            )
     if cache_kind == "mixed":
         assert second_key.is_contiguous()
         assert second_value.is_contiguous()
@@ -248,6 +308,216 @@ def test_main_allocator_attention_layout(
     assert torch.count_nonzero(value_cache[3:]) == 0
     assert torch.count_nonzero(second_key) == 0
     assert torch.count_nonzero(second_value) == 0
+
+
+@pytest.mark.parametrize("prefill_context_parallel_size", [1, 2])
+@pytest.mark.parametrize("decode_context_parallel_size", [1, 2])
+def test_main_allocator_pure_gqa_uses_separate_contiguous_kv_cache(
+    monkeypatch, prefill_context_parallel_size, decode_context_parallel_size
+):
+    layer_name = "model.layers.0.self_attn.attn"
+    spec = FullAttentionSpec(block_size=8, num_kv_heads=2, head_size=64, dtype=torch.float16)
+    num_blocks = 3
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=num_blocks * spec.page_size_bytes,
+                layers=[layer_name],
+                layer_stride=num_blocks * spec.page_size_bytes,
+                block_stride=spec.page_size_bytes,
+                offset=0,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec)],
+    )
+    impl = AscendAttentionBackendImpl.__new__(AscendAttentionBackendImpl)
+    impl.sliding_window = None
+    layer = SimpleNamespace(
+        get_attn_backend=lambda: AscendAttentionBackend,
+        kv_sharing_target_layer_name=None,
+        num_heads=8,
+        impl=impl,
+    )
+    vllm_config = SimpleNamespace(
+        additional_config={},
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        kv_transfer_config=None,
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(), is_hybrid=False, use_mla=False),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=max(prefill_context_parallel_size, decode_context_parallel_size),
+            prefill_context_parallel_size=prefill_context_parallel_size,
+            decode_context_parallel_size=decode_context_parallel_size,
+        ),
+        quant_config=None,
+    )
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args, **_kwargs: {layer_name: layer})
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda *_args, **_kwargs: False)
+    _configure_pa_allocation_check(monkeypatch, vllm_config, pa_enabled=False)
+
+    kv_caches = attn_utils.allocate_kv_cache_main(
+        kv_cache_config,
+        device=torch.device("cpu"),
+        layout=None,
+        kernel_block_sizes=[spec.block_size],
+    )
+
+    key_cache, value_cache = kv_caches[layer_name]
+    assert key_cache.is_contiguous()
+    assert value_cache.is_contiguous()
+    assert key_cache.untyped_storage().data_ptr() != value_cache.untyped_storage().data_ptr()
+
+
+def test_main_allocator_shared_pure_gqa_aliases_contiguous_owner(monkeypatch):
+    owner_name = "model.layers.0.self_attn.attn"
+    alias_name = "model.layers.1.self_attn.attn"
+    spec = FullAttentionSpec(block_size=2, num_kv_heads=1, head_size=4, dtype=torch.float16)
+    num_blocks = 3
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=num_blocks * spec.page_size_bytes,
+                layers=[owner_name],
+                layer_stride=num_blocks * spec.page_size_bytes,
+                block_stride=spec.page_size_bytes,
+                offset=0,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[owner_name, alias_name], kv_cache_spec=spec)],
+    )
+    impl = AscendAttentionBackendImpl.__new__(AscendAttentionBackendImpl)
+    impl.sliding_window = None
+    layer = SimpleNamespace(
+        get_attn_backend=lambda: AscendAttentionBackend,
+        kv_sharing_target_layer_name=None,
+        num_heads=8,
+        impl=impl,
+    )
+    vllm_config = SimpleNamespace(
+        additional_config={},
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        kv_transfer_config=None,
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(), is_hybrid=False, use_mla=False),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=1,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+        ),
+        quant_config=None,
+    )
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args, **_kwargs: {owner_name: layer})
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda *_args, **_kwargs: False)
+    _configure_pa_allocation_check(monkeypatch, vllm_config, pa_enabled=False)
+    shared_layers = {alias_name: owner_name}
+
+    raw = attn_utils._allocate_kv_cache(config, shared_layers=shared_layers, device=torch.device("cpu"))
+    owner_raw_key, owner_raw_value = raw[owner_name]
+    assert isinstance(raw[owner_name], tuple)
+    assert owner_raw_key.is_contiguous() and owner_raw_value.is_contiguous()
+    assert owner_raw_key.untyped_storage().data_ptr() != owner_raw_value.untyped_storage().data_ptr()
+
+    caches = attn_utils._reshape_kv_cache_v2(
+        attn_groups=[AttentionGroup(AscendAttentionBackend, [owner_name], spec, 0)],
+        kv_cache_raw_tensors=raw,
+        cache_dtype="auto",
+        kernel_block_sizes=[spec.block_size],
+        shared_kv_cache_layers=shared_layers,
+        kv_cache_config=config,
+    )
+    owner_key, owner_value = caches[owner_name]
+    assert caches[alias_name] is caches[owner_name]
+    assert owner_key.shape == owner_value.shape == (num_blocks, spec.block_size, spec.num_kv_heads, spec.head_size)
+    assert owner_key.is_contiguous() and owner_value.is_contiguous()
+    assert owner_key.untyped_storage().data_ptr() != owner_value.untyped_storage().data_ptr()
+
+    alias_key, alias_value = caches[alias_name]
+    alias_key[0].fill_(3)
+    assert torch.all(owner_key[0] == 3)
+    assert torch.count_nonzero(owner_value) == 0
+    alias_value[1].fill_(5)
+    assert torch.all(owner_value[1] == 5)
+    assert torch.count_nonzero(owner_key[1]) == 0
+
+
+@pytest.mark.parametrize("padded_first", [False, True])
+def test_full_attention_allocation_selects_contiguous_layout_per_layer(monkeypatch, padded_first):
+    dense_name = "model.layers.0.self_attn.attn"
+    padded_name = "model.layers.1.self_attn.attn"
+    dense_spec = FullAttentionSpec(block_size=2, num_kv_heads=1, head_size=4, dtype=torch.float16)
+    padded_spec = replace(dense_spec, page_size_padded=64)
+    specs = {dense_name: dense_spec, padded_name: padded_spec}
+    names = [padded_name, dense_name] if padded_first else [dense_name, padded_name]
+    num_blocks = 3
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=num_blocks * specs[name].page_size_bytes,
+                layers=[name],
+                layer_stride=num_blocks * specs[name].page_size_bytes,
+                block_stride=specs[name].page_size_bytes,
+                offset=0,
+            )
+            for name in names
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[name], kv_cache_spec=specs[name]) for name in names],
+    )
+    impl = AscendAttentionBackendImpl.__new__(AscendAttentionBackendImpl)
+    impl.sliding_window = None
+    layers = {name: SimpleNamespace(get_attn_backend=lambda: AscendAttentionBackend, impl=impl) for name in names}
+    vllm_config = SimpleNamespace(
+        additional_config={},
+        kv_transfer_config=None,
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(), is_hybrid=False, use_mla=False),
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        quant_config=None,
+    )
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args, **_kwargs: layers)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda *_args, **_kwargs: False)
+
+    raw = attn_utils._allocate_kv_cache(config, {}, torch.device("cpu"))
+    assert isinstance(raw[dense_name], tuple)
+    assert isinstance(raw[padded_name], torch.Tensor)
+    assert sum(part.numel() for part in raw[dense_name]) == num_blocks * dense_spec.page_size_bytes
+    assert raw[padded_name].numel() == num_blocks * padded_spec.page_size_bytes
+
+    groups = [
+        AttentionGroup(
+            backend=AscendAttentionBackend,
+            layer_names=[name],
+            kv_cache_spec=specs[name],
+            kv_cache_group_id=group_id,
+        )
+        for group_id, name in enumerate(names)
+    ]
+    caches = attn_utils._reshape_kv_cache_v2(groups, raw, "auto", [2, 2], {}, config)
+    dense_key, dense_value = caches[dense_name]
+    padded_key, padded_value = caches[padded_name]
+    assert all(cache.shape == (num_blocks, 2, 1, 4) for cache in (*caches[dense_name], *caches[padded_name]))
+    assert dense_key.is_contiguous() and dense_value.is_contiguous()
+    assert dense_key.stride() == dense_value.stride() == (8, 4, 4, 1)
+    assert not padded_key.is_contiguous() and not padded_value.is_contiguous()
+    assert padded_key.stride() == padded_value.stride() == (32, 4, 4, 1)
+    assert dense_key.untyped_storage().data_ptr() != dense_value.untyped_storage().data_ptr()
+    assert padded_key.untyped_storage().data_ptr() == padded_value.untyped_storage().data_ptr()
+
+    padded_key[1].fill_(3)
+    padded_value[1].fill_(5)
+    assert torch.count_nonzero(dense_key) == torch.count_nonzero(dense_value) == 0
+    raw_pages = raw[padded_name].view(num_blocks, padded_spec.page_size_bytes)
+    assert torch.count_nonzero(raw_pages[0]) == 0
+    assert torch.count_nonzero(raw_pages[2]) == 0
+    assert torch.count_nonzero(raw_pages[1, padded_spec.real_page_size_bytes :]) == 0
+    dense_key[2].fill_(7)
+    assert torch.count_nonzero(dense_value) == 0
+    assert torch.all(padded_key[1] == 3) and torch.all(padded_value[1] == 5)
 
 
 def test_sparse_offload_allocator_uses_host_main_cache_and_device_resident_buffer(monkeypatch):
@@ -2123,7 +2393,8 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
         assert all(call["pcp_cache_group_idx"] is None for call in calls)
 
 
-def test_mrv2_allocates_and_reshapes_hidden_state_cache(monkeypatch):
+@pytest.mark.parametrize("with_full_attention", [False, True])
+def test_mrv2_allocates_and_reshapes_hidden_state_cache(monkeypatch, with_full_attention):
     """Keep private buffers and match the lane's upstream cache-write layout."""
     from vllm.model_executor.models.extract_hidden_states import (
         CacheOnlyAttentionBackend,
@@ -2154,6 +2425,17 @@ def test_mrv2_allocates_and_reshapes_hidden_state_cache(monkeypatch):
             )
         ],
     )
+    if with_full_attention:
+        full_name = "model.layers.0.self_attn.attn"
+        full_spec = FullAttentionSpec(block_size=block_size, num_kv_heads=1, head_size=4, dtype=dtype)
+        kv_cache_config.kv_cache_tensors.append(
+            _make_kv_cache_tensor(num_blocks * full_spec.page_size_bytes, [full_name], full_spec.page_size_bytes)
+        )
+        kv_cache_config.kv_cache_groups.append(KVCacheGroupSpec(layer_names=[full_name], kv_cache_spec=full_spec))
+        impl = AscendAttentionBackendImpl.__new__(AscendAttentionBackendImpl)
+        impl.sliding_window = None
+        layer = SimpleNamespace(get_attn_backend=lambda: AscendAttentionBackend, impl=impl)
+        monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args, **_kwargs: {full_name: layer})
 
     monkeypatch.setattr(
         attn_utils,
@@ -2161,7 +2443,7 @@ def test_mrv2_allocates_and_reshapes_hidden_state_cache(monkeypatch):
         lambda: SimpleNamespace(
             additional_config={},
             kv_transfer_config=None,
-            model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen3")),
+            model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen3"), is_hybrid=False, use_mla=False),
             quant_config=None,
             cache_config=SimpleNamespace(cache_dtype="auto"),
         ),
@@ -2172,6 +2454,9 @@ def test_mrv2_allocates_and_reshapes_hidden_state_cache(monkeypatch):
     raw = attn_utils._allocate_kv_cache(kv_cache_config, shared_layers={}, device="cpu")
     assert isinstance(raw[layer_name], torch.Tensor)
     assert raw[layer_name].numel() == tensor_size
+    if with_full_attention:
+        assert isinstance(raw[full_name], tuple)
+        assert sum(part.numel() for part in raw[full_name]) == num_blocks * full_spec.page_size_bytes
 
     attn_groups = [
         AttentionGroup(
@@ -2181,11 +2466,20 @@ def test_mrv2_allocates_and_reshapes_hidden_state_cache(monkeypatch):
             kv_cache_group_id=0,
         )
     ]
+    if with_full_attention:
+        attn_groups.append(
+            AttentionGroup(
+                backend=AscendAttentionBackend,
+                layer_names=[full_name],
+                kv_cache_spec=full_spec,
+                kv_cache_group_id=1,
+            )
+        )
     reshaped = attn_utils._reshape_kv_cache_v2(
         attn_groups=attn_groups,
         kv_cache_raw_tensors=raw,
         cache_dtype="auto",
-        kernel_block_sizes=[block_size],
+        kernel_block_sizes=[block_size] * len(attn_groups),
         shared_kv_cache_layers={},
         kv_cache_config=kv_cache_config,
     )
@@ -2193,6 +2487,23 @@ def test_mrv2_allocates_and_reshapes_hidden_state_cache(monkeypatch):
     assert isinstance(cache, torch.Tensor)
     assert cache.shape == (num_blocks, num_kv_heads, block_size, head_size)
     assert cache.dtype == dtype
+    assert cache.is_contiguous()
+    assert cache.untyped_storage().data_ptr() == raw[layer_name].untyped_storage().data_ptr()
+    assert cache.untyped_storage().nbytes() == tensor_size
+    if with_full_attention:
+        key, value = reshaped[full_name]
+        assert key.shape == value.shape == (num_blocks, block_size, full_spec.num_kv_heads, full_spec.head_size)
+        assert key.dtype == value.dtype == dtype
+        assert key.is_contiguous() and value.is_contiguous()
+        assert key.data_ptr() == raw[full_name][0].data_ptr()
+        assert value.data_ptr() == raw[full_name][1].data_ptr()
+        assert len({view.untyped_storage().data_ptr() for view in (key, value, cache)}) == 3
+        key[1].fill_(3)
+        value[2].fill_(5)
+        assert torch.count_nonzero(cache) == 0
+        cache[3].fill_(7)
+        assert torch.count_nonzero(key[3]) == torch.count_nonzero(value[3]) == 0
+        assert torch.all(key[1] == 3) and torch.all(value[2] == 5)
 
 
 class _PrefillStateBuilder:

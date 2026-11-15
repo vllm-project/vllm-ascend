@@ -12,7 +12,10 @@ incorrect stride.
 This feature keeps the logical block table and block IDs unchanged while
 constructing strided tensor views over the existing physical allocation. It is
 implemented during Ascend model runner cache construction and applies to hybrid
-Attention + Mamba models and supported pure GQA Attention models.
+Attention + Mamba models, padded pages, and specialized packed caches. Ordinary
+unpadded pure GQA Attention layers use the existing separate contiguous K/V
+allocation path so FIA can consume them without materializing the whole cache
+on every decode step.
 
 ## 2. Goals and Non-Goals
 
@@ -156,8 +159,9 @@ The scheduler continues to operate on logical block IDs. These helpers only
 change how a worker maps a logical ID to a physical address.
 
 Hybrid Attention uses the common hybrid allocation contract when
-`use_hybrid_blocks` is enabled. Pure GQA Attention can use the block-major
-non-contiguous view without requiring a Mamba layer in the same model.
+`use_hybrid_blocks` is enabled. An unpadded pure GQA Attention layer without a
+hybrid or specialized cache contract uses separate contiguous K and V backing
+tensors; it does not require a Mamba layer in the same model.
 
 ## 5. Mamba State Access
 
@@ -226,9 +230,15 @@ removed after the layout implementation is considered stable.
 - The logical block table and scheduler-visible block IDs remain unchanged.
 - The exact physical layout depends on the model's Attention and Mamba cache
   specifications and the selected kernel block sizes.
+- Ordinary unpadded pure GQA layers retain the separate contiguous K/V layout;
+  non-contiguous Attention views are limited to layouts that need physical page
+  padding, hybrid sharing, or specialized packed storage.
 - Sparse, compressed, offloaded, or connector-specific cache paths must retain
   their own layout contracts; they should not be assumed to accept a strided
   view without dedicated validation.
+- Connector support for independent K/V buffers remains backend-specific. The
+  default pure GQA allocation does not expand the supported scope of shared
+  aliases in Mooncake V2, external UCM, or future connector implementations.
 - Graph capture, PD disaggregation, and KV connectors require end-to-end
   validation for each supported configuration.
 

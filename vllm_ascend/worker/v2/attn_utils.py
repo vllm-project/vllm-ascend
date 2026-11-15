@@ -1157,6 +1157,18 @@ def allocate_shared_attention_kv_cache(
     }
 
 
+def uses_contiguous_gqa_kv_cache(vllm_config: VllmConfig, spec: KVCacheSpec) -> bool:
+    """Return whether an ordinary pure GQA cache should use separate contiguous K/V buffers."""
+    model_config = getattr(vllm_config, "model_config", None)
+    return (
+        getattr(model_config, "is_hybrid", None) is False
+        and getattr(model_config, "use_mla", None) is False
+        and not is_c8_mxfp_kv_quant(vllm_config)
+        and type(spec) is FullAttentionSpec
+        and spec.page_size_bytes == spec.real_page_size_bytes
+    )
+
+
 def _allocate_kv_cache(
     kv_cache_config: KVCacheConfig,
     shared_layers: dict[str, str],
@@ -1166,8 +1178,8 @@ def _allocate_kv_cache(
     Initialize the KV cache buffer with the correct size. The buffer needs to be
     reshaped to the desired shape before being used by the models.
 
-    FullAttention caches use a combined allocation for block-strided K/V
-    views. Specialized caches keep their existing allocation layouts.
+    Unpadded pure-GQA caches use separate contiguous K/V allocations.
+    Specialized and hybrid caches keep their existing allocation layouts.
     KV transfer aligns each raw allocation to 2 MiB.
 
     Args:
@@ -1561,6 +1573,7 @@ def _allocate_kv_cache(
                     (backend is None or not backend.is_sparse())
                     and not use_dcp
                     and not requires_contiguous_pa_kv_cache(layer, vllm_config, layer_spec)
+                    and not uses_contiguous_gqa_kv_cache(vllm_config, layer_spec)
                 ):
                     kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(layer_size, alignment, device)
                     continue
