@@ -364,13 +364,9 @@ def _load_model_state_prepare_inputs(base_cls):
         node for node in module.body if isinstance(node, ast.ClassDef) and node.name == "AscendQwen4ExpModelState"
     )
     method = next(node for node in state.body if isinstance(node, ast.FunctionDef) and node.name == "prepare_inputs")
-    wrapper = ast.ClassDef(
-        name="_TestState",
-        bases=[ast.Name(id="_Base", ctx=ast.Load())],
-        keywords=[],
-        body=[method],
-        decorator_list=[],
-    )
+    wrapper = ast.parse("class _TestState(_Base):\n    pass\n").body[0]
+    assert isinstance(wrapper, ast.ClassDef)
+    wrapper.body = [method]
     namespace = {"_Base": base_cls, "Any": object}
     compiled = ast.fix_missing_locations(ast.Module(body=[wrapper], type_ignores=[]))
     exec(compile(compiled, str(source), "exec"), namespace)
