@@ -85,6 +85,11 @@ void unmap_and_release(unsigned long long device, ssize_t size,
   // std::cout << "unmap_and_release: device=" << device << ", size=" << size <<
   // ", d_mem=" << d_mem << ", p_memHandle=" << p_memHandle << std::endl;
   ensure_context(device);
+  // Sleep releases the physical allocation but retains this handle and the
+  // virtual reservation. A later tensor deleter must only release the address.
+  if (*p_memHandle == nullptr) {
+    return;
+  }
   aclError error_code = aclrtUnmapMem(d_mem);
   if (error_code != 0) {
     throw std::runtime_error("aclrtUnmapMem failed with acl error code: " +
@@ -95,6 +100,7 @@ void unmap_and_release(unsigned long long device, ssize_t size,
     throw std::runtime_error("aclrtFreePhysical failed with acl error code: " +
                             std::to_string(error_code) + " " + __FILE__ + ":" + std::to_string(__LINE__));
   }
+  *p_memHandle = nullptr;
 }
 
 PyObject* create_tuple_from_c_integers(unsigned long long a,

@@ -10,6 +10,8 @@ from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 from unittest.mock import Mock, patch
 
+from vllm_ascend.device_allocator.sleep_signals import preserve_worker_signal_handlers
+
 ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -131,6 +133,7 @@ class TestFLALazyImports(unittest.TestCase):
         runner_module = ModuleType("vllm_ascend.worker.v2.model_runner")
         runner_module.__dict__.update(NPUModelRunner=lambda *args: events.append("model_runner"))
         namespace = {
+            "preserve_worker_signal_handlers": preserve_worker_signal_handlers,
             "register_ascend_fla_customop": lambda: events.append("register"),
             "init_workspace_manager": Mock(),
         }
