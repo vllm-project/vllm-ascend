@@ -7,6 +7,8 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from vllm_ascend.ascend_config import RlConfig
+
 
 @pytest.fixture
 def worker(monkeypatch):
@@ -32,7 +34,7 @@ def worker(monkeypatch):
         "get_ascend_config",
         lambda: SimpleNamespace(
             weight_nz_mode=0,
-            rl_config=SimpleNamespace(enabled=False, sleep_mode_extra_cleanup=False),
+            rl_config=RlConfig(),
         ),
     )
     return worker

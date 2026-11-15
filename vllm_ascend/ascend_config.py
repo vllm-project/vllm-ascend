@@ -381,8 +381,15 @@ class RlConfig:
 
     enabled: bool = False
     sleep_mode_extra_cleanup: bool = False
+    sleep_mode_graph_reuse: bool = False
     enable_training_consistency: bool = False
     enable_batch_invariant: bool = False
+
+    @model_validator(mode="after")
+    def _validate_graph_reuse(self):
+        if self.sleep_mode_graph_reuse and not (self.enabled and self.sleep_mode_extra_cleanup):
+            raise ValueError("sleep_mode_graph_reuse requires rl_config.enabled and sleep_mode_extra_cleanup")
+        return self
 
     def apply(self, ascend_config: AscendConfig) -> None:
         if not self.enabled:
@@ -787,6 +794,8 @@ class AscendConfig:
     # pydantic after-validator). Preserves the original __init__ ordering —
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        if self.rl_config.sleep_mode_graph_reuse and not vc.model_config.enable_sleep_mode:
+            raise ValueError("sleep_mode_graph_reuse requires enable_sleep_mode")
         if self.shared_engram is not None and self.shared_engram.backend in ("a2", "a5"):
             if getattr(vc, "shutdown_timeout", 0) <= 0:
                 raise ValueError("shared_engram requires --shutdown-timeout > 0 to retire reader leases")

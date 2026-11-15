@@ -707,6 +707,8 @@ def test_worker_retires_reader_before_network_shutdown(monkeypatch):
 
 
 def test_worker_continues_cleanup_when_reader_close_fails(rdma):
+    from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager, serialized_sleep_transition
+
     worker_file = Path(rdma.__file__).resolve().parents[3] / "worker" / "worker.py"
     module = ast.parse(worker_file.read_text())
     worker_class = next(node for node in module.body if isinstance(node, ast.ClassDef) and node.name == "NPUWorker")
@@ -719,6 +721,8 @@ def test_worker_continues_cleanup_when_reader_close_fails(rdma):
 
     namespace: dict[str, Any] = {
         "AscendEplbState": type("AscendEplbState", (), {}),
+        "SleepWakeupManager": SleepWakeupManager,
+        "serialized_sleep_transition": serialized_sleep_transition,
         "ensure_kv_transfer_shutdown": lambda: events.append("kv"),
         "ensure_ec_transfer_shutdown": lambda: events.append("ec"),
     }
