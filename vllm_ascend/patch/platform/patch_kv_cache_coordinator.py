@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import inspect
 import sys
 from collections.abc import Mapping
 from copy import copy
@@ -91,6 +92,23 @@ def _manager_spec(spec: KVCacheSpec) -> KVCacheSpec:
     if isinstance(spec, UniformTypeKVCacheSpecs):
         return next(iter(spec.kv_cache_specs.values()))
     return spec
+
+
+def _manager_accepts_retention(manager_cls) -> bool:
+    """Whether this manager's lookup takes ``retention_interval``.
+
+    vLLM #43447 added the keyword; a lane older than it, or a test double
+    without a lookup at all, must keep the previous call shape. An object whose
+    signature cannot be introspected (a C callable, a non-callable attribute)
+    falls back to that shape too, rather than failing coordinator startup.
+    """
+    lookup = getattr(manager_cls, "find_longest_cache_hit", None)
+    if lookup is None:
+        return False
+    try:
+        return "retention_interval" in inspect.signature(lookup).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
@@ -232,6 +250,15 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 for manager, g in zip(self.single_type_managers, kv_cache_config.kv_cache_groups)
             )
         self.verify_and_split_kv_cache_groups()
+        # Per-group managers learned the ``retention_interval`` keyword with
+        # vLLM #43447. Probe the classes once here instead of per lookup, so the
+        # scheduling hot path stays a set membership test and a lane without the
+        # keyword keeps the previous call shape.
+        self._retention_forwarding_managers = frozenset(
+            manager_cls
+            for _spec, _group_ids, manager_cls, _use_eagle in self.attention_groups
+            if _manager_accepts_retention(manager_cls)
+        )
 
         # Align the WRITE-path mask granularity (reachable_block_mask) with the
         # READ-path hit granularity (find_longest_cache_hit) so SlidingWindowManager
@@ -364,6 +391,16 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         block_sizes = [self._get_effective_block_size(group.spec) for group in self.attention_groups]
         self.lcm_block_size = lcm(*block_sizes)
 
+    def _retention_call_kwargs(self, manager_cls) -> dict[str, int | None]:
+        """Retention interval to hand to one group's manager.
+
+        Empty on a lane whose manager predates vLLM #43447, and on instances
+        built without ``__init__`` (unit tests).
+        """
+        if manager_cls not in getattr(self, "_retention_forwarding_managers", ()):
+            return {}
+        return {"retention_interval": getattr(self, "retention_interval", None)}
+
     def find_longest_cache_hit(
         self,
         block_hashes: list[BlockHash],
@@ -448,6 +485,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     alignment_tokens=self._cache_hit_alignment_tokens,
                     dcp_world_size=self.dcp_world_size if spec.dcp_sharded else 1,
                     pcp_world_size=1,
+                    **self._retention_call_kwargs(manager_cls),
                 )
                 hit_blocks, _new_hit_length = hit_result
                 if drop_eagle_block:
@@ -510,6 +548,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 alignment_tokens=self._cache_hit_alignment_tokens,
                 dcp_world_size=self.dcp_world_size,
                 pcp_world_size=1,
+                **self._retention_call_kwargs(manager_cls),
             )
             for gid, blks in zip(group_ids, blocks):
                 hit_blocks[gid] = blks

@@ -300,8 +300,15 @@ class _RecordingManager:
         alignment_tokens,
         dcp_world_size=1,
         pcp_world_size=1,
+        retention_interval=None,
     ):
-        cls.calls.append({"max_length": max_length, "drop_eagle_block": drop_eagle_block})
+        cls.calls.append(
+            {
+                "max_length": max_length,
+                "drop_eagle_block": drop_eagle_block,
+                "retention_interval": retention_interval,
+            }
+        )
         return (([],), max_length)
 
 
@@ -406,6 +413,80 @@ def test_per_group_lookup_matches_scheduler_call_convention():
     assert len(blocks) == 2
     assert _RecordingFA.calls[-1]["max_length"] == 4095
     assert hit_lengths == (4095, 4095)
+
+
+# ---------------------------------------------------------------------------
+# prefix_cache_retention_interval: reading the resolved config is not enough,
+# the value has to reach the per-group lookup
+# ---------------------------------------------------------------------------
+
+
+def test_lookup_forwards_retention_interval_to_managers():
+    """Holding the value on the coordinator is not enough.
+
+    The existing ``test_coordinator_uses_resolved_retention_interval`` only
+    asserts ``coordinator.retention_interval``, which is why the missing
+    propagation into the lookup could go unnoticed.
+    """
+    coordinator = _make_lookup_coordinator(producer=True)
+    coordinator.retention_interval = 4096
+    coordinator._retention_forwarding_managers = frozenset({_RecordingFA, _RecordingMamba})
+    coordinator.find_longest_cache_hit(block_hashes=[], max_cache_hit_length=2048)
+    assert _RecordingFA.calls[-1]["retention_interval"] == 4096
+    assert _RecordingMamba.calls[-1]["retention_interval"] == 4096
+
+
+def test_per_group_lookup_forwards_retention_interval():
+    """The per-group entry point needs the same forwarding as the flat one.
+
+    ``BalanceScheduler`` and ``DyntraLBScheduler`` reach the managers through
+    ``find_longest_cache_hit_per_group``, so leaving it out would silently drop
+    the setting on exactly the schedulers Ascend runs.
+    """
+    coordinator = _make_lookup_coordinator(producer=True)
+    coordinator.retention_interval = 4096
+    coordinator._retention_forwarding_managers = frozenset({_RecordingFA, _RecordingMamba})
+    coordinator.find_longest_cache_hit_per_group([], 2048)
+    assert _RecordingFA.calls[-1]["retention_interval"] == 4096
+    assert _RecordingMamba.calls[-1]["retention_interval"] == 4096
+
+
+def test_lookup_omits_retention_for_managers_without_the_keyword():
+    """A lane whose manager predates vLLM #43447 keeps the previous call shape."""
+    coordinator = _make_lookup_coordinator(producer=True)
+    coordinator.retention_interval = 4096
+    coordinator._retention_forwarding_managers = frozenset({_RecordingFA})
+    assert coordinator._retention_call_kwargs(_RecordingFA) == {"retention_interval": 4096}
+    assert coordinator._retention_call_kwargs(_RecordingMamba) == {}
+
+
+def test_manager_probe_tolerates_objects_it_cannot_introspect():
+    """Signature probing must degrade to "no forwarding", not crash startup.
+
+    ``inspect.signature`` raises ``ValueError`` on some C callables and
+    ``TypeError`` on anything that is not callable, so a manager class carrying
+    either must not take the coordinator down with it.
+    """
+
+    class _CLevelLookup:
+        find_longest_cache_hit = range
+
+    class _NotCallableLookup:
+        find_longest_cache_hit = 0
+
+    assert mod._manager_accepts_retention(_CLevelLookup) is False
+    assert mod._manager_accepts_retention(_NotCallableLookup) is False
+    assert mod._manager_accepts_retention(_RecordingFA) is True
+
+
+def test_retention_kwargs_tolerate_instance_built_without_init():
+    """``__init__`` is skipped by some tests, so the attribute may be absent."""
+
+    class _Stub:
+        _retention_forwarding_managers = frozenset({_RecordingFA})
+
+    kwargs = mod.AscendHybridKVCacheCoordinator._retention_call_kwargs(_Stub(), _RecordingFA)
+    assert kwargs == {"retention_interval": None}
 
 
 if __name__ == "__main__":

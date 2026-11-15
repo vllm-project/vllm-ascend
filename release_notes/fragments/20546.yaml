@@ -1,0 +1,13 @@
+pr: 20546
+entries:
+  - category: bugfix
+    text: >-
+      Fixed `--prefix-cache-retention-interval` still being ignored on the
+      Ascend hybrid KV cache path. Upstream #21229 already made the coordinator
+      read the resolved `CacheConfig` field and run the validator, but the
+      overridden `find_longest_cache_hit` and
+      `find_longest_cache_hit_per_group` did not forward the value to the
+      per-group managers, so the setting remained a no-op. Managers that
+      declare the keyword now receive it; lanes predating vLLM #43447 keep the
+      previous call shape.
+    model: deepseek-v4
