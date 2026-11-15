@@ -1695,12 +1695,23 @@ def _reshape_kv_cache_v2(
         kv_cache_config.kv_cache_groups,
         kv_cache_config.num_blocks,
     )
-    cache_block_strides = {
-        name: descriptor.block_stride
-        for descriptor in kv_cache_config.kv_cache_tensors
-        for name in get_kv_cache_tensor_layers(descriptor)
-    }
-    layer_tuple_strides = cache_block_strides if is_deepseek_v41_cache(layer_kv_cache_spec) else {}
+    layer_tuple_strides: dict[str, int] = {}
+    if is_deepseek_v41_cache(layer_kv_cache_spec):
+        layer_tuple_strides = {
+            name: descriptor.block_stride
+            for descriptor in kv_cache_config.kv_cache_tensors
+            for name in get_kv_cache_tensor_layers(descriptor)
+        }
+
+    dsv4_page_strides = (
+        {
+            name: descriptor.block_stride
+            for descriptor in kv_cache_config.kv_cache_tensors
+            for name in get_kv_cache_tensor_layers(descriptor)
+        }
+        if is_dsv4_model and uses_turboquant_groups(kv_cache_config.kv_cache_groups)
+        else {}
+    )
 
     for group in attn_groups:
         if group.kv_cache_group_id >= len(kernel_block_sizes):
@@ -2035,7 +2046,7 @@ def _reshape_kv_cache_v2(
                     kv_cache_spec,
                     group.backend,
                     kv_cache_config,
-                    cache_block_strides.get(layer_name),
+                    dsv4_page_strides.get(layer_name),
                 )
                 continue
 
