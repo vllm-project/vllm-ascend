@@ -1545,12 +1545,22 @@ def create_runtime_component_views(
     page_bytes: int,
     block_stride: int,
     *,
-    as_tuple: bool = False,
-) -> list[torch.Tensor] | tuple[torch.Tensor, ...]:
+    manager_blocks: int | None = None,
+) -> list[torch.Tensor]:
     """Interpret backend byte shapes [B,H,N,C] using the existing NHD ABI."""
     if not shapes or len(shapes) != len(dtypes):
         raise ValueError("Each runtime cache component requires a shape and dtype.")
     num_blocks = shapes[0][0]
+    if manager_blocks is not None:
+        if manager_blocks <= 0 or num_blocks < manager_blocks or num_blocks % manager_blocks:
+            raise ValueError("Runtime blocks must be a positive multiple of manager blocks.")
+        kernel_blocks_per_manager = num_blocks // manager_blocks
+        if kernel_blocks_per_manager > 1 and block_stride != page_bytes:
+            raise ValueError("Splitting manager pages requires adjacent physical kernel slots.")
+        if page_bytes % kernel_blocks_per_manager:
+            raise ValueError("Physical pages must split into whole kernel slots.")
+        page_bytes //= kernel_blocks_per_manager
+        block_stride //= kernel_blocks_per_manager
     if block_stride == page_bytes:
         if raw.nbytes % page_bytes:
             raise ValueError("Cache allocation is not a whole number of physical pages.")
@@ -1563,8 +1573,7 @@ def create_runtime_component_views(
         (blocks, tokens, heads, content_bytes // dtype.itemsize)
         for (blocks, heads, tokens, content_bytes), dtype in zip(shapes, dtypes)
     ]
-    views = create_cache_component_views(raw, typed_shapes, list(dtypes), block_stride)
-    return tuple(views) if as_tuple else views
+    return create_cache_component_views(raw, typed_shapes, list(dtypes), block_stride)
 
 
 def create_cache_component_views(
@@ -1610,8 +1619,10 @@ def create_kv_cache_runtime_views(
     kernel_block_sizes: Sequence[int],
     shared_layers: Mapping[str, str],
     layout: Any = None,
+    *,
+    attn_layers: Mapping[str, AttentionLayerBase] | None = None,
 ) -> dict[str, Any]:
-    """Delegate component views to backends using the descriptor block strides."""
+    """Build state and attention views using the descriptor block strides."""
     specs = _get_layer_kv_cache_specs(kv_cache_config)
     placements = {name: descriptor for descriptor in kv_cache_config.kv_cache_tensors for name in descriptor.layers}
     caches = {}
@@ -1623,21 +1634,33 @@ def create_kv_cache_runtime_views(
                 continue
             spec = specs[name]
             descriptor = placements[name]
-            runtime = group.backend.get_runtime_shapes(
+            num_blocks = kv_cache_config.num_blocks_of(descriptor)
+            if isinstance(spec, MambaSpec):
+                # KDA states use manager pages and keep their individual ranks and dtypes.
+                shapes = [(num_blocks, *shape) for shape in spec.shapes]
+                caches[name] = create_cache_component_views(
+                    raw_tensors[name], shapes, list(spec.dtypes), descriptor.block_stride
+                )
+                continue
+            layer = attn_layers.get(name) if attn_layers is not None else None
+            view_provider = layer if hasattr(layer, "get_runtime_shapes") else group.backend
+            shapes = view_provider.get_runtime_shapes(
                 spec,
-                kv_cache_config.num_blocks_of(descriptor),
+                num_blocks,
                 layout,
                 kernel_block_size=kernel_block_sizes[group.kv_cache_group_id],
-                block_stride=descriptor.block_stride,
             )
-            caches[name] = create_runtime_component_views(
+            dtypes = view_provider.get_runtime_dtypes(spec)
+            components = create_runtime_component_views(
                 raw_tensors[name],
-                runtime.shapes,
-                runtime.dtypes,
-                runtime.page_bytes,
-                runtime.block_stride,
-                as_tuple=runtime.as_tuple,
+                shapes,
+                dtypes,
+                spec.page_size_bytes,
+                descriptor.block_stride,
+                manager_blocks=num_blocks,
             )
+            format_views = getattr(view_provider, "format_runtime_views", None)
+            caches[name] = format_views(components) if format_views is not None else components
     for name, target in shared_layers.items():
         caches[name] = caches[target]
     return caches
@@ -1692,6 +1715,7 @@ def unified_allocate_kv_cache(
         kernel_block_sizes,
         shared_layers,
         layout,
+        attn_layers=attn_layers,
     )
 
 
@@ -1714,7 +1738,7 @@ def allocate_kv_cache_main(
         raise NotImplementedError("Extensible KV cache allocation is not supported on Ascend.")
     vllm_config = get_current_vllm_config()
     model_type = getattr(getattr(vllm_config.model_config, "hf_text_config", None), "model_type", None)
-    if model_type in ("deepseek_v4", "deepseek_v41", "deepseek_v41_text"):
+    if model_type in ("deepseek_v4", "deepseek_v41", "deepseek_v41_text", "kimi_linear"):
         return unified_allocate_kv_cache(kv_cache_config, device, layout, kernel_block_sizes)
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
     shared_layers = {

@@ -44,7 +44,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadataBuilder,
     AscendDSASWABackend,
 )
-from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.attention.mla_v1 import AscendMLAAttention, AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAImpl, AscendSFAMetadataBuilder
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
@@ -469,6 +469,122 @@ def test_mrv2_mamba_views_skip_physical_page_padding():
     assert torch.count_nonzero(raw[64:72]) == 0
     assert torch.count_nonzero(raw[72:80]) > 0
     assert torch.count_nonzero(raw[80:]) == 0
+
+
+@pytest.mark.parametrize("use_flashmla", [False, True])
+@pytest.mark.parametrize("kernel_blocks_per_manager", [1, 2])
+def test_k3_unified_allocator_preserves_legacy_views(monkeypatch, use_flashmla, kernel_blocks_per_manager):
+    mla_names = ["layers.0.mla", "layers.1.mla"]
+    kda_name = "layers.2.kda"
+    num_blocks, kernel_block_size = 2, 128
+    manager_block_size = kernel_blocks_per_manager * kernel_block_size
+    mla_spec = AscendMLAAttentionSpec(
+        block_size=manager_block_size,
+        num_kv_heads=1,
+        head_size=576,
+        kv_lora_rank=512,
+        qk_rope_head_dim=64,
+        dtype=torch.bfloat16,
+        page_size_padded=manager_block_size * 640 * torch.bfloat16.itemsize,
+    )
+    page_bytes = mla_spec.page_size_bytes
+    kda_spec = MambaSpec(
+        block_size=mla_spec.block_size,
+        shapes=((4,), (2,)),
+        dtypes=(torch.bfloat16, torch.float32),
+        page_size_padded=page_bytes,
+    )
+    layer_stride = num_blocks * page_bytes
+    offset = 16
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=offset + len(mla_names) * layer_stride,
+                layers=names,
+                layer_stride=layer_stride,
+                block_stride=page_bytes,
+                offset=offset,
+            )
+            for names in (mla_names, [kda_name])
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=mla_names, kv_cache_spec=mla_spec),
+            KVCacheGroupSpec(layer_names=[kda_name], kv_cache_spec=kda_spec),
+        ],
+    )
+    mla_layer = AscendMLAAttention.__new__(AscendMLAAttention)
+    torch.nn.Module.__init__(mla_layer)
+    mla_layer.kv_lora_rank = mla_spec.kv_lora_rank
+    mla_layer.qk_rope_head_dim = mla_spec.qk_rope_head_dim
+    mla_layer.attn_backend = AscendMLABackend
+    mla_layer.impl = SimpleNamespace(use_flashmla=use_flashmla, supports_strided_mla_writer=lambda: True)
+    kda_backend = SimpleNamespace(full_cls_name=lambda: "KdaBackend")
+    layers = dict.fromkeys(mla_names, mla_layer)
+    layers[kda_name] = SimpleNamespace(get_attn_backend=lambda: kda_backend)
+    vllm_config = SimpleNamespace(
+        additional_config={},
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        compilation_config=SimpleNamespace(static_forward_context=layers),
+        kv_transfer_config=None,
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type="kimi_linear")),
+        speculative_config=None,
+    )
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(
+        attn_utils,
+        "get_layers_from_vllm_config",
+        lambda _config, _type, names=None: layers if names is None else {name: layers[name] for name in names},
+    )
+    kernel_block_sizes = [kernel_block_size, kda_spec.block_size]
+    device = torch.device("cpu")
+    old_raw = attn_utils._allocate_kv_cache(config, shared_layers={}, device=device)
+    old = attn_utils._reshape_kv_cache_v2(
+        attn_utils._get_cache_attention_groups(config, layers, {}),
+        old_raw,
+        "auto",
+        kernel_block_sizes,
+        {},
+        config,
+    )
+    # The public entry must use unified allocation for both MLA layouts.
+    legacy_allocate = MagicMock(side_effect=AssertionError("Expected unified K3 allocation"))
+    monkeypatch.setattr(attn_utils, "_allocate_kv_cache", legacy_allocate)
+    new = attn_utils.allocate_kv_cache_main(config, device, None, kernel_block_sizes)
+    assert new.keys() == old.keys() == layers.keys()
+    backing_addresses = set()
+    for name, old_cache in old.items():
+        new_cache = new[name]
+        assert type(new_cache) is type(old_cache)
+        old_components = (old_cache,) if isinstance(old_cache, torch.Tensor) else old_cache
+        new_components = (new_cache,) if isinstance(new_cache, torch.Tensor) else new_cache
+        for actual, expected in zip(new_components, old_components, strict=True):
+            assert actual.shape == expected.shape
+            assert actual.dtype == expected.dtype
+            assert actual.stride() == expected.stride()
+            assert actual.storage_offset() == expected.storage_offset()
+            assert actual.untyped_storage().nbytes() == expected.untyped_storage().nbytes()
+            backing_addresses.add(actual.untyped_storage().data_ptr())
+    assert len(backing_addresses) == 1
+
+    if kernel_blocks_per_manager == 1:
+        # Place both MLA layers in each manager block. The KDA group still
+        # overlays the same backing, with the same distance between block IDs.
+        packed_stride = len(mla_names) * page_bytes
+        packed = replace(
+            config,
+            kv_cache_tensors=[
+                replace(descriptor, layer_stride=page_bytes, block_stride=packed_stride)
+                for descriptor in config.kv_cache_tensors
+            ],
+        )
+        caches = attn_utils.allocate_kv_cache_main(packed, device, None, kernel_block_sizes)
+        for layer_index, name in enumerate(mla_names):
+            cache = caches[name] if use_flashmla else caches[name][0]
+            assert cache.storage_offset() * cache.element_size() == offset + layer_index * page_bytes
+            assert cache.stride(0) * cache.element_size() == packed_stride
+        for state in caches[kda_name]:
+            assert state.stride(0) * state.element_size() == packed_stride
 
 
 def test_mrv2_attention_views_interleave_kv_per_physical_page():

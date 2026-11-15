@@ -17,14 +17,14 @@ from vllm_ascend.worker.v2 import attn_utils
 def _runtime_views(raw, spec, num_blocks, *, block_stride=None):
     from vllm_ascend.worker.v2.attn_utils import create_runtime_component_views
 
-    runtime = AscendDSAC4Backend.get_runtime_shapes(spec, num_blocks, None, block_stride=block_stride)
+    shapes = AscendDSAC4Backend.get_runtime_shapes(spec, num_blocks, None)
+    dtypes = AscendDSAC4Backend.get_runtime_dtypes(spec)
     return create_runtime_component_views(
         raw,
-        runtime.shapes,
-        runtime.dtypes,
-        runtime.page_bytes,
-        runtime.block_stride,
-        as_tuple=runtime.as_tuple,
+        shapes,
+        dtypes,
+        spec.page_size_bytes,
+        spec.page_size_bytes if block_stride is None else block_stride,
     )
 
 
@@ -301,15 +301,12 @@ def test_dsa_runtime_shapes_are_byte_shapes_from_storage_spec(monkeypatch, scale
         "get_kv_cache_shape",
         Mock(side_effect=AssertionError("Runtime shapes must derive from the spec")),
     )
-    runtime = AscendDSAC4Backend.get_runtime_shapes(spec, 3, None, 128)
-    assert runtime.shapes == (
+    shapes = AscendDSAC4Backend.get_runtime_shapes(spec, 3, None, 128)
+    assert shapes == (
         (3, 1, 32, 128),
         (3, 1, 32, get_dtype_size(scale_dtype)),
     )
-    assert runtime.dtypes == (spec.dtype, scale_dtype)
-    assert runtime.page_bytes == spec.page_size_bytes
-    assert runtime.block_stride == spec.page_size_bytes
-    assert not runtime.as_tuple
+    assert AscendDSAC4Backend.get_runtime_dtypes(spec) == (spec.dtype, scale_dtype)
     raw = torch.zeros(3 * spec.page_size_bytes, dtype=torch.int8)
     components = _runtime_views(raw, spec, 3)
     assert components[0].shape == (3, 32, 1, 128)

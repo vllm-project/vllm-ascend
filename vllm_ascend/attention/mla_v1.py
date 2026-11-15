@@ -142,32 +142,26 @@ class AscendMLABackend(AttentionBackend):
         layout: Any,
         kernel_block_size: int | None = None,
         *,
-        block_stride: int | None = None,
+        use_flashmla: bool = False,
     ) -> KVCacheRuntimeShapes:
-        """Describe ordinary NoPE/RoPE components as byte shapes [B,H,N,C]."""
+        """Describe the selected MLA layout as byte shapes [B,H,N,C]."""
         if spec.kv_lora_rank is None or spec.qk_rope_head_dim is None:
             raise ValueError("MLA runtime views require component dimensions in the cache spec.")
         block_size = spec.block_size if kernel_block_size is None else kernel_block_size
         if block_size <= 0 or spec.block_size % block_size:
             raise ValueError("MLA kernel block size must divide the manager block size.")
         kernel_blocks_per_manager = spec.block_size // block_size
-        page_bytes = spec.page_size_bytes
-        block_stride = page_bytes if block_stride is None else block_stride
-        if kernel_blocks_per_manager > 1 and block_stride != page_bytes:
-            raise ValueError("MLA manager-block splitting requires contiguous per-layer pages.")
-        if page_bytes % kernel_blocks_per_manager:
-            raise ValueError("MLA physical pages must split into whole kernel slots.")
+        itemsize = spec.dtype.itemsize
+        if spec.page_size_bytes % (kernel_blocks_per_manager * itemsize):
+            raise ValueError("MLA physical pages must split into dtype-aligned kernel slots.")
+        slot_bytes = spec.page_size_bytes // kernel_blocks_per_manager
         prefix = (num_blocks * kernel_blocks_per_manager, spec.num_kv_heads, block_size)
-        return KVCacheRuntimeShapes(
-            shapes=(
-                (*prefix, spec.kv_lora_rank * spec.dtype.itemsize),
-                (*prefix, spec.qk_rope_head_dim * spec.dtype.itemsize),
-            ),
-            dtypes=(spec.dtype, spec.dtype),
-            page_bytes=page_bytes // kernel_blocks_per_manager,
-            block_stride=block_stride // kernel_blocks_per_manager,
-            as_tuple=True,
-        )
+        widths = (spec.kv_lora_rank, spec.qk_rope_head_dim)
+        if spec.num_kv_heads * block_size * sum(widths) * itemsize > slot_bytes:
+            raise ValueError("MLA kernel slot is smaller than its cache components.")
+        if use_flashmla:
+            widths = (sum(widths),)
+        return tuple((*prefix, width * itemsize) for width in widths)
 
     @staticmethod
     def get_impl_cls() -> type["MLAAttentionImpl"]:
@@ -195,6 +189,31 @@ class AscendMLAAttention(MLAAttention):
     """
 
     supports_pcp_dcp: ClassVar[bool] = True
+
+    def get_runtime_shapes(
+        self,
+        spec: AscendMLAAttentionSpec,
+        num_blocks: int,
+        layout: Any,
+        kernel_block_size: int,
+    ) -> KVCacheRuntimeShapes:
+        """Describe the layout required by the implementation selected for this layer."""
+        return AscendMLABackend.get_runtime_shapes(
+            spec,
+            num_blocks,
+            layout,
+            kernel_block_size=kernel_block_size,
+            use_flashmla=self.impl.use_flashmla,
+        )
+
+    def get_runtime_dtypes(self, spec: AscendMLAAttentionSpec) -> tuple[torch.dtype, ...]:
+        return (spec.dtype,) if self.impl.use_flashmla else (spec.dtype, spec.dtype)
+
+    def format_runtime_views(self, components: list[torch.Tensor]) -> torch.Tensor | tuple[torch.Tensor, ...]:
+        if self.impl.use_flashmla:
+            (cache,) = components
+            return cache
+        return tuple(components)
 
 
 @dataclass
