@@ -54,7 +54,6 @@ from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     build_dspark_draft_config,
-    disable_profiling_chunk_for_draft,
 )
 
 
@@ -91,11 +90,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         self.dcp_manager = DCPManager(
             dcp_world_size=self.attn_vllm_config.parallel_config.decode_context_parallel_size,
             dcp_rank=get_dcp_group().rank_in_group,
-            max_buffer_num_tokens=self.max_num_tokens,
-            max_num_reqs=self.max_num_reqs,
-            device=self.device,
             vllm_config=self.attn_vllm_config,
-            use_async_scheduling=self.vllm_config.scheduler_config.async_scheduling,
         )
 
     def load_draft_model(
@@ -103,8 +98,7 @@ class AscendDSparkSpeculator(LmheadTPDraftSamplingMixin, DSparkSpeculator):
         target_model: torch.nn.Module,
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
-        with disable_profiling_chunk_for_draft(self.vllm_config):
-            model = super().load_draft_model(target_model, target_attn_layer_names)
+        model = super().load_draft_model(target_model, target_attn_layer_names)
         if hasattr(model, "post_process"):
             model.post_process(self.vllm_config)
         if hasattr(model, "configure_target_aux_hidden_capture"):

@@ -56,9 +56,6 @@ from vllm_ascend.worker.v2.attn_utils import (
 )
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
-from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
-    disable_profiling_chunk_for_draft,
-)
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.sparse_kv_offload import SparseKVOffloadMetadata
 
 if TYPE_CHECKING:
@@ -141,11 +138,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
         self.dcp_manager = DCPManager(
             dcp_world_size=self.draft_vllm_config.parallel_config.decode_context_parallel_size,
             dcp_rank=get_dcp_group().rank_in_group,
-            max_buffer_num_tokens=self.max_num_tokens,
-            max_num_reqs=self.max_num_reqs,
-            device=self.device,
             vllm_config=self.draft_vllm_config,
-            use_async_scheduling=self.vllm_config.scheduler_config.async_scheduling,
         )
 
     @draft_config_context()
@@ -158,12 +151,11 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
             source_parallel_config,
             pipeline_parallel_size=1,
         )
-        with disable_profiling_chunk_for_draft(self.vllm_config):
-            draft_config = replace(
-                self.vllm_config,
-                parallel_config=parallel_config,
-                cache_config=replace(self.vllm_config.cache_config),
-            )
+        draft_config = replace(
+            self.vllm_config,
+            parallel_config=parallel_config,
+            cache_config=replace(self.vllm_config.cache_config),
+        )
         # V1 parity: swap in the draft model config after validation —
         # re-validating would reject the dense head (fine-grained TP is MoE-only).
         draft_config.model_config = self.draft_model_config
