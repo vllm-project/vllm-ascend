@@ -1,0 +1,98 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+
+import gc
+import socket
+from copy import copy
+from urllib.parse import urlsplit
+
+import torch
+from torch.utils.hooks import RemovableHandle
+from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.model_executor.model_loader.weight_cache import daemon as upstream
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
+
+from .config import validate_preload_config
+
+
+class AscendWeightCacheDaemon(upstream.WeightCacheDaemon):
+    model: torch.nn.Module | None
+
+    def load_model(self) -> None:
+        # Unlike engine workers, a preload process does not construct NPUWorker.
+        from vllm_ascend import ops
+        from vllm_ascend.ascend_forward_context import sync_v2_extra_kwargs
+        from vllm_ascend.utils import adapt_patch, register_ascend_customop, register_ascend_fla_customop
+
+        validate_preload_config(self.vllm_config)
+        device_index = current_platform.logical_device_id_to_visible_device_id(self.local_rank)
+        torch.npu.set_device(device_index)
+        torch.npu.config.allow_internal_format = True
+        sync_v2_extra_kwargs(self.vllm_config)
+        adapt_patch()
+        with set_current_vllm_config(self.vllm_config):
+            ops.register_dummy_fusion_op()
+            register_ascend_customop(self.vllm_config)
+            register_ascend_fla_customop()
+            set_random_seed(self.model_config.seed)
+        # Upstream initializes communication before entering its own model
+        # config context. HCCL options need a config even when DP is 1.
+        with set_current_vllm_config(self._get_daemon_init_config()):
+            super().load_model()
+
+    def _get_daemon_init_config(self) -> VllmConfig:
+        init_config = self.vllm_config
+        if init_config.parallel_config.nnodes > 1:
+            rendezvous = urlsplit(self.distributed_init_method)
+            if rendezvous.scheme != "tcp" or rendezvous.hostname is None or rendezvous.port is None:
+                raise ValueError("Multi-node Ascend preload requires a TCP rendezvous with an explicit port")
+            # Upstream uses the config's master endpoint for multi-node TP.
+            # Keep the daemon's endpoint without changing the engine config.
+            init_config = copy(init_config)
+            init_config.parallel_config = copy(init_config.parallel_config)
+            init_config.parallel_config.master_addr = rendezvous.hostname
+            init_config.parallel_config.master_port = rendezvous.port
+        return init_config
+
+    def warmup(self) -> None:
+        # The upstream daemon warmup is specific to FlashInfer. Ascend engine
+        # workers own their kernel warmup and ACL graph capture.
+        return
+
+    def _handle_release(self, conn: socket.socket) -> None:
+        from .loader import _clear_rope_caches
+
+        # Parameters can own bound weight_loader methods, forming cycles.
+        # Compiled models also register strong bytecode callbacks. Drop these
+        # references and collect NPU IPC limbo before upstream acknowledges a
+        # copy handoff; empty_cache alone cannot release live allocations.
+        if self.model is not None:
+            for module in self.model.modules():
+                handle = getattr(module, "_bytecode_hook_handle", None)
+                if isinstance(handle, RemovableHandle):
+                    handle.remove()
+            # Drop the loop's last module reference before collecting model allocations.
+            del module
+        self.model = None
+        self.vllm_config.compilation_config.static_forward_context.clear()
+        _clear_rope_caches()
+        gc.collect()
+        torch.npu.ipc_collect()
+        super()._handle_release(conn)
+
+
+def run_ascend_daemon(*args, **kwargs) -> None:
+    """Importable spawn target; install device adapters in every new process."""
+    from vllm.plugins import load_general_plugins
+
+    from vllm_ascend import _ensure_global_patch
+    from vllm_ascend.patch.platform.patch_preload import apply_preload_patch
+
+    _ensure_global_patch()
+    apply_preload_patch()
+    # A spawn process does not inherit the engine's loader/model registries.
+    # Initialize plugins only after device patches are fully installed, never
+    # while importing this module or from inside a plugin callback.
+    load_general_plugins()
+    upstream._run_daemon_original(*args, **kwargs)
