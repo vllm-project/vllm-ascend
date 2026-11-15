@@ -85,7 +85,9 @@ def test_indexer_keeps_its_own_page_class():
     planned = align_hybrid_kv_cache_specs(specs)
     assert planned["indexer"] is indexer
     assert indexer.page_size_bytes == 40
-    assert planned["full"].page_size_bytes == planned["state"].page_size_bytes == 128
+    assert planned == specs
+    assert planned["full"].page_size_bytes == 64
+    assert planned["state"].page_size_bytes == 128
 
 
 def test_builder_aligns_before_default_grouping(monkeypatch):
@@ -97,6 +99,7 @@ def test_builder_aligns_before_default_grouping(monkeypatch):
     monkeypatch.setattr(planning.DefaultKVCacheConfigBuilder, "get_kv_cache_groups", upstream)
     config = SimpleNamespace(
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        model_config=SimpleNamespace(supports_kv_cache_grouping=False, hf_config=SimpleNamespace(model_type="qwen3")),
     )
     assert AscendKVCacheConfigBuilder().get_kv_cache_groups(config, specs) == []
 
@@ -124,7 +127,7 @@ def test_builder_fallback_aligns_once_and_uses_unpatched_grouping(monkeypatch):
     monkeypatch.setattr(builder_module, "_get_kimi_k3_dspark_mixed_kv_cache_groups", lambda *_: None)
     config = SimpleNamespace(
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
-        model_config=SimpleNamespace(supports_kv_cache_grouping=False),
+        model_config=SimpleNamespace(supports_kv_cache_grouping=False, hf_config=SimpleNamespace(model_type="qwen3")),
     )
     assert builder_module.AscendKVCacheConfigBuilder().get_kv_cache_groups(config, specs) == []
     align.assert_called_once_with(specs)

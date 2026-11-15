@@ -2472,7 +2472,9 @@ def test_sparse_hybrid_page_alignment_preserves_native_component_pages(indexer_d
         ),
     }
     original = dict(specs)
-    attn_utils._align_hybrid_attention_page_sizes(specs, minimum_page_size=800000)
+    from vllm_ascend.core.kv_cache_planning import align_hybrid_kv_cache_specs
+
+    assert align_hybrid_kv_cache_specs(specs) == original
     # PR4's paired planner aligns recurrent states to main pages separately.
     # Enlarging token blocks to equalize MLA/indexer bytes changes ownership.
     assert specs == original

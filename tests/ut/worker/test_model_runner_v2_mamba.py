@@ -1031,6 +1031,7 @@ def test_attention_cache_reshape_uses_virtual_kernel_block_count(
 def test_get_kv_cache_spec_keeps_mamba_layers(mock_get_layers):
     spec = _mamba_spec()
     mamba_layer = MagicMock()
+    mamba_layer.is_draft_layer = False
     mamba_layer.kv_sharing_target_layer_name = None
     mamba_layer.get_kv_cache_spec.return_value = spec
     mock_get_layers.return_value = {"linear_attn": mamba_layer}
@@ -1066,6 +1067,7 @@ def test_spec_collection_keeps_owner_pages_until_planning(
             return _FakeAttentionBackend
 
     mamba_layer = MagicMock()
+    mamba_layer.is_draft_layer = False
     mamba_layer.kv_sharing_target_layer_name = None
     mamba_layer.get_kv_cache_spec.return_value = mamba_spec
     mock_get_layers.return_value = {
@@ -1127,6 +1129,7 @@ def test_planning_rejects_nondivisible_hybrid_attention_pages(
             return _FakeAttentionBackend
 
     mamba_layer = MagicMock()
+    mamba_layer.is_draft_layer = False
     mamba_layer.kv_sharing_target_layer_name = None
     mamba_layer.get_kv_cache_spec.return_value = mamba_spec
     mock_get_layers.return_value = {
