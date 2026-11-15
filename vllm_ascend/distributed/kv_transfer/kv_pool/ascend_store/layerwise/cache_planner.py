@@ -269,13 +269,13 @@ def plan_layerwise_cache_reuse(
     vllm_config: VllmConfig,
 ) -> LayerwiseReuseLayout | None:
     """Build the KV buffer layout for prefill offload on one worker rank."""
+    extra_config = get_layerwise_offload_config(getattr(vllm_config, "kv_transfer_config", None))
+    if extra_config is None:
+        return None
     # An empty device pool has no byte views to reuse.
     if not kv_cache_config.kv_cache_tensors or kv_cache_config.num_blocks == 0 or not kv_cache_config.kv_cache_groups:
         return None
     if vllm_config.parallel_config.pipeline_parallel_size > 1:
-        return None
-    extra_config = get_layerwise_offload_config(getattr(vllm_config, "kv_transfer_config", None))
-    if extra_config is None:
         return None
     rules = get_spec_reuse_rules(vllm_config)
     if rules is None:

@@ -24,13 +24,10 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
-    get_layerwise_offload_config,
-    get_spec_reuse_rules,
     plan_layerwise_cache_reuse,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     LAYERWISE_REUSE_BACKING_BYTES,
-    get_layerwise_reuse_backing_bytes,
 )
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
@@ -43,7 +40,6 @@ from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
     get_glm5_next_kv_cache_config,
     get_glm5_next_kv_cache_groups,
-    get_glm5_next_max_memory_usage,
     get_glm5_next_pool_bytes_per_block,
 )
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
@@ -512,17 +508,12 @@ def _ascend_max_memory_usage_bytes_from_groups(
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> int:
     """Keep Ascend admission accounting with the upstream builder API."""
-    extra_config = get_layerwise_offload_config(getattr(vllm_config, "kv_transfer_config", None))
-    if extra_config is not None and kv_cache_groups and get_spec_reuse_rules(vllm_config) is not None:
-        probe = builder.get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks=1)
-        if get_layerwise_reuse_backing_bytes(probe) is not None:
-            return _orig_max_memory_usage_bytes_from_groups(builder, vllm_config, kv_cache_groups)
     if vllm_config.model_config.hf_config.model_type == "kimi_k31":
         return paired_sfa_max_memory(vllm_config, kv_cache_groups)
     if tq_cache.uses_turboquant_groups(kv_cache_groups):
         return tq_cache.max_memory_usage(vllm_config, kv_cache_groups)
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
-        return get_glm5_next_max_memory_usage(vllm_config, kv_cache_groups)
+        return _orig_max_memory_usage_bytes_from_groups(builder, vllm_config, kv_cache_groups)
     qwen_bytes = get_qwen4_exp_max_memory_usage(vllm_config, kv_cache_groups)
     if qwen_bytes is not None:
         return qwen_bytes
@@ -575,12 +566,6 @@ def _ascend_get_kv_cache_config_from_groups(
     dropped by worker pickle IPC, which never reads it.
     """
     kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
-    extra_config = get_layerwise_offload_config(kv_transfer_config)
-    offload_requested = (
-        extra_config is not None and bool(kv_cache_groups) and get_spec_reuse_rules(vllm_config) is not None
-    )
-    if offload_requested and available_memory < 0:
-        raise ValueError("available_memory must be non-negative")
     qwen_config = (
         None
         if vllm_version_is("0.28.0")
@@ -647,17 +632,16 @@ def _ascend_get_kv_cache_config_from_groups(
         # Remove these snapshots once upstream preserves per-layer ownership.
         kv_cache_config.dspark_context_group_ids = resident_mla_context_group_ids(kv_cache_config.kv_cache_groups)
         kv_cache_config.dspark_draft_only_group_ids = draft_only_group_ids(kv_cache_config.kv_cache_groups)
-    if offload_requested:
-        reuse_layout = plan_layerwise_cache_reuse(kv_cache_config, vllm_config)
-        if reuse_layout is not None:
-            # The scheduler keeps this cost when it collapses the per-entry specs.
-            kv_cache_config.kv_transfer_config = replace(
-                kv_transfer_config,
-                kv_connector_extra_config={
-                    **kv_transfer_config.kv_connector_extra_config,
-                    LAYERWISE_REUSE_BACKING_BYTES: reuse_layout.kv_cache_tensors[0].size,
-                },
-            )
+    reuse_layout = plan_layerwise_cache_reuse(kv_cache_config, vllm_config)
+    if reuse_layout is not None:
+        # The scheduler keeps this cost when it collapses the per-entry specs.
+        kv_cache_config.kv_transfer_config = replace(
+            kv_transfer_config,
+            kv_connector_extra_config={
+                **kv_transfer_config.kv_connector_extra_config,
+                LAYERWISE_REUSE_BACKING_BYTES: reuse_layout.kv_cache_tensors[0].size,
+            },
+        )
     return kv_cache_config
 
 
