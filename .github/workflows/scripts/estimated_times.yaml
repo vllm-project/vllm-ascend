@@ -11,7 +11,10 @@
 estimated_times:
   tests/e2e/pull_request/one_card/test_thinking_budget.py: 60
   tests/e2e/pull_request/one_card/test_thinking_budget_addressing.py: 60
-  tests/e2e/pull_request/one_card/test_thinking_budget_generation.py: 6600
+  tests/e2e/pull_request/one_card/test_thinking_budget_nonbinding.py: 2000
+  tests/e2e/pull_request/one_card/test_thinking_budget_generation.py: 2000
+  tests/e2e/pull_request/one_card/test_thinking_budget_preemption_constrained.py: 3000
+  tests/e2e/pull_request/one_card/test_thinking_budget_preemption_natural.py: 3600
   tests/e2e/pull_request/one_card/test_thinking_budget_serving.py: 2500
   tests/e2e/pull_request/one_card/test_mc2_local_padding.py: 60
   tests/e2e/pull_request/one_card/test_mla_prolog_head_padding.py: 30

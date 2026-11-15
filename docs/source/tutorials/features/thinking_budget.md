@@ -154,6 +154,9 @@ python -m pytest -sv tests/ut/worker/v2/test_thinking_budget.py \
 python -m pytest -sv tests/e2e/pull_request/one_card/test_thinking_budget.py \
     tests/e2e/pull_request/one_card/test_thinking_budget_addressing.py
 python -m pytest -sv tests/e2e/pull_request/one_card/test_thinking_budget_generation.py
+python -m pytest -sv tests/e2e/pull_request/one_card/test_thinking_budget_nonbinding.py
+python -m pytest -sv tests/e2e/pull_request/one_card/test_thinking_budget_preemption_constrained.py
+python -m pytest -sv tests/e2e/pull_request/one_card/test_thinking_budget_preemption_natural.py
 python -m pytest -sv tests/e2e/pull_request/one_card/test_thinking_budget_serving.py
 ```
 
@@ -165,6 +168,17 @@ including rejected drafts, mixed budgets, slot reuse, and resumed end prefixes.
 Rejection tests exercise absent, tensor, and cached draft logits with standard,
 entropy, and block verification. Large-address tests require at least 8 GiB of
 free NPU memory plus headroom and cover cold and incremental history scans.
+The 50 real-model cases are split into default-mode generation (10), exact
+nonbinding-budget comparisons (8), constrained preemption (16), and natural
+preemption (16) files so CI can schedule them within its per-job time limit.
+The original 32 preemption cases retain their assertions and parameter combinations.
+Exact nonbinding-budget comparisons use batch-invariant model computation and
+no prefix cache. They compare cold, disabled (`None`/`-1`), mixed, upper-bound,
+and repeated disabled batches at the same positions without retries or output
+tolerances. This controls BF16 model-output variation that also occurs between
+budget-disabled requests. Default-mode natural generation and OpenAI serving
+retain their normal computation and prefix caching. Compared token IDs are
+logged before asserting equality.
 Model tests cover Qwen3-1.7B and ordinary-model regression with
 Qwen2.5-0.5B-Instruct. The constrained-cache tests assert that scheduler preemption actually occurs
 with no speculation, n-gram speculation, and a draft model. Restricted-token
