@@ -147,8 +147,8 @@ class AscendMLABackend(AttentionBackend):
         num_blocks: int,
         layout: Any,
         kernel_block_size: int | None = None,
-    ) -> tuple[KVCacheRuntimeShapes, int]:
-        """Return MLA byte shapes [B,H,N,C] and the kernel blocks per manager page."""
+    ) -> KVCacheRuntimeShapes:
+        """Describe the selected MLA layout as byte shapes [B,H,N,C]."""
         if spec.kv_lora_rank is None or spec.qk_rope_head_dim is None:
             raise ValueError("MLA runtime views require component dimensions in the cache spec.")
         block_size = spec.block_size if kernel_block_size is None else kernel_block_size
@@ -165,7 +165,7 @@ class AscendMLABackend(AttentionBackend):
             raise ValueError("MLA kernel slot is smaller than its cache components.")
         if spec.mla_cache_layout == "token_interleaved":
             widths = (sum(widths),)
-        return tuple((*prefix, width * itemsize) for width in widths), kernel_blocks_per_manager
+        return tuple((*prefix, width * itemsize) for width in widths)
 
     @staticmethod
     def get_runtime_dtypes(spec: AscendMLAAttentionSpec) -> tuple[torch.dtype, ...]:
