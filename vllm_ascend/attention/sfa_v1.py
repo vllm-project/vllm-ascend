@@ -2175,7 +2175,11 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         # A sharded-decode PCP rank can own no request but must still write
         # and gather KV with the other ranks.
-        has_local_query = attn_metadata.num_actual_tokens > 0
+        # Empty PCP ranks still score the global batch against their DCP shard
+        # and join the same candidate/output collectives as the query owners.
+        has_local_query = (
+            attn_metadata.num_actual_tokens > 0 or getattr(attn_metadata, "pcp_dcp_query_layout", None) is not None
+        )
         if self.runtime_has_indexer:
             # One unified indexer call: k path -> cache write -> top-k
             # selection (the selection kernel reads the freshly written

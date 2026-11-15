@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, NamedTuple, TypeVar
 
 import torch
@@ -14,6 +14,12 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
     DCPMetadataBuilderMixin,
     build_pcp_ordered_slot_mapping,
+)
+from vllm_ascend.attention.context_parallel.kpool_pcp import (
+    KPoolPCPQueryLayout,
+    build_kpool_pcp_query_layout,
+    gather_kpool_pcp_queries,
+    restore_kpool_pcp_queries,
 )
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
     _index_select_kv_blocks,
@@ -92,6 +98,8 @@ class AscendSFADCPMetadata(AscendSFAMetadata):
     """SFA metadata fields used only by the DCP execution path."""
 
     dcp_context: DCPContext | None = None
+    pcp_dcp_query_layout: KPoolPCPQueryLayout | None = None
+    pcp_dcp_global_metadata: "AscendSFADCPMetadata | None" = None
 
 
 M = TypeVar("M", bound=AscendSFAMetadata)
@@ -493,6 +501,10 @@ class AscendSFAPCPDCPMetadataBuilder(AscendSFADCPMetadataBuilder):
             pcp_context,
             pcp_cache_group_idx,
         )
+        if enable_kpool_dcp(self.vllm_config):
+            # Main MLA and KPool writes keep this receiver's DCP ownership.
+            global_slots = pcp_context.global_slot_mappings[pcp_cache_group_idx, : pcp_context.global_batch.num_tokens]
+            return build_pcp_ordered_slot_mapping(global_slots, pcp_context, self.pcp_indexer_slot_mapping_buf)
         dcp_block_table = self._get_dcp_local_block_table(
             global_common_attn_metadata.block_table_tensor,
             global_common_attn_metadata.num_reqs,
@@ -574,7 +586,35 @@ class AscendSFAPCPDCPMetadataBuilder(AscendSFADCPMetadataBuilder):
             metadata.slot_mapping = metadata.pcp_prolog_global_slots
             if num_decode_tokens:
                 metadata.slot_mapping = torch.cat((rank_slots[0, :num_decode_tokens], metadata.slot_mapping))
+        if enable_kpool_dcp(self.vllm_config) and metadata.pcp_has_global_prefill:
+            self._attach_kpool_pcp_queries(metadata, common_attn_metadata, pcp_context, pcp_cache_group_idx)
         return metadata
+
+    def _attach_kpool_pcp_queries(self, metadata, common, context, cache_group_idx):
+        global_common = get_sfa_pcp_global_metadata(common, context, cache_group_idx)
+        num_reqs = global_common.num_reqs
+        block_table = self._get_dcp_local_block_table(global_common.block_table_tensor, num_reqs)
+        # A separate tensor avoids overwriting the local/chunk request lengths
+        # retained by the cache writer and the next layer's metadata.
+        global_dcp = DCPContext(
+            slot_mapping=context.global_slot_mappings[cache_group_idx, : global_common.num_input_tokens],
+            block_table=block_table,
+            seq_lens=self._get_dcp_local_seq_lens(global_common.seq_lens).to(torch.int32),
+        )
+        metadata.pcp_dcp_global_metadata = replace(
+            metadata,
+            num_input_tokens=global_common.num_input_tokens,
+            num_actual_tokens=global_common.num_actual_tokens,
+            cum_query_lens=global_common.query_start_loc[1 : num_reqs + 1],
+            query_start_loc=global_common.query_start_loc[: num_reqs + 1],
+            seq_lens=global_common.seq_lens,
+            seq_lens_cpu=None,
+            positions=global_common.positions,
+            block_table=block_table,
+            slot_mapping=global_dcp.slot_mapping,
+            dcp_context=global_dcp,
+        )
+        metadata.pcp_dcp_query_layout = build_kpool_pcp_query_layout(common, context, get_pcp_group())
 
 
 class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
@@ -653,7 +693,20 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             return
         assert isinstance(attn_metadata, AscendSFADCPMetadata)
         assert attn_metadata.dcp_context is not None
+        if getattr(attn_metadata, "pcp_dcp_query_layout", None) is not None:
+            global_metadata = attn_metadata.pcp_dcp_global_metadata
+            assert global_metadata is not None and global_metadata.dcp_context is not None
+            global_metadata.dcp_context.gather_context = self._start_kpool_pcp_query_gather(
+                ql_nope, q_pe, attn_metadata.pcp_dcp_query_layout
+            )
+            return
         attn_metadata.dcp_context.gather_context = self._start_dcp_query_gather(ql_nope, q_pe)
+
+    def _start_kpool_pcp_query_gather(self, ql_nope, q_pe, layout):
+        ql_nope = gather_kpool_pcp_queries(ql_nope, layout, get_pcp_group())
+        if q_pe is not None:
+            q_pe = gather_kpool_pcp_queries(q_pe, layout, get_pcp_group()) if q_pe.shape[-1] else ql_nope[..., :0]
+        return self._start_dcp_query_gather(ql_nope, q_pe)
 
     def _on_kv_cache_written(self, kv_cache: tuple[torch.Tensor, ...], attn_metadata: M) -> None:
         if self._has_prefill(attn_metadata) and not self._sharded_indexer:
@@ -946,6 +999,16 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
     ):
         assert attn_metadata.dcp_context is not None, "DCP SFA requires attn_metadata.dcp_context."
         assert self.dcp_group is not None, "DCP SFA requires dcp_group when dcp_size > 1."
+        layout = getattr(attn_metadata, "pcp_dcp_query_layout", None)
+        local_num_tokens = ql_nope.shape[0] if layout is not None else 0
+        if layout is not None:
+            topk_indices = gather_kpool_pcp_queries(topk_indices, layout, get_pcp_group())
+            attn_metadata = attn_metadata.pcp_dcp_global_metadata
+            assert attn_metadata is not None and attn_metadata.dcp_context is not None
+            actual_seq_lengths_query = attn_metadata.cum_query_lens
+            actual_seq_lengths_key = attn_metadata.seq_lens
+            if attn_metadata.dcp_context.gather_context is None:
+                attn_metadata.dcp_context.gather_context = self._start_kpool_pcp_query_gather(ql_nope, q_pe, layout)
         dcp_context = attn_metadata.dcp_context
         if self.qk_rope_head_dim == 0:
             kv_cache = (_view_cache_as_operator_pages(kv_cache[0], attn_metadata.block_size), *kv_cache[1:])
@@ -1047,4 +1110,6 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             softmax_lse,
             softmax_sum=sum_for_pack,
         )
+        if layout is not None:
+            output = restore_kpool_pcp_queries(output, layout, local_num_tokens)
         return output.to(output_dtype)

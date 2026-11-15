@@ -162,8 +162,10 @@ def glm5_next_dcp_indexer(
 ):
     """Merge pool candidates globally, then expand tokens and append the tail.
 
-    All ranks must have identical query rows (PCP=1). Main MLA and compressed
-    pools are token-sharded; the small compressor ring remains replicated.
+    All ranks must have identical query rows. PCP callers first gather queries
+    in global request order, then restore their local rows after selection.
+    Main MLA and compressed pools are token-sharded; the small compressor ring
+    remains replicated.
     Tensor contents may change on replay, including request lengths/pages.
     """
     if pool_size <= 1 or topk <= 0 or topk % pool_size or interleave <= 0 or interleave % pool_size:

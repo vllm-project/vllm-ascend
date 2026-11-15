@@ -139,7 +139,9 @@ class FlashWorker:
 @pytest.mark.parametrize("enforce_eager", [True, False], ids=["eager", "graph"])
 @pytest.mark.parametrize("use_replayssm", [False, True], ids=["no_recover", "recover"])
 @pytest.mark.parametrize("prefix_caching", [False, True], ids=["no_prefix", "prefix"])
-def test_glm53flash_tp4(tmp_path, monkeypatch, enforce_eager, use_replayssm, prefix_caching, dcp_size=1):
+def test_glm53flash_tp4(
+    tmp_path, monkeypatch, enforce_eager, use_replayssm, prefix_caching, dcp_size=1, pcp_size=1, tp_size=TP_SIZE
+):
     for name, value in {
         "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
@@ -154,10 +156,8 @@ def test_glm53flash_tp4(tmp_path, monkeypatch, enforce_eager, use_replayssm, pre
         load_format=LOADER,
         worker_extension_cls=f"{__name__}.FlashWorker",
         dtype="bfloat16",
-        tensor_parallel_size=TP_SIZE,
-        # TODO: Add PCP coverage once GLM-Flash supports PCP, including MTP
-        # and RecoverSSM in eager and graph modes within the four-card budget.
-        prefill_context_parallel_size=1,
+        tensor_parallel_size=tp_size,
+        prefill_context_parallel_size=pcp_size,
         decode_context_parallel_size=dcp_size,
         cp_kv_cache_interleave_size=128,
         enable_expert_parallel=True,
@@ -192,7 +192,7 @@ def test_glm53flash_tp4(tmp_path, monkeypatch, enforce_eager, use_replayssm, pre
             "cudagraph_capture_sizes": [6, 12, 24],
         }
     with VllmRunner(str(model), **settings) as runner:
-        assert runner.model.collective_rpc("check_flash_paths") == [True] * TP_SIZE
+        assert runner.model.collective_rpc("check_flash_paths") == [True] * (tp_size * pcp_size)
         params = SamplingParams(temperature=0, max_tokens=OUTPUT_TOKENS, ignore_eos=True, detokenize=False)
         # A second mixed batch reuses slots after the first request finishes.
         # 127/128/129 and 511/512/513 straddle input/chunk boundaries.
@@ -230,4 +230,20 @@ def test_glm53flash_dcp_mtp_flashcomm_prefix(tmp_path, monkeypatch, dcp_size, en
         use_replayssm=use_replayssm,
         prefix_caching=True,
         dcp_size=dcp_size,
+    )
+
+
+@pytest.mark.parametrize("dcp_size", [2, 4])
+@pytest.mark.parametrize("enforce_eager", [True, False])
+def test_glm53flash_pcp_dcp_mtp_flashcomm_prefix(tmp_path, monkeypatch, dcp_size, enforce_eager):
+    # RecoverSSM still limits PCP to its existing KV-producer path.
+    test_glm53flash_tp4(
+        tmp_path,
+        monkeypatch,
+        enforce_eager=enforce_eager,
+        use_replayssm=False,
+        prefix_caching=True,
+        dcp_size=dcp_size,
+        pcp_size=2,
+        tp_size=2,
     )

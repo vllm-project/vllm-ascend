@@ -8,11 +8,10 @@ def validate_kpool_dcp(vllm_config, *, check_cache_layout: bool = True) -> None:
     world = parallel.decode_context_parallel_size
     if world <= 1:
         return
-    if parallel.prefill_context_parallel_size != 1:
-        # Candidate exchange requires the same query rows on every rank.
-        # PCP DualChunkSwap has different query rows and needs another exchange.
-        raise NotImplementedError("GLM KPool DCP currently requires PCP=1 on the DCP worker.")
-    if parallel.tensor_parallel_size % world:
+    pcp = parallel.prefill_context_parallel_size
+    if pcp > 1 and world not in (pcp, parallel.tensor_parallel_size * pcp):
+        raise ValueError("GLM KPool PCP+DCP requires DCP=PCP or DCP=TP*PCP.")
+    if pcp == 1 and parallel.tensor_parallel_size % world:
         raise ValueError("GLM KPool DCP size must divide tensor_parallel_size.")
     if not check_cache_layout:
         # ReplaySSM validation precedes the platform's cache-size/interleave

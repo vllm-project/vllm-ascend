@@ -68,7 +68,7 @@ def test_dcp_config(world, interleave):
 @pytest.mark.parametrize(
     "section,field,value,message",
     [
-        ("parallel_config", "prefill_context_parallel_size", 2, "PCP=1"),
+        ("parallel_config", "prefill_context_parallel_size", 4, "DCP=PCP"),
         ("parallel_config", "tensor_parallel_size", 3, "must divide"),
         ("parallel_config", "cp_kv_cache_interleave_size", 1, "divisible"),
         ("parallel_config", "cp_kv_cache_interleave_size", 192, "dividing"),
@@ -89,8 +89,18 @@ def test_early_recoverssm_validation_leaves_layout_to_platform():
     cfg.cache_config.block_size = None
     validate(cfg, check_cache_layout=False)
     cfg.parallel_config.prefill_context_parallel_size = 2
-    with pytest.raises(NotImplementedError, match="PCP=1"):
+    validate(cfg, check_cache_layout=False)
+    cfg.parallel_config.decode_context_parallel_size = 4
+    with pytest.raises(ValueError, match="DCP=PCP"):
         validate(cfg, check_cache_layout=False)
+
+
+@pytest.mark.parametrize("tp,pcp,dcp", [(1, 2, 2), (2, 2, 2), (2, 2, 4), (4, 2, 8), (2, 4, 8)])
+def test_joint_pcp_dcp_topologies(tp, pcp, dcp):
+    cfg = config(dcp)
+    cfg.parallel_config.tensor_parallel_size = tp
+    cfg.parallel_config.prefill_context_parallel_size = pcp
+    load_functions("models/glm5next/dcp.py", ["validate_kpool_dcp"]).validate_kpool_dcp(cfg)
 
 
 @pytest.mark.parametrize("world", [2, 4, 8])
@@ -339,3 +349,259 @@ def test_output_rows_cannot_alias():
             max_model_len=8192,
             output_buffer=torch.empty(1, 11, dtype=torch.int32).expand(3, 11),
         )
+
+
+def pcp_functions():
+    return load_functions(
+        "attention/context_parallel/kpool_pcp.py",
+        ["build_kpool_pcp_query_layout", "gather_kpool_pcp_queries", "restore_kpool_pcp_queries"],
+        KPoolPCPQueryLayout=SimpleNamespace,
+    )
+
+
+def pcp_batch(pcp, mixed, short):
+    # Two separated prefill chunks per rank, with an optional replicated decode.
+    tokens = 1 if short else 17
+    chunks = torch.tensor_split(torch.arange(int(mixed), tokens + int(mixed)), 2 * pcp)
+    rank_indices = [torch.cat((chunks[r], chunks[2 * pcp - 1 - r])) for r in range(pcp)]
+    if mixed:
+        rank_indices = [torch.cat((torch.tensor([0]), indices)) for indices in rank_indices]
+    width = max(map(len, rank_indices)) + 1
+    padded = torch.zeros(pcp, width, dtype=torch.long)
+    restore = torch.full((tokens + int(mixed),), -1, dtype=torch.long)
+    for rank, indices in enumerate(rank_indices):
+        padded[rank, : len(indices)] = indices
+        for offset, index in enumerate(indices):
+            if restore[index] < 0:
+                restore[index] = rank * width + offset
+    assert (restore >= 0).all()
+    return SimpleNamespace(
+        padded_gather_idx=padded.flatten(),
+        hidden_restore_idx=restore,
+        global_batch=SimpleNamespace(num_tokens=restore.numel()),
+    ), rank_indices
+
+
+@pytest.mark.parametrize("pcp", [2, 4])
+@pytest.mark.parametrize("mixed,short", [(False, False), (True, False), (False, True), (True, True)])
+def test_pcp_queries_align_and_restore_with_empty_ranks(pcp, mixed, short):
+    funcs = pcp_functions()
+    context, rank_indices = pcp_batch(pcp, mixed, short)
+    global_query = torch.arange(context.global_batch.num_tokens * 16).reshape(-1, 2, 8).float()
+    width = context.padded_gather_idx.numel() // pcp
+    sends = [global_query.new_full((width, 2, 8), -999) for _ in range(pcp)]
+    for send, indices in zip(sends, rank_indices):
+        send[: len(indices)] = global_query[indices]
+    for rank, indices in enumerate(rank_indices):
+        group = SimpleNamespace(world_size=pcp, rank_in_group=rank)
+        group.all_gather = Mock(return_value=torch.cat(sends))
+        common = SimpleNamespace(num_input_tokens=width, num_actual_tokens=len(indices))
+        layout = funcs.build_kpool_pcp_query_layout(common, context, group)
+        # Exercise the short-input padding path as well as a completely empty rank.
+        gathered = funcs.gather_kpool_pcp_queries(sends[rank][: len(indices)], layout, group)
+        torch.testing.assert_close(gathered, global_query)
+        assert group.all_gather.call_args.args[0].shape[0] == width
+        local = funcs.restore_kpool_pcp_queries(gathered, layout, width, fill_value=-1)
+        torch.testing.assert_close(local[: len(indices)], global_query[indices])
+        assert (local[len(indices) :] == -1).all()
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+@pytest.mark.parametrize("short", [False, True])
+def test_indexer_joint_pcp_dcp_scores_global_rows_and_keeps_local_shared_buffer(monkeypatch, rank, short):
+    funcs = pcp_functions()
+    context, rank_indices = pcp_batch(2, False, short)
+    width = context.padded_gather_idx.numel() // 2
+    global_query = torch.arange(context.global_batch.num_tokens * 16).reshape(-1, 2, 8).float()
+    global_weights = torch.arange(context.global_batch.num_tokens * 2).reshape(-1, 2).float()
+    indices = context.padded_gather_idx
+    group = SimpleNamespace(world_size=2, rank_in_group=rank)
+    group.all_gather = Mock(side_effect=[global_query[indices], global_weights[indices]])
+    common = SimpleNamespace(num_input_tokens=width, num_actual_tokens=len(rank_indices[rank]))
+    layout = funcs.build_kpool_pcp_query_layout(common, context, group)
+    scoring_metadata = SimpleNamespace(positions=torch.arange(context.global_batch.num_tokens))
+    metadata = SimpleNamespace(pcp_dcp_query_layout=layout, write_metadata=scoring_metadata)
+    global_topk = torch.arange(context.global_batch.num_tokens * 11, dtype=torch.int32).reshape(-1, 1, 11)
+    kernel = Mock(return_value=global_topk)
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm_ascend.ops.triton.glm5_next_dcp_indexer",
+        SimpleNamespace(glm5_next_dcp_indexer=kernel),
+    )
+    select = load_method(
+        "attention/indexer_kpool.py",
+        "Glm5NextKPoolIndexerBackend",
+        "_select_dcp_candidates",
+        gather_kpool_pcp_queries=funcs.gather_kpool_pcp_queries,
+        restore_kpool_pcp_queries=funcs.restore_kpool_pcp_queries,
+        get_pcp_group=lambda: group,
+        get_dcp_group=lambda: group,
+    )
+    shared = torch.full((width + 1, 15), 99, dtype=torch.int32)
+    backend = SimpleNamespace(
+        topk_tokens=8, index_kpool=4, _dcp_interleave=128, _max_model_len=8192, topk_indices_buffer=shared
+    )
+    local_indices = indices.view(2, width)[rank]
+    result = select(backend, global_query[local_indices], global_weights[local_indices], None, metadata, None)
+    torch.testing.assert_close(kernel.call_args.args[0], global_query)
+    torch.testing.assert_close(kernel.call_args.args[2], global_weights.to(torch.bfloat16))
+    assert kernel.call_args.args[3] is scoring_metadata
+    assert kernel.call_args.kwargs["output_buffer"] is None
+    assert result.data_ptr() == shared.data_ptr()
+    expected = funcs.restore_kpool_pcp_queries(global_topk, layout, width, fill_value=-1)
+    torch.testing.assert_close(result, expected)
+    assert (shared[-1] == 99).all() and (shared[:, 11:] == 99).all()
+
+
+def test_joint_metadata_keeps_local_and_global_requests_separate():
+    funcs = pcp_functions()
+    context, rank_indices = pcp_batch(2, True, False)
+    width = context.padded_gather_idx.numel() // 2
+    context.global_slot_mappings = torch.arange(context.global_batch.num_tokens).unsqueeze(0)
+    common = SimpleNamespace(num_input_tokens=width, num_actual_tokens=len(rank_indices[0]))
+    global_common = SimpleNamespace(
+        num_reqs=2,
+        num_input_tokens=context.global_batch.num_tokens,
+        num_actual_tokens=context.global_batch.num_tokens,
+        query_start_loc=torch.tensor([0, 1, context.global_batch.num_tokens]),
+        seq_lens=torch.tensor([257, 513]),
+        positions=torch.arange(context.global_batch.num_tokens),
+        block_table_tensor=torch.tensor([[5, 7], [11, 13]], dtype=torch.int32),
+    )
+    local_lens = torch.tensor([128, 131, 255])
+    metadata = SimpleNamespace(
+        dcp_context=SimpleNamespace(seq_lens=local_lens),
+        pcp_dcp_query_layout=None,
+        pcp_dcp_global_metadata=None,
+        cum_query_lens=torch.tensor([1, 5, 9]),
+    )
+    attach = load_method(
+        "attention/context_parallel/sfa_cp.py",
+        "AscendSFAPCPDCPMetadataBuilder",
+        "_attach_kpool_pcp_queries",
+        get_sfa_pcp_global_metadata=Mock(return_value=global_common),
+        DCPContext=SimpleNamespace,
+        replace=lambda obj, **kwargs: SimpleNamespace(**(vars(obj) | kwargs)),
+        build_kpool_pcp_query_layout=funcs.build_kpool_pcp_query_layout,
+        get_pcp_group=lambda: SimpleNamespace(world_size=2, rank_in_group=0),
+    )
+    builder = SimpleNamespace(
+        _get_dcp_local_block_table=lambda table, count: table,
+        _get_dcp_local_seq_lens=lambda seq: torch.tensor([129, 257]),
+    )
+    attach(builder, metadata, common, context, 0)
+    assert metadata.dcp_context.seq_lens is local_lens
+    assert metadata.cum_query_lens.tolist() == [1, 5, 9]
+    global_metadata = metadata.pcp_dcp_global_metadata
+    assert global_metadata.cum_query_lens.tolist() == [1, 18]
+    assert global_metadata.dcp_context.seq_lens.tolist() == [129, 257]
+    assert global_metadata.dcp_context.block_table is global_common.block_table_tensor
+    assert global_metadata.pcp_dcp_query_layout is None
+
+
+@pytest.mark.parametrize("rank,short", [(0, False), (1, False), (1, True)])
+@pytest.mark.parametrize("quantized", [False, True])
+def test_joint_sfa_uses_global_requests_and_restores_local_outputs(rank, short, quantized):
+    funcs = pcp_functions()
+    context, rank_indices = pcp_batch(2, not short, short)
+    width = context.padded_gather_idx.numel() // 2
+    rows = context.global_batch.num_tokens
+    common = SimpleNamespace(num_input_tokens=width, num_actual_tokens=len(rank_indices[rank]))
+    group = SimpleNamespace(world_size=2, rank_in_group=rank)
+    layout = funcs.build_kpool_pcp_query_layout(common, context, group)
+    query = torch.arange(rows * 16).reshape(rows, 2, 8).float()
+    topk = torch.arange(rows * 11, dtype=torch.int32).reshape(rows, 1, 11)
+    group.all_gather = Mock(return_value=topk[context.padded_gather_idx])
+    local_query = query[layout.local_indices]
+    global_metadata = SimpleNamespace(
+        cum_query_lens=torch.tensor([rows]),
+        seq_lens=torch.tensor([513]),
+        block_size=128,
+        smla_metadata=None,
+        dcp_context=SimpleNamespace(
+            seq_lens=torch.tensor([257]), block_table=torch.tensor([[7, 11]]), gather_context=None
+        ),
+    )
+    metadata = SimpleNamespace(
+        dcp_context=object(), pcp_dcp_query_layout=layout, pcp_dcp_global_metadata=global_metadata
+    )
+    # Distinct output rows make a wrong local/global permutation observable.
+    global_output = query + 1000
+    operator = Mock(return_value=(global_output, torch.zeros(1, rows, 2), torch.ones(1, rows, 2)))
+    execute = load_method(
+        "attention/context_parallel/sfa_cp.py",
+        "AscendSFADCPImpl",
+        "_execute_sparse_flash_attention_process",
+        gather_kpool_pcp_queries=funcs.gather_kpool_pcp_queries,
+        restore_kpool_pcp_queries=funcs.restore_kpool_pcp_queries,
+        get_pcp_group=lambda: group,
+        _view_cache_as_operator_pages=lambda cache, block_size: cache,
+        enable_sfa_dcp_force_tmajor_restore=lambda: False,
+        DeviceOperator=SimpleNamespace(execute_sparse_flash_attention_process=operator),
+    )
+    impl = SimpleNamespace(
+        dcp_group=group,
+        qk_rope_head_dim=0,
+        enable_sparse_sfa_turboquant=False,
+        _sharded_indexer=True,
+        _local_topk=False,
+        _kpool_dcp=True,
+        _has_prefill=lambda _: True,
+        _start_kpool_pcp_query_gather=Mock(return_value=query),
+        _finish_dcp_gather=lambda gathered, **kw: (gathered, None),
+        _finish_dcp_packed_gather=lambda gathered, **kw: gathered,
+        _remap_sparse_indices=Mock(side_effect=lambda ids: ids),
+        _mask_nope_dcp_padding=lambda *args: args[:1] + args[2:],
+        _merge_dcp_outputs=Mock(return_value=global_output),
+    )
+    result = execute(
+        impl,
+        local_query,
+        None,
+        (torch.zeros(1, dtype=torch.int8 if quantized else torch.bfloat16),),
+        topk[layout.local_indices],
+        metadata,
+        torch.tensor([width]),
+        torch.tensor([999]),
+    )
+    args, kwargs = operator.call_args
+    torch.testing.assert_close(args[4], topk)
+    assert args[5] is global_metadata
+    assert args[6] is global_metadata.cum_query_lens
+    assert args[7] is global_metadata.dcp_context.seq_lens
+    assert kwargs["block_table"] is global_metadata.dcp_context.block_table
+    torch.testing.assert_close(kwargs["packed_query"] if quantized else args[1], query)
+    assert global_metadata.dcp_context.gather_context is None
+    torch.testing.assert_close(result[: len(rank_indices[rank])], global_output[rank_indices[rank]])
+    assert (result[len(rank_indices[rank]) :] == 0).all()
+
+
+def test_joint_cache_write_slots_keep_dcp_ownership():
+    context, rank_indices = pcp_batch(2, True, False)
+    width = context.padded_gather_idx.numel() // 2
+    # Every global token has exactly one DCP cache owner. Decode replicas and
+    # PCP padding must not turn a non-owner's -1 into a writable cache address.
+    positions = torch.arange(context.global_batch.num_tokens)
+    mask = torch.zeros(2, width, dtype=torch.bool)
+    for rank, indices in enumerate(rank_indices):
+        mask[rank, : len(indices)] = True
+    mask[1, 0] = False
+    context.gathered_kv_write_mask = mask.flatten()
+    funcs = load_functions("attention/context_parallel/common_cp.py", ["build_pcp_ordered_slot_mapping"])
+    build = load_method(
+        "attention/context_parallel/sfa_cp.py",
+        "AscendSFAPCPDCPMetadataBuilder",
+        "_build_pcp_ordered_indexer_slot_mapping",
+        get_sfa_pcp_global_metadata=lambda *a: None,
+        enable_kpool_dcp=lambda _: True,
+        build_pcp_ordered_slot_mapping=funcs.build_pcp_ordered_slot_mapping,
+    )
+    for owner in range(2):
+        slots = torch.where(positions // 4 % 2 == owner, positions // 8 * 4 + positions % 4 + 128, -1)
+        context.global_slot_mappings = slots.unsqueeze(0)
+        builder = SimpleNamespace(
+            vllm_config=config(), pcp_indexer_slot_mapping_buf=torch.empty(2 * width, dtype=torch.long)
+        )
+        actual = build(builder, None, context, 0)
+        expected = slots[context.padded_gather_idx].masked_fill(~mask.flatten(), -1)
+        torch.testing.assert_close(actual, expected)

@@ -46,6 +46,22 @@ gathers query heads, computes local softmax statistics and merges partial
 outputs. A5's ordinary BF16 NoPE sink is included once, on DCP rank zero;
 quantized/A3 paths retain their existing sink-free behavior.
 
+## PCP composition
+
+With PCP greater than one, use DCP=PCP or DCP=TP*PCP. Before scoring,
+`KPoolPCPQueryLayout` gathers the current query vectors and head weights,
+removes padding and duplicate decode rows, and restores global request order.
+The scorer uses the compressor's global-request metadata with rank-local
+physical cache pages. Only the selected local query rows are copied back into
+the shared Top-K buffer; padded rows contain `-1`.
+
+Main SFA gathers the matching query/token-index rows and uses separate global
+request lengths and local DCP page tables. The existing TP output All2All and
+PCP output/LSE AllGather merge all KV owners before local query rows are
+restored. Empty PCP ranks participate in both exchanges. Neither history
+cache is gathered. Decode-only graph replay keeps the existing replicated
+query path; PCP-prefill permutations are attached only for global prefills.
+
 ## Memory and graph replay
 
 The local score capacity is bounded by model length, DCP/interleave and table

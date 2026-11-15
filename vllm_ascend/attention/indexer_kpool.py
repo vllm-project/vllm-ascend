@@ -32,6 +32,12 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
+from vllm_ascend.attention.context_parallel.kpool_pcp import (
+    KPoolPCPQueryLayout,
+    build_kpool_pcp_query_layout,
+    gather_kpool_pcp_queries,
+    restore_kpool_pcp_queries,
+)
 from vllm_ascend.attention.context_parallel.sfa_dcp_utils import get_sfa_pcp_global_metadata
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import (
@@ -234,6 +240,7 @@ class AscendIndexerKPoolMetadata:
     write_metadata: "AscendIndexerKPoolMetadata | None" = None
     pcp_hidden_restore_indices: torch.Tensor | None = None
     pcp_local_token_count: int = 0
+    pcp_dcp_query_layout: KPoolPCPQueryLayout | None = None
     # Per-rank contiguous scoring slice, or None for the replicated path.
     indexer_row_shard: AscendIndexerKPoolRowShard | None = None
 
@@ -481,6 +488,10 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             if pcp_context.padded_gather_idx is None:
                 raise RuntimeError("KPool PCP prefill requires the gathered-token layout.")
             metadata.pcp_local_token_count = pcp_context.padded_gather_idx.numel() // self.pcp_size
+            if self.vllm_config.parallel_config.decode_context_parallel_size > 1:
+                metadata.pcp_dcp_query_layout = build_kpool_pcp_query_layout(
+                    common_attn_metadata, pcp_context, get_pcp_group()
+                )
         return metadata
 
     def _build_metadata(
@@ -993,6 +1004,38 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             query, *args, q_descale=q_descale, k_descale=k_descale, quant_mode=0, **kwargs
         )
 
+    def _select_dcp_candidates(self, query, weights, cache, metadata, scale_cache):
+        from vllm_ascend.ops.triton.glm5_next_dcp_indexer import glm5_next_dcp_indexer
+
+        num_tokens = query.shape[0]
+        layout = metadata.pcp_dcp_query_layout
+        scoring_metadata = metadata
+        if layout is not None:
+            query = gather_kpool_pcp_queries(query, layout, get_pcp_group())
+            weights = gather_kpool_pcp_queries(weights, layout, get_pcp_group())
+            scoring_metadata = metadata.write_metadata
+            assert scoring_metadata is not None
+        indices = glm5_next_dcp_indexer(
+            query,
+            cache,
+            weights.to(torch.bfloat16),
+            scoring_metadata,
+            get_dcp_group(),
+            topk=self.topk_tokens,
+            pool_size=self.index_kpool,
+            interleave=self._dcp_interleave,
+            max_model_len=self._max_model_len,
+            output_buffer=self.topk_indices_buffer if layout is None else None,
+            scale_cache=scale_cache,
+        )
+        if layout is not None:
+            indices = restore_kpool_pcp_queries(indices, layout, num_tokens, fill_value=-1)
+            if self.topk_indices_buffer is not None:
+                output = self.topk_indices_buffer[:num_tokens, : self.topk_tokens + self.index_kpool - 1]
+                output.copy_(indices[:, 0])
+                indices = output.unsqueeze(1)
+        return indices
+
     def _forward_cann(
         self,
         hidden_states: torch.Tensor,
@@ -1105,6 +1148,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         # FULL capture retains selection because replay may have live queries.
         if num_tokens == 0 or (
             indexer_metadata.num_actual_tokens == 0
+            and indexer_metadata.pcp_dcp_query_layout is None
             and get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.FULL
         ):
             if self.topk_indices_buffer is not None:
@@ -1114,26 +1158,12 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             return torch.full((num_tokens, 1, output_width), -1, dtype=torch.int32, device=hidden_states.device)
         assert q_values is not None and weights is not None
         if getattr(self, "_use_dcp", False):
-            from vllm_ascend.ops.triton.glm5_next_dcp_indexer import glm5_next_dcp_indexer
-
             if quantized:
                 # Match the FP8 query quantization used by the ordinary CANN
                 # path; dequantization feeds the existing weighted-Q formula.
                 q_quant, q_scale = torch_npu.npu_dynamic_quant(q_values, dst_type=torch.float8_e4m3fn)
                 q_values = q_quant.float() * q_scale.unsqueeze(-1)
-            return glm5_next_dcp_indexer(
-                q_values,
-                indexer_cache,
-                weights.to(torch.bfloat16),
-                indexer_metadata,
-                get_dcp_group(),
-                topk=self.topk_tokens,
-                pool_size=self.index_kpool,
-                interleave=self._dcp_interleave,
-                max_model_len=self._max_model_len,
-                output_buffer=self.topk_indices_buffer,
-                scale_cache=indexer_scale_cache,
-            )
+            return self._select_dcp_candidates(q_values, weights, indexer_cache, indexer_metadata, indexer_scale_cache)
         # Under TP row sharding the scorer and packer address the rank's
         # slice only; every sliced row still scores its full visible key
         # history, so the packed indices are bitwise-equal to the

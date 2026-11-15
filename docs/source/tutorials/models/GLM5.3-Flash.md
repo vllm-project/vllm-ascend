@@ -2141,7 +2141,7 @@ refer to [Optix-for-PD-disaggregation](https://gitcode.com/Ascend/msmodeling/blo
 ### 9.4 Decode Context Parallelism on A3/A5
 
 GLM-5.3-Flash can distribute both its MLA token cache and compressed KPool
-cache across a DCP group inside TP. Each rank scores its local complete pools,
+cache across a DCP group within TP or across PCP and TP. Each rank scores its local complete pools,
 exchanges only candidates, and expands the global selection into token indices.
 The recurrent KDA state and the small compressor tail retain their existing
 TP/request layouts. DCP does not reduce model-weight or recurrent-state memory.
@@ -2157,13 +2157,30 @@ command above:
 --cp-kv-cache-interleave-size 128
 ```
 
-DCP must divide TP; sizes 2, 4 and 8 have dedicated operator tests. The token
+With PCP1, DCP must divide TP; sizes 2, 4 and 8 have dedicated operator tests. The token
 interleave must be divisible by `index_kpool` and divide the cache block size.
 The platform currently normalizes sparse-attention interleave to the cache
 block size in colocated serving. For PD/KV-pool serving, set both values
-explicitly and equally. PCP and DCP cannot both exceed one on the same GLM
-worker. A separate PCP Prefill engine can feed a PCP1 DCP Decode engine using
-the connector's supported topology and matching cache formats.
+explicitly and equally. With PCP greater than one, DCP must equal PCP or
+TP times PCP, matching the shared SFA query-head gather and output merge.
+For example, a four-device engine can use TP2/PCP2/DCP2 or TP2/PCP2/DCP4:
+
+```shell
+--tensor-parallel-size 2 \
+--prefill-context-parallel-size 2 \
+--decode-context-parallel-size 4 \
+--block-size 128 \
+--cp-kv-cache-interleave-size 128
+```
+
+PCP prefill queries and head weights are gathered in original request order
+before candidate exchange. Main attention uses the same global query order
+and restores each PCP rank's local rows after merging softmax statistics.
+Padding and replicated decode rows are removed from the global query view;
+an empty local rank still participates in the collectives. Historical MLA
+and KPool caches remain sharded. A separate PCP Prefill engine can also feed
+a PCP1 DCP Decode engine using a connector-supported topology and matching
+cache formats.
 
 The implementation preserves the following acceleration paths:
 
@@ -2172,7 +2189,7 @@ The implementation preserves the following acceleration paths:
 | Chunked prefill and mixed batches | Score only locally owned complete pools; never gather the indexer history. |
 | `FULL_DECODE_ONLY` and draft graphs | Visibility and causal tails read device lengths/positions on every replay. |
 | MTP and shared Top-K | Shared buffers contain global token IDs; every layer still updates its pool and rollback ring. |
-| RecoverSSM (`use_replayssm`) | Retains TP-sharded KDA heads and request-owned rollback state; existing PP and prefix-cache constraints still apply. |
+| RecoverSSM (`use_replayssm`) | Retains KDA heads and request-owned rollback state. Its existing PCP restriction to TP1 KV producers remains; colocated PCP+DCP with RecoverSSM is not enabled by this change. |
 | Prefix caching | MLA and KPool share scheduler IDs; compressor rings remain non-cacheable request state. |
 | FlashComm1 and EP | Keep the existing TP/EP layout; indexer query rows must be restored before candidate exchange. |
 | A3 cache formats | BF16 indexer; ordinary BF16 or INT8 main KV paths. |
@@ -2186,7 +2203,8 @@ sink, counted once across the DCP group.
 Validation before deployment must include the operator and four-card model
 tests below on the intended software stack. CPU unit tests do not validate
 Triton compilation, CANN numerical behavior or HCCL graph replay. The synthetic
-model test covers MTP, FlashComm1, prefix reuse and RecoverSSM; real-weight
+model test covers MTP, FlashComm1, prefix reuse and PCP1 RecoverSSM, plus
+TP2/PCP2 with DCP2/4 in eager and decode-graph modes; real-weight
 accuracy, C8 configurations, PD transfers and performance require separate
 hardware runs. Compare DCP1 and DCP2/4/8 at the same TP size, recording TTFT,
 TPOT, throughput, peak memory and speculative acceptance on short/long prompts
