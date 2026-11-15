@@ -2019,14 +2019,17 @@ def _reshape_kv_cache_v2(
             num_blocks = total_bytes // page_stride_bytes
             num_blocks_per_kv_block = get_storage_block_size(kv_cache_spec) // kernel_block_size
             kernel_num_blocks = num_blocks * num_blocks_per_kv_block
+            packed_sfa_main_cache = enable_sfa(vllm_config) and kv_cache_spec_uses_packed_sfa_main_cache(kv_cache_spec)
+            storage_width = kv_cache_spec.head_size
+            if packed_sfa_main_cache:
+                storage_width = kv_cache_spec.state_content_size_bytes // get_dtype_size(kv_cache_spec.dtype)
             kv_cache_shape = group.backend.get_kv_cache_shape(
                 kernel_num_blocks,
                 kernel_block_size,
                 kv_cache_spec.num_kv_heads,
-                kv_cache_spec.head_size,
+                storage_width,
                 (getattr(kv_cache_spec, "cache_dtype_str", None) or "auto") if kv_cache_spec.is_draft else cache_dtype,
             )
-            packed_sfa_main_cache = enable_sfa(vllm_config) and kv_cache_spec_uses_packed_sfa_main_cache(kv_cache_spec)
             if isinstance(kv_cache_spec, (AscendMLAAttentionSpec, MLAAttentionSpec)) and (
                 get_kv_cache_compression_ratio(kv_cache_spec) > 1
             ):
@@ -2051,7 +2054,7 @@ def _reshape_kv_cache_v2(
                 k_dim, v_dim = _get_attention_kv_cache_dims(layer_name, kv_cache_spec)
                 k_shape = (num_blocks_, block_size_, num_kv_heads, k_dim)
                 if packed_sfa_main_cache:
-                    k_shape = (num_blocks_, block_size_, num_kv_heads, kv_cache_spec.head_size)
+                    k_shape = kv_cache_shape
                     v_dim = 0
                 v_shape = (num_blocks_, block_size_, num_kv_heads, v_dim)
             else:
@@ -2075,11 +2078,6 @@ def _reshape_kv_cache_v2(
 
             if packed_sfa_main_cache:
                 raw_k_tensor = raw_cache
-                k_dtype = (
-                    torch.int8
-                    if vllm_config.cache_config.cache_dtype == TURBOQUANT_CACHE_DTYPE
-                    else kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
-                )
                 k_cache = raw_k_tensor.view(k_dtype).view(k_shape)
                 kv_caches[layer_name] = (k_cache,)
             elif isinstance(raw_cache, tuple):

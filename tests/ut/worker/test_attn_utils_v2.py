@@ -2505,8 +2505,40 @@ def test_kpool_sfa_main_cache_spec(monkeypatch, use_turboquant, expected_width):
     assert isinstance(spec, AscendMLAAttentionSpec)
     assert spec.cache_sparse_sfa_c8 is (not use_turboquant)
     assert spec.cache_sparse_sfa_turboquant is use_turboquant
-    assert spec.head_size == expected_width
+    assert spec.head_size == layer.head_size
+    assert spec.state_content_bytes == expected_width
+    assert spec.page_size_bytes == spec.block_size * spec.num_kv_heads * expected_width
     assert spec.dtype == torch.int8
+    merged = AscendMLAAttentionSpec.merge([spec])
+    assert merged.state_content_bytes == expected_width
+    assert merged.page_size_bytes == spec.page_size_bytes
+
+    num_blocks = 2
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=merged)],
+    )
+    raw = torch.zeros(num_blocks * merged.page_size_bytes, dtype=torch.int8)
+    caches = attn_utils._reshape_kv_cache_v2(
+        attn_groups=[
+            SimpleNamespace(
+                kv_cache_group_id=0,
+                kv_cache_spec=merged,
+                layer_names=[layer_name],
+                backend=AscendSFABackend,
+            )
+        ],
+        kv_cache_raw_tensors={layer_name: raw},
+        cache_dtype=vllm_config.cache_config.cache_dtype,
+        kernel_block_sizes=[merged.block_size],
+        shared_kv_cache_layers={},
+        kv_cache_config=kv_cache_config,
+    )
+    (packed_cache,) = caches[layer_name]
+    assert packed_cache.shape == (num_blocks, merged.block_size, merged.num_kv_heads, expected_width)
+    assert packed_cache.dtype == merged.dtype
+    assert packed_cache.data_ptr() == raw.data_ptr()
 
 
 def test_v2_sparse_offload_marks_main_mla_cache_host_resident(monkeypatch):

@@ -248,10 +248,13 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
 
     @property
     def real_page_size_bytes(self) -> int:
+        content_bytes = self.head_size * get_dtype_size(self.dtype)
+        if self.uses_packed_sfa_main_cache and self.state_content_bytes is not None:
+            content_bytes = self.state_content_size_bytes
         return (
             get_storage_block_size(self)
             * self.num_kv_heads
-            * (self.head_size * get_dtype_size(self.dtype) + self.scale_dim * get_dtype_size(self.scale_dtype))
+            * (content_bytes + self.scale_dim * get_dtype_size(self.scale_dtype))
         )
 
     @property
@@ -275,6 +278,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
                 spec.scale_dtype,
                 spec.cache_sparse_sfa_c8,
                 spec.cache_sparse_sfa_turboquant,
+                spec.state_content_bytes if spec.uses_packed_sfa_main_cache else None,
                 spec.store_on_host,
                 spec.alignment,
                 get_kv_cache_compression_ratio(spec),

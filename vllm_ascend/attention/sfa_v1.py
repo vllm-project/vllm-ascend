@@ -369,10 +369,10 @@ class AscendSFABackend(AttentionBackend):
         if spec.kv_lora_rank is None or spec.qk_rope_head_dim is None:
             raise ValueError("Packed SFA specs require NoPE and RoPE dimensions.")
         if spec.cache_sparse_sfa_turboquant:
-            width = get_tq_fused_slot_bytes(spec.kv_lora_rank, spec.qk_rope_head_dim)
-            return replace(spec, head_size=width, dtype=torch.int8)
-        width = get_sfa_qsfa_packed_head_dim(spec.kv_lora_rank, spec.qk_rope_head_dim)
-        return replace(spec, head_size=width)
+            slot_bytes = get_tq_fused_slot_bytes(spec.kv_lora_rank, spec.qk_rope_head_dim)
+            return replace(spec, state_content_bytes=slot_bytes, dtype=torch.int8)
+        slot_bytes = get_sfa_qsfa_packed_head_dim(spec.kv_lora_rank, spec.qk_rope_head_dim)
+        return replace(spec, state_content_bytes=slot_bytes)
 
     @staticmethod
     def get_name() -> str:
