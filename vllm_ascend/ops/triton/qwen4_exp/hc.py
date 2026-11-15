@@ -210,6 +210,7 @@ def _hc_gate_mix_row_block_kernel(
     inner_offsets = tile * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     row_mask = row_offsets < rows
     inner_mask = inner_offsets < GROUP_DIM
+    mask = row_mask[:, None] & inner_mask[None, :]
     accumulator = tl.zeros([ROWS_PER_BLOCK, BLOCK_SIZE], dtype=tl.float32)
     for stream in tl.static_range(HC_COUNT):
         column_offsets = stream * GROUP_DIM + inner_offsets
@@ -219,7 +220,6 @@ def _hc_gate_mix_row_block_kernel(
             gates = tl.load(gate_ptr + gate_offsets)
             values = tl.load(x_ptr + x_offsets)
         else:
-            mask = row_mask[:, None] & inner_mask[None, :]
             gates = tl.load(gate_ptr + gate_offsets, mask=mask, other=0.0)
             values = tl.load(x_ptr + x_offsets, mask=mask, other=0.0)
         accumulator += tl.sigmoid(gates.to(tl.float32)) * values.to(tl.float32)
@@ -228,7 +228,6 @@ def _hc_gate_mix_row_block_kernel(
     if EVEN_ROWS and EVEN_BLOCK:
         tl.store(output_ptr + output_offsets, accumulator)
     else:
-        mask = row_mask[:, None] & inner_mask[None, :]
         tl.store(output_ptr + output_offsets, accumulator, mask=mask)
 
 
