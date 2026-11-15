@@ -28,6 +28,11 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
+    get_layerwise_offload_config,
+    get_spec_reuse_rules,
+    plan_layerwise_cache_reuse,
+)
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_pool_bytes_per_block,
     group_cache_specs,
@@ -92,12 +97,20 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         vllm_config: VllmConfig,
         kv_cache_groups: list[KVCacheGroupSpec],
     ) -> int:
-        """One global block ID consumes sum(page sizes) x layer tuples.
+        """Return the device memory cost per global block ID.
 
         The default implementation materializes a one-block pool and requires a
         single device backing size, which the DSV4 shared-tuple, the TurboQuant
         packed, the DSV4.1, and the GLM-Next layouts all violate.
         """
+        extra_config = get_layerwise_offload_config(getattr(vllm_config, "kv_transfer_config", None))
+        if extra_config is not None and kv_cache_groups and get_spec_reuse_rules(vllm_config) is not None:
+            native_config = self.get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks=1)
+            layout = plan_layerwise_cache_reuse(native_config, vllm_config)
+            if layout is not None:
+                # Each reuse descriptor reports the size of the same device backing.
+                # This plan has one block, so that size is the cost per block.
+                return next(tensor.size for tensor in layout.kv_cache_tensors if not tensor.host_resident)
         if vllm_config.model_config.hf_config.model_type == "kimi_k31":
             return paired_sfa_pool_bytes(kv_cache_groups)
         if is_deepseek_v41_cache(kv_cache_groups):

@@ -127,6 +127,8 @@
 #      wrapper)
 #   3. `vllm.v1.engine.core.EngineCore.post_step` (pp-mtp patch, invocation
 #      moved here from patch_pp_mtp.py)
+#   4. `vllm.v1.engine.core.EngineCore._initialize_kv_caches`
+#      `vllm.v1.engine.core.generate_scheduler_kv_cache_config`
 #    Why:
 #       Previously patch_balance_schedule and patch_dyntra_lb_core
 #       each wrapped `EngineCoreProc.run_engine_core` independently, forming
@@ -139,12 +141,15 @@
 #       import. In `spawn` children, unpickling this wrapper imports this
 #       module, deterministically re-applying all engine-core-level patches
 #       before any `EngineCore` is instantiated.
+#       For layerwise offload, plan from rank-local specs before vLLM
+#       reduces each group to its representative spec.
 #    Related PR (if no, explain why):
 #       No, vllm-ascend internal refactor of its own platform patches.
 #    Future Plan:
 #       Remove this patch once upstream exposes stable extension points for
 #       engine-core-level customization, or when the feature modules no longer
-#       need an entry-point hook.
+#       need an entry-point hook. Drop the offload hooks when upstream
+#       exposes rank-local planning to scheduler configuration builders.
 #
 # ** 6. File: platform/patch_engram_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -294,6 +299,19 @@
 #    Future Plan:
 #       Remove once upstream exposes the PD role to the coordinator or
 #       removes the EAGLE last-block drop for verified prompt blocks.
+#   3. `vllm.v1.core.sched.scheduler.Scheduler._get_local_prefix_cache_hit`
+#    Why:
+#       Layerwise scratch buffers overwrite locally hashed prefix pages.
+#       Hash presence alone cannot establish that their payload is resident.
+#    How:
+#       Ask AscendStore for a recoverable prefix boundary only when layerwise
+#       cache reuse is active. Bound the existing local hash lookup to that
+#       boundary so the scheduler can reuse block IDs and restore rotated KV.
+#    Related PR (if no, explain why):
+#       No upstream PR; this accompanies layerwise main-cache reuse.
+#    Future Plan:
+#       Remove when upstream prefix admission can track scratch residency or
+#       delegate hit validation to the layerwise connector before admission.
 #
 # ** 10. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -304,10 +322,17 @@
 #       accounting.
 #    How:
 #       Both supported versions select AscendKVCacheConfigBuilder through
-#       NPUPlatform. Its default materialization delegates to the patched
-#       planning functions.
+#       NPUPlatform. Its inherited materialization calls the patched planning
+#       function to build the native descriptors. The builder probes the
+#       offload planner for device cost. Offload admission uses Core's
+#       group-lifetime calculation with that cost; ordinary layouts retain
+#       their native admission paths.
 #    Related PR:
 #       https://github.com/vllm-project/vllm/pull/53558
+#    Future Plan:
+#       Remove the remaining native placement/admission patches when upstream
+#       supports those Ascend layouts.
+#
 #   2. `vllm.v1.core.kv_cache_planning.get_kv_cache_config_from_groups`
 #      `vllm.v1.core.kv_cache_planning._pool_bytes_per_block`
 #    Why:

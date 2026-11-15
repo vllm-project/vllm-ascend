@@ -86,7 +86,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_kv import (
     get_resident_dspark_layer_names,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    apply_layerwise_kv_cache_plan,
+    AscendLayerwiseKVCacheConfig,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     allocate_kv_offload_topk_profile_buffers,
@@ -458,10 +458,10 @@ class NPUModelRunner(GPUModelRunner):
             is_last_pp_rank=self.is_last_pp_rank,
             shared_kv_cache_layers=getattr(self, "shared_kv_cache_layers", None),
         )
-        # P also needs persistent prompt draft KV until D acknowledges its
-        # transfer. It must never alias target layerwise scratch buffers.
-        persistent_draft_names = resident_draft_names | set(getattr(kv_cache_config, "dspark_draft_layer_names", ()))
-        apply_layerwise_kv_cache_plan(kv_cache_config, self.vllm_config, excluded_layer_names=persistent_draft_names)
+        if isinstance(kv_cache_config, AscendLayerwiseKVCacheConfig) and not (
+            kv_cache_config.reuse_layout.reused_cache_names.isdisjoint(resident_draft_names)
+        ):
+            raise ValueError("Resident DSpark draft caches cannot rotate through target layerwise slots.")
         if sparse_cfg.enabled:
             self.sparse_kv_offload_manager = init_sparse_kv_offload_manager(
                 self.vllm_config, kv_cache_config, sparse_cfg
