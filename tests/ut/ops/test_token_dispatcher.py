@@ -1113,7 +1113,10 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
 
         # This test covers dispatch-side activation quantization, not the
         # separately tested LoRA index exchange collective.
-        with patch("vllm_ascend.ops.fused_moe.token_dispatcher.all2all_lora_indices"):
+        with (
+            self._mock_split_copy_state(self.dispatcher),
+            patch("vllm_ascend.ops.fused_moe.token_dispatcher.all2all_lora_indices"),
+        ):
             result = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 
         self.mock_npu_dynamic_quant.assert_not_called()
