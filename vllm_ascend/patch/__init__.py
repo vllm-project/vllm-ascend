@@ -296,17 +296,13 @@
 #       removes the EAGLE last-block drop for verified prompt blocks.
 #   3. `vllm.v1.core.sched.scheduler.Scheduler._get_local_prefix_cache_hit`
 #    Why:
-#       Layerwise scratch buffers overwrite locally hashed prefix pages.
-#       Hash presence alone cannot establish that their payload is resident.
+#       A prefix hash can outlive its KV in a reused buffer.
 #    How:
-#       Ask AscendStore for a recoverable prefix boundary only when layerwise
-#       cache reuse is active. Bound the existing local hash lookup to that
-#       boundary so the scheduler can reuse block IDs and restore rotated KV.
-#    Related PR (if no, explain why):
-#       No upstream PR; this accompanies layerwise main-cache reuse.
+#       Cap local hits at the prefix AscendStore can restore.
+#    Related PR:
+#       No upstream PR for this AscendStore lookup limit.
 #    Future Plan:
-#       Remove when upstream prefix admission can track scratch residency or
-#       delegate hit validation to the layerwise connector before admission.
+#       Remove when upstream lets connectors limit local prefix hits.
 #
 # ** 10. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -317,16 +313,13 @@
 #       accounting.
 #    How:
 #       Both supported versions select AscendKVCacheConfigBuilder through
-#       NPUPlatform. Its inherited materialization calls the patched planning
-#       function to build the native descriptors. The builder carries the reuse
-#       result to the scheduler and probes device cost. Offload admission uses Core's
-#       group-lifetime calculation with that cost; ordinary layouts retain
-#       their native admission paths.
+#       NPUPlatform. Its default materialization delegates to the patched
+#       planning functions. The builder supplies the per-block offload cost
+#       to Core and carries the reuse layout to the scheduler.
 #    Related PR:
 #       https://github.com/vllm-project/vllm/pull/53558
 #    Future Plan:
-#       Remove the remaining native placement/admission patches when upstream
-#       supports those Ascend layouts.
+#       Remove when vLLM supports these layouts through the builder API.
 #
 #   2. `vllm.v1.core.kv_cache_planning.get_kv_cache_config_from_groups`
 #      `vllm.v1.core.kv_cache_planning._pool_bytes_per_block`
