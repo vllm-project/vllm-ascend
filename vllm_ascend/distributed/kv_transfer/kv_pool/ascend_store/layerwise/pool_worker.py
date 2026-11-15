@@ -76,6 +76,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     is_kv_save_role,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import BaseKVPoolWorker
+from vllm_ascend.utils import is_deepseek_v41
 
 # PERF-TUNE switch: defer the last layer's save drain out of the forward
 # critical path; the drain runs at the start of the next step's start_load_kv.
@@ -2304,7 +2305,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 layer_id = self.current_layer
                 # Conv/recurrent state is updated inside attention, after this
                 # entry event. Preserve its post-compute save hook.
-                if layer_id not in self._recurrent_layers:
+                # V4.1 publishes from its cache-write hook. The gate only
+                # releases prefetch, including layers with no pooled resources.
+                if layer_id not in self._recurrent_layers and not is_deepseek_v41(getattr(self, "hf_config", None)):
                     gate.on_start = lambda: self._submit_attention_save(layer_id)
                 gate.on_finish = self._finish_attention_window
             if getattr(self, "block_key_hybrid", False) and self.next_layer_to_submit <= self.current_layer:
@@ -2352,6 +2355,31 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             self._finish_current_layerwise_load_sessions()
         if hasattr(self, "kv_role") and not is_kv_save_role(self.kv_role, getattr(self, "consumer_is_to_put", False)):
             self.current_layer += 1
+
+    def start_dsv41_pool_attention(self) -> None:
+        get_attention_compute_start_gate().record()
+
+    def finish_empty_dsv41_layer(self, physical_layer: int, metadata: AscendConnectorMetadata) -> None:
+        local_layer = self._global_to_local_layer[physical_layer]
+        if local_layer != self.current_layer:
+            raise RuntimeError(f"V4.1 empty pool layer {local_layer} does not match cursor {self.current_layer}")
+        if self.layer_save_tasks[local_layer]:
+            raise RuntimeError(f"V4.1 empty pool layer {local_layer} has pending KV saves")
+        # Reuse normal completion, including the final-layer drain, with no PUT.
+        self.save_kv_layer(metadata)
+
+    def abort_dsv41_pool_attention(self) -> None:
+        self._layer_load_aborted.set()
+        get_attention_compute_start_gate().cancel()
+        # Drain in-flight reads before releasing their leases. Revoke queued
+        # but uncommitted puts after the sender finishes previously queued work.
+        try:
+            self._drain_attention_transfers(full=True)
+        finally:
+            with self._put_started_keys_lock:
+                keys = list(self._put_started_keys)
+            self._queue_layerwise_revoke_keys(keys)
+            self._finish_current_layerwise_load_sessions()
 
     def save_kv_layer(self, connector_metadata: AscendConnectorMetadata) -> None:
         # Match process_layer_data(), including stage-local draft layers.

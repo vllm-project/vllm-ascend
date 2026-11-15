@@ -1,5 +1,6 @@
 import enum
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import lru_cache
 from importlib import import_module
@@ -13,6 +14,7 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.speculative import SpeculativeConfig
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group, is_v1_kv_transfer_group
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention, MLACommonMetadataBuilder
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.torch_utils import get_dtype_size
@@ -627,6 +629,31 @@ def notify_dsv41_cache_written(
         callback = getattr(get_kv_transfer_group(), "on_dsv41_cache_written", None)
         if callback is not None:
             callback(cache_name, swa_slots, cache_only=cache_only)
+
+
+def notify_dsv41_pool_attention_start(cache_name: str, *, empty: bool = False) -> None:
+    if has_kv_transfer_group() and is_v1_kv_transfer_group():
+        connector = get_kv_transfer_group()
+        callback = getattr(connector, "on_dsv41_pool_attention_start", None)
+        if callback is not None and connector.has_connector_metadata():
+            callback(cache_name, empty=empty)
+
+
+@contextmanager
+def dsv41_pool_attention():
+    """Release pending pool work if a V4.1 attention invocation fails."""
+    try:
+        yield
+    except Exception:
+        if has_kv_transfer_group() and is_v1_kv_transfer_group():
+            connector = get_kv_transfer_group()
+            callback = getattr(connector, "on_dsv41_pool_attention_error", None)
+            if callback is not None and connector.has_connector_metadata():
+                try:
+                    callback()
+                except Exception:
+                    logger.exception("Failed to clean up V4.1 layerwise pool attention")
+        raise
 
 
 def notify_kv_cache_written(layer_name: str = ""):

@@ -1945,6 +1945,47 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         for layer_tasks in worker.layer_load_tasks:
             self.assertEqual(layer_tasks, [])
 
+    def test_dsv41_private_layer_releases_third_layer_prefetch_without_put(self):
+        worker = self._make_worker()
+        worker.hf_config = SimpleNamespace(model_type="deepseek_v41")
+        worker.block_key_hybrid = worker.use_block_key_layerwise = True
+        worker.kv_role = "kv_both"
+        worker.consumer_is_to_put = False
+        worker.num_layers = 3
+        worker.current_layer = worker.next_layer_to_submit = 0
+        worker.num_prefetch_layers = 2
+        worker.prefetch_layer_map = {}
+        worker.layer_load_finished_events = [threading.Event() for _ in range(3)]
+        worker.layer_load_tasks = [[], [], [object()]]
+        worker.external_slot_release_waiter = None
+        worker.kv_recv_thread = MagicMock()
+        worker._check_hybrid_load_errors = MagicMock()
+        worker._submit_attention_save = MagicMock()
+        worker._recurrent_layers = set()
+
+        with patch.object(torch.npu, "Event"):
+            worker.wait_for_layer_load()
+            task = worker.kv_recv_thread.add_request.call_args.args[0]
+            self.assertEqual(task.layer_id, 2)
+            self.assertFalse(task.attention_start_gate.wait(timeout=0))
+            worker.start_dsv41_pool_attention()
+            self.assertTrue(task.attention_start_gate.wait(timeout=0))
+        worker._submit_attention_save.assert_not_called()
+
+    def test_dsv41_empty_layer_does_not_publish_pending_puts(self):
+        worker = self._make_worker()
+        worker._global_to_local_layer = {20: 0}
+        worker.current_layer = 0
+        worker.layer_save_tasks = [[object()]]
+        worker.save_kv_layer = MagicMock()
+        metadata = AscendConnectorMetadata(set())
+        with self.assertRaisesRegex(RuntimeError, "has pending KV saves"):
+            worker.finish_empty_dsv41_layer(20, metadata)
+        worker.save_kv_layer.assert_not_called()
+        worker.layer_save_tasks[0].clear()
+        worker.finish_empty_dsv41_layer(20, metadata)
+        worker.save_kv_layer.assert_called_once_with(metadata)
+
     def test_layerwise_prefetch_window_advances_with_model_layer(self):
         """load(L) is submitted at model layer max(0, L - P), for every shard.
 

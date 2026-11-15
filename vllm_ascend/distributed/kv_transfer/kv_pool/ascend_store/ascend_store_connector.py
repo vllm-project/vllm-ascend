@@ -458,6 +458,22 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             )
         worker.save_kv_layer(self._get_connector_metadata())
 
+    def on_dsv41_pool_attention_start(self, cache_name: str, *, empty: bool = False) -> None:
+        if not self.use_block_key_layerwise:
+            return
+        assert self.connector_worker is not None
+        worker = cast(LayerwiseKVPoolWorker, self.connector_worker)
+        worker.start_dsv41_pool_attention()
+        if empty and self.can_put:
+            layer = worker._extract_physical_layer_index(cache_name)
+            worker.finish_empty_dsv41_layer(layer, self._get_connector_metadata())
+
+    def on_dsv41_pool_attention_error(self) -> None:
+        if self.use_block_key_layerwise:
+            assert self.connector_worker is not None
+            worker = cast(LayerwiseKVPoolWorker, self.connector_worker)
+            worker.abort_dsv41_pool_attention()
+
     def wait_for_save(self):
         if not self.can_put:
             # A load-only consumer has no store thread to wait for.

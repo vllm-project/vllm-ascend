@@ -733,6 +733,25 @@ class TestAscendStoreConnectorLayerwise(unittest.TestCase):
             connector._mamba_state = None
         return connector
 
+    def test_dsv41_replay_cut_layer_loads_once_and_publishes_after_normal_write(self):
+        connector = self._make_shared_layer_connector(mamba_state=False)
+        connector.can_put = True
+        worker = connector.connector_worker
+        worker._global_to_local_layer = {1: 0}
+        worker.current_layer = 0
+        metadata = AscendConnectorMetadata(set())
+        connector.bind_connector_metadata(metadata)
+        name = "layers.1.self_attn.swa_cache"
+
+        connector.wait_for_layer_load(name)
+        connector.on_dsv41_cache_written(name, None, cache_only=True)
+        worker.save_kv_layer.assert_not_called()
+
+        connector.wait_for_layer_load(name)
+        connector.on_dsv41_cache_written(name, None)
+        worker.wait_for_layer_load.assert_called_once_with()
+        worker.save_kv_layer.assert_called_once_with(metadata)
+
     def test_ple_and_attention_share_one_load_but_copy_each_owner(self):
         connector = self._make_shared_layer_connector()
         worker = connector.connector_worker

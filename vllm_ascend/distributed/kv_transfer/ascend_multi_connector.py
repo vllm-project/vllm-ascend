@@ -177,6 +177,18 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             if callable(hook):
                 hook(cache_name, swa_slots, cache_only=cache_only)
 
+    def on_dsv41_pool_attention_start(self, cache_name: str, *, empty: bool = False) -> None:
+        for connector in self._connectors:
+            hook = getattr(connector, "on_dsv41_pool_attention_start", None)
+            if callable(hook):
+                hook(cache_name, empty=empty)
+
+    def on_dsv41_pool_attention_error(self) -> None:
+        for connector in self._connectors:
+            hook = getattr(connector, "on_dsv41_pool_attention_error", None)
+            if callable(hook):
+                hook()
+
     def update_state_after_alloc(self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int):
         chosen_connector = self._requests_to_connector.get(request.request_id, -1)
         empty_blocks = blocks.new_empty()

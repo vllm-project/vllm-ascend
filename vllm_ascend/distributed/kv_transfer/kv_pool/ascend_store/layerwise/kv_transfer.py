@@ -1247,6 +1247,8 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             if data.attention_start_gate is not None:
                 if not self._wait_for_event(data.attention_start_gate):
                     return
+            if self._load_abort_event.is_set():
+                return
             if self.external_slot_release_waiter is not None:
                 self.external_slot_release_waiter(layer_id)
             for task in data.transfer_tasks:
