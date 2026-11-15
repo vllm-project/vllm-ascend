@@ -1,0 +1,12 @@
+pr: 21912
+entries:
+  - category: bugfix
+    text: >-
+      Validate layerwise KV pool prefetch values before creating backend clients
+      or transfer threads. Reject floats, booleans and non-positive values, and
+      report unsupported backends and GVA-only buffer options on Mooncake.
+  - category: documentation
+    text: >-
+      Consolidate layerwise KV pool configuration and implementation constraints,
+      including Chinese translations. Preserve the GVA prefetch default of
+      min(shared_buffers, 8), the Mooncake default of 2 and discard_partial_chunks=true.
