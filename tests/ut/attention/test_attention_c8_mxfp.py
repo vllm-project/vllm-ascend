@@ -18,7 +18,15 @@ class TestC8TransferConnector(TestBase):
             "kv_connector": "MultiConnector",
             "kv_connector_extra_config": {"connectors": [memcache]},
         }
-        for config in (memcache, multi, SimpleNamespace(**memcache)):
+        object_config = SimpleNamespace(
+            kv_connector="AscendStoreConnector",
+            kv_connector_extra_config=SimpleNamespace(backend="MEMCACHE"),
+        )
+        object_multi = SimpleNamespace(
+            kv_connector="MultiConnector",
+            kv_connector_extra_config=SimpleNamespace(connectors=[object_config]),
+        )
+        for config in (memcache, multi, SimpleNamespace(**memcache), object_config, object_multi):
             with self.subTest(config=config):
                 self.assertTrue(uses_ascend_store_memcache(config))
                 self.assertFalse(uses_mooncake_connector(config))
@@ -45,7 +53,19 @@ class TestC8TransferConnector(TestBase):
                 )
                 error_type = RuntimeError if backend == "memcache" else NotImplementedError
                 with self.assertRaisesRegex(error_type, expected_error):
-                    impl.forward(None, None, None, (), SimpleNamespace(), output=output)
+                    impl.forward(None, None, None, None, (), SimpleNamespace(), output=output)
+
+    def test_no_transfer_config_skips_connector_checks(self):
+        impl = object.__new__(AscendC8MXFPAttentionBackendImpl)
+        impl.vllm_config = SimpleNamespace(kv_transfer_config=None)
+        with (
+            patch("vllm_ascend.attention.attention_c8_mxfp.uses_mooncake_connector") as uses_mooncake,
+            patch("vllm_ascend.attention.attention_c8_mxfp.uses_ascend_store_memcache") as uses_memcache,
+            self.assertRaisesRegex(RuntimeError, "requires a.*KV cache"),
+        ):
+            impl.forward(None, None, None, None, (), SimpleNamespace(), output=torch.zeros(1))
+        uses_mooncake.assert_not_called()
+        uses_memcache.assert_not_called()
 
 
 class TestC8MXFPQfaQueryPlan(TestBase):

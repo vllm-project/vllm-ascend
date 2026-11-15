@@ -1683,14 +1683,18 @@ def uses_ascend_store_memcache(kv_transfer_config: Any) -> bool:
         connector = getattr(kv_transfer_config, "kv_connector", None)
         extra_config = getattr(kv_transfer_config, "kv_connector_extra_config", None)
 
-    if connector == "AscendStoreConnector" and isinstance(extra_config, dict):
+    if isinstance(extra_config, dict):
         backend = extra_config.get("backend", "mooncake")
+        connectors = extra_config.get("connectors", [])
+    else:
+        backend = getattr(extra_config, "backend", "mooncake")
+        connectors = getattr(extra_config, "connectors", [])
+
+    if connector == "AscendStoreConnector":
         if isinstance(backend, str) and backend.lower() == "memcache":
             return True
 
-    if isinstance(extra_config, dict):
-        return uses_ascend_store_memcache(extra_config.get("connectors", []))
-    return False
+    return uses_ascend_store_memcache(connectors)
 
 
 def _collect_kv_connector_names(value: Any) -> set[str]:
