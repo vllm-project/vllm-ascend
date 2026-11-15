@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Ascend coverage for the upstream Model Runner V2 thinking-budget path."""
 
+import inspect
 from types import SimpleNamespace
 
 import numpy as np
@@ -391,6 +392,12 @@ def test_v2_rejection_sampler_budget_boundary_and_plain_neighbor(
             assert cache_type is not None
             draft_logits = cache_type(4, 3, VOCAB_SIZE, dtype=torch.float32, fill=-torch.inf, device=DEVICE)
             draft_logits.values.copy_(values)
+    # v0.33.0 separates the verification tokens from the history tokens.
+    # All drafts in this fixture are valid, so both inputs are identical.
+    # The verified main revision uses draft_sampled directly for verification.
+    verify_kwargs = {}
+    if "verify_draft_sampled" in inspect.signature(rejection._verify).parameters:
+        verify_kwargs["verify_draft_sampled"] = inputs
     _, sampled, counts = rejection._verify(
         logits,
         draft_logits,
@@ -402,6 +409,7 @@ def test_v2_rejection_sampler_budget_boundary_and_plain_neighbor(
         expanded,
         local,
         np.array([6, 6], dtype=np.int32),
+        **verify_kwargs,
     )
     sampled, counts = sampled.cpu(), counts.cpu().tolist()
     assert counts[0] == 4
