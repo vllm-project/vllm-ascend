@@ -683,7 +683,7 @@ class TestAscendMoERunner:
             AscendMoERunner,
         )
         monkeypatch.setattr(shared_experts_owner, "shared_experts", property(lambda _: None), raising=False)
-        seen = []
+        seen: list[object] = []
         for method in (object(), object()):
             layer = SimpleNamespace(
                 _moe_comm_methods={MoECommType.FUSED_MC2: method},
@@ -695,7 +695,9 @@ class TestAscendMoERunner:
 
         with (
             pytest.raises(RuntimeError, match="layer failure"),
-            moe_comm_method_module.bind_layer_moe_comm_method({MoECommType.FUSED_MC2: object()}),
+            moe_comm_method_module.bind_layer_moe_comm_method(
+                {MoECommType.FUSED_MC2: MagicMock(spec=moe_comm_method_module.MoECommMethod)}
+            ),
         ):
             raise RuntimeError("layer failure")
         assert context.moe_comm_method is original

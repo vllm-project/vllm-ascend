@@ -5,6 +5,7 @@ import ast
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest import TestCase, main
 from unittest.mock import Mock
 
@@ -18,7 +19,7 @@ class TestCatccosAsyncContract(TestCase):
         )
         for sync_enabled in (False, True):
             with self.subTest(sync_enabled=sync_enabled):
-                events = []
+                events: list[str] = []
                 output = object()
                 tensor = Mock()
                 tensor.contiguous.return_value = tensor
@@ -36,7 +37,7 @@ class TestCatccosAsyncContract(TestCase):
                     npu=SimpleNamespace(synchronize=lambda events=events: events.append("sync")),
                     ops=SimpleNamespace(catccos=SimpleNamespace(ascend950_dispatch_ffn_combine=launch)),
                 )
-                namespace = {
+                namespace: dict[str, Any] = {
                     "torch": torch,
                     "initialize_catccos": lambda events=events: events.append("init"),
                     "moe_profile_range": lambda *args: nullcontext(),
