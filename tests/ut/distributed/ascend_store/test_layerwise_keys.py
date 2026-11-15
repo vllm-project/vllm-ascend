@@ -16,11 +16,54 @@ import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_layerwise
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MemcacheBackend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
 
 
 class TestBoundLayerwiseKeys(unittest.TestCase):
+    def test_hit_check_key_templates_are_cached_by_topology(self):
+        calls = []
+
+        def make_key(group_id, block_hash, rank, stage):
+            calls.append((group_id, block_hash, rank, stage))
+            return f"model:{group_id}@{block_hash}@pp:{stage}@rank:{rank}"
+
+        builder = LayerwiseKeyBuilder(make_key, pp_size=2, pcp_size=2, pcp_sharded_group_ids={1})
+
+        def expected(group_id, block_hash, num_ranks):
+            pcp_size = builder.pcp_size if group_id in builder.pcp_sharded_group_ids else 1
+            return [
+                builder.make_full_key(group_id, block_hash, rank, stage, pcp_rank)
+                for stage in range(builder.pp_size)
+                for pcp_rank in range(pcp_size)
+                for rank in range(num_ranks)
+            ]
+
+        expected_first = expected(1, "first", 2)
+        expected_second = expected(1, "second", 2)
+        calls.clear()
+        self.assertEqual(builder.make_hit_check_keys(1, "first", 2), expected_first)
+        self.assertEqual(builder.make_hit_check_keys(1, "second", 2), expected_second)
+        self.assertEqual(len(calls), 8)
+
+        builder.make_hit_check_keys(0, "third", 2)
+        self.assertEqual(len(calls), 12)
+        builder.make_hit_check_keys(0, "fourth", 1)
+        self.assertEqual(len(calls), 14)
+
+    def test_hit_check_key_template_collision_uses_direct_keys(self):
+        def make_key(group_id, block_hash, rank, stage):
+            return f"{block_hash}@hash@{rank}"
+
+        builder = LayerwiseKeyBuilder(make_key, pp_size=1)
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys._BLOCK_HASH_PLACEHOLDER",
+            "hash",
+        ):
+            self.assertEqual(builder.make_hit_check_keys(0, "first", 1), ["first@hash@0"])
+            self.assertEqual(builder.make_hit_check_keys(0, "second", 1), ["second@hash@0"])
+
     def test_attention_keys_share_pcp_replicas(self):
         for pp_size in (1, 2):
             for num_groups, backend_class in product((1, 2), (MooncakeBackend, MemcacheBackend)):

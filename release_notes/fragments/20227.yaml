@@ -1,0 +1,4 @@
+pr: 20227
+entries:
+  - category: performance
+    text: Reduced CPU overhead of AscendStore layerwise scheduler lookups by reusing invariant KV key templates across block hashes.
