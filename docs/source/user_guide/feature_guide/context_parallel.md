@@ -51,8 +51,19 @@ The draft embedding and LM head must contain complete local weights without
 PCP/TP communication. In particular, a shared PCP-sharded target vocabulary
 layer cannot be used with different request subsets. Eligibility is checked
 after loading the draft and agreed across its PCP group; unsupported cases log
-the reason and retain replicated execution. The switch does not change the
-target model's vocabulary layout. Leave it disabled to restore the baseline.
+the reason and retain replicated execution. The switch itself does not change
+the target model's vocabulary layout. When the draft shares PCP-sharded target
+embedding or LM-head weights, the initial implementation requires explicitly
+disabling that weight sharding as well:
+
+```json
+{"enable_pcp_embedding_lmhead_weight_sharding": false, "dflash_pcp_request_sharding": true}
+```
+
+This changes the shared target vocabulary layout too. Compare request sharding
+on and off with the same vocabulary layout, and also compare against the original
+configuration. Disabling only `dflash_pcp_request_sharding` restores replicated
+draft queries but does not restore the original vocabulary layout.
 
 For 32 requests and PCP=8, every rank still updates valid draft context KV for
 all 32 requests, but generates candidates for only four requests. Ownership is
@@ -74,7 +85,12 @@ changes and preemption/resume before enabling broader support. Benchmark against
 replicated execution with identical settings and record query time, gather time,
 acceptance, output throughput, memory use and P95 latency. The target is improved
 concurrent throughput with at most 5% single-request P95 latency regression;
-no hardware speedup measurement is available yet.
+the initial A5 GSM8K subset experiment did not demonstrate an end-to-end gain
+over the original PCP vocabulary-sharded baseline. Against a full-vocabulary
+replicated-query control, mean TPOT improved by less than 1% in a single sweep.
+These results do not establish a repeatable speedup. Per-stage NPU profiling,
+steady-load benchmarks, and the remaining correctness scenarios are still
+required before treating this experimental path as a validated optimization.
 
 ### Decode Context Parallel
 
