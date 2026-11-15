@@ -320,8 +320,8 @@ class AscendDSABackend(AttentionBackend):
         num_blocks: int,
         layout: Any,
         kernel_block_size: int | None = None,
-    ) -> KVCacheRuntimeShapes:
-        """Return page components as byte shapes [B,H,N,C] (RFC vLLM#65650).
+    ) -> tuple[KVCacheRuntimeShapes, int]:
+        """Return page components as byte shapes [B,H,N,C] and their split ratio.
 
         V4 stores NHD components regardless of the generic layout selection.
         Its compressed-token count comes from the spec, not the manager's
@@ -333,7 +333,7 @@ class AscendDSABackend(AttentionBackend):
         shapes = [(*prefix, spec.head_size * spec.dtype.itemsize)]
         if getattr(spec, "scale_dim", 0):
             shapes.append((*prefix, spec.scale_dim * spec.scale_dtype.itemsize))
-        return tuple(shapes)
+        return tuple(shapes), 1
 
     @staticmethod
     def get_runtime_dtypes(spec: AttentionSpec) -> tuple[torch.dtype, ...]:

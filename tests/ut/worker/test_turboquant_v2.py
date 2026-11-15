@@ -17,7 +17,7 @@ from vllm_ascend.worker.v2 import attn_utils
 def _runtime_views(raw, spec, num_blocks, *, block_stride=None):
     from vllm_ascend.worker.v2.attn_utils import create_runtime_component_views
 
-    shapes = AscendDSAC4Backend.get_runtime_shapes(spec, num_blocks, None)
+    shapes, _ = AscendDSAC4Backend.get_runtime_shapes(spec, num_blocks, None)
     dtypes = AscendDSAC4Backend.get_runtime_dtypes(spec)
     return create_runtime_component_views(
         raw,
@@ -301,7 +301,8 @@ def test_dsa_runtime_shapes_are_byte_shapes_from_storage_spec(monkeypatch, scale
         "get_kv_cache_shape",
         Mock(side_effect=AssertionError("Runtime shapes must derive from the spec")),
     )
-    shapes = AscendDSAC4Backend.get_runtime_shapes(spec, 3, None, 128)
+    shapes, kernel_blocks_per_manager = AscendDSAC4Backend.get_runtime_shapes(spec, 3, None, 128)
+    assert kernel_blocks_per_manager == 1
     assert shapes == (
         (3, 1, 32, 128),
         (3, 1, 32, get_dtype_size(scale_dtype)),
