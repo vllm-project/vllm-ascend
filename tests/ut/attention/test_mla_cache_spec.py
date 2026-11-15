@@ -16,8 +16,14 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
 @pytest.mark.parametrize(
     "model_type,heads",
-    [("glm_moe_dsa", 1), ("glm4_moe_lite", 1), ("glm5_next", 1), ("glm5_next_text", 1),
-     ("kimi_linear", 1), ("deepseek_v3", 12)],
+    [
+        ("glm_moe_dsa", 1),
+        ("glm4_moe_lite", 1),
+        ("glm5_next", 1),
+        ("glm5_next_text", 1),
+        ("kimi_linear", 1),
+        ("deepseek_v3", 12),
+    ],
 )
 def test_mla_owner_preserves_upstream_spec_metadata(monkeypatch, model_type, heads):
     source = MLAAttentionSpec(
@@ -88,8 +94,10 @@ def _make_owner(impl, backend, rope_dim=64):
 
 def _get_owner_spec(monkeypatch, layer):
     source = MLAAttentionSpec(
-        block_size=128, num_kv_heads=1,
-        head_size=layer.kv_lora_rank + layer.qk_rope_head_dim, dtype=torch.bfloat16,
+        block_size=128,
+        num_kv_heads=1,
+        head_size=layer.kv_lora_rank + layer.qk_rope_head_dim,
+        dtype=torch.bfloat16,
     )
     monkeypatch.setattr(MLAAttention, "get_kv_cache_spec", lambda *_: source)
     config = SimpleNamespace(
@@ -136,8 +144,11 @@ def test_fa_quant_decision_stays_with_each_owner(monkeypatch, quantized):
 
 def test_sfa_backend_requires_owner_component_dimensions():
     spec = AscendMLAAttentionSpec(
-        block_size=128, num_kv_heads=1, head_size=576,
-        dtype=torch.int8, cache_sparse_sfa_c8=True,
+        block_size=128,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=torch.int8,
+        cache_sparse_sfa_c8=True,
     )
     with pytest.raises(ValueError, match="NoPE and RoPE dimensions"):
         AscendSFABackend.customize_spec(spec)

@@ -18,7 +18,6 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowSpec,
-    SparseCacheRole,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu import attn_utils as upstream_attn_utils

@@ -652,7 +652,6 @@ def test_indexer_owner_reports_data_scale_and_replication(monkeypatch, c4, c8, r
     assert owner.get_attn_backend() is AscendSFAIndexerBackend
 
 
-
 @pytest.mark.parametrize("mtp", [False, True])
 def test_indexer_owner_tracks_runtime_cache_requirement(monkeypatch, mtp):
     from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
@@ -666,7 +665,9 @@ def test_indexer_owner_tracks_runtime_cache_requirement(monkeypatch, mtp):
     monkeypatch.setattr(indexer_module, "get_current_vllm_config", lambda: config)
     spec = AscendSFAIndexerCacheSpec(block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
     # Deliberately use a name that cannot be mapped to an attention layer.
-    source = SimpleNamespace(prefix="cache_owner", head_dim=128, kv_cache=torch.empty(0), cache_config=config.cache_config)
+    source = SimpleNamespace(
+        prefix="cache_owner", head_dim=128, kv_cache=torch.empty(0), cache_config=config.cache_config
+    )
     owner = AscendSFAIndexerCache(source, spec)
     impl = AscendSFAImpl.__new__(AscendSFAImpl)
     impl.indexer = SimpleNamespace(k_cache=owner)

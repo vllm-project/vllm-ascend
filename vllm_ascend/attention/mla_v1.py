@@ -83,9 +83,9 @@ from vllm_ascend.quantization.methods import (
 )
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
-    _is_glm_model,
     ACL_FORMAT_FRACTAL_ND,
     ACL_FORMAT_FRACTAL_NZ,
+    _is_glm_model,
     enable_sfa,
     is_pd_decode_recompute_scheduler_enabled,
     maybe_trans_nz,
@@ -208,8 +208,7 @@ class AscendMLAAttention(MLAAttention):
             cache_sparse_sfa_turboquant=use_sfa_turboquant,
             cache_sparse_sfa_c8=use_sfa_c8,
             store_on_host=(
-                not (spec.is_draft or self.is_draft_layer)
-                and getattr(self.impl, "store_kv_cache_on_host", False)
+                not (spec.is_draft or self.is_draft_layer) and getattr(self.impl, "store_kv_cache_on_host", False)
             ),
             head_size=head_size,
             dtype=dtype,

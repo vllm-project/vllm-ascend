@@ -3,10 +3,10 @@ from unittest.mock import MagicMock, patch
 
 import torch
 from torch import nn
-from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm.config import CacheConfig, CompilationConfig, VllmConfig
 from vllm.forward_context import ForwardContext
 from vllm.model_executor.layers.mla import MLAModules
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 from tests.ut.base import TestBase
 from vllm_ascend.attention.indexer import (
