@@ -36,7 +36,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    AscendLayerwiseKVCacheConfig,
+    get_layerwise_reuse_backing_bytes,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_scheduler import (
     LayerwiseKVPoolScheduler,
@@ -67,10 +67,12 @@ def create_kv_pool_scheduler(
     vllm_config: VllmConfig, use_layerwise: bool, kv_cache_config: KVCacheConfig | None = None
 ) -> BaseKVPoolScheduler:
     if use_layerwise:
-        reuse_layout = (
-            kv_cache_config.reuse_layout if isinstance(kv_cache_config, AscendLayerwiseKVCacheConfig) else None
+        return LayerwiseKVPoolScheduler(
+            vllm_config,
+            use_layerwise,
+            kv_cache_config,
+            layerwise_offload=get_layerwise_reuse_backing_bytes(kv_cache_config) is not None,
         )
-        return LayerwiseKVPoolScheduler(vllm_config, use_layerwise, kv_cache_config, reuse_layout=reuse_layout)
     return KVPoolScheduler(vllm_config, use_layerwise, kv_cache_config)
 
 

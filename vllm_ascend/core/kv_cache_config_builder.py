@@ -21,7 +21,6 @@ from vllm.v1.core.kv_cache_planning import (
     unify_hybrid_kv_cache_specs,
 )
 from vllm.v1.kv_cache_interface import (
-    KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
     MLAAttentionSpec,
@@ -32,10 +31,9 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
     get_layerwise_offload_config,
     get_spec_reuse_rules,
-    plan_layerwise_cache_reuse,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    AscendLayerwiseKVCacheConfig,
+    get_layerwise_reuse_backing_bytes,
 )
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_pool_bytes_per_block,
@@ -96,19 +94,6 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
 
         return super().get_kv_cache_groups(vllm_config, kv_cache_spec)
 
-    def get_kv_cache_config_from_groups(
-        self,
-        vllm_config: VllmConfig,
-        kv_cache_groups: list[KVCacheGroupSpec],
-        num_blocks: int,
-    ) -> KVCacheConfig:
-        native_config = super().get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks)
-        reuse_layout = plan_layerwise_cache_reuse(native_config, vllm_config)
-        if reuse_layout is None:
-            return native_config
-        # The scheduler's copy retains the reuse result when it collapses the specs.
-        return AscendLayerwiseKVCacheConfig.from_config(native_config, reuse_layout)
-
     def _get_pool_bytes_per_block(
         self,
         vllm_config: VllmConfig,
@@ -123,9 +108,9 @@ class AscendKVCacheConfigBuilder(DefaultKVCacheConfigBuilder):
         extra_config = get_layerwise_offload_config(getattr(vllm_config, "kv_transfer_config", None))
         if extra_config is not None and kv_cache_groups and get_spec_reuse_rules(vllm_config) is not None:
             probe = self.get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks=1)
-            if isinstance(probe, AscendLayerwiseKVCacheConfig):
-                # Each descriptor reports the size of the same device backing.
-                return probe.reuse_layout.kv_cache_tensors[0].size
+            backing_bytes = get_layerwise_reuse_backing_bytes(probe)
+            if backing_bytes is not None:
+                return backing_bytes
         if vllm_config.model_config.hf_config.model_type == "kimi_k31":
             return paired_sfa_pool_bytes(kv_cache_groups)
         if is_deepseek_v41_cache(kv_cache_groups):

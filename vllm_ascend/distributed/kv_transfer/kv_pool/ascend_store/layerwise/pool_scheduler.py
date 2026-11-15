@@ -12,9 +12,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     resolve_backend,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    LayerwiseReuseLayout,
-)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
     RequestTracker,
@@ -50,7 +47,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         use_layerwise: bool,
         kv_cache_config: KVCacheConfig | None = None,
         *,
-        reuse_layout: LayerwiseReuseLayout | None = None,
+        layerwise_offload: bool = False,
     ) -> None:
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         backend_name, self.layerwise_backend = resolve_backend(extra_config)
@@ -70,8 +67,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         self.sharded_mamba_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
         self.load_async = False
         self._prefix_probe: tuple[str, int] | None = None
-        if self.use_layerwise_transfer:
-            self._init_layerwise_offload(reuse_layout)
+        self.layerwise_offload = self.use_layerwise_transfer and layerwise_offload
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
         self.layerwise_keys = (
             self.layerwise_backend.bind_layerwise_keys(
@@ -116,11 +112,6 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             # checkpoint exists. Keep the full hit for the external lookup.
             return self._get_layerwise_hit_tokens(request, local_limit, 0)
         return pool_hit
-
-    def _init_layerwise_offload(self, reuse_layout: LayerwiseReuseLayout | None) -> None:
-        self.layerwise_offload = reuse_layout is not None
-        if reuse_layout is not None and reuse_layout.layers:
-            self.num_layers = max(self.num_layers, max(reuse_layout.layers) + 1)
 
     def get_running_target_token_len(self, request: Request, num_new_tokens: int) -> int:
         target_token_len = request.num_computed_tokens + num_new_tokens

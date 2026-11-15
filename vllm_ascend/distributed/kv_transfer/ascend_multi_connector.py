@@ -9,7 +9,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiCo
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    AscendLayerwiseKVCacheConfig,
+    get_layerwise_reuse_layout,
 )
 
 if TYPE_CHECKING:
@@ -43,7 +43,7 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         self._configure_layerwise_reuse_completion()
         if (
             role == KVConnectorRole.WORKER
-            and isinstance(kv_cache_config, AscendLayerwiseKVCacheConfig)
+            and get_layerwise_reuse_layout(kv_cache_config) is not None
             and len(self._connectors) > 1
             and (
                 len(self._layerwise_slot_release_providers) != len(self._connectors) - 1

@@ -98,7 +98,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_pl
     plan_layerwise_cache_reuse,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    AscendLayerwiseKVCacheConfig,
+    get_layerwise_reuse_backing_bytes,
+    with_layerwise_reuse_layout,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     plan_sparse_kv_offload_memory,
@@ -1226,14 +1227,15 @@ class NPUWorker(WorkerBase):
         # Plan from this rank's native descriptors before connectors bind to the cache.
         reuse_layout = plan_layerwise_cache_reuse(kv_cache_config, self.vllm_config)
         if reuse_layout is not None:
-            kv_cache_config = AscendLayerwiseKVCacheConfig.from_config(kv_cache_config, reuse_layout)
-            kv_cache_config.kv_cache_tensors = list(reuse_layout.kv_cache_tensors)
+            kv_cache_config = with_layerwise_reuse_layout(
+                kv_cache_config, self.vllm_config.kv_transfer_config, reuse_layout
+            )
             logger.info(
                 "Layerwise reuse uses one %d-byte device backing; independent layers=%s.",
                 reuse_layout.kv_cache_tensors[0].size,
                 reuse_layout.independent_layers,
             )
-        elif isinstance(kv_cache_config, AscendLayerwiseKVCacheConfig):
+        elif get_layerwise_reuse_backing_bytes(kv_cache_config) is not None:
             raise RuntimeError("Worker could not rebuild the KV offload layout budgeted by Core.")
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
         # Restrict the discardable kv_cache pool to backing cache allocations.

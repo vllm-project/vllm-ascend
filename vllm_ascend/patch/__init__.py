@@ -314,8 +314,8 @@
 #    How:
 #       Both supported versions select AscendKVCacheConfigBuilder through
 #       NPUPlatform. Its default materialization delegates to the patched
-#       planning functions. The builder supplies the per-block offload cost
-#       to Core and carries the reuse layout to the scheduler.
+#       planning functions. They record the reuse plan's backing size before
+#       spec collapse so Core can budget and the scheduler can enable offload.
 #    Related PR:
 #       https://github.com/vllm-project/vllm/pull/53558
 #    Future Plan:

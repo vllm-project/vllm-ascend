@@ -53,9 +53,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_trans
     LayerBatchBuilder,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    AscendLayerwiseKVCacheConfig,
     LayerwiseCacheConfig,
     get_layerwise_kv_cache_specs,
+    get_layerwise_reuse_layout,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
     LayerBlockRange,
@@ -140,9 +140,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         super()._init_kv_transfer_config(vllm_config, extra_config, use_layerwise, kv_cache_config)
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
         self._layerwise_reuse_layout = (
-            kv_cache_config.reuse_layout
-            if self.use_layerwise_transfer and isinstance(kv_cache_config, AscendLayerwiseKVCacheConfig)
-            else None
+            get_layerwise_reuse_layout(kv_cache_config) if self.use_layerwise_transfer else None
         )
         self._dspark_draft_layer_names = (
             set(getattr(kv_cache_config, "dspark_draft_layer_names", ())) if self.use_layerwise_transfer else set()

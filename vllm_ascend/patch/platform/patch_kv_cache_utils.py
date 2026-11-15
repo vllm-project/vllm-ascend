@@ -26,9 +26,11 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
     get_layerwise_offload_config,
     get_spec_reuse_rules,
+    plan_layerwise_cache_reuse,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    AscendLayerwiseKVCacheConfig,
+    LAYERWISE_REUSE_BACKING_BYTES,
+    get_layerwise_reuse_backing_bytes,
 )
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
@@ -513,7 +515,7 @@ def _ascend_max_memory_usage_bytes_from_groups(
     extra_config = get_layerwise_offload_config(getattr(vllm_config, "kv_transfer_config", None))
     if extra_config is not None and kv_cache_groups and get_spec_reuse_rules(vllm_config) is not None:
         probe = builder.get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, num_blocks=1)
-        if isinstance(probe, AscendLayerwiseKVCacheConfig):
+        if get_layerwise_reuse_backing_bytes(probe) is not None:
             return _orig_max_memory_usage_bytes_from_groups(builder, vllm_config, kv_cache_groups)
     if vllm_config.model_config.hf_config.model_type == "kimi_k31":
         return paired_sfa_max_memory(vllm_config, kv_cache_groups)
@@ -572,7 +574,8 @@ def _ascend_get_kv_cache_config_from_groups(
     ``copy.deepcopy`` in ``generate_scheduler_kv_cache_config`` and is
     dropped by worker pickle IPC, which never reads it.
     """
-    extra_config = get_layerwise_offload_config(getattr(vllm_config, "kv_transfer_config", None))
+    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+    extra_config = get_layerwise_offload_config(kv_transfer_config)
     offload_requested = (
         extra_config is not None and bool(kv_cache_groups) and get_spec_reuse_rules(vllm_config) is not None
     )
@@ -631,7 +634,7 @@ def _ascend_get_kv_cache_config_from_groups(
             kv_cache_groups=kv_cache_groups,
             prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
         )
-    kv_cache_config.kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+    kv_cache_config.kv_transfer_config = kv_transfer_config
     speculative_config = getattr(vllm_config, "speculative_config", None)
     if speculative_config is not None and speculative_config.method == "dspark":
         from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import resident_mla_context_group_ids
@@ -644,6 +647,17 @@ def _ascend_get_kv_cache_config_from_groups(
         # Remove these snapshots once upstream preserves per-layer ownership.
         kv_cache_config.dspark_context_group_ids = resident_mla_context_group_ids(kv_cache_config.kv_cache_groups)
         kv_cache_config.dspark_draft_only_group_ids = draft_only_group_ids(kv_cache_config.kv_cache_groups)
+    if offload_requested:
+        reuse_layout = plan_layerwise_cache_reuse(kv_cache_config, vllm_config)
+        if reuse_layout is not None:
+            # The scheduler keeps this cost when it collapses the per-entry specs.
+            kv_cache_config.kv_transfer_config = replace(
+                kv_transfer_config,
+                kv_connector_extra_config={
+                    **kv_transfer_config.kv_connector_extra_config,
+                    LAYERWISE_REUSE_BACKING_BYTES: reuse_layout.kv_cache_tensors[0].size,
+                },
+            )
     return kv_cache_config
 
 

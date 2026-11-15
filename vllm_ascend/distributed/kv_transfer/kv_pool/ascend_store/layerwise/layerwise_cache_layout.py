@@ -5,12 +5,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Mapping
-from dataclasses import dataclass, fields
+from copy import copy
+from dataclasses import dataclass, replace
 from math import lcm
 from typing import Any
 
 import regex as re
 import torch
+from vllm.config import KVTransferConfig
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -46,19 +48,34 @@ class LayerwiseReuseLayout:
         return bool(self.prefetch_layer_map)
 
 
-@dataclass(kw_only=True)
-class AscendLayerwiseKVCacheConfig(KVCacheConfig):
-    """Carry the explicit Ascend layout through vLLM's configuration-only hooks."""
+LAYERWISE_REUSE_BACKING_BYTES = "_layerwise_reuse_backing_bytes"
+_LAYERWISE_REUSE_LAYOUT = "_layerwise_reuse_layout"
 
-    reuse_layout: LayerwiseReuseLayout
 
-    @classmethod
-    def from_config(cls, config: KVCacheConfig, reuse_layout: LayerwiseReuseLayout) -> AscendLayerwiseKVCacheConfig:
-        native_fields = {field.name: getattr(config, field.name) for field in fields(KVCacheConfig)}
-        result = cls(**native_fields, reuse_layout=reuse_layout)
-        # Preserve metadata already attached by the native Ascend builder.
-        vars(result).update({name: value for name, value in vars(config).items() if name not in vars(result)})
-        return result
+def get_layerwise_reuse_backing_bytes(config: KVCacheConfig | None) -> int | None:
+    transfer_config = getattr(config, "kv_transfer_config", None)
+    if transfer_config is None:
+        return None
+    return transfer_config.kv_connector_extra_config.get(LAYERWISE_REUSE_BACKING_BYTES)
+
+
+def get_layerwise_reuse_layout(config: KVCacheConfig | None) -> LayerwiseReuseLayout | None:
+    transfer_config = getattr(config, "kv_transfer_config", None)
+    if transfer_config is None:
+        return None
+    return transfer_config.kv_connector_extra_config.get(_LAYERWISE_REUSE_LAYOUT)
+
+
+def with_layerwise_reuse_layout(
+    config: KVCacheConfig, transfer_config: KVTransferConfig, reuse_layout: LayerwiseReuseLayout
+) -> KVCacheConfig:
+    worker_config = copy(config)
+    worker_config.kv_cache_tensors = list(reuse_layout.kv_cache_tensors)
+    worker_config.kv_transfer_config = replace(
+        transfer_config,
+        kv_connector_extra_config={**transfer_config.kv_connector_extra_config, _LAYERWISE_REUSE_LAYOUT: reuse_layout},
+    )
+    return worker_config
 
 
 _NUM_SHARED_BUFFERS = "layerwise_num_shared_buffers"

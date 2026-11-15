@@ -90,9 +90,9 @@ from vllm_ascend.core.kv_cache_interface import (
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import KV_CACHE_BUFFER_ALIGNMENT
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    AscendLayerwiseKVCacheConfig,
     allocate_cache_backing,
     get_cache_views,
+    get_layerwise_reuse_layout,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     allocate_kv_cache_tensors_for_sparse_kv_offload,
@@ -1194,12 +1194,13 @@ def _allocate_kv_cache(
     # prefill disaggregation need the addr of cache tensor be aligned with 2M
     alignment = KV_CACHE_BUFFER_ALIGNMENT
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
-    if isinstance(kv_cache_config, AscendLayerwiseKVCacheConfig):
+    reuse_layout = get_layerwise_reuse_layout(kv_cache_config)
+    if reuse_layout is not None:
         return allocate_cache_backing(
             kv_cache_config,
             layer_kv_cache_spec,
             lambda size: _allocate_int8_cache_tensor(size, alignment, device),
-            kv_cache_config.reuse_layout.cache_view_sizes,
+            reuse_layout.cache_view_sizes,
         )
 
     attn_layers: dict[str, AttentionLayerBase] | None = None
