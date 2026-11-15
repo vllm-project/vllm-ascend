@@ -1,6 +1,6 @@
 from copy import copy
-from dataclasses import dataclass
-from typing import Any, ClassVar, NamedTuple, TypeVar
+from dataclasses import dataclass, fields
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, TypeVar
 
 import numpy as np
 import torch
@@ -27,7 +27,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, MLAAttentionSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -141,8 +141,6 @@ class AscendMLABackend(AttentionBackend):
         num_blocks: int,
         layout: Any,
         kernel_block_size: int | None = None,
-        *,
-        use_flashmla: bool = False,
     ) -> KVCacheRuntimeShapes:
         """Describe the selected MLA layout as byte shapes [B,H,N,C]."""
         if spec.kv_lora_rank is None or spec.qk_rope_head_dim is None:
@@ -159,9 +157,22 @@ class AscendMLABackend(AttentionBackend):
         widths = (spec.kv_lora_rank, spec.qk_rope_head_dim)
         if spec.num_kv_heads * block_size * sum(widths) * itemsize > slot_bytes:
             raise ValueError("MLA kernel slot is smaller than its cache components.")
-        if use_flashmla:
+        if spec.mla_cache_layout == "token_interleaved":
             widths = (sum(widths),)
         return tuple((*prefix, width * itemsize) for width in widths)
+
+    @staticmethod
+    def get_runtime_dtypes(spec: AscendMLAAttentionSpec) -> tuple[torch.dtype, ...]:
+        return (spec.dtype,) if spec.mla_cache_layout == "token_interleaved" else (spec.dtype, spec.dtype)
+
+    @staticmethod
+    def format_runtime_views(
+        spec: AscendMLAAttentionSpec, components: list[torch.Tensor]
+    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
+        if spec.mla_cache_layout == "token_interleaved":
+            (cache,) = components
+            return cache
+        return tuple(components)
 
     @staticmethod
     def get_impl_cls() -> type["MLAAttentionImpl"]:
@@ -190,30 +201,17 @@ class AscendMLAAttention(MLAAttention):
 
     supports_pcp_dcp: ClassVar[bool] = True
 
-    def get_runtime_shapes(
-        self,
-        spec: AscendMLAAttentionSpec,
-        num_blocks: int,
-        layout: Any,
-        kernel_block_size: int,
-    ) -> KVCacheRuntimeShapes:
-        """Describe the layout required by the implementation selected for this layer."""
-        return AscendMLABackend.get_runtime_shapes(
-            spec,
-            num_blocks,
-            layout,
-            kernel_block_size=kernel_block_size,
-            use_flashmla=self.impl.use_flashmla,
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        spec = super().get_kv_cache_spec(vllm_config)
+        if not isinstance(spec, MLAAttentionSpec) or not getattr(self.impl, "use_flashmla", False):
+            return spec
+        values = {field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
+        values.update(
+            kv_lora_rank=self.kv_lora_rank,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            mla_cache_layout="token_interleaved",
         )
-
-    def get_runtime_dtypes(self, spec: AscendMLAAttentionSpec) -> tuple[torch.dtype, ...]:
-        return (spec.dtype,) if self.impl.use_flashmla else (spec.dtype, spec.dtype)
-
-    def format_runtime_views(self, components: list[torch.Tensor]) -> torch.Tensor | tuple[torch.Tensor, ...]:
-        if self.impl.use_flashmla:
-            (cache,) = components
-            return cache
-        return tuple(components)
+        return AscendMLAAttentionSpec(**values)
 
 
 @dataclass

@@ -4,7 +4,7 @@
 import inspect
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, Literal
 
 import torch
 from typing_extensions import Self
@@ -205,6 +205,9 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # Ordinary MLA component widths; None means the split is not described.
     kv_lora_rank: int | None = None
     qk_rope_head_dim: int | None = None
+    # Ordinary MLA stores either two component planes per kernel block or
+    # one NoPE/RoPE record per token.
+    mla_cache_layout: Literal["component_major", "token_interleaved"] = "component_major"
     scale_dim: int = 0
     scale_dtype: torch.dtype = torch.int8
     # Sparse C8 changes the main cache into one packed byte tensor. Keep that
@@ -268,6 +271,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
                 spec.num_heads,
                 spec.kv_lora_rank,
                 spec.qk_rope_head_dim,
+                spec.mla_cache_layout,
                 spec.scale_dtype,
                 spec.cache_sparse_sfa_c8,
                 spec.cache_sparse_sfa_turboquant,
@@ -294,6 +298,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             num_heads=first_spec.num_heads,
             kv_lora_rank=first_spec.kv_lora_rank,
             qk_rope_head_dim=first_spec.qk_rope_head_dim,
+            mla_cache_layout=first_spec.mla_cache_layout,
             scale_dtype=first_spec.scale_dtype,
             alignment=first_spec.alignment,
             cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,

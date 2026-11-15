@@ -485,8 +485,10 @@ def test_k3_unified_allocator_preserves_legacy_views(monkeypatch, use_flashmla, 
         kv_lora_rank=512,
         qk_rope_head_dim=64,
         dtype=torch.bfloat16,
+        mla_cache_layout="token_interleaved" if use_flashmla else "component_major",
         page_size_padded=manager_block_size * 640 * torch.bfloat16.itemsize,
     )
+    mla_spec = AscendMLAAttentionSpec.merge([mla_spec, mla_spec])
     page_bytes = mla_spec.page_size_bytes
     kda_spec = MambaSpec(
         block_size=mla_spec.block_size,
@@ -550,6 +552,8 @@ def test_k3_unified_allocator_preserves_legacy_views(monkeypatch, use_flashmla, 
     # The public entry must use unified allocation for both MLA layouts.
     legacy_allocate = MagicMock(side_effect=AssertionError("Expected unified K3 allocation"))
     monkeypatch.setattr(attn_utils, "_allocate_kv_cache", legacy_allocate)
+    # View construction should get the selected format from the spec alone.
+    mla_layer.impl = SimpleNamespace()
     new = attn_utils.allocate_kv_cache_main(config, device, None, kernel_block_sizes)
     assert new.keys() == old.keys() == layers.keys()
     backing_addresses = set()
@@ -1310,14 +1314,14 @@ def test_draft_layer_specs_are_tagged_for_eagle_groups(monkeypatch, is_draft_lay
 
 
 @pytest.mark.parametrize(
-    ("model_type", "expected_num_heads"),
-    [("kimi_linear", 1), ("deepseek_v3", 12)],
+    ("model_type", "expected_num_heads", "use_flashmla"),
+    [("kimi_linear", 1, False), ("kimi_linear", 1, True), ("deepseek_v3", 12, False)],
 )
 @pytest.mark.parametrize("dcp_sharded", [False, True])
 @pytest.mark.parametrize(("source_is_draft", "is_draft_layer"), [(False, False), (False, True), (True, False)])
 @pytest.mark.parametrize("non_causal", [False, True])
 def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(
-    monkeypatch, model_type, expected_num_heads, source_is_draft, is_draft_layer, non_causal, dcp_sharded
+    monkeypatch, model_type, expected_num_heads, source_is_draft, is_draft_layer, non_causal, dcp_sharded, use_flashmla
 ):
     source_spec = MLAAttentionSpec(
         block_size=128,
@@ -1328,17 +1332,21 @@ def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(
         non_causal_multi_token_decode=non_causal,
         dcp_sharded=dcp_sharded,
     )
-    layer = MLAAttention.__new__(MLAAttention)
+    layer = AscendMLAAttention.__new__(AscendMLAAttention)
+    torch.nn.Module.__init__(layer)
     layer.impl = SimpleNamespace(
         fa_quant_layer=False,
         enable_sparse_sfa_c8=False,
         enable_sparse_sfa_turboquant=False,
+        use_flashmla=use_flashmla,
     )
     layer.num_heads = 12
+    layer.kv_lora_rank = 512
+    layer.qk_rope_head_dim = 64
     layer.model_version = None
     layer.indexes_kv_by_block_stride = False
     layer.is_draft_layer = is_draft_layer
-    layer.get_kv_cache_spec = lambda _config: source_spec
+    monkeypatch.setattr(MLAAttention, "get_kv_cache_spec", lambda _layer, _config: source_spec)
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(
             dtype=torch.bfloat16,
@@ -1373,6 +1381,7 @@ def test_mla_cache_spec_uses_physical_heads_for_kimi_k3(
     assert spec.is_draft is (source_is_draft or is_draft_layer)
     assert spec.store_on_host is not spec.is_draft
     assert spec.non_causal_multi_token_decode is non_causal
+    assert spec.mla_cache_layout == ("token_interleaved" if use_flashmla else "component_major")
 
 
 @pytest.mark.parametrize(

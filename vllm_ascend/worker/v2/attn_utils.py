@@ -312,6 +312,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 head_size=head_size,
                 kv_lora_rank=attn_module.kv_lora_rank,
                 qk_rope_head_dim=attn_module.qk_rope_head_dim,
+                mla_cache_layout=getattr(spec, "mla_cache_layout", "component_major"),
                 dtype=dtype,
                 cache_dtype_str=cache_dtype_str,
                 cache_sparse_sfa_c8=cache_sparse_sfa_c8,
@@ -1619,8 +1620,6 @@ def create_kv_cache_runtime_views(
     kernel_block_sizes: Sequence[int],
     shared_layers: Mapping[str, str],
     layout: Any = None,
-    *,
-    attn_layers: Mapping[str, AttentionLayerBase] | None = None,
 ) -> dict[str, Any]:
     """Build state and attention views using the descriptor block strides."""
     specs = _get_layer_kv_cache_specs(kv_cache_config)
@@ -1642,15 +1641,13 @@ def create_kv_cache_runtime_views(
                     raw_tensors[name], shapes, list(spec.dtypes), descriptor.block_stride
                 )
                 continue
-            layer = attn_layers.get(name) if attn_layers is not None else None
-            view_provider = layer if hasattr(layer, "get_runtime_shapes") else group.backend
-            shapes = view_provider.get_runtime_shapes(
+            shapes = group.backend.get_runtime_shapes(
                 spec,
                 num_blocks,
                 layout,
                 kernel_block_size=kernel_block_sizes[group.kv_cache_group_id],
             )
-            dtypes = view_provider.get_runtime_dtypes(spec)
+            dtypes = group.backend.get_runtime_dtypes(spec)
             components = create_runtime_component_views(
                 raw_tensors[name],
                 shapes,
@@ -1659,8 +1656,8 @@ def create_kv_cache_runtime_views(
                 descriptor.block_stride,
                 manager_blocks=num_blocks,
             )
-            format_views = getattr(view_provider, "format_runtime_views", None)
-            caches[name] = format_views(components) if format_views is not None else components
+            format_views = getattr(group.backend, "format_runtime_views", None)
+            caches[name] = format_views(spec, components) if format_views is not None else components
     for name, target in shared_layers.items():
         caches[name] = caches[target]
     return caches
@@ -1715,7 +1712,6 @@ def unified_allocate_kv_cache(
         kernel_block_sizes,
         shared_layers,
         layout,
-        attn_layers=attn_layers,
     )
 
 
