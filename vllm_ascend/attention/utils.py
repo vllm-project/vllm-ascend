@@ -639,6 +639,14 @@ def notify_dsv41_pool_attention_start(cache_name: str, *, empty: bool = False) -
             callback(cache_name, empty=empty)
 
 
+def notify_dsv41_pool_cut_writes(cache_name: str, attn_metadata: dict[str, Any]) -> None:
+    if has_kv_transfer_group() and is_v1_kv_transfer_group():
+        connector = get_kv_transfer_group()
+        callback = getattr(connector, "on_dsv41_pool_cut_writes", None)
+        if callback is not None and connector.has_connector_metadata():
+            callback(cache_name, attn_metadata)
+
+
 @contextmanager
 def dsv41_pool_attention():
     """Release pending pool work if a V4.1 attention invocation fails."""

@@ -991,6 +991,9 @@ class KVCacheStoreLayerSendingThread(KVCacheStoreLayerSendingThreadBase):
         if isinstance(request, _LayerRevokeTask):
             try:
                 self._revoke_range_keys(list(request.keys))
+                for active_keys in self._group_put_keys.values():
+                    if active_keys is not None:
+                        active_keys.difference_update(request.keys)
             finally:
                 self.request_queue.task_done()
             return

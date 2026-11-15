@@ -3,9 +3,10 @@ from __future__ import annotations
 import os
 import threading
 import time
-from collections.abc import Callable, Generator, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import suppress
-from typing import Any, cast
+from dataclasses import replace
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
@@ -78,6 +79,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import BaseKVPoolWorker
 from vllm_ascend.utils import is_deepseek_v41
 
+if TYPE_CHECKING:
+    from vllm_ascend.attention.dsa_v41 import AscendDSAV41Metadata
+
 # PERF-TUNE switch: defer the last layer's save drain out of the forward
 # critical path; the drain runs at the start of the next step's start_load_kv.
 # Opt-in (default off): the synchronous inline drain is the long-standing
@@ -122,6 +126,10 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self._masked_runs_cache: dict[tuple[str, str, int, int, int], list[tuple[int, int]]] = {}
         self._dspark_prefix_keys: DSparkPrefixKeys | None = None
         self.dspark_prefix_cache: DSparkPrefixCache | None = None
+        self.dsv41_backbone_end: int | None = None
+        self._dsv41_draft_loads_ready = False
+        self._dsv41_cut_slot_sources: dict[int, tuple[str, ...]] = {}
+        self._dsv41_cache_only_blocks: dict[int, set[int]] = {}
         self._init_layerwise_config()
 
     def _init_kv_transfer_config(self, vllm_config, extra_config, use_layerwise, kv_cache_config) -> None:
@@ -591,6 +599,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         if self.use_recoverssm:
             kv_caches = self._recoverssm_store_caches(kv_caches)
+        if self.use_block_key_layerwise and self.pp_size == 1 and not self.use_kvpp and is_deepseek_v41(self.hf_config):
+            self._register_dsv41_pool_layout(kv_caches)
         draft_names = set(getattr(self, "_dspark_draft_layer_names", ()))
         draft_caches = {name: cache for name, cache in kv_caches.items() if name in draft_names}
         target_caches = (
@@ -600,6 +610,64 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self._register_dspark_prefix_cache(draft_caches)
         auxiliary_caches = draft_caches if getattr(self, "dspark_prefix_cache", None) is not None else None
         self._register_kv_caches(target_caches, auxiliary_caches, draft_names)
+
+    def _register_dsv41_pool_layout(self, kv_caches: Mapping[str, torch.Tensor]) -> None:
+        # Keep the model import behind the V4.1 registration path.
+        from vllm_ascend.models.deepseek_v41.layerwise_cache_access import build_layer_cache_access_plan
+        from vllm_ascend.models.deepseek_v41.model import build_layer_plan
+
+        assert self.kv_cache_config is not None
+        topology = build_layer_plan(self.hf_config)
+        backbone_end = len(topology.layers)
+        specs = get_layerwise_kv_cache_specs(self.kv_cache_config)
+        backbone_names = {name for name in specs if self._extract_physical_layer_index(name) < backbone_end}
+        swa_name = next((name for name in sorted(backbone_names) if name.endswith(".self_attn.swa_cache")), None)
+        if swa_name is None:
+            raise ValueError("V4.1 Mooncake pool has no backbone SWA cache")
+        prefix = swa_name.rsplit("layers.", 1)[0].removesuffix(".")
+        accesses = build_layer_cache_access_plan(topology, self.kv_cache_config, prefix)
+        resources = {resource.cache_name for access in accesses for resource in access.writes}
+        if resources != backbone_names or not resources <= kv_caches.keys():
+            raise ValueError(
+                "V4.1 Mooncake pool cache layout differs from the model ownership: "
+                f"unexpected={sorted(backbone_names - resources)}, "
+                f"unregistered={sorted(resources - kv_caches.keys())}"
+            )
+
+        for access in accesses:
+            local_layer = self._global_to_local_layer[access.execution_layer]
+            expected_groups = {r.group_id for r in access.writes if r.group_id in self.cacheable_group_ids}
+            actual_groups = {group_id for group_id, _ in self._groups_for_layerwise_transfer(local_layer)}
+            if expected_groups != actual_groups:
+                raise ValueError(
+                    f"V4.1 Mooncake pool layer {access.execution_layer}: "
+                    f"expected groups {sorted(expected_groups)}, got {sorted(actual_groups)}"
+                )
+
+        draft_names = specs.keys() - backbone_names
+        speculative = self.vllm_config.speculative_config
+        if draft_names and (
+            getattr(speculative, "method", None) != "dspark"
+            or any(not name.endswith(".self_attn.swa_cache") for name in draft_names)
+            or not draft_names <= kv_caches.keys()
+        ):
+            raise ValueError(f"V4.1 Mooncake pool has unexpected draft resources: {sorted(draft_names)}")
+        if self.num_layers != backbone_end + len(draft_names) or set(self._global_to_local_layer) != set(
+            range(self.num_layers)
+        ):
+            raise ValueError("V4.1 Mooncake pool requires consecutive backbone and DSpark layer indices")
+        self.dsv41_backbone_end = backbone_end
+
+        cut = max(role.layer_idx for role in topology.layers if role.is_kv_source)
+        cut_slot_sources: dict[int, set[str]] = {}
+        for resource in accesses[cut].writes:
+            if resource.group_id not in self.cacheable_group_ids:
+                continue
+            name = resource.cache_name
+            # The folded index writes one K/scale slice per original Index K slot.
+            slot_source = name.removesuffix("_folded") if name.endswith(".indexer.k_cache_folded") else name
+            cut_slot_sources.setdefault(resource.group_id, set()).add(slot_source)
+        self._dsv41_cut_slot_sources = {group: tuple(sorted(names)) for group, names in cut_slot_sources.items()}
 
     def _register_dspark_prefix_cache(self, draft_caches: dict[str, torch.Tensor]) -> None:
         prefix_keys: DSparkPrefixKeys | None = getattr(self, "_dspark_prefix_keys", None)
@@ -682,6 +750,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         if self.use_layerwise_transfer and self.layerwise_offload and self.tp_size > 1:
             get_tp_group().barrier()
         self.current_layer = 0
+        self._dsv41_draft_loads_ready = False
+        self._dsv41_cache_only_blocks = {}
         self.layerwise_retrievers: list[Any] = []
         self.next_layer_to_submit = 0
         reset_attention_compute_start_gate()
@@ -2342,30 +2412,127 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         # KVPP can observe completion after attention; reset at the next bind.
         if not self.use_kvpp:
             self.layer_load_finished_events[self.current_layer].clear()
+        backbone_end = getattr(self, "dsv41_backbone_end", None)
+        last_load_layer = self.current_layer == self.num_layers - 1 or (
+            backbone_end is not None
+            and self.current_layer + 1 == backbone_end
+            and not any(self.layer_load_tasks[backbone_end:])
+        )
         if (
             getattr(self, "block_key_hybrid", False) or (self.use_kvpp and self.use_block_key_layerwise)
-        ) and self.current_layer == self.num_layers - 1:
+        ) and last_load_layer:
             # The final model layer can have no reachable load rows. Completion
             # belongs to the whole request, not whichever group happens to end here.
             for req_id in self._current_layerwise_last_chunk_req_ids:
                 self.kv_recv_thread.set_finished_request(req_id)
-        if getattr(self, "use_block_key_layerwise", False) and (
-            self._layer_load_aborted.is_set() or self.current_layer == self.num_layers - 1
-        ):
+        if getattr(self, "use_block_key_layerwise", False) and (self._layer_load_aborted.is_set() or last_load_layer):
             self._finish_current_layerwise_load_sessions()
         if hasattr(self, "kv_role") and not is_kv_save_role(self.kv_role, getattr(self, "consumer_is_to_put", False)):
             self.current_layer += 1
+
+    def dsv41_draft_is_finished(self, physical_layer: int) -> bool:
+        return (
+            self.dsv41_backbone_end is not None
+            and self.dsv41_backbone_end <= physical_layer < self.num_layers
+            and self.current_layer == self.num_layers
+        )
+
+    def wait_for_dsv41_layer_load(self, physical_layer: int) -> bool:
+        target_end = self.dsv41_backbone_end
+        assert target_end is not None
+        if self.dsv41_draft_is_finished(physical_layer):
+            # Draft proposals may run again under the same target step.
+            return False
+        self._check_dsv41_pool_layer(physical_layer)
+        if self._dsv41_draft_loads_ready and physical_layer >= target_end:
+            if not self.can_put:
+                self.current_layer += 1
+        else:
+            self.wait_for_layer_load()
+        return True
+
+    def _check_dsv41_pool_layer(self, physical_layer: int) -> None:
+        local_layer = self._global_to_local_layer.get(physical_layer)
+        if local_layer != self.current_layer:
+            raise RuntimeError(
+                f"V4.1 Mooncake pool layer {physical_layer} maps to local layer {local_layer}, "
+                f"but the step expects local layer {self.current_layer}"
+            )
+
+    def finish_dsv41_draft_loads(self) -> None:
+        """Restore any draft prefix before the speculator writes its context KV."""
+        target_end = self.dsv41_backbone_end
+        first_pending_layer = self.current_layer
+        if (
+            target_end is None
+            or first_pending_layer < target_end
+            or self._dsv41_draft_loads_ready
+            or not any(self.layer_load_tasks[first_pending_layer:])
+        ):
+            return
+        try:
+            for layer in range(first_pending_layer, self.num_layers):
+                self.current_layer = layer
+                self.wait_for_layer_load()
+                self.start_dsv41_pool_attention()
+        finally:
+            self.current_layer = first_pending_layer
+        self._dsv41_draft_loads_ready = True
+
+    def finish_dsv41_pool_step(self, metadata: AscendConnectorMetadata) -> None:
+        target_end = self.dsv41_backbone_end
+        if target_end is None or not target_end <= self.current_layer < self.num_layers:
+            return
+        # Drafting is optional. Close any unvisited layer without publishing
+        # cache pages merely because they were reserved at metadata binding.
+        self.finish_dsv41_draft_loads()
+        if not self.can_put:
+            self.current_layer = self.num_layers
+            return
+        while self.current_layer < self.num_layers:
+            self.finish_empty_dsv41_layer(self.current_layer, metadata)
+
+    def record_dsv41_cut_writes(
+        self, cache_name: str, attn_metadata: Mapping[str, "AscendDSAV41Metadata"]
+    ) -> None:
+        """Record pages completely written by the cut-layer cache-only phase."""
+        self._check_dsv41_pool_layer(self._extract_physical_layer_index(cache_name))
+        num_written_rows = attn_metadata[cache_name].num_actual_tokens
+        for task in self.layer_save_tasks[self.current_layer]:
+            group_id = task.group_id
+            complete: set[int] | None = None
+            for slot_source in self._dsv41_cut_slot_sources.get(group_id, ()):
+                metadata = attn_metadata[slot_source]
+                slots = metadata.slot_mapping[: min(num_written_rows, metadata.num_actual_tokens)]
+                offsets: dict[int, set[int]] = {}
+                # Only the empty-compaction path inspects slots on the host.
+                for block, offset in slots.tolist():
+                    if block > 0 and 0 <= offset < metadata.storage_block_size:
+                        offsets.setdefault(block, set()).add(offset)
+                written = {block for block, rows in offsets.items() if len(rows) == metadata.storage_block_size}
+                complete = written if complete is None else complete & written
+            self._dsv41_cache_only_blocks[group_id] = complete or set()
 
     def start_dsv41_pool_attention(self) -> None:
         get_attention_compute_start_gate().record()
 
     def finish_empty_dsv41_layer(self, physical_layer: int, metadata: AscendConnectorMetadata) -> None:
-        local_layer = self._global_to_local_layer[physical_layer]
-        if local_layer != self.current_layer:
-            raise RuntimeError(f"V4.1 empty pool layer {local_layer} does not match cursor {self.current_layer}")
-        if self.layer_save_tasks[local_layer]:
-            raise RuntimeError(f"V4.1 empty pool layer {local_layer} has pending KV saves")
-        # Reuse normal completion, including the final-layer drain, with no PUT.
+        self._check_dsv41_pool_layer(physical_layer)
+        revoked = set()
+        for task in self.layer_save_tasks[self.current_layer]:
+            shared = task.shared_block_data
+            if shared is None or shared.block_keys is None:
+                raise RuntimeError(f"V4.1 empty pool layer {physical_layer} has invalid block-key save metadata")
+            complete = self._dsv41_cache_only_blocks.get(task.group_id, ())
+            keep = [int(block) in complete for block in shared.block_ids_arr]
+            revoked.update(key for key, written in zip(shared.block_keys, keep, strict=True) if not written)
+            task.shared_block_data = replace(
+                shared,
+                block_ids_arr=shared.block_ids_arr[np.asarray(keep, dtype=bool)],
+                block_keys=[key for key, written in zip(shared.block_keys, keep, strict=True) if written],
+            )
+        self._dsv41_cache_only_blocks.clear()
+        self._queue_layerwise_revoke_keys(list(revoked))
         self.save_kv_layer(metadata)
 
     def abort_dsv41_pool_attention(self) -> None:

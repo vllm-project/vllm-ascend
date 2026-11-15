@@ -183,6 +183,12 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             if callable(hook):
                 hook(cache_name, empty=empty)
 
+    def on_dsv41_pool_cut_writes(self, cache_name: str, attn_metadata: dict[str, Any]) -> None:
+        for connector in self._connectors:
+            hook = getattr(connector, "on_dsv41_pool_cut_writes", None)
+            if callable(hook):
+                hook(cache_name, attn_metadata)
+
     def on_dsv41_pool_attention_error(self) -> None:
         for connector in self._connectors:
             hook = getattr(connector, "on_dsv41_pool_attention_error", None)

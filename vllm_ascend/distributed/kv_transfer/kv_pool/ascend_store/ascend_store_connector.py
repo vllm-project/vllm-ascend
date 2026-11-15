@@ -396,11 +396,16 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if not self.use_layerwise:
             return
         assert self.connector_worker is not None
+        worker = cast(LayerwiseKVPoolWorker, self.connector_worker)
         # PLE and attention can share one physical layer. Load its groups once,
         # then let each cache owner copy its own recurrent state before use.
-        layer = self.connector_worker._extract_physical_layer_index(layer_name)
+        layer = worker._extract_physical_layer_index(layer_name)
         if self._loaded_layer != layer:
-            cast(LayerwiseKVPoolWorker, self.connector_worker).wait_for_layer_load()
+            if isinstance(getattr(worker, "dsv41_backbone_end", None), int):
+                if not worker.wait_for_dsv41_layer_load(layer):
+                    return
+            else:
+                worker.wait_for_layer_load()
             self._loaded_layer = layer
         # Mamba state copy must run AFTER this layer's load finishes,
         # otherwise the copy would race with the in-flight layerwise load and
@@ -450,6 +455,8 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         worker = cast(LayerwiseKVPoolWorker, self.connector_worker)
         physical_layer = worker._extract_physical_layer_index(cache_name)
+        if isinstance(worker.dsv41_backbone_end, int) and worker.dsv41_draft_is_finished(physical_layer):
+            return
         local_layer = worker._global_to_local_layer[physical_layer]
         if local_layer != worker.current_layer:
             raise RuntimeError(
@@ -463,10 +470,20 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             return
         assert self.connector_worker is not None
         worker = cast(LayerwiseKVPoolWorker, self.connector_worker)
+        layer = worker._extract_physical_layer_index(cache_name)
+        if isinstance(worker.dsv41_backbone_end, int) and worker.dsv41_draft_is_finished(layer):
+            return
         worker.start_dsv41_pool_attention()
         if empty and self.can_put:
-            layer = worker._extract_physical_layer_index(cache_name)
             worker.finish_empty_dsv41_layer(layer, self._get_connector_metadata())
+
+    def on_dsv41_pool_cut_writes(self, cache_name: str, attn_metadata: dict[str, Any]) -> None:
+        if not self.use_block_key_layerwise or not self.can_put:
+            return
+        assert self.connector_worker is not None
+        worker = cast(LayerwiseKVPoolWorker, self.connector_worker)
+        if worker.dsv41_backbone_end is not None:
+            worker.record_dsv41_cut_writes(cache_name, attn_metadata)
 
     def on_dsv41_pool_attention_error(self) -> None:
         if self.use_block_key_layerwise:
@@ -475,11 +492,14 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             worker.abort_dsv41_pool_attention()
 
     def wait_for_save(self):
-        if not self.can_put:
-            # A load-only consumer has no store thread to wait for.
+        if self.use_layerwise:
+            worker = cast(LayerwiseKVPoolWorker, self.connector_worker)
+            if isinstance(getattr(worker, "dsv41_backbone_end", None), int) and self.has_connector_metadata():
+                worker.finish_dsv41_pool_step(self._get_connector_metadata())
             return
 
-        if self.use_layerwise:
+        if not self.can_put:
+            # A load-only consumer has no store thread to wait for.
             return
 
         assert self.connector_worker is not None
@@ -489,6 +509,8 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
         metadata = self._get_connector_metadata()
+        if isinstance(getattr(self.connector_worker, "dsv41_backbone_end", None), int):
+            cast(LayerwiseKVPoolWorker, self.connector_worker).finish_dsv41_draft_loads()
         if self._current_step_has_real_forward:
             try:
                 self.connector_worker.m_store.ensure_initialized()

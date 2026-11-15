@@ -12,6 +12,8 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.utils.torch_utils import direct_register_custom_op
 
+from vllm_ascend.attention.utils import dsv41_pool_attention, notify_dsv41_pool_cut_writes
+
 if TYPE_CHECKING:
     from .model import DeepseekV41Model
 
@@ -53,6 +55,9 @@ class AscendDecoderReplayLayers:
             # The cut layer's cache is shared by later layers, so populate it
             # for every token before switching to replay-only metadata.
             self.write_batch_kv(*states)
+            if self.num_actual_rows == 0 and self.first_swa_prefix is not None:
+                with dsv41_pool_attention():
+                    notify_dsv41_pool_cut_writes(self.first_swa_prefix, get_forward_context().attn_metadata)
         with self.context_factory():
             rows = self.rows
             for buffer in self.row_buffers:
