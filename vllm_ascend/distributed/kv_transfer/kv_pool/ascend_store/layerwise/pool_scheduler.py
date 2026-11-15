@@ -31,6 +31,12 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler imp
 
 class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
     def _build_req_meta(self, request_tracker: RequestTracker, *args, **kwargs):
+        request_tuple = getattr(self, "_unfinished_requests", {}).get(request_tracker.req_id)
+        if self.layerwise_offload and request_tuple is not None:
+            tokens = request_tuple[0].all_token_ids
+            if isinstance(tokens, Sequence):
+                # Scheduled verifier placeholders have no input state to save.
+                request_tracker.token_len = min(request_tracker.token_len, len(tokens))
         if self.layerwise_offload and request_tracker.layerwise_request_id is None:
             request_tracker.layerwise_request_id = uuid4().hex
         return super()._build_req_meta(request_tracker, *args, **kwargs)
@@ -59,6 +65,8 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
         self.sharded_mamba_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
         self.load_async = False
+        self._prefix_probe: tuple[str, int] | None = None
+        self._verified_prefix = getattr(kv_cache_config, "layerwise_store_verified_prefix", False)
         if self.use_layerwise_transfer or get_layerwise_reuse_config(vllm_config.kv_transfer_config) is not None:
             self._init_layerwise_offload(vllm_config, kv_cache_config, extra_config)
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
@@ -125,7 +133,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
                 vllm_cached_tokens=num_current_tokens,
                 kvpool_cached_tokens=num_current_tokens,
                 can_load=True,
-                layerwise_snapshot_end_token=request_tracker.last_layerwise_snapshot_end_token,
+                layerwise_snapshot_end_token=num_current_tokens,
                 layerwise_snapshot_block_index=request_tracker.last_layerwise_snapshot_block_index,
                 layerwise_snapshot_start_block=request_tracker.last_layerwise_snapshot_start_block,
                 layerwise_previous_step=True,
@@ -152,11 +160,31 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
                 load_spec.kvpool_store_skip_tokens = restored_tokens
         return result
 
+    def get_local_prefix_cache_limit(self, request: Request) -> int | None:
+        if not self.layerwise_offload or not getattr(self, "_verified_prefix", False):
+            return None
+        hit = self._lookup_external_hit_tokens(request, 0) or 0
+        self._prefix_probe = (request.request_id, hit)
+        limit = self._floor_to_cache_transfer_granularity(request.num_tokens - 1)
+        # Query the exact replay endpoint; a later KDA checkpoint cannot be
+        # sliced into a valid earlier state.
+        if hit > limit:
+            return self._get_block_key_layerwise_hit_tokens(request, limit, 0) if limit else 0
+        return hit
+
     def _lookup_external_hit_tokens(self, request: Request, num_computed_tokens: int) -> int | None:
+        probe = getattr(self, "_prefix_probe", None)
+        self._prefix_probe = None
+        if probe is not None and probe[0] == request.request_id:
+            return probe[1]
         prompt_token_len = len(request.prompt_token_ids)
         if self.use_block_key_layerwise:
             token_len = self._floor_to_cache_transfer_granularity(prompt_token_len)
-            if not self.use_eagle and len(self.cacheable_group_ids) != len(self.original_block_size):
+            if self.layerwise_offload and getattr(self, "_verified_prefix", False):
+                # Verify the actual restart boundary before both HBM admission
+                # and external allocation. KDA cannot undo a later checkpoint.
+                token_len = min(token_len, self._floor_to_cache_transfer_granularity(request.num_tokens - 1))
+            elif not self.use_eagle and len(self.cacheable_group_ids) != len(self.original_block_size):
                 token_len = self._floor_to_cache_transfer_granularity(max(prompt_token_len - 1, 0))
             if token_len < self.cache_transfer_granularity:
                 return None

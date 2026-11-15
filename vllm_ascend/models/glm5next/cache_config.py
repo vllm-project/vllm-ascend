@@ -66,10 +66,11 @@ def _is_glm5_next_spec(spec: KVCacheSpec) -> bool:
 
 
 def _keep_speculative_state_resident(vllm_config: VllmConfig) -> bool:
-    return (
-        getattr(vllm_config, "speculative_config", None) is not None
-        and get_layerwise_reuse_config(getattr(vllm_config, "kv_transfer_config", None)) is not None
-    )
+    extra = get_layerwise_reuse_config(getattr(vllm_config, "kv_transfer_config", None))
+    reuse_state = extra.get("layerwise_reuse_mtp_state", True) if extra is not None else True
+    if not isinstance(reuse_state, bool):
+        raise TypeError("layerwise_reuse_mtp_state must be a boolean")
+    return getattr(vllm_config, "speculative_config", None) is not None and extra is not None and not reuse_state
 
 
 def _unpadded_page_size(spec: KVCacheSpec) -> int:
@@ -409,12 +410,18 @@ def get_glm5_next_kv_cache_groups(
     return groups
 
 
+def get_glm5_next_plan_bytes(plan: KVCacheConfig) -> int:
+    if getattr(plan, "layerwise_component_plan", False) and getattr(plan, "layerwise_kv_cache_reuse", False):
+        return max(tensor.size for tensor in plan.kv_cache_tensors)
+    return sum(tensor.size for tensor in plan.kv_cache_tensors)
+
+
 def get_glm5_next_pool_bytes_per_block(groups: list[KVCacheGroupSpec], vllm_config: VllmConfig | None = None) -> int:
     """Return physical bytes represented by one global block ID."""
 
     if vllm_config is not None:
         plan = _build_glm5_next_kv_cache_config(vllm_config, groups, 1)
-        return sum(tensor.size for tensor in plan.kv_cache_tensors)
+        return get_glm5_next_plan_bytes(plan)
     layout = _get_glm5_next_cache_layout(groups)
     if layout is None:
         raise ValueError("Expected GLM-Next cache groups.")
@@ -426,7 +433,9 @@ def get_glm5_next_alignment_reserve(vllm_config: VllmConfig, groups: list[KVCach
     if getattr(vllm_config, "kv_transfer_config", None) is None:
         return 0
     plan = _build_glm5_next_kv_cache_config(vllm_config, groups, 1)
-    return len(plan.kv_cache_tensors) * GLM5_NEXT_CACHE_ALIGNMENT
+    return (
+        1 if getattr(plan, "layerwise_component_plan", False) else len(plan.kv_cache_tensors)
+    ) * GLM5_NEXT_CACHE_ALIGNMENT
 
 
 def get_glm5_next_kv_cache_config(
@@ -437,11 +446,9 @@ def get_glm5_next_kv_cache_config(
     """Describe one standard unpacked tensor per physical cache slot."""
 
     plan = _build_glm5_next_kv_cache_config(vllm_config, groups, 1)
-    bytes_per_block = sum(tensor.size for tensor in plan.kv_cache_tensors)
+    bytes_per_block = get_glm5_next_plan_bytes(plan)
     plan.num_blocks = may_override_num_blocks(vllm_config, max(available_memory // bytes_per_block, 0))
-    for tensor in plan.kv_cache_tensors:
-        tensor.size *= plan.num_blocks
-    return plan
+    return _build_glm5_next_kv_cache_config(vllm_config, groups, plan.num_blocks)
 
 
 def _build_glm5_next_kv_cache_config(
@@ -538,7 +545,17 @@ def _build_glm5_next_kv_cache_config(
             else (),
         )
         plan.kv_cache_allocation_alignment = GLM5_NEXT_CACHE_ALIGNMENT
-        apply_layerwise_kv_cache_plan(plan, vllm_config)
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
+            apply_layerwise_kv_cache_plan as apply_registered_plan,
+        )
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_planner import (
+            get_spec_reuse_rules,
+        )
+
+        if get_spec_reuse_rules(vllm_config) is not None:
+            apply_registered_plan(plan, vllm_config)
+        else:
+            apply_layerwise_kv_cache_plan(plan, vllm_config)
     return plan
 
 

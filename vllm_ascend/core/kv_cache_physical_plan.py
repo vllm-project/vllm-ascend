@@ -24,7 +24,8 @@ def get_physical_kv_cache_config(
 
 def get_kv_cache_allocation_overhead(kv_cache_config: KVCacheConfig) -> int:
     """Fixed cost for plans allocating one aligned raw tensor per descriptor."""
-    return len(kv_cache_config.kv_cache_tensors) * getattr(kv_cache_config, "kv_cache_allocation_alignment", 0)
+    count = 1 if getattr(kv_cache_config, "layerwise_component_plan", False) else len(kv_cache_config.kv_cache_tensors)
+    return count * getattr(kv_cache_config, "kv_cache_allocation_alignment", 0)
 
 
 def get_physical_kv_cache_config_from_specs(

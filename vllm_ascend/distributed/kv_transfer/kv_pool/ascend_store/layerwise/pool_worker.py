@@ -60,6 +60,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     build_layerwise_reuse_layout,
     get_layerwise_kv_cache_specs,
     get_layerwise_reuse_config,
+    reuse_sources,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.metadata import (
     LayerBlockRange,
@@ -327,7 +328,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self.next_layer_to_submit = 0
         self.layerwise_offload = False
         self.independent_layers: list[int] = []
-        self.prefetch_layer_map: dict[int, int] = {}
+        self.prefetch_layer_map: dict[int, int | tuple[int, ...]] = {}
         if self.use_layerwise_transfer or self.use_mooncake_offload:
             if self._layerwise_reuse_layout is None:
                 cache_layout = build_layerwise_cache_layout(
@@ -382,14 +383,21 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
 
     @staticmethod
     def _remap_layout_to_stage_local(
-        prefetch_layer_map: dict[int, int],
+        prefetch_layer_map: dict[int, int | tuple[int, ...]],
         independent_layers: list[int],
         stage_globals: list[int],
-    ) -> tuple[dict[int, int], list[int]]:
+    ) -> tuple[dict[int, int | tuple[int, ...]], list[int]]:
         """Translate a global-indexed reuse layout to stage-local indices."""
         global_to_local = {global_idx: local_idx for local_idx, global_idx in enumerate(stage_globals)}
         return (
-            {global_to_local[layer]: global_to_local[source] for layer, source in prefetch_layer_map.items()},
+            {
+                global_to_local[layer]: (
+                    global_to_local[source]
+                    if isinstance(source, int)
+                    else tuple(global_to_local[item] for item in source)
+                )
+                for layer, source in prefetch_layer_map.items()
+            },
             [global_to_local[layer] for layer in independent_layers],
         )
 
@@ -713,6 +721,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         if self.use_layerwise_transfer and self.layerwise_offload and self.pcp_size > 1:
             # Replica readers must wait for PCP 0 to publish the previous step.
             get_pcp_group().barrier()
+        if getattr(self.kv_cache_config, "layerwise_component_plan", False) and self.layer_save_finished_events:
+            for event in self.layer_save_finished_events:
+                event.clear()
         self.current_layer = 0
         self.layerwise_retrievers: list[Any] = []
         self.next_layer_to_submit = 0
@@ -784,7 +795,8 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         """Include both writers of each shared slot, including its first owner."""
         return any(
             candidate_group == group_id
-            for layer in set(self.prefetch_layer_map) | set(self.prefetch_layer_map.values())
+            for layer in set(self.prefetch_layer_map)
+            | {source for value in self.prefetch_layer_map.values() for source in reuse_sources(value)}
             for candidate_group, _ in self.physical_layer_to_group_layers.get(layer, [(0, layer)])
         )
 
@@ -2553,7 +2565,11 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             # Recurrent state may be cleared or copied before the next load
             # hook. Finish reading shared state before returning from forward.
             if _LW_DEFER_LAST_SAVE and not (
-                self._recurrent_layers & (self.prefetch_layer_map.keys() | set(self.prefetch_layer_map.values()))
+                self._recurrent_layers
+                & (
+                    self.prefetch_layer_map.keys()
+                    | {source for value in self.prefetch_layer_map.values() for source in reuse_sources(value)}
+                )
             ):
                 # PERF-TUNE(2): move the last layer's save drain off the forward
                 # critical path. The drain (host wait + event reset) runs at the
@@ -2597,7 +2613,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 while not save_finished_events[layer_id].wait(timeout=10):
                     send_thread.raise_if_failed()
             send_thread.raise_if_failed()
-        reuse_source_layers = set(self.prefetch_layer_map.values())
+        reuse_source_layers = {source for value in self.prefetch_layer_map.values() for source in reuse_sources(value)}
         for layer_id in range(num_local):
             if layer_id in reuse_source_layers:
                 continue

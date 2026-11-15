@@ -281,14 +281,16 @@
 #    Future Plan:
 #       Remove once upstream exposes the PD role to the coordinator or
 #       removes the EAGLE last-block drop for verified prompt blocks.
-#   3. `HybridKVCacheCoordinator.find_longest_cache_hit` and
+#   3. `Scheduler._get_local_prefix_cache_hit`,
+#      `HybridKVCacheCoordinator.find_longest_cache_hit` and
 #      `...find_longest_cache_hit_per_group`
 #    Why:
 #       GLM layerwise scratch buffers overwrite locally hashed prefix pages.
 #       Hash presence alone cannot establish that their payload is resident.
 #    How:
-#       When the physical planner marks layerwise cache reuse, reject local
-#       prefix hits and let AscendStore verify and restore the external data.
+#       Ask AscendStore for a verified prefix bound before local admission.
+#       Registered component plans retain local block/hash sharing and restore
+#       shared payload per layer. Legacy scratch plans reject local hits.
 #       Ordinary persistent cache layouts retain their existing hit policy.
 #    Related PR (if no, explain why):
 #       No upstream PR; this accompanies GLM Prefill main-pack reuse.

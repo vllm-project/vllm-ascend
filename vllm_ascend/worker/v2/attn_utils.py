@@ -1190,6 +1190,17 @@ def _allocate_kv_cache(
     # prefill disaggregation need the addr of cache tensor be aligned with 2M
     alignment = 2 * 1024 * 1024
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
+    if getattr(kv_cache_config, "layerwise_component_plan", False) and getattr(
+        kv_cache_config, "layerwise_kv_cache_reuse", False
+    ):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_views import (
+            allocate_cache_backing,
+        )
+
+        return allocate_cache_backing(
+            kv_cache_config, layer_kv_cache_spec, lambda size: _allocate_int8_cache_tensor(size, alignment, device)
+        )
+
     attn_layers: dict[str, AttentionLayerBase] | None = None
     # Gemma 4 full/sliding groups share one pool while retaining contiguous
     # K/V views. The worker keeps the full budget only for this V2 path.

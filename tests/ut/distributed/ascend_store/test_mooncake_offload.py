@@ -26,12 +26,14 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_trans
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     LayerwiseCacheTopology,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_scheduler import LayerwiseKVPoolScheduler
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     LoadSpec,
     ReqMeta,
     RequestTracker,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import BaseKVPoolScheduler
 
 
 class TestMooncakeOffload(unittest.TestCase):
@@ -316,6 +318,105 @@ class TestMooncakeOffload(unittest.TestCase):
             self.assertFalse(worker.m_store.open_reads)
             previous = end
         self.assertFalse(errors)
+
+    def test_mtp_reuses_aligned_kda_execution_snapshots(self):
+        worker, arrays, errors = self.make_ring(hybrid=True, block_size=16, num_blocks=9)
+        worker.vllm_config.speculative_config = SimpleNamespace(method="deepseek_mtp", num_speculative_tokens=3)
+        worker.prefetch_layer_map = {layer: (source,) for layer, source in worker.prefetch_layer_map.items()}
+        # Both successors observe source 1's save in this step; the first
+        # waiter must not consume its event before the second waiter sees it.
+        worker.prefetch_layer_map[2] = (0, 1)
+        worker.kv_cache_config.layerwise_component_plan = True
+        previous = 0
+        attention_values = {}
+        for end in (16, 32, 45):
+            request = self.request(end, previous=previous, snapshot=previous or None)
+            request.num_prompt_tokens = 64
+            request.block_ids_by_group = [[1, 2, 3, 4], [5, 6, 7, 8]]
+            request.block_ids_by_group_np = [np.asarray(ids) for ids in request.block_ids_by_group]
+            metadata = AscendConnectorMetadata(set())
+            metadata.add_request(request)
+            worker.prepare_layerwise_step(metadata)
+            for layer in range(4):
+                worker.wait_for_layer_load()
+                group = layer % 2
+                ids = request.block_ids_by_group[group]
+                if previous:
+                    if group:
+                        np.testing.assert_array_equal(arrays[0][ids[(previous - 1) // 16]], layer + previous)
+                    else:
+                        for index in range((previous + 15) // 16):
+                            np.testing.assert_array_equal(arrays[0][ids[index]], attention_values[layer, index])
+                with attention_transfer_window():
+                    selected = ids[previous // 16 : (end + 15) // 16] if not group else [ids[(end - 1) // 16]]
+                    arrays[0][selected] = layer + end
+                    if not group:
+                        for index in range(previous // 16, (end + 15) // 16):
+                            attention_values[layer, index] = layer + end
+                worker.save_kv_layer(metadata)
+            previous = end
+        self.assertFalse(errors)
+
+    def test_hbm_hash_hit_still_restores_shared_payload(self):
+        worker, arrays, errors = self.make_ring()
+        self.run_step(worker, arrays, self.request(32))
+        request = self.request(48, previous=32, incarnation="new-request")
+        request.load_spec.vllm_cached_tokens = 32
+        request.load_spec.layerwise_previous_step = False
+        arrays[0].fill(255)
+        self.run_step(worker, arrays, request, 32)
+        self.assertFalse(errors)
+
+    def test_store_verified_local_limit_reuses_the_probe(self):
+        scheduler = LayerwiseKVPoolScheduler.__new__(LayerwiseKVPoolScheduler)
+        scheduler.layerwise_offload = scheduler._verified_prefix = True
+        scheduler._prefix_probe = None
+        scheduler.cache_transfer_granularity = 16
+        scheduler._floor_to_cache_transfer_granularity = lambda value: value // 16 * 16
+        scheduler.use_block_key_layerwise = True
+        scheduler.use_eagle = False
+        scheduler.cacheable_group_ids = scheduler.original_block_size = [16]
+        scheduler._get_block_key_layerwise_hit_tokens = MagicMock(return_value=32)
+        request = SimpleNamespace(request_id="same-prefix", prompt_token_ids=list(range(49)), num_tokens=49)
+        self.assertEqual(scheduler.get_local_prefix_cache_limit(request), 32)
+        self.assertEqual(scheduler._lookup_external_hit_tokens(request, 32), 32)
+        scheduler._get_block_key_layerwise_hit_tokens.assert_called_once()
+        scheduler._get_block_key_layerwise_hit_tokens.return_value = 48
+        self.assertEqual(scheduler.get_local_prefix_cache_limit(request), 48)
+
+    def test_full_prompt_verifies_the_actual_restart_boundary(self):
+        scheduler = LayerwiseKVPoolScheduler.__new__(LayerwiseKVPoolScheduler)
+        scheduler.layerwise_offload = scheduler._verified_prefix = True
+        scheduler._prefix_probe = None
+        scheduler.cache_transfer_granularity = 16
+        scheduler._floor_to_cache_transfer_granularity = lambda value: value // 16 * 16
+        scheduler.use_block_key_layerwise = True
+        scheduler._get_block_key_layerwise_hit_tokens = MagicMock(return_value=16)
+        request = SimpleNamespace(request_id="aligned-prefix", prompt_token_ids=list(range(32)), num_tokens=32)
+        self.assertEqual(scheduler.get_local_prefix_cache_limit(request), 16)
+        self.assertEqual(scheduler._lookup_external_hit_tokens(request, 16), 16)
+        scheduler._get_block_key_layerwise_hit_tokens.assert_called_once_with(request, 16, 0)
+        scheduler._get_block_key_layerwise_hit_tokens.return_value = 0
+        self.assertEqual(scheduler.get_local_prefix_cache_limit(request), 0)
+
+    def test_mtp_verifier_rows_do_not_advance_the_snapshot_endpoint(self):
+        scheduler = LayerwiseKVPoolScheduler.__new__(LayerwiseKVPoolScheduler)
+        scheduler.layerwise_offload = True
+        # Request.all_token_ids is a read-only Sequence, not a Python list.
+        scheduler._unfinished_requests = {"request": (SimpleNamespace(all_token_ids=range(32)), [])}
+        tracker = SimpleNamespace(req_id="request", token_len=35, layerwise_request_id="incarnation")
+        with patch.object(BaseKVPoolScheduler, "_build_req_meta", return_value=None):
+            scheduler._build_req_meta(tracker)
+        self.assertEqual(tracker.token_len, 32)
+
+    def test_shared_kda_rejects_post_acceptance_decode_commits(self):
+        worker, _, _ = self.make_ring(hybrid=True)
+        worker.vllm_config.speculative_config = SimpleNamespace(method="deepseek_mtp", num_speculative_tokens=3)
+        request = self.request(33, previous=32, snapshot=32)
+        request.num_prompt_tokens = 32
+        request.block_ids_by_group = [[1, 2, 3, 4], [5, 6, 7, 8]]
+        with self.assertRaisesRegex(NotImplementedError, "speculative prefill"):
+            worker.process_layer_data([request])
 
     def test_unaligned_recurrent_restore_never_uses_a_later_speculative_endpoint(self):
         worker, _, _ = self.make_ring(hybrid=True)

@@ -23,6 +23,7 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_kv_cache_config,
     get_glm5_next_kv_cache_groups,
     get_glm5_next_max_memory_usage,
+    get_glm5_next_plan_bytes,
     get_glm5_next_pool_bytes_per_block,
 )
 from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
@@ -387,9 +388,10 @@ def test_mooncake_glm_main_packs_reuse_preserves_resident_auxiliary_capacity(buf
     plan = get_glm5_next_kv_cache_config(config, groups, byte_cost * 9)
     assert plan.num_blocks == 9
     assert len(plan.kv_cache_tensors) == buffers + 3
-    assert sum(tensor.size for tensor in plan.kv_cache_tensors) == byte_cost * 9
+    assert get_glm5_next_plan_bytes(plan) == byte_cost * 9
     assert len(plan.layerwise_cache_topology.main_packs) == 3
-    assert len(plan.layerwise_reuse_layout.buffer_slots) == buffers
+    assert plan.layerwise_component_plan
+    assert len({tensor.size for tensor in plan.kv_cache_tensors}) == 1
     names = [name for tensor in plan.kv_cache_tensors for name in tensor.layers]
     assert sorted(names) == sorted(specs)
     for tensor in plan.kv_cache_tensors:
@@ -403,7 +405,8 @@ def test_mooncake_glm_main_packs_reuse_preserves_resident_auxiliary_capacity(buf
 
 @pytest.mark.parametrize("method", ["deepseek_mtp", "dspark"])
 @pytest.mark.parametrize("speculative_blocks", [0, 3])
-def test_mooncake_glm_speculative_state_and_draft_cache_remain_resident(method, speculative_blocks):
+@pytest.mark.parametrize("reuse_state", [False, True])
+def test_mooncake_glm_speculative_reuse_keeps_draft_resident(method, speculative_blocks, reuse_state):
     config = make_config()
     config.model_config.get_num_layers = lambda parallel: 16
     config.parallel_config.tensor_parallel_size = 8
@@ -413,6 +416,7 @@ def test_mooncake_glm_speculative_state_and_draft_cache_remain_resident(method, 
         kv_role="kv_producer",
         kv_connector_extra_config={
             "backend": "mooncake",
+            "layerwise_reuse_mtp_state": reuse_state,
             "use_layerwise": True,
             "layerwise_num_shared_buffers": 1,
             "layerwise_independent_layers": [0],
@@ -435,18 +439,18 @@ def test_mooncake_glm_speculative_state_and_draft_cache_remain_resident(method, 
     byte_cost = get_glm5_next_pool_bytes_per_block(groups, config)
     plan = get_glm5_next_kv_cache_config(config, groups, byte_cost * 9)
     assert plan.layerwise_kv_cache_reuse
-    assert sum(t.size for t in plan.kv_cache_tensors) == byte_cost * 9
+    assert get_glm5_next_plan_bytes(plan) == byte_cost * 9
     recurrent = {
         int(name.split("layers.")[1].split(".")[0]) for name, spec in specs.items() if isinstance(spec, MambaSpec)
     }
     layout = plan.layerwise_reuse_layout
-    assert recurrent <= set(layout.independent_layers)
-    assert not recurrent.intersection(layout.prefetch_layer_map)
-    assert not recurrent.intersection(layout.prefetch_layer_map.values())
+    reused = {int(name.split("layers.")[1].split(".")[0]) for name in layout.reused_cache_names}
+    if reuse_state:
+        assert recurrent.intersection(reused)
+    else:
+        assert not recurrent.intersection(reused)
     assert set(plan.layerwise_draft_layer_names) == {name for name in specs if "layers.16." in name}
-    for tensor in plan.kv_cache_tensors:
-        if any(name in plan.layerwise_draft_layer_names for name in tensor.layers):
-            assert all(name in plan.layerwise_draft_layer_names for name in tensor.layers)
+    assert not set(plan.layerwise_draft_layer_names).intersection(layout.reused_cache_names)
 
 
 def test_worker_preserves_generic_mtp_draft_bytes_in_reuse_budget():

@@ -6,7 +6,7 @@ import ctypes
 import queue
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -204,6 +204,24 @@ def worker(monkeypatch, request):
     obj.shutdown()
     assert obj._sender_executor is None
     assert obj._zmq_context is None
+
+
+def test_component_reuse_waits_for_every_push_source(worker):
+    worker._slot_predecessors = {2: (0, 1)}
+    worker._prefilling_request_ids = ("active",)
+    first, second = Future(), Future()
+    worker._slot_writes = {0: (first,), 1: (second,)}
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        gate = executor.submit(worker.wait_for_layer_reuse, 2)
+        try:
+            first.set_result(None)
+            with pytest.raises(TimeoutError):
+                gate.result(timeout=0.02)
+        finally:
+            if not first.done():
+                first.set_result(None)
+            second.set_result(None)
+        gate.result(timeout=3)
 
 
 def test_shared_slot_waits_for_write_and_does_not_publish_prefix_early(worker):

@@ -43,6 +43,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     get_physical_layer_index,
+    reuse_sources,
 )
 
 # Rank tuples are (PP, PCP, TP), matching scheduler handshake keys.
@@ -221,7 +222,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         self._remote_metadata: SizedDict = SizedDict(max_size=128)
         self._sender_executor: ThreadPoolExecutor | None = None
         layout = getattr(kv_cache_config, "layerwise_reuse_layout", None)
-        self._slot_predecessors: dict[int, int] = (
+        self._slot_predecessors: dict[int, int | tuple[int, ...]] = (
             layout.prefetch_layer_map
             if layout is not None and getattr(kv_cache_config, "layerwise_kv_cache_reuse", False)
             else {}
@@ -231,7 +232,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             or vllm_config.parallel_config.prefill_context_parallel_size != 1
         ):
             raise ValueError("Mooncake Push with shared buffers requires P PP=PCP=1")
-        self._slot_sources = set(self._slot_predecessors.values())
+        self._slot_sources = {source for value in self._slot_predecessors.values() for source in reuse_sources(value)}
         self._scratch_layers = self._slot_sources | self._slot_predecessors.keys()
         self._slot_writes: dict[int, tuple[Future, ...]] = {}
         self._slot_index_by_name: dict[str, int] = {}
@@ -796,15 +797,13 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         )
 
     def wait_for_layer_reuse(self, layer_idx: int) -> None:
-        source = self._slot_predecessors.get(layer_idx)
-        if source is None or not self._prefilling_request_ids:
+        if not self._prefilling_request_ids:
             return
-        # Called from the Store receive thread after the predecessor's Store
-        # save. The MultiConnector publishes the Push gate before that save.
-        writes = self._slot_writes.get(source)
-        if writes is None:
-            raise RuntimeError(f"Mooncake Push is missing the shared-slot save hook for layer {source}")
-        wait_futures(writes)
+        for source in reuse_sources(self._slot_predecessors.get(layer_idx)):
+            writes = self._slot_writes.get(source)
+            if writes is None:
+                raise RuntimeError(f"Mooncake Push is missing the shared-slot save hook for layer {source}")
+            wait_futures(writes)
 
     def save_kv_layer(self, layer_name: str) -> None:
         if not self.kv_transfer_config.is_kv_producer or not self._prefilling_request_ids:

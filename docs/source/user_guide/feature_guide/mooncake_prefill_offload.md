@@ -7,9 +7,10 @@ This reduces the physical KV allocation at the cost of additional Store traffic.
 
 This implementation targets GLM-5.3-Flash with TP8 and expert parallelism, and
 uses the existing cache-spec interfaces for ordinary attention models. GLM main
-MLA/KDA backing packs are reused together while compressed indexer and tail
-backings remain resident. With speculative decoding, KDA state and draft cache
-allocations stay resident.
+MLA/KDA components can rotate through shared slots while compressed indexer,
+tail and draft caches remain resident. Target KDA state can also reuse slots
+with native MTP enabled. Model-registered eligibility rules preserve GLM's
+native page strides, padding and component sizes.
 
 The implementation has CPU regression coverage. Ascend correctness, graph-mode
 compatibility and end-to-end performance require hardware validation before
@@ -65,19 +66,28 @@ hardware-specific options and use `--tensor-parallel-size 8
 --enable-expert-parallel --enable-chunked-prefill --mamba-cache-mode align
 --enforce-eager`. EP uses the TP8 group in this configuration. Native MTP can use
 `--speculative-config '{"method":"deepseek_mtp","num_speculative_tokens":3,"enforce_eager":true}'`.
-KDA state remains resident so speculative acceptance can select its correct
-checkpoint after forward. Native MTP caches also remain resident, participate in
+Target KDA caches use exact execution snapshots; each transferred state page
+retains its native speculative-state contents for the model's align pre-copy.
+Set `layerwise_reuse_mtp_state=false` in the Store extra config to retain the
+previous resident target-KDA behavior. Native MTP draft caches remain resident, participate in
 external prefix loading, and complete their part of the Mooncake block object
 before it becomes readable. Later proposal iterations do not advance the
 completed target/offload hook sequence.
+The shared-KDA path with MTP is for prefill. Requests that also perform
+speculative decode commits on this instance must set
+`layerwise_reuse_mtp_state=false`, since acceptance happens after the layer-save
+hook. Non-speculative running steps retain exact endpoint snapshots.
 Start with PP=PCP=DCP=1 and synchronous scheduling. The existing layerwise
 parallelism constraints still apply; other parallel topologies need separate
 hardware validation. Set the load failure policy to `fail` for hybrid models.
 
-`layerwise_num_shared_buffers` counts reusable main backing slots. A configured
-independent layer pins its whole GLM main pack. Auxiliary backings are additional
-resident allocations, so total HBM use is not simply the number of ring slots
-times one layer's KV. Too few slots can serialize computation and transfers;
+`layerwise_num_shared_buffers` bounds the reusable slots in each block-stride
+class. A configured independent layer pins its cache components. The planner
+packs components from different groups only when their block IDs are disjoint;
+same-group components used by the same layer must occupy different slots.
+Resident and rotating windows occupy one device allocation. Resident windows
+still consume HBM, so total use is not simply the ring-slot count times one
+layer's KV. Too few slots can serialize computation and transfers;
 compare 2, 4 and 8 slots with prefetch depths 1 and 2 on the target hardware.
 
 Warmup and profiling use immediate Mamba state copies. They do not register
@@ -93,9 +103,11 @@ Only that request restores these private snapshots; other requests see committed
 full prefixes. Reused recurrent state restores its exact saved endpoint,
 including an unaligned prompt tail or a subsequent single-token decode step.
 For example, with block size 1152, endpoints 13824, 16395 and 16396 are distinct
-states. The latter two use immutable private snapshots; neither is floored to
-an older checkpoint. Speculative recurrent state stays resident and is selected
-by the model after acceptance. Missing exact snapshots still fail the request;
+states. Reused KDA saves a private execution snapshot at each endpoint, including
+13824 when an older request already published the same public block hash.
+The latter two are never floored to an older checkpoint. Speculative verifier
+placeholders beyond the real input token sequence are not new snapshot tokens.
+Missing exact snapshots still fail the request;
 recovery never silently skips a shared recurrent restore or rolls it back from
 a later state. Private snapshots become evictable Store objects;
 size the Store for in-flight snapshots as well as shared prefixes. If a required
@@ -106,8 +118,45 @@ and groups, and the next buffer owner waits for the preceding layer's copy.
 An object becomes visible only after its final group layer commits. Failed PUTs
 or commits stop reuse. TP ranks synchronize between chunks so replicated-cache
 readers cannot race their writer. This barrier is part of the performance cost.
-Local prefix-cache hits are disabled for scratch allocations; the connector
-still checks the external pool for reusable prefixes.
+For registered component layouts, local prefix hashing remains enabled when
+prefix caching is configured. Before accepting an HBM hash hit, the scheduler
+asks the Store connector for a verified restart boundary. Shared scratch bytes
+are restored layer by layer even if the local blocks need no new allocation.
+A Store miss caps the local hit at zero. Legacy scratch layouts without this
+verification continue to reject local hits.
+
+For a repeated 16395-token prompt with block size 1152, a verified 13824-token
+prefix can reuse existing local block IDs, then restore the shared KDA/MLA
+payload and compute the remaining 2571 tokens. For a 16128-token prompt, the
+restart limit is 14976: the last token must still run through the model, and KDA
+at 16128 cannot be truncated into KDA at 14976. The Store lookup verifies that
+actual earlier endpoint. A local hash alone never establishes KDA residency.
+
+## Component Planning
+
+The eligibility registry and byte-window planner are adapted from
+[PR #21256](https://github.com/vllm-project/vllm-ascend/pull/21256). Mooncake keeps
+its own batched GET/PUT sessions, commits and immutable snapshot keys.
+
+GLM first creates its native cache descriptors. The registered rules allow
+target main MLA and align-mode KDA, keep indexer/tail and draft entries resident,
+and exclude explicitly independent layers. The planner validates group identity,
+preserves each native window's stride and size, and assigns compatible windows
+to reusable slots. Other models need their own eligibility rules and native
+layout validation before entering this planner; this is not automatic support
+for every attention implementation.
+
+For example, if a layer reuses one component last written by layer 1 and another
+last written by layer 3, its dependency is `(1, 3)`. It waits for both Store saves
+and both Push source-read completions before loading over those windows. Merely
+waiting for layer 3 is insufficient: layer 3 might have had no Store work while
+layer 1's asynchronous save was still reading its slot.
+
+The physical budget counts the shared backing once. After automatic block
+sizing, the planner rebuilds offsets for the chosen block count; multiplying
+descriptor capacities alone would leave overlapping offsets. Unknown specs keep
+their native layout. The opt-in component path currently rejects host-backed
+caches and `num_gpu_blocks_override`.
 
 `apply_layerwise_kv_cache_plan` runs during cache initialization. GLM capacity
 planning now materializes the shared descriptors once; runner initialization
@@ -121,9 +170,10 @@ not remove network latency or the mandatory buffer fences.
 
 Compare the same model, weights, software versions, chunk size, scheduler and
 parallel configuration with buffer reuse disabled and enabled. Use isolated
-Mooncake stores for cold-cache comparisons. First keep the same
-`--num-gpu-blocks-override` to compare physical allocation at equal capacity;
-then remove the override to compare capacity at equal HBM budgets.
+Mooncake stores for cold-cache comparisons. Use automatic block sizing and
+record both allocated block counts and physical backing bytes. Compare capacity
+at equal HBM budgets, then tune memory budgets to compare equal logical capacity;
+the component planner rejects `--num-gpu-blocks-override`.
 
 With baseline and candidate endpoints serving the same model name:
 

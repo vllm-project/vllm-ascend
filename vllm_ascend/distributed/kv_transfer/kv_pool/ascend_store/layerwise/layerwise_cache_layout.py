@@ -679,3 +679,10 @@ def apply_layerwise_kv_cache_plan(
         len(new_tensors),
         len(reuse_layout.buffer_slots),
     )
+
+
+def reuse_sources(source: int | tuple[int, ...] | None) -> tuple[int, ...]:
+    """Normalize legacy single-source and component dependency plans."""
+    if source is None:
+        return ()
+    return (source,) if isinstance(source, int) else source

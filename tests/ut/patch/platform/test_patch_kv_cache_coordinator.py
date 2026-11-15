@@ -34,6 +34,7 @@ scheduler wrapper is exercised against one-off scheduler double classes.
 """
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -51,6 +52,35 @@ from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
 )
 
 HASH_BLOCK_SIZE = 128
+
+
+@pytest.mark.parametrize("verified,requested,expected", [(32, None, 32), (32, 16, 16), (0, None, 0), (None, 48, 48)])
+def test_store_verified_local_prefix_bound(monkeypatch, verified, requested, expected):
+    original = Mock(return_value=("blocks", 0, 0, False))
+    monkeypatch.setattr(mod, "_original_get_local_prefix_cache_hit", original)
+    monkeypatch.setattr(mod, "_supports_prefix_hit_limit", True)
+    connector = SimpleNamespace(get_local_prefix_cache_limit=Mock(return_value=verified))
+    manager = SimpleNamespace(prefix_cache_lookup_enabled=Mock(return_value=True))
+    scheduler = SimpleNamespace(connector=connector, kv_cache_manager=manager)
+    request = object()
+    assert mod._get_local_prefix_cache_hit(scheduler, request, requested) == ("blocks", 0, 0, False)
+    original.assert_called_once_with(scheduler, request, expected)
+
+
+def test_store_prefix_probe_is_skipped_when_local_prefix_cache_is_disabled(monkeypatch):
+    original = Mock(return_value=("blocks", 0, 0, False))
+    monkeypatch.setattr(mod, "_original_get_local_prefix_cache_hit", original)
+    monkeypatch.setattr(mod, "_supports_prefix_hit_limit", True)
+    probe = Mock()
+    scheduler = SimpleNamespace(
+        connector=SimpleNamespace(get_local_prefix_cache_limit=probe),
+        kv_cache_manager=SimpleNamespace(prefix_cache_lookup_enabled=lambda request: False),
+    )
+    request = object()
+    mod._get_local_prefix_cache_hit(scheduler, request)
+    probe.assert_not_called()
+    original.assert_called_once_with(scheduler, request, None)
+
 
 FA_SPEC = FullAttentionSpec(
     block_size=128,

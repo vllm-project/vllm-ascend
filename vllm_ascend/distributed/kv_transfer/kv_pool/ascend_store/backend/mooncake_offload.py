@@ -117,6 +117,9 @@ def _save_entries(worker, request, view, group, hashes):
             else snapshot_key(worker, request, group, index, request.target_token_len)
         )
         entries.append((key, index - start))
+    if reused_state and request.target_token_len > 0:
+        partial = (request.target_token_len - 1) // size
+        view.partial_block_index = partial
     if partial is not None:
         entries.append((snapshot_key(worker, request, group, partial, request.target_token_len), None))
     return entries
