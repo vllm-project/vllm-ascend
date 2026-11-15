@@ -13,11 +13,11 @@ from vllm_ascend.ops.triton.qwen4_exp.hc import (
 )
 
 pytestmark = [
+    pytest.mark.skipif(not HAS_TRITON, reason="Triton is not available"),
     pytest.mark.skipif(
         not get_current_hardware_profile().supports(HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK),
-        reason="Qwen4Exp HC row-block profiling is currently validated on A3 only",
+        reason="Qwen4Exp HC row-block kernel is not enabled for this hardware profile",
     ),
-    pytest.mark.skipif(not HAS_TRITON, reason="Triton is not available"),
 ]
 
 HC_COUNT = 4

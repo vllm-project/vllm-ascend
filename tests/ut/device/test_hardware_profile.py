@@ -58,6 +58,7 @@ _EXPECTED_CAPABILITIES = {
     AscendDeviceType.A2: _STANDARD_CAPABILITIES
     | {
         HardwareCapability.MM_REDUCE_SCATTER_BF16,
+        HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
         HardwareCapability.RMS_NORM_CAST,
         HardwareCapability.NPU_TOP_K_TOP_P,
         HardwareCapability.FLASH_ATTN_NPU_3,
@@ -129,6 +130,7 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.MOE_GATING_TOP_K_HASH_VISION,
             HardwareCapability.NPUGRAPH_EX,
             HardwareCapability.NPU_TOP_K_TOP_P,
+            HardwareCapability.QWEN4EXP_HC_GATE_MIX_ROW_BLOCK,
             HardwareCapability.RUNTIME_CUSTOM_OPS,
             HardwareCapability.STANDARD_MAMBA_PATCH,
             HardwareCapability.STANDARD_WORKER_PATCHES,
