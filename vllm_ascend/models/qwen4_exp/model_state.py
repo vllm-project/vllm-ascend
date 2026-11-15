@@ -57,7 +57,12 @@ class AscendQwen4ExpModelState(Qwen4ExpModelState, AscendMambaHybridModelState):
 
     def prepare_inputs(self, input_batch: Any, req_states: Any) -> dict[str, Any]:
         model_inputs = super().prepare_inputs(input_batch, req_states)
-        self.qsa_prepared_input_adapter.prepare_inputs(input_batch)
+        # Qwen4Exp's RoPE state expands text positions to the three MRoPE axes.
+        # Prepare the same tensor passed to model.forward; using the raw 1-D
+        # scheduler positions makes the prepared shape miss and silently falls
+        # back to a replay-unsafe gather inside the captured QSA forward.
+        positions = model_inputs.get("positions", input_batch.positions)
+        self.qsa_prepared_input_adapter.prepare_positions(positions, input_batch.num_tokens_after_padding)
         return model_inputs
 
     def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
