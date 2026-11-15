@@ -200,7 +200,11 @@ class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
         """
         query_lens_list = [(i + 1) * self.num_query_per_req for i in range(num_reqs_padded)]
         for metadata in attn_metadata.values():
-            metadata.actual_seq_lengths_q = query_lens_list
+            decode_metadata = getattr(metadata, "decode", None)
+            if decode_metadata is not None:
+                decode_metadata.actual_seq_lengths_q = query_lens_list
+            else:
+                metadata.actual_seq_lengths_q = query_lens_list
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)

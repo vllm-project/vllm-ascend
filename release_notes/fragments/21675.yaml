@@ -1,0 +1,6 @@
+pr: 21675
+entries:
+  - category: feature
+    text: Added MLA attention mode support for DFlash2 draft models in speculative decoding on Ascend NPUs.
+  - category: performance
+    text: Skipped the per-step CPU sequence-length synchronization for Kimi K3.1 with DFlash2 drafts, removing a device-to-host sync from the speculative decode hot path.
