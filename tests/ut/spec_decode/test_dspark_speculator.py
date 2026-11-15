@@ -165,8 +165,9 @@ def test_process_weight_preserves_the_unrotated_projection():
     torch.testing.assert_close(actual, expected, atol=2e-6, rtol=3e-6)
 
 
+@pytest.mark.parametrize("lmhead_enabled", [False, True])
 @pytest.mark.parametrize("num_rows", [0, 3, 8, 9])
-def test_dspark_lmhead_aligns_collective_rows_and_trims_logits(monkeypatch, num_rows):
+def test_dspark_lmhead_aligns_collective_rows_and_trims_logits(monkeypatch, num_rows, lmhead_enabled):
     spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
     spec.max_num_reqs, spec.num_speculative_steps = 4, 2
     inputs_seen = []
@@ -177,19 +178,21 @@ def test_dspark_lmhead_aligns_collective_rows_and_trims_logits(monkeypatch, num_
         return hidden @ weight
 
     model = SimpleNamespace(compute_draft_logits=compute_logits)
-    monkeypatch.setattr(dspark_module, "lmhead_tp_enable", lambda: True)
+    monkeypatch.setattr(dspark_module, "lmhead_tp_enable", lambda: lmhead_enabled)
     spec._lmhead_tp_wrap_draft_logits(model)
     hidden = torch.arange(num_rows * 2, dtype=torch.float32).reshape(num_rows, 2)
 
-    if num_rows > 8:
+    if lmhead_enabled and num_rows > 8:
         with pytest.raises(ValueError, match="exceed the group-agreed capacity"):
             model.compute_draft_logits(hidden)
         assert inputs_seen == []
     else:
         torch.testing.assert_close(model.compute_draft_logits(hidden), hidden @ weight)
-        assert inputs_seen[0].shape == (8, 2)
+        assert inputs_seen[0].shape == (8 if lmhead_enabled else num_rows, 2)
         torch.testing.assert_close(inputs_seen[0][:num_rows], hidden)
         assert torch.count_nonzero(inputs_seen[0][num_rows:]) == 0
+        if not lmhead_enabled:
+            assert model.compute_draft_logits is compute_logits
 
 
 def _context_speculator(monkeypatch, group_ids=(0, 1), layer_map=(1, 0)):

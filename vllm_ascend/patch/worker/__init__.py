@@ -18,6 +18,7 @@
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.utils import vllm_version_is
 
 # patch_ascend_ops rebinds causal_conv1d to the AscendC wrappers and
 # patch_triton overwrites causal_conv1d_update with the NPU Triton kernel, so
@@ -71,7 +72,10 @@ import vllm_ascend.patch.worker.patch_model_runner  # noqa
 import vllm_ascend.patch.worker.patch_eagle_speculator  # noqa
 import vllm_ascend.patch.worker.patch_dflash_speculator  # noqa
 import vllm_ascend.patch.worker.patch_dspark  # noqa
-import vllm_ascend.patch.worker.patch_adaptive_verification  # noqa
+
+# Remove this block and patch_adaptive_verification.py when vLLM 0.33.0 support ends.
+if vllm_version_is("0.33.0"):
+    import vllm_ascend.patch.worker.patch_adaptive_verification  # noqa
 
 # 310P: draft FULL must use AutoRegressiveAclGraphManager310 (no FIA graph_task).
 # patch_eagle_speculator above installs the 910 manager; re-override here.

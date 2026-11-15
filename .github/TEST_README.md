@@ -6,7 +6,7 @@ This document describes the CI workflows for `vllm-ascend`, how to add tests, an
 
 | Workflow | Trigger | What it runs |
 |----------|---------|---------------|
-| `pr_test.yaml` | PR to main/dev/release branches | Lint + selective tests (UT + E2E) |
+| `pr_test.yaml` | PR opened/reopened, a label is added, or a `/run` comment | Lint + selective tests (UT + E2E) |
 | `_selected_tests.yaml` | Called by `pr_test.yaml` | Runs tests selected by `select_tests.py` |
 | `_parse_trigger.yaml` | PR comment `/e2e` | Parses comment to run specific E2E tests |
 | `_pre_commit.yml` | Called by `pr_test.yaml` | Lint and format checks |

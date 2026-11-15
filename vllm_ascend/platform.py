@@ -172,6 +172,10 @@ class NPUPlatform(Platform):
         return True
 
     @classmethod
+    def get_hisparse_backend_cls(cls) -> str:
+        return "vllm_ascend.hisparse.backend.AscendHiSparseBackend"
+
+    @classmethod
     def opaque_attention_op(cls) -> bool:
         return True
 
@@ -464,6 +468,25 @@ class NPUPlatform(Platform):
 
         super()._align_hybrid_block_size(vllm_config, backend_cls)
 
+        if vllm_config.model_config.use_mla and vllm_config.model_config.hf_config.model_type == "kimi_k31":
+            from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim, get_tq_fused_slot_bytes
+            from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
+
+            # Keep the upstream token/checkpoint block sizes. K3.1's packed
+            # main page includes RoPE and scale bytes that the generic MLA
+            # page calculation above does not account for.
+            # Recurrent states overlay this page; the indexer and draft keep
+            # their independently sized physical regions.
+            cache_config = vllm_config.cache_config
+            text_config = vllm_config.model_config.hf_text_config
+            if cache_config.cache_dtype in ("int8", "fp8"):
+                token_bytes = get_sfa_qsfa_packed_head_dim(text_config.kv_lora_rank, text_config.qk_rope_head_dim)
+            elif cache_config.cache_dtype == TURBOQUANT_CACHE_DTYPE:
+                token_bytes = get_tq_fused_slot_bytes(text_config.kv_lora_rank, text_config.qk_rope_head_dim)
+            else:
+                return
+            cache_config.mamba_page_size_padded = cache_config.block_size * token_bytes
+
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
         cache_config = vllm_config.cache_config
@@ -612,6 +635,8 @@ class NPUPlatform(Platform):
                 if ratios:
                     config.compress_ratios = list(ratios)
 
+        # TODO: Remove this guard once GLM-5.3-Flash DFlash2 supports pipeline parallelism.
+        _validate_glm5next_dflash2_pp_config(vllm_config)
         cls._validate_indexer_pp_config(vllm_config)
 
         _validate_pcp_dcp_config(vllm_config)
@@ -1163,6 +1188,13 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
     # Validate scheduler extension policies (read ascend_config.scheduler_config)
     from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
 
+    attention_config = getattr(vllm_config, "attention_config", None)
+    if (
+        getattr(attention_config, "hisparse_config", None) is not None
+        and ascend_config.sparse_kv_offload_config.enabled
+    ):
+        raise ValueError("Sparse KV offload cannot be combined with HiSparse")
+
     additional_config = vllm_config.additional_config
     if additional_config is None:
         vllm_config.additional_config = {}
@@ -1235,8 +1267,6 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
                 "single node; got "
                 f"nnodes_within_dp={parallel_config.nnodes_within_dp}."
             )
-        if scheduler_extension_config.profiling_chunk_config.enabled:
-            raise ValueError("DyntraLB cannot be used with profiling_chunk_config.")
 
     # recompute_scheduler_enable: only supported on PD-disaggregated D nodes
     if scheduler_extension_config.recompute_scheduler_enable:
@@ -1514,18 +1544,6 @@ def _setup_worker_and_scheduler(
             async_scheduling=vllm_config.scheduler_config.async_scheduling
         )
 
-    # Use ProfilingChunkScheduler when profiling-based chunk sizing is on.
-    if scheduler_config.profiling_chunk_config.enabled:
-        vllm_config.scheduler_config.scheduler_cls = (
-            "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkAsyncScheduler"
-            if vllm_config.scheduler_config.async_scheduling
-            else "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler"
-        )
-        # Apply the EngineCore.__init__ patch here for the InprocClient (in-process).
-        # And the EngineCore.__init__ patch for EngineCoreProc (the spawned child process)
-        # has been moved to patch_engine_core.py.
-        import vllm_ascend.patch.platform.patch_profiling_chunk  # noqa
-
     # Extend original scheduler_config to use BatchJobAwareScheduler.
     if scheduler_config.batch_job_sched_config.enabled:
         if vllm_config.scheduler_config.async_scheduling:
@@ -1561,8 +1579,6 @@ def _swa_bounded_replay_unsupported_mode(ascend_config) -> str | None:
         return "recompute_scheduler_enable"
     if scheduler_config.dyntra_lb_config.enabled:
         return "dyntra_lb_config"
-    if scheduler_config.profiling_chunk_config.enabled:
-        return "profiling_chunk_config"
     if scheduler_config.enable_balance_scheduling:
         return "enable_balance_scheduling"
     return None
@@ -1609,10 +1625,36 @@ def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
 
     use_dcp = parallel_config.decode_context_parallel_size > 1
     use_sparse = model_uses_sfa_sparse(model_config)
+    # Hybrid Kimi enlarges manager blocks to hold KDA state pages. The
+    # Mooncake pull path transfers kernel blocks and retains the DCP token
+    # interleave; changing that interleave after worker initialization would
+    # reinterpret the already allocated block tables.
+    interleave = parallel_config.cp_kv_cache_interleave_size
+    hybrid_kernel_interleave = (
+        getattr(model_config, "architecture", None) == "KimiK31ForConditionalGeneration"
+        and vllm_config.use_v2_model_runner
+        and cache_config.cache_dtype == "fp8"
+        and vllm_config.kv_transfer_config is not None
+        and vllm_config.kv_transfer_config.kv_connector in ("MooncakeConnectorV2", "MooncakePullConnector")
+        and interleave > 0
+        and cache_config.block_size % interleave == 0
+    )
+    if use_dcp and hybrid_kernel_interleave:
+        from vllm.v1.worker.utils import select_common_block_size
+
+        from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+
+        kernel_block_size = select_common_block_size(cache_config.block_size, [AscendSFABackend])
+        if interleave % kernel_block_size:
+            raise ValueError(
+                "Mooncake local DCP interleave must be a positive multiple of the kernel block size: "
+                f"interleave={interleave}, kernel_block_size={kernel_block_size}"
+            )
     if (
         vllm_config.kv_transfer_config is not None
         and cache_config.block_size != parallel_config.cp_kv_cache_interleave_size
         and use_dcp
+        and not hybrid_kernel_interleave
     ):
         raise AssertionError(
             f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size}) "
@@ -1620,7 +1662,12 @@ def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
             "needs to be equal if DCP is enabled in P/D disaggregate and kv pool scenario."
         )
 
-    if use_sparse and use_dcp and parallel_config.cp_kv_cache_interleave_size != cache_config.block_size:
+    if (
+        use_sparse
+        and use_dcp
+        and parallel_config.cp_kv_cache_interleave_size != cache_config.block_size
+        and not hybrid_kernel_interleave
+    ):
         logger.warning_once(
             "The current SFA decode-context-parallel implementation requires "
             f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size})"
@@ -2000,6 +2047,33 @@ def _validate_deepseek_v4_tp_config(vllm_config: VllmConfig) -> None:
         raise ValueError(f"DeepSeek {variant} supports at most TP{max_tp_size}. Got tp_size={tp_size}.")
 
 
+def _validate_glm5next_dflash2_pp_config(vllm_config: VllmConfig) -> None:
+    parallel_config = vllm_config.parallel_config
+    pp_size = parallel_config.pipeline_parallel_size
+    if pp_size <= 1:
+        return
+
+    speculative_config = vllm_config.speculative_config
+    if speculative_config is None or getattr(speculative_config, "method", None) != "dflash":
+        return
+
+    model_config = vllm_config.model_config
+    model_types = {
+        getattr(getattr(model_config, field, None), "model_type", None) for field in ("hf_config", "hf_text_config")
+    }
+    if model_types.isdisjoint({"glm5_next", "glm5_next_text"}):
+        return
+
+    draft_model_config = getattr(speculative_config, "draft_model_config", None)
+    draft_architectures = getattr(draft_model_config, "architectures", None) or ()
+    if "DFlash2DraftModel" not in draft_architectures:
+        return
+
+    raise ValueError(
+        f"GLM-5.3-Flash with DFlash2 currently requires pipeline_parallel_size=1. Got pipeline_parallel_size={pp_size}."
+    )
+
+
 def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> None:
     speculative_config = vllm_config.speculative_config
     if speculative_config is None:
@@ -2021,6 +2095,11 @@ def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> N
 
     draft_model_config = speculative_config.draft_model_config
     if draft_model_config is None:
+        return
+
+    # Upstream DFlashSpeculator runs dense DSpark drafts at DCP=1 and the
+    # target runner marks their KV groups with dcp_sharded=False.
+    if vllm_config.use_v2_model_runner and speculative_config.use_dspark() and not draft_model_config.use_mla:
         return
 
     # MLA draft models do not use the GQA/MQA head-sharding rules below.

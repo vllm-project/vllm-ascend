@@ -73,8 +73,7 @@ jobs:
         strategy:
           fail-fast: false
           matrix:
-            part: [0, 1, 2, 3]
-            # image_tag: [9.1.0-910b-ubuntu22.04-py3.12]
+            part: [0, 1, 2, 3, 4, 5]
             image_tag: [9.2.1-910b-ubuntu22.04-py3.12]
             num_npus: [1]
         container:
@@ -194,6 +193,8 @@ jobs:
               uv pip install datasets 
               uv pip install vllm_bnb_plugin
               uv pip install msguard openpyxl
+              uv pip install --no-deps tilelang==0.1.15
+              uv pip install --no-deps mhc==0.5.5
 
           - name: Install FLA NPU for A2 upstream tests
             run: |
@@ -212,7 +213,7 @@ jobs:
               python3 ../.github/workflows/scripts/run_suite.py \
                 --suite e2e-upstream_singlecard \
                 --auto-partition-id "${{ matrix.part }}" \
-                --auto-partition-size 4 \
+                --auto-partition-size 6 \
                 --continue-on-error
 
     e2e-upstream_multicard:
@@ -222,7 +223,6 @@ jobs:
           fail-fast: false
           matrix:
             part: [0]
-            # image_tag: [9.1.0-910b-ubuntu22.04-py3.12]
             image_tag: [9.2.1-910b-ubuntu22.04-py3.12]
             num_npus: [2, 4]
         container:
@@ -327,7 +327,8 @@ jobs:
                 echo "csrc cache miss: compile kernels on the NPU runner"
                 uv pip install -e . --no-build-isolation
               fi
-              uv pip install tblib 
+              uv pip install tblib
+              uv pip install "mteb[bm25s]"
 
           - name: Install FLA NPU for A2 upstream tests
             run: |
@@ -340,7 +341,9 @@ jobs:
             env:
               PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
               VLLM_WORKER_MULTIPROC_METHOD: spawn
+              PYTEST_ADDOPTS: -p upstream_test_plugin
             run: |
+              export PYTHONPATH="${GITHUB_WORKSPACE}/tests${PYTHONPATH:+:$PYTHONPATH}"
               python3 ../.github/workflows/scripts/run_suite.py \
                 --suite e2e-upstream_a2_${{ matrix.num_npus }} \
                 --auto-partition-id "${{ matrix.part }}" \
@@ -354,7 +357,6 @@ jobs:
           fail-fast: false
           matrix:
             part: [0]
-            # image_tag: [9.1.0-910b-ubuntu22.04-py3.12]
             image_tag: [9.2.1-910b-ubuntu22.04-py3.12]
             num_npus: [1]
         container:

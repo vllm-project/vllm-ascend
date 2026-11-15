@@ -64,7 +64,7 @@ def make_vllm_config():
     return vllm_config
 
 
-def register_patterns(pass_module, layer_shapes, device_type=AscendDeviceType.A2):
+def register_patterns(pass_module, layer_shapes, device_type=AscendDeviceType.A2, rope_dim=128):
     """Build the pass over attention layers of the given shapes on the given hardware.
 
     Returns the (head_dim, num_heads, num_kv_heads, eps) of every
@@ -77,6 +77,7 @@ def register_patterns(pass_module, layer_shapes, device_type=AscendDeviceType.A2
     with (
         patch.object(pass_module, "get_layers_from_vllm_config", return_value=layers),
         patch.object(pass_module, "get_current_hardware_profile", return_value=get_hardware_profile(device_type)),
+        patch.object(pass_module, "get_rope_dim", return_value=rope_dim),
         patch.object(pass_module, "HAS_TRITON", True),
         patch.object(pass_module, "qkv_rmsnorm_rope_vnorm_fits_ub", qkv_rmsnorm_rope_vnorm_fits_ub, create=True),
         patch.object(pass_module.QKVNormRopeFusionPattern, "register", autospec=True) as qkv_register,

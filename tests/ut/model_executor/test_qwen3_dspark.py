@@ -63,9 +63,15 @@ class TestQwen3DSparkWeightLoading:
         torch.testing.assert_close(model.lm_head.weight, head_before)
 
 
+@pytest.mark.parametrize(
+    "embed_name",
+    [
+        "language_model.model.embed_tokens.weight",
+        "model.language_model.embed_tokens.weight",
+    ],
+)
 @pytest.mark.parametrize("model_cls", [qwen3_dspark.AscendQwen3DSparkForCausalLM, DFlash2Qwen3ForCausalLM])
-def test_quarot_loads_missing_target_vocab_shards(tmp_path, model_cls) -> None:
-    embed_name = "language_model.model.embed_tokens.weight"
+def test_quarot_loads_missing_target_vocab_shards(tmp_path, model_cls, embed_name) -> None:
     head_name = "language_model.lm_head.weight"
     shard_name = "model-00001-of-00001.safetensors"
     target_weight = torch.arange(8, dtype=torch.float32).view(4, 2)

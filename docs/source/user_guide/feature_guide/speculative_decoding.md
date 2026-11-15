@@ -593,8 +593,8 @@ enabled; do not set the target's `enforce_eager=True`. M-RoPE positions continue
 to use vLLM's model-state implementation and the compacted device query boundaries.
 
 Ascend reuses vLLM's confidence estimates, cost profiling, budget allocator, and
-rejection sampler. Newer vLLM Triton budget allocators are used directly; the
-Ascend `index_fill_` workaround applies only to the older torch allocator.
+rejection sampler. Newer vLLM Triton budget allocators are used directly;
+legacy torch budget allocators run eagerly on Ascend.
 No change to sampling probabilities or model weights is required.
 
 Validate each target/draft pair on the intended NPU and CANN version. Compare
@@ -900,11 +900,11 @@ and devices:
 ```
 
 RecoverSSM requires speculative decoding, PP=1 and DCP=1. PCP is limited to
-Prefill producers with TP=1 using the Mooncake connectors below;
+Prefill producers with TP=1;
 PCP Decode consumers and colocated PCP execution are not supported.
 Stochastic rounding must be disabled.
 
-For prefill/decode separation, use `MooncakeConnectorV2` or
+For direct prefill-to-decode transfer, use `MooncakeConnectorV2` or
 `MooncakePullConnector` with matching model weights, speculative window,
 cache dtypes, convolution layout and RecoverSSM settings on both sides.
 PCP producers may use a different KDA head-shard count from Decode consumers:
@@ -933,12 +933,58 @@ PCP does not require `--enforce-eager` for the entire P model. Its KDA path has
 an eager dispatch boundary, allowing the surrounding model to be compiled.
 Validate the selected P graph configuration separately for your deployment.
 
+For external prefix-cache storage and recovery with RecoverSSM, use
+`AscendStoreConnector` with the Memcache or Mooncake backend. When combining
+external prefix caching with direct prefill-to-decode transfer, use
+`MultiConnector` to combine the Store connector with the transfer connector.
+Follow the cache-layout and parallelism requirements in the
+[AscendStore deployment guide](kv_cache_pool_ascend_store.md) and, for Mooncake
+layerwise hybrid pooling, the
+[hybrid attention guide](mooncake_hybrid_attention.md).
+
 !!! warning
 
     This feature is experimental. Floating-point differences can change generated
     tokens; evaluate model accuracy and performance for your workload before use.
 
 Removing `--use-replayssm` selects the native KDA path.
+
+## Experimental Kimi K3 and K3.1 KDA RecoverSSM
+
+Kimi K3 and K3.1 can use the Ascend KDA RecoverSSM path with DSpark speculative
+decoding. It keeps one recurrent checkpoint per request and writes compact,
+request-indexed verification records, then reconstructs the accepted state
+after sampling. RecoverSSM is disabled by default.
+
+Add the following options to your existing Kimi serving command, replacing the
+path with a compatible DSpark draft model. Keep the parallelism, quantization,
+KV-cache dtype and memory settings appropriate for the model and devices:
+
+```shell
+--use-replayssm \
+--speculative-config '{"method": "dspark", "model": "/path/to/dspark", "num_speculative_tokens": 3}'
+```
+
+Requirements:
+
+- Adaptive verification and stochastic rounding are unsupported.
+
+For experimental prefill/decode separation, use `MooncakeConnectorV2` or
+`MooncakePullConnector` and enable `--use-replayssm` on both Prefill and Decode.
+Both sides must use the same integration version, model and weights,
+TP size, prefix-caching configuration, speculative method and window, and
+persistent state dtypes. Set `VLLM_SSM_CONV_STATE_LAYOUT=SD` on both sides;
+the connector does not validate the peer's convolution layout or all other peer
+settings.
+
+!!! warning
+
+    This feature is experimental. An A5 P/D functional test with PP4/TP8 on
+    Prefill and DP4/TP8/DCP8 on Decode passed with PCP=1, using an experimental
+    image with modified parallelism checks. This does not establish correctness
+    for the unmodified PR, PCP greater than 1, or other parallel configurations.
+    End-to-end P/D output equivalence remains unverified, including when prefix
+    caching is enabled.
 
 ## Synthetic Rejection Sampling
 

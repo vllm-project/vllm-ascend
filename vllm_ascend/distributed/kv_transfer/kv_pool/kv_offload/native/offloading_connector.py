@@ -26,6 +26,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
+    KVCacheGroupRole,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -36,6 +37,7 @@ from vllm.v1.kv_offload.base import (
     CanonicalPageMapping,
 )
 
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 
@@ -268,6 +270,16 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
                             mappings.get(layer_name),
                         )
                     elif isinstance(layer_cache, (tuple, list)):
+                        if group.role is KVCacheGroupRole.HISPARSE_INDEXER and isinstance(
+                            layer_spec, AscendSFAIndexerCacheSpec
+                        ):
+                            layer = self.vllm_config.compilation_config.static_forward_context[layer_name]
+                            block_stride = getattr(layer, "hisparse_block_stride", 1)
+                            if block_stride > 1:
+                                # Attention addresses the dense alias with scaled block IDs.
+                                # Offloading receives logical block IDs, so restore the slab stride.
+                                (dense_cache,) = layer_cache
+                                layer_cache = (dense_cache[::block_stride],)
                         views = _canonicalize_split_cache(
                             layer_cache,
                             num_blocks,

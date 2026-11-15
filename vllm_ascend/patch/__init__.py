@@ -28,6 +28,23 @@
 
 # What's Patched and how it works:
 # --------------------------------
+# * vllm_ascend/hisparse/host_pool.py (HiSparse backend initialization):
+#   Target: vllm.v1.hisparse.runtime.allocate_pinned_host_pool.
+#   Why: AIV mapping alone does not enable DMA to pageable Host storage.
+#   How: Installed only by the HiSparse backend; allocate private pinned storage
+#        before Core builds cache views, retaining Core's release lifecycle.
+#   Related PR: No backend Host-allocation hook exists in the supported Core.
+#   Future plan: Replace this adapter with that upstream hook when available.
+# --------------------------------
+# * vllm_ascend/hisparse/backend.py (HiSparse backend initialization):
+#   Target: HiSparseConnectorWorker._init_dma and invalidate_blocks in vLLM Core.
+#   Why: Ascend uses int32 slot staging and can invalidate recycled slots in one
+#        grouped device operation.
+#   How: Bind the staging buffer and invalidator after Core initializes DMA.
+#        Other backends and unsupported invalidation inputs use Core's methods.
+#   Future plan: Remove the wrappers when Core exposes backend extension points
+#                for slot staging and recycled-block invalidation.
+# --------------------------------
 # * worker/patch_kda_recoverssm.py:
 #   Target: Kimi KDA's KDARecoverSSMCommitContext module binding.
 #   Why: The upstream metadata builder imports its CUDA context directly.
@@ -37,13 +54,15 @@
 # --------------------------------
 # * platform/patch_replayssm_config.py:
 #   Target: VllmConfig.validate_mamba_cached_kernel and its Pydantic validator.
-#   Why: The paired upstream validator selects KDA RecoverSSM only for Kimi,
-#        while Ascend also implements it for GLM-Next.
-#   How: Validate GLM's supported execution/cache/PD contract and derive
-#        use_kda_recoverssm from the existing use_replayssm flag. Other models
-#        and disabled configurations retain the upstream validator.
-#   Related PR: No upstream GLM ReplaySSM configuration extension exists yet.
-#   Future plan: Remove this patch when upstream supports GLM KDA selection.
+#   Why: Ascend's GLM and Kimi KDA RecoverSSM paths have platform-specific
+#        cache and parallelism restrictions, and upstream does not recognize
+#        all Kimi K3.1 architecture aliases.
+#   How: Select the request-indexed KDA path from its text-config contract,
+#        validate its execution constraints and derive use_kda_recoverssm from
+#        use_replayssm. Other models and disabled configurations retain the
+#        upstream validator.
+#   Related PR: No upstream platform-specific ReplaySSM selector exists yet.
+#   Future plan: Remove when upstream supports the Ascend KDA configuration contract.
 # --------------------------------
 # * Platform Patch:
 # ==========#
@@ -109,18 +128,12 @@
 #   3. `vllm.v1.engine.core.EngineCore.post_step` (pp-mtp patch, invocation
 #      moved here from patch_pp_mtp.py)
 #    Why:
-#       Previously patch_balance_schedule, patch_dyntra_lb_core and
-#       patch_profiling_chunk each wrapped `EngineCoreProc.run_engine_core`
-#       independently, forming an implicit wrapper chain whose correctness
-#       depended on import order. The profiling patch was additionally only
-#       imported when profiling chunk sizing was enabled at config-build time,
-#       so its child-process re-application silently failed when the spawn
-#       target was captured before the import, when the feature was enabled
-#       late, or on the Ray engine-core path.
+#       Previously patch_balance_schedule and patch_dyntra_lb_core
+#       each wrapped `EngineCoreProc.run_engine_core` independently, forming
+#       an implicit wrapper chain whose correctness depended on import order.
 #    How：
 #       Install the single `run_engine_core` wrapper: initialize the ascend
-#       config, re-apply the profiling patches when profiling chunk sizing is
-#       enabled, select `DyntraLBDPEngineCoreProc` (dyntra-lb enabled) or
+#       config, select `DyntraLBDPEngineCoreProc` (dyntra-lb enabled) or
 #       `BalanceDPEngineCoreProc` (balance enabled) at runtime via an explicit
 #       if/elif, then delegate to the pristine upstream entry point stashed at
 #       import. In `spawn` children, unpickling this wrapper imports this
@@ -284,23 +297,7 @@
 #
 # ** 10. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes`
-#      `vllm.v1.engine.core.resolve_kv_cache_block_sizes`
-#    Why:
-#       vLLM PR #40860 added a restriction that hybrid KV cache groups with
-#       multiple block sizes do not support decode context parallelism.
-#       This restriction is correct for CUDA but not for Ascend, which
-#       implements context parallelism for MLA and SWA-MLA layers separately.
-#    How：
-#       Monkey-patch resolve_kv_cache_block_sizes to handle the multiple-groups
-#       + DCP case by returning lcm(block_sizes) * dcp as scheduler_block_size
-#       instead of raising ValueError.
-#    Related PR (if no, explain why):
-#       vLLM PR #40860 ([Feat] DeepSeek V4 Rebased).
-#    Future Plan:
-#       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
-#       non-CUDA backends, or exposes a platform hook for this behavior.
-#   2. `vllm.v1.core.kv_cache_planning.get_kv_cache_config_from_groups`,
+#   1. `vllm.v1.core.kv_cache_planning.get_kv_cache_config_from_groups`,
 #      `..._max_memory_usage_bytes_from_groups`, `..._pool_bytes_per_block`
 #    Why:
 #       Ascend cache layouts need platform-specific materialization and memory
@@ -311,6 +308,22 @@
 #       planning functions.
 #    Related PR:
 #       https://github.com/vllm-project/vllm/pull/53558
+#   2. `vllm.v1.core.kv_cache_planning.get_kv_cache_config_from_groups`
+#      `vllm.v1.core.kv_cache_planning._pool_bytes_per_block`
+#    Why:
+#       Ascend dense GQA attention requires contiguous K/V pools. Replicated
+#       draft pages cannot alias block-strided target/Mamba pages with different
+#       scheduler block IDs in hybrid DCP models.
+#    How:
+#       Use dcp_sharded to identify replicated dense attention groups, then
+#       delegate each physical pool's descriptors to the upstream planner.
+#       Sum the pools' bytes per block to keep allocation within the budget.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/56723 supplies dcp_sharded;
+#       the remaining physical-layout restriction is specific to Ascend.
+#    Future Plan:
+#       Remove pool separation when Ascend dense attention supports the
+#       upstream block-strided shared-pool layout.
 #
 # ** 11. File: platform/patch_mamba_block_aligned_split.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -587,34 +600,6 @@
 #       Remove this patch once upstream vLLM's `ModelConfig.verify_with_parallel_config`
 #       supports local drafter models with PP > 1, or moves the PP validation to a
 #       separate hook that can be overridden per-model-type.
-#
-# ** 18. File: platform/patch_profiling_chunk.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.engine.core.EngineCore.__init__`
-#   2. `Scheduler.update_from_output` (scheduler class, wrapped when profiling chunk is enabled)
-#    Why:
-#       Profiling-based dynamic chunk sizing needs to run a one-shot profiling pass
-#       after `model_executor` is ready, and to feed per-step execution latency back
-#       into `ProfilingChunkManager` so the history-aware chunk predictor can refine
-#       online. In multiprocessing `spawn` mode the child process starts a fresh
-#       interpreter, so monkey-patches applied in the parent are lost unless the
-#       subprocess entry point re-applies them before any `EngineCore` is created.
-#    How：
-#       Replace `EngineCore.__init__` to call `scheduler.run_profiling_chunk_init`
-#       when present, then wrap `scheduler.update_from_output` once per process to
-#       read `model_output.execution_time_ms` and `scheduler_output` token/chunk
-#       metadata and call `ProfilingChunkManager.record_batch_execution_time` (and
-#       bootstrap target latency for the first chunk when needed). In `spawn`
-#       children, the module-level `_apply_profiling_patches()` re-runs the
-#       idempotent patch helper when this module is imported; `patch_engine_core.py`
-#       imports this module and additionally invokes the helper when profiling
-#       chunk sizing is enabled.
-#    Related PR (if no, explain why):
-#       No, vllm-ascend-specific profiling / scheduling integration.
-#    Future Plan:
-#       Remove or narrow this patch if upstream exposes stable hooks for backend
-#       profiling startup and per-step timing callbacks without monkey-patching
-#       `EngineCore` and the multiprocess entry point.
 #
 # ** 19. File: platform/patch_speculative_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -909,6 +894,21 @@
 #    Future Plan:
 #       Remove only this embedding provisioning when the minimum supported vLLM
 #       version provides it in DeepseekV2Model; keep the unrelated PP transport.
+#
+#   3. `vllm.model_executor.models.deepseek_v2.DeepseekV2Model.forward`
+#      `vllm.model_executor.models.deepseek_v2.DeepseekV2ForCausalLM.set_aux_hidden_state_layers`
+#    Why:
+#       Ascend needs residual-aware aux capture, TP/SP gathering, and shared
+#       TopK buffers across PP boundaries with Model Runner V2.
+#    How:
+#       Reuse EagleModelMixin's aux-slot layout, packing, and collection. Keep
+#       the Ascend TopK transport separate from the upstream aux-slot relay.
+#       Shared AUX_HIDDEN_STATES transport remains available to other models.
+#    Related PR (if no, explain why):
+#       No upstream PR yet; capture and gathering use Ascend-specific layouts.
+#    Future Plan:
+#       Remove the forward patch when upstream extension points cover Ascend
+#       capture, gathering, and TopK transport without copying the forward.
 #
 # ** 3. File: worker/patch_distributed.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1447,7 +1447,8 @@
 #       the upstream indexer backend is GPU-specific.
 #    How：
 #       Route SFA indexer cache layers to the existing
-#       `AscendSFAIndexerBackend`.
+#       `AscendSFAIndexerBackend`, or `AscendHiSparseIndexerBackend` when
+#       HiSparse is enabled. The model wrapper uses the cache's backend choice.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm-ascend/pull/13069
 #    Future Plan:
@@ -1632,23 +1633,15 @@
 #   1. `vllm.v1.worker.gpu.spec_decode.adaptive_verification._assign_draft_token_budget_compiled`
 #    Why:
 #       The upstream adaptive-verification draft-budget allocator is wrapped by
-#       `torch.compile`, whose compiled path is not supported on Ascend. In
-#       addition, the current A5 `index_fill_` implementation converts its
-#       device index tensor to a host vector, introducing synchronization
-#       proportional to the number of indices.
+#       `torch.compile`, whose compiled path is not supported on Ascend.
 #    How:
-#       Run the original upstream allocator eagerly, preserving its algorithm,
-#       and use a scoped `TorchFunctionMode` to route only `index_fill_` through
-#       `DeviceOperator`. The A5 adaptor temporarily implements it with the
-#       equivalent `scatter_` operation; other hardware keeps the native path.
-#       Apply this only when the legacy torch allocator exists. Newer vLLM
+#       Run the original upstream allocator eagerly, preserving its algorithm.
+#       Apply this only for vLLM 0.33.0 in the worker patch registry. Newer vLLM
 #       Triton allocators are reused directly without replacing their kernels.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/47808
 #    Future Plan:
-#       Remove the scoped `index_fill_` interception once the native A5 operator
-#       accepts device indices without synchronization. Remove this patch
-#       entirely once the compiled allocator is also supported on Ascend.
+#       Remove this patch when vLLM 0.33.0 support ends.
 #
 # ** 32. File: worker/patch_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1789,3 +1782,9 @@
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
 #
+
+# worker/patch_qwen3_5.py: GDN internal prefill checkpoints.
+# Why: Ascend replaces the upstream GDN forward/backend.
+# How: initialize the capability-gated per-layer NPU adaptation after upstream init.
+# Related PR: vllm-project/vllm#60050.
+# Future Plan: remove this initialization hook when a shared backend extension supports it.

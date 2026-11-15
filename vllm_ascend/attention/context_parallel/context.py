@@ -68,3 +68,5 @@ class AscendPCPAttentionContext:
     local_to_global_req_indices: tuple[int, ...] | None = None
     # Actual local tokens in the unpartitioned batch, excluding padding.
     local_token_indices: torch.Tensor | None = None
+    # Padded tensor width consumed by each rank's model forward.
+    local_num_tokens: int | None = None

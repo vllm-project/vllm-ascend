@@ -122,6 +122,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "dequant_swiglu_quant"
         "grouped_matmul_swiglu_quant"
         "grouped_matmul_swiglu_quant_v2"
+        "attn_res_fwd"
         "chunk_fwd_o_vllm"
         "kda_gate_cumsum_vllm"
         "kda_layout_swap12"
@@ -216,6 +217,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "kda_gate_cumsum_vllm"
         "kda_layout_swap12"
         "k2q_csr"
+        "hi_sparse_resolve_residency"
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")

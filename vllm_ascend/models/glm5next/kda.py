@@ -9,6 +9,7 @@ from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import ParallelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import divide, get_pcp_group
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -22,7 +23,8 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils.torch_utils import direct_register_custom_op, get_kv_cache_torch_dtype
+from vllm.models.kimi_k3.nvidia.ops.recoverssm import KDARecoverSSMRecords
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from vllm_ascend.attention.utils import (
@@ -92,7 +94,7 @@ class PCPRowParallelLinear(RowParallelLinear):
         self.tp_group = pcp_group
         self.update_param_tp_status()
 
-    def forward(self, input_):
+    def forward(self, input_, pcp_output_indices=None):
         if self.input_is_parallel:
             input_parallel = input_
         else:
@@ -100,7 +102,10 @@ class PCPRowParallelLinear(RowParallelLinear):
         bias = None if self.tp_rank > 0 or self.skip_bias_add else self.bias
         output = self.quant_method.apply(self, input_parallel, bias)
         if self.reduce_results and self.tp_size > 1:
-            output = self.tp_group.all_reduce(output)
+            if pcp_output_indices is not None:
+                output = self.tp_group.reduce_scatter(output[pcp_output_indices], dim=0)
+            else:
+                output = self.tp_group.all_reduce(output)
         if not self.return_bias:
             return output
         return output, self.bias if self.skip_bias_add else None
@@ -210,17 +215,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
     ) -> tuple[torch.dtype, torch.dtype]:
         if self.model_config is None or self.cache_config is None:
             raise ValueError("model_config and cache_config must be set")
-        dtypes = MambaStateDtypeCalculator.kda_state_dtype(
+        return MambaStateDtypeCalculator.kda_state_dtype(
             self.model_config.dtype,
             self.cache_config.mamba_cache_dtype,
             self.cache_config.mamba_ssm_cache_dtype,
         )
-        if self.use_recoverssm:
-            # vLLM main moved KDA RecoverSSM records out of the KV cache and
-            # removed the calculator helper, but Ascend still packs the
-            # float32 correction and activation key/gate records into the page.
-            return (*dtypes, torch.float32, get_kv_cache_torch_dtype("auto", self.model_config.dtype))
-        return dtypes
 
     def get_state_shape(
         self,
@@ -229,24 +228,13 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # (AscendC causal-conv with num_accepted_tokens) can
         # slide the window across the draft-verify tokens without reading past
         # the allocated width. Matches qwen_gdn_linear_attn.get_state_shape.
-        shapes = MambaStateShapeCalculator.kda_state_shape(
+        return MambaStateShapeCalculator.kda_state_shape(
             self.tp_size,
             self.num_heads,
             self.head_dim,
             conv_kernel_size=self.conv_size,
             num_spec=self.num_spec,
         )
-        if self.use_recoverssm:
-            # One checkpoint per request plus compact update records, matching
-            # the layout the Ascend commit context allocates from.
-            local_num_heads = divide(self.num_heads, self.tp_size)
-            spec_query_len = self.num_spec + 1
-            return (
-                *shapes,
-                (local_num_heads, spec_query_len, self.head_dim),
-                (local_num_heads, spec_query_len, 2 * self.head_dim),
-            )
-        return shapes
 
     def __init__(
         self,
@@ -362,6 +350,16 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
 
         self.A_log = nn.Parameter(torch.empty(1, 1, self.local_num_heads, 1, dtype=torch.float32))
         set_weight_attrs(self.A_log, {"weight_loader": self._a_log_weight_loader})
+        self.recoverssm_records: KDARecoverSSMRecords | None = None
+        if self.use_recoverssm:
+            self.recoverssm_records = KDARecoverSSMRecords.allocate(
+                vllm_config.scheduler_config.max_num_seqs,
+                self.local_num_heads,
+                self.num_spec + 1,
+                self.head_dim,
+                vllm_config.model_config.dtype,
+                self.A_log.device,
+            )
 
         self.g_b_proj = column_linear(
             self.head_dim,
@@ -486,19 +484,31 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         )
         core_attn_out = self.o_norm(core_attn_out, g2)
         core_attn_out = core_attn_out.reshape(core_attn_out.size(1), -1)
-        output = self.o_proj(core_attn_out)[0]
+        use_pcp_reduce_scatter = False
         if has_pcp_prefill:
             assert pcp_context is not None
             if pcp_context.padded_gather_idx.numel() != self.pcp_size * local_num_tokens:
                 raise RuntimeError("KDA PCP token mapping does not match the rank-local model input.")
-            local_start = self.pcp_rank * local_num_tokens
-            local_indices = pcp_context.padded_gather_idx[local_start : local_start + local_num_tokens]
-            if output_buffer is None:
-                return torch.index_select(output, 0, local_indices)
-            # Restore directly into the graph-owned output rather than
-            # allocating an indexed tensor and then copying it again.
-            torch.index_select(output, 0, local_indices, out=output_buffer)
-            return None
+            # Mixed batches replicate decode rows in every rank's packed output.
+            # Keep them on AllReduce to avoid expanding the communication input.
+            use_pcp_reduce_scatter = isinstance(self.o_proj, PCPRowParallelLinear) and bool(
+                pcp_context.global_batch.is_prefilling_np.all()
+            )
+        if use_pcp_reduce_scatter:
+            assert pcp_context is not None
+            logger.info_once("KDA PCP pure-prefill output uses packed ReduceScatter.")
+            output = self.o_proj(core_attn_out, pcp_output_indices=pcp_context.padded_gather_idx)[0]
+        else:
+            output = self.o_proj(core_attn_out)[0]
+            if has_pcp_prefill:
+                assert pcp_context is not None
+                local_start = self.pcp_rank * local_num_tokens
+                local_indices = pcp_context.padded_gather_idx[local_start : local_start + local_num_tokens]
+                if output_buffer is None:
+                    return torch.index_select(output, 0, local_indices)
+                # Preserve the graph-owned output address on the fallback path.
+                torch.index_select(output, 0, local_indices, out=output_buffer)
+                return None
         if output_buffer is None:
             return output
         output_buffer.copy_(output)
@@ -540,13 +550,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         use_spec = num_spec_decodes > 0 and spec_state_indices_tensor is not None
         # Safe-gate checkpoints use the bounded sigmoid variant.
         lower_bound = self.kda_lower_bound
-        constant_caches = self.kv_cache
 
         qkv_proj_states = qkv_proj_states[:num_actual_tokens]
         g1 = g1[:, :num_actual_tokens]
         beta = beta[:, :num_actual_tokens]
 
-        conv_state, recurrent_state, *records = constant_caches
+        conv_state, recurrent_state = self.kv_cache
         # AscendC consumes [cache, state_len, dim]. Preserve the original storage.
         # Layout is process-global and resolved once at init (see __init__).
         if self._conv_state_dim_first:
@@ -662,7 +671,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # groups. Recurrent writeback handles decode padding without a pre-clear.
         if use_spec:
             if self.use_recoverssm:
-                correction_cache, kg_cache = records
+                records = self.recoverssm_records
+                assert records is not None
                 # One paged checkpoint per request; verification only records
                 # compact updates. MRV2 commits after rejection sampling.
                 spec_output = kda_recoverssm_verify(
@@ -675,8 +685,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     self.dt_bias,
                     lower_bound,
                     recurrent_state,
-                    correction_cache,
-                    kg_cache,
+                    records.correction,
+                    records.key_gate,
                     spec_query_start_loc,
                     spec_state_indices_tensor[:, 0],
                     self.num_spec + 1,

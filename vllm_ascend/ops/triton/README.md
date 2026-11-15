@@ -71,6 +71,8 @@ configuration rather than the runner input or sampling interface.
 | [activation/swiglu_quant.py](activation/swiglu_quant.py) | Activation/quantization |
 | [activation/swiglustep.py](activation/swiglustep.py) | Activation/quantization |
 | [ascend_jit_warmup.py](ascend_jit_warmup.py) | Shared JIT warmup infrastructure |
+| [dcp/dcp_jit.py](dcp/dcp_jit.py) | DCP compile-only JIT owners |
+| [dcp/dcp_warmup.py](dcp/dcp_warmup.py) | SFA/MLA DCP owner registration and key coverage |
 | [attention_update.py](attention_update.py) | Model/attention primitive or shared utility |
 | [batch_invariant/matmul.py](batch_invariant/matmul.py) | Batch-invariant operations |
 | [batch_invariant/mean.py](batch_invariant/mean.py) | Batch-invariant operations |
@@ -83,7 +85,7 @@ configuration rather than the runner input or sampling interface.
 | [dcp/dcp_a2a_batched.py](dcp/dcp_a2a_batched.py) | Distributed attention |
 | [dcp/sfa_dcp_exchange.py](dcp/sfa_dcp_exchange.py) | Model/attention primitive or shared utility |
 | [dcp/sfa_dcp_merge.py](dcp/sfa_dcp_merge.py) | Model/attention primitive or shared utility |
-| [dcp/sfa_dcp_query.py](dcp/sfa_dcp_query.py) | Model/attention primitive or shared utility |
+| [sharded_indexer.py](sharded_indexer.py) | DCP candidate transport and causal metadata |
 | [dspark_swa_indices.py](dspark_swa_indices.py) | Model/attention primitive or shared utility |
 | [engram_gate.py](engram_gate.py) | Model/attention primitive or shared utility |
 | [engram_hash.py](engram_hash.py) | Model/attention primitive or shared utility |
@@ -114,9 +116,11 @@ configuration rather than the runner input or sampling interface.
 | [kda/kda.py](kda/kda.py) | KDA computation |
 | [kda/l2norm.py](kda/l2norm.py) | KDA computation |
 | [kda/output_writeback.py](kda/output_writeback.py) | KDA computation |
+| [kimi_pixel_norm.py](kimi_pixel_norm.py) | Kimi image pixel lookup normalization; see [operator documentation](docs/kimi_pixel_norm.md). |
 | [kda/recoverssm.py](kda/recoverssm.py) | Model state recovery |
 | [kda/solve_tril.py](kda/solve_tril.py) | KDA computation |
 | [kda/utils.py](kda/utils.py) | KDA computation |
+| [hisparse.py](hisparse.py) | HiSparse mapped-Host refill, Resident gather, KV packing and invalidation; see [operator documentation](docs/hisparse.md). |
 | [layernorm_gated.py](layernorm_gated.py) | Model/attention primitive or shared utility |
 | [linearnorm/fused_eh_norm.py](linearnorm/fused_eh_norm.py) | Normalization/rotary fusion |
 | [linearnorm/qsa_rmsnorm_mrope.py](linearnorm/qsa_rmsnorm_mrope.py) | Model/attention primitive or shared utility |
@@ -148,7 +152,7 @@ configuration rather than the runner input or sampling interface.
 | [qwen4_exp/qsa.py](qwen4_exp/qsa.py) | Model/attention primitive or shared utility |
 | [rms_norm.py](rms_norm.py) | Model/attention primitive or shared utility |
 | [rope.py](rope.py) | Model/attention primitive or shared utility |
-| [sfa_indexer_store.py](sfa_indexer_store.py) | Model/attention primitive or shared utility |
+| [sfa_indexer_store.py](sfa_indexer_store.py) | Indexer cache publication; see [operator documentation](docs/sfa_indexer_store.md). |
 | [sparse_index_remap.py](sparse_index_remap.py) | Model/attention primitive or shared utility |
 | [spec_decode/dspark_swa_indices.py](spec_decode/dspark_swa_indices.py) | Model attention indices |
 | [triton_utils.py](triton_utils.py) | Model/attention primitive or shared utility |

@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import torch
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
+from tests.ut.attention.utils import _update_out_and_lse
 from vllm_ascend.attention.context_parallel import common_cp
 from vllm_ascend.attention.context_parallel.common_cp import use_dcp_q_replicate
 from vllm_ascend.attention.context_parallel.metadata import (
@@ -12,7 +13,6 @@ from vllm_ascend.attention.context_parallel.metadata import (
     DCPMetadataBuilderMixin,
     _npu_attention_update,
     _npu_attn_out_lse_update,
-    _update_out_and_lse,
 )
 
 

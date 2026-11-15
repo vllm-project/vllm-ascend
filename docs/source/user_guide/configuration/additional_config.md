@@ -166,26 +166,15 @@ removed. They no longer take effect.
 
 **scheduler_config**
 
-The legacy top-level `enable_balance_scheduling`, `recompute_scheduler_enable`, `short_request_first_config`, and `profiling_chunk_config` keys remain supported during the migration period, but are deprecated. If both formats provide the same field, the value in `scheduler_config` takes precedence.
+The legacy top-level `enable_balance_scheduling`, `recompute_scheduler_enable`, `short_request_first_config` keys remain supported during the migration period, but are deprecated. If both formats provide the same field, the value in `scheduler_config` takes precedence.
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `enable_balance_scheduling` | bool | `False` | Whether to enable balance scheduling. The legacy `VLLM_ASCEND_BALANCE_SCHEDULING` environment variable is no longer supported. |
 | `recompute_scheduler_enable` | bool | `False` | Whether to enable the recompute scheduler. **Only valid on PD-disaggregated D nodes** (`kv_role` is `kv_consumer`). **Do not enable on P nodes or in PD-mixed mode** (no `kv_transfer_config`, `kv_role` is `kv_producer`, or `kv_role` is `kv_both`); startup will fail with a clear error. |
-| `profiling_chunk_config` | dict | `{}` | Configuration options for dynamic chunked pipeline parallel. See [Dynamic Chunked Pipeline Parallel](../feature_guide/dynamic_chunk_pipeline_parallel.md) for details. |
 | `short_request_first_config` | dict | `{}` | Configuration options for ShortRequestFirst prefill scheduling on FCFS synchronous or asynchronous, PD-prefill (P), or PD-mixed nodes. |
 | `batch_job_sched_config` | dict | `{}` | Configuration options for the batch-job-aware scheduler. See [Batch-Job-Aware Scheduler](../feature_guide/batch_job_aware_scheduler.md) for details. |
 | `dyntra_lb_config` | dict | `{}` | Configuration options for DyntraLB load balancing on PD-disaggregated decode nodes. |
-
-**scheduler_config.profiling_chunk_config**
-
-| Name | Type | Default | Description |
-| ---- | ---- | ------- | ----------- |
-| `enabled`       | bool  | `False` | Whether to enable dynamic chunked pipeline parallel. Requires `pipeline-parallel-size > 1`. |
-| `smooth_factor` | float | `1.0`   | Smoothing factor (0 < x ≤ 1.0). Higher values trust the dynamic prediction more. To disable CPP and return to normal fixed chunking, set `enabled` to `false`. |
-| `min_chunk`     | int   | `4096`  | Minimum chunk size for dynamic calculation. Should be smaller than `max-num-batched-tokens`. |
-| `need_timing` | bool | True | Enable/disable Online Calibration |
-| `max_fit_chunk` | int | 30 | Number of chunk-time data for Online Calibration |
 
 **scheduler_config.dyntra_lb_config**
 
@@ -337,3 +326,34 @@ KVPP supports non-hybrid MLA/SFA models with eager execution or `PIECEWISE` grap
 KVPP can be combined with `MooncakeConnectorV2` for P/D disaggregation and `AscendStoreConnector` for KV pooling under the connector-specific restrictions in the [KVPP guide](../feature_guide/kvpp.md#kv-transfer-configuration). Enable KVPP only on the prefill node for P/D disaggregation. `MultiConnector` can combine these connectors; each child must satisfy its own type and role requirements.
 
 PCP gathers prefill KV before cache writes. KVPP layer broadcasts restore prior-forward cache contents before attention; the broadcast decision uses the global scheduled batch rather than PCP-local segment offsets.
+
+## GDN internal prefill checkpoints
+
+Enable with `--additional-config '{"gdn_internal_prefill_checkpoints": true}'`.
+The option remains disabled by default pending numerical and performance
+qualification of the alternate prefill recurrence on supported NPUs.
+Requires prefix caching in align mode and vLLM with #60050. The optimization is
+experimental. Eligible GDN layers require BF16,
+K=V=128, PCP=1 and no ubatching. The upstream all-layer capability check preserves split
+prefill when another recurrent layer cannot export checkpoints.
+KV transfer configurations and legacy EAGLE/MTP block dropping without
+lookahead hashes fall back to existing prefill scheduling: the scheduler and
+worker cannot safely assume the same internal checkpoint boundary in these modes.
+
+Checkpoint-bearing prefill uses the existing Triton recurrence instead of the
+AscendC FwdH implementation to export only selected FP32 chunk-start states.
+Convolution history and recurrent state are written through the shared upstream
+checkpoint exporter. Enabled layers use the same Triton recurrence for cold
+prefills and cache-hit tails, including tails without a new checkpoint. At an
+exported boundary, the cold FP32 accumulator is rounded to the configured SSM
+cache dtype before continuing, matching the state restored by a cache hit.
+Decode is unchanged. This backend change needs numerical
+and performance qualification; skipping a model forward does not guarantee a
+net speedup. A persistent FP32 scratch buffer is allocated during profiling, of size
+`max_num_seqs * local_value_heads * 128 * 128 * 4` bytes. Eligible layers
+with the same VllmConfig, device and state shape share it; ubatching is excluded.
+Checkpoint export retains a view of the pre-convolution input; the pinned FLA
+convolution allocates its output separately.
+Small prefix match units can increase checkpoint traffic.
+
+Validate correctness, quality and performance on the deployment hardware before deploying in production.

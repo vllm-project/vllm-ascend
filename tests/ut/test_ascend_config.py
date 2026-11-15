@@ -40,11 +40,11 @@ from vllm_ascend.ascend_config import (
     EplbConfig,
     FinegrainedTPConfig,
     KVPPConfig,
-    ProfilingChunkConfig,
     QuantizedAllReduceConfig,
     RejectionSamplerConfig,
     RlConfig,
     SchedulerConfig,
+    SharedEngramConfig,
     ShortRequestFirstConfig,
     SparseKVOffloadConfig,
     clear_ascend_config,
@@ -55,6 +55,37 @@ from vllm_ascend.ascend_config import (
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.utils import clear_enable_sp, enable_sp, shared_expert_dp_enabled
+
+
+def test_shared_engram_requires_v2_runner():
+    config = AscendConfig(
+        shared_engram={"backend": "a3", "endpoint": "127.0.0.1:29500"},
+        sparse_kv_offload_config=SparseKVOffloadConfig(),
+    )
+    vc = SimpleNamespace(use_v2_model_runner=False, engram_config=SimpleNamespace(cpu_offload=True))
+    try:
+        config.derive_and_validate(vc)
+    except ValueError as exc:
+        assert "Model Runner V2" in str(exc)
+    else:
+        raise AssertionError("V1 must reject shared Engram")
+
+
+def test_shared_engram_config_schema():
+    import pytest
+    from pydantic import TypeAdapter
+
+    config = SharedEngramConfig(backend="a3", endpoint="owner:29500")
+    assert config.backend == "a3" and config.endpoint == "owner:29500"
+    for values in (
+        {"endpoint": "owner:29500"},
+        {"backend": "a3"},
+        {"backend": "unknown", "endpoint": "owner:29500"},
+        {"backend": "a3", "endpoint": "owner:0"},
+        {"backend": "a3", "endpoint": "owner:29500", "unexpected": True},
+    ):
+        with pytest.raises(ValueError):
+            TypeAdapter(SharedEngramConfig).validate_python(values)
 
 
 def VllmConfig(*args: Any, **kwargs: Any) -> _VllmConfig:
@@ -447,7 +478,8 @@ class TestAscendConfig(TestBase):
         self.assertFalse(ascend_config.multistream_overlap_shared_expert)
         self.assertFalse(ascend_config.enable_kv_nz)
         self.assertEqual(ascend_config.weight_nz_mode, 1)
-        self.assertEqual(ascend_config.mega_moe_max_tokens, 65536)
+        # 0 = let the MegaMoe operator auto-compute the receive capacity.
+        self.assertEqual(ascend_config.mega_moe_max_tokens, 0)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
         self.assertTrue(ascend_compilation_config.fuse_norm_quant)
@@ -593,9 +625,10 @@ class TestAscendConfig(TestBase):
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_validates_mega_moe_max_tokens(self, mock_fix_incompatible_config):
-        # NOTE: pydantic coerces numeric strings (e.g. "65536") to int, so only
-        # out-of-range values are invalid on main.
-        invalid_values = [0, -1]
+        # NOTE: pydantic coerces numeric strings (e.g. "65536") to int, and 0 is
+        # now a valid value (let the MegaMoe operator auto-compute), so only
+        # negative values are invalid.
+        invalid_values = [-1]
 
         for invalid_value in invalid_values:
             clear_ascend_config()
@@ -617,7 +650,6 @@ class TestAscendConfig(TestBase):
                 "enable_balance_scheduling": True,
                 "recompute_scheduler_enable": True,
                 "short_request_first_config": {"enabled": True, "threshold": 512},
-                "profiling_chunk_config": {"enabled": False},
             }
         }
 
@@ -627,7 +659,6 @@ class TestAscendConfig(TestBase):
         self.assertTrue(scheduler_config.recompute_scheduler_enable)
         self.assertTrue(scheduler_config.short_request_first_config.enabled)
         self.assertEqual(scheduler_config.short_request_first_config.threshold, 512)
-        self.assertFalse(scheduler_config.profiling_chunk_config.enabled)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -636,7 +667,6 @@ class TestAscendConfig(TestBase):
         test_vllm_config.additional_config = {
             "recompute_scheduler_enable": "false",
             "short_request_first_config": {"enabled": "true", "threshold": "512"},
-            "profiling_chunk_config": {"enabled": "false"},
             "batch_job_sched_config": {"enabled": "false"},
         }
 
@@ -645,7 +675,6 @@ class TestAscendConfig(TestBase):
         self.assertFalse(scheduler_config.recompute_scheduler_enable)
         self.assertTrue(scheduler_config.short_request_first_config.enabled)
         self.assertEqual(scheduler_config.short_request_first_config.threshold, 512)
-        self.assertFalse(scheduler_config.profiling_chunk_config.enabled)
         self.assertFalse(scheduler_config.batch_job_sched_config.enabled)
 
     @_clean_up_ascend_config
@@ -1214,7 +1243,6 @@ class TestSchedulerConfig(TestBase):
         self.assertFalse(config.enable_balance_scheduling)
         self.assertFalse(config.recompute_scheduler_enable)
         self.assertFalse(config.short_request_first_config.enabled)
-        self.assertFalse(config.profiling_chunk_config.enabled)
         self.assertFalse(hasattr(config, "_additional_config"))
         self.assertFalse(hasattr(config, "_balance_env_value"))
 
@@ -1237,12 +1265,6 @@ class TestSchedulerConfig(TestBase):
     def test_unknown_nested_scheduler_key_is_rejected(self):
         with self.assertRaises(ValueError):
             SchedulerConfig.from_additional_config({"scheduler_config": {"unknown_option": {"enabled": True}}})
-
-    def test_unknown_profiling_chunk_key_is_rejected(self):
-        with self.assertRaises(ValueError):
-            SchedulerConfig.from_additional_config(
-                {"scheduler_config": {"profiling_chunk_config": {"unknown_option": False}}}
-            )
 
     def test_unknown_batch_job_key_is_rejected(self):
         with self.assertRaises(ValueError):
@@ -1272,7 +1294,6 @@ class TestSchedulerConfig(TestBase):
                         "threshold": 512,
                         "long_max_wait_ms": 2000,
                     },
-                    "profiling_chunk_config": {"enabled": True, "need_timing": False},
                 }
             },
         )
@@ -1282,8 +1303,6 @@ class TestSchedulerConfig(TestBase):
         self.assertTrue(config.short_request_first_config.enabled)
         self.assertEqual(config.short_request_first_config.threshold, 512)
         self.assertEqual(config.short_request_first_config.long_max_wait_ms, 2000.0)
-        self.assertTrue(config.profiling_chunk_config.enabled)
-        self.assertFalse(config.profiling_chunk_config.need_timing)
 
     @patch("vllm_ascend.ascend_config.logger.warning_once")
     def test_legacy_top_level_config_warns_and_remains_supported(self, mock_warning_once):
@@ -1292,15 +1311,13 @@ class TestSchedulerConfig(TestBase):
                 "enable_balance_scheduling": True,
                 "recompute_scheduler_enable": True,
                 "short_request_first_config": {"enabled": True},
-                "profiling_chunk_config": {"enabled": True},
             },
         )
 
         self.assertTrue(config.enable_balance_scheduling)
         self.assertTrue(config.recompute_scheduler_enable)
         self.assertTrue(config.short_request_first_config.enabled)
-        self.assertTrue(config.profiling_chunk_config.enabled)
-        self.assertEqual(mock_warning_once.call_count, 4)
+        self.assertEqual(mock_warning_once.call_count, 3)
 
     @patch("vllm_ascend.ascend_config.logger.warning_once")
     def test_nested_config_wins_and_legacy_fields_fill_missing_values(self, mock_warning_once):
@@ -1350,14 +1367,6 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         self.assertFalse(cfg.enable_npugraph_ex)
         with self.assertRaises(ValueError):
             AscendCompilationConfig(unknown_key=1)
-
-    def test_profiling_chunk_config_int_lax_and_range(self):
-        # int string "2" coerces to 2 (fixes "2"==2 silent failure)
-        cfg = ProfilingChunkConfig(min_chunk="4096", max_fit_chunk="30")
-        self.assertEqual(cfg.min_chunk, 4096)
-        # range check preserved
-        with self.assertRaises(ValueError):
-            ProfilingChunkConfig(smooth_factor=1.5)
 
     def test_short_request_first_config_unknown_key_forbidden(self):
         # Was hand-written unknown-key check; now extra="forbid".
@@ -1925,6 +1934,82 @@ class TestTopLevelSwitchTypeValidation(TestBase):
             config.derive_and_validate(vc)
 
     @_clean_up
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
+    def test_fused_mc2_mode_3_rejects_a3(self, _mock_profile):
+        config = AscendConfig(
+            sparse_kv_offload_config=SimpleNamespace(enabled=False),
+            enable_fused_mc2=3,
+        )
+        self.assertTrue(config.megamoe_shared_expert_fusion)
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(hidden_size=4096)),
+        )
+        with self.assertRaisesRegex(NotImplementedError, "only supported on A5"):
+            config._validate_megamoe_shared_expert_fusion(vllm_config)
+
+    @_clean_up
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
+    def test_fused_mc2_mode_3_rejects_latent_moe(self, _mock_profile):
+        config = AscendConfig(
+            sparse_kv_offload_config=SimpleNamespace(enabled=False),
+            enable_fused_mc2=3,
+        )
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(
+                hf_text_config=SimpleNamespace(hidden_size=7168, routed_expert_hidden_size=3584),
+            ),
+        )
+        with self.assertRaisesRegex(NotImplementedError, "does not support latent-MoE"):
+            config._validate_megamoe_shared_expert_fusion(vllm_config)
+
+    @_clean_up
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
+    def test_fused_mc2_mode_3_allows_a5_non_latent(self, _mock_profile):
+        config = AscendConfig(
+            sparse_kv_offload_config=SimpleNamespace(enabled=False),
+            enable_fused_mc2=3,
+        )
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(hidden_size=4096)),
+        )
+        # A5 with a non-latent (shared residual width) model must not raise.
+        config._validate_megamoe_shared_expert_fusion(vllm_config)
+
+    @_clean_up
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
+    def test_fused_mc2_mode_2_still_allowed_on_a3(self, _mock_profile):
+        config = AscendConfig(
+            sparse_kv_offload_config=SimpleNamespace(enabled=False),
+            enable_fused_mc2=2,
+        )
+        self.assertFalse(config.megamoe_shared_expert_fusion)
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(hidden_size=4096)),
+        )
+        # Plain MegaMoe (=2) is not the shared-expert fusion and stays allowed on A3.
+        config._validate_megamoe_shared_expert_fusion(vllm_config)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_derive_and_validate_invokes_shared_expert_fusion_check(self, mock_fix):
+        vc = VllmConfig()
+        with patch.object(AscendConfig, "_validate_megamoe_shared_expert_fusion") as mock_check:
+            init_ascend_config(vc)
+        mock_check.assert_called_once()
+
+    @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_converged_bypass_fields_are_validated(self, mock_fix):
         vc = VllmConfig()
@@ -2327,13 +2412,43 @@ class TestEngramSharedMemoryDefaults(TestBase):
                         config = VllmConfig(device_config=DeviceConfig(device="cpu"))
                         config.parallel_config.data_parallel_size = dp
                         config.parallel_config.prefill_context_parallel_size = pcp
-                        config.engram_config = SimpleNamespace(dp_shared_memory=shared)
+                        config.engram_config = SimpleNamespace(cpu_offload=True, dp_shared_memory=shared)
                         ascend_config = AscendConfig(sparse_kv_offload_config=SparseKVOffloadConfig())
                         with patch.object(
                             _VllmConfig, "use_v2_model_runner", new_callable=PropertyMock, return_value=use_v2
                         ):
                             ascend_config.derive_and_validate(config)
                         self.assertEqual(config.engram_config.dp_shared_memory, shared or (use_v2 and auto_shared))
+
+    def test_dp_shared_memory_not_set_when_cpu_offload_false(self):
+        """dp_shared_memory requires cpu_offload=True (upstream constraint).
+
+        When cpu_offload=False (e.g. ETP path with embedding_across_dp=True),
+        derive_and_validate must NOT auto-enable dp_shared_memory, otherwise
+        the upstream _validate_shared_memory raises ValueError.
+        """
+        topologies = (
+            (1, 1, False),
+            (2, 1, True),
+            (1, 2, True),
+            (2, 4, True),
+        )
+        for use_v2 in (False, True):
+            for dp, pcp, _auto_shared in topologies:
+                for shared in (False, True):
+                    with self.subTest(use_v2=use_v2, dp=dp, pcp=pcp, shared=shared):
+                        config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+                        config.parallel_config.data_parallel_size = dp
+                        config.parallel_config.prefill_context_parallel_size = pcp
+                        config.engram_config = SimpleNamespace(cpu_offload=False, dp_shared_memory=shared)
+                        ascend_config = AscendConfig(sparse_kv_offload_config=SparseKVOffloadConfig())
+                        with patch.object(
+                            _VllmConfig, "use_v2_model_runner", new_callable=PropertyMock, return_value=use_v2
+                        ):
+                            ascend_config.derive_and_validate(config)
+                        # dp_shared_memory must remain unchanged — never auto-enabled
+                        # when cpu_offload=False, regardless of DP/PCP/V2 topology.
+                        self.assertEqual(config.engram_config.dp_shared_memory, shared)
 
     def test_no_engram_config_is_preserved(self):
         config = VllmConfig(device_config=DeviceConfig(device="cpu"))

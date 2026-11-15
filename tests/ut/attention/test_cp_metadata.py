@@ -3,7 +3,6 @@
 """Tests for the backend-agnostic DCP metadata math in the attention layer."""
 
 import importlib.util
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -12,8 +11,6 @@ import torch
 from vllm.distributed.parallel_state import GroupCoordinator
 
 from vllm_ascend.attention.context_parallel import dcp_metadata
-from vllm_ascend.attention.utils import AscendDCPMetadata
-from vllm_ascend.worker.dcp_utils import DCPManager
 
 # Upstream main removed the model-runner-v1 block table with MRV1 (#20097);
 # the v2 AscendBlockTables needs the NPU triton slot-mapping kernel, so the
@@ -168,46 +165,22 @@ def test_local_seq_lens_counts_only_owned_tokens(dcp_size, cp_kv_cache_interleav
 
 
 def test_legacy_gqa_metadata_fields_match_current_contract() -> None:
-    manager = object.__new__(DCPManager)
-    manager.dcp_world_size = 2
-    manager.dcp_world_rank = 0
-    manager.vllm_config = MagicMock()
-    manager.vllm_config.parallel_config.cp_kv_cache_interleave_size = 1
-
-    common_attn_metadata = SimpleNamespace(
-        num_reqs=2,
-        _seq_lens_cpu=torch.tensor([133, 261], dtype=torch.int32),
-        seq_lens=torch.tensor([133, 261], dtype=torch.int32),
-        query_start_loc_cpu=torch.tensor([0, 5, 10], dtype=torch.int32),
-        max_query_len=5,
-        context_parallel_metadata=None,
-    )
-    manager.prepare_legacy_dcp_metadata(common_attn_metadata)
-    manager_metadata = common_attn_metadata.context_parallel_metadata
-    assert isinstance(manager_metadata, AscendDCPMetadata)
-
     helper_metadata = dcp_metadata.build_legacy_gqa_dcp_metadata(
-        common_attn_metadata._seq_lens_cpu[: common_attn_metadata.num_reqs],
-        common_attn_metadata.query_start_loc_cpu,
-        common_attn_metadata.max_query_len,
+        torch.tensor([133, 261], dtype=torch.int32),
+        torch.tensor([0, 5, 10], dtype=torch.int32),
+        5,
         dcp_size=2,
         cp_kv_cache_interleave_size=1,
     )
 
-    # Pin the contract shared with test_dcp_manager.py.
-    np.testing.assert_array_equal(
-        manager_metadata.num_computed_tokens_of_dcp,
-        np.array([[67, 66], [131, 130]], dtype=np.int32),
-    )
+    # Pin the DCP metadata contract for the legacy GQA path.
     np.testing.assert_array_equal(
         helper_metadata.num_computed_tokens_of_dcp,
-        manager_metadata.num_computed_tokens_of_dcp,
+        np.array([[67, 66], [131, 130]], dtype=np.int32),
     )
-    torch.testing.assert_close(helper_metadata.query_lens_cpu, manager_metadata.query_lens_cpu)
     torch.testing.assert_close(helper_metadata.query_lens_cpu, torch.tensor([5, 5], dtype=torch.int32))
-    assert helper_metadata.max_query_len == manager_metadata.max_query_len == 5
+    assert helper_metadata.max_query_len == 5
     assert helper_metadata.dcp_mtp_attn_mask is None
-    assert manager_metadata.dcp_mtp_attn_mask is None
 
 
 def test_slot_reference_supports_empty_and_single_token() -> None:
