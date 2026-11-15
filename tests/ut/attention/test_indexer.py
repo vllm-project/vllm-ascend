@@ -616,6 +616,7 @@ def test_indexer_owner_reports_data_scale_and_replication(monkeypatch, c4, c8, r
     )
     monkeypatch.setattr(indexer_module, "get_current_vllm_config", lambda: config)
     monkeypatch.setattr(indexer_module, "enable_sfa_dcp_replicated_indexer", lambda _: replicas > 1)
+    monkeypatch.setattr(indexer_module, "enable_sfa_dcp_sharded_indexer", lambda _: False)
     backend = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
     torch.nn.Module.__init__(backend)
     backend.head_dim = 128
@@ -658,6 +659,7 @@ def test_indexer_owner_tracks_runtime_cache_requirement(monkeypatch, mtp):
     from vllm_ascend.worker.v2 import attn_utils
 
     config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=None),
         cache_config=SimpleNamespace(block_size=128),
         compilation_config=SimpleNamespace(static_forward_context={}),
     )

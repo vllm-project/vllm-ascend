@@ -363,7 +363,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 cache_dtype_str = "auto"
 
         indexer_replicas = 1
-        if enable_sfa_dcp_replicated_indexer(vllm_config):
+        if enable_sfa_dcp_replicated_indexer(vllm_config) and not enable_sfa_dcp_sharded_indexer(vllm_config):
             indexer_replicas = vllm_config.parallel_config.decode_context_parallel_size
 
         # Preserve upstream ownership/grouping metadata; override only the

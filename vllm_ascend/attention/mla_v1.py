@@ -164,6 +164,8 @@ class AscendMLAAttention(MLAAttention):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> AscendMLAAttentionSpec:
         """Publish the complete cache demand using the selected execution format."""
         spec = super().get_kv_cache_spec(vllm_config)
+        if getattr(getattr(vllm_config, "attention_config", None), "hisparse_config", None) is not None:
+            return spec
         values = {field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
         model_type = getattr(vllm_config.model_config.hf_text_config, "model_type", None)
         storage_heads = self.num_heads
@@ -205,7 +207,10 @@ class AscendMLAAttention(MLAAttention):
             qk_rope_head_dim=self.qk_rope_head_dim,
             cache_sparse_sfa_turboquant=use_sfa_turboquant,
             cache_sparse_sfa_c8=use_sfa_c8,
-            store_on_host=getattr(self.impl, "store_kv_cache_on_host", False),
+            store_on_host=(
+                not (spec.is_draft or self.is_draft_layer)
+                and getattr(self.impl, "store_kv_cache_on_host", False)
+            ),
             head_size=head_size,
             dtype=dtype,
             cache_dtype_str=cache_dtype_str,

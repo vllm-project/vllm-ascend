@@ -163,6 +163,6 @@ def test_worker_collects_mla_spec_without_reading_impl(monkeypatch):
     monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: {"main": layer})
     config = SimpleNamespace(
         cache_config=SimpleNamespace(cache_dtype="auto"),
-        attention_config=SimpleNamespace(indexer_kv_dtype="auto"),
+        attention_config=SimpleNamespace(indexer_kv_dtype="auto", hisparse_config=None),
     )
     assert attn_utils.get_kv_cache_spec(config)["main"] is source
