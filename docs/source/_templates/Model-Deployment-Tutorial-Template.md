@@ -92,11 +92,11 @@ If multi-node deployment is required, please follow the [Verify Multi-node Commu
 - Provide specific installation steps and commands (parameters should be explained with meaning, value range, units, etc.).
 - **Version Number Writing Specification:** Prefer using placeholders (values are centrally configured). If a fixed value is used and it differs from the documented validation version, a comment MUST be added stating: "Please replace with your actual version."
 - Provide verification commands and expected status: guide users to check the installation result by executing commands (e.g., docker ps), specifying success criteria such as status codes or output characteristics,**and provide a complete example of the echo output**.
-- If the model supports only a single hardware series (e.g., Atlas 300I DUO only), explicitly state this at the beginning of the installation section. If multiple hardware series are supported(e.g., A3/A2 series), use tabbed syntax to present them separately, with newer models listed first. For syntax differences between MkDocs and Sphinx frameworks, refer to [Syntax Supplement](template-supplement.md#3-tabs).
+- If the model supports only a single hardware series (e.g., Atlas 300I DUO only), explicitly state this at the beginning of the installation section. If multiple hardware series are supported(e.g., A3/A2 series), use tabbed syntax to present them separately, with newer models listed first. For syntax differences between MkDocs and Sphinx frameworks, refer to [Syntax Supplement](template-supplement.md#4-tabs).
 
 ### 4.1 Docker Image Installation
 
-**Example: (For MkDocs + Material tab syntax (`=== "label"`) and Sphinx + MyST-Parser tab syntax (`::::{tab-item}`), please refer to the [Syntax Supplement](template-supplement.md#3-tabs).)**
+**Example: (For MkDocs + Material tab syntax (`=== "label"`) and Sphinx + MyST-Parser tab syntax (`::::{tab-item}`), please refer to the [Syntax Supplement](template-supplement.md#4-tabs).)**
 
 === "A3 series"
 
@@ -123,7 +123,7 @@ If multi-node deployment is required, please follow the [Verify Multi-node Commu
 - Provide troubleshooting guidance below the startup commands. If the issue is already covered in the public FAQ, a direct link to it may be used.
 - **Model path specification**: In deployment commands, the model path must use the variable placeholder `<YOUR_MODEL_PATH>`, with a comment reminding users to replace this placeholder with the path recorded in Section 3.1.
 - The configuration script for the **Commercial Model** shall be strictly aligned with the optimal performance configuration validated for the specific version release scenario. The use of generic default startup scripts that have not undergone performance tuning and verification is prohibited.
-- If the model supports only a single hardware series (e.g., Atlas 300I DUO only), explicitly state this at the beginning of the installation section. If multiple hardware series are supported(e.g., A3/A2 series), use tabbed syntax to present them separately, with newer models listed first. For syntax differences between MkDocs and Sphinx frameworks, refer to [Syntax Supplement](template-supplement.md#3-tabs).
+- If the model supports only a single hardware series (e.g., Atlas 300I DUO only), explicitly state this at the beginning of the installation section. If multiple hardware series are supported(e.g., A3/A2 series), use tabbed syntax to present them separately, with newer models listed first. For syntax differences between MkDocs and Sphinx frameworks, refer to [Syntax Supplement](template-supplement.md#4-tabs).
 - Provide the output example when the startup is successful.
 
 ### 5.1 Single-Node Online Deployment
