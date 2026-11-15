@@ -98,7 +98,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_pl
     plan_layerwise_cache_reuse,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    with_layerwise_reuse_layout,
+    apply_layerwise_kv_cache_plan,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     plan_sparse_kv_offload_memory,
@@ -1226,7 +1226,7 @@ class NPUWorker(WorkerBase):
         # Plan from this rank's native descriptors before connectors bind to the cache.
         reuse_layout = plan_layerwise_cache_reuse(kv_cache_config, self.vllm_config)
         if reuse_layout is not None:
-            kv_cache_config = with_layerwise_reuse_layout(
+            kv_cache_config = apply_layerwise_kv_cache_plan(
                 kv_cache_config, self.vllm_config.kv_transfer_config, reuse_layout
             )
             logger.info(

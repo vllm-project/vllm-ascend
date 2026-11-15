@@ -66,7 +66,7 @@ def get_layerwise_reuse_layout(config: KVCacheConfig | None) -> LayerwiseReuseLa
     return transfer_config.kv_connector_extra_config.get(_LAYERWISE_REUSE_LAYOUT)
 
 
-def with_layerwise_reuse_layout(
+def apply_layerwise_kv_cache_plan(
     config: KVCacheConfig, transfer_config: KVTransferConfig, reuse_layout: LayerwiseReuseLayout
 ) -> KVCacheConfig:
     worker_config = copy(config)
