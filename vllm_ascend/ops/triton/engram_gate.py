@@ -35,11 +35,10 @@ def _engram_gate_kernel(
     branch = tl.program_id(1)
     col = tl.arange(0, BLOCK)
     valid = col < DIM
-    h = tl.load(hidden + token * hidden_stride_t + branch * hidden_stride_h + col, valid, 0).to(tl.float32)
     if HAS_GATE_HIDDEN:
         score_h = tl.load(gate_hidden + token * gate_stride_t + branch * gate_stride_h + col, valid, 0).to(tl.float32)
     else:
-        score_h = h
+        score_h = tl.load(hidden + token * hidden_stride_t + branch * hidden_stride_h + col, valid, 0).to(tl.float32)
     key = tl.load(kv + token * kv_stride_t + branch * DIM + col, valid, 0).to(tl.float32)
     qw = tl.load(q + branch * q_stride_h + col * q_stride_d, valid, 0).to(tl.float32)
     kw = tl.load(k + branch * k_stride_h + col * k_stride_d, valid, 0).to(tl.float32)
@@ -53,6 +52,8 @@ def _engram_gate_kernel(
     active = tl.load(mask + token * mask_stride) != 0
     gate = tl.where(active, gate, 0.0)
     value = tl.load(kv + token * kv_stride_t + HC * DIM + col, valid, 0).to(tl.float32)
+    # Keep the residual out of UB until scoring reductions have finished.
+    h = tl.load(hidden + token * hidden_stride_t + branch * hidden_stride_h + col, valid, 0).to(tl.float32)
     tl.store(output + (token * HC + branch) * DIM + col, h + gate * value, valid)
 
 
@@ -70,6 +71,9 @@ def fused_engram_gate(hidden, kv, q_weight, k_weight, token_mask, eps, *, gate_h
         raise ValueError("fused Engram gate requires contiguous hidden/key channels")
     output = torch.empty(hidden.shape, dtype=hidden.dtype, device=hidden.device)
     if tokens:
+        # Strided channel gathers can exceed A3 UB capacity during lowering.
+        q_weight = q_weight.contiguous()
+        k_weight = k_weight.contiguous()
         _engram_gate_kernel[(tokens, branches)](
             hidden,
             score_input,
