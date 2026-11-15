@@ -1,6 +1,6 @@
 from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any, ClassVar, TypeVar
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 import torch
 import torch_npu
@@ -48,6 +48,7 @@ from vllm_ascend.attention.utils import (
     uses_pcp_sharded_layout,
     wait_for_kv_layer_from_connector,
 )
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
@@ -358,6 +359,20 @@ def _get_config_bool(configs: tuple[Any, ...], attr: str) -> bool:
 
 class AscendSFABackend(AttentionBackend):
     accept_output_buffer: bool = True
+
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
+        """Resolve the packed SFA width from the MLA component dimensions."""
+        spec = super().customize_spec(spec)
+        if not isinstance(spec, AscendMLAAttentionSpec) or not spec.uses_packed_sfa_main_cache:
+            return spec
+        if spec.kv_lora_rank is None or spec.qk_rope_head_dim is None:
+            raise ValueError("Packed SFA specs require NoPE and RoPE dimensions.")
+        if spec.cache_sparse_sfa_turboquant:
+            width = get_tq_fused_slot_bytes(spec.kv_lora_rank, spec.qk_rope_head_dim)
+            return replace(spec, head_size=width, dtype=torch.int8)
+        width = get_sfa_qsfa_packed_head_dim(spec.kv_lora_rank, spec.qk_rope_head_dim)
+        return replace(spec, head_size=width)
 
     @staticmethod
     def get_name() -> str:

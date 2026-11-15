@@ -1,5 +1,5 @@
 from copy import copy
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, TypeVar
 
 import numpy as np
@@ -27,7 +27,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, MLAAttentionSpec, SlidingWindowMLASpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -104,6 +104,12 @@ PROLOG_V3_MAX_BLOCK_SIZE = 1024
 
 class AscendMLABackend(AttentionBackend):
     accept_output_buffer: bool = True
+
+    @staticmethod
+    def customize_fa_quant_spec(
+        spec: AscendMLAAttentionSpec, rope_head_dim: int, dtype: torch.dtype
+    ) -> AscendMLAAttentionSpec:
+        return replace(spec, head_size=spec.head_size + rope_head_dim, dtype=dtype, cache_dtype_str=None)
 
     @staticmethod
     def get_name() -> str:
@@ -202,16 +208,49 @@ class AscendMLAAttention(MLAAttention):
     supports_pcp_dcp: ClassVar[bool] = True
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        """Publish the complete per-layer MLA spec for MRV2."""
         spec = super().get_kv_cache_spec(vllm_config)
-        if not isinstance(spec, MLAAttentionSpec) or not getattr(self.impl, "use_flashmla", False):
+        if not vllm_config.use_v2_model_runner or not isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec)):
             return spec
-        values = {field.name: getattr(spec, field.name) for field in fields(spec) if field.init}
+
+        use_sparse = enable_sfa(vllm_config)
+        # Preserve the MRV2 selection order when more than one flag is present.
+        use_fa_quant = getattr(self.impl, "fa_quant_layer", False)
+        use_turboquant = use_sparse and not use_fa_quant and getattr(self.impl, "enable_sparse_sfa_turboquant", False)
+        use_c8 = (
+            use_sparse and not use_fa_quant and not use_turboquant and getattr(self.impl, "enable_sparse_sfa_c8", False)
+        )
+        values = {
+            field.name: getattr(spec, field.name)
+            for field in fields(AscendMLAAttentionSpec)
+            if field.init and hasattr(spec, field.name)
+        }
         values.update(
+            num_heads=(
+                spec.num_heads
+                if getattr(vllm_config.model_config.hf_text_config, "model_type", None) == "kimi_linear"
+                else self.num_heads
+            ),
+            model_version=spec.model_version or getattr(self, "model_version", None),
+            indexes_kv_by_block_stride=bool(
+                getattr(spec, "indexes_kv_by_block_stride", False) or getattr(self, "indexes_kv_by_block_stride", False)
+            ),
             kv_lora_rank=self.kv_lora_rank,
             qk_rope_head_dim=self.qk_rope_head_dim,
-            mla_cache_layout="token_interleaved",
+            mla_cache_layout="token_interleaved" if getattr(self.impl, "use_flashmla", False) else "component_major",
+            cache_sparse_sfa_c8=use_c8,
+            cache_sparse_sfa_turboquant=use_turboquant,
+            store_on_host=use_sparse and get_ascend_config().sparse_kv_offload_config.enabled,
         )
-        return AscendMLAAttentionSpec(**values)
+        if use_c8 or use_turboquant:
+            values["cache_dtype_str"] = vllm_config.cache_config.cache_dtype
+        if use_c8:
+            values["dtype"] = kv_cache_dtype_str_to_dtype(values["cache_dtype_str"], vllm_config.model_config)
+
+        ascend_spec = AscendMLAAttentionSpec(**values)
+        if use_fa_quant:
+            ascend_spec = AscendMLABackend.customize_fa_quant_spec(ascend_spec, self.qk_rope_head_dim, self.impl.dtype)
+        return self.get_attn_backend().customize_spec(ascend_spec)
 
 
 @dataclass
