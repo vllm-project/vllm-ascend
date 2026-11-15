@@ -13,9 +13,13 @@ from unittest.mock import Mock
 
 import msgspec
 import pytest
+import torch
 from zmq.constants import SocketOption, SocketType
 from zmq.sugar.context import Context
 
+import vllm_ascend.attention.utils as attention_utils
+import vllm_ascend.models.glm5next.kda as model_kda
+from vllm_ascend.distributed.kv_transfer.ascend_multi_connector import AscendMultiConnector
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker, push_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import MooncakeBaseConnectorWorker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
@@ -222,6 +226,152 @@ def test_component_reuse_waits_for_every_push_source(worker):
                 first.set_result(None)
             second.set_result(None)
         gate.result(timeout=3)
+
+
+@pytest.mark.parametrize("tp_size,tp_rank", [(1, 0), (8, 3)])
+def test_kda_model_hook_fences_push_and_completes_destination(worker, monkeypatch, tp_size, tp_rank):
+    # Exercise the model -> helper -> MultiConnector -> Push path. Calling
+    # worker.save_kv_layer(name) directly would miss an anonymous KDA hook.
+    name = worker.transfer_metadata.layer_names[0]
+    conv, state = torch.zeros(3, 2, 3), torch.zeros(3, 1, 1, 1)
+    remote_conv, remote_state = torch.full((12, 2, 3 * tp_size), -1.0), torch.full((12, tp_size, 1, 1), -1.0)
+    spec = Mock(spec=push_worker.MambaSpec, tp_replicated=False, sliding_window=None, is_circular=False)
+    spec.dtypes = (torch.float32, torch.float32)
+    spec.mamba_type = base_worker.MambaAttentionBackendEnum.GDN_ATTN
+    worker.kv_cache_specs = [spec]
+    worker.tp_size, worker.tp_rank = tp_size, tp_rank
+    remote = remote_metadata()
+    pp = remote.metadata_by_pp_rank[0]
+    for metadata in (worker.transfer_metadata, pp):
+        metadata.block_strides[:] = [[24, 4]]
+        metadata.block_lens[:] = [[24, 4]]
+        metadata.block_shapes[:] = [[(2, 3), (1, 1, 1)]]
+        metadata.block_size_scales[:] = [[1, 1]]
+    pp.block_strides[:] = [[24 * tp_size, 4 * tp_size]]
+    pp.block_lens[:] = [[24 * tp_size, 4 * tp_size]]
+    pp.block_shapes[:] = [[(2, 3 * tp_size), (tp_size, 1, 1)]]
+    worker.transfer_metadata.kv_caches_base_addr[:] = [[conv.data_ptr(), state.data_ptr()]]
+    pp.metadata_by_pcp_rank[0].metadata_by_tp_rank[0].kv_caches_base_addr[:] = [
+        [remote_conv.data_ptr(), remote_state.data_ptr()]
+    ]
+    monkeypatch.setattr(worker, "_get_remote_metadata", lambda message: remote)
+    worker._slot_predecessors = {1: (0,)}
+    worker._slot_index_by_name = {name: 0}
+    worker._slot_sources = {0}
+    worker._scratch_layers = {0, 1}
+    entered, release = threading.Event(), threading.Event()
+
+    def write(session, sources, destinations, sizes):
+        entered.set()
+        assert release.wait(timeout=3)
+        for source, destination, size in zip(sources, destinations, sizes, strict=True):
+            ctypes.memmove(destination, source, size)
+        return 0
+
+    worker.engine.batch_transfer_sync_write.side_effect = write
+    saves = []
+
+    def store_save(layer_name, caches, metadata):
+        assert 0 in worker._slot_writes, "Store could release KDA before Push publishes its fence"
+        assert layer_name == name
+        saves.append(layer_name)
+
+    connector = AscendMultiConnector.__new__(AscendMultiConnector)
+    connector._layerwise_slot_release_providers = [
+        SimpleNamespace(save_kv_layer=lambda name, *args: worker.save_kv_layer(name))
+    ]
+    connector._non_slot_release_connectors = [
+        SimpleNamespace(wait_for_layer_load=lambda name: None, save_kv_layer=store_save)
+    ]
+    connector._external_slot_release_sink_configured = True
+    connector._mamba_state = None
+    monkeypatch.setattr(connector, "has_connector_metadata", lambda: True)
+    metadata = object.__new__(model_kda.GDNAttentionMetadata)
+    for key, value in dict(
+        non_spec_query_start_loc=torch.tensor([0, 1]),
+        non_spec_state_indices_tensor=torch.tensor([2]),
+        num_actual_tokens=1,
+        spec_query_start_loc=None,
+        spec_state_indices_tensor=None,
+        spec_token_indx=None,
+        non_spec_token_indx=None,
+        num_accepted_tokens=None,
+        num_spec_decodes=0,
+        num_prefills=1,
+        num_decodes=0,
+        num_decode_tokens=0,
+        prefill_state_indices=torch.tensor([2]),
+        prefill_has_initial_state=torch.tensor([True]),
+        non_spec_prefill_metadata=SimpleNamespace(causal_conv1d=Mock(), chunk=object()),
+    ).items():
+        setattr(metadata, key, value)
+    context = SimpleNamespace(attn_metadata={name: metadata})
+    for module in (model_kda, attention_utils):
+        monkeypatch.setattr(module, "get_forward_context", lambda: context)
+    monkeypatch.setattr(attention_utils, "has_kv_transfer_group", lambda: True)
+    monkeypatch.setattr(attention_utils, "is_v1_kv_transfer_group", lambda: True)
+    monkeypatch.setattr(attention_utils, "get_kv_transfer_group", lambda: connector)
+    monkeypatch.setattr(model_kda, "record_attention_compute_start", lambda: None)
+    monkeypatch.setattr(model_kda, "causal_conv1d", lambda x, *args, **kwargs: x)
+    layer = SimpleNamespace(
+        prefix=name,
+        local_num_heads=1,
+        head_dim=1,
+        local_projection_size=1,
+        kda_lower_bound=-4.0,
+        kv_cache=(conv, state),
+        _conv_state_dim_first=False,
+        _merged_conv_weight=torch.zeros(4, 3),
+        A_log=torch.zeros(1),
+        dt_bias=torch.zeros(1),
+    )
+
+    def prefill(q, *args):
+        # Stand in for NPU kernels; the production dispatch and connector
+        # hooks run unchanged, and the transfer copies real CPU state bytes.
+        conv[2].fill_(7)
+        state[2].fill_(9)
+        return q
+
+    monkeypatch.setattr(model_kda, "chunk_kda", prefill)
+    try:
+        for computed in (0, 4):
+            worker.start_load_kv(source_meta(computed, 4))
+            assert not worker._reqs_send_state["d-request"].available_layers
+            model_kda.Glm5NextLinearAttention._forward_core(
+                layer, torch.zeros(1, 3), torch.zeros(1, 1, 1, 1), torch.zeros(1, 1, 1), torch.zeros(1, 1, 1, 1)
+            )
+            assert worker._reqs_send_state["d-request"].available_layers[name][0] == computed + 4
+            if computed == 0:
+                assert worker._slot_writes[0] == ()  # KDA Push is final-chunk only.
+                worker.wait_for_layer_reuse(1)
+                assert not entered.is_set()
+                assert not worker._send_done.called
+            else:
+                assert entered.wait(timeout=3)
+                assert not worker._send_done.called
+                assert torch.all(remote_conv == -1) and torch.all(remote_state == -1)
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    gate = executor.submit(worker.wait_for_layer_reuse, 1)
+                    try:
+                        with pytest.raises(TimeoutError):
+                            gate.result(timeout=0.02)
+                    finally:
+                        release.set()
+                    gate.result(timeout=3)
+            worker.wait_for_save()
+    finally:
+        release.set()
+    drive(worker, lambda: worker._send_done.called)
+    assert saves == [name, name]
+    assert worker.engine.batch_transfer_sync_write.call_count == 1
+    assert worker._send_done.call_args.args[1] is None
+    expected_conv = torch.full_like(remote_conv[11], -1)
+    expected_conv[:, [tp_rank + projection * tp_size for projection in range(3)]] = conv[2]
+    expected_state = torch.full_like(remote_state[11], -1)
+    expected_state[tp_rank : tp_rank + 1] = state[2]
+    torch.testing.assert_close(remote_conv[11], expected_conv)
+    torch.testing.assert_close(remote_state[11], expected_state)
 
 
 def test_shared_slot_waits_for_write_and_does_not_publish_prefix_early(worker):

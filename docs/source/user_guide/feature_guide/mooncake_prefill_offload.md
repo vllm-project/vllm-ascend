@@ -55,6 +55,14 @@ Target/draft readiness keeps mainline's namespace-aware layer identity;
 offload maps cache names separately to the physical slot indices. Store
 prefix hits become Push-readable only after their layer load and write hook.
 
+GLM KDA's prefill, speculative and plain-decode exits report the registered
+cache name (`self.prefix`) to the save hook. An anonymous hook can advance
+Store's layer cursor, but Push cannot identify its KDA cache, publish WRITE
+fences or complete the destination's layer set. Keep the missing-hook checks:
+skipping a fence or excluding KDA from Push tracking while Store rotates it can
+expose overwritten state to D. KDA does not need to be made independent to fix
+this hook mismatch; start with `layerwise_independent_layers=[0]`.
+
 P/D examples are in
 `examples/disaggregated_prefill_v1/glm53_mooncake_offload/`.
 Start with P PP=PCP=DCP=1; Push with shared buffers currently rejects PP/PCP
