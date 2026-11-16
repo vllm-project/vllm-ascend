@@ -4,5 +4,7 @@ entries:
     text: >-
       Added experimental layerwise KV offload for the existing DeepSeek-V4 Flash
       and Pro models through AscendStore and Memcache, including sliding-window
-      and compressor-state caches.
+      and compressor-state caches. Cache format v2 excludes overlapping A5
+      indexer transfer views and starts a separate namespace from earlier
+      experimental cache objects.
     model: deepseek-v4

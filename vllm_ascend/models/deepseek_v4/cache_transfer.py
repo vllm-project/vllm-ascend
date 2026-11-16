@@ -16,6 +16,9 @@ def cache_format_digest(config: KVCacheConfig) -> str:
     Call before the scheduler unwraps uniform groups. The resulting attribute
     on KVCacheConfig survives worker IPC and scheduler configuration copying.
     """
+    # v2 uses disjoint indexer data/scale views in every transfer path.
+    # Older layerwise workers included the overlapping full-page view,
+    # changing group offsets; those stored objects must not be reused.
     groups = []
     for group in config.kv_cache_groups:
         assert isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
@@ -26,7 +29,7 @@ def cache_format_digest(config: KVCacheConfig) -> str:
                 for spec in (group.kv_cache_spec.kv_cache_specs[name],)
             ]
         )
-    payload = json.dumps(("dsv4-components-v1", groups), default=str, sort_keys=True, separators=(",", ":"))
+    payload = json.dumps(("dsv4-components-v2", groups), default=str, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode()).hexdigest()[:24]
 
 

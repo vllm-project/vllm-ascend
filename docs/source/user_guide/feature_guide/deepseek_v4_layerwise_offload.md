@@ -61,6 +61,11 @@ The adapter adds the following contracts:
   view remains available to model kernels and is not transferred again.
 - A logical-format digest separates incompatible wire formats while allowing
   resident and rotated instances with different device capacities to share keys.
+  The current `dsv4-components-v2` identity isolates older objects written with
+  the overlapping A5 indexer view. Upgrading intentionally starts a new cache
+  namespace; old objects are not migrated. Upgrade every participating worker
+  before comparing warm-prefix hit rates. Slot count, independent-layer selection,
+  and device block count do not change this logical-format identity.
 - Public load metadata is batched across groups and requests. Private keys remain
   scoped to their request, and every successful lease acquisition is released.
 
@@ -76,6 +81,7 @@ pytest -q \
   tests/ut/models/test_dsv4_layerwise.py \
   tests/ut/distributed/ascend_store/test_dsv4_layerwise_runtime.py \
   tests/ut/distributed/ascend_store/test_dsv4_prefix_offload.py \
+  tests/ut/distributed/ascend_store/test_dsv4_transfer_registration.py \
   tests/ut/distributed/ascend_store/test_reuse_snapshot_blocks.py \
   tests/ut/distributed/ascend_store/test_pool_worker.py
 ```
