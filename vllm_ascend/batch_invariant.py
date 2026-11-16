@@ -40,7 +40,7 @@ if HAS_TRITON:
 
 
 try:
-    import batch_invariant_ops  # type: ignore[import-not-found] # noqa
+    import batch_invariant_ops  # type: ignore[import-not-found, import-untyped] # noqa
 
     HAS_ASCENDC_BATCH_INVARIANT = True
 except ImportError:

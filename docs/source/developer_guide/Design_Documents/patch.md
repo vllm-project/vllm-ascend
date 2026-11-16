@@ -14,6 +14,10 @@ We should keep in mind that Patch is not the best way to make vLLM Ascend compat
 
 ## How it works
 
+### EPLB state integration prototype
+
+This prototype uses the state and policy interfaces proposed in [vLLM #49700](https://github.com/vllm-project/vllm/pull/49700). Its verified runtime pin includes the unmerged interfaces. Platform configuration resolves Ascend defaults, policies consume the CPU load and original extensible stats snapshot, and model-state methods own map commits and workspace consumption. Initial expert placement, explicit transfers, changed-layer scheduling and local shutdown remain Ascend adaptations. MoE construction continues through the existing factory adapters in this branch.
+
 In `vllm_ascend/patch`, you can see the code structure as follows:
 
 ```shell

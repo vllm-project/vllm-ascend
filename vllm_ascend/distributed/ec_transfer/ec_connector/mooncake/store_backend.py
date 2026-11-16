@@ -57,7 +57,7 @@ def ensure_mooncake_store_imported() -> None:
     process-wide engine that is later passed to ``MooncakeDistributedStore``.
     """
     try:
-        import mooncake.store  # type: ignore[import-not-found]  # noqa: F401
+        import mooncake.store  # type: ignore[import-not-found, import-untyped]  # noqa: F401
     except ImportError as error:
         raise ImportError("Install mooncake with Store support to enable cross_encoder_cache.") from error
 

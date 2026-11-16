@@ -15,10 +15,10 @@ from multiprocessing.connection import Connection
 import numpy as np
 import torch
 from vllm.distributed import get_eplb_group
-from vllm.distributed.eplb.policy import AbstractEplbPolicy
+from vllm.distributed.eplb.policy import AbstractEplbPolicy, EplbStats
 
 from vllm_ascend.ascend_config import StairConfig
-from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
+from vllm_ascend.distributed.eplb.policy import AscendEplbStats, PreparedLoadStats
 from vllm_ascend.distributed.eplb.policy._stair_process import receive_planner_response, send_planner_request
 
 _MEAN_RATIO_TIE_TOLERANCE = 1e-9
@@ -207,17 +207,16 @@ class StairEplbPolicy(AbstractEplbPolicy):
 
     def rebalance_experts(
         self,
-        weight: torch.Tensor | PreparedLoadStats,
-        num_replicas: int,
-        num_groups: int,
-        num_nodes: int,
-        num_ranks: int,
+        weight: torch.Tensor,
+        stats: EplbStats,
         old_global_expert_indices: torch.Tensor | None = None,
-        *,
-        last_committed_mean_ratios: np.ndarray | None = None,
-        rank_node_ids: np.ndarray | None = None,
     ) -> torch.Tensor:
         """Plan a placement through the upstream policy entry point."""
+        num_replicas = stats.num_replicas
+        num_nodes = stats.num_nodes
+        num_ranks = stats.num_gpus
+        last_committed_mean_ratios = stats.last_committed_mean_ratios if isinstance(stats, AscendEplbStats) else None
+        rank_node_ids = stats.rank_node_ids if isinstance(stats, AscendEplbStats) else None
         if num_ranks < 1 or num_replicas < 1 or num_replicas % num_ranks:
             raise ValueError("STAIR requires equal rank capacity")
         if old_global_expert_indices is None:
@@ -226,11 +225,11 @@ class StairEplbPolicy(AbstractEplbPolicy):
         current_map = old_global_expert_indices.cpu()
         if current_map.ndim != 2 or current_map.shape[1] != num_replicas:
             raise ValueError("current expert placement must be [layers, num_replicas]")
-        if isinstance(weight, PreparedLoadStats):
-            if weight.values.device.type != "cpu" or weight.sample_counts is None:
+        if isinstance(stats, AscendEplbStats):
+            if weight.device.type != "cpu" or stats.sample_counts is None:
                 raise ValueError("prepared STAIR statistics require CPU values and sample counts")
-            logical_load_values = weight.values.to(dtype=torch.float64).numpy()
-            sample_counts = weight.sample_counts
+            logical_load_values = weight.to(dtype=torch.float64).numpy()
+            sample_counts = stats.sample_counts
         else:
             logical_load_values = weight.to(device="cpu", dtype=torch.float64).numpy()
             if logical_load_values.ndim == 2:
@@ -269,6 +268,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
         target.source_rank_ids = plan.source_rank_ids
         target.source_slot_ids = plan.source_slot_ids
         target.predicted_mean_ratios = plan.predicted_mean_ratios
+        target.rank_node_ids = node_ids
 
         if plan.imbalance_ratios is None:
             raise RuntimeError("STAIR planner returned no imbalance summary")

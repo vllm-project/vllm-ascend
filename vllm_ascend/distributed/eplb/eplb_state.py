@@ -6,10 +6,9 @@
 import inspect
 import threading
 import time
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from contextvars import ContextVar
-from dataclasses import fields
+from dataclasses import dataclass, fields
 from datetime import timedelta
 from typing import Any
 
@@ -18,7 +17,8 @@ import torch
 from torch.distributed import all_reduce
 from vllm.distributed import get_ep_group, get_eplb_group
 from vllm.distributed.eplb import eplb_state as _eplb_state
-from vllm.distributed.eplb.policy import AbstractEplbPolicy
+from vllm.distributed.eplb.policy import AbstractEplbPolicy, DefaultEplbPolicy
+from vllm.distributed.eplb.rebalance_execute import AsyncEplbLayerResult
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -26,39 +26,30 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from vllm_ascend.device.hardware_profile import MoECommPolicy, get_current_hardware_profile
-from vllm_ascend.distributed.eplb.eplb_communicator import AscendHixlEplbCommunicator, _HixlSession
-from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
+from vllm_ascend.distributed.eplb.eplb_communicator import (
+    AscendGlooEplbCommunicator,
+    AscendHixlEplbCommunicator,
+    _HixlSession,
+)
+from vllm_ascend.distributed.eplb.policy import AscendEplbStats, PreparedLoadStats
 from vllm_ascend.distributed.eplb.tensor_ops import (
     build_expert_replica_routing_table,
     count_allgather_tokens,
     make_allgather_mask,
 )
 
+_EXPLICIT_TRANSFER_TARGET_ATTR = "_vllm_ascend_explicit_transfer_target"
 ASYNC_EPLB_CYCLE_COMMITTED_LOG = "Ascend async EPLB cycle committed"
 _EPLB_CLOSE_TIMEOUT_SECONDS = 300
-_EPLB_EVENT_POLL_SECONDS = 0.1
 EXPERT_MAPPING_EP_SIZE: ContextVar[int] = ContextVar("vllm_ascend_expert_mapping_ep_size", default=1)
 # ForwardContext.additional_kwargs key holding one gathered AllGather source
 # mask per micro-batch. Read directly rather than through _EXTRA_CTX: the
 # proxy cannot create the list atomically, which DBO needs.
 _ALLGATHER_SOURCE_MASK_SLOTS = "eplb_allgather_source_mask_slots"
-
-
-@contextmanager
-def _configured_upstream_policy(name: str, policy: AbstractEplbPolicy | None) -> Iterator[None]:
-    """Expose an Ascend policy only while upstream initializes its state."""
-    policies: dict[str, Any] = _eplb_state.EPLB_POLICIES
-    if policy is None or name in policies:
-        yield
-        return
-    policies[name] = policy
-    try:
-        yield
-    finally:
-        policies.pop(name)
 
 
 def _upstream_from_mapping_accepts_valid_expert_count() -> bool:
@@ -258,8 +249,129 @@ def _raise_if_async_worker_stopped(state: Any) -> None:
         raise error
 
 
+def _copy_host_map(src: torch.Tensor, dst: torch.Tensor) -> None:
+    dst.copy_(src, non_blocking=True)
+
+
+def _commit_ascend_maps_for_layer(
+    model_state,
+    physical_to_logical_map: torch.Tensor,
+    logical_to_physical_map: torch.Tensor,
+    logical_replica_count: torch.Tensor,
+    layer_idx: int,
+) -> None:
+    physical_dst = model_state.physical_to_logical_map[layer_idx]
+    if physical_to_logical_map.shape != physical_dst.shape:
+        raise ValueError("Async EPLB cannot change the number of physical experts")
+    _copy_host_map(physical_to_logical_map, physical_dst)
+
+    logical_dst = model_state.logical_to_physical_map[layer_idx]
+    if logical_to_physical_map.shape != logical_dst.shape:
+        raise ValueError("Prepared logical map does not match the configured capacity")
+    _copy_host_map(logical_to_physical_map, logical_dst)
+    _copy_host_map(
+        logical_replica_count,
+        model_state.logical_replica_count[layer_idx],
+    )
+
+
+@dataclass
+class _AscendAsyncLayerResult:
+    layer_idx: int | None
+    new_physical_to_logical_map: torch.Tensor | None
+    new_logical_to_physical_map: torch.Tensor | None
+    new_logical_replica_count: torch.Tensor | None
+    transfer_metadata: Any
+    consumed_event: Any
+    is_last_result: bool
+
+
+class AscendEplbModelState(_eplb_state.EplbModelState):
+    """Commit one model's placement and consume its pending transfers."""
+
+    pending_result: AsyncEplbLayerResult | _AscendAsyncLayerResult | None
+    _last_committed_mean_ratios: np.ndarray
+
+    def _commit_eplb_maps(self, new_physical_to_logical_map) -> None:
+        super()._commit_eplb_maps(new_physical_to_logical_map)
+        self._update_after_commit()
+
+    def _commit_eplb_maps_for_layer(self, new_physical_to_logical_map, layer) -> None:
+        result = self.pending_result
+        new_logical_to_physical_map = getattr(result, "new_logical_to_physical_map", None)
+        if new_logical_to_physical_map is not None:
+            new_logical_replica_count = getattr(result, "new_logical_replica_count", None)
+            assert new_logical_replica_count is not None
+            _commit_ascend_maps_for_layer(
+                self,
+                new_physical_to_logical_map,
+                new_logical_to_physical_map,
+                new_logical_replica_count,
+                layer,
+            )
+        else:
+            super()._commit_eplb_maps_for_layer(new_physical_to_logical_map, layer)
+        self._update_after_commit(layer)
+
+    def _update_after_commit(self, layer_idx=None) -> None:
+        refresh_model_routing_tables(self, layer_idx)
+        target = getattr(self.communicator, _EXPLICIT_TRANSFER_TARGET_ATTR, None)
+        if target is not None and hasattr(target, "predicted_mean_ratios"):
+            layers = range(self.model.num_moe_layers) if layer_idx is None else (layer_idx,)
+            for layer in layers:
+                predicted_ratio = target.predicted_mean_ratios[layer]
+                if np.isfinite(predicted_ratio):
+                    self._last_committed_mean_ratios[layer] = predicted_ratio
+
+    def _move_to_workspace(self, ep_rank: int) -> None:
+        result = self.pending_result
+        assert result is not None
+        layer_idx = result.layer_idx
+        is_last_result = getattr(result, "is_last_result", layer_idx == self.model.num_moe_layers - 1)
+        if layer_idx is not None:
+            assert result.new_physical_to_logical_map is not None
+            _eplb_state.move_from_buffer(
+                expert_weights=self.model.expert_weights[layer_idx],
+                expert_weights_buffers=self.expert_buffer,
+                transfer_metadata=result.transfer_metadata,
+                new_indices=result.new_physical_to_logical_map.numpy(),
+                ep_rank=ep_rank,
+            )
+            self._commit_eplb_maps_for_layer(result.new_physical_to_logical_map, layer_idx)
+        if is_last_result:
+            self.rebalanced = False
+            self.communicator.__dict__.pop(_EXPLICIT_TRANSFER_TARGET_ATTR, None)
+            hixl_timings = getattr(self.communicator, "_eplb_hixl_phase_timings", [])
+            if hixl_timings and ep_rank == 0:
+                logger.info(
+                    "HIXL EPLB transfer: model=%s rank=%d launch_ms=%.3f background_transfer_ms=%.3f "
+                    "confirmation_ms=%.3f foreground_wait_ms=%.3f requests=%d bytes=%d layers=%d "
+                    "migration_span_steps=%d migration_deferred_steps=%d",
+                    self.model_name,
+                    ep_rank,
+                    sum(timing.launch_ms for timing in hixl_timings),
+                    sum(timing.transfer_ms for timing in hixl_timings),
+                    sum(timing.confirmation_ms for timing in hixl_timings),
+                    getattr(self, "_eplb_foreground_wait_ms", 0.0),
+                    sum(timing.request_count for timing in hixl_timings),
+                    sum(timing.transfer_bytes for timing in hixl_timings),
+                    len(hixl_timings),
+                    getattr(self, "_eplb_migration_span_steps", 0),
+                    getattr(self, "_eplb_migration_deferred_steps", 0),
+                )
+            self.communicator.__dict__.pop("_eplb_hixl_phase_timings", None)
+            self.__dict__.pop("_eplb_migration_span_steps", None)
+            self.__dict__.pop("_eplb_migration_deferred_steps", None)
+            self.__dict__.pop("_eplb_foreground_wait_ms", None)
+
+        self.pending_result = None
+        result.consumed_event.record()
+
+
 class AscendEplbState(_eplb_state.EplbState):
     """Keep Ascend routing and load-recording state around upstream EPLB."""
+
+    model_state_cls = AscendEplbModelState
 
     cuda_device_index: int | None
     device_index: int | None
@@ -271,16 +383,15 @@ class AscendEplbState(_eplb_state.EplbState):
         device: torch.device,
         policy: AbstractEplbPolicy | None = None,
     ) -> None:
-        super().__init__(parallel_config, device)
         self._configured_policy = policy
-        if policy is not None:
-            self.policy = policy
+        super().__init__(parallel_config, device)
         self._has_fresh_recorded_load = False
         self._is_load_sampling_step = False
         self._should_collect_local_load = False
         self.allgather_record_tensor: torch.Tensor | None = None
         self._uses_phase_filter = False
         self._stop_async = threading.Event()
+        self._last_consumed_event: torch.Event | None = None
         self._suspended = False
         self._close_error: Exception | None = None
         self._hixl_session: _HixlSession | None = None
@@ -289,6 +400,25 @@ class AscendEplbState(_eplb_state.EplbState):
         # pointing at the attribute upstream actually reads.
         if self.device_index is None:
             self.device_index = torch.accelerator.current_device_index()
+
+    def create_policy(self) -> AbstractEplbPolicy:
+        return self._configured_policy or DefaultEplbPolicy()
+
+    def create_model_communicator(self, model, expert_buffer, group_coordinator):
+        backend = self.parallel_config.eplb_config.communicator
+        if backend == "torch_gloo":
+            return AscendGlooEplbCommunicator(
+                cpu_group=group_coordinator.cpu_group,
+                expert_buffer=expert_buffer,
+                all_expert_weights=model.expert_weights,
+            )
+        if backend == "hixl":
+            return AscendHixlEplbCommunicator(
+                cpu_group=group_coordinator.cpu_group,
+                all_expert_weights=model.expert_weights,
+                expert_buffer=expert_buffer,
+            )
+        return super().create_model_communicator(model, expert_buffer, group_coordinator)
 
     @property
     def uses_custom_load_stats(self) -> bool:
@@ -301,11 +431,7 @@ class AscendEplbState(_eplb_state.EplbState):
             raise RuntimeError("Cannot add EPLB models after HIXL initialization")
         token = EXPERT_MAPPING_EP_SIZE.set(get_ep_group().world_size)
         try:
-            with _configured_upstream_policy(
-                self.parallel_config.eplb_config.policy,
-                self._configured_policy,
-            ):
-                super().add_model(model, model_config, model_name=model_name)
+            super().add_model(model, model_config, model_name=model_name)
         finally:
             EXPERT_MAPPING_EP_SIZE.reset(token)
         # Snapshot the placement for every profile, not just AllGather. The load
@@ -331,13 +457,13 @@ class AscendEplbState(_eplb_state.EplbState):
             if isinstance(layer.eplb_state, AscendEplbLayerState):
                 layer.eplb_state.allgather_record_tensor = self.allgather_record_tensor
 
-    def wait_for_rearrangement(self, stream) -> bool:
-        """Allow an idle worker to stop without recording a fake device event."""
-        while not self.rearrange_event._recorded.wait(_EPLB_EVENT_POLL_SECONDS):
-            if self._stop_async.is_set():
-                return False
-        self.rearrange_event.wait(stream=stream)
-        return True
+    def wait_for_rearrangement(self, stream: torch.Stream | None) -> bool:
+        """Keep the local worker interruptible until upstream shutdown support lands."""
+        while not self._stop_async.is_set():
+            if self.rearrange_event._recorded.wait(timeout=0.1):
+                self.rearrange_event.wait(stream=stream)
+                return True
+        return False
 
     def close(self) -> None:
         """Close EPLB while its CPU groups and NPU mappings are still alive."""
@@ -355,6 +481,10 @@ class AscendEplbState(_eplb_state.EplbState):
                 if worker.is_alive():
                     raise TimeoutError("EPLB background worker could not be stopped; worker must terminate")
                 self.async_worker = None
+                if self._last_consumed_event is not None:
+                    with gpu_sync_allowed():
+                        self._last_consumed_event.synchronize()
+                    self._last_consumed_event = None
             if self._hixl_session is not None:
                 self._hixl_session.close()
         except Exception as error:
@@ -374,6 +504,8 @@ class AscendEplbState(_eplb_state.EplbState):
 
     def start_async_loop(self, *args, **kwargs) -> None:
         if not self._suspended:
+            if self.async_worker is None:
+                self._stop_async.clear()
             communicators = {
                 key: model_state.communicator
                 for key, model_state in self.model_states.items()
@@ -577,17 +709,20 @@ class AscendEplbState(_eplb_state.EplbState):
         if global_load_stats.keys() != self.model_states.keys():
             raise ValueError("Load statistics must contain exactly one entry per EPLB model")
         num_gpus = get_eplb_group().device_group.size()
-        num_nodes = len(np.unique(self.get_rank_node_ids()))
+        rank_node_ids = self.get_rank_node_ids()
+        num_nodes = len(np.unique(rank_node_ids))
         for model_key, model_state in self.model_states.items():
             load_stats = global_load_stats[model_key]
-            model_state._policy_load_stats = load_stats
             model = model_state.model
-            model_state.eplb_stats = _eplb_state.EplbStats(
+            model_state.eplb_stats = AscendEplbStats(
                 global_expert_load_window=load_stats.values,
                 num_replicas=model.num_physical_experts,
                 num_groups=model.num_expert_groups,
                 num_nodes=num_nodes,
                 num_gpus=num_gpus,
+                sample_counts=load_stats.sample_counts.copy() if load_stats.sample_counts is not None else None,
+                rank_node_ids=rank_node_ids.copy(),
+                last_committed_mean_ratios=model_state._last_committed_mean_ratios.copy(),
             )
         for model_state in self.model_states.values():
             model_state.rebalanced = True
@@ -648,9 +783,6 @@ class AscendEplbState(_eplb_state.EplbState):
                 is_profile=is_profile,
                 rank_mapping=rank_mapping,
             )
-        if not is_profile and not self.is_async:
-            for model_state in self.model_states.values():
-                refresh_model_routing_tables(model_state)
         if not is_profile:
             self._has_fresh_recorded_load = False
         return result
@@ -750,8 +882,7 @@ class AscendEplbState(_eplb_state.EplbState):
             if num_valid_physical_experts is None:
                 raise TypeError("num_valid_physical_experts is required by the selected vLLM release mapping contract")
             from_mapping_kwargs["num_valid_physical_experts"] = num_valid_physical_experts
-        with _configured_upstream_policy(parallel_config.eplb_config.policy, policy):
-            state = super().from_mapping(**from_mapping_kwargs)
+        state = super().from_mapping(**from_mapping_kwargs)
         state._configured_policy = policy
         if policy is not None:
             state.policy = policy

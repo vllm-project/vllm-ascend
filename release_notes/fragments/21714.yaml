@@ -1,0 +1,6 @@
+pr: 21714
+entries:
+  - category: dependency
+    text: MRV2 EPLB integration requires the upstream platform, policy, and model-state interfaces in the verified vLLM runtime revision.
+  - category: config
+    text: An omitted Ascend EPLB policy resolves to stair through the NPU platform hook; explicitly selecting default remains supported.

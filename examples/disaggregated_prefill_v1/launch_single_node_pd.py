@@ -73,7 +73,7 @@ def _mooncake_lib_path() -> str:
     """Locate the directory holding the mooncake shared libraries."""
     candidates: list[Path] = []
     try:
-        import mooncake  # type: ignore[import-not-found]
+        import mooncake  # type: ignore[import-not-found, import-untyped]
 
         pkg = Path(mooncake.__file__).resolve().parent
         candidates.extend([pkg / "lib", pkg, pkg.parent])
