@@ -1,0 +1,4 @@
+pr: 21658
+entries:
+  - category: performance
+    text: DeepSeek V4.1 shards indexer queries across tensor-parallel ranks for eligible batches. Full decode graphs use replicated scoring for short histories, and PCP uses replicated scoring when its local query batches are too small to amortize the data exchange.

@@ -32,7 +32,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
-from vllm.v1.worker.gpu.pcp_manager import PCPManager
+from vllm.v1.worker.gpu.pcp_manager import PCPManager, RankSegment
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.context_parallel.common_cp import is_pcp_decode_sharding_enabled
@@ -65,6 +65,8 @@ class AscendPCPAttentionContext:
     local_token_indices: torch.Tensor | None = None
     # Padded tensor width consumed by each rank's model forward.
     local_num_tokens: int | None = None
+    # Smallest real token count across PCP ranks, before graph padding.
+    min_local_num_tokens: int = 0
 
 
 class AscendPCPManager(PCPManager):
@@ -86,6 +88,7 @@ class AscendPCPManager(PCPManager):
     _is_draft_prefill_sharded: bool = False
     # The batch restore_for_sampling handed to sampling and the speculator.
     _sampling_global_batch: InputBatch | None = None
+    _min_local_num_tokens: int = 0
     # Draft input buffers and row count overwritten by staged rank-local
     # draft prefill inputs; the rows are stashed in the _draft_*_stash buffers.
     _staged_draft_inputs: tuple[InputBuffers, int] | None = None
@@ -278,6 +281,24 @@ class AscendPCPManager(PCPManager):
             and self.vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
             and global_batch.num_draft_tokens == 0
         )
+
+    def _build_batch_layout(
+        self,
+        num_scheduled_tokens: np.ndarray,
+        num_computed_tokens: np.ndarray,
+        is_prefilling: np.ndarray,
+        query_start_loc_np: np.ndarray,
+        padded_num_tokens: int | None = None,
+    ) -> tuple[list[list[RankSegment]], list[int]]:
+        segments_by_rank, per_rank_num_tokens = super()._build_batch_layout(
+            num_scheduled_tokens,
+            num_computed_tokens,
+            is_prefilling,
+            query_start_loc_np,
+            padded_num_tokens=padded_num_tokens,
+        )
+        self._min_local_num_tokens = min(per_rank_num_tokens)
+        return segments_by_rank, per_rank_num_tokens
 
     def partition_batch(
         self,
@@ -684,6 +705,7 @@ class AscendPCPManager(PCPManager):
         return AscendPCPAttentionContext(
             global_batch=global_batch,
             local_num_tokens=local_batch.num_tokens_after_padding,
+            min_local_num_tokens=self._min_local_num_tokens,
             local_to_global_req_indices=local_to_global_req_indices,
             local_token_indices=self._local_gather_idx[: local_batch.num_tokens],
             global_block_tables=self._block_tables.gather_block_tables(

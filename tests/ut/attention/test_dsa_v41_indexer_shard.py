@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import numpy as np
 import pytest
 import torch
 import torch.nn.functional as F
@@ -10,6 +11,7 @@ from vllm_ascend.attention.dsa_v41_indexer_shard import (
     gather_indexer_rows,
     plan_indexer_rows,
     rebase_indexer_lengths,
+    should_shard_v41_full_decode,
 )
 
 
@@ -71,6 +73,37 @@ def test_full_decode_partition_depends_on_bucket_and_not_runtime_lengths():
     replay = plan_indexer_rows(24, 8, 7, seq_lens=[1001, 800, 0, 0], **kwargs)
     assert capture == replay == IndexerRowPartition((3,) * 8, 7)
     assert plan_indexer_rows(6, 8, 0, topk=512, ratio=2, full_graph=True) is None
+
+
+@pytest.mark.parametrize(
+    "bucket,history,expected",
+    [
+        (8, [128, 256], False),
+        (8, [1023, 8192], False),
+        (8, [1024, 8192], True),
+        (8, [], False),
+        (6, [8192], False),
+        (24, [8192, 8192], True),
+    ],
+)
+def test_full_decode_sharding_requires_long_history_and_enough_bucket_rows(bucket, history, expected):
+    assert should_shard_v41_full_decode(bucket, 8, np.array(history, dtype=np.int32), 512) is expected
+
+
+@pytest.mark.parametrize(
+    "bucket,pcp_min_rows,expected",
+    [
+        (4, 3, False),  # Six one-token requests over two PCP ranks.
+        (8, 7, False),  # Fifteen one-token requests over two PCP ranks.
+        (8, 8, True),
+        (16, 13, False),  # The last TP shard contains only one real row.
+        (16, 14, True),
+        (24, 0, False),  # An empty PCP rank selects the replicated graph.
+    ],
+)
+def test_pcp_full_decode_gates_on_real_rows_in_each_padded_tp_shard(bucket, pcp_min_rows, expected):
+    history = np.full(16, 50_000, dtype=np.int32)
+    assert should_shard_v41_full_decode(bucket, 4, history, 512, pcp_min_query_rows=pcp_min_rows) is expected
 
 
 def test_gather_restores_row_order_and_topk_lengths_in_one_collective():

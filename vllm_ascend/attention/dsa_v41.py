@@ -34,6 +34,8 @@ from vllm.v1.kv_cache_interface import AttentionSpec, CircularBufferSpec
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend, build_dspark_swa_indices, dsv4_dsa_overlap_stream
 from vllm_ascend.attention.dsa_v41_indexer_shard import (
+    MIN_PCP_INDEXER_ROWS_PER_TP_RANK,
+    V41_FULL_INDEXER_SHARD,
     IndexerRowPartition,
     gather_indexer_rows,
     plan_indexer_rows,
@@ -1675,13 +1677,19 @@ class AscendDSAV41IndexerMetadataBuilder(AscendDSAV41AttentionMetadataBuilder):
             self._build_qli_metadata(req.local_indexer, req.local_indexer, sharded=True, **kwargs)
 
     def _build_indexer_partition(self, req: AscendDSAV41Metadata, *, full_graph: bool) -> None:
-        if not self._supports_device_ops:
+        if not self._supports_device_ops or (full_graph and V41_FULL_INDEXER_SHARD.get() is False):
             return
         parallel = self.vllm_config.parallel_config
         if (
             parallel.tensor_parallel_size < 2
             or parallel.decode_context_parallel_size > 1
             or self.vllm_config.lora_config is not None
+        ):
+            return
+        if (
+            not full_graph
+            and parallel.prefill_context_parallel_size > 1
+            and req.num_actual_tokens < parallel.tensor_parallel_size * MIN_PCP_INDEXER_ROWS_PER_TP_RANK
         ):
             return
         tp = get_tp_group()
