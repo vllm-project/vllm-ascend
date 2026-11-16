@@ -444,6 +444,7 @@ class AscendConfig:
             "msmonitor_use_daemon": false,
             "enable_transpose_kv_cache_by_block": true,
             "weight_nz_mode": 1,
+            "enable_moe_tail_plain_add": false,
             "enable_shared_expert_dp": false,
             "enable_sparse_sfa_c8": false,
             "enable_sparse_li_c8": false,
@@ -619,6 +620,11 @@ class AscendConfig:
     msmonitor_use_daemon: bool = False
     enable_transpose_kv_cache_by_block: bool = True
     weight_nz_mode: int = 1
+    # Merge shared and routed MoE outputs with a plain tensor add instead of a
+    # single-element `torch._foreach_add`. Both are bit-identical; on 910B the
+    # foreach form still launches a dedicated add kernel per MoE layer, which
+    # is pure launch overhead for a 1-element tensor list.
+    enable_moe_tail_plain_add: bool = False
 
     # ---- sub-configs (no vllm_config dep): pydantic dict→dataclass coercion ----
     ascend_compilation_config: AscendCompilationConfig = dataclasses.field(default_factory=AscendCompilationConfig)
