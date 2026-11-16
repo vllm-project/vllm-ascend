@@ -591,7 +591,9 @@ class TestMooncakeHybridConnectorRegistration(unittest.TestCase):
                     return MagicMock()
 
                 with (
-                    patch(f"{module}.global_te.register_buffer", side_effect=register_nonoverlapping) as register_buffer,
+                    patch(
+                        f"{module}.global_te.register_buffer", side_effect=register_nonoverlapping
+                    ) as register_buffer,
                     patch(f"{module}.KVCacheRecvingThread", side_effect=ready_receiver) as receiver,
                     patch(f"{module}.get_ip", return_value="127.0.0.1"),
                 ):
@@ -679,13 +681,21 @@ class TestMooncakeHybridConnectorRegistration(unittest.TestCase):
                 thread.vllm_config = types.SimpleNamespace(speculative_config=None)
                 thread.reformat_kv_cache = MagicMock()
 
-                def native_read(_session, local_addrs, remote_addrs, lengths):
+                def native_read(
+                    _session,
+                    local_addrs,
+                    remote_addrs,
+                    lengths,
+                    local_caches=local_caches,
+                    remote_caches=remote_caches,
+                ):
                     for local_addr, remote_addr, length in zip(local_addrs, remote_addrs, lengths):
                         for address, caches in ((local_addr, local_caches), (remote_addr, remote_caches)):
                             self.assertTrue(
                                 any(
                                     cache.untyped_storage().data_ptr() <= address
-                                    and address + length <= cache.untyped_storage().data_ptr() + cache.untyped_storage().nbytes()
+                                    and address + length
+                                    <= cache.untyped_storage().data_ptr() + cache.untyped_storage().nbytes()
                                     for cache in caches
                                 )
                             )
