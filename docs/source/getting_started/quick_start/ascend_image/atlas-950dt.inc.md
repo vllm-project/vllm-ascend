@@ -24,6 +24,12 @@
 
     #### Start the container {: #quick-start-atlas-950dt-container }
 
+    ???+ note "Host URMA provider libraries"
+
+        If `/usr/local/Ascend/driver/lib64/driver/urma` links to `/usr/lib64/urma` on the host, ensure that the link target is available inside the container.
+        When it is absent, add `-v /usr/lib64/urma:/usr/lib64/urma:ro` to the `docker run` command below.
+        See [950DT URMA provider troubleshooting](../faqs.md#atlas-950dt-urma-provider) for checks and verification.
+
     === "Ubuntu"
 
         ```bash
