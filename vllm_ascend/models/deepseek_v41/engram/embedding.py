@@ -52,6 +52,54 @@ if TYPE_CHECKING:
     from .shared_host import HostTableSlice
     from .shared_pool import SharedPoolClient
 
+# Offloaded parameters carry the host range they alias as a parameter attribute.
+# The tensor attribute travels through the layerwise reload's meta round trip
+# (``to_meta_tensor`` / ``materialize_meta_tensor`` copy ``tensor.__dict__``),
+# which is what lets the reload rebuild the parameter on its host storage
+# instead of allocating a full device copy of an offloaded table.
+HOST_OFFLOAD_STORAGE_ATTR = "_host_offload_storage"
+
+_HOST_OFFLOAD_PARAMS = (
+    ("weight", "_codes_uva"),
+    ("weight_scale_inv", "_scales_uva"),
+)
+
+
+def register_host_offload_storage(module: nn.Module) -> None:
+    """Expose a host-offloaded table's storage to reload and weight updates.
+
+    ``cpu_offload`` builds the table in registered host memory and aliases it
+    through ``weight``/``weight_scale_inv``, whose data is never read from the
+    device.  The aliases alone are not enough for a reload: the layerwise path
+    moves the parameters to the meta device, materializes them again on the
+    default (device) device when the update arrives, and only then copies the
+    result back.  For a table this large that materialization is a full per-rank
+    device allocation (22.89 GiB for a 384M x 256 BF16 table over 8 ranks) which
+    does not fit next to the weights a level-2 sleep keeps resident.
+
+    Attaching the host range to the parameter gives the reload the tensor to
+    rebuild the parameter on, so an update lands in the storage the lookup
+    kernel already reads.
+    """
+    for param_name, holder_attr in _HOST_OFFLOAD_PARAMS:
+        param = getattr(module, param_name, None)
+        holder = getattr(module, holder_attr, None)
+        if holder is None:
+            continue
+        if not isinstance(param, nn.Parameter):
+            raise TypeError(f"{type(module).__name__}.{param_name} must be a Parameter to carry {holder_attr}")
+        # Registered storage, not a registered buffer: a non-persistent buffer
+        # that aliases a parameter's storage is deliberately not captured for
+        # reloading (`_is_non_persistent_parameter_alias_buffer`), and the
+        # quantized scale parameter is a second alias of the codes range.
+        try:
+            param.__dict__[HOST_OFFLOAD_STORAGE_ATTR] = holder.tensor
+        except AttributeError as exc:
+            raise RuntimeError(
+                f"{type(module).__name__}.{param_name} cannot carry its host storage; a layerwise reload would "
+                f"rebuild the offloaded table on the device and run out of memory"
+            ) from exc
+
 
 class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
     """TP(+EDP) head shard with BF16, INT8/FP32 or native MXFP8/E8M0."""
@@ -135,6 +183,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         try:
             self.weight = nn.Parameter(weight, requires_grad=False)
             self.weight_scale_inv = nn.Parameter(scales, requires_grad=False) if scales is not None else None
+            register_host_offload_storage(self)
             for param in (self.weight, self.weight_scale_inv):
                 if param is None:
                     continue
@@ -275,6 +324,11 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
             buffer.close()
             setattr(self, name, None)
             param = getattr(self, alias)
+            # The released range is gone; drop the host storage the alias was
+            # rebuilt on so a later reload cannot materialize a parameter into
+            # unmapped host memory.
+            if isinstance(param, nn.Parameter):
+                param.__dict__.pop(HOST_OFFLOAD_STORAGE_ATTR, None)
             setattr(
                 self,
                 alias,
