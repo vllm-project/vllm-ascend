@@ -227,11 +227,7 @@ def packed_sfa_cache_views(raw, spec, num_blocks, row_bytes, mla_dims=None, fuse
     if isinstance(spec, AscendSFAIndexerCacheSpec):
         key_bytes = KIMI_KERNEL_BLOCK_SIZE * spec.head_size * get_dtype_size(spec.dtype)
         key = view(spec.head_size, spec.dtype)
-        if not spec.scale_dim:
-            return (key,)
         scale = view(spec.scale_dim, spec.scale_dtype, key_bytes)
-        if spec.cache_sparse_li_c4:
-            scale = scale.unflatten(-1, (spec.scale_dim // 2, 2))
         return (key, scale)
     if spec.uses_packed_sfa_main_cache:
         return (view(spec.head_size, spec.dtype),)

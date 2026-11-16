@@ -9,7 +9,7 @@ Kimi K3.1 defaults to `BLNHC`. The existing `VLLM_KV_CACHE_LAYOUT` override
 can select another block-outermost layout such as `BLHNC`. The old layer-outermost
 paired-page implementation has been removed; explicit `LBNHC` selections fail
 during configuration. This implementation targets Model Runner V2, packed SFA
-main cache, one latent KV head, PCP=1 and DCP=1. Unsupported context-parallel
+main cache, C8 indexer K/scale storage, one latent KV head, PCP=1 and DCP=1. Unsupported context-parallel
 packing fails during planning.
 
 ## Ownership and storage
