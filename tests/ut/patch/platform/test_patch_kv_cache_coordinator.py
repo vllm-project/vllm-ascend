@@ -409,8 +409,7 @@ def test_per_group_lookup_matches_scheduler_call_convention():
     assert hit_lengths == (4095, 4095)
 
 
-@pytest.mark.parametrize("per_group", [False, True])
-def test_cache_lookup_preserves_replicated_draft_positions(per_group):
+def test_per_group_lookup_preserves_replicated_draft_positions():
     coordinator = _make_lookup_coordinator(producer=True)
     coordinator.dcp_world_size = 2
     draft_spec = replace(FA_SPEC, is_draft=True, dcp_sharded=False)
@@ -418,12 +417,7 @@ def test_cache_lookup_preserves_replicated_draft_positions(per_group):
         SpecGroup(FA_SPEC, [0], _RecordingFA, False),
         SpecGroup(draft_spec, [1], _RecordingMamba, True),
     ]
-    assert coordinator._get_effective_block_size(FA_SPEC) == 256
-    assert coordinator._get_effective_block_size(draft_spec) == 128
-    if per_group:
-        coordinator.find_longest_cache_hit_per_group([], 2048)
-    else:
-        coordinator.find_longest_cache_hit([], 2048)
+    coordinator.find_longest_cache_hit_per_group([], 2048)
     assert _RecordingFA.calls[-1]["dcp_world_size"] == 2
     assert _RecordingMamba.calls[-1]["dcp_world_size"] == 1
 

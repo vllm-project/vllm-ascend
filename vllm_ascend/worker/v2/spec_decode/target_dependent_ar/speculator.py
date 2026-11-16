@@ -733,7 +733,7 @@ class AscendTargetDependentARSpeculator(LmheadTPDraftSamplingMixin, TargetDepend
 
             metadata.seq_lens_cpu.copy_(next_seq_lens_cpu)
 
-    # TODO: Move build_fia_params and build_fia_params_dcp out of the
+    # TODO: Move build_fia_params out of the
     # speculator into the attention backend's graph-parameter helpers.
     def build_fia_params(
         self,

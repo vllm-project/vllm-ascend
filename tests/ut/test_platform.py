@@ -27,8 +27,8 @@ from vllm_ascend.platform import (
     _validate_eplb_config,
     _validate_glm5next_dflash2_pp_config,
     _validate_parallel_config,
-    _validate_pcp_dcp_config,
     _validate_sfa_dcp_kv_sp,
+    _validate_target_dcp_config,
 )
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
@@ -230,12 +230,11 @@ def test_validate_v41_adaptive_preserves_other_configs(mode):
     "use_mla,pcp_size,dcp_size",
     [
         pytest.param(True, 2, 2, id="mla-equal"),
-        pytest.param(True, 2, 16, id="mla-full-tp-pcp"),
         pytest.param(False, 2, 1, id="pcp-only"),
         pytest.param(False, 1, 1, id="tp-only"),
     ],
 )
-def test_validate_pcp_dcp_config_accepts_supported_sizes(use_mla, pcp_size, dcp_size):
+def test_validate_target_dcp_config_accepts_supported_configs(use_mla, pcp_size, dcp_size):
     config = SimpleNamespace(
         model_config=SimpleNamespace(use_mla=use_mla),
         parallel_config=SimpleNamespace(
@@ -243,32 +242,20 @@ def test_validate_pcp_dcp_config_accepts_supported_sizes(use_mla, pcp_size, dcp_
             decode_context_parallel_size=dcp_size,
         ),
     )
-    _validate_pcp_dcp_config(config)
+    _validate_target_dcp_config(config)
 
 
-@pytest.mark.parametrize(
-    "pcp_size,dcp_size",
-    [
-        pytest.param(1, 2, id="dcp-only"),
-        pytest.param(2, 2, id="pcp-dcp-equal"),
-        pytest.param(2, 4, id="dcp-larger"),
-        pytest.param(4, 2, id="pcp-larger"),
-        pytest.param(2, 16, id="full-tp-pcp-rejected-for-gqa"),
-    ],
-)
-def test_validate_pcp_dcp_config_rejects_unsupported_sizes(pcp_size, dcp_size):
+@pytest.mark.parametrize("pcp_size", [1, 2])
+def test_validate_target_dcp_config_rejects_gqa_dcp(pcp_size):
     config = SimpleNamespace(
         model_config=SimpleNamespace(use_mla=False),
         parallel_config=SimpleNamespace(
             prefill_context_parallel_size=pcp_size,
-            decode_context_parallel_size=dcp_size,
+            decode_context_parallel_size=2,
         ),
     )
-    with pytest.raises(
-        ValueError,
-        match=r"Decode Context Parallelism \(DCP\) is not supported for GQA/MQA models",
-    ):
-        _validate_pcp_dcp_config(config)
+    with pytest.raises(ValueError, match="DCP.*not supported for GQA/MQA"):
+        _validate_target_dcp_config(config)
 
 
 @pytest.mark.parametrize("dcp_size", [2, 16])

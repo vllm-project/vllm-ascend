@@ -134,13 +134,8 @@ def get_pcp_profile_num_tokens(vllm_config: VllmConfig, max_num_tokens: int, max
 
 
 def model_supports_dcp(model_config: Any) -> bool:
-    """Whether the model uses an attention architecture supported by Ascend DCP."""
-    return (
-        getattr(model_config, "use_mla", False)
-        or getattr(model_config, "is_deepseek_mla", False)
-        or model_uses_sfa_sparse(model_config)
-        or model_uses_kpool_indexer(model_config)
-    )
+    """Whether the model enables MLA or uses Ascend SFA attention."""
+    return getattr(model_config, "use_mla", False) or model_uses_sfa_sparse(model_config)
 
 
 def extract_dsv4_layer_index(config: Any, layer_name: str) -> int:

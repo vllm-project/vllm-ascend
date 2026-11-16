@@ -10,10 +10,6 @@ Decode Context Parallel shards the KV cache along the sequence dimension across 
 
 This document describes PCP execution and DCP cache sharding. See the [PCP/DCP RFC](https://github.com/vllm-project/vllm-ascend/issues/12622) for the design rationale.
 
-!!! note "GQA DCP support"
-
-    Decode Context Parallelism (DCP) is not supported for GQA/MQA models. GQA PCP remains supported. GQA draft models keep native TP head sharding and a complete sequence cache on each DCP rank when the target uses DCP. MLA and SFA models retain DCP support. See [RFC #21305](https://github.com/vllm-project/vllm-ascend/issues/21305).
-
 ## KV-cache layout
 
 DCP stores tokens in an interleaved layout across ranks. The interleaving granularity is controlled by `cp_kv_cache_interleave_size`, whose declared default is `1`.

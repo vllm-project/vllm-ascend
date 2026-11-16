@@ -9,10 +9,6 @@ Context Parallel (CP) serves long-context requests by splitting work or KV-cache
 
 For a general introduction to these two strategies, see the upstream [vLLM Context Parallel Deployment](https://docs.vllm.ai/en/latest/serving/context_parallel_deployment/) guide.
 
-!!! note "GQA DCP support"
-
-    Decode Context Parallelism (DCP) is not supported for GQA/MQA models. GQA PCP remains supported. GQA draft models keep native TP head sharding and a complete sequence cache on each DCP rank when the target uses DCP. MLA and SFA models retain DCP support. See [RFC #21305](https://github.com/vllm-project/vllm-ascend/issues/21305).
-
 ## Supported Scenarios
 
 ### Prefill Context Parallel { #prefill-context-parallel }
@@ -173,6 +169,6 @@ The following constraint applies to both standalone DCP and PCP+DCP:
         --kv-transfer-config '{...}'
     ```
 
-- Mooncake block-key layerwise KV pooling supports standalone DCP when the producer and consumer use the same DCP size. PCP and DCP cannot be enabled together for layerwise pooling, and cache groups whose block size is not scaled by DCP (sliding-window, recurrent/align-state, circular-buffer, ...) are not supported with DCP. The smallest cache-group block size must divide every other group block size, and `--prefix-match-unit` must be unset with DCP. For GQA/MQA, `tensor_parallel_size // num_key_value_heads` must be at least the DCP size. Hybrid DCP support is experimental. See [Mooncake Layerwise KV Cache Pooling](mooncake_layerwise_adaptation_and_optimization.md#decode-context-parallelism-dcp).
+- Mooncake block-key layerwise KV pooling supports standalone DCP when the producer and consumer use the same DCP size. PCP and DCP cannot be enabled together for layerwise pooling, and cache groups whose block size is not scaled by DCP (sliding-window, recurrent/align-state, circular-buffer, ...) are not supported with DCP. The smallest cache-group block size must divide every other group block size, and `--prefix-match-unit` must be unset with DCP. GQA/MQA models do not support DCP. Hybrid DCP support is experimental. See [Mooncake Layerwise KV Cache Pooling](mooncake_layerwise_adaptation_and_optimization.md#decode-context-parallelism-dcp).
 
 For implementation details, see the [Context Parallel design document](../../developer_guide/Design_Documents/context_parallel.md).

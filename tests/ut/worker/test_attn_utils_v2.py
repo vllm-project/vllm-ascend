@@ -1147,8 +1147,7 @@ def test_gqa_pcp_cache_keeps_tp_local_kv_heads(monkeypatch):
 
 
 @pytest.mark.parametrize("is_draft_layer", [True, False])
-@pytest.mark.parametrize("dcp_size", [1, 2, 4])
-def test_draft_layer_specs_keep_ownership_and_sequence_capacity(monkeypatch, is_draft_layer, dcp_size):
+def test_draft_layer_specs_keep_ownership_and_sequence_capacity(monkeypatch, is_draft_layer):
     """Draft specs carry ``is_draft`` so EAGLE groups get flagged on main.
 
     vLLM #42309 annotates ``is_eagle_group`` from ``spec.is_draft``; without the
@@ -1178,7 +1177,7 @@ def test_draft_layer_specs_keep_ownership_and_sequence_capacity(monkeypatch, is_
         parallel_config=SimpleNamespace(
             tensor_parallel_size=1,
             prefill_context_parallel_size=1,
-            decode_context_parallel_size=dcp_size,
+            decode_context_parallel_size=2,
         ),
         attention_config=AttentionConfig(indexer_kv_dtype="auto"),
         cache_config=SimpleNamespace(cache_dtype="auto", block_size=128),
@@ -1195,14 +1194,13 @@ def test_draft_layer_specs_keep_ownership_and_sequence_capacity(monkeypatch, is_
     speculator = object.__new__(AscendEagleSpeculator)
     speculator.dcp_size = 1
     speculator.draft_attn_layer_names = {"model.layers.0.self_attn.attn"} if is_draft_layer else set()
-    runner = SimpleNamespace(vllm_config=vllm_config, speculator=speculator, dcp_size=dcp_size)
+    runner = SimpleNamespace(vllm_config=vllm_config, speculator=speculator, dcp_size=2)
     spec = upstream_model_runner.GPUModelRunner.get_kv_cache_spec(runner)["model.layers.0.self_attn.attn"]
 
     assert spec.is_draft is is_draft_layer
-    assert spec.dcp_sharded is (not is_draft_layer or dcp_size == 1)
-    expected_blocks = 8 if is_draft_layer else 8 // dcp_size
+    assert spec.dcp_sharded is (not is_draft_layer)
+    expected_blocks = 8 if is_draft_layer else 4
     assert spec.max_num_blocks_per_req(vllm_config, 1024) == expected_blocks
-    assert spec.max_memory_usage_bytes(vllm_config) == expected_blocks * spec.page_size_bytes
 
 
 @pytest.mark.parametrize(

@@ -275,13 +275,10 @@ def test_gqa_dcp_keeps_upstream_validation(monkeypatch, pcp_size):
     def validate_config(model, config):
         validated.append((model, config))
         assert config is parallel_config
-        assert config.enable_expert_parallel is True
-        assert config.decode_context_parallel_size == 2
 
     monkeypatch.setattr(patch_speculative_config, "_orig_verify_with_parallel_config", validate_config)
     _ascend_verify_with_parallel_config(model_config, parallel_config)
-    assert len(validated) == 1
-    assert validated[0][0] is model_config
+    assert validated == [(model_config, parallel_config)]
     assert parallel_config.decode_context_parallel_size == 2
 
 

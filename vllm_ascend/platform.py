@@ -671,8 +671,8 @@ class NPUPlatform(Platform):
         _validate_glm5next_dflash2_pp_config(vllm_config)
         cls._validate_indexer_pp_config(vllm_config)
 
+        _validate_target_dcp_config(vllm_config)
         _validate_deepseek_v41_adaptive_config(vllm_config)
-        _validate_pcp_dcp_config(vllm_config)
         _validate_draft_decode_context_parallel_config(vllm_config)
         _validate_parallel_config(vllm_config)
         _validate_engram_config(vllm_config)
@@ -2171,7 +2171,7 @@ def _validate_parallel_config(vllm_config: VllmConfig) -> None:
             )
 
 
-def _validate_pcp_dcp_config(vllm_config: VllmConfig) -> None:
+def _validate_target_dcp_config(vllm_config: VllmConfig) -> None:
     """Validate DCP support for the target model."""
     if vllm_config.parallel_config.decode_context_parallel_size > 1 and not model_supports_dcp(
         vllm_config.model_config

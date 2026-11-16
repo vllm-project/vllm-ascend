@@ -296,24 +296,6 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             treat_short_extends_as_decodes=not self.use_pcp,
         )
 
-    def _build_backend_metadata(
-        self,
-        common_attn_metadata: AscendCommonAttentionMetadata,
-        *,
-        block_table: torch.Tensor,
-        query_lens: torch.Tensor,
-        seq_lens: torch.Tensor,
-        num_decodes: int,
-        num_prefills: int,
-    ) -> dict[str, Any]:
-        """Extension point for layouts such as DCP.
-
-        The base builder owns common token classification, padding, masks and
-        cache metadata. Specialized backends only add their phase-specific
-        metadata here.
-        """
-        return {}
-
     def build(
         self,
         common_prefix_len: int,
@@ -421,14 +403,6 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
                 dim=0,
             )
 
-        backend_metadata = self._build_backend_metadata(
-            common_attn_metadata,
-            block_table=block_table,
-            query_lens=query_start_loc_cpu[1:] - query_start_loc_cpu[:-1],
-            seq_lens=seq_lens,
-            num_decodes=num_decodes,
-            num_prefills=num_prefills,
-        )
         attn_metadata = self.metadata_cls(
             num_actual_tokens=num_actual_tokens,
             num_decode_tokens=num_decode_tokens,
@@ -448,7 +422,6 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             num_decodes=num_decodes,
             causal=common_attn_metadata.causal,
             model_runner_type=self.model_config.runner_type,
-            **backend_metadata,
         )
         if pcp_shard_slot_mapping is not None:
             self._finalize_pcp_metadata(attn_metadata, pcp_shard_slot_mapping)
