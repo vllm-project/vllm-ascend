@@ -100,6 +100,7 @@ def test_npu_worker_supports_shared_region_view_apis(
         "SingleDirectionNPUOffloadingHandler",
         FakeHandler,
     )
+    monkeypatch.setattr(cpu_npu_mod, "register_dram", lambda *args: None)
     kv_caches = SimpleNamespace(
         tensors=[
             SimpleNamespace(
@@ -185,6 +186,7 @@ def test_only_tiering_spec_overrides_shared_region_capability() -> None:
         (True, 3, 2, 1, 0),
     ],
 )
+@pytest.mark.parametrize("backend", ["auto", "memcpy", "sdma"])
 def test_tiering_worker_matches_v027_shared_region_contract(
     monkeypatch: pytest.MonkeyPatch,
     replicated_layout: bool,
@@ -192,6 +194,7 @@ def test_tiering_worker_matches_v027_shared_region_contract(
     world_size: int,
     worker_rank: int,
     expected_rank: int,
+    backend: str,
 ) -> None:
     captured: dict = {}
 
@@ -221,6 +224,7 @@ def test_tiering_worker_matches_v027_shared_region_contract(
         parallel=SimpleNamespace(world_size=world_size, rank=worker_rank),
     )
     spec._engine_id = "engine-dp0"
+    spec.extra_config = {"dram_transfer_backend": backend}
     spec.replicated_layout = replicated_layout
     spec.cpu_page_size_per_worker = 64
     spec.num_chunks = 10
@@ -241,6 +245,7 @@ def test_tiering_worker_matches_v027_shared_region_contract(
         "blocks_per_chunk": 2,
         "num_cpu_blocks": 10,
         "mmap_region": captured["region"],
+        "dram_transfer_backend": backend,
     }
 
 

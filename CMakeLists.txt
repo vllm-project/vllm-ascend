@@ -182,6 +182,76 @@ else()
   message(STATUS "aclrtHostRegisterV2: pinned host registration unavailable; ECCPUConnector will be rejected")
 endif()
 
+# FFTS SDMA requires the A3 runtime ABI and device-mapped host memory.
+if(SOC_VERSION MATCHES "ascend910_93.*")
+  find_path(CANN_FFTS_INCLUDE_DIR NAMES runtime/rt_ffts_plus.h rt_external_ffts.h
+    HINTS ${ASCEND_HOME_PATH}/include ${ASCEND_HOME_PATH}/pkg_inc/runtime
+          ${ASCEND_HOME_PATH}/aarch64-linux/pkg_inc/runtime
+          ${ASCEND_HOME_PATH}/x86_64-linux/pkg_inc/runtime NO_DEFAULT_PATH)
+  find_library(CANN_FFTS_RUNTIME NAMES runtime
+    HINTS ${ASCEND_HOME_PATH}/lib64 ${ASCEND_HOME_PATH}/aarch64-linux/lib64
+          ${ASCEND_HOME_PATH}/x86_64-linux/lib64 NO_DEFAULT_PATH)
+  if(CANN_FFTS_INCLUDE_DIR AND CANN_FFTS_RUNTIME)
+    include(CMakePushCheckState)
+    cmake_push_check_state()
+    set(CMAKE_REQUIRED_INCLUDES ${ASCEND_HOME_PATH}/include ${CANN_FFTS_INCLUDE_DIR}
+      ${ASCEND_HOME_PATH}/pkg_inc ${ASCEND_HOME_PATH}/pkg_inc/toolchain
+      ${ASCEND_HOME_PATH}/pkg_inc/profiling
+      ${ASCEND_HOME_PATH}/aarch64-linux/pkg_inc
+      ${ASCEND_HOME_PATH}/aarch64-linux/pkg_inc/toolchain
+      ${ASCEND_HOME_PATH}/aarch64-linux/pkg_inc/profiling
+      ${ASCEND_HOME_PATH}/x86_64-linux/pkg_inc
+      ${ASCEND_HOME_PATH}/x86_64-linux/pkg_inc/toolchain
+      ${ASCEND_HOME_PATH}/x86_64-linux/pkg_inc/profiling)
+    set(CMAKE_REQUIRED_LIBRARIES ascendcl ${CANN_FFTS_RUNTIME})
+    # SDK-only build hosts need not have libascend_hal from the NPU driver.
+    # Still resolve the ACL/FFTS symbols directly referenced by this probe.
+    list(APPEND CMAKE_REQUIRED_LINK_OPTIONS "-Wl,--allow-shlib-undefined")
+    check_cxx_source_compiles("
+      #include <acl/acl.h>
+      #if __has_include(\"runtime/rt_ffts_plus.h\")
+      #include \"runtime/rt_ffts_plus.h\"
+      #else
+      #include \"rt_external_ffts.h\"
+      #endif
+      int main() {
+        static_assert(sizeof(rtFftsPlusComCtx_t) == 128);
+        static_assert(sizeof(rtFftsPlusSdmaCtx_t) == 128);
+        rtFftsPlusComCtx_t context = {};
+        auto* sdma = reinterpret_cast<rtFftsPlusSdmaCtx_t*>(&context);
+        sdma->contextType = RT_CTX_TYPE_SDMA;
+        sdma->threadDim = 1;
+        sdma->sdmaSqeHeader = 0x1E70;
+        sdma->sourceAddressBaseL = sdma->sourceAddressBaseH = 0;
+        sdma->destinationAddressBaseL = sdma->destinationAddressBaseH = 0;
+        sdma->nonTailDataLength = sdma->tailDataLength = 1;
+        context.successorNum = context.predCntInit = context.predCnt = 0;
+        context.successorList[0] = 0;
+        rtFftsPlusSqe_t sqe = {};
+        sqe.fftsType = RT_FFTS_PLUS_TYPE;
+        sqe.totalContextNum = sqe.readyContextNum = sqe.preloadContextNum = 1;
+        sqe.subType = 0x5A;
+        rtFftsPlusTaskInfo_t task = {};
+        task.fftsPlusSqe = &sqe;
+        task.descBuf = &context;
+        task.descBufLen = sizeof(context);
+        task.descAddrType = RT_FFTS_PLUS_CTX_DESC_ADDR_TYPE_HOST;
+        void* device = nullptr;
+        (void)aclrtHostRegister(nullptr, 0, ACL_HOST_REGISTER_MAPPED, &device);
+        return rtFftsPlusTaskLaunchWithFlag(&task, nullptr, 0);
+      }
+    " HAVE_CANN_KV_OFFLOAD_FFTS)
+    if(HAVE_CANN_KV_OFFLOAD_FFTS)
+      target_compile_definitions(vllm_ascend_C PRIVATE CANN_KV_OFFLOAD_FFTS)
+      target_include_directories(vllm_ascend_C PRIVATE ${CMAKE_REQUIRED_INCLUDES})
+      target_link_libraries(vllm_ascend_C PRIVATE ${CANN_FFTS_RUNTIME})
+      message(STATUS "Tiering DRAM: A3 FFTS SDMA backend available")
+    endif()
+    cmake_pop_check_state()
+  endif()
+endif()
+
+
 if(SOC_VERSION MATCHES "ascend310p.*")
     target_compile_definitions(vllm_ascend_C PRIVATE -DASCEND_PLATFORM_310P)
 endif()
