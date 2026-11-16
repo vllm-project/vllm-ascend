@@ -86,8 +86,10 @@ Model Runner V2 C8 command above:
 
 Use the direct `HiSparseConnector` with private per-rank Host pools. PCP partitions
 prefill and gathers packed C8 KV before Resident writes and Host mirroring.
-Decode requests are replicated across PCP ranks and write Resident directly
-without a KV gather. HiSparse disables PCP decode request sharding.
+Decode requests follow the standard PCP request-sharding policy. Each rank
+computes its local queries, then gathers packed C8 KV so every rank can update
+its Resident cache and Host mirror. Later speculative draft steps remain
+replicated and write Resident directly without a KV gather.
 
 When using speculative decoding, size `device_buffer_size` to hold the
 deduplicated union of KV rows selected across all verification tokens of a request.

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 """Separate PCP query rows from rank-major HiSparse KV writes.
 
-C8 PCP prefill and replicated decode, including full graphs.
+C8 PCP prefill and request-sharded decode, including full graphs.
 Core retains residency scheduling, DMA and the Host write completion fence.
 """
 

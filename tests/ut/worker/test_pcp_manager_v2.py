@@ -261,18 +261,21 @@ def test_constructor_forwards_decode_sharding_with_release_compatible_arguments(
 
 
 @pytest.mark.parametrize("pcp_size", [2, 4, 8])
-def test_hisparse_keeps_decode_replicated(pcp_size):
+def test_hisparse_uses_standard_decode_sharding(pcp_size):
     config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY)
     config.attention_config = SimpleNamespace(hisparse_config={})
     config.parallel_config.prefill_context_parallel_size = pcp_size
-    manager = AscendPCPManager(pcp_size, pcp_size - 1, torch.device("cpu"), shard_decode_requests=True)
+    manager = AscendPCPManager(pcp_size, 0, torch.device("cpu"), shard_decode_requests=True)
     manager.bind_config(config)
-    assert not is_pcp_decode_sharding_enabled(config)
-    assert not manager.shard_decode_requests
+    assert is_pcp_decode_sharding_enabled(config)
+    assert manager.shard_decode_requests
     counts = np.array([1, 4], dtype=np.int32)
     prefilling = np.array([False, False])
-    np.testing.assert_array_equal(manager.replicated_requests(counts, prefilling), [True, True])
-    assert list(manager._iter_rank_chunks(pcp_size - 1, counts, prefilling)) == [(0, 0, 1), (1, 0, 4)]
+    np.testing.assert_array_equal(manager.replicated_requests(counts, prefilling), [False, False])
+    assert list(manager._iter_rank_chunks(0, counts, prefilling)) == [(0, 0, 1)]
+    assert list(manager._iter_rank_chunks(1, counts, prefilling)) == [(1, 0, 4)]
+    for rank in range(2, pcp_size):
+        assert list(manager._iter_rank_chunks(rank, counts, prefilling)) == []
 
 
 def test_setup_preserves_upstream_decode_sharding_policy():
