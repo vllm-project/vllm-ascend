@@ -1,5 +1,14 @@
-test_name: "DeepSeek-V4.1-Flash-w8a8-PD-MRV2"
-model: "Eco-Tech/DeepSeek-V4.1-Flash-w8a8"
+# DeepSeek-V4.1-Flash W4A8 / A3 / 2 节点 PD 分离
+# 依据：社区文档 docs/source/tutorials/models/DeepSeek-V4.1-Flash.md（v0.30.0）A3 PD 模板
+#       + PR #20764 的 A3 serving configuration
+# 说明：本文件替换原 DeepSeek-V4.1-Flash-w8a8-PD-MRV2 用例（同一 PR 内 git mv 改名）。
+#
+# 节点布局：node0 = Prefill（DP4 × PCP4 × TP1），node1 = Decode（DP16 × TP1）
+# 连接器：MooncakeHybridConnector，无 KV 池、无显式 engine_id
+# 与旧 W8A8 用例的差异：换 W4A8(1017) 权重、P 侧开 swa-bounded-replay + prefix caching、
+#                        D 侧关 prefix caching / swa-bounded-replay、HCCL_BUFFSIZE 4096
+test_name: "DeepSeek-V4.1-Flash-w4a8-PD-MRV2"
+model: "Eco-Tech/DeepSeek-V4.1-Flash-1017-w4a8"
 num_nodes: 2
 npu_per_node: 16
 dp_load_balancing: external
@@ -7,27 +16,27 @@ dp_load_balancing: external
 routing:
   type: "disaggregated_prefill"
   groups:
-    prefiller: [ 0 ]
-    decoder: [ 1 ]
+    prefiller: [0]
+    decoder: [1]
 
 config:
   - node_index: 0
     port_start: 7100
     dp_rpc_port: 12321
-    dp_size: 2
-    dp_size_local: 2
+    dp_size: 4
+    dp_size_local: 4
     dp_rank_start: 0
-    tp_size: 2
+    tp_size: 1
     cp_size: 4
     dp_address: "${NODE_0_IP}"
-
   - node_index: 1
     port_start: 7100
     dp_rpc_port: 12321
-    dp_size: 8
-    dp_size_local: 8
+    dp_size: 16
+    dp_size_local: 16
     dp_rank_start: 0
-    tp_size: 2
+    tp_size: 1
+    cp_size: 1
     dp_address: "${NODE_1_IP}"
 
 env_common: &env_common
@@ -36,6 +45,8 @@ env_common: &env_common
   SERVER_PORT: "${PORT}"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
   VLLM_RPC_TIMEOUT: "3600000"
+  # PR #21146 写 36000，main 现有 MRV2 用例是 360000；两者都是"实际不超时"语义。
+  # 这里跟 main 对齐，避免同族两个数。
   VLLM_ENGINE_READY_TIMEOUT_S: "360000"
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
   HCCL_EXEC_TIMEOUT: "204"
@@ -43,6 +54,7 @@ env_common: &env_common
   OMP_PROC_BIND: "false"
   OMP_NUM_THREADS: "10"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  LD_LIBRARY_PATH: "$LD_LIBRARY_PATH:/usr/local/lib/"
   https_proxy: ""
   http_proxy: ""
   all_proxy: ""
@@ -60,9 +72,10 @@ env_prefill: &env_prefill
 
 env_decode: &env_decode
   <<: *env_common
-  HCCL_BUFFSIZE: "1800"
+  HCCL_BUFFSIZE: "4096"
 
 templates:
+  # ------------------------------------------------------------------ Prefill
   - node_index: 0
     envs:
       <<: *env_prefill
@@ -91,7 +104,7 @@ templates:
       - --max-num-batched-tokens
       - "8192"
       - --max-num-seqs
-      - "32"
+      - "16"
       - --speculative-config
       - '{"num_speculative_tokens": 5, "method": "dspark"}'
       - --trust-remote-code
@@ -104,23 +117,23 @@ templates:
       - --tool-call-parser
       - "deepseek_v41"
       - --enable-auto-tool-choice
-      - --model-loader-extra-config
-      - '{"enable_multithread_load": true, "num_threads": 32}'
       - --safetensors-load-strategy
       - "lazy"
       - --gpu-memory-utilization
-      - "0.92"
+      - "0.9"
       - --quantization
       - "ascend"
       - --enforce-eager
+      - --swa-bounded-replay
       - --enable-prefix-caching
       - --engram-config
       - '{"cpu_offload": true, "dp_shared_memory": true}'
       - --additional-config
-      - '{"enable_cpu_binding": true, "enable_fused_mc2": 1, "enable_flashcomm1": true, "enable_shared_expert_dp": true}'
+      - '{"enable_cpu_binding": true, "enable_fused_mc2": 2, "enable_flashcomm1": false, "multistream_overlap_shared_expert": false}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 2}, "decode": {"dp_size": 8, "tp_size": 2}}}'
+      - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_producer", "kv_port": "30000", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 1}, "decode": {"dp_size": 16, "tp_size": 1}}}'
 
+  # ------------------------------------------------------------------- Decode
   - node_index: 1
     envs:
       <<: *env_decode
@@ -139,19 +152,22 @@ templates:
       - ${DP_RPC_PORT}
       - --tensor-parallel-size
       - ${TP_SIZE}
+      - --prefill-context-parallel-size
+      - ${CP_SIZE}
       - --enable-expert-parallel
       - --seed
       - "1024"
       - --max-model-len
       - "1048576"
       - --max-num-batched-tokens
-      - "400"
+      - "512"
       - --max-num-seqs
-      - "32"
+      - "72"
       - --async-scheduling
       - --block-size
       - "128"
       - --no-enable-prefix-caching
+      - --no-swa-bounded-replay
       - --trust-remote-code
       - --tokenizer-mode
       - "deepseek_v41"
@@ -160,8 +176,6 @@ templates:
       - --tool-call-parser
       - "deepseek_v41"
       - --enable-auto-tool-choice
-      - --model-loader-extra-config
-      - '{"enable_multithread_load": true, "num_threads": 16}'
       - --safetensors-load-strategy
       - "lazy"
       - --gpu-memory-utilization
@@ -169,11 +183,11 @@ templates:
       - --quantization
       - "ascend"
       - --speculative-config
-      - '{"num_speculative_tokens": 5, "method": "dspark", "enforce_eager": true}'
+      - '{"num_speculative_tokens": 5, "method": "dspark"}'
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeConnectorV2", "kv_role": "kv_consumer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 2}, "decode": {"dp_size": 8, "tp_size": 2}}}'
+      - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_consumer", "kv_port": "30100", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 1}, "decode": {"dp_size": 16, "tp_size": 1}}}'
       - --engram-config
       - '{"cpu_offload": true, "dp_shared_memory": true}'
       - --additional-config
@@ -188,10 +202,12 @@ benchmarks:
     max_out_len: 65536
     batch_size: 32
     baseline: 88
+    # 与 #21146 保持一致取 5；按 GPQA n=198、p=0.88 的 3σ 应为 7（5 只有 2.17σ）
     threshold: 5
     temperature: 1
     thinking: true
     reasoning_effort: low
+
   perf_TPOT50_16k_1:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs1200_deepseek
@@ -201,9 +217,11 @@ benchmarks:
     max_out_len: 1024
     batch_size: 64
     request_rate: 2.7
+    # 占位值，继承自 #21146；首次跑通后必须用 CI 3~5 次均值替换
     baseline: 1800
     threshold: 0.95
     tpot_threshold: 50
+
   perf_TPOT50_128k_1_prefix90_warmup:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K-in128k-bs512-prefix90-ds
@@ -215,6 +233,7 @@ benchmarks:
     request_rate: 0
     baseline: 0
     threshold: 0.95
+
   perf_TPOT50_128k_1_prefix90:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K-in128k-bs512-prefix90-ds
@@ -224,6 +243,7 @@ benchmarks:
     max_out_len: 1024
     batch_size: 64
     request_rate: 2.5
+    # 占位值，同上
     baseline: 1800
     threshold: 0.95
     tpot_threshold: 50
