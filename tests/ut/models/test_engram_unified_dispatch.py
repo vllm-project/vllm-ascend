@@ -14,7 +14,8 @@ ROOT = Path(__file__).resolve().parents[3] / "vllm_ascend/models/deepseek_v41"
 
 
 @pytest.mark.parametrize("backend", [None, "a2", "a3", "a5"])
-def test_model_selects_exactly_one_backend(monkeypatch, backend):
+@pytest.mark.parametrize("sharded", [False, True])
+def test_model_selects_exactly_one_backend(monkeypatch, backend, sharded):
     module = ast.parse((ROOT / "model.py").read_text())
     cls = next(n for n in module.body if isinstance(n, ast.ClassDef) and n.name == "DeepseekV41Model")
     init = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "__init__")
@@ -35,13 +36,18 @@ def test_model_selects_exactly_one_backend(monkeypatch, backend):
 
     def create_reader(*args, **kwargs):
         calls.append("hixl")
-        return "reader"
+        return types.SimpleNamespace(shard={"index": 0, "count": 1})
+
+    def create_sharded_reader(*args, **kwargs):
+        calls.append("hixl-sharded")
+        return object()
 
     def identity(*args):
         calls.append("gva")
         return "identity"
 
     monkeypatch.setattr(rdma, "RemoteReader", create_reader, raising=False)
+    monkeypatch.setattr(rdma, "ShardedRemoteReader", create_sharded_reader, raising=False)
     monkeypatch.setattr(rdma, "capacity_for_batch", lambda *args: 32, raising=False)
     monkeypatch.setattr(pool, "checkpoint_identity", identity, raising=False)
     for name, item in [
@@ -56,7 +62,8 @@ def test_model_selects_exactly_one_backend(monkeypatch, backend):
         if backend is None
         else types.SimpleNamespace(
             backend=backend,
-            endpoint="owner:29500",
+            endpoint=None if sharded else "owner:29500",
+            endpoints=["owner0:29500", "owner1:29500"] if sharded else None,
             capacity=32,
             library_path=None,
             listen_port=None,
@@ -80,7 +87,8 @@ def test_model_selects_exactly_one_backend(monkeypatch, backend):
         get_tensor_model_parallel_world_size=lambda: 1,
     )
     exec(compile(tree, str(ROOT / "model.py"), "exec"), ns)
-    assert calls == ({None: [], "a2": ["hixl"], "a3": ["gva"], "a5": ["hixl"]}[backend])
+    hixl = "hixl-sharded" if sharded else "hixl"
+    assert calls == ({None: [], "a2": [hixl], "a3": ["gva"], "a5": [hixl]}[backend])
     assert (model._engram_remote_reader is not None) == (backend in ("a2", "a5"))
     assert (ns["shared_pool_endpoint"] is not None) == (backend == "a3")
 
