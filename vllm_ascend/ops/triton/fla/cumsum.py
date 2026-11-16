@@ -101,7 +101,10 @@ def chunk_local_cumsum_scalar(
     # sub-chunk tile (H >= 125 for the GDN chunk_size of 64), and every prefill of such a model
     # crashes on the first cumsum call. For H <= 64 the raw value is already >= chunk_size, so
     # those shapes keep exactly the historical tile size.
-    OPTIM_BLOCK_SIZE = max(triton.next_power_of_2(OPTIM_BLOCK_ELEMENT_BUDGET // (H * chunk_size)), chunk_size)
+    # The budget division itself drops to zero once H * chunk_size exceeds the budget, and
+    # ``next_power_of_2`` is only meaningful for positive values, so keep the operand at 1.
+    optim_block_elements = max(OPTIM_BLOCK_ELEMENT_BUDGET // (H * chunk_size), 1)
+    OPTIM_BLOCK_SIZE = max(triton.next_power_of_2(optim_block_elements), chunk_size)
     if cu_seqlens is not None and block_indices is None:
         block_indices = prepare_chunk_indices(cu_seqlens, chunk_size=OPTIM_BLOCK_SIZE)
     num_blocks = len(block_indices) if cu_seqlens is not None else triton.cdiv(T, OPTIM_BLOCK_SIZE)

@@ -29,7 +29,14 @@ MIN_CHUNKS_PER_BLOCK = 1
 
 
 def _reference_next_power_of_2(value):
-    return 1 << max(value - 1, 0).bit_length()
+    """Mirror ``triton.next_power_of_2`` bit for bit, including its non-positive input.
+
+    Triton rounds by propagating the sign bit downwards, so 0 stays 0 instead of raising.
+    """
+    value -= 1
+    for shift in (1, 2, 4, 8, 16, 32):
+        value |= value >> shift
+    return value + 1
 
 
 def _legacy_block_t(num_heads, chunk_size):
@@ -167,13 +174,29 @@ class TestChunkLocalCumsumBlockT(unittest.TestCase):
     def test_block_t_is_exactly_chunk_size_when_heuristic_collapses(self):
         # H = 125 is the smallest v-head count whose raw heuristic value (32) is below the
         # GDN chunk_size of 64; before the clamp that meant N_CHUNKS == 0 and a crash.
+        # The last two cases push H * chunk_size past the element budget, where the raw
+        # division round-trips through a non-positive value (0 or 1).
         for relative_path in CUMSUM_MODULES:
             launcher, kernel, _, _ = self._load(relative_path)
-            for num_heads, chunk_size in ((125, 64), (128, 64), (256, 64), (128, 128), (2048, 64)):
+            cases = ((125, 64), (128, 64), (256, 64), (128, 128), (2048, 64), (4096, 64), (8192, 64))
+            for num_heads, chunk_size in cases:
                 with self.subTest(module=relative_path, num_heads=num_heads, chunk_size=chunk_size):
                     launch = _launch(launcher, kernel, num_heads, chunk_size)
                     self.assertEqual(launch["BLOCK_T"], chunk_size)
                     self.assertLess(_legacy_block_t(num_heads, chunk_size), chunk_size)
+
+    def test_element_budget_underflow_is_clamped(self):
+        # H * chunk_size beyond the budget makes the raw division zero, and Triton's
+        # next_power_of_2 keeps zero as zero, so the value passed to the kernel has to be
+        # clamped rather than relying on the rounding helper.
+        for relative_path in CUMSUM_MODULES:
+            launcher, kernel, _, _ = self._load(relative_path)
+            for num_heads, chunk_size in ((8192, 64), (16384, 32)):
+                with self.subTest(module=relative_path, num_heads=num_heads, chunk_size=chunk_size):
+                    self.assertGreater(num_heads * chunk_size, 2**18)
+                    self.assertEqual(_reference_next_power_of_2(2**18 // (num_heads * chunk_size)), 0)
+                    launch = _launch(launcher, kernel, num_heads, chunk_size)
+                    self.assertEqual(launch["BLOCK_T"], chunk_size)
 
     def test_block_t_matches_legacy_heuristic_for_small_head_counts(self):
         # H <= 64 must keep the historical tile size: no grid/block change for existing models.
