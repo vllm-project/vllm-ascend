@@ -135,7 +135,7 @@
 # kv cache
 /vllm_ascend/core/kv_cache_config_builder.py @yzeyu71 @Angazenn @zhenwenqi2024 @@yiz-liu
 /vllm_ascend/core/kv_cache_interface.py @yzeyu71 @Angazenn @zhenwenqi2024 @yiz-liu
-/vllm_ascend/core/kv_cache_placement.py @yzeyu71 @Angazenn @zhenwenqi2024 @yiz-liu @weiguihua2 @pisceskkk @zhaochuang001 @recky-c @li1how
+/vllm_ascend/core/kv_cache_placement.py @yzeyu71 @Angazenn @zhenwenqi2024 @yiz-liu
 /vllm_ascend/core/single_type_kv_cache_manager.py @yzeyu71 @Angazenn @zhenwenqi2024 @yiz-liu
 
 # Core framework
