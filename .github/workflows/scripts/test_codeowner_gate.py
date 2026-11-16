@@ -408,3 +408,43 @@ class TestGetPrReviews:
         ]
         monkeypatch.setattr(gate, "gh_api", lambda endpoint, **kw: data)
         assert gate.get_pr_reviews(1) == {"alice": "APPROVED"}
+
+
+class TestDismissalSurvivesPush:
+    """Approvals survive pushes: the repo ruleset auto-dismisses reviews on
+    push and gate authors cannot change that setting, so DISMISSED reviews
+    are ignored and the previous state persists."""
+
+    def test_approval_survives_dismissal(self, monkeypatch):
+        data = [
+            {"user": {"login": "alice"}, "state": "APPROVED"},
+            {"user": {"login": "alice"}, "state": "DISMISSED"},  # auto-dismiss on push
+        ]
+        monkeypatch.setattr(gate, "gh_api", lambda endpoint, **kw: data)
+        assert gate.get_pr_reviews(1) == {"alice": "APPROVED"}
+
+    def test_changes_requested_overrides_approval(self, monkeypatch):
+        data = [
+            {"user": {"login": "alice"}, "state": "APPROVED"},
+            {"user": {"login": "alice"}, "state": "CHANGES_REQUESTED"},
+        ]
+        monkeypatch.setattr(gate, "gh_api", lambda endpoint, **kw: data)
+        assert gate.get_pr_reviews(1) == {"alice": "CHANGES_REQUESTED"}
+
+    def test_reapproval_after_changes_requested(self, monkeypatch):
+        data = [
+            {"user": {"login": "alice"}, "state": "APPROVED"},
+            {"user": {"login": "alice"}, "state": "CHANGES_REQUESTED"},
+            {"user": {"login": "alice"}, "state": "APPROVED"},
+            {"user": {"login": "alice"}, "state": "DISMISSED"},
+        ]
+        monkeypatch.setattr(gate, "gh_api", lambda endpoint, **kw: data)
+        assert gate.get_pr_reviews(1) == {"alice": "APPROVED"}
+
+    def test_approved_still_counts_after_dismissal_in_gate(self, rules):
+        # DISMISSED entries in the reviews dict no longer occur (they are
+        # filtered upstream), but the gate must remain robust to them.
+        failures, _ = gate.check_approvals(
+            1, "author", rules, ["vllm_ascend/device/a.py"], {"alice": "DISMISSED", "bob": "APPROVED"}
+        )
+        assert failures == []

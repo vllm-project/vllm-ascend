@@ -896,7 +896,7 @@ jobs:
           # forward instead of being re-executed or silently dropped.
           if [ "${EVENT_NAME}" = "pull_request_review" ]; then
             if [ "${OWNER_RESULT}" != "success" ]; then
-              fail "CODEOWNERS approval gate failed: every changed file needs an approval from one of its owners (a dismissed review also re-opens the gate). See the codeowner-approval job for details."
+              fail "CODEOWNERS approval gate failed: every changed file needs an approval from one of its owners. Approvals survive pushes; an owner can withdraw one by submitting a review that requests changes."
             fi
           PREV_FILE="${RUNNER_TEMP}/prev_conclusion.txt"
           python3 - <<'PY'

@@ -437,7 +437,12 @@ owners before the PR can merge. Key points:
   their repository role — owners without org membership are intentional.
 - A pending "changes requested" review from any owner of a changed file blocks
   the merge even if another owner has approved. Address the feedback, then ask
-  the owner to re-review (they can approve or dismiss their review).
+  the owner to re-review (they can approve, or withdraw their objection by
+  requesting changes again — dismissing does not revoke a previous approval).
+- Approvals survive pushes: the repository auto-dismisses reviews on every
+  push, but the gate ignores dismissals, so owners do not need to re-approve
+  after each commit. An owner's latest approve / request-changes review is
+  what counts.
 - Owners are cumulative down the directory tree: when parent and child
   directories have separate owners (for example `/vllm_ascend/model_loader`
   and `/vllm_ascend/model_loader/rfork/`), an rfork change needs one approval
