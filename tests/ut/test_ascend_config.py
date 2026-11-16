@@ -153,9 +153,15 @@ class TestQuantizedAllReduceConfig(TestBase):
             with self.subTest(is_a5=is_a5), patch("vllm_ascend.ascend_config.is_950", return_value=is_a5):
                 config = QuantizedAllReduceConfig()
                 self.assertFalse(config.enable)
-                self.assertEqual(config.min_numel, 16777216)
+                # None means "pick the per-TP int8 default measured on A2".
+                self.assertIsNone(config.min_numel)
                 self.assertEqual(config.quant_dtype, expected_dtype)
                 self.assertEqual(dataclasses.asdict(config)["quant_dtype"], expected_dtype)
+
+    def test_auto_min_numel_accepts_null(self):
+        config = QuantizedAllReduceConfig(enable=True, min_numel=None)
+        self.assertTrue(config.enable)
+        self.assertIsNone(config.min_numel)
 
     def test_explicit_values_and_lax_bool(self):
         config = QuantizedAllReduceConfig(enable="true", min_numel="2097152")  # type: ignore[arg-type]
