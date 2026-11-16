@@ -396,6 +396,7 @@ class ShardedPoolClient:
         if len(endpoints) < 2:
             raise ValueError("sharded Engram requires at least two owners")
         self.closed = False
+        self._closing = False
         self.clients, self.views = [], []
         self.device = device
         self._packed_mapping = None
@@ -457,8 +458,8 @@ class ShardedPoolClient:
             raise
 
     def view(self, key, start, end, *, rows, width, dtype):
-        if self.closed:
-            raise RuntimeError("Shared Engram client is closed")
+        if self.closed or self._closing:
+            raise RuntimeError("Shared Engram client is closed or closing")
         meta = self.clients[0].manifest["tensors"][key]
         if (meta["total_rows"], meta["width"], meta["dtype"]) != (rows, width, str(dtype).removeprefix("torch.")):
             raise ValueError("shared Engram tensor layout mismatch")
@@ -522,6 +523,7 @@ class ShardedPoolClient:
     def close(self):
         if self.closed:
             return
+        self._closing = True
         _close_all(self.views)
         # Drop this layer's mapping reference before releasing any owner lease.
         if self._packed_mapping is not None:

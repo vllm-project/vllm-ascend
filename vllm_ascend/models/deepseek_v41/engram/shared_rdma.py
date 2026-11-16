@@ -428,6 +428,7 @@ class ShardedRemoteReader:
         if len(endpoints) < 2:
             raise ValueError("sharded Engram requires at least two owners")
         self.readers = []
+        self._closing = False
         self.capacity = capacity
         self._last_use = None
         self._operation_lock = threading.Lock()
@@ -455,7 +456,7 @@ class ShardedRemoteReader:
             raise
 
     def _ensure_open(self):
-        if not self.readers or any(reader.closed or reader.failed for reader in self.readers):
+        if self._closing or not self.readers or any(reader.closed or reader.failed for reader in self.readers):
             raise RuntimeError("remote Engram reader is failed or closed")
 
     def _lookup(self, tables, indices, cpu_hashes, outputs):
@@ -545,6 +546,7 @@ class ShardedRemoteReader:
             self._close()
 
     def _close(self):
+        self._closing = True
         if not self.readers or all(reader.closed for reader in self.readers):
             return
         if any(reader.failed for reader in self.readers):
