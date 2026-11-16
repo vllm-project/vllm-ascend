@@ -1184,6 +1184,75 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
         raise ValueError("Upstream EPLB is only supported by Model Runner V2 on Ascend.")
 
 
+def _configure_prefill_admission_scheduler(vllm_config: VllmConfig, scheduler_extension_config: Any) -> None:
+    """Select the shared token-level admission scheduler when requested.
+
+    ``enabled`` is the low-bandwidth deployment signal. Keeping that signal in
+    platform configuration avoids embedding product detection in the scheduler
+    hot path.
+    """
+    admission_config = scheduler_extension_config.prefill_admission_config
+    if not admission_config.enabled:
+        return
+
+    pipeline_parallel_size = vllm_config.parallel_config.pipeline_parallel_size
+    if pipeline_parallel_size <= 1:
+        raise ValueError(
+            "prefill_admission_config requires pipeline parallelism (pp > 1). "
+            "Enable it only for low-bandwidth PP deployments."
+        )
+    if not vllm_config.scheduler_config.enable_chunked_prefill:
+        raise ValueError(
+            "prefill_admission_config requires chunked prefill so the scheduler can assign "
+            "a small token budget without changing request state."
+        )
+
+    kv_transfer_config = vllm_config.kv_transfer_config
+    kv_role = getattr(kv_transfer_config, "kv_role", None)
+    if kv_transfer_config is not None and kv_role != "kv_both":
+        raise ValueError(
+            "prefill_admission_config only supports PD-mixed mode "
+            "(kv_role='kv_both' or no kv_transfer_config), not PD-disaggregated "
+            "P/D nodes."
+        )
+
+    incompatible_features = []
+    if scheduler_extension_config.recompute_scheduler_enable:
+        incompatible_features.append("recompute_scheduler_enable")
+    if scheduler_extension_config.dyntra_lb_config.enabled:
+        incompatible_features.append("dyntra_lb_config")
+    if scheduler_extension_config.enable_balance_scheduling:
+        incompatible_features.append("enable_balance_scheduling")
+    if scheduler_extension_config.batch_job_sched_config.enabled:
+        incompatible_features.append("batch_job_sched_config")
+    if incompatible_features:
+        raise ValueError(
+            "prefill_admission_config cannot be combined with "
+            f"{', '.join(incompatible_features)}. Please disable one of them."
+        )
+
+    short_request_async_cls = "vllm_ascend.core.short_request_first_scheduler.ShortRequestFirstAsyncScheduler"
+    if vllm_config.scheduler_config.async_scheduling:
+        scheduler_cls = "vllm_ascend.core.prefill_admission_scheduler.PrefillAdmissionAsyncScheduler"
+    else:
+        scheduler_cls = "vllm_ascend.core.prefill_admission_scheduler.PrefillAdmissionScheduler"
+
+    current_scheduler_cls = vllm_config.scheduler_config.scheduler_cls
+    if current_scheduler_cls not in (None, short_request_async_cls, scheduler_cls):
+        raise ValueError(
+            "prefill_admission_config cannot replace an explicitly configured scheduler_cls "
+            f"({current_scheduler_cls!r})."
+        )
+
+    vllm_config.scheduler_config.scheduler_cls = scheduler_cls
+    logger.info(
+        "Enabled token-level prefill admission throttling for low-bandwidth PP: "
+        "pipeline_parallel_size=%d, scheduler_cls=%s",
+        pipeline_parallel_size,
+        scheduler_cls,
+    )
+
+
 def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
     """Validate Ascend-specific options.
 
@@ -1245,6 +1314,8 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
             vllm_config.scheduler_config.scheduler_cls = (
                 "vllm_ascend.core.short_request_first_scheduler.ShortRequestFirstAsyncScheduler"
             )
+
+    _configure_prefill_admission_scheduler(vllm_config, scheduler_extension_config)
 
     dyntra_lb_config = scheduler_extension_config.dyntra_lb_config
     if dyntra_lb_config.enabled:

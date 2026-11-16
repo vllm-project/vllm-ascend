@@ -358,3 +358,19 @@ convolution allocates its output separately.
 Small prefix match units can increase checkpoint traffic.
 
 Validate correctness, quality and performance on the deployment hardware before deploying in production.
+
+| `prefill_admission_config` | dict | `{}` | Token-level Prefill admission throttling for explicitly selected low-bandwidth PP, PD-mixed deployments. Disabled by default. |
+
+**scheduler_config.prefill_admission_config**
+
+This policy keeps vLLM's unified token-level scheduler and Running-request priority. It does not add global Prefill/Decode phases: a throttled Prefill simply receives no token budget in that step, while the Scheduler output remains the per-request `num_scheduled_tokens` mapping. When the Decode batch is below the configured watermark, the policy derives a small Prefill token budget from the available PP bubble capacity. Periodic admission and a maximum wait bound prevent Prefill starvation.
+
+The feature is not enabled through product-name detection. Operators should enable it only for low-bandwidth PP deployments. Startup requires `pipeline-parallel-size > 1`, chunked Prefill, and a PD-mixed node (`kv_role="kv_both"` or no KV transfer configuration). The same Scheduler logic is used by Model Runner V1 and V2.
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `enabled` | bool | `False` | Enable low-bandwidth PP Prefill admission throttling. |
+| `prefill_interval` | int | `4` | Admit Prefill tokens at least once every N scheduler steps, subject to the normal Running-first token allocation. |
+| `decode_low_watermark` | int | `0` | Decode batch size below which PP bubble admission is allowed. `0` derives the watermark from `pipeline_parallel_size`. |
+| `max_prefill_wait_ms` | float | `1000.0` | Maximum admission deferral before a Prefill is released. Must be positive. |
+| `prefill_tokens_per_pp_bubble` | int | `512` | Small-grained Prefill token budget contributed by each estimated unused PP slot. |

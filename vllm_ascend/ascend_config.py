@@ -1702,6 +1702,27 @@ class DyntraLBConfig:
 
 
 @config
+class PrefillAdmissionConfig:
+    """Opt-in prefill admission limits for low-bandwidth pipeline parallelism."""
+
+    enabled: bool = False
+    prefill_interval: int = 4
+    decode_low_watermark: int = 0
+    max_prefill_wait_ms: float = 1000.0
+    prefill_tokens_per_pp_bubble: int = 512
+
+    @model_validator(mode="after")
+    def _validate_limits(self) -> PrefillAdmissionConfig:
+        if self.prefill_interval <= 0 or self.decode_low_watermark < 0:
+            raise ValueError("prefill_interval must be positive and decode_low_watermark must be non-negative")
+        if self.max_prefill_wait_ms <= 0 or not math.isfinite(self.max_prefill_wait_ms):
+            raise ValueError("max_prefill_wait_ms must be finite and positive")
+        if self.prefill_tokens_per_pp_bubble <= 0:
+            raise ValueError("prefill_tokens_per_pp_bubble must be positive")
+        return self
+
+
+@config
 class SchedulerConfig:
     """Configuration object for ``additional_config["scheduler_config"]``.
 
@@ -1718,6 +1739,7 @@ class SchedulerConfig:
     short_request_first_config: ShortRequestFirstConfig = dataclasses.field(default_factory=ShortRequestFirstConfig)
     batch_job_sched_config: BatchJobSchedConfig = dataclasses.field(default_factory=BatchJobSchedConfig)
     dyntra_lb_config: DyntraLBConfig = dataclasses.field(default_factory=DyntraLBConfig)
+    prefill_admission_config: PrefillAdmissionConfig = dataclasses.field(default_factory=PrefillAdmissionConfig)
 
     @classmethod
     def from_additional_config(cls, additional_config: dict[str, Any]) -> SchedulerConfig:
@@ -1758,6 +1780,7 @@ class SchedulerConfig:
             "short_request_first_config": _resolve("short_request_first_config", {}),
             "batch_job_sched_config": _resolve("batch_job_sched_config", {}),
             "dyntra_lb_config": scheduler_config.get("dyntra_lb_config", {}),
+            "prefill_admission_config": scheduler_config.get("prefill_admission_config", {}),
         }
         # Forward nested unknown keys to pydantic so extra="forbid" reports
         # typos instead of the resolver silently dropping them.
