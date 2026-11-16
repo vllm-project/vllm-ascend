@@ -123,7 +123,7 @@ def packed_sfa_cache_groups(config, specs):
         raise ValueError("Block-outermost Kimi cache requires whole 128-token kernel pages.")
     full = {n: replace(s, block_outermost=True) for n, s in full.items()}
     recurrent = {
-        n: replace(s, page_size_padded=None)
+        n: s
         for n, s in sorted(specs.items(), key=lambda item: extract_layer_index(item[0]))
         if isinstance(s, MambaSpec)
     }
