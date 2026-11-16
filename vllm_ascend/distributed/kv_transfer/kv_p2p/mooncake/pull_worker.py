@@ -118,6 +118,18 @@ class MooncakePullRecvingThread(threading.Thread):
         self.dcp_size = dcp_size
         self.device = device
         self.ready_event = ready_event
+        # Bidirectional KV transfer: check if remote blocks have expired.
+        # Read from extra_config with the same environment-variable fallback
+        # as the scheduler side (base_scheduler.py) so both sides agree on
+        # the feature flag regardless of how it was configured.
+        from vllm_ascend import envs as ascend_envs
+
+        self.is_bidirectional_kv_xfer_enabled = (
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "bidirectional_kv_xfer", False
+            )
+            or ascend_envs.VLLM_ASCEND_BIDIRECTIONAL_KV_XFER
+        )
         self.executor = ThreadPoolExecutor(
             max_workers=32,
             initializer=torch.npu.set_device,
@@ -536,6 +548,21 @@ class MooncakePullRecvingThread(threading.Thread):
         requests: dict[str, ReqMeta],
     ) -> set[str]:
         """Build and execute transfer buckets for one producer engine."""
+        # Check if any requests have expired blocks (for bidirectional KV transfer)
+        if self.is_bidirectional_kv_xfer_enabled:
+            expired_request_ids = self._check_expired_requests(requests)
+            if expired_request_ids:
+                logger.warning(
+                    "Mooncake bidirectional KV transfer: declining %d expired requests from engine %s: %s",
+                    len(expired_request_ids),
+                    remote_engine_id,
+                    sorted(expired_request_ids),
+                )
+                # Remove expired requests from the processing set
+                requests = {k: v for k, v in requests.items() if k not in expired_request_ids}
+                if not requests:
+                    return expired_request_ids
+
         remote_metadata = self._get_remote_metadata(remote_engine_id, remote_host, remote_port)
         tp_rank_groups_by_pp_rank = self.remote_tp_rank_groups[remote_engine_id]
         layer_pairs_by_pp_rank = self.remote_layer_index_pairs[remote_engine_id]
@@ -1550,6 +1577,26 @@ class MooncakePullRecvingThread(threading.Thread):
         )
         return transfer_metadata
 
+    def _check_expired_requests(self, requests: dict[str, ReqMeta]) -> set[str]:
+        """Check if any requests have expired blocks for bidirectional KV transfer."""
+        expired_request_ids = set()
+        current_time = time.time()
+
+        for request_id, req_meta in requests.items():
+            # Check if this is a bidirectional transfer (P pulling from D)
+            # and if the blocks have expired
+            if req_meta.remote_blocks_expiry_time is not None:
+                if current_time >= req_meta.remote_blocks_expiry_time:
+                    expired_request_ids.add(request_id)
+                    logger.debug(
+                        "Mooncake request %s has expired blocks (expiry_time=%.3f, current_time=%.3f)",
+                        request_id,
+                        req_meta.remote_blocks_expiry_time,
+                        current_time,
+                    )
+
+        return expired_request_ids
+
 
 class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
     """Worker-side framework for Mooncake pull transfers."""
@@ -1562,14 +1609,31 @@ class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
     ) -> None:
         super().__init__(vllm_config, engine_id, kv_cache_config)
         self._recving_thread: MooncakePullRecvingThread | None = None
+        # Bidirectional KV transfer: P (kv_producer) also pulls KV from D.
+        # Same precedence as the scheduler side (extra_config > env var).
+        from vllm_ascend import envs as ascend_envs
+
+        self.is_bidirectional_kv_xfer_enabled = (
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "bidirectional_kv_xfer", False
+            )
+            or ascend_envs.VLLM_ASCEND_BIDIRECTIONAL_KV_XFER
+        )
 
     def register_kv_caches(
         self,
         kv_caches: dict[str, torch.Tensor | list[torch.Tensor]],
     ) -> None:
-        """Register caches and start the D-side pull execution thread."""
+        """Register caches and start the D-side pull execution thread.
+
+        Under bidirectional transfer the P node (kv_producer) also needs a
+        pull thread to fetch D-side KV blocks for the next turn's prefill.
+        """
         super().register_kv_caches(kv_caches)
-        if self.kv_transfer_config.is_kv_consumer:
+        needs_recving_thread = self.kv_transfer_config.is_kv_consumer or (
+            self.is_bidirectional_kv_xfer_enabled and self.kv_transfer_config.is_kv_producer
+        )
+        if needs_recving_thread:
             if not isinstance(self.xfer_handshake_metadata, MooncakeTransferMetadata):
                 raise RuntimeError("Mooncake KV caches were registered without transfer metadata")
             ready_event = threading.Event()
@@ -1604,8 +1668,19 @@ class MooncakePullConnectorWorker(MooncakeBaseConnectorWorker):
         """Start the pull operations described by scheduler metadata."""
         if not metadata.requests:
             return
-        if self.kv_transfer_config.is_kv_consumer:
-            assert self._recving_thread is not None
+        # Standard P→D path: D (kv_consumer) pulls KV from P. Bidirectional
+        # path: P (kv_producer) also pulls KV from D — on P, every entry in
+        # metadata.requests is a bidir D→P pull request (the standard P→D
+        # handoff never populates _reqs_need_recv on the producer side).
+        if self.kv_transfer_config.is_kv_consumer or self.is_bidirectional_kv_xfer_enabled:
+            if self._recving_thread is None:
+                # kv_producer has no recving thread by default; only create
+                # the pull when bidir is enabled and requests are present.
+                if not (self.is_bidirectional_kv_xfer_enabled and self.kv_transfer_config.is_kv_producer):
+                    return
+                raise RuntimeError(
+                    "Mooncake bidirectional pull requested but no receiving thread is available"
+                )
             request_groups: dict[str, dict[str, ReqMeta]] = {}
             for request_id, request_metadata in metadata.requests.items():
                 requests = request_groups.setdefault(request_metadata.remote_engine_id, {})

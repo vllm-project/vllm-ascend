@@ -197,6 +197,10 @@ class BalanceScheduler(Scheduler):
         # For logging.
         scheduled_timestamp = time.monotonic()
 
+        # Track whether this step has synchronous KV loads so the worker
+        # calls start_load_kv before the forward pass (PR #20810 backport).
+        has_sync_kv_loads = False
+
         self.kv_cache_manager.new_step_starts()
 
         # DP prefill balancing: on a throttled (non-cadence-aligned) step, defer
@@ -699,6 +703,11 @@ class BalanceScheduler(Scheduler):
                     _skip_request(request_queue)
                     continue
 
+                # Synchronous KV load: mark so the worker calls start_load_kv
+                # before the forward pass (PR #20810 backport).
+                if num_external_computed_tokens > 0:
+                    has_sync_kv_loads = True
+
                 request = request_queue.pop_request()
                 self.deferred_waiting.discard(request)
                 self.running.append(request)
@@ -847,6 +856,7 @@ class BalanceScheduler(Scheduler):
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
+            has_sync_kv_loads=has_sync_kv_loads,
         )
         scheduler_output_kwargs["kv_connector_block_state"] = kv_connector_block_state
         scheduler_output = SchedulerOutput(**scheduler_output_kwargs)

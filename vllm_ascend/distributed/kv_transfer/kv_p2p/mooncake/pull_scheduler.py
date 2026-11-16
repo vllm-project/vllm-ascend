@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 """Scheduler-side logic for Mooncake pull transfers."""
 
+import hashlib
 import queue
 import threading
 import time
 from collections import OrderedDict, defaultdict, deque
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 import msgspec
@@ -50,6 +51,60 @@ if TYPE_CHECKING:
 GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
 ACK_MSG = b"ACK"
+
+# Prefix length (hex chars) of each content-hash in the bidirectional KV
+# block-hash chain. 16 hex chars (64 bits) per block is collision-safe for
+# alignment verification while keeping the per-request JSON payload compact.
+BIDIR_BLOCK_HASH_HEX_LEN = 16
+
+# Hash granularity for the bidirectional KV alignment chain, in tokens. This
+# is deliberately independent of the scheduler-level block size (which for
+# hybrid-attention models under HMA is the lcm of per-group block sizes,
+# e.g. 896 for Qwen3.5 — far too coarse: a 4527-token prompt + 300-token
+# decode output both span exactly 5 x 896-token blocks, so no decode-side KV
+# would ever be recovered). 128 matches the physical attention-group block
+# size (the unit of KV transfer) and keeps ~40 hashes per 5k-token request.
+BIDIR_HASH_BLOCK_SIZE = 128
+
+
+def _bidir_block_hash(parent: str, block_tokens: Sequence[int]) -> str:
+    """Hash one chain step: ``sha256(parent + "," + tokens)`` truncated.
+
+    Shared by the full-block chain and the sequence tail so both sides
+    compute identical values for the same token span and parent.
+    """
+    digest = hashlib.sha256()
+    digest.update(parent.encode("ascii"))
+    digest.update(b",")
+    digest.update(",".join(str(token) for token in block_tokens).encode("ascii"))
+    return digest.hexdigest()[:BIDIR_BLOCK_HASH_HEX_LEN]
+
+
+def _bidir_block_hash_chain(
+    token_ids: Sequence[int],
+    block_size: int,
+    max_blocks: int | None = None,
+) -> list[str]:
+    """Content-addressed hash chain over consecutive blocks of ``token_ids``.
+
+    Each block's hash incorporates its parent's hash (chained, like vLLM's
+    prefix-cache block hashes), so a match at block ``i`` proves the whole
+    prefix ``[0, (i + 1) * block_size)`` is token-identical. The chain is
+    computed identically on the D side (over prompt + decode output) and on
+    the P side (over the next turn's prompt), so the longest common chain
+    prefix is the exact token-alignment boundary between D's cached KV and
+    the new request.
+    """
+    num_blocks = len(token_ids) // block_size
+    if max_blocks is not None:
+        num_blocks = min(num_blocks, max_blocks)
+    hashes: list[str] = []
+    parent = ""
+    for block_index in range(num_blocks):
+        block_tokens = token_ids[block_index * block_size : (block_index + 1) * block_size]
+        parent = _bidir_block_hash(parent, block_tokens)
+        hashes.append(parent)
+    return hashes
 
 
 class MooncakeSchedulerSendingThread(threading.Thread):
@@ -110,6 +165,9 @@ class MooncakeSchedulerSendingThread(threading.Thread):
         self.ready_event = ready_event
         self.stop_event = threading.Event()
         self.delayed_free_requests: OrderedDict[str, float] = OrderedDict()
+        # request_id -> block count; total feeds the D pinned-block budget.
+        self.delayed_free_blocks: dict[str, int] = {}
+        self.pinned_block_total = 0
         self.finished_requests: queue.SimpleQueue[str] = queue.SimpleQueue()
         self.state_lock = threading.Lock()
 
@@ -314,6 +372,23 @@ class MooncakeSchedulerSendingThread(threading.Thread):
         with self.state_lock:
             self.delayed_free_requests[request_id] = delay_start_time
 
+    def add_delayed_request_with_blocks(self, request_id: str, expiry_time: float, num_blocks: int) -> None:
+        """Track a delayed-free request together with its block count.
+
+        The running total (self.pinned_block_total) feeds the scheduler's
+        pinned-block budget so D can refuse to pin more than
+        ``decoder_kv_block_budget`` blocks at once.
+        """
+        with self.state_lock:
+            self.delayed_free_requests[request_id] = expiry_time
+            self.delayed_free_blocks[request_id] = num_blocks
+            self.pinned_block_total += num_blocks
+
+    @property
+    def total_pinned_blocks(self) -> int:
+        with self.state_lock:
+            return self.pinned_block_total
+
     def get_and_clear_finished_requests(self) -> set[str]:
         finished: set[str] = set()
         with self.state_lock:
@@ -348,10 +423,22 @@ class MooncakeSchedulerSendingThread(threading.Thread):
 
     def _run_busy_loop(self, sock: Any) -> None:
         decoder = msgspec.msgpack.Decoder(type=tuple)
+        # Proactive expiry check interval: expired delayed-free blocks are
+        # released periodically even when no new requests arrive, so the
+        # pinned-block budget is replenished without depending on traffic.
+        last_expiry_sweep = time.time()
+        EXPIRY_SWEEP_INTERVAL_S = 30.0
         while not self.stop_event.is_set():
             try:
                 frames = sock.recv_multipart()
             except zmq.Again:  # type: ignore[attr-defined]
+                # ZMQ RCVTIMEO (1s) expired with no incoming message — use
+                # this idle tick to proactively release expired blocks.
+                now = time.time()
+                if now - last_expiry_sweep >= EXPIRY_SWEEP_INTERVAL_S:
+                    with self.state_lock:
+                        self._retrieve_expired_requests_locked()
+                    last_expiry_sweep = now
                 continue
 
             identity = frames[0]
@@ -387,22 +474,76 @@ class MooncakeSchedulerSendingThread(threading.Thread):
             )
             return
         del self.delayed_free_requests[request_id]
+        released = self.delayed_free_blocks.pop(request_id, None)
+        if released is not None:
+            self.pinned_block_total -= released
         self.finished_requests.put(request_id)
 
     def _retrieve_expired_requests_locked(self) -> None:
         current_time = time.time()
         while self.delayed_free_requests:
             request_id = next(iter(self.delayed_free_requests))
-            delay_start_time = self.delayed_free_requests[request_id]
-            if current_time - delay_start_time <= envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT:
+            expiry_time = self.delayed_free_requests[request_id]
+
+            # Check if expired (expiry_time is absolute timestamp)
+            if current_time < expiry_time:
                 break
 
             self._mark_finished_locked(request_id)
             logger.error(
-                "Force freed expired Mooncake request %s after %s seconds",
+                "Force freed expired Mooncake request %s at %.2f (expired at %.2f)",
                 request_id,
-                envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
+                current_time,
+                expiry_time,
             )
+
+    def sweep_expired_blocks(self) -> int:
+        """Proactively release blocks whose TTL has expired.
+
+        Called from the scheduler's budget check (before deciding whether to
+        reject a new request) and from the busy-loop idle sweep. Returns the
+        number of expired requests freed.
+        """
+        with self.state_lock:
+            before = len(self.delayed_free_requests)
+            self._retrieve_expired_requests_locked()
+            freed = before - len(self.delayed_free_requests)
+        if freed > 0:
+            logger.info(
+                "Mooncake expiry sweep: freed %d expired delayed requests "
+                "(%d blocks released, %d still pinned)",
+                freed,
+                self.pinned_block_total,
+                len(self.delayed_free_requests),
+            )
+        return freed
+
+    def evict_oldest_for_budget(self, needed_blocks: int, budget: int) -> int:
+        """Evict the oldest delayed blocks (LRU) until enough budget is free.
+
+        The delayed_free_requests OrderedDict is expiry-ordered (oldest
+        first). Evicting from the front releases blocks closest to their
+        TTL expiry — the least valuable for a next-turn pull. Returns the
+        number of evicted requests.
+        """
+        evicted = 0
+        with self.state_lock:
+            while (
+                self.pinned_block_total + needed_blocks > budget
+                and self.delayed_free_requests
+            ):
+                request_id = next(iter(self.delayed_free_requests))
+                self._mark_finished_locked(request_id)
+                evicted += 1
+                logger.warning(
+                    "Mooncake LRU eviction: force-freed request %s to reclaim "
+                    "budget (pinned=%d, needed=%d, budget=%d)",
+                    request_id,
+                    self.pinned_block_total,
+                    needed_blocks,
+                    budget,
+                )
+        return evicted
 
 
 class MooncakeSchedulerRecvingThread(threading.Thread):
@@ -533,8 +674,30 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         self._reqs_recv_info: dict[str, tuple[str, int, str]] = {}
         self._sending_thread: MooncakeSchedulerSendingThread | None = None
         self._recving_thread: MooncakeSchedulerRecvingThread | None = None
+        # D-node bidirectional pinned-block budget: cap total blocks held for
+        # D→P reuse so multi-turn bursts cannot exhaust the KV pool. When the
+        # budget is exhausted, new requests skip delay-free entirely (blocks
+        # are released normally; the next turn does a local prefill).
+        total_blocks = kv_cache_config.num_blocks
+        self.decoder_kv_block_budget = int(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "decoder_kv_block_budget", max(1, total_blocks // 5)
+            )
+        )
+        logger.info(
+            "Bidirectional KV: decoder pinned-block budget=%d (pool=%d blocks)",
+            self.decoder_kv_block_budget,
+            total_blocks,
+        )
 
-        if self.kv_transfer_config.is_kv_consumer:
+        # The recving thread handles scheduler-to-scheduler DONE notifications
+        # after pull transfers complete. It is needed by kv_consumer nodes
+        # (standard D pulls from P) and by kv_producer nodes under bidirectional
+        # transfer (P pulls from D and must ACK D on completion).
+        needs_recving_thread = self.kv_transfer_config.is_kv_consumer or (
+            self.is_bidirectional_kv_xfer_enabled and self.kv_transfer_config.is_kv_producer
+        )
+        if needs_recving_thread:
             recving_ready_event = threading.Event()
             self._recving_thread = MooncakeSchedulerRecvingThread(recving_ready_event)
             self._recving_thread.start()
@@ -554,7 +717,13 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         self,
         metadata: Mapping[int | tuple[int, ...], KVConnectorHandshakeMetadata],
     ) -> None:
-        if not self.kv_transfer_config.is_kv_producer or not metadata or self._sending_thread is not None:
+        # The sending thread is needed by kv_producer nodes (standard P→D) and
+        # also by kv_consumer nodes when bidirectional KV transfer is enabled
+        # (D must expose its blocks so P can pull them in the next turn).
+        needs_sending_thread = self.kv_transfer_config.is_kv_producer or (
+            self.is_bidirectional_kv_xfer_enabled and self.kv_transfer_config.is_kv_consumer
+        )
+        if not needs_sending_thread or not metadata or self._sending_thread is not None:
             return
 
         ready_event = threading.Event()
@@ -593,6 +762,134 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             if count > 0:
                 return count, True
 
+        # Bidirectional KV transfer: P pulls blocks from D
+        if (
+            self.is_bidirectional_kv_xfer_enabled
+            and params is not None
+            and params.get("do_remote_decode")
+            and params.get("remote_block_ids")
+            and all(
+                p in params
+                for p in (
+                    "remote_engine_id",
+                    "remote_request_id",
+                    "remote_host",
+                    "remote_port",
+                )
+            )
+        ):
+            # Decode node has kv blocks for part of prefill request, so, provide them
+            # as an external token count to scheduler.
+            # Use synchronous load (load_kv_async=False) with reserve-1 to avoid
+            # the async load deadlock (WAITING_FOR_REMOTE_KVS state never resolves
+            # because the scheduler doesn't produce a step to trigger start_load_kv).
+            # The has_sync_kv_loads fix in patch_balance_schedule.py ensures
+            # start_load_kv is called before the forward pass for sync loads.
+            #
+            # Alignment boundary (hash index preferred, conservative fallback):
+            # 1. Hash index: if D reported a content-addressed block hash chain
+            #    (remote_block_hashes), walk this request's prompt chain against
+            #    it block by block. The longest matching chain prefix is the
+            #    exact token-alignment boundary, which also recovers the
+            #    assistant-text KV from the previous turn's decode output (the
+            #    conservative bound deliberately excludes it).
+            # 2. Conservative fallback: bound the pull by D's reported prompt
+            #    length (remote_num_prompt_tokens). Only D's prompt-side KV is
+            #    guaranteed token-aligned with this prompt; decode output
+            #    (thinking tokens, template tails) does not reliably reappear.
+            remote_block_hashes = params.get("remote_block_hashes") or None
+            if remote_block_hashes:
+                remote_block_size = params.get("remote_block_size") or self.block_size
+                local_token_ids = list(request.prompt_token_ids or [])
+                local_hashes = _bidir_block_hash_chain(
+                    local_token_ids,
+                    remote_block_size,
+                    max_blocks=len(remote_block_hashes),
+                )
+                matched_blocks = 0
+                for local_hash, remote_hash in zip(local_hashes, remote_block_hashes):
+                    if local_hash != remote_hash:
+                        break
+                    matched_blocks += 1
+                aligned_tokens = matched_blocks * remote_block_size
+                # Full-sequence alignment check: all full blocks matched AND
+                # the tail hash (tokens beyond the last full block) matches.
+                # Only then does D's final state snapshot land exactly on the
+                # resume boundary — required for stateful (hybrid) models.
+                fully_aligned = False
+                remote_full_len = params.get("remote_num_tokens") or 0
+                remote_tail_hash = params.get("remote_tail_hash")
+                if (
+                    matched_blocks == len(remote_block_hashes)
+                    and remote_tail_hash is not None
+                    and remote_full_len > 0
+                ):
+                    tail_start = matched_blocks * remote_block_size
+                    local_tail = local_token_ids[tail_start:remote_full_len]
+                    if len(local_tail) == remote_full_len - tail_start:
+                        tail_parent = remote_block_hashes[-1] if remote_block_hashes else ""
+                        fully_aligned = (
+                            _bidir_block_hash(tail_parent, local_tail) == remote_tail_hash
+                        )
+                        if fully_aligned:
+                            aligned_tokens = remote_full_len
+                if self.has_stateful_groups:
+                    # Stateful models: D's mamba state is a single snapshot at
+                    # the END of its sequence. Pulling a partial prefix would
+                    # hand P a wrong initial state (fluent but incorrect
+                    # output). Only a verified FULL alignment may be pulled,
+                    # and only when the prompt continues past it (no
+                    # reserve-1: the state is valid exactly at the boundary).
+                    if not fully_aligned:
+                        logger.info(
+                            "Bidirectional KV: stateful model requires full-sequence "
+                            "alignment, matched %d/%d blocks (tail=%s); skipping pull for %s",
+                            matched_blocks,
+                            len(remote_block_hashes),
+                            "present" if remote_tail_hash is not None else "absent",
+                            request.request_id,
+                        )
+                        return 0, False
+                    count = aligned_tokens - num_computed_tokens
+                    if count <= 0 or aligned_tokens >= request.num_prompt_tokens:
+                        # Nothing new to compute: reserve-1 would shift the
+                        # state boundary by one — unsafe on stateful models.
+                        return 0, False
+                    logger.info(
+                        "Bidirectional KV: full-sequence alignment verified "
+                        "(%d tokens), pulling for stateful request %s",
+                        aligned_tokens,
+                        request.request_id,
+                    )
+                    return count, False
+                count = min(aligned_tokens, request.num_prompt_tokens) - num_computed_tokens
+                logger.info(
+                    "Bidirectional KV hash-align: matched %d blocks (%d tokens) of "
+                    "%d remote hashes; prompt_tokens=%d, remote_prompt_tokens=%s, "
+                    "num_computed_tokens=%d, external_count=%d",
+                    matched_blocks,
+                    aligned_tokens,
+                    len(remote_block_hashes),
+                    request.num_prompt_tokens,
+                    params.get("remote_num_prompt_tokens"),
+                    num_computed_tokens,
+                    max(count, 0),
+                )
+            else:
+                # Stateful models cannot use the conservative fallback: the
+                # prompt-bound prefix alone never carries D's final state.
+                if self.has_stateful_groups:
+                    return 0, False
+                # Conservative fallback: no hash chain reported (older D-side
+                # metadata cached by the proxy, or D running a pre-hash build).
+                remote_prompt_tokens = params.get("remote_num_prompt_tokens") or 0
+                count = min(remote_prompt_tokens, request.num_prompt_tokens) - num_computed_tokens
+            # Reserve the last token for local prefill to avoid num_new_tokens=0.
+            if count >= request.num_prompt_tokens - num_computed_tokens:
+                count = max(count - 1, 0)
+            if count > 0:
+                return count, False
+
         return 0, False
 
     def update_state_after_alloc(
@@ -612,10 +909,50 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
         if params is not None and (params.get("do_remote_prefill", False) or params.get("do_remote_decode", False)):
             self._reqs_in_batch.add(request.request_id)
 
-        if params is None or not params.get("do_remote_prefill"):
+        # Standard P->D prefill path
+        if params is not None and params.get("do_remote_prefill"):
+            if params.get("remote_block_ids"):
+                required_remote_fields = (
+                    "remote_engine_id",
+                    "remote_host",
+                    "remote_port",
+                    "remote_request_id",
+                )
+                if all(field in params for field in required_remote_fields):
+                    remote = (
+                        params["remote_host"],
+                        params["remote_port"],
+                        params["remote_request_id"],
+                    )
+                    if num_external_tokens > 0:
+                        self._reqs_need_recv[request.request_id] = (
+                            request,
+                            blocks.get_unhashed_block_ids_all_groups(),
+                            blocks.get_block_ids(),
+                            num_external_tokens,
+                        )
+                        self._reqs_recv_info[request.request_id] = remote
+                    else:
+                        if self._recving_thread is None:
+                            raise RuntimeError("Producer Mooncake scheduler cannot acknowledge a receive request")
+                        self._recving_thread.add_request(*remote)
+                else:
+                    logger.warning("Got invalid KVTransferParams. params=%s.", params)
+            else:
+                assert num_external_tokens == 0
+
+            # Only trigger one transfer for a request.
+            params["do_remote_prefill"] = False
             return
 
-        if params.get("remote_block_ids"):
+        # Bidirectional KV transfer: P pulls blocks from D
+        if (
+            self.is_bidirectional_kv_xfer_enabled
+            and params is not None
+            and params.get("do_remote_decode")
+            and params.get("remote_block_ids")
+            and not params.get("_remote_blocks_processed")
+        ):
             required_remote_fields = (
                 "remote_engine_id",
                 "remote_host",
@@ -641,12 +978,10 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
                         raise RuntimeError("Producer Mooncake scheduler cannot acknowledge a receive request")
                     self._recving_thread.add_request(*remote)
             else:
-                logger.warning("Got invalid KVTransferParams. params=%s.", params)
-        else:
-            assert num_external_tokens == 0
+                logger.warning("Got invalid KVTransferParams for bidirectional transfer. params=%s.", params)
 
-        # Only trigger one transfer for a request.
-        params["do_remote_prefill"] = False
+            # Mark as processed to avoid duplicate transfers
+            params["_remote_blocks_processed"] = True
 
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
         meta = MooncakeConnectorMetadata()
@@ -683,6 +1018,7 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             params,
         )
 
+        # Handle case where do_remote_prefill is still set (request aborted before scheduling)
         if params is not None and params.get("do_remote_prefill"):
             required_remote_fields = (
                 "remote_host",
@@ -704,58 +1040,192 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
             params["do_remote_prefill"] = False
             return False, None
 
-        if (
-            params is None
-            or not params.get("do_remote_decode")
-            or request.status != RequestStatus.FINISHED_LENGTH_CAPPED
+        # Determine if this is a P node or D node based on the instance role.
+        # In bidirectional mode, the kv_producer instance (P) does prefill and
+        # the kv_consumer instance (D) does decode. We use the connector's
+        # kv_role rather than the request params, because the params flag
+        # do_remote_decode is set by the proxy on both P's prefill response
+        # and D's incoming request, making it unreliable for direction detection.
+        is_p_node = self.kv_transfer_config.is_kv_producer
+        is_d_node = self.kv_transfer_config.is_kv_consumer
+
+        # For D node without bidirectional KV transfer, don't delay free
+        if is_d_node and not self.is_bidirectional_kv_xfer_enabled:
+            return False, None
+
+        # Check request status - only delay free for successful completions
+        if request.status not in (
+            RequestStatus.FINISHED_LENGTH_CAPPED,
+            RequestStatus.FINISHED_STOPPED,
         ):
             return False, None
 
+        # Calculate blocks to potentially delay. For the D node under
+        # bidirectional transfer, extend the advertised block set to the FULL
+        # token sequence (prompt + decode output) so the next turn's P node
+        # can also pull the decode-generated KV (assistant text), not just the
+        # prompt-side KV.
         prompt_token_ids = request.prompt_token_ids or []
         prompt_len = len(prompt_token_ids)
-        computed_block_ids = self._get_transfer_block_ids(block_ids, prompt_len)
+        output_token_ids = list(request.output_token_ids or [])
+        if is_d_node and self.is_bidirectional_kv_xfer_enabled:
+            full_seq = list(prompt_token_ids) + output_token_ids
+            advertised_len = len(full_seq)
+        else:
+            full_seq = list(prompt_token_ids)
+            advertised_len = prompt_len
+        computed_block_ids = self._get_transfer_block_ids(block_ids, advertised_len)
         num_computed_blocks = sum(len(group_block_ids) for group_block_ids in computed_block_ids)
         delay_free_blocks = num_computed_blocks > 0
-        if delay_free_blocks:
-            logger.info(
-                "Delaying free of %d blocks for request %s",
-                num_computed_blocks,
-                request.request_id,
+
+        if not delay_free_blocks:
+            return False, None
+
+        # D-node memory budget: cap total pinned bidirectional blocks so a
+        # burst of multi-turn sessions cannot exhaust the KV pool. When the
+        # budget is exceeded, first sweep expired blocks (proactive release
+        # of blocks whose TTL has passed but were not yet freed because no
+        # engine step triggered the opportunistic check). If still short,
+        # evict the OLDEST delayed blocks (LRU) — sessions that have not sent
+        # a next-turn pull are less valuable than fresh sessions. Only when
+        # the pool itself is too small do we skip delay-free entirely.
+        if is_d_node and self.is_bidirectional_kv_xfer_enabled:
+            current_pinned = (
+                self._sending_thread.total_pinned_blocks if self._sending_thread is not None else 0
             )
-            delay_start_time = time.time()
-            self._reqs_need_send[request.request_id] = delay_start_time
-            if self._sending_thread is None:
-                raise RuntimeError("Mooncake scheduler metadata has not been initialized")
-            self._sending_thread.add_delayed_request(
+            if current_pinned + num_computed_blocks > self.decoder_kv_block_budget:
+                # Step 1: sweep expired blocks (free blocks past their TTL).
+                if self._sending_thread is not None:
+                    self._sending_thread.sweep_expired_blocks()
+                    current_pinned = self._sending_thread.total_pinned_blocks
+                # Step 2: evict oldest (LRU) until enough budget is available.
+                if self._sending_thread is not None:
+                    evicted = self._sending_thread.evict_oldest_for_budget(
+                        num_computed_blocks, self.decoder_kv_block_budget
+                    )
+                    if evicted > 0:
+                        logger.info(
+                            "Bidirectional KV: evicted %d oldest delayed blocks "
+                            "(LRU) to make budget for request %s",
+                            evicted,
+                            request.request_id,
+                        )
+                    current_pinned = self._sending_thread.total_pinned_blocks
+                if current_pinned + num_computed_blocks > self.decoder_kv_block_budget:
+                    logger.warning(
+                        "Bidirectional KV: block budget exhausted (%d+%d > %d after "
+                        "expiry sweep + LRU eviction), skipping delay-free for request %s",
+                        current_pinned,
+                        num_computed_blocks,
+                        self.decoder_kv_block_budget,
+                        request.request_id,
+                    )
+                    return False, None
+
+        # Content-addressed block hash chain over the full sequence. Only the
+        # D node reports it; the next turn's P node walks its own prompt chain
+        # against this chain to find the exact token-alignment boundary.
+        remote_block_hashes: list[str] = []
+        remote_tail_hash: str | None = None
+        if is_d_node and self.is_bidirectional_kv_xfer_enabled:
+            remote_block_hashes = _bidir_block_hash_chain(full_seq, BIDIR_HASH_BLOCK_SIZE)
+            # Tail hash: covers the tokens beyond the last full hash block
+            # (advertised_len % BIDIR_HASH_BLOCK_SIZE != 0). Stateful (hybrid)
+            # models may only pull when the ENTIRE D-side sequence aligns with
+            # the next prompt prefix, because D's mamba state is a single
+            # snapshot at the end of the sequence; the tail hash makes the
+            # full-alignment boundary verifiable.
+            tail_start = len(remote_block_hashes) * BIDIR_HASH_BLOCK_SIZE
+            if advertised_len > tail_start:
+                tail_parent = remote_block_hashes[-1] if remote_block_hashes else ""
+                remote_tail_hash = _bidir_block_hash(
+                    tail_parent, full_seq[tail_start:advertised_len]
+                )
+            logger.debug(
+                "Bidirectional KV: reporting %d block hashes over %d tokens "
+                "(prompt=%d + output=%d, tail=%s) for request %s",
+                len(remote_block_hashes),
+                advertised_len,
+                prompt_len,
+                len(output_token_ids),
+                "yes" if remote_tail_hash is not None else "no",
                 request.request_id,
-                delay_start_time,
             )
 
+        # Determine TTL based on node type
+        if is_d_node:
+            # D node: use decoder_kv_blocks_ttl for bidirectional transfer
+            ttl = self.decoder_kv_blocks_ttl
+            logger.info(
+                "Bidirectional KV: Delaying free of %d blocks for request %s with TTL %d seconds",
+                num_computed_blocks,
+                request.request_id,
+                ttl,
+            )
+        else:
+            # P node: use standard abort timeout
+            ttl = envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
+            logger.info(
+                "Delaying free of %d blocks for request %s with TTL %d seconds",
+                num_computed_blocks,
+                request.request_id,
+                ttl,
+            )
+
+        # Store expiry timestamp
+        expiry_time = time.time() + ttl
+        self._reqs_need_send[request.request_id] = expiry_time
+        if self._sending_thread is None:
+            raise RuntimeError("Mooncake scheduler metadata has not been initialized")
+        if is_d_node and self.is_bidirectional_kv_xfer_enabled:
+            self._sending_thread.add_delayed_request_with_blocks(
+                request.request_id, expiry_time, num_computed_blocks
+            )
+        else:
+            self._sending_thread.add_delayed_request(request.request_id, expiry_time)
+
+        # Build response metadata. For the D node, remote_num_tokens is the
+        # EXACT advertised sequence length (prompt + output) so the next-turn
+        # P node can verify full-sequence alignment against the tail hash.
+        remote_num_tokens = advertised_len if is_d_node else 0
+        blocks_expiry_time = expiry_time if is_d_node else None
+
         return delay_free_blocks, {
-            "do_remote_prefill": True,
-            "do_remote_decode": False,
+            "do_remote_prefill": is_p_node,
+            "do_remote_decode": is_d_node,
             "remote_block_ids": computed_block_ids,
+            "remote_num_tokens": remote_num_tokens,
             "remote_num_prompt_tokens": prompt_len,
+            "remote_block_hashes": remote_block_hashes,
+            "remote_tail_hash": remote_tail_hash,
+            "remote_block_size": BIDIR_HASH_BLOCK_SIZE,
             "remote_engine_id": self.engine_id,
             "remote_request_id": request.request_id,
             "remote_host": self.side_channel_host,
             "remote_port": self.side_channel_port,
-            "last_token_id": request.output_token_ids[-1],
+            "remote_blocks_expiry_time": blocks_expiry_time,
         }
 
     def update_connector_output(
         self,
         connector_output: KVConnectorOutput,
     ) -> None:
-        # D side: this output has already aggregated completion from all
-        # workers. Send one scheduler-to-scheduler ACK for the request.
-        for req_id in connector_output.finished_recving or ():
+        # D side (standard P→D): this output has already aggregated completion
+        # from all workers. Send one scheduler-to-scheduler ACK for the request.
+        # P side (bidirectional D→P): same ACK semantics — notify D that its
+        # blocks have been read so it can release them. On P the upstream
+        # scheduler must NOT see finished_recving (the request already
+        # completed via the synchronous load path; _update_from_kv_xfer_finished
+        # would assert because the request has been freed). Clear the sets on
+        # the kv_producer side after consuming them here.
+        is_p_node = self.kv_transfer_config.is_kv_producer
+        for req_id in list(connector_output.finished_recving or ()):
             remote = self._reqs_recv_info.pop(req_id, None)
             if remote is not None:
                 if self._recving_thread is None:
                     raise RuntimeError("Producer Mooncake scheduler received a receive-completion event")
                 self._recving_thread.add_request(*remote)
-                if req_id in connector_output.failed_recving:
+                if req_id in (connector_output.failed_recving or set()):
                     logger.error(
                         "Mooncake D receive failed after worker aggregation: request_id=%s, "
                         "remote_request_id=%s, producer=%s:%s, failure_policy=%s; producer release notification queued",
@@ -765,6 +1235,11 @@ class MooncakePullConnectorScheduler(MooncakeBaseConnectorScheduler):
                         remote[1],
                         self.kv_transfer_config.kv_load_failure_policy,
                     )
+        if is_p_node and self.is_bidirectional_kv_xfer_enabled:
+            # Consume and drop: P's synchronous bidir loads complete within the
+            # scheduling step; upstream must not process them as async loads.
+            connector_output.finished_recving = None
+            connector_output.failed_recving = None
 
         # P side: feed scheduler-received ACKs into vLLM's standard delayed
         # free path. Scheduler._update_from_kv_xfer_finished reads this same
