@@ -62,6 +62,31 @@ For non-layerwise complete-block transfers, adjacent MLA components sharing one 
 
 This bulk fast path uses physical-page-major object contents instead of the previous component-major segmented contents. A fresh namespace is required even when upgrading from the earlier segmented version of this fix. Writers and readers must agree on transfer mode and cache layout; do not share these objects with layerwise readers or workers using a different component layout.
 
+### DeepSeek V4.1 Layerwise Pooling
+
+DeepSeek V4.1 uses the existing Memcache GVA layerwise path with
+`backend: "memcache"` and `use_layerwise: true`. It requires Model Runner V2
+and eager execution (`--enforce-eager`). TP and PCP are supported; PP, DCP,
+KVPP, and graph replay are not supported for this shared-source layout.
+No additional transfer-mode option is needed. The model's `kv_source_layer_ids`
+select the shared-source layout automatically. Layerwise scratch-buffer reuse
+is disabled because later layers still consume the source layers' KV.
+
+The transfer sequence keeps every model layer. Layers without registered KV
+have empty tasks; source KV, index caches, SWA, and registered draft caches
+retain their existing cache-group addressing. For bounded replay, the cut
+layer loads before its cache-only write and saves after its normal forward's
+last write, while later layers can continue computing. Draft caches are loaded
+before draft preparation and saved after drafting. The final save fence waits
+for all copies before publishing a reusable pool entry or reusing source memory.
+
+With `AscendMultiConnector`, Mooncake V2 push uses the composite attention
+boundary to mark all caches owned by a layer ready. Draft caches remain deferred
+until the post-forward save fence. Unsupported sibling connectors do not receive
+these composite layer callbacks. Transfer failures abort the step instead of
+publishing incomplete KV. Use the same cache layout on all pool readers and
+writers; existing entries from a different layout must use a separate namespace.
+
 ### Prefix Cache Retention
 
 Configure retention with the upstream vLLM argument `--prefix-cache-retention-interval`.

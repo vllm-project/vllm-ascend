@@ -124,6 +124,10 @@ def register_connector():
         "AscendStoreConnector",
     )
 
+    # Upstream vLLM registers its own MooncakeLayerwiseConnector when the
+    # paired layerwise work (vllm#62504) lands, and register_connector
+    # rejects duplicates; take the name over like MultiConnector above.
+    KVConnectorFactory._registry.pop("MooncakeLayerwiseConnector", None)
     KVConnectorFactory.register_connector(
         "MooncakeLayerwiseConnector",
         "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector",

@@ -35,6 +35,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_backend_class,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    has_shared_kv_sources,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_scheduler import (
     LayerwiseKVPoolScheduler,
 )
@@ -141,6 +144,10 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.backend_class = get_backend_class(self.backend_name) if self.use_layerwise else None
         self.layerwise_data_plane = self.backend_class.layerwise_data_plane if self.backend_class is not None else None
         self.use_block_key_layerwise = self.use_layerwise and self.layerwise_data_plane == "block_key"
+        self.supports_composite_kv_loads = (
+            self.use_layerwise and self.layerwise_data_plane == "gva" and has_shared_kv_sources(vllm_config)
+        )
+        self.supports_composite_kv_saves = self.supports_composite_kv_loads
         self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "save_decode_cache", False
         )
@@ -400,7 +407,11 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         # then let each cache owner copy its own recurrent state before use.
         layer = self.connector_worker._extract_physical_layer_index(layer_name)
         if self._loaded_layer != layer:
-            cast(LayerwiseKVPoolWorker, self.connector_worker).wait_for_layer_load()
+            worker = cast(LayerwiseKVPoolWorker, self.connector_worker)
+            if getattr(worker, "has_shared_kv", False) is True:
+                worker.wait_for_layer_load(layer_name)
+            else:
+                worker.wait_for_layer_load()
             self._loaded_layer = layer
         # Mamba state copy must run AFTER this layer's load finishes,
         # otherwise the copy would race with the in-flight layerwise load and
@@ -438,7 +449,16 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             # A load-only consumer does not publish KV.
             return
         assert self.connector_worker is not None
-        cast(LayerwiseKVPoolWorker, self.connector_worker).save_kv_layer(self._get_connector_metadata())
+        worker = cast(LayerwiseKVPoolWorker, self.connector_worker)
+        if getattr(worker, "has_shared_kv", False) is True:
+            worker.save_kv_layer(self._get_connector_metadata(), layer_name)
+        else:
+            worker.save_kv_layer(self._get_connector_metadata())
+
+    def finish_forward(self) -> None:
+        if self.use_layerwise:
+            cast(LayerwiseKVPoolWorker, self.connector_worker).finish_forward()
+        super().finish_forward()
 
     def wait_for_save(self):
         if not self.can_put:
@@ -446,6 +466,8 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             return
 
         if self.use_layerwise:
+            if getattr(self.connector_worker, "has_shared_kv", False) is True:
+                cast(LayerwiseKVPoolWorker, self.connector_worker).wait_for_save(self._get_connector_metadata())
             return
 
         assert self.connector_worker is not None

@@ -16,6 +16,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     build_layerwise_reuse_layout,
     get_layerwise_kv_cache_specs,
     get_layerwise_reuse_config,
+    has_shared_kv_sources,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
@@ -47,12 +48,13 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             )
         self.use_block_key_layerwise = use_layerwise and self.layerwise_data_plane == "block_key"
         self.use_layerwise_transfer = use_layerwise and self.layerwise_data_plane == "gva"
+        self.has_shared_kv = self.use_layerwise_transfer and has_shared_kv_sources(vllm_config)
         self.dspark_prefix_keys: DSparkPrefixKeys | None = None
         self.dspark_draft_only_group_ids = frozenset(getattr(kv_cache_config, "dspark_draft_only_group_ids", ()))
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
         self.sharded_mamba_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
         self.load_async = False
-        if self.use_layerwise_transfer:
+        if self.use_layerwise_transfer and not getattr(self, "has_shared_kv", False):
             self._init_layerwise_offload(vllm_config, kv_cache_config, extra_config)
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
         self.layerwise_keys = (
@@ -79,13 +81,13 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             raise ValueError("AscendStore private KV state requires Mooncake block-key or non-layerwise transfer")
 
     def _process_hit_without_alloc(self, store_skip_tokens: int) -> bool:
-        return store_skip_tokens > 0
+        return not getattr(self, "has_shared_kv", False) and store_skip_tokens > 0
 
     def _async_load_enabled(self) -> bool:
         return False
 
     def _init_layerwise_offload(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig, extra_config) -> Any:
-        reuse_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config)
+        reuse_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config, vllm_config=vllm_config)
         if kv_cache_config is not None and reuse_config is not None:
             reuse_layout = build_layerwise_reuse_layout(
                 get_layerwise_kv_cache_specs(kv_cache_config),

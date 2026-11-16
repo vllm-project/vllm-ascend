@@ -112,11 +112,31 @@ class LayerwiseReuseLayout:
     has_layer_reuse: bool
 
 
-def get_layerwise_reuse_config(kv_transfer_config: Any) -> dict[str, Any] | None:
+def has_shared_kv_sources(vllm_config: Any) -> bool:
+    """Identify source sharing from the text-model structure, not its name."""
+    model = vllm_config.model_config
+    config = getattr(model, "hf_text_config", None) or model.hf_config
+    sources = getattr(config, "kv_source_layer_ids", None)
+    if not isinstance(sources, (list, tuple)) or not sources:
+        return False
+    count = getattr(config, "num_hidden_layers", 0)
+    if (
+        type(count) is not int
+        or any(type(source) is not int or not 0 <= source < count for source in sources)
+        or any(left >= right for left, right in zip(sources, sources[1:]))
+    ):
+        raise ValueError("Invalid kv_source_layer_ids for the model's layer count")
+    return len(sources) < count
+
+
+def get_layerwise_reuse_config(kv_transfer_config: Any, *, vllm_config: Any = None) -> dict[str, Any] | None:
     """Return the extra config of the layerwise-reuse connector, if any.
 
     Layerwise cache reuse requires the GVA backend and an enabled connector.
     """
+    if vllm_config is not None and has_shared_kv_sources(vllm_config):
+        # Consumers must retain their source buffers throughout the forward.
+        return None
     if kv_transfer_config is None:
         return None
 
@@ -336,7 +356,7 @@ def apply_layerwise_kv_cache_plan(
     excluded_layer_names: set[str] | None = None,
 ) -> None:
     """Rewrite logical layer tensors to use shared physical KV buffers."""
-    extra_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config)
+    extra_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config, vllm_config=vllm_config)
     if extra_config is None:
         return
 
