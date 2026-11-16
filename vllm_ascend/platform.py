@@ -1949,6 +1949,14 @@ def _validate_engram_config(vllm_config: VllmConfig) -> None:
         "Qwen4ExpForCausalLM",
         "Qwen4ExpForConditionalGeneration",
     ):
+        if engram_config is not None:
+            if getattr(engram_config, "disk_offload", False):
+                raise ValueError("Qwen PLE disk offload is not supported on Ascend")
+            if engram_config.cpu_offload:
+                if engram_config.embedding_across_dp or engram_config.use_thp:
+                    raise ValueError("Qwen PLE UVA offload requires ETP=TP without THP")
+                if not vllm_config.use_v2_model_runner:
+                    raise ValueError("Qwen PLE UVA offload requires model runner v2")
         # Qwen4Exp PLE is managed by its model-specific implementation and the
         # upstream ngram_embedding, which reads engram_config directly. Keep the
         # config flowing to upstream instead of clearing it; model/layer/device
