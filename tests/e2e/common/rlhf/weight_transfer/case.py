@@ -46,6 +46,10 @@ class WeightUpdateModelCase:
     expert_intermediate_size: int | None = None
     trust_remote_code: bool = True
     extra_server_args: tuple[str, ...] = ()
+    prompts: tuple[str | tuple[int, ...], ...] = (
+        "The capital of France is",
+        "Explain why the sky is blue in one sentence:",
+    )
     # One representative model covers both backends and packing modes.
     full_transfer_matrix: bool = False
     skip_reason: str | None = None
@@ -232,8 +236,23 @@ MINIMAX_M3_CASE = WeightUpdateModelCase(
             # native config derives these before overrides are applied.
             "layer_types": ["full_attention", "full_attention", "full_attention", "minimax_m3_sparse"],
             "mlp_layer_types": ["dense", "dense", "dense", "sparse"],
+            "sparse_attention_config": {
+                "use_sparse_attention": True,
+                "sparse_index_dim": 128,
+                "sparse_num_index_heads": 4,
+                # One local block plus one score-selected block; the prompt spans five.
+                "sparse_topk_blocks": 2,
+                "sparse_block_size": 128,
+                "sparse_score_type": "max",
+                "sparse_init_block": 0,
+                "sparse_local_block": 1,
+                "sparse_attention_freq": [0, 0, 0, 1],
+                "sparse_disable_index_value": [0, 0, 0, 1],
+            },
         },
     },
+    # Token IDs make the multi-block length independent of tokenizer segmentation.
+    prompts=(tuple(range(1000, 1640)),),
     meta_config_attribute="text_config",
     checkpoint_model_prefix="language_model.model.",
     checkpoint_name_map=minimax_m3_checkpoint_name,
@@ -257,6 +276,11 @@ MINIMAX_M31_FLASH_CASE = replace(
             **MINIMAX_M3_CASE.hf_overrides["text_config"],
             # Flash uses sparse attention in every layer, including the dense MLP layers.
             "layer_types": ["minimax_m3_sparse"] * 4,
+            "sparse_attention_config": {
+                **MINIMAX_M3_CASE.hf_overrides["text_config"]["sparse_attention_config"],
+                "sparse_attention_freq": [1] * 4,
+                "sparse_disable_index_value": [1] * 4,
+            },
         },
     },
 )

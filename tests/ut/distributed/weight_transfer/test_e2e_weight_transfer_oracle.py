@@ -29,7 +29,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from tests.e2e.common.rlhf.weight_transfer import reference_check as utils
-from tests.e2e.common.rlhf.weight_transfer.case import MODEL_CASES
+from tests.e2e.common.rlhf.weight_transfer.case import MINIMAX_M3_CASE, MINIMAX_M31_FLASH_CASE, MODEL_CASES
 from tests.e2e.common.rlhf.weight_transfer.reference_check import (
     live_update_serve_args,
     reference_serve_args,
@@ -187,3 +187,17 @@ def test_reference_signature_starts_one_server_per_measurement_conditions(refere
     assert mock_generate.call_count == 2
     # One gate per startup, not per call: a cache hit must not stop the world.
     assert mock_wait.call_count == 2
+
+
+@pytest.mark.parametrize("case", [MINIMAX_M3_CASE, MINIMAX_M31_FLASH_CASE], ids=["m3", "m3.1-flash"])
+def test_minimax_signature_exercises_score_selected_blocks(case):
+    sparse = case.hf_overrides["text_config"]["sparse_attention_config"]
+    client = MagicMock()
+    client.completions.create.return_value.choices[0].logprobs.token_logprobs = [-1.0]
+    utils.generation_signature(client, case.model, prompts=case.prompts)
+    request = client.completions.create.call_args.kwargs
+    prompt = request["prompt"]
+    assert isinstance(prompt, list) and all(isinstance(token, int) for token in prompt)
+    num_blocks = (len(prompt) + sparse["sparse_block_size"] - 1) // sparse["sparse_block_size"]
+    assert sparse["sparse_init_block"] + sparse["sparse_local_block"] < sparse["sparse_topk_blocks"] < num_blocks
+    assert len(prompt) + request["max_tokens"] <= 1024
