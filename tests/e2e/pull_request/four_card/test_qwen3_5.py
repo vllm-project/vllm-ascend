@@ -58,6 +58,7 @@ def test_qwen3_5_35b_dp2_tp2_ep_sp_full_decode_only_mtp3():
         tensor_parallel_size=2,
         enable_expert_parallel=True,
         all2all_backend="allgather_reducescatter",
+        additional_config={"enable_flashcomm1": True},
         max_model_len=4096,
         gpu_memory_utilization=0.90,
         distributed_executor_backend="mp",
