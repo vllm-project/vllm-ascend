@@ -482,3 +482,56 @@ def test_tp0_drain_uses_pre_reload_hooks_for_soft_purge():
             worker.stop()
     finally:
         RequestGuardStore.reset_for_tests()
+
+
+def test_run_sample_phase_drains_bus_before_sample_fn():
+    """Sample entry must drain TP Gloo bus before connector post_forward/SFA.
+
+    Wave-head submit overlaps forward; draining at ``run_sample_phase`` entry
+    keeps that overlap while preventing bus broadcast from crossing
+    ``all_gather_object`` inside ``sample_fn`` / ``get_finished``.
+    """
+    from vllm_ascend.observability.runtime_guard.processor import (
+        RuntimeGuardProcessor,
+        SamplePhaseResult,
+    )
+
+    order: list[str] = []
+    p = object.__new__(RuntimeGuardProcessor)
+    p.runtime_config = MagicMock()
+    p.runtime_config.is_fully_off.return_value = False
+    p.detectors = MagicMock()
+    p.wave_tracker = MagicMock()
+    p.runner = MagicMock()
+    p._last_input_batch = None
+    p._merged_bus_inflight = True
+
+    def _drain(*, warn_if_pending: bool = False, timeout: float | None = None):
+        order.append("drain")
+        p._merged_bus_inflight = False
+        return True
+
+    def sample_fn():
+        order.append("sample")
+        assert p._merged_bus_inflight is False
+        return SamplePhaseResult(
+            scheduler_output=None,
+            input_batch=None,
+            model_runner_output=None,
+            sampler_output=SimpleNamespace(sampled_token_ids=[1]),
+            valid_sampled_token_ids=[1],
+            req_ids_output_copy=["r1"],
+            finished_req_ids=None,
+        )
+
+    p._drain_merged_bus = _drain  # type: ignore[method-assign]
+    p._drain_merged_bus_before_sample_tp_gloo = (  # type: ignore[method-assign]
+        RuntimeGuardBusMixin._drain_merged_bus_before_sample_tp_gloo.__get__(p)
+    )
+    p.mark_finished = MagicMock()
+    p.needs_sample_phase_hooks = lambda: False  # type: ignore[method-assign]
+    p.end_of_wave = MagicMock()  # type: ignore[method-assign]
+
+    p.run_sample_phase(sample_fn=sample_fn, speculative_config=None, use_async=False)
+    assert order == ["drain", "sample"]
+    p.end_of_wave.assert_called_once()

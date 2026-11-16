@@ -486,12 +486,13 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         so it fires BEFORE grammar bitmask.
 
         Hook sequence (``S1`` golden path):
+            1.5. drain merged bus (TP Gloo) before ``sample_fn`` / connector
             2. ``sample_fn()`` returns :class:`SamplePhaseResult`
             3. ``mark_finished``
             4. ``check_after_spec`` (spec only; ``accepted_token_nums_fn`` for branch)
             5. ``record_sample_waves``
             6. ``check_after_sample`` (host-ready ids only; see defer note below)
-            7. ``end_of_wave`` (config+dump gate; after sync auto arm when possible)
+            7. ``end_of_wave`` (deferred D2H + manual; bus drain is usually a no-op)
 
         Native KV capture uses ``dump_kv`` actions only (fully decoupled from
         Ascend/msprobe PrecisionDebugger dump).
@@ -503,6 +504,14 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         Appending ``AsyncOutput.sampled_token_ids`` (padded numpy) here inflated
         cumulative IO and false-triggered ``token_repeat`` (W2-3 / D-11).
         """
+        # Finish any wave-head DueBitsBusWorker collective on the inference
+        # thread *before* ``sample_fn``. ``sample_tokens`` calls
+        # ``kv_connector.post_forward`` → SFA ``get_finished`` →
+        # ``all_gather_object`` on the same TP ``cpu_group``. Draining here
+        # keeps forward overlap, but guarantees a consistent Gloo order so
+        # ranks cannot interleave bus broadcast with connector all_gather.
+        # No-sample waves still drain in ``end_of_wave`` / begin_wave finally.
+        self._drain_merged_bus_before_sample_tp_gloo()
         # sample and mark_finished are shared. Detectors off still stamps
         # finish before end-of-wave so a same-wave manual report can read the
         # prompt cache; reap waits until the next ``begin_wave``.

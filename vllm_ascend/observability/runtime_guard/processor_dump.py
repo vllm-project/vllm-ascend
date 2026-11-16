@@ -128,12 +128,14 @@ class RuntimeGuardDumpMixin:
         self._refund_dropped_dump_arms(jobs)
 
     def end_of_wave(self, *, has_scheduled_tokens: bool = True) -> None:
-        """End-of-wave: drain async merged bus, then deferred D2H + manual dump.
+        """End-of-wave: drain async merged bus (if needed), then deferred D2H.
 
-        Async last-PP TP path: wave-head only submitted the due broadcast;
-        collectives finish here (ideally already done during forward). Sync /
-        file paths have nothing inflight — drain is a no-op. Non-last PP
-        returns immediately (same gate as ``begin_wave``).
+        Async last-PP TP path: wave-head submitted the due broadcast to overlap
+        forward. Sampled waves usually already drained in
+        :meth:`RuntimeGuardProcessor.run_sample_phase` (before connector
+        ``post_forward`` / SFA TP Gloo). This call is then a no-op for the bus
+        and only runs deferred D2H + manual dump. No-sample / early-return
+        waves still drain here. Non-last PP returns immediately.
         ``has_scheduled_tokens``: False on dummy / no-sample (do not burn manual_dump).
         """
         if not should_run_wave_sync_on_rank():
