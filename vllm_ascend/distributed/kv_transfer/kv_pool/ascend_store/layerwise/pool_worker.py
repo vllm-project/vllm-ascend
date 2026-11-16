@@ -136,6 +136,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         self.use_block_key_layerwise = self.layerwise_data_plane == "block_key"
         self.use_layerwise_transfer = self.layerwise_data_plane == "gva"
         self._step_load_keys: set[str] = set()
+        # Request ID -> cache group ID -> request block index -> (saved end token, pool key).
         self._snapshot_keys: dict[str, dict[int, dict[int, tuple[int, str]]]] = {}
         super()._init_kv_transfer_config(vllm_config, extra_config, use_layerwise, kv_cache_config)
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
@@ -823,9 +824,11 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             block_end = (block_idx + 1) * block_size
             end = min(block_end, cached_tokens)
             saved = snapshot.get(block_idx)
-            if saved is not None and (saved[0] == end or (not uses_align_state and saved[0] > end)):
-                # A hash can become available after the preceding save.
-                return saved[1]
+            if saved is not None:
+                saved_end_token, pool_key = saved
+                if saved_end_token == end or (not uses_align_state and saved_end_token > end):
+                    # A hash can become available after the preceding save.
+                    return pool_key
             # An aligned Mamba endpoint uses the single-page transfer slot
             # even when its complete state is stored under a public key.
             if end == block_end and block_idx < len(block_hashes):
