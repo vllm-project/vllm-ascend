@@ -13,6 +13,8 @@
 # - Load balances requests to multiple prefiller and decoder servers.
 # - Supports OpenAI-compatible /v1/completions and /v1/chat/completions endpoints.
 # - Streams responses from backend servers to clients.
+# - Prefill affinity: route same conversation to same prefill instance for prefix cache reuse.
+# - Bidirectional KV transfer: enables P to pull cached KV blocks from D for multi-turn dialogue.
 #
 # Prerequisites:
 # - Python 3.10+
@@ -35,6 +37,7 @@
 # ------------------------------
 # Run the proxy server, specifying the host/port for each prefiller and decoder:
 #
+# Standard mode (unidirectional P→D KV transfer):
 #   python load_balance_proxy_server_example.py \
 #     --host 0.0.0.0 --port 9000 --workers 2 \
 #     --prefiller-hosts 127.0.0.1 127.0.0.1 \
@@ -42,13 +45,26 @@
 #     --decoder-hosts 127.0.0.1 127.0.0.1 \
 #     --decoder-ports 8200 8201
 #
+# With bidirectional KV transfer enabled (for multi-turn dialogue optimization):
+#   python load_balance_proxy_server_example.py \
+#     --host 0.0.0.0 --port 9000 --workers 2 \
+#     --enable-bidirectional-kv-xfer \
+#     --decoder-kv-blocks-ttl 480 \
+#     --prefiller-hosts 127.0.0.1 127.0.0.1 \
+#     --prefiller-ports 8100 8101 \
+#     --decoder-hosts 127.0.0.1 127.0.0.1 \
+#     --decoder-ports 8200 8201
+#
 # This will start the proxy on port 9000, load balancing between two prefiller
-# and two decoder servers.
+# and two decoder servers. When bidirectional KV transfer is enabled, D-side
+# cached KV blocks are preserved with a TTL (default 480s) and can be pulled
+# by P in subsequent turns of the same conversation.
 #
 # Step 3: Send a Request to the Proxy
 # -----------------------------------
 # You can now send OpenAI-compatible requests to the proxy. For example:
 #
+# Single-turn request (no session tracking):
 #   curl -X POST http://localhost:9000/v1/completions \
 #     -H "Content-Type: application/json" \
 #     -d '{
@@ -57,15 +73,35 @@
 #           "max_tokens": 16
 #         }'
 #
-# Or for chat completions:
-#
+# Multi-turn chat with session tracking (enables bidirectional KV transfer):
 #   curl -X POST http://localhost:9000/v1/chat/completions \
 #     -H "Content-Type: application/json" \
+#     -H "X-Session-Id: user-session-12345" \
 #     -d '{
 #           "model": "your-model",
 #           "messages": [{"role": "user", "content": "Hello!"}],
 #           "max_tokens": 16
 #         }'
+#
+# Second turn of the same conversation (P will pull cached KV from D if available):
+#   curl -X POST http://localhost:9000/v1/chat/completions \
+#     -H "Content-Type: application/json" \
+#     -H "X-Session-Id: user-session-12345" \
+#     -d '{
+#           "model": "your-model",
+#           "messages": [
+#             {"role": "user", "content": "Hello!"},
+#             {"role": "assistant", "content": "Hi there!"},
+#             {"role": "user", "content": "Tell me more."}
+#           ],
+#           "max_tokens": 32
+#         }'
+#
+# The X-Session-Id header is used to track conversations. When bidirectional KV
+# transfer is enabled, the proxy will:
+#   1. Save D-side KV metadata after first turn completes
+#   2. Inject this metadata into P's prefill request for subsequent turns
+#   3. P will then pull cached KV blocks from D via Mooncake RDMA READ
 #
 # Step 4: Health Check
 # --------------------
@@ -109,6 +145,9 @@
 # - You can scale the number of prefiller and decoder servers as needed.
 # - The proxy will round-robin requests to balance load.
 # - For production, ensure your backend servers are robust and secure.
+# - Use --enable-prefill-affinity to route same conversations to same P instance.
+# - Use --enable-bidirectional-kv-xfer to enable D→P KV block pulling for multi-turn dialogue.
+# - Set --decoder-kv-blocks-ttl to control how long D-side KV blocks are retained (default: 480s).
 #
 # For more details, see the code and comments in this file.
 
@@ -297,11 +336,59 @@ class SharedProxyScheduler:
             ServerRole.DECODE: RolePools(),
         }
         self._ordinal = 0
+        # Bidirectional KV transfer: session_id → (kv_transfer_params, expiry_time)
+        self._session_kv_states: dict[str, tuple[dict, float]] = {}
 
         for host, port in prefiller_instances:
             self._add_server_no_lock(ServerRole.PREFILL, host, port)
         for host, port in decoder_instances:
             self._add_server_no_lock(ServerRole.DECODE, host, port)
+
+    def save_session_kv_state(self, session_id: str, kv_params: dict, ttl_seconds: int) -> None:
+        """Save D-side KV metadata after decode completes, with TTL expiry."""
+        if not session_id or not kv_params:
+            return
+        with self._lock:
+            expiry_time = time.time() + ttl_seconds
+            # Cleanup expired entries on every save (cheap: dict scan over
+            # session IDs only, no KV data). Keeps the store bounded even
+            # for long-running proxies with many short-lived sessions.
+            expired = [
+                sid
+                for sid, (_, exp) in self._session_kv_states.items()
+                if expiry_time >= exp
+            ]
+            for sid in expired:
+                del self._session_kv_states[sid]
+            self._session_kv_states[session_id] = (kv_params.copy(), expiry_time)
+
+    def get_session_kv_state(self, session_id: str) -> dict | None:
+        """Retrieve cached D-side KV metadata for bidirectional transfer.
+
+        Returns None (and evicts the entry) when either the proxy-side TTL
+        has expired or the D-reported block expiry has already passed — the
+        latter protects against D restarting (fresh blocks, stale metadata
+        in the proxy) or clock drift between P and D.
+        """
+        if not session_id:
+            return None
+        with self._lock:
+            entry = self._session_kv_states.get(session_id)
+            if entry is None:
+                return None
+            kv_params, expiry_time = entry
+            now = time.time()
+            if now >= expiry_time:
+                del self._session_kv_states[session_id]
+                return None
+            # Guard against D-side block expiry: the blocks D promised are
+            # only valid until remote_blocks_expiry_time. If that has
+            # already passed, P's pull would fail; drop the stale entry.
+            remote_expiry = kv_params.get("remote_blocks_expiry_time")
+            if remote_expiry is not None and now >= float(remote_expiry):
+                del self._session_kv_states[session_id]
+                return None
+            return kv_params.copy()
 
     def _pool(self, role: ServerRole) -> RolePools:
         return self._pools[role]
@@ -712,6 +799,17 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Route conversations to stable prefill endpoints to reuse prefix cache; decode remains load balanced.",
     )
+    parser.add_argument(
+        "--enable-bidirectional-kv-xfer",
+        action="store_true",
+        help="Enable bidirectional KV transfer: P can pull cached KV blocks from D for multi-turn dialogue scenarios.",
+    )
+    parser.add_argument(
+        "--decoder-kv-blocks-ttl",
+        type=int,
+        default=480,
+        help="TTL (in seconds) for D-side cached KV blocks. After this timeout, blocks are released if not reused. Default: 480s",
+    )
     parser.add_argument("--max-retries", type=int, default=3, help="Maximum number of retries for HTTP requests")
     parser.add_argument(
         "--retry-delay", type=float, default=0.001, help="Base delay (seconds) for exponential backoff retries"
@@ -852,16 +950,30 @@ def auth_headers(request_id: str) -> dict[str, str]:
     }
 
 
-def build_prefill_request(req_data: dict) -> dict:
+def build_prefill_request(req_data: dict, cached_kv_params: dict | None = None) -> dict:
+    """Build prefill request with optional bidirectional KV transfer params.
+
+    Args:
+        req_data: Original request data from client
+        cached_kv_params: If provided, use D-side KV metadata for bidirectional transfer.
+                         Otherwise, use standard P→D transfer params.
+    """
     payload = req_data.copy()
-    payload["kv_transfer_params"] = {
-        "do_remote_decode": True,
-        "do_remote_prefill": False,
-        "remote_engine_id": None,
-        "remote_block_ids": None,
-        "remote_host": None,
-        "remote_port": None,
-    }
+
+    if cached_kv_params is not None:
+        # Bidirectional transfer: P pulls KV from D
+        payload["kv_transfer_params"] = cached_kv_params
+    else:
+        # Standard transfer: P pushes KV to D
+        payload["kv_transfer_params"] = {
+            "do_remote_decode": True,
+            "do_remote_prefill": False,
+            "remote_engine_id": None,
+            "remote_block_ids": None,
+            "remote_host": None,
+            "remote_port": None,
+        }
+
     payload["stream"] = False
     payload["max_tokens"] = 1
     payload["min_tokens"] = 1
@@ -878,8 +990,20 @@ async def send_request_to_service(
     request_id: str,
     max_retries: int = 3,
     base_delay: float = 0.2,
+    cached_kv_params: dict | None = None,
 ):
-    req_data = build_prefill_request(req_data)
+    """Send request to backend service with optional bidirectional KV params.
+
+    Args:
+        client: HTTP client for the target instance
+        endpoint: API endpoint (e.g., "/v1/completions")
+        req_data: Request data from client
+        request_id: Unique request identifier
+        max_retries: Maximum number of retry attempts
+        base_delay: Base delay for exponential backoff
+        cached_kv_params: If provided, use for bidirectional KV transfer
+    """
+    req_data = build_prefill_request(req_data, cached_kv_params)
     headers = auth_headers(request_id)
     max_attempts = max(1, max_retries)
     for attempt in range(1, max_attempts + 1):
@@ -979,12 +1103,24 @@ async def _release_decoder_once(runtime: WorkerRuntime, info: InstanceInfo) -> N
     info.decoder_released = True
 
 
+def extract_session_id(request: Request, req_data: dict) -> str | None:
+    """Extract session identifier from request for bidirectional KV transfer."""
+    # Priority 1: X-Session-Id header (explicit session tracking)
+    if session_id := request.headers.get("X-Session-Id"):
+        return session_id
+    # Priority 2: user field in request data (conversation affinity key)
+    if isinstance(req_data.get("user"), str) and req_data["user"]:
+        return req_data["user"]
+    return None
+
+
 async def assign_instances(
     api: str,
     req_data: Any,
     request_length: int,
     *,
     is_initial_request: bool,
+    session_id: str | None = None,
 ) -> InstanceInfo:
     runtime = get_runtime()
     args = get_global_args()
@@ -998,6 +1134,17 @@ async def assign_instances(
         prefiller = await runtime.schedule(pick_prefill, prefiller_score)
     prefiller_key = prefiller["key"]
 
+    # Bidirectional KV transfer: query cached D-side KV metadata
+    cached_kv_params = None
+    if session_id and getattr(args, "enable_bidirectional_kv_xfer", False):
+        cached_kv_params = await runtime.schedule("get_session_kv_state", session_id)
+        if cached_kv_params:
+            logger.info(
+                "Bidirectional KV transfer: found cached metadata for session %s, "
+                "will instruct P to pull from D",
+                session_id[:16],
+            )
+
     try:
         response = await send_request_to_service(
             await runtime.get_client(ServerRole.PREFILL, prefiller_key),
@@ -1006,6 +1153,7 @@ async def assign_instances(
             request_id,
             max_retries=args.max_retries,
             base_delay=args.retry_delay,
+            cached_kv_params=cached_kv_params,
         )
     except (Exception, asyncio.CancelledError):
         await _abort_prefill_selection(runtime, prefiller_key, prefiller_score, is_initial_request=is_initial_request)
@@ -1049,12 +1197,13 @@ async def reassign_instances(
     previous_instance: InstanceInfo,
     *,
     previous_prefiller_kv_released: bool,
+    session_id: str | None = None,
 ) -> InstanceInfo:
     runtime = get_runtime()
     if not previous_prefiller_kv_released:
         await runtime.schedule("release_prefill_kv", previous_instance.prefiller_key, previous_instance.prefiller_score)
     await _release_decoder_once(runtime, previous_instance)
-    return await assign_instances(api, req_data, request_length, is_initial_request=False)
+    return await assign_instances(api, req_data, request_length, is_initial_request=False, session_id=session_id)
 
 
 async def _replay_first_chunk(first_chunk: bytes, gen: Any):
@@ -1077,13 +1226,19 @@ async def handle_completions_impl(api: str, request: Request):
     request_released = False
     try:
         req_data = await request.json()
-        if args.enable_prefill_affinity and (session_id := request.headers.get("X-Session-Id")):
+        # Extract session_id early for bidirectional KV transfer
+        session_id = None
+        if getattr(args, "enable_bidirectional_kv_xfer", False) or args.enable_prefill_affinity:
+            session_id = extract_session_id(request, req_data)
+        if args.enable_prefill_affinity and session_id:
             req_data["user"] = session_id
         if request_id := request.headers.get("X-Request-Id"):
             req_data["request_id"] = request_id
         req_body = await request.body()
         request_length = len(req_body)
-        instance_info = await assign_instances(api, req_data, request_length, is_initial_request=True)
+        instance_info = await assign_instances(
+            api, req_data, request_length, is_initial_request=True, session_id=session_id
+        )
         stream_flag = bool(req_data.get("stream", False))
         chat_flag = "messages" in req_data
 
@@ -1149,6 +1304,7 @@ async def handle_completions_impl(api: str, request: Request):
             retry = True
             completion_tokens = 0
             reported_prefiller_cached_tokens = instance_info.prefiller_cached_tokens
+            last_chunk_json = None  # Track last chunk for extracting kv_transfer_params
 
             async def release_prefill_kv_once() -> None:
                 nonlocal released_kv
@@ -1192,6 +1348,7 @@ async def handle_completions_impl(api: str, request: Request):
                             chunk_str = chunk_str[len("data: ") :]
                         try:
                             chunk_json = json.loads(chunk_str)
+                            last_chunk_json = chunk_json  # Keep track of last chunk
                         except json.JSONDecodeError:
                             logger.debug("Skipping chunk: %s", chunk_str)
                             yield chunk
@@ -1237,6 +1394,7 @@ async def handle_completions_impl(api: str, request: Request):
                                 tmp_request_length,
                                 instance_info,
                                 previous_prefiller_kv_released=released_kv,
+                                session_id=session_id,
                             )
                             released_kv = False
                             break
@@ -1247,6 +1405,23 @@ async def handle_completions_impl(api: str, request: Request):
                                 choice["text"] = generated_token
                             chunk = encode_response_chunk(chunk_json, is_sse)
                         yield chunk
+
+                # After streaming completes, extract and save D-side KV metadata if available
+                if (
+                    session_id
+                    and getattr(args, "enable_bidirectional_kv_xfer", False)
+                    and last_chunk_json is not None
+                ):
+                    decode_kv_params = last_chunk_json.get("kv_transfer_params")
+                    if decode_kv_params and decode_kv_params.get("do_remote_decode"):
+                        ttl = getattr(args, "decoder_kv_blocks_ttl", 480)
+                        await runtime.schedule("save_session_kv_state", session_id, decode_kv_params, ttl)
+                        logger.info(
+                            "Bidirectional KV transfer: saved D-side metadata for session %s (TTL=%ds)",
+                            session_id[:16],
+                            ttl,
+                        )
+
             except asyncio.CancelledError:
                 logger.warning(
                     "Streaming from decoder %s:%s was cancelled; releasing request %s resources",

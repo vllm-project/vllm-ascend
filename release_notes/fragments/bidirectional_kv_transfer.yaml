@@ -1,0 +1,6 @@
+enhancements:
+  - |
+    Mooncake P/D connector: bidirectional KV transfer for multi-turn sessions.
+    Decode nodes delay-release their KV blocks so a Prefill node can pull the
+    previous turn's KV via Mooncake. A content-addressed hash chain (128-token
+    blocks) verifies exact token alignment before each pull.

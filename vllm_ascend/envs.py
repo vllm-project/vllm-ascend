@@ -22,26 +22,6 @@ import os
 from collections.abc import Callable
 from typing import Any
 
-
-def _bool_env(name: str, default: bool) -> bool:
-    """Parse a boolean environment variable as ``1`` or ``0``.
-
-    Only ``1`` and ``0`` are accepted (surrounding whitespace is ignored).
-    Unset or empty values fall back to ``default``, which keeps
-    ``export VAR=`` from crashing. Any other value raises ValueError naming the
-    variable, instead of failing inside ``int()`` with an opaque message.
-    """
-    raw = os.getenv(name)
-    if raw is None or not raw.strip():
-        return default
-    value = raw.strip()
-    if value == "1":
-        return True
-    if value == "0":
-        return False
-    raise ValueError(f"Invalid value for environment variable {name}: {raw!r}. Expected '0' or '1'.")
-
-
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
 
@@ -61,7 +41,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     # This configuration option should only be set to False when running UT
     # scenarios in an environment without an NPU. Do not set it to False in
     # other scenarios.
-    "COMPILE_CUSTOM_KERNELS": lambda: _bool_env("COMPILE_CUSTOM_KERNELS", True),
+    "COMPILE_CUSTOM_KERNELS": lambda: bool(int(os.getenv("COMPILE_CUSTOM_KERNELS", "1"))),
     # The CXX compiler used for compiling the package. If not set, the default
     # value is None, which means the system default CXX compiler will be used.
     "CXX_COMPILER": lambda: os.getenv("CXX_COMPILER", None),
@@ -73,7 +53,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Please make sure that the version is correct.
     "SOC_VERSION": lambda: os.getenv("SOC_VERSION", None),
     # If set, vllm-ascend will print verbose logs during compilation
-    "VERBOSE": lambda: _bool_env("VERBOSE", False),
+    "VERBOSE": lambda: bool(int(os.getenv("VERBOSE", "0"))),
     # The home path for CANN toolkit. If not set, the default value is
     # /usr/local/Ascend/ascend-toolkit/latest
     "ASCEND_HOME_PATH": lambda: os.getenv("ASCEND_HOME_PATH", None),
@@ -92,6 +72,19 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Enable bidirectional KV transfer in the Mooncake P/D connector: Decode
+    # nodes delay-release their KV blocks so a Prefill node can pull the
+    # incremental KV produced during decode when the same conversation's next
+    # turn arrives, avoiding a full re-prefill. 0: disabled (default), 1: on.
+    "VLLM_ASCEND_BIDIRECTIONAL_KV_XFER": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_BIDIRECTIONAL_KV_XFER", "0"))
+    ),
+    # TTL (seconds) for KV blocks cached on Decode nodes during bidirectional
+    # transfer. After this timeout the blocks are released if not pulled by a
+    # Prefill node. Default 480s (8 minutes); raise for long multi-turn sessions.
+    "VLLM_ASCEND_DECODER_KV_BLOCKS_TTL": lambda: int(
+        os.getenv("VLLM_ASCEND_DECODER_KV_BLOCKS_TTL", "480")
+    ),
 }
 
 # end-env-vars-definition
