@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from vllm import envs
@@ -245,6 +245,23 @@ MINIMAX_M3_CASE = WeightUpdateModelCase(
 )
 
 
+MINIMAX_M31_FLASH_CASE = replace(
+    MINIMAX_M3_CASE,
+    id="minimax-m3.1-flash-sparse-moe-layout",
+    model="MiniMax/MiniMax-M3.1-Flash" if envs.VLLM_USE_MODELSCOPE else "MiniMaxAI/MiniMax-M3.1-Flash",
+    hf_overrides={
+        **MINIMAX_M3_CASE.hf_overrides,
+        # The published checkpoint is quantized; this lane generates BF16 weights.
+        "quantization_config": None,
+        "text_config": {
+            **MINIMAX_M3_CASE.hf_overrides["text_config"],
+            # Flash uses sparse attention in every layer, including the dense MLP layers.
+            "layer_types": ["minimax_m3_sparse"] * 4,
+        },
+    },
+)
+
+
 # Keep packed lanes skipped until #18763 fixes cross-stream chunk loading.
 # HCCL's second update diverged in #18726 (38570793020, attempts 1/2) and
 # main daily runs 38186343470, 38325024027, 38657430708 and 38679145716;
@@ -257,7 +274,7 @@ PACKED_LANE_SKIP_REASON = (
 )
 
 
-MODEL_CASES = (*QWEN_CASES, *DEEPSEEK_CASES, *DEEPSEEK_V41_CASES, *GLM_CASES, MINIMAX_M3_CASE)
+MODEL_CASES = (*QWEN_CASES, *DEEPSEEK_CASES, *DEEPSEEK_V41_CASES, *GLM_CASES, MINIMAX_M3_CASE, MINIMAX_M31_FLASH_CASE)
 
 
 def pytest_model_cases(backend: str, *, model_cases: tuple[WeightUpdateModelCase, ...] = MODEL_CASES) -> list[Any]:
