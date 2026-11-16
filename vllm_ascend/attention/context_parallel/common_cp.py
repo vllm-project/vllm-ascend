@@ -38,8 +38,6 @@ def is_pcp_decode_sharding_enabled(vllm_config) -> bool:
     keep replicated decodes so every PCP rank advances its head-sharded
     Mamba state in the same request order.
     """
-    if getattr(getattr(vllm_config, "attention_config", None), "hisparse_config", None) is not None:
-        return False
     if model_uses_kpool_indexer(getattr(vllm_config, "model_config", None)):
         # TODO: Adapt PCP decode request sharding for GLM-5.3-Flash, including
         # recurrent-state ownership and request ordering across PCP ranks.

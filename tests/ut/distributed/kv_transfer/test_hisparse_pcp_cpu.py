@@ -416,6 +416,23 @@ def test_replicated_decode_uses_first_rank_slots_without_gather(padded_tokens):
     assert batch.num_tokens == 3
 
 
+@pytest.mark.parametrize("capture", [False, True])
+def test_sharded_decode_keeps_gathered_resident_and_host_rows(capture):
+    connector, cache, meta, local, batch, manager = make_connector()
+    manager.is_decode_sharded = True
+    batch.is_prefilling_np[:] = False
+    meta.pcp_has_global_prefill = False
+    meta.hisparse_write_has_prefill = False
+    meta.hisparse_for_capture = capture
+    scheduler = NS(kv_connector_metadata=object(), has_sync_kv_loads=True)
+    connector.pre_forward(scheduler, local, {"layer0": meta})
+    assert connector._pending_load_kwargs["num_tokens"] == manager._padded_gather_idx.numel()
+    assert cache.slot_mapping.data_ptr() == manager._gathered_kv_slot_mappings[1].data_ptr()
+    assert cache.slot_mapping.tolist() == [100, 103, -1, 101, 104, -1]
+    assert meta.hisparse_write_req_id_per_token.tolist() == [0, 0, -1, 0, 1, -1]
+    assert cache.runtime.request_state_indices.tolist() == [7, 7, 9]
+
+
 def test_draft_decode_uses_global_slots_tables_and_persistent_canonical_states():
     connector, cache, _, _, _, manager = make_connector()
     cache.draft_layer = True
@@ -627,17 +644,20 @@ def test_pcp_reuses_supported_c8_prolog(monkeypatch):
 
 @pytest.mark.parametrize("capture", [False, True])
 @pytest.mark.parametrize("pcp_world_size", [2, 4, 8])
-def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, capture, pcp_world_size):
+@pytest.mark.parametrize("prefill", [False, True])
+def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, capture, pcp_world_size, prefill):
     import vllm_ascend.attention.sfa_hisparse as module
     from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
     from vllm_ascend.hisparse import cache_ops
 
     impl = module.AscendHiSparseImpl.__new__(module.AscendHiSparseImpl)
     impl.pcp_enabled = True
-    impl.is_pcp_decode_sharded = False
+    impl.is_pcp_decode_sharded = not prefill
     impl.hisparse_cache = handle()
     impl.hisparse_cache.finish_kv_update = Mock()
-    meta, *_ = gathered_metadata(prefill=True)
+    meta, *_ = gathered_metadata(prefill=prefill)
+    meta.uses_pcp_sharded_layout = True
+    meta.num_prefills = int(prefill)
     meta.num_input_tokens = 3
     meta.hisparse_for_capture = capture
     num_write_rows = meta.num_input_tokens * pcp_world_size
@@ -655,7 +675,6 @@ def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, cap
     scratch = torch.zeros((1, 128, 1, 656), dtype=torch.uint8).view(torch.float8_e4m3fn)
     slots = torch.arange(128, dtype=torch.int64)
     impl._pcp_prolog_workspace = lambda: (scratch, slots)
-    monkeypatch.setattr(module, "needs_pcp_kv_gather", lambda *a: True)
 
     def fused(self, hidden, caches, cos, sin, mapping, **kwargs):
         assert caches[0] is scratch
@@ -741,11 +760,14 @@ def test_replicated_decode_prolog_writes_resident_directly(monkeypatch):
     ],
 )
 @pytest.mark.parametrize("pcp_world_size,pcp_rank", [(size, rank) for size in (1, 2, 4, 8) for rank in range(size)])
-def test_real_pcp_layout_maps_each_global_write_once(monkeypatch, lengths, prefills, pcp_world_size, pcp_rank):
+@pytest.mark.parametrize("shard_decode", [False, True])
+def test_real_pcp_layout_maps_each_global_write_once(
+    monkeypatch, lengths, prefills, pcp_world_size, pcp_rank, shard_decode
+):
     import vllm_ascend.worker.v2.pcp_manager as pcp_module
 
     monkeypatch.setattr(pcp_module, "async_copy_to_gpu", lambda values, device: torch.as_tensor(values).clone())
-    manager = pcp_module.AscendPCPManager(pcp_world_size, pcp_rank, torch.device("cpu"), True)
+    manager = pcp_module.AscendPCPManager(pcp_world_size, pcp_rank, torch.device("cpu"), shard_decode)
     manager.bind_config(
         NS(
             attention_config=NS(hisparse_config={}),
