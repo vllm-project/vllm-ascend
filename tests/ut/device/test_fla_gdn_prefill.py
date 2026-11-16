@@ -27,6 +27,7 @@ kernel, verifying the optimized parameter contract:
 """
 
 from types import SimpleNamespace
+from typing import Any
 from unittest import TestCase, main
 
 import torch
@@ -225,7 +226,7 @@ class TestFlaGdnPrefillAdaptor(TestCase):
                     g = torch.randn(BATCH, TOKENS, HV, HEAD_DIM, dtype=g_dtype)
                     beta = torch.randn(BATCH, TOKENS, HV, dtype=beta_dtype)
 
-                    calls = []
+                    calls: list[Any] = []
 
                     def fused_fwd(q_in, k_in, v_in, g_in, beta_in, _calls=calls, **kwargs):
                         _calls.append({"g": g_in, "beta": beta_in})
@@ -251,7 +252,7 @@ class TestFlaGdnPrefillAdaptor(TestCase):
 
         tokens = TOKENS
         state = make_state()
-        seen = []
+        seen: list[Any] = []
 
         def fused(q, k, v, g, beta, indices=indices, effective=effective, seen=seen, tokens=tokens, **kwargs):
             self.assertIs(kwargs["chunk_indices"], indices)
