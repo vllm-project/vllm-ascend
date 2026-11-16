@@ -15,14 +15,18 @@ from vllm_ascend.patch.worker import patch_qwen3_5
     reason="The 310P branch intentionally does not install packed GDN weights.",
 )
 @pytest.mark.parametrize("checkpoint_enabled", [False, True])
-def test_standard_gdn_constructor_registers_packed_weight_after_base_init(checkpoint_enabled: bool):
+@pytest.mark.parametrize("positional", [False, True])
+def test_standard_gdn_constructor_registers_packed_weight_after_base_init(checkpoint_enabled: bool, positional: bool):
     hf_config = SimpleNamespace()
     engine_config = SimpleNamespace(
         model_config=SimpleNamespace(dtype=torch.bfloat16),
         cache_config=SimpleNamespace(mamba_cache_mode="none"),
     )
 
-    def fake_original_init(layer, config, vllm_config):
+    extra = object()
+
+    def fake_original_init(layer, config, vllm_config, *, future_option):
+        assert future_option is extra
         assert config is hf_config
         assert vllm_config is engine_config
         torch.nn.Module.__init__(layer)
@@ -38,10 +42,15 @@ def test_standard_gdn_constructor_registers_packed_weight_after_base_init(checkp
             "vllm_ascend.ops.gdn_checkpoint.get_ascend_config",
             return_value=SimpleNamespace(gdn_internal_prefill_checkpoints=checkpoint_enabled),
         ),
-        patch.object(patch_qwen3_5, "initialize_gdn_projection_overlap") as init_overlap,
+        patch("vllm_ascend.ops.gdn.initialize_gdn_projection_overlap") as init_overlap,
     ):
         layer = object.__new__(patch_qwen3_5._GDN_PATCH_TARGET)
-        patch_qwen3_5._gdn_init_with_packed_weight(layer, config=hf_config, vllm_config=engine_config)
+        if positional:
+            patch_qwen3_5._gdn_init_with_packed_weight(layer, hf_config, engine_config, future_option=extra)
+        else:
+            patch_qwen3_5._gdn_init_with_packed_weight(
+                layer, config=hf_config, vllm_config=engine_config, future_option=extra
+            )
 
     init_overlap.assert_called_once_with(layer, engine_config)
     packed = layer.conv1d.get_parameter("ascend_conv1d_weight")

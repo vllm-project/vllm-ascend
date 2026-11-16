@@ -3,6 +3,7 @@
 """Optional overlap of independent GDN input projections during ACL capture."""
 
 import torch
+import torch_npu  # noqa: F401 - register the NPU backend and torch.npu
 from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 
