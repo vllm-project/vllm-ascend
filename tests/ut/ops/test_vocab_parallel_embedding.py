@@ -341,9 +341,7 @@ def _exchange_embedding(monkeypatch, mode, tp_rank=0, tp_size=1, exchange_rank=0
         (VocabParallelMode.PCP_X_TP, 1),
         (VocabParallelMode.PCP_X_TP, 2),
         (VocabParallelMode.FINE_GRAINED, 1),
-        # Fine-grained embedding TP composed with standard TP: same two-level
-        # exchange contract as PCP_X_TP (token exchange over the fine-grained
-        # group, then the TP all-reduce completing the vocabulary result).
+        # Fine-grained embedding TP composed with standard TP.
         (VocabParallelMode.FINE_GRAINED, 2),
     ],
 )
@@ -518,9 +516,6 @@ class TestVocabParallelPlan(unittest.TestCase):
         lmhead_group = group(3, 4)
         pcp_config = MagicMock()
         pcp_config.parallel_config.prefill_context_parallel_size = 2
-        # tp_rank/tp_world parameterize the standard TP group per case so the
-        # composed lm-head layout (finegrained x standard TP) is covered
-        # alongside the pure-DP one.
         cases: tuple[
             tuple[str, str, bool, bool, bool, bool, int, int, VocabParallelMode, int, int],
             ...,
@@ -711,9 +706,7 @@ class TestAscendLogitsProcessor(unittest.TestCase):
         self.mock_group.world_size = 2
         self.mock_group.rank_in_group = 0
         self.mock_pcp_group = MagicMock(world_size=1, rank_in_group=0)
-        # Pure-DP layout by default: plan resolution and _get_logits_lmheadtp
-        # both consult the standard TP group, which must stay trivial here so
-        # the existing assertions keep their pre-composition semantics.
+        # Trivial TP group keeps the pure-DP (pre-composition) semantics.
         self.mock_tp_group = MagicMock(world_size=1, rank_in_group=0)
         self.mock_ascend_config = MagicMock()
 
