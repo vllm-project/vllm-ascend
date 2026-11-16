@@ -39,6 +39,7 @@ except ImportError:
     IntermediateTensors = None
 
 from vllm.utils.torch_utils import direct_register_custom_op
+
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather, sp_reduce_scatter
@@ -95,6 +96,7 @@ def _dense_sp_can_fuse(
 # Column-parallel: AllGather + Matmul
 # ---------------------------------------------------------------------------
 
+
 def _get_hcom():
     """Resolve the HCCL communicator handle at runtime (not at trace time)."""
     tp_group = get_tp_group()
@@ -142,6 +144,7 @@ direct_register_custom_op(
 # Row-parallel: Matmul + ReduceScatter
 # ---------------------------------------------------------------------------
 
+
 def _dense_sp_mm_reduce_scatter_impl(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -177,6 +180,7 @@ def _dense_sp_mm_reduce_scatter_fake(
     world_size: int,
 ) -> torch.Tensor:
     from vllm.utils.math_utils import cdiv
+
     return x.new_empty((cdiv(x.shape[0], world_size), weight.shape[0]))
 
 
