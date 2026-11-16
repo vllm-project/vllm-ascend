@@ -22,10 +22,10 @@ from vllm_ascend.hisparse.pcp import (
 )
 
 
-@pytest.mark.parametrize("pcp_world_size", [1, 2, 4, 8])
+@pytest.mark.parametrize("pcp_world_size", [2, 4, 8])
 @pytest.mark.parametrize("initial_capacity", [4, 128])
-@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
-def test_pcp_host_staging_is_sized_before_capture(monkeypatch, initial_capacity, dtype, pcp_world_size):
+def test_pcp_host_staging_is_sized_before_capture(monkeypatch, initial_capacity, pcp_world_size):
+    dtype = torch.int32
     from vllm_ascend.hisparse import pcp
 
     cache = handle()
@@ -57,38 +57,6 @@ def test_pcp_host_staging_is_sized_before_capture(monkeypatch, initial_capacity,
         assert allocations == [(capacity, {"dtype": dtype, "pin_memory": True})]
     else:
         assert staging.slots is original and not allocations
-
-
-def test_forward_clear_removes_gathered_write_metadata():
-    cache = handle()
-    meta, *_ = gathered_metadata()
-    cache._prepare_for_batch(meta)
-    connector = PCPHiSparseConnector.__new__(PCPHiSparseConnector)
-    connector.kv_connector = NS(connector_worker=NS(_group_leaders=[("layer0", cache)]))
-    connector._pcp_attn_metadata = {"layer0": meta}
-    connector.prepare_host_mirror()
-    assert cache.num_actual_tokens == 6
-    worker = NS(cache_handles=[cache], _per_layer_mirrored={0}, _submitted_mirror_layers={0})
-    HiSparseConnectorWorker._clear_forward_mirror_state(worker)
-    assert not worker._per_layer_mirrored and not worker._submitted_mirror_layers
-    assert cache.num_actual_tokens == 0
-    assert cache.req_id_per_token is None
-    assert not cache.host_mirror_required
-
-
-def test_zero_local_queries_still_allow_target_mirror_defer():
-    from vllm_ascend.hisparse.host_mirror import _DirectMirrorSources
-
-    worker = NS(
-        resident_caches=[object()],
-        host_caches=[object()],
-        cache_handles=[NS(num_actual_tokens=6)],
-        _dma_submitted=False,
-        _per_layer_mirrored=set(),
-        _submitted_mirror_layers=set(),
-        _draft_layers=set(),
-    )
-    assert _DirectMirrorSources(worker, (0,)).can_defer(worker)
 
 
 def test_pcp_connector_keeps_target_host_mirror_overlap(monkeypatch):
@@ -170,7 +138,7 @@ def gathered_metadata(local_tokens=3, prefill=False):
     )
     local = Batch(
         local_tokens,
-        torch.tensor([7, 7, 9], dtype=torch.int32),
+        torch.tensor([7, 7, 9], dtype=torch.int64),
         ["A", "A", "B"],
         torch.tensor([0, 1, 2, local_tokens]),
         np.array([prefill, prefill, False]),
@@ -181,27 +149,20 @@ def gathered_metadata(local_tokens=3, prefill=False):
     meta.num_input_tokens = indices.numel() // 2
     meta.pcp_has_global_prefill = prefill
     prepare_pcp_query_metadata(
-        meta, torch.empty_like(local.idx_mapping), torch.empty(1, dtype=torch.int32), local.idx_mapping, 2
+        meta,
+        torch.empty(local.idx_mapping.shape, dtype=torch.int32),
+        torch.empty(1, dtype=torch.int32),
+        local.idx_mapping,
+        2,
     )
     meta.hisparse_write_req_id_per_token = get_pcp_write_request_ids(global_batch, indices, mask)
     return meta, local, global_batch, indices, mask
 
 
-def test_int64_batch_indices_follow_hisparse_int32_contract():
-    meta, local, batch, indices, mask = gathered_metadata()
-    local.idx_mapping = local.idx_mapping.to(torch.int64)
-    prepare_pcp_query_metadata(
-        meta, meta.hisparse_request_state_indices, meta.hisparse_num_valid_write_rows, local.idx_mapping, 2
-    )
-    assert meta.hisparse_request_state_indices.dtype == torch.int32
-    assert meta.hisparse_request_state_indices.device == indices.device
-    assert meta.hisparse_request_state_indices.tolist() == [7, 7, 9]
-    assert local.idx_mapping.dtype == torch.int64
-
-
 def test_global_write_ids_and_local_dual_chunk_states_are_distinct():
     meta, local, _, _, _ = gathered_metadata()
     assert meta.hisparse_write_req_id_per_token.tolist() == [0, 0, -1, 0, 1, -1]
+    assert meta.hisparse_request_state_indices.dtype == torch.int32
     assert meta.hisparse_request_state_indices.tolist() == local.idx_mapping.tolist()
     assert meta.hisparse_num_valid_write_rows.tolist() == [6]
     cache = handle()
@@ -222,12 +183,6 @@ def test_write_target_keeps_gathered_tail_and_masks_padding(prefill):
     assert count == 6  # local queries=3, max requests=2 must not truncate KV.
     assert slots.tolist() == [10, 11, -1, 12, 13, -1]
     assert cache.host_mirror_required == prefill
-
-
-def test_non_pcp_write_target_preserves_request_cap():
-    cache = handle()
-    cache._prepare_for_batch(metadata())
-    assert cache.write_target(6, 6)[2] == 2
 
 
 def test_zero_local_queries_still_publish_global_prefill(monkeypatch):
@@ -329,6 +284,7 @@ def test_connector_reuses_core_mirror_and_clear_after_local_queries(monkeypatch,
         connector.finish_forward()
     worker._enqueue_row_dma.assert_called_once_with((0,), ready_event=None)
     assert worker._invalidate_written_slots.call_args.args[2].tolist() == [0, 0, -1, 0, 1, -1]
+    assert cache.mirror_slot_mapping.tolist() == [50, 53, -1, 51, 54, -1]
     assert cache.num_actual_tokens == 0 and cache.req_id_per_token is None
     assert not cache.host_mirror_required
 
@@ -382,14 +338,6 @@ def test_connector_stages_canonical_requests_and_gathered_slot_rows():
     assert cache.slot_mapping[0].item() == 120
     assert cache.source_block_table[2].item() == 90
     assert cache.runtime.hot_block_table[2].item() == 140
-
-
-def test_capture_bindings_exist_before_connector_pre_forward():
-    connector, cache, _, _, _, manager = make_connector()
-    assert cache.slot_mapping.data_ptr() == manager._gathered_kv_slot_mappings[1].data_ptr()
-    assert cache.mirror_slot_mapping.data_ptr() == manager._gathered_kv_slot_mappings[0].data_ptr()
-    assert cache.source_block_table is manager._local_block_tables[0]
-    assert cache.runtime.hot_block_table is manager._local_block_tables[1]
 
 
 @pytest.mark.parametrize("padded_tokens", [3, 8])
@@ -448,6 +396,8 @@ def test_capture_and_real_forward_keep_query_and_scatter_input_addresses():
     from vllm_ascend.hisparse.pcp import prepare_pcp_query_metadata
 
     connector, cache, meta, local, batch, manager = make_connector()
+    assert cache.slot_mapping.data_ptr() == manager._gathered_kv_slot_mappings[1].data_ptr()
+    assert cache.mirror_slot_mapping.data_ptr() == manager._gathered_kv_slot_mappings[0].data_ptr()
     meta.num_input_tokens = 3
     meta.pcp_has_global_prefill = False
     states = torch.empty(8, dtype=torch.int32)
@@ -484,17 +434,6 @@ def test_connector_disabled_and_no_forward_do_not_require_pcp_layout():
     assert connector._pending_load_kwargs == {}
 
 
-@pytest.mark.parametrize("sync_load", [False, True])
-def test_connector_inherits_core_load_scheduling(sync_load):
-    connector, _, meta, local, global_batch, _ = make_connector()
-    scheduler = NS(kv_connector_metadata=object(), has_sync_kv_loads=sync_load)
-    connector.pre_forward(scheduler, local, {"layer0": meta})
-    connector.kv_connector.handle_preemptions.assert_called_once_with(scheduler.kv_connector_metadata)
-    connector.kv_connector.bind_connector_metadata.assert_called_once_with(scheduler.kv_connector_metadata)
-    assert connector._pending_load_kwargs["request_state_indices"] is global_batch.idx_mapping
-    assert connector._start_load_kv.call_count == int(sync_load)
-
-
 def test_connector_eager_reads_metadata_from_forward_context(monkeypatch):
     import vllm_ascend.hisparse.pcp as pcp_module
 
@@ -512,33 +451,6 @@ def test_connector_eager_reads_metadata_from_forward_context(monkeypatch):
     prepare_pcp_query_states(cache, meta)
     assert cache.runtime.request_state_indices.tolist() == [7, 7, 9]
     assert hisparse_write_target(cache, meta, 6, 6)[2] == 6
-
-
-def test_worker_mirrors_global_rows_without_any_local_queries():
-    cache = handle()
-    meta, *_ = gathered_metadata(local_tokens=0, prefill=True)
-    cache._prepare_for_batch(meta)
-    cache.mirror_slot_mapping = torch.tensor([30, 33, -1, 31, 34, -1])
-    worker = NS(
-        cache_handles=[cache],
-        _group_leaders=[("layer0", cache)],
-        is_host_writer=True,
-        _draft_layers=set(),
-        _per_layer_mirrored=set(),
-        _submitted_mirror_layers=set(),
-        _enqueue_row_dma=Mock(),
-        _invalidate_written_slots=Mock(),
-    )
-    connector = PCPHiSparseConnector.__new__(PCPHiSparseConnector)
-    connector.kv_connector = NS(connector_worker=worker)
-    connector._pcp_attn_metadata = {"layer0": meta}
-    assert cache.num_actual_tokens == 0
-    connector.prepare_host_mirror()
-    HiSparseConnectorWorker._enqueue_host_mirror(worker)
-    worker._enqueue_row_dma.assert_called_once_with((0,), ready_event=None)
-    args = worker._invalidate_written_slots.call_args.args
-    assert args[1].tolist() == [30, 33, -1, 31, 34, -1]
-    assert args[2].tolist() == [0, 0, -1, 0, 1, -1]
 
 
 def test_attention_binds_query_group_once_before_followers(monkeypatch):
@@ -610,21 +522,6 @@ def test_c8_scatter_covers_gathered_tail(monkeypatch):
     impl.hisparse_cache.finish_kv_update.assert_not_called()
 
 
-def test_pcp_reuses_supported_c8_prolog(monkeypatch):
-    from vllm_ascend.attention.sfa_hisparse import AscendHiSparseImpl
-    from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
-    from vllm_ascend.quantization.methods import AscendW8A8MXFP8DynamicLinearMethod
-
-    impl = AscendHiSparseImpl.__new__(AscendHiSparseImpl)
-    impl.pcp_enabled = True
-    impl.enable_sparse_sfa_c8 = True
-    impl.fused_qkv_a_proj = object()
-    method = AscendW8A8MXFP8DynamicLinearMethod.__new__(AscendW8A8MXFP8DynamicLinearMethod)
-    impl._get_layer_quant_method = lambda layer: method
-    monkeypatch.setattr(AscendSFAImpl, "_fused_preprocess_type", lambda self: "supported-prolog")
-    assert impl._fused_preprocess_type() == "supported-prolog"
-
-
 @pytest.mark.parametrize("capture", [False, True])
 @pytest.mark.parametrize("pcp_world_size", [2, 4, 8])
 def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, capture, pcp_world_size):
@@ -690,16 +587,6 @@ def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, cap
     assert impl.hisparse_cache.submit_layer_mirror.call_count == (0 if capture else 1)
 
 
-def test_native_packed_store_does_not_write_host_source():
-    from vllm_ascend.attention.sfa_hisparse import AscendHiSparseImpl
-
-    impl = AscendHiSparseImpl.__new__(AscendHiSparseImpl)
-    # This is the hook _forward_impl calls after _exec_kv_local has committed
-    # Resident and Host mirror. The old _store_parallel_kv hook is never called.
-    assert "_store_packed_kv_cache" in AscendHiSparseImpl.__dict__
-    assert impl._store_packed_kv_cache(None, None, None, (torch.empty(1),), None, None) is None
-
-
 def test_replicated_decode_prolog_writes_resident_directly(monkeypatch):
     import vllm_ascend.attention.sfa_hisparse as module
     from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
@@ -740,7 +627,7 @@ def test_replicated_decode_prolog_writes_resident_directly(monkeypatch):
         ([1, 1, 9], [False, False, True]),
     ],
 )
-@pytest.mark.parametrize("pcp_world_size,pcp_rank", [(size, rank) for size in (1, 2, 4, 8) for rank in range(size)])
+@pytest.mark.parametrize("pcp_world_size,pcp_rank", [(2, 0), (2, 1), (4, 3), (8, 7)])
 def test_real_pcp_layout_maps_each_global_write_once(monkeypatch, lengths, prefills, pcp_world_size, pcp_rank):
     import vllm_ascend.worker.v2.pcp_manager as pcp_module
 

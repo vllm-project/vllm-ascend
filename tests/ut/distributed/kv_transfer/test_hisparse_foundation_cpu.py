@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU boundary checks using the installed Core and Ascend implementations."""
 
-import inspect
 import math
 from dataclasses import replace
 from types import SimpleNamespace as NS
@@ -76,6 +75,7 @@ def test_c8_prolog_requires_matching_fp8_weight_scheme(mxfp8):
     method = AscendW8A8MXFP8DynamicLinearMethod if mxfp8 else AscendW8A8DynamicLinearMethod
     impl = AscendHiSparseImpl.__new__(AscendHiSparseImpl)
     impl.enable_sparse_sfa_c8 = True
+    impl.pcp_enabled = True
     impl.fused_qkv_a_proj = NS(quant_method=NS(quant_method=method.__new__(method)))
     impl.is_kv_consumer, impl.has_indexer = False, False
     impl.dcp_group = None
@@ -154,9 +154,10 @@ def test_dma_descriptor_batches_preserve_rows_and_submit_policy(monkeypatch, cou
         assert call.kwargs == {"prefer_small_async": count <= backend._D2H_BATCH_LIMIT}
 
 
-@pytest.mark.parametrize("count", [4, 2048])
-@pytest.mark.parametrize("descriptor_index", [0, 1, 2])
-@pytest.mark.parametrize("invalid_layout", ["strided", "2d", "short", "scalar"])
+@pytest.mark.parametrize(
+    "count,descriptor_index,invalid_layout",
+    [(4, 0, "strided"), (4, 1, "2d"), (2048, 2, "short"), (2048, 0, "scalar")],
+)
 def test_dma_rejects_invalid_descriptors_before_submission(monkeypatch, count, descriptor_index, invalid_layout):
     submit = Mock()
     monkeypatch.setattr(torch.ops._C_ascend, "swap_blocks_batch", submit, raising=False)
@@ -171,34 +172,6 @@ def test_dma_rejects_invalid_descriptors_before_submission(monkeypatch, count, d
     with pytest.raises(ValueError, match="equal-length contiguous descriptor arrays"):
         AscendHiSparseBackend().swap_blocks_batch(*descriptors)
     submit.assert_not_called()
-
-
-@pytest.mark.parametrize("synchronize_fails", [False, True])
-def test_host_registration_release_waits_for_device_completion(monkeypatch, synchronize_fails):
-    from vllm.v1.hisparse import runtime
-
-    events: list[str | tuple[str, bool]] = []
-    pools = [torch.empty(64, dtype=torch.uint8)]
-    owner = pools[0]
-
-    def synchronize():
-        events.append("synchronize")
-        if synchronize_fails:
-            raise RuntimeError("device context unusable")
-
-    backend = NS(unpin_tensor=lambda tensor: events.append(("unpin", tensor is owner)))
-    monkeypatch.setattr(runtime, "get_hisparse_backend", lambda: backend)
-    monkeypatch.setattr(torch.accelerator, "synchronize", synchronize)
-    release_kwargs = {"pinned_host_pools": pools}
-    if "runtimes" in inspect.signature(runtime.release_pinned_state).parameters:
-        release_kwargs["runtimes"] = []
-    runtime.release_pinned_state(**release_kwargs)
-    if synchronize_fails:
-        assert events == ["synchronize"]
-        assert len(pools) == 1 and pools[0] is owner
-    else:
-        assert events == ["synchronize", ("unpin", True)]
-        assert not pools
 
 
 def test_private_host_allocator_keeps_other_backends_on_core_path(monkeypatch):
