@@ -1,0 +1,4 @@
+pr: 22006
+entries:
+  - category: performance
+    text: EPLB expert-load recording now splits large local expert sets into bounded Triton blocks and uses the load-view integer width for accumulation when counts are wider.
