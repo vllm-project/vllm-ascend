@@ -18,7 +18,7 @@ include =
     */vllm_ascend/*
     # Any format of Python code under the directory usr.
     /vllm_ascend/*
-# Configuring the list of files whose coverage data is not to be collected.
+# Configuring the list of files whose coverage data is not to be collected.111
 omit = */.local/*
     /usr/*
     utils/tirefire.py
