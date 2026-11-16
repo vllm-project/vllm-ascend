@@ -173,7 +173,6 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         try:
             self.weight = nn.Parameter(weight, requires_grad=False)
             self.weight_scale_inv = nn.Parameter(scales, requires_grad=False) if scales is not None else None
-            register_host_offload_storage(self)
             for param in (self.weight, self.weight_scale_inv):
                 if param is None:
                     continue
@@ -201,6 +200,8 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
                 if rollback_shared_engram(self._shared_pool_client.close):
                     self._shared_pool_client = None
             raise
+
+        register_host_offload_storage(self)
 
     def _get_shard_info(self) -> tuple[int, int]:
         if self.dp_size == 1:
