@@ -45,6 +45,16 @@ Set it in `runtime_config.json`, the same file as `ascend_log`:
 
 `basic`, `detail`, and `0` through `1` are accepted. The stored value is the name. With `runtime_config_hot_reload=true`, the next apply writes that name into the process-local level: startup, the API / EngineCore file poll, and the worker wave-head cascade. Each process keeps its own integer. An invalid level rejects that load and leaves the previous level in place.
 
+Change the level on a running server:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/set_metrics_level?level=detail"
+```
+
+The API server sends a utility RPC to every EngineCore, the same path as `POST /sleep`. Each EngineCore sets its own level (scheduler metrics run there) and broadcasts `set_metrics_level` to its workers, including pipeline stages that do not run the wave-head reload. The response is `{"status": "ok", "level": "detail"}`. An unknown level returns HTTP 400.
+
+> **Do not mix the two channels.** The endpoint sets the level **in memory only**; it does not write `metrics.level` back to `runtime_config.json`. The file and the endpoint are separate channels — pick one per deployment. If you use the endpoint and then edit `runtime_config.json` afterwards (even an unrelated key), the file edit changes the digest, the next poll re-applies the whole file, and `metrics.level` silently resets to the file's stale value with no trace in the changes log. To make a level survive a restart or a file edit, put it in `runtime_config.json` (or `additional_config.runtime_config`) instead of calling the endpoint.
+
 This level applies to handlers that record through `vllm_ascend.observability.ms_metrics.handlers.common`. Metrics emitted by `ms_service_metric.provider_handlers` (scheduler, model-runner phase, memory, and EPLB duration) follow the `ms-service-metric` on/off switch. Lowering the level stops new samples. Series already created in the Prometheus registry remain until the process exits.
 
 Declare `level` on a new expensive metric. The default is `basic`:
