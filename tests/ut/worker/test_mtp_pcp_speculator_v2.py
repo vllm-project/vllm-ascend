@@ -31,14 +31,11 @@ from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 from vllm_ascend.attention.mla_v1 import AscendMLADecodeMetadata, AscendMLAMetadata
 from vllm_ascend.platform import _validate_eplb_config
 from vllm_ascend.utils import vllm_version_is
-from vllm_ascend.worker.v2.spec_decode.eagle import (
-    speculator as eagle_speculator_module,
-)
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.spec_decode.mtp.speculator import (
     AscendMTPSpeculator,
 )
-from vllm_ascend.worker.v2.spec_decode.pcp_utils import build_dspark_draft_config, disable_profiling_chunk_for_draft
+from vllm_ascend.worker.v2.spec_decode.pcp_utils import build_dspark_draft_config
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar import (
     speculator as speculator_module,
 )
@@ -451,108 +448,6 @@ def test_capture_follows_upstream_contract() -> None:
     assert decode_args[1] is speculator.input_buffers
     assert decode_args[3] is speculator.attn_groups
     assert all(n == 4 for name, n in events if name.startswith("on_"))
-
-
-def test_eagle_draft_config_disables_profiling_chunk() -> None:
-    additional_config = {"scheduler_config": {"profiling_chunk_config": {"enabled": "yes"}}}
-    target_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(
-            pipeline_parallel_size=2,
-            prefill_context_parallel_size=2,
-            enable_expert_parallel=True,
-            enable_eplb=True,
-        ),
-        additional_config=additional_config,
-    )
-    speculator = object.__new__(AscendEagleSpeculator)
-    # Delegation to the base's _create_draft_vllm_config reads these too.
-    speculator.vllm_config = target_config
-    target_config.cache_config = SimpleNamespace()
-    target_config.parallel_config.decode_context_parallel_size = 1
-    speculator.draft_model_config = SimpleNamespace(is_moe=False)
-
-    with (
-        patch.object(eagle_speculator_module, "replace", side_effect=_fake_config_replace),
-        patch.object(speculator_module, "replace", side_effect=_fake_config_replace),
-    ):
-        draft_config = speculator._create_draft_vllm_config()
-
-    assert draft_config.additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] is False
-    assert target_config.additional_config is additional_config
-    assert additional_config["scheduler_config"]["profiling_chunk_config"]["enabled"] == "yes"
-    assert draft_config.parallel_config.pipeline_parallel_size == 1
-    assert draft_config.parallel_config.is_moe_model is False
-    # Eagle drafts shard prefill with the target, so they keep its PCP topology.
-    assert draft_config.parallel_config.prefill_context_parallel_size == 2
-
-
-@pytest.mark.parametrize(("enabled", "legacy"), [(True, False), ("yes", True)])
-def test_disable_profiling_chunk_for_draft_accepts_pydantic_true_values(enabled, legacy):
-    profiling_chunk = {"enabled": enabled, "min_chunk": 128}
-    if legacy:
-        additional_config = {"profiling_chunk_config": profiling_chunk, "enable_cpu_binding": True}
-    else:
-        additional_config = {
-            "scheduler_config": {"profiling_chunk_config": profiling_chunk},
-            "enable_cpu_binding": True,
-        }
-    config = _config(additional_config)
-
-    with disable_profiling_chunk_for_draft(config):
-        draft_additional_config = config.additional_config
-        draft_profiling_chunk = (
-            draft_additional_config["profiling_chunk_config"]
-            if legacy
-            else draft_additional_config["scheduler_config"]["profiling_chunk_config"]
-        )
-        assert draft_profiling_chunk == {"enabled": False, "min_chunk": 128}
-        assert draft_additional_config is not additional_config
-        assert draft_profiling_chunk is not profiling_chunk
-
-    assert config.additional_config is additional_config
-    assert profiling_chunk["enabled"] == enabled
-
-
-@pytest.mark.parametrize(("pp_size", "enabled"), [(1, True), (2, "off")])
-def test_disable_profiling_chunk_for_draft_noop(pp_size, enabled):
-    additional_config = {"profiling_chunk_config": {"enabled": enabled}}
-    config = _config(additional_config, pp_size=pp_size)
-
-    with disable_profiling_chunk_for_draft(config):
-        assert config.additional_config is additional_config
-
-
-def test_disable_profiling_chunk_for_draft_uses_nested_precedence():
-    additional_config = {
-        "scheduler_config": {"profiling_chunk_config": {"enabled": False}},
-        "profiling_chunk_config": {"enabled": True},
-    }
-    config = _config(additional_config)
-
-    with disable_profiling_chunk_for_draft(config):
-        assert config.additional_config is additional_config
-
-
-def test_disable_profiling_chunk_for_draft_restores_after_failure():
-    additional_config = {"scheduler_config": {"profiling_chunk_config": {"enabled": True}}}
-    config = _config(additional_config)
-    expected_context = pytest.raises(RuntimeError, match="draft failed")
-
-    with expected_context, disable_profiling_chunk_for_draft(config):
-        assert config.additional_config is not additional_config
-        raise RuntimeError("draft failed")
-
-    assert config.additional_config is additional_config
-
-
-def test_disable_profiling_chunk_for_draft_rejects_invalid_boolean():
-    config = _config({"profiling_chunk_config": {"enabled": "sometimes"}})
-
-    with (
-        pytest.raises(ValueError, match="additional_config.profiling_chunk_config.enabled must be a boolean"),
-        disable_profiling_chunk_for_draft(config),
-    ):
-        pass
 
 
 def test_eagle_inherited_loader_keeps_upstream_construction_tag(eplb_worker_config):

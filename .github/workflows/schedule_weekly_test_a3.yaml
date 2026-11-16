@@ -20,6 +20,11 @@
 # order by the npu-scheduler instead of being serialized by workflow `needs`.
 name: Weekly-A3
 
+run-name: >-
+  ${{ inputs.request_id != '' &&
+      format('Weekly-A3 (PR) {0}', inputs.request_id) ||
+      'Weekly-A3 (scheduled)' }}
+
 on:
   workflow_dispatch:
     inputs:
@@ -63,6 +68,11 @@ on:
         required: false
         default: '{}'
         type: string
+      drain_pr_runs:
+        description: 'Cancel in-flight PR runs of this workflow before starting (set by the external scheduler)'
+        required: false
+        default: false
+        type: boolean
 permissions:
   contents: read
   pull-requests: read
@@ -130,6 +140,56 @@ jobs:
       double_node: ${{ steps.set-matrix.outputs.double_node }}
       single_node: ${{ steps.set-matrix.outputs.single_node }}
     steps:
+      # The external scheduler dispatches scheduled runs with request_id empty,
+      # test_cases=all and drain_pr_runs=true. Force-cancel PR-triggered runs
+      # of this workflow before the tests start, otherwise their pending jobs
+      # stay ahead of this run in the npu-scheduler FIFO queue. Requiring the
+      # explicit opt-in keeps a manual dispatch (request_id also defaults to
+      # empty) from cancelling unrelated PR runs. The run-name carries (PR) so
+      # the display title can be used for matching.
+      - name: Cancel PR weekly runs before scheduled test
+        if: ${{ inputs.request_id == '' && inputs.drain_pr_runs }}
+        continue-on-error: true
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ secrets.PAT_TOKEN }}
+          script: |
+            // Best-effort cleanup: never fail the job.
+            try {
+              // Only drain PR runs of this workflow, never other platforms.
+              const workflowRef = process.env.GITHUB_WORKFLOW_REF || '';
+              const workflow_id = workflowRef.split('@')[0].split('/').pop();
+              if (!workflow_id) {
+                core.warning('Cannot derive workflow file from GITHUB_WORKFLOW_REF; skip');
+                return;
+              }
+
+              const { owner, repo } = context.repo;
+              const { data } = await github.rest.actions.listWorkflowRuns({
+                owner, repo, workflow_id, per_page: 100,
+              });
+              for (const run of data.workflow_runs) {
+                if (run.id === context.runId) continue;
+                if (run.status === 'completed') continue;
+                if (!(run.display_title || '').includes('(PR)')) continue;
+                core.info(`Force-cancelling ${run.display_title}: ${run.html_url}`);
+                try {
+                  await github.request(
+                    'POST /repos/{owner}/{repo}/actions/runs/{run_id}/force-cancel',
+                    { owner, repo, run_id: run.id },
+                  );
+                } catch (error) {
+                  if (error.status === 409 || error.status === 410) {
+                    core.info(`Run ${run.id} already finished`);
+                  } else {
+                    core.warning(`Failed to force-cancel ${run.id}: ${error.message}`);
+                  }
+                }
+              }
+            } catch (error) {
+              core.warning(`Skipping PR run cleanup: ${error.message}`);
+            }
+
       - id: export
         run: |
           {
@@ -222,7 +282,8 @@ jobs:
       bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
       bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
       bisect_config_base_path: ${{ matrix.test_config.config_base_path }}
-      testcase_timeout: 600
+      testcase_timeout: 120
+      job_timeout: 1200
       should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
@@ -274,7 +335,8 @@ jobs:
       bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
       bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
       bisect_config_base_path: ${{ matrix.test_config.config_base_path }}
-      testcase_timeout: 600
+      testcase_timeout: 120
+      job_timeout: 1200
       should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (

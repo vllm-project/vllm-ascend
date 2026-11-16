@@ -93,5 +93,17 @@ def main():
         print("POOL_CLOSED", flush=True)
 
 
+def dispatch():
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--backend", choices=("a2", "a3", "a5"))
+    args, _ = parser.parse_known_args()
+    if args.backend in ("a2", "a5"):
+        from vllm_ascend.shared_engram_rdma import main as rdma_main
+
+        rdma_main()
+    else:
+        main()
+
+
 if __name__ == "__main__":
-    main()
+    dispatch()

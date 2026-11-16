@@ -1762,6 +1762,18 @@ void npu_fused_quant_lightning_indexer_manage_meta(
     return;
 }
 
+// hisparse_resolve_residency: fully in-place (all outputs are caller-owned
+// buffers annotated (a!) in the schema and the op returns nothing), so there
+// are no shapes or dtypes to infer and the meta kernel is a no-op.
+void hisparse_resolve_residency_meta(
+    const at::Tensor&, const at::Tensor&, const std::optional<at::Tensor>&,
+    const std::optional<at::Tensor>&, const std::optional<at::Tensor>&, const std::optional<at::Tensor>&,
+    const std::optional<at::Tensor>&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+    const at::Tensor&, const at::Tensor&, const std::optional<at::Tensor>&,
+    const std::optional<at::Tensor>&, const std::optional<at::Tensor>&, const std::optional<at::Tensor>&,
+    const std::optional<at::Tensor>&, const std::optional<at::Tensor>&, const std::optional<at::Tensor>&,
+    int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {}
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -1886,6 +1898,9 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("kda_gate_cumsum_vllm", &vllm_ascend::meta::kda_gate_cumsum_vllm_meta);
     // kda_layout_swap12
     ops.impl("kda_layout_swap12", &vllm_ascend::meta::kda_layout_swap12_meta);
+    // hisparse_resolve_residency mutates caller-owned buffers and returns no
+    // values, so the meta registration is a no-op.
+    ops.impl("hisparse_resolve_residency", &vllm_ascend::meta::hisparse_resolve_residency_meta);
 }
 }
 #endif

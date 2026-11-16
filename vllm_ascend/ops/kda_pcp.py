@@ -81,6 +81,14 @@ class KimiKDAHostMetadataBackend(AscendGDNHostMetadataBackend):
         return True
 
 
+class KimiKDARecoverSSMMetadataBackend(KimiKDAHostMetadataBackend):
+    @staticmethod
+    def get_builder_cls():
+        from vllm_ascend.models.kimi_k3.recoverssm_metadata import AscendKimiKDARecoverSSMMetadataBuilder
+
+        return AscendKimiKDARecoverSSMMetadataBuilder
+
+
 def kda_pcp_gather(hidden_states: torch.Tensor, pcp_size: int, layer_name: str) -> torch.Tensor:
     context = get_forward_context()
     gathered = context.no_compile_layers[layer_name].pcp_group.all_gather(hidden_states.contiguous(), dim=0)
