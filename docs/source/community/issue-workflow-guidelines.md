@@ -28,12 +28,17 @@ These labels describe the nature of the issue.
 | `feature request` | Request for new functionality                                                                    |
 | `RFC`             | Request for Comments — significant architectural or design change requiring community discussion |
 | `new model`       | Request to add support for a new model on Ascend NPU                                             |
-| `usage`           | A usage question; no code change may be required                                                 |
+| `Usage`           | A usage question; no code change may be required                                                 |
 | `question`        | A general question; no code change may be required                                               |
 | `documentation`   | Improvements or corrections to documentation                                                     |
 | `installation`    | Issues related to setup and deployment                                                           |
 | `performance`     | Performance regression, bottleneck, or optimization request                                      |
 | `bug`             | Something is not working correctly or behaves unexpectedly                                       |
+
+The issue forms under `.github/ISSUE_TEMPLATE` apply the matching type label automatically when an
+issue is opened through them. GitHub only applies a template label when a label with exactly that
+name exists in the repository, so the labels referenced by the templates must be kept in sync with
+the list above.
 
 ### 1.3 Priority Labels (Optional)
 
