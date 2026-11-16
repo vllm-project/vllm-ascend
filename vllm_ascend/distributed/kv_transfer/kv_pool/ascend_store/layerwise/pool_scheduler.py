@@ -162,12 +162,10 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         num_computed_tokens: int,
     ) -> int:
         self._get_or_create_request_tracker(request.request_id)
-        if self.layerwise_offload and (
-            self.num_speculative_blocks_by_group or len(self.cacheable_group_ids) != len(self.original_block_size)
-        ):
+        if self.layerwise_offload:
             # Probe the endpoint we can actually resume from. Trimming a full
-            # hit afterwards could select an earlier recurrent checkpoint that was
-            # never produced by chunked prefill.
+            # hit afterwards could require a request-private partial page or
+            # select a recurrent checkpoint never produced by chunked prefill.
             token_len = min(token_len, self._floor_to_cache_transfer_granularity(request.num_tokens - 1))
             if token_len <= 0:
                 return 0

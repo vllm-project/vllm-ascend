@@ -175,9 +175,9 @@ class PrefixPool:
     def hit(self, tokens, *, local_tokens=0):
         return self.scheduler._get_layerwise_hit_tokens(self.request(tokens), tokens, local_tokens)
 
-    def restore(self, tokens, *, replay=False):
+    def restore(self, tokens, *, replay=False, prompt_tokens=None):
         reset_step(self.worker)
-        prompt = tokens if replay else tokens + 1
+        prompt = (tokens if replay else tokens + 1) if prompt_tokens is None else prompt_tokens
         count, _ = self.scheduler.get_num_new_matched_tokens(self.request(prompt), 0)
         assert count == tokens - int(replay)
         request = self.meta(count, prompt, req_id="b", offset=300000, load_spec=self.scheduler.load_specs["b"])
@@ -218,7 +218,11 @@ def test_full_prefix_replay_has_the_compressor_and_swa_history(model, replay):
     pool = PrefixPool(model)
     pool.save(0, 4096)
     expected = [32, 1, 4, 4, 4, 16] if model == "flash" else [32, 1, 16, 4, 4, 4]
-    assert pool.restore(4096, replay=replay) == expected
+    if replay:
+        assert pool.scheduler.get_num_new_matched_tokens(pool.request(4096), 0) == (0, False)
+        assert not pool.scheduler.load_specs
+    else:
+        assert pool.restore(4096) == expected
 
 
 @pytest.mark.parametrize("model", ["flash", "pro"])

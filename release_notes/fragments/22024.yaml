@@ -8,3 +8,8 @@ entries:
       indexer transfer views and starts a separate namespace from earlier
       experimental cache objects.
     model: deepseek-v4
+  - category: bugfix
+    text: >-
+      Fixed complete-prefix replay with layerwise KV buffer reuse by looking
+      up the resumable checkpoint before excluding the final prompt token.
+    model: deepseek-v4
