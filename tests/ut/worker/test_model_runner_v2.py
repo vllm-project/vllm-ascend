@@ -1521,8 +1521,12 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
     runner = _make_runner()
     runner.input_buffers = object()
     runner.compilation_config = SimpleNamespace(static_forward_context={})
+    runner.model_config = SimpleNamespace(architecture=architecture, hf_config=SimpleNamespace())
     runner.vllm_config = SimpleNamespace(
         attention_config=AttentionConfig(),
+        # The DSA metadata gate resolves both sections through vllm_config.
+        model_config=runner.model_config,
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1),
         compilation_config=runner.compilation_config,
         scheduler_config=SimpleNamespace(max_num_seqs=8),
         kv_transfer_config=None,
@@ -1532,8 +1536,6 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp(a5, architecture)
     runner.pcp_manager.max_num_local_reqs = 16
     runner.model_state = SimpleNamespace(pcp_manager=None, kvpp_runtime=None)
     runner.speculator = SimpleNamespace()
-    runner.model_config = SimpleNamespace(architecture=architecture, hf_config=SimpleNamespace())
-    runner.vllm_config.model_config = runner.model_config
     kv_cache_config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
     original = vllm_model_runner.ModelCudaGraphManager
     seen = {}
@@ -1593,8 +1595,12 @@ def test_initialize_kv_cache_forwards_allocation_context():
     """Forward allocation context before preparing KDA state-copy plans."""
     runner = _make_runner()
     runner.compilation_config = SimpleNamespace(static_forward_context={})
+    runner.model_config = SimpleNamespace(architecture="OtherModel", hf_config=SimpleNamespace())
     runner.vllm_config = SimpleNamespace(
         attention_config=AttentionConfig(),
+        # The DSA metadata gate resolves both sections through vllm_config.
+        model_config=runner.model_config,
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1),
         compilation_config=runner.compilation_config,
         scheduler_config=SimpleNamespace(max_num_seqs=8),
         kv_transfer_config=None,
@@ -1603,8 +1609,6 @@ def test_initialize_kv_cache_forwards_allocation_context():
     runner.pcp_manager = None
     runner.model_state = SimpleNamespace(pcp_manager=None, kvpp_runtime=None)
     runner.speculator = None
-    runner.model_config = SimpleNamespace(architecture="OtherModel", hf_config=SimpleNamespace())
-    runner.vllm_config.model_config = runner.model_config
     called = False
     captured_kwargs: dict[str, object] = {}
     allocation_context = object()
