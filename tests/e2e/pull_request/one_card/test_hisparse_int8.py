@@ -85,8 +85,13 @@ def test_int8_indexer_strided_store_and_selection():
     torch.manual_seed(29)
     pages, block, width, offset = 32, 128, 128, 256
     spec = AscendSFAIndexerCacheSpec(
-        block_size=block, num_kv_heads=1, head_size=width, dtype=torch.int8,
-        scale_dim=1, scale_dtype=torch.float16, cache_sparse_li_c8=True,
+        block_size=block,
+        num_kv_heads=1,
+        head_size=width,
+        dtype=torch.int8,
+        scale_dim=1,
+        scale_dtype=torch.float16,
+        cache_sparse_li_c8=True,
     )
     stride = spec.page_size_bytes + 256
     raw = torch.full((offset + pages * stride + 256,), 37, dtype=torch.int8, device="npu")
@@ -98,18 +103,25 @@ def test_int8_indexer_strided_store_and_selection():
     torch.testing.assert_close(key.cpu().reshape(-1, width), values.cpu(), atol=0, rtol=0)
     torch.testing.assert_close(scale.cpu().flatten(), scales.half().cpu().flatten(), atol=0, rtol=0)
     raw_cpu = raw.cpu()
-    assert torch.all(raw_cpu[:offset] == 37) and torch.all(raw_cpu[offset + pages * stride:] == 37)
+    assert torch.all(raw_cpu[:offset] == 37) and torch.all(raw_cpu[offset + pages * stride :] == 37)
     for page in range(pages):
-        assert torch.all(raw_cpu[offset + page * stride + spec.page_size_bytes:offset + (page + 1) * stride] == 37)
+        assert torch.all(raw_cpu[offset + page * stride + spec.page_size_bytes : offset + (page + 1) * stride] == 37)
     query, query_scale = torch_npu.npu_dynamic_quant(torch.randn(4, 64, width, device="npu", dtype=torch.bfloat16))
     kwargs = dict(
-        query=query, weights=torch.randn(4, 64, device="npu", dtype=torch.float16),
+        query=query,
+        weights=torch.randn(4, 64, device="npu", dtype=torch.float16),
         query_dequant_scale=query_scale.half(),
         actual_seq_lengths_query=torch.tensor([4], dtype=torch.int32, device="npu"),
         actual_seq_lengths_key=torch.tensor([pages * block], dtype=torch.int32, device="npu"),
         block_table=torch.arange(pages, dtype=torch.int32, device="npu").view(1, -1),
-        query_quant_mode=0, key_quant_mode=0, layout_query="TND", layout_key="PA_BSND",
-        sparse_count=2048, sparse_mode=3, pre_tokens=2**63-1, next_tokens=2**63-1,
+        query_quant_mode=0,
+        key_quant_mode=0,
+        layout_query="TND",
+        layout_key="PA_BSND",
+        sparse_count=2048,
+        sparse_mode=3,
+        pre_tokens=2**63 - 1,
+        next_tokens=2**63 - 1,
     )
     actual = torch_npu.npu_quant_lightning_indexer(key=key, key_dequant_scale=scale.squeeze(2), **kwargs)
     expected = torch_npu.npu_quant_lightning_indexer(
@@ -193,7 +205,12 @@ def test_int8_resolver_refill_attention(capture, clip_capacity):
         )
         runtime._swap_rows(slice(0, rows))
         return AscendHiSparseImpl._c8_physical_attention(
-            impl, q, qr, cache, attention, indices_are_mapped=True,
+            impl,
+            q,
+            qr,
+            cache,
+            attention,
+            indices_are_mapped=True,
         )
 
     graph = None
@@ -230,7 +247,7 @@ def test_int8_resolver_refill_attention(capture, clip_capacity):
             for row in range(rows):
                 keep = (mapped[row] >= 0) & (mapped[row] < capacity)
                 selected = mapped[row, keep]
-                wanted[row, :selected.numel()] = selected
+                wanted[row, : selected.numel()] = selected
                 assert counts[row].item() == selected.numel()
                 if row >= live:
                     assert torch.all(virtual[row] == -1)

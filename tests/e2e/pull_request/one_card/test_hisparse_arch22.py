@@ -227,7 +227,7 @@ def test_random_request_unions(capture, compact):
                 compacted = torch.full_like(mapped, -1)
                 for row in range(rows):
                     selected = mapped[row][mapped[row] >= 0]
-                    compacted[row, :selected.numel()] = selected
+                    compacted[row, : selected.numel()] = selected
                 torch.testing.assert_close(attention.cpu(), compacted)
             # Every selected token, whether resident, cached or copied, has
             # exactly the canonical host payload. Sentinel layer stays intact.
@@ -598,9 +598,33 @@ def test_native_resolver_empty_state_tables():
     counts = torch.empty(1, dtype=torch.int32, device="npu")
     stats = torch.zeros(2, dtype=torch.int64, device="npu")
     torch.ops._C_ascend.hisparse_resolve_residency(
-        logical, table, None, states, table, table, None, tags, order, out,
-        resolved, errors, None, counts, None, None, None, None, stats,
-        8, 4, 4, 4, 0, 4, 4, 0,
+        logical,
+        table,
+        None,
+        states,
+        table,
+        table,
+        None,
+        tags,
+        order,
+        out,
+        resolved,
+        errors,
+        None,
+        counts,
+        None,
+        None,
+        None,
+        None,
+        stats,
+        8,
+        4,
+        4,
+        4,
+        0,
+        4,
+        4,
+        0,
     )
     assert torch.all(out.cpu() == -1) and torch.all(resolved.cpu() == -1)
     assert torch.all(counts.cpu() == 0) and torch.all(stats.cpu() == 0)
@@ -638,10 +662,33 @@ def test_resident_fast_path_dynamic_graph(state_count, mask_dtype, compact, resi
 
     def forward():
         torch.ops._C_ascend.hisparse_resolve_residency(
-            indices, hot_table, requests, states, source, resident, valid_rows,
-            dgi, lru, out, resolved, errors, attention, counts, swap_host,
-            swap_device, swap_counts, mask, stats, (state_count * cols + 1) * block,
-            block, block, block, 0, 256, hot, capacity if compact else 0,
+            indices,
+            hot_table,
+            requests,
+            states,
+            source,
+            resident,
+            valid_rows,
+            dgi,
+            lru,
+            out,
+            resolved,
+            errors,
+            attention,
+            counts,
+            swap_host,
+            swap_device,
+            swap_counts,
+            mask,
+            stats,
+            (state_count * cols + 1) * block,
+            block,
+            block,
+            block,
+            0,
+            256,
+            hot,
+            capacity if compact else 0,
         )
 
     resident.fill_(resident_base)
@@ -658,9 +705,9 @@ def test_resident_fast_path_dynamic_graph(state_count, mask_dtype, compact, resi
             (None, None, 2),
             (None, None, rows),
         ):
-            resident_cpu = torch.arange(
-                resident_base, resident_base + state_count * cols, dtype=torch.int32
-            ).view(state_count, cols)
+            resident_cpu = torch.arange(resident_base, resident_base + state_count * cols, dtype=torch.int32).view(
+                state_count, cols
+            )
             if cold_page is not None:
                 resident_cpu[:, cold_page] = 0
             current_indices = indices_cpu.clone()
@@ -679,17 +726,33 @@ def test_resident_fast_path_dynamic_graph(state_count, mask_dtype, compact, resi
             torch.npu.synchronize()
             live_indices = oracle_indices.clone()
             live_indices[live_rows:] = -1
-            expected = reference(live_indices, requests_cpu, states_cpu, source_cpu, resident_cpu,
-                                 hot_table.cpu(), torch.full_like(dgi.cpu(), -1), lru_cpu, block)
+            expected = reference(
+                live_indices,
+                requests_cpu,
+                states_cpu,
+                source_cpu,
+                resident_cpu,
+                hot_table.cpu(),
+                torch.full_like(dgi.cpu(), -1),
+                lru_cpu,
+                block,
+            )
             expected_out, expected_count, sh, sd, sc, tags, order, expected_stats = expected
             expected_attention = torch.where(expected_out >= 0, expected_out // block * 256 + expected_out % block, -1)
             if compact:
                 for row in range(rows):
                     selected = expected_attention[row][expected_attention[row] >= 0]
                     expected_attention[row].fill_(-1)
-                    expected_attention[row, :len(selected)] = selected
-            for actual, wanted in ((out, expected_out), (attention, expected_attention), (counts, expected_count),
-                                   (swap_counts, sc), (dgi, tags), (lru, order), (stats, expected_stats)):
+                    expected_attention[row, : len(selected)] = selected
+            for actual, wanted in (
+                (out, expected_out),
+                (attention, expected_attention),
+                (counts, expected_count),
+                (swap_counts, sc),
+                (dgi, tags),
+                (lru, order),
+                (stats, expected_stats),
+            ):
                 torch.testing.assert_close(actual.cpu(), wanted)
             expected_resolved = torch.full_like(oracle_indices, -1)
             expected_mask = torch.zeros_like(oracle_indices, dtype=mask_dtype)
@@ -785,9 +848,33 @@ def test_resident_parallel_rows_preserve_output_neighbors(valid_count):
 
     def forward():
         torch.ops._C_ascend.hisparse_resolve_residency(
-            logical, hot_table, requests, None, source, resident, live,
-            tags, order, out, resolved, errors, attention, counts, sh, sd,
-            swaps, None, None, 33 * block, block, block, block, 0, 256, 8192, 131106 * 256,
+            logical,
+            hot_table,
+            requests,
+            None,
+            source,
+            resident,
+            live,
+            tags,
+            order,
+            out,
+            resolved,
+            errors,
+            attention,
+            counts,
+            sh,
+            sd,
+            swaps,
+            None,
+            None,
+            33 * block,
+            block,
+            block,
+            block,
+            0,
+            256,
+            8192,
+            131106 * 256,
         )
 
     with _invalidation_graph(forward) as (graph, stream):
@@ -858,9 +945,33 @@ def test_union_overflow_preserves_state(capture, compact):
 
     def forward():
         torch.ops._C_ascend.hisparse_resolve_residency(
-            logical, table, requests, None, None, None, None, tags, lru, out,
-            resolved, errors, attention, counts, sh, sd, swaps, None, stats,
-            32, 4, 4, 4, 0, 4, 4, 32 if compact else 0,
+            logical,
+            table,
+            requests,
+            None,
+            None,
+            None,
+            None,
+            tags,
+            lru,
+            out,
+            resolved,
+            errors,
+            attention,
+            counts,
+            sh,
+            sd,
+            swaps,
+            None,
+            stats,
+            32,
+            4,
+            4,
+            4,
+            0,
+            4,
+            4,
+            32 if compact else 0,
         )
 
     graph = None

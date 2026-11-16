@@ -412,10 +412,7 @@ class HiSparseNPUOps:
         direct_tiles = num_tokens * table_tiles
         search_probes = num_state_rows * table_tiles * search_steps
         sort_buffer_bytes = 3 * num_tokens * torch.int64.itemsize
-        if (
-            direct_tiles >= 2 * search_probes + _SORT_MIN_DIRECT_TILES
-            and sort_buffer_bytes <= _SORT_BUFFER_LIMIT_BYTES
-        ):
+        if direct_tiles >= 2 * search_probes + _SORT_MIN_DIRECT_TILES and sort_buffer_bytes <= _SORT_BUFFER_LIMIT_BYTES:
             keys = torch.empty((num_tokens,), dtype=torch.int64, device=device)
             sorted_keys = torch.empty_like(keys)
             order = torch.empty_like(keys)

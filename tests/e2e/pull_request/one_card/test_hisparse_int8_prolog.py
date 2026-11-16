@@ -47,22 +47,14 @@ def test_int8_prolog_resident_writes_match_sfa(capture, hisparse):
         impl.kv_lora_rank = 512
         impl.qk_rope_head_dim = 64
         impl._kv_staging_capacity = 128
-        impl.q_a_layernorm = NS(
-            weight=torch.ones(2048, device="npu", dtype=torch.bfloat16), variance_epsilon=1e-6
-        )
-        impl.kv_a_layernorm = NS(
-            weight=torch.ones(512, device="npu", dtype=torch.bfloat16), variance_epsilon=1e-6
-        )
+        impl.q_a_layernorm = NS(weight=torch.ones(2048, device="npu", dtype=torch.bfloat16), variance_epsilon=1e-6)
+        impl.kv_a_layernorm = NS(weight=torch.ones(512, device="npu", dtype=torch.bfloat16), variance_epsilon=1e-6)
         impl.fused_qkv_a_proj = NS(
-            weight=torch_npu.npu_format_cast(
-                torch.randint(-16, 16, (6144, 2624), device="npu", dtype=torch.int8), 29
-            ),
+            weight=torch_npu.npu_format_cast(torch.randint(-16, 16, (6144, 2624), device="npu", dtype=torch.int8), 29),
             weight_scale=torch.full((2624,), 0.002, device="npu"),
         )
         impl.q_proj = NS(
-            weight=torch_npu.npu_format_cast(
-                torch.randint(-16, 16, (2048, 1024), device="npu", dtype=torch.int8), 29
-            ),
+            weight=torch_npu.npu_format_cast(torch.randint(-16, 16, (2048, 1024), device="npu", dtype=torch.int8), 29),
             weight_scale=torch.full((1024,), 0.002, device="npu"),
         )
         impl.W_UK_T = (torch.randn(4, 192, 512, device="npu", dtype=torch.bfloat16) * 0.01).contiguous()
@@ -73,8 +65,13 @@ def test_int8_prolog_resident_writes_match_sfa(capture, hisparse):
         local_slots = torch.arange(128, device="npu", dtype=torch.int64)
         raw = torch.zeros(8 * 6 * 128 * 656, device="npu", dtype=torch.int8)
         cache = PagedCacheView.bind(
-            raw, dtype=torch.int8, row_width=656, byte_offset=128 * 656,
-            block_stride=6 * 128 * 656, num_blocks=8, block_size=128,
+            raw,
+            dtype=torch.int8,
+            row_width=656,
+            byte_offset=128 * 656,
+            block_stride=6 * 128 * 656,
+            num_blocks=8,
+            block_size=128,
         ).cache
         rows = 32
         valid = 32

@@ -498,7 +498,9 @@ def test_bf16_hisparse_indexer_passes_through_page_scatter_indices(monkeypatch):
 
 @pytest.mark.parametrize("padding", [0, 256])
 @pytest.mark.parametrize("dtype,scale_dtype", [(torch.int8, torch.float16), (torch.float8_e4m3fn, torch.float32)])
-def test_c8_indexer_views_and_writes_preserve_neighboring_slab_bytes(monkeypatch, indexer_spec, padding, dtype, scale_dtype):
+def test_c8_indexer_views_and_writes_preserve_neighboring_slab_bytes(
+    monkeypatch, indexer_spec, padding, dtype, scale_dtype
+):
     scale_size = scale_dtype.itemsize
     scale_bits = torch.int16 if scale_size == 2 else torch.int32
     spec = replace(
