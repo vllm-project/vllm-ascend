@@ -72,6 +72,39 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Enable the Engram SSD DP participation probe (phase-3 T0). When "1",
+    # every engram prepare step joins a fixed-size CPU collective over the
+    # engram DP group and appends a JSONL record; capture/profile steps are
+    # recorded but do not join. Default "0" (off). Not sensitive.
+    "VLLM_ASCEND_ENGRAM_SSD_DP_PROBE": lambda: os.getenv("VLLM_ASCEND_ENGRAM_SSD_DP_PROBE", "0"),
+    # Directory for probe JSONL logs (one file per process). Default
+    # /tmp/engram_ssd_dp_probe. Not sensitive.
+    "VLLM_ASCEND_ENGRAM_SSD_DP_PROBE_DIR": lambda: os.getenv(
+        "VLLM_ASCEND_ENGRAM_SSD_DP_PROBE_DIR", "/tmp/engram_ssd_dp_probe"),
+    # Hard bound (seconds) for one probe protocol step. A step that cannot
+    # complete within it aborts the process (exit code 86) after flushing a
+    # TIMEOUT record. Range (0, 3600]. Default 60.
+    "VLLM_ASCEND_ENGRAM_SSD_DP_PROBE_TIMEOUT_S": lambda: float(
+        os.getenv("VLLM_ASCEND_ENGRAM_SSD_DP_PROBE_TIMEOUT_S", "60")),
+    # Fault injection for the probe, comma-separated specs (test only):
+    # skip_step=<N>:rank=<R>, skip_phase=<P>:rank=<R>,
+    # delay_phase=<P>:rank=<R>:ms=<M>, extra_step:rank=<R>. Default empty.
+    "VLLM_ASCEND_ENGRAM_SSD_DP_PROBE_FAULT": lambda: os.getenv(
+        "VLLM_ASCEND_ENGRAM_SSD_DP_PROBE_FAULT", ""),
+    # Which probe step categories join the CPU protocol. "auto": real engine
+    # steps and engine-idle dummy waves join; capture/profile steps log only.
+    # "auto_gated" additionally waits on a one-time group barrier before the
+    # first join (mirrors the SSD runtime's all-group-ready startup step).
+    # "real_only" and "none" narrow it for experiments. Default "auto".
+    "VLLM_ASCEND_ENGRAM_SSD_DP_PROBE_JOIN_POLICY": lambda: os.getenv(
+        "VLLM_ASCEND_ENGRAM_SSD_DP_PROBE_JOIN_POLICY", "auto"),
+    # Bound (seconds) for the auto_gated startup barrier. Default 1800.
+    "VLLM_ASCEND_ENGRAM_SSD_DP_PROBE_GATE_TIMEOUT_S": lambda: float(
+        os.getenv("VLLM_ASCEND_ENGRAM_SSD_DP_PROBE_GATE_TIMEOUT_S", "1800")),
+    # Deprecated diagnostic option. Ignored by the memory-only startup RPC;
+    # retained only to emit a migration warning once in each engine parent.
+    "VLLM_ASCEND_ENGRAM_SSD_EPOCH_FILE": lambda: os.getenv(
+        "VLLM_ASCEND_ENGRAM_SSD_EPOCH_FILE", ""),
 }
 
 # end-env-vars-definition

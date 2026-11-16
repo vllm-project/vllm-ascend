@@ -238,3 +238,6 @@ csrc/third_party/
 
 # local build cache
 .vllm_ascend/
+
+# Local Engram native-engine build output
+/build-engram/

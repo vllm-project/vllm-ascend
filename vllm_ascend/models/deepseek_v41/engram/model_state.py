@@ -29,6 +29,7 @@ from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.models.deepseek_v41.decoder_replay_state import DecoderReplayInputs, DecoderReplayState
+from vllm_ascend.models.deepseek_v41.engram.ssd.dp_probe import EngramDPProbe
 from vllm_ascend.worker.v2.attn_utils import ring_state_update_skipped
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_states.default import AscendModelState, ReplayAttnMetadata
@@ -102,6 +103,10 @@ class EngramModelState(AscendModelState):
         depth = model.token_lookback_depth
         self.lookback_token_ids: torch.Tensor | None = None
         self._cg_mode: CUDAGraphMode | None = None
+        # Phase-3 T0: DP participation probe at the future SSD prepare point.
+        # Env-gated; inert unless VLLM_ASCEND_ENGRAM_SSD_DP_PROBE=1.
+        self._engram_dp_probe = EngramDPProbe()
+        self._probe_stage: dict[str, Any] = {}
         if depth > 0:
             model.register_forward_pre_hook(self._prepare_engram_before_forward, with_kwargs=True)
             # Persistent so a captured graph can read it on replay.
@@ -249,7 +254,12 @@ class EngramModelState(AscendModelState):
         window = self.lookback_token_ids
         if window is None:
             return model_inputs
-        dummy = input_batch.is_dummy or self.kvpp_is_dummy_run or ring_state_update_skipped()
+        # T0 probe: keep the dummy components so prepare_engram can tell an
+        # engine-idle dummy wave from a profiling/kvpp dummy run.
+        stage_is_dummy = bool(input_batch.is_dummy)
+        stage_kvpp = bool(self.kvpp_is_dummy_run)
+        stage_ring_skip = bool(ring_state_update_skipped())
+        dummy = stage_is_dummy or stage_kvpp or stage_ring_skip
         batch = input_batch
         token_indices = None
         if self.pcp_context is not None and not dummy:
@@ -275,6 +285,18 @@ class EngramModelState(AscendModelState):
                 BLOCK_DEPTH=triton.next_power_of_2(depth),
             )
         model_inputs["lookback_token_ids"] = window
+        # T0 probe: remember how this step was staged so prepare_engram can
+        # classify it (idle dummy vs real vs in-graph-producer FULL step).
+        self._probe_stage = {
+            "dummy": bool(dummy),
+            "is_dummy": stage_is_dummy,
+            "kvpp": stage_kvpp,
+            "ring_skip": stage_ring_skip,
+            "num_tokens": int(batch.num_tokens),
+            "num_reqs": int(batch.num_reqs),
+            "cg_mode": str(self._cg_mode),
+            "padded": int(input_batch.num_tokens_after_padding),
+        }
         if self._engram_graph_inputs is not None and self._cg_mode == CUDAGraphMode.FULL:
             graph_inputs = self._engram_graph_inputs
             query = graph_inputs["engram_query_start_loc"]
@@ -284,6 +306,7 @@ class EngramModelState(AscendModelState):
                 query[: batch.num_reqs + 1].copy_(batch.query_start_loc[: batch.num_reqs + 1])
             graph_inputs["engram_valid_token_count"].fill_(valid_tokens)
             model_inputs.update(graph_inputs)
+            self._probe_stage["producer_full"] = not dummy
             # FULL replay runs its own producers. No Python-side hash/lookup
             # and no ExternalEvent records may precede it on this route.
             return model_inputs
@@ -307,6 +330,8 @@ class EngramModelState(AscendModelState):
 
     def prepare_engram_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
         self._engram_inputs = None
+        self._probe_stage = {"dummy": True, "num_tokens": int(num_tokens),
+                             "num_reqs": int(num_reqs), "cg_mode": str(self._cg_mode)}
         model_inputs: dict[str, Any] = {}
         window = self.lookback_token_ids
         if window is not None:
@@ -328,8 +353,45 @@ class EngramModelState(AscendModelState):
 
     def prepare_engram(self) -> dict[str, Any]:
         """Refresh buffers once inside eager forward or before FULL replay."""
+        self._probe_prepare_step()
         if self._engram_inputs is None:
             return {}
         model_inputs = self.model.prepare_engram_inputs(**self._engram_inputs)
         self._engram_inputs = None
         return model_inputs
+
+    def _probe_prepare_step(self) -> None:
+        """T0 participation probe at the future SSD prepare entry point.
+
+        Fires once per executed engine step that reaches engram preparation:
+        eager real/idle steps via the model pre-hook, FULL replay steps via
+        aclgraph run_fullgraph, and graph-capture runs (logged only). The
+        category distinguishes real work from idle dummy batches and from
+        capture/profile steps that must not join a business protocol.
+        """
+        probe = self._engram_dp_probe
+        if not probe.cfg.enabled:
+            return
+        stage = self._probe_stage or {}
+        category = "real"
+        try:
+            capturing = bool(torch.npu.is_current_stream_capturing())
+        except Exception:
+            capturing = False
+        if capturing:
+            category = "capture"
+        elif stage.get("kvpp") or stage.get("ring_skip"):
+            category = "profile"
+        elif stage.get("dummy"):
+            category = "idle"
+        elif self._engram_inputs is None and not stage.get("producer_full"):
+            category = "unknown"
+        probe.step(
+            category=category,
+            num_tokens=int(stage.get("num_tokens", 0)),
+            num_reqs=int(stage.get("num_reqs", 0)),
+            cg_mode=str(stage.get("cg_mode", "")),
+            bucket=int(stage.get("padded", 0)),
+            extra={"staged": self._engram_inputs is not None,
+                   "producer_full": bool(stage.get("producer_full", False))},
+        )

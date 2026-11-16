@@ -232,3 +232,20 @@ if(SOC_VERSION MATCHES "ascend310p.*|ascend950")
 else()
   install(TARGETS vllm_ascend_C vllm_ascend_kernels DESTINATION ${VLLM_ASCEND_INSTALL_PATH})
 endif()
+
+# ---------------------------------------------------------------------------
+# Engram SSD offload native engine (phase-3 T1)
+# Pure-C libaio row reader; no torch/CANN dependencies. Follows the project
+# convention of installing shared objects at the vllm_ascend package root
+# (develop installs into the source tree; wheels pick them up via build_py).
+# ---------------------------------------------------------------------------
+add_library(engram_ssd_c SHARED
+  ${CMAKE_CURRENT_LIST_DIR}/vllm_ascend/models/deepseek_v41/engram/ssd/native/ssd_fill.c
+  ${CMAKE_CURRENT_LIST_DIR}/vllm_ascend/models/deepseek_v41/engram/ssd/native/row_cache.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/vllm_ascend/models/deepseek_v41/engram/ssd/native/aligned_mapping.c
+)
+set_target_properties(engram_ssd_c PROPERTIES OUTPUT_NAME "engram_ssd" PREFIX "lib")
+target_compile_options(engram_ssd_c PRIVATE -O2 -g -Wall -Wextra -fPIC)
+set_target_properties(engram_ssd_c PROPERTIES LINKER_LANGUAGE CXX)
+target_link_libraries(engram_ssd_c PRIVATE pthread)
+install(TARGETS engram_ssd_c DESTINATION ${VLLM_ASCEND_INSTALL_PATH})

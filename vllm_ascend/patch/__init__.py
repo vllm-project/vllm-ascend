@@ -1872,3 +1872,12 @@
 #       Remove this patch when upstream provides a backend capability hook for
 #       enabling MoE sequence parallelism with DP=1.
 #
+
+# Engram SSD startup lifecycle (platform/patch_engine_core.py):
+#   EngineCore.__init__ is wrapped after the profiling-chunk wrapper. It runs
+#   the SSD engine-parent rendezvous / worker activation RPC / global ack only
+#   when SSD offload and DP>1 are enabled, after warmup and before READY.
+#   Existing run_engine_core import path reinstalls it under multiprocessing
+#   spawn. No upstream post-warmup/pre-READY extension point currently exists.
+#   Related PR: local Engram SSD feature development (not submitted yet).
+#   Remove this wrapper when upstream exposes that startup lifecycle hook.

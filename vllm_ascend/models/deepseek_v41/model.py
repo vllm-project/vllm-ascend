@@ -22,8 +22,10 @@ from vllm.distributed import (
     get_engram_dp_size,
     get_ep_group,
     get_pp_group,
+    get_engram_dp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
 )
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
@@ -1052,7 +1054,130 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             bool(vllm_config.engram_config and vllm_config.engram_config.dp_shared_memory)
         )
         self.engram_layout = EngramLayout.from_config(config) if self.has_engram else None
-        if self.engram_layout is not None:
+        # SSD 后端: 模型级 runtime + 无权重消费视图(04 §9.1)。
+        # 两层共用一个 runtime/容量预算; manifest 即预检; 不做全表分配。
+        self.engram_ssd_runtime = None
+        ssd_cfg = get_ascend_config().engram_ssd if self.engram_layout is not None else None
+        if ssd_cfg is not None and ssd_cfg.enabled:
+            if len(config.engram_layer_ids) != 2:
+                raise ValueError("engram_ssd currently requires exactly 2 engram layers")
+            if vllm_config.load_config.load_format != "ascend_engram_ssd":
+                raise ValueError(
+                    "engram_ssd requires --load-format ascend_engram_ssd so the "
+                    "table tensors stay on disk")
+            from vllm_ascend.models.deepseek_v41.engram.ssd.cache import SSDRowCache
+            from vllm_ascend.models.deepseek_v41.engram.ssd.embedding import (
+                AscendSSDEngramEmbedding,
+            )
+            from vllm_ascend.models.deepseek_v41.engram.ssd.engine import SSDFillEngine
+            from vllm_ascend.models.deepseek_v41.engram.ssd.manifest import (
+                SSDManifest,
+            )
+            from vllm_ascend.models.deepseek_v41.engram.ssd.runtime import (
+                EngramSSDRuntime,
+            )
+
+            tp_size = get_tensor_model_parallel_world_size()
+            tp_rank = get_tensor_model_parallel_rank()
+            model_layout = {
+                "version": ssd_cfg.artifact_version,
+                "layers": {
+                    int(layer_id): {
+                        "rows": int(rows),
+                        "codes_dtype": "I8",
+                        "codes_dim": int(config.engram_head_dim),
+                        "scale_dtype": "F8_E8M0",
+                    }
+                    for layer_id, rows in zip(config.engram_layer_ids,
+                                              config.engram_num_embeddings)
+                },
+            }
+            manifest = SSDManifest.load(ssd_cfg.manifest, model_layout, ssd_cfg.table_paths)
+            n_hash_cols = (config.engram_max_ngram_size - 1) * config.engram_n_heads
+            if n_hash_cols % tp_size:
+                raise ValueError(
+                    f"engram_ssd requires uniform column shards: {n_hash_cols} "
+                    f"columns over TP{tp_size}")
+            part_cols = n_hash_cols // tp_size
+            max_tokens = max(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                vllm_config.compilation_config.max_cudagraph_capture_size or 0,
+            )
+            # DP 共享装配(T5): 同 TP 位 engram DP 组一份平面/目录/引擎;
+            # leader(rank_in_group 0) 持有 cache+engine, client 只映射平面。
+            # 协议经 ProtocolEpoch(父角色单写者, T0 结论)激活。
+            from vllm.distributed import get_tensor_model_parallel_rank as _tp_rank_fn
+
+            dp_group = None
+            protocol = None
+            shared_planes = None
+            shared_engine = None
+            shared_cache = None
+            if get_engram_dp_size() > 1:
+                from vllm_ascend.models.deepseek_v41.engram.ssd.distributed import (
+                    EngramSSDProtocol,
+                    LeaderCacheHooks,
+                    ProtocolEpoch,
+                )
+                from vllm_ascend.models.deepseek_v41.engram.ssd.planes import SSDPlanes
+
+                dp_group = get_engram_dp_group()
+                if dp_group is None or dp_group.world_size <= 1:
+                    raise ValueError(
+                        "engram_ssd with DP>1 requires a node-local engram DP group")
+                # aclrtHostRegisterV2 需要设备上下文已初始化
+                torch.zeros(1, device=torch.device("npu", torch.npu.current_device()))
+                shared_planes = SSDPlanes(self._ssd_capacity(ssd_cfg), torch.device(
+                    "npu", torch.npu.current_device()), group=dp_group)
+                if dp_group.rank_in_group == 0:
+                    cpu_base = ssd_cfg.io_cpu_list[0] if ssd_cfg.io_cpu_list else -1
+                    shared_engine = SSDFillEngine(
+                        ssd_cfg.table_paths,
+                        layer_rows=[sp.logical_rows for sp in manifest.specs],
+                        layer_bases=[sp.packed_global_base for sp in manifest.specs],
+                        threads_per_disk=ssd_cfg.threads_per_disk,
+                        qd=ssd_cfg.queue_depth,
+                        io_nr=ssd_cfg.io_setup_events,
+                        cpu_base=cpu_base)
+                    rebuild = ssd_cfg.rebuild_threshold or None
+                    shared_cache = SSDRowCache(
+                        self._ssd_capacity(ssd_cfg),
+                        row_limit=max(manifest.total_logical_rows,
+                                      manifest.specs[-1].packed_global_base
+                                      + manifest.specs[-1].logical_rows),
+                        rebuild_threshold=rebuild)
+                hooks = None
+                if shared_cache is not None:
+                    codes_np, scales_np = shared_planes.numpy_views()
+                    hooks = LeaderCacheHooks(
+                        shared_cache, shared_engine, codes_np, scales_np,
+                        base1=manifest.specs[1].packed_global_base
+                        if len(manifest.specs) > 1 else 0,
+                        extents_threshold=64)
+                protocol = EngramSSDProtocol(
+                    dp_group, epoch_fn=ProtocolEpoch.current,
+                    timeout_s=300.0, leader_hooks=hooks)
+            self.engram_ssd_runtime = EngramSSDRuntime(
+                ssd_cfg, manifest,
+                device=torch.device("npu", torch.npu.current_device()),
+                num_layers=len(config.engram_layer_ids),
+                total_hash_cols=n_hash_cols,
+                col_start=tp_rank * part_cols,
+                col_count=part_cols,
+                max_tokens=max_tokens,
+                tp_size=tp_size,
+                planes=shared_planes, engine=shared_engine,
+                cache=shared_cache, protocol=protocol,
+            )
+            for slot, (layer_id, rows) in enumerate(
+                    zip(config.engram_layer_ids, config.engram_num_embeddings)):
+                head_sizes = tuple(size for order in self.engram_layout.primes[slot]
+                                   for size in order)
+                self.layers[layer_id].engram.embed_tokens = AscendSSDEngramEmbedding(
+                    rows, config.engram_head_dim, head_sizes, slot,
+                    tp_size=tp_size, head_start=tp_rank * part_cols,
+                    part_n_hash_cols=part_cols)
+        if self.engram_layout is not None and self.engram_ssd_runtime is None:
             # Head buckets use TP x DP x PCP when sharded, or TP alone when host
             # storage is shared across local DP x PCP replicas.
             # Fail on an unreadable checkpoint before the first table exists:
@@ -1132,6 +1257,10 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 )
             }
         )
+
+    @staticmethod
+    def _ssd_capacity(ssd_cfg) -> int:
+        return ssd_cfg.capacity()
 
     def embed_input_ids(self, input_ids):
         return self.embed_tokens(input_ids)
@@ -1240,6 +1369,48 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             publish_mask()
         lookups = {}
         tables = [self.layers[layer_id].engram.embed_tokens for layer_id in config.engram_layer_ids]
+        if self.engram_ssd_runtime is not None:
+            # SSD 分支: 图外一次统一准备两层(hash 已算好, 无 DP 通信,
+            # runtime 写入固定输出缓冲), TP 列拼接后与 DDR 路径同形。
+            if hashes is None:
+                # dummy/idle 无 hash: 不触发 SSD IO, 输出固定零。
+                # DP 共享模式且协议已激活: 以空行加入本轮(P0-P4),
+                # 使 busy 对端的行轮次可完成(§10: idle rank 每步参加)。
+                rt = self.engram_ssd_runtime
+                if (rt.protocol is not None and rt.protocol.epoch_fn() >= 1
+                        and not torch.npu.is_current_stream_capturing()):
+                    import numpy as _np
+
+                    rt.protocol.step(_np.zeros(0, _np.uint64), num_tokens=0)
+                for layer_id in config.engram_layer_ids:
+                    if output_buffers is None:
+                        lookups[layer_id] = torch.empty(
+                            (0, tables[0].n_hash_cols * tables[0].dim),
+                            dtype=torch.bfloat16, device=device)
+                    else:
+                        output_buffers[layer_id][:output_tokens].zero_()
+                        lookups[layer_id] = output_buffers[layer_id]
+                    if ready_events is not None:
+                        ready_events[layer_id].record(torch.npu.current_stream())
+                return lookups, mask if mask_output_buffer is None else mask_output_buffer
+            prepared = self.engram_ssd_runtime.prepare(
+                hashes, mask if mask_output_buffer is None else None)
+            count = hashes.shape[0]
+            for slot, layer_id in enumerate(config.engram_layer_ids):
+                out = prepared.layer_outputs[layer_id]     # [T, part_cols, dim]
+                if get_tensor_model_parallel_world_size() > 1:
+                    out = tensor_model_parallel_all_gather(out, dim=1)
+                rows = out.reshape(count, -1)
+                if output_buffers is None:
+                    lookups[layer_id] = rows
+                else:
+                    target = output_buffers[layer_id]
+                    target[: rows.shape[0]].copy_(rows)
+                    target[rows.shape[0]: output_tokens].zero_()
+                    lookups[layer_id] = target
+                if ready_events is not None:
+                    ready_events[layer_id].record(torch.npu.current_stream())
+            return lookups, mask if mask_output_buffer is None else mask_output_buffer
         if participates:
             assert hashes is not None
             # One DP gather feeds every layer sharing the split table.
@@ -1284,6 +1455,10 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         """Preparation runs outside capture; consumers support eager and FULL."""
         if not self.has_engram or not self._engram_overlap_enabled:
             return False
+        if self.engram_ssd_runtime is not None:
+            # SSD 首版: 同流串行准备(CPU 目录/IO 在图外, 输出同流),
+            # 不沿用辅助流异步释放假设(04 §9.1)。
+            return False
         if not is_forward_context_available():
             return True
         context = get_forward_context()
@@ -1297,6 +1472,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         return (
             self.has_engram
             and self._engram_overlap_enabled
+            and self.engram_ssd_runtime is None
             and self.engram_hash is not None
             and not self.engram_hash.use_slot_cache
             and not self.use_sequence_parallel
@@ -1359,6 +1535,9 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
 
     def retire_engram_lookups(self, *, reset_events=False):
         """Join preparation before input reuse, including skipped consumers."""
+        if self.engram_ssd_runtime is not None:
+            # gather 完成确认后释放租约; 失败(消费者状态不明)由 runtime poison。
+            self.engram_ssd_runtime.finish_execution(failed=reset_events)
         if self.has_engram:
             main = torch.npu.current_stream()
             if self._engram_prepare_stream is not None:
@@ -1825,6 +2004,14 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         if not self.model.has_engram:
             return self._load_model_weights((name, tensor) for name, tensor in weights if ".engram." not in name)
         loaded = self._load_model_weights((name, tensor) for name, tensor in weights if self._is_milestone_weight(name))
+        if self.model.engram_ssd_runtime is not None:
+            from vllm_ascend.model_loader.engram_ssd_loader import (
+                assert_external_tables_complete,
+            )
+
+            assert_external_tables_complete(
+                self.model.engram_root,
+                list(self.model.config.engram_layer_ids))
         return loaded
 
     def set_moe_parameters(self):

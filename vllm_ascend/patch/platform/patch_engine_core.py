@@ -14,8 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from functools import wraps
+
 import vllm.v1.engine.core as _engine_core_mod
-from vllm.v1.engine.core import EngineCoreProc
+from vllm.v1.engine.core import EngineCore, EngineCoreProc
 
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.patch.platform.patch_balance_schedule import BalanceDPEngineCoreProc, _balance_scheduling_enabled
@@ -56,12 +58,31 @@ def _run_engine_core_patch_func(*args, dp_rank: int = 0, local_dp_rank: int = 0,
     return _OriginalRunEngineCore(*args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs)
 
 
+def _apply_engram_ssd_startup_patch() -> None:
+    # Installed outside the profiling wrapper: its additional warmup must
+    # finish too. Module import reapplies this in spawned engine processes.
+    original_init = EngineCore.__init__
+    if getattr(original_init, "_engram_ssd_startup", False):
+        return
+
+    @wraps(original_init)
+    def initialize_and_activate(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        from vllm_ascend.models.deepseek_v41.engram.ssd.activation import activate_engine_protocol
+
+        activate_engine_protocol(self)
+
+    initialize_and_activate._engram_ssd_startup = True
+    EngineCore.__init__ = initialize_and_activate
+
+
 def _apply_patch() -> None:
     global _PATCHED
     if _PATCHED:
         return
     _PATCHED = True
 
+    _apply_engram_ssd_startup_patch()
     # Patch EngineCore.post_step
     pp_mtp_patch_post_step()
     # Patch EngineCoreProc.run_engine_core
