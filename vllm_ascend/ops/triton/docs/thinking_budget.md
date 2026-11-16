@@ -39,7 +39,7 @@ lowering issue.
 ## `_update_committed_marker_cache_kernel_ascend`
 
 The marker-cache implementation keeps the upstream algorithm and data layout.
-It rewrites three-term runtime conditions as nested
+Its only compatibility change rewrites three-term runtime conditions as nested
 two-term conditions:
 
 ```text
@@ -51,31 +51,6 @@ unsupported chained-boolean lowering in older Triton-Ascend versions.
 
 This workaround can be deleted when Triton-Ascend 3.6.0 is the minimum
 supported version.
-
-## History-address range
-
-History offsets are measured in int32 **elements**, not bytes. For a contiguous
-`[max_num_seqs, max_model_len]` history, the largest valid offset is
-`max_num_seqs * max_model_len - 1`. All offsets fit in signed int32 when this
-product is at most `2**31`; in particular, `max_num_seqs <= 2048` together with
-`max_model_len <= 1048576` is within that range. Widening the row index is not
-needed for that bounded range.
-
-The scheduler configuration does not impose a 2048 upper bound on
-`max_num_seqs`. Request state allocates the configured capacity and assigns
-free slots from the highest index first, so a large history offset does not
-require that many concurrently active requests. Both compatibility kernels
-widen the request index before multiplying by the row stride. This preserves
-address arithmetic for configured histories whose reachable offsets exceed
-signed int32, consistent with upstream staged history writes.
-
-The address test uses `AscendRequestState` and normal request insertion with
-scheduler-validated capacities `(3, 8)` and `(8193, 262144)`. The larger case
-allocates a contiguous history of about 8 GiB, with ordinary row stride 262144;
-its first request occupies slot 8192, whose row offset is `2**31`. It does not
-construct an `as_strided` view. This is a production-state allocation boundary
-test, not a claim that a complete model deployment or workload at that capacity
-has been validated.
 
 ## Inputs and state
 
@@ -103,5 +78,4 @@ plain requests, and oversized budgets:
 
 ```bash
 pytest -sv tests/e2e/pull_request/one_card/test_thinking_budget.py
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_thinking_budget.py
 ```

@@ -160,10 +160,10 @@ V2 request lifecycle coverage targets `AscendRequestState` and upstream
 not required. The host tests check lifecycle and sampler contracts with device
 storage mocked. The focused NPU operator test covers history loads and cold
 and incremental marker scans, including isolation of inactive request slots.
-It uses a contiguous production request-state allocation with a validated
-scheduler capacity. The large boundary case needs approximately 8 GiB of free
-NPU memory plus headroom; it does not validate a full model deployment at that
-capacity. The operator test can be explicitly selected for PR CI:
+It uses contiguous production request-state allocations within the existing
+int32 history-address range. It checks committed and in-flight token loads,
+disabled budgets, missing markers, and isolation of inactive slots.
+The operator test can be explicitly selected for PR CI:
 
 ```text
 /e2e tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_thinking_budget.py
