@@ -387,3 +387,10 @@ msgstr "    | 输入长度 128k    | TTFT: 24.04s | TTFT: 28.33s |"
 
 msgid "    | Input length 256k    | TTFT: 51.41s | TTFT: 55.61s |"
 msgstr "    | 输入长度 256k    | TTFT: 51.41s | TTFT: 55.61s |"
+
+msgid ""
+"|         | Eager | Graph | Prefix <br> Cache | Chunked <br> Prefill | "
+"Flashcomm1 | SRF |"
+msgstr ""
+"|         | Eager | Graph | Prefix <br> Cache | Chunked <br> Prefill | "
+"Flashcomm1 | SRF |"
