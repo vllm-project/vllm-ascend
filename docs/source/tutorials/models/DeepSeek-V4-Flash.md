@@ -32,7 +32,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 |  Weight Version                              | Hardware Requirements                                                      | Download Links |
 |----------------------------------------------|----------------------------------------------------------------------------|----------------|
 | `DeepSeek-V4-Flash-0731-w8a8` | 1 Atlas 800I A3 (128GB × 8) node or 1 Atlas 800I A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-0731-w8a8) |
-| `DeepSeek-V4-Flash-0731` | 1 950DT node (96GB × 8)| [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) |
+| `DeepSeek-V4-Flash-0731` | 1 950DT node (96GB × 8)| [ModelScope](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V4-Flash-0731) \| [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) |
 | `DeepSeek-V4-Flash-0731-w4a4c8` | 950PR&950DT products | Quantize locally with [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/lab_practice/deepseek_v4/deepseek_v4_flash_w4a4c8.yaml) |
 
 - `DeepSeek-V4-Flash-0731-w4a4c8` (W4A4 MXFP4 mixed-precision quantization): For how the ultra-low-bit quantization preserves accuracy, see the [W4A4C8 FAQ](#q-how-do-the-w4a4c8-ultra-low-bit-quantized-weights-preserve-accuracy).
