@@ -55,15 +55,26 @@ Environment knobs:
   devices are a documented option — dedicated, unmounted, no filesystem
   signature);
 - ``KV_POOL_MEMCACHE_UBSIO_DEVICES``: UBS IO standalone device count (default
-  ``TP_SIZE``, one per DRAM-enabled local service).
+  ``TP_SIZE``, one per DRAM-enabled local service);
+- ``QWEN38_POOL_DEVICE_ROCE``: ``1`` pins the mooncake legs to the device RoCE
+  transport (``ASCEND_GLOBAL_RESOURCE_CONFIG`` with
+  ``protocol_desc=["roce:device"]``, ``HCCL_INTRA_PCIE_ENABLE=0``,
+  ``HCCL_INTRA_ROCE_ENABLE=1``); ``0`` (default) leaves HIXL on the platform
+  default. Set it on hosts whose default HCCS P2P channel cannot carry
+  cross-rank puts, i.e. the dev A2 boxes;
+- ``QWEN38_POOL_CASE_TIMEOUT_SECONDS``: per-case ceiling (default ``1800``,
+  ``0`` disables). A failed engine initialisation can leave the pytest process
+  alive after the failure; the watchdog turns that into a fast failure.
 
-Host / runner prerequisites (official KV pool guide): the mooncake legs run
-the HIXL RoCE direct mode. The test arms the three transport knobs of the
-repo's validated RoCE Store path (``ASCEND_GLOBAL_RESOURCE_CONFIG`` with
-``protocol_desc=["roce:device"]``, ``HCCL_INTRA_PCIE_ENABLE=0``,
-``HCCL_INTRA_ROCE_ENABLE=1``) and keeps ``ASCEND_ENABLE_USE_FABRIC_MEM``
-unset; the devices themselves still have to expose working RoCE endpoints
-(``/etc/hccn.conf`` visible in the container, per-NPU RoCE IP and link up).
+Host / runner prerequisites (official KV pool guide): the mooncake legs talk to
+the pool over HIXL. The transport itself is host-specific, so the RoCE knobs are
+opt-in (``QWEN38_POOL_DEVICE_ROCE=1``) rather than unconditional; a slice whose
+NPUs have no configured device RoCE endpoint must keep the platform default,
+otherwise HIXL aborts with "Device roce endpoint is unavailable" and the store
+never initialises. ``ASCEND_ENABLE_USE_FABRIC_MEM`` stays unset either way
+(fabric mem is the documented A3-HCCS mode). Hosts that do pin RoCE need the
+devices to expose working endpoints (``/etc/hccn.conf`` visible in the
+container, per-NPU RoCE IP and link up).
 The official A2 environment also reserves 2MB
 hugepages, but no scenario consumes them (all four scenarios were verified
 passing with ``nr_hugepages=0`` on A2), so their absence only prints a note.
@@ -76,6 +87,7 @@ import math
 import os
 import shutil
 import tempfile
+import threading
 import time
 from contextlib import ExitStack, contextmanager
 from importlib.metadata import PackageNotFoundError
@@ -185,6 +197,22 @@ STORE_ROCE_RESOURCE_CONFIG = json.dumps(
     },
     separators=(",", ":"),
 )
+# Whether the mooncake legs pin the device RoCE descriptor above. It is
+# host-specific, so it must not be unconditional:
+#   - the dev A2 boxes need it, because their default HCCS P2P channel fails
+#     cross-rank with DisableP2P=17 / IPC import 107000 (put error -800);
+#   - the a2b3-2 CI slice exposes NPUs (phy_device_id 2/3) without a configured
+#     device RoCE endpoint, where either descriptor - explicit or auto-derived -
+#     makes HIXL fail with "Device roce endpoint is unavailable", the Ascend
+#     transport never installs, and mooncake store setup never succeeds.
+# Default to the platform behaviour (HIXL auto-derives from the target) and let
+# RoCE hosts opt in with QWEN38_POOL_DEVICE_ROCE=1.
+DEVICE_ROCE = os.environ.get("QWEN38_POOL_DEVICE_ROCE", "0") == "1"
+# Hard per-case ceiling. A failed mooncake initialisation leaves client retry
+# threads and worker children behind, so the pytest process can outlive the
+# failure and burn the whole job timeout (run 43892339442 failed at 15:21 and was
+# cancelled at 17:08). 0 disables the watchdog.
+CASE_TIMEOUT_SECONDS = int(os.environ.get("QWEN38_POOL_CASE_TIMEOUT_SECONDS", "1800"))
 
 AB_MODE = os.environ.get("KV_POOL_AB_MODE", "gate")
 # The mooncake-layerwise scenario runs without a version gate: the official
@@ -397,25 +425,28 @@ def _leg(
                 # reserves 200000 2MB hugepages (a production-environment
                 # guideline; the single-node legs keep the loopback route and
                 # were verified passing with no reserved hugepages at all).
-                # The RoCE trio below mirrors the repo's validated RoCE Store
-                # path so the Store engine pins its device RoCE endpoints
-                # instead of letting HIXL auto-derive them.
-                # Without RoCE direct mode the default HCCS P2P channel fails
-                # cross-rank with DisableP2P=17 / IPC import 107000 (put error
-                # -800). ASCEND_ENABLE_USE_FABRIC_MEM must stay unset: fabric
-                # mem is the documented A3-HCCS mode, and an empty-string
-                # value still reads as "set" to the engine, which then fails
-                # its hugepage-reserve path on A2.
+                # RoCE direct mode is host-specific (see DEVICE_ROCE): the dev
+                # A2 boxes need the pinned descriptor, the CI slice must keep
+                # the platform default. ASCEND_ENABLE_USE_FABRIC_MEM must stay
+                # unset on A2 either way: fabric mem is the documented A3-HCCS
+                # mode, and an empty-string value still reads as "set" to the
+                # engine, which then fails its hugepage-reserve path.
                 os.environ.pop("ASCEND_ENABLE_USE_FABRIC_MEM", None)
-                stack.enter_context(
-                    patch.dict(
-                        os.environ,
-                        {
-                            "ASCEND_GLOBAL_RESOURCE_CONFIG": STORE_ROCE_RESOURCE_CONFIG,
-                            "HCCL_INTRA_PCIE_ENABLE": "0",
-                            "HCCL_INTRA_ROCE_ENABLE": "1",
-                        },
+                if DEVICE_ROCE:
+                    stack.enter_context(
+                        patch.dict(
+                            os.environ,
+                            {
+                                "ASCEND_GLOBAL_RESOURCE_CONFIG": STORE_ROCE_RESOURCE_CONFIG,
+                                "HCCL_INTRA_PCIE_ENABLE": "0",
+                                "HCCL_INTRA_ROCE_ENABLE": "1",
+                            },
+                        )
                     )
+                print(
+                    f"[kv_pool_a2] {case_name}: transport="
+                    f"{'device RoCE (pinned)' if DEVICE_ROCE else 'platform default (HIXL auto)'}",
+                    flush=True,
                 )
                 mooncake_config = _mooncake_pool_config(tier_ssd, case_name)
                 if tier_ssd:
@@ -690,6 +721,30 @@ def _phase_perf(runner: VllmRunner, prompt_ids: list[int], tag: str) -> tuple[fl
     return p50, p95, throughput
 
 
+def _install_case_watchdog(case: str) -> None:
+    """Force-exit the process if a single case overruns its ceiling.
+
+    A failed mooncake/worker initialisation leaves retry threads and child
+    processes behind, so pytest can outlive the failure instead of reporting it:
+    run 43892339442 failed at 15:21 and kept the job occupied until it was
+    cancelled at 17:08, i.e. the CI slice burned its whole 120-minute timeout on
+    an already-failed case. A daemon watchdog converts that into an immediate,
+    diagnosable failure.
+    """
+    if CASE_TIMEOUT_SECONDS <= 0:
+        return
+
+    def _bail() -> None:
+        time.sleep(CASE_TIMEOUT_SECONDS)
+        print(
+            f"[kv_pool_a2] {case}: watchdog exceeded {CASE_TIMEOUT_SECONDS}s with no progress, forcing exit",
+            flush=True,
+        )
+        os._exit(4)
+
+    threading.Thread(name=f"kv-pool-watchdog-{case}", target=_bail, daemon=True).start()
+
+
 @pytest.mark.e2e_model(MODEL)
 @pytest.mark.e2e_coverage(
     arch="dense",
@@ -738,6 +793,8 @@ def test_qwen38_kv_pool_ab_a2(backend: str, use_layerwise: bool):
             "storage-enabled pool reports 0 of 16128 expected hits (tier-2 on the same "
             "card reports 16128). Re-enable once memcache fixes the device_count=1 path."
         )
+
+    _install_case_watchdog(case)
 
     if backend == "mooncake":
         # The official support matrix asks for mooncake >= 0.3.14 for
