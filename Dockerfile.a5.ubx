@@ -25,6 +25,21 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 WORKDIR /workspace
 
+# Install CANN 950 (A5) ops package.
+ARG TARGETPLATFORM
+RUN ARCH=${TARGETPLATFORM:-$(uname -m)}; \
+    case "$ARCH" in \
+        "linux/arm64"|"aarch64") \
+            CANN_OPS_URL="https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.2.0.P006/Ascend-cann-950-ops_9.2.0.P006_linux-aarch64.run" ;; \
+        "linux/amd64"|"x86_64") \
+            CANN_OPS_URL="https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.2.0.P006/Ascend-cann-950-ops_9.2.0.P006_linux-x86_64.run" ;; \
+        *) echo "Unsupported architecture: $ARCH" && exit 1 ;; \
+    esac && \
+    wget --quiet "$CANN_OPS_URL" -O /tmp/Ascend-cann-950-ops.run && \
+    chmod +x /tmp/Ascend-cann-950-ops.run && \
+    /tmp/Ascend-cann-950-ops.run --install --quiet --install-for-all && \
+    rm -f /tmp/Ascend-cann-950-ops.run
+
 # Install clang-15 (for triton-ascend)
 RUN apt-get update -y && \
     apt-get install -y git vim wget curl protobuf-compiler libprotobuf-dev net-tools gcc g++ cmake numactl libnuma-dev libibverbs-dev libhiredis-dev clang-15 && \
