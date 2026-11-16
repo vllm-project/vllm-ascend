@@ -1,0 +1,6 @@
+pr: 21751
+entries:
+  - category: feature
+    text: >-
+      Added BF16 PLE UVA host offload for Qwen3.8-Flash-Next on Ascend,
+      with node-local DP memory sharing and no MemFabric Offload API dependency.
