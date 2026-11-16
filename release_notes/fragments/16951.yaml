@@ -1,0 +1,5 @@
+pr: 16951
+entries:
+  - category: bugfix
+    text: Enabled explicitly configured local KV communication resources on Ascend A3.
+    hardware: [A3]
