@@ -388,7 +388,7 @@ class AscendDSAV41Impl:
     def _write_swa_cache(attn, metadata, value):
         if not value.shape[0]:
             return
-        cache = attn.dsa_attn.swa_cache_layer.kv_cache[0]
+        cache = attn.dsa_attn.swa_cache_layer.kv_cache
         backend = getattr(attn, "packed_cache_ops", None)
         if backend is not None:
             backend.write_attention_cache(
@@ -637,14 +637,14 @@ class AscendDSAV41Impl:
         backend = getattr(attn, "packed_cache_ops", None)
         if backend is not None:
             backend.write_attention_cache(
-                attn.long_kv_cache.kv_cache[0],
+                attn.long_kv_cache.kv_cache,
                 compressor_metadata.cache.flat_slot_mapping[:num_tokens],
                 latent.squeeze(1),
                 kind="cmp",
             )
         else:
             scatter_cache_sk(
-                attn.long_kv_cache.kv_cache[0],
+                attn.long_kv_cache.kv_cache,
                 long_slots,
                 latent.squeeze(1),
             )
@@ -659,10 +659,10 @@ class AscendDSAV41Impl:
 
         context = get_forward_context().no_compile_layers
         source_layer = context[self.index_k_source_prefix]
-        source_cache = source_layer.kv_cache[0]
+        source_cache = source_layer.kv_cache
         if self.role.uses_candidate_filter and getattr(attn.indexer, "packed_cache_ops", None) is not None:
             folded_name = self.index_k_source_prefix + "_folded"
-            folded_cache = context[folded_name].kv_cache[0]
+            folded_cache = context[folded_name].kv_cache
             source_cache = (*source_cache, folded_cache)
         assert prepared_indexer is not None
         if prepared_indexer.quantize_done is not None:
@@ -696,7 +696,7 @@ class AscendDSAV41Impl:
     def _forward_attention(self, attn, q, metadata, compressed_indices, *, source_cache=None):
         """Run SparseFlashMla with the same PA metadata for both operator stages."""
         if source_cache is None and self.role.has_long_context:
-            source_cache = get_forward_context().no_compile_layers[self.long_kv_source_prefix].kv_cache[0]
+            source_cache = get_forward_context().no_compile_layers[self.long_kv_source_prefix].kv_cache
         backend = getattr(attn, "packed_cache_ops", None)
         if backend is not None:
             compressed_lengths = None
@@ -704,7 +704,7 @@ class AscendDSAV41Impl:
                 compressed_lengths = attn.shared_state.topk_lengths[: q.shape[0]]
             return backend.qsmla(
                 q,
-                attn.dsa_attn.swa_cache_layer.kv_cache[0],
+                attn.dsa_attn.swa_cache_layer.kv_cache,
                 source_cache,
                 metadata,
                 compressed_indices,
@@ -737,7 +737,7 @@ class AscendDSAV41Impl:
             DeviceMetadataStage.ATTENTION,
             id(op_metadata),
         )
-        swa_cache = attn.dsa_attn.swa_cache_layer.kv_cache[0]
+        swa_cache = attn.dsa_attn.swa_cache_layer.kv_cache
         if metadata.swa.replay_block_table is not None:
             # Rebase only SWA: A3 CSA cannot mask its missing prefix with
             # sparse ori indices. Compressed KV retains its causal coordinates.
@@ -1809,15 +1809,13 @@ class DeepseekV41CacheLayer(nn.Module, AttentionLayerBase):
         super().__init__()
         self.prefix = prefix
         self.spec = spec
-        self.kv_cache = [torch.empty(0)]
+        self.kv_cache: torch.Tensor | tuple[torch.Tensor, ...] = torch.empty(0)
         context = vllm_config.compilation_config.static_forward_context
         context[prefix] = self
 
-    def bind_kv_cache(self, kv_cache: torch.Tensor | tuple[torch.Tensor, ...] | list[torch.Tensor]) -> None:
-        """Keep tensor/tuple consumers behind the ``kv_cache[0]`` contract."""
-        if isinstance(kv_cache, list):
-            kv_cache = kv_cache[0] if len(kv_cache) == 1 else tuple(kv_cache)
-        self.kv_cache = [kv_cache]
+    def bind_kv_cache(self, kv_cache: torch.Tensor | tuple[torch.Tensor, ...]) -> None:
+        """Bind a single cache view or a tuple of component views."""
+        self.kv_cache = kv_cache
 
     def get_kv_cache_spec(self, vllm_config):
         return self.spec

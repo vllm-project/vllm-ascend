@@ -366,13 +366,15 @@ def test_mrv2_unified_pool_preserves_slot_layout(runtime, monkeypatch, block_siz
     if kv_transfer:
         assert backing.data_ptr() % (2 * 1024 * 1024) == 0
     placements = {d.layers[0]: d for d in planned.kv_cache_tensors}
-    views = {}
-    for name, components in caches.items():
-        layers[name].bind_kv_cache(components)
-        views[name] = layers[name].kv_cache[0]
-        first = components[0]
+    for name, cache in caches.items():
+        expected_type = tuple if getattr(layer_specs[name], "scale_dim", 0) else torch.Tensor
+        assert isinstance(cache, expected_type)
+        layers[name].bind_kv_cache(cache)
+        assert layers[name].kv_cache is cache
+        first = cache[0] if isinstance(cache, tuple) else cache
         assert first.untyped_storage().data_ptr() == backing.untyped_storage().data_ptr()
         assert first.data_ptr() - backing.data_ptr() == placements[name].offset
+    views = caches
     assert views[folded].stride(0) * views[folded].element_size() == placements[folded].block_stride
     views[folded][1].fill_(7)
     assert torch.count_nonzero(views[long_kv]) == 0
@@ -519,7 +521,7 @@ def test_model_registration_and_binding(runtime):
     for index, (name, spec) in enumerate(specs.items()):
         modules[str(index)] = DeepseekV41CacheLayer(runtime, name, spec)
     assert len(context) == 51
-    assert all(module.kv_cache[0].numel() == 0 for module in context.values())
+    assert all(module.kv_cache.numel() == 0 for module in context.values())
     state = context["language_model.model.layers.2.self_attn.compressor.state_cache"]
     assert state is context["language_model.model.layers.2.self_attn.compressor.state_cache"]
     assert not state.spec.prefix_cacheable
@@ -1286,7 +1288,7 @@ def test_ring_source_reuses_prepared_store_coordinates(monkeypatch, num_tokens, 
     attn = SimpleNamespace(
         compressor=SimpleNamespace(wkv=lambda x: x, wgate=lambda x: x, pool_projected=pool),
         indexer=SimpleNamespace(update_keys=update_keys),
-        long_kv_cache=SimpleNamespace(kv_cache=[torch.empty(0)]),
+        long_kv_cache=SimpleNamespace(kv_cache=torch.empty(0)),
         head_dim=8,
         nope_head_dim=6,
     )
@@ -1329,7 +1331,7 @@ def test_projected_model_entry_keeps_fp32_state_and_existing_norm(config, monkey
     compressor.register_buffer("_ring_pooled", torch.empty(4, 8, dtype=torch.bfloat16), persistent=False)
     compressor._ring_num_cores = 1
     state = torch.zeros(3, 32, 1, 16, dtype=torch.float32)
-    monkeypatch.setattr(compressor, "state_cache", SimpleNamespace(kv_cache=[state]), raising=False)
+    monkeypatch.setattr(compressor, "state_cache", SimpleNamespace(kv_cache=state), raising=False)
     metadata = SimpleNamespace(c2_ring_metadata=torch.zeros(5, 1, dtype=torch.int32), max_query_len=2)
     pooled = torch.randn(2, 8, dtype=torch.bfloat16)
     expected = compressor.norm(pooled).clone()
