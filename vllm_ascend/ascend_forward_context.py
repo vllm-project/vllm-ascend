@@ -267,16 +267,12 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     # Cap for fused MC2 / MegaMoe: regular MC2 (gated by enable_prefill_mc2) uses
     # HCCL comm buffer (HCCL_BUFFSIZE); MegaMoe (use_mega_moe, non-decode-only)
     # uses the symm buffer (separate torch alloc, not HCCL_BUFFSIZE).
-    prefill_mc2 = ascend_config.enable_prefill_mc2 or (use_mega_moe and not _is_decode_only_node(vllm_config))
-    if prefill_mc2:
+    if ascend_config.enable_prefill_mc2 or (use_mega_moe and not _is_decode_only_node(vllm_config)):
         max_num_tokens = get_pcp_profile_num_tokens(
             vllm_config, vllm_config.scheduler_config.max_num_batched_tokens, max_num_reqs
         )
-    else:
-        max_num_tokens = max_num_reqs * uniform_decode_query_len
-
-    if vllm_config.compilation_config.cudagraph_capture_sizes:
-        graph_num_tokens = vllm_config.compilation_config.max_cudagraph_capture_size
+    elif vllm_config.compilation_config.cudagraph_capture_sizes:
+        max_num_tokens = vllm_config.compilation_config.max_cudagraph_capture_size
         compilation_config = vllm_config.compilation_config
         decode_sizes = None
         if not vllm_version_is("0.33.0"):
@@ -299,12 +295,12 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
                 vllm_config.get_decode_cudagraph_query_lens(uniform_decode_query_len),
                 decode_max_tokens,
             )
-            graph_num_tokens = max(
+            max_num_tokens = max(
                 compilation_config.max_prefill_cudagraph_capture_tokens or 0,
                 max((num_reqs * query_len for num_reqs, query_len in target_shapes), default=0),
             )
-        # Graph descriptors are PCP-local padded shapes; do not divide them by PCP.
-        max_num_tokens = max(max_num_tokens, graph_num_tokens) if prefill_mc2 else graph_num_tokens
+    else:
+        max_num_tokens = max_num_reqs * uniform_decode_query_len
     tp_size = vllm_config.parallel_config.tensor_parallel_size
 
     # Use integer arithmetic for ceiling division.

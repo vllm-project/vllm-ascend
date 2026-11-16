@@ -770,26 +770,3 @@ def test_prefill_mc2_capacity_keeps_per_rank_operator_limit(monkeypatch, fused, 
     config.speculative_config = None
     afc.set_mc2_tokens_capacity(config, 500, 1)
     assert afc.get_mc2_tokens_capacity() == expected
-
-
-@pytest.mark.parametrize("graph_tokens,expected", [(512, 2048), (4096, 4096)])
-@pytest.mark.parametrize("split_grid", [False, True])
-def test_prefill_mc2_capacity_also_covers_local_graphs(monkeypatch, graph_tokens, expected, split_grid):
-    monkeypatch.setattr(afc, "get_ascend_config", lambda: SimpleNamespace(enable_prefill_mc2=True, enable_fused_mc2=1))
-    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: True)
-    config = _make_vllm_config(
-        max_num_batched_tokens=16384,
-        cudagraph_capture_sizes=[512, 4096, 8192],
-        max_cudagraph_capture_size=8192 if split_grid else graph_tokens,
-    )
-    config.parallel_config.prefill_context_parallel_size = 8
-    config.speculative_config = SimpleNamespace(method="mtp", num_speculative_tokens=1)
-    if split_grid:
-        if vllm_version_is("0.33.0"):
-            pytest.skip("Separate target/draft graph grids are a main-only API")
-        config.compilation_config.decode_cudagraph_capture_request_sizes = [1, 500]
-        config.compilation_config.max_decode_cudagraph_capture_tokens = None
-        config.compilation_config.max_prefill_cudagraph_capture_tokens = graph_tokens
-        config.get_decode_cudagraph_query_lens = lambda _: {2: 500}
-    afc.set_mc2_tokens_capacity(config, 500, 2)
-    assert afc.get_mc2_tokens_capacity() == expected
