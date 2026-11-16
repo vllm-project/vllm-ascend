@@ -1,4 +1,4 @@
 pr: 21941
 entries:
   - category: bugfix
-    text: Fixed a first-request failure when Kimi K3 RecoverSSM is used with prefill context parallelism.
+    text: Fixed a first-request failure when RecoverSSM for Kimi K3 and K3.1 is used with prefill context parallelism.

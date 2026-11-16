@@ -3,7 +3,9 @@ entries:
   - category: feature
     text: >-
       Added experimental opt-in KDA RecoverSSM for Kimi K3 and K3.1 DSpark
-      decoding on Model Runner V2. Prefix caching uses Mamba cache mode align.
-      Experimental Mooncake prefill/decode separation requires matching
-      RecoverSSM, prefix-caching and state settings on both sides.
-    hardware: [A3, A5]
+      decoding on Model Runner V2; prefix caching uses Mamba cache mode align,
+      and experimental Mooncake prefill/decode separation requires matching
+      RecoverSSM, prefix-caching and state settings on both sides. Earlier A3
+      operator tests and limited 950DT functional tests, including tests using
+      an experimental image with modified parallelism checks, do not establish
+      end-to-end support for other hardware or configurations.
