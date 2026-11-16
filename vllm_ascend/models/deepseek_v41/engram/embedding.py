@@ -56,7 +56,7 @@ from .shared_pool import rollback_shared_engram
 
 if TYPE_CHECKING:
     from .shared_host import HostTableSlice
-    from .shared_pool import SharedPoolClient
+    from .shared_pool import ShardedPoolClient, SharedPoolClient
 
 HOST_OFFLOAD_STORAGE_ATTR = "_host_offload_storage"
 
@@ -130,7 +130,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         ):
             raise ValueError("Remote Engram requires INT8 or FP8 cpu_offload with dp_shared_memory")
         self._shared_pool_spec = (shared_pool_endpoint, shared_pool_identity, shared_pool_key)
-        self._shared_pool_client: SharedPoolClient | None = None
+        self._shared_pool_client: SharedPoolClient | ShardedPoolClient | None = None
         if shared_pool_endpoint and (
             not cpu_offload or storage_dtype != torch.int8 or not shared_pool_identity or not shared_pool_key
         ):
@@ -244,9 +244,12 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
 
             assert identity is not None and key is not None
             warmup_shared_engram_aicpu()
-            client_cls = ShardedPoolClient if isinstance(pool_endpoint, list) else SharedPoolClient
-            client = client_cls(pool_endpoint, identity, device=device)
-            if isinstance(pool_endpoint, str) and client.manifest.get("shard", {"index": 0, "count": 1}) != {
+            client: SharedPoolClient | ShardedPoolClient
+            if isinstance(pool_endpoint, list):
+                client = ShardedPoolClient(pool_endpoint, identity, device=device)
+            else:
+                client = SharedPoolClient(pool_endpoint, identity, device=device)
+            if isinstance(client, SharedPoolClient) and client.manifest.get("shard", {"index": 0, "count": 1}) != {
                 "index": 0,
                 "count": 1,
             }:

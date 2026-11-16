@@ -413,7 +413,7 @@ class ShardedPoolClient:
             keys = list(manifests[0]["tensors"])
             if not keys or any(m.get("packing") != "byte-v1" or list(m["tensors"]) != keys for m in manifests):
                 raise ValueError("shared Engram owners have different packed tensor layouts")
-            ranks = set()
+            ranks: set[int] = set()
             for index, manifest in enumerate(manifests):
                 owner_ranks = {meta["owner_rank"] for meta in manifest["tensors"].values()}
                 if (
@@ -528,6 +528,7 @@ class ShardedPoolClient:
         # Drop this layer's mapping reference before releasing any owner lease.
         if self._packed_mapping is not None:
             runtime = self.clients[0].runtime
+            assert runtime is not None
             with MemfabricRuntime._lock:
                 if runtime._packed_refs == 1:
                     self._packed_mapping.close()

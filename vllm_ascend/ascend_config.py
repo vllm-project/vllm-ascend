@@ -498,7 +498,7 @@ class SharedEngramConfig:
             raise ValueError("set exactly one of shared Engram endpoint or endpoints")
         if self.endpoints is not None and len(self.endpoints) < 2:
             raise ValueError("shared Engram endpoints must contain at least two owners")
-        endpoints = self.endpoints or [self.endpoint]
+        endpoints = self.endpoints if self.endpoints is not None else [self.endpoint or ""]
         if len(set(endpoints)) != len(endpoints):
             raise ValueError("shared Engram endpoints must be distinct")
         for endpoint in endpoints:

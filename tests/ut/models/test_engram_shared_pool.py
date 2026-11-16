@@ -10,6 +10,7 @@ import threading
 import types
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
+from typing import Any
 
 import pytest
 import torch
@@ -1022,7 +1023,7 @@ def test_config_requires_two_endpoints_when_using_a_list():
     cls = next(node for node in module.body if isinstance(node, ast.ClassDef) and node.name == "SharedEngramConfig")
     method = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "_validate")
     method.decorator_list = []
-    namespace = {}
+    namespace: dict[str, Any] = {}
     exec(compile(ast.Module(body=[method], type_ignores=[]), str(source), "exec"), namespace)
     validate = namespace["_validate"]
     config = types.SimpleNamespace(
