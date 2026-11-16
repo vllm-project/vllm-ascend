@@ -908,9 +908,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             keys = self._layerwise_session_tracker.release_failed_get_attempts(request_ids_by_key)
             self._end_layerwise_load_keys(keys)
 
-    def _finish_current_layerwise_load_sessions(self) -> None:
-        self._data_plane.finish_current_load_sessions()
-
     def _open_layerwise_get_sessions(self, request_key_slots: list[tuple[ReqMeta, str, int, int | None]]) -> None:
         if not request_key_slots:
             return
@@ -2004,7 +2001,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             self._drain_attention_transfers()
         except Exception:
             self._layer_load_aborted.set()
-            self._finish_current_layerwise_load_sessions()
+            self._data_plane.finish_sessions()
             raise
 
     def _drain_attention_transfers(self, drain_recv: bool | None = None, full: bool = False) -> None:
@@ -2165,7 +2162,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 with suppress(Exception):
                     self._drain_attention_transfers(full=True)
             if getattr(self, "use_block_key_layerwise", False):
-                self._finish_current_layerwise_load_sessions()
+                self._data_plane.finish_sessions()
             raise
         # KVPP can observe completion after attention; reset at the next bind.
         if not self.use_kvpp:
@@ -2180,7 +2177,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         if getattr(self, "use_block_key_layerwise", False) and (
             self._layer_load_aborted.is_set() or self.current_layer == self.num_layers - 1
         ):
-            self._finish_current_layerwise_load_sessions()
+            self._data_plane.finish_sessions()
         if hasattr(self, "kv_role") and not is_kv_save_role(self.kv_role, getattr(self, "consumer_is_to_put", False)):
             self.current_layer += 1
 

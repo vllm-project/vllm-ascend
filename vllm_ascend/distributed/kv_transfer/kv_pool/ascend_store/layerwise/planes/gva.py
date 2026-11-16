@@ -43,5 +43,5 @@ class GvaDataPlane(LayerwiseDataPlane):
         self._worker._alloc_gvas_for_save(requests)
         return {}
 
-    def finish_current_load_sessions(self) -> None:
+    def finish_sessions(self) -> None:
         """GVA loads read through worker-held addresses, not pool sessions."""

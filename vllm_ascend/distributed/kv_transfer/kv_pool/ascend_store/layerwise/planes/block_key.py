@@ -54,7 +54,7 @@ class BlockKeyDataPlane(LayerwiseDataPlane):
         self._prepare_single_group_sessions(requests)
         return {}
 
-    def finish_current_load_sessions(self) -> None:
+    def finish_sessions(self) -> None:
         worker = self._worker
         if worker._layer_load_aborted.is_set():
             req_ids = worker._current_layerwise_request_ids.copy()
@@ -204,7 +204,7 @@ class BlockKeyDataPlane(LayerwiseDataPlane):
             with worker._put_started_keys_lock:
                 keys = list(worker._put_started_keys - previously_started)
             worker._queue_layerwise_revoke_keys(keys)
-            worker._finish_current_layerwise_load_sessions()
+            self.finish_sessions()
             raise
 
     def _prepare_group_sessions(self, requests: list[ReqMeta]) -> dict[int, list[ReqMeta]]:

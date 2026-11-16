@@ -577,7 +577,7 @@ class TestKVPPPoolWorker(unittest.TestCase):
         worker.kv_recv_thread = MagicMock()
         worker.external_slot_release_waiter = None
         worker._submit_ready_layer_loads = MagicMock()
-        worker._finish_current_layerwise_load_sessions = MagicMock()
+        worker._data_plane.finish_sessions = MagicMock()
         worker.wait_for_layer_load()
         # Both observers can see the same completion, in either order.
         worker.wait_for_layer_load_ready("model.layers.9.self_attn.attn")

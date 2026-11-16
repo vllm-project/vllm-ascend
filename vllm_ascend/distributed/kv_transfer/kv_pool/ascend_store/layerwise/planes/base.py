@@ -34,5 +34,5 @@ class LayerwiseDataPlane(ABC):
         """
 
     @abstractmethod
-    def finish_current_load_sessions(self) -> None:
+    def finish_sessions(self) -> None:
         """Release the step's pool-side load sessions."""
