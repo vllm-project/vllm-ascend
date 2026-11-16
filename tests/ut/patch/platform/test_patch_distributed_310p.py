@@ -18,7 +18,7 @@ def broadcast():
             "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
             return_value=SimpleNamespace(supports=lambda cap: False),
         ),
-        patch.object(torch.distributed, "broadcast") as original,
+        patch.object(torch.distributed, "broadcast", autospec=True) as original,
         patch.object(torch.distributed.distributed_c10d, "broadcast"),
         patch.object(torch.distributed, "all_reduce"),
         patch.object(torch.distributed.distributed_c10d, "all_reduce"),
@@ -28,12 +28,32 @@ def broadcast():
         yield torch.distributed.broadcast, original
 
 
-def test_cpu_broadcast_delegates_rank_validation_and_async_handle(broadcast):
+@pytest.mark.parametrize("sources", [{"src": 2}, {"group_src": 1}])
+@pytest.mark.parametrize("async_op", [False, True])
+def test_cpu_broadcast_preserves_root_and_async_handle(broadcast, sources, async_op):
     fn, original = broadcast
     tensor = torch.ones(1)
     group = object()
-    assert fn(tensor, group=group, group_src=1, async_op=True) is original.return_value
-    original.assert_called_once_with(tensor, src=None, group=group, async_op=True, group_src=1)
+    original.return_value = MagicMock() if async_op else None
+    assert fn(tensor, group=group, async_op=async_op, **sources) is original.return_value
+    original.assert_called_once_with(
+        tensor, src=sources.get("src"), group=group, async_op=async_op, group_src=sources.get("group_src")
+    )
+
+
+@pytest.mark.parametrize("sources", [{}, {"src": 2, "group_src": 1}])
+def test_cpu_broadcast_preserves_upstream_validation_errors(broadcast, sources):
+    fn, original = broadcast
+    tensor = torch.ones(1)
+    group = object()
+    error = ValueError("invalid broadcast root")
+    original.side_effect = error
+    with pytest.raises(ValueError) as caught:
+        fn(tensor, group=group, **sources)
+    assert caught.value is error
+    original.assert_called_once_with(
+        tensor, src=sources.get("src"), group=group, async_op=False, group_src=sources.get("group_src")
+    )
 
 
 @pytest.mark.parametrize("sources", [{}, {"src": 2, "group_src": 0}])

@@ -34,6 +34,8 @@ def communication_adaptation_310p():
     def broadcast310p_wrapper(fn):
         def broadcast310p(tensor, src=None, group=None, async_op=False, group_src=None):
             if tensor.device.type == "cpu":
+                # PyTorch 2.10 accepts group_src. Preserve its root validation
+                # (including rejecting simultaneous src and group_src).
                 return fn(tensor, src=src, group=group, async_op=async_op, group_src=group_src)
             if (src is None) == (group_src is None):
                 raise ValueError("Specify exactly one of src and group_src.")
