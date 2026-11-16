@@ -447,25 +447,37 @@ def init_attention_projections(self, config, quant_config, prefix, reduce_result
         return_bias=False,
     )
     self.fused_attn_epilogue = None
-    epilogue_layout = get_ascend_config().dsv41_attn_epilogue
-    if epilogue_layout:
-        from vllm_ascend.ops.dsv41_attn_epilogue import get_attn_epilogue_out
-        from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DSDynamicLinearMethod
+    if not get_current_hardware_profile().supports(HardwareCapability.DSV41_FUSED_ATTN_EPILOGUE):
+        return
 
-        parallel = get_current_vllm_config().parallel_config
-        scheme = getattr(self.wo_a.quant_method, "quant_method", None)
-        if (
-            (tp_size, self.n_heads, self.n_groups, self.head_dim, self.rope_head_dim, self.o_lora_rank, self.dim)
-            != (1, 64, 8, 512, 64, 1024, 5120)
-            or parallel.prefill_context_parallel_size != 1
-            or parallel.decode_context_parallel_size != 1
-            or oproj_tp_enable()
-            or not isinstance(scheme, AscendW8A8MXFP8DSDynamicLinearMethod)
-        ):
-            raise ValueError("dsv41_attn_epilogue requires local TP1 V4.1 Flash DS MXFP8 projections without CP/OTP")
-        for projection in (self.wo_a, self.wo_b):
-            projection._dsv41_attn_epilogue_layout = epilogue_layout
-        self.fused_attn_epilogue = get_attn_epilogue_out()
+    vllm_config = get_current_vllm_config()
+    parallel = vllm_config.parallel_config
+    transfer = vllm_config.kv_transfer_config
+    if (
+        (tp_size, self.n_heads, self.n_groups, self.head_dim, self.rope_head_dim, self.o_lora_rank, self.dim)
+        != (1, 64, 8, 512, 64, 1024, 5120)
+        or parallel.prefill_context_parallel_size != 1
+        or parallel.decode_context_parallel_size != 1
+        or oproj_tp_enable()
+        or (transfer is not None and transfer.is_kv_producer and not transfer.is_kv_consumer)
+        or vllm_config.lora_config is not None
+        or envs.VLLM_BATCH_INVARIANT
+    ):
+        return
+
+    from vllm_ascend.ops.dsv41_attn_epilogue import get_attn_epilogue_out
+    from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DSDynamicLinearMethod
+
+    projections = (self.wo_a, self.wo_b)
+    if not all(
+        isinstance(getattr(projection.quant_method, "quant_method", None), AscendW8A8MXFP8DSDynamicLinearMethod)
+        for projection in projections
+    ):
+        return
+    self.fused_attn_epilogue = get_attn_epilogue_out()
+    if self.fused_attn_epilogue is not None:
+        for projection in projections:
+            projection._dsv41_epilogue_nd = True
 
 
 @dataclass(frozen=True)

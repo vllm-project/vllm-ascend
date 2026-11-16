@@ -2,5 +2,7 @@ pr: 21826
 entries:
   - category: feature
     text: >-
-      Add an opt-in fused output projection for DeepSeek V4.1 on A5,
-      releasing temporary attention buffers after their last consumer.
+      Automatically use the fused attention output projection for supported
+      short DeepSeek V4.1 Flash batches on A5 when the matching operator
+      package is installed. The projection releases temporary attention
+      buffers after their last consumer.

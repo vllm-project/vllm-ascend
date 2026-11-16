@@ -126,6 +126,8 @@ class HardwareCapability(Enum):
     # Let inplace_partial_rotary_mul negate sine internally; profiles without
     # this contract negate the sine input explicitly and pass negate_sin=False.
     INPLACE_PARTIAL_ROTARY_MUL_NEGATE_SIN = auto()
+    # Fused inverse RoPE and local MXFP8 output projection for DeepSeek V4.1 Flash.
+    DSV41_FUSED_ATTN_EPILOGUE = auto()
     # CANN FP8 indexer quantization plus separate page-strided K/scale writes.
     INDEXER_QUANT_CACHE = auto()
     # Prepare per-token INT8 KDA projection inputs before the BFG stream wait.
@@ -398,6 +400,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES,
                     HardwareCapability.DSV4_COMPRESSED_CACHE,
                     HardwareCapability.DSV41_PACKED_CACHE,
+                    HardwareCapability.DSV41_FUSED_ATTN_EPILOGUE,
                     HardwareCapability.ENGRAM_UNROTATED_GATE,
                     HardwareCapability.ENGRAM_MXFP8,
                     HardwareCapability.DYNAMIC_MX_QUANT_FUSION,
