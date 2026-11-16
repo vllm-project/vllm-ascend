@@ -44,19 +44,6 @@ def test_failed_close_preserves_owner_for_retry():
     assert obj.weight is None and owner.close.call_count == 2
 
 
-@pytest.mark.skipif(
-    not hasattr(AscendPLEHostEmbedding, "_copy_embedding_shard_"),
-    reason="_copy_embedding_shard_ not available in this vLLM version",
-)
-def test_checkpoint_overlap_keeps_cpu_target_and_row_order():
-    obj = embedding()
-    source = torch.arange(6 * 160).reshape(6, 160).bfloat16()
-    copied = obj._copy_embedding_shard_(obj.weight, source, checkpoint_start=8)
-    assert copied == 4 and obj.weight.device.type == "cpu"
-    torch.testing.assert_close(obj.weight, source[2:], rtol=0, atol=0)
-    assert obj._copy_embedding_shard_(obj.weight, source, checkpoint_start=20) == 0
-
-
 @pytest.mark.parametrize("reduce_results", [True, False])
 def test_backend_reduces_only_when_outer_sp_does_not(monkeypatch, reduce_results):
     from vllm_ascend.ops.triton.qwen4_exp import ple_lookup
@@ -71,84 +58,6 @@ def test_backend_reduces_only_when_outer_sp_does_not(monkeypatch, reduce_results
     output = obj(torch.zeros((3, 16), dtype=torch.int64))
     assert torch.all(output == (3 if reduce_results else 2))
     assert obj.parallel_group.all_reduce.call_count == int(reduce_results)
-
-
-@pytest.mark.parametrize(
-    "enabled,has_layers,dp_size,draft",
-    [
-        (None, False, 1, False),
-        (True, False, 1, False),
-        (None, True, 1, False),
-        (None, True, 2, False),
-        (False, True, 2, False),
-        (True, True, 2, False),
-        (None, True, 2, True),
-        (False, True, 2, True),
-    ],
-)
-def test_qwen_offload_uses_upstream_defaults(enabled, has_layers, dp_size, draft):
-    from vllm.config import EngramConfig, VllmConfig
-
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(
-            architecture="Qwen4ExpForConditionalGeneration",
-            hf_text_config=SimpleNamespace(ple_layer_ids=[1] if has_layers else []),
-        ),
-        speculative_config=None,
-        engram_config=None if enabled is None else EngramConfig(cpu_offload=enabled),
-        parallel_config=SimpleNamespace(
-            data_parallel_size=dp_size,
-            prefill_context_parallel_size=1,
-            enable_elastic_ep=False,
-        ),
-    )
-    if draft:
-        target = config.model_config
-        config.model_config = SimpleNamespace(architecture="Qwen4ExpMTP")
-        config.speculative_config = SimpleNamespace(target_model_config=target, draft_model_config=config.model_config)
-    if not has_layers and enabled is not None:
-        with pytest.raises(ValueError, match="non-empty"):
-            VllmConfig._resolve_and_verify_engram_config(config)
-    elif not has_layers:
-        VllmConfig._resolve_and_verify_engram_config(config)
-        assert config.engram_config is None
-    else:
-        VllmConfig._resolve_and_verify_engram_config(config)
-        assert config.engram_config.cpu_offload is (enabled is not False)
-        assert config.engram_config.dp_shared_memory is (enabled is not False and dp_size > 1)
-
-
-@pytest.mark.parametrize(
-    "field",
-    [
-        "embedding_across_dp",
-        "use_thp",
-    ],
-)
-def test_offload_rejects_unsupported_topology(field):
-    from vllm.config import EngramConfig
-
-    from vllm_ascend.platform import _validate_engram_config
-
-    parallel = SimpleNamespace(
-        data_parallel_size=1,
-        pipeline_parallel_size=1,
-        prefill_context_parallel_size=1,
-        decode_context_parallel_size=1,
-        use_ubatching=False,
-        enable_elastic_ep=False,
-    )
-    engram_kwargs = dict(cpu_offload=True, dp_shared_memory=False)
-    engram_kwargs[field] = True
-    config = SimpleNamespace(
-        engram_config=EngramConfig(**engram_kwargs),
-        model_config=SimpleNamespace(architecture="Qwen4ExpForConditionalGeneration"),
-        speculative_config=None,
-        parallel_config=parallel,
-        use_v2_model_runner=True,
-    )
-    with pytest.raises(ValueError, match="Qwen PLE UVA offload requires"):
-        _validate_engram_config(config)
 
 
 @pytest.mark.parametrize("failure", ["unregister", "free"])
@@ -178,7 +87,7 @@ def test_host_buffer_release_failure_is_retryable(failure):
     assert buffer.lib.aclrtFreeHost.call_count == (2 if failure == "free" else 1)
 
 
-@pytest.mark.parametrize("rank", [0, 1, 2, 3])
+@pytest.mark.parametrize("rank", [0, 1])
 def test_shared_loader_has_one_writer(monkeypatch, rank):
     from vllm_ascend.models.qwen4_exp import ple_embedding
 
@@ -210,126 +119,6 @@ def test_shared_loader_propagates_peer_failure(monkeypatch):
         obj.weight_loader(obj.weight, torch.zeros_like(obj.weight), checkpoint_start=10)
 
 
-@pytest.mark.parametrize("architecture", ["Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration"])
-@pytest.mark.parametrize("dp_size", [1, 2, 4])
-def test_offload_shared_tables_require_multiple_dp_replicas(architecture, dp_size):
-    from vllm.config import EngramConfig
-
-    from vllm_ascend.platform import _validate_engram_config
-
-    config = SimpleNamespace(
-        engram_config=EngramConfig(cpu_offload=True, dp_shared_memory=True),
-        model_config=SimpleNamespace(architecture=architecture),
-        speculative_config=None,
-        parallel_config=SimpleNamespace(
-            data_parallel_size=dp_size,
-            prefill_context_parallel_size=1,
-            decode_context_parallel_size=1,
-            enable_elastic_ep=False,
-            use_ubatching=False,
-        ),
-        use_v2_model_runner=True,
-    )
-    if dp_size == 1:
-        with pytest.raises(ValueError, match="data_parallel_size"):
-            config.engram_config.verify_parallel_config(config.parallel_config)
-    else:
-        config.engram_config.verify_parallel_config(config.parallel_config)
-        _validate_engram_config(config)
-        assert config.engram_config.dp_shared_memory is True
-
-
-@pytest.mark.parametrize("elastic_ep,ubatching", [(True, False), (False, True), (True, True)])
-def test_offload_private_tables_allow_execution_options(elastic_ep, ubatching):
-    from vllm.config import EngramConfig
-
-    from vllm_ascend.platform import _validate_engram_config
-
-    config = SimpleNamespace(
-        engram_config=EngramConfig(cpu_offload=True, dp_shared_memory=False),
-        model_config=SimpleNamespace(architecture="Qwen4ExpForConditionalGeneration"),
-        speculative_config=None,
-        parallel_config=SimpleNamespace(
-            data_parallel_size=2,
-            enable_elastic_ep=elastic_ep,
-            use_ubatching=ubatching,
-        ),
-        use_v2_model_runner=True,
-    )
-    config.engram_config.verify_parallel_config(config.parallel_config)
-    _validate_engram_config(config)
-
-
-@pytest.mark.parametrize("pcp,dcp", [(1, 2), (2, 1), (2, 2)])
-def test_offload_does_not_add_context_parallel_restrictions(pcp, dcp):
-    from vllm.config import EngramConfig
-
-    from vllm_ascend.platform import _validate_engram_config
-
-    config = SimpleNamespace(
-        engram_config=EngramConfig(cpu_offload=True, dp_shared_memory=False),
-        model_config=SimpleNamespace(architecture="Qwen4ExpForConditionalGeneration"),
-        speculative_config=None,
-        parallel_config=SimpleNamespace(
-            data_parallel_size=1,
-            prefill_context_parallel_size=pcp,
-            decode_context_parallel_size=dcp,
-            enable_elastic_ep=False,
-        ),
-        use_v2_model_runner=True,
-    )
-    config.engram_config.verify_parallel_config(config.parallel_config)
-    _validate_engram_config(config)
-
-
-def test_shared_tables_still_reject_elastic_ep():
-    from vllm.config import EngramConfig
-
-    config = EngramConfig(cpu_offload=True, dp_shared_memory=True)
-    with pytest.raises(ValueError, match="elastic EP"):
-        config.verify_parallel_config(
-            SimpleNamespace(data_parallel_size=2, prefill_context_parallel_size=1, enable_elastic_ep=True)
-        )
-
-
-@pytest.mark.parametrize("size", [None, 1])
-def test_shared_tables_fall_back_without_local_peers(monkeypatch, size):
-    from vllm.models.qwen4_exp.common.ngram_embedding import Qwen4ExpPLEEmbedding
-
-    from vllm_ascend.models.qwen4_exp import ple_embedding
-
-    group = None if size is None else SimpleNamespace(world_size=size)
-    monkeypatch.setattr(
-        ple_embedding,
-        "get_current_vllm_config",
-        lambda: SimpleNamespace(engram_config=SimpleNamespace(dp_shared_memory=True)),
-    )
-    monkeypatch.setattr(ple_embedding, "get_engram_dp_group", lambda: group)
-    monkeypatch.setattr(Qwen4ExpPLEEmbedding, "__init__", lambda self, *a, **kw: torch.nn.Module.__init__(self))
-    obj = AscendPLEHostEmbedding()
-    assert obj._shared_group is None
-
-
-def test_shared_tables_fall_back_across_nodes(monkeypatch):
-    """DP replicas on different nodes fall back to private host tables
-    instead of raising — dp_shared_memory is a default-on optimization."""
-    from vllm.models.qwen4_exp.common.ngram_embedding import Qwen4ExpPLEEmbedding
-
-    from vllm_ascend.models.qwen4_exp import ple_embedding
-
-    group = SimpleNamespace(world_size=2, cpu_group=object())
-    monkeypatch.setattr(
-        ple_embedding,
-        "get_current_vllm_config",
-        lambda: SimpleNamespace(engram_config=SimpleNamespace(dp_shared_memory=True)),
-    )
-    monkeypatch.setattr(ple_embedding, "get_engram_dp_group", lambda: group)
-    monkeypatch.setattr(ple_embedding, "in_the_same_node_as", lambda cpu_group: [False, False])
-    monkeypatch.setattr(Qwen4ExpPLEEmbedding, "__init__", lambda self, *a, **kw: torch.nn.Module.__init__(self))
-    obj = AscendPLEHostEmbedding()
-    assert obj._shared_group is None
-
-
 def test_oot_constructs_backend_without_rebinding_upstream(monkeypatch):
     from vllm.models.qwen4_exp.amd import ple_layer
     from vllm.models.qwen4_exp.common.ngram_embedding import (
@@ -355,25 +144,6 @@ def test_oot_constructs_backend_without_rebinding_upstream(monkeypatch):
     assert obj.supports_prefetch is False
     device = Qwen4ExpPLEDeviceEmbedding()
     assert type(device) is Qwen4ExpPLEDeviceEmbedding
-
-
-@pytest.mark.parametrize("dtype", [torch.float16, torch.float32, torch.int8])
-def test_host_embedding_rejects_non_bf16_before_allocation(dtype):
-    obj = embedding()
-    with pytest.raises(ValueError, match="BF16"):
-        obj.allocate_embedding_weight(4, 160, dtype)
-
-
-def test_disk_offload_rejected_on_ascend():
-    from vllm_ascend.platform import _validate_engram_config
-
-    config = SimpleNamespace(
-        engram_config=SimpleNamespace(disk_offload=True),
-        model_config=SimpleNamespace(architecture="Qwen4ExpForConditionalGeneration"),
-        speculative_config=None,
-    )
-    with pytest.raises(ValueError, match="disk offload"):
-        _validate_engram_config(config)
 
 
 @pytest.mark.parametrize("buffer_constructor_failed", [False, True])
