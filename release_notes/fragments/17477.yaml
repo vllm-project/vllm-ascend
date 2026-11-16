@@ -1,0 +1,5 @@
+pr: 17477
+entries:
+  - category: bugfix
+    text: Fixed INT8 lightning-indexer weight conversion on Ascend A5 while preserving FP8 weights.
+    hardware: [A5]
