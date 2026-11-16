@@ -1744,8 +1744,6 @@ def _reshape_kv_cache_v2(
                     tensor._ascend_packed_kernel_pages = spec.block_size // KIMI_KERNEL_BLOCK_SIZE
                     tensor._ascend_packed_row_bytes = row_bytes
             kv_caches[name] = views[0] if fused_mla else views
-        for name, owner in shared_kv_cache_layers.items():
-            kv_caches[name] = kv_caches[owner]
         return kv_caches
     # Qwen4 QSA hybrids (Qwen3.8 Flash Next) reconstruct every owner's
     # view from the same deterministic layout that _allocate_kv_cache used:
