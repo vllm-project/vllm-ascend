@@ -583,6 +583,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         sinks: torch.Tensor = None,
         **kwargs,
     ) -> None:
+        if envs.VLLM_ASCEND_CALIB_FA_V:
+            from vllm_ascend.attention import fa_v_calib
+
+            fa_v_calib.maybe_install()
         self.vllm_config = get_current_vllm_config()
         self.use_pcp = (
             type(self) is AscendAttentionBackendImpl

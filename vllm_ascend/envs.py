@@ -77,6 +77,13 @@ env_variables: dict[str, Callable[[], Any]] = {
     # with chunked/prefix-hit histories and all decode steps keep the stock
     # FIA path. Valid values: "0" (default, disabled) or "1" (enabled).
     "VLLM_ASCEND_QFA_A3_PREFILL": lambda: bool(int(os.getenv("VLLM_ASCEND_QFA_A3_PREFILL", "0"))),
+    # Output directory for per-head V amax calibration (QFA INT8 static
+    # fa_v.scale weight generation). When set to a writable directory, each
+    # worker wraps Attention.forward and dumps per-layer per-head value amax
+    # to <dir>/fa_v_stats_rank{rank}.pt once per forward step. Intended for
+    # eager-mode offline calibration only (fa_v_calib module); default ""
+    # keeps it fully inert. Not sensitive.
+    "VLLM_ASCEND_CALIB_FA_V": lambda: os.getenv("VLLM_ASCEND_CALIB_FA_V", ""),
 }
 
 # end-env-vars-definition
