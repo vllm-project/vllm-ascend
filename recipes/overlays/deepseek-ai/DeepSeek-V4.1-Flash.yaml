@@ -1,0 +1,203 @@
+# Source: https://github.com/vllm-project/vllm/blob/2b635e9014c3914b3e881e02ee88b4ddc4d6989d/recipes/models/deepseek-ai/DeepSeek-V4.1-Flash.yaml
+# Extracted with vllm-project/recipes@afa74b7acb2a1ce7372115807e9fe45f2b168171.
+meta:
+  hardware:
+    ascend_910b: verified
+hardware_notes:
+  ascend_910b:
+    title: W4A8 prefill/decode disaggregation on Atlas 800I A2 (910B4)
+    body: >-
+      Validated on 2 nodes x 8 NPU (16x Ascend 910B4, 64 GB HBM each): one
+      prefill node at DP2 x TP1 x PCP4 and one decode node at DP8 x TP1, KV
+      cache transferred by MooncakeHybridConnector, DSpark drafting 5 tokens.
+      The Ascend proxy (load_balance_proxy_server_example.py, port 2999 on the
+      prefill node) fronts both pools: two prefill endpoints and eight decode
+      endpoints. Automatic Docker installation is disabled because the
+      validated build is an internal nightly; re-validate on the pinned public
+      tag before treating this as a validated deployment.
+    link:
+      label: vLLM Ascend DeepSeek-V4.1-Flash tutorial
+      href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/DeepSeek-V4.1-Flash.html
+strategy_hardware:
+  single_node_tp:
+    npu: unsupported
+  single_node_tep:
+    npu: unsupported
+  single_node_dep:
+    npu: unsupported
+  multi_node_tp:
+    npu: unsupported
+  multi_node_tep:
+    npu: unsupported
+  multi_node_dep:
+    npu: unsupported
+  pd_cluster:
+    npu: unsupported
+    ascend_910b: supported
+features:
+  spec_decoding:
+    hardware_overrides:
+      ascend_910b:
+        args:
+          - '--speculative-config'
+          - '{"num_speculative_tokens":5,"method":"dspark"}'
+variants:
+  ascend_w4a8:
+    model_id: Eco-Tech/DeepSeek-V4.1-Flash-1017-w4a8
+    label: W4A8 (A2 PD)
+    precision: int4
+    vram_minimum_gb: 529
+    description: >-
+      ModelSlim INT4 W4A8 for one prefill node (DP2 x TP1 x PCP4) and one
+      decode node (DP8 x TP1) of Atlas 800I A2, 8x Ascend 910B4 (64 GB) each.
+      Requires --quantization ascend.
+    supported_hardware:
+      - ascend_910b
+    tp:
+      ascend_910b: 1
+    min_vllm_version: '0.32.0'
+    extra_args:
+      - '--quantization'
+      - ascend
+      - '--trust-remote-code'
+      - '--block-size'
+      - '128'
+      - '--max-model-len'
+      - '1048576'
+      - '--gpu-memory-utilization'
+      - '0.97'
+      - '--safetensors-load-strategy'
+      - lazy
+      - '--enable-expert-parallel'
+      - '--seed'
+      - '1024'
+      - '--host'
+      - 0.0.0.0
+      - '--reasoning-parser'
+      - deepseek_v41
+      - '--tool-call-parser'
+      - deepseek_v41
+      - '--enable-auto-tool-choice'
+      - '--engram-config'
+      - '{"cpu_offload":true,"dp_shared_memory":true}'
+    extra_env:
+      PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+      HCCL_OP_EXPANSION_MODE: AIV
+      HCCL_CONNECT_TIMEOUT: '1200'
+      VLLM_USE_V2_MODEL_RUNNER: '1'
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: '30000'
+      VLLM_ENGINE_READY_TIMEOUT_S: '360000'
+      OMP_NUM_THREADS: '1'
+      TASK_QUEUE_ENABLE: '1'
+    hardware_overrides:
+      ascend_910b:
+        docker_image: quay.io/ascend/vllm-ascend:v0.32.0rc1
+        docker_serve_command: "vllm serve"
+        install:
+          pip: false
+presets:
+  ascend_a2_w4a8_pd:
+    label: A2 W4A8 PD (1P + 1D)
+    hardware: ascend_910b
+    strategy: pd_cluster
+    variants: [ascend_w4a8]
+    default: false
+    select:
+      pd_router: ascend
+      pd_connector: mooncake_ascend
+      frontend: python
+      features:
+        spec_decoding: true
+        encoder_parallel: false
+    source:
+      label: vLLM Ascend DeepSeek-V4.1-Flash tutorial
+      href: https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/DeepSeek-V4.1-Flash.html
+      key: dsv41-a2-w4a8-pd
+      revision: '2026-11-13'
+    runbook: |
+      One prefill node and one decode node, eight NPUs each, behind the Ascend
+      proxy (`load_balance_proxy_server_example.py`, port 2999 on the prefill
+      node, two prefill endpoints and eight decode endpoints).
+
+      Prefill parallelism: the validated lane runs DP2 x TP1 x PCP4 (four
+      devices per rank). The pool topology does not model prefill context
+      parallelism, so the rendered prefill command carries
+      `--tensor-parallel-size 4` for the same device count. Launch the
+      validated lane with `--tensor-parallel-size 1
+      --prefill-context-parallel-size 4` instead.
+
+      Process model: the validated deployment starts one `vllm serve` per DP
+      rank (prefill ports 8000-8001, decode ports 8000-8007). The rendered
+      commands use one process per pool with external data-parallel load
+      balancing, which exposes the same endpoints to the proxy. Set the
+      per-rank device slice (`ASCEND_RT_VISIBLE_DEVICES`) and node addresses
+      for your own hosts.
+    roles:
+      prefill:
+        nodes: 1
+        parallelism: dep
+        tp: 4
+        pp: 1
+        args:
+          - '--max-num-batched-tokens'
+          - '4096'
+          - '--max-num-seqs'
+          - '16'
+          - '--enforce-eager'
+          - '--swa-bounded-replay'
+          - '--enable-prefix-caching'
+          - '--additional-config'
+          - '{"enable_cpu_binding":true,"enable_fused_mc2":2,"enable_flashcomm1":false,"enable_shared_expert_dp":true}'
+        env:
+          HCCL_BUFFSIZE: '1024'
+          HCCL_IF_IP: $PREFILL_NODE_1
+          VLLM_HOST_IP: $PREFILL_NODE_1
+          HCCL_SOCKET_IFNAME: $IFACE_NAME
+          GLOO_SOCKET_IFNAME: $IFACE_NAME
+          TP_SOCKET_IFNAME: $IFACE_NAME
+        json_args:
+          --kv-transfer-config:
+            kv_connector: MooncakeHybridConnector
+            kv_role: kv_producer
+            kv_port: '30000'
+            kv_connector_extra_config:
+              prefill: { dp_size: 2, tp_size: 1, pcp_size: 4 }
+              decode: { dp_size: 8, tp_size: 1 }
+      decode:
+        nodes: 1
+        parallelism: dep
+        tp: 1
+        pp: 1
+        args:
+          - '--prefill-context-parallel-size'
+          - '1'
+          - '--max-num-batched-tokens'
+          - '512'
+          - '--max-num-seqs'
+          - '72'
+          - '--async-scheduling'
+          - '--no-enable-prefix-caching'
+          - '--no-swa-bounded-replay'
+          - '--kv-cache-memory-bytes'
+          - '4600000000'
+          - '--additional-config'
+          - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_flashcomm1":false,"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}'
+        env:
+          HCCL_BUFFSIZE: '1800'
+          HCCL_IF_IP: $DECODE_NODE_1
+          VLLM_HOST_IP: $DECODE_NODE_1
+          HCCL_SOCKET_IFNAME: $IFACE_NAME
+          GLOO_SOCKET_IFNAME: $IFACE_NAME
+          TP_SOCKET_IFNAME: $IFACE_NAME
+        json_args:
+          --speculative-config:
+            enforce_eager: false
+          --compilation-config:
+            cudagraph_mode: FULL_DECODE_ONLY
+          --kv-transfer-config:
+            kv_connector: MooncakeHybridConnector
+            kv_role: kv_consumer
+            kv_port: '30100'
+            kv_connector_extra_config:
+              prefill: { dp_size: 2, tp_size: 1, pcp_size: 4 }
+              decode: { dp_size: 8, tp_size: 1 }
