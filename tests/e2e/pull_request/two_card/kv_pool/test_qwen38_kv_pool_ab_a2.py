@@ -118,12 +118,42 @@ POOL_MAX_TOKENS = 16
 # buffer (ubsio.mem=1GB/die) collapses the query index to 1-3 of 16 blocks
 # (device reads stay 0); (3) non-layerwise + storage.enabled=true collapses
 # cross-request hits to a single block regardless of buffer size or wait.
+# Token count the pool must report as reused for a repeated prefix (R2/R3).
+# Measured on A2 with a forced-eviction layout (128MB DRAM tier + 40 x 16K
+# pressure prefixes, mooncake 0.3.14rc3): the DRAM tier empties into the SSD
+# tier without a single put failing, so the write path is healthy, but the
+# query no longer reports the evicted prefix as resident and R2 reads 0 reused
+# tokens. That SSD read-back gap is why the committed default keeps the
+# eviction-free tier; the knobs above exist to re-check the gap once the
+# platform fix lands.
 # The eviction-free tier-3 legs keep the SSD tier armed (writes reach the
 # UBS IO layer; reads return through its DRAM buffer via rewarm) with the
 # SSD medium read-back left to the platform fix and a Nightly layer.
 DRAM_TIER = "4GB"
 MEMCACHE_SSD_DRAM_TIER = "4GB"
-MOONCAKE_SSD_DRAM_TIER = "4GB"
+# The mooncake tier-3 DRAM tier stays env-overridable so the DRAM -> SSD
+# offload and read-back path can be exercised on demand: a 16K prompt holds
+# roughly 600MB of KV per rank, so 128MB overflows the tier and forces the
+# pool to evict blocks into the SSD tier. The default keeps the eviction-free
+# CI layout.
+MOONCAKE_SSD_DRAM_TIER = os.environ.get("QWEN38_POOL_MOONCAKE_SSD_DRAM_TIER", "4GB")
+# Pressure prefixes written before the hit rounds. Each one is a fresh 16K
+# prefix that fills the deliberately small DRAM tier and pushes the shared
+# prefix out to the SSD tier, which is what turns the tier-3 leg into a real
+# offload + read-back check instead of an armed-but-idle one. 0 keeps the
+# eviction-free default.
+SSD_PRESSURE_PROMPTS = int(os.environ.get("QWEN38_POOL_SSD_PRESSURE_PROMPTS", "0"))
+# Offload directory override. The default keeps the per-case tempdir; point it
+# at a host-visible mount to inspect what actually lands on the device.
+MOONCAKE_SSD_OFFLOAD_ROOT = os.environ.get("QWEN38_POOL_SSD_ROOT", "")
+# Mooncake's bucket storage backend defaults to a 256MiB bucket. On this stack
+# that bucket size fails to persist and logs nothing: the SSD tier stays empty,
+# the master never sees a LOCAL_DISK replica, and eviction therefore can never
+# release the DRAM copy of an evicted object (pool fills up and every further
+# put returns -200). 64MiB is the largest bucket observed to write reliably.
+MOONCAKE_OFFLOAD_BUCKET_SIZE_LIMIT_BYTES = int(
+    os.environ.get("QWEN38_POOL_OFFLOAD_BUCKET_BYTES", str(64 * 1024 * 1024))
+)
 
 AB_MODE = os.environ.get("KV_POOL_AB_MODE", "gate")
 # The mooncake-layerwise scenario runs without a version gate: the official
@@ -162,6 +192,17 @@ MEMCACHE_UBSIO_DEVICES = int(os.environ.get("KV_POOL_MEMCACHE_UBSIO_DEVICES", TP
 # differences even with intact KV, so H3/accuracy must use low-entropy text.
 SENTENCE_A = "Explain how historical records help people understand the past. "
 SENTENCE_B = "The mountain railway climbs steadily toward the old observatory. "
+
+# Natural-language bases for the tier-3 pressure prefixes; see
+# SSD_PRESSURE_PROMPTS. A per-index, per-run nonce is appended at use time so a
+# prefix from an earlier run can never be served instead of a fresh write
+# (tier-3 storage persists across service restarts).
+PRESSURE_SENTENCES = (
+    "Draft a travel plan that lists every museum worth visiting in the capital. ",
+    "Summarize the key milestones in the history of long-distance communication. ",
+    "Describe the process of turning raw wool into warm winter clothing. ",
+    "Outline the main arguments for and against daylight saving time. ",
+)
 
 
 def _mooncake_version() -> str:
@@ -229,7 +270,7 @@ def _mooncake_pool_config(tier_ssd: bool, case_name: str) -> MooncakeKVPoolConfi
         # chunked prefill then fails intermittently ("Hybrid layerwise load
         # failed"), so the DRAM-only tier runs there instead (the SSD store
         # stays armed-but-idle).
-        ssd_root = os.path.join(tempfile.gettempdir(), f"{case_name}_mooncake_ssd")
+        ssd_root = MOONCAKE_SSD_OFFLOAD_ROOT or os.path.join(tempfile.gettempdir(), f"{case_name}_mooncake_ssd")
         os.makedirs(ssd_root, exist_ok=True)
         config.update(
             {
@@ -344,6 +385,31 @@ def _leg(
             else:
                 pool = stack.enter_context(SingleNodeMemcacheManager(_memcache_pool_config(tier_ssd), case_name))
             stack.enter_context(patch.dict(os.environ, pool.server_envs))
+            if backend == "mooncake" and tier_ssd:
+                # SSD offload tuning for the mooncake tier-3 leg (official
+                # ssd-offload.md plus measured constraints on this stack):
+                # - the staging buffer must be a 1GiB multiple (Ascend
+                #   fabric-memory alignment);
+                # - the bucket backend must stay at or below a 64MiB bucket.
+                #   The backend default of 256MiB fails to persist silently:
+                #   nothing is written, no ERROR is logged, the master never
+                #   records a LOCAL_DISK replica, and eviction can therefore
+                #   never release DRAM. That failure mode is exactly what this
+                #   leg exists to catch;
+                # - explicit quotas keep the tier bounded instead of the
+                #   backend's whole-disk default.
+                stack.enter_context(
+                    patch.dict(
+                        os.environ,
+                        {
+                            "MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES": str(1024**3),
+                            "MOONCAKE_OFFLOAD_BUCKET_SIZE_LIMIT_BYTES": str(MOONCAKE_OFFLOAD_BUCKET_SIZE_LIMIT_BYTES),
+                            "MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE": str(16 * 1024**3),
+                            "MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES": str(16 * 1024**3),
+                            "MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY": "lru",
+                        },
+                    )
+                )
             extra_config: dict[str, Any] = {
                 "backend": backend,
                 "use_layerwise": use_layerwise,
@@ -443,6 +509,25 @@ def _phase_hit(runner: VllmRunner, state: dict[str, Any], tag: str) -> None:
         f"[{tag}] prompt {len(prompt_a)} cannot hit with block_size={block_size} lcm={lcm}; "
         "raise POOL_PROMPT_TOKENS above 2x the reported lcm"
     )
+
+    if SSD_PRESSURE_PROMPTS > 0:
+        # Tier-3 overflow: write fresh 16K prefixes until the small DRAM tier is
+        # full, so the pool has to evict earlier blocks — the shared prefix
+        # included — into the SSD tier. R2/R3 below then prove the evicted
+        # prefix is read back from the SSD tier instead of being lost.
+        print(
+            f"[kv_pool_a2] {tag} pressure: {SSD_PRESSURE_PROMPTS} prompts dram_tier={MOONCAKE_SSD_DRAM_TIER}",
+            flush=True,
+        )
+        for index in range(SSD_PRESSURE_PROMPTS):
+            sentence = (
+                PRESSURE_SENTENCES[index % len(PRESSURE_SENTENCES)] + f"Pressure probe {index} {time.time_ns()}. "
+            )
+            _generate(runner, _natural_tokens(runner, sentence, POOL_PROMPT_TOKENS), 1)
+            if (index + 1) % 10 == 0:
+                print(f"[kv_pool_a2] {tag} pressure {index + 1}/{SSD_PRESSURE_PROMPTS}", flush=True)
+        # Let the offload heartbeat (10s default) drain the queued writes.
+        time.sleep(30)
 
     began = time.perf_counter()
     before = snapshot_metrics(runner)
