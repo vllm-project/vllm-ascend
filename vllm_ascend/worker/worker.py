@@ -20,10 +20,12 @@
 import copy
 import gc
 import logging
-from contextlib import AbstractContextManager, nullcontext
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from fnmatch import filter as fnmatch_filter
+from threading import RLock
 from types import NoneType
-from typing import Any
+from typing import TYPE_CHECKING, Any, NoReturn
 from unittest.mock import patch
 
 import torch
@@ -47,7 +49,7 @@ from vllm.distributed.kv_transfer import (
     has_kv_transfer_group,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandshakeMetadata
-from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group
+from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.model_loader.weight_checksum import compute_tensor_digests, zero_weights
@@ -71,17 +73,20 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
+from vllm.v1.worker import gpu_worker
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
+from vllm.v1.worker.gpu_worker import Worker as GPUWorker
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
 )
-from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
+from vllm.v1.worker.worker_base import CompilationTimes
 from vllm.v1.worker.workspace import init_workspace_manager
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config, init_ascend_config
 from vllm_ascend.batch_invariant import init_batch_invariance
+from vllm_ascend.core import kv_cache_dtype_handlers  # noqa: F401
 from vllm_ascend.core.kv_cache_placement import (
     KVPPPhysicalCachePlan,
     create_kvpp_cache_allocation_plan,
@@ -116,9 +121,18 @@ from vllm_ascend.utils import (
     register_ascend_fla_customop,
     register_device_print,
     setup_ascend_local_comm_res,
+    vllm_version_is,
 )
 
+if TYPE_CHECKING:
+    from vllm.config.profiler import ProfilerConfig
+    from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
+    from vllm.distributed.parallel_state import Handle
+    from vllm.distributed.weight_transfer import WeightTransferEngine
+    from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 
+
+# Both supported versions resolve grouping through the platform's builder.
 def get_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
@@ -141,7 +155,27 @@ torch._dynamo.trace_rules.torch_name_rule_map.append(torch_non_c_binding_in_grap
 torch.npu.config.allow_internal_format = True
 
 
-class NPUWorker(WorkerBase):
+_GPU_WORKER_TRITON_LOCK = RLock()
+
+
+@contextmanager
+def allow_v2_model_runner_without_triton() -> Iterator[None]:
+    """Relax the GPU worker's Triton check during Ascend construction."""
+    # Serialize callers so overlapping constructors cannot restore the flag
+    # while another constructor using this context is still running.
+    with _GPU_WORKER_TRITON_LOCK:
+        has_triton = getattr(gpu_worker, "HAS_TRITON", True)
+        if has_triton:
+            yield
+            return
+        gpu_worker.HAS_TRITON = True
+        try:
+            yield
+        finally:
+            gpu_worker.HAS_TRITON = has_triton
+
+
+class NPUWorker(GPUWorker):
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -189,32 +223,42 @@ class NPUWorker(WorkerBase):
         configure_ascend_file_logging()
         check_ascend_device_type()
 
-        super().__init__(
-            vllm_config=vllm_config,
-            local_rank=local_rank,
-            rank=rank,
-            distributed_init_method=distributed_init_method,
-            is_driver_worker=is_driver_worker,
-        )
+        if getattr(vllm_config.parallel_config, "enable_fault_tolerance", False):
+            raise NotImplementedError("Ascend does not support the GPU fault-tolerance sentinel.")
+
+        # 310P runs Model Runner V2 without Triton. Replace this context manager
+        # with a _validate_triton() override once all supported vLLM versions
+        # include the upstream hook.
+        # https://github.com/vllm-project/vllm/pull/68320
+        with allow_v2_model_runner_without_triton():
+            super().__init__(
+                vllm_config=vllm_config,
+                local_rank=local_rank,
+                rank=rank,
+                distributed_init_method=distributed_init_method,
+                is_driver_worker=is_driver_worker,
+            )
+
+        # Shared worker state is initialized and owned by GPUWorker.__init__.
+        # These are annotation-only declarations (no runtime assignment) so that
+        # mypy keeps the inherited types: it runs with --follow-imports=skip and
+        # the vLLM base class body is not analyzed.
+        self.profiler_config: ProfilerConfig | None
+        self.profiler: TorchNPUProfilerWrapper | None
+        self.weight_transfer_engine: WeightTransferEngine | None
+        self._weight_update_active: bool
+        self._pp_send_work: list[Handle]
 
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
         else:
             self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[self.cache_config.cache_dtype]
 
-        # Profiler is lazily initialized on first profile(is_start=True) call (RFC #6954)
-        self.profiler_config = vllm_config.profiler_config
-        self.profiler: TorchNPUProfilerWrapper | None = None
         self.npugraph_memory_bytes = 0
         # Buffers and parameters saved before sleep.
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
         self._sleep_saved_parameters: dict[str, torch.Tensor] = {}
         self.sleep_wakeup_manager = SleepWakeupManager(vllm_config, self, lambda: getattr(self, "model_runner", None))
-
-        # Weight transfer engine is created in `load_model` once the model
-        # is available, since the engine needs a reference to the model.
-        self.weight_transfer_engine = None
-        self._weight_update_active = False
 
         # FixMe: this is a patch to fix the issue cause by https://github.com/vllm-project/vllm/commit/de94289a98d7ec52a5ef02719e01a1db8b505170
         from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
@@ -224,7 +268,6 @@ class NPUWorker(WorkerBase):
 
         self.use_v2_model_runner = self.vllm_config.use_v2_model_runner
         self._kvpp_cache_allocation_plan: KVPPPhysicalCachePlan | None = None
-        self._pp_send_work: list[Handle] = []
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
         if ascend_compilation_config.enable_npugraph_ex and ascend_compilation_config.enable_static_kernel:
@@ -243,6 +286,95 @@ class NPUWorker(WorkerBase):
 
             signal.signal(signal.SIGTERM, signal_handler)
             signal.signal(signal.SIGINT, signal_handler)
+
+    # Quarantine newly visible GPUWorker interfaces until each NPU contract is
+    # validated.
+    @property
+    def sleep_mode_backend(self) -> "SleepModeBackend":
+        raise NotImplementedError("GPUWorker.sleep_mode_backend is not validated on Ascend.")
+
+    def _get_sleep_parameters(self, model: nn.Module) -> dict[str, nn.Parameter]:
+        raise NotImplementedError("GPUWorker._get_sleep_parameters is not validated on Ascend.")
+
+    def discard(self, tags: tuple[str, ...]) -> None:
+        raise NotImplementedError("GPUWorker.discard is not validated on Ascend.")
+
+    def checkpoint_prepare(self) -> None:
+        raise NotImplementedError("GPUWorker.checkpoint_prepare is not validated on Ascend.")
+
+    def checkpoint_restore(self) -> None:
+        raise NotImplementedError("GPUWorker.checkpoint_restore is not validated on Ascend.")
+
+    def _scoped_allocator_max_split(self, max_split_size_mb: int):
+        raise NotImplementedError("GPUWorker._scoped_allocator_max_split is not validated on Ascend.")
+
+    def _init_workspace_and_model_runner(self) -> None:
+        raise NotImplementedError("GPUWorker._init_workspace_and_model_runner is not validated on Ascend.")
+
+    def _make_model_runner(self) -> NoReturn:
+        raise NotImplementedError("GPUWorker._make_model_runner is not validated on Ascend.")
+
+    def handle_ft_command(self, ft_request):
+        raise NotImplementedError("GPUWorker.handle_ft_command is not validated on Ascend.")
+
+    def _compile_or_warm_up_model(self) -> CompilationTimes:
+        raise NotImplementedError("GPUWorker._compile_or_warm_up_model is not validated on Ascend.")
+
+    def _maybe_activate_jit_monitor(self) -> None:
+        raise NotImplementedError("GPUWorker._maybe_activate_jit_monitor is not validated on Ascend.")
+
+    def _get_cudagraph_capture_context(self) -> AbstractContextManager[None]:
+        raise NotImplementedError("GPUWorker._get_cudagraph_capture_context is not validated on Ascend.")
+
+    def reset_mm_cache(self) -> None:
+        reset_fn = getattr(self.model_runner, "reset_mm_cache", None)
+        if callable(reset_fn):
+            reset_fn()
+
+    def get_draft_model(self) -> nn.Module | None:
+        raise NotImplementedError("GPUWorker.get_draft_model is not validated on Ascend.")
+
+    def supports_draft_weight_updates(self) -> bool:
+        return False
+
+    def _set_draft_weight_update_target(self) -> None:
+        raise NotImplementedError("GPUWorker._set_draft_weight_update_target is not validated on Ascend.")
+
+    def get_compilation_match_table(self) -> dict[str, int]:
+        raise NotImplementedError("GPUWorker.get_compilation_match_table is not validated on Ascend.")
+
+    def get_encoder_timing_stats(self) -> dict[str, dict[str, float | int]]:
+        raise NotImplementedError("GPUWorker.get_encoder_timing_stats is not validated on Ascend.")
+
+    def annotate_profile(self, scheduler_output):
+        raise NotImplementedError("GPUWorker.annotate_profile is not validated on Ascend.")
+
+    @property
+    def randomize_dummy_inputs(self) -> bool:
+        raise NotImplementedError("GPUWorker.randomize_dummy_inputs is not validated on Ascend.")
+
+    def save_sharded_state(
+        self,
+        path: str,
+        pattern: str | None = None,
+        max_size: int | None = None,
+    ) -> None:
+        raise NotImplementedError("GPUWorker.save_sharded_state is not validated on Ascend.")
+
+    def save_tensorized_model(self, tensorizer_config: "TensorizerConfig") -> None:
+        raise NotImplementedError("GPUWorker.save_tensorized_model is not validated on Ascend.")
+
+    def shutdown_weight_transfer_engine(self) -> None:
+        raise NotImplementedError("GPUWorker.shutdown_weight_transfer_engine is not validated on Ascend.")
+
+    def start_draft_weight_update(self) -> None:
+        raise NotImplementedError("GPUWorker.start_draft_weight_update is not validated on Ascend.")
+
+    def _start_weight_update(self, is_draft: bool = False) -> None:
+        raise NotImplementedError("GPUWorker._start_weight_update is not validated on Ascend.")
+
+    def elastic_ep_execute(self, execute_method: str, *args, **kwargs):
+        raise NotImplementedError("GPUWorker.elastic_ep_execute is not validated on Ascend.")
 
     def uninstall_static_kernel(self):
         import fcntl
@@ -289,6 +421,9 @@ class NPUWorker(WorkerBase):
             if not matches:
                 raise ValueError(f"No parameter matches sleep retention: {pattern}")
             names.update(matches)
+        meta_names = [name for name in names if parameters[name].device.type == "meta"]
+        if meta_names:
+            raise ValueError(f"Sleep retention cannot snapshot meta parameters: {', '.join(sorted(meta_names))}")
         self._sleep_saved_parameters = {
             name: param.detach().to("cpu") for name, param in parameters.items() if name in names and not param.is_cpu
         }
@@ -298,6 +433,12 @@ class NPUWorker(WorkerBase):
         for name, value in self._sleep_saved_parameters.items():
             model.get_parameter(name).copy_(value)
         self._sleep_saved_parameters.clear()
+
+    def set_metrics_level(self, level: str) -> str:
+        """Set this worker process's MS metric level. Called by collective RPC."""
+        from vllm_ascend.observability.ms_metrics.control import apply_process_metrics_level
+
+        return apply_process_metrics_level(level)
 
     def sleep(self, level: int = 1) -> None:
         self.synchronize_device()
@@ -428,7 +569,10 @@ class NPUWorker(WorkerBase):
 
         assert self.weight_transfer_engine is not None
         self.weight_transfer_engine.finish_weight_update()
-        self.model_runner.reset_lora_state()
+        if vllm_version_is("0.33.0"):
+            self.model_runner.reset_lora_state()
+        else:
+            self.model_runner.on_target_weights_replaced()
         self._weight_update_active = False
 
     def shutdown(self) -> None:
@@ -464,6 +608,13 @@ class NPUWorker(WorkerBase):
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
+
+    def _get_gpu_memory_utilization(self) -> float:
+        utilization = self.cache_config.gpu_memory_utilization
+        # vLLM #56492 defers the default until the KV allocation mode is known.
+        if utilization is None:
+            return self.cache_config.resolved_gpu_memory_utilization
+        return utilization
 
     def _init_device(self):
         # vLLM v0.24.0 (PR #45026) removed automatic per-process device
@@ -536,7 +687,7 @@ class NPUWorker(WorkerBase):
 
         # take current memory snapshot
         self.init_snapshot = MemorySnapshot(device=device)
-        self.requested_memory = self.init_snapshot.total_memory * self.cache_config.gpu_memory_utilization
+        self.requested_memory = self.init_snapshot.total_memory * self._get_gpu_memory_utilization()
         if self.init_snapshot.free_memory < self.requested_memory:
             GiB = lambda b: round(b / GiB_bytes, 2)
             raise ValueError(
@@ -544,7 +695,7 @@ class NPUWorker(WorkerBase):
                 f"({GiB(self.init_snapshot.free_memory)}/"
                 f"{GiB(self.init_snapshot.total_memory)} GiB) on startup "
                 f"is less than desired GPU memory utilization "
-                f"({self.cache_config.gpu_memory_utilization}, "
+                f"({self._get_gpu_memory_utilization()}, "
                 f"{GiB(self.requested_memory)} GiB). Decrease GPU memory "
                 f"utilization or reduce GPU memory used by other processes."
             )
@@ -808,7 +959,13 @@ class NPUWorker(WorkerBase):
         # TODO: The Step-3.5/3.7 models will be sunset in the future. Once they
         # are, remove this is_step_model exemption: this line and the
         # `or is_step_model` budget gate below.
-        is_step_model = self.model_config.hf_text_config.model_type in ("step3p5", "step3p7")
+        is_step_model = self.model_config.hf_text_config.model_type in (
+            "step3p5",
+            "step3p7",
+            "step5",
+            "step5_vl",
+            "step5_mtp",
+        )
         if (
             has_attention
             and (has_mamba or is_step_model or shares_attention_pool)
@@ -1026,7 +1183,7 @@ class NPUWorker(WorkerBase):
                 f"({format_gib(self.init_snapshot.free_memory)}/"
                 f"{format_gib(self.init_snapshot.total_memory)} GiB) on startup. "
                 f"Desired GPU memory utilization is "
-                f"({self.cache_config.gpu_memory_utilization}, "
+                f"({self._get_gpu_memory_utilization()}, "
                 f"{format_gib(self.requested_memory)} GiB). "
                 f"Actual usage: {format_gib(self.model_runner.model_memory_usage)} GiB "
                 f"for weights, {format_gib(self.peak_activation_memory)} GiB for peak "
@@ -1141,18 +1298,6 @@ class NPUWorker(WorkerBase):
             return {(pp_rank, pcp_rank, tp_rank): metadata}
         return {(pp_rank, tp_rank): metadata}
 
-    def get_simple_cpu_offload_num_cpu_blocks(self) -> int | None:
-        from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (  # noqa: E501
-            _find_simple_cpu_offload_connector,
-        )
-
-        if not has_kv_transfer_group():
-            return None
-        connector = _find_simple_cpu_offload_connector(get_kv_transfer_group())
-        if connector is None:
-            return None
-        return connector.get_aligned_num_cpu_blocks()
-
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         kv_cache_spec = self.model_runner.get_kv_cache_spec()
         kvpp_config = KVPPConfig.from_vllm_config(self.vllm_config)
@@ -1223,6 +1368,13 @@ class NPUWorker(WorkerBase):
             # Connector construction must see loader-owned draft caches before
             # planning target layerwise scratch buffers or pool transfers.
             kv_cache_config.dspark_draft_layer_names = tuple(sorted(speculator.draft_attn_layer_names))
+        if (
+            speculative is not None
+            and speculative.method == "dflash"
+            and speculator is not None
+            and get_layerwise_gva_config(self.vllm_config.kv_transfer_config) is not None
+        ):
+            kv_cache_config.dflash_draft_layer_names = tuple(sorted(speculator.draft_attn_layer_names))
         # Plan from this rank's native descriptors before connectors bind to the cache.
         reuse_layout = plan_layerwise_cache_reuse(kv_cache_config, self.vllm_config)
         if reuse_layout is not None:
@@ -1334,7 +1486,11 @@ class NPUWorker(WorkerBase):
     @runtime_guard_idle_step
     def execute_dummy_batch(self) -> None:
         self.log_memory_stats()
-        num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
+        num_tokens = (
+            getattr(self.model_runner, "uniform_decode_query_len", 1)
+            if vllm_version_is("0.33.0")
+            else self.model_runner.decode_query_len
+        )
         # Idle DP worker RPCs also need the current config for replay metadata.
         with set_current_vllm_config(self.vllm_config):
             self.model_runner._dummy_run(num_tokens, uniform_decode=True, skip_gdn_state_update=True)

@@ -1,6 +1,7 @@
 import unittest
 from contextlib import contextmanager
 from types import SimpleNamespace
+from typing import Any
 from unittest import mock
 from unittest.mock import MagicMock, patch
 
@@ -14,6 +15,7 @@ from vllm_ascend.ops import linear
 from vllm_ascend.ops.linear import (
     AscendDCPGroupColumnParallelLinear,
     AscendMergedColumnParallelLinear,
+    AscendQKVParallelLinear,
     AscendReplicatedLinear,
     AscendRowParallelLinear,
     AscendUnquantizedLinearMethod,
@@ -21,10 +23,15 @@ from vllm_ascend.ops.linear import (
 from vllm_ascend.ops.linear_op import DCPGroupColumnParallelOp
 from vllm_ascend.quantization.method_adapters import AscendLinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import AscendW8A8DynamicLinearMethod
+from vllm_ascend.utils import vllm_version_is
 
 
 class BaseLinearTest(unittest.TestCase):
     def setUp(self):
+        # Several tests in this file replace the process-global AscendConfig
+        # with a MagicMock; snapshot it so tearDown restores the worker state
+        # for later tests in the same xdist worker.
+        self._previous_ascend_config = ascend_config._ASCEND_CONFIG
         self.mock_group = mock.MagicMock()
         self.mock_group.world_size = 2
         self.mock_group.rank_in_group = 0
@@ -53,6 +60,7 @@ class BaseLinearTest(unittest.TestCase):
             p.start()
 
     def tearDown(self):
+        ascend_config._ASCEND_CONFIG = self._previous_ascend_config
         for p in self.patches:
             p.stop()
 
@@ -227,6 +235,57 @@ class TestAscendRowParallelLinear(BaseLinearTest):
 
 
 class TestAscendMergedColumnParallelLinear(BaseLinearTest):
+    def test_merged_checkpoint_reload_keeps_output_padding_zero(self):
+        for padding_size in (0, 3):
+            kwargs: dict[str, Any] = dict(
+                input_size=8, output_sizes=[4, 6], bias=True, disable_tp=True, padding_size=padding_size
+            )
+            if vllm_version_is("0.33.0") and padding_size:
+                with self.assertRaisesRegex(ValueError, "output padding requires"):
+                    AscendMergedColumnParallelLinear(**kwargs)
+                continue
+            layer = AscendMergedColumnParallelLinear(**kwargs)
+            self.assertEqual(tuple(layer.weight.shape), (10 + padding_size, 8))
+            for value in (1.0, 2.0):
+                # Dirty the complete allocation to verify reload clears only
+                # padding while loading every real checkpoint row and bias.
+                layer.weight.data.fill_(-7)
+                layer.bias.data.fill_(-7)
+                for shard, size in enumerate((4, 6)):
+                    layer.weight_loader(layer.weight, torch.full((size, 8), value), shard)
+                    layer.weight_loader(layer.bias, torch.full((size,), value), shard)
+                torch.testing.assert_close(layer.weight[:10], torch.full_like(layer.weight[:10], value))
+                torch.testing.assert_close(layer.bias[:10], torch.full_like(layer.bias[:10], value))
+                if padding_size:
+                    torch.testing.assert_close(layer.weight[10:], torch.zeros_like(layer.weight[10:]))
+                    torch.testing.assert_close(layer.bias[10:], torch.zeros_like(layer.bias[10:]))
+                    self.assertEqual(layer.weight.weight_loader_numel, 80)
+                    self.assertEqual(layer.bias.weight_loader_numel, 10)
+                    self.assertEqual(layer._checkpoint_output_sizes, [4, 6])
+                    self.assertEqual(layer.shard_ids, (0, 1))
+
+    @unittest.skipIf(vllm_version_is("0.33.0"), "Stacked shard tracking was added after v0.33")
+    def test_custom_allocations_preserve_missing_shard_validation(self):
+        layers: tuple[Any, ...] = (
+            AscendMergedColumnParallelLinear(input_size=8, output_sizes=[4, 4], bias=False, disable_tp=True),
+            AscendQKVParallelLinear(hidden_size=8, head_size=2, total_num_heads=2, bias=False, disable_tp=True),
+        )
+        for layer in layers:
+            with self.subTest(layer=type(layer).__name__):
+                shards = layer.shard_ids
+                first = shards[0]
+                size = layer._get_shard_size_mapping(first)
+                layer.weight_loader(layer.weight, torch.ones(size, 8), first)
+                self.assertEqual(layer.pop_missing_shards(), [f"weight.{shard}" for shard in shards[1:]])
+                # A new complete load must start fresh and cover every shard.
+                for shard in shards:
+                    size = layer._get_shard_size_mapping(shard)
+                    layer.weight_loader(layer.weight, torch.ones(size, 8), shard)
+                self.assertEqual(layer.pop_missing_shards(), [])
+                torch.testing.assert_close(layer.weight, torch.ones_like(layer.weight))
+                with self.assertRaises(ValueError):
+                    layer.validate_shard_id("invalid", layer.weight)
+
     def test_merged_mlp_tp_init(self):
         ascend_config._ASCEND_CONFIG = MagicMock()
         ascend_config._ASCEND_CONFIG.scheduler_config.recompute_scheduler_enable = False

@@ -56,6 +56,13 @@ from vllm_ascend.models.qwen4_exp.cache_config import (
     get_qwen4_exp_max_memory_usage,
     get_qwen4_exp_pool_bytes_per_block,
 )
+from vllm_ascend.models.step5.cache_config import (
+    get_step5_kv_cache_config_from_groups,
+    get_step5_kv_cache_groups,
+    get_step5_max_memory_usage,
+    get_step5_pool_bytes_per_block,
+    is_step5_groups,
+)
 from vllm_ascend.quantization.methods.kv_cache.turboquant import TURBOQUANT_CACHE_DTYPE
 from vllm_ascend.quantization.methods.kv_cache.turboquant import cache as tq_cache
 from vllm_ascend.utils import vllm_version_is
@@ -488,6 +495,8 @@ def _ascend_pool_bytes_per_block(  # type: ignore[misc]
         return sum(_orig_pool_bytes_per_block(vllm_config, pool) for pool in pools)
     if tq_cache.uses_turboquant_groups(kv_cache_groups):
         return tq_cache.pool_bytes_per_block(kv_cache_groups)
+    if is_step5_groups(kv_cache_groups):
+        return get_step5_pool_bytes_per_block(kv_cache_groups)
     if is_deepseek_v41_cache(kv_cache_groups):
         return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
@@ -508,6 +517,8 @@ def _ascend_max_memory_usage_bytes_from_groups(
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> int:
     """Keep Ascend admission accounting with the upstream builder API."""
+    if is_step5_groups(kv_cache_groups):
+        return get_step5_max_memory_usage(vllm_config, kv_cache_groups)
     if vllm_config.model_config.hf_config.model_type == "kimi_k31":
         return paired_sfa_max_memory(vllm_config, kv_cache_groups)
     if tq_cache.uses_turboquant_groups(kv_cache_groups):
@@ -542,6 +553,9 @@ def _get_ascend_kv_cache_groups(
 ) -> list[KVCacheGroupSpec]:
     if vllm_config.model_config.hf_config.model_type == "kimi_k31":
         return paired_sfa_cache_groups(vllm_config, kv_cache_spec)
+    step5_groups = get_step5_kv_cache_groups(vllm_config, kv_cache_spec, _orig_get_kv_cache_groups)
+    if step5_groups is not None:
+        return step5_groups
     if any(is_glm5_next_cache_spec(spec) for spec in kv_cache_spec.values()):
         return get_glm5_next_kv_cache_groups(vllm_config, kv_cache_spec)
     groups = get_qwen4_exp_kv_cache_groups(vllm_config, kv_cache_spec, _orig_get_kv_cache_groups)
@@ -565,7 +579,6 @@ def _ascend_get_kv_cache_config_from_groups(
     ``copy.deepcopy`` in ``generate_scheduler_kv_cache_config`` and is
     dropped by worker pickle IPC, which never reads it.
     """
-    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
     qwen_config = (
         None
         if vllm_version_is("0.28.0")
@@ -574,6 +587,8 @@ def _ascend_get_kv_cache_config_from_groups(
     pools = _get_replicated_draft_pools(kv_cache_groups)
     if vllm_config.model_config.hf_config.model_type == "kimi_k31":
         kv_cache_config = paired_sfa_cache_config(vllm_config, kv_cache_groups, available_memory)
+    elif is_step5_groups(kv_cache_groups):
+        kv_cache_config = get_step5_kv_cache_config_from_groups(vllm_config, kv_cache_groups, available_memory)
     elif pools is not None:
         # Every physical pool shares the scheduler's block count, but owns a
         # disjoint byte range. Use the same aggregate divisor as admission and
@@ -619,6 +634,7 @@ def _ascend_get_kv_cache_config_from_groups(
             kv_cache_groups=kv_cache_groups,
             prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
         )
+    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
     kv_cache_config.kv_transfer_config = kv_transfer_config
     speculative_config = getattr(vllm_config, "speculative_config", None)
     if speculative_config is not None and speculative_config.method == "dspark":
@@ -634,7 +650,7 @@ def _ascend_get_kv_cache_config_from_groups(
         kv_cache_config.dspark_draft_only_group_ids = draft_only_group_ids(kv_cache_config.kv_cache_groups)
     reuse_layout = plan_layerwise_cache_reuse(kv_cache_config, vllm_config)
     if reuse_layout is not None:
-        # The scheduler keeps this cost when it collapses the per-entry specs.
+        # Core uses the size for budgeting. The scheduler detects reuse by its presence.
         kv_cache_config.kv_transfer_config = replace(
             kv_transfer_config,
             kv_connector_extra_config={

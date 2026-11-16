@@ -2,7 +2,7 @@ from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_events import (
     KVCacheEvent,
     KVConnectorKVEvents,
@@ -36,7 +36,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    get_layerwise_reuse_backing_bytes,
+    has_shared_kv_sources,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_scheduler import (
     LayerwiseKVPoolScheduler,
@@ -66,14 +66,8 @@ if TYPE_CHECKING:
 def create_kv_pool_scheduler(
     vllm_config: VllmConfig, use_layerwise: bool, kv_cache_config: KVCacheConfig | None = None
 ) -> BaseKVPoolScheduler:
-    if use_layerwise:
-        return LayerwiseKVPoolScheduler(
-            vllm_config,
-            use_layerwise,
-            kv_cache_config,
-            layerwise_offload=get_layerwise_reuse_backing_bytes(kv_cache_config) is not None,
-        )
-    return KVPoolScheduler(vllm_config, use_layerwise, kv_cache_config)
+    scheduler_class = LayerwiseKVPoolScheduler if use_layerwise else KVPoolScheduler
+    return scheduler_class(vllm_config, use_layerwise, kv_cache_config)
 
 
 def create_kv_pool_worker(
@@ -125,6 +119,13 @@ class AscendStoreKVEvents(KVConnectorKVEvents):
 
 class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     @classmethod
+    def supports_lookahead_block_hashes(cls, kv_transfer_config: KVTransferConfig) -> bool:
+        # AscendStore's external coordinator retains the trailing EAGLE-block
+        # drop and prompt-token replay boundaries. It does not propagate the
+        # core lookahead length through its store/lookup masks.
+        return False
+
+    @classmethod
     def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
         """
         AscendStore requires PIECEWISE CUDA graph mode when layerwise
@@ -150,6 +151,10 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.backend_class = get_backend_class(self.backend_name) if self.use_layerwise else None
         self.layerwise_data_plane = self.backend_class.layerwise_data_plane if self.backend_class is not None else None
         self.use_block_key_layerwise = self.use_layerwise and self.layerwise_data_plane == "block_key"
+        self.supports_composite_kv_loads = (
+            self.use_layerwise and self.layerwise_data_plane == "gva" and has_shared_kv_sources(vllm_config)
+        )
+        self.supports_composite_kv_saves = self.supports_composite_kv_loads
         self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "save_decode_cache", False
         )
@@ -401,15 +406,23 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         cast(LayerwiseKVPoolWorker, self.connector_worker).wait_for_layer_load_ready(layer_name)
 
+    def finish_forward(self) -> None:
+        if self.use_layerwise and self.has_connector_metadata():
+            assert self.connector_worker is not None
+            cast(LayerwiseKVPoolWorker, self.connector_worker).load_dflash_draft_kv()
+
     def wait_for_layer_load(self, layer_name: str) -> None:
         if not self.use_layerwise:
             return
         assert self.connector_worker is not None
+        worker = cast(LayerwiseKVPoolWorker, self.connector_worker)
+        if layer_name in getattr(worker, "dflash_draft_layer_names", ()):
+            return
         # PLE and attention can share one physical layer. Load its groups once,
         # then let each cache owner copy its own recurrent state before use.
-        layer = self.connector_worker._extract_physical_layer_index(layer_name)
+        layer = worker._extract_physical_layer_index(layer_name)
         if self._loaded_layer != layer:
-            cast(LayerwiseKVPoolWorker, self.connector_worker).wait_for_layer_load()
+            worker.wait_for_layer_load()
             self._loaded_layer = layer
         # Mamba state copy must run AFTER this layer's load finishes,
         # otherwise the copy would race with the in-flight layerwise load and
@@ -447,7 +460,9 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             # A load-only consumer does not publish KV.
             return
         assert self.connector_worker is not None
-        cast(LayerwiseKVPoolWorker, self.connector_worker).save_kv_layer(self._get_connector_metadata())
+        worker = cast(LayerwiseKVPoolWorker, self.connector_worker)
+        if layer_name not in getattr(worker, "dflash_draft_layer_names", ()):
+            worker.save_kv_layer(self._get_connector_metadata())
 
     def wait_for_save(self):
         if not self.can_put:
@@ -455,6 +470,10 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             return
 
         if self.use_layerwise:
+            assert self.connector_worker is not None
+            worker = cast(LayerwiseKVPoolWorker, self.connector_worker)
+            if self.has_connector_metadata():
+                worker.save_dflash_draft_kv(self._get_connector_metadata())
             return
 
         assert self.connector_worker is not None

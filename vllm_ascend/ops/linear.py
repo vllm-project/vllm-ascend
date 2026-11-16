@@ -42,7 +42,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayoutPolicy, get_current_hardware_profile
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
-from vllm_ascend.utils import maybe_trans_nz
+from vllm_ascend.utils import maybe_trans_nz, vllm_version_is
 from vllm_ascend.weight_switch import WeightSwitchGatherSpec, WeightSwitchMixin
 
 
@@ -238,6 +238,8 @@ class AscendQKVParallelLinear(QKVParallelLinear):
             return_bias=return_bias,
             disable_tp=disable_tp,
         )
+        # vLLM #63752: custom allocation bypasses the stacked initializer.
+        self.loaded_shard_ids: dict[str, set[str | int]] = {}
 
     def forward(
         self,
@@ -273,16 +275,22 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
+        padding_size: int = 0,
     ):
+        if vllm_version_is("0.33.0") and padding_size:
+            raise ValueError("Merged-linear output padding requires the verified vLLM main revision")
+        # #66784's inherited weight loaders read this even without padding.
+        self.padding_size = padding_size
         self.custom_op, self.tp_rank, self.tp_size = get_parallel_op(disable_tp, prefix, self, "column")
         # TODO(realliujiaxu): Replace the initialization code below with super().__init__ after
         # linear of vllm supports custom comm group
-        self.output_sizes = output_sizes
-        assert all(output_size % self.tp_size == 0 for output_size in output_sizes)
+        self.output_sizes = output_sizes + [padding_size * self.tp_size] if padding_size else output_sizes
+        self.shard_ids = tuple(range(len(output_sizes)))
+        assert all(output_size % self.tp_size == 0 for output_size in self.output_sizes)
         AscendColumnParallelLinear.__init__(
             self,
             input_size=input_size,
-            output_size=sum(output_sizes),
+            output_size=sum(self.output_sizes),
             bias=bias,
             gather_output=gather_output,
             skip_bias_add=skip_bias_add,
@@ -292,6 +300,13 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
             return_bias=return_bias,
             disable_tp=disable_tp,
         )
+        # vLLM #63752: custom allocation bypasses the stacked initializer.
+        self.loaded_shard_ids: dict[str, set[str | int]] = {}
+        if not vllm_version_is("0.33.0"):
+            for name in self.padding_fill_params():
+                param = getattr(self, name)
+                self._zero_output_padding(param)
+                set_weight_attrs(param, {"weight_loader_numel": param[:-padding_size].numel()})
 
     def forward(
         self,

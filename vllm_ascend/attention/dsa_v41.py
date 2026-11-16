@@ -25,11 +25,17 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadata,
     AttentionMetadataBuilder,
+    max_decode_query_len,
 )
-from vllm.v1.kv_cache_interface import CircularBufferSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, CircularBufferSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.dsa_v1 import build_dspark_swa_indices, dsv4_dsa_overlap_stream
+from vllm_ascend.attention.dsa_v1 import AscendDSABackend, build_dspark_swa_indices, dsv4_dsa_overlap_stream
+from vllm_ascend.attention.utils import (
+    KVCacheRuntimeShapes,
+    maybe_save_kv_layer_to_connector,
+    wait_for_kv_layer_from_connector,
+)
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
@@ -37,6 +43,7 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
 )
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.models.deepseek_v41.cache_config import STATE_RING_ROWS
 from vllm_ascend.ops.rope_dsv4 import (
     get_cos_and_sin_dsa,
     get_full_cos_and_sin_dsa_for_layer,
@@ -95,8 +102,11 @@ def dsa_v41_write_kv(
     forward_context = get_forward_context()
     attn = forward_context.no_compile_layers[layer_name]
     metadata = attn.v41_impl._get_layer_metadata(forward_context.attn_metadata)
+    wait_for_kv_layer_from_connector(layer_name)
     hidden_states = hidden_states[: metadata.swa.num_actual_tokens]
     attn.v41_impl._update_caches(attn, hidden_states, metadata)
+    # The following cut-layer forward writes retained rows again. Its normal
+    # save hook records the final-write event without advancing twice here.
 
 
 def dsa_v41_write_kv_fake(
@@ -141,12 +151,13 @@ def build_replay_swa_visible_lens(
     request's data, it would read phantom keys that score zero and take weight
     in the replayed token's softmax.
 
-    This operator bounds a window with one scalar for the whole call
+    The band-mode operator bounds a window with one scalar for the whole call
     (``ori_win_left``), which cannot express a per-token floor, so the floor
     travels through ``ori_topk_length`` in band mode: "the number of ori KV
     entries this query token may see". Entries are counted back from the token's
     own right edge, so a count of ``position - floor + 1`` is exactly "keep the
-    window ending here, but not past the floor".
+    window ending here, but not past the floor". A5 uses an explicit list
+    and builds its indices with the same count.
 
     Positions are derived the way the operator derives its own, from
     ``seqused_ori_kv - actS1Size + s1``, so the two coordinate systems cannot
@@ -379,7 +390,7 @@ class AscendDSAV41Impl:
     def _write_swa_cache(attn, metadata, value):
         if not value.shape[0]:
             return
-        cache = attn.dsa_attn.swa_cache_layer.kv_cache[0]
+        cache = attn.dsa_attn.swa_cache_layer.kv_cache
         backend = getattr(attn, "packed_cache_ops", None)
         if backend is not None:
             backend.write_attention_cache(
@@ -628,14 +639,14 @@ class AscendDSAV41Impl:
         backend = getattr(attn, "packed_cache_ops", None)
         if backend is not None:
             backend.write_attention_cache(
-                attn.long_kv_cache.kv_cache[0],
+                attn.long_kv_cache.kv_cache,
                 compressor_metadata.cache.flat_slot_mapping[:num_tokens],
                 latent.squeeze(1),
                 kind="cmp",
             )
         else:
             scatter_cache_sk(
-                attn.long_kv_cache.kv_cache[0],
+                attn.long_kv_cache.kv_cache,
                 long_slots,
                 latent.squeeze(1),
             )
@@ -650,10 +661,10 @@ class AscendDSAV41Impl:
 
         context = get_forward_context().no_compile_layers
         source_layer = context[self.index_k_source_prefix]
-        source_cache = source_layer.kv_cache[0]
+        source_cache = source_layer.kv_cache
         if self.role.uses_candidate_filter and getattr(attn.indexer, "packed_cache_ops", None) is not None:
             folded_name = self.index_k_source_prefix + "_folded"
-            folded_cache = context[folded_name].kv_cache[0]
+            folded_cache = context[folded_name].kv_cache
             source_cache = (*source_cache, folded_cache)
         assert prepared_indexer is not None
         if prepared_indexer.quantize_done is not None:
@@ -687,7 +698,7 @@ class AscendDSAV41Impl:
     def _forward_attention(self, attn, q, metadata, compressed_indices, *, source_cache=None):
         """Run SparseFlashMla with the same PA metadata for both operator stages."""
         if source_cache is None and self.role.has_long_context:
-            source_cache = get_forward_context().no_compile_layers[self.long_kv_source_prefix].kv_cache[0]
+            source_cache = get_forward_context().no_compile_layers[self.long_kv_source_prefix].kv_cache
         backend = getattr(attn, "packed_cache_ops", None)
         if backend is not None:
             compressed_lengths = None
@@ -695,7 +706,7 @@ class AscendDSAV41Impl:
                 compressed_lengths = attn.shared_state.topk_lengths[: q.shape[0]]
             return backend.qsmla(
                 q,
-                attn.dsa_attn.swa_cache_layer.kv_cache[0],
+                attn.dsa_attn.swa_cache_layer.kv_cache,
                 source_cache,
                 metadata,
                 compressed_indices,
@@ -728,7 +739,7 @@ class AscendDSAV41Impl:
             DeviceMetadataStage.ATTENTION,
             id(op_metadata),
         )
-        swa_cache = attn.dsa_attn.swa_cache_layer.kv_cache[0]
+        swa_cache = attn.dsa_attn.swa_cache_layer.kv_cache
         if metadata.swa.replay_block_table is not None:
             # Rebase only SWA: A3 CSA cannot mask its missing prefix with
             # sparse ori indices. Compressed KV retains its causal coordinates.
@@ -795,6 +806,7 @@ class AscendDSAV41Impl:
                 projector._forward_o_proj(o_proj_input, output)
             return output
         metadata = self._get_layer_metadata(forward_context.attn_metadata)
+        wait_for_kv_layer_from_connector(attn.v41_layer_name)
         q, prepared_indexer = self._prepare_inputs_and_caches(
             attn, hidden_states, metadata, forward_context.attn_metadata
         )
@@ -811,10 +823,18 @@ class AscendDSAV41Impl:
             heads = attn.n_local_heads
             attention_output = hidden_states.new_empty((0, heads, attn.head_dim))
         self._project_output(attn, attention_output, hidden_states, projected=output)
+        maybe_save_kv_layer_to_connector(attn.v41_layer_name, attn.dsa_attn.swa_cache_layer.kv_cache)
         return output
 
 
 class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]):
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(cls, vllm_config: VllmConfig, kv_cache_spec) -> int | None:
+        # Every proposed row is written to the C2 ring before rejection. Keep
+        # the first accepted row available when the next step rolls back to it.
+        # Wider blocks could overwrite that row even if only the anchor survives.
+        return min(max_decode_query_len(vllm_config), STATE_RING_ROWS)
+
     def __init__(
         self,
         kv_cache_spec,
@@ -1161,6 +1181,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 else:
                     if compressed and req.compress_ratio != 1:
                         active_slots = compressed_slot_mapping(active_slots, req.compress_ratio)
+                    # The common slot-mapping producer already marks padding as PAD.
                     valid = active_slots >= 0
                     if compressed and req.compress_ratio == 2:
                         if kwargs.get("skip_ring_state_update", False):
@@ -1275,41 +1296,6 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             indices_view.copy_(req.ori_sparse_indices)
             lengths_view.copy_(req.ori_topk_length)
             req.ori_sparse_indices, req.ori_topk_length = indices_view, lengths_view
-        if (
-            not noncausal
-            and req.ori_sparse_indices is None
-            and self._a5_causal_swa_indices is not None
-            and req.positions is not None
-        ):
-            cache_key = f"a5-causal-swa:w{window_size}"
-            cached_window = self.common_v41_batch_metadata.get(cache_key)
-            if cached_window is None:
-                assert self._device_backend is not None
-                cached_window = self._device_backend.build_window_indices(
-                    req.positions[: req.num_input_tokens],
-                    window_size,
-                    indices_output=self._a5_causal_swa_indices[: req.num_input_tokens],
-                    lengths_output=self._a5_causal_swa_lengths[: req.num_input_tokens],
-                )
-                self.common_v41_batch_metadata[cache_key] = cached_window
-            req.ori_sparse_indices, req.ori_topk_length = cached_window
-        if req.ori_topk_length is None and req.ori_sparse_indices is not None and noncausal:
-            req.ori_topk_length = (req.ori_sparse_indices >= 0).sum(dim=-1, dtype=torch.int32)
-
-        # SWA bounded replay (vLLM #56227): a prefill admission that hit the
-        # prefix cache recomputes the hit's last window, and only the
-        # sliding-window group is rebuilt by it. That group's window is the one
-        # that can reach below ``replay_start`` into the region it does not hold,
-        # so the floor rides ``ori_topk_length``, the operator's per-token
-        # channel for "how many ori KV entries this query may see". The window's
-        # width stays a scalar (``ori_win_left``) and still bounds it from above,
-        # so this only ever narrows the mask, and only for the requests that are
-        # replaying.
-        #
-        # Only the sliding-window group carries it, because
-        # ``_forward_attention`` reads the mask and this length from
-        # ``metadata.swa`` whichever group's loop ranges it was handed, and those
-        # ranges come from the same band -- so they stay a superset of the window.
         replay_start = getattr(common, "replay_start", None)
         replay_visible_lens = None
         if replay_start is not None and req.cache_kind == "swa":
@@ -1320,11 +1306,32 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 replay_start,
                 req.num_actual_tokens,
             )
-        # In band mode this tensor is the per-token visible length; the sparse
-        # path above is its other producer, and that one pairs it with an index
-        # list. The operator's mask mode is therefore the band in both cases.
-        if replay_visible_lens is not None:
+        if (
+            not noncausal
+            and req.ori_sparse_indices is None
+            and self._a5_causal_swa_indices is not None
+            and req.positions is not None
+        ):
+            cache_key = f"a5-causal-swa:w{window_size}"
+            cached_window = self.common_v41_batch_metadata.get(cache_key) if replay_visible_lens is None else None
+            if cached_window is None:
+                assert self._device_backend is not None
+                # A5 reads the first N sparse indices, so a replay floor changes both tensors.
+                cached_window = self._device_backend.build_window_indices(
+                    req.positions[: req.num_input_tokens],
+                    window_size,
+                    visible_lengths=replay_visible_lens,
+                    indices_output=self._a5_causal_swa_indices[: req.num_input_tokens],
+                    lengths_output=self._a5_causal_swa_lengths[: req.num_input_tokens],
+                )
+                if replay_visible_lens is None:
+                    self.common_v41_batch_metadata[cache_key] = cached_window
+            req.ori_sparse_indices, req.ori_topk_length = cached_window
+        elif replay_visible_lens is not None:
+            # Scalar-band backends consume a count from the right edge of the window.
             req.ori_topk_length = replay_visible_lens
+        elif req.ori_topk_length is None and req.ori_sparse_indices is not None and noncausal:
+            req.ori_topk_length = (req.ori_sparse_indices >= 0).sum(dim=-1, dtype=torch.int32)
         req.ori_mask_mode = 0 if noncausal else 4
         req.ori_win_left = max(0, window_size - 1)
         req.ori_win_right = 0
@@ -1343,6 +1350,7 @@ class AscendDSAV41StateMetadataBuilder(AscendDSAV41MetadataBuilder):
         return req
 
     def _build_compressor_cache(self, common, req: AscendDSAV41Metadata, **kwargs) -> None:
+        """Publish C2 ring updates and source RoPE metadata for the state cache."""
         req.c2_ring_metadata = None
         req.c2_complete_mask = None
         req.c2_source_positions = None
@@ -1760,6 +1768,17 @@ class DeepseekV41CacheBackend(AttentionBackend):
     def get_kv_cache_shape(num_blocks, block_size, num_kv_heads, head_size, cache_dtype_str="auto"):
         return num_blocks, block_size, num_kv_heads, head_size
 
+    @classmethod
+    def get_runtime_shapes(
+        cls,
+        spec: AttentionSpec,
+        num_blocks: int,
+        layout: Any,
+        kernel_block_size: int | None = None,
+    ) -> KVCacheRuntimeShapes:
+        """Expose NHD data/scale pages, including packed A5 byte widths."""
+        return AscendDSABackend.get_runtime_shapes(spec, num_blocks, layout, kernel_block_size)
+
 
 class _DeepseekV41RoleBackend(DeepseekV41CacheBackend):
     metadata_role = ""
@@ -1800,13 +1819,13 @@ class DeepseekV41CacheLayer(nn.Module, AttentionLayerBase):
         super().__init__()
         self.prefix = prefix
         self.spec = spec
-        self.kv_cache = [torch.empty(0)]
+        self.kv_cache: torch.Tensor | tuple[torch.Tensor, ...] = torch.empty(0)
         context = vllm_config.compilation_config.static_forward_context
         context[prefix] = self
 
     def bind_kv_cache(self, kv_cache: torch.Tensor | tuple[torch.Tensor, ...]) -> None:
-        """Bind one allocated slot view, keeping the ``kv_cache[0]`` contract."""
-        self.kv_cache = [kv_cache]
+        """Bind a single cache view or a tuple of component views."""
+        self.kv_cache = kv_cache
 
     def get_kv_cache_spec(self, vllm_config):
         return self.spec

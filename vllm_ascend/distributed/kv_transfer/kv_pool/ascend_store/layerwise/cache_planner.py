@@ -38,16 +38,17 @@ def get_spec_reuse_rules(vllm_config: VllmConfig) -> SpecReuseRules | None:
 
 def get_layerwise_ascend_store_config(kv_transfer_config: Any) -> dict[str, Any] | None:
     """Return the extra config for layerwise AscendStore."""
+    store_connectors = ("AscendStoreConnector", "MooncakeConnectorStoreV1")
     connector_name = getattr(kv_transfer_config, "kv_connector", None)
     extra_config = getattr(kv_transfer_config, "kv_connector_extra_config", None) or {}
     if connector_name == "MultiConnector":
         for child_config in extra_config.get("connectors", ()):
-            if isinstance(child_config, dict) and child_config.get("kv_connector") == "AscendStoreConnector":
+            if isinstance(child_config, dict) and child_config.get("kv_connector") in store_connectors:
                 extra_config = child_config.get("kv_connector_extra_config") or {}
                 break
         else:
             return None
-    elif connector_name != "AscendStoreConnector":
+    elif connector_name not in store_connectors:
         return None
 
     if extra_config.get("use_layerwise", False):
@@ -56,7 +57,7 @@ def get_layerwise_ascend_store_config(kv_transfer_config: Any) -> dict[str, Any]
 
 
 def get_layerwise_gva_config(kv_transfer_config: Any) -> dict[str, Any] | None:
-    """Return the layerwise GVA store config used by DSpark."""
+    """Return the config for a layerwise store using GVA."""
     extra_config = get_layerwise_ascend_store_config(kv_transfer_config)
     if extra_config is None:
         return None
