@@ -806,6 +806,9 @@ jobs:
   # access count as approvers on purpose (this is why the native
   # require_code_owner_review is not used).
   codeowner-approval:
+    # Bot reviews (e.g. gemini-code-assist COMMENTED) never change the
+    # approval state, so skip re-evaluating the gate for them.
+    if: ${{ github.event_name != 'pull_request_review' || github.event.review.user.type != 'Bot' }}
     runs-on: linux-amd64-cpu-2-hk
     permissions:
       pull-requests: read
@@ -849,7 +852,9 @@ jobs:
   # in GitHub branch protection rules instead of tracking individual matrix job names.
   ci-gate:
     needs: [pre-commit, cpu-ut, select-tests, run-selected-tests, run-selected-tests-a5, codeowner-approval]
-    if: ${{ !cancelled() }}
+    # Skip bot-review-triggered runs too: they cannot change the gate verdict
+    # (see the codeowner-approval job condition).
+    if: ${{ !cancelled() && (github.event_name != 'pull_request_review' || github.event.review.user.type != 'Bot') }}
     runs-on: linux-amd64-cpu-2-hk
     # On review events this job may wait for an in-flight pull_request CI run to
     # finish before carrying its verdict forward (see the Check step).
