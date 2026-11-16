@@ -980,14 +980,14 @@ settings.
 
     This feature is experimental. On 950DT Products, a Kimi K3.1 P/D functional
     test used PP4/TP8 on Prefill and DP4/TP8/DCP8 on Decode with PCP=1, using an
-    experimental image with modified parallelism checks. A separate PP4/TP1/PCP8
-    smoke test completed one 16,384-input-token request with one output token and
-    prefix caching disabled. These tests do not establish multi-request or
-    speculative-decoding correctness, output equivalence, or the correctness of
-    other configurations. Earlier A3 operator tests do not establish Kimi K3 or
-    K3.1 end-to-end functionality on A3; end-to-end functionality on 950PR Products
-    also remains unverified. Assess the risks and validate your configuration
-    before use.
+    experimental image with modified parallelism checks. A separate prefill-focused
+    Kimi K3.1 experts8 run with PP4/TP1/PCP8, DSpark, eager execution, and prefix
+    caching disabled completed 2,016 requests, each with 16,384 input tokens and
+    one output token. These tests do not establish multi-token speculative-decoding
+    correctness, output equivalence, or the correctness of other configurations.
+    Earlier A3 operator tests do not establish Kimi K3 or K3.1 end-to-end
+    functionality on A3; end-to-end functionality on 950PR Products also remains
+    unverified. Assess the risks and validate your configuration before use.
 
 ## Synthetic Rejection Sampling
 
