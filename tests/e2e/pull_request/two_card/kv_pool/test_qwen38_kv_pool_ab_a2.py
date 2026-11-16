@@ -410,6 +410,38 @@ def _leg(
                     )
                 )
                 mooncake_config = _mooncake_pool_config(tier_ssd, case_name)
+                if tier_ssd:
+                    # SSD offload tuning for the mooncake tier-3 leg (official
+                    # ssd-offload.md plus measured constraints on this stack):
+                    # - the staging buffer must be a 1GiB multiple (Ascend
+                    #   fabric-memory alignment);
+                    # - the bucket backend must stay at or below a 64MiB bucket.
+                    #   The backend default of 256MiB fails to persist silently:
+                    #   nothing is written, no ERROR is logged, the master never
+                    #   records a LOCAL_DISK replica, and eviction can therefore
+                    #   never release DRAM. That failure mode is exactly what
+                    #   this leg exists to catch;
+                    # - explicit quotas keep the tier bounded instead of the
+                    #   backend's whole-disk default.
+                    # Installed before the master is started below, so the
+                    # master process and the worker processes run with the same
+                    # offload environment: the master inherits ``os.environ`` at
+                    # spawn time, and a mismatch there is one more variable to
+                    # rule out when diagnosing the tier.
+                    stack.enter_context(
+                        patch.dict(
+                            os.environ,
+                            {
+                                "MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES": str(1024**3),
+                                "MOONCAKE_OFFLOAD_BUCKET_SIZE_LIMIT_BYTES": str(
+                                    MOONCAKE_OFFLOAD_BUCKET_SIZE_LIMIT_BYTES
+                                ),
+                                "MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE": str(16 * 1024**3),
+                                "MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES": str(16 * 1024**3),
+                                "MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY": "lru",
+                            },
+                        )
+                    )
                 ssd_root = mooncake_config.config.get("ssd_offload_path")
                 if ssd_root:
                     # The tier-3 offload directory can hold gigabytes of KV
@@ -420,31 +452,6 @@ def _leg(
             else:
                 pool = stack.enter_context(SingleNodeMemcacheManager(_memcache_pool_config(tier_ssd), case_name))
             stack.enter_context(patch.dict(os.environ, pool.server_envs))
-            if backend == "mooncake" and tier_ssd:
-                # SSD offload tuning for the mooncake tier-3 leg (official
-                # ssd-offload.md plus measured constraints on this stack):
-                # - the staging buffer must be a 1GiB multiple (Ascend
-                #   fabric-memory alignment);
-                # - the bucket backend must stay at or below a 64MiB bucket.
-                #   The backend default of 256MiB fails to persist silently:
-                #   nothing is written, no ERROR is logged, the master never
-                #   records a LOCAL_DISK replica, and eviction can therefore
-                #   never release DRAM. That failure mode is exactly what this
-                #   leg exists to catch;
-                # - explicit quotas keep the tier bounded instead of the
-                #   backend's whole-disk default.
-                stack.enter_context(
-                    patch.dict(
-                        os.environ,
-                        {
-                            "MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES": str(1024**3),
-                            "MOONCAKE_OFFLOAD_BUCKET_SIZE_LIMIT_BYTES": str(MOONCAKE_OFFLOAD_BUCKET_SIZE_LIMIT_BYTES),
-                            "MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE": str(16 * 1024**3),
-                            "MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES": str(16 * 1024**3),
-                            "MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY": "lru",
-                        },
-                    )
-                )
             extra_config: dict[str, Any] = {
                 "backend": backend,
                 "use_layerwise": use_layerwise,
