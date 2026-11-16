@@ -167,11 +167,11 @@ def compute_topk_scores(
             PADDED_COLS=triton.next_power_of_2(num_cols),
         )
     if logits_mode:
-        logprobs = logits.gather(-1, logprob_token_ids).to(torch.float32)
+        scores = logits.gather(-1, logprob_token_ids).to(torch.float32)
     else:
-        logprobs = compute_token_logprobs(logits, logprob_token_ids)
+        scores = compute_token_logprobs(logits, logprob_token_ids)
     if valid_mask is not None:
-        logprobs = logprobs.masked_fill(~valid_mask, float("-inf"))
+        scores = scores.masked_fill(~valid_mask, float("-inf"))
 
     token_ranks = torch.empty(
         batch_size,
@@ -200,7 +200,7 @@ def compute_topk_scores(
     is_tensor = isinstance(cu_num_logits, torch.Tensor)
     return LogprobsTensors(
         logprob_token_ids=logprob_token_ids,
-        logprobs=logprobs,
+        logprobs=scores,
         selected_token_ranks=token_ranks,
         cu_num_generated_tokens=None if is_tensor else cu_num_logits,
         cu_num_generated_tokens_tensor=cu_num_logits if is_tensor else None,
