@@ -136,7 +136,7 @@ class AscendSFAIndexerCache(DeepseekV32IndexerCache):
 
     align_kv_cache_with_mamba = False
 
-    def __init__(self, source: nn.Module, spec: AscendSFAIndexerCacheSpec) -> None:
+    def __init__(self, source: nn.Module, spec: AscendSFAIndexerCacheSpec, backend_cls: type[AttentionBackend]) -> None:
         nn.Module.__init__(self)
         self.prefix = source.prefix
         self.kv_cache = source.kv_cache
@@ -144,6 +144,9 @@ class AscendSFAIndexerCache(DeepseekV32IndexerCache):
         self.head_dim = source.head_dim
         self.dtype = spec.dtype
         self.cache_spec = spec
+        # Metadata discovery must use the same backend as the indexer impl,
+        # including after the model construction config context has exited.
+        self.backend_cls = backend_cls
         self.cache_enabled = True
         get_current_vllm_config().compilation_config.static_forward_context[self.prefix] = self
 
@@ -154,7 +157,7 @@ class AscendSFAIndexerCache(DeepseekV32IndexerCache):
         return replace(self.cache_spec, block_size=vllm_config.cache_config.block_size)  # type: ignore[call-arg]
 
     def get_attn_backend(self):
-        return AscendSFAIndexerBackend
+        return self.backend_cls
 
 
 class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
@@ -280,7 +283,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
 
         vllm_config = get_current_vllm_config()
         spec = self._build_cache_spec(self.k_cache.get_kv_cache_spec(vllm_config), vllm_config)
-        self.k_cache = AscendSFAIndexerCache(self.k_cache, spec)
+        self.k_cache = AscendSFAIndexerCache(self.k_cache, spec, backend_cls=type(self))
         vllm_indexer.k_cache = self.k_cache
 
         model_type = get_current_vllm_config().model_config.hf_config.model_type

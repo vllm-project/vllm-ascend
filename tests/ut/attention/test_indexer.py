@@ -643,7 +643,7 @@ def test_indexer_owner_reports_data_scale_and_replication(monkeypatch, c4, c8, r
     prefix = "model.layers.0.self_attn.indexer.k_cache"
     old_owner = SimpleNamespace(head_dim=132, prefix=prefix, kv_cache=torch.empty(0), cache_config=config.cache_config)
     config.compilation_config.static_forward_context[prefix] = old_owner
-    owner = AscendSFAIndexerCache(old_owner, spec)
+    owner = AscendSFAIndexerCache(old_owner, spec, backend_cls=AscendSFAIndexerBackend)
     assert config.compilation_config.static_forward_context[prefix] is owner
     assert owner.get_kv_cache_spec(config) == spec
     owner.cache_enabled = False
@@ -669,7 +669,7 @@ def test_indexer_owner_tracks_runtime_cache_requirement(monkeypatch, mtp):
     source = SimpleNamespace(
         prefix="cache_owner", head_dim=128, kv_cache=torch.empty(0), cache_config=config.cache_config
     )
-    owner = AscendSFAIndexerCache(source, spec)
+    owner = AscendSFAIndexerCache(source, spec, backend_cls=AscendSFAIndexerBackend)
     impl = AscendSFAImpl.__new__(AscendSFAImpl)
     impl.indexer = SimpleNamespace(k_cache=owner)
     impl.has_indexer = True
