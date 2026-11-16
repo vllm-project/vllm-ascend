@@ -51,7 +51,12 @@ defaults:
     shell: bash -el {0}
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Split the group by event so a `pull_request_review` run never cancels the
+  # in-flight `pull_request` CI run. The review-event ci-gate carries the
+  # pull_request run's verdict forward (see the ci-gate job), so cancelling
+  # that run here used to leave the review gate with only a `cancelled`
+  # conclusion to read, deadlocking it until a manual re-run.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -852,15 +857,24 @@ jobs:
     needs: [pre-commit, cpu-ut, select-tests, run-selected-tests, run-selected-tests-a5, codeowner-approval]
     if: ${{ !cancelled() }}
     runs-on: linux-amd64-cpu-2-hk
+    # On review events this job may wait for an in-flight pull_request CI run to
+    # finish before carrying its verdict forward (see the Check step).
+    timeout-minutes: 360
     permissions:
       # Post/delete the gate-failure PR comment (issue comments).
       issues: write
       pull-requests: write
+      # Read the latest pull_request E2E run + its jobs to carry the code-CI
+      # verdict forward on review events (Actions REST API).
+      actions: read
     env:
       EVENT_NAME: ${{ github.event_name }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       RUN_ID: ${{ github.run_id }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Maximum time (seconds) a review-event ci-gate waits for the latest
+      # pull_request CI run to complete before giving up.
+      GATE_WAIT_SECONDS: "21600"
     steps:
       - name: Check all required jobs
         id: check
@@ -892,38 +906,137 @@ jobs:
             exit 1
           }
 
-          # On review events the heavy jobs above are skipped; the gate verdict
-          # is: (a) owner approval still holds and (b) the previous ci-gate run
-          # on this same head sha was green, so prior CI results are carried
-          # forward instead of being re-executed or silently dropped.
+          # On review events the heavy jobs above are skipped, so this gate
+          # carries forward the verdict of the latest `pull_request` E2E run on
+          # this same head sha. That run is the authoritative code-CI result and
+          # is never cancelled by the review event (concurrency groups are
+          # split per event). If the pull_request CI is still running when the
+          # review lands, wait for it to finish here instead of reading a stale
+          # or cancelled result, so approving mid-CI (or right after an infra
+          # flake is retried) resolves automatically without a manual re-run.
           if [ "${EVENT_NAME}" = "pull_request_review" ]; then
             if [ "${OWNER_RESULT}" != "success" ]; then
               fail "CODEOWNERS approval gate failed: every changed file needs an approval from one of its owners. Approvals survive pushes; an owner can withdraw one by submitting a review that requests changes."
             fi
-          PREV_FILE="${RUNNER_TEMP}/prev_conclusion.txt"
-          python3 - <<'PY'
-          import json, os, urllib.request
+            export GATE_VERDICT_FILE="${RUNNER_TEMP}/gate_verdict.txt"
+            python3 - <<'PY'
+          import json, os, time, urllib.request
 
-          request = urllib.request.Request(
-              f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}"
-              f"/commits/{os.environ['HEAD_SHA']}/check-runs?check_name=ci-gate",
-              headers={
-                  "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+          repo = os.environ["GITHUB_REPOSITORY"]
+          sha = os.environ["HEAD_SHA"]
+          token = os.environ["GH_TOKEN"]
+
+
+          def get(url):
+              request = urllib.request.Request(url, headers={
+                  "Authorization": f"Bearer {token}",
                   "Accept": "application/vnd.github+json",
-              },
-          )
-          with urllib.request.urlopen(request) as response:
-              data = json.load(response)
-          concluded = [c for c in data.get("check_runs", []) if c.get("conclusion")]
-          with open(os.environ["PREV_FILE"], "w") as f:
-              f.write(concluded[-1]["conclusion"] if concluded else "none")
+              })
+              with urllib.request.urlopen(request) as response:
+                  return json.load(response)
+
+
+          def latest_pull_request_run():
+              data = get(
+                  f"https://api.github.com/repos/{repo}/actions/runs"
+                  f"?head_sha={sha}&per_page=100"
+              )
+              runs = [
+                  r for r in data.get("workflow_runs", [])
+                  if r.get("name") == "E2E" and r.get("event") == "pull_request"
+              ]
+              runs.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+              return runs[0] if runs else None
+
+
+          def verdict(name, detail=""):
+              with open(os.environ["GATE_VERDICT_FILE"], "w") as f:
+                  f.write(name + "\n" + detail + "\n")
+
+
+          # A code job that never ran (skipped) or is still absent does not
+          # count as a failure; anything else that is not success does.
+          def is_gate_job(name):
+              return (
+                  name in ("pre-commit", "select-tests")
+                  or name.startswith("run-selected-tests (vllm@")
+                  or name.startswith("run-selected-tests-a5 (vllm@")
+                  or (name.startswith("cpu-ut (vllm@") and " / cpu-ut card" in name)
+              )
+
+
+          deadline = time.time() + float(os.environ["GATE_WAIT_SECONDS"])
+          run = latest_pull_request_run()
+          while run and run.get("status") in (
+              "queued", "requested", "waiting", "in_progress"
+          ):
+              if time.time() > deadline:
+                  raise SystemExit("timed out waiting for pull_request CI")
+              time.sleep(60)
+              run = latest_pull_request_run()
+
+          if run is None:
+              verdict("no-ci")
+          elif run.get("conclusion") == "success":
+              # The whole pull_request run was green, so ci-gate passed too.
+              verdict("success")
+          else:
+              jobs = get(run["jobs_url"] + "?per_page=100").get("jobs", [])
+              ci_gate_job = next(
+                  (j for j in jobs if j.get("name") == "ci-gate"), None)
+              owner_job = next(
+                  (j for j in jobs if j.get("name") == "codeowner-approval"), None)
+              select_job = next(
+                  (j for j in jobs if j.get("name") == "select-tests"), None)
+              bad = [
+                  f"{j.get('name')}:{j.get('conclusion')}"
+                  for j in jobs
+                  if is_gate_job(j.get("name", ""))
+                  and j.get("conclusion") not in (None, "skipped", "success")
+              ]
+              gate_conclusion = ci_gate_job.get("conclusion") if ci_gate_job else None
+              if bad:
+                  verdict("code-failure", ", ".join(bad))
+              elif gate_conclusion == "success":
+                  verdict("success")
+              elif gate_conclusion == "failure":
+                  if select_job and select_job.get("conclusion") == "skipped":
+                      verdict("tests-not-run")
+                  elif owner_job and owner_job.get("conclusion") != "success":
+                      # The only blocker in the previous run was the (then
+                      # missing) CODEOWNERS approval, which now exists.
+                      verdict("owner-resolved")
+                  else:
+                      verdict("gate-failed")
+              else:
+                  verdict("cancelled", f"ci-gate={gate_conclusion}")
           PY
-          PREV_CONCLUSION="$(cat "${PREV_FILE}")"
-            if [ "${PREV_CONCLUSION}" != "success" ]; then
-              fail "A review was submitted, but CI for this commit has not passed yet (previous ci-gate conclusion: ${PREV_CONCLUSION}). Waiting for CI or fixing failures does not require a re-review."
-            fi
-            echo "=== CI Gate: PASSED (review event, prior CI green + owner approval) ==="
-            exit 0
+            VERDICT="$(sed -n '1p' "${GATE_VERDICT_FILE}")"
+            VERDICT_DETAIL="$(sed -n '2p' "${GATE_VERDICT_FILE}")"
+            case "${VERDICT}" in
+              success|owner-resolved)
+                echo "=== CI Gate: PASSED (review event, prior code CI green + owner approval) ==="
+                exit 0
+                ;;
+              no-ci)
+                fail "A review was submitted before any pull_request CI run existed for this commit (${HEAD_SHA}). CI must run first; no re-review is needed."
+                ;;
+              code-failure)
+                fail "A review was submitted, but the code CI for this commit did not pass (failed: ${VERDICT_DETAIL}). Fix/re-run the failing job(s); the gate will pass once CI is green and no re-review is needed."
+                ;;
+              tests-not-run)
+                fail "The previous CI run did not execute tests (select-tests was skipped), so its result cannot be carried forward. A maintainer must add the 'ready-precise' label and re-run CI."
+                ;;
+              gate-failed)
+                fail "A review was submitted, but the previous ci-gate failed for a reason other than owner approval. Open the failed pull_request CI run for this commit for details."
+                ;;
+              cancelled)
+                fail "The latest pull_request CI run for this commit was cancelled (${VERDICT_DETAIL}), so it cannot be carried forward. Re-run the pull_request CI; no re-review is needed."
+                ;;
+              *)
+                fail "A review was submitted, but the CI state for this commit could not be determined (verdict: '${VERDICT}'). Check the pull_request CI run for this commit."
+                ;;
+            esac
           fi
 
           if [ "${OWNER_RESULT}" != "success" ]; then
