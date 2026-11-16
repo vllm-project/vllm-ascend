@@ -100,7 +100,7 @@ from tests.e2e.pull_request.kv_pool_watch import (
 )
 
 MODEL = os.environ.get("QWEN38_POOL_MODEL", "Eco-Tech/Qwen3.8-27B-w8a8")
-TP_SIZE = 2
+TP_SIZE = int(os.environ.get("QWEN38_POOL_TP_SIZE", "2"))
 
 # 16K-class shared prefix with a non-zero tail: the pool only transfers whole
 # blocks/lcm groups, and an lcm-aligned prompt would trim its final block into
@@ -674,7 +674,7 @@ def test_qwen38_kv_pool_ab_a2(backend: str, use_layerwise: bool):
     tier_ssd = use_layerwise
     mode = "layerwise" if use_layerwise else "bulk"
     tier = "tier3-ssd" if tier_ssd else "tier2-dram"
-    case = f"qwen38_tp2_{backend}_{mode}_{tier}"
+    case = f"qwen38_tp{TP_SIZE}_{backend}_{mode}_{tier}"
 
     if backend == "mooncake":
         # The official support matrix asks for mooncake >= 0.3.14 for
