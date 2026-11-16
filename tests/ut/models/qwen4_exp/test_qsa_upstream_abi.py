@@ -5,10 +5,13 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+from vllm.v1.attention.ops import metadata as upstream_metadata_ops
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.models.qwen4_exp import qsa
 from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 
 
 def test_main_and_draft_qkv_projection_use_upstream_path() -> None:
@@ -280,6 +283,118 @@ def test_pcp_indexer_global_write_invalidates_the_local_layout(monkeypatch) -> N
     assert global_common._token_to_req_indices_cache is None
     assert global_common._num_computed_tokens_cache is None
     assert common._token_to_req_indices_cache is local_mapping
+
+
+@pytest.mark.parametrize("local_live_tokens", [0, 1, 2])
+def test_pcp_qsa_full_graph_keeps_capture_and_replay_extents(monkeypatch, local_live_tokens) -> None:
+    local_table = torch.tensor([[3], [0]], dtype=torch.int32)
+    global_table = torch.tensor([[3], [4], [0], [0]], dtype=torch.int32)
+    global_slots = torch.full((1, 4), -1, dtype=torch.long)
+    restore = torch.arange(4)
+    main_builder = object.__new__(qsa.AscendQSAMetadataBuilder)
+    indexer_builder = qsa.AscendPCPQSAIndexerMetadataBuilder(
+        MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16, tokens_per_state=4),
+        ["indexer"],
+        SimpleNamespace(
+            scheduler_config=SimpleNamespace(max_num_seqs=4, max_num_batched_tokens=4),
+            speculative_config=None,
+            parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        ),
+        torch.device("cpu"),
+    )
+
+    def token_to_req(query_starts, out, num_mapped, num_tokens):
+        tokens = torch.arange(num_tokens, dtype=query_starts.dtype)
+        requests = torch.searchsorted(query_starts[1:], tokens, right=True)
+        out[:num_tokens].copy_(torch.where(tokens < num_mapped, requests, 0))
+        return out[:num_tokens]
+
+    monkeypatch.setattr(upstream_metadata_ops, "compute_token_to_req_indices", token_to_req)
+    monkeypatch.setattr(
+        qsa.upstream_qsa.Qwen4ExpQSAMetadataBuilder,
+        "build",
+        lambda _, prefix_len, common, fast_build=False: SimpleNamespace(num_actual_tokens=common.num_actual_tokens),
+    )
+    monkeypatch.setattr(qsa, "get_pcp_group", lambda: object())
+    monkeypatch.setattr(qsa, "all_gather_async", lambda rows, *_args, **_kwargs: (torch.cat((rows, rows + 2)), None))
+    groups = [
+        SimpleNamespace(
+            layer_names=["main"], backend=qsa.AscendQSABackend, get_metadata_builder=lambda _: main_builder
+        ),
+        SimpleNamespace(layer_names=["indexer"], get_metadata_builder=lambda _: indexer_builder),
+    ]
+    cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=None)])
+
+    for capture in (True, False):
+        global_live_tokens = 4 if capture else max(local_live_tokens, 1)
+        local_live = 2 if capture else local_live_tokens
+        global_starts = torch.arange(5, dtype=torch.int32)
+        local_starts = torch.arange(3, dtype=torch.int32)
+        if not capture:
+            global_slots[0, :global_live_tokens] = torch.arange(10, 10 + global_live_tokens)
+            restore[:global_live_tokens] = torch.arange(2, 2 + global_live_tokens)
+            restore[global_live_tokens:] = 0
+        context = SimpleNamespace(
+            local_num_tokens=2,
+            local_token_indices=None if capture else torch.arange(local_live),
+            hidden_restore_idx=restore,
+            global_batch=SimpleNamespace(
+                num_reqs=global_live_tokens,
+                num_reqs_after_padding=4,
+                num_tokens=global_live_tokens,
+                num_tokens_after_padding=4,
+                query_start_loc=global_starts,
+                query_start_loc_np=global_starts.numpy(),
+                seq_lens=(torch.arange(4) < global_live_tokens).to(torch.int32) * 8,
+                positions=torch.arange(4),
+                num_scheduled_tokens=torch.ones(global_live_tokens, dtype=torch.int32).numpy(),
+            ),
+            global_block_tables=(global_table,),
+            global_slot_mappings=global_slots,
+        )
+        metadata = build_attn_metadata(
+            attn_groups=[groups],
+            query_start_loc_gpu=local_starts,
+            query_start_loc_cpu=local_starts,
+            seq_lens=(torch.arange(2) < local_live).to(torch.int32) * 8,
+            num_reqs=2,
+            num_actual_reqs=max(local_live, 1),
+            num_tokens=2,
+            num_actual_tokens=local_live,
+            max_query_len=1,
+            max_seq_len=8,
+            block_tables=(local_table,),
+            slot_mappings=torch.full((1, 4), -1, dtype=torch.long),
+            is_prefilling=torch.zeros(2, dtype=torch.bool),
+            kv_cache_config=cache_config,
+            pcp_context=context,
+            full_graph_mode=not capture,
+            for_cudagraph_capture=capture,
+            skip_ring_state_update=False,
+        )
+        main, local = metadata["main"], metadata["indexer"]
+        write = local.write_metadata
+        assert main.num_actual_tokens == local.num_actual_tokens == 2
+        assert main.qsa_request_plan is None
+        assert local.pcp_context is context
+        assert local.logical_positions.tolist() == [7] * local_live + [-1] * (2 - local_live)
+        assert write.num_actual_tokens == 4
+        assert write.query_start_loc.shape == (5,)
+        assert write.logical_positions.tolist() == [7] * global_live_tokens + [-1] * (4 - global_live_tokens)
+        assert main.slot_mapping.data_ptr() == global_slots.data_ptr()
+        assert (write.slot_mapping[global_live_tokens:] == -1).all()
+        assert (write.slot_mapping[:global_live_tokens] >= 0).tolist() == [not capture] * global_live_tokens
+        if capture:
+            capture_buffers = (local.logical_positions, write.slot_mapping)
+        else:
+            assert local.logical_positions.data_ptr() == capture_buffers[0].data_ptr()
+            assert write.slot_mapping.data_ptr() == capture_buffers[1].data_ptr()
+
+        gathered = qsa._gather_pcp_cache_rows(torch.arange(2), context, write.num_actual_tokens)
+        expected = (
+            list(range(4)) if capture else list(range(2, 2 + global_live_tokens)) + [0] * (4 - global_live_tokens)
+        )
+        assert gathered.tolist() == expected
 
 
 @pytest.mark.parametrize("num_local_tokens", [0, 2])

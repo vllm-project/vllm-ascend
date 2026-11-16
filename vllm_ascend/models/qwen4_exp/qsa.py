@@ -84,11 +84,13 @@ else:
 QSAKVCache: TypeAlias = tuple[torch.Tensor, torch.Tensor]
 
 
-def _gather_pcp_cache_rows(rows: torch.Tensor, pcp_context: "AscendPCPAttentionContext") -> torch.Tensor:
+def _gather_pcp_cache_rows(
+    rows: torch.Tensor, pcp_context: "AscendPCPAttentionContext", num_write_tokens: int
+) -> torch.Tensor:
     if rows.shape[0] != pcp_context.local_num_tokens:
         raise ValueError("QSA PCP cache input must include the rank-local padding")
     gathered, _ = all_gather_async(rows.contiguous(), get_pcp_group(), async_op=False)
-    return gathered.index_select(0, pcp_context.hidden_restore_idx[: pcp_context.global_batch.num_tokens])
+    return gathered.index_select(0, pcp_context.hidden_restore_idx[:num_write_tokens])
 
 
 def _store_qsa_cache_rows(
@@ -445,9 +447,11 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         if pcp_context is not None:
             raw_metadata = raw_metadata.write_metadata
             compressed_metadata = compressed_metadata.write_metadata
-            token_k = _gather_pcp_cache_rows(token_k, pcp_context)
+            num_write_tokens = raw_metadata.num_actual_tokens
+            token_k = _gather_pcp_cache_rows(token_k, pcp_context, num_write_tokens)
             if self.raw_key_cache.rope_position_cache is not None:
-                positions = _gather_pcp_cache_rows(positions.movedim(-1, 0), pcp_context).movedim(0, -1)
+                gathered_positions = _gather_pcp_cache_rows(positions.movedim(-1, 0), pcp_context, num_write_tokens)
+                positions = gathered_positions.movedim(0, -1)
         num_tokens = raw_metadata.num_actual_tokens
         raw_key_cache = self.raw_key_cache.key_cache
         rope_position_cache = self.raw_key_cache.rope_position_cache
@@ -654,7 +658,7 @@ class AscendQSAImpl:
         request_plan = getattr(attn_metadata, "qsa_request_plan", None)
         if request_plan is None:
             logger.info_once("QSA attention is using the CANN GBSA backend.")
-            return qsa_gbsa_attention(
+            result = qsa_gbsa_attention(
                 query[:num_tokens],
                 key_cache,
                 value_cache,
@@ -665,6 +669,9 @@ class AscendQSAImpl:
                 seq_lens,
                 output[:num_tokens],
             )
+            if getattr(attn_metadata, "pcp_full_graph", False):
+                result.masked_fill_(logical_positions[:num_tokens, None, None] < 0, 0)
+            return result
         # main's ABI does not carry the freshly projected K/V; the dispatcher
         # then gathers them from the paged cache that `do_kv_cache_update`
         # already filled for this step.
@@ -700,16 +707,31 @@ class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
     # decode phase cannot cross into FIA when a request grows during replay.
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
 
-    def build(self, common_prefix_len: int, common_attn_metadata: CommonAttentionMetadata, fast_build: bool = False):
-        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+        *,
+        for_capture: bool = False,
+    ):
         pcp_context = getattr(common_attn_metadata, "pcp_context", None)
-        if pcp_context is not None and pcp_context.local_token_indices is not None:
+        full_pcp_graph = pcp_context is not None and common_attn_metadata.graph_pad_size >= 0
+        if full_pcp_graph:
+            common_attn_metadata = common_attn_metadata.replace(num_actual_tokens=common_attn_metadata.graph_pad_size)
+        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build or full_pcp_graph)
+        metadata.pcp_full_graph = full_pcp_graph
+        if pcp_context is not None and (full_pcp_graph or pcp_context.local_token_indices is not None):
             group = common_attn_metadata.pcp_cache_group_idx
-            metadata.slot_mapping = pcp_context.global_slot_mappings[group, : pcp_context.global_batch.num_tokens]
+            batch = pcp_context.global_batch
+            num_write_tokens = batch.num_tokens_after_padding if full_pcp_graph else batch.num_tokens
+            metadata.slot_mapping = pcp_context.global_slot_mappings[group, :num_write_tokens]
+        metadata.qsa_request_plan = None
+        if for_capture or full_pcp_graph:
+            return metadata
         phases = common_attn_metadata.is_prefilling
         if phases is None or phases.device.type != "cpu":
             raise ValueError("QSA phase dispatch requires scheduler CPU is_prefilling metadata")
-        metadata.qsa_request_plan = None
         if any(phases.tolist()):
             lengths = common_attn_metadata.seq_lens_cpu_upper_bound
             if lengths is None:
@@ -725,9 +747,7 @@ class AscendQSAMetadataBuilder(upstream_qsa.Qwen4ExpQSAMetadataBuilder):
     def build_for_cudagraph_capture(self, common_attn_metadata: CommonAttentionMetadata):
         # Capture dummy metadata need not carry live phase flags. Explicitly
         # bypass the prefill planner for the decode-only graph contract.
-        metadata = super().build(0, common_attn_metadata, fast_build=True)
-        metadata.qsa_request_plan = None
-        return metadata
+        return self.build(0, common_attn_metadata, fast_build=True, for_capture=True)
 
 
 class AscendQSABackend(UpstreamQSABackend):  # type: ignore[valid-type, misc]
@@ -814,15 +834,34 @@ class AscendPCPQSAIndexerMetadataBuilder(QSAIndexerMetadataBuilder):
         self.write_builder = QSAIndexerMetadataBuilder(kv_cache_spec, layer_names, vllm_config, device)
 
     def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
-        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
         context = common_attn_metadata.pcp_context
-        if context is not None and context.local_token_indices is not None:
+        full_pcp_graph = context is not None and common_attn_metadata.graph_pad_size >= 0
+        if full_pcp_graph:
+            # Keep TopK and GBSA at the captured local extent. The upstream
+            # metadata builder gives unmapped query rows a logical position of -1.
+            query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+            if common_attn_metadata.num_actual_tokens == 0:
+                # The empty rank's placeholder request has padded offsets.
+                query_start_loc_cpu = torch.zeros_like(query_start_loc_cpu)
+            common_attn_metadata = common_attn_metadata.replace(
+                num_actual_tokens=common_attn_metadata.graph_pad_size,
+                query_start_loc_cpu=query_start_loc_cpu,
+                _token_to_req_indices_cache=None,
+            )
+        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        if context is not None and (full_pcp_graph or context.local_token_indices is not None):
             group = common_attn_metadata.pcp_cache_group_idx
             batch = context.global_batch
+            num_write_tokens = batch.num_tokens_after_padding if full_pcp_graph else batch.num_tokens
+            num_write_reqs = batch.num_reqs_after_padding if full_pcp_graph else batch.num_reqs
             global_common = get_sfa_pcp_global_metadata(common_attn_metadata, context, group).replace(
-                query_start_loc=batch.query_start_loc[: batch.num_reqs + 1],
+                num_actual_tokens=num_write_tokens,
+                num_input_tokens=num_write_tokens,
+                num_reqs=num_write_reqs,
+                seq_lens=batch.seq_lens[:num_write_reqs],
+                query_start_loc=batch.query_start_loc[: num_write_reqs + 1],
                 query_start_loc_cpu=torch.from_numpy(batch.query_start_loc_np[: batch.num_reqs + 1]),
-                slot_mapping=context.global_slot_mappings[group, : batch.num_tokens],
+                slot_mapping=context.global_slot_mappings[group, :num_write_tokens],
                 max_query_len=int(batch.num_scheduled_tokens.max(initial=0)),
                 token_to_req=None,
                 # The copied metadata can already cache the rank-local layout.
@@ -941,7 +980,9 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         pcp_context = getattr(side_metadata, "pcp_context", None)
         write_key, write_value = key, value
         if pcp_context is not None:
-            write_key, write_value = _gather_pcp_cache_rows(torch.stack((key, value), dim=1), pcp_context).unbind(dim=1)
+            write_key, write_value = _gather_pcp_cache_rows(
+                torch.stack((key, value), dim=1), pcp_context, main_metadata.slot_mapping.shape[0]
+            ).unbind(dim=1)
         self.impl.do_kv_cache_update(
             self,
             write_key,

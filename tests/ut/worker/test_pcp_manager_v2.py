@@ -1207,6 +1207,30 @@ def test_dummy_attention_context_uses_current_batch(pcp_rank, has_stale_batch):
     manager._block_tables.gather_block_tables.assert_not_called()
 
 
+def test_sharded_dummy_and_replay_share_the_restore_buffer():
+    device = torch.device("cpu")
+    manager = AscendPCPManager(2, 0, device, max_num_reqs=4, max_num_tokens=4)
+    manager.global_input_buffers = AscendInputBuffers(4, 4, device)
+    manager._global_batch_slot_mappings = torch.empty((1, 4), dtype=torch.long)
+    manager._block_tables = SimpleNamespace(
+        get_dummy_block_tables=lambda num_reqs: (torch.zeros((num_reqs, 1), dtype=torch.int32),)
+    )
+
+    with (
+        patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"),
+        patch("vllm_ascend.worker.v2.pcp_manager.update_cos_sin"),
+    ):
+        local_batch = AscendInputBatch.make_dummy(2, 2, manager.input_buffers)
+        capture = manager._build_sharded_dummy_attention_context(local_batch, query_len=1)
+
+    torch.testing.assert_close(capture.hidden_restore_idx, torch.arange(4))
+    manager._hidden_restore_idx = torch.tensor([2, 0])
+    manager._pad_hidden_restore_idx(SimpleNamespace(num_tokens=2, num_tokens_after_padding=4))
+
+    assert capture.hidden_restore_idx.data_ptr() == manager._hidden_restore_idx.data_ptr()
+    torch.testing.assert_close(capture.hidden_restore_idx, torch.tensor([2, 0, 0, 0]))
+
+
 def test_capture_input_uses_upstream_staging_path():
     manager = AscendPCPManager(2, 0, torch.device("cpu"))
     input_batch = SimpleNamespace()
