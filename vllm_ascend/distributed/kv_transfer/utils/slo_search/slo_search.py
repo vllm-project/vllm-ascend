@@ -125,7 +125,7 @@ def parse_metrics(text, percentile, latency_unit, stage="total", require_cache=F
         raise TrialError("child output contains ERROR or a Python traceback; inspect console.log")
     # Prefix warmup and the full workload each print summaries. Only use the
     # full workload, even if its summary is incomplete.
-    text = text.rsplit("[开始] 全量数据集测试", 1)[-1]
+    text = text.rsplit("[\u5f00\u59cb] \u5168\u91cf\u6570\u636e\u96c6\u6d4b\u8bd5", 1)[-1]
     header = None
     result = {}
     counters = {}

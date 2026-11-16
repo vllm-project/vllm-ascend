@@ -1,35 +1,35 @@
-# KV Pool SLO 并发搜索
+# KV Pool SLO Concurrency Search
 
-`slo_search.py` 通过 AISBench 搜索满足延迟和请求成功率要求的最高并发，并保存各轮的延迟、吞吐和缓存命中指标。例如，搜索 **TTFT P90 < 10 s、TPOT P90 < 20 ms** 时的最高并发及对应吞吐。
+`slo_search.py` uses AISBench to find the highest concurrency that meets latency and request success rate requirements, saving latency, throughput, and cache hit metrics for each trial. For example, it can find the highest concurrency and corresponding throughput with **TTFT P90 < 10 s and TPOT P90 < 20 ms**.
 
-工具仅依赖 Python 3.9+ 标准库，通过命令行调用外部项目 [aisbench_auto_tools_prefix](https://github.com/rayn-zzz/aisbench_auto_tools_prefix) 中的 `aisbench_test.py`：
+The tool requires only the Python 3.9+ standard library. It invokes `aisbench_test.py` from the external [aisbench_auto_tools_prefix](https://github.com/rayn-zzz/aisbench_auto_tools_prefix) project through its CLI:
 
 ```text
-slo_search.py → aisbench_test.py → AISBench → 模型服务
+slo_search.py → aisbench_test.py → AISBench → model service
 ```
 
-## 运行前准备
+## Prerequisites
 
-1. 按 [KV Cache Pool 部署指南](../../../../../docs/source/user_guide/feature_guide/kv_cache_pool_ascend_store.md) 启动模型服务及存储后端，确认压测环境能够访问服务。
-2. 单独准备完整的 `aisbench_auto_tools_prefix` 项目及其 AISBench 依赖，配置 `config.py` 中的模型、tokenizer、服务地址、鉴权和数据集路径。前缀测试还需配置缓存指标查询所需的 `POD_INFO` 或 `HOST_IP:HOST_PORT`。
-3. 确认执行压测的 Python 能运行 `aisbench_test.py`，且 `ais_bench` 命令在子进程的 `PATH` 中。
-4. 确认外部项目及 AISBench 的配置、数据和日志目录可写。外部项目会生成数据、更新配置及数据集软链接；同一份项目不要同时运行多个搜索器或手动压测。
+1. Start the model service and storage backend following the [KV Cache Pool deployment guide](../../../../../docs/source/user_guide/feature_guide/kv_cache_pool_ascend_store.md), and verify that the benchmark environment can access the service.
+2. Set up a complete, separate checkout of `aisbench_auto_tools_prefix` and its AISBench dependencies. Configure the model, tokenizer, service address, authentication, and dataset paths in `config.py`. Prefix tests also require `POD_INFO` or `HOST_IP:HOST_PORT` for cache metric queries.
+3. Verify that the benchmark Python interpreter can run `aisbench_test.py` and that `ais_bench` is available in the subprocess `PATH`.
+4. Ensure that the external project and AISBench configuration, data, and log directories are writable. The external project generates data and updates configuration and dataset symlinks. Do not run multiple searchers or manual benchmarks concurrently against the same checkout.
 
-工具只负责发压、搜索和记录，不启动模型服务或配置 KV Pool，也不会清空服务缓存。
+The tool generates load, searches concurrency, and records results. It does not start the model service, configure KV Pool, or clear the service cache.
 
-以下示例使用 Bash。从 vllm-ascend 仓库根目录进入工具目录：
+The following examples use Bash. From the vllm-ascend repository root, enter the tool directory:
 
 ```bash
 cd vllm_ascend/distributed/kv_transfer/utils/slo_search
 ```
 
-将示例中的 `/path/to/aisbench_auto_tools_prefix` 替换为已配置好的外部项目目录。搜索器可与外部项目放在不同目录；使用不同 Python 环境时，通过 `--python /path/to/python` 指定压测解释器。
+Replace `/path/to/aisbench_auto_tools_prefix` with your configured external project directory. The searcher and external project can reside in different directories. To use a separate Python environment for benchmarking, specify its interpreter with `--python /path/to/python`.
 
-## 使用示例
+## Usage Examples
 
-### 按 P90 搜索
+### Search Using P90
 
-使用 2048 token 输入、1024 token 输出，要求 TTFT P90 < 10 s、TPOT P90 < 20 ms，搜索并发上限为 128：
+Search up to concurrency 128 with 2048 input tokens, 1024 output tokens, TTFT P90 < 10 s, and TPOT P90 < 20 ms:
 
 ```bash
 python slo_search.py \
@@ -40,11 +40,11 @@ python slo_search.py \
   -- --input_len 2048 --output_len 1024
 ```
 
-独立的 `--` 分隔两类参数：之前是搜索器参数（如 `--max-concurrency`），之后是原样传给 `aisbench_test.py` 的参数（如 `--input_len`）。
+The standalone `--` separates searcher arguments, such as `--max-concurrency`, from arguments passed unchanged to `aisbench_test.py`, such as `--input_len`.
 
-默认从并发 8 开始，每轮完整请求数为并发的 4 倍，使用 P90 判定 SLO，不额外复测边界。每轮同时展示 TTFT/TPOT 的平均值和 P90，结束后打印结果汇总及保存目录。
+By default, the search starts at concurrency 8, uses four times the concurrency as the full-workload request count for each trial, evaluates SLOs using P90, and performs no extra boundary confirmation. Each trial displays mean and P90 TTFT/TPOT values. When the search finishes, it prints a result summary and the output directory.
 
-### 前缀缓存：64K 输入、1K 输出
+### Prefix Cache: 64K Input, 1K Output
 
 ```bash
 python slo_search.py \
@@ -61,11 +61,11 @@ python slo_search.py \
   --prefix_test
 ```
 
-`--prefix_test` 由外部项目执行前缀预热；`--prefix-num-equals-concurrency` 让每轮前缀种类数等于并发。例如，并发 8 时默认使用 8 种前缀、32 条完整请求，预热请求不包含在这 32 条中。
+`--prefix_test` asks the external project to warm up prefixes. `--prefix-num-equals-concurrency` sets the number of distinct prefixes to the trial's concurrency. For example, concurrency 8 uses 8 distinct prefixes and 32 full-workload requests by default; warmup requests are excluded from those 32 requests.
 
-`--repeat_rate 0.9` 表示生成数据中公共前缀约占输入的 90%。实际缓存命中率以每轮记录为准。
+`--repeat_rate 0.9` means that the shared prefix accounts for approximately 90% of the generated input. Refer to each trial's metrics for the actual cache hit rate.
 
-### 仅约束平均 TTFT：64K 输入、1 token 输出
+### Mean TTFT Only: 64K Input, 1 Output Token
 
 ```bash
 python slo_search.py \
@@ -82,166 +82,166 @@ python slo_search.py \
   --prefix_test
 ```
 
-此例仅用平均 TTFT < 10 s 判定延迟是否达标，仍记录 TTFT P90。单 token 输出的 TPOT 不适用，显示为 `N/A`，JSON 中为 `null`，`tpot_status` 为 `not_applicable_single_token`；此时不能指定 `--tpot-limit-ms`。
+This example evaluates latency using only mean TTFT < 10 s while still recording TTFT P90. TPOT does not apply to single-token output: it appears as `N/A` in the terminal and `null` in JSON, with `tpot_status` set to `not_applicable_single_token`. Do not specify `--tpot-limit-ms` for this workload.
 
-### 可选边界复测
+### Optional Boundary Confirmation
 
-在搜索器参数中添加 `--confirm-runs 2`，可对候选边界及邻点分别复测两轮。以“并发 10 通过、11 不通过”、默认 `--boundary-radius 1` 为例，按 11、10、9 的顺序复测，每个点的两轮均通过才确认达标。搜索轮次不计入复测轮数。
+Add `--confirm-runs 2` to the searcher arguments to rerun the candidate boundary and neighboring points twice each. For example, if concurrency 10 passes and 11 fails, the default `--boundary-radius 1` confirms points in the order 11, 10, 9. Both confirmation trials at a point must pass for it to be confirmed. Search trials do not count toward confirmation runs.
 
-若邻点范围内没有确认通过的并发，工具会继续逐点向下复测，直到找到通过点或达到最小并发。设为 `--boundary-radius 0` 时，初始复测范围仅包含候选点。
+If no point in the neighboring range is confirmed, the tool continues downward one concurrency at a time until a point passes or the minimum concurrency is reached. With `--boundary-radius 0`, the initial confirmation range contains only the candidate point.
 
-## SLO 判定与搜索方式
+## SLO Evaluation and Search Strategy
 
-一轮必须满足所有已指定的延迟阈值及最低请求成功率：
+A trial must meet every specified latency limit and the minimum request success rate:
 
 ```text
-指定 TTFT 阈值时：所选统计口径的 TTFT < ttft-limit-ms
-指定 TPOT 阈值时：所选统计口径的 TPOT < tpot-limit-ms
-请求成功率 >= min-success-rate
+If a TTFT limit is specified: TTFT for the selected statistic < ttft-limit-ms
+If a TPOT limit is specified: TPOT for the selected statistic < tpot-limit-ms
+Request success rate >= min-success-rate
 ```
 
-- 延迟阈值单位为毫秒，严格使用 `<`；TPOT 等于 20 ms 时不满足 `< 20 ms`。默认请求成功率要求为 100%。
-- TTFT 和 TPOT 至少指定一个阈值，共用 `--percentile`。可使用 `mean` 或日志实际提供的分位数（如 `90`、`99`），不支持混合统计口径。
-- 每轮始终记录平均值和 P90，判定只使用所选口径。两个指标各自满足 P90 阈值，不代表同一批 90% 的请求同时满足两个条件。
-- `--stage` 选择汇总表中对应 Stage 的延迟、吞吐和请求统计，默认 `total`；它不改变发压方式或启用稳态测试。前缀预热统计不用于判定。
+- Latency limits are in milliseconds and use strict `<` comparisons. A TPOT of 20 ms does not meet a `< 20 ms` limit. The default request success rate requirement is 100%.
+- Specify at least one TTFT or TPOT limit. Both metrics share `--percentile`, which accepts `mean` or a percentile present in the logs, such as `90` or `99`. Mixing statistics is not supported.
+- Every trial records mean and P90 values, but SLO evaluation uses only the selected statistic. Both metrics meeting their P90 limits does not mean that the same 90% of requests meet both conditions.
+- `--stage` selects latency, throughput, and request statistics from the corresponding Stage in the summary tables; the default is `total`. It does not change load generation or enable steady-state testing. Prefix warmup statistics are excluded from SLO evaluation.
 
-| 阶段 | 行为 |
+| Phase | Behavior |
 | --- | --- |
-| `expand` | 从起始并发倍增，直到首次不达标或达到搜索上限 |
-| `bisect` | 二分查找通过与不通过的边界；起始点不通过时也会向下搜索 |
-| `confirm` | 可选：复测候选边界及邻点，要求每个点的所有复测轮次通过 |
+| `expand` | Double concurrency from the starting point until the first failure or the search limit |
+| `bisect` | Bisect the boundary between passing and failing points; also search downward if the starting point fails |
+| `confirm` | Optionally rerun the candidate boundary and neighboring points, requiring all confirmation trials at each point to pass |
 
-默认 `--confirm-runs 0`，结果来自搜索轮次；启用复测后，结果来自确认通过的最高并发及其复测轮次。搜索依赖近似单调的 SLO 假设，不逐点穷举。比较结果时，应保持输入输出长度、前缀配置、服务状态及统计口径一致。
+With the default `--confirm-runs 0`, results come from search trials. When confirmation is enabled, results come from the highest confirmed concurrency and its confirmation trials. The search assumes approximately monotonic SLO behavior and does not scan every concurrency. Keep input/output lengths, prefix configuration, service state, and the selected statistic consistent when comparing results.
 
-## 参数参考
+## Argument Reference
 
-完整帮助可通过 `python slo_search.py --help` 查看。
+Run `python slo_search.py --help` for the full help text.
 
-### SLO 与搜索范围
+### SLOs and Search Range
 
-| 参数 | 默认值 | 说明 |
+| Argument | Default | Description |
 | --- | --- | --- |
-| `--ttft-limit-ms` | 未指定 | TTFT 严格上限，单位 ms；省略时不约束 TTFT |
-| `--tpot-limit-ms` | 未指定 | TPOT 严格上限，单位 ms；省略时不约束 TPOT |
-| `--percentile` | `P90` | 延迟统计口径；平均值用 `mean` |
-| `--stage` | `total` | 要读取的 AISBench Stage 名称 |
-| `--min-success-rate` | `1.0` | 请求成功率下限，范围 `(0, 1]` |
-| `--min-concurrency` | `1` | 最低搜索并发 |
-| `--start-concurrency` | `8` | 起始并发 |
-| `--max-concurrency` | `1024` | 最高搜索并发 |
-| `--confirm-runs` | `0` | 每个点的额外复测轮数，`0` 表示关闭 |
-| `--boundary-radius` | `1` | 初始复测范围内候选点左右的整数邻点数 |
+| `--ttft-limit-ms` | Unset | Strict TTFT upper limit in ms; omit to leave TTFT unconstrained |
+| `--tpot-limit-ms` | Unset | Strict TPOT upper limit in ms; omit to leave TPOT unconstrained |
+| `--percentile` | `P90` | Latency statistic; use `mean` for the average |
+| `--stage` | `total` | AISBench Stage name to read |
+| `--min-success-rate` | `1.0` | Minimum request success rate, in `(0, 1]` |
+| `--min-concurrency` | `1` | Minimum search concurrency |
+| `--start-concurrency` | `8` | Starting concurrency |
+| `--max-concurrency` | `1024` | Maximum search concurrency |
+| `--confirm-runs` | `0` | Extra confirmation trials per point; `0` disables confirmation |
+| `--boundary-radius` | `1` | Number of neighboring integer concurrency points on each side of the candidate in the initial confirmation range |
 
-并发范围须满足 `1 <= min-concurrency <= start-concurrency <= max-concurrency`。例如，上限设为 4 时，起始并发也须调整为不超过 4。
+The concurrency range must satisfy `1 <= min-concurrency <= start-concurrency <= max-concurrency`. For example, if the maximum is 4, the starting concurrency must also be adjusted to at most 4.
 
-### 请求量与前缀
+### Request Counts and Prefixes
 
-| 参数 | 默认值 | 说明 |
+| Argument | Default | Description |
 | --- | --- | --- |
-| `--requests-per-concurrency` | `4` | 每轮完整请求数相对于并发的倍数，须为正整数 |
-| `--min-data-num` | `0` | 每轮完整请求数下限 |
-| `--data-num` | 未指定 | 固定完整请求数，须不小于最高搜索并发 |
-| `--prefix-num-equals-concurrency` | 关闭 | 每轮设置 `--prefix_num` 等于该轮并发 |
+| `--requests-per-concurrency` | `4` | Full-workload requests per unit of concurrency in each trial; must be a positive integer |
+| `--min-data-num` | `0` | Minimum full-workload request count per trial |
+| `--data-num` | Unset | Fixed full-workload request count; must be at least the maximum search concurrency |
+| `--prefix-num-equals-concurrency` | Disabled | Set `--prefix_num` to the trial's concurrency |
 
-未指定 `--data-num` 时，每轮完整请求数为 `max(min-data-num, 当前并发 × requests-per-concurrency)`。
+Without `--data-num`, each trial uses `max(min-data-num, current concurrency × requests-per-concurrency)` full-workload requests.
 
-启用前缀数量联动时，须在 `--` 后指定 `--dataset_type prefix_cache`，且不能同时传 `--prefix_num` 或 `--dataset`。未启用联动时，可透传固定的 `--prefix_num`。是否预热由 `--prefix_test` 控制，预热并发由外部项目版本及其配置决定。
+When linking the prefix count to concurrency, pass `--dataset_type prefix_cache` after `--` and do not also pass `--prefix_num` or `--dataset`. Otherwise, a fixed `--prefix_num` can be passed through. `--prefix_test` controls warmup; warmup concurrency depends on the external project's version and configuration.
 
-使用已有 `--dataset` 时，实际请求量由数据集决定，工具不会自动扩充数据；需自行确保数据量足以测试目标并发。
+When using an existing `--dataset`, the dataset determines the actual request count. The tool does not expand it automatically; ensure that it contains enough data for the target concurrency.
 
-搜索器统一设置 `--concurrency`、`--request_rate 0`、`--repeat 1` 和 `--data_num`，这些参数不能放在 `--` 后；也不支持透传 `--test_accuracy`。
+The searcher manages `--concurrency`, `--request_rate 0`, `--repeat 1`, and `--data_num`; do not place these arguments after `--`. Passing through `--test_accuracy` is also unsupported.
 
-### 路径与执行控制
+### Paths and Execution Control
 
-| 参数 | 默认值 | 说明 |
+| Argument | Default | Description |
 | --- | --- | --- |
-| `--project-dir` | 脚本所在目录 | 包含 `aisbench_test.py` 的外部项目目录 |
-| `--python` | 当前 Python | 执行外部项目的 Python 解释器 |
-| `--output-dir` | `<project-dir>/slo_results/<时间戳>` | 本次结果目录，必须尚不存在 |
-| `--timeout` | `3600` 秒 | 每轮子进程超时，包含数据准备、预热及完整压测 |
-| `--latency-unit` | 未指定 | 仅在日志缺少时间单位时指定 `ms` 或 `s` |
+| `--project-dir` | Script directory | External project directory containing `aisbench_test.py` |
+| `--python` | Current Python interpreter | Python interpreter used to run the external project |
+| `--output-dir` | `<project-dir>/slo_results/<timestamp>` | Output directory for this search; must not already exist |
+| `--timeout` | `3600` seconds | Subprocess timeout per trial, including data preparation, warmup, and the full benchmark |
+| `--latency-unit` | Unset | Specify `ms` or `s` only when the logs omit time units |
 
-`--timeout` 是单轮超时，不是整个搜索的总时限。任意一轮超时都会终止该轮子进程树并中止搜索。
+`--timeout` applies to each trial, not the entire search. Any trial timeout terminates that trial's subprocess tree and aborts the search.
 
-## 结果与日志
+## Results and Logs
 
-默认结果目录位于外部项目下。显式指定相对 `--output-dir` 时，路径相对于当前工作目录。每次搜索使用新目录，不覆盖已有结果。
+By default, results are stored under the external project directory. An explicitly specified relative `--output-dir` is resolved against the current working directory. Each search requires a new directory and does not overwrite existing results.
 
 ```text
-<project-dir>/slo_results/<时间戳>/
-├── settings.json          搜索配置和透传参数
-├── summary.json           最终结论或中止原因
-├── history.csv            各轮指标
-├── history.jsonl          各轮完整记录及实际命令
-└── trial_0001/            后续轮次依次编号
-    ├── command.json       本轮执行命令
-    ├── console.log        子进程输出及解析成功后的指标汇总表
-    ├── metrics.txt        解析成功后的指标汇总表
-    └── result.json        本轮指标和判定，或错误原因
+<project-dir>/slo_results/<timestamp>/
+├── settings.json          Search configuration and passthrough arguments
+├── summary.json           Final result or abort reason
+├── history.csv            Metrics for each trial
+├── history.jsonl          Full trial records and actual commands
+└── trial_0001/            Subsequent trials are numbered sequentially
+    ├── command.json       Command executed for this trial
+    ├── console.log        Subprocess output and metric summary after successful parsing
+    ├── metrics.txt        Metric summary after successful parsing
+    └── result.json        Trial metrics and outcome, or error reason
 ```
 
-### 最终结果
+### Final Result
 
 ```bash
 RESULT_DIR=/path/to/result_directory
 python -m json.tool "$RESULT_DIR/summary.json"
 ```
 
-| 字段 | 含义 |
+| Field | Meaning |
 | --- | --- |
-| `status` | `complete` 为搜索完成；`aborted` 为中止，原因见 `error` |
-| `highest_passing_concurrency` | 最高达标并发；`null` 为未找到达标点 |
-| `result_source` | `search` 为搜索轮次，`confirm` 为复测轮次 |
-| `active_slo_metrics` | 参与判断的延迟指标，如 `["ttft"]` |
-| `confirmation_performed` | 是否启用额外复测 |
-| `result_trial_ids` | 最终结果对应的轮次编号 |
-| `throughput.*_tokens_per_s_mean` | 结果轮次的输出或 Prefill 平均吞吐，token/s |
-| `throughput.requests_per_s_mean` | 结果轮次的平均请求吞吐，req/s |
-| `worst_ttft_ms`、`worst_tpot_ms` | 结果轮次中最大的所选延迟统计值，ms |
-| `result_cache_metrics` | 结果轮次的缓存指标 |
-| `confirmation_trial_ids`、`confirmation_cache_metrics` | 复测结果；未启用复测时为空数组 |
-| `at_search_limit` | 是否达到搜索上限；为 `true` 时可提高上限再测 |
+| `status` | `complete` when the search finishes; `aborted` on an error, with the reason in `error` |
+| `highest_passing_concurrency` | Highest passing concurrency; `null` if no passing point was found |
+| `result_source` | `search` for search trials or `confirm` for confirmation trials |
+| `active_slo_metrics` | Latency metrics used for evaluation, such as `["ttft"]` |
+| `confirmation_performed` | Whether extra confirmation was enabled |
+| `result_trial_ids` | Trial IDs used for the final result |
+| `throughput.*_tokens_per_s_mean` | Mean output or prefill throughput across result trials, in token/s |
+| `throughput.requests_per_s_mean` | Mean request throughput across result trials, in req/s |
+| `worst_ttft_ms`, `worst_tpot_ms` | Maximum selected latency statistic across result trials, in ms |
+| `result_cache_metrics` | Cache metrics from result trials |
+| `confirmation_trial_ids`, `confirmation_cache_metrics` | Confirmation results; empty arrays when confirmation is disabled |
+| `at_search_limit` | Whether the search limit was reached; if `true`, consider increasing the limit and rerunning |
 
-无达标点时，不生成吞吐及延迟结果字段。异常中止时，`summary.json` 仅记录中止状态、错误和已记录轮数。
+If no point passes, throughput and latency result fields are omitted. On an abort, `summary.json` records only the aborted status, error, and recorded trial count.
 
-未启用复测时，吞吐来自最终并发的单个搜索轮次；启用复测时，吞吐取最终选中并发的复测均值。“最差 P90”是这些轮次各自 P90 的最大值，不是合并请求后重新计算的 P90。
+Without confirmation, throughput comes from the single search trial at the final concurrency. With confirmation, throughput is averaged over confirmation trials at the selected concurrency. The "worst P90" is the maximum of those trials' individual P90 values, not a P90 recalculated from pooled requests.
 
-### 每轮指标
+### Per-Trial Metrics
 
 ```bash
 cat "$RESULT_DIR/history.csv"
 cat "$RESULT_DIR/trial_0001/metrics.txt"
 ```
 
-历史记录包含并发、请求量、阶段、延迟、吞吐、请求成功率和缓存指标。`status` 为 `pass`、`fail` 或 `error`，分别表示达标、不达标和无效轮次；无效轮次会中止搜索。
+History records include concurrency, request count, phase, latency, throughput, request success rate, and cache metrics. `status` is `pass`, `fail`, or `error`, indicating a passing, failing, or invalid trial respectively. Invalid trials abort the search.
 
-`ttft_mean_ms`、`ttft_p90_ms`、`tpot_mean_ms`、`tpot_p90_ms` 记录平均值及 P90。`ttft_ms`、`tpot_ms` 为 SLO 所选口径的值，单位均为 ms；其他分位数还会在终端单独展示。
+`ttft_mean_ms`, `ttft_p90_ms`, `tpot_mean_ms`, and `tpot_p90_ms` record mean and P90 values. `ttft_ms` and `tpot_ms` hold the selected SLO statistic, also in ms. Other selected percentiles are displayed separately in the terminal.
 
-缓存命中率记录为 `hbm_hit_rate_pct`、`external_hit_rate_pct`，范围为 0～100，并保存各自的 `*_hits`、`*_queries` 和 `*_cache_status`：
+Cache hit rates are recorded as `hbm_hit_rate_pct` and `external_hit_rate_pct` in the range 0–100, along with their respective `*_hits`, `*_queries`, and `*_cache_status` fields:
 
-- 命中率由完整压测期间的汇总命中/查询计数计算，不平均各节点百分比。`external` 保留外部 KV 缓存的含义。
-- `no_queries` 表示查询量为零，命中率未定义；`not_reported` 表示日志未提供该指标。两者在终端显示 `N/A`，JSON 为 `null`，CSV 为空。
-- 缓存指标对应完整压测区间，即使指定其他 Stage，也不能视为该 Stage 的专属指标。
+- Hit rates are calculated from aggregate hit/query counts over the full benchmark, without averaging per-node percentages. `external` retains its meaning as the external KV cache.
+- `no_queries` means the query count is zero and the hit rate is undefined. `not_reported` means the logs did not provide the metric. Both appear as `N/A` in the terminal, `null` in JSON, and empty cells in CSV.
+- Cache metrics cover the full benchmark interval. Selecting another Stage does not make them specific to that Stage.
 
-Prefill 吞吐来自 AISBench 的 `Prefill Token Throughput`。吞吐及缓存指标用于观测，不参与 SLO 判定。
+Prefill throughput comes from AISBench's `Prefill Token Throughput`. Throughput and cache metrics are recorded for observation and do not affect SLO evaluation.
 
-如需保存搜索器整体终端输出，可使用 `set -o pipefail`，并在命令末尾添加 `2>&1 | tee slo_search.log`。各轮子进程输出以 `trial_*/console.log` 为准。
+To save the searcher's complete terminal output, use `set -o pipefail` and append `2>&1 | tee slo_search.log` to the command. Each trial's subprocess output is stored in `trial_*/console.log`.
 
-## 故障排查
+## Troubleshooting
 
-| 情况 | 处理方式 |
+| Situation | Action |
 | --- | --- |
-| 缺少延迟、吞吐或请求统计 | 检查该轮 `console.log`。日志须包含 TTFT/TPOT 的平均值、P90 及所选分位数，以及 Prefill/Output Token Throughput、Request Throughput、Total Requests、Failed Requests；单 token 输出可无 TPOT |
-| 时间单位缺失 | 指定 `--latency-unit ms` 或 `--latency-unit s`；有单位时以日志为准 |
-| 缺少或无效的缓存汇总 | 启用 `--prefix_test` 时，须有完整压测的 `Prefix cache hit summary` 及 `ALL_PODS` 中的 HBM/external 命中和查询计数；检查节点配置及服务 `/metrics` 的可访问性 |
-| 结果目录已存在 | 使用新的 `--output-dir`，或省略该参数自动生成目录 |
-| 项目目录被占用 | `.slo_search.lock` 防止搜索器重叠运行；强制结束后，确认相关进程已停止，再删除遗留锁 |
-| 子进程退出、超时或指标解析失败 | 查看 `summary.json` 的 `error` 及该轮 `console.log`；已记录轮次会保留，错误不会作为普通 SLO 不达标继续搜索 |
+| Missing latency, throughput, or request statistics | Inspect the trial's `console.log`. Logs must include TTFT/TPOT mean, P90, and the selected percentile, plus Prefill/Output Token Throughput, Request Throughput, Total Requests, and Failed Requests. TPOT may be absent for single-token output |
+| Missing time units | Specify `--latency-unit ms` or `--latency-unit s`; units present in the logs take precedence |
+| Missing or invalid cache summary | With `--prefix_test`, the full benchmark must include a `Prefix cache hit summary` with HBM/external hit and query counts in `ALL_PODS`. Check node configuration and service `/metrics` access |
+| Output directory already exists | Use a new `--output-dir`, or omit it to generate a directory automatically |
+| Project directory is in use | `.slo_search.lock` prevents overlapping searchers. After forced termination, verify that related processes have stopped before deleting a stale lock |
+| Subprocess exit, timeout, or metric parsing failure | Inspect `error` in `summary.json` and the trial's `console.log`. Recorded trials are preserved. Errors abort the search instead of being treated as ordinary SLO failures |
 
-日志格式须与工具支持的汇总表匹配。所选分位数或 Stage 缺失、日志包含 ERROR/Traceback、缓存节点被跳过或计数异常时，工具会报错，不复用预热结果或其他轮次指标。
+The log format must match the summary tables supported by the tool. Missing percentiles or Stages, ERROR/Traceback output, skipped cache nodes, or invalid counters cause errors. The tool does not reuse warmup results or metrics from other trials.
 
-| 退出码 | 含义 |
+| Exit Code | Meaning |
 | --- | --- |
-| `0` | 搜索完成并找到达标点 |
-| `1` | 搜索完成但未找到达标点 |
-| `2` | 参数、执行或解析错误 |
+| `0` | Search completed with a passing point |
+| `1` | Search completed without a passing point |
+| `2` | Argument, execution, or parsing error |
