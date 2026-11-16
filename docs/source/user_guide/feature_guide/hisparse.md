@@ -69,9 +69,10 @@ Model Runner V2 C8 command above:
 --kv-transfer-config '{"kv_connector":"HiSparseConnector","kv_role":"kv_both","kv_connector_extra_config":{"host_pool_gib":64}}'
 ```
 
-Use the direct `HiSparseConnector` with private per-rank Host pools. PCP gathers
-packed C8 KV rows before Resident writes and Host mirroring; sparse attention
-uses local query rows. The layout follows the configured PCP group size.
+Use the direct `HiSparseConnector` with private per-rank Host pools. PCP partitions
+prefill and gathers packed C8 KV before Resident writes and Host mirroring.
+Decode requests are replicated across PCP ranks and write Resident directly
+without a KV gather. HiSparse disables PCP decode request sharding.
 
 When using speculative decoding, size `device_buffer_size` to hold the
 deduplicated union of KV rows selected across all verification tokens of a request.

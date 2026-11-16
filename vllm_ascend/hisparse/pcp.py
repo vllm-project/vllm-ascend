@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 """Separate PCP query rows from rank-major HiSparse KV writes.
 
-C8 request-sharded target and replicated draft decode, including full graphs.
+C8 PCP prefill and replicated decode, including full graphs.
 Core retains residency scheduling, DMA and the Host write completion fence.
 """
 
@@ -144,6 +144,12 @@ class PCPHiSparseConnector(ActiveKVConnector):
         slots = manager._gathered_kv_slot_mappings
         assert indices is not None and mask is not None and slots is not None
         count = indices.numel()
+        if not manager.is_decode_sharded and not global_batch.is_prefilling_np.any():
+            # Replicated decode writes once per rank without a KV collective.
+            # Rank 0's gathered span has the same rows, including graph padding.
+            count = input_batch.num_tokens_after_padding
+            indices = torch.arange(count, device=indices.device)
+            mask = indices < global_batch.num_tokens
         local_tables = manager._local_block_tables
         assert local_tables is not None
         for cache, group_id, hot_group_id in self._pcp_bindings:

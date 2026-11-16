@@ -161,7 +161,8 @@ class AscendHiSparseMetadataBuilder(AscendSFAMetadataBuilder):
             states, valid_rows = self._pcp_query_buffers[draft_index]
             local_states = pcp_context.local_request_state_indices
             assert local_states is not None
-            prepare_pcp_query_metadata(metadata, states, valid_rows, local_states, self._pcp_size)
+            write_world_size = self._pcp_size if needs_pcp_kv_gather(metadata, self.is_pcp_decode_sharded) else 1
+            prepare_pcp_query_metadata(metadata, states, valid_rows, local_states, write_world_size)
         if metadata.num_prefills:
             seq_lens_cpu = metadata.seq_lens_cpu
             if seq_lens_cpu is None:
@@ -201,8 +202,8 @@ class AscendHiSparseImpl(AscendSFAImpl):
         if parallel.decode_context_parallel_size > 1:
             raise ValueError("Ascend HiSparse does not support DCP")
         if parallel.prefill_context_parallel_size > 1:
-            if not self.enable_sparse_sfa_c8 or not self.is_pcp_decode_sharded:
-                raise ValueError("HiSparse PCP requires C8 and request-sharded target decode")
+            if not self.enable_sparse_sfa_c8:
+                raise ValueError("HiSparse PCP requires native C8")
         builder = kwargs.get("index_group_builder")
         if builder is None:
             if self.topk_indices_buffer is None:
@@ -398,6 +399,11 @@ class AscendHiSparseImpl(AscendSFAImpl):
         if self.index_group_index == 0:
             prepare_pcp_query_states(self.hisparse_cache, attn_metadata)
         return super().forward(layer_name, hidden_states, kv_cache, attn_metadata, output)
+
+    def _num_replicated_kv_tokens(self, attn_metadata) -> int:
+        # Resident slots and Host mirror rows share the rank-major write layout.
+        # Duplicate decode rows already have invalid slots; retain their positions.
+        return 0
 
     def _exec_kv_local(self, kv_no_split, cos, sin, kv_cache, slots, attn_metadata):
         assert self.kv_a_layernorm is not None
