@@ -20,6 +20,40 @@ The features described below are those enabled by the deployment commands in thi
 
 Refer to the [Supported Models](../../user_guide/support_matrix/supported_models.md) page for the support matrix and the [Feature Guide](../../user_guide/feature_guide/index.md) for feature configuration.
 
+### Experimental indexer context sharding on A3
+
+Add `"enable_minimax_m3_indexer_dcp": true` to `--additional-config` to
+shard MiniMax's replicated index-key cache across the existing TP group.
+This experimental mode requires TP2 or TP4, BF16 KV, CANN MsaIndexScore,
+128-token blocks, and 128-dimensional index keys. Keep the generic
+`--decode-context-parallel-size` and `--prefill-context-parallel-size` at `1`.
+
+Main K/V remain head-parallel. With TP4, the 60-layer main-model cache
+payload falls from 45 to 33.75 KiB per token per rank: 25% fewer KV bytes,
+or 33.3% more tokens at a fixed KV budget. Weights, graph workspaces,
+score buffers, and speculative model caches are separate.
+
+Decode scores compact local index keys and combines block maxima with
+FP16 MAX reduce-scatter before the existing TopK selection. Prefill gathers
+live index pages for the existing CANN operator. The added communication
+trades latency for capacity; serving gains depend on the workload.
+
+For PD, enable the option on both roles, use the same TP size, and select
+`MooncakeConnectorV2`. PP layer partitioning may differ. Unsharded producers
+and sharded consumers have incompatible index-cache layouts.
+
+Validate the matching CANN/torch_npu stack before deployment:
+
+```bash
+pytest -q tests/e2e/pull_request/one_card/test_minimax_m3_indexer_dcp.py
+pytest -q tests/e2e/pull_request/four_card/test_minimax_m3_indexer_dcp.py
+torchrun --standalone --nproc-per-node=4 benchmarks/benchmark_minimax_m3_indexer_dcp.py --graph
+```
+
+The benchmark checks scores before comparing latency and temporary memory
+for replicated keys, earlier expanded DCP, and current compact DCP. It measures
+one indexer layer, excluding model serving and PD transfer.
+
 ## 3 Prerequisites
 
 ### 3.1 Model Weight

@@ -88,6 +88,8 @@ def _minimax_qknorm_rope_cache_kernel(
     I_TOKEN: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     INDEX_BLOCK_SIZE: tl.constexpr,
+    INDEX_CONTEXT_SIZE: tl.constexpr,
+    INDEX_CONTEXT_RANK: tl.constexpr,
     CACHE_FP8: tl.constexpr,
     INDEX_FP8: tl.constexpr,
     FP8_E4M3_MAX: tl.constexpr,
@@ -142,9 +144,9 @@ def _minimax_qknorm_rope_cache_kernel(
         offsets = token * IQ_HEADS * HEAD_DIM + tl.arange(0, IQ_HEADS)[:, None] * HEAD_DIM + dim[None, :]
         tl.store(index_query + offsets, iq)
         slot = tl.load(index_slots + token, token < NUM_SLOTS, other=-1).to(tl.int64)
-        if slot >= 0:
+        if slot >= 0 and slot % INDEX_CONTEXT_SIZE == INDEX_CONTEXT_RANK:
             ik = extract_slice(iqk, (IQ_HEADS, 0), (1, HEAD_DIM), (1, 1))
-            offset = slot // INDEX_BLOCK_SIZE * I_BLOCK + slot % INDEX_BLOCK_SIZE * I_TOKEN
+            offset = slot // INDEX_BLOCK_SIZE * I_BLOCK + slot % INDEX_BLOCK_SIZE // INDEX_CONTEXT_SIZE * I_TOKEN
             tl.store(index_cache + offset + dim, ik.reshape(HEAD_DIM))
 
 
@@ -167,6 +169,9 @@ def minimax_qknorm_rope_cache(
     num_index_heads: int,
     eps: float,
     index_packed: torch.Tensor | None = None,
+    *,
+    index_context_parallel_size: int = 1,
+    index_context_parallel_rank: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return Q/index Q and insert K/V/index K, with no intermediate KV tensors.
 
@@ -193,6 +198,11 @@ def minimax_qknorm_rope_cache(
     assert key_cache.ndim == value_cache.ndim == 4 and index_cache.ndim == 3
     assert key_cache.shape == value_cache.shape and key_cache.shape[2:] == (num_kv_heads, head_dim)
     assert index_cache.shape[-1] == head_dim
+    assert index_context_parallel_size in (1, 2, 4)
+    assert 0 <= index_context_parallel_rank < index_context_parallel_size
+    if index_context_parallel_size > 1:
+        assert index_cache.shape[1] * index_context_parallel_size == 128
+        assert index_cache.dtype == torch.bfloat16
     assert key_cache.stride(-1) == value_cache.stride(-1) == index_cache.stride(-1) == 1
     assert 0 <= num_actual_tokens <= packed.shape[0]
     assert slot_mapping.numel() >= num_actual_tokens and index_slot_mapping.numel() >= num_actual_tokens
@@ -245,7 +255,9 @@ def minimax_qknorm_rope_cache(
         *value_cache.stride()[:3],
         *index_cache.stride()[:2],
         key_cache.shape[1],
-        index_cache.shape[1],
+        index_cache.shape[1] * index_context_parallel_size,
+        index_context_parallel_size,
+        index_context_parallel_rank,
         key_cache.dtype == torch.float8_e4m3fn,
         index_cache.dtype == torch.float8_e4m3fn,
         FP8_E4M3_MAX=FP8_E4M3_MAX,

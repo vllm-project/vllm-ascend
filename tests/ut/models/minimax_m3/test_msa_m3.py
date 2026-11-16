@@ -670,12 +670,17 @@ def test_sparse_metadata_builder_forwards_uniform_decode_prefix(
     ],
     ids=lambda case: case.name,
 )
-def test_indexer_metadata_builder(batch_spec: BatchSpec) -> None:
+@pytest.mark.parametrize("shard_index_cache", [False, True])
+def test_indexer_metadata_builder(batch_spec: BatchSpec, shard_index_cache: bool) -> None:
     device = torch.device("cpu")
     builder = _make_indexer_builder(device)
+    builder.shard_index_cache = shard_index_cache
     common = _create_common_attn_metadata(batch_spec, block_size=128, device=device)
+    common.block_table_tensor.mul_(3).add_(7)
+    original_block_table = common.block_table_tensor.clone()
     metadata = builder.build(0, common)
 
+    assert torch.equal(common.block_table_tensor, original_block_table)
     assert metadata.num_actual_tokens == sum(batch_spec.query_lens)
     assert metadata.num_decodes + metadata.num_prefills == batch_spec.batch_size
     if msa_m3_module._USE_ASCENDC_INDEX_SCORE_PREFILL:
@@ -687,6 +692,7 @@ def test_indexer_metadata_builder(batch_spec: BatchSpec) -> None:
         assert metadata.num_decodes == batch_spec.batch_size
         assert metadata.prefill is None
         assert metadata.decode is not None
+        assert torch.equal(metadata.decode.block_table, original_block_table)
         if msa_m3_module._USE_ASCENDC_INDEX_SCORE_DECODE:
             assert metadata.decode.start_loc is not None
             assert metadata.decode.context_lens is not None
@@ -705,6 +711,14 @@ def test_indexer_metadata_builder(batch_spec: BatchSpec) -> None:
         assert metadata.num_prefills == batch_spec.batch_size
         assert metadata.decode is None
         assert metadata.prefill is not None
+        if shard_index_cache:
+            pages = metadata.prefill.gather_pages
+            assert pages is not None
+            valid = torch.arange(original_block_table.shape[1])[None, :] * 128 < common.seq_lens[:, None]
+            assert torch.equal(pages[metadata.prefill.block_table[valid].long()], original_block_table[valid])
+        else:
+            assert metadata.prefill.gather_pages is None
+            assert torch.equal(metadata.prefill.block_table, original_block_table)
         if msa_m3_module._USE_ASCENDC_INDEX_SCORE_PREFILL:
             assert metadata.prefill.start_loc is not None
             assert metadata.prefill.context_lens is not None
@@ -921,6 +935,7 @@ def test_a5_indexer_forward_keeps_triton_decode_branch() -> None:
         AscendMiniMaxM3IndexerCache,
         SimpleNamespace(
             prefix="layer.attn.index_cache",
+            context_parallel_size=1,
             kv_cache=torch.zeros(4, 128, 4),
         ),
     )
@@ -998,6 +1013,7 @@ def test_triton_indexer_forward_accepts_single_return_value() -> None:
         AscendMiniMaxM3IndexerCache,
         SimpleNamespace(
             prefix="layer.attn.index_cache",
+            context_parallel_size=1,
             kv_cache=torch.zeros(4, 128, 4),
         ),
     )
@@ -1074,6 +1090,7 @@ def test_a3_indexer_forward_receives_fused_select_counts() -> None:
         AscendMiniMaxM3IndexerCache,
         SimpleNamespace(
             prefix="layer.attn.index_cache",
+            context_parallel_size=1,
             kv_cache=torch.zeros(4, 128, 4),
         ),
     )
@@ -1137,6 +1154,7 @@ def test_a5_indexer_forward_keeps_original_prefill_path() -> None:
         AscendMiniMaxM3IndexerCache,
         SimpleNamespace(
             prefix="layer.attn.index_cache",
+            context_parallel_size=1,
             kv_cache=torch.zeros(4, 128, 4),
         ),
     )
@@ -2656,7 +2674,8 @@ def test_ascendc_index_decode_uses_full_cache_without_tp_collectives(
     impl.init_blocks = 1
     impl.local_blocks = 1
     impl.index_cache = cast(
-        AscendMiniMaxM3IndexerCache, SimpleNamespace(prefix="index", kv_cache=torch.zeros(258, 128, 4))
+        AscendMiniMaxM3IndexerCache,
+        SimpleNamespace(prefix="index", context_parallel_size=1, kv_cache=torch.zeros(258, 128, 4)),
     )
     context = _make_mrv2_padding_context() if idle_dp else SimpleNamespace(additional_kwargs={})
     context.attn_metadata = {"index": metadata}

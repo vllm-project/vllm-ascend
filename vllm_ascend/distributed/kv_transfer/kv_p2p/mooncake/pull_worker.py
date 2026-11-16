@@ -26,6 +26,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_interface import (
+    AscendMiniMaxM3IndexerDCPSpec,
     AscendSFAIndexerCacheSpec,
     is_circular_kv_cache_spec,
 )
@@ -335,6 +336,19 @@ class MooncakePullRecvingThread(threading.Thread, MooncakeTransferAddressMixin):
                 remote_pcp_size,
                 remote_tp_size,
             )
+
+        if isinstance(spec, AscendMiniMaxM3IndexerDCPSpec):
+            if (
+                self.tp_size != remote_tp_size
+                or self.pcp_size != 1
+                or remote_pcp_size != 1
+                or self.dcp_size != 1
+                or remote_dcp_size != 1
+                or self.block_shapes[local_layer_index] != remote_metadata.block_shapes[remote_layer_index]
+            ):
+                raise ValueError("M3 indexer DCP PD requires matching TP and sharded index layouts on P and D")
+            # Index keys differ on every TP rank; these are not replicas.
+            return [[self.tp_rank]]
 
         local_dcp_size, remote_dcp_size = self._get_attention_dcp_sizes(
             spec, remote_layer_index, remote_metadata, remote_dcp_size
