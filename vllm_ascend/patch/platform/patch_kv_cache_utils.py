@@ -565,7 +565,6 @@ def _ascend_get_kv_cache_config_from_groups(
     ``copy.deepcopy`` in ``generate_scheduler_kv_cache_config`` and is
     dropped by worker pickle IPC, which never reads it.
     """
-    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
     qwen_config = (
         None
         if vllm_version_is("0.28.0")
@@ -619,6 +618,7 @@ def _ascend_get_kv_cache_config_from_groups(
             kv_cache_groups=kv_cache_groups,
             prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
         )
+    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
     kv_cache_config.kv_transfer_config = kv_transfer_config
     speculative_config = getattr(vllm_config, "speculative_config", None)
     if speculative_config is not None and speculative_config.method == "dspark":
