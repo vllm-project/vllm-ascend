@@ -1,0 +1,4 @@
+pr: 21212
+entries:
+  - category: dependency
+    text: MRV2 MoE construction uses upstream OOT router registration through the verified vLLM runtime revision.
