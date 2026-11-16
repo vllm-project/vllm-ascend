@@ -148,7 +148,7 @@ def test_bilateral_chunks_copy_each_token_once(
         pp.metadata_by_pcp_rank[pcp_rank].metadata_by_tp_rank[tp_rank].kv_caches_base_addr[:] = [
             [ctypes.addressof(target)]
         ]
-    writes = []
+    writes: list[int] = []
 
     def copy(session, src, dst, lengths):
         for source_addr, target_addr, size in zip(src, dst, lengths):
@@ -232,7 +232,7 @@ def test_mamba_dcp_preserves_tp_state_bytes(
         # of the connector's address slicing, including distinct conv rows.
         if replicated:
             tp, rank = 1, 0
-        conv = []
+        conv: list[int] = []
         for row in range(2):
             offset = row * sum(widths)
             for width in widths:
@@ -258,7 +258,8 @@ def test_mamba_dcp_preserves_tp_state_bytes(
             map(ctypes.addressof, buffers)
         )
     senders = producers(p_dcp, p_tp, remote, 1, 1, "mla", pcp=p_pcp)
-    sources, writes = [], []
+    sources = []
+    writes: list[int] = []
 
     def copy(session, src, dst, lengths):
         for source, target, length in zip(src, dst, lengths, strict=True):
