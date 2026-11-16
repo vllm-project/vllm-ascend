@@ -9,6 +9,7 @@ Core retains residency scheduling, DMA and the Host write completion fence.
 import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import HiSparseConnector
 from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.v1.kv_cache_interface import HiSparseHotSpec, HiSparseResidentSpec
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
 
@@ -72,25 +73,18 @@ class PCPHiSparseConnector(ActiveKVConnector):
         self._pcp_manager = manager
         self._pcp_attn_metadata = {}
         self._global_block_tables = block_tables
-        self._draft_request_states = torch.empty_like(block_tables.input_block_tables[0][:, 0], dtype=torch.int32)
         worker = self.kv_connector.connector_worker
+        groups = worker.kv_cache_config.kv_cache_groups
+        resident_groups = [i for i, group in enumerate(groups) if isinstance(group.kv_cache_spec, HiSparseResidentSpec)]
+        hot_groups = [
+            i
+            for i, group in enumerate(groups)
+            if isinstance(group.kv_cache_spec, HiSparseHotSpec)
+            for _ in group.layer_names
+        ]
         self._pcp_bindings = []
-        for cache in worker.cache_handles:
-            matches = [
-                group
-                for group, slots in enumerate(block_tables.slot_mappings)
-                if slots.data_ptr() == cache.slot_mapping.data_ptr()
-            ]
-            if len(matches) != 1:
-                raise RuntimeError("HiSparse Resident mapping must identify one KV group")
-            hot_groups = [
-                group
-                for group, table in enumerate(block_tables.input_block_tables)
-                if table.data_ptr() == cache.runtime.hot_block_table.data_ptr()
-            ]
-            if len(hot_groups) != 1:
-                raise RuntimeError("HiSparse Hot table must identify one KV group")
-            self._pcp_bindings.append((cache, matches[0], hot_groups[0]))
+        for cache, hot_group in zip(worker.cache_handles, hot_groups, strict=True):
+            self._pcp_bindings.append((cache, resident_groups[cache.runtime.resident_source_index], hot_group))
         self._pcp_host_group_id = host_group_id
         # Graph warmup/capture bypasses connector.pre_forward. Bind the PCP
         # persistent storage now so capture and replay use identical addresses.
@@ -116,11 +110,9 @@ class PCPHiSparseConnector(ActiveKVConnector):
             if cache.draft_layer:
                 self._bind_cache_layout(cache, group_id, hot_group_id, slots, tables)
 
-    def prepare_draft_decode(self, request_states, num_reqs):
+    def prepare_draft_decode(self):
         """Later draft steps are replicated; use global rows without KV gather."""
-        states = self._draft_request_states
-        states.fill_(-1)
-        states[:num_reqs].copy_(request_states[:num_reqs])
+        states = self.kv_connector.connector_worker.request_state_indices
         block_tables = self._global_block_tables
         for cache, group_id, hot_group_id in self._pcp_bindings:
             if cache.draft_layer:
@@ -141,8 +133,7 @@ class PCPHiSparseConnector(ActiveKVConnector):
         global_batch = manager.global_batch
         indices = manager._padded_gather_idx
         mask = manager._gathered_kv_write_mask
-        slots = manager._gathered_kv_slot_mappings
-        assert indices is not None and mask is not None and slots is not None
+        assert indices is not None and mask is not None
         count = indices.numel()
         if not manager.is_decode_sharded and not global_batch.is_prefilling_np.any():
             # Replicated decode writes once per rank without a KV collective.
@@ -150,10 +141,6 @@ class PCPHiSparseConnector(ActiveKVConnector):
             count = input_batch.num_tokens_after_padding
             indices = torch.arange(count, device=indices.device)
             mask = indices < global_batch.num_tokens
-        local_tables = manager._local_block_tables
-        assert local_tables is not None
-        for cache, group_id, hot_group_id in self._pcp_bindings:
-            self._bind_cache_layout(cache, group_id, hot_group_id, slots[:, :count], local_tables)
         write_request_ids = get_pcp_write_request_ids(global_batch, indices, mask)
         for metadata in (attn_metadata or {}).values():
             metadata.hisparse_write_req_id_per_token = write_request_ids
