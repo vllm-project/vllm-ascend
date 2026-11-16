@@ -722,9 +722,9 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 # without alpha/bias or interleaving.
                 activation_kwargs = dict(
                     swiglu_mode=3,
-                    # Step3p5 may leave the limit at its default zero; use 7.0
-                    # in that case while honoring a configured nonzero limit.
-                    clamp_limit=mlp_compute_input.swiglu_limit or 7.0,
+                    # Match the fixed post-SiLU limit in moe_mlp.py's
+                    # unfused SWIGLUSTEP path, independent of MoE config.
+                    clamp_limit=7.0,
                 )
             else:
                 # Mode 2 applies the non-interleaved SwiGLU-OAI activation:
