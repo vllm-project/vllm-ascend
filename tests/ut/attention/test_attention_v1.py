@@ -688,6 +688,100 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.assertEqual(value.shape, (4, 8, 128, 64))
         self.assertEqual(block_size, 128)
 
+    def _run_sink_fia_with_mask_metadata(self, metadata, query_tokens):
+        query = torch.randn(query_tokens, 8, 64)
+        key = torch.randn(query_tokens, 8, 64)
+        value = torch.randn(query_tokens, 8, 64)
+        output = torch.empty_like(query)
+
+        with (
+            patch.object(attn_module, "_EXTRA_CTX", SimpleNamespace(capturing=False)),
+            patch.object(
+                self.impl_swa_sink,
+                "_get_fia_params",
+                return_value=(key, value, 128, None, [query_tokens]),
+            ),
+            patch.object(
+                attn_module.torch_npu,
+                "npu_fused_infer_attention_score_v2",
+                return_value=(torch.ones_like(query), None),
+            ) as fused_attention,
+        ):
+            self.impl_swa_sink.forward_fused_infer_attention(query, key, value, metadata, output)
+
+        return fused_attention.call_args.kwargs
+
+    def test_sink_fia_non_causal_multi_query_uses_dense_sparse_mode(self):
+        # A bidirectionally trained draft arrives with causal=False and no mask;
+        # sparse mode 3 would fail paged tiling and window the draft block.
+        metadata = SimpleNamespace(
+            attn_state=AscendAttentionState.PrefillNoCache,
+            actual_seq_lengths_q=[10],
+            seq_lens_list=[10],
+            attn_mask=None,
+            causal=False,
+        )
+        self.impl_swa_sink.sliding_window = None
+        with patch.object(attn_module, "AttentionMaskBuilder") as mask_builder:
+            kwargs = self._run_sink_fia_with_mask_metadata(metadata, query_tokens=10)
+
+        mask_builder.assert_not_called()
+        self.assertIsNone(kwargs["atten_mask"])
+        self.assertEqual(kwargs["sparse_mode"], 0)
+
+    def test_sink_fia_non_causal_swa_multi_query_uses_band_window(self):
+        metadata = SimpleNamespace(
+            attn_state=AscendAttentionState.PrefillNoCache,
+            actual_seq_lengths_q=[10],
+            seq_lens_list=[10],
+            attn_mask=None,
+            causal=False,
+        )
+        splitfuse_mask = object()
+        with patch.object(attn_module, "AttentionMaskBuilder") as mask_builder:
+            mask_builder.return_value.get_splitfuse_attn_mask.return_value = splitfuse_mask
+            kwargs = self._run_sink_fia_with_mask_metadata(metadata, query_tokens=10)
+
+        self.assertEqual(kwargs["sparse_mode"], 4)
+        self.assertIs(kwargs["atten_mask"], splitfuse_mask)
+        self.assertEqual(kwargs["pre_tokens"], 1023)
+        self.assertEqual(kwargs["next_tokens"], 1023)
+
+    def test_sink_fia_causal_multi_query_keeps_metadata_mask(self):
+        metadata_mask = torch.ones(1, 1, 10, 10, dtype=torch.bool)
+        metadata = SimpleNamespace(
+            attn_state=AscendAttentionState.PrefillNoCache,
+            actual_seq_lengths_q=[10],
+            seq_lens_list=[10],
+            attn_mask=metadata_mask,
+            causal=True,
+        )
+        self.impl_swa_sink.sliding_window = None
+        with patch.object(attn_module, "AttentionMaskBuilder") as mask_builder:
+            kwargs = self._run_sink_fia_with_mask_metadata(metadata, query_tokens=10)
+
+        mask_builder.assert_not_called()
+        self.assertIs(kwargs["atten_mask"], metadata_mask)
+        self.assertEqual(kwargs["sparse_mode"], 3)
+
+    def test_sink_fia_causal_swa_multi_query_keeps_metadata_mask(self):
+        metadata_mask = torch.ones(1, 1, 10, 10, dtype=torch.bool)
+        metadata = SimpleNamespace(
+            attn_state=AscendAttentionState.PrefillNoCache,
+            actual_seq_lengths_q=[10],
+            seq_lens_list=[10],
+            attn_mask=metadata_mask,
+            causal=True,
+        )
+        with patch.object(attn_module, "AttentionMaskBuilder") as mask_builder:
+            kwargs = self._run_sink_fia_with_mask_metadata(metadata, query_tokens=10)
+
+        mask_builder.assert_not_called()
+        self.assertIs(kwargs["atten_mask"], metadata_mask)
+        self.assertEqual(kwargs["sparse_mode"], 4)
+        self.assertEqual(kwargs["pre_tokens"], 1024)
+        self.assertEqual(kwargs["next_tokens"], 0)
+
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_large_head_prefill_uses_device_operator_fallback(self, mock_get_forward_context):
         query = torch.randn(2, 8, FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE)

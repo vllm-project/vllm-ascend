@@ -976,10 +976,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
             actual_seq_qlen = attn_metadata.actual_seq_lengths_q
             if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
                 actual_seq_qlen = torch.tensor([1] * len(attn_metadata.seq_lens_list), dtype=torch.int32).cumsum(dim=0)
-            if self.sliding_window is not None:
-                sparse_mode = 4
-            else:
-                sparse_mode = 3
+            # Drafts trained bidirectionally (``dflash_config.causal=false``)
+            # reach this path with ``causal=False`` and therefore without a
+            # metadata mask. Sparse modes 3 and 4 imply a causal template, which
+            # fails paged tiling when the mask is missing and would also window
+            # the draft block the wrong way, so take the causality from the
+            # metadata instead of assuming it, exactly like the non-sink path.
+            atten_mask, sparse_mode, pre_tokens, next_tokens = self._get_fia_mask_params(attn_metadata, query.device)
             attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
                 query,
                 key.contiguous(),
@@ -987,9 +990,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 num_query_heads=self.num_heads,
                 num_key_value_heads=self.num_kv_heads,
                 input_layout="TND",
-                pre_tokens=self.sliding_window if self.sliding_window is not None else SWA_INT_MAX,
-                next_tokens=0,
-                atten_mask=attn_metadata.attn_mask,
+                pre_tokens=pre_tokens,
+                next_tokens=next_tokens,
+                atten_mask=atten_mask,
                 sparse_mode=sparse_mode,
                 softmax_scale=self.scale,
                 block_table=block_table,
