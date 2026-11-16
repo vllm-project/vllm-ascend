@@ -68,7 +68,7 @@ PERFORMANCE_TOLERANCE = 0.10
 # not useful, and silently skipping checks is not acceptable either: every entry
 # below still fails when the measured value drifts outside its bound.
 # See #20674 (accuracy) and #21760 (burst coalescing / throughput variance).
-KNOWN_GREEDY_OFFSETS = {
+KNOWN_GREEDY_OFFSETS: dict[int, dict[str, Any]] = {
     # prompt index -> expected first-token prefill |delta| and allowed upper slack
     3: {
         "expected": 0.0851,
