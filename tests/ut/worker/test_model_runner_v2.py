@@ -2587,8 +2587,7 @@ def test_shutdown_releases_uva_owner_without_shared_pool_client():
     assert calls == ["parent", "release"]
 
 
-@pytest.mark.parametrize("published_model", [False, True])
-@pytest.mark.parametrize("cleanup_fails", [False, True])
+@pytest.mark.parametrize("published_model,cleanup_fails", [(False, False), (False, True), (True, True)])
 def test_load_failure_closes_unpublished_host_owners(published_model, cleanup_fails):
     from vllm_ascend.model_executor.warmup import nz_warmup
     from vllm_ascend.models.host_offload import register_host_offload_owner

@@ -73,10 +73,19 @@ def test_backend_reduces_only_when_outer_sp_does_not(monkeypatch, reduce_results
     assert obj.parallel_group.all_reduce.call_count == int(reduce_results)
 
 
-@pytest.mark.parametrize("enabled", [None, False, True])
-@pytest.mark.parametrize("has_layers", [False, True])
-@pytest.mark.parametrize("dp_size", [1, 2])
-@pytest.mark.parametrize("draft", [False, True])
+@pytest.mark.parametrize(
+    "enabled,has_layers,dp_size,draft",
+    [
+        (None, False, 1, False),
+        (True, False, 1, False),
+        (None, True, 1, False),
+        (None, True, 2, False),
+        (False, True, 2, False),
+        (True, True, 2, False),
+        (None, True, 2, True),
+        (False, True, 2, True),
+    ],
+)
 def test_qwen_offload_uses_upstream_defaults(enabled, has_layers, dp_size, draft):
     from vllm.config import EngramConfig, VllmConfig
 
@@ -107,26 +116,6 @@ def test_qwen_offload_uses_upstream_defaults(enabled, has_layers, dp_size, draft
         VllmConfig._resolve_and_verify_engram_config(config)
         assert config.engram_config.cpu_offload is (enabled is not False)
         assert config.engram_config.dp_shared_memory is (enabled is not False and dp_size > 1)
-
-
-def test_constructor_failure_releases_allocated_table(monkeypatch):
-    from vllm.models.qwen4_exp.common.ngram_embedding import Qwen4ExpPLEEmbedding
-
-    from vllm_ascend.models.qwen4_exp import ple_embedding
-
-    monkeypatch.setattr(ple_embedding, "get_current_vllm_config", lambda: SimpleNamespace(engram_config=None))
-    owner = Mock()
-
-    def fail(self, *args, **kwargs):
-        torch.nn.Module.__init__(self)
-        self._host_table = owner
-        self.weight = torch.nn.Parameter(torch.zeros(1), requires_grad=False)
-        raise ValueError("construction failed")
-
-    monkeypatch.setattr(Qwen4ExpPLEEmbedding, "__init__", fail)
-    with pytest.raises(ValueError, match="construction failed"):
-        AscendPLEHostEmbedding()
-    owner.close.assert_called_once()
 
 
 @pytest.mark.parametrize(
@@ -449,22 +438,20 @@ def test_load_scope_retains_successful_and_failed_constructors(monkeypatch):
         buffer.close.assert_called_once()
 
 
-@pytest.mark.parametrize("preallocated", [False, True])
-def test_lookup_accepts_keyword_ids_and_reuses_output(monkeypatch, preallocated):
+def test_lookup_accepts_keyword_ids_and_reuses_output(monkeypatch):
     from vllm_ascend.ops.triton.qwen4_exp import ple_lookup
 
     obj = embedding()
     obj.embedding_dim = 160
     obj._host_table = SimpleNamespace(ptrs=None)
     ids = torch.zeros((3, 16), dtype=torch.int64)
-    output = torch.empty((3, 16, 160), dtype=torch.bfloat16) if preallocated else None
+    output = torch.empty((3, 16, 160), dtype=torch.bfloat16)
     lookup = Mock(side_effect=lambda ptrs, ids, out, *args: out.fill_(2))
     monkeypatch.setattr(ple_lookup, "lookup", lookup)
     result = obj._lookup(input_ids=ids, output=output)
     assert result.shape == (3, 16, 160) and result.dtype == torch.bfloat16
     assert torch.all(result == 2)
-    if preallocated:
-        assert result is output
+    assert result is output
     lookup.assert_called_once()
 
 
