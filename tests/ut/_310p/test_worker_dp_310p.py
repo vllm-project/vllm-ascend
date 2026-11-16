@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+from contextlib import nullcontext
 from functools import partial
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -202,3 +203,122 @@ def test_pipeline_parallel_is_still_rejected():
     vllm_config.parallel_config.pipeline_parallel_size = 2
     with pytest.raises(NotImplementedError, match="pipeline_parallel_size"):
         NPUModelRunner310V2._validate_config(vllm_config)
+
+
+def test_base_worker_keeps_hccl_world_and_world_derived_mp_backend():
+    from vllm_ascend.worker.worker import NPUWorker
+
+    assert NPUWorker._select_distributed_backends(SimpleNamespace()) == ("hccl", None)
+
+
+def test_310p_single_replica_keeps_default_backends():
+    worker = make_worker(data_parallel_size=1)
+    assert worker._select_distributed_backends() == ("hccl", None)
+
+
+def test_310p_dp_uses_gloo_world_with_hccl_device_backend():
+    worker = make_worker(data_parallel_size=2)
+    assert worker._select_distributed_backends() == ("gloo", "hccl")
+
+
+def test_selected_backends_reach_both_initializers():
+    """The 310P pair is used for the world group and every Ascend device group."""
+    from vllm_ascend.worker import worker as worker_module
+
+    worker = object.__new__(NPUWorker310)
+    worker.parallel_config = SimpleNamespace(
+        world_size=4,
+        tensor_parallel_size=2,
+        pipeline_parallel_size=1,
+        prefill_context_parallel_size=1,
+        decode_context_parallel_size=1,
+        data_parallel_size=2,
+    )
+    worker.rank = 0
+    worker.local_rank = 0
+    worker.distributed_init_method = "env://"
+    worker.vllm_config = SimpleNamespace(engram_config=None)
+
+    with (
+        patch.object(worker_module, "init_batch_invariance"),
+        patch.object(worker_module, "set_current_vllm_config", return_value=nullcontext()),
+        patch.object(worker_module, "init_distributed_environment") as init_dist,
+        patch.object(worker_module, "ensure_model_parallel_initialized") as ensure_mp,
+        patch.object(worker_module, "init_ascend_model_parallel") as init_ascend,
+        patch.object(worker_module, "ensure_ec_transfer_initialized"),
+    ):
+        worker._init_worker_distributed_environment()
+
+    assert init_dist.call_args.args[4] == "gloo"
+    assert ensure_mp.call_args.kwargs["backend"] == "hccl"
+    assert init_ascend.call_args.kwargs["device_backend"] == "hccl"
+
+
+def _ascend_config(**overrides):
+    config = SimpleNamespace(
+        kvpp_config=SimpleNamespace(size=1),
+        pd_tp_ratio=1,
+        pd_head_ratio=1,
+        eplb_config=SimpleNamespace(dynamic_eplb=False),
+        finegrained_tp_config=SimpleNamespace(
+            oproj_tensor_parallel_size=0,
+            lmhead_tensor_parallel_size=0,
+            embedding_tensor_parallel_size=0,
+            mlp_tensor_parallel_size=0,
+            qkv_iproj_tensor_parallel_size=1,
+        ),
+    )
+    for name, value in overrides.items():
+        setattr(config, name, value)
+    return config
+
+
+def test_supported_dp_combinations_pass_subgroup_validation():
+    worker = make_worker(data_parallel_size=2)
+    with patch("vllm_ascend.ascend_config.get_ascend_config", return_value=_ascend_config()):
+        worker_module._validate_310p_dp_subgroup_support(worker.parallel_config)
+
+
+def test_single_replica_skips_subgroup_validation():
+    worker = make_worker(data_parallel_size=1)
+    with patch("vllm_ascend.ascend_config.get_ascend_config") as get_config:
+        worker_module._validate_310p_dp_subgroup_support(worker.parallel_config)
+    get_config.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        ({"kvpp_config": SimpleNamespace(size=2)}, "kvpp_config.size=2"),
+        ({"pd_tp_ratio": 2}, "separated prefill"),
+        ({"pd_head_ratio": 2}, "separated prefill"),
+        ({"eplb_config": SimpleNamespace(dynamic_eplb=True)}, "dynamic_eplb"),
+        (
+            {"finegrained_tp_config": SimpleNamespace(
+                oproj_tensor_parallel_size=2,
+                lmhead_tensor_parallel_size=0,
+                embedding_tensor_parallel_size=0,
+                mlp_tensor_parallel_size=0,
+                qkv_iproj_tensor_parallel_size=1,
+            )},
+            "finegrained_tp: oproj",
+        ),
+        (
+            {"finegrained_tp_config": SimpleNamespace(
+                oproj_tensor_parallel_size=0,
+                lmhead_tensor_parallel_size=0,
+                embedding_tensor_parallel_size=0,
+                mlp_tensor_parallel_size=0,
+                qkv_iproj_tensor_parallel_size=2,
+            )},
+            "finegrained_tp: qkv_iproj",
+        ),
+    ],
+)
+def test_dp_rejects_subgroups_310p_cannot_build(overrides, message):
+    worker = make_worker(data_parallel_size=2)
+    with (
+        patch("vllm_ascend.ascend_config.get_ascend_config", return_value=_ascend_config(**overrides)),
+        pytest.raises(NotImplementedError, match=message),
+    ):
+        worker_module._validate_310p_dp_subgroup_support(worker.parallel_config)

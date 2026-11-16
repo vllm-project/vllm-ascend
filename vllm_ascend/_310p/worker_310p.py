@@ -34,13 +34,57 @@ from vllm_ascend._310p.kv_cache_sharing import get_310p_shared_cache_slots
 from vllm_ascend.utils import is_rc_device
 from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
 
-# HCCL reserves this many consecutive host ports per engine-core process.
+# HCCL allocates a contiguous block of host ports per engine-core process,
+# starting at HCCL_IF_BASE_PORT (see the CANN HCCL environment reference:
+# https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/API/hcclug/hcclenvref_07_0019.html).
+# 310P DP gives every replica its own block. This implementation does not probe
+# for occupied ports, so co-located instances must reserve disjoint blocks.
 _HCCL_PORTS_PER_DP_REPLICA = 32
 _MIN_HCCL_PORT = 1024
 _MAX_HCCL_PORT = 65535
 
 
+def _validate_310p_dp_subgroup_support(parallel_config) -> None:
+    """Reject DP combinations that would need subgroups 310P cannot build yet.
+
+    The check runs before any communication group is created, so an unsupported
+    combination fails early instead of building a group with a wrong backend.
+    """
+    if parallel_config.data_parallel_size <= 1:
+        return
+    from vllm_ascend.ascend_config import get_ascend_config
+
+    ascend_config = get_ascend_config()
+    unsupported = []
+    if ascend_config.kvpp_config.size > 1:
+        unsupported.append(f"kvpp_config.size={ascend_config.kvpp_config.size}")
+    if ascend_config.pd_tp_ratio > 1 or ascend_config.pd_head_ratio > 1:
+        unsupported.append("separated prefill (pd_tp_ratio/pd_head_ratio)")
+    finegrained = ascend_config.finegrained_tp_config
+    enabled_finegrained = [
+        name
+        for name in ("oproj", "lmhead", "embedding", "mlp", "qkv_iproj")
+        if getattr(finegrained, f"{name}_tensor_parallel_size", 0) > 1
+    ]
+    if enabled_finegrained:
+        unsupported.append("finegrained_tp: " + ", ".join(enabled_finegrained))
+    if ascend_config.eplb_config.dynamic_eplb:
+        unsupported.append("eplb_config.dynamic_eplb")
+    if unsupported:
+        raise NotImplementedError(
+            "Data parallelism on 310P does not support settings that require "
+            f"unverified device subgroups: {', '.join(unsupported)}."
+        )
+
+
 class NPUWorker310(NPUWorker):
+    def _select_distributed_backends(self) -> tuple[str, str | None]:
+        # DP control traffic stays on Gloo to avoid an extra HCCL domain;
+        # TP/MoE tensor collectives still need HCCL.
+        if self.parallel_config.data_parallel_size > 1:
+            return "gloo", "hccl"
+        return super()._select_distributed_backends()
+
     def _scale_kv_cache_memory_for_multi_group(self, available_memory: int) -> int:
         kv_cache_spec = self.get_kv_cache_spec()
         layout_resolver = getattr(self.vllm_config.cache_config, "get_resolved_kv_cache_layout", None)
@@ -68,6 +112,7 @@ class NPUWorker310(NPUWorker):
 
         # Reject unsupported model/parallel settings before allocating NPU resources.
         NPUModelRunner310V2._validate_config(self.vllm_config)
+        _validate_310p_dp_subgroup_support(self.parallel_config)
         self.device = self._init_device()
         torch_npu.npu.set_compile_mode(jit_compile=False)
 

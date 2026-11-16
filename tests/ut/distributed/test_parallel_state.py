@@ -196,7 +196,7 @@ def test_kvpp_group_stays_inside_pipeline_stage(monkeypatch, size, pcp_size):
     )
     calls, groups = {}, {}
 
-    def init_group(ranks, local_rank, backend, *, group_name):
+    def init_group(ranks, local_rank, backend, *, group_name, **kwargs):
         calls[group_name] = (ranks, local_rank, backend)
         groups[group_name] = MagicMock()
         return groups[group_name]
@@ -226,6 +226,105 @@ def test_kvpp_group_stays_inside_pipeline_stage(monkeypatch, size, pcp_size):
     if size > 1:
         groups["kvpp"].destroy.assert_called_once_with()
     assert parallel_state._KVPP is None
+
+
+@pytest.mark.parametrize("device_backend", [None, "hccl"])
+def test_device_backend_selects_subgroup_backend(monkeypatch, device_backend):
+    """A Gloo world group still builds device subgroups with the given backend."""
+    from vllm_ascend.distributed import parallel_state
+
+    for name in ("_KVPP", "_MC2", "_P_TP", "_OTP", "_LMTP", "_EMBED_TP", "_MLP_TP", "_DYNAMIC_EPLB"):
+        monkeypatch.setattr(parallel_state, name, None)
+    config = SimpleNamespace(
+        kvpp_config=SimpleNamespace(size=1),
+        pd_tp_ratio=1,
+        pd_head_ratio=1,
+        eplb_config=SimpleNamespace(dynamic_eplb=False),
+        finegrained_tp_config=SimpleNamespace(
+            oproj_tensor_parallel_size=0,
+            lmhead_tensor_parallel_size=0,
+            embedding_tensor_parallel_size=0,
+            mlp_tensor_parallel_size=0,
+            qkv_iproj_tensor_parallel_size=1,
+        ),
+    )
+    calls = {}
+
+    def init_group(ranks, local_rank, backend, *, group_name, **kwargs):
+        calls[group_name] = backend
+        return MagicMock()
+
+    monkeypatch.setattr(parallel_state.torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(parallel_state.torch.distributed, "get_world_size", lambda: 4)
+    # The 310P DP world group is Gloo.
+    monkeypatch.setattr(parallel_state.torch.distributed, "get_backend", lambda _: "gloo")
+    monkeypatch.setattr(parallel_state, "get_world_group", lambda: SimpleNamespace(local_rank=0, device_group=object()))
+    monkeypatch.setattr(parallel_state, "get_ascend_config", lambda: config)
+    monkeypatch.setattr(parallel_state, "init_model_parallel_group", init_group)
+    parallel_state.init_ascend_model_parallel(
+        SimpleNamespace(
+            tensor_parallel_size=4,
+            pipeline_parallel_size=1,
+            data_parallel_size=1,
+            prefill_context_parallel_size=1,
+        ),
+        device_backend=device_backend,
+    )
+    # ``None`` keeps deriving from the world group; "hccl" is used verbatim.
+    assert calls["mc2"] == (device_backend or "gloo")
+    parallel_state.destroy_ascend_model_parallel()
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_device_backend_does_not_override_shared_engram_cpu_group(monkeypatch, shared):
+    """The intentionally Gloo CPU group keeps Gloo even when device_backend is HCCL."""
+    from vllm_ascend.distributed import parallel_state
+
+    for name in ("_KVPP", "_MC2", "_P_TP", "_OTP", "_LMTP", "_EMBED_TP", "_MLP_TP", "_DYNAMIC_EPLB"):
+        monkeypatch.setattr(parallel_state, name, None)
+    config = SimpleNamespace(
+        kvpp_config=SimpleNamespace(size=1),
+        pd_tp_ratio=1,
+        pd_head_ratio=1,
+        eplb_config=SimpleNamespace(dynamic_eplb=False),
+        finegrained_tp_config=SimpleNamespace(
+            oproj_tensor_parallel_size=0,
+            lmhead_tensor_parallel_size=0,
+            embedding_tensor_parallel_size=0,
+            mlp_tensor_parallel_size=0,
+            qkv_iproj_tensor_parallel_size=1,
+        ),
+    )
+    upstream = parallel_state.vllm_parallel_state
+    for name in ("_ENGRAM_DP", "_TP", "_ETP", "_DCP", "_PCP", "_PP", "_DP", "_EP", "_EPLB"):
+        monkeypatch.setattr(upstream, name, None)
+    monkeypatch.setattr(upstream, "_engram_dp_shard_size", lambda *_: 4)
+    calls = {}
+
+    def init_group(ranks, local_rank, backend, *, group_name, **kwargs):
+        calls[group_name] = backend
+        return MagicMock()
+
+    monkeypatch.setattr(parallel_state.torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(parallel_state.torch.distributed, "get_world_size", lambda: 8)
+    monkeypatch.setattr(parallel_state.torch.distributed, "get_backend", lambda _: "gloo")
+    monkeypatch.setattr(parallel_state, "get_world_group", lambda: SimpleNamespace(local_rank=0, device_group=object()))
+    monkeypatch.setattr(parallel_state, "get_ascend_config", lambda: config)
+    monkeypatch.setattr(parallel_state, "init_model_parallel_group", init_group)
+    parallel_state.init_ascend_model_parallel(
+        SimpleNamespace(
+            tensor_parallel_size=2,
+            pipeline_parallel_size=1,
+            data_parallel_size=2,
+            prefill_context_parallel_size=2,
+        ),
+        SimpleNamespace(dp_shared_memory=shared),
+        device_backend="hccl",
+    )
+    assert calls["edp"] == ("gloo" if shared else "hccl")
+    assert calls["mc2"] == "hccl"
+    parallel_state.destroy_ascend_model_parallel()
+    upstream.destroy_model_parallel()
 
 
 @pytest.mark.parametrize("shared", [False, True])

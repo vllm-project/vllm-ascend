@@ -63,12 +63,17 @@ _REPLICATED = ReplicatedGroup()
 def init_ascend_model_parallel(
     parallel_config: ParallelConfig,
     engram_config: "EngramConfig | None" = None,
+    *,
+    device_backend: str | None = None,
 ):
     if model_parallel_initialized():
         return
     assert torch.distributed.is_initialized()
     world_size = torch.distributed.get_world_size()
-    backend = torch.distributed.get_backend(get_world_group().device_group)
+    # The world group may carry CPU control traffic only (e.g. 310P DP uses
+    # Gloo there), so device collectives need an explicit device backend.
+    # ``None`` keeps the historical behaviour of reusing the world backend.
+    backend = device_backend or torch.distributed.get_backend(get_world_group().device_group)
     global_tp_size = parallel_config.tensor_parallel_size
     global_dp_size = parallel_config.data_parallel_size
     global_pp_size = parallel_config.pipeline_parallel_size

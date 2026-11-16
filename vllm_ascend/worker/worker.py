@@ -88,7 +88,6 @@ from vllm_ascend.core.kv_cache_placement import (
     register_kvpp_draft_layers,
 )
 from vllm_ascend.cpu_binding import bind_cpus
-from vllm_ascend.device.device_config import is_310p
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
@@ -1408,16 +1407,19 @@ class NPUWorker(WorkerBase):
         with set_current_vllm_config(self.vllm_config):
             self.model_runner._dummy_run(num_tokens, uniform_decode=True, skip_gdn_state_update=True)
 
+    def _select_distributed_backends(self) -> tuple[str, str | None]:
+        """Return ``(world_backend, model_parallel_backend)`` for this worker.
+
+        ``model_parallel_backend`` is ``None`` when the world group already
+        serves device collectives. A non-``None`` value also selects the
+        backend for Ascend's own device subgroups (MC2, KVPP, P_TP, ...).
+        """
+        return "hccl", None
+
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
         init_batch_invariance()
-        # Keep world control traffic on Gloo to avoid an extra HCCL domain on
-        # 310P. TP and MoE DP tensor collectives still require HCCL subgroups.
-        world_backend = "hccl"
-        mp_backend: str | None = None
-        if is_310p() and self.parallel_config.data_parallel_size > 1:
-            world_backend = "gloo"
-            mp_backend = "hccl"
+        world_backend, mp_backend = self._select_distributed_backends()
         init_distributed_environment(
             self.parallel_config.world_size,
             self.rank,
@@ -1440,7 +1442,11 @@ class NPUWorker(WorkerBase):
                 self.parallel_config.decode_context_parallel_size,
                 backend=mp_backend,
             )
-        init_ascend_model_parallel(self.parallel_config, self.vllm_config.engram_config)
+        init_ascend_model_parallel(
+            self.parallel_config,
+            self.vllm_config.engram_config,
+            device_backend=mp_backend,
+        )
         ensure_ec_transfer_initialized(self.vllm_config)
 
     def get_supported_pooling_tasks(self):
