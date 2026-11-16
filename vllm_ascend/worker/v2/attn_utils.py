@@ -95,6 +95,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.models.deepseek_v41.cache_config import is_deepseek_v41_cache
 from vllm_ascend.models.glm5next.cache_views import view_compressed_indexer_cache, view_kpool_tail_cache
+from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
 from vllm_ascend.models.qwen4_exp.cache_config import (
     GDN,
     HIDDEN,
@@ -251,7 +252,26 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             attention_layer_names.append(layer_name)
             continue
 
-    if mamba_specs:
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    if (
+        mamba_specs
+        and speculative_config is not None
+        and speculative_config.use_dflash()
+        and any(is_glm5_next_cache_spec(spec) for spec in kv_cache_spec.values())
+    ):
+        # With TP=1 and PCP>1, the target KDA state is sharded across heads,
+        # which can reduce the target MLA page size after state alignment.
+        # DFlash2 draft KV remains replicated across PCP ranks, so its larger
+        # page can inflate the target pool under generic hybrid alignment.
+        # Let GLM-Next's planner align target MLA and recurrent-state pages
+        # while keeping the dense draft pages in separate slots.
+        if vllm_config.parallel_config.decode_context_parallel_size == 1:
+            # DFlash restores the global PCP batch and keeps its context KV replicated.
+            for layer_name, spec in kv_cache_spec.items():
+                if spec.is_draft and spec.dcp_sharded:
+                    kv_cache_spec[layer_name] = replace(spec, dcp_sharded=False)
+        kv_cache_spec.update(mamba_specs)
+    elif mamba_specs:
         if any(isinstance(spec, AscendSFAIndexerCacheSpec) for spec in kv_cache_spec.values()):
             # K3.1 recurrent padding is settled by NPUPlatform before the
             # layers construct their specs. Keep indexer/draft pages native.

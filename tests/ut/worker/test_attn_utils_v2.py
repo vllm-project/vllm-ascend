@@ -21,7 +21,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu import attn_utils as upstream_attn_utils
-from vllm.v1.worker.utils import AttentionGroup
+from vllm.v1.worker.utils import AttentionGroup, customize_attention_spec
 
 from vllm_ascend.attention import dsa_attn_kv_plan, dsa_v1
 from vllm_ascend.attention import utils as attention_utils
@@ -2287,12 +2287,19 @@ def _make_mla_layer(*, fa_quant: bool = False, sparse_c8: bool = False):
     return layer
 
 
-def test_kpool_sfa_c8_main_cache_spec(monkeypatch):
+@pytest.mark.parametrize("with_dflash", [False, True])
+def test_kpool_sfa_c8_main_cache_spec(monkeypatch, with_dflash):
     layer_name = "language_model.model.layers.3.self_attn.attn"
     layer = _make_mla_layer(sparse_c8=True)
     layer.kv_lora_rank = 512
     layer.qk_rope_head_dim = 0
-    source_spec = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=512, dtype=torch.bfloat16)
+    source_spec = MLAAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.bfloat16,
+        model_version="glm5_next",
+    )
     monkeypatch.setattr(MLAAttention, "get_kv_cache_spec", lambda *_: source_spec)
     layer.__class__ = AscendMLAAttention
     del layer.get_kv_cache_spec
@@ -2300,6 +2307,23 @@ def test_kpool_sfa_c8_main_cache_spec(monkeypatch):
     layer.impl.kv_cache_dtype = "int8"
     layer.impl.c8_cache_dtype = torch.int8
     layer.impl.sfa_qsfa_packed_kv_head_dim = 528
+    layers = {layer_name: layer}
+    state_spec = MambaSpec(block_size=16, shapes=((32,),), dtypes=(torch.bfloat16,))
+    draft_spec = SlidingWindowSpec(
+        block_size=128,
+        num_kv_heads=8,
+        head_size=128,
+        dtype=torch.bfloat16,
+        sliding_window=2048,
+        dcp_sharded=True,
+    )
+    if with_dflash:
+        layers["state"] = SimpleNamespace(get_kv_cache_spec=lambda _cfg: state_spec, is_draft_layer=False)
+        layers["draft"] = SimpleNamespace(
+            get_kv_cache_spec=lambda _cfg: draft_spec,
+            get_attn_backend=lambda: AscendAttentionBackend,
+            is_draft_layer=True,
+        )
     vllm_config = SimpleNamespace(
         additional_config={},
         attention_config=AttentionConfig(indexer_kv_dtype="int8"),
@@ -2310,10 +2334,11 @@ def test_kpool_sfa_c8_main_cache_spec(monkeypatch):
             hf_config=SimpleNamespace(),
             hf_text_config=SimpleNamespace(index_topk=2048, index_kpool=4, kv_lora_rank=512, qk_rope_head_dim=0),
         ),
-        parallel_config=SimpleNamespace(decode_context_parallel_size=2),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1 if with_dflash else 2),
         quant_config=None,
+        speculative_config=SimpleNamespace(use_dflash=lambda: True) if with_dflash else None,
     )
-    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args, **_kwargs: {layer_name: layer})
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args, **_kwargs: layers)
     monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
     monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda _cfg: False)
     monkeypatch.setattr(attn_utils, "get_current_hardware_profile", lambda: get_hardware_profile(AscendDeviceType.A3))
@@ -2324,11 +2349,20 @@ def test_kpool_sfa_c8_main_cache_spec(monkeypatch):
     )
 
     assert attn_utils.enable_sfa(vllm_config)
-    spec = attn_utils.get_kv_cache_spec(vllm_config)[layer_name]
+    specs = attn_utils.get_kv_cache_spec(vllm_config)
+    spec = specs[layer_name]
     assert isinstance(spec, AscendMLAAttentionSpec)
     assert spec.cache_sparse_sfa_c8
     assert spec.head_size == 528
     assert spec.dtype == torch.int8
+    if with_dflash:
+        assert spec.page_size_bytes == 16 * 528
+        assert specs["state"].page_size_bytes == state_spec.page_size_bytes
+        assert specs["draft"].is_draft
+        expected_draft_spec = customize_attention_spec(
+            AscendAttentionBackend, replace(draft_spec, is_draft=True, dcp_sharded=False)
+        )
+        assert specs["draft"] == expected_draft_spec
 
 
 def test_v2_sparse_offload_marks_main_mla_cache_host_resident(monkeypatch):
