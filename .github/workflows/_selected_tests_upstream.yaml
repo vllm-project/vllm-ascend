@@ -78,10 +78,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-  UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
+  UV_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly https://download.pytorch.org/whl/cpu/"
   UV_INDEX_STRATEGY: unsafe-best-match
-  UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
   UV_HTTP_TIMEOUT: 120
   UV_NO_CACHE: 1
   UV_SYSTEM_PYTHON: 1
@@ -100,10 +98,10 @@ jobs:
           fail-fast: false
           matrix:
             part: [0]
-            image_tag: [9.2.0_20260928212200-910b-ubuntu22.04-py3.12]
+            image_tag: [9.2.1-910b-ubuntu22.04-py3.12]
             num_npus: [1]
         container:
-          image: swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann:${{ matrix.image_tag }}
+          image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
           env:
             VLLM_LOGGING_LEVEL: ERROR
             HF_HUB_OFFLINE: 1
@@ -119,11 +117,8 @@ jobs:
               npu-smi info
               cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
 
-          - name: Config mirrors
+          - name: Install packages
             run: |
-              sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
-              pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-              pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
               apt-get update -y
               apt install git zstd -y
               git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -219,9 +214,7 @@ jobs:
               CSRC_CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit }}
             run: |
               export MAX_JOBS=$(( ${{ matrix.num_npus }} * 23 ))
-              pip install uc-manager
               uv pip install -r requirements-dev.txt
-              uv pip install --force-reinstall --no-deps triton-ascend==3.2.2
               # Preserve CI availability during the transition by compiling on
               # the NPU only when the CPU-produced cache is unavailable.
               if [ "$CSRC_CACHE_HIT" = "true" ]; then
@@ -234,22 +227,10 @@ jobs:
               uv pip install tblib
 
           - name: Install FLA NPU for A2 upstream tests
-            env:
-              GIT_PROXY: https://gh-proxy.test.osinfra.cn/
             run: |
               set -euo pipefail
-              FLA_WHL=flash_linear_attention_npu_a2-26.9.1+deva4a7958-py3-none-manylinux_2_34_aarch64.whl
-              FLA_SHA256=7c3d3d07419a9cb1a17ca0d683d4d5de82d69c6523ada96396c9d6d0317e583a
-              FLA_DOWNLOAD_URL="https://github.com/flashserve/flash-linear-attention-npu/releases/download/v26.9.1-beta2/$FLA_WHL"
-              if [ -n "${GIT_PROXY:-}" ]; then
-                FLA_DOWNLOAD_URL="${GIT_PROXY}${FLA_DOWNLOAD_URL}"
-              fi
-              curl --fail --location --show-error --silent --retry 3 --retry-delay 5 --retry-all-errors \
-                "$FLA_DOWNLOAD_URL" -o "/tmp/$FLA_WHL"
-              echo "$FLA_SHA256  /tmp/$FLA_WHL" | sha256sum --check
-              uv pip install --no-deps "/tmp/$FLA_WHL"
+              uv pip install --no-deps flash-linear-attention-npu-a2===26.9.1
               python3 -c "import fla_npu.ops.ascendc"
-              rm -f "/tmp/$FLA_WHL"
 
           - name: Run vllm-project/vllm test
             working-directory: ./vllm-empty

@@ -1,0 +1,4 @@
+pr: 16851
+entries:
+  - category: bugfix
+    text: Enabled shared custom-op initialization on Ascend A5 while preserving the DeepSeek V4 RMSNorm and FP32 cast fallback on hardware without fused RmsNormCast support.

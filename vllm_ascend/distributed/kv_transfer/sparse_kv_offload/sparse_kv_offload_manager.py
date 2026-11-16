@@ -30,7 +30,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.utils import CpuGpuBuffer
 
-from vllm_ascend.ascend_config import SparseKVOffloadConfig, get_ascend_config
+from vllm_ascend.ascend_config import SparseKVOffloadConfig
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import copy_sfa_pool_capacity
 from vllm_ascend.utils import AscendDeviceType, enable_custom_op, get_ascend_device_type
 
@@ -45,7 +45,6 @@ OFFLOAD_K_CACHE_CPU_INDEX = 2
 OFFLOAD_V_CACHE_CPU_INDEX = 3
 OFFLOAD_TOPK_BUFFER_K_INDEX = 4
 OFFLOAD_TOPK_BUFFER_V_INDEX = 5
-OFFLOAD_STORE_PORT_BASE = 8500
 
 FSA_EXTERNAL_PLAN_READY_MARKER = 0x5A45
 FSA_PAIRED_SELECTION_COPY_MARKER = 0x5A56
@@ -317,6 +316,25 @@ def get_sparse_kv_offload_cpu_pool_size_bytes(
     return raw_host_bytes + alignment_reserve_bytes
 
 
+def resolve_sparse_kv_offload_store_url(
+    sparse_kv_offload_config: SparseKVOffloadConfig,
+    data_parallel_index: int,
+) -> str:
+    """Build the MemFabric store endpoint of one sparse KV offload group.
+
+    Every TP rank of a group binds the same endpoint, while each data parallel
+    group uses its own port. The base port is configurable so that independent
+    services sharing a network namespace can be assigned distinct endpoints.
+    """
+    store_port = sparse_kv_offload_config.store_port_base + data_parallel_index
+    if not 1 <= store_port <= 65535:
+        raise ValueError(
+            "sparse_kv_offload_config.store_port_base plus the data parallel index "
+            f"must be a valid TCP port, got {store_port}."
+        )
+    return f"tcp://127.0.0.1:{store_port}"
+
+
 def allocate_kv_cache_tensors_for_sparse_kv_offload(
     k_tensor_size: int,
     v_tensor_size: int,
@@ -446,33 +464,6 @@ def update_sparse_kv_offload_metadata(
     offload_token_to_req.copy_to_gpu(num_tokens_padded)
 
 
-def prepare_sparse_kv_offload_mtp_dummy_metadata(
-    num_tokens: int,
-    num_reqs: int,
-    query_start_loc_cpu: torch.Tensor,
-    req_ids_buffer: CpuGpuBuffer,
-    token_to_req_buffer: CpuGpuBuffer,
-) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-    if not get_ascend_config().sparse_kv_offload_config.enabled:
-        return None, None
-    if req_ids_buffer is None or token_to_req_buffer is None:
-        raise RuntimeError("Sparse KV offload metadata buffers are not initialized")
-
-    query_lens = np.diff(query_start_loc_cpu[: num_reqs + 1].numpy()).astype(np.int32, copy=False)
-    token_to_req = np.repeat(np.arange(num_reqs, dtype=np.int32), query_lens)
-    if token_to_req.shape[0] < num_tokens:
-        token_to_req = np.pad(token_to_req, (0, num_tokens - token_to_req.shape[0]))
-
-    req_ids_buffer.np[:num_reqs] = np.arange(1, num_reqs + 1, dtype=np.int64)
-    req_ids_buffer.copy_to_gpu(num_reqs)
-    token_to_req_buffer.np[:num_tokens] = token_to_req[:num_tokens]
-    token_to_req_buffer.copy_to_gpu(num_tokens)
-    return (
-        req_ids_buffer.gpu[:num_reqs],
-        token_to_req_buffer.gpu[:num_tokens],
-    )
-
-
 class SparseKVOffloadManager:
     """
     A manager responsible to the Sparse KV cache Offload.
@@ -547,8 +538,10 @@ class SparseKVOffloadManager:
         config.world_size = self.tp_size
         config.rank_id = self.tp_rank
         config.scene = offload.Scene.SHARED
-        store_port = OFFLOAD_STORE_PORT_BASE + parallel_config.data_parallel_index
-        config.store_url = f"tcp://127.0.0.1:{store_port}"
+        config.store_url = resolve_sparse_kv_offload_store_url(
+            self.sparse_kv_offload_config,
+            parallel_config.data_parallel_index,
+        )
         assert offload.initialize(config) == 0, "Sparse KV offload offload.initialize failed."
         self.tp_group.barrier()
 
@@ -729,6 +722,14 @@ class SparseKVOffloadManager:
                 f"v_len={len(self.v_caches_cpu)}"
             )
         return self.k_caches_cpu[layer_id], self.v_caches_cpu[layer_id]
+
+    def get_topk_cache_components(self) -> set[tuple[str, int]]:
+        """Identify scratch views that must not be zeroed by logical KV block ID."""
+        return {
+            (layer_name, component_id)
+            for layer_name in self.offload_layer_names
+            for component_id in (OFFLOAD_TOPK_BUFFER_K_INDEX, OFFLOAD_TOPK_BUFFER_V_INDEX)
+        }
 
     def register_kv_caches(
         self,

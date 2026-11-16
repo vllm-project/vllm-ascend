@@ -63,7 +63,47 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots i
 from vllm_ascend.distributed.kv_transfer.utils.memfabric_transfer_engine import (  # noqa: E402
     BACKEND_MEMFABRIC,
 )
-from vllm_ascend.utils import vllm_version_is  # noqa: E402
+
+
+@pytest.mark.parametrize("device_id", [0, 1, 3])
+def test_send_thread_uses_worker_device(device_id):
+    state = ProducerSendState(
+        last_layer_idx=0,
+        layer_metadata={},
+        p_session="test-session",
+        main_group_idx=0,
+        indexer_group_idx=0,
+        block_sizes=(),
+        layer_storage_slots={},
+    )
+    thread = MembPullSendingThread(ready_event=threading.Event(), state=state, device_id=device_id)
+    thread._stopped = True
+    module = "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.send_thread"
+    with patch(f"{module}.torch.npu.set_device") as set_device:
+        thread.start()
+        thread.join(timeout=5)
+
+        assert not thread.is_alive()
+        set_device.assert_called_once_with(device_id)
+        assert thread.ready_event.is_set()
+        assert thread.startup_error is None
+
+
+def test_send_thread_reports_device_binding_failure():
+    thread = MembPullSendingThread(
+        ready_event=threading.Event(),
+        state=ProducerSendState(0, {}, "test-session", 0, 0, (), {}),
+        device_id=3,
+    )
+    thread._stopped = True
+    module = "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.send_thread"
+    error = RuntimeError("could not bind to NPU")
+    with patch(f"{module}.torch.npu.set_device", side_effect=error) as set_device:
+        thread.run()
+
+        assert thread.startup_error is error
+        assert thread.ready_event.is_set()
+        set_device.assert_called_once_with(3)
 
 
 def test_sfa_remote_d2h_connector_is_registered():
@@ -1802,15 +1842,9 @@ def test_producer_scheduler_reports_no_loaded_group():
 
 
 def test_loaded_group_ids_hook_is_version_gated():
-    # vLLM main added the scheduler hook `get_loaded_kv_cache_group_ids`;
-    # v0.31.0 has neither the hook nor its caller.
-    if vllm_version_is("0.31.0"):
-        assert "get_loaded_kv_cache_group_ids" not in SfaRemoteD2HConnector.__dict__
-    else:
-        assert "get_loaded_kv_cache_group_ids" in SfaRemoteD2HConnector.__dict__
+    assert "get_loaded_kv_cache_group_ids" in SfaRemoteD2HConnector.__dict__
 
 
-@pytest.mark.skipif(vllm_version_is("0.31.0"), reason="main-only scheduler hook")
 def test_connector_reports_the_groups_its_scheduler_restores():
     connector = SfaRemoteD2HConnector.__new__(SfaRemoteD2HConnector)
     connector.connector_scheduler = MagicMock()

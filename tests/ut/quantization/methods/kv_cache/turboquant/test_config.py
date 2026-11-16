@@ -16,7 +16,6 @@ def runtime(monkeypatch):
     return SimpleNamespace(
         cache_config=SimpleNamespace(cache_dtype="turboquant_4bit_nc"),
         attention_config=SimpleNamespace(indexer_kv_dtype="int8"),
-        use_v2_model_runner=True,
         model_config=SimpleNamespace(
             dtype=torch.bfloat16,
             hf_text_config=SimpleNamespace(
@@ -62,7 +61,6 @@ def test_missing_hf_config_fails_with_validation_error(runtime):
 @pytest.mark.parametrize(
     "path,value,message",
     [
-        ("use_v2_model_runner", False, "VLLM_USE_V2_MODEL_RUNNER"),
         ("model_config.dtype", torch.float16, "BF16"),
         ("model_config.hf_text_config.model_type", "deepseek_v3", "requires DeepSeek V4"),
         ("model_config.hf_text_config.head_dim", 256, "head_dim=512"),
@@ -139,13 +137,5 @@ def test_sfa_model_allows_context_parallelism(runtime):
     # Only the compressed-cache path forbids DCP/PCP; the packed SFA cache works
     # with context parallelism.
     _as_sfa_model(runtime).parallel_config.decode_context_parallel_size = 2
-
-    config.validate_turboquant(runtime)
-
-
-def test_sfa_cache_accepts_the_v1_model_runner(runtime):
-    # The V1 runner builds the same packed SFA main cache spec; the compressed
-    # cache of the DeepSeek V4 path stays V2-only, as the case above asserts.
-    _as_sfa_model(runtime).use_v2_model_runner = False
 
     config.validate_turboquant(runtime)

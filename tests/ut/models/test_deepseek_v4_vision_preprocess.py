@@ -6,6 +6,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
+import pytest
 import torch
 from PIL import Image
 from transformers import BatchFeature
@@ -73,6 +74,77 @@ class _ConcurrentStubInfo(_StubInfo):
 
     def get_tokenizer(self):
         return self.tokenizer
+
+
+@pytest.fixture
+def vision_info():
+    config = SimpleNamespace(
+        vision_patch_size=14,
+        vision_downsample_ratio=3,
+        vision_max_n_token=384,
+        vision_min_pixels=147456,
+        vision_max_wh_ratio=8,
+    )
+    ctx = SimpleNamespace(get_hf_config=lambda *args, **kwargs: config)
+    return prep.DeepseekV4VLProcessingInfo(ctx)
+
+
+def test_dummy_image_covers_wide_image(vision_info):
+    """A square underestimates both tokens and patches (vLLM #59373)."""
+    dummy = vision_info.get_image_size_with_most_features()
+    processor = vision_info.get_hf_processor()
+    dummy_output = processor(images=[Image.new("RGB", dummy)])
+    wide_output = processor(images=[Image.new("RGB", (1932, 336))])
+
+    assert dummy == (1932, 336)
+    assert dummy_output["patches"].shape[0] == 3312
+    assert dummy_output["types"].numel() == 378
+    assert wide_output["patches"].shape[0] <= dummy_output["patches"].shape[0]
+    assert wide_output["types"].numel() <= dummy_output["types"].numel()
+
+
+@pytest.mark.parametrize("max_wh_ratio", [1, 2, 8, None])
+def test_dummy_image_respects_aspect_ratio_without_resizing(vision_info, max_wh_ratio):
+    config = vision_info.get_hf_config()
+    config.vision_max_wh_ratio = max_wh_ratio
+    dummy = vision_info.get_image_size_with_most_features()
+
+    if max_wh_ratio is not None:
+        assert dummy.width <= dummy.height * max_wh_ratio
+
+    output = vision_info.get_hf_processor()(images=[Image.new("RGB", dummy)])
+    n_vit_h, n_vit_w = output["vit_grid"][0].tolist()
+    assert n_vit_h * config.vision_patch_size == dummy.height
+    assert n_vit_w * config.vision_patch_size == dummy.width
+
+
+@pytest.mark.parametrize("max_n_token", [384, 385])
+@pytest.mark.parametrize("start_pos", range(COMPRESS_PAD_TO))
+def test_dummy_image_reserves_compressor_padding(vision_info, max_n_token, start_pos):
+    config = vision_info.get_hf_config()
+    config.vision_max_n_token = max_n_token
+    dummy = vision_info.get_image_size_with_most_features()
+    output = vision_info.get_hf_processor()(images=[Image.new("RGB", dummy)])
+    n_llm_h, n_llm_w = output["llm_grid"][0].tolist()
+    types, _ = prep.build_image_block(n_llm_h, n_llm_w, start_pos)
+    compress_pad = COMPRESS_PAD_TO - 1 - start_pos % COMPRESS_PAD_TO
+
+    assert output["types"].numel() <= max_n_token - (COMPRESS_PAD_TO - 1)
+    assert types.numel() <= max_n_token
+    assert torch.equal(types[compress_pad:], output["types"])
+
+
+def test_dummy_builder_uses_worst_case_images(vision_info):
+    builder = prep.DeepseekV4VLDummyInputsBuilder(vision_info)
+    num_images = 2
+    mm_data = builder.get_dummy_mm_data(seq_len=4096, mm_counts={"image": num_images}, mm_options={})
+
+    assert len(mm_data["image"]) == num_images
+    assert all(image.size == (1932, 336) for image in mm_data["image"])
+
+    output = vision_info.get_hf_processor()(images=mm_data["image"])
+    assert output["patches"].shape[0] == num_images * 3312
+    assert output["types"].numel() == num_images * 378
 
 
 def test_local_image_processor_builds_vit_and_llm_inputs():

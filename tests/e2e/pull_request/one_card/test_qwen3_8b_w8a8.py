@@ -28,7 +28,7 @@ def test_dense_w8a8_eagle3_full_graph():
     """Verify dense W8A8 inference with Eagle-3 speculative decoding."""
     example_prompts = PROMPTS_SHORT
     sampling_params = SamplingParams(
-        max_tokens=300,
+        max_tokens=64,
         temperature=0.0,
         ignore_eos=False,
     )

@@ -39,6 +39,8 @@ import inspect
 import os
 import sys
 import types
+import weakref
+from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -120,7 +122,9 @@ def test_unpacked_send_stores_reduce_tensor_args_only():
         engine.is_sender = True
         engine.npu_uuid = "node-0"
         engine.gpu_uuid = engine.npu_uuid
-        source = iter([("model.weight", torch.zeros(3))])
+        source = MagicMock()
+        source.__iter__.return_value = iter([("model.weight", torch.zeros(3))])
+        source.iter_full.return_value = iter([("model.weight", torch.zeros(3))])
         with patch.object(engine, "_all_gather_and_merge_handles", side_effect=lambda handles: handles):
             engine._send_unpacked(source)
 
@@ -218,6 +222,7 @@ def test_receive_packed_weights_loads_model():
     engine.model = MagicMock()
     engine.device = MagicMock(index=0)
     engine.packed = True
+    engine._packed_importer = MagicMock()
 
     with (
         patch(f"{_MODULE}.npu_generate_uuid", return_value="node-0"),
@@ -236,6 +241,7 @@ def test_receive_packed_weights_loads_model():
         dtype_names=update_info.dtype_names,
         tensor_sizes=update_info.tensor_sizes,
         device_index=0,
+        importer=engine._packed_importer,
     )
     engine.model.load_weights.assert_called_once_with(packed_weights)
 
@@ -272,7 +278,7 @@ def test_packed_sender_waits_before_reusing_each_chunk(is_sender):
     engine.packed = True
     engine.npu_uuid = "node-0"
     engine.packed_buffer_size_bytes = 16
-    engine.source = []
+    engine.source = MagicMock()
     events: list[str] = []
 
     def chunks(**kwargs):
@@ -372,3 +378,85 @@ def test_uuid_uses_assigned_device_with_visibility_mapping():
             assert npu_ipc_engine.npu_generate_uuid(1) == "host-7"
     finally:
         npu_ipc_engine.npu_generate_uuid.cache_clear()
+
+
+@pytest.mark.parametrize("cleanup", ["finish_weight_update", "shutdown"])
+def test_packed_export_imported_once_with_fresh_payload_and_release(cleanup):
+    """Multiple chunks share an import, but load fresh independent weights."""
+
+    def fake_base_init(self, config, vllm_config, device, model):
+        self.device, self.model = device, model
+        self.model_config = None
+
+    model = MagicMock()
+    with patch.object(WeightTransferEngine, "__init__", fake_base_init):
+        engine = NPUIPCWeightTransferEngine(None, None, torch.device("cpu:0"), model)
+    engine.packed = True
+    staging = torch.tensor([1.0, 2.0])
+    imports: list[weakref.ReferenceType[torch.Tensor]] = []
+    loaded: list[torch.Tensor] = []
+
+    def rebuild(*args):
+        assert args[6] == 0
+        assert args[-1] == f"export-{len(imports) + 1}"
+        mapping = staging.view(torch.uint8)
+        imports.append(weakref.ref(mapping))
+        return mapping
+
+    model.load_weights.side_effect = lambda weights: loaded.append(weights[0][1])
+    info = engine.update_info_cls(
+        names=["w"],
+        dtype_names=["float32"],
+        shapes=[[2]],
+        tensor_sizes=[8],
+        ipc_handles={"node-0": (None,) * 6 + (999, "export-1")},
+    )
+    with (
+        _patch_rebuild_npu_tensor(rebuild),
+        _patch_reload_module(),
+        patch(f"{_MODULE}.npu_generate_uuid", return_value="node-0"),
+    ):
+        engine.receive_weights(info)
+        staging.copy_(torch.tensor([3.0, 4.0]))
+        engine.receive_weights(info)
+        assert len(imports) == 1
+        assert imports[0]() is not None
+        assert torch.equal(loaded[0], torch.tensor([1.0, 2.0]))
+        assert torch.equal(loaded[1], torch.tensor([3.0, 4.0]))
+        getattr(engine, cleanup)()
+        assert imports[0]() is None
+        # Cleanup is idempotent; a later update must open a new mapping.
+        getattr(engine, cleanup)()
+        next_info = replace(info, ipc_handles={"node-0": (None,) * 6 + (999, "export-2")})
+        engine.receive_weights(next_info)
+        assert len(imports) == 2
+        engine.shutdown()
+        assert imports[1]() is None
+
+
+def test_packed_export_replacement_and_failed_rebuild_release():
+    from vllm_ascend.distributed.weight_transfer.packed_tensor import NPUPackedBufferImporter
+
+    importer = NPUPackedBufferImporter()
+    staging = torch.zeros(8, dtype=torch.uint8)
+    refs = []
+
+    def rebuild(*args):
+        if args[-1] == "bad-export":
+            raise RuntimeError("cannot import")
+        mapping = staging.view(-1)
+        refs.append(weakref.ref(mapping))
+        return mapping
+
+    with _patch_rebuild_npu_tensor(rebuild):
+        importer.rebuild(["same-storage", "refcount-slot-1"])
+        importer.rebuild(["same-storage", "refcount-slot-1"])
+        assert len(refs) == 1
+        importer.rebuild(["same-storage", "refcount-slot-2"])
+        assert refs[0]() is None
+        assert refs[1]() is not None
+        with pytest.raises(RuntimeError, match="cannot import"):
+            importer.rebuild(["same-storage", "bad-export"])
+        assert refs[1]() is not None
+        importer.close()
+        assert refs[1]() is None

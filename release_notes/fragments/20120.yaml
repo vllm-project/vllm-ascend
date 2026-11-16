@@ -1,0 +1,6 @@
+pr: 20120
+entries:
+  - category: bugfix
+    text: >-
+      Fixed MiniMax MXFP8 model scale-policy handling in MoE dispatch and combine,
+      preserving explicitly quantized inputs and configured overrides.

@@ -24,7 +24,7 @@ import torch
 import torch.nn as nn
 from torch.nn.parameter import Parameter
 from vllm.config import get_current_vllm_config
-from vllm.distributed import divide
+from vllm.distributed import divide, get_tensor_model_parallel_rank
 from vllm.model_executor.layers.linear import (  # noqa
     WEIGHT_LOADER_V2_SUPPORTED,
     ColumnParallelLinear,
@@ -113,8 +113,9 @@ class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
             weight_fp32 = layer.weight.data.to(torch.float32)
             new_fp32 = weight_fp32 if keep_nd_weight or skip_weight_nz_conversion else maybe_trans_nz(weight_fp32)
             # keep the captured graph's weight reference to the updated weight
-            # during RL weight updates.
-            replace_parameter(layer, "weight_fp32", new_fp32, prefer_copy=True)
+            # during RL weight updates. vLLM main (#62326) dropped `prefer_copy`
+            # and keeps the parameter object by default.
+            replace_parameter(layer, "weight_fp32", new_fp32)
         if "conv1d" not in layer.prefix and not skip_weight_nz_conversion:
             # 310P torch_npu rejects FRACTAL_NZ matmul when the weight-side
             # matrix has n=1 or k=1. Keep scalar gates such as Qwen MoE's
@@ -436,6 +437,13 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
             disable_tp=disable_tp,
         )
 
+        # Ascend initializes this layer without calling ColumnParallelLinear's
+        # constructor, which normally sets the allowance before create_weights.
+        self.allow_fp8_block_shape_mismatch = False
+        allow_fp8_mismatch = getattr(self, "_maybe_allow_fp8_block_shape_mismatch", None)
+        if allow_fp8_mismatch is not None:
+            allow_fp8_mismatch()
+
         self.gather_output = gather_output
 
         if output_sizes is None:
@@ -516,6 +524,37 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
                 self.weight.data.copy_(loaded_weight)
         else:
             super().weight_loader(param, loaded_weight)
+
+
+class AscendDCPGroupColumnParallelLinear(AscendColumnParallelLinear):
+    """Project group Q heads for every token, then select local heads for prefill."""
+
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        *,
+        bias: bool = False,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
+        parallel = get_current_vllm_config().parallel_config
+        self.group_size = parallel.decode_context_parallel_size
+        tp_size = parallel.tensor_parallel_size
+        if output_size % tp_size:
+            raise ValueError("DCP Q output size must be divisible by TP size")
+        self.qrep_active = self.group_size > 1
+        self.rank_in_group = get_tensor_model_parallel_rank() % self.group_size
+        super().__init__(input_size, output_size, bias=bias, quant_config=quant_config, prefix=prefix)
+        self.update_param_tp_status()
+
+    def _local_view(self, out: torch.Tensor) -> torch.Tensor:
+        """Select this TP rank's heads from a (..., group_heads, head_dim) output."""
+        if self.group_size == 1:
+            return out
+        local_num_heads = out.shape[-2] // self.group_size
+        start = self.rank_in_group * local_num_heads
+        return out[..., start : start + local_num_heads, :].contiguous()
 
 
 class AscendReplicatedLinear(ReplicatedLinear):

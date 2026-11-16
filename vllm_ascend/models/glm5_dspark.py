@@ -160,10 +160,15 @@ class Glm5DSparkModel(nn.Module):
             if slots.numel() != context_states.shape[0]:
                 raise ValueError("GLM MLA draft slot mapping must match context rows.")
             attn = layer.self_attn
+            kv_cache = attn.attn.kv_cache
+            if isinstance(kv_cache, torch.Tensor):
+                # Split fused KV into zero-copy NoPE/RoPE views for the context writer.
+                kv_cache = (kv_cache[..., : attn.kv_lora_rank], kv_cache[..., attn.kv_lora_rank :])
+            if attn.attn.impl._cache_requires_prolog_v3_writer(kv_cache):
+                attn.attn.impl.exec_context_kv_prolog_v3(context_states, cos, sin, kv_cache, slots)
+                continue
             qkv = attn.fused_qkv_a_proj(context_states)[0]
-            attn.attn.impl.exec_kv_prefill(
-                qkv[..., attn.q_lora_rank :].contiguous(), cos, sin, attn.attn.kv_cache, slots
-            )
+            attn.attn.impl.exec_kv_prefill(qkv[..., attn.q_lora_rank :].contiguous(), cos, sin, kv_cache, slots)
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor, inputs_embeds=None) -> torch.Tensor:
         hidden_states = self.embed_input_ids(input_ids) if inputs_embeds is None else inputs_embeds

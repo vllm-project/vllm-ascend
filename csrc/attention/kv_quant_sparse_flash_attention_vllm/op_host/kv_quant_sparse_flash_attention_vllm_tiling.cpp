@@ -13,6 +13,7 @@
  * \brief
  */
 
+#include "../op_kernel/arch35/qsfa_a5_address_precompute.h"
 #include <map>
 #include <vector>
 #include <numeric>
@@ -404,7 +405,7 @@ void QSFAMlaTiling::InitParams()
     perfMode_ = QSFAPerfMode::V_TEMPLATE_MODE;
     coreNum_ = aicNum_;
 
-    // The kernel pads absent RoPE lanes internally; retain the original UB/workspace layout.
+    // Retain the existing UB/workspace capacity; arch22 no-RoPE computes 512 dimensions.
     headDimAlign_ = Align(MLA_NOPE_HEAD_DIM + MLA_ROPE_HEAD_DIM, BYTE_BLOCK);
     ZeroTensorProcess();
 }
@@ -554,12 +555,21 @@ void QSFAMlaTiling::GetWorkspaceSize()
         workspaceSize_ = libapiSize_;
         constexpr uint32_t TRIPLE_BUFFER_NUM = 3;
         constexpr uint32_t S2_BASE_SIZE = 128;            // S2轴基本块大小
-        constexpr uint32_t D_SIZE = 576;
+        const uint32_t dSize = qsfaInfo_->qHeadDim;
         auto ascendcPlatform = platform_ascendc::PlatformAscendC(qsfaInfo_->platformInfo);
         uint32_t aicNum = ascendcPlatform.GetCoreNumAic();
         if (qsfaInfo_->gSize > 64) { // G大于64时核间切G，V0结果出核，需申请GM空间
-            workspaceSize_ += (S2_BASE_SIZE * D_SIZE * GetTypeSize(qsfaInfo_->inputQType) \
+            workspaceSize_ += (S2_BASE_SIZE * dSize * GetTypeSize(qsfaInfo_->inputQType) \
                 * TRIPLE_BUFFER_NUM * (aicNum >> 1));
+        }
+        if (qsfaInfo_->inputKvType == ge::DT_INT8 && qsfaInfo_->kvLayout == QSFALayout::PA_BSND &&
+            qsfa_a5::CanPrecomputeAddresses(qsfaInfo_->blockSize, qsfaInfo_->maxBlockNumPerBatch,
+                qsfaInfo_->sparseBlockCount, qsfaInfo_->sparseMode,
+                qsfaInfo_->gSize > 64, qsfaInfo_->qHeadDim == 512)) {
+            const uint64_t queryRows = qsfaInfo_->qLayout == QSFALayout::TND ? qsfaInfo_->s1Size :
+                static_cast<uint64_t>(qsfaInfo_->bSize) * qsfaInfo_->s1Size;
+            workspaceSize_ += queryRows *
+                qsfaInfo_->sparseBlockCount * sizeof(int64_t);
         }
     } else {
         uint32_t mmResElemSize = 4;         // 4:fp32
@@ -594,6 +604,17 @@ void QSFAMlaTiling::GetWorkspaceSize()
 
 void QSFAMlaTiling::CalcBlockDim()
 {
+    // Reduce idle launches on arch22 for both RoPE and no-RoPE paths.
+    if (qsfaInfo_->npuArch == NpuArch::DAV_2201) {
+        uint64_t taskNum = qsfaInfo_->s1Size;
+        if (qsfaInfo_->qLayout != QSFALayout::TND) {
+            taskNum = static_cast<uint64_t>(qsfaInfo_->bSize) * qsfaInfo_->s1Size;
+        }
+        if (taskNum > 0 && taskNum < usedCoreNum_) {
+            usedCoreNum_ = taskNum;
+            tilingData_.singleCoreParams.set_usedCoreNum(usedCoreNum_);
+        }
+    }
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(qsfaInfo_->platformInfo);
     auto aicNum = usedCoreNum_;
     auto aivNum = 2 * usedCoreNum_;
@@ -1256,19 +1277,10 @@ ge::graphStatus QSFATilingCheck::CheckFeatureMlaAntiquantShapeSizes() const
             "q_head_num must be divisible by kv_head_num."),
         return ge::GRAPH_FAILED);
 
-    if (isA5_) {
-        std::vector<uint32_t> gSizeSupportList = {1, 2, 4, 8, 16, 32, 48, 64, 128};
-        OP_CHECK_IF(std::find(gSizeSupportList.begin(), gSizeSupportList.end(), gSize_) == gSizeSupportList.end(),
-            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "group num", std::to_string(gSize_).c_str(),
-                "group num should be in 1, 2, 4, 8, 16, 32, 48, 64, 128."),
-            return ge::GRAPH_FAILED);
-    } else {
-        std::vector<uint32_t> gSizeSupportList = {1, 2, 4, 8, 16, 32, 64, 128};
-        OP_CHECK_IF(std::find(gSizeSupportList.begin(), gSizeSupportList.end(), gSize_) == gSizeSupportList.end(),
-            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "group num", std::to_string(gSize_).c_str(),
-                "group num should be in 1, 2, 4, 8, 16, 32, 64, 128."),
-            return ge::GRAPH_FAILED);
-    }
+    OP_CHECK_IF(gSize_ < 1U || gSize_ > 128U,
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "group num", std::to_string(gSize_).c_str(),
+            "group num should be in [1, 128]."),
+        return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
 }

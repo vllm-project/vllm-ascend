@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 import torch
 import torch.distributed as dist
+import torch_npu
 from torch.distributed import P2POp, ProcessGroup, batch_isend_irecv
 from vllm.distributed.eplb.eplb_communicator import (
     EplbCommunicator,
@@ -22,6 +23,9 @@ from vllm.distributed.utils import is_weak_contiguous
 from vllm.logger import logger
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.network_utils import get_ip, get_open_port, join_host_port
+
+from vllm_ascend.quantization.nz import NzCastSpec
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_internal_npu_format
 
 _HIXL_MEMORY_ALIGNMENT = 2 * 1024 * 1024
 _HIXL_MAX_REGISTERED_REGIONS = 4000
@@ -65,6 +69,42 @@ def _resolve_hixl_module() -> Any:
     return hixl_compat
 
 
+def _view_cast_specs(views: Sequence[Any]) -> list[NzCastSpec | None]:
+    return [getattr(view, "nz_cast_spec", None) for view in views]
+
+
+def _map_buffer_cast_specs(
+    expert_buffer: Sequence[Any],
+    all_expert_weights: Sequence[Sequence[Any]],
+) -> tuple[dict[int, NzCastSpec], list[torch.Tensor]]:
+    """Associate every parameterized receive buffer tensor with its cast.
+
+    The buffers are allocated as ``empty_like`` of one layer's weight views, so
+    a view cast with parameters hands its cast down to the buffer that receives
+    into it. ``add_recv`` is given those exact tensor objects, which is what
+    lets the receive path look the cast up by identity instead of tracking
+    positions. The buffers are kept alive here so an identity cannot be reused
+    by a later allocation.
+    """
+    buffer_specs = _view_cast_specs(expert_buffer)
+    for layer_views in all_expert_weights:
+        layer_specs = _view_cast_specs(layer_views)
+        if layer_specs != buffer_specs:
+            raise ValueError(
+                "Gloo EPLB receives into buffers shared by every layer, so each layer's NZ cast layout has to "
+                f"match theirs, but got {layer_specs} against {buffer_specs}."
+            )
+    specs: dict[int, NzCastSpec] = {}
+    retained: list[torch.Tensor] = []
+    for view, spec in zip(expert_buffer, buffer_specs):
+        if spec is None:
+            continue
+        for tensor in view:
+            specs[id(tensor)] = spec
+            retained.append(tensor)
+    return specs, retained
+
+
 class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
     """Gloo CPU-staging EPLB communicator for async mode on Ascend.
 
@@ -75,10 +115,19 @@ class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
     distributed collectives.
     """
 
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
+    def __init__(
+        self,
+        cpu_group: ProcessGroup,
+        expert_buffer: Sequence[Any] = (),
+        all_expert_weights: Sequence[Sequence[Any]] = (),
+    ) -> None:
+        super().__init__(cpu_group)
+        # The async worker hands its own stream over through set_stream().
         self._stream: torch.Stream | None = None
         self._pinned_staging_buffers: dict[tuple[torch.dtype, tuple[int, ...]], list[torch.Tensor]] = {}
+        # Keyed by the identity of the buffer tensors add_recv() receives, and
+        # holding those buffers so no later allocation can reuse an identity.
+        self._buffer_cast_specs, self._retained_buffers = _map_buffer_cast_specs(expert_buffer, all_expert_weights)
 
     def set_stream(self, stream: torch.Stream | None) -> None:
         self._stream = stream
@@ -141,8 +190,38 @@ class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
             request.wait()
 
         with stream if stream is not None else contextlib.nullcontext():
-            for dst_tensor, cpu_tensor in recv_staging:
-                dst_tensor.copy_(cpu_tensor, non_blocking=True)
+            for dst_tensor, src_tensor in recv_staging:
+                if is_internal_npu_format(dst_tensor):
+                    # Ascend950 cannot copy CPU tensors directly into internal
+                    # storage, so stage on device and convert there. The
+                    # conversion has to reproduce the destination's own cast:
+                    # its format can be a C0 variant that depends on the
+                    # parameters, and copy_ refuses mismatched descriptions.
+                    # TODO: Remove this workaround once copy_ supports H2D
+                    # copies into NZ storage on Ascend950.
+                    src_tensor = torch_npu.npu_format_cast(
+                        src_tensor.to(dst_tensor.device, non_blocking=True),
+                        ACL_FORMAT_FRACTAL_NZ,
+                        **self._destination_cast_kwargs(dst_tensor),
+                    )
+                dst_tensor.copy_(src_tensor, non_blocking=True)
+
+    def _destination_cast_kwargs(self, dst_tensor: torch.Tensor) -> dict[str, Any]:
+        """Return how to rebuild an NZ source for one receive destination."""
+        spec = self._buffer_cast_specs.get(id(dst_tensor))
+        if spec is not None:
+            return spec.cast_kwargs()
+        dst_format = int(torch_npu.get_npu_format(dst_tensor))
+        if dst_format == ACL_FORMAT_FRACTAL_NZ:
+            return {}
+        # Converting without the parameters would land on plain FRACTAL_NZ and
+        # the copy below would fail with a description mismatch. Name the
+        # missing contract instead: the quant method owning this weight has to
+        # hand its cast over on the view it exports to EPLB.
+        raise RuntimeError(
+            f"Gloo EPLB cannot rebuild a receive destination in format {dst_format}: the quant method that "
+            "built it does not report the NZ cast behind its get_eplb_weight_views() entry."
+        )
 
     @property
     def needs_profile_buffer_reservation(self) -> bool:
@@ -472,6 +551,7 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
         self._all_expert_weights = all_expert_weights
         self._expert_buffer = expert_buffer
         self._stream: torch.Stream | None = None
+        self._consumed_event: torch.Event | None = None
         self._session: _HixlSession | None = None
         self._remote_send_meta: dict[int, _ExpertMetadata] = {}
         self._expert_to_src_row: list[dict[int, int]] | None = None
@@ -559,7 +639,19 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
         self._require_session()._set_hixl_context()
         self._stream = stream
 
-    def set_transfer_context(self, old_indices: np.ndarray, layer_idx: int) -> None:
+    def set_consumed_event(self, event: torch.Event | None) -> None:
+        """Set the recorded buffer-consumption dependency for one layer."""
+        self._consumed_event = event
+
+    def set_transfer_context(
+        self,
+        old_indices: np.ndarray,
+        layer_idx: int,
+        recv_rows: Sequence[dict[int, int]] | None = None,
+    ) -> None:
+        # HIXL is receiver-initiated: it reads into the caller's tensor rows, so
+        # the per-rank recv rows needed by push backends are unused here.
+        del recv_rows
         self._require_session()
         if self._pending_reads:
             raise RuntimeError("HIXL EPLB started a layer with pending transfers")
@@ -607,12 +699,16 @@ class AscendHixlEplbCommunicator(EplbCommunicator):
         phase_started_at = time.perf_counter()
         local_error: Exception | None = None
         try:
-            # HIXL's private streams cannot honor the consumed-event wait on
-            # the EPLB stream. Finish that wait before a READ overwrites the
-            # shared buffer with the next layer's weights.
+            # HIXL's private streams bypass the EPLB stream's consumed-event
+            # wait. Finish consumption before a READ reuses the buffer, without
+            # waiting for unrelated work subsequently queued on the EPLB stream.
             with gpu_sync_allowed():
-                stream = self._stream if self._stream is not None else torch.accelerator.current_stream()
-                stream.synchronize()
+                if self._consumed_event is not None:
+                    self._consumed_event.synchronize()
+                else:
+                    # First layer and callers without a consumption event.
+                    stream = self._stream if self._stream is not None else torch.accelerator.current_stream()
+                    stream.synchronize()
             session._start_transfers(self._pending_reads)
         except Exception as error:
             local_error = error

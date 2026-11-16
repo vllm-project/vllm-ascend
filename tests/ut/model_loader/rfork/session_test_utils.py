@@ -19,6 +19,7 @@ def make_session(runtime):
     session.planner.remove_seed.return_value = True
     session.transfer_backend = Mock()
     session.transfer_backend.register_memory_region.return_value = True
+    session.transfer_backend.registered_structural_digest = "registered-digest"
     session.transfer_backend.read_weights_from_seed.return_value = True
     session.transfer_backend.unregister_memory_region.return_value = True
     session.transfer_backend.finalize_transfer_engine.return_value = True

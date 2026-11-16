@@ -18,7 +18,7 @@
   4. Gather: load `PADDED_TOPK` token ids for the request under the mask `k_offset < topk`, gather `logits[i, t]` at those ids, compute `logits - lse_i - m_i` in fp32 and store the `topk` valid lanes.
 
   The row is read twice from global memory rather than staged in UB, which keeps UB usage bounded by `BLOCK_SIZE` instead of by `vocab_size`. `multibuffer=False` is passed at launch for the same reason.
-- **Supported modes**: Atlas A2, Atlas A3, and 950PR&950DT Products. Used by vLLM model-runner-v2 sampling; it is installed over the upstream implementation in `vllm_ascend/patch/worker/patch_v2/patch_triton.py`. It runs in the sampler post-processing path, i.e. eagerly, outside ACL Graph capture.
+- **Supported modes**: Atlas A2, Atlas A3, and 950PR&950DT Products. Used by vLLM model-runner-v2 sampling; it is installed over the upstream implementation in `vllm_ascend/patch/worker/patch_triton.py`. It runs in the sampler post-processing path, i.e. eagerly, outside ACL Graph capture.
 
 ## Parameters
 
@@ -45,7 +45,7 @@
 
 ## Origin and Differences
 
-- **Origin**: adapted from vLLM's GPU implementation `vllm/v1/worker/gpu/sample/logprob.py` (recorded in the file header). The Ascend version is installed over the upstream symbols by `vllm_ascend/patch/worker/patch_v2/patch_triton.py` (`logprob.compute_token_logprobs`, and `compute_topk_logprobs` for `sampler`, `prompt_logprob` and `rejection_sampler`).
+- **Origin**: adapted from vLLM's GPU implementation `vllm/v1/worker/gpu/sample/logprob.py` (recorded in the file header). The Ascend version is installed over the upstream symbols by `vllm_ascend/patch/worker/patch_triton.py` (`logprob.compute_token_logprobs`, and `compute_topk_logprobs` for `sampler`, `prompt_logprob` and `rejection_sampler`).
 - **Differences**:
     - NPU adaptation for performance: the vocabulary tile is pinned to `BLOCK_SIZE = 12944` and the kernel is launched with `multibuffer=False`, both sized against the UB budget of the vector core; `tl.maximum` carries `propagate_nan=tl.PropagateNan.ALL` as a compatibility workaround after the NPU-IR upgrade. The companion `_ranks_kernel` used by `compute_topk_logprobs` is parallelized over `get_vectorcore_num()` cores with a `rows_per_core` row loop (and `do_not_specialize` on `batch_size` / `rows_per_core`) instead of one program per request, because an NPU has far fewer, much wider cores than a GPU has SMs.
     - Modified for a specific vllm-ascend logic or different input parameters: `compute_topk_logprobs` builds `logprob_token_ids` with `torch.topk` + `torch.cat` and then calls this kernel once for the concatenated ids. The upstream `logprob_token_ids_state` / `expanded_idx_mapping` / `max_per_req_token_ids` path is accepted for signature compatibility but not implemented — a non-zero `max_per_req_token_ids` logs a warn-once and falls back to the default token ids.

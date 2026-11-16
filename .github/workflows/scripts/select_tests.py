@@ -764,6 +764,12 @@ def main():
         "on a reserved runner. Scheduled full-suite coverage runs do not pass "
         "this flag, so --all-tests keeps collecting CPU UT coverage.",
     )
+    parser.add_argument(
+        "--skip-a5",
+        action="store_true",
+        help="Exclude A5 runner groups. PR precision/full runs use this while "
+        "A5 capacity is limited; A5 tests run separately under ready-a5.",
+    )
     args = parser.parse_args()
     global _SKIP_CPU_UT
     _SKIP_CPU_UT = args.skip_cpu_ut
@@ -879,6 +885,8 @@ def main():
             parser.error(str(exc))
 
     test_groups = _resolve_to_runners(all_groups, runners, partition_config, estimated_times)
+    if args.skip_a5:
+        test_groups = [group for group in test_groups if group["npu_type"] != NpuType.A5.value]
 
     _write_output(test_groups, matched_modules)
 

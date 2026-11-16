@@ -1,4 +1,4 @@
-# runtime_config
+# Runtime Configuration
 
 JSON schema for Runtime Guard. Default path: `<cwd>/runtime/config/runtime_config.json`.
 

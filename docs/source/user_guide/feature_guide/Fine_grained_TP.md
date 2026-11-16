@@ -54,7 +54,7 @@ To check whether a checkpoint qualifies, look at its `config.json`: the model co
 
 The restriction comes from the sharding axis: fine-grained TP shards weights across the data-parallel (DP) dimension, and only MoE deployments keep a cross-rank DP group — for a dense model, every DP rank runs as an independent DP=1 engine, leaving no group to shard across.
 
-Within a qualifying MoE model, `mlp_tensor_parallel_size` shards the dense MLP layers — for example, the first three dense layers of DeepSeek-R1; the routed experts of the MoE layers are sharded by expert parallel instead, and shared experts stay replicated.
+Within a qualifying MoE model, `mlp_tensor_parallel_size` shards the dense MLP layers — for example, the first three dense layers of DeepSeek-R1; the routed experts of the MoE layers are sharded by expert parallelism instead, and shared experts stay replicated.
 
 #### Preconditions for o_proj / MLP TP
 
@@ -213,14 +213,14 @@ After the instance starts, check which knobs passed startup validation:
 
 ## Configuration Parameters
 
-All knobs live under `finegrained_tp_config` inside `--additional-config`. The default `0` disables a knob.
+All knobs live under `finegrained_tp_config` inside `--additional-config`. The default `1` disables a knob.
 
 | Parameter | Type | Default | Required | Value Range | Description |
 |-----------|------|---------|----------|-------------|-------------|
-| `oproj_tensor_parallel_size` | int | 0 | No | 0, or a divisor of `data_parallel_size` | TP size of the attention output projection (`o_proj`, or the two-stage `wo_a`/`wo_b` in DSA-style models). Values > 1 require the [o_proj / MLP preconditions](#preconditions-for-o_proj--mlp-tp). |
-| `mlp_tensor_parallel_size` | int | 0 | No | 0, or a divisor of `data_parallel_size` | TP size of the MLP (feed-forward) blocks. Values > 1 require the [o_proj / MLP preconditions](#preconditions-for-o_proj--mlp-tp). |
-| `lmhead_tensor_parallel_size` | int | 0 | No | 0, or a divisor of `data_parallel_size` | TP size of the LM head (shards the vocabulary dimension). |
-| `embedding_tensor_parallel_size` | int | 0 | No | 0, or a divisor of `data_parallel_size` | TP size of the token embedding table. |
+| `oproj_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | TP size of the attention output projection (`o_proj`, or the two-stage `wo_a`/`wo_b` in DSA-style models). Values > 1 require the [o_proj / MLP preconditions](#preconditions-for-o_proj--mlp-tp). |
+| `mlp_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | TP size of the MLP (feed-forward) blocks. Values > 1 require the [o_proj / MLP preconditions](#preconditions-for-o_proj--mlp-tp). |
+| `lmhead_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | TP size of the LM head. |
+| `embedding_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | TP size of the token embedding table. |
 
 ## Experimental Results
 

@@ -22,6 +22,7 @@
 #include "../attn_res_fwd_tiling_data.h"
 #include "reduce_common.h"
 #include "attn_res_fwd_regbase_common.h"
+#include "attn_res_fwd_cooperative_regbase.h"
 
 namespace AttnResFwd {
 
@@ -140,7 +141,9 @@ private:
         pipe_->InitBuffer(outFp32Buf_, hiddenSizeAlignFp32_ * sizeof(float));
         // 与 arch22 一致：meta 按 32B block（8 fp32）对齐
         metaAlign_ = (blockCount_ + ELEM_PER_BLK_FP32 - 1U) / ELEM_PER_BLK_FP32 * ELEM_PER_BLK_FP32;
-        pipe_->InitBuffer(vecMetaBuf_, metaAlign_ * sizeof(float));
+        const uint32_t scoreElems = blockCount_ > 2U * RegBase::kVlFp32 ?
+            (metaAlign_ + RegBase::kVlFp32 - 1U) / RegBase::kVlFp32 * RegBase::kVlFp32 : metaAlign_;
+        pipe_->InitBuffer(vecMetaBuf_, scoreElems * sizeof(float));
         pipe_->InitBuffer(metaSoftmaxBuf_, metaAlign_ * sizeof(float));
         // Softmax 期间作 fold/Brcb scratch；Softmax 后 Brcb 成 metaBrc[n*8] 供 Weighted
         pipe_->InitBuffer(metaBrcBuf_, metaAlign_ * ELEM_PER_BLK_FP32 * sizeof(float));
@@ -274,13 +277,12 @@ private:
     {
         if (blockCount_ <= RegBase::kVlFp32) {
             RegBase::SoftmaxOneRegister(vecMeta_, blockCount_);
-        } else {
+        } else if (blockCount_ <= 2U * RegBase::kVlFp32) {
             RegBase::SoftmaxSmallRegBase(vecMeta_, blockCount_, metaAlign_, scalarLocal_, metaSoftmax_, metaBrc_);
+        } else {
+            CooperativeRegBase::Softmax(vecMeta_, scalarLocal_, blockCount_);
         }
-        const uint8_t brcRepeat =
-            static_cast<uint8_t>((blockCount_ + ELEM_PER_BLK_FP32 - 1U) / ELEM_PER_BLK_FP32);
-        Brcb(metaBrc_, vecMeta_, brcRepeat, {1, MOV_8});
-        PipeBarrier<PIPE_V>();
+        CooperativeRegBase::BroadcastScores(metaBrc_, vecMeta_, metaAlign_);
     }
 
     /*! Softmax 后：每 token 一次搬出 B 个 probs（Que 同步） */

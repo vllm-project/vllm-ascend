@@ -8,11 +8,10 @@ from typing import Any
 import numpy as np
 import torch
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
-from vllm.v1.worker.gpu.spec_decode.standalone_ar.speculator import (
-    StandaloneARSpeculator,
-)
+from vllm.v1.worker.gpu.spec_decode.standalone_ar.speculator import StandaloneARSpeculator
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_factory,
     build_attn_metadata_wrapper,
@@ -20,6 +19,12 @@ from vllm_ascend.worker.v2.attn_utils import (
 
 
 class AscendStandaloneARSpeculator(StandaloneARSpeculator):
+    if not vllm_version_is("0.33.0"):
+
+        def supports_batch_sharded_draft_logits(self) -> bool:
+            # NPU draft-logits kernels index the cache by request state.
+            return False
+
     def _build_attn_metadata(
         self,
         num_reqs: int,

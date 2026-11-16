@@ -197,6 +197,7 @@
             "moonshotai/Kimi-K2-Thinking",
             "moonshotai/Kimi-Linear-48B-A3B-Instruct",
             "neuralmagic/Qwen2.5-3B-quantized.w8a8",
+            "niannianxu/Qwen3.8-27B-LiLiCorr-block8-epoch0",
             "nv-community/Minitron-8B-Base",
             "nv-community/audio-flamingo-3",
             "nv-community/audio-flamingo-3-hf",
@@ -346,6 +347,7 @@
             "Eco-Tech/Kimi-K2.5-W4A8",
             "Eco-Tech/Kimi-K2.6-w4a8",
             "Eco-Tech/Kimi-K2.7-Code-w4a8",
+            "Eco-Tech/Kimi-K3-w4a8",
             "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot",
             "Eco-Tech/MiniMax-M2.7-eagle-model-short",
             "Eco-Tech/MiniMax-M2.7-w8a8-QuaRot",
@@ -446,6 +448,7 @@
             "Qwen/Qwen3.5-9B",
             "Qwen/Qwen3.6-27B",
             "Qwen/Qwen3.6-35B-A3B",
+            "Qwen/Qwen3.8-27B",
             "RedHatAI/GLM-5.2-speculator.dspark",
             "RedHatAI/Qwen3-32B-speculator.eagle3",
             "RedHatAI/Qwen3-8B-speculator.eagle3",
@@ -504,6 +507,7 @@
             "mistralai/Voxtral-Mini-4B-Realtime-2602",
             "moonshotai/Kimi-K2-Thinking",
             "moonshotai/Kimi-Linear-48B-A3B-Instruct",
+            "niannianxu/Qwen3.8-27B-LiLiCorr-block8-epoch0",
             "nv-community/audio-flamingo-3",
             "nv-community/audio-flamingo-3-hf",
             "openai-mirror/whisper-large-v3",
@@ -583,7 +587,9 @@
             "Eco-Tech/GLM-5.2-w8a8c8",
             "rainney/AEON-DFlash-Qwen3.6-35B-A3B",
             "Eco-Tech/GLM-5.3-w8a8c8",
-            "Eco-Tech/GLM-5.3-Flash-w8a8"
+            "Eco-Tech/GLM-5.3-Flash-w8a8",
+            "Eco-Tech/Kimi-K3.1-Pro-w4a8",
+            "Eco-Tech/Qwen3.6-27B-W8A8-310P"
         ],
         "a5": [
             "Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4",
@@ -602,6 +608,7 @@
             "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mxfp8",
             "Eco-Tech/Qwen3.6-27B-w8a8-mxfp8",
             "Eco-Tech/Qwen3.6-35B-A3B-w8a8-mxfp8",
+            "Eco-Tech/Step-3.7-Flash-w8a8-mxfp8",
             "LLM-Research/original",
             "Qwen/Qwen3-235B-A22B",
             "Qwen/Qwen3-30B-A3B",
@@ -624,7 +631,13 @@
             "vllm-ascend/Qwen3.5-397B-A17B-w4a8",
             "vllm-ascend/qwen36-35ba3b-2d-weights-poken-lora",
             "vllm-ascend/qwen36-35ba3b-moe-all-linear-poken-lora",
-            "deepseek-ai/DeepSeek-V4-Flash-0731"
+            "deepseek-ai/DeepSeek-V4-Flash-0731",
+            "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+            "Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8",
+            "Eco-Tech/GLM-5.3-w8a8c8",
+            "Eco-Tech/Qwen3.6-27B-w8a8c8-mxfp8",
+            "Eco-Tech/Qwen3.6-35B-A3B-w4a8-mxfp",
+            "Eco-Tech/Qwen3.5-397B-A17B-w8a8c8-mxfp8"
         ],
         "310p": [
             "vllm-ascend/Qwen3-8B-w8a8sc-310-vllm-tp1",
@@ -702,6 +715,15 @@
       "vllm-ascend/GSM8K_prefix90_in32768_bs128_qwen_prefix",
       "vllm-ascend/GSM8K_prefix90_in32768_bs128_qwen",
       "vllm-ascend/GSM8K_prefix100_in16384_bs500_GLM5_3_flash_w8a8",
-      "vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8"
+      "vllm-ascend/GSM8K_prefix0_in16384_bs500_GLM5_3_w8a8c8",
+      "vllm-ascend/GSM8K_prefix100_in1047400_DeepSeek-V4-Flash-0731",
+      "vllm-ascend/GSM8K_prefix100_in1047500_DeepSeek-V4_1_Flash_1017",
+      "vllm-ascend/GSM8K_prefix100_in1047000_GLM_5_3-Flash_w8a8_mxfp8",
+      "vllm-ascend/GSM8K_prefix90_in131072_Qwen3_6_27B_w8a8c8_mxfp8",
+      "vllm-ascend/GSM8K_prefix0_in10240_Qwen3_6_35B_w4a8_mxfp",
+      "vllm-ascend/GSM8K_prefix90_in131072_bs1000_Qwen3.5-397B-A17B-w8a8c8-mxfp8",
+      "vllm-ascend/aime2026",
+      "vllm-ascend/gsm8k_step",
+      "vllm-ascend/GSM8K_prefix90_in131072_bs500_DeepSeek-V4-Flash-0731"
     ]
 }

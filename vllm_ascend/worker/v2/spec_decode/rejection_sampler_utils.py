@@ -17,8 +17,11 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+from typing import Any, cast
+
 import torch
 from vllm.triton_utils import tl, triton
+from vllm.v1.worker.gpu.sample.gumbel import _TL_RAND_MIN
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     _compute_cumulative_log_p_kernel,
     _compute_global_residual_mass,
@@ -31,7 +34,15 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     _compute_local_logits_stats_kernel as _compute_block_stats_kernel,
 )
 
-from vllm_ascend.ops.triton.v2.spec_decode.resample import resample
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ops.triton.spec_decode.entropy_verify import (
+    _entropy_partials_kernel,
+    _entropy_verify,
+)
+from vllm_ascend.ops.triton.spec_decode.resample import resample
+from vllm_ascend.utils import vllm_version_is
+
+_ENTROPY_EPSILON = 1e-10
 
 
 @triton.jit
@@ -86,11 +97,16 @@ def _probabilistic_rejection_kernel(
     # [num_logits, num_blocks]
     local_residual_mass_ptr,
     local_residual_mass_stride,
+    # [num_logits, num_blocks], same layout as target_local_sumexp
+    entropy_partials_ptr,
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
     SYNTHETIC_MODE: tl.constexpr,
     USE_BLOCK_VERIFICATION: tl.constexpr,
+    USE_ENTROPY_VERIFY: tl.constexpr,
+    POSTERIOR_THRESHOLD: tl.constexpr,
+    POSTERIOR_ALPHA: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     # Cast to int64 before pointer arithmetic: triton-ascend computes
@@ -134,7 +150,7 @@ def _probabilistic_rejection_kernel(
                     u_pos = tl.load(pos_ptr + logit_idx).to(tl.int32)
                     u_seed = tl.randint(seed, u_pos)
                     u = tl.max(tl.rand(u_seed, tl.arange(0, 1)).to(tl.float32), axis=0)
-                    u = tl.maximum(u, 4.6566127342e-10)
+                    u = tl.maximum(u, _TL_RAND_MIN)
                     rate = tl.load(synthetic_conditional_rates_ptr + i)
                     accepted &= u < rate
                     # -1 placeholder draft tokens can never be accepted.
@@ -152,7 +168,7 @@ def _probabilistic_rejection_kernel(
                     u_pos = tl.load(pos_ptr + logit_idx).to(tl.int32)
                     u_seed = tl.randint(seed, u_pos)
                     u = tl.max(tl.rand(u_seed, tl.arange(0, 1)).to(tl.float32), axis=0)
-                    u = tl.maximum(u, 4.6566127342e-10)
+                    u = tl.maximum(u, _TL_RAND_MIN)
                     prefix_joint_ratio = tl.exp(tl.load(cumulative_log_p_ptr + logit_idx).to(tl.float32))
                     next_draft_token = tl.load(
                         draft_sampled_ptr + logit_idx + 2,
@@ -211,7 +227,7 @@ def _probabilistic_rejection_kernel(
                 u_pos = tl.load(pos_ptr + logit_idx).to(tl.int32)
                 u_seed = tl.randint(seed, u_pos)
                 u = tl.max(tl.rand(u_seed, tl.arange(0, 1)).to(tl.float32), axis=0)
-                u = tl.maximum(u, 4.6566127342e-10)
+                u = tl.maximum(u, _TL_RAND_MIN)
                 if HAS_DRAFT_LOGITS:
                     draft_logit = tl.load(
                         draft_logits_ptr
@@ -233,13 +249,26 @@ def _probabilistic_rejection_kernel(
                     draft_log_prob = draft_logit - draft_lse
                 else:
                     # One-hot draft: q(draft_token) = 1, log_q = 0.
-                    draft_log_prob = 0
+                    draft_log_prob = 0.0
                 if SYNTHETIC_MODE:
                     # Synthetic acceptance: accept IFF u ~ U(0, 1) < rate.
                     # The logprob/LSE values above are still needed to
                     # resample the rejected token.
                     rate = tl.load(synthetic_conditional_rates_ptr + i)
                     accepted &= u < rate
+                elif USE_ENTROPY_VERIFY:
+                    accepted &= _entropy_verify(
+                        entropy_partials_ptr,
+                        target_local_sumexp_stride,
+                        logit_idx,
+                        vocab_num_blocks,
+                        target_log_prob,
+                        draft_log_prob,
+                        u,
+                        PADDED_VOCAB_NUM_BLOCKS,
+                        POSTERIOR_THRESHOLD,
+                        POSTERIOR_ALPHA,
+                    )
                 else:
                     # Probability ratio test: p(x) > u * q(x)
                     # Equivalent log form: log_p(x) > log(u) + log_q(x)
@@ -301,17 +330,81 @@ def rejection_sample(
     synthetic_conditional_rates: torch.Tensor | None = None,
     use_fp64: bool = False,
     use_block_verification: bool = False,
+    # vLLM main (#59554) forwards these watermarking kwargs when a watermark
+    # key is configured; the NPU kernels do not implement watermarking.
+    contexts: torch.Tensor | None = None,
+    watermarking: torch.Tensor | None = None,
+    watermarking_skip_mask: torch.Tensor | None = None,
+    watermark_key: int | None = None,
+    # vLLM main (#53987) added FLy, an ROCm-only entropy-gated verification
+    # mode. Accept the kwargs so the shared call site keeps working, but reject
+    # the mode itself.
+    fly_window_size: int = 0,
+    fly_entropy_threshold: float = 0.3,
+    fly_entropy_top_k: int = 3,
+    use_entropy_verify: bool | None = None,
+    posterior_threshold: float = 0.95,
+    posterior_alpha: float = 0.4,
+    draft_logits_num_shards: int = 1,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    # Upstream passes logits after applying sampling parameters. Resolve the
+    # worker configuration here to keep its sampler and chunking flow unchanged.
+    # An explicit flag bypasses configuration lookup for standalone callers.
     if use_fp64:
         raise NotImplementedError("FP64 rejection sampling is not supported on NPU.")
+    if vllm_version_is("0.33.0"):
+        draft_logits_row_mapping = None
+        if draft_logits_num_shards != 1:
+            # vLLM main (#63554) can shard the draft logits cache across TP ranks;
+            # the NPU kernels index it by request state, so reject sharding.
+            raise NotImplementedError("Batch-sharded draft logits are not supported on NPU.")
+    else:
+        # Main passes a `DraftLogitsCache` (values plus an optional per-row
+        # mapping) in the same positional slot.
+        draft_logits_cache = cast(Any, draft_logits)
+        if draft_logits_cache is None:
+            draft_logits = None
+            draft_logits_row_mapping = None
+        elif isinstance(draft_logits_cache, torch.Tensor):
+            # Public callers (and the frozen one-card E2E) still pass the raw
+            # per-step tensor, which never carries a per-row mapping.
+            draft_logits_row_mapping = None
+        else:
+            draft_logits = draft_logits_cache.values
+            draft_logits_row_mapping = draft_logits_cache.row_mapping
+        if draft_logits_row_mapping is not None:
+            raise NotImplementedError("Batch-sharded draft logits are not supported on NPU.")
+    if fly_window_size > 0:
+        raise NotImplementedError("FLy rejection sampling is not supported on NPU.")
+    if (
+        contexts is not None
+        or watermarking is not None
+        or watermarking_skip_mask is not None
+        or watermark_key is not None
+    ):
+        raise NotImplementedError("Watermarking is not supported in the NPU rejection sampler.")
     if use_block_verification:
         assert synthetic_conditional_rates is None, (
             "Block verification is incompatible with synthetic acceptance rates."
         )
 
+    if use_entropy_verify is None:
+        config = get_ascend_config().rejection_sampler_config
+        use_entropy_verify = config.enable_entropy_verify
+        posterior_threshold = config.posterior_threshold
+        posterior_alpha = config.posterior_alpha
+    if use_entropy_verify and use_block_verification:
+        raise ValueError("Upstream block verification cannot be combined with entropy verify.")
+    use_entropy_verify = use_entropy_verify and synthetic_conditional_rates is None
+    if use_entropy_verify and (not (0 < posterior_threshold <= 1) or not (posterior_alpha >= 0)):
+        raise ValueError("posterior_threshold must be in (0, 1] and posterior_alpha must be >= 0.")
+
     num_reqs = cu_num_logits.shape[0] - 1
     num_logits, vocab_size = target_logits.shape
     has_draft_logits = draft_logits is not None
+
+    # Both upstream kernels detect bonus rows using the total logit count.
+    stats_num_logits = num_logits
 
     if draft_logits is None:
         # When draft_logits is None, create a dummy tensor so that Triton
@@ -334,90 +427,199 @@ def rejection_sample(
     target_local_sumexp = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
     draft_local_max = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
     draft_local_sumexp = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
-    _compute_block_stats_kernel[(num_logits, vocab_num_blocks)](
-        target_local_argmax,
-        target_local_argmax.stride(0),
-        target_local_max,
-        target_local_max.stride(0),
-        target_local_sumexp,
-        target_local_sumexp.stride(0),
-        draft_local_max,
-        draft_local_max.stride(0),
-        draft_local_sumexp,
-        draft_local_sumexp.stride(0),
-        target_logits,
-        target_logits.stride(0),
-        draft_logits,
-        draft_logits.stride(0),
-        draft_logits.stride(1),
-        expanded_idx_mapping,
-        expanded_local_pos,
-        temperature,
-        vocab_size,
-        num_speculative_steps,
-        BLOCK_SIZE=VOCAB_BLOCK_SIZE,
-        HAS_DRAFT_LOGITS=has_draft_logits,
-        # TODO: Remove this workaround after the Triton Ascend AutoBlockify
-        # bug for max-with-index reductions is fixed.
-        has_auto_blockify_blacklist_op=True,
-    )
-
-    if use_block_verification:
-        cumulative_log_p = target_logits.new_empty(num_logits, dtype=torch.float32)
-        _compute_cumulative_log_p_kernel[(num_reqs,)](
-            cumulative_log_p,
-            target_logits,
-            target_logits.stride(0),
+    if vllm_version_is("0.33.0"):
+        _compute_block_stats_kernel[(num_logits, vocab_num_blocks)](
+            target_local_argmax,
+            target_local_argmax.stride(0),
             target_local_max,
             target_local_max.stride(0),
             target_local_sumexp,
             target_local_sumexp.stride(0),
-            draft_sampled,
-            draft_logits,
-            draft_logits.stride(0),
-            draft_logits.stride(1),
             draft_local_max,
             draft_local_max.stride(0),
             draft_local_sumexp,
             draft_local_sumexp.stride(0),
-            cu_num_logits,
-            idx_mapping,
+            target_logits,
+            target_logits.stride(0),
+            draft_logits,
+            draft_logits.stride(0),
+            draft_logits.stride(1),
+            expanded_idx_mapping,
+            expanded_local_pos,
             temperature,
-            vocab_num_blocks,
-            PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
+            vocab_size,
+            stats_num_logits,
+            BLOCK_SIZE=VOCAB_BLOCK_SIZE,
             HAS_DRAFT_LOGITS=has_draft_logits,
-            num_warps=1,
+            # TODO: Remove this workaround after the Triton Ascend AutoBlockify
+            # bug for max-with-index reductions is fixed.
+            has_auto_blockify_blacklist_op=True,
         )
+    else:
+        _compute_block_stats_kernel[(num_logits, vocab_num_blocks)](
+            target_local_argmax,
+            target_local_argmax.stride(0),
+            target_local_max,
+            target_local_max.stride(0),
+            target_local_sumexp,
+            target_local_sumexp.stride(0),
+            draft_local_max,
+            draft_local_max.stride(0),
+            draft_local_sumexp,
+            draft_local_sumexp.stride(0),
+            target_logits,
+            target_logits.stride(0),
+            draft_logits,
+            draft_logits.stride(0),
+            draft_logits.stride(1),
+            draft_logits_row_mapping,
+            expanded_idx_mapping,
+            expanded_local_pos,
+            temperature,
+            vocab_size,
+            stats_num_logits,
+            BLOCK_SIZE=VOCAB_BLOCK_SIZE,
+            HAS_DRAFT_LOGITS=has_draft_logits,
+            # TODO: Remove this workaround after the Triton Ascend AutoBlockify
+            # bug for max-with-index reductions is fixed.
+            has_auto_blockify_blacklist_op=True,
+        )
+
+    entropy_partials = None
+    # With alpha=0 the threshold is constant; no vocabulary scan is needed.
+    if use_entropy_verify and posterior_alpha > 0:
+        entropy_partials = torch.empty_like(target_local_sumexp)
+        _entropy_partials_kernel[(num_logits, vocab_num_blocks)](
+            target_logits,
+            target_logits.stride(0),
+            target_local_max,
+            target_local_sumexp,
+            target_local_sumexp.stride(0),
+            entropy_partials,
+            expanded_idx_mapping,
+            expanded_local_pos,
+            temperature,
+            vocab_size,
+            vocab_num_blocks,
+            num_speculative_steps,
+            BLOCK_SIZE=VOCAB_BLOCK_SIZE,
+            PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
+            EPSILON=_ENTROPY_EPSILON,
+        )
+
+    if use_block_verification:
+        cumulative_log_p = target_logits.new_empty(num_logits, dtype=torch.float32)
+        if vllm_version_is("0.33.0"):
+            _compute_cumulative_log_p_kernel[(num_reqs,)](
+                cumulative_log_p,
+                target_logits,
+                target_logits.stride(0),
+                target_local_max,
+                target_local_max.stride(0),
+                target_local_sumexp,
+                target_local_sumexp.stride(0),
+                draft_sampled,
+                draft_logits,
+                draft_logits.stride(0),
+                draft_logits.stride(1),
+                draft_local_max,
+                draft_local_max.stride(0),
+                draft_local_sumexp,
+                draft_local_sumexp.stride(0),
+                cu_num_logits,
+                idx_mapping,
+                temperature,
+                vocab_num_blocks,
+                PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
+                HAS_DRAFT_LOGITS=has_draft_logits,
+                num_warps=1,
+            )
+        else:
+            _compute_cumulative_log_p_kernel[(num_reqs,)](
+                cumulative_log_p,
+                target_logits,
+                target_logits.stride(0),
+                target_local_max,
+                target_local_max.stride(0),
+                target_local_sumexp,
+                target_local_sumexp.stride(0),
+                draft_sampled,
+                draft_logits,
+                draft_logits.stride(0),
+                draft_logits.stride(1),
+                draft_logits_row_mapping,
+                draft_local_max,
+                draft_local_max.stride(0),
+                draft_local_sumexp,
+                draft_local_sumexp.stride(0),
+                cu_num_logits,
+                idx_mapping,
+                temperature,
+                vocab_num_blocks,
+                PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
+                HAS_DRAFT_LOGITS=has_draft_logits,
+                num_warps=1,
+            )
         if has_draft_logits:
             local_residual_mass = target_logits.new_empty(num_logits, vocab_num_blocks, dtype=torch.float32)
             if num_logits > 1:
-                _compute_local_residual_mass_kernel[(num_logits - 1, vocab_num_blocks)](
-                    local_residual_mass,
-                    local_residual_mass.stride(0),
-                    cumulative_log_p,
-                    target_logits,
-                    target_logits.stride(0),
-                    target_local_max,
-                    target_local_max.stride(0),
-                    target_local_sumexp,
-                    target_local_sumexp.stride(0),
-                    draft_logits,
-                    draft_logits.stride(0),
-                    draft_logits.stride(1),
-                    draft_local_max,
-                    draft_local_max.stride(0),
-                    draft_local_sumexp,
-                    draft_local_sumexp.stride(0),
-                    draft_sampled,
-                    expanded_idx_mapping,
-                    expanded_local_pos,
-                    temperature,
-                    vocab_size,
-                    num_speculative_steps,
-                    vocab_num_blocks,
-                    BLOCK_SIZE=VOCAB_BLOCK_SIZE,
-                    PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
-                )
+                if vllm_version_is("0.33.0"):
+                    _compute_local_residual_mass_kernel[(num_logits - 1, vocab_num_blocks)](
+                        local_residual_mass,
+                        local_residual_mass.stride(0),
+                        cumulative_log_p,
+                        target_logits,
+                        target_logits.stride(0),
+                        target_local_max,
+                        target_local_max.stride(0),
+                        target_local_sumexp,
+                        target_local_sumexp.stride(0),
+                        draft_logits,
+                        draft_logits.stride(0),
+                        draft_logits.stride(1),
+                        draft_local_max,
+                        draft_local_max.stride(0),
+                        draft_local_sumexp,
+                        draft_local_sumexp.stride(0),
+                        draft_sampled,
+                        expanded_idx_mapping,
+                        expanded_local_pos,
+                        temperature,
+                        vocab_size,
+                        stats_num_logits,
+                        vocab_num_blocks,
+                        BLOCK_SIZE=VOCAB_BLOCK_SIZE,
+                        PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
+                    )
+                else:
+                    _compute_local_residual_mass_kernel[(num_logits - 1, vocab_num_blocks)](
+                        local_residual_mass,
+                        local_residual_mass.stride(0),
+                        cumulative_log_p,
+                        target_logits,
+                        target_logits.stride(0),
+                        target_local_max,
+                        target_local_max.stride(0),
+                        target_local_sumexp,
+                        target_local_sumexp.stride(0),
+                        draft_logits,
+                        draft_logits.stride(0),
+                        draft_logits.stride(1),
+                        draft_logits_row_mapping,
+                        draft_local_max,
+                        draft_local_max.stride(0),
+                        draft_local_sumexp,
+                        draft_local_sumexp.stride(0),
+                        draft_sampled,
+                        expanded_idx_mapping,
+                        expanded_local_pos,
+                        temperature,
+                        vocab_size,
+                        stats_num_logits,
+                        vocab_num_blocks,
+                        BLOCK_SIZE=VOCAB_BLOCK_SIZE,
+                        PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
+                    )
         else:
             local_residual_mass = None
     else:
@@ -461,11 +663,15 @@ def rejection_sample(
         cumulative_log_p,
         local_residual_mass,
         local_residual_mass.stride(0) if local_residual_mass is not None else 0,
+        entropy_partials,
         vocab_num_blocks,
         PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
         HAS_DRAFT_LOGITS=has_draft_logits,
         SYNTHETIC_MODE=synthetic_conditional_rates is not None,
         USE_BLOCK_VERIFICATION=use_block_verification,
+        USE_ENTROPY_VERIFY=use_entropy_verify,
+        POSTERIOR_THRESHOLD=posterior_threshold if use_entropy_verify else 1.0,
+        POSTERIOR_ALPHA=posterior_alpha if use_entropy_verify else 0.0,
         num_warps=1,
     )
 

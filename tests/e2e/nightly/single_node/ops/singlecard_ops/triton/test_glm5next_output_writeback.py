@@ -5,9 +5,14 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.kda.output_writeback import write_recurrent_output
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize(
     "source_tokens,output_tokens,valid_tokens,heads,dtype",
     [
@@ -39,6 +44,9 @@ def test_recurrent_writeback_matches_reference(source_tokens, output_tokens, val
     torch.testing.assert_close(storage[-17:].cpu(), torch.full((17,), -7, dtype=dtype), rtol=0, atol=0)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @torch.inference_mode()
 def test_recurrent_writeback_dp_padding_graph_replay(dtype):

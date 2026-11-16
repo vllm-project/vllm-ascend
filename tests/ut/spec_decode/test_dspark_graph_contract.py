@@ -16,6 +16,7 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 import vllm_ascend.worker.v2.spec_decode.dflash.aclgraph as aclgraph_module
 import vllm_ascend.worker.v2.spec_decode.dflash.speculator as dflash_module
 import vllm_ascend.worker.v2.spec_decode.dspark.speculator as speculator_module
+from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.compilation.updatable_graph import UpdatableGraph
 from vllm_ascend.worker.v2.spec_decode.dflash.aclgraph import DFlashAclGraphManager
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
@@ -25,6 +26,21 @@ class _BackendA:
     @staticmethod
     def get_impl_cls():
         return object
+
+
+def test_flash_attn_graph_replay_uses_device_metadata_without_host_updates(monkeypatch):
+    manager = DFlashAclGraphManager.__new__(DFlashAclGraphManager)
+    manager.speculator = SimpleNamespace(
+        attn_backends={f"draft.{i}": AscendFlashAttentionBackend for i in range(6)},
+        build_draft_attn_metadatas=MagicMock(side_effect=AssertionError("unexpected host metadata rebuild")),
+    )
+    replay = MagicMock(return_value=object())
+    monkeypatch.setattr(DFlashCudaGraphManager, "run_fullgraph", replay)
+    desc = BatchExecutionDescriptor(cg_mode=CUDAGraphMode.FULL, num_tokens=24, num_reqs=3)
+
+    assert manager.run_fullgraph(desc) is replay.return_value
+    replay.assert_called_once_with(desc)
+    manager.speculator.build_draft_attn_metadatas.assert_not_called()
 
 
 def _speculator(**attributes):

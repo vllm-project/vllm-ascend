@@ -15,28 +15,29 @@
 #
 # Patch target: vllm/config/cache.py
 # - DeepSeek V4 / similar Ascend sparse-attention models store the MLA KV
-#   cache in ``int8``. Upstream's ``CacheConfig.cache_dtype`` field is typed
-#   as ``CacheDType = Literal["auto", "float16", ...]`` and rejects ``"int8"``
-#   at CLI/config validation time with a pydantic ``literal_error`` -- even
-#   though ``kv_cache_dtype_str_to_dtype`` supports ``int8`` (it maps to
-#   ``torch.int8`` upstream, see ``vllm/utils/torch_utils.py``).
-#   This patch widens the accepted ``Literal`` to include ``"int8"`` without
-#   touching the upstream vllm tree, by rebuilding the pydantic dataclass
-#   schema in place.
+#   cache in ``int8``; the A5 QFA path stores it as C8-MXFP (FP8 KV + E8M0
+#   scales) behind ``--kv-cache-dtype mxfp8``. Current vLLM main rejects both
+#   strings in ``CacheConfig._validate_cache_dtype`` via
+#   ``is_known_kv_cache_dtype``, which reads the mutable
+#   ``vllm.config.cache.KV_CACHE_DTYPES`` mirror list -- the same list backs
+#   the ``get_attn_backend`` assertion in ``vllm/v1/attention/selector.py``.
+#   (Older releases instead gated on the ``CacheDType`` Literal with a
+#   pydantic ``literal_error``.) This patch widens both: it appends
+#   ``"int8"``/``"mxfp8"`` to ``KV_CACHE_DTYPES`` and widens the
+#   ``CacheDType`` Literal by rebuilding the pydantic dataclass schema in
+#   place, without touching the upstream vllm tree.
 #
 # Why a platform patch:
 #   ``vllm serve`` builds its argparse parser in
-#   ``AsyncEngineArgs.add_cli_args`` (``vllm/engine/arg_utils.py``). The
-#   ``--kv-cache-dtype`` choices are generated from the upstream
-#   ``CacheDType`` Literal while the parser is being built, *before*
+#   ``AsyncEngineArgs.add_cli_args`` (``vllm/engine/arg_utils.py``) before
 #   ``current_platform.pre_register_and_update(parser)`` runs
-#   ``adapt_patch(is_global_patch=True)`` (i.e. this module). So the argparse
-#   choices are widened separately in
-#   ``vllm_ascend/platform.py::pre_register_and_update`` (same pattern as the
-#   ``--quantization`` choice). Rebuilding the schema here makes the new
-#   ``Literal`` visible to the pydantic validation of ``CacheConfig`` when it
-#   is constructed later from the parsed args -- in time for validation to
-#   accept ``int8``.
+#   ``adapt_patch(is_global_patch=True)`` (i.e. this module). Appending to
+#   the mirror list makes the later ``CacheConfig`` construction accept the
+#   Ascend dtypes; the Literal rebuild additionally keeps ``get_args``
+#   consumers (e.g. the CLI choices widening in
+#   ``vllm_ascend/platform.py::pre_register_and_update``) in sync. Worker
+#   processes re-apply the same widening via
+#   ``patch/worker/patch_kv_cache_dtype.py``.
 
 import typing
 
@@ -45,32 +46,10 @@ from vllm.config import cache as _cache_mod
 from vllm.config.cache import CacheConfig
 from vllm.logger import logger
 
-# The upstream Literal that gates ``cache_dtype``. We widen it to also accept
-# ``"int8"`` (DeepSeek V4 Ascend MLA KV cache dtype) and ``"mxfp8"`` (C8-MXFP
-# KV cache on the QFA path). Keep the existing members verbatim so other
-# behavior is unchanged.
-_ORIG_CACHE_DTYPE = _cache_mod.CacheDType
-_CACHE_DTYPE_WITH_ASCEND = typing.Literal[
-    "auto",
-    "float16",
-    "bfloat16",
-    "fp8",
-    "fp8_e4m3",
-    "fp8_e5m2",
-    "fp8_inc",
-    "fp8_ds_mla",
-    "turboquant_k8v4",
-    "turboquant_4bit_nc",
-    "turboquant_k3v4_nc",
-    "turboquant_3bit_nc",
-    "int4_per_token_head",
-    "int8_per_token_head",
-    "fp8_per_token_head",
-    "nvfp4",
-    "nvfp4_4over6",
-    "int8",
-    "mxfp8",
-]
+# Ascend-only ``--kv-cache-dtype`` values: ``"int8"`` (DeepSeek V4 / similar
+# Ascend MLA KV cache dtype) and ``"mxfp8"`` (C8-MXFP KV cache on the QFA
+# path).
+_ASCEND_CACHE_DTYPES = ("int8", "mxfp8")
 
 
 def _apply_kv_cache_dtype_int8_patch() -> None:
@@ -96,14 +75,34 @@ def _apply_kv_cache_dtype_int8_patch() -> None:
     call multiple times / across plugin entry points (the ``force`` flag
     rebuilds even though ``__pydantic_complete__`` is already True).
     """
-    # Idempotency: if int8 is already accepted, nothing to do.
-    existing_args = getattr(_ORIG_CACHE_DTYPE, "__args__", ())
-    if "int8" in existing_args and "mxfp8" in existing_args:
+    # Widen the mutable mirror list first: ``is_known_kv_cache_dtype`` (the
+    # ``_validate_cache_dtype`` field validator and the ``get_attn_backend``
+    # assertion) reads this list, so a widened Literal alone still dies with
+    # "Invalid kv_cache_dtype" at CacheConfig construction. The mirror list
+    # only exists on newer vLLM main; releases (e.g. v0.32.0) gate on the
+    # Literal alone, so the append is main-only.
+    mirror_list = getattr(_cache_mod, "KV_CACHE_DTYPES", None)
+    if mirror_list is not None:
+        for dtype in _ASCEND_CACHE_DTYPES:
+            if dtype not in mirror_list:
+                mirror_list.append(dtype)
+
+    # Idempotency: if both are already accepted, nothing to do.
+    existing_args = getattr(_cache_mod.CacheDType, "__args__", ())
+    missing = tuple(d for d in _ASCEND_CACHE_DTYPES if d not in existing_args)
+    if not missing:
         return
 
-    _cache_mod.CacheDType = _CACHE_DTYPE_WITH_ASCEND
-    CacheConfig.__annotations__["cache_dtype"] = _CACHE_DTYPE_WITH_ASCEND
-    CacheConfig.__dataclass_fields__["cache_dtype"].type = _CACHE_DTYPE_WITH_ASCEND
+    # Derive from the current upstream Literal and append the Ascend-only
+    # dtypes so no upstream member is dropped (a hardcoded list goes stale
+    # as upstream adds members). Subscripting with the plain tuple is the
+    # same __getitem__ call as star-unpacking it and parses on Python 3.10
+    # (PEP 646 starred subscripts are 3.11+).
+    widened = typing.Literal[existing_args + missing]  # type: ignore[valid-type]
+
+    _cache_mod.CacheDType = widened
+    CacheConfig.__annotations__["cache_dtype"] = widened
+    CacheConfig.__dataclass_fields__["cache_dtype"].type = widened
 
     # Rebuild the pydantic dataclass schema so the new Literal is enforced.
     # ``_parent_namespace_depth=1`` makes pydantic resolve types against this

@@ -128,12 +128,8 @@ def test_runners_call_run_sample_phase():
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[3] / "vllm_ascend"
-    v1 = (root / "worker" / "v1" / "model_runner.py").read_text(encoding="utf-8")
     v2 = (root / "worker" / "v2" / "model_runner.py").read_text(encoding="utf-8")
     hooks = (root / "observability" / "runtime_guard" / "hooks.py").read_text(encoding="utf-8")
-    # v1 stays unwired.
-    assert "runtime_guard" not in v1
-    assert "run_sample_phase(" not in v1
     # v2 routes it through the shared decorator; the method body is the
     # original functional logic (no _rg_* / guard hook split / runner-side
     # stash — the postprocess stash lives in the decorator's wrap).
@@ -160,6 +156,9 @@ def test_d11_async_model_runner_output_defers_after_sample():
     class _FakeAsync(AsyncModelRunnerOutput):
         def get_output(self) -> ModelRunnerOutput:
             raise AssertionError("run_sample_phase must not call get_output")
+
+        def get_kv_connector_output(self) -> None:
+            return None
 
     RuntimeGuardProcessor.reset_for_tests()
     p = bare_processor()

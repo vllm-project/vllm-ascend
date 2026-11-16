@@ -5,7 +5,7 @@ comment command, without running the PR-selected test suite.
 
 ## Background
 
-The `E2E` workflow ([`pr_test.yaml`](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/pr_test.yaml)) runs a PR-selected set of tests when a PR has one of the `ready-precise`, `ready-all`, `ready-a5`, or `main2main` labels. `main2main` runs the full suite twice, once against the verified vLLM main commit and once against the matched vLLM release tag.
+The `E2E` workflow ([`pr_test.yaml`](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/pr_test.yaml)) runs a PR-selected set of tests when a PR has one of the `ready-precise`, `ready-all`, `ready-a5`, or `main2main` labels. `main2main` runs the full suite twice, once against the verified vLLM main commit and once against the matched vLLM release tag. On release branches (`releases/v*`) the workflow tests only the matched vLLM release tag, because those branches are matched to a released upstream version.
 This is expensive in CI resources and time.
 
 Authorized users can trigger only the specific test files they care about by posting a
@@ -48,8 +48,8 @@ to a logical partition, which selects an exact runner label from `runner_label.j
 
 | Path pattern | Hardware | Runner |
 |---|---|---|
-| `two_card` in path | two_card A3 NPU | `linux-aarch64-a3-800t-2` |
-| `four_card` in path | four_card A3 NPU | `linux-aarch64-a3-800t-4` |
+| `two_card` in path | two_card A3 NPU (560T) | `linux-aarch64-a3-800i-2` |
+| `four_card` in path | four_card A3 NPU (560T) | `linux-aarch64-a3-800i-4` |
 | `_310p` in filename under one_card | Ascend 310P x1 | `linux-aarch64-310p-1` |
 | `_310p` in filename under two_card | Ascend 310P x2 | `linux-aarch64-310p-2` |
 | `_310p` in filename under four_card | Ascend 310P x4 | `linux-aarch64-310p-4` |
@@ -106,9 +106,9 @@ Run tests across multiple hardware categories in one comment:
 /e2e tests/e2e/pull_request/one_card/test_offline_inference.py tests/e2e/pull_request/two_card/test_data_parallel.py
 ```
 
-Re-trigger after fixing an issue: just push a new commit. The `synchronize` event
-re-runs the workflow and picks up the existing `/e2e` comment automatically — no need
-to post a new comment.
+Re-trigger after fixing an issue: pushing a new commit does not start CI by itself.
+Post `/e2e` again to re-run these paths, or `/run` to run the full PR gate on the
+latest commit.
 
 ## Troubleshooting
 
@@ -116,8 +116,8 @@ to post a new comment.
 
 - Check that the comment starts exactly with `/e2e` followed by at least one path,
   with no leading spaces or extra characters before the slash.
-- To re-trigger after fixing an issue, simply push a new commit — the workflow will
-  reuse the existing `/e2e` comment automatically.
+- To re-trigger after fixing an issue, push the fix and post `/e2e` again (or `/run`
+  for the full PR gate on the latest commit).
 
 **Tests ran on the wrong hardware.**
 

@@ -6,7 +6,7 @@
 import inspect
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import fields
@@ -19,17 +19,32 @@ from torch.distributed import all_reduce
 from vllm.distributed import get_ep_group, get_eplb_group
 from vllm.distributed.eplb import eplb_state as _eplb_state
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
-from vllm.distributed.parallel_state import in_the_same_node_as
+from vllm.distributed.parallel_state import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    in_the_same_node_as,
+)
+from vllm.forward_context import get_forward_context
 from vllm.logger import logger
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
+from vllm_ascend.device.hardware_profile import MoECommPolicy, get_current_hardware_profile
 from vllm_ascend.distributed.eplb.eplb_communicator import AscendHixlEplbCommunicator, _HixlSession
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
-from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
+from vllm_ascend.distributed.eplb.tensor_ops import (
+    build_expert_replica_routing_table,
+    count_allgather_tokens,
+    make_allgather_mask,
+)
 
 ASYNC_EPLB_CYCLE_COMMITTED_LOG = "Ascend async EPLB cycle committed"
 _EPLB_CLOSE_TIMEOUT_SECONDS = 300
 _EPLB_EVENT_POLL_SECONDS = 0.1
 EXPERT_MAPPING_EP_SIZE: ContextVar[int] = ContextVar("vllm_ascend_expert_mapping_ep_size", default=1)
+# ForwardContext.additional_kwargs key holding one gathered AllGather source
+# mask per micro-batch. Read directly rather than through _EXTRA_CTX: the
+# proxy cannot create the list atomically, which DBO needs.
+_ALLGATHER_SOURCE_MASK_SLOTS = "eplb_allgather_source_mask_slots"
 
 
 @contextmanager
@@ -57,6 +72,9 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
     def __init__(self) -> None:
         super().__init__()
         self.expert_replica_routing_table: torch.Tensor | None = None
+        self.allgather_expert_replica_routing_table: torch.Tensor | None = None
+        self.allgather_record_tensor: torch.Tensor | None = None
+        self.allgather_source_is_padding: torch.Tensor | None = None
         self.local_expert_start = 0
         self.local_expert_count = 0
 
@@ -96,13 +114,89 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
         self._set_local_expert_range(expert_load_view)
         self.refresh_expert_replica_routing_table()
 
+    def record_load(
+        self,
+        expert_tokens: torch.Tensor | None,
+        group_list_type: int,
+        *,
+        topk_ids: torch.Tensor,
+        num_source_tokens: int,
+        is_sequence_parallel: bool = False,
+        all_gather_mask: Callable[[torch.Tensor], torch.Tensor] | None = None,
+    ) -> None:
+        """Record MRV2 load, constructing and gathering source eligibility when needed."""
+        local_load = None
+        if all_gather_mask is not None:
+            assert self.num_unpadded_tokens_tensors is not None and self.should_record_tensor is not None
+            num_unpadded_tokens = self.num_unpadded_tokens_tensors[dbo_current_ubatch_id()]
+            # Every MoE layer of this model derives the same mask from the same
+            # per-forward inputs, so gathering it in each one repeats a
+            # collective as many times as the model has MoE layers. Hold it on
+            # the forward context, which lives exactly as long as the mask is
+            # valid: warmup, graph capture and draft forwards each enter their
+            # own, and none of them passes through the EPLB controller.
+            # ``setdefault`` because DBO runs its micro-batches on two threads
+            # that share one context, and a lost list would leave the ranks
+            # gathering a different number of times.
+            ubatch = dbo_current_ubatch_id()
+            forward_context = get_forward_context()
+            slots = forward_context.additional_kwargs.setdefault(
+                _ALLGATHER_SOURCE_MASK_SLOTS,
+                [None] * len(self.num_unpadded_tokens_tensors),
+            )
+            token_mask = slots[ubatch]
+            if token_mask is None:
+                is_padding = self.allgather_source_is_padding
+                if is_padding is None:
+                    is_padding = getattr(forward_context, "is_padding", None)
+                token_mask = make_allgather_mask(
+                    num_source_tokens,
+                    num_unpadded_tokens,
+                    self.should_record_tensor,
+                    is_padding=is_padding,
+                    tp_size=get_tensor_model_parallel_world_size() if is_sequence_parallel else 1,
+                    tp_rank=get_tensor_model_parallel_rank() if is_sequence_parallel else 0,
+                )
+                token_mask = all_gather_mask(token_mask)
+                slots[ubatch] = token_mask
+            local_load = count_allgather_tokens(topk_ids, token_mask, self.local_expert_start, self.local_expert_count)
+            assert self.allgather_record_tensor is not None
+            torch.maximum(
+                self.allgather_record_tensor,
+                token_mask.any().to(torch.int32),
+                out=self.allgather_record_tensor,
+            )
+        if expert_tokens is None:
+            raise RuntimeError("MRV2 EPLB requires operator-provided expert counts")
+        expert_load_view = self.expert_load_view
+        record_enabled = self.should_record_tensor
+        if local_load is not None:
+            expert_tokens = local_load
+            assert self.allgather_record_tensor is not None
+            record_enabled = self.allgather_record_tensor > 0
+            group_list_type = 1
+        if expert_load_view is None or record_enabled is None:
+            raise RuntimeError("MRV2 EPLB load-recording state is not initialized")
+        if expert_tokens.numel() != self.local_expert_count:
+            raise RuntimeError(
+                "MoE expert count does not match local EPLB experts: "
+                f"{expert_tokens.numel()} != {self.local_expert_count}"
+            )
+        torch.ops.vllm.ascend_eplb_record_expert_tokens(
+            expert_tokens,
+            expert_load_view,
+            record_enabled,
+            group_list_type,
+            self.local_expert_start,
+        )
+
     def refresh_expert_replica_routing_table(self) -> None:
         logical_to_physical_map = self.logical_to_physical_map
         logical_replica_count = self.logical_replica_count
         if logical_to_physical_map is None or logical_replica_count is None:
             raise RuntimeError("Cannot build the replica routing table before EPLB layer state is initialized.")
 
-        new_routing_table = _eplb_ops.build_expert_replica_routing_table(
+        new_routing_table = build_expert_replica_routing_table(
             logical_to_physical_map,
             logical_replica_count,
             get_ep_group().rank_in_group,
@@ -117,6 +211,12 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
             )
         else:
             self.expert_replica_routing_table = new_routing_table
+        if get_current_hardware_profile().moe_comm_policy is MoECommPolicy.CAPACITY_AND_WORLD_SIZE:
+            common_table = build_expert_replica_routing_table(logical_to_physical_map, logical_replica_count, ep_rank=0)
+            if self.allgather_expert_replica_routing_table is None:
+                self.allgather_expert_replica_routing_table = common_table
+            else:
+                self.allgather_expert_replica_routing_table.copy_(common_table, non_blocking=True)
 
 
 def refresh_model_routing_tables(
@@ -130,6 +230,19 @@ def refresh_model_routing_tables(
         layer_state = layer.eplb_state
         if isinstance(layer_state, AscendEplbLayerState):
             layer_state.refresh_expert_replica_routing_table()
+    if hasattr(model_state, "_allgather_physical_map"):
+        current_map = model_state.physical_to_logical_map
+        # Async layer refreshes follow changed-layer commits. Comparing the
+        # device maps here would synchronize the foreground inference stream.
+        if layer_idx is not None or not torch.equal(current_map, model_state._allgather_physical_map):
+            if model_state._allgather_physical_map.shape == current_map.shape:
+                model_state._allgather_physical_map.copy_(current_map)
+            else:
+                model_state._allgather_physical_map = current_map.clone()
+            model_state.expert_load_pass.zero_()
+            model_state.expert_load_window.zero_()
+            if hasattr(model_state, "_load_mapping_generation"):
+                model_state._load_mapping_generation += 1
 
 
 def _raise_if_async_worker_stopped(state: Any) -> None:
@@ -165,6 +278,8 @@ class AscendEplbState(_eplb_state.EplbState):
         self._has_fresh_recorded_load = False
         self._is_load_sampling_step = False
         self._should_collect_local_load = False
+        self.allgather_record_tensor: torch.Tensor | None = None
+        self._uses_phase_filter = False
         self._stop_async = threading.Event()
         self._suspended = False
         self._close_error: Exception | None = None
@@ -180,7 +295,7 @@ class AscendEplbState(_eplb_state.EplbState):
         """Whether the selected policy transforms temporal load samples."""
         return callable(getattr(getattr(self, "policy", None), "prepare_local_load_stats", None))
 
-    def add_model(self, model, model_config) -> None:
+    def add_model(self, model, model_config, model_name: str | None = None) -> None:
         """Build the EP-aware layout and initialize custom load statistics."""
         if self._hixl_session is not None:
             raise RuntimeError("Cannot add EPLB models after HIXL initialization")
@@ -190,11 +305,31 @@ class AscendEplbState(_eplb_state.EplbState):
                 self.parallel_config.eplb_config.policy,
                 self._configured_policy,
             ):
-                super().add_model(model, model_config)
+                super().add_model(model, model_config, model_name=model_name)
         finally:
             EXPERT_MAPPING_EP_SIZE.reset(token)
+        # Snapshot the placement for every profile, not just AllGather. The load
+        # history is keyed by physical slot, so a committed rearrangement that
+        # moves a different logical expert into a slot invalidates it, and
+        # refresh_model_routing_tables needs the previous placement to notice.
+        # Seeding here rather than on first use also covers the first commit,
+        # which already carries the new mapping by the time the tables refresh.
+        model_state = self.model_states[model_config.compute_hash()]
+        model_state._allgather_physical_map = model_state.physical_to_logical_map.clone()
         if self.uses_custom_load_stats:
             self._initialize_load_stats_state(self.model_states[model_config.compute_hash()])
+
+    def _propagate_shared_tensors(self, model, num_unpadded_tokens_tensors) -> None:
+        super()._propagate_shared_tensors(model, num_unpadded_tokens_tensors)
+        if get_current_hardware_profile().moe_comm_policy is not MoECommPolicy.CAPACITY_AND_WORLD_SIZE:
+            return
+        if self.should_record_tensor is None:
+            return
+        if self.allgather_record_tensor is None:
+            self.allgather_record_tensor = torch.full((), -1, dtype=torch.int32, device=self.device)
+        for layer in model.moe_layers:
+            if isinstance(layer.eplb_state, AscendEplbLayerState):
+                layer.eplb_state.allgather_record_tensor = self.allgather_record_tensor
 
     def wait_for_rearrangement(self, stream) -> bool:
         """Allow an idle worker to stop without recording a fake device event."""
@@ -351,8 +486,21 @@ class AscendEplbState(_eplb_state.EplbState):
         self.raise_if_close_failed()
         if self._hixl_session is not None:
             _raise_if_async_worker_stopped(self)
-        is_sampling = getattr(self, "_is_load_sampling_step", False) and not is_dummy and not is_profile
+        is_sampling = getattr(self, "_is_load_sampling_step", False) and not is_profile
         should_collect = getattr(self, "_should_collect_local_load", False)
+        allgather_record = getattr(self, "allgather_record_tensor", None)
+        if is_sampling and allgather_record is not None:
+            if is_dummy or getattr(self, "_uses_phase_filter", False):
+                # A source-idle owner can still execute remote tokens. The
+                # device decision also preserves phase filtering under replay.
+                gathered = int(allgather_record.item())
+                if gathered >= 0:
+                    should_collect = gathered != 0
+                    if should_collect:
+                        is_dummy = False
+            if not is_dummy and should_collect:
+                self._has_fresh_recorded_load = True
+        is_sampling = is_sampling and not is_dummy
         self._is_load_sampling_step = False
         self._should_collect_local_load = False
         if self.uses_custom_load_stats:
@@ -612,4 +760,7 @@ class AscendEplbState(_eplb_state.EplbState):
                 state._initialize_load_stats_state(model_state)
         for model_state in state.model_states.values():
             refresh_model_routing_tables(model_state)
+            # Elastic EP builds the state here instead of through add_model, so
+            # seed the placement snapshot on the same terms.
+            model_state._allgather_physical_map = model_state.physical_to_logical_map.clone()
         return state

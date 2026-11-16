@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import inspect
 import queue
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiKVConnectorMetadata
-from vllm.v1.worker import kv_connector_model_runner_mixin as runner_mixin
+from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
 from vllm_ascend.distributed.kv_transfer.ascend_multi_connector import AscendMultiConnector
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.connector import SfaRemoteD2HConnector
@@ -21,6 +22,10 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.worker import (
     SFAPDRD2HProducerWorker,
 )
 from vllm_ascend.distributed.kv_transfer.utils.memfabric_transfer_engine import BACKEND_MEMFABRIC
+
+# The deferred-finalize hook only exists on the newer connector API; the
+# release lane finalizes inside post_forward().
+DEFERS_FINALIZE = "defer_finalize" in inspect.signature(ActiveKVConnector.post_forward).parameters
 
 
 def _connector(worker, *, producer):
@@ -63,6 +68,7 @@ def _scheduler_output(metadata, *, multi, has_sync_loads):
 @pytest.mark.parametrize("multi", [False, True])
 @pytest.mark.parametrize("early_dispatch", [False, True])
 @pytest.mark.parametrize("tp_size,tp_rank,remote_tp_size", [(8, 3, 8), (16, 7, 4)])
+@pytest.mark.skipif(not DEFERS_FINALIZE, reason="the connector API has no deferred finalize hook")
 def test_producer_prepares_before_forward_and_preserves_target_state_for_mtp(
     has_sync_loads, multi, early_dispatch, tp_size, tp_rank, remote_tp_size
 ):
@@ -97,9 +103,14 @@ def test_producer_prepares_before_forward_and_preserves_target_state_for_mtp(
         # without routing through a worker load hook, even if one is present.
         patch.object(worker, "start_load_kv", side_effect=AssertionError("producer has no loads"), create=True),
         patch.object(worker, "bind_connector_metadata", wraps=worker.bind_connector_metadata) as bind_metadata,
-        patch.object(runner_mixin, "get_kv_transfer_group", return_value=connector),
-        patch.object(runner_mixin, "get_forward_context", return_value=SimpleNamespace(attn_metadata={})),
+        # register_kv_caches is the only constructor hook that needs a real
+        # kv_cache_config; bind/load/save stay real throughout the test.
+        patch.object(connector, "register_kv_caches", MagicMock()),
+        patch("vllm.v1.worker.gpu.kv_connector.get_kv_transfer_group", return_value=connector),
+        patch("vllm.v1.worker.gpu.kv_connector.is_forward_context_available", return_value=True),
+        patch("vllm.v1.worker.gpu.kv_connector.get_forward_context", return_value=SimpleNamespace(attn_metadata={})),
     ):
+        runner = ActiveKVConnector(None, {})
         for step in range(2):
             metadata = SfaPDProducerMetadata()
             req_id = f"request-{step}"
@@ -129,16 +140,20 @@ def test_producer_prepares_before_forward_and_preserves_target_state_for_mtp(
                 assert task.send_request[req_id].group_member_idx == tp_rank % tp_ratio
                 assert sender.send_queue.empty()
 
-            with runner_mixin.KVConnectorModelRunnerMixin._get_kv_connector_output(output, defer_finalize=True):
-                assert request.remote_port == mapped_port
-                assert worker.current_layer == 0
-                assert bind_metadata.call_count == step + 1
-                assert worker._pd_dispatched_layers == set()
-                run_layer(0)
-                run_layer(1)
+            # Execute the runner's pre-forward hook: bind the step metadata
+            # (which prepares dispatch state), then start sync loads. Async
+            # loads are deferred to post_forward.
+            runner.pre_forward(output)
+            assert request.remote_port == mapped_port
+            assert worker.current_layer == 0
+            assert bind_metadata.call_count == step + 1
+            assert worker._pd_dispatched_layers == set()
+            run_layer(0)
+            run_layer(1)
 
             # The deferred hook must neither rewind the counter/dedup set nor
             # offset the port again on the metadata retained by queued tasks.
+            runner.post_forward(output.finished_req_ids, defer_finalize=True)
             assert request.remote_port == mapped_port
             assert worker.current_layer == 2
             assert bind_metadata.call_count == step + 1
@@ -146,7 +161,7 @@ def test_producer_prepares_before_forward_and_preserves_target_state_for_mtp(
             run_layer(2)
             assert worker.current_layer == 3
             assert worker._pd_dispatched_layers == {0, 1, 2}
-            connector.clear_connector_metadata()
+            runner.finalize_step()
             assert not child.has_connector_metadata()
     assert sender.mark_layer_pending.call_count == 6
     assert sender.record_p_save_event.call_count == 6
@@ -169,12 +184,19 @@ def test_consumer_destinations_still_follow_ordered_load_hook(has_sync_loads, mu
     output = _scheduler_output(metadata, multi=multi, has_sync_loads=has_sync_loads)
     with (
         patch.object(worker, "start_load_kv", wraps=worker.start_load_kv) as start_load,
-        patch.object(runner_mixin, "get_kv_transfer_group", return_value=connector),
-        patch.object(runner_mixin, "get_forward_context", return_value=SimpleNamespace(attn_metadata={})),
+        patch.object(connector, "register_kv_caches", MagicMock()),
+        patch("vllm.v1.worker.gpu.kv_connector.get_kv_transfer_group", return_value=connector),
+        patch("vllm.v1.worker.gpu.kv_connector.is_forward_context_available", return_value=True),
+        patch("vllm.v1.worker.gpu.kv_connector.get_forward_context", return_value=SimpleNamespace(attn_metadata={})),
     ):
-        with runner_mixin.KVConnectorModelRunnerMixin._get_kv_connector_output(output):
-            assert start_load.call_count == int(has_sync_loads)
-            assert child.get_copy_sfa_slot_bindings() == ({req_id: 3} if has_sync_loads else {})
+        runner = ActiveKVConnector(None, {})
+        runner.pre_forward(output)
+        assert start_load.call_count == int(has_sync_loads)
+        assert child.get_copy_sfa_slot_bindings() == ({req_id: 3} if has_sync_loads else {})
+        if DEFERS_FINALIZE:
+            runner.post_forward(output.finished_req_ids, defer_finalize=False)
+        else:
+            runner.post_forward(output.finished_req_ids)
         start_load.assert_called_once_with(metadata)
     external_id = get_external_request_id(req_id)
     assert worker._dest_blocks_by_req[external_id] == ([1], [2])

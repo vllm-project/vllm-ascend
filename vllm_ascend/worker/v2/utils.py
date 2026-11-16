@@ -39,6 +39,7 @@ class AscendV2KVBlockZeroer(KVBlockZeroer):
         num_blocks: int,
         runner_only_attn_layers: set[str] | None = None,
         cache_dtype: str | None = None,
+        excluded_cache_components: set[tuple[str, int]] | None = None,
     ) -> None:
         # The upstream constructor changed between v0.28 and main. Set the two
         # fields consumed by this subclass directly, then delegate each logical
@@ -46,6 +47,7 @@ class AscendV2KVBlockZeroer(KVBlockZeroer):
         self.device = device
         self._meta = None
         runner_only_attn_layers = runner_only_attn_layers or set()
+        excluded_cache_components = excluded_cache_components or set()
         groups = list(attn_groups_iter)
         # The 4th component of an mxfp8 tuple is the static checkpoint V
         # scale: clearing a recycled block must preserve it.
@@ -72,6 +74,9 @@ class AscendV2KVBlockZeroer(KVBlockZeroer):
                 for layer_name in group.layer_names:
                     if layer_name in runner_only_attn_layers:
                         continue
+                    # Offload TopK views are query-row scratch, not paged KV.
+                    if (layer_name, component_id) in excluded_cache_components:
+                        continue
                     kv_cache = layer_caches[layer_name]
                     component = None
                     if isinstance(kv_cache, torch.Tensor) and component_id == 0:
@@ -79,7 +84,7 @@ class AscendV2KVBlockZeroer(KVBlockZeroer):
                     elif isinstance(kv_cache, (tuple, list)) and component_id < len(kv_cache):
                         component = kv_cache[component_id]
                     # Ascend Block Zeroer unpacks tuple/list KV caches; skip empty views to avoid zero-sized launches.
-                    if component is not None and component.numel() > 0:
+                    if isinstance(component, torch.Tensor) and component.numel() > 0:
                         layer_names.append(layer_name)
                         component_context[layer_name] = SimpleNamespace(kv_cache=component)
                 if layer_names:
@@ -217,15 +222,20 @@ def torch_npu_graph_wrapper(*args, **kwargs):
 
 
 def prepare_v41_source_rope(runner: "NPUModelRunner") -> None:
-    """Validate and cache V4.1 source RoPE tables on compressor builders."""
-    # Lazy import avoids the model/cache registration cycle.
+    """Prepare V4.1 RoPE and stable PCP buffer owners before capture."""
+    # Lazy imports avoid the model/cache registration cycle.
+    from vllm_ascend.attention.context_parallel.dsa_v41_cp import AscendDSAV41PCPMetadataBuilder
     from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
 
+    pcp_builders = []
     for groups in runner.attn_groups:
         for attn_group in groups:
             for builder in attn_group.metadata_builders:
                 if isinstance(builder, AscendDSAV41MetadataBuilder):
                     builder.prepare_source_rope()
+                if isinstance(builder, AscendDSAV41PCPMetadataBuilder):
+                    pcp_builders.append(builder)
+    AscendDSAV41PCPMetadataBuilder.prepare_shared_buffers(pcp_builders)
 
 
 def prepare_v41_dummy_ring_state(runner: "NPUModelRunner", num_reqs: int) -> None:

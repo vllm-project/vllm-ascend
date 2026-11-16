@@ -149,13 +149,31 @@ def _mamba_block_aligned_split(
     for name in drop_attrs:
         setattr(self, name, False)
     try:
-        return _original_mamba_block_aligned_split(
+        result = _original_mamba_block_aligned_split(
             self,
             request,
             num_new_tokens,
             num_new_local_computed_tokens,
             num_external_computed_tokens,
         )
+        # A resend must recompute its last input token for logits. When the
+        # prompt ends exactly on a state-page boundary, its reusable state is
+        # therefore one page earlier. Materialize that checkpoint before the
+        # final chunk; retaining only the terminal state makes the first hot
+        # replay miss every Mamba group. PD crops one token before scheduling,
+        # so this also covers API prompts of k * block_size + 1 tokens.
+        block_size = self.cache_config.block_size
+        if (
+            getattr(self.cache_config, "enable_prefix_caching", True)
+            and self.hash_block_size == block_size
+            and not getattr(self, "mamba_has_prefill_checkpoint_blocks", False)
+            and request.num_prompt_tokens % block_size == 0
+        ):
+            start = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens
+            replay_boundary = max(request.num_prompt_tokens - block_size, 0)
+            if start < replay_boundary < start + result:
+                result = replay_boundary - start
+        return result
     finally:
         for name, value in original_drop_values.items():
             setattr(self, name, value)
