@@ -1276,7 +1276,9 @@ def test_initialize_kv_cache_marks_310p_target_and_draft_groups(monkeypatch) -> 
 
     runner.speculator.set_attn.side_effect = set_draft_attn
     runner.speculator.init_cudagraph_manager.side_effect = init_draft_graph
-    monkeypatch.setattr(model_runner_module, "init_attn_backend", Mock(return_value=(target_groups, MagicMock(), [128])))
+    monkeypatch.setattr(
+        model_runner_module, "init_attn_backend", Mock(return_value=(target_groups, MagicMock(), [128]))
+    )
     monkeypatch.setattr(model_runner_module, "Ascend310PBlockTables", Mock())
     monkeypatch.setattr(model_runner_module, "initialize_mamba_ssu_backend", Mock())
     monkeypatch.setattr(model_runner_module, "ModelAclGraphManager310", Mock())
