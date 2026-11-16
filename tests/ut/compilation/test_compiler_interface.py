@@ -13,8 +13,11 @@ except ImportError:
     # CPU CI has no npugraph_ex (vendored in torch_npu). Stub the single
     # symbol compiler_interface imports at module level so the sym_range
     # logic stays testable on CPU runners.
-    _static_kernel_stub = ModuleType("npugraph_ex._acl_concrete_graph.static_kernel")
-    _static_kernel_stub._set_static_kernel_blacklist = MagicMock()
+
+    class _StaticKernelStub(ModuleType):
+        _set_static_kernel_blacklist = MagicMock()
+
+    _static_kernel_stub = _StaticKernelStub("npugraph_ex._acl_concrete_graph.static_kernel")
     for _name, _mod in [
         ("npugraph_ex", ModuleType("npugraph_ex")),
         ("npugraph_ex._acl_concrete_graph", ModuleType("npugraph_ex._acl_concrete_graph")),
