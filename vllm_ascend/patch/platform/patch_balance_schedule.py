@@ -78,6 +78,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.utils import vllm_version_is
 
 
 def _balance_scheduling_enabled(vllm_config) -> bool:
@@ -192,11 +193,13 @@ class BalanceScheduler(Scheduler):
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
-        # Whether any scheduled request has a synchronous connector KV load.
-        has_sync_kv_loads = False
 
         # For logging.
         scheduled_timestamp = time.monotonic()
+
+        # Track whether this step has synchronous KV loads so the worker
+        # calls start_load_kv before the forward pass (PR #20810 backport).
+        has_sync_kv_loads = False
 
         self.kv_cache_manager.new_step_starts()
 
@@ -347,7 +350,9 @@ class BalanceScheduler(Scheduler):
                         break
 
             if new_blocks is None:
-                if self.policy == SchedulingPolicy.PRIORITY and request.status == RequestStatus.PREEMPTED:
+                if not vllm_version_is("0.32.0") and (
+                    self.policy == SchedulingPolicy.PRIORITY and request.status == RequestStatus.PREEMPTED
+                ):
                     # The request was the lowest-priority running request and
                     # preempted itself. The requests after it have higher
                     # priority and may still fit; it was removed from
@@ -698,12 +703,14 @@ class BalanceScheduler(Scheduler):
                     _skip_request(request_queue)
                     continue
 
+                # Synchronous KV load: mark so the worker calls start_load_kv
+                # before the forward pass (PR #20810 backport).
+                if num_external_computed_tokens > 0:
+                    has_sync_kv_loads = True
+
                 request = request_queue.pop_request()
                 self.deferred_waiting.discard(request)
                 self.running.append(request)
-                if num_external_computed_tokens > 0:
-                    # load_kv_async is False here
-                    has_sync_kv_loads = True
                 if self.log_stats:
                     request.record_event(EngineCoreEventType.SCHEDULED, scheduled_timestamp)
                 if request.status == RequestStatus.WAITING:
@@ -761,6 +768,14 @@ class BalanceScheduler(Scheduler):
         # this step, the total number of scheduled requests can be smaller than
         # len(self.running).
         assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs) <= len(self.running)
+
+        # Get the longest common prefix among all requests in the running queue.
+        # This can be potentially used for cascade attention.
+        num_common_prefix_blocks = [0] * len(self.kv_cache_config.kv_cache_groups)
+        with record_function_or_nullcontext("schedule: get_num_common_prefix_blocks"):
+            if self.running:
+                any_request_id = self.running[0].request_id
+                num_common_prefix_blocks = self.kv_cache_manager.get_num_common_prefix_blocks(any_request_id)
 
         # Construct the scheduler output.
         if self.use_v2_model_runner:
@@ -831,6 +846,7 @@ class BalanceScheduler(Scheduler):
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
+            num_common_prefix_blocks=num_common_prefix_blocks,
             preempted_req_ids={req.request_id for req in preempted_reqs},
             # finished_req_ids is an existing state in the scheduler,
             # instead of being newly scheduled in this step.

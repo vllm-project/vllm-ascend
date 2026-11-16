@@ -1,0 +1,7 @@
+enhancements:
+  - |
+    Mooncake P/D connector: bidirectional KV transfer for multi-turn sessions.
+    Decode nodes delay-release their KV blocks so a Prefill node can pull the
+    previous turn's KV via Mooncake. A content-addressed hash chain (128-token
+    blocks) verifies exact token alignment before each pull. Validated on
+    Qwen3-Coder-30B-A3B (TP=4): TTFT reduced by 38% at 16K and 60% at 32K.
