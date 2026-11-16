@@ -205,6 +205,12 @@ __aicore__ inline void SyncFunc() {
         /* blkLen is the same on every loop iteration; compute once and hoist. */
         const uint32_t blkLen =
             (tableSize_ * sizeof(int32_t) + AMU_UB_ALIGN - 1U) / AMU_UB_ALIGN * AMU_UB_ALIGN;
+        /* --- Compute prefixSum[0..totalValid] ---
+         * prefixSum[i] = number of label==1 slots in [0, i).
+         * Buffer size depends on totalValid (GM-derived) — InitBuffer stays here. */
+        const uint32_t prefixSumBufLen =
+            ((totalValid + 1U) * sizeof(int32_t) + AMU_UB_ALIGN - 1U) / AMU_UB_ALIGN * AMU_UB_ALIGN;
+
 
         /* InitBuffers that have fixed / tiling-param-derived sizes */
         pipe_->InitBuffer(reqIdsBuf_,            reqIdsBufLen);
@@ -218,6 +224,10 @@ __aicore__ inline void SyncFunc() {
         pipe_->InitBuffer(tmpReqIdI32Buf_,            AMU_UB_ALIGN);
         pipe_->InitBuffer(tmpEraseBuf_,            AMU_UB_ALIGN);
         pipe_->InitBuffer(cleanBuf_,            BUFFER_SIZE_BYTE_8K);
+        pipe_->InitBuffer(prefixSumBuf_, prefixSumBufLen);
+
+        
+
         
 
         /* Core-partitioning scalars (current-part range; history range computed
@@ -281,12 +291,7 @@ __aicore__ inline void SyncFunc() {
             --totalValid;
         }
 
-        /* --- Compute prefixSum[0..totalValid] ---
-         * prefixSum[i] = number of label==1 slots in [0, i).
-         * Buffer size depends on totalValid (GM-derived) — InitBuffer stays here. */
-        const uint32_t prefixSumBufLen =
-            ((totalValid + 1U) * sizeof(int32_t) + AMU_UB_ALIGN - 1U) / AMU_UB_ALIGN * AMU_UB_ALIGN;
-        pipe_->InitBuffer(prefixSumBuf_, prefixSumBufLen);
+
         // LocalTensor<int32_t> prefixSumLocal = prefixSumBuf_.AllocTensor<int32_t>();
         LocalTensor<int32_t> prefixSumLocal = prefixSumBuf_.Get<int32_t>();
 

@@ -14,6 +14,7 @@ constexpr int64_t UB_SINGLE_DMA_SIZE_MAX = 190 * 1024;
 constexpr int64_t UB_SINGLE_PING_PONG_ADD_SIZE_MAX = 128 * 1024 / 2;
 constexpr static int32_t UB_HEAD_OFFSET = 60 * 1024;
 constexpr static int32_t UB_MID_OFFSET = UB_HEAD_OFFSET + UB_SINGLE_PING_PONG_ADD_SIZE_MAX + UB_ALIGN_SIZE;
+constexpr int kRebatchCapacity = 96;
 // static constexpr uint32_t BUFFER_SIZE_BYTE_8K = 8 * 1024;
 #define DATA_FLUSH(_gm_tensor, _type) \
     Barrier(); \
@@ -53,6 +54,7 @@ __aicore__ inline void Process()
     DATA_FLUSH(runningBsGm_, int32_t);
     DATA_FLUSH(historyBsGm_, int32_t);
     DATA_FLUSH(originalBsGm_, int32_t);
+    DATA_FLUSH(actualBsGm_, int32_t);
     runningBs_    = runningBsGm_.GetValue(0);
     historyBs_    = historyBsGm_.GetValue(0);
     originalBs_   = originalBsGm_.GetValue(0);
@@ -310,8 +312,10 @@ __aicore__ inline void copyGmToGmWithSelectBlocks(
 }
 __aicore__ inline void CombineRebatch()
 {
-
     actualBs_ = actualBsGm_.GetValue(0);
+    if (runningBs_ < actualBs_ || runningBs_ < 0 || actualBs_ < 0) {
+        return;
+    }
     if (actualBs_ == runningBs_) {
         // if (!copyResidualBack_) {
         //     copyGmToGmWithSelectBlocks(
@@ -324,7 +328,7 @@ __aicore__ inline void CombineRebatch()
     DATA_FLUSH(moeCntInputGm_, int32_t);
     int32_t paddingCnt = moeCntInputGm_.GetValue(0);
     uint32_t labelScanEnd = originalBs_ + historyBs_;
-    int32_t posBuf[100] = {0};
+    int32_t posBuf[kRebatchCapacity] = {0};
     uint32_t nzCnt = 0;
     LocalTensor<int32_t> discardTokenLocal = discardLabelBuf.Get<int32_t>();
     CpGMtoUB(discardTokenLocal, discardLabelGm_, maxBs_ * sizeof(int32_t));
