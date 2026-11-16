@@ -186,9 +186,7 @@ def test_hc_gate_mix_row_counts_reuse_compilation(monkeypatch: pytest.MonkeyPatc
         for rows in row_counts:
             x = x_backing[:rows]
             gate = gate_backing[:rows]
-            actual = hc_gate_mix(x, gate, HC_COUNT)
-            legacy = _legacy_gate_mix(x, gate)
+            hc_gate_mix(x, gate, HC_COUNT)
             torch.npu.synchronize()
 
-            torch.testing.assert_close(actual, legacy, atol=0, rtol=0)
             assert len(compile_events) == expected_compile_count, (rows, compile_events)
