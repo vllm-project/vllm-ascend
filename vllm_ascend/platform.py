@@ -397,11 +397,7 @@ class NPUPlatform(Platform):
         # process, so CacheConfig._validate_cache_dtype sees the registered
         # dtypes. Worker processes re-run the registration through the eager
         # import in vllm_ascend/worker/worker.py.
-        from vllm_ascend.core.kv_cache_dtype_handlers import (  # noqa: F401
-            Fp8AscendHandler,
-            Int8AscendHandler,
-            Mxfp8AscendHandler,
-        )
+        from vllm_ascend.core import kv_cache_dtype_handlers
 
         # For online serving, "ascend" quantization method is not a choice natively,
         # so we need to add "ascend" quantization method to quantization methods list
