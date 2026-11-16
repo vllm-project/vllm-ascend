@@ -80,6 +80,9 @@ class TestRecomputeSchedulerWithoutShortRequestFirst(TestBase):
         model_config.hf_text_config = MagicMock()
         model_config.hf_text_config.is_encoder_decoder = False
         model_config.hf_text_config.model_type = "qwen3"
+        # vLLM main reads this in ModelConfig.supports_multimodal_inputs; the
+        # patched __post_init__ no longer initializes it.
+        model_config.runner_type = "generate"
 
         cache_config = CacheConfig(
             block_size=BLOCK_SIZE,

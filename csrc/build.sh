@@ -77,6 +77,8 @@ CANN_3RD_LIB_PATH="${CURRENT_DIR}/third_party"
 # Keep this csrc-relative default aligned with the CMake adapter and Docker
 # restore/export paths; those paths must refer to the same cache directory.
 BUILD_CACHE_DIR="${VLLM_ASCEND_BUILD_CACHE_DIR:-${CURRENT_DIR}/build_cache}"
+# Local source-hash slots per SOC/operator; <=0 disables cleanup.
+BUILD_CACHE_MAX_OPERATOR_VERSIONS=2
 CUSTOM_OPTION="-DBUILD_OPEN_PROJECT=ON"
 
 dotted_line="---------------------------------------------------------------------------------------------------------------------"
@@ -1643,4 +1645,10 @@ else
         build ${BUILD}
     fi
 fi
+
+# Prune only after all foreground csrc build commands have succeeded.
+# Do not share this cache directory with another concurrent build or prune.
+python3 "$CURRENT_DIR/scripts/build_cache.py" prune \
+    --cache-root "$BUILD_CACHE_DIR" \
+    --max-operator-versions "$BUILD_CACHE_MAX_OPERATOR_VERSIONS" || true
 } | awk '{print strftime("[%Y-%m-%d %H:%M:%S]"), $0}'

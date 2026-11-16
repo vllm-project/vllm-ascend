@@ -78,7 +78,7 @@ def test_deepseek_v4_w4a8_tp4_basic_greedy():
 @pytest.mark.e2e_model("gdydems/DeepSeek-V4-Flash-w4a8-mtp")
 @pytest.mark.e2e_coverage(
     arch="moe",
-    feature="dsa_cp",
+    feature="",
     parallel="TP,EP",
     deploy="pd_mix",
     hardware="A3",

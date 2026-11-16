@@ -14,6 +14,8 @@ from tests.e2e.pull_request.one_card.spec_decode.utils import (
     calculate_acceptance_per_pos,
 )
 
+pytestmark = pytest.mark.skip(reason="Model Runner V1 is outside the default CI path")
+
 
 @pytest.mark.parametrize("method", DRAFT_PARALLEL_MODELS.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [8])

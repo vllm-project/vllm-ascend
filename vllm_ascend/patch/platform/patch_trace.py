@@ -4,9 +4,9 @@
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 
+import logging
 from collections.abc import AsyncGenerator
 from functools import wraps
-import logging
 
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.v1.request import Request, RequestStatus
@@ -48,9 +48,7 @@ def _patch_chat_stream_generator() -> None:
         return
 
     @wraps(original)
-    async def trace_chat_completion_stream_generator(
-        self, *args, **kwargs
-    ) -> AsyncGenerator[str, None]:
+    async def trace_chat_completion_stream_generator(self, *args, **kwargs) -> AsyncGenerator[str, None]:
         request_id = kwargs.get("request_id")
         if request_id is None and len(args) > 2:
             request_id = args[2]
@@ -71,9 +69,7 @@ def _patch_chat_stream_generator() -> None:
             yield item
 
     setattr(trace_chat_completion_stream_generator, _WRAPPED_ATTR, True)
-    OpenAIServingChat.chat_completion_stream_generator = (
-        trace_chat_completion_stream_generator
-    )
+    OpenAIServingChat.chat_completion_stream_generator = trace_chat_completion_stream_generator
     logger.info("Trace patched OpenAIServingChat.chat_completion_stream_generator")
 
 

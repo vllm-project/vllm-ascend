@@ -155,13 +155,12 @@ def _mock_npu_env():
         ),
         # These tests do not exercise context parallelism. Short-circuit the
         # backend routing checks so their mocked config stays scoped to VWN.
-        patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=False),
+        patch("vllm_ascend.attention.attention_v1.is_dcp_enabled", return_value=False),
         patch(
             "vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_replicated_indexer",
             return_value=False,
         ),
-        patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_dsa_cp", return_value=False),
-        patch("vllm_ascend.attention.mla_v1.enable_dcp", return_value=False),
+        patch("vllm_ascend.attention.mla_v1.is_dcp_enabled", return_value=False),
     ):
         yield
 

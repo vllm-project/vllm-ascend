@@ -12,7 +12,7 @@ from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
 from vllm_ascend.ops.fused_moe.router.grouped_topk_router import (
     AscendGroupedTopKRouter,
 )
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.v1.model_runner import NPUModelRunner
 
 
 def test_upstream_routed_experts_binder_supports_ascend_router():

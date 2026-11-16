@@ -1,0 +1,123 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+# Composes the runtime image build and the matching nightly test image build into
+# a single reusable pipeline for one (chip, OS) pair:
+#   build-base (uses _schedule_image_build.yaml) -> build-nightly (uses _nightly_image_build.yaml)
+# Callers invoke this once per (chip, OS) so a slow base image only blocks its own
+# nightly image; there is no global "wait for every base image" barrier.
+#
+# All dependency versions come from the root Dockerfiles, so this workflow only
+# selects the target and the source branch.
+name: 'Nightly image build with base'
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        required: true
+        type: string
+        description: "Nightly target / chip: 'a2', 'a3', '310p' or 'a5'"
+      os:
+        required: true
+        type: string
+        description: "Operating system variant to build: 'ubuntu' or 'openeuler'"
+      soc:
+        required: true
+        type: string
+        description: "Ascend SoC type (e.g. 910b, a3, 310p, 950)"
+      dockerfile:
+        required: true
+        type: string
+        description: "Base image Dockerfile (e.g. Dockerfile, Dockerfile.a3, Dockerfile.openEuler)"
+      suffix:
+        required: true
+        type: string
+        description: "Base image tag suffix (e.g. '', 'a3', 'openeuler', 'a3-openeuler')"
+      vllm_ascend_branch:
+        required: false
+        type: string
+        default: 'main'
+        description: "Branch/ref to checkout"
+      base_image_branch:
+        required: false
+        type: string
+        default: ''
+        description: "Branch used to resolve the base image tag. Defaults to vllm_ascend_branch."
+      build_type:
+        required: false
+        type: string
+        default: 'full'
+        description: "Matrix shape for the nightly test image: 'full' builds both architectures; 'release' builds ubuntu arm64 only. Dependency versions always come from the Dockerfiles."
+      should_push:
+        required: false
+        type: boolean
+        default: false
+        description: "If true, login to SWR and push built images."
+      skip_base:
+        required: false
+        type: boolean
+        default: false
+        description: "If true, skip the base image build and only build the nightly image (base image must already exist)."
+      swr_registry:
+        required: false
+        type: string
+        default: 'swr.cn-north-12.myhuaweicloud.com'
+        description: 'SWR registry domain'
+    secrets:
+      SWR_USERNAME:
+        required: false
+      SWR_PASSWORD:
+        required: false
+      SYNC_TOOLS_TOKEN:
+        required: false
+
+jobs:
+  build-base:
+    name: Build base image (${{ inputs.suffix || 'a2' }}-${{ inputs.os }})
+    if: ${{ !inputs.skip_base && github.repository == 'vllm-project/vllm-ascend' }}
+    uses: ./.github/workflows/_schedule_image_build.yaml
+    with:
+      dockerfile: ${{ inputs.dockerfile }}
+      suffix: ${{ inputs.suffix }}
+      soc: ${{ inputs.soc }}
+      should_push: ${{ inputs.should_push }}
+      schedule_tag_pattern: 'main'
+      branch_ref: ${{ inputs.vllm_ascend_branch || 'main' }}
+      swr_registry: ${{ inputs.swr_registry }}
+    secrets:
+      SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
+      SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
+      SYNC_TOOLS_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}
+
+  build-nightly:
+    name: Build nightly-${{ inputs.target }} (${{ inputs.os }})
+    needs: build-base
+    if: ${{ always() && (needs.build-base.result == 'success' || needs.build-base.result == 'skipped') }}
+    uses: ./.github/workflows/_nightly_image_build.yaml
+    with:
+      target: ${{ inputs.target }}
+      os_filter: ${{ inputs.os }}
+      vllm_ascend_branch: ${{ inputs.vllm_ascend_branch }}
+      base_image_branch: ${{ inputs.base_image_branch || inputs.vllm_ascend_branch }}
+      build_type: ${{ inputs.build_type }}
+      should_push: ${{ inputs.should_push }}
+      soc: ${{ inputs.soc }}
+    secrets:
+      SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
+      SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
+      SYNC_TOOLS_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}

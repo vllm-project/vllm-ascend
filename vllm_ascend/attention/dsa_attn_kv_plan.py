@@ -11,15 +11,19 @@ import torch_npu
 from vllm.triton_utils import tl, triton
 
 from vllm_ascend.attention.mixed_quant_sparse_flash_mla import (
-    mixed_quant_sparse_flash_mla,
-    mixed_quant_sparse_flash_mla_metadata,
+    mixed_quant_sparse_flash_mla_fp8,
+    mixed_quant_sparse_flash_mla_metadata_fp8,
+    mixed_quant_sparse_flash_mla_metadata_turboquant,
+    mixed_quant_sparse_flash_mla_turboquant,
 )
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.quantization.methods.kv_cache.turboquant import is_turboquant
 
-_BF16_KV_CACHE_DTYPES = frozenset({"bfloat16", "bf16"})
+# "auto" means the model dtype, bfloat16, so it selects the bfloat16 layout on A5 and
+# belongs with the requests that name it.
+_BF16_KV_CACHE_DTYPES = frozenset({"auto", "bfloat16", "bf16"})
 
 
 def _supports_dsv4_compressed_cache() -> bool:
@@ -29,11 +33,9 @@ def _supports_dsv4_compressed_cache() -> bool:
 def resolve_dsv4_cache_dtype(cache_dtype, model_dtype: str) -> str:
     """Return the KV cache dtype the platform should pin for DeepSeek-V4.
 
-    On A5 the launch request has to stay readable afterwards, because it is the
-    only thing that separates an explicit bfloat16 KV request from ``auto``.
-    ``auto`` and the model dtype resolve identically everywhere downstream, so
-    collapsing every non-bfloat16 request to ``auto`` preserves the upstream
-    values while keeping the mode recoverable.
+    On A5 the two layouts a request can select are bfloat16 and fp8, so an unset
+    request is pinned to the bfloat16 one it means -- the model dtype -- and every
+    other request keeps a string that says it is not bfloat16.
     """
     if not _supports_dsv4_compressed_cache():
         return model_dtype
@@ -42,6 +44,12 @@ def resolve_dsv4_cache_dtype(cache_dtype, model_dtype: str) -> str:
 
 def is_a5_bf16_kv_enabled(vllm_config) -> bool:
     """Return whether BF16 SparseFlashMla KV is enabled on A5.
+
+    An unset request means the model dtype, bfloat16, and has to select the same
+    layout an explicit bfloat16 request does. Reading the literal alone is what put
+    the fp8 plan on a bfloat16 page: the plan asked for ``head_size + 96`` and the
+    page had ``head_size``, which the operator reports as ``ori_kv head dimension ...
+    512, should be 608``.
 
     Callers must pass the engine ``vllm_config``. Do not look it up from the
     process-global current config: that context is only set during
@@ -192,14 +200,21 @@ class DsaAttnKvPlan:
         if not self.uses_kv_compress_epilog:
             torch.ops._C_ascend.npu_scatter_nd_update_sk(cache, slot_mapping, x)
             return
-        torch.ops._C_ascend.kv_compress_epilog(
-            kv_compress_cache=cache.view(-1, 1, cache.shape[-1]),
+        # cann_ops_transformer.kv_compress_epilog writes the PA_BBND
+        # quantMode=1 (608 B/token) layout directly:
+        #   [rope(64 bf16=128B) | nope(448 fp8) | scale(7 bf16=14B) | pad(18B)]
+        # The op only accepts UINT8 caches, so reinterpret the FP8 cache view
+        # (same 8-bit storage; the in-place update lands in the original
+        # tensor). quant_mode="fp8_bf16" (int 0): group(64) FP8(e4m3) with
+        # bf16 scale, rope kept bf16.
+        torch.ops.cann_ops_transformer.kv_compress_epilog(
+            cache=cache.view(torch.uint8),
             x=x.view(-1, x.shape[-1]),
             slot_mapping=slot_mapping,
             quant_group_size=64,
-            quant_mode=2,
-            round_scale_flag=True,
-            layout=1,
+            quant_mode="fp8_bf16",
+            round_scale=True,
+            x_scale=1.0,
         )
 
 
@@ -212,8 +227,8 @@ def get_dsa_attn_kv_plan(vllm_config, compress_ratio: int = 1) -> DsaAttnKvPlan:
             layout_kv="PA_BBND",
             compressor_slot_mapping_format=DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET,
             requires_block_offset_slots=True,
-            sparse_attn_op=mixed_quant_sparse_flash_mla,
-            sparse_attn_metadata_op=mixed_quant_sparse_flash_mla_metadata,
+            sparse_attn_op=mixed_quant_sparse_flash_mla_turboquant,
+            sparse_attn_metadata_op=mixed_quant_sparse_flash_mla_metadata_turboquant,
             sparse_attn_base_kwargs={},
             sparse_attn_metadata_kwargs={},
             include_metadata_device=False,
@@ -255,10 +270,10 @@ def get_dsa_attn_kv_plan(vllm_config, compress_ratio: int = 1) -> DsaAttnKvPlan:
         layout_kv="PA_ND",
         compressor_slot_mapping_format=DSA_COMPRESSOR_SLOT_MAPPING_FLAT,
         requires_block_offset_slots=False,
-        sparse_attn_op=torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv,
-        sparse_attn_metadata_op=torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv_metadata,
-        sparse_attn_base_kwargs={"kv_quant_mode": 1, "tile_size": 64, "rope_head_dim": 64},
-        sparse_attn_metadata_kwargs={"kv_quant_mode": 1},
+        sparse_attn_op=mixed_quant_sparse_flash_mla_fp8,
+        sparse_attn_metadata_op=mixed_quant_sparse_flash_mla_metadata_fp8,
+        sparse_attn_base_kwargs={},
+        sparse_attn_metadata_kwargs={},
         include_metadata_device=False,
         applies_sparse_attn_runtime_kwargs=False,
     )

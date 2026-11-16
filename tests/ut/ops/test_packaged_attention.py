@@ -108,3 +108,30 @@ def test_attention_meta_outputs(return_lse):
     assert lse.shape == ((1, 7, 64) if return_lse else (0,))
     assert lse.dtype == torch.float32
     assert output.device.type == lse.device.type == "meta"
+
+
+def test_cann_adapter_preserves_optional_arguments(monkeypatch):
+    from unittest.mock import Mock
+
+    compute = Mock(return_value="result")
+    monkeypatch.setattr(ops.cann_ops, "_get_ds41_compute", lambda _name: compute)
+    value = torch.empty(1)
+    result = ops.cann_ops._quant_lightning_indexer_impl(value, value, value, value, value, 16, 0)
+    assert result == "result"
+    assert compute.call_count == 1
+    assert compute.call_args.kwargs["topk"] == 16
+    assert compute.call_args.kwargs["quant_mode"] == 0
+    assert compute.call_args.kwargs["q"] is value
+    assert "cu_seqlens_q" not in compute.call_args.kwargs
+
+
+def test_missing_cann_wheel_keeps_native_provider(monkeypatch):
+    def missing(_name):
+        raise ModuleNotFoundError("CANN package is absent", name="cann_ops_transformer")
+
+    ops.cann_ops.has_ds41_ops.cache_clear()
+    monkeypatch.setattr(ops.cann_ops, "import_module", missing)
+    try:
+        assert not ops.cann_ops.has_ds41_ops()
+    finally:
+        ops.cann_ops.has_ds41_ops.cache_clear()

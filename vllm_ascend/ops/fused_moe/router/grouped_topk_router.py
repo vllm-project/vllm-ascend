@@ -45,7 +45,6 @@ class AscendGroupedTopKRouter(BaseRouter):
             renormalize=self.renormalize,
             num_expert_group=self.num_expert_group if self.use_grouped_topk else None,
             has_e_score_bias=self.e_score_correction_bias is not None,
-            routed_scaling_factor=self.routed_scaling_factor,
         )
 
     def _renormalize_topk_weights(

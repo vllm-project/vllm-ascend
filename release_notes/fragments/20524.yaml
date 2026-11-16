@@ -1,0 +1,7 @@
+pr: 20524
+entries:
+  - category: performance
+    text: >-
+      Reduced non-boundary and mixed-boundary GLM KDA RecoverSSM commit latency
+      with device-side request routing and balanced one-dimensional launch grids.
+    model: glm-5.3-flash

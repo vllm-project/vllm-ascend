@@ -128,7 +128,9 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
         leading_dims = quantized_x.shape[:-1]
         if quantized_x.dim() > 2:
             quantized_x = quantized_x.reshape(-1, quantized_x.shape[-1])
-            pertoken_scale = pertoken_scale.reshape(-1, pertoken_scale.shape[-1]) if pertoken_scale.dim() > 1 else pertoken_scale
+            pertoken_scale = (
+                pertoken_scale.reshape(-1, pertoken_scale.shape[-1]) if pertoken_scale.dim() > 1 else pertoken_scale
+            )
             reshaped = True
         output = torch_npu.npu_quant_matmul(
             quantized_x,
@@ -147,7 +149,7 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
     def process_weights_after_loading(self, layer):
         layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
         # cast quantized weight tensors in NZ format for higher inference speed
-        if self.act_quant_type == torch.int8:
+        if self.act_quant_type == torch.int8 and not getattr(layer, "_fused_preprocess_managed", False):
             layer.weight.data = maybe_trans_nz(layer.weight.data)
         layer.weight_scale.data = layer.weight_scale.data.flatten()
         layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
@@ -167,7 +169,9 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
     def __init__(self):
         vllm_config = get_current_vllm_config()
         ascend_config = get_ascend_config()
-        self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.convert_weight_to_list
+        self.dynamic_eplb = (
+            False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.convert_weight_to_list
+        )
         self.use_expert_weight_list = self.dynamic_eplb or (
             vllm_config.use_v2_model_runner is True and vllm_config.parallel_config.enable_eplb is True
         )
@@ -342,6 +346,14 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             layer.cann_mega_moe_fused_w2_scale_list = list(
                 layer.fused_w2_scale.view(layer.w2_weight.shape[0], -1).data.unbind(dim=0)
             )
+            # MegaMoe reads the fused int64 scale lists above exclusively for
+            # activations whose fused MC2 path supports the scale layout.
+            # swigluoai_uninterleave still uses the standard GMM path, which
+            # reads the fp32 scale copy during forward.
+            activation = getattr(layer, "activation", "silu")
+            activation = getattr(activation, "value", activation)
+            if activation != "swigluoai_uninterleave":
+                del layer.w13_weight_scale_fp32
 
     def _get_mlp_weights(self, layer: torch.nn.Module) -> tuple:
         """Return (w1, w1_scale, w2, w2_scale) in the standard MLP layout."""

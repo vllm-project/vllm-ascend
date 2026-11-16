@@ -1,0 +1,66 @@
+# GLM-5.1-W8A8C8-MTP offload Performance Testing
+test_cases:
+  - name: "GLM-5.1-w8a8c8-MTP-offload-test-perf"
+    model: "Eco-Tech/GLM-5.1-w8a8c8-MTP"
+    envs:
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "1"
+      HCCL_BUFFSIZE: "200"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      VLLM_ASCEND_BALANCE_SCHEDULING: "1"
+      VLLM_ASCEND_ENABLE_MLAPO: "0"
+      VLLM_ENGINE_READY_TIMEOUT_S: "1800"
+      SERVER_PORT: "8077"
+      ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"
+    server_cmd:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--data-parallel-size"
+      - "2"
+      - "--tensor-parallel-size"
+      - "8"
+      - "--enable-expert-parallel"
+      - "--seed"
+      - "1024"
+      - "--max-num-seqs"
+      - "48"
+      - "--max-model-len"
+      - "133120"
+      - "--max-num-batched-tokens"
+      - "4096"
+      - "--trust-remote-code"
+      - "--gpu-memory-utilization"
+      - "0.95"
+      - "--quantization"
+      - "ascend"
+      - "--enable-chunked-prefill"
+      - "--async-scheduling"
+      - "--additional-config"
+      - '{"ascend_compilation_config":{"enable_npugraph_ex":false,"fuse_muls_add":true},"multistream_overlap_shared_expert":false,"enable_mlapo":false}'
+      - "--enforce-eager"
+      - "--speculative-config"
+      - '{"num_speculative_tokens":3,"method":"deepseek_mtp"}'
+      - "--offload-backend"
+      - "prefetch"
+      - "--offload-group-size"
+      - "8"
+      - "--offload-num-in-group"
+      - "4"
+      - "--offload-params"
+      - "experts"
+
+    benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in65536-bs1500-prefix90-glm51
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 64
+        max_out_len: 1500
+        batch_size: 32
+        request_rate: 0
+        baseline: 10
+        threshold: 0.97

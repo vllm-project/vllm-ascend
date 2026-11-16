@@ -263,6 +263,8 @@ def test_upstream_compatible_layout_uses_upstream_canonicalization(
             num_blocks=4,
             kv_cache_groups=[SimpleNamespace(layer_names=[layer_name], kv_cache_spec=spec)],
             kv_cache_tensors=[],
+            hisparse_host_num_blocks=None,
+            prefix_cacheable_group_ids=(0,),
         ),
         monkeypatch,
     )
@@ -298,6 +300,8 @@ def test_split_attention_cache_is_zero_copy(
             num_blocks=4,
             kv_cache_groups=[SimpleNamespace(layer_names=[layer_name], kv_cache_spec=spec)],
             kv_cache_tensors=[],
+            hisparse_host_num_blocks=None,
+            prefix_cacheable_group_ids=(0,),
         ),
         monkeypatch,
     )

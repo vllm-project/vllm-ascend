@@ -4,9 +4,14 @@
 import pytest
 import torch
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.kda.kda import layer_norm_gated_fwd, rms_norm_gated
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @torch.inference_mode()
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("tokens, heads, head_dim", [(1, 1, 128), (16, 4, 128), (37, 4, 128), (2, 1, 1024)])
@@ -42,6 +47,9 @@ def test_kimi_kda_fused_rms_norm_sigmoid_gate(dtype, tokens, heads, head_dim, st
     torch.testing.assert_close(output_gate, output_gate_before, rtol=0, atol=0)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @torch.inference_mode()
 @pytest.mark.parametrize("residual_dtype", [None, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("elementwise_affine", [False, True])
@@ -71,6 +79,9 @@ def test_fused_rms_norm_silu_gate_preserves_prenorm_contract(residual_dtype, ele
     torch.testing.assert_close(x, before, rtol=0, atol=0)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @torch.inference_mode()
 @pytest.mark.parametrize("tokens", [1, 4, 8, 16, 32, 37, 64, 768])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -125,6 +136,9 @@ def test_kimi_norm_gate_strides_and_direct_output(tokens, dtype, inplace):
         torch.testing.assert_close(output_storage[:, tokens:], torch.full_like(output_storage[:, tokens:], 7))
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5), reason="Requires Ascend A3/A5"
+)
 @torch.inference_mode()
 @pytest.mark.parametrize("tokens,heads", [(257, 6), (65, 12)])
 @pytest.mark.parametrize("dim", [384, 512])
@@ -152,6 +166,9 @@ def test_kimi_norm_gate_wide_feature_tile(tokens, heads, dim):
     torch.testing.assert_close(actual, baseline.reshape(x.shape), rtol=0, atol=0)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+)
 @torch.inference_mode()
 @pytest.mark.parametrize("dim", [128, 1024])
 @pytest.mark.parametrize("layout", ["row_gap", "feature_gap"])

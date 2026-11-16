@@ -5,10 +5,13 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+import torch_npu
 from vllm.triton_utils import triton
 
+from vllm_ascend.ops.rotary_embedding import rope_forward_oot
 from vllm_ascend.ops.triton.msa import minimax_qknorm_rope_cache as fused_module
 from vllm_ascend.ops.triton.msa.minimax_qknorm_rope_cache import minimax_qknorm_rope_cache
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
 
 def reference(packed, cos_sin, positions, weights, q_heads, kv_heads, index_heads, eps):
@@ -26,6 +29,18 @@ def reference(packed, cos_sin, positions, weights, q_heads, kv_heads, index_head
         x[..., half : 2 * half] = b * cs[..., :half] + a * cs[..., half:]
         parts[part] = x.reshape(packed.shape[0], -1)
     return parts
+
+
+def core_boundary_tokens(num_vector_cores):
+    return sorted(
+        {
+            max(1, num_vector_cores - 1),
+            num_vector_cores,
+            num_vector_cores + 1,
+            2 * num_vector_cores - 1,
+            2 * num_vector_cores + 1,
+        }
+    )
 
 
 @pytest.mark.parametrize("tokens", [1, 4, 8, 16, 32, 64, 128, 192, 256, 513])
@@ -92,6 +107,20 @@ def test_minimax_qknorm_rope_cache(tokens, heads, rotary_dim):
         untouched = torch.ones(blocks * block_size, dtype=torch.bool)
         untouched[mapping[valid]] = False
         assert torch.equal(cache.cpu().view(blocks * block_size, -1)[untouched], gold[untouched])
+
+
+@pytest.mark.parametrize("tokens", [1024, 2048, 4096, 8192])
+@torch.inference_mode()
+def test_minimax_qknorm_rope_cache_prefill(tokens):
+    test_minimax_qknorm_rope_cache(tokens, (8, 1, 1), 64)
+
+
+@pytest.mark.parametrize("heads", [(8, 1, 1), (16, 1, 1)])
+@torch.inference_mode()
+def test_minimax_qknorm_rope_cache_core_boundaries(heads):
+    init_device_properties_triton()
+    for tokens in core_boundary_tokens(get_vectorcore_num()):
+        test_minimax_qknorm_rope_cache(tokens, heads, 64)
 
 
 @torch.inference_mode()
@@ -174,17 +203,20 @@ def test_dynamic_cache_capacity_and_strided_positions(blocks, tokens):
     assert torch.count_nonzero(key[0].float()).item() == 0
 
 
-@pytest.mark.parametrize("fp8", [False, True])
+@pytest.mark.parametrize("cache_fp8", [False, True])
+@pytest.mark.parametrize("index_fp8", [False, True])
 @pytest.mark.parametrize("tokens", [8, 192])
 @torch.inference_mode()
-def test_cache_graph_replay_updates_slots_and_preserves_strides(fp8, tokens):
-    if fp8 and not any(tag in torch.npu.get_device_name(0).lower() for tag in ("950", "910_95")):
+def test_cache_graph_replay_updates_slots_and_preserves_strides(cache_fp8, index_fp8, tokens):
+    if (cache_fp8 or index_fp8) and not any(tag in torch.npu.get_device_name(0).lower() for tag in ("950", "910_95")):
         pytest.skip("FP8 cache conversion requires A5")
     torch.manual_seed(29)
     qh, kh, ih, hd, actual = 8, 1, 1, 128, 5
-    cache_dtype = torch.float8_e4m3fn if fp8 else torch.bfloat16
+    # Compile both FP8 branches independently as well as together.
+    cache_dtype = torch.float8_e4m3fn if cache_fp8 else torch.bfloat16
+    index_dtype = torch.float8_e4m3fn if index_fp8 else torch.bfloat16
     packed = torch.randn(tokens, 12 * hd, dtype=torch.bfloat16, device="npu")
-    if fp8:
+    if cache_fp8:
         # V saturation is independent of normalization.
         packed[:, 9 * hd : 10 * hd] *= 1000
     weights = [torch.randn(hd, dtype=packed.dtype, device="npu") * 0.1 for _ in range(4)]
@@ -193,7 +225,7 @@ def test_cache_graph_replay_updates_slots_and_preserves_strides(fp8, tokens):
     # Different main/index block sizes and padded block strides.
     key = torch.zeros((3, 17, kh, hd), dtype=cache_dtype, device="npu")[:, :16]
     value = torch.zeros((3, 18, kh, hd), dtype=cache_dtype, device="npu")[:, :16]
-    index = torch.zeros((6, 9, hd), dtype=cache_dtype, device="npu")[:, :8]
+    index = torch.zeros((6, 9, hd), dtype=index_dtype, device="npu")[:, :8]
     slots = torch.full((tokens,), -1, dtype=torch.int64, device="npu")
     index_slots = slots.clone()
 
@@ -232,23 +264,25 @@ def test_cache_graph_replay_updates_slots_and_preserves_strides(fp8, tokens):
     torch.npu.synchronize()
     expected = reference(packed.cpu(), cs.cpu(), positions.cpu(), [w.cpu() for w in weights], qh, kh, ih, 1e-6)
     torch.testing.assert_close(q.cpu().float(), expected[0].to(q.dtype).float(), atol=0.032, rtol=0.01)
-    expected_iq = expected[3].clamp(-448, 448) if fp8 else expected[3]
+    expected_iq = expected[3].clamp(-448, 448) if index_fp8 else expected[3]
     torch.testing.assert_close(
-        iq.cpu().float(), expected_iq.to(iq.dtype).float(), atol=0.25 if fp8 else 0.032, rtol=0.01
+        iq.cpu().float(), expected_iq.to(iq.dtype).float(), atol=0.25 if index_fp8 else 0.032, rtol=0.01
     )
     for cache, part, mapping in (
         (key, expected[1], slots),
         (value, expected[2], slots),
         (index, expected[4], index_slots),
     ):
-        gold = torch.zeros(cache.shape, dtype=cache_dtype)
+        gold = torch.zeros(cache.shape, dtype=cache.dtype)
         part = part.to(packed.dtype) if cache is not index else part
-        if fp8:
+        if cache.dtype == torch.float8_e4m3fn:
             part = part.float().clamp(-448, 448)
         for token, slot in enumerate(mapping.cpu().tolist()[:actual]):
             if slot >= 0:
-                gold[slot // cache.shape[1], slot % cache.shape[1]] = part[token].reshape_as(gold[0, 0]).to(cache_dtype)
-        torch.testing.assert_close(cache.cpu().float(), gold.float(), atol=0.25 if fp8 else 0.032, rtol=0.01)
+                gold[slot // cache.shape[1], slot % cache.shape[1]] = part[token].reshape_as(gold[0, 0]).to(cache.dtype)
+        torch.testing.assert_close(
+            cache.cpu().float(), gold.float(), atol=0.25 if cache.dtype == torch.float8_e4m3fn else 0.032, rtol=0.01
+        )
     # Replay repeatedly while another stream generates memory traffic.
     traffic = torch.empty(1 << 20, device="npu")
     stream = torch.npu.Stream()
@@ -320,7 +354,11 @@ def test_request_sizes_reuse_one_compiled_variant(isolated_fused_kernel):
     assert jit_variant_count(kernel) == compile_spy.call_count == 1
     # These are three independent sweeps, not a parametrized test with a fresh
     # runtime cache per case. Include 0/1 and aligned/unaligned scalar values.
-    cases = [(n, n, 64) for n in (1, 4, 8, 16, 32, 64, 128, 192, 256, 512)]
+    init_device_properties_triton()
+    token_counts = sorted(
+        set((1, 4, 8, 16, 32, 64, 128, 192, 256, 512)) | set(core_boundary_tokens(get_vectorcore_num()))
+    )
+    cases = [(n, n, 64) for n in token_counts]
     cases += [(192, n, 64) for n in (0, 1, 4, 15, 16, 17, 31, 32, 127, 191, 192)]
     cases += [(192, 192, n) for n in (3, 64, 5392, 8192)]
     for tokens, actual, blocks in cases:
@@ -359,3 +397,60 @@ def test_layout_variants_compile_once_then_reuse(isolated_fused_kernel):
         assert jit_variant_count(kernel) == len(layouts), layout
         assert compile_spy.call_count == len(layouts), layout
     print(f"layout sweep: variants={len(layouts)}, revisit_compile_entries=0")
+
+
+@pytest.mark.parametrize("tokens", [8, 128, 192])
+@pytest.mark.parametrize("cache_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+@torch.inference_mode()
+def test_dspark_prepare_matches_unfused_a5_chain(tokens, cache_dtype):
+    if not any(tag in torch.npu.get_device_name(0).lower() for tag in ("950", "910_95")):
+        pytest.skip("This differential reference uses the A5 RMSNorm path")
+    init_device_properties_triton()
+    torch.manual_seed(29)
+    hd, qh, kh, ih, actual = 128, 8, 1, 1, tokens - 3
+    packed = torch.randn(tokens, 12 * hd, dtype=torch.bfloat16, device="npu")
+    weights = [torch.randn(hd, dtype=packed.dtype, device="npu") * 0.1 for _ in range(4)]
+    angles = torch.randn(1024, 32, device="npu")
+    cs = torch.cat((angles.cos(), angles.sin()), -1).to(packed.dtype)
+    positions = torch.arange(tokens, device="npu") + 31
+    # Scheduler-sized main pages and 128-token indexer pages are independent.
+    key = torch.zeros((4, 512, kh, hd), dtype=cache_dtype, device="npu")
+    value = torch.zeros_like(key)
+    index = torch.zeros((16, 128, hd), dtype=cache_dtype, device="npu")
+    slots = torch.randperm(2048, device="npu")[:tokens].long()
+    index_slots = torch.randperm(2048, device="npu")[:tokens].long()
+    slots[::7] = -1
+    index_slots[::11] = -1
+    q, iq = minimax_qknorm_rope_cache(
+        packed, cs, positions, *weights, key, value, index, slots, index_slots, actual, qh, kh, ih, 1e-6
+    )
+    parts = list(packed.split([qh * hd, kh * hd, kh * hd, ih * hd, hd], -1))
+    for idx, weight in zip([0, 1, 3, 4], weights):
+        x = parts[idx].reshape(-1, hd).contiguous()
+        parts[idx] = torch_npu.npu_rms_norm(x, 1.0 + weight, 1e-6)[0].reshape(tokens, -1)
+    parts[0], parts[1] = rope_forward_oot(positions, parts[0], parts[1], cs, hd, 64, True)
+    parts[3], parts[4] = rope_forward_oot(
+        positions,
+        parts[3],
+        parts[4],
+        cs,
+        hd,
+        64,
+        True,
+        out_dtype=cache_dtype if cache_dtype == torch.float8_e4m3fn else None,
+    )
+    comparisons = [("q", q, parts[0]), ("index_q", iq, parts[3])]
+    for name, cache, part, mapping in [
+        ("k", key, parts[1], slots),
+        ("v", value, parts[2], slots),
+        ("index_k", index, parts[4], index_slots),
+    ]:
+        gold = torch.zeros(cache.shape, dtype=cache.dtype)
+        part = part.cpu().float().clamp(-448, 448).to(cache.dtype)
+        for token, slot in enumerate(mapping.cpu().tolist()[:actual]):
+            if slot >= 0:
+                gold[slot // cache.shape[1], slot % cache.shape[1]] = part[token].reshape_as(gold[0, 0])
+        comparisons.append((name, cache, gold))
+    for name, result, expected in comparisons:
+        x, y = result.cpu().float(), expected.cpu().float()
+        torch.testing.assert_close(x, y, atol=0.25 if result.dtype == torch.float8_e4m3fn else 0.032, rtol=0.01)

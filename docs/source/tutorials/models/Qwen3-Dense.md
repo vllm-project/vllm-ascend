@@ -389,7 +389,7 @@ The following is an example configuration for the accuracy evaluation config fil
 ```bash
 # Example configuration: benchmarks/ais_bench/benchmark/configs/models/vllm_api/vllm_api_general_chat.py
 from ais_bench.benchmark.models import VLLMCustomAPIChat
-from ais_bench.benchmark.utils.model_postprocessors import extract_non_reasoning_content
+from ais_bench.benchmark.utils.postprocess.model_postprocessors import extract_non_reasoning_content
 
 models = [
     dict(

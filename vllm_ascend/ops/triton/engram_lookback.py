@@ -21,13 +21,21 @@ def _gather_lookback_kernel(
     batch_idx = tl.program_id(0)
     in_batch = batch_idx < num_reqs
     req_state_idx = tl.load(idx_mapping_ptr + batch_idx, mask=in_batch, other=0)
-    num_computed = tl.load(num_computed_tokens_ptr + req_state_idx)
+    num_computed = tl.load(
+        num_computed_tokens_ptr + req_state_idx,
+        mask=in_batch,
+        other=0,
+    )
 
     offs = tl.arange(0, BLOCK_DEPTH)
     pos = num_computed - 1 - offs
     valid = in_batch & (offs < DEPTH) & (pos >= 0)
+    # Ascend must not form an out-of-bounds GM address even for masked lanes.
+    # Fresh requests have num_computed == 0, so clamp their negative history
+    # positions before pointer arithmetic; the mask still yields -1 padding.
+    safe_pos = tl.maximum(pos, 0)
     ids = tl.load(
-        all_token_ids_ptr + req_state_idx * all_token_ids_stride + pos,
+        all_token_ids_ptr + req_state_idx * all_token_ids_stride + safe_pos,
         mask=valid,
         other=-1,
     )

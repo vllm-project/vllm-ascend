@@ -42,10 +42,12 @@ BASELINES = {
     "dspark": [1.0, 0.8, 0.6, 0.6, 0.6, 0.6, 0.6],
     "dspark_dynamic": [0.68, 0.54, 0.46, 0.38, 0.22, 0.11, 0.11],
     # DSpark with draft_window_size=512 on a prompt longer than the window
-    # (test_dspark_kv_sliding_window in test_dspark.py). Measured on the
-    # deepseek-ai/dspark_qwen3_8b_block7 single-block draft in CI; positions
-    # 3-6 exceed the no-window "dspark" baseline because the single-block
-    # drafter relies on the most recent context, which the window keeps.
+    # (test_dspark_kv_sliding_window in test_dspark.py). MRv2 blacklists
+    # DSpark KV sliding window, so this case stays on the V1 runner. Measured
+    # on the deepseek-ai/dspark_qwen3_8b_block7 single-block draft in CI;
+    # positions 3-6 exceed the no-window "dspark" baseline because the
+    # single-block drafter relies on the most recent context, which the
+    # window keeps.
     "dspark_sliding_window": [0.88, 0.88, 0.88, 0.88, 0.75, 0.75, 0.62],
 }
 

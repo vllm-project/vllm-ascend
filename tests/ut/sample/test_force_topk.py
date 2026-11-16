@@ -12,11 +12,14 @@ Run (CPU, no NPU required):
 """
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
 
-from vllm_ascend.ops.force_topk_sample import force_topk_sample
+# The reference checks run on CPU, outside the torch_npu compiler boundary.
+with patch("torch.compile", side_effect=lambda *args, **kwargs: lambda fn: fn):
+    from vllm_ascend.ops.force_topk_sample import force_topk_sample
 
 _EPS = 1e-5
 

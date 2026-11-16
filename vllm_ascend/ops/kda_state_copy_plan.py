@@ -32,6 +32,9 @@ if TYPE_CHECKING:
     from vllm_ascend.ops.triton.kda_state_copy_kernel import _CompiledKernel
 
 
+_FALLBACK_COPY_BLOCK_SIZE = 8192
+
+
 def supports_kda_state_copy(state: torch.Tensor) -> bool:
     """Match PR #17301's A5 FP32/BF16 dense-payload capability predicate.
 
@@ -195,17 +198,10 @@ class KDAStateCopyPlan:
         if any(t.data_ptr() % 16 for t in tensors[1:]):
             raise RuntimeError("unaligned normalized KDA buffer")
         with nullcontext() if torch.npu.current_device() == state.device.index else torch.npu.device(state.device):
-            # CompiledKernel.__getitem__ bypasses the Triton JIT argument binder.
-            # The Ascend launcher stub retains the complete bound signature,
-            # including tl.constexpr arguments. Therefore the direct launch must
-            # use the same 12-argument ordering as the preparation-time launch.
             self._compiled[indices.dtype, to_cache][(indices.numel(), self._tiles, 1)](
                 *tensors,
                 *self._scalars,
                 0 if to_cache else 1,
-                to_cache,
-                not to_cache,
-                DEFAULT_KDA_BLOCK_SIZE,
             )
 
     def gather(self, state: torch.Tensor, indices: torch.Tensor, flags: torch.Tensor | None) -> torch.Tensor:
@@ -257,6 +253,7 @@ class StridedKDAFallbackPlan:
     _state_bytes: int
     _configuration: tuple[str, str, tuple[tuple[str, str], ...]]
     _compiled: _CompiledKernel
+    _launch_constants: tuple[int, ...]
     _layer_name: str
 
     @classmethod
@@ -285,7 +282,13 @@ class StridedKDAFallbackPlan:
             src = torch.tensor([source.data_ptr()], dtype=torch.int64, device=state.device)
             dst = torch.tensor([dest.data_ptr()], dtype=torch.int64, device=state.device)
             size = torch.tensor([32], dtype=torch.int64, device=state.device)
-            plan._compiled = batch_memcpy_kernel[(1,)](src, dst, size, BLOCK_SIZE=8192)
+            plan._compiled = batch_memcpy_kernel[(1,)](src, dst, size, BLOCK_SIZE=_FALLBACK_COPY_BLOCK_SIZE)
+            # Newer Triton launchers retain constexpr slots; older signatures
+            # contain only runtime arguments. Resolve this once during prepare
+            # so direct serving launches match the compiled kernel's ABI.
+            plan._launch_constants = (
+                (_FALLBACK_COPY_BLOCK_SIZE,) if "constexpr" in plan._compiled.src.signature.values() else ()
+            )
             torch.npu.synchronize()
         return plan
 
@@ -323,7 +326,7 @@ class StridedKDAFallbackPlan:
             packed.zero_()
             src, dst = cache_ptrs, packed_ptrs
         with torch.npu.device(state.device):
-            self._compiled[(count, 1, 1)](src, dst, sizes)
+            self._compiled[(count, 1, 1)](src, dst, sizes, *self._launch_constants)
 
     def gather(self, state, indices, flags):
         """Gather valid rows and clear false flags without any serving JIT."""

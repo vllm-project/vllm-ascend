@@ -8,14 +8,13 @@ import functools
 import inspect
 import logging
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
-def execute_operation(
-    operation_str: str | None, param_dict: dict[str, Any], func_name: str = ""
-) -> None:
+def execute_operation(operation_str: str | None, param_dict: dict[str, Any], func_name: str = "") -> None:
     if not operation_str:
         return
     try:
@@ -24,8 +23,7 @@ def execute_operation(
         logger.exception("Error executing trace code for %s: %s", func_name, exc)
 
 
-def marker_prof_wrapper(original_method: Callable[..., Any],
-                        params: dict[str, Any]) -> Callable[..., Any]:
+def marker_prof_wrapper(original_method: Callable[..., Any], params: dict[str, Any]) -> Callable[..., Any]:
     entry_operation = params.get("entry_operation")
     exit_operation = params.get("exit_operation")
 
@@ -54,8 +52,7 @@ def marker_prof_wrapper(original_method: Callable[..., Any],
     return wrapper
 
 
-def timer_prof_wrapper(original_method: Callable[..., Any],
-                       params: dict[str, Any]) -> Callable[..., Any]:
+def timer_prof_wrapper(original_method: Callable[..., Any], params: dict[str, Any]) -> Callable[..., Any]:
     entry_operation = params.get("entry_operation")
     exit_operation = params.get("exit_operation")
 
@@ -68,9 +65,7 @@ def timer_prof_wrapper(original_method: Callable[..., Any],
             start_time = time.time()
             result = await original_method(self, *args, **kwargs)
             end_time = time.time()
-            param_dict.update(
-                {"result": result, "start_time": start_time, "end_time": end_time}
-            )
+            param_dict.update({"result": result, "start_time": start_time, "end_time": end_time})
             execute_operation(exit_operation, param_dict, original_method.__name__)
             return result
 
@@ -83,9 +78,7 @@ def timer_prof_wrapper(original_method: Callable[..., Any],
         start_time = time.time()
         result = original_method(self, *args, **kwargs)
         end_time = time.time()
-        param_dict.update(
-            {"result": result, "start_time": start_time, "end_time": end_time}
-        )
+        param_dict.update({"result": result, "start_time": start_time, "end_time": end_time})
         execute_operation(exit_operation, param_dict, original_method.__name__)
         return result
 

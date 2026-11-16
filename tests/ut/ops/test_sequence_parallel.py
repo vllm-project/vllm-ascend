@@ -60,6 +60,28 @@ def test_sp_shard_fake_derives_cdiv_rows(set_tp):
     assert _ascend_sp_shard_fake(x).shape == (2, 4)
 
 
+def test_sp_reduce_scatter_appends_zero_rows_with_cat(set_tp, monkeypatch: pytest.MonkeyPatch):
+    set_tp(2, 0)
+    monkeypatch.setattr(sp_module, "_custom_collective", lambda name, value: value)
+    original_cat = torch.cat
+    cat_calls = []
+
+    def record_cat(tensors, dim=0):
+        cat_calls.append((tensors, dim))
+        return original_cat(tensors, dim=dim)
+
+    monkeypatch.setattr(sp_module.torch, "cat", record_cat)
+    x = torch.arange(3 * 4, dtype=torch.float32).reshape(3, 4)
+
+    out = sp_module._ascend_sp_reduce_scatter_impl(x)
+
+    assert out.shape == (4, 4)
+    assert torch.equal(out[:3], x)
+    assert torch.equal(out[3], torch.zeros(4))
+    assert len(cat_calls) == 1
+    assert cat_calls[0][1] == 0
+
+
 def test_sp_padding_mask_pads_true_rows(set_tp):
     set_tp(4, 3)
     is_padding = torch.tensor([False, True, False])

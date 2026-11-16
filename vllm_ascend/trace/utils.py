@@ -7,7 +7,6 @@
 import logging
 import multiprocessing
 import os
-import re
 import socket
 import threading
 import time
@@ -16,13 +15,13 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+import regex as re
+
 PREFILL = "prefill"
 DECODE = "decode"
 
 _LOGGER_LOCK = threading.Lock()
-_VLLM_INTERNAL_REQUEST_ID_RE = re.compile(
-    r"^(?P<external>.+)-[0-9a-fA-F]{8}$"
-)
+_VLLM_INTERNAL_REQUEST_ID_RE = re.compile(r"^(?P<external>.+)-[0-9a-fA-F]{8}$")
 
 
 def safe_print(directory: str, message: str) -> None:
@@ -58,9 +57,7 @@ def get_ip() -> str:
 
 
 ip_str = get_ip()
-trace_output_directory = os.getenv(
-    "TRACE_OUTPUT_DIRECTORY", "/tmp/trace_output_directory"
-)
+trace_output_directory = os.getenv("TRACE_OUTPUT_DIRECTORY", "/tmp/trace_output_directory")
 
 
 def get_role() -> str:
@@ -93,8 +90,7 @@ def log_action(action: str, request_id: Any, role: str | None = None) -> None:
     request_id = normalize_request_id(request_id)
     safe_print(
         trace_output_directory,
-        f"<<<Action: {action}; Timestamp:{time.time()}; "
-        f"RequestID:{request_id}; Role:{role or get_role()}_{ip_str}",
+        f"<<<Action: {action}; Timestamp:{time.time()}; RequestID:{request_id}; Role:{role or get_role()}_{ip_str}",
     )
 
 

@@ -15,14 +15,11 @@ from typing import Any
 
 import torch
 
-
 DSA_BLOCK_SIZE = 128
 DSA_TOPK = 2048
 
 
-def get_dsa_config_value(
-    model_config: Any, attribute: str, default: Any = None
-) -> Any:
+def get_dsa_config_value(model_config: Any, attribute: str, default: Any = None) -> Any:
     """Read a DSA model attribute from the model's config variants.
 
     Hugging Face configurations are exposed through either ``hf_config`` or
@@ -47,14 +44,8 @@ def get_dsa_config_value(
 def get_dsa_raw_seq(speculative_config: Any) -> int:
     """Return the number of query rows represented by one scheduler row."""
 
-    num_speculative_tokens = getattr(
-        speculative_config, "num_speculative_tokens", None
-    )
-    return (
-        num_speculative_tokens + 1
-        if isinstance(num_speculative_tokens, int)
-        else 1
-    )
+    num_speculative_tokens = getattr(speculative_config, "num_speculative_tokens", None)
+    return num_speculative_tokens + 1 if isinstance(num_speculative_tokens, int) else 1
 
 
 @dataclass(frozen=True)
@@ -84,15 +75,12 @@ class DsaOffloadConfig:
             raise ValueError("DSA selection_block_size must be positive")
         if self.topk % self.selection_block_size != 0:
             raise ValueError(
-                "DSA topk must be an integer multiple of selection_block_size "
-                "for the installed recipes kernels"
+                "DSA topk must be an integer multiple of selection_block_size for the installed recipes kernels"
             )
 
     @property
     def selection_blocks_per_row(self) -> int:
-        return (
-            self.topk + self.selection_block_size - 1
-        ) // self.selection_block_size
+        return (self.topk + self.selection_block_size - 1) // self.selection_block_size
 
     def selection_rows(self, batch_size: int) -> int:
         if batch_size < 0:

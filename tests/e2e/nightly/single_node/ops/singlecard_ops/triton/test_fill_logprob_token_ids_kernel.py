@@ -30,6 +30,8 @@ Fills logprob token IDs matrix:
 import pytest
 import torch
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.ops.triton.v2.sample.fill_logprob_token_idx import _fill_logprob_token_ids_kernel
 
@@ -73,6 +75,9 @@ def _fill_logprob_token_ids_ref(
 
 
 class TestFillLogprobTokenIdsKernel:
+    @pytest.mark.skipif(
+        get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    )
     @pytest.mark.parametrize("batch_size", [1, 4, 8])
     @pytest.mark.parametrize("topk", [0, 3, 5])
     def test_custom_token_ids(self, batch_size, topk):
@@ -144,6 +149,9 @@ class TestFillLogprobTokenIdsKernel:
             f"Valid mask do not match for batch_size={batch_size}, topk={topk}."
         )
 
+    @pytest.mark.skipif(
+        get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3), reason="Requires Ascend A2/A3"
+    )
     def test_no_custom_no_topk(self):
         """When both custom and topk are empty, only sampled token is written."""
         init_device_properties_triton()

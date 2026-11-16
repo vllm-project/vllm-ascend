@@ -15,6 +15,80 @@ from vllm_ascend.models.deepseek_v41 import mixed_quant_attention as a5_indexer
 TOKENS, TOPK = 4, 512
 
 
+@pytest.mark.parametrize("otp_enabled,pcp_sharding", [(False, None), (False, False), (True, False), (False, True)])
+@pytest.mark.parametrize("num_tokens", [0, 1, 7])
+@pytest.mark.parametrize("provide_output", [False, True])
+def test_profile_initializes_sharded_o_proj(monkeypatch, otp_enabled, pcp_sharding, num_tokens, provide_output):
+    impl = AscendDSAV41Impl.__new__(AscendDSAV41Impl)
+    hidden_states = torch.ones(num_tokens, 8, dtype=torch.bfloat16)
+    output = torch.full_like(hidden_states, float("nan")) if provide_output else None
+    calls = []
+
+    def project_o_proj(inputs, projected):
+        assert inputs.shape == (num_tokens, 4, 2)
+        assert inputs.dtype == hidden_states.dtype
+        assert inputs.device == hidden_states.device
+        assert torch.count_nonzero(inputs) == 0
+        assert projected.shape == hidden_states.shape
+        calls.append(projected)
+        projected.zero_()
+        return projected
+
+    projector = SimpleNamespace(_forward_o_proj=project_o_proj)
+    if pcp_sharding is not None:
+        projector.enable_pcp_o_proj_weight_sharding = pcp_sharding
+    attn = SimpleNamespace(
+        n_local_heads=4,
+        head_dim=2,
+        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=projector)),
+    )
+    monkeypatch.setattr(dsa_v41, "get_forward_context", lambda: SimpleNamespace(attn_metadata=None))
+    monkeypatch.setattr(dsa_v41, "oproj_tp_enable", lambda: otp_enabled)
+    monkeypatch.setattr(dsa_v41, "get_potential_max_tokens", lambda: num_tokens)
+
+    result = impl.forward(attn, None, hidden_states, output)
+
+    should_project = otp_enabled or bool(pcp_sharding)
+    assert len(calls) == int(should_project)
+    if should_project:
+        assert calls[0].untyped_storage().data_ptr() == result.untyped_storage().data_ptr()
+        assert calls[0].storage_offset() == result.storage_offset()
+    if provide_output:
+        assert result is output
+    assert result.shape == hidden_states.shape
+    assert result.dtype == hidden_states.dtype
+    assert torch.equal(result, torch.zeros_like(hidden_states))
+
+
+def test_v41_otp_profile_exercises_only_decode_capacity(monkeypatch):
+    impl = AscendDSAV41Impl.__new__(AscendDSAV41Impl)
+    capacity = 3
+    seen = []
+
+    def project(inputs, outputs):
+        seen.append((inputs.shape, outputs.shape, torch.count_nonzero(inputs).item()))
+        outputs.fill_(1)
+
+    projector = SimpleNamespace(
+        _oproj_send_buf=torch.empty((2, capacity, 1, 2)),
+        _forward_o_proj=project,
+        enable_pcp_o_proj_weight_sharding=False,
+    )
+    attn = SimpleNamespace(
+        n_local_heads=2,
+        head_dim=2,
+        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=projector)),
+    )
+    monkeypatch.setattr(dsa_v41, "get_forward_context", lambda: SimpleNamespace(attn_metadata=None))
+    monkeypatch.setattr(dsa_v41, "oproj_tp_enable", lambda: True)
+    output = torch.full((5, 2), -1.0)
+
+    assert impl.forward(attn, None, torch.empty(5, 2), output) is output
+    assert seen == [((capacity, 2, 2), (capacity, 2), 0)]
+    torch.testing.assert_close(output[:capacity], torch.ones_like(output[:capacity]))
+    torch.testing.assert_close(output[capacity:], torch.zeros_like(output[capacity:]))
+
+
 @pytest.mark.parametrize("in_graph", [False, True])
 def test_cp_defer_scope_forwards_graph_mode_and_restores_both_builders(monkeypatch, in_graph):
     base = dsa_v41.AscendDSAV41MetadataBuilder

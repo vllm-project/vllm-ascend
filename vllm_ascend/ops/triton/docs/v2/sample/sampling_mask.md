@@ -2,34 +2,37 @@
 
 ## Description
 
-- **Function**: identifies finite logits for active requests, packs the boolean
-  keep mask into bytes, and counts the kept vocabulary entries.
+- **Function**: identifies finite logits for committed tokens, packs the boolean
+  keep mask into request-major output rows, and counts the kept vocabulary entries.
 - **Python entry point**: `sampling_mask_from_logits_npu` in
   `vllm_ascend/ops/triton/v2/sample/sampling_mask.py`.
 - **Triton kernel**: `_pack_sampling_mask_kernel_ascend`.
-- **Integration**: `vllm_ascend/patch/worker/patch_v2/patch_triton.py` binds the
+- **Integration**: `vllm_ascend/patch/worker/patch_triton.py` binds the
   wrapper directly as `SamplingMaskTensors.from_logits`.
 
-For request row `r` and vocabulary index `i`, the keep condition is:
+For request `r`, output slot `s` and vocabulary index `i`, the keep condition is:
 
 ```text
-keep[r, i] = isfinite(logits[r, i]) and num_sampled_tokens[r] > 0
+output_row = r * rows_per_request + s
+source_row = cu_num_logits[r] + s
+is_active = s < num_sampled_tokens[r]
+keep[output_row, i] = is_active and isfinite(logits[source_row, i])
 ```
 
-The output bit layout shared by both supported interfaces is:
+The output bit layout is:
 
 ```text
-packed_mask[r, i // 8] bit (i % 8) = keep[r, i]
-counts[r] = sum_i keep[r, i]
+packed_mask[output_row, i // 8] bit (i % 8) = keep[output_row, i]
+counts[output_row] = sum_i keep[output_row, i]
 ```
 
-An inactive request therefore has a zero mask and a zero count. Vocabulary
-tails that are not divisible by eight are masked and do not contribute bits or
-counts.
+An inactive slot has a zero mask and count. Its logits load is masked and
+filled with negative infinity, so slots without a source row are not read.
+Vocabulary tails that are not divisible by eight do not contribute bits or counts.
 
 ## Data flow
 
-The kernel processes one request per Triton program and scans its vocabulary in
+The kernel processes one reserved output row per Triton program and scans its vocabulary in
 4096-element blocks:
 
 ```text
@@ -54,27 +57,32 @@ non-contiguous vocabulary input.
 
 ## Parameters and outputs
 
+`num_output_rows = num_reqs * rows_per_request`. Source logits may have a
+different row count, with each request starting at its cumulative offset.
+
 | Name | Input/Output/Attribute | Shape | Data type | Description |
 | --- | --- | --- | --- | --- |
-| `logits` | Input | `[num_reqs, vocab_size]` | floating point | Per-request logits. NaN, `+inf`, and `-inf` entries are excluded. |
-| `num_sampled_tokens` | Input | `[num_reqs]` | integer | A row is active only when its value is greater than zero. |
-| `packed_mask` | Output | `[num_reqs, ceil(vocab_size / 8)]` | uint8 | Little-bit-order packed finite-logit mask. |
-| `counts` | Output | `[num_reqs]` | int32 | Number of set bits in each row. |
+| `logits` | Input | `[num_logits, vocab_size]` | floating point | Processed logits. NaN, `+inf`, and `-inf` entries are excluded. |
+| `cu_num_logits` | Input | `[num_reqs + 1]` or longer | integer | Cumulative source-row offsets; chunk offsets may start above zero. |
+| `num_sampled_tokens` | Input | `[num_reqs]` | integer | Committed-token count per request; slots below this count are active. |
+| `max_num_kept` | Attribute | scalar | Python int | Accepted for upstream compatibility; compact IDs remain unsupported. |
+| `rows_per_request` | Attribute/Output metadata | scalar | Python int | Reserved slots per request; defaults to 1 and is retained for decoding. |
+| `token_ids` | Output | `[num_output_rows, 0]` | int32 | Zero-width buffer selecting exact packed-mask decoding. |
+| `packed_mask` | Output | `[num_output_rows, ceil(vocab_size / 8)]` | uint8 | Little-bit-order packed finite-logit mask. |
+| `counts` | Output | `[num_output_rows]` | int32 | Number of set bits in each row. |
 | `vocab_size` | Output metadata | scalar | Python int | Original vocabulary size used when unpacking the mask. |
 
-The wrapper accepts both dependency-baseline calling conventions:
+The wrapper follows the upstream request-major calling convention:
 
 ```text
-SamplingMaskTensors.from_logits(logits, num_sampled_tokens)
-SamplingMaskTensors.from_logits(logits, num_sampled_tokens, max_num_kept)
+SamplingMaskTensors.from_logits(
+    logits, cu_num_logits, num_sampled_tokens, max_num_kept, rows_per_request=1)
 ```
 
-Without `max_num_kept`, it returns the three-field
-`SamplingMaskTensors(packed_mask, counts, vocab_size)`. When the argument is
-provided, it returns the four-field
-`SamplingMaskTensors(token_ids, packed_mask, counts, vocab_size)` with a
-zero-width `token_ids` tensor. The upstream `tolists()` method consequently
-uses the exact packed mask for every non-empty row.
+It returns the five-field
+`SamplingMaskTensors(token_ids, packed_mask, counts, vocab_size, rows_per_request)`
+with zero-width `token_ids`. The upstream `tolists()` method consequently uses
+exact packed-mask decoding for non-empty rows.
 
 Compact token-ID generation is temporarily unsupported on Ascend because its
 `tl.cumsum`-based dynamic scatter can hang with Triton-Ascend 3.2.2. The wrapper
@@ -98,7 +106,11 @@ inputs are passed through without a copy.
 
 ## Constraints
 
-- `logits` is a rank-2 tensor and `num_sampled_tokens` has one entry per row.
+- The caller supplies rank-2 `logits`, rank-1 sampled counts with one entry per
+  request, and rank-1 cumulative offsets with at least `num_reqs + 1` entries.
+- The caller ensures positive integer `rows_per_request`, valid logits spans,
+  and committed counts bounded by both the reserved slots and the span length.
+  The wrapper follows upstream without extra type, rank or offset-length checks.
 - The operator is inference-only and has no backward path.
 - The vocabulary size may be non-aligned to both 4096 elements and eight bits;
   masked tail lanes are supported.
@@ -107,10 +119,10 @@ inputs are passed through without a copy.
   provide the required integer count on affected Triton-Ascend versions.
 - The wrapper-level contiguous copy is separate from the Triton kernel launch;
   kernel-only profiling does not include that copy cost.
-- Both the release dependency's three-field bitmask interface and the verified
-  main dependency's four-field compact-ID plus bitmask interface are supported.
-  Supplying `max_num_kept` selects the four-field return structure; both
-  interfaces launch `_pack_sampling_mask_kernel_ascend`.
+- The upstream request-major API and five-field return structure are required;
+  legacy three-/four-field interface adapters are not provided.
+- Empty batches skip the kernel launch. Device-side offsets/counts can change
+  during graph replay while the captured layouts and `rows_per_request` stay fixed.
 
 ## Origin and differences
 
@@ -124,9 +136,9 @@ inputs are passed through without a copy.
 - **Performance adaptation**: replaces per-element variable shifts and a
   scalar-heavy `[512, 8]` axis-1 reduction with an `[8, 512]` vector reduction
   using compile-time bit weights.
-- The packed bit order, active-row semantics, count values, and final decoded
-  token IDs are unchanged. The four-field structure remains compatible, while
-  its compact `token_ids` optimization is replaced by the exact bitmask fallback.
+- The packed bit order, finite-support counts and final decoded token IDs are
+  unchanged. Request-major row mapping additionally supports multiple committed
+  tokens; the compact `token_ids` optimization remains an exact bitmask fallback.
 
 ## Test cases
 
@@ -135,9 +147,9 @@ over-2048, full-vocabulary, randomly sparse, and inactive rows with a vocabulary
 size not divisible by eight. It also mirrors vLLM v0.29.0's processed top-k and
 top-p support test, retains the large stride-2 UB-overflow regression, adds NaN
 and positive infinity exclusions, checks exact counts and decoded token IDs,
-and verifies that the caller's non-contiguous `logits` view is unchanged. With
-the later four-field main interface, it additionally validates the zero-width
-compact buffer and exact bitmask fallback.
+and verifies that the caller's non-contiguous `logits` view is unchanged.
+Request-major cases also cover ragged offsets, inactive slots, empty batches,
+concatenation/slicing and graph replay with updated device metadata.
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sampling_mask.py

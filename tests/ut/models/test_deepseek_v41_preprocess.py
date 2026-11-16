@@ -10,7 +10,6 @@ import torch
 import torch_npu
 
 from vllm_ascend.attention import dsa_v41
-from vllm_ascend.attention.context_parallel import dsa_v41_cp
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
@@ -42,8 +41,6 @@ def test_dsa_v41_custom_op_forwards_its_output_buffer(monkeypatch):
         ("replicated", 1, True, "decode", False),
         ("replicated", 5, True, "mixed", False),
         ("replicated", 1, True, "dummy", False),
-        ("legacy", 5, True, None, False),
-        ("legacy", 5, True, "prefill", False),
         ("pcp", 5, True, None, False),
         ("pcp", 5, True, "prefill", False),
         ("empty", 5, True, None, False),
@@ -192,7 +189,7 @@ def test_preprocess_equivalence_and_stream_dependencies(
         ),
         rope=lambda *args: (cos, sin),
     )
-    ids = list(range(num_tokens)) if layout == "replicated" else [2, 3, 4] if layout == "legacy" else [0, 4]
+    ids = list(range(num_tokens)) if layout == "replicated" else [0, 4]
     if layout == "empty":
         ids = []
     local_hidden, local_cos, local_sin = hidden[ids], cos[ids], sin[ids]
@@ -200,11 +197,11 @@ def test_preprocess_equivalence_and_stream_dependencies(
         cache_metadata
         if layout == "replicated"
         else SimpleNamespace(
-            swa=SimpleNamespace(num_actual_tokens=len(ids), cp_token_range=(2, 5, 3, 5)),
+            swa=SimpleNamespace(num_actual_tokens=len(ids)),
             rope=lambda *args: (local_cos, local_sin),
         )
     )
-    impl_class = dsa_v41_cp.AscendDSAV41CPImpl if layout == "legacy" else dsa_v41.AscendDSAV41Impl
+    impl_class = dsa_v41.AscendDSAV41Impl
     impl = impl_class.__new__(impl_class)
     impl.multistream_dsv4_dsa_overlap = overlap
     impl.role = SimpleNamespace(is_kv_source=False, has_long_context=False)
@@ -220,10 +217,7 @@ def test_preprocess_equivalence_and_stream_dependencies(
     trace.clear()
     quant_inputs.clear()
 
-    if layout == "legacy":
-        impl._global_layer_metadata = lambda by_prefix: cache_metadata
-        q, qr, prepared = impl._prepare_inputs_and_caches(attn, padded_hidden, query_metadata, {})
-    elif layout == "replicated":
+    if layout == "replicated":
         q, qr, prepared = impl._prepare_inputs_and_caches(attn, padded_hidden, query_metadata, {})
     else:
         local_padded = torch.cat((local_hidden, torch.full((3, 8), 9999.0)))

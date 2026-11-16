@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 import torch
@@ -94,13 +94,8 @@ def build_dsa_group_specs(
     if num_hidden_layers <= 0:
         raise ValueError("num_hidden_layers must be positive")
     if indexer_types is None:
-        return tuple(
-            DsaGroupSpec(layer, layer, (layer,))
-            for layer in range(num_hidden_layers)
-        )
-    if isinstance(indexer_types, (str, bytes)) or not isinstance(
-        indexer_types, Sequence
-    ):
+        return tuple(DsaGroupSpec(layer, layer, (layer,)) for layer in range(num_hidden_layers))
+    if isinstance(indexer_types, (str, bytes)) or not isinstance(indexer_types, Sequence):
         raise TypeError("indexer_types must be a sequence of 'full'/'shared' values")
     if len(indexer_types) < num_hidden_layers:
         raise ValueError("indexer_types is shorter than num_hidden_layers")
@@ -284,8 +279,7 @@ class DsaOffloadRuntime:
         batch_size = selection_topk_indices.shape[0]
         if batch_size > metadata.pool_ids.shape[0]:
             raise ValueError(
-                f"Batch size {batch_size} exceeds the capacity of DSA group "
-                f"metadata ({metadata.pool_ids.shape[0]})"
+                f"Batch size {batch_size} exceeds the capacity of DSA group metadata ({metadata.pool_ids.shape[0]})"
             )
         plan, install_records, actual_seq = dsa_plan(
             selection_topk_indices,
@@ -326,14 +320,11 @@ class DsaOffloadRuntime:
             raise RuntimeError(f"DSA group {group_id} has no active plan")
         expected_layer = group.layers[active.next_layer_index]
         if layer_id != expected_layer:
-            raise RuntimeError(
-                f"DSA group {group_id} expected layer {expected_layer}, got {layer_id}"
-            )
+            raise RuntimeError(f"DSA group {group_id} expected layer {expected_layer}, got {layer_id}")
         if config != active.state.config:
             raise RuntimeError("DSA Serve config differs from the active group plan")
         workspace = self.resident_state.workspace(layer_id)
         batch_size = active.state.batch_size
-        selection_rows = config.selection_rows(batch_size)
         selection_blocks = config.selection_block_count(batch_size)
         dsa_serve(
             active.state.plan,
@@ -362,10 +353,7 @@ class DsaOffloadRuntime:
             raise RuntimeError(f"DSA group {group_id} has no active plan")
         expected_layer = group.layers[active.next_layer_index]
         if layer_id != expected_layer:
-            raise RuntimeError(
-                f"DSA group {group_id} expected install for layer "
-                f"{expected_layer}, got {layer_id}"
-            )
+            raise RuntimeError(f"DSA group {group_id} expected install for layer {expected_layer}, got {layer_id}")
         if config != active.state.config:
             raise RuntimeError("DSA Install config differs from the active group plan")
         metadata = self.group_metadata[group_id]

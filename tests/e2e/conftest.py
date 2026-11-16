@@ -917,13 +917,23 @@ def _run_vllm_runner_dp_worker(conn, llm_kwargs: dict[str, Any], dp_rank: int, d
         if not full_device_ids:
             full_device_ids = [str(i) for i in range(torch.npu.device_count())]
 
+        # Pass the full (un-sharded) device list for every backend. vLLM
+        # slices it per DP rank internally via assigned_physical_gpu_ids
+        # (see get_physical_gpu_ids_for_local_dp_rank).
+        llm_kwargs["device_ids"] = full_device_ids
+
+        # The Ray backend starts a node-local Ray instance per DP worker and
+        # binds its workers to the devices visible to that instance. Shard
+        # ASCEND_RT_VISIBLE_DEVICES per DP rank so each engine's Ray instance
+        # only sees its own slice; with the full list the independent Ray
+        # instances can bind workers of different DP ranks (or of several PP
+        # ranks) to the same physical NPU. The device_ids above stays the
+        # complete list, so vLLM's per-rank slicing does not rely on the env
+        # var.
         if llm_kwargs.get("distributed_executor_backend") == "ray":
-            devs = full_device_ids
-            chunk = max(len(devs) // dp_size, 1)
+            chunk = max(len(full_device_ids) // dp_size, 1)
             start = dp_rank * chunk
-            os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(devs[start : start + chunk])
-        else:
-            llm_kwargs["device_ids"] = full_device_ids
+            os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(full_device_ids[start : start + chunk])
 
         llm = LLM(**llm_kwargs)
         conn.send({"status": "ready", "rank": dp_rank})

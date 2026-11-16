@@ -3,6 +3,7 @@
 
 import ast
 import importlib.util
+import logging
 import sys
 from dataclasses import dataclass
 from importlib.metadata import EntryPoint
@@ -13,7 +14,9 @@ from unittest.mock import Mock
 import yaml
 
 _REPOSITORY_ROOT = Path(__file__).parents[3]
-_PACKAGE_ROOT = _REPOSITORY_ROOT / "vllm_ascend" / "observability"
+_PACKAGE_ROOT = _REPOSITORY_ROOT / "vllm_ascend" / "observability" / "ms_metrics"
+_HANDLER_PACKAGE = "vllm_ascend.observability.ms_metrics.handlers"
+_COMMON_MODULE = f"{_HANDLER_PACKAGE}.common"
 
 
 def _load_all_provider_configs(config_paths):
@@ -41,6 +44,17 @@ def _install_provider_api(monkeypatch, **attributes):
     monkeypatch.setitem(sys.modules, "ms_service_metric.provider_api", provider_api)
 
 
+def _load_feature_handlers(monkeypatch, module_name: str, feature: str):
+    """Load ``handlers/<feature>.py`` freshly with ``handlers/common.py`` seeded.
+
+    The common module is registered under its real absolute name so the
+    feature module's import resolves without importing the whole package.
+    """
+    common = _load_source(f"{module_name}_common", "handlers/common.py")
+    monkeypatch.setitem(sys.modules, _COMMON_MODULE, common)
+    return _load_source(module_name, f"handlers/{feature}.py")
+
+
 def test_get_metric_provider_returns_packaged_yaml(monkeypatch):
     @dataclass
     class FakeMetricProvider:
@@ -61,7 +75,7 @@ def test_get_metric_provider_returns_packaged_yaml(monkeypatch):
     assert provider.framework_package == "vllm_ascend"
     assert provider.ownership_mode == "overlay"
     assert provider.owned_symbol_prefixes == ("vllm_ascend.",)
-    assert provider.handler_module_prefixes == ("vllm_ascend.observability.",)
+    assert provider.handler_module_prefixes == ("vllm_ascend.observability.ms_metrics.",)
     assert provider.config_paths == tuple(sorted(provider.config_paths))
     assert [Path(path).name for path in provider.config_paths] == [
         "base_metrics.yaml",
@@ -76,7 +90,7 @@ def test_get_metric_provider_returns_packaged_yaml(monkeypatch):
         item.get("handler", "").startswith(
             (
                 "ms_service_metric.provider_handlers:",
-                "vllm_ascend.observability.handlers:",
+                "vllm_ascend.observability.ms_metrics.handlers:",
             )
         )
         for item in config
@@ -96,9 +110,9 @@ def test_setup_registers_provider_entry_point_and_yaml_package_data():
     package_data = ast.literal_eval(keywords["package_data"])
 
     assert entry_points["ms_service_metric.providers"] == [
-        "vllm-ascend = vllm_ascend.observability:get_metric_provider"
+        "vllm-ascend = vllm_ascend.observability.ms_metrics:get_metric_provider"
     ]
-    assert package_data["vllm_ascend.observability"] == ["config/*.yaml"]
+    assert package_data["vllm_ascend.observability.ms_metrics"] == ["config/*.yaml"]
 
 
 def test_provider_entry_point_loads_without_metric_core(monkeypatch):
@@ -110,7 +124,7 @@ def test_provider_entry_point_loads_without_metric_core(monkeypatch):
 
     entry_point = EntryPoint(
         name="vllm-ascend",
-        value="vllm_ascend.observability:get_metric_provider",
+        value="vllm_ascend.observability.ms_metrics:get_metric_provider",
         group="ms_service_metric.providers",
     )
 
@@ -129,13 +143,16 @@ def test_ascend_handler_module_loads_from_yaml_path(monkeypatch):
     monkeypatch.setitem(sys.modules, "vllm_ascend", package)
     for module_name in (
         "vllm_ascend.observability",
-        "vllm_ascend.observability.provider",
-        "vllm_ascend.observability.handlers",
+        "vllm_ascend.observability.ms_metrics",
+        "vllm_ascend.observability.ms_metrics.provider",
+        "vllm_ascend.observability.ms_metrics.handlers",
+        "vllm_ascend.observability.ms_metrics.handlers.common",
+        "vllm_ascend.observability.ms_metrics.handlers.eplb",
     ):
         monkeypatch.delitem(sys.modules, module_name, raising=False)
 
     handler_module = __import__(
-        "vllm_ascend.observability.handlers",
+        _HANDLER_PACKAGE,
         fromlist=["eplb_do_update_hotness_handler"],
     )
 
@@ -173,7 +190,7 @@ def test_eplb_handler_records_rank_zero_hotness(monkeypatch):
         MetricType=metric_type,
         get_metric_recorder=lambda: metrics,
     )
-    handlers = _load_source("test_vllm_ascend_metric_handlers", "handlers.py")
+    handlers = _load_feature_handlers(monkeypatch, "test_vllm_ascend_metric_handlers", "eplb")
     worker = type(
         "Worker",
         (),
@@ -195,12 +212,12 @@ def test_eplb_handler_records_rank_zero_hotness(monkeypatch):
     assert result == "updated"
     assert metrics.get_or_create_metric.call_count == 5
     metrics.get_or_create_metric.assert_any_call(
-        "eplb:expert_hotness:current_mean",
+        metric_name="eplb:expert_hotness:current_mean",
         metric_type="gauge",
         label_names=["rank", "phase"],
     )
     metrics.get_or_create_metric.assert_any_call(
-        "eplb:expert_hotness:imbalance",
+        metric_name="eplb:expert_hotness:imbalance",
         metric_type="gauge",
         label_names=["rank", "phase", "layer"],
     )
@@ -216,7 +233,7 @@ def test_eplb_handler_registers_metrics_once_per_recorder(monkeypatch):
         MetricType=metric_type,
         get_metric_recorder=lambda: current_metrics[0],
     )
-    handlers = _load_source("test_vllm_ascend_metric_handlers_cache", "handlers.py")
+    handlers = _load_feature_handlers(monkeypatch, "test_vllm_ascend_metric_handlers_cache", "eplb")
     worker = type(
         "Worker",
         (),
@@ -248,11 +265,38 @@ def test_eplb_handler_skips_nonzero_rank(monkeypatch):
         MetricType=metric_type,
         get_metric_recorder=lambda: metrics,
     )
-    handlers = _load_source("test_vllm_ascend_metric_handlers_nonzero", "handlers.py")
+    handlers = _load_feature_handlers(monkeypatch, "test_vllm_ascend_metric_handlers_nonzero", "eplb")
     worker = type("Worker", (), {"rank_id": 1})()
 
     assert handlers.eplb_do_update_hotness_handler(lambda _: "updated", worker) == "updated"
     metrics.record_metric.assert_not_called()
+
+
+def test_eplb_handler_skips_when_recorder_unavailable(monkeypatch, caplog):
+    metric_type = type("MetricType", (), {"GAUGE": "gauge"})
+    _install_provider_api(
+        monkeypatch,
+        MetricType=metric_type,
+        get_metric_recorder=lambda: None,  # ← when recorder is None
+    )
+    handlers = _load_feature_handlers(monkeypatch, "test_vllm_ascend_metric_handlers_no_recorder", "eplb")
+    worker = type(
+        "Worker",
+        (),
+        {
+            "rank_id": 0,
+            "latest_expert_hotness": {"current_mean": 1.0},
+        },
+    )()
+
+    result = handlers.eplb_do_update_hotness_handler(lambda _: "updated", worker)
+
+    assert result == "updated"
+    with caplog.at_level(logging.WARNING):
+        result = handlers.eplb_do_update_hotness_handler(lambda _: "updated", worker)
+
+    assert result == "updated"
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
 def test_eplb_handler_given_metric_failure_then_preserves_inference_result(monkeypatch):
@@ -264,7 +308,7 @@ def test_eplb_handler_given_metric_failure_then_preserves_inference_result(monke
         MetricType=metric_type,
         get_metric_recorder=lambda: metrics,
     )
-    handlers = _load_source("test_vllm_ascend_metric_handlers_failure", "handlers.py")
+    handlers = _load_feature_handlers(monkeypatch, "test_vllm_ascend_metric_handlers_failure", "eplb")
     worker = type(
         "Worker",
         (),

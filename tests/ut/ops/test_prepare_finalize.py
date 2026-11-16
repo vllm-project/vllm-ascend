@@ -15,6 +15,20 @@ from vllm_ascend.ops.fused_moe.prepare_finalize import (
 
 class TestPrepareAndFinalize(unittest.TestCase):
     def setUp(self):
+        # These fixtures expose V1 forward-context attributes directly.
+        self.mock_use_v2 = patch(
+            "vllm_ascend.mrv2_utils.envs_vllm.VLLM_USE_V2_MODEL_RUNNER",
+            False,
+        )
+        self.mock_use_v2.start()
+        self.addCleanup(self.mock_use_v2.stop)
+        self.mock_v2_extra_kwargs = patch(
+            "vllm_ascend.ascend_forward_context._USE_V2_EXTRA_KWARGS",
+            False,
+        )
+        self.mock_v2_extra_kwargs.start()
+        self.addCleanup(self.mock_v2_extra_kwargs.stop)
+
         # Mock FusedMoEConfig
         mock_ascend_config = MagicMock()
         mock_ascend_config.enable_context_parallel = False
@@ -36,6 +50,7 @@ class TestPrepareAndFinalize(unittest.TestCase):
         # instead of falling back to F.pad outside a worker context.
         mock_vllm_config = MagicMock()
         mock_vllm_config.parallel_config.tensor_parallel_size = 1
+        mock_vllm_config.use_v2_model_runner = False
         config_context = set_current_vllm_config(mock_vllm_config)
         config_context.__enter__()
         self.addCleanup(config_context.__exit__, None, None, None)

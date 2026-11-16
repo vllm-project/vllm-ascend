@@ -57,9 +57,6 @@ def bind_kv_cache(
     utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
 
 
-utils.bind_kv_cache = bind_kv_cache
-
-
 def bind_kv_cache_to_layers(
     kv_caches: dict[str, torch.Tensor],
     forward_context: dict[str, Attention],
@@ -82,6 +79,3 @@ def bind_kv_cache_to_layers(
             layer.kv_cache = kv_cache
     ordered_layer_names = sorted(kv_caches, key=lambda name: extract_layer_index(name, num_attn_module))
     utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
-
-
-utils.bind_kv_cache_to_layers = bind_kv_cache_to_layers

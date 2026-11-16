@@ -84,7 +84,35 @@ def init_ascend_model_parallel(
         global_tp_size,
     )
 
-    if engram_config is not None and global_pcp_size > 1:
+    # Engram Tensor Parallel (ETP) group shards the PLE/Engram embedding table.
+    # Upstream initializes _ETP from the (possibly hidden) engram_config; with
+    # PCP>1 the worker clears it so _ETP falls back to _TP. Rebuild a true
+    # TP x DP group when embedding_across_dp asks for it. Must write the
+    # upstream _ETP global so model code calling get_etp_group() sees it.
+    # Tests pass a SimpleNamespace stand-in without get_parallel_size, so guard
+    # with getattr and fall back to global_tp_size (upstream keeps _ETP as-is).
+    get_etp_size = getattr(engram_config, "get_parallel_size", None) if engram_config is not None else None
+    etp_size = get_etp_size(parallel_config) if get_etp_size is not None else global_tp_size
+    if etp_size != global_tp_size and (
+        vllm_parallel_state._ETP is None or vllm_parallel_state._ETP is vllm_parallel_state.get_tp_group()
+    ):
+        # Overwrite only when the upstream group is still the TP fallback (or
+        # not yet built); an already-created independent ETP group is kept.
+        etp_ranks = all_ranks.permute(0, 2, 3, 1, 4).reshape(-1, etp_size).unbind(0)
+        vllm_parallel_state._ETP = init_model_parallel_group(
+            [ranks.tolist() for ranks in etp_ranks],
+            get_world_group().local_rank,
+            backend,
+            group_name="etp",
+        )
+
+    # Upstream creates the Engram DP group only for DeepSeek V4.1.  Qwen also
+    # needs it to share host tables when PCP=1 and DP>1; create the missing
+    # group here, while reusing any group already initialized.
+    if engram_config is not None and (
+        global_pcp_size > 1
+        or (engram_config.dp_shared_memory and global_dp_size > 1 and vllm_parallel_state.get_engram_dp_group() is None)
+    ):
         # Worker initialization defers the upstream DP-only group so the final
         # DP x PCP group is created once. Upstream owns its getter and teardown.
         assert vllm_parallel_state.get_engram_dp_group() is None
@@ -202,13 +230,13 @@ def init_ascend_model_parallel(
 
     global _OTP, _LMTP, _EMBED_TP, _MLP_TP
 
-    if otp_size > 0:
+    if otp_size > 1:
         _OTP = _create_or_get_group(otp_size, "otp")
-    if lmhead_tp_size > 0:
+    if lmhead_tp_size > 1:
         _LMTP = _create_or_get_group(lmhead_tp_size, "lmheadtp")
-    if embedding_tp_size > 0:
+    if embedding_tp_size > 1:
         _EMBED_TP = _create_or_get_group(embedding_tp_size, "emtp")
-    if mlp_tp_size > 0:
+    if mlp_tp_size > 1:
         _MLP_TP = _create_or_get_group(mlp_tp_size, "mlptp")
 
 

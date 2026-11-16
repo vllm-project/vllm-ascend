@@ -86,9 +86,7 @@ class NPUInputBatch(InputBatch):
 
         self._req_ids: list[str | None] = []
         self.req_id_to_index: dict[str, int] = {}
-        self._dsa_row_change_callback: Callable[
-            [list[tuple[int, int]], list[int]], None
-        ] | None = None
+        self._dsa_row_change_callback: Callable[[list[tuple[int, int]], list[int]], None] | None = None
 
         # TODO(woosuk): This buffer could be too large if max_model_len is big.
         # Find a way to reduce the CPU memory usage.
@@ -261,12 +259,9 @@ class NPUInputBatch(InputBatch):
         self.sampled_token_ids_cpu: torch.Tensor | None = None
         self.async_copy_ready_event: torch.Event | None = None
 
-
     def set_dsa_row_change_callback(
         self,
-        callback: Callable[
-            [list[tuple[int, int]], list[int]], None
-        ] | None,
+        callback: Callable[[list[tuple[int, int]], list[int]], None] | None,
     ) -> None:
         """Attach the Decode DSA resident-row lifecycle sink."""
         self._dsa_row_change_callback = callback

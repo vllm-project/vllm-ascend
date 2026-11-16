@@ -1,0 +1,4 @@
+pr: 21380
+entries:
+  - category: bugfix
+    text: Fixed inconsistent SFA attention and indexer KV gather boundaries for PCP speculative lookahead shards that could cause hangs during short prefills.

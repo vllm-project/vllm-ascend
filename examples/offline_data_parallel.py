@@ -125,7 +125,7 @@ def main(
 
     import torch
 
-    _dp_device_ids = [str(i) for i in range(torch.npu.device_count())]
+    _dp_device_ids = list(range(torch.npu.device_count()))
 
     # Sample prompts.
     prompts = [

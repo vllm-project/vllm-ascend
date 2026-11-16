@@ -30,9 +30,7 @@ def _workspace(layer_id: int, batch_capacity: int = 2) -> DsaLayerWorkspace:
         resident_k_rope=torch.empty((batch_capacity, 16, 2)),
         selection_kv_cache=torch.empty((selection_blocks, 128, 4)),
         selection_k_rope=torch.empty((selection_blocks, 128, 2)),
-        selection_block_table=torch.arange(
-            selection_blocks, dtype=torch.int32
-        ).view(selection_rows, 16),
+        selection_block_table=torch.arange(selection_blocks, dtype=torch.int32).view(selection_rows, 16),
     )
 
 
@@ -136,19 +134,13 @@ def test_group_plan_serve_install_order_and_active_batch_slicing(monkeypatch):
     block_table = torch.tensor([[0, 1, -1, -1]], dtype=torch.int32)
 
     runtime.plan_group(0, topk, seq, config=config)
-    runtime.serve_layer(
-        0, full_cache, full_rope, block_table, seq, config=config
-    )
+    runtime.serve_layer(0, full_cache, full_rope, block_table, seq, config=config)
     runtime.install_after_layer(0, config=config)
-    runtime.serve_layer(
-        1, full_cache, full_rope, block_table, seq, config=config
-    )
+    runtime.serve_layer(1, full_cache, full_rope, block_table, seq, config=config)
     runtime.install_after_layer(1, config=config)
 
     runtime.plan_group(1, topk, seq, config=config)
-    runtime.serve_layer(
-        2, full_cache, full_rope, block_table, seq, config=config
-    )
+    runtime.serve_layer(2, full_cache, full_rope, block_table, seq, config=config)
     runtime.install_after_layer(2, config=config)
 
     assert [call[0] for call in calls] == [
@@ -262,9 +254,7 @@ def test_new_request_invalidates_empty_row_after_graph_warmup(monkeypatch):
 
 
 def test_group_builder_preserves_full_shared_ownership():
-    assert dsa_offload_runtime.build_dsa_group_specs(
-        ["full", "shared", "full", "shared"], 4
-    ) == (
+    assert dsa_offload_runtime.build_dsa_group_specs(["full", "shared", "full", "shared"], 4) == (
         DsaGroupSpec(group_id=0, owner_layer=0, layers=(0, 1)),
         DsaGroupSpec(group_id=1, owner_layer=2, layers=(2, 3)),
     )

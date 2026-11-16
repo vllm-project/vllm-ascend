@@ -14,6 +14,18 @@ from vllm_ascend.distributed.kv_transfer.ascend_multi_connector import (  # noqa
 )
 
 
+def test_load_ready_observer_does_not_advance_child_attention_hooks():
+    observer = MagicMock()
+    child = SimpleNamespace(wait_for_layer_load_ready=observer, wait_for_layer_load=MagicMock())
+    other = SimpleNamespace(wait_for_layer_load=MagicMock())
+    connector = AscendMultiConnector.__new__(AscendMultiConnector)
+    connector._connectors = [child, other]
+    connector.wait_for_layer_load_ready("model.layers.9.self_attn.attn")
+    observer.assert_called_once_with("model.layers.9.self_attn.attn")
+    child.wait_for_layer_load.assert_not_called()
+    other.wait_for_layer_load.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "producer,consumer,method,full_prompt",
     [

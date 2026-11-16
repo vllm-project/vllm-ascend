@@ -13,6 +13,7 @@ from vllm_ascend.ops.triton.dcp.dcp_a2a_batched import (
     _fused_dcp_lse_combine_batched_kernel,
     _pack_dcp_output_lse_batched_kernel,
 )
+from vllm_ascend.ops.triton.dcp.sfa_dcp_exchange import can_exchange, exchange
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
 
@@ -487,6 +488,18 @@ def dcp_a2a_fused_combine(
     scatter_size is the All2All group size, not the unified DCP size when
     stacking PCP and DCP. Use 1 when Q heads were not gathered over TP.
     """
+    # Keep PCP composition and token-scatter paths on the upstream implementation.
+    if (
+        pcp_group is None
+        and not return_lse
+        and not defer_combine
+        and scatter_dim == 1
+        and can_exchange(partial_output, softmax_lse, scatter_size)
+    ):
+        if scatter_group is None:
+            raise ValueError("SFA output scatter requires an explicit All2All group.")
+        return exchange(partial_output, softmax_lse, scatter_group).to(partial_output.dtype)
+
     send = pack_dcp_output_lse(
         partial_output,
         softmax_lse,

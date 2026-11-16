@@ -11,6 +11,8 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.ops.triton.v2.spec_decode.resample import resample
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
@@ -75,6 +77,10 @@ def _repeat_rows(rows: torch.Tensor, repeats: int) -> torch.Tensor:
     return rows.unsqueeze(0).expand(repeats, -1).contiguous()
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @torch.inference_mode()
 def test_random_bonus_single_support_accepts_logits_dtypes(dtype):
@@ -118,6 +124,10 @@ def test_random_bonus_single_support_accepts_logits_dtypes(dtype):
     assert torch.equal(num_sampled, torch.ones_like(num_sampled))
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @torch.inference_mode()
 def test_full_draft_residual_accepts_logits_dtypes(dtype):
@@ -153,6 +163,10 @@ def test_full_draft_residual_accepts_logits_dtypes(dtype):
     assert num_sampled[0].item() == 1
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @torch.inference_mode()
 def test_partial_negative_inf_has_zero_probability_mass():
     """Masked -inf vocabulary entries are valid zero-mass tokens and are never sampled."""
@@ -183,6 +197,10 @@ def test_partial_negative_inf_has_zero_probability_mass():
     _assert_distribution(sampled[:, 0], probs)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @torch.inference_mode()
 def test_ragged_requests_and_shuffled_mapping_select_correct_rows():
     """Ragged cu_num_logits and shuffled request-state mappings select the intended resample row per request."""
@@ -223,6 +241,10 @@ def test_ragged_requests_and_shuffled_mapping_select_correct_rows():
     assert torch.equal(rejected_steps, torch.tensor([1, 3, 3], dtype=torch.int32, device=DEVICE))
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @pytest.mark.parametrize("vocab_size", [1023, 1024, 1025])
 @torch.inference_mode()
 def test_greedy_bonus_handles_block_tail(vocab_size):
@@ -252,6 +274,10 @@ def test_greedy_bonus_handles_block_tail(vocab_size):
     assert num_sampled[0].item() == 1
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @torch.inference_mode()
 def test_greedy_non_bonus_preserves_verification_result():
     """Greedy rejection must not read unwritten workspaces or overwrite the target argmax from verification."""
@@ -286,6 +312,10 @@ def test_greedy_non_bonus_preserves_verification_result():
     assert torch.equal(num_sampled, torch.tensor([1, 2], dtype=torch.int32, device=DEVICE))
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @torch.inference_mode()
 def test_one_hot_none_and_dummy_tensor_are_semantically_identical():
     """Support both direct draft_logits=None and the upper-layer dummy-tensor compatibility path."""
@@ -342,6 +372,10 @@ def test_one_hot_none_and_dummy_tensor_are_semantically_identical():
     assert torch.equal(count_none, count_dummy)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @torch.inference_mode()
 def test_full_draft_residual_uses_request_state_mapping():
     """req_idx and req_state_idx are different address spaces; shuffled mappings must select the right draft row."""
@@ -387,6 +421,10 @@ def test_full_draft_residual_uses_request_state_mapping():
     assert torch.equal(num_sampled, torch.ones_like(num_sampled))
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @torch.inference_mode()
 def test_random_bonus_distribution_matches_softmax():
     probs = torch.tensor([0.05, 0.15, 0.40, 0.25, 0.15], dtype=torch.float32)
@@ -416,6 +454,10 @@ def test_random_bonus_distribution_matches_softmax():
     _assert_distribution(sampled[:, 0], probs)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @torch.inference_mode()
 def test_full_draft_residual_distribution_matches_positive_p_minus_q():
     p = torch.tensor([0.35, 0.30, 0.20, 0.10, 0.05], dtype=torch.float32)
@@ -452,6 +494,52 @@ def test_full_draft_residual_distribution_matches_positive_p_minus_q():
     )
     torch.npu.synchronize()
     _assert_distribution(sampled[:, 0], expected)
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
+@torch.inference_mode()
+def test_block_residual_scales_target_by_accepted_prefix():
+    """Both mass passes must use p_tau * p - q, including across vocab blocks."""
+    vocab_size = 1025
+    p = torch.zeros(vocab_size)
+    q = torch.zeros(vocab_size)
+    support = [0, 1024, 2, 3]
+    p[support] = torch.tensor([0.4, 0.3, 0.2, 0.1])
+    q[support] = torch.tensor([0.1, 0.1, 0.4, 0.4])
+    prefix_ratio = 0.5
+    residual = torch.clamp(prefix_ratio * p - q, min=0)
+    expected = residual / residual.sum()
+    lengths = [3] * STAT_TRIALS
+    total_logits = sum(lengths)
+    target_logits = _repeat_rows(p.log(), total_logits).to(DEVICE)
+    draft_logits = q.log().view(1, 1, -1).expand(STAT_TRIALS, 2, -1).contiguous().to(DEVICE)
+    sampled = torch.full((STAT_TRIALS, 3), -1, dtype=torch.int64, device=DEVICE)
+    # One accepted token, followed by the rejected token and a bonus row.
+    num_sampled = torch.ones(STAT_TRIALS, dtype=torch.int32, device=DEVICE)
+    zeros = torch.zeros(STAT_TRIALS, device=DEVICE)
+    cumulative_log_p = torch.full((total_logits,), prefix_ratio, device=DEVICE).log()
+    resample(
+        sampled,
+        num_sampled,
+        target_logits,
+        zeros,
+        draft_logits,
+        zeros,
+        _cu_num_logits(lengths),
+        _expanded_mapping(lengths),
+        torch.zeros(total_logits, dtype=torch.int32, device=DEVICE),
+        torch.ones(STAT_TRIALS, device=DEVICE),
+        torch.arange(STAT_TRIALS, dtype=torch.int64, device=DEVICE),
+        _position_tensor(total_logits),
+        cumulative_log_p=cumulative_log_p,
+        use_block_verification=True,
+    )
+    assert (num_sampled == 2).all()
+    assert (sampled[:, 0] == -1).all()
+    _assert_distribution(sampled[:, 1], expected)
 
 
 @torch.inference_mode()
@@ -495,6 +583,10 @@ def test_one_hot_residual_distribution_excludes_rejected_token_and_renormalizes(
     _assert_distribution(sampled[:, 0], expected)
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @torch.inference_mode()
 def test_business_vocab_shape_single_support():
     """Exercise the current business vocabulary shape with multiple tasks per Vector Core worker."""
@@ -532,6 +624,10 @@ def test_business_vocab_shape_single_support():
     assert torch.equal(num_sampled, torch.ones_like(num_sampled))
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @torch.inference_mode()
 def test_mixed_greedy_bonus_random_bonus_and_residual_in_one_launch():
     """Inactive workspace cells must stay masked when different request branches share one launch."""
@@ -581,6 +677,10 @@ def test_mixed_greedy_bonus_random_bonus_and_residual_in_one_launch():
     assert torch.equal(num_sampled, torch.ones_like(num_sampled))
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @torch.inference_mode()
 def test_full_draft_moderate_near_cancellation_keeps_positive_residual():
     """A small but fp32-resolvable positive residual must not collapse to zero mass."""
@@ -613,6 +713,10 @@ def test_full_draft_moderate_near_cancellation_keeps_positive_residual():
     assert num_sampled[0].item() == 1
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @torch.inference_mode()
 def test_same_seed_and_position_are_deterministic():
     vocab_size = 17
@@ -654,6 +758,60 @@ def test_same_seed_and_position_are_deterministic():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
+@pytest.mark.parametrize("has_draft_logits", [False, True])
+@pytest.mark.parametrize("rejection_step", [0, 1])
+@pytest.mark.parametrize("use_block_verification", [False, True])
+@torch.inference_mode()
+def test_rejection_sample_residual_is_independent_of_acceptance_draw(
+    has_draft_logits, rejection_step, use_block_verification
+):
+    """Reusing the acceptance draw would select only token 2 after rejection."""
+    num_spec_steps = rejection_step + 1
+    num_logits_per_req = num_spec_steps + 1
+    lengths = [num_logits_per_req] * STAT_TRIALS
+    target_probs = torch.tensor([0.5, 0.25, 0.25], dtype=torch.float32, device=DEVICE)
+    draft_probs = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32, device=DEVICE)
+    target_rows = draft_probs.log().repeat(num_logits_per_req, 1)
+    target_rows[rejection_step] = target_probs.log()
+    target_logits = target_rows.repeat(STAT_TRIALS, 1)
+    draft_logits = draft_probs.log().repeat(STAT_TRIALS, num_spec_steps, 1) if has_draft_logits else None
+    total_logits = sum(lengths)
+
+    sampled, num_sampled = rejection_sample(
+        target_logits,
+        draft_logits,
+        torch.zeros(total_logits, dtype=torch.int32, device=DEVICE),
+        _cu_num_logits(lengths),
+        _position_tensor(total_logits),
+        torch.arange(STAT_TRIALS, dtype=torch.int32, device=DEVICE),
+        _expanded_mapping(lengths),
+        torch.arange(num_logits_per_req, dtype=torch.int32, device=DEVICE).repeat(STAT_TRIALS),
+        torch.ones(STAT_TRIALS, dtype=torch.float32, device=DEVICE),
+        torch.arange(STAT_TRIALS, dtype=torch.int64, device=DEVICE) + 4001,
+        num_spec_steps,
+        use_block_verification=use_block_verification,
+    )
+    torch.npu.synchronize()
+
+    rejected = num_sampled == rejection_step + 1
+    assert bool(((num_sampled == num_logits_per_req) | rejected).all())
+    torch.testing.assert_close(rejected.float().mean(), torch.tensor(0.5, device=DEVICE), rtol=0.0, atol=STAT_ATOL)
+    if rejection_step:
+        assert bool((sampled[:, :rejection_step] == 0).all())
+    _assert_distribution(sampled[:, rejection_step], target_probs.cpu())
+    # The recovered token has equal residual mass on tokens 1 and 2,
+    # even though rejection conditions the acceptance draw to be above 0.5.
+    _assert_distribution(sampled[rejected, rejection_step] - 1, torch.tensor([0.5, 0.5]))
+
+
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @torch.inference_mode()
 def test_rejection_sample_greedy_end_to_end():
     """The upper rejection path and categorical resample preserve greedy semantics."""
@@ -728,6 +886,10 @@ def test_rejection_sample_greedy_end_to_end():
     assert max(counts) == num_logits_per_req
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @torch.inference_mode()
 def test_empty_batch_is_noop():
     target_logits = torch.empty((0, 8), dtype=torch.float32, device=DEVICE)
@@ -756,6 +918,10 @@ def test_empty_batch_is_noop():
     assert num_sampled.numel() == 0
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @torch.inference_mode()
 def test_zero_vocab_is_rejected():
     with pytest.raises(ValueError, match="vocab_size must be greater than 0"):
@@ -775,6 +941,10 @@ def test_zero_vocab_is_rejected():
         )
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @torch.inference_mode()
 def test_explicit_full_draft_requires_draft_logits():
     with pytest.raises(ValueError, match="draft_logits cannot be None"):
@@ -795,6 +965,10 @@ def test_explicit_full_draft_requires_draft_logits():
         )
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @torch.inference_mode()
 def test_target_vocab_dimension_must_be_contiguous():
     vocab_size = 8
@@ -819,6 +993,10 @@ def test_target_vocab_dimension_must_be_contiguous():
         )
 
 
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A2/A3/A5",
+)
 @torch.inference_mode()
 def test_draft_vocab_dimension_must_be_contiguous():
     vocab_size = 8

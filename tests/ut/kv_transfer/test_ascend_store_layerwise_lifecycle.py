@@ -45,11 +45,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
     record_attention_compute_start,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import (
     KVCacheStoreLayerRecvingThread,
     KVCacheStoreLayerSendingThread,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import get_layerwise_kv_cache_specs
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
+    get_layerwise_kv_cache_specs,
+)
 
 
 class MemoryStore:

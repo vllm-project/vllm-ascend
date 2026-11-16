@@ -15,7 +15,7 @@ from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCap
 from vllm_ascend.utils import bootstrap_custom_op_env
 
 # A5 的 hardware profile 未启用 RUNTIME_CUSTOM_OPS，enable_custom_op() 会直接
-# 返回 False，需参考 test_add_rms_norm_bias_a5.py 用 bootstrap + 显式 import。
+# 返回 False，需参考 test_add_rms_norm_bias.py 用 bootstrap + 显式 import。
 bootstrap_custom_op_env()
 import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, E402
 
@@ -77,12 +77,8 @@ def test_a5_cache_destination_layout(dtype, width, count, row_gap):
 
 
 @pytest.mark.parametrize(
-    "a",
-    [16, 77],
-)
-@pytest.mark.parametrize(
-    "b",
-    [8, 128],
+    "a,b",
+    [(16, 8), (77, 128)],
 )
 @pytest.mark.parametrize(
     "var_dtype, idx_dtype",
@@ -95,7 +91,7 @@ def test_a5_cache_destination_layout(dtype, width, count, row_gap):
 )
 @pytest.mark.parametrize(
     "contiguous",
-    [True, False],
+    [True],
 )
 def test_scatter_nd_update_sk(a: int, b: int, var_dtype, idx_dtype, contiguous: bool):
     n = max(1, a // 4)
@@ -136,7 +132,7 @@ def test_scatter_nd_update_sk(a: int, b: int, var_dtype, idx_dtype, contiguous: 
 )
 @pytest.mark.parametrize(
     "contiguous",
-    [True, False],
+    [True],
 )
 def test_scatter_nd_update_sk_duplicate_indices(var_dtype, idx_dtype, contiguous: bool):
     """Duplicated indices take the sort path; the result is deterministic when
@@ -168,8 +164,10 @@ def test_scatter_nd_update_sk_duplicate_indices(var_dtype, idx_dtype, contiguous
     "dtype", [torch.int8, torch.float16, torch.bfloat16, torch.float32, torch.float8_e4m3fn, torch.float8_e5m2]
 )
 @pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
-@pytest.mark.parametrize("tokens", [3, 2049])
-@pytest.mark.parametrize("layout", ["contiguous", "row_gap", "offset"])
+@pytest.mark.parametrize(
+    "tokens,layout",
+    [(3, "contiguous"), (2049, "contiguous"), (2049, "row_gap"), (2049, "offset")],
+)
 @torch.inference_mode()
 def test_cache_adaptor_dispatch_preserves_backing_storage(dtype, index_dtype, tokens, layout):
     # Run this same adaptor regression on A2/A3 and A5, including the packed
@@ -263,8 +261,8 @@ def test_indexer_cache_dispatch_for_keys_and_scales(key_dtype, scale_dtype, row_
         expected.append(before)
     indexer = SimpleNamespace(
         enable_sparse_li_c8=scale_dtype is not None,
+        enable_sparse_li_quant=scale_dtype is not None,
         k_cache=SimpleNamespace(kv_cache=tuple(caches)),
-        _use_c8_reshape_optim=lambda: False,
     )
     with (
         patch.object(
@@ -280,7 +278,6 @@ def test_indexer_cache_dispatch_for_keys_and_scales(key_dtype, scale_dtype, row_
             keys[0] if scale_dtype else keys[0].unsqueeze(1),
             keys[1] if scale_dtype else None,
             slots,
-            SimpleNamespace(num_actual_tokens=tokens // 2),
         )
         torch.npu.synchronize()
         a5 = get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED

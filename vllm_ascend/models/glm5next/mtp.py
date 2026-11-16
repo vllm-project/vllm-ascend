@@ -5,6 +5,7 @@ from collections.abc import Callable, Iterable
 
 import torch
 import torch.nn as nn
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
@@ -23,6 +24,7 @@ from vllm.model_executor.models.deepseek_v2 import DeepseekV2MixtureOfExperts
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.triton.linearnorm.fused_eh_norm import fused_eh_norm
 from vllm_ascend.utils import is_rot_weight_used
@@ -36,11 +38,44 @@ from .model import (
 )
 
 
+def glm5next_mtp_eh_norm(
+    positions: torch.Tensor,
+    inputs_embeds: torch.Tensor,
+    previous_hidden: torch.Tensor,
+    enorm_weight: torch.Tensor,
+    hnorm_weight: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    # Keep the Triton launch opaque to Dynamo. The current Ascend generated-code
+    # cache can retain process-local kernel_side_table indices for directly
+    # captured launches, which cannot be replayed in a fresh process.
+    return fused_eh_norm(positions, inputs_embeds, previous_hidden, enorm_weight, hnorm_weight, eps)
+
+
+def glm5next_mtp_eh_norm_fake(
+    positions: torch.Tensor,
+    inputs_embeds: torch.Tensor,
+    previous_hidden: torch.Tensor,
+    enorm_weight: torch.Tensor,
+    hnorm_weight: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    return inputs_embeds.new_empty((inputs_embeds.shape[0], 2 * inputs_embeds.shape[1]))
+
+
+direct_register_custom_op(
+    op_name="glm5next_mtp_eh_norm",
+    op_func=glm5next_mtp_eh_norm,
+    mutates_args=[],
+    fake_impl=glm5next_mtp_eh_norm_fake,
+)
+
+
 class Glm5NextMultiTokenPredictorLayer(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None
-        config = vllm_config.speculative_config.draft_model_config.hf_config
+        config = vllm_config.speculative_config.draft_model_config.hf_text_config
         self.config = config
         quant_config = vllm_config.quant_config
 
@@ -87,7 +122,7 @@ class Glm5NextMultiTokenPredictorLayer(nn.Module):
     ) -> torch.Tensor:
         assert inputs_embeds is not None
         # Fused: zero pos-0 embeds + enorm(embeds) + hnorm(prev) + cat -> [N, 2H].
-        eh_input = fused_eh_norm(
+        eh_input = torch.ops.vllm.glm5next_mtp_eh_norm(
             positions,
             inputs_embeds,
             previous_hidden_states,
@@ -107,7 +142,7 @@ class Glm5NextMultiTokenPredictorLayer(nn.Module):
 class Glm5NextMultiTokenPredictor(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_text_config
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = config.num_nextn_predict_layers
         self.layers = torch.nn.ModuleDict(
@@ -197,10 +232,11 @@ class Glm5NextMultiTokenPredictor(nn.Module):
         return self.logits_processor.get_top_tokens(mtp_layer.shared_head.head, hidden_states)
 
 
+@support_torch_compile
 class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        self.config = vllm_config.model_config.hf_config
+        self.config = vllm_config.model_config.hf_text_config
         self.quant_config = vllm_config.quant_config
         self.model = Glm5NextMultiTokenPredictor(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
         self.is_rot_weight_used = is_rot_weight_used(vllm_config)
@@ -327,6 +363,16 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             # prefix to match.
             if name.startswith("model.language_model."):
                 name = name.replace("model.language_model.", "model.", 1)
+            # The target embedding is absent on the last PP stage. Load a
+            # local copy before filtering for MTP layers, while allowing an
+            # MTP-specific embedding to take precedence in either file order.
+            if name == "model.embed_tokens.weight":
+                if name not in loaded_params:
+                    param = params_dict[name]
+                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                    weight_loader(param, loaded_weight)
+                    loaded_params.add(name)
+                continue
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is None:
                 continue
@@ -406,5 +452,6 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
                 raise ValueError(f"MTP speculative decoding layer {layer_idx} weights missing from checkpoint.")
         if self.is_rot_weight_used and "rot.weight" not in loaded_params:
             raise ValueError("GLM5-Next MTP requires rot.weight when the quantization config sets is_rot_used.")
+        self.has_own_embed_tokens = "model.embed_tokens.weight" in loaded_params
         self._maybe_set_own_lm_head(loaded_params)
         return loaded_params

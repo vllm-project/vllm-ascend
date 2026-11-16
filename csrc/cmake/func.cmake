@@ -10,6 +10,24 @@
 
 include(${CMAKE_CURRENT_LIST_DIR}/build_cache.cmake)
 
+function(install_common_kernel_headers destination)
+    install(DIRECTORY "${OPS_ADV_UTILS_KERNEL_INC}/"
+            DESTINATION "${destination}"
+    )
+    install(FILES "${VLLM_ASCEND_CANN_COMPAT_HEADER}"
+            DESTINATION "${destination}"
+    )
+    install(DIRECTORY "${OPS_TRANSFORMER_DIR}/moe/common/kernel_utils"
+            DESTINATION "${destination}"
+    )
+    set(catlass_include_dir "${OPS_TRANSFORMER_DIR}/third_party/catlass/include")
+    if (EXISTS "${catlass_include_dir}/catlass/catlass.hpp")
+        install(DIRECTORY "${catlass_include_dir}/"
+                DESTINATION "${destination}"
+        )
+    endif()
+endfunction()
+
 function(filter_copy_files SELECTED_FILES SELECTED_DIRS)
     set(_selected_files "")
     set(_selected_dirs "")
@@ -371,7 +389,9 @@ function(add_ops_src_copy)
             add_custom_command(OUTPUT ${OPS_UTILS_INC_KERNEL_DIR}
                     COMMAND mkdir -p ${OPS_UTILS_INC_KERNEL_DIR}/regbase
                     COMMAND cp -rf ${OPS_ADV_UTILS_KERNEL_INC}/*.* ${OPS_UTILS_INC_KERNEL_DIR}
-                    DEPENDS ${OPS_UTILS_INC_KERNEL_FILES}
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                            ${VLLM_ASCEND_CANN_COMPAT_HEADER} ${OPS_UTILS_INC_KERNEL_DIR}/cann_compat.h
+                    DEPENDS ${OPS_UTILS_INC_KERNEL_FILES} ${VLLM_ASCEND_CANN_COMPAT_HEADER}
             )
 
             add_custom_target(${OPS_UTILS_INC_KERNEL_TARGET}
@@ -651,9 +671,8 @@ function(add_bin_compile_target)
             if (EXISTS ${OPS_ADV_UTILS_KERNEL_INC})
                 list(APPEND _CACHE_SHARED_COMPILER_INPUTS ${SRC_OUT_DIR}/ascendc/common)
             endif()
-            # The generated adapter embeds this absolute -include path. Its
-            # location is normalized by the cache wrapper, but its contents
-            # are a semantic compiler input and must remain identity-sensitive.
+            # Keep compatibility-header contents in the cache identity so header
+            # changes invalidate cached kernels.
             if (EXISTS ${VLLM_ASCEND_CANN_COMPAT_HEADER})
                 list(APPEND _CACHE_SHARED_COMPILER_INPUTS ${VLLM_ASCEND_CANN_COMPAT_HEADER})
             endif()

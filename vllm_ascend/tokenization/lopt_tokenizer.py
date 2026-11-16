@@ -260,9 +260,7 @@ def _build_chunk_encoding(chunk: TextChunk, input_ids: Any, offset_mapping: Any)
     if len(token_ids) != len(local_offsets):
         raise ChunkEncodingError("input_ids and offset_mapping lengths differ")
 
-    global_offsets = tuple(
-        (chunk.global_start + start, chunk.global_start + end) for start, end in local_offsets
-    )
+    global_offsets = tuple((chunk.global_start + start, chunk.global_start + end) for start, end in local_offsets)
     return ChunkEncoding(
         index=chunk.index,
         global_start=chunk.global_start,
@@ -353,6 +351,7 @@ def _parallel_encode_chunks(
     executor: Executor,
 ) -> list[ChunkEncoding]:
     from concurrent.futures import as_completed
+
     futures: list[Future[ChunkEncoding]] = [executor.submit(_encode_chunk, tokenizer, chunk) for chunk in chunks]
     encodings: list[ChunkEncoding] = []
     try:
@@ -468,9 +467,7 @@ def _freeze_encoding_builder(builder: _ChunkEncodingBuilder) -> ChunkEncoding:
     if not token_ids or len(token_ids) != len(global_offsets):
         raise OverlapMatchError("merged chunk encoding is empty or inconsistent")
 
-    local_offsets = tuple(
-        (start - builder.global_start, end - builder.global_start) for start, end in global_offsets
-    )
+    local_offsets = tuple((start - builder.global_start, end - builder.global_start) for start, end in global_offsets)
     return ChunkEncoding(
         index=builder.index,
         global_start=builder.global_start,
@@ -533,9 +530,7 @@ def _merge_chunk_encodings(encodings: list[ChunkEncoding], min_match_tokens: int
     return _freeze_encoding_builder(merged)
 
 
-def _find_adjacent_matches(
-    encodings: Sequence[_PositionEncoding], min_match_tokens: int
-) -> list[OverlapMatch]:
+def _find_adjacent_matches(encodings: Sequence[_PositionEncoding], min_match_tokens: int) -> list[OverlapMatch]:
     matches: list[OverlapMatch] = []
     for left, right in zip(encodings, encodings[1:]):
         match = _find_position_overlap(left, right, min_match_tokens)
@@ -547,9 +542,7 @@ def _find_adjacent_matches(
     return matches
 
 
-def _merge_chunk_token_ids(
-    encodings: Sequence[_PositionEncoding], min_match_tokens: int
-) -> list[int]:
+def _merge_chunk_token_ids(encodings: Sequence[_PositionEncoding], min_match_tokens: int) -> list[int]:
     """Join token ranges after independently locating every adjacent seam."""
     if not encodings:
         raise OverlapMatchError("cannot merge an empty chunk list")
@@ -812,11 +805,7 @@ class LosslessParallelTokenizer:
             if not truncation:
                 return ids
 
-            if (
-                not isinstance(max_length, int)
-                or isinstance(max_length, bool)
-                or max_length < 0
-            ):
+            if not isinstance(max_length, int) or isinstance(max_length, bool) or max_length < 0:
                 raise LoptError("truncation requires a non-negative integer max_length")
 
             if len(ids) <= max_length:

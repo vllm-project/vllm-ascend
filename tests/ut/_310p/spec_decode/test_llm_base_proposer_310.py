@@ -20,7 +20,7 @@ import torch
 from tests.ut.base import TestBase
 from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
 from vllm_ascend._310p.spec_decode.llm_base_proposer_310 import AscendSpecDecodeBaseProposer310
-from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
+from vllm_ascend.worker.v1.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
 
 
 class TestAscendSpecDecodeBaseProposer310(TestBase):

@@ -117,8 +117,8 @@ python -m pytest --confcutdir=tests/ut/ops \
   tests/ut/ops/test_kda_state_copy_integration.py \
   tests/ut/ops/test_kimi_kda.py
 python -m pytest --confcutdir=tests/e2e/nightly/single_node/ops/singlecard_ops \
-  tests/e2e/nightly/single_node/ops/singlecard_ops/test_kda_state_copy_integration.py \
-  tests/e2e/nightly/single_node/ops/singlecard_ops/test_kda_state_copy_triton.py
+  tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_kda_state_copy_integration.py \
+  tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_kda_state_copy_triton.py
 ```
 
 ## Performance acceptance and remaining boundaries
@@ -160,23 +160,6 @@ Previous standalone-only policy tests were migrated as follows:
 stubs. `test_kda_state_copy_triton.py` retains the original numerical assertions
 but invokes sealed production plans rather than a standalone registry.
 
-### Reproducible paired performance check
+### Optional native reference
 
-The optional native differential tests skip only when the separately built
-PR #17301 reference op is absent; all independent correctness tests remain
-required. Production does not depend on that op. The benchmark requires it
-explicitly and fails early if unavailable:
-
-```bash
-python -m tests.e2e.nightly.single_node.ops.singlecard_ops.benchmark_kda_state_copy_triton \
-  --output /tmp/kda-round-1.json --seed 41 --trials 100
-```
-
-Use a fresh process and a new output file for each seed. The benchmark includes
-production allocation, a native predicate ablation, equal preallocated
-boundaries, and two labels for the identical native callable as a measurement
-control. Every trial shuffles order. Output lifetimes end outside the timed
-intervals. It records all raw samples and implementation hashes, denies Triton
-compiler entry after warmup, and reports host enqueue, synchronized wall, eager
-Event and 100-call graph replay separately. Never interpret eager Event as pure
-kernel time or combine different rounds/modes by subtracting their medians.
+The optional native differential tests skip only when the separately built PR #17301 reference op is absent. Independent correctness tests remain required. Production does not depend on that op.

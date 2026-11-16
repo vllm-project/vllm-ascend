@@ -29,6 +29,7 @@ from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpec
 def make_speculator():
     spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
     spec.replicated_pcp = False
+    spec.enable_adaptive_verification = False
     spec.attn_architecture = "MLA"
     spec.use_dcp = False
     spec.requires_non_causal = True
@@ -72,7 +73,9 @@ def test_dspark_sync_matches_global_draft_requests(monkeypatch, replicated_pcp):
             num_tokens_across_dp=torch.tensor([4, 4]), uniform_token_count=1, eager=False, num_reqs=4
         )
     monkeypatch.setattr(DSparkSpeculator, "propose", parent_propose)
-    assert spec.propose(batch, *[None for _ in range(10)], dp_sync=target_sync) == "draft"
+    # vLLM #60754 renamed `dp_sync` -> `dp_sync_state` on main.
+    dp_sync_kwarg = "dp_sync_state"
+    assert spec.propose(batch, *[None for _ in range(10)], **{dp_sync_kwarg: target_sync}) == "draft"
 
 
 def make_target():
@@ -119,7 +122,7 @@ def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABac
     monkeypatch.setattr(shared, "prepare_replicated_pcp_config", lambda config: (config, False))
     config = SimpleNamespace(
         attention_config=AttentionConfig(),
-        speculative_config=SimpleNamespace(method="dspark", use_dspark=lambda: True),
+        speculative_config=SimpleNamespace(method="dspark", enforce_eager=None, use_dspark=lambda: True),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         cache_config=SimpleNamespace(block_size=128),
     )
@@ -261,20 +264,28 @@ def test_capture_delegates_and_restores_contexts(monkeypatch, architecture, fail
         return context("model")
 
     monkeypatch.setattr(graph, "model_capture_wrapper", model_context)
-    args: tuple[Any, ...] = (
+    forward_args: tuple[Any, ...] = (
         MagicMock(),
         SimpleNamespace(positions=torch.arange(20)),
         object(),
         [],
         object(),
         128,
-        False,
-        "capture",
     )
+    # vLLM main renamed the hook to
+    # ``prepare_forward(num_reqs, attn_metadata)``.
+    args = (*forward_args, False, None, "capture")
+    expected_kwargs = {
+        "causal": False,
+        "prepare_forward": "capture",
+        "progress_bar_desc": "Capturing CUDA graphs",
+    }
 
-    def capture(self, *received):
+    def capture(self, *received, **kwargs):
         assert self is manager
-        assert received == args
+        assert received == forward_args
+        # The Ascend wrapper forwards the trailing options as keywords.
+        assert kwargs == expected_kwargs
         assert events == ["enter communicator", "enter model"]
         events.append("capture")
         if fail:

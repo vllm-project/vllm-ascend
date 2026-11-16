@@ -1,0 +1,7 @@
+pr: 20107
+entries:
+  - category: bugfix
+    text: >-
+      Corrected DeepSeek-V4 VL dummy image selection for multimodal memory
+      profiling to account for wide images within the configured token and
+      aspect-ratio limits.

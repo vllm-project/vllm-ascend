@@ -11,7 +11,7 @@ _envs: &envs
   HCCL_DFS_CONFIG: "task_exception:off,inconsistent_check:off"
 #  OMP_NUM_THREADS: "100"
 #  OMP_PROC_BIND: "false"
-  HCCL_BUFFSIZE: "400"
+  HCCL_BUFFSIZE: "2048"
   HCCL_OP_EXPANSION_MODE: "AIV"
 #  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
   VLLM_ASCEND_ENABLE_PREFETCH_MLP: "1"
@@ -26,6 +26,8 @@ _server_cmd: &server_cmd
   - "--distributed-executor-backend"
   - "mp"
   - "--tensor-parallel-size"
+  - "1"
+  - --prefill-context-parallel-size
   - "8"
   - "--data-parallel-size"
   - "1"
@@ -48,7 +50,7 @@ _server_cmd: &server_cmd
   - "--reasoning-parser"
   - "glm45"
   - "--gpu-memory-utilization"
-  - "0.95"
+  - "0.90"
   - "--compilation-config"
   - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
   - "--trust-remote-code"
@@ -57,7 +59,7 @@ _server_cmd: &server_cmd
   - "--speculative-config"
   - '{"num_speculative_tokens":3,"method":"deepseek_mtp","enforce_eager":true}'
   - "--additional-config"
-  - '{"enable_cpu_binding":"True","multistream_overlap_shared_expert":"True","enable_sparse_sfa_c8":true,"enable_sparse_li_c8":true,"enable_dsa_cp":true,"eplb_config":{"dynamic_eplb":true,"expert_heat_collection_interval":50,"algorithm_execution_interval":5,"eplb_policy_type":2,"num_redundant_experts":0}}'
+  - '{"enable_cpu_binding":"True","multistream_overlap_shared_expert":"True","enable_sparse_sfa_c8":true,"enable_sparse_li_c8":true,"eplb_config":{"dynamic_eplb":true,"expert_heat_collection_interval":50,"algorithm_execution_interval":5,"eplb_policy_type":2,"num_redundant_experts":0}}'
 
 # ==========================================
 # ACTUAL TEST CASES
