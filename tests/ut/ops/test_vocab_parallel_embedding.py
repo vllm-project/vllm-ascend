@@ -31,7 +31,7 @@ from vllm_ascend.ops.vocab_parallel_embedding import (
     AscendVocabParallelEmbedding,
     VocabParallelMode,
     _resolve_vocab_parallel_plan,
-    kimi_embedding_finegrained_forward,
+    embedding_finegrained_forward,
 )
 
 VOCAB_PARALLEL_EMBEDDING_TEST_NUM_RANDOM_SEEDS = 128
@@ -53,9 +53,6 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         self.mock_pcp_group.world_size = 1
         self.mock_pcp_group.rank_in_group = 0
 
-        parallel_state._MLP_TP = self.mock_group
-        parallel_state._OTP = self.mock_group
-
         mock_vllm_config = MagicMock()
         mock_vllm_config.additional_config = {}
         self.mock_ascend_config = MagicMock()
@@ -63,6 +60,9 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         self.mock_ascend_config.finegrained_tp_config.embedding_tensor_parallel_size = 2
 
         self.patches = [
+            patch.object(parallel_state, "_MLP_TP", self.mock_group),
+            patch.object(parallel_state, "_OTP", self.mock_group),
+            patch("vllm_ascend.ops.vocab_parallel_embedding.uses_aiv_communication", return_value=True),
             patch("vllm_ascend.utils.get_ascend_config", return_value=self.mock_ascend_config),
             patch("vllm_ascend.distributed.parallel_state.get_lmhead_tp_group", return_value=self.mock_group),
             patch(
@@ -309,7 +309,7 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         self.assertEqual(layer.num_added_embeddings_per_partition, layer.num_added_embeddings)
 
 
-def _exchange_embedding(monkeypatch, mode, tp_rank=0, tp_size=1, exchange_rank=0, model_type=None, aiv=False):
+def _exchange_embedding(monkeypatch, mode, tp_rank=0, tp_size=1, exchange_rank=0, model_type=None, aiv=True):
     """Keep real planning, weight loading and lookup; replace only runtime topology."""
     module = "vllm_ascend.ops.vocab_parallel_embedding"
     tp_group = SimpleNamespace(rank_in_group=tp_rank, world_size=tp_size, unique_name="tp")
@@ -339,24 +339,25 @@ def _exchange_embedding(monkeypatch, mode, tp_rank=0, tp_size=1, exchange_rank=0
     return layer, weight
 
 
-@pytest.mark.parametrize("model_type", ["kimi_linear", "other"])
+@pytest.mark.parametrize("model_type", ["kimi_linear", "glm5_next", "other"])
 @pytest.mark.parametrize("aiv", [True, False])
 @pytest.mark.parametrize("mode", [VocabParallelMode.FINE_GRAINED, VocabParallelMode.PCP_X_TP])
-def test_embedding_overlap_is_scoped_to_kimi_ccu(monkeypatch, model_type, aiv, mode):
+def test_embedding_overlap_depends_on_layout_and_communication(monkeypatch, model_type, aiv, mode):
     layer, _ = _exchange_embedding(monkeypatch, mode, model_type=model_type, aiv=aiv)
-    enabled = mode is VocabParallelMode.FINE_GRAINED and model_type == "kimi_linear" and not aiv
-    assert (layer._kimi_embedding_pipeline is not None) is enabled
+    enabled = mode is VocabParallelMode.FINE_GRAINED and not aiv
+    assert (layer._embedding_pipeline is not None) is enabled
 
 
-def test_kimi_embedding_pipeline_compilation_and_mm_lookup(monkeypatch):
-    layer, weight = _exchange_embedding(monkeypatch, VocabParallelMode.FINE_GRAINED, model_type="kimi_linear")
+@pytest.mark.parametrize("model_type", ["kimi_linear", "glm5_next", "other"])
+def test_embedding_pipeline_compilation_and_mm_lookup(monkeypatch, model_type):
+    layer, weight = _exchange_embedding(monkeypatch, VocabParallelMode.FINE_GRAINED, model_type=model_type, aiv=False)
     seen = []
 
     def pipeline(layer, owner):
         seen.append(owner.clone())
         return weight[owner]
 
-    monkeypatch.setattr(layer._kimi_embedding_pipeline, "forward", pipeline)
+    monkeypatch.setattr(layer._embedding_pipeline, "forward", pipeline)
     # Exercise the compiled custom-op boundary, rather than tracing Python
     # stream creation and event operations into the model graph.
     monkeypatch.setattr(torch.npu, "current_stream", lambda: None)
@@ -365,7 +366,7 @@ def test_kimi_embedding_pipeline_compilation_and_mm_lookup(monkeypatch):
     # The production op is registered for PrivateUse1. Reuse its real Python
     # body as a scoped CPU kernel, leaving the schema/fake kernel unchanged.
     library = torch.library.Library("vllm", "IMPL", "CPU")
-    library.impl("kimi_embedding_finegrained_forward", kimi_embedding_finegrained_forward)
+    library.impl("embedding_finegrained_forward", embedding_finegrained_forward)
     try:
         compiled = torch.compile(layer, backend="eager", fullgraph=True)
         for ids in (torch.tensor([1, 3]), torch.tensor([2]), torch.empty(0, dtype=torch.long)):
@@ -654,6 +655,7 @@ class TestAscendLogitsProcessor(unittest.TestCase):
         self.mock_quant_method.apply = MagicMock(return_value=torch.randn(2, self.vocab_size))
         self.mock_all_to_all_single = MagicMock(side_effect=lambda out, inp, **kwargs: out.copy_(inp))
         self.patches = [
+            patch("vllm_ascend.ops.vocab_parallel_embedding.uses_aiv_communication", return_value=True),
             patch("vllm_ascend.ops.vocab_parallel_embedding.get_lmhead_tp_group", return_value=self.mock_group),
             patch("vllm_ascend.ops.vocab_parallel_embedding.lmhead_tp_enable", return_value=True),
             patch(
@@ -700,6 +702,16 @@ class TestAscendLogitsProcessor(unittest.TestCase):
         self.mock_all_to_all_single.assert_called_once()
         # [N/P, V] after redistribution, then truncated to org_vocab_size.
         self.assertEqual(logits.shape, (1, self.vocab_size))
+
+    def test_lmhead_pipeline_selection_does_not_require_a_model_schema(self):
+        from vllm_ascend.ops.finegrained_tp import ChunkedLMHeadTP
+
+        for aiv in (False, True):
+            with patch("vllm_ascend.ops.vocab_parallel_embedding.uses_aiv_communication", return_value=aiv):
+                head = AscendParallelLMHead(16, 4, prefix="lm_head")
+            assert (head._lmhead_pipeline is None) is aiv
+            if not aiv:
+                assert isinstance(head._lmhead_pipeline, ChunkedLMHeadTP)
 
     def test_get_logits_replicated_head_takes_normal_path(self):
         """A replicated head (tp_size==1, e.g. the DSpark Markov w2) must not
@@ -765,3 +777,19 @@ class TestAscendLogitsProcessor(unittest.TestCase):
 
         self.assertEqual(events, [("pcp", -1), ("tp", -1)])
         self.assertTrue(torch.equal(logits, torch.tensor([[0.0, 1.0, 10.0, 11.0, 20.0, 21.0, 30.0]])))
+
+
+@pytest.mark.parametrize("model_type", ["kimi_linear", "glm5_next", "other"])
+def test_tied_embedding_without_head_pipeline_uses_serial_exchange(monkeypatch, model_type):
+    layer, _ = _exchange_embedding(monkeypatch, VocabParallelMode.FINE_GRAINED, model_type=model_type, aiv=True)
+    assert not hasattr(layer, "_lmhead_pipeline")
+    group = SimpleNamespace(world_size=2, device_group=None, all_gather=lambda hidden, dim: torch.cat((hidden, hidden)))
+    module = "vllm_ascend.ops.vocab_parallel_embedding"
+    monkeypatch.setattr(f"{module}.get_lmhead_tp_group", lambda: group)
+    monkeypatch.setattr(f"{module}.dist.all_to_all_single", lambda output, source, **kwargs: output.copy_(source))
+    config = MagicMock()
+    config.model_config.head_dtype = None
+    with set_current_vllm_config(config):
+        processor = AscendLogitsProcessor(vocab_size=8)
+        logits = processor._get_logits(torch.ones(1, 2), layer)
+    assert logits.shape == (1, 8)

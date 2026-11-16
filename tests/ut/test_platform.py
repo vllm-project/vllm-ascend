@@ -594,6 +594,8 @@ class TestNPUPlatform(TestBase):
         mock_ascend_config.finegrained_tp_config.oproj_tensor_parallel_size = 0
         mock_ascend_config.finegrained_tp_config.mlp_tensor_parallel_size = 0
         mock_ascend_config.finegrained_tp_config.shared_expert_tensor_parallel_size = 1
+        mock_ascend_config.finegrained_tp_config.qkv_iproj_tensor_parallel_size = 1
+        mock_ascend_config.finegrained_tp_config.gproj_tensor_parallel_size = 1
         mock_ascend_config.scheduler_config.enable_balance_scheduling = False
         mock_ascend_config.scheduler_config.batch_job_sched_config.enabled = False
         mock_ascend_config.mc2_comm_alg = ""
@@ -1269,6 +1271,8 @@ class TestNPUPlatform(TestBase):
             "oproj_tensor_parallel_size",
             "mlp_tensor_parallel_size",
             "shared_expert_tensor_parallel_size",
+            "qkv_iproj_tensor_parallel_size",
+            "gproj_tensor_parallel_size",
         ):
             with self.subTest(field=field):
                 vllm_config = TestNPUPlatform.mock_vllm_config()

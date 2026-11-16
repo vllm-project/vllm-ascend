@@ -265,6 +265,7 @@ def test_mixed_forward_marks_auxiliary_beta_as_preprocessed(recover):
     nn.Module.__init__(attention)
     attention.uses_mixed_projection = True
     attention.use_recoverssm = recover
+    attention.projection_tp = None
     attention.pcp_size = 1
     attention.local_num_heads = 2
     attention.head_dim = 3
@@ -630,6 +631,7 @@ def test_kda_forward_preserves_live_rows_with_nan_padding(mode, source_layout):
             return_value=SimpleNamespace(attn_metadata={"kda": metadata}),
         ),
     ):
+        attention._forward_core = AscendKimiK3DeltaAttention._forward_core.__get__(attention)
         AscendKimiK3DeltaAttention._forward(
             attention,
             values,
@@ -779,6 +781,7 @@ def test_kda_prefill_direct_norm_and_idle_output(mode, recover):
         ),
     ):
         raw_beta = torch.linspace(-2, 2, tokens).reshape(1, tokens, 1).expand(-1, -1, heads)
+        attention._forward_core = AscendKimiK3DeltaAttention._forward_core.__get__(attention)
         AscendKimiK3DeltaAttention._forward(
             attention,
             torch.randn(tokens, 3 * heads * dim),
@@ -972,3 +975,48 @@ def test_finegrained_w8a8_quantization_precedes_gate_without_hardware_capability
         trace.append("G-A2A")
         attention._matmul_fused_qkv(prepared)
     assert trace == ["quant-vector", "G-A2A", "QKV-cube"]
+
+
+@pytest.mark.parametrize(
+    "qkv_size,gate_size,heads,full_rank,error",
+    [(2, 1, 4, False, "full-rank"), (2, 1, 3, True, "KDA head count"), (1, 2, 3, True, "KDA head count")],
+)
+def test_kimi_projection_checks_its_own_head_contract(qkv_size, gate_size, heads, full_rank, error):
+    def init(attention, config, vllm_config, prefix):
+        nn.Module.__init__(attention)
+        attention.num_heads = heads
+
+    config = SimpleNamespace(linear_attn_config={"use_full_rank_gate": full_rank})
+    vc = SimpleNamespace(
+        quant_config=SimpleNamespace(uses_kimi_k3_mixed_kda_projection=lambda prefix: True),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
+        additional_config={
+            "finegrained_tp_config": {
+                "qkv_iproj_tensor_parallel_size": qkv_size,
+                "gproj_tensor_parallel_size": gate_size,
+            }
+        },
+    )
+    with (
+        patch("vllm_ascend.ops.kimi_kda.KimiK3DeltaAttention.__init__", init),
+        pytest.raises(ValueError, match=error),
+    ):
+        AscendKimiK3DeltaAttention(config, vc)
+
+
+def test_kda_forward_preserves_core_override():
+    class CustomCore(AscendKimiK3DeltaAttention):
+        def _forward_core(self, *args, **kwargs):
+            return torch.ones(1, 2, 1, 2)
+
+    attention = CustomCore.__new__(CustomCore)
+    nn.Module.__init__(attention)
+    attention.o_norm = SimpleNamespace(forward_oot=MagicMock())
+    gate = torch.zeros(4, 1, 2)
+    output = torch.empty(1, 4, 1, 2)
+    with patch("vllm_ascend.ops.kimi_kda.maybe_save_kv_layer_to_connector"):
+        attention._forward(torch.empty(0), torch.empty(0), gate, torch.empty(0), output)
+    norm_input, owner_gate = attention.o_norm.forward_oot.call_args.args
+    torch.testing.assert_close(norm_input, torch.ones(1, 2, 1, 2))
+    torch.testing.assert_close(owner_gate, gate[:2])
+    assert attention.o_norm.forward_oot.call_args.kwargs["out"] is output

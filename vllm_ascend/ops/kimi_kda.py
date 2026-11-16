@@ -249,6 +249,11 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         if qkv_size > 1 or gate_size > 1:
             if not uses_mixed_projection:
                 raise ValueError("Kimi projection TP requires the mixed QKV/BF16 gate checkpoint format.")
+            if not config.linear_attn_config.get("use_full_rank_gate", False):
+                raise ValueError("Kimi projection TP requires full-rank output gates.")
+            for name, size in (("qkv_iproj_tensor_parallel_size", qkv_size), ("gproj_tensor_parallel_size", gate_size)):
+                if size > 1 and self.num_heads % size:
+                    raise ValueError(f"{name} must divide the KDA head count ({self.num_heads}).")
             qkv_group = get_qkv_iproj_tp_group() if qkv_size > 1 else None
             gate_group = get_gproj_tp_group() if gate_size > 1 else None
             self.in_proj_qkvgfab = ProjectionMergedColumnParallelLinear(
@@ -420,7 +425,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
-        if getattr(self, "projection_tp", None) is not None:
+        if self.projection_tp is not None:
             output = torch.empty_like(hidden_states)
             torch.ops.vllm.kimi_kda_finegrained_forward(hidden_states, output, self.prefix)
             return output
@@ -723,8 +728,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         beta_is_preprocessed: bool = False,
     ) -> None:
         """Dispatch speculative, prefill, and decode tokens through KDA kernels."""
-        norm_input = AscendKimiK3DeltaAttention._forward_core(
-            self,
+        norm_input = self._forward_core(
             mixed_qkv,
             g1,
             beta,

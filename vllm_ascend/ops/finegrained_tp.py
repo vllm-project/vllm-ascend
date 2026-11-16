@@ -202,8 +202,6 @@ class KDAProjectionTP:
     def project(self, layer, hidden, *, aux_stream: torch.npu.Stream):
         capacity = projection_capacity(hidden)
         owner = F.pad(hidden, (0, 0, 0, capacity - hidden.shape[0]))
-        if capacity == 0:
-            raise RuntimeError("KDA projection TP requires the runner to skip globally empty steps uniformly.")
         q_input = self.communication.gather(owner, self.qkv_group) if self.qkv_group is not None else None
         if self.gate_group is self.qkv_group:
             g_input = q_input
@@ -313,10 +311,11 @@ class ChunkedEmbeddingTP:
 
 
 class ChunkedMLPTP:
+    """Pipeline CCU collectives with quantization and MLP activation work."""
+
     def __init__(self, group):
         self.group = group
         self.communication = TPCommunication()
-        self.uses_aiv = uses_aiv_communication(group)
 
     def forward(self, layer, hidden):
         rows = hidden.shape[0]
@@ -333,8 +332,6 @@ class ChunkedMLPTP:
             partial = down.quant_method.apply(down, down_input, bias=bias)
             outputs.append(self.communication.scatter(partial, self.group))
         # AG0, AG1, RS0, RS1 are launched in the same order on every rank.
-        if self.uses_aiv:
-            return torch.cat([pending.wait() for pending in outputs], dim=0)[:rows]
         return _restore_owner_chunks(outputs, rows)
 
 

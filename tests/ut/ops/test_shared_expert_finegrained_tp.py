@@ -211,3 +211,21 @@ def test_reused_shared_group_is_destroyed_once(monkeypatch):
     group.destroy.assert_called_once()
     with pytest.raises(AssertionError, match="not initialized"):
         parallel_state.get_shared_expert_tp_group()
+
+
+@pytest.mark.parametrize("knob", ["qkv_iproj_tensor_parallel_size", "gproj_tensor_parallel_size"])
+@pytest.mark.parametrize("model_type", ["kimi_linear", "glm5_next", "other"])
+def test_projection_config_has_no_model_schema_dependency(knob, model_type):
+    vc = valid_config()
+    vc.model_config.hf_text_config = SimpleNamespace(model_type=model_type)
+    config = FinegrainedTPConfig(**{knob: 2})
+    config._validate_preconditions(vc)
+    assert getattr(config, knob) == 2
+
+
+@pytest.mark.parametrize("knob", ["qkv_iproj_tensor_parallel_size", "gproj_tensor_parallel_size"])
+def test_projection_config_requires_runtime_graph_guard(knob):
+    vc = valid_config()
+    vc.use_v2_model_runner = False
+    with pytest.raises(ValueError, match="V2 model runner"):
+        FinegrainedTPConfig(**{knob: 2})._validate_preconditions(vc)

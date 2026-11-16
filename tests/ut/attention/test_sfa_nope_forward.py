@@ -18,6 +18,8 @@ from vllm_ascend.ops.finegrained_tp import PendingGate, PendingTensor
 
 @pytest.fixture(autouse=True)
 def mock_scatter_nd_update(monkeypatch):
+    monkeypatch.setattr(torch.Tensor, "record_stream", lambda tensor, stream: None)
+
     def scatter(cache, indices, updates):
         slots = indices[:, 0]
         valid = (slots >= 0) & (slots < cache.shape[0])

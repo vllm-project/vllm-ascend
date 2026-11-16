@@ -94,7 +94,12 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.parallel_state import get_gproj_tp_group, get_mlp_tp_group
-from vllm_ascend.ops.finegrained_tp import ChunkedMLPTP, FullRankGateTP, ProjectionColumnParallelLinear
+from vllm_ascend.ops.finegrained_tp import (
+    ChunkedMLPTP,
+    FullRankGateTP,
+    ProjectionColumnParallelLinear,
+    uses_aiv_communication,
+)
 from vllm_ascend.ops.kda_parallel import KDARowParallelLinear, get_kda_state_shape
 from vllm_ascend.ops.kimi_kda import (
     AscendKimiK3DeltaAttention as AscendKimiK3DeltaAttentionBase,
@@ -292,19 +297,23 @@ class AscendKimiMLP(KimiMLP):
         )
         self.use_sequence_parallel = use_sequence_parallel
         self._finegrained_mlp = None
-        if isinstance(getattr(getattr(self, "gate_up_proj", None), "custom_op", None), MLPColumnParallelOp):
-            self._finegrained_mlp = ChunkedMLPTP(get_mlp_tp_group())
-            self._finegrained_prefix = prefix
-            context = get_current_vllm_config().compilation_config.static_forward_context
-            if prefix in context:
-                raise ValueError(f"Duplicate fine-grained MLP layer name: {prefix}")
-            context[prefix] = self
+        if isinstance(getattr(self.gate_up_proj, "custom_op", None), MLPColumnParallelOp):
+            group = get_mlp_tp_group()
+            # Pipelined AG/RS can overlap the next chunk's quant/activation
+            # Vector work. AIV uses the original ordered linear collectives.
+            if not uses_aiv_communication(group):
+                self._finegrained_mlp = ChunkedMLPTP(group)
+                self._finegrained_prefix = prefix
+                context = get_current_vllm_config().compilation_config.static_forward_context
+                if prefix in context:
+                    raise ValueError(f"Duplicate fine-grained MLP layer name: {prefix}")
+                context[prefix] = self
 
     def _prepare_down_input(self, gate_up: torch.Tensor) -> torch.Tensor:
         return self.act_fn(gate_up)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if getattr(self, "_finegrained_mlp", None) is not None:
+        if self._finegrained_mlp is not None:
             output = torch.empty_like(x)
             torch.ops.vllm.kimi_mlp_finegrained_forward(x, output, self._finegrained_prefix)
             return output
@@ -679,6 +688,10 @@ class AscendKimiDSAAttention(AscendKimiMLAAttention):
         if config.mla_use_output_gate:
             gate_size = get_ascend_config().finegrained_tp_config.gproj_tensor_parallel_size
             if gate_size > 1:
+                if config.num_attention_heads % gate_size:
+                    raise ValueError(
+                        f"gproj_tensor_parallel_size must divide the DSA head count ({config.num_attention_heads})."
+                    )
                 group = get_gproj_tp_group()
                 self.g_proj = ProjectionColumnParallelLinear(
                     config.hidden_size,
