@@ -139,7 +139,6 @@ def packed_sfa_cache_groups(config, specs):
     ]
     groups = history_groups + groups[1:]
     specs.update(full)
-    specs.update(recurrent)
     return groups
 
 
