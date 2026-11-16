@@ -42,14 +42,17 @@
 import typing
 
 import pydantic.dataclasses as _pdc
+import torch
 from vllm.config import cache as _cache_mod
 from vllm.config.cache import CacheConfig
 from vllm.logger import logger
 
 # Ascend-only ``--kv-cache-dtype`` values: ``"int8"`` (DeepSeek V4 / similar
-# Ascend MLA KV cache dtype) and ``"mxfp8"`` (C8-MXFP KV cache on the QFA
-# path).
-_ASCEND_CACHE_DTYPES = ("int8", "mxfp8")
+# Ascend MLA KV cache dtype), ``"mxfp8"`` (C8-MXFP KV cache on the QFA path)
+# and ``"int8_qfa"`` (A2/A3 QFA INT8 KV cache: INT8 payloads plus a per-token
+# FP32 K descale packed in each paged packet; raw-int8 allocation, so the
+# torch-dtype mapping resolves to torch.int8).
+_ASCEND_CACHE_DTYPES = ("int8", "mxfp8", "int8_qfa")
 
 
 def _apply_kv_cache_dtype_int8_patch() -> None:
@@ -113,7 +116,13 @@ def _apply_kv_cache_dtype_int8_patch() -> None:
         raise_errors=True,
         _parent_namespace_depth=1,
     )
-    logger.info("Patched CacheConfig.cache_dtype to accept 'int8' and 'mxfp8' (Ascend KV cache dtypes).")
+    # Storage-dtype resolution for the QFA INT8 path: the caches are raw int8
+    # allocations, and the generic impl constructor resolves the dtype string
+    # through STR_DTYPE_TO_TORCH_DTYPE before any packet view is built.
+    import vllm.utils.torch_utils as _torch_utils
+
+    _torch_utils.STR_DTYPE_TO_TORCH_DTYPE.setdefault("int8_qfa", torch.int8)
+    logger.info("Patched CacheConfig.cache_dtype to accept 'int8', 'mxfp8' and 'int8_qfa' (Ascend KV cache dtypes).")
 
 
 _apply_kv_cache_dtype_int8_patch()

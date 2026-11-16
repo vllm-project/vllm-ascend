@@ -48,7 +48,7 @@ import vllm.utils.torch_utils as _torch_utils
 
 # Ascend-only ``--kv-cache-dtype`` values; keep in sync with
 # ``_ASCEND_CACHE_DTYPES`` in ``patch/platform/patch_kv_cache_dtype.py``.
-_ASCEND_CACHE_DTYPES = ("int8", "mxfp8")
+_ASCEND_CACHE_DTYPES = ("int8", "mxfp8", "int8_qfa")
 
 
 def _apply_fp8_kv_cache_dtype_flip() -> None:
@@ -131,8 +131,9 @@ def _widen_cache_dtype_literal_for_worker() -> None:
     # The C8-MXFP path stores FP8 KV payloads; the generic impl constructor
     # resolves the dtype string before the C8 backend swaps the class, so the
     # mapping must exist even though the C8 caches are allocated as raw int8
-    # bytes.
+    # bytes. The QFA INT8 path likewise resolves "int8_qfa" to torch.int8.
     _torch_utils.STR_DTYPE_TO_TORCH_DTYPE.setdefault("mxfp8", torch.float8_e4m3fn)
+    _torch_utils.STR_DTYPE_TO_TORCH_DTYPE.setdefault("int8_qfa", torch.int8)
 
     # Unconditional rebind: the selector's module-global CacheDType must point
     # at the widened Literal regardless of import order / fork inheritance.
