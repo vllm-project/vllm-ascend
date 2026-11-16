@@ -41,7 +41,12 @@ def test_packed_cp_attention_matches_unsharded(context, pcp, graph_mode):  # noq
     local_source = source[owned]
     manager_blocks = local_source.shape[0] // 256
     spec = AscendMLAAttentionSpec(
-        block_size=256, num_kv_heads=1, head_size=656, dtype=torch.int8, cache_sparse_sfa_c8=True, block_outermost=True
+        block_size=256,
+        num_kv_heads=1,
+        head_size=656,
+        dtype=torch.int8,
+        cache_sparse_sfa_c8=True,
+        is_block_outermost=True,
     )
     row_bytes = 4 * 128 * 656
     backing = torch.zeros((manager_blocks + 1) * row_bytes, dtype=torch.int8, device="npu")

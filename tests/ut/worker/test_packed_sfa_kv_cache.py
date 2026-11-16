@@ -45,7 +45,7 @@ def test_packed_roles_receive_independent_metadata(capture):
         head_size=656,
         dtype=torch.int8,
         cache_sparse_sfa_c8=True,
-        block_outermost=True,
+        is_block_outermost=True,
     )
     index = AscendSFAIndexerCacheSpec(
         block_size=block,
@@ -54,7 +54,7 @@ def test_packed_roles_receive_independent_metadata(capture):
         dtype=torch.int8,
         scale_dim=1,
         scale_dtype=torch.float32,
-        block_outermost=True,
+        is_block_outermost=True,
     )
     uniform = UniformTypeKVCacheSpecs.from_specs({"main": main, "index": index})
     row = 2770944

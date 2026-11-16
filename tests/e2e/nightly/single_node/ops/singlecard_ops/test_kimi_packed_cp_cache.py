@@ -53,7 +53,7 @@ def test_packed_main_store_pcp_read_and_sparse_attention():
         head_size=656,
         dtype=torch.int8,
         cache_sparse_sfa_c8=True,
-        block_outermost=True,
+        is_block_outermost=True,
     )
     row_bytes = 4 * 128 * 656
     rows = source.shape[0] // 256 + 1
@@ -98,7 +98,7 @@ def test_packed_indexer_store_and_topk():
         scale_dim=1,
         scale_dtype=torch.float16,
         cache_sparse_li_c8=True,
-        block_outermost=True,
+        is_block_outermost=True,
     )
     row_bytes = 4 * 128 * 130
     backing = torch.full((4 * row_bytes,), -7, dtype=torch.int8, device="npu")

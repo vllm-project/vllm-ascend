@@ -650,7 +650,7 @@ def build_attn_metadata(
                     query_start_loc_cpu=common_attn_metadata.query_start_loc_cpu[: num_actual_reqs + 1],
                 )
             group_common_metadata = common_attn_metadata
-            if getattr(attn_group.kv_cache_spec, "block_outermost", False):
+            if getattr(attn_group.kv_cache_spec, "is_block_outermost", False):
                 group_common_metadata = map_packed_sfa_metadata(
                     attn_metadata_builder,
                     common_attn_metadata,

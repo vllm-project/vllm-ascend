@@ -178,7 +178,7 @@ def prepare_ascend_kernel_block_sizes(
         if (
             spec.has_layer_views
             and isinstance(spec, AttentionSpec)
-            and ((aliases_layers and not block_outermost_packed) or getattr(spec, "block_outermost", False))
+            and ((aliases_layers and not block_outermost_packed) or getattr(spec, "is_block_outermost", False))
             and kernel_block_sizes[index] == manager_block_size
             and group_id < len(attn_groups)
             and attn_groups[group_id]

@@ -60,7 +60,7 @@ def _attention_specs(groups):
 
 def is_packed_sfa_groups(groups) -> bool:
     return any(
-        getattr(spec, "block_outermost", False)
+        getattr(spec, "is_block_outermost", False)
         for group in groups
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
         for spec in group.kv_cache_spec.kv_cache_specs.values()
@@ -105,7 +105,7 @@ def packed_sfa_cache_groups(config, specs):
     indexer = sorted((n for n, s in specs.items() if isinstance(s, AscendSFAIndexerCacheSpec)), key=extract_layer_index)
     full = {n: specs[n] for pair in zip(main, indexer) for n in pair}
     full.update(sorted(((n, s) for n, s in specs.items() if s.is_draft), key=lambda item: extract_layer_index(item[0])))
-    full = {n: replace(s, block_outermost=True) for n, s in full.items()}
+    full = {n: replace(s, is_block_outermost=True) for n, s in full.items()}
     recurrent = {
         n: s
         for n, s in sorted(specs.items(), key=lambda item: extract_layer_index(item[0]))
