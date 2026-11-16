@@ -2197,6 +2197,8 @@ def test_v28d_merged_bus_collective_failure_refunds_handed_off_jobs():
         _apply_config_cascade=MagicMock(),
         _refund_dropped_dump_arms=lambda jobs: refunded.append(list(jobs)),
         _drop_pending_dump_jobs=MagicMock(),
+        # Snapshot before submit (soft-purge True→False path).
+        needs_sample_phase_hooks=lambda: False,
     )
     group = SimpleNamespace(world_size=2, cpu_group=object(), is_first_rank=True, rank_in_group=0)
     worker = attach_bus_worker(proc, name="ut-v28d")
