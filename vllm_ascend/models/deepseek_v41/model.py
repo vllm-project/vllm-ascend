@@ -52,7 +52,7 @@ from vllm.model_executor.models.utils import PPMissingLayer, is_pp_missing_param
 from vllm.models.deepseek_v41.common.engram import EngramLayout
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.utils.torch_utils import direct_register_custom_op, kv_cache_dtype_str_to_dtype
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.dsa_v1 import AscendDSAImpl, OProjBufferPool
@@ -99,6 +99,30 @@ from .engram.parallel import gather_engram_hashes, resolve_dp_shared_memory
 from .engram.shared_pool import rollback_shared_engram
 from .engram_lifecycle import close_engram_on_init_failure
 from .indexer import DeepseekV41Indexer
+
+
+def _mtp_save_and_collapse(hidden_states: torch.Tensor, pre_mix: torch.Tensor, buffer_key: str) -> torch.Tensor:
+    # The persistent MTP buffer is graph-external state, like a KV cache.
+    # Keeping it out of FX tensor inputs avoids functionalizing a prefix
+    # write into copies of the entire prefill-capacity allocation.
+    buffer = get_forward_context().no_compile_layers[buffer_key]
+    buffer[: hidden_states.shape[0]].copy_(hidden_states.flatten(1))
+    return DeepseekV41DecoderLayer.hc_collapse(hidden_states, pre_mix)
+
+
+def _mtp_save_and_collapse_fake(
+    hidden_states: torch.Tensor, pre_mix: torch.Tensor, buffer_key: str
+) -> torch.Tensor:
+    return hidden_states.new_empty((hidden_states.shape[0], hidden_states.shape[-1]))
+
+
+direct_register_custom_op(
+    op_name="ascend_dsv41_mtp_save_and_collapse",
+    op_func=_mtp_save_and_collapse,
+    mutates_args=[],
+    fake_impl=_mtp_save_and_collapse_fake,
+    dispatch_key="PrivateUse1",
+)
 
 
 def _engram_enabled_for_runtime(config, vllm_config) -> bool:
@@ -1015,6 +1039,12 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             if get_pp_group().is_last_rank and needs_mtp_hidden_states
             else None
         )
+        if self._mtp_hidden_buffer is not None:
+            self._mtp_hidden_buffer_key = f"{prefix}._mtp_hidden_buffer"
+            static_context = vllm_config.compilation_config.static_forward_context
+            if self._mtp_hidden_buffer_key in static_context:
+                raise ValueError(f"Duplicate MTP buffer key: {self._mtp_hidden_buffer_key}")
+            static_context[self._mtp_hidden_buffer_key] = self._mtp_hidden_buffer
         self.make_empty_intermediate_tensors = self._make_empty_intermediate_tensors
         self.use_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
         topology = build_layer_plan(self.config)
@@ -1727,10 +1757,11 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             if use_sequence_parallel:
                 hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
                 pre_mix = sp_all_gather(pre_mix)[:full_num_tokens]
-            num_tokens = hidden_states.shape[0]
-            self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
-
-        hidden_states = last_layer.hc_collapse(hidden_states, pre_mix)
+            hidden_states = torch.ops.vllm.ascend_dsv41_mtp_save_and_collapse(
+                hidden_states, pre_mix, self._mtp_hidden_buffer_key
+            )
+        else:
+            hidden_states = last_layer.hc_collapse(hidden_states, pre_mix)
         if use_sequence_parallel and self._mtp_hidden_buffer is None:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
         hidden_states = self.norm(hidden_states)
