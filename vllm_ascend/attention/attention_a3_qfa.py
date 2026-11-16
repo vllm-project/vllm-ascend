@@ -47,6 +47,7 @@ QFA_INT8_SCALE_LEVEL = 127.0
 QFA_MASK_NO_MASK = 0
 QFA_MASK_CAUSAL = 3
 QFA_ABSMAX_EPS = 1e-12
+QFA_INT8_NZ_DIM_FRAG = 32
 
 
 def _quantize_per_token_head(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -61,6 +62,117 @@ def _quantize_per_head(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     descale = x.abs().amax(dim=(0, 2)).clamp_min(QFA_ABSMAX_EPS).float() / QFA_INT8_SCALE_LEVEL
     payload = (x.float() / descale.view(1, -1, 1)).round().clamp(-QFA_INT8_SCALE_LEVEL, QFA_INT8_SCALE_LEVEL)
     return payload.to(torch.int8), descale
+
+
+def qfa_int8_packet_section_sizes(
+    num_kv_heads: int, block_size: int, head_dim: int
+) -> tuple[int, int, int]:
+    """Element counts per paged packet in physical order: K, K_descale, V.
+
+    K/V payloads live in the operator's PA_NZ 5-D shape
+    ``(Bn, N, D//32, Bs, 32)`` (INT8, one byte per element); the K descale is
+    the measured ``(Bn, N, Bs)`` FP32 section (probe_panz_descale candidate A,
+    rel_fro=0.00%). All three sections are strided views over one raw
+    allocation per layer.
+    """
+    if head_dim % QFA_INT8_NZ_DIM_FRAG:
+        raise ValueError(
+            f"QFA INT8 packet requires head_dim divisible by {QFA_INT8_NZ_DIM_FRAG}, got {head_dim}."
+        )
+    if block_size <= 0:
+        raise ValueError("QFA INT8 packet requires a positive block size.")
+    kv_elems = num_kv_heads * block_size * head_dim
+    kd_elems = num_kv_heads * block_size
+    return kv_elems, kd_elems, kv_elems
+
+
+def qfa_int8_page_size_bytes(
+    num_kv_heads: int, block_size: int, head_dim: int
+) -> int:
+    """Bytes per paged packet: K + V INT8 payloads plus the FP32 K descale."""
+    k_elems, kd_elems, v_elems = qfa_int8_packet_section_sizes(
+        num_kv_heads, block_size, head_dim
+    )
+    # INT8 payload = 1 byte/elem; FP32 descale = 4 bytes/elem.
+    return k_elems + v_elems + 4 * kd_elems
+
+
+def qfa_int8_cache_spec(spec: "FullAttentionSpec") -> "FullAttentionSpec":
+    """Budget the K descale into the page so the planner sizes the pool.
+
+    Mirrors mxfp_cache_spec: keep the real D and the scheduler block size,
+    raise ``state_content_bytes`` so the packet's extra FP32 section is
+    accounted for in page_size_bytes.
+    """
+    from dataclasses import replace
+
+    real_bytes = spec.head_size * 2  # K + V payload bytes per token per head
+    packet_bytes = qfa_int8_page_size_bytes(spec.num_kv_heads, spec.block_size, spec.head_size)
+    content_bytes = packet_bytes // (spec.block_size * spec.num_kv_heads)
+    return replace(spec, dtype=torch.int8, state_content_bytes=content_bytes)
+
+
+def qfa_int8_paged_cache_views(
+    raw_tensor: torch.Tensor,
+    num_kernel_blocks: int,
+    num_kv_heads: int,
+    head_dim: int,
+    block_size: int,
+    *,
+    page_stride_bytes: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Three strided views over one raw INT8 allocation, PA_NZ contract.
+
+    Returns ``(k_nz, k_descale, v_nz)``:
+    - ``k_nz``/``v_nz``: ``(Bn, N, D//32, Bs, 32)`` INT8 (QFA layout_kv PA_NZ)
+    - ``k_descale``: ``(Bn, N, Bs)`` FP32 (probe-verified section shape)
+    """
+    if raw_tensor.ndim != 1 or raw_tensor.dtype != torch.int8 or raw_tensor.stride(0) != 1:
+        raise ValueError("QFA INT8 raw cache must be a contiguous 1-D int8 view.")
+    if num_kernel_blocks <= 0:
+        raise ValueError("QFA INT8 cache requires at least one kernel block.")
+
+    k_elems, kd_elems, v_elems = qfa_int8_packet_section_sizes(
+        num_kv_heads, block_size, head_dim
+    )
+    payload_bytes = k_elems + 4 * kd_elems + v_elems
+    pitch = payload_bytes if page_stride_bytes is None else page_stride_bytes
+    if pitch < payload_bytes or raw_tensor.numel() < num_kernel_blocks * pitch:
+        raise ValueError("QFA INT8 raw cache or physical page pitch is smaller than the packet.")
+    # FP32 section alignment: k_elems is a multiple of head_dim (>=32), and the
+    # pitch is a sum of 4-byte-multiple sections, so both divide by 4 exactly.
+    if k_elems % 4 or pitch % 4:
+        raise ValueError("QFA INT8 packet sections must be 4-byte aligned for the FP32 descale view.")
+
+    def _strided_view(shape, offset_bytes, elem_dtype, elem_size):
+        # Per-axis strides in elements: dims 1.. contiguous, dim0 = packet pitch.
+        tail = []
+        inner = 1
+        for dim in reversed(shape[1:]):
+            tail.append(inner)
+            inner *= dim
+        tail.reverse()
+        strides = (pitch // elem_size, *tail)
+        return torch.as_strided(
+            raw_tensor.view(torch.uint8).view(elem_dtype),
+            shape,
+            strides,
+            storage_offset=raw_tensor.storage_offset() + offset_bytes // elem_size,
+        )
+
+    nz_shape = (
+        num_kernel_blocks,
+        num_kv_heads,
+        head_dim // QFA_INT8_NZ_DIM_FRAG,
+        block_size,
+        QFA_INT8_NZ_DIM_FRAG,
+    )
+    kd_shape = (num_kernel_blocks, num_kv_heads, block_size)
+    return (
+        _strided_view(nz_shape, 0, torch.int8, 1),                    # K payload
+        _strided_view(kd_shape, k_elems, torch.float32, 4),           # K descale
+        _strided_view(nz_shape, k_elems + 4 * kd_elems, torch.int8, 1),  # V payload
+    )
 
 
 def _build_int8_cu_seqlens(attn_metadata) -> torch.Tensor:
@@ -168,129 +280,237 @@ class AscendQFA3PrefillBackendImpl(AscendAttentionBackendImpl):
         return output
 
 
-class AscendQFA3C8Impl(AscendC8AttentionBackendImpl):
-    """Decode path on the A3 QFA INT8-GQA paged operator (quant_mode=12).
+class AscendQFA3Int8Impl(AscendAttentionBackendImpl):
+    """INT8 KV cache backend computed by the A3 QFA paged operator.
 
-    Inherits the C8 INT8 KV-cache infrastructure (static per-channel
-    quantization, paged scatter writes, FIA fallbacks for prefill states)
-    from AscendC8AttentionBackendImpl and replaces the DecodeOnly forward
-    with the native INT8 QFA operator:
+    Activated by ``--kv-cache-dtype int8_qfa`` (plus the
+    VLLM_ASCEND_QFA_A3_DECODE A/B lever). Structure mirrors the C8-MXFP
+    backend with INT8 semantics:
 
-    - Q: per-token-head dynamic quantization (TND payload, NT descale)
-    - K: INT8 paged cache + per-page FP32 descale cache (Step 2); until
-      then the inherited per-channel K path feeds the operator as
-      descale=scale broadcast (functional shape, unverified numerics)
-    - V: static per-head descale (v_cache_scale from the fa_v.scale
-      calibration channel)
+    - Cache: one raw INT8 allocation per layer, packet-packed
+      ``[K(PA_NZ) | K_descale(FP32, (Bn,N,Bs)) | V(PA_NZ)]`` built by
+      :func:`qfa_int8_paged_cache_views`.
+    - Write path (reshape_and_cache): Q/K per-token-head dynamic
+      quantization (``npu_dynamic_quant``), V static per-head
+      (layer.v_cache_scale, the fa_v.scale calibration channel);
+      payloads scattered via index_put over the packet views.
+    - Read path: one QFA call per step for the whole batch (decode and
+      prefill alike; the causal mask covers decode rows too).
 
-    Step 1 scope: DecodeOnly dispatch + call-chain bring-up with in-test
-    scales. Prefill states keep the inherited FIA dequant path.
+    Precondition violations fail fast (unsupported model shapes must not
+    silently detour to a different numerics path).
     """
 
-    _decode_logged = False
+    _logged = False
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        if not AscendQFA3C8Impl._decode_logged:
+        if not AscendQFA3Int8Impl._logged:
             logger.info(
-                "A3 QFA INT8-GQA decode attention enabled "
-                "(VLLM_ASCEND_QFA_A3_DECODE=1); DecodeOnly steps run the "
-                "paged QFA operator, other states keep the C8 FIA path."
+                "A3 QFA INT8 KV cache attention enabled "
+                "(--kv-cache-dtype int8_qfa); one QFA call per step for "
+                "decode and prefill alike."
             )
-            AscendQFA3C8Impl._decode_logged = True
+            AscendQFA3Int8Impl._logged = True
 
     # ------------------------------------------------------------------
-    # Step 1: DecodeOnly dispatch. The inherited forward() handles cache
-    # writes + state routing; only the decode branch is replaced here.
+    # per-step derivations (graph-replay safe; shared across layers via
+    # the step cache, c8_mxfp pattern)
     # ------------------------------------------------------------------
-    def _forward_c8_decode(
+    def _step_cache(self, attn_metadata: AscendMetadata) -> dict:
+        cache = getattr(attn_metadata, "qfa_int8_step_cache", None)
+        if cache is None:
+            cache = {}
+            attn_metadata.qfa_int8_step_cache = cache
+        return cache
+
+    def _step_lengths(self, attn_metadata: AscendMetadata, num_tokens: int):
+        """(cu_seqlens_q, seqused_kv) derived once per step on device.
+
+        The clamp/cummax sanitizes the padded tail (stale -1 entries from
+        larger earlier steps) the same way the C8-MXFP backend does.
+        """
+        cache = self._step_cache(attn_metadata)
+        lengths = cache.get("lengths")
+        if lengths is None:
+            lengths = (
+                attn_metadata.query_start_loc_gpu.clamp(min=0, max=num_tokens).cummax(dim=0).values.to(torch.int32),
+                attn_metadata.seq_lens_gpu.clamp(min=1).to(torch.int32),
+            )
+            cache["lengths"] = lengths
+        return lengths
+
+    def _step_slot_index(self, attn_metadata: AscendMetadata, slot_mapping: torch.Tensor):
+        """slot -> (page, pos) index tensors for the packet writes, once."""
+        cache = self._step_cache(attn_metadata)
+        slot_index = cache.get("slot_index")
+        if slot_index is None:
+            safe = slot_mapping.to(torch.long).clamp(min=0)
+            block_size = self._kernel_block_size()
+            slot_index = (safe // block_size, safe % block_size)
+            cache["slot_index"] = slot_index
+        return slot_index
+
+    def _kernel_block_size(self) -> int:
+        if self.key_cache is None:
+            raise RuntimeError("A3 QFA INT8 requires bound caches before slot indexing.")
+        return self.key_cache.shape[3]  # NZ view (Bn, N, Df, Bs, 32)
+
+    # ------------------------------------------------------------------
+    # write path
+    # ------------------------------------------------------------------
+    def reshape_and_cache(  # type: ignore[override]
         self,
         query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: AscendMetadata,
-        output: torch.Tensor,
-        layer,
-    ) -> torch.Tensor:
-        return self._forward_qfa_decode(query, attn_metadata, output, layer)
+        *args,
+        **kwargs,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Quantize and scatter K/V (+ K descale) into the packet cache."""
+        num_actual_tokens = attn_metadata.num_actual_tokens
+        if key is None or value is None or num_actual_tokens == 0:
+            return query, key, value, kwargs.get("output", None)
 
-    def _forward_qfa_decode(self, query, attn_metadata, output, layer):
-        """Native INT8 decode via the paged QFA operator.
+        if len(kv_cache) != 3:
+            raise RuntimeError(
+                "A3 QFA INT8 requires a (k, k_descale, v) packet cache tuple, "
+                f"got length {len(kv_cache)}."
+            )
+        k_nz, k_descale, v_nz = kv_cache
 
-        The preconditions below are invariants of the supported deployment
-        (causal decoder-only model, GPU-side length sources, bound caches);
-        a violation means the assembly chain broke, so fail fast instead
-        of silently falling back to FIA.
+        # Per-token-head dynamic K quantization: payload + FP32 descale [T, N].
+        k_int8, k_descale_tok = torch_npu.npu_dynamic_quant(
+            key[:num_actual_tokens], dst_type=torch.int8
+        )
+        # V static per-head scale: the fa_v.scale channel (ones until the
+        # calibrated weights land, Step 3).
+        v_scale = self._layer_v_scale(attn_metadata)
+        v_int8 = torch.clamp(
+            torch.round(value[:num_actual_tokens].float() / v_scale.view(1, -1, 1)),
+            -QFA_INT8_SCALE_LEVEL,
+            QFA_INT8_SCALE_LEVEL,
+        ).to(torch.int8)
+
+        pages, pos = self._step_slot_index(
+            attn_metadata, attn_metadata.slot_mapping[:num_actual_tokens]
+        )
+        num_tokens = pages.shape[0]
+        n_heads = self.num_kv_heads
+        head_dim = self.head_size
+        nz_last = QFA_INT8_NZ_DIM_FRAG
+
+        # Scatter payloads into the NZ views: token rows are [T, N, Df, 32];
+        # index_put with (page, n, pos) triple broadcasts the Df*32 tail.
+        idx_n = torch.arange(n_heads, device=pages.device).view(1, n_heads)
+        idx_page = pages.view(num_tokens, 1).expand(num_tokens, n_heads)
+        idx_pos = pos.view(num_tokens, 1).expand(num_tokens, n_heads)
+        payload_src = k_int8.view(num_tokens, n_heads, head_dim // nz_last, nz_last)
+        k_nz.index_put_((idx_page, idx_n, idx_pos), payload_src)
+        payload_src_v = v_int8.view(num_tokens, n_heads, head_dim // nz_last, nz_last)
+        v_nz.index_put_((idx_page, idx_n, idx_pos), payload_src_v)
+        # K descale [T, N] -> (Bn, N, Bs)
+        k_descale.index_put_((idx_page, idx_n, idx_pos), k_descale_tok)
+
+        from vllm_ascend.attention.attention_v1 import notify_kv_cache_written
+
+        notify_kv_cache_written()
+        return query, key, value, kwargs.get("output", None)
+
+    def _layer_v_scale(self, attn_metadata: AscendMetadata) -> torch.Tensor:
+        """Static per-head V scale for the current layer.
+
+        Reads layer.v_cache_scale when present (fa_v.scale channel; per-head
+        [Hkv] after Step 3's weights) and falls back to a ones tensor for
+        bring-up. The layer object is not threaded into reshape_and_cache on
+        this code path, so resolve it through the forward context.
         """
-        from cann_ops_transformer.ops import quant_flash_attn
+        layer = getattr(attn_metadata, "qfa_int8_current_layer", None)
+        scale = getattr(layer, "v_cache_scale", None) if layer is not None else None
+        if scale is not None and scale.numel() == self.num_kv_heads:
+            return scale.data.to(torch.float32)
+        return torch.ones(self.num_kv_heads, dtype=torch.float32, device="npu")
 
+    # ------------------------------------------------------------------
+    # read path: one QFA call per step for the whole batch
+    # ------------------------------------------------------------------
+    def forward(
+        self,
+        layer,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        assert output is not None, "Output tensor must be provided."
+        if output_scale is not None or output_block_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not supported for AscendQFA3Int8Impl"
+            )
+        if attn_metadata is None:
+            return output.fill_(0)
         if self.sliding_window is not None:
             raise NotImplementedError(
-                "A3 QFA decode does not support sliding-window attention "
-                f"(layer={getattr(layer, 'layer_name', '?')})."
+                "A3 QFA INT8 does not support sliding-window attention."
             )
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER_DECODER):
             raise NotImplementedError(
-                f"A3 QFA decode does not support attn_type={self.attn_type} "
-                f"(layer={getattr(layer, 'layer_name', '?')})."
+                f"A3 QFA INT8 does not support attn_type={self.attn_type}."
             )
-        qsl_gpu = attn_metadata.query_start_loc_gpu
-        seq_lens_gpu = attn_metadata.seq_lens_gpu
-        if qsl_gpu is None or seq_lens_gpu is None:
+        if len(kv_cache) != 3:
             raise RuntimeError(
-                "A3 QFA decode requires the GPU-side length sources "
-                "(query_start_loc_gpu / seq_lens_gpu) on AscendMetadata."
-            )
-        if self.key_cache is None or self.value_cache is None:
-            raise RuntimeError(
-                "A3 QFA decode requires bound K/V caches "
-                f"(layer={getattr(layer, 'layer_name', '?')})."
+                "A3 QFA INT8 requires a (k, k_descale, v) packet cache tuple, "
+                f"got length {len(kv_cache)}."
             )
 
-        num_tokens = query.shape[0]
-        batch_size = len(attn_metadata.seq_lens_list)
-        if num_tokens <= 0 or batch_size <= 0:
+        # Expose the layer for the write path's V scale resolution, then run
+        # the generic forward (reshape_and_cache via unified_kv_cache_update).
+        attn_metadata.qfa_int8_current_layer = layer
+
+        num_tokens = attn_metadata.num_actual_tokens
+        if num_tokens <= 0:
             return output
 
-        # Device-side length derivation (graph-replay safe; sanitizes the
-        # padded tail the same way the C8-MXFP backend does).
-        cu_seqlens_q = qsl_gpu.clamp(min=0, max=num_tokens).cummax(dim=0).values[: batch_size + 1].to(torch.int32)
-        seqused_kv = seq_lens_gpu.clamp(min=1)[:batch_size].to(torch.int32)
-        max_seqlen_q = attn_metadata.max_query_len or num_tokens
-        mask_mode = QFA_MASK_NO_MASK if max_seqlen_q == 1 else QFA_MASK_CAUSAL
+        k_nz, k_descale, v_nz = kv_cache
+        self.key_cache = k_nz
+        self.value_cache = v_nz
 
-        # Q per-token-head quantization (TND payload + NT descale).
+        # K/V writes happen inside the stock forward's cache-update hook.
+        super().forward(query, key, value, kv_cache, attn_metadata, output)
+
+        # Attention on the quantized cache.
+        from cann_ops_transformer.ops import quant_flash_attn
+
         q_int8, q_descale = torch_npu.npu_dynamic_quant(
             query[:num_tokens], dst_type=torch.int8
         )
-        q_descale_nt = q_descale.t().contiguous()  # (Q_N, Q_T)
+        q_descale_nt = q_descale.t().contiguous()  # NT: (Q_N, Q_T)
 
-        # Paged K/V: the LBNHC cache IS the operator's PA_BNBD layout.
-        k_cache, v_cache = self.key_cache, self.value_cache
-
-        # K descale per page: Step 1 uses the inherited per-channel scale
-        # broadcast to the (Bn, KV_N, Bs) contract (functional placeholder;
-        # Step 2 replaces it with the dynamic per-token descale cache).
-        k_descale_pages = self._step1_k_descale_pages(k_cache, layer, batch_size)
-
-        # V descale: static per-head, from the fa_v.scale channel. The
-        # inherited _prepare_c8_scales shards per-channel (Hkv*D); the QFA
-        # contract wants per-head, so reduce over D.
-        self._prepare_c8_scales(layer, query.device)
-        v_descale = layer._c8_v_scale.view(self.num_kv_heads, -1).amax(dim=1)
-
+        v_scale = self._layer_v_scale(attn_metadata)
         p_scale = torch.tensor([QFA_INT8_SCALE_LEVEL], dtype=torch.float32, device=query.device)
-        block_table = self._qfa_block_table(attn_metadata, batch_size)
+
+        cu_seqlens_q, seqused_kv = self._step_lengths(attn_metadata, num_tokens)
+        max_seqlen_q = attn_metadata.max_query_len or num_tokens
+        mask_mode = QFA_MASK_NO_MASK if max_seqlen_q == 1 else QFA_MASK_CAUSAL
+        batch_size = cu_seqlens_q.shape[0] - 1
 
         attn_out, _ = quant_flash_attn(
             q_int8,
-            k_cache,
-            v_cache,
+            k_nz,
+            v_nz,
             q_descale_nt,
-            k_descale_pages,
-            v_descale,
+            k_descale,
+            v_scale,
             QFA_INT8_GQA_QUANT_MODE,
-            block_table=block_table,
-            cu_seqlens_q=cu_seqlens_q,
-            seqused_kv=seqused_kv,
+            block_table=self._qfa_block_table(attn_metadata, batch_size),
+            cu_seqlens_q=cu_seqlens_q[: batch_size + 1],
+            seqused_kv=seqused_kv[:batch_size],
             p_scale=p_scale,
             metadata=None,
             softmax_scale=self.scale,
@@ -298,45 +518,29 @@ class AscendQFA3C8Impl(AscendC8AttentionBackendImpl):
             win_left=-1,
             win_right=-1,
             max_seqlen_q=max_seqlen_q,
-            max_seqlen_kv=int(attn_metadata.seq_lens_list[batch_size - 1]) if batch_size else 1,
+            max_seqlen_kv=-1,
             layout_q="TND",
             layout_q_descale="NT",
-            layout_kv="PA_BNBD",
+            layout_kv="PA_NZ",
             layout_out="TND",
             return_softmax_lse=False,
         )
-        output[:num_tokens] = attn_out
+        output[:num_tokens] = attn_out.view(num_tokens, self.num_heads, self.head_size)
         return output
 
-    def _step1_k_descale_pages(self, k_cache: torch.Tensor, layer, batch_size: int) -> torch.Tensor:
-        """Placeholder K descale (Bn, KV_N, Bs): the inherited per-channel
-        K scale reduced per head, broadcast over pages/tokens. Numerically
-        wrong for real quantization (per-channel cache holds round(x *
-        inv_perchannel)) -- Step 1 only proves the call chain; Step 2's
-        dynamic descale cache replaces this entirely."""
-        self._prepare_c8_scales(layer, k_cache.device)
-        k_scale = layer._c8_k_scale.view(self.num_kv_heads, -1).amax(dim=1)  # (Hkv,)
-        num_blocks = k_cache.shape[0]
-        block_size = k_cache.shape[2] if k_cache.dim() == 4 else 128
-        return k_scale.view(1, self.num_kv_heads, 1).expand(num_blocks, self.num_kv_heads, block_size).contiguous()
-
     def _qfa_block_table(self, attn_metadata, batch_size: int) -> torch.Tensor:
-        """block_table for the operator, at kernel-block granularity.
-
-        The cache tensors are laid out in kernel blocks (Bs=128, see
-        model_runner get_kv_cache_shape(num_blocks * chunk, ...)). The
-        metadata table follows the scheduler page; for hybrid models that
-        page is 896 = 7 kernel blocks, so each scheduler entry expands to
-        `ratio` consecutive kernel blocks (device-side, replay-safe).
-        """
-        bt = attn_metadata.block_tables[:batch_size]
-        cache_bs = self.key_cache.shape[2] if self.key_cache.dim() == 4 else 128
+        """block_table at kernel-block granularity (scheduler 896 -> x7)."""
+        bt = attn_metadata.block_tables[:batch_size].to(torch.int32)
+        cache_bs = self._kernel_block_size()
         sched_bs = self.vllm_config.cache_config.block_size
-        bt = bt.to(torch.int32)
         if sched_bs == cache_bs:
             return bt
+        if sched_bs % cache_bs:
+            raise RuntimeError(
+                f"Scheduler block size {sched_bs} is not a multiple of the "
+                f"QFA kernel block size {cache_bs}."
+            )
         ratio = sched_bs // cache_bs
-        # entry [i, j] covers kernel pages j*ratio .. j*ratio+ratio-1
         expanded = bt.view(batch_size, -1, 1) * ratio + torch.arange(
             ratio, device=bt.device, dtype=torch.int32
         ).view(1, 1, ratio)

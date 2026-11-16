@@ -1403,12 +1403,24 @@ A5_C8_MXFP_KV_CACHE_BLOCK_SIZE = 512
 # present; it is not the switch.
 C8_MXFP_KV_CACHE_DTYPE = "mxfp8"
 
+# QFA INT8 KV cache on A2/A3 (decode operator, quant_mode=12): INT8 K/V with
+# a per-token FP32 K descale embedded in each paged packet and a static
+# per-head FP32 V descale (fa_v.scale). One dtype string = one code path, the
+# same convention as mxfp8; the legacy "int8" string stays with the C8
+# per-channel FIA-antiquant channel.
+QFA_INT8_KV_CACHE_DTYPE = "int8_qfa"
+
 
 def is_c8_mxfp_kv_quant(vllm_config: VllmConfig) -> bool:
     # Tolerate partially constructed configs (e.g. SimpleNamespace in tests):
     # a missing cache_config means the mxfp8 KV cache dtype is not enabled.
     cache_config = getattr(vllm_config, "cache_config", None)
     return cache_config is not None and cache_config.cache_dtype == C8_MXFP_KV_CACHE_DTYPE
+
+
+def is_qfa_int8_kv_quant(vllm_config: VllmConfig) -> bool:
+    cache_config = getattr(vllm_config, "cache_config", None)
+    return cache_config is not None and cache_config.cache_dtype == QFA_INT8_KV_CACHE_DTYPE
 
 
 def refresh_block_size(vllm_config):

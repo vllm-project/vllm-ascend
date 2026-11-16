@@ -60,6 +60,10 @@ from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config
+from vllm_ascend.attention.attention_a3_qfa import (
+    qfa_int8_cache_spec,
+    qfa_int8_paged_cache_views,
+)
 from vllm_ascend.attention.attention_c8_mxfp import (
     mxfp_cache_spec,
     mxfp_cache_views_for_spec,
@@ -119,6 +123,7 @@ from vllm_ascend.utils import (
     get_kv_cache_tensor_layers,
     is_c8_mxfp_kv_quant,
     is_hidden_state_cache_spec,
+    is_qfa_int8_kv_quant,
     kv_cache_spec_uses_packed_sfa_main_cache,
     vllm_version_is,
 )
@@ -371,6 +376,8 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             spec = AscendFlashAttentionBackend.customize_spec(spec)
         if type(spec) is FullAttentionSpec and is_c8_mxfp_kv_quant(vllm_config):
             spec = mxfp_cache_spec(spec)
+        elif type(spec) is FullAttentionSpec and is_qfa_int8_kv_quant(vllm_config):
+            spec = qfa_int8_cache_spec(spec)
         # vLLM #42309 annotates EAGLE groups from ``spec.is_draft``, tagged on
         # the spec while specs are built. The v0.32.0 lane has no ``is_draft``
         # field and annotates EAGLE groups through the packed hook, so only main
@@ -1548,6 +1555,10 @@ def _allocate_kv_cache(
                     # One packet-backed allocation holds K, V and both scales.
                     kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(layer_size, alignment, device)
                     continue
+                if is_qfa_int8_kv_quant(vllm_config):
+                    # One packet allocation: K + FP32 K_descale + V.
+                    kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(layer_size, alignment, device)
+                    continue
                 if attn_layers is None:
                     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
                 layer = attn_layers.get(layer_name)
@@ -1753,6 +1764,22 @@ def _reshape_kv_cache_v2(
                 if not isinstance(raw_cache, torch.Tensor):
                     raise ValueError("C8_MXFP requires one combined raw allocation per layer.")
                 kv_caches[layer_name] = mxfp_cache_views_for_spec(raw_cache, kv_cache_spec, kernel_block_size)
+                continue
+
+            if type(kv_cache_spec) is FullAttentionSpec and is_qfa_int8_kv_quant(vllm_config):
+                raw_cache = kv_cache_raw_tensors[layer_name]
+                if not isinstance(raw_cache, torch.Tensor):
+                    raise ValueError("QFA INT8 requires one combined raw allocation per layer.")
+                ratio = kv_cache_spec.block_size // kernel_block_size
+                page_pitch = raw_cache.numel() // (kv_cache_config.num_blocks * ratio)
+                kv_caches[layer_name] = qfa_int8_paged_cache_views(
+                    raw_cache,
+                    kv_cache_config.num_blocks * ratio,
+                    kv_cache_spec.num_kv_heads,
+                    kv_cache_spec.head_size,
+                    kernel_block_size,
+                    page_stride_bytes=page_pitch,
+                )
                 continue
 
             if qwen4_cache_layout is not None:
