@@ -425,6 +425,8 @@ class ShardedRemoteReader:
     copy_hashes = staticmethod(RemoteReader.copy_hashes)
 
     def __init__(self, model, endpoints, *, capacity, library_path=None, listen_port=None, local_comm_res=None):
+        if len(endpoints) < 2:
+            raise ValueError("sharded Engram requires at least two owners")
         self.readers = []
         self.capacity = capacity
         self._last_use = None
@@ -452,8 +454,13 @@ class ShardedRemoteReader:
                 self.close()
             raise
 
+    def _ensure_open(self):
+        if not self.readers or any(reader.closed or reader.failed for reader in self.readers):
+            raise RuntimeError("remote Engram reader is failed or closed")
+
     def _lookup(self, tables, indices, cpu_hashes, outputs):
         with self._operation_lock:
+            self._ensure_open()
             return self._lookup_locked(tables, indices, cpu_hashes, outputs)
 
     def _lookup_locked(self, tables, indices, cpu_hashes, outputs):
@@ -516,6 +523,7 @@ class ShardedRemoteReader:
         self._lookup([table], [indices], [cpu_ids], [out])
 
     def lookup_layers(self, tables, gathered, cpu_hashes):
+        self._ensure_open()
         if gathered.shape[0] * sum(table.part_n_hash_cols for table in tables) > self.capacity:
             return None
         outputs = [

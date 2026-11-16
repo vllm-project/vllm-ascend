@@ -218,3 +218,6 @@ physical memory required.
 Stop all consumers first, then nonzero owners, and finally shard 0. A missing or
 failed owner makes the group unavailable; restart the complete group with a new
 generation. These static shards do not provide failover.
+
+For a single owner, use the `endpoint` string configuration. The `endpoints`
+list requires at least two owners.

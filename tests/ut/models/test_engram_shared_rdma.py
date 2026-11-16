@@ -943,3 +943,21 @@ def test_fp8_checkpoint_preserves_code_dtype_and_index(rdma, tmp_path, index_nam
     # Equal raw bytes reinterpreted as INT8 must not attach as the same table.
     save_file({weight_key: codes.view(torch.int8), scale_key: torch.ones(4, 8)}, tmp_path / "weights.safetensors")
     assert metadata != rdma.checkpoint_metadata(tmp_path)
+
+
+def test_sharded_reader_rejects_closed_or_failed_before_empty_lookup(rdma):
+    for closed, failed in ((True, False), (False, True)):
+        reader = object.__new__(rdma.ShardedRemoteReader)
+        reader.readers = [SimpleNamespace(closed=closed, failed=failed)]
+        reader._operation_lock = threading.Lock()
+        reader.capacity = 1
+        with pytest.raises(RuntimeError, match="failed or closed"):
+            reader._lookup([], [], [], [])
+        with pytest.raises(RuntimeError, match="failed or closed"):
+            reader.lookup_layers([], SimpleNamespace(shape=(2,)), None)
+
+
+@pytest.mark.parametrize("endpoints", [[], ["owner:1"]])
+def test_sharded_reader_rejects_fewer_than_two_endpoints(rdma, endpoints):
+    with pytest.raises(ValueError, match="at least two owners"):
+        rdma.ShardedRemoteReader("model", endpoints, capacity=1)

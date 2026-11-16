@@ -900,6 +900,9 @@ def test_sharded_clients_share_one_mapping_and_keep_leases_on_failed_last_close(
     second._packed_mapping.fail = False
     second.close()
     assert runtime._packed_refs == 0 and events.count("lease released") == 4
+    with pytest.raises(RuntimeError, match="client is closed"):
+        second.view("layer2", 3, 10, rows=11, width=1, dtype=torch.int8)
+    assert runtime._packed_refs == 0
 
 
 def test_sharded_client_rejects_wrong_group_and_releases_leases(pool_module, monkeypatch):
@@ -929,6 +932,7 @@ def test_sharded_client_keeps_other_leases_if_common_mapping_cannot_close(pool_m
 
     client = object.__new__(pool_module.ShardedPoolClient)
     client.views = []
+    client.closed = False
     client._packed_mapping = None
     client.clients = [types.SimpleNamespace(close=fail), types.SimpleNamespace(close=lambda: events.append("released"))]
     with pytest.raises(RuntimeError, match="mapping still live"):
@@ -1003,3 +1007,29 @@ def test_packed_tensor_chunks_never_cross_gib_slabs(pool_module, monkeypatch):
     finally:
         owner.runtime = None
         owner.close(timeout=2)
+
+
+def test_sharded_pool_rejects_fewer_than_two_endpoints(pool_module):
+    for endpoints in ([], ["owner:1"]):
+        with pytest.raises(ValueError, match="at least two owners"):
+            pool_module.ShardedPoolClient(endpoints, "model", device="cpu")
+
+
+def test_config_requires_two_endpoints_when_using_a_list():
+    source = Path(__file__).resolve().parents[3] / "vllm_ascend/ascend_config.py"
+    module = ast.parse(source.read_text())
+    cls = next(node for node in module.body if isinstance(node, ast.ClassDef) and node.name == "SharedEngramConfig")
+    method = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "_validate")
+    method.decorator_list = []
+    namespace = {}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(source), "exec"), namespace)
+    validate = namespace["_validate"]
+    config = types.SimpleNamespace(
+        endpoint=None, endpoints=["owner:1"], capacity=65536, listen_port=None, local_comm_res=None
+    )
+    with pytest.raises(ValueError, match="at least two owners"):
+        validate(config)
+    config.endpoints.append("other:2")
+    assert validate(config) is config
+    config.endpoints, config.endpoint = None, "owner:1"
+    assert validate(config) is config
