@@ -8,9 +8,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import uses_sfa_dspark_kv_transfer
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
-    get_layerwise_reuse_layout,
-)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -88,22 +85,12 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             if all(connector is not provider for provider in self._layerwise_slot_release_providers)
         ]
         self._external_slot_release_sink_configured = False
-        if self._layerwise_slot_release_providers:
-            for connector in self._connectors:
-                set_waiter = getattr(connector, "set_external_slot_release_waiter", None)
-                if callable(set_waiter) and set_waiter(self._wait_for_external_slot_release) is not False:
-                    self._external_slot_release_sink_configured = True
-
-        if (
-            getattr(self, "role", None) == KVConnectorRole.WORKER
-            and get_layerwise_reuse_layout(self._kv_cache_config) is not None
-            and len(self._connectors) > 1
-            and (
-                len(self._layerwise_slot_release_providers) != len(self._connectors) - 1
-                or not self._external_slot_release_sink_configured
-            )
-        ):
-            raise ValueError("Layerwise offload requires a slot-release fence for every PD connector.")
+        if not self._layerwise_slot_release_providers:
+            return
+        for connector in self._connectors:
+            set_waiter = getattr(connector, "set_external_slot_release_waiter", None)
+            if callable(set_waiter) and set_waiter(self._wait_for_external_slot_release) is not False:
+                self._external_slot_release_sink_configured = True
 
     def _wait_for_external_slot_release(self, layer_idx: int) -> None:
         for provider in self._layerwise_slot_release_providers:
