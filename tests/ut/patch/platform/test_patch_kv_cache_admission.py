@@ -206,6 +206,7 @@ def test_uncached_inflight_prefill_reserves_only_remaining_capacity(kind):
     scheduler.max_model_len = max_model_len
     scheduler.num_spec_tokens = 0
     scheduler._inflight_prefills = {request}
+    scheduler._parked_reserved_blocks = 0
     expected = manager.max_admission_blocks_per_request - len(blocks)
     assert scheduler._inflight_prefill_reserved_blocks() == expected
 
@@ -256,6 +257,7 @@ def test_async_remote_admission_leaves_capacity_to_resume_prefill():
     scheduler.max_model_len = 200000
     scheduler.num_spec_tokens = 0
     scheduler._inflight_prefills = set()
+    scheduler._parked_reserved_blocks = 0
     admitted = []
     for i in range(16):
         request = Request(str(i), [1] * 113484, SamplingParams(max_tokens=1), None)
