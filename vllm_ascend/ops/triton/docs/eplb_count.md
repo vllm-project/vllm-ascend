@@ -28,6 +28,14 @@ weighted scatter API.
 
 ## Validation
 
+The current launch explicitly sets `compile_mode="simd"` to select pure SIMD
+on Ascend 950. A2/A3 already use SIMD under the default hybrid mode. See the
+[compiler options reference](https://triton-ascend.readthedocs.io/en/v3.6.0/environment_variable_and_compiler_options_reference.html).
+This compiler-option change is pending device validation: the available A5
+cards were mapped by other running containers at the latest resource check.
+The measurements and compiler evidence below belong to commit `980f446c2`,
+before this option was added, and do not validate the forced-SIMD candidate.
+
 Both A3 Ascend910_9362 (NpuArch 2201) and A5 Ascend950DT_9582 (NpuArch 3510)
 passed 81 tests with exact integer equality, including mutable-input Graph replay.
 Cases include both ID dtypes, strides, empty inputs, single expert, 511/512/513

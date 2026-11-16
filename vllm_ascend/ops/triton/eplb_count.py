@@ -89,5 +89,6 @@ def count_allgather_tokens_triton(
         BLOCK_SIZE=ASSIGNMENTS_PER_TILE,
         # Keep a vector accumulator: the backend cannot lower a one-element loop-carried tensor.
         NUM_BINS=max(2, triton.next_power_of_2(local_expert_count)),
+        compile_mode="simd",
     )
     return counts
