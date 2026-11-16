@@ -634,7 +634,7 @@ def _ascend_get_kv_cache_config_from_groups(
         kv_cache_config.dspark_draft_only_group_ids = draft_only_group_ids(kv_cache_config.kv_cache_groups)
     reuse_layout = plan_layerwise_cache_reuse(kv_cache_config, vllm_config)
     if reuse_layout is not None:
-        # The scheduler keeps this cost when it collapses the per-entry specs.
+        # Core uses the size for budgeting. The scheduler detects reuse by its presence.
         kv_cache_config.kv_transfer_config = replace(
             kv_transfer_config,
             kv_connector_extra_config={
