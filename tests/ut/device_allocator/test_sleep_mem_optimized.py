@@ -369,6 +369,7 @@ def test_sleep_wakeup_releases_anchor_after_aclgraph_recapture():
 
     assert calls == ["hccl", "acl", "release"]
     assert manager._asleep is False
+    assert manager._hccl_restored is False
 
 
 def test_staged_wakeup_keeps_anchor_until_kv_cache_recapture():
@@ -381,11 +382,30 @@ def test_staged_wakeup_keeps_anchor_until_kv_cache_recapture():
 
     manager.wakeup(tags=["weights"])
     manager.hccl.release_lifecycle_anchor.assert_not_called()
+    manager.hccl.wakeup.assert_called_once_with()
     assert manager._asleep is True
+    assert manager._hccl_restored is True
 
     manager.wakeup(tags=["kv_cache"])
     manager.hccl.release_lifecycle_anchor.assert_called_once_with()
+    manager.hccl.wakeup.assert_called_once_with()
     assert manager._asleep is False
+    assert manager._hccl_restored is False
+
+
+def test_kv_only_wakeup_still_restores_hccl():
+    model_runner = MagicMock(use_aclgraph=True)
+    manager = SleepWakeupManager(MagicMock(), MagicMock(), lambda: model_runner)
+    manager.hccl.wakeup = MagicMock()
+    manager.acl_graph.wakeup = MagicMock()
+    manager.hccl.release_lifecycle_anchor = MagicMock()
+    manager._asleep = True
+
+    manager.wakeup(tags=["kv_cache"])
+
+    manager.hccl.wakeup.assert_called_once_with()
+    manager.acl_graph.wakeup.assert_called_once_with(["kv_cache"])
+    manager.hccl.release_lifecycle_anchor.assert_called_once_with()
 
 
 def _graph_manager(name: str):
@@ -543,6 +563,7 @@ def test_sleep_wakeup_manager_skips_duplicate_sleep():
     manager.acl_graph.sleep.assert_called_once_with()
     manager.hccl.sleep.assert_called_once_with()
     assert manager._asleep is True
+    assert manager._hccl_restored is False
 
 
 def test_sleep_wakeup_manager_wakeup_without_sleep_is_noop():

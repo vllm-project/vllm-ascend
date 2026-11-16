@@ -38,6 +38,9 @@ class SleepWakeupManager:
         self.hccl = HcclSleepWakeupManager(vllm_config, worker)
         self._model_runner_getter = model_runner_getter
         self._asleep = False
+        # Staged level-2 wakeup calls wakeup() twice (weights, then kv_cache).
+        # HCCL only needs to be restored once per sleep cycle.
+        self._hccl_restored = False
 
     @staticmethod
     def _measure_memory_released(cleanup: Callable[[], None]) -> int:
@@ -55,6 +58,7 @@ class SleepWakeupManager:
         if model_runner.use_aclgraph:
             self.acl_graph.sleep()
         self.hccl.sleep()
+        self._hccl_restored = False
         free_bytes_after_cleanup = torch.npu.mem_get_info()[0]
         free_mem = free_bytes_after_cleanup - free_bytes_before_cleanup
         logger.info(
@@ -67,7 +71,9 @@ class SleepWakeupManager:
         if not self._asleep:
             logger.info("wakeup() called without a preceding sleep(); skipping wake recovery.")
             return
-        self.hccl.wakeup()
+        if not self._hccl_restored:
+            self.hccl.wakeup()
+            self._hccl_restored = True
         model_runner = self._model_runner_getter()
         if model_runner.use_aclgraph:
             self.acl_graph.wakeup(tags)
@@ -77,6 +83,7 @@ class SleepWakeupManager:
             # happens only after the KV cache is restored.
             self.hccl.release_lifecycle_anchor()
             self._asleep = False
+            self._hccl_restored = False
 
 
 class AclGraphSleepWakeupManager:
