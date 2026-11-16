@@ -45,7 +45,6 @@ OFFLOAD_K_CACHE_CPU_INDEX = 2
 OFFLOAD_V_CACHE_CPU_INDEX = 3
 OFFLOAD_TOPK_BUFFER_K_INDEX = 4
 OFFLOAD_TOPK_BUFFER_V_INDEX = 5
-OFFLOAD_STORE_PORT_BASE = 8500
 
 FSA_EXTERNAL_PLAN_READY_MARKER = 0x5A45
 FSA_PAIRED_SELECTION_COPY_MARKER = 0x5A56
@@ -317,6 +316,25 @@ def get_sparse_kv_offload_cpu_pool_size_bytes(
     return raw_host_bytes + alignment_reserve_bytes
 
 
+def resolve_sparse_kv_offload_store_url(
+    sparse_kv_offload_config: SparseKVOffloadConfig,
+    data_parallel_index: int,
+) -> str:
+    """Build the MemFabric store endpoint of one sparse KV offload group.
+
+    Every TP rank of a group binds the same endpoint, while each data parallel
+    group uses its own port. The base port is configurable so that independent
+    services sharing a network namespace can be assigned distinct endpoints.
+    """
+    store_port = sparse_kv_offload_config.store_port_base + data_parallel_index
+    if not 1 <= store_port <= 65535:
+        raise ValueError(
+            "sparse_kv_offload_config.store_port_base plus the data parallel index "
+            f"must be a valid TCP port, got {store_port}."
+        )
+    return f"tcp://127.0.0.1:{store_port}"
+
+
 def allocate_kv_cache_tensors_for_sparse_kv_offload(
     k_tensor_size: int,
     v_tensor_size: int,
@@ -520,8 +538,10 @@ class SparseKVOffloadManager:
         config.world_size = self.tp_size
         config.rank_id = self.tp_rank
         config.scene = offload.Scene.SHARED
-        store_port = OFFLOAD_STORE_PORT_BASE + parallel_config.data_parallel_index
-        config.store_url = f"tcp://127.0.0.1:{store_port}"
+        config.store_url = resolve_sparse_kv_offload_store_url(
+            self.sparse_kv_offload_config,
+            parallel_config.data_parallel_index,
+        )
         assert offload.initialize(config) == 0, "Sparse KV offload offload.initialize failed."
         self.tp_group.barrier()
 
