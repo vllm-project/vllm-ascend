@@ -177,7 +177,7 @@ def test_dma_rejects_invalid_descriptors_before_submission(monkeypatch, count, d
 def test_host_registration_release_waits_for_device_completion(monkeypatch, synchronize_fails):
     from vllm.v1.hisparse import runtime
 
-    events = []
+    events: list[str | tuple[str, bool]] = []
     pools = [torch.empty(64, dtype=torch.uint8)]
     owner = pools[0]
 

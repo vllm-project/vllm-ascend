@@ -29,7 +29,7 @@ supported, with independent Main and Indexer KV dtype selection.
 | --- | --- |
 | Hardware and software | Ascend 950 with a SIMT-capable CANN 9.2 toolchain. |
 | Cache formats | C4, TurboQuant and INT8-format C8 are outside the current support scope. |
-| Parallelism and transport | PCP=2 is validated for native C8 on one Ascend 950 node. DCP and external P/D transport remain outside the current support scope. |
+| Parallelism and transport | PCP=2 and PCP=4 are validated for native C8 on one Ascend 950 node. DCP and external P/D transport remain outside the current support scope. |
 | Host storage | Use private Host pools per tensor-parallel rank and Core eager Host mirroring. |
 | TopK | The existing SFA requirement of divisibility by 128 applies. |
 | Feature mutual exclusion | HiSparse and `additional_config.sparse_kv_offload_config.enabled` cannot be enabled together. |
@@ -74,7 +74,9 @@ installs an Ascend query/write-layout adapter; no Core source patch is required.
 KV rows before Resident writes and Host mirroring; sparse attention still uses
 local query rows. No additional custom kernel is needed.
 
-GLM-5.3 C8 has been validated with EP, full decode graphs and MTP3. The Hot
+GLM-5.3 C8 has been validated with EP, full decode graphs and MTP3 at PCP=2
+and PCP=4. The layout adapter uses the configured PCP group size; CPU tests
+cover PCP=1/2/4/8, while PCP=8 has not been validated end to end. The Hot
 buffer must hold the union of selected rows across verification tokens; 10240
 rows was used for top-k 2048 and three speculative tokens. Keep the same
 parallelism, graph and speculative settings when comparing offload on/off.
