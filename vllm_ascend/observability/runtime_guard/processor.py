@@ -298,29 +298,27 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         try:
             self.wave_tracker.advance(has_scheduled_tokens=has_scheduled_tokens)
             cfg = self.runtime_config
-            # No detectors, no manual dump, no dump quota, hot-reload off: nothing
-            # for the wave-head bus. Dump-only (auto dump on, detectors off) still
-            # goes through refresh → merged due bus / local stash so dump jobs
-            # reach end-of-wave D2H; config_due stays false when hot-reload is off.
-            skip_wave_head_bus = (
-                not cfg.hot_reload_enabled
-                and not cfg.manual_dump_armed()
-                and not cfg.needs_sample_phase_hooks()
-                and not cfg.dump_enabled()
+            # Wave-head collectives exist only for config/dump lanes. Detectors
+            # run in sample phase and must not force an empty due-broadcast every
+            # wave when hot-reload and dump are both off. Gates below are shared
+            # config (identical on every TP rank) — never key off local job
+            # queues, which differ across ranks.
+            need_wave_head_bus = (
+                bool(cfg.hot_reload_enabled) or bool(cfg.manual_dump_armed()) or bool(cfg.dump_enabled())
             )
-            if skip_wave_head_bus:
-                if self._kv_dump_jobs:
-                    # Dump inactive: drop with per-arm refund (quota was
-                    # consumed at arm time; no D2H will happen).
-                    self._drop_pending_dump_jobs()
-                self._end_of_wave_if_no_sample(has_scheduled_tokens=has_scheduled_tokens)
-                return
-            self.wave_head_sync(scheduler_output=scheduler_output)
-            # Prompt cache must not wait for sample-phase hooks. With hot-reload,
-            # the only prefill wave that carries ``scheduled_new_reqs`` can land
-            # while detectors are still off; bus may enable hooks at end-of-wave,
-            # after which n_new=0 forever and Bug #9 cache never writes (S06 empty
-            # prompt). Caching here is cheap (new reqs only) and idempotent.
+            if need_wave_head_bus:
+                self.wave_head_sync(scheduler_output=scheduler_output)
+            elif self._kv_dump_jobs:
+                # Dump inactive: drop with per-arm refund (quota was consumed at
+                # arm time; no D2H will happen).
+                self._drop_pending_dump_jobs()
+            # Prompt cache must not wait for sample-phase hooks / bus lanes.
+            # With hot-reload, the only prefill wave that carries
+            # ``scheduled_new_reqs`` can land while detectors are still off; bus
+            # may enable hooks at end-of-wave, after which n_new=0 forever and
+            # Bug #9 cache never writes (S06 empty prompt). Detector-only also
+            # needs this path without paying an empty merged-bus collective.
+            # Caching here is cheap (new reqs only) and idempotent.
             self._cache_prompt_token_ids_from_scheduler_output(scheduler_output)
             # Same gate as the prompt cache, not sample-phase hooks. Hot-reload
             # can cache prompts while detectors are still off; those entries
