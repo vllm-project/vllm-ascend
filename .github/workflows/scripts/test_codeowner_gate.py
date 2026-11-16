@@ -71,25 +71,25 @@ class TestMatching:
 
 class TestApprovals:
     def test_any_owner_approve_passes(self, rules):
-        failures, _unclaimed = gate.check_approvals(
+        failures, _unclaimed, _self_owned = gate.check_approvals(
             1, "author", rules, ["vllm_ascend/device/a.py"], {"bob": "APPROVED"}
         )
         assert failures == []
 
     def test_non_owner_approve_does_not_count(self, rules):
-        failures, _unclaimed = gate.check_approvals(
+        failures, _unclaimed, _self_owned = gate.check_approvals(
             1, "author", rules, ["vllm_ascend/device/a.py"], {"zoe": "APPROVED"}
         )
         assert failures
 
     def test_author_excluded_even_if_owner(self, rules):
-        failures, _unclaimed = gate.check_approvals(
+        failures, _unclaimed, _self_owned = gate.check_approvals(
             1, "alice", rules, ["vllm_ascend/device/a.py"], {"alice": "APPROVED"}
         )
         assert failures
 
     def test_changes_requested_not_counted(self, rules):
-        failures, _unclaimed = gate.check_approvals(
+        failures, _unclaimed, _self_owned = gate.check_approvals(
             1, "author", rules, ["vllm_ascend/device/a.py"], {"alice": "CHANGES_REQUESTED"}
         )
         assert failures
@@ -97,14 +97,16 @@ class TestApprovals:
     def test_unowned_file_fails(self, rules):
         # Policy: unclaimed files are not gate failures; they are surfaced
         # as a notice (PR comment / warnings) instead.
-        failures, unclaimed = gate.check_approvals(1, "author", rules, ["unknown/x.py"], {})
+        failures, unclaimed, _self = gate.check_approvals(1, "author", rules, ["unknown/x.py"], {})
         assert failures == []
         assert unclaimed == ["unknown/x.py"]
 
     def test_todo_owner_approval_counts(self, rules):
         # dave is a TODO owner; the check accepts their approve (gate is
         # permission-model independent on purpose).
-        failures, _unclaimed = gate.check_approvals(1, "author", rules, ["vllm_ascend/eplb/x.py"], {"dave": "APPROVED"})
+        failures, _unclaimed, _self_owned = gate.check_approvals(
+            1, "author", rules, ["vllm_ascend/eplb/x.py"], {"dave": "APPROVED"}
+        )
         assert failures == []
 
 
@@ -150,11 +152,11 @@ class TestCoverage:
 class TestAuthorOnlyOwnership:
     def test_author_is_sole_owner(self, rules):
         rules = gate.parse_codeowners("/mymod @solo\n")
-        failures, _unclaimed = gate.check_approvals(1, "solo", rules, ["mymod/x.py"], {"solo": "APPROVED"})
-        assert "only owner is the PR author" in failures[0]
+        failures, _unclaimed, self_owned = gate.check_approvals(1, "solo", rules, ["mymod/x.py"], {"solo": "APPROVED"})
+        assert failures == [] and self_owned == ["mymod/x.py"]
 
     def test_waiting_message_lists_eligible_owners(self, rules):
-        failures, _unclaimed = gate.check_approvals(1, "zoe", rules, ["vllm_ascend/device/a.py"], {})
+        failures, _unclaimed, _self_owned = gate.check_approvals(1, "zoe", rules, ["vllm_ascend/device/a.py"], {})
         assert "waiting for approval from one of: @alice, @bob" in failures[0]
 
 
@@ -187,13 +189,13 @@ class TestNestedOwners:
 
     def test_either_owner_approve_passes(self):
         for reviewer in ("yilunh998", "yangsonglin13"):
-            failures, _unclaimed = gate.check_approvals(
+            failures, _unclaimed, _self_owned = gate.check_approvals(
                 1, "author", self.rules(), ["model_loader/rfork/x.py"], {reviewer: "APPROVED"}
             )
             assert failures == [], (reviewer, failures)
 
     def test_parent_veto_blocks_submodule(self):
-        failures, _unclaimed = gate.check_approvals(
+        failures, _unclaimed, _self_owned = gate.check_approvals(
             1,
             "author",
             self.rules(),
@@ -203,7 +205,7 @@ class TestNestedOwners:
         assert len(failures) == 1 and "yilunh998" in failures[0]
 
     def test_child_veto_blocks_even_if_parent_approves(self):
-        failures, _unclaimed = gate.check_approvals(
+        failures, _unclaimed, _self_owned = gate.check_approvals(
             1,
             "author",
             self.rules(),
@@ -213,33 +215,35 @@ class TestNestedOwners:
         assert len(failures) == 1 and "yangsonglin13" in failures[0]
 
     def test_parent_owner_still_owns_uncovered_files(self):
-        failures, _unclaimed = gate.check_approvals(
+        failures, _unclaimed, _self_owned = gate.check_approvals(
             1, "author", self.rules(), ["model_loader/netloader/x.py"], {"yilunh998": "APPROVED"}
         )
         assert failures == []
 
     def test_changes_requested_blocks_despite_approval(self, rules):
-        failures, _unclaimed = gate.check_approvals(
+        failures, _unclaimed, _self_owned = gate.check_approvals(
             1, "author", rules, ["vllm_ascend/device/a.py"], {"alice": "CHANGES_REQUESTED", "bob": "APPROVED"}
         )
         assert any("changes requested by @alice" in f for f in failures)
 
     def test_blocking_owner_re_review_clears_gate(self, rules):
-        failures, _unclaimed = gate.check_approvals(
+        failures, _unclaimed, _self_owned = gate.check_approvals(
             1, "author", rules, ["vllm_ascend/device/a.py"], {"alice": "APPROVED", "bob": "APPROVED"}
         )
         assert failures == []
 
     def test_dismissed_review_does_not_block(self, rules):
-        failures, _unclaimed = gate.check_approvals(
+        failures, _unclaimed, _self_owned = gate.check_approvals(
             1, "author", rules, ["vllm_ascend/device/a.py"], {"alice": "DISMISSED", "bob": "APPROVED"}
         )
         assert failures == []
 
     def test_author_requested_changes_not_counted(self):
         rules = gate.parse_codeowners("/a @solo\n")
-        failures, _unclaimed = gate.check_approvals(1, "solo", rules, ["a/x.py"], {"solo": "CHANGES_REQUESTED"})
-        assert any("only owner is the PR author" in f for f in failures)
+        failures, _unclaimed, self_owned = gate.check_approvals(
+            1, "solo", rules, ["a/x.py"], {"solo": "CHANGES_REQUESTED"}
+        )
+        assert failures == [] and self_owned == ["a/x.py"]
 
 
 class TestGhApi:
@@ -302,12 +306,12 @@ class TestSkipInApprovals:
         # /tests is actively owned, but the later SKIP(owner) /tests/ut/
         # carves out a deliberately-unowned subtree.
         rules = gate.parse_codeowners("/tests @wenjun91\n# SKIP(owner): /tests/ut/\n# SKIP(owner): /tests/ut/\n")
-        failures, _unclaimed = gate.check_approvals(1, "author", rules, ["tests/ut/foo.py"], {})
+        failures, _unclaimed, _self_owned = gate.check_approvals(1, "author", rules, ["tests/ut/foo.py"], {})
         assert failures == []
 
     def test_active_outside_skip_still_gated(self):
         rules = gate.parse_codeowners("/tests @wenjun91\n# SKIP(owner): /tests/ut/\n")
-        failures, _unclaimed = gate.check_approvals(1, "author", rules, ["tests/e2e/foo.py"], {})
+        failures, _unclaimed, _self_owned = gate.check_approvals(1, "author", rules, ["tests/e2e/foo.py"], {})
         assert any("wenjun91" in f for f in failures)
 
     def test_skip_before_active_does_not_win(self):
@@ -317,33 +321,37 @@ class TestSkipInApprovals:
         assert not skipped and owners == ["@wenjun91"]
 
     def test_todo_owner_approval_counts(self, rules):
-        failures, _unclaimed = gate.check_approvals(1, "author", rules, ["vllm_ascend/eplb/x.py"], {"dave": "APPROVED"})
+        failures, _unclaimed, _self_owned = gate.check_approvals(
+            1, "author", rules, ["vllm_ascend/eplb/x.py"], {"dave": "APPROVED"}
+        )
         assert failures == []
 
 
 class TestChangesRequested:
     def test_changes_requested_blocks_despite_approval(self, rules):
-        failures, _unclaimed = gate.check_approvals(
+        failures, _unclaimed, _self_owned = gate.check_approvals(
             1, "author", rules, ["vllm_ascend/device/a.py"], {"alice": "CHANGES_REQUESTED", "bob": "APPROVED"}
         )
         assert any("changes requested by @alice" in f for f in failures)
 
     def test_blocking_owner_re_review_clears_gate(self, rules):
-        failures, _unclaimed = gate.check_approvals(
+        failures, _unclaimed, _self_owned = gate.check_approvals(
             1, "author", rules, ["vllm_ascend/device/a.py"], {"alice": "APPROVED", "bob": "APPROVED"}
         )
         assert failures == []
 
     def test_dismissed_review_does_not_block(self, rules):
-        failures, _unclaimed = gate.check_approvals(
+        failures, _unclaimed, _self_owned = gate.check_approvals(
             1, "author", rules, ["vllm_ascend/device/a.py"], {"alice": "DISMISSED", "bob": "APPROVED"}
         )
         assert failures == []
 
     def test_author_requested_changes_not_counted(self):
         rules = gate.parse_codeowners("/a @solo\n")
-        failures, _unclaimed = gate.check_approvals(1, "solo", rules, ["a/x.py"], {"solo": "CHANGES_REQUESTED"})
-        assert any("only owner is the PR author" in f for f in failures)
+        failures, _unclaimed, self_owned = gate.check_approvals(
+            1, "solo", rules, ["a/x.py"], {"solo": "CHANGES_REQUESTED"}
+        )
+        assert failures == [] and self_owned == ["a/x.py"]
 
 
 class TestContentlessExemption:
@@ -453,7 +461,7 @@ class TestDismissalSurvivesPush:
     def test_approved_still_counts_after_dismissal_in_gate(self, rules):
         # DISMISSED entries in the reviews dict no longer occur (they are
         # filtered upstream), but the gate must remain robust to them.
-        failures, _ = gate.check_approvals(
+        failures, _unclaimed, _self = gate.check_approvals(
             1, "author", rules, ["vllm_ascend/device/a.py"], {"alice": "DISMISSED", "bob": "APPROVED"}
         )
         assert failures == []

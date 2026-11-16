@@ -443,6 +443,9 @@ owners before the PR can merge. Key points:
   push, but the gate ignores dismissals, so owners do not need to re-approve
   after each commit. An owner's latest approve / request-changes review is
   what counts.
+- Files whose only owner is the PR author do not need an additional approval
+  (a sole owner cannot self-approve). The failure comment lists such files so
+  the module can gain a co-owner over time.
 - Owners are cumulative down the directory tree: when parent and child
   directories have separate owners (for example `/vllm_ascend/model_loader`
   and `/vllm_ascend/model_loader/rfork/`), an rfork change needs one approval

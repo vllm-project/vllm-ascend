@@ -823,6 +823,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           UNCLAIMED_OUT: ${{ runner.temp }}/unclaimed_files.txt
+          SELF_OWNED_OUT: ${{ runner.temp }}/self_owned_files.txt
           APPROVAL_FAILURES_OUT: ${{ runner.temp }}/approval_failures.txt
         run: |
           python3 .github/workflows/scripts/codeowner_gate.py check-approvals \
@@ -841,6 +842,7 @@ jobs:
           if-no-files-found: error
           path: |
             ${{ runner.temp }}/unclaimed_files.txt
+            ${{ runner.temp }}/self_owned_files.txt
             ${{ runner.temp }}/approval_failures.txt
             ${{ runner.temp }}/coverage_errors.txt
 
