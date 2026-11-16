@@ -152,45 +152,28 @@ speculation with `min_p` or `logit_bias` is rejected during request validation.
 python -m pytest -sv tests/ut/worker/v2/test_thinking_budget.py \
     tests/ut/worker/v2/test_thinking_budget_validation.py
 python -m pytest -sv tests/e2e/pull_request/one_card/test_thinking_budget.py \
-    tests/e2e/pull_request/one_card/test_thinking_budget_addressing.py
-python -m pytest -sv tests/e2e/pull_request/one_card/test_thinking_budget_generation.py
-python -m pytest -sv tests/e2e/pull_request/one_card/test_thinking_budget_nonbinding.py
-python -m pytest -sv tests/e2e/pull_request/one_card/test_thinking_budget_preemption_constrained.py
-python -m pytest -sv tests/e2e/pull_request/one_card/test_thinking_budget_preemption_natural.py
-python -m pytest -sv tests/e2e/pull_request/one_card/test_thinking_budget_serving.py
+    tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_thinking_budget.py
 ```
 
 V2 request lifecycle coverage targets `AscendRequestState` and upstream
 `ThinkingBudgetState` in `tests/ut/worker/v2/`; the removed V1 input batch is
 not required. The host tests check lifecycle and sampler contracts with device
-storage mocked. NPU tests exercise the upstream budget state with Ascend kernels,
-including rejected drafts, mixed budgets, slot reuse, and resumed end prefixes.
-Rejection tests exercise absent, tensor, and cached draft logits with standard,
-entropy, and block verification. Large-address tests require at least 8 GiB of
-free NPU memory plus headroom and cover cold and incremental history scans.
-The 50 real-model cases are split into default-mode generation (10), exact
-nonbinding-budget comparisons (8), constrained preemption (16), and natural
-preemption (16) files so CI can schedule them within its per-job time limit.
-The original 32 preemption cases retain their assertions and parameter combinations.
-Exact nonbinding-budget comparisons use batch-invariant model computation and
-no prefix cache. They compare cold, disabled (`None`/`-1`), mixed, upper-bound,
-and repeated disabled batches at the same positions without retries or output
-tolerances. This controls BF16 model-output variation that also occurs between
-budget-disabled requests. Default-mode natural generation and OpenAI serving
-retain their normal computation and prefix caching. Compared token IDs are
-logged before asserting equality.
-Model tests cover Qwen3-1.7B and ordinary-model regression with
-Qwen2.5-0.5B-Instruct. The constrained-cache tests assert that scheduler preemption actually occurs
-with no speculation, n-gram speculation, and a draft model. Restricted-token
-cases compare exact output against an unconstrained run; unrestricted cases
-check the reasoning budget and final answer while recording token differences.
-Probabilistic-draft natural preemption and serving tests use `top_p=0.95`, `top_k=20`,
-and `presence_penalty=1.0`, with both greedy and random target sampling.
-These explicit sampling settings reduce model repetition; the budget controls
-the marked reasoning phase and does not guarantee answer quality or EOS under
-arbitrary sampling settings and total-output limits.
-Mixed-batch kernel tests also verify that unlimited requests retain their
-logits bit-for-bit in both single-token and speculative verification rows.
+storage mocked. The focused NPU operator test covers history loads and cold
+and incremental marker scans, including isolation of inactive request slots.
+It uses a contiguous production request-state allocation with a validated
+scheduler capacity. The large boundary case needs approximately 8 GiB of free
+NPU memory plus headroom; it does not validate a full model deployment at that
+capacity. The operator test can be explicitly selected for PR CI:
+
+```text
+/e2e tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_thinking_budget.py
+```
+
+Broader real-model generation, nonbinding-output, preemption and OpenAI-serving
+acceptance coverage is maintained separately from these focused regressions.
+The existing [hardware acceptance evidence](https://github.com/jryxxx/vllm-ascend/releases/tag/thinking-budget-a2-evidence-a6162d7)
+records tested revisions, configurations, output comparisons and runner failures.
+Those historical results do not imply that a newer revision has passed CI.
 
 For reproducible results record both source commits, model revision, CANN,
 driver, torch/torch_npu and Triton versions, device type, commands, seeds,
