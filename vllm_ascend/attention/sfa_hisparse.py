@@ -377,15 +377,18 @@ class AscendHiSparseImpl(AscendSFAImpl):
         # Preserve C8 latent, BF16 RoPE and FP32 scales byte-for-byte. The
         # collective has the same rank-major ordering as gathered slot mapping.
         gathered = get_pcp_group().all_gather(packed, dim=0)
+        self._scatter_c8_kv(gathered.view(torch.uint8), gathered.shape[0], attn_metadata)
+
+    def _scatter_c8_kv(self, packed, num_slot_rows, attn_metadata):
         cache = self.hisparse_cache
-        destination, mapping, count = hisparse_write_target(cache, attn_metadata, gathered.shape[0], gathered.shape[0])
-        payload = gathered[:count].view(torch.uint8)
+        destination, mapping, count = hisparse_write_target(cache, attn_metadata, packed.shape[0], num_slot_rows)
+        payload = packed[:count]
         cache_ops.scatter_packed_kv(
             payload,
             payload[:, :0],
             destination.view(torch.uint8),
             mapping,
-            attn_metadata.hisparse_num_valid_write_rows,
+            getattr(attn_metadata, "hisparse_num_valid_write_rows", attn_metadata.query_start_loc[-1:]),
         )
         finish_hisparse_kv_update(cache, attn_metadata)
 
@@ -416,21 +419,8 @@ class AscendHiSparseImpl(AscendSFAImpl):
             from vllm_ascend.hisparse.c8 import pack_c8_components
 
             rope, latent, scales = super()._exec_kv_local(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
-            rows = latent.numel() // self.kv_lora_rank
             packed = pack_c8_components(latent.contiguous(), rope.contiguous(), scales.contiguous())
-            cache = self.hisparse_cache
-            destination, mapping, count = hisparse_write_target(cache, attn_metadata, rows, slots.numel())
-            packed = packed[:count]
-            # Reuse the existing byte-capable scatter; no fused C8 kernel or
-            # payload conversion is needed for the baseline data path.
-            cache_ops.scatter_packed_kv(
-                packed,
-                packed[:, :0],
-                destination.view(torch.uint8),
-                mapping,
-                getattr(attn_metadata, "hisparse_num_valid_write_rows", attn_metadata.query_start_loc[-1:]),
-            )
-            finish_hisparse_kv_update(cache, attn_metadata)
+            self._scatter_c8_kv(packed, slots.numel(), attn_metadata)
             return rope, latent, scales
         values = kv_no_split.reshape(-1, self.kv_lora_rank + self.qk_rope_head_dim)
         num_tokens = values.shape[0]
