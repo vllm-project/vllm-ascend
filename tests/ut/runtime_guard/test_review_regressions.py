@@ -944,6 +944,90 @@ def test_v17e_spec_acceptance_low_rate_triggers_incident():
     assert alerts[0].detail["acceptance_rate"] < 0.3
 
 
+def test_v17f_spec_acceptance_padded_row_uses_num_draft_tokens():
+    """Adaptive/padded rows: draft_len from num_draft_tokens_per_req, not pad width.
+
+    Row width 5 with two real drafts + bonus and two -1 pads must not treat
+    pads as drafts (would report 50% when acceptance is 100%).
+    """
+    from vllm_ascend.observability.runtime_guard.detector.spec_acceptance import SpecAcceptanceDetector
+
+    section = {
+        "enabled": True,
+        "window": 1,
+        "low_threshold": 0.3,
+        "len_low_threshold": 1.4,
+        "high_threshold": 0.96,
+        "len_high_threshold": 2.8,
+    }
+    rc = SimpleNamespace(
+        detector_section=lambda name: section,
+        detector_get=lambda sec, key, default=None: section.get(key, default),
+    )
+    runner = SimpleNamespace(
+        tp_rank=0,
+        speculative_config=SimpleNamespace(),
+        input_batch=SimpleNamespace(req_ids=["r1"], num_draft_tokens_per_req=[2]),
+        requests=None,
+    )
+    det = SpecAcceptanceDetector(runtime_config=rc, runner=runner)
+    # bonus + 2 drafts + 2 pads; accepted_token_num=3 → full accept of 2 drafts
+    sampled = torch.tensor([[10, 11, 12, -1, -1]])
+    with (
+        patch(
+            "vllm_ascend.observability.runtime_guard.detector.spec_acceptance.get_pp_group",
+            return_value=SimpleNamespace(is_last_rank=True),
+        ),
+        patch(
+            "vllm_ascend.observability.runtime_guard.detector.spec_acceptance.runner_tp_rank",
+            return_value=0,
+        ),
+    ):
+        alerts = det.check_all(sampled, [3], req_ids=["r1"])
+    assert alerts == []
+    _accepted, draft_len, _sampled, _acc = det._history["r1"][0]
+    assert draft_len == 2
+
+
+def test_v17g_spec_acceptance_pad_fallback_strips_minus_one():
+    """Without draft metadata, ignore -1 pads when inferring draft_len."""
+    from vllm_ascend.observability.runtime_guard.detector.spec_acceptance import SpecAcceptanceDetector
+
+    section = {
+        "enabled": True,
+        "window": 1,
+        "low_threshold": 0.3,
+        "len_low_threshold": 1.4,
+        "high_threshold": 0.96,
+        "len_high_threshold": 2.8,
+    }
+    rc = SimpleNamespace(
+        detector_section=lambda name: section,
+        detector_get=lambda sec, key, default=None: section.get(key, default),
+    )
+    runner = SimpleNamespace(
+        tp_rank=0,
+        speculative_config=SimpleNamespace(),
+        input_batch=SimpleNamespace(req_ids=["r1"]),
+        requests=None,
+    )
+    det = SpecAcceptanceDetector(runtime_config=rc, runner=runner)
+    sampled = torch.tensor([[10, 11, 12, -1, -1]])
+    with (
+        patch(
+            "vllm_ascend.observability.runtime_guard.detector.spec_acceptance.get_pp_group",
+            return_value=SimpleNamespace(is_last_rank=True),
+        ),
+        patch(
+            "vllm_ascend.observability.runtime_guard.detector.spec_acceptance.runner_tp_rank",
+            return_value=0,
+        ),
+    ):
+        det.check_all(sampled, [3], req_ids=["r1"])
+    _accepted, draft_len, _sampled, _acc = det._history["r1"][0]
+    assert draft_len == 2  # len([10,11,12]) - 1, not len(row) - 1 == 4
+
+
 def test_v17b_spec_acceptance_v2_threads_req_ids_without_input_batch():
     """v2: runner.input_batch is None; req_ids must come from SamplePhaseResult."""
     from vllm_ascend.observability.runtime_guard.detector.spec_acceptance import SpecAcceptanceDetector
