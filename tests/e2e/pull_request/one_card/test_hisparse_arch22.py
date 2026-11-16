@@ -342,7 +342,9 @@ def test_topk_2048_speculative_union_graph(query_rows, hot_size, cross_stream, d
     attention = torch.empty_like(indices) if dtype == torch.int8 else None
     counts = torch.empty(query_rows, dtype=torch.int32, device="npu")
     sh, sd, sc = torch.empty_like(out), torch.empty_like(out), torch.empty_like(counts)
-    stats = torch.zeros(2, dtype=torch.int64, device="npu")
+    stats_backing = torch.full((6,), -73, dtype=torch.int64, device="npu")
+    stats = stats_backing[1:3]
+    stats.zero_()
 
     stream = torch.Stream(device="npu") if cross_stream else None
     ready = torch.Event() if cross_stream else None
@@ -431,6 +433,8 @@ def test_topk_2048_speculative_union_graph(query_rows, hot_size, cross_stream, d
     torch.testing.assert_close(stats.cpu(), torch.tensor([cold_hits + 10 * positions, union], dtype=torch.int64))
     torch.testing.assert_close(hot[1:].cpu().reshape(hot_size, width)[:union], host[block : block + union])
     torch.testing.assert_close(lru.cpu(), expected_lru)
+    assert stats_backing[0].item() == -73
+    assert torch.all(stats_backing[3:].cpu() == -73)
     graph.reset()
     mapping.close()
 
@@ -500,13 +504,16 @@ def test_invalidate_hot_capacity_graph(hot_capacity):
 
 
 @pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
-@pytest.mark.parametrize("hot_capacity", [7, 2049, 10240])
+@pytest.mark.parametrize("hot_capacity", [1, 7, 2049, 10240])
 def test_batched_invalidation_dynamic_graph(dtype, hot_capacity):
     """Duplicate writes and changing states must not race or pollute neighbors."""
     torch.manual_seed(71)
     initial = torch.randint(-1, 128, (3, 4, hot_capacity), dtype=torch.int32)
     initial[:, :, 0] = 2**31 - 1
-    tables = [table.npu() for table in initial]
+    backing = [torch.full((table.numel() + 9,), -73, dtype=torch.int32, device="npu") for table in initial]
+    tables = [storage[1:-8].view_as(table) for storage, table in zip(backing, initial)]
+    for table, original in zip(tables, initial):
+        table.copy_(original)
     groups = torch.tensor([table.data_ptr() for table in tables], dtype=torch.int64, device="npu")
     states = torch.tensor([3, 1, 0, -1], dtype=torch.int32, device="npu")
     requests_cpu = torch.tensor([0, 0, 1, 0, 2, 3, -1, 9], dtype=torch.int32)
@@ -532,8 +539,72 @@ def test_batched_invalidation_dynamic_graph(dtype, hot_capacity):
                 if 0 <= request < 4 and 0 <= state_cpu[request] < 4 and 0 <= value <= 2**31 - 1:
                     row = expected[:, state_cpu[request]]
                     row[row == value] = -1
-            for table, wanted in zip(tables, expected):
+            for storage, table, wanted in zip(backing, tables, expected):
                 torch.testing.assert_close(table.cpu(), wanted)
+                assert storage[0].item() == -73 and torch.all(storage[-8:].cpu() == -73)
+
+
+@pytest.mark.parametrize("empty", ["groups", "states", "writes", "state_count", "region"])
+@pytest.mark.parametrize("empty_view", [False, True])
+def test_native_invalidation_empty_inputs(empty, empty_view):
+    table = torch.arange(7, dtype=torch.int32, device="npu")[None]
+    groups = torch.tensor([table.data_ptr()], dtype=torch.int64, device="npu")
+    states = torch.zeros(1, dtype=torch.int32, device="npu")
+    requests, written = states.clone(), states.clone()
+
+    def make_empty(tensor):
+        return tensor[:0] if empty_view else torch.empty(0, dtype=tensor.dtype, device=tensor.device)
+
+    if empty == "groups":
+        groups = make_empty(groups)
+    elif empty == "states":
+        states = make_empty(states)
+    elif empty == "writes":
+        requests, written = make_empty(requests), make_empty(written)
+    state_count, region = (0 if empty == "state_count" else 1), (0 if empty == "region" else 7)
+    native = torch.ops._C_ascend.hisparse_invalidate_written
+    native(groups, states, requests, written, state_count, region)
+    torch.testing.assert_close(table.cpu(), torch.arange(7, dtype=torch.int32)[None])
+    # Empty work must not hide an invalid tensor shape.
+    with pytest.raises(RuntimeError, match="contiguous vectors"):
+        native(groups.view(-1, 1), states, requests, written, state_count, region)
+
+
+@pytest.mark.parametrize("count", [64, 65])
+def test_native_invalidation_write_limit(count):
+    table = torch.arange(count, dtype=torch.int32, device="npu")[None]
+    groups = torch.tensor([table.data_ptr()], dtype=torch.int64, device="npu")
+    states = torch.zeros(1, dtype=torch.int32, device="npu")
+    requests = torch.zeros(count, dtype=torch.int32, device="npu")
+    written = torch.arange(count, dtype=torch.int32, device="npu")
+    native = torch.ops._C_ascend.hisparse_invalidate_written
+    if count > 64:
+        with pytest.raises(RuntimeError, match="at most 64 writes"):
+            native(groups, states, requests, written, 1, count)
+        torch.testing.assert_close(table.cpu(), torch.arange(count, dtype=torch.int32)[None])
+    else:
+        native(groups, states, requests, written, 1, count)
+        assert torch.all(table.cpu() == -1)
+
+
+def test_native_resolver_empty_state_tables():
+    logical = torch.zeros((1, 4), dtype=torch.int32, device="npu")
+    table = torch.empty((0, 1), dtype=torch.int32, device="npu")
+    states = torch.empty(0, dtype=torch.int32, device="npu")
+    tags = torch.empty((0, 4), dtype=torch.int32, device="npu")
+    order = torch.empty((0, 4), dtype=torch.int16, device="npu")
+    out, resolved = torch.empty_like(logical), torch.empty_like(logical)
+    errors = torch.empty((1, 8), dtype=torch.int32, device="npu")
+    counts = torch.empty(1, dtype=torch.int32, device="npu")
+    stats = torch.zeros(2, dtype=torch.int64, device="npu")
+    torch.ops._C_ascend.hisparse_resolve_residency(
+        logical, table, None, states, table, table, None, tags, order, out,
+        resolved, errors, None, counts, None, None, None, None, stats,
+        8, 4, 4, 4, 0, 4, 4, 0,
+    )
+    assert torch.all(out.cpu() == -1) and torch.all(resolved.cpu() == -1)
+    assert torch.all(counts.cpu() == 0) and torch.all(stats.cpu() == 0)
+    assert torch.all(errors.cpu() == 0)
 
 
 @pytest.mark.parametrize("state_count", [1, 4])

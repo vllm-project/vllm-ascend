@@ -31,20 +31,22 @@ void invalidate_written(const at::Tensor& groups, const at::Tensor& states,
     TORCH_CHECK(state_count >= 0 && state_count <= INT32_MAX && region >= 0 && region <= 32768 &&
                 states.numel() <= INT32_MAX && groups.numel() <= INT32_MAX / 16,
                 "Invalid HiSparse invalidation geometry");
+    std::array<at::Tensor, 4> tensors = {groups, states, requests, written};
+    for (const auto& tensor : tensors) {
+        TORCH_CHECK(tensor.device() == groups.device() && tensor.dim() == 1 && tensor.is_contiguous(),
+                    "HiSparse invalidation requires contiguous vectors on one NPU");
+    }
+    if (!groups.numel() || !states.numel() || !written.numel() || !state_count || !region) return;
     c10_npu::NPUGuard guard(groups.device());
     auto npu_stream = c10_npu::getCurrentNPUStream();
-    std::array<at::Tensor, 4> tensors = {groups, states, requests, written};
     std::array<uint64_t, 4> pointers{};
     std::vector<at::Tensor> owners;
     for (size_t i = 0; i < tensors.size(); ++i) {
         const auto& tensor = tensors[i];
-        TORCH_CHECK(tensor.device() == groups.device() && tensor.dim() == 1 && tensor.is_contiguous(),
-                    "HiSparse invalidation requires contiguous vectors on one NPU");
         pointers[i] = reinterpret_cast<uintptr_t>(tensor.data_ptr());
         owners.emplace_back(tensor.detach());
         c10_npu::NPUCachingAllocator::recordStream(tensor.storage().data_ptr(), npu_stream);
     }
-    if (!groups.numel() || !written.numel() || !state_count || !region) return;
     const int group_count = groups.numel(), request_count = states.numel(), tokens = written.numel();
     const bool written64 = written.scalar_type() == at::kLong;
     int64_t vector_cores = 0;
@@ -201,7 +203,9 @@ inline void resolve_residency_arch22(
         if (i == 18) TORCH_CHECK(tensor.numel() == 1, "Invalid HiSparse valid-row scalar");
         // Register the use before dispatch so allocator reuse follows queued
         // work on the resolver stream, even if the caller releases a view.
-        c10_npu::NPUCachingAllocator::recordStream(tensor.storage().data_ptr(), npu_stream);
+        if (tensor.numel()) {
+            c10_npu::NPUCachingAllocator::recordStream(tensor.storage().data_ptr(), npu_stream);
+        }
     }
     TORCH_CHECK(bool(swap_host) == bool(swap_device) && bool(swap_host) == bool(swap_counts),
                 "All compact HiSparse swap outputs are required together");
