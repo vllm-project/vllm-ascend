@@ -2427,8 +2427,8 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         request = ReqMeta(
             req_id="r1",
             token_len_chunk=32,
-            block_ids_by_group=[[0, 1]],
-            block_ids_by_group_np=[np.asarray([0, 1], dtype=np.int64)],
+            block_ids_by_group=[[1, 2]],
+            block_ids_by_group_np=[np.asarray([1, 2], dtype=np.int64)],
             block_hashes=["h0", "h1"],
             load_spec=LoadSpec(
                 vllm_cached_tokens=16,
@@ -2560,22 +2560,22 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             load_spec=LoadSpec(0, 16 * len(block_hashes), True),
         )
 
-    def test_layerwise_lease_refresh_preserves_first_duplicate_key_index(self):
+    def test_layerwise_lease_refresh_updates_all_destinations_of_a_shared_key(self):
         worker = self._make_gva_worker()
         request = self._make_multi_block_gva_request(["h0", "h1", "h0"])
-        before = [SimpleNamespace(size=lambda: 64, gva_list=lambda gva=gva: [gva]) for gva in (201, 202, 203)]
-        pinned = [SimpleNamespace(gva_list=lambda gva=gva: [gva]) for gva in (301, 302, 303)]
+        before = [SimpleNamespace(size=lambda: 64, gva_list=lambda gva=gva: [gva]) for gva in (201, 202)]
+        pinned = [SimpleNamespace(gva_list=lambda gva=gva: [gva]) for gva in (301, 302)]
         worker.m_store.batch_get_key_info.side_effect = [before, pinned]
-        worker.m_store.batch_add_lease.return_value = [0, 0, 0]
+        worker.m_store.batch_add_lease.return_value = [0, 0]
 
         self.assertIsNone(worker._prepare_load_gvas_for_request([request]))
 
-        # Repeated replies update the first matching slot, as keys.index did.
-        self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [303, 302, 203])
+        # A single public lease supplies the refreshed address to both blocks.
+        self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [301, 302, 301])
         queried = worker.m_store.batch_get_key_info.call_args_list[0].args[0]
-        self.assertEqual(queried[0], queried[2])
-        self.assertEqual(request.load_keys, queried)
-        self.assertEqual(worker._step_load_keys, set(queried))
+        self.assertEqual(len(queried), 2)
+        self.assertEqual(request.load_keys, [queried[0], queried[1], queried[0]])
+        self.assertEqual(set(worker._step_load_keys), set(queried))
 
     def test_layerwise_lease_refresh_has_linear_key_lookup_work(self):
         operations = {"eq": 0, "hash": 0}
@@ -2604,7 +2604,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
 
         self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), list(range(2000, 2000 + count)))
         self.assertEqual(request.load_keys, [f"full@0@h{index}" for index in range(count)])
-        self.assertEqual(worker._step_load_keys, set(request.load_keys))
+        self.assertEqual(set(worker._step_load_keys), set(request.load_keys))
         self.assertEqual(worker.m_store.batch_get_key_info.call_count, 2)
         worker.m_store.batch_add_lease.assert_called_once()
         # Bound key operations rather than elapsed time or implementation details;
@@ -2624,7 +2624,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         queried = worker.m_store.batch_get_key_info.call_args_list[0].args[0]
         refreshed = worker.m_store.batch_get_key_info.call_args_list[1].args[0]
         self.assertEqual(refreshed, [queried[0], queried[2]])
-        self.assertEqual(worker._step_load_keys, set(refreshed))
+        self.assertEqual(set(worker._step_load_keys), set(refreshed))
         self.assertIsNone(request.load_block_gvas_by_group_np)
 
     def test_layerwise_lease_refresh_rejects_malformed_metadata(self):
@@ -2644,10 +2644,10 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
                     self.assertIsNone(request.load_block_gvas_by_group_np)
                     if stage == "before_lease":
                         worker.m_store.batch_add_lease.assert_not_called()
-                        self.assertEqual(worker._step_load_keys, set())
+                        self.assertEqual(worker._step_load_keys, [])
                     else:
                         queried = worker.m_store.batch_get_key_info.call_args_list[0].args[0]
-                        self.assertEqual(worker._step_load_keys, set(queried))
+                        self.assertEqual(set(worker._step_load_keys), set(queried))
 
     def test_layerwise_lease_refresh_keeps_partial_retry_index(self):
         worker = self._make_gva_worker()
@@ -2657,8 +2657,8 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         request.load_spec = LoadSpec(0, 40, True)
         before = [SimpleNamespace(size=lambda: 64, gva_list=lambda gva=gva: [gva]) for gva in (201, 202, 203)]
         pinned = [SimpleNamespace(gva_list=lambda gva=gva: [gva]) for gva in (301, 302, 303)]
-        worker.m_store.batch_get_key_info.side_effect = [before, pinned]
-        worker.m_store.batch_add_lease.side_effect = [[0, 0, -3101], [0]]
+        worker.m_store.batch_get_key_info.side_effect = [before[:2], pinned[:2], before[2:], pinned[2:]]
+        worker.m_store.batch_add_lease.side_effect = [[0, 0], [-3101], [0]]
 
         with patch(
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker.time.sleep"
@@ -2666,10 +2666,11 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             self.assertIsNone(worker._prepare_load_gvas_for_request([request]))
 
         queried = worker.m_store.batch_get_key_info.call_args_list[0].args[0]
-        self.assertEqual(worker.m_store.batch_add_lease.call_args_list[1].args[0], [queried[2]])
+        partial = worker.m_store.batch_get_key_info.call_args_list[2].args[0]
+        self.assertEqual(worker.m_store.batch_add_lease.call_args_list[2].args[0], partial)
         self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [301, 302, 0])
         self.assertEqual(request.partial_load_gva_per_group, [303])
-        self.assertEqual(worker._step_load_keys, set(queried))
+        self.assertEqual(set(worker._step_load_keys), set(queried + partial))
         sleep.assert_called_once()
 
     def test_full_pool_hit_uses_verified_extent(self):
@@ -2822,12 +2823,15 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         partial_info = MagicMock()
         partial_info.size.return_value = 64
         partial_info.gva_list.return_value = [202]
-        worker.m_store.batch_get_key_info.return_value = [
-            full_info,
-            partial_info,
+        worker.m_store.batch_get_key_info.side_effect = [
+            [full_info],
+            [full_info],
+            [partial_info],
+            [partial_info],
         ]
         worker.m_store.batch_add_lease.side_effect = [
-            [0, -3101],
+            [0],
+            [-3101],
             [0],
         ]
         request = ReqMeta(
@@ -2852,7 +2856,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
 
         partial_key = worker._make_layerwise_partial_key(request, 0, 1, 20)
         self.assertEqual(
-            worker.m_store.batch_add_lease.call_args_list[1].args[0],
+            worker.m_store.batch_add_lease.call_args_list[2].args[0],
             [partial_key],
         )
         sleep.assert_called_once()
@@ -2869,9 +2873,8 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         missing_info.size.return_value = 0
         missing_info.gva_list.return_value = []
         worker.m_store.batch_get_key_info.side_effect = [
+            [valid_info, missing_info],
             [valid_info],
-            [valid_info],
-            [missing_info],
         ]
         worker.m_store.batch_add_lease.return_value = [0]
         request = self._make_gva_request(
@@ -3559,6 +3562,7 @@ class TestKVPoolWorkerReachableMasks(unittest.TestCase):
             can_save=True,
             block_ids_np=np.asarray(block_ids, dtype=np.int64),
             block_ids_by_group_np=[np.asarray(block_ids, dtype=np.int64)],
+            block_ids_by_group=[block_ids],
         )
         params.update(overrides)
         request = ReqMeta(**params)
@@ -3570,14 +3574,15 @@ class TestKVPoolWorkerReachableMasks(unittest.TestCase):
 
     def test_compute_reachable_store_masks_fallbacks(self):
         worker = self._make_worker()
-        request = self._make_request()
-        self.assertIsNone(worker._compute_reachable_store_masks(request))
+        request = self._make_request(needs_private_snapshot=False)
+        self.assertEqual(worker._compute_reachable_store_masks(request), ([True] * 4,))
 
         worker.cache_coordinator = object()
-        self.assertIsNone(worker._compute_reachable_store_masks(self._make_request(save_end_token=60)))
+        request_unaligned = self._make_request(save_end_token=60, needs_private_snapshot=False)
+        self.assertEqual(worker._compute_reachable_store_masks(request_unaligned), ([True] * 4,))
 
         worker.token_database.store_mask = MagicMock(side_effect=AssertionError("unaligned"))
-        self.assertIsNone(worker._compute_reachable_store_masks(request))
+        self.assertEqual(worker._compute_reachable_store_masks(request), ([True] * 4,))
 
         expected = ([False, True],)
         worker.token_database.store_mask = MagicMock(return_value=expected)

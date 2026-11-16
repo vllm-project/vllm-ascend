@@ -4,6 +4,7 @@ import sys
 from collections.abc import Mapping
 from copy import copy
 from dataclasses import replace
+from functools import wraps
 from math import lcm
 
 import vllm
@@ -21,6 +22,7 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHashList,
     KVCacheBlock,
 )
+from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import (
     MambaManager,
     get_manager_for_kv_cache_spec,
@@ -37,6 +39,30 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
+
+
+def _install_layerwise_prefix_limit(scheduler_class: type) -> None:
+    """Bound local hash hits by restorable pool data before block adoption.
+
+    The connector's external-hit callback runs after local lookup and cannot
+    reduce that lookup's hit. Keep this narrow wrapper until upstream exposes
+    a connector hook for the local lookup limit. No model runner is replaced.
+    """
+    original = scheduler_class._get_local_prefix_cache_hit
+
+    @wraps(original)
+    def get_local_prefix_cache_hit(self, request, max_cache_hit_length=None):
+        get_limit = getattr(self.connector, "get_local_prefix_cache_limit", None)
+        if get_limit is not None and self.kv_cache_manager.prefix_cache_lookup_enabled(request):
+            limit = get_limit(request)
+            if limit is not None:
+                max_cache_hit_length = limit if max_cache_hit_length is None else min(limit, max_cache_hit_length)
+        return original(self, request, max_cache_hit_length)
+
+    scheduler_class._get_local_prefix_cache_hit = get_local_prefix_cache_hit
+
+
+_install_layerwise_prefix_limit(Scheduler)
 
 
 def _skips_eagle_block_drop(kv_transfer_config) -> bool:

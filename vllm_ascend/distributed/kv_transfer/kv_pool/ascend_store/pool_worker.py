@@ -70,6 +70,7 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
 )
+from vllm_ascend.models.deepseek_v4.cache_transfer import transfer_cache_views
 
 SAVE_BATCH_FAILURE_POLL_INTERVAL_S = 1.0
 
@@ -691,6 +692,8 @@ class BaseKVPoolWorker(ABC):
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         if self.use_recoverssm:
             kv_caches = self._recoverssm_store_caches(kv_caches)
+        if getattr(self.kv_cache_config, "dsv4_cache_format", None) is not None:
+            kv_caches = transfer_cache_views(kv_caches)
         self._set_num_blocks(kv_caches)
         self._register_kv_caches(kv_caches)
 

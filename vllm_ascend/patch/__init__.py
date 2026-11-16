@@ -294,6 +294,19 @@
 #    Future Plan:
 #       Remove once upstream exposes the PD role to the coordinator or
 #       removes the EAGLE last-block drop for verified prompt blocks.
+#   3. `vllm.v1.core.sched.scheduler.Scheduler._get_local_prefix_cache_hit`
+#    Why:
+#       Rotating buffers may retain block hashes after their layer bytes have
+#       been overwritten; a local hit must be restorable from the external pool.
+#    How:
+#       Bound the existing lookup by the connector's verified checkpoint before
+#       block adoption. Keep the original method in a closure, with no new global
+#       state. Connectors without a limit preserve the native lookup behavior.
+#    Related PR (if no, explain why):
+#       No upstream hook exists for a connector to reduce local hits before
+#       adoption; get_num_new_matched_tokens runs after that lookup.
+#    Future Plan:
+#       Remove the wrapper when upstream exposes a connector-local-lookup limit.
 #
 # ** 10. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -29,6 +29,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cache_pl
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwise_cache_layout import (
     LAYERWISE_REUSE_BACKING_BYTES,
 )
+from vllm_ascend.models.deepseek_v4.cache_reuse import validate_deepseek_v4_layerwise_config
+from vllm_ascend.models.deepseek_v4.cache_transfer import cache_format_digest
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
@@ -619,6 +621,9 @@ def _ascend_get_kv_cache_config_from_groups(
             kv_cache_groups=kv_cache_groups,
             prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
         )
+    if _is_deepseek_v4_groups(kv_cache_groups):
+        # Retain all member formats before scheduler conversion unwraps groups.
+        kv_cache_config.dsv4_cache_format = cache_format_digest(kv_cache_config)
     kv_cache_config.kv_transfer_config = kv_transfer_config
     speculative_config = getattr(vllm_config, "speculative_config", None)
     if speculative_config is not None and speculative_config.method == "dspark":
@@ -634,6 +639,8 @@ def _ascend_get_kv_cache_config_from_groups(
         kv_cache_config.dspark_draft_only_group_ids = draft_only_group_ids(kv_cache_config.kv_cache_groups)
     reuse_layout = plan_layerwise_cache_reuse(kv_cache_config, vllm_config)
     if reuse_layout is not None:
+        if _is_deepseek_v4_groups(kv_cache_groups):
+            validate_deepseek_v4_layerwise_config(vllm_config)
         # The scheduler keeps this cost when it collapses the per-entry specs.
         kv_cache_config.kv_transfer_config = replace(
             kv_transfer_config,

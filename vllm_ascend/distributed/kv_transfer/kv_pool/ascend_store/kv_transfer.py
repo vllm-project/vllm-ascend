@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import logging
 import queue
 import threading
 import time
@@ -201,12 +202,13 @@ class KVTransferThread(threading.Thread):
 
         # direction: 0/SMEMB_COPY_L2G = save (write), 1/SMEMB_COPY_G2L = load (read)
         dir_name = "save(L2G)" if direction == 0 else "load(G2L)" if direction == 1 else f"dir{direction}"
-        logger.debug(
-            "[KVPOOL] batch_copy %s gvas=%d total_bytes=%d",
-            dir_name,
-            len(gvas),
-            int(sizes.sum()) if len(sizes) else 0,
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "[KVPOOL] batch_copy %s gvas=%d total_bytes=%d",
+                dir_name,
+                len(gvas),
+                int(sizes.sum()),
+            )
 
         max_transfer_addrs = 0
         if max_transfer_blocks > 0:
@@ -223,16 +225,21 @@ class KVTransferThread(threading.Thread):
                 sizes[start:end],
                 max_transfer_bytes,
             )
+            # Convert once for the SDK. Logger arguments are evaluated even
+            # when DEBUG is disabled, so do not create separate logging lists.
+            gvas_list = split_gvas.tolist()
+            addrs_list = split_addrs.tolist()
+            sizes_list = split_sizes.tolist()
             logger.debug(
                 "[KVPOOL] batch_copy %s split_gvas=%s split_sizes=%s",
                 dir_name,
-                split_gvas.tolist(),
-                split_sizes.tolist(),
+                gvas_list,
+                sizes_list,
             )
             res = self.m_store.store.batch_copy(
-                split_gvas.tolist(),
-                split_addrs.tolist(),
-                split_sizes.tolist(),
+                gvas_list,
+                addrs_list,
+                sizes_list,
                 direction,
             )
             if res != 0:

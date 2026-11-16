@@ -135,7 +135,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         )
         self.use_block_key_layerwise = self.layerwise_data_plane == "block_key"
         self.use_layerwise_transfer = self.layerwise_data_plane == "gva"
-        self._step_load_keys: set[str] = set()
+        # The SDK counts acquisitions, including two requests sharing a key.
+        # Retain duplicates so every successful read lease is released once.
+        self._step_load_keys: list[str] = []
         self._snapshot_keys: dict[str, dict[int, dict[int, tuple[int, str]]]] = {}
         super()._init_kv_transfer_config(vllm_config, extra_config, use_layerwise, kv_cache_config)
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
@@ -676,7 +678,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         if self._step_load_keys:
             if self.kv_recv_thread is not None:
                 self._drain_attention_transfers(full=True)
-            keys, self._step_load_keys = list(self._step_load_keys), set()
+            keys, self._step_load_keys = self._step_load_keys, []
             result = self.m_store.batch_remove_lease(keys)
             if result != 0:
                 logger.error("AscendStore lease cleanup returned %s; backend TTL will reclaim leases", result)
@@ -1467,12 +1469,21 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                             candidate_public_keys.add(key)
                     candidate_keys.append(key)
                 partial_key = None
-                if keep_snapshot and partial_block_index is not None and partial_block_index < len(block_ids_by_group):
+                if (
+                    keep_snapshot
+                    and partial_block_index is not None
+                    and partial_block_index < len(block_ids_by_group)
+                    and block_ids_by_group[partial_block_index] != 0
+                ):
                     partial_key = self._make_layerwise_partial_key(
                         request, group_id, partial_block_index, request.target_token_len
                     )
                 if keep_snapshot:
                     pages = self._snapshot_keys.setdefault(request.req_id, {}).setdefault(group_id, {})
+                    # Released window pages no longer belong to this request.
+                    for index in list(pages):
+                        if index >= len(block_ids_by_group) or block_ids_by_group[index] == 0:
+                            del pages[index]
                     if self.group_uses_align_state[group_id] and (candidate_blocks or partial_key is not None):
                         pages.clear()
                     pages.update(
@@ -1672,6 +1683,28 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                     for task in self.layer_save_tasks[layer_id]:
                         task.cached_process_tokens = cached
 
+    @staticmethod
+    def _mask_allocated_blocks(
+        request: ReqMeta, masks: tuple[Sequence[bool] | None, ...] | None
+    ) -> tuple[list[bool], ...]:
+        """Intersect transfer ranges with the scheduler's actual ownership.
+
+        Sliding-window eviction leaves NULL IDs in the logical block table.
+        Preserve explicit checkpoint boundaries. Partial/unhashed pages use
+        the separate snapshot path; NULL IDs never become readable payloads.
+        """
+        result = []
+        for group_id, block_ids in enumerate(request.block_ids_by_group):
+            mask = masks[group_id] if masks is not None and group_id < len(masks) else None
+            result.append(
+                [
+                    block_id != 0 and (mask is None or mask[index])
+                    for index, block_id in enumerate(block_ids)
+                    if mask is None or index < len(mask)
+                ]
+            )
+        return tuple(result)
+
     def _compute_reachable_store_masks(
         self,
         request: ReqMeta,
@@ -1700,8 +1733,20 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             except AssertionError:
                 masks = None
         align_groups = getattr(self, "group_uses_align_state", [])
+        if self.layerwise_offload and request.needs_private_snapshot:
+            # Paged continuation needs every live page. Aligned recurrent
+            # state retains its existing endpoint/checkpoint protocol below.
+            masks = tuple(
+                masks[group_id]
+                if masks is not None
+                and group_id < len(masks)
+                and group_id < len(align_groups)
+                and align_groups[group_id]
+                else None
+                for group_id in range(self.num_kv_cache_groups)
+            )
         if not any(align_groups):
-            return masks
+            return self._mask_allocated_blocks(request, masks)
         # Mamba align slots can be null even when their token range is
         # reachable. They do not contain a state snapshot. Do not allocate
         # readable pool keys or copy block zero for these holes; the
@@ -1745,7 +1790,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 )
                 for index in range(num_blocks)
             ]
-        return tuple(result)
+        return self._mask_allocated_blocks(request, tuple(result))
 
     def _process_load_for_layer_batch(
         self,
@@ -1922,8 +1967,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
 
         # Planning selects the keys, including private snapshots. The lease
         # policy can batch public keys without changing those selections.
-        lease_loads = getattr(self, "_lease_step_load_gvas", self._lease_group_load_gvas)
-        for (request, groups, _), addresses in zip(plans, lease_loads(plans), strict=True):
+        for (request, groups, _), addresses in zip(plans, self._lease_step_load_gvas(plans), strict=True):
             if addresses is None:
                 self._fail_load_preparation(request)
                 failed = True
@@ -1948,17 +1992,40 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 request.load_gva_block_offset = 0
         return False if failed else None
 
-    def _lease_group_load_gvas(self, plans: list[_LoadPlan]) -> Iterable[list[list[int]] | None]:
-        for _, groups, _ in plans:
-            addresses = []
-            for _, _, keys, has_partial in groups:
-                leases = self._lease_load_gvas(keys, {len(keys) - 1} if has_partial else None)
-                if leases is None or not all(leases):
+    def _lease_step_load_gvas(self, plans: list[_LoadPlan]) -> Iterable[list[list[int]] | None]:
+        # Batch public leases across groups and requests, as in GLM PR #21262.
+        # DSV4's snapshot planner still decides which exact execution pages
+        # are private; these remain scoped to their owning request.
+        public_keys: dict[str, None] = {}
+        for _, _, keys in plans:
+            public_keys.update(keys)
+        public_gvas: dict[str, int] = {}
+        for keys in self._layerwise_key_batches(list(public_keys)):
+            addresses = self._lease_load_gvas(keys)
+            if addresses is not None:
+                public_gvas.update((key, gva) for key, gva in zip(keys, addresses, strict=True) if gva)
+
+        for _, groups, request_public_keys in plans:
+            if any(key not in public_gvas for key in request_public_keys):
+                yield None
+                continue
+            private_keys = list(
+                dict.fromkeys(key for _, _, keys, _ in groups for key in keys if key not in request_public_keys)
+            )
+            partial_keys = {keys[-1] for _, _, keys, has_partial in groups if has_partial}
+            private_gvas: dict[str, int] = {}
+            for keys in self._layerwise_key_batches(private_keys):
+                partial_slots = {index for index, key in enumerate(keys) if key in partial_keys}
+                addresses = self._lease_load_gvas(keys, partial_slots)
+                if addresses is None or not all(addresses):
                     yield None
                     break
-                addresses.append(leases)
+                private_gvas.update(zip(keys, addresses, strict=True))
             else:
-                yield addresses
+                yield [
+                    [public_gvas[key] if key in request_public_keys else private_gvas[key] for key in keys]
+                    for _, _, keys, _ in groups
+                ]
 
     def _fail_load_preparation(self, request: ReqMeta) -> None:
         logger.error("Memcache load preparation failed for %s", request.req_id)
@@ -1989,7 +2056,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         results = self.m_store.batch_add_lease(readable_keys, LAYERWISE_READ_LEASE_TTL_MS)
         if results is None or len(results) != len(readable_keys):
             return None
-        self._step_load_keys.update(key for key, result in zip(readable_keys, results, strict=True) if result == 0)
+        self._step_load_keys.extend(key for key, result in zip(readable_keys, results, strict=True) if result == 0)
         leased_keys = []
         for index, result in zip(readable_indices, results, strict=True):
             key = keys[index]
@@ -2001,7 +2068,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                         return None
                     result = retry[0]
                     if result == 0:
-                        self._step_load_keys.add(key)
+                        self._step_load_keys.append(key)
                     if result != MEMCACHE_UNMATCHED_STATE:
                         break
             if result == 0:
@@ -2021,8 +2088,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             key_indices.setdefault(key, index)
         for key, info in zip(leased_keys, infos, strict=True):
             address = next((gva for gva in info.gva_list() if gva > 0), 0) if info is not None else 0
-            if address == 0:
-                return None
+            # Keep per-key misses local to their owning requests when this
+            # batch contains public keys from several requests. The lease
+            # remains tracked for cleanup even if its address is unreadable.
             gvas[key_indices[key]] = address
         return gvas
 
@@ -2093,7 +2161,9 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 len(group_block_hashes),
             )
             if partial_block_index is not None and (
-                partial_block_index < load_start_block or partial_block_index >= full_len
+                partial_block_index < load_start_block
+                or partial_block_index >= full_len
+                or block_ids_by_group[partial_block_index] == 0
             ):
                 if get_saved_key is not None:
                     return None
@@ -2239,7 +2309,10 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         if self.cache_coordinator is None and getattr(self, "block_key_hybrid", False):
             raise ValueError("Block-key hybrid loads require a reachability coordinator")
         masks = None
-        if self.cache_coordinator is not None:
+        previous_step = (
+            self.layerwise_offload and request.load_spec is not None and request.load_spec.layerwise_previous_step
+        )
+        if self.cache_coordinator is not None and not previous_step:
             try:
                 masks = self.token_database.load_mask(request.block_hashes, cached_tokens)
             except AssertionError:
@@ -2251,7 +2324,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             if self.layerwise_offload and uses_align and group_id in self._reused_layers_by_group
         ]
         if not reused_state_groups:
-            return masks
+            return self._mask_allocated_blocks(request, masks)
         # Preserve other groups' reachability masks. An aligned recurrent page
         # represents one endpoint; unaligned state uses the partial GVA path.
         result: list[Sequence[bool] | None] = list(masks) if masks is not None else [None] * self.num_kv_cache_groups
@@ -2261,7 +2334,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 index == cached_tokens // size - 1 and cached_tokens % size == 0 and block_id != 0
                 for index, block_id in enumerate(request.block_ids_by_group[group_id])
             ]
-        return tuple(result)
+        return self._mask_allocated_blocks(request, tuple(result))
 
     def _drain_deferred_last_save(self) -> None:
         """PERF-TUNE(2): deferred tail of the previous step's last-layer save."""
