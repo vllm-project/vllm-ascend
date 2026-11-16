@@ -30,6 +30,7 @@ from vllm_ascend.ops.triton.qwen4_exp.hc import (
     hc_silu,
 )
 
+from . import ple_embedding  # noqa: F401 - register the OOT host embedding before model construction
 from .ple import AscendPCPPLELayer, patch_upstream_ple_short_conv
 
 # Keep the upstream model and weight loader authoritative. HyperConnection's

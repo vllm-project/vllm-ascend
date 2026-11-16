@@ -1,0 +1,4 @@
+pr: 21751
+entries:
+  - category: feature
+    text: Added Qwen PLE BF16 UVA host offload with local DP memory sharing and cleanup after failed model loading.

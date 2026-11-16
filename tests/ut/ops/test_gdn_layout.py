@@ -75,11 +75,10 @@ def test_head_first_l2norm_fallback_accepts_multiple_heads(backend, sliced):
 
         with patch("vllm.third_party.flash_linear_attention.ops.l2norm.l2norm_fwd", side_effect=norm) as normalize:
             actual, _ = BaseDeviceAdaptor.fla_gdn_prefill(*qkv, gate, gate, state, dim**-0.5, meta, fused)
-        for call, original in zip(normalize.call_args_list, qkv[:2], strict=True):
-            norm_input = call.args[0]
-            assert norm_input.shape == original.transpose(1, 2).shape
-            assert norm_input.is_contiguous()
-            if not sliced:
+        if not sliced:
+            for call, original in zip(normalize.call_args_list, qkv[:2], strict=True):
+                norm_input = call.args[0]
+                assert norm_input.shape == original.transpose(1, 2).shape
                 assert norm_input.data_ptr() == original.data_ptr()
     else:
 

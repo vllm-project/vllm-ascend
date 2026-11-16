@@ -91,16 +91,6 @@ def test_qwen4_exp_mtp_position_cache_ignores_other_architectures() -> None:
     assert draft_model_config.max_model_len == 262144
 
 
-def _rope_model_config(uses_mrope: bool) -> SimpleNamespace:
-    rope_parameters = {"mrope_section": [24, 20, 20], "mrope_interleaved": True} if uses_mrope else {}
-    hf_config = SimpleNamespace(rope_parameters=rope_parameters)
-    return SimpleNamespace(
-        uses_mrope=uses_mrope,
-        hf_config=hf_config,
-        hf_text_config=hf_config,
-    )
-
-
 def test_modelslim_mtp_layer_ids_are_remapped_by_qwen_model_adapter() -> None:
     quant_config = SimpleNamespace(
         quant_description={
@@ -148,10 +138,10 @@ def test_draft_config_remaps_modelslim_description(monkeypatch) -> None:
         )
     )
     target_config = SimpleNamespace(
+        speculative_config=None,
         model_config=SimpleNamespace(
             hf_text_config=SimpleNamespace(mtp_num_hidden_layers=1),
         ),
-        speculative_config=None,
     )
     monkeypatch.setattr(
         mtp,
@@ -167,11 +157,32 @@ def test_draft_config_remaps_modelslim_description(monkeypatch) -> None:
     }
 
 
+def test_position_cache_is_aligned_before_upstream_draft_config(monkeypatch) -> None:
+    vllm_config, draft_model_config, _ = _make_long_context_config()
+    draft_model_config.hf_text_config.mtp_num_hidden_layers = 1
+    draft_config = SimpleNamespace(quant_config=None)
+
+    def make_draft_config(_config, _start):
+        assert draft_model_config.hf_text_config.max_position_embeddings == 1010000
+        assert draft_model_config.max_model_len == 1010000
+        return draft_config
+
+    monkeypatch.setattr(
+        mtp,
+        "_upstream_make_draft_vllm_config",
+        make_draft_config,
+    )
+
+    actual = mtp._make_draft_vllm_config(vllm_config, mtp_start_layer_idx=48)
+
+    assert actual is draft_config
+
+
 def test_draft_config_forwards_explicit_mtp_layer_count(monkeypatch) -> None:
     draft_config = SimpleNamespace(
         quant_config=SimpleNamespace(quant_description={"mtp.layers.1.mlp.weight": "W4A8_DYNAMIC"})
     )
-    target_config = SimpleNamespace()
+    target_config = SimpleNamespace(speculative_config=None)
     calls = []
 
     def make_draft(config, start, num_layers):
@@ -194,7 +205,7 @@ def test_draft_config_preserves_legacy_two_argument_api(monkeypatch, hf_config) 
     draft_config = SimpleNamespace(
         quant_config=SimpleNamespace(quant_description={f"mtp.layers.{last_layer}.mlp.weight": "W4A8_DYNAMIC"})
     )
-    target_config = SimpleNamespace(model_config=SimpleNamespace(hf_text_config=hf_config))
+    target_config = SimpleNamespace(speculative_config=None, model_config=SimpleNamespace(hf_text_config=hf_config))
     calls = []
 
     def make_draft(config, start):

@@ -135,6 +135,7 @@ def _make_draft_vllm_config(
     mtp_start_layer_idx: int,
     num_mtp_layers: int | None = None,
 ) -> VllmConfig:
+    _align_qwen4_exp_mtp_position_cache(vllm_config)
     if num_mtp_layers is None:
         # vLLM v0.33.0 uses the two-argument API; its caller supplies no count.
         draft_vllm_config = _upstream_make_draft_vllm_config(vllm_config, mtp_start_layer_idx)
