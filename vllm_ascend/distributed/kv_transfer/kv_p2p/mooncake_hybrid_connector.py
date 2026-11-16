@@ -1789,8 +1789,6 @@ class MooncakeConnectorWorker:
         self.block_len_per_addr: list[int] = []
         self.block_stride_per_addr: list[int] = []
         self.addr_group_idx: list[list[int]] = []
-        ptrs = []
-        lengths = []
         if not self.use_hybrid:
             for layer_name, kv_cache_tuple in kv_caches.items():
                 if isinstance(kv_cache_tuple, (list, tuple)) is False:
@@ -1803,8 +1801,6 @@ class MooncakeConnectorWorker:
                         single_kv_cache.element_size() * math.prod(block_shape) * block_size_scale
                     )
                     self.kv_caches_base_addr.append(single_kv_cache.data_ptr())
-                    ptrs.append(single_kv_cache.data_ptr())
-                    lengths.append(single_kv_cache.element_size() * math.prod(single_kv_cache.shape))
         elif self.use_mamba:
             for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
                 for layer_name in get_kv_cache_tensor_layers(kv_cache_tensor):
@@ -1858,13 +1854,12 @@ class MooncakeConnectorWorker:
         else:
             raise TypeError("Mooncake connector does not support this type kv_cache now.")
 
-        if self.use_hybrid:
-            register_regions = collect_configured_register_regions(self.kv_cache_config, kv_caches)
-            validate_register_region_count(register_regions)
-            ptrs = register_regions.ptrs
-            lengths = register_regions.lengths
-
-        global_te.register_buffer(ptrs, lengths)
+        # Dense K/V views can share an interleaved backing allocation too.
+        # Keep logical addresses above for transfer metadata, but register each
+        # configured storage once, including the full physical stride span.
+        register_regions = collect_configured_register_regions(self.kv_cache_config, kv_caches)
+        validate_register_region_count(register_regions)
+        global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
         # After KV Caches registered, start the sending or receiving thread.
         metadata = MooncakeAgentMetadata(
             engine_id=self.engine_id,

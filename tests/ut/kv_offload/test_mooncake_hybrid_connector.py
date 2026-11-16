@@ -522,6 +522,110 @@ class TestMooncakeHybridConnectorWorker(unittest.TestCase):
 
 
 class TestMooncakeHybridConnectorRegistration(unittest.TestCase):
+    def test_dense_registration_preserves_logical_views_and_registers_storage_once(self):
+        alignment = 2 * 1024 * 1024
+        num_blocks = 4
+        block_width = 16
+        module = "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector"
+
+        for layout in ("aligned_interleaved", "short_config_interleaved", "interleaved", "independent"):
+            with self.subTest(layout=layout):
+                backing_size = num_blocks * 2 * block_width * 2
+                if layout in ("aligned_interleaved", "short_config_interleaved"):
+                    raw = torch.empty(backing_size + alignment, dtype=torch.uint8)
+                    offset = (-raw.data_ptr()) % alignment
+                    backing = raw[offset : offset + backing_size].view(torch.float16)
+                else:
+                    backing = torch.empty(backing_size // 2, dtype=torch.float16)
+                if layout == "independent":
+                    caches = tuple(torch.empty((num_blocks, block_width), dtype=torch.float16) for _ in range(2))
+                else:
+                    interleaved = backing.view(num_blocks, 2, block_width)
+                    caches = (interleaved[:, 0], interleaved[:, 1])
+                    self.assertFalse(caches[0].is_contiguous())
+
+                def register_nonoverlapping(ptrs, lengths):
+                    ranges = sorted(zip(ptrs, lengths))
+                    for (start, length), (next_start, _) in zip(ranges, ranges[1:]):
+                        if start + length > next_start:
+                            raise ValueError("overlapping consumer registration")
+
+                # The old dense path registered logical payload lengths at
+                # interleaved view pointers, overlapping and missing tail bytes.
+                if layout != "independent":
+                    with self.assertRaisesRegex(ValueError, "overlapping consumer registration"):
+                        register_nonoverlapping(
+                            [cache.data_ptr() for cache in caches], [cache.nbytes for cache in caches]
+                        )
+
+                worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+                worker.vllm_config = types.SimpleNamespace(
+                    model_config=types.SimpleNamespace(is_deepseek_mla=False, hf_text_config=types.SimpleNamespace())
+                )
+                worker.kv_cache_config = types.SimpleNamespace(
+                    num_blocks=num_blocks,
+                    kv_cache_tensors=[
+                        types.SimpleNamespace(
+                            size=backing_size // 2 if layout == "short_config_interleaved" else backing_size,
+                            layers=["attn"],
+                            shared_by=["attn"],
+                        )
+                    ],
+                )
+                worker.use_hybrid = worker.use_mamba = worker.use_compress = False
+                worker.kv_role = "kv_consumer"
+                worker.engine_id = "decode"
+                worker.engine = "engine"
+                worker.te_rpc_port = worker.handshake_port = worker.side_channel_port = 32000
+                worker.block_size = block_width
+                worker.tp_rank = 0
+                worker.tp_size = worker._prefill_pp_size = worker.hma_group_size = 1
+                worker._mamba_ssm_size = (0, 0)
+                worker._prefill_pp_layer_partition = None
+                logical_ptrs = [cache.data_ptr() for cache in caches]
+                logical_strides = [cache.stride() for cache in caches]
+
+                def ready_receiver(*args):
+                    args[15].set()
+                    return MagicMock()
+
+                with (
+                    patch(f"{module}.global_te.register_buffer", side_effect=register_nonoverlapping) as register_buffer,
+                    patch(f"{module}.KVCacheRecvingThread", side_effect=ready_receiver) as receiver,
+                    patch(f"{module}.get_ip", return_value="127.0.0.1"),
+                ):
+                    worker.register_kv_caches({"attn": caches})
+
+                ptrs, lengths = register_buffer.call_args.args
+                expected_ranges = (
+                    [(cache.data_ptr(), cache.nbytes) for cache in caches]
+                    if layout == "independent"
+                    else [(backing.data_ptr(), backing_size)]
+                )
+                if layout == "short_config_interleaved":
+                    # A config smaller than the physical strided span must
+                    # fall back to the actual allocation, never truncate it.
+                    expected_ranges = [(backing.data_ptr(), raw.data_ptr() + raw.nbytes - backing.data_ptr())]
+                self.assertEqual(list(zip(ptrs, lengths)), expected_ranges)
+                if layout == "aligned_interleaved":
+                    self.assertEqual(ptrs[0] % alignment, 0)
+                    self.assertEqual(lengths, [backing_size])
+                for cache in caches:
+                    span = cache.element_size() * (
+                        1 + sum((size - 1) * stride for size, stride in zip(cache.shape, cache.stride()))
+                    )
+                    self.assertTrue(
+                        any(
+                            start <= cache.data_ptr() and cache.data_ptr() + span <= start + length
+                            for start, length in zip(ptrs, lengths)
+                        )
+                    )
+                self.assertEqual(worker.kv_caches_base_addr, logical_ptrs)
+                self.assertEqual(worker.xfer_handshake_metadata.kv_caches_base_addr, logical_ptrs)
+                self.assertEqual(worker.xfer_handshake_metadata.block_lens, [block_width * 2] * 2)
+                self.assertEqual(receiver.call_args.args[7:10], (logical_ptrs, [block_width * 2] * 2, []))
+                self.assertEqual([cache.stride() for cache in caches], logical_strides)
+
     def test_zero_layer_stride_uses_descriptor_layers_as_shared_by(self):
         num_blocks = 2
         block_stride = 80
