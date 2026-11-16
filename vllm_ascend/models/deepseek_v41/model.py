@@ -769,9 +769,9 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
         output = torch.empty(0, dtype=hidden_states.dtype, device=hidden_states.device)
         torch.ops.vllm.dsa_v41_write_kv(hidden_states, output, self.v41_layer_name)
 
-    def forward_sp(self, positions, hidden_states):
+    def forward_sp(self, positions, hidden_states, *, use_sp=True):
         output = hidden_states.new_empty((positions.shape[0], self.dim))
-        torch.ops.vllm.dsa_v41_forward_sp(hidden_states, output, self.v41_layer_name)
+        torch.ops.vllm.dsa_v41_forward_sp(hidden_states, output, self.v41_layer_name, use_sp)
         return output
 
 
@@ -928,11 +928,11 @@ class DeepseekV41DecoderLayer(nn.Module):
         )
         x = self.input_layernorm(x)
         if (
-            use_sequence_parallel
+            (use_sequence_parallel or self.prefill_context_parallel_size > 1)
             and getattr(self, "projected_sp_enabled", False)
             and positions.shape[0] >= self.projected_sp_min_tokens
         ):
-            x = self.self_attn.forward_sp(positions, x)
+            x = self.self_attn.forward_sp(positions, x, use_sp=use_sequence_parallel)
         else:
             if use_sequence_parallel:
                 x = sp_all_gather(x)[: positions.shape[0]]

@@ -119,17 +119,21 @@ direct_register_custom_op(
 
 
 @eager_break_during_capture
-def dsa_v41_forward_sp(hidden_states: torch.Tensor, output: torch.Tensor, layer_name: str) -> None:
-    """Execute projected SP with an explicit full-token output capacity."""
+def dsa_v41_forward_sp(hidden_states: torch.Tensor, output: torch.Tensor, layer_name: str, use_sp: bool) -> None:
+    """Execute token-local projections behind the attention side-effect boundary."""
     attn = get_forward_context().no_compile_layers[layer_name]
-    attn.v41_impl.forward_sp(attn, hidden_states, output)
+    attn.v41_impl.forward_sp(attn, hidden_states, output, use_sp=use_sp)
+
+
+def dsa_v41_forward_sp_fake(hidden_states: torch.Tensor, output: torch.Tensor, layer_name: str, use_sp: bool) -> None:
+    return None
 
 
 direct_register_custom_op(
     op_name="dsa_v41_forward_sp",
     op_func=dsa_v41_forward_sp,
     mutates_args=["output"],
-    fake_impl=dsa_v41_forward_fake,
+    fake_impl=dsa_v41_forward_sp_fake,
     dispatch_key="PrivateUse1",
 )
 
@@ -835,7 +839,7 @@ class AscendDSAV41Impl:
         kv = wkv.matmul(kv_quant, kv_scale, bias=attn.wkv.bias)
         return q_a, kv
 
-    def _finish_sp_qkv_multistream(self, attn, projected, cos, sin, swa_metadata):
+    def _finish_sp_qkv_multistream(self, attn, projected, cos, sin, swa_metadata, *, cache_rope=None):
         """Overlap gathered Q normalization/GEMM with KV normalization/RoPE."""
         main_stream = torch.npu.current_stream()
         aux_stream = dsv4_dsa_overlap_stream()
@@ -845,7 +849,7 @@ class AscendDSAV41Impl:
         with npu_stream_switch(aux_stream):
             aux_stream.wait_event(ready)
             kv = attn.kv_norm(projected["swa_kv"]).view(-1, 1, attn.head_dim)
-            self._apply_rotary(attn, kv, cos, sin)
+            self._apply_rotary(attn, kv, *(cache_rope if cache_rope is not None else (cos, sin)))
             if not write_on_main:
                 self._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
         qr = attn.q_norm(projected["q_a"])
@@ -857,8 +861,10 @@ class AscendDSAV41Impl:
             self._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
         return q, qr
 
-    def forward_sp(self, attn, hidden_states, output):
+    def forward_sp(self, attn, hidden_states, output, *, use_sp=True):
         """Project padded local shards before gathering, then publish full caches."""
+        if not use_sp:
+            return self.forward(attn, None, hidden_states, output)
         projected = project_and_gather(
             attn,
             hidden_states,
@@ -872,20 +878,38 @@ class AscendDSAV41Impl:
             # The legacy profiling branch only uses shape/dtype, not input data.
             return self.forward(attn, None, output, output)
         metadata = self._get_layer_metadata(context.attn_metadata)
+        return self._forward_projected(attn, projected, projected, metadata, metadata, output)
+
+    def _forward_projected(self, attn, query, cache, metadata, cache_metadata, output):
         num_tokens = metadata.swa.num_actual_tokens
-        projected = {name: value[:num_tokens] for name, value in projected.items()}
+        num_cache_tokens = cache_metadata.swa.num_actual_tokens
+        layer_name = attn.rotary_emb.layername
+        cos, sin = metadata.rope(layer_name, num_tokens) if num_tokens else (None, None)
+        cache_rope = cache_metadata.rope(layer_name, num_cache_tokens) if num_cache_tokens else None
+        q = qr = prepared = None
+        cache_written = False
         if num_tokens:
-            positions = metadata.positions[:num_tokens]
-            cos, sin = metadata.rope(attn.rotary_emb.layername, num_tokens)
-            if self.multistream_dsv4_dsa_overlap:
-                q, qr = self._finish_sp_qkv_multistream(attn, projected, cos, sin, metadata.swa)
+            q_a = query["q_a"][:num_tokens]
+            if self.multistream_dsv4_dsa_overlap and num_cache_tokens:
+                q, qr = self._finish_sp_qkv_multistream(
+                    attn,
+                    {"q_a": q_a, "swa_kv": cache["swa_kv"][:num_cache_tokens]},
+                    cos,
+                    sin,
+                    cache_metadata.swa,
+                    cache_rope=cache_rope,
+                )
+                cache_written = True
             else:
-                qr = attn.q_norm(projected["q_a"])
+                qr = attn.q_norm(q_a)
                 q = attn.wq_b(qr).unflatten(-1, (-1, attn.head_dim))
                 self._apply_rotary(attn, q, cos, sin)
-                kv = attn.kv_norm(projected["swa_kv"]).view(-1, 1, attn.head_dim)
-                self._apply_rotary(attn, kv, cos, sin)
-                self._write_swa_cache(attn, metadata.swa, kv.squeeze(1))
+        if num_cache_tokens and not cache_written:
+            kv = attn.kv_norm(cache["swa_kv"][:num_cache_tokens]).view(-1, 1, attn.head_dim)
+            self._apply_rotary(attn, kv, *cache_rope)
+            self._write_swa_cache(attn, cache_metadata.swa, kv.squeeze(1))
+        if num_tokens:
+            weights = query.get("indexer_weights")
             prepared = self._prepare_indexer_inputs(
                 attn,
                 None,
@@ -893,23 +917,25 @@ class AscendDSAV41Impl:
                 cos,
                 sin,
                 metadata,
-                projected_weights=projected.get("indexer_weights"),
+                projected_weights=weights[:num_tokens] if weights is not None else None,
             )
-            if self.role.is_kv_source:
-                self._write_compressed_source(
-                    attn,
-                    None,
-                    positions,
-                    cos,
-                    sin,
-                    metadata,
-                    prepared_indexer=prepared,
-                    projected_inputs=projected,
-                )
-            else:
+            if metadata is not cache_metadata or not (self.role.is_kv_source and num_cache_tokens):
                 self._quantize_indexer_query(attn, prepared, metadata)
+        # PCP ranks without local queries must still publish replicated caches.
+        if self.role.is_kv_source and num_cache_tokens:
+            self._write_compressed_source(
+                attn,
+                None,
+                cache_metadata.positions[:num_cache_tokens],
+                *cache_rope,
+                cache_metadata,
+                prepared_indexer=prepared if metadata is cache_metadata else None,
+                projected_inputs={name: value[:num_cache_tokens] for name, value in cache.items()},
+            )
+        if num_tokens:
+            positions = metadata.positions[:num_tokens]
             indices = self._select_sparse_indices(attn, None, qr, positions, cos, sin, metadata, prepared)
-            attention_output = self._forward_attention(attn, q.to(hidden_states.dtype), metadata, indices)
+            attention_output = self._forward_attention(attn, q.to(output.dtype), metadata, indices)
             AscendDSAV41Impl._apply_rotary(attn, attention_output, cos, sin, inverse=True)
         else:
             attention_output = output.new_empty((0, attn.n_local_heads, attn.head_dim))

@@ -703,7 +703,7 @@ def runtime(builders, monkeypatch):
         monkeypatch.setattr(dsa_v41, "oproj_tp_enable", lambda: False)
         impl = dsa_v41_cp.AscendDSAV41PCPImpl(
             "model.layers.0",
-            SimpleNamespace(is_kv_source=False, has_long_context=False, compress_ratio=0),
+            SimpleNamespace(is_kv_source=False, is_index_source=False, has_long_context=False, compress_ratio=0),
             None,
             None,
             None,
@@ -728,7 +728,7 @@ def runtime(builders, monkeypatch):
             torch.ops._C_ascend, "inplace_partial_rotary_mul", lambda *args, **kwargs: None, raising=False
         )
 
-        def run(scenario):
+        def run(scenario, *, projected=False, use_sp=False):
             batch = _batch(2, rank, scenario, decode_sharded=decode_sharded)
             metadata = _build_planes(owners, batch)
             context.attn_metadata = metadata
@@ -741,7 +741,12 @@ def runtime(builders, monkeypatch):
 
             def gather(value, dim):
                 events.append("hidden")
-                return torch.cat(peers, dim=dim)
+                inputs = peers
+                if projected and isinstance(metadata[PREFIXES["swa"]], dsa_v41_cp.AscendDSAV41PCPMetadata):
+                    # Only SWA KV traverses PCP in this layer. Q stays local.
+                    inputs = [peer[:, :2].contiguous() for peer in peers]
+                    torch.testing.assert_close(value, inputs[rank])
+                return torch.cat(inputs, dim=dim)
 
             monkeypatch.setattr(dsa_v41_cp, "get_pcp_group", lambda: SimpleNamespace(all_gather=gather))
             projector.reference_input = torch.zeros_like(peers[rank])
@@ -752,7 +757,24 @@ def runtime(builders, monkeypatch):
             if scenario != "dummy":
                 expected_cache[batch.slots] = canonical[:, :2]
             output = torch.full_like(peers[rank], -777)
-            assert impl.forward(attn, None, peers[rank], output) is output
+            if projected:
+                hidden = peers[rank]
+                if use_sp:
+                    padded = torch.nn.functional.pad(hidden, (0, 0, 0, hidden.shape[0] % 2))
+
+                    def tp_gather(value):
+                        events.append("tp")
+                        # wq_a is identity and wkv selects the first two columns.
+                        packed = torch.cat((padded, padded[:, :2]), dim=-1)
+                        torch.testing.assert_close(value, packed.chunk(2)[0])
+                        return packed
+
+                    monkeypatch.setattr(dsa_v41_cp, "sp_all_gather", tp_gather)
+                    monkeypatch.setattr(dsa_v41, "sp_all_gather", tp_gather)
+                    hidden = padded.chunk(2)[0]
+                assert impl.forward_sp(attn, hidden, output, use_sp=use_sp) is output
+            else:
+                assert impl.forward(attn, None, peers[rank], output) is output
             torch.testing.assert_close(output, projector.reference_input)
             torch.testing.assert_close(cache, expected_cache)
             return batch, metadata
@@ -763,6 +785,23 @@ def runtime(builders, monkeypatch):
 
 
 class TestPCPBatchLifecycle:
+    @pytest.mark.parametrize("use_sp", [False, True])
+    @pytest.mark.parametrize("overlap", [False, True])
+    @pytest.mark.parametrize("decode_sharded", [False, True])
+    def test_projected_pcp_preserves_cache_and_output(self, runtime, use_sp, overlap, decode_sharded):
+        state = runtime(overlap=overlap, decode_sharded=decode_sharded)
+        for scenario in ("prefill", "empty", "mixed", "decode", "dummy"):
+            state.events.clear()
+            _, metadata = state.run(scenario, projected=True, use_sp=use_sp)
+            sharded = isinstance(metadata[PREFIXES["swa"]], dsa_v41_cp.AscendDSAV41PCPMetadata)
+            assert state.events.count("hidden") == int(sharded)
+            assert state.events.count("tp") == int(use_sp)
+            if sharded and use_sp:
+                assert state.events.index("tp") < state.events.index("hidden")
+            if scenario == "empty":
+                assert "attention" not in state.events
+                assert "cache" in state.events and "project" in state.events
+
     @pytest.mark.parametrize("sharding,overlap", [(False, False), (False, True), (True, False), (True, True)])
     @pytest.mark.parametrize("decode_sharded", [False, True])
     def test_profile_prefill_decode_and_verification_share_one_weight_lifecycle(

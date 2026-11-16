@@ -26,6 +26,8 @@ from vllm_ascend.attention.dsa_v41 import (
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, is_pcp_enabled, uses_pcp_sharded_layout
 from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio, get_storage_block_size
+from vllm_ascend.models.common.ops.sequence_parallel import sp_all_gather
+from vllm_ascend.models.deepseek_v41.projected_sp import gather_projections, project_shard
 from vllm_ascend.ops.rope_dsv4 import get_full_cos_and_sin_dsa_for_layer
 
 
@@ -509,19 +511,19 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
     supports_pcp: ClassVar[bool] = True
 
     @staticmethod
-    def _gather_and_restore_hidden_states(
-        hidden_states: torch.Tensor,
+    def _gather_and_restore_rows(
+        rows: torch.Tensor,
         metadata: AscendDSAV41PCPMetadata,
     ) -> torch.Tensor:
-        assert hidden_states.shape[0] == metadata.local_num_tokens_after_padding
-        gathered = get_pcp_group().all_gather(hidden_states.contiguous(), dim=0)
+        assert rows.shape[0] == metadata.local_num_tokens_after_padding
+        gathered = get_pcp_group().all_gather(rows.contiguous(), dim=0)
         return torch.index_select(gathered, 0, metadata.hidden_restore_idx)
 
     def _prepare_inputs_and_caches(self, attn, hidden_states, metadata, metadata_by_prefix):
         if not isinstance(metadata.swa, AscendDSAV41PCPMetadata):
             return super()._prepare_inputs_and_caches(attn, hidden_states, metadata, metadata_by_prefix)
         # Empty query ranks also join hidden and weight collectives.
-        global_hidden_states = self._gather_and_restore_hidden_states(hidden_states, metadata.swa)
+        global_hidden_states = self._gather_and_restore_rows(hidden_states, metadata.swa)
         projector = attn.dsa_attn.dsa_attn.impl
         projector._parallel_o_proj.all_gather_weights()
         global_metadata = self._global_layer_metadata(metadata_by_prefix)
@@ -546,3 +548,30 @@ class AscendDSAV41PCPImpl(_ReplicatedCacheImpl):
         # V4.1 already projects padded output even on empty query ranks.
         with projector._parallel_o_proj.batch(needs_global_metadata=needs_global_metadata, has_prefill=has_prefill):
             return super().forward(attn, positions, hidden_states, output)
+
+    def forward_sp(self, attn, hidden_states, output, *, use_sp=True):
+        metadata_by_prefix = get_forward_context().attn_metadata
+        swa = metadata_by_prefix[self.swa_prefix] if metadata_by_prefix is not None else None
+        if not isinstance(swa, AscendDSAV41PCPMetadata):
+            return super().forward_sp(attn, hidden_states, output, use_sp=use_sp)
+
+        metadata = self._get_layer_metadata(metadata_by_prefix)
+        cache_metadata = self._global_layer_metadata(metadata_by_prefix)
+        projector = attn.dsa_attn.dsa_attn.impl
+        with projector._parallel_o_proj.batch(
+            needs_global_metadata=True, has_prefill=cache_metadata.swa.num_prefills > 0
+        ):
+            local = project_shard(
+                attn,
+                hidden_states,
+                project_qkv=self._project_sp_qkv_multistream if self.multistream_dsv4_dsa_overlap else None,
+            )
+            if use_sp:
+                # TP restores the padded PCP-local row layout.
+                local = gather_projections(local, lambda packed: sp_all_gather(packed)[: output.shape[0]])
+            cache = gather_projections(
+                {name: value for name, value in local.items() if name not in ("q_a", "indexer_weights")},
+                lambda packed: self._gather_and_restore_rows(packed, swa),
+            )
+            projector._parallel_o_proj.all_gather_weights()
+            return self._forward_projected(attn, local, cache, metadata, cache_metadata, output)
