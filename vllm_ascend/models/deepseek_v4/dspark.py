@@ -520,8 +520,8 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        draft_head_params: set[str] = set()
-        head_params = {
+        loaded_head_names: set[str] = set()
+        head_dst_names = {
             "model.embed_tokens.weight",
             "lm_head.weight",
             "model.hc_head_fn",
@@ -559,10 +559,10 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
             # Main-model heads are fallbacks only. Concurrent shard loading can
             # yield either namespace first; an MTP head must always win without
             # buffering the checkpoint or depending on shard completion order.
-            if name in head_params:
+            if name in head_dst_names:
                 if is_draft_weight:
-                    draft_head_params.add(name)
-                elif name in draft_head_params:
+                    loaded_head_names.add(name)
+                elif name in loaded_head_names:
                     continue
 
             # Detect whether the checkpoint ships its own embed_tokens / lm_head
