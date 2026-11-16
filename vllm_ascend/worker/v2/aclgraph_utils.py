@@ -16,7 +16,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from typing import Any
 
@@ -88,7 +88,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         vllm_config: VllmConfig,
         device: torch.device,
         cudagraph_mode: CUDAGraphMode,
-        decode_query_len: int,
+        decode_query_len: int | Mapping[int, int],
         model_runner: Any,
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
@@ -158,10 +158,8 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
         # calculate num_tokens_across_dp.
         num_tokens_across_dp = torch.full([self.model_runner.dp_size], num_tokens)
-        # sfa_v1.py:AscendSFABackend.get_impl_cls reaches
-        # sfa_cp.py:resolve_sfa_impl, whose SFA CP selector reads the current
-        # ModelConfig. Publish the target config because set_forward_context()
-        # does not update it.
+        # Attention graph updates must see the target ModelConfig.
+        # set_forward_context() does not update the current VllmConfig.
         # TODO: Remove this explicit current-config scope once ACL graph replay
         # passes VllmConfig directly through the graph-update interfaces.
         with (

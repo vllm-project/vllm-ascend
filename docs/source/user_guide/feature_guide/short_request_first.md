@@ -106,8 +106,6 @@ ShortRequestFirst changes only the waiting-queue policy. It requires FCFS schedu
 
 The `additional_config.scheduler_config.enable_balance_scheduling` setting keeps its existing behavior: it controls balance scheduling's cross-DP admission logic. ShortRequestFirst is installed independently of whether balance scheduling is enabled, so the balance-disabled path continues to delegate scheduling to vLLM while using the ShortRequestFirst waiting queue.
 
-When combining ShortRequestFirst with CPP, set `scheduler_config.enable_balance_scheduling` to `false` because CPP and balance scheduling cannot be enabled at the same time.
-
 ## Minimal examples
 
 Disable it explicitly:

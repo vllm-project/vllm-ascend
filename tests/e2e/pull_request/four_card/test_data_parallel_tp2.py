@@ -164,6 +164,16 @@ def _run_a5_allgather_eplb(rank, port, graph_mode):
             state.allgather_source_is_padding = padding
 
             def forward():
+                # Every real forward enters its own context, and EPLB holds the
+                # gathered source mask there for the rest of it. Reusing one
+                # context across the iterations below would keep the first
+                # mask after the padding and the recording gate change.
+                with override_forward_context(create_forward_context(None, config)):
+                    _EXTRA_CTX.moe_comm_type = MoECommType.ALLGATHER
+                    _EXTRA_CTX.max_tokens_across_dp = EPLB_ROWS
+                    return forward_once()
+
+            def forward_once():
                 prepared = prepare.prepare(hidden, logits)
                 physical = _ascend_apply_eplb_mapping(router, logical_ids)
                 dispatched = dispatcher.token_dispatch(

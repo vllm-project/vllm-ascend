@@ -11,6 +11,7 @@ from tools.bisect.config import BisectOptions
 from tools.bisect.version_compat import (
     TORCH_NPU_REQUIREMENTS_FILE,
     VLLM_PACKAGE,
+    VLLM_PIP_EXTRA_INDEX_URL,
     VLLM_TAG_FILE,
     PackageVersions,
     VersionAdapter,
@@ -156,13 +157,14 @@ def test_adapter_sets_empty_target_device_for_editable_vllm_install(
 
     # _switch_vllm sets os.environ["VLLM_VERSION"] as a side effect. Isolate it
     # so later cpu-ut cases keep resolving against the installed vllm version.
-    with mock.patch.dict(os.environ, {}):
+    with mock.patch.dict(os.environ, {}, clear=True):
         adapter.ensure_targets({"vllm": "v0.25.1"}, ("vllm",))
 
     command, env = runs[0]
-    assert command[:4] == ["pip", "install", "-e", str(vllm_dir)]
+    assert command[:4] == ["pip", "install", "-e", f"{vllm_dir}[audio]"]
     assert env is not None
     assert env["VLLM_TARGET_DEVICE"] == "empty"
+    assert env["PIP_EXTRA_INDEX_URL"] == VLLM_PIP_EXTRA_INDEX_URL
 
 
 def _is_git_worktree_clean(repo: Path) -> bool:

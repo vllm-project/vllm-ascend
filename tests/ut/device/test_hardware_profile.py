@@ -17,6 +17,7 @@ from vllm_ascend.device.hardware_profile import (
     HardwareCapability,
     MoECommPolicy,
     QuantizationBackendFamily,
+    WeightFormat,
     WeightLayoutPolicy,
     get_current_hardware_profile,
     get_hardware_profile,
@@ -60,6 +61,10 @@ _EXPECTED_CAPABILITIES = {
     },
     AscendDeviceType.A3: _STANDARD_CAPABILITIES
     | {
+        HardwareCapability.KDA_INT8_QUANT_OVERLAP,
+        HardwareCapability.NATIVE_INT8_SPARSE,
+        HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
+        HardwareCapability.RMS_NORM_DYNAMIC_QUANT,
         HardwareCapability.CANN_MEGAMOE,
         HardwareCapability.MC2_FULLMESH_V2_COMM,
         HardwareCapability.RMS_NORM_CAST,
@@ -83,9 +88,9 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
             HardwareCapability.SCATTER_ND_CACHE_STORE,
             HardwareCapability.SCATTER_ND_FP8_CACHE_STORE,
-            HardwareCapability.BGMV_SGMV_META_REGISTRATION,
             HardwareCapability.CANN_MEGAMOE,
             HardwareCapability.CANN_MEGAMOE_MXFP,
+            HardwareCapability.CANN_MEGAMOE_SHARED_EXPERT_FUSION,
             HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT,
             HardwareCapability.DEVICE_LENGTH_FLASH_ATTN,
             HardwareCapability.CLUSTER_CPU_TOPOLOGY,
@@ -99,6 +104,7 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.FLA_GDN_PREFILL,
             HardwareCapability.FP8_ATTENTION,
             HardwareCapability.POOL_KEY_INDEXER_FP8,
+            HardwareCapability.INDEXER_QUANT_CACHE,
             HardwareCapability.FUSED_ROTARY_MUL_INTERLEAVE,
             HardwareCapability.GRAPH_MM_REDUCE_SCATTER_FUSION,
             HardwareCapability.GRAPH_MULS_ADD_FUSION,
@@ -107,12 +113,14 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.LORA_CUSTOM_OPS,
             HardwareCapability.MLA_FLASH,
             HardwareCapability.MLAPO_NATIVE_WEIGHTS,
+            HardwareCapability.MINIMAX_M3_GBSA_METADATA_REUSE,
             HardwareCapability.MM_REDUCE_SCATTER_AI_CPU_INFERENCE,
             HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
             HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
             HardwareCapability.MOE_GATING_TOP_K_HASH_VISION,
             HardwareCapability.NPUGRAPH_EX,
             HardwareCapability.NPU_TOP_K_TOP_P,
+            HardwareCapability.RUNTIME_CUSTOM_OPS,
             HardwareCapability.STANDARD_MAMBA_PATCH,
             HardwareCapability.STANDARD_WORKER_PATCHES,
             HardwareCapability.SWIGLU_OAI_MX_QUANT,
@@ -120,6 +128,22 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.UNRESTRICTED_MLAPO,
         }
     ),
+}
+
+
+_STANDARD_WEIGHT_FORMATS = frozenset({WeightFormat.BF16, WeightFormat.FP16, WeightFormat.INT8})
+_INT4_WEIGHT_FORMATS = _STANDARD_WEIGHT_FORMATS | {WeightFormat.INT4}
+_FP8_WEIGHT_FORMATS = _INT4_WEIGHT_FORMATS | {
+    WeightFormat.FP8,
+    WeightFormat.HIF8,
+    WeightFormat.MXFP8,
+    WeightFormat.MXFP4,
+}
+_EXPECTED_WEIGHT_FORMATS = {
+    AscendDeviceType.A2: _INT4_WEIGHT_FORMATS,
+    AscendDeviceType.A3: _INT4_WEIGHT_FORMATS,
+    AscendDeviceType._310P: _STANDARD_WEIGHT_FORMATS,
+    AscendDeviceType.A5: _FP8_WEIGHT_FORMATS,
 }
 
 
@@ -134,6 +158,7 @@ _EXPECTED_CAPABILITIES = {
         "weight_layout_policy",
         "moe_comm_policy",
         "quantization_backend_family",
+        "native_weight_formats",
     ),
     [
         (
@@ -146,6 +171,7 @@ _EXPECTED_CAPABILITIES = {
             WeightLayoutPolicy.CONFIGURABLE,
             MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY,
             QuantizationBackendFamily.STANDARD,
+            _INT4_WEIGHT_FORMATS,
         ),
         (
             AscendDeviceType.A3,
@@ -157,6 +183,7 @@ _EXPECTED_CAPABILITIES = {
             WeightLayoutPolicy.CONFIGURABLE,
             MoECommPolicy.FUSED_OR_CAPACITY,
             QuantizationBackendFamily.STANDARD,
+            _INT4_WEIGHT_FORMATS,
         ),
         (
             AscendDeviceType._310P,
@@ -168,6 +195,7 @@ _EXPECTED_CAPABILITIES = {
             WeightLayoutPolicy.FORCE_NZ,
             MoECommPolicy.ALLGATHER,
             QuantizationBackendFamily.COMPATIBILITY,
+            _STANDARD_WEIGHT_FORMATS,
         ),
         (
             AscendDeviceType.A5,
@@ -179,6 +207,7 @@ _EXPECTED_CAPABILITIES = {
             WeightLayoutPolicy.CONFIGURABLE,
             MoECommPolicy.CAPACITY_AND_WORLD_SIZE,
             QuantizationBackendFamily.STANDARD,
+            _FP8_WEIGHT_FORMATS,
         ),
     ],
 )
@@ -192,6 +221,7 @@ def test_hardware_profile_implementation_matrix(
     weight_layout_policy: WeightLayoutPolicy,
     moe_comm_policy: MoECommPolicy,
     quantization_backend_family: QuantizationBackendFamily,
+    native_weight_formats: frozenset[WeightFormat],
 ) -> None:
     profile = get_hardware_profile(device_type)
 
@@ -204,16 +234,49 @@ def test_hardware_profile_implementation_matrix(
     assert profile.weight_layout_policy is weight_layout_policy
     assert profile.moe_comm_policy is moe_comm_policy
     assert profile.quantization_backend_family is quantization_backend_family
+    assert profile.native_weight_formats == native_weight_formats
 
 
 @pytest.mark.parametrize("device_type", list(AscendDeviceType))
 def test_hardware_profile_capability_matrix(device_type: AscendDeviceType) -> None:
     profile = get_hardware_profile(device_type)
     expected_capabilities = _EXPECTED_CAPABILITIES[device_type]
+    expected_weight_formats = _EXPECTED_WEIGHT_FORMATS[device_type]
 
     assert profile.capabilities == expected_capabilities
     for capability in HardwareCapability:
         assert profile.supports(capability) is (capability in expected_capabilities)
+
+    assert profile.native_weight_formats == expected_weight_formats
+    for weight_format in WeightFormat:
+        assert profile.supports_weight_format(weight_format) is (weight_format in expected_weight_formats)
+
+
+@pytest.mark.parametrize(
+    "device_type,expected_min_query_len",
+    [
+        (AscendDeviceType.A2, 9),
+        (AscendDeviceType.A3, None),
+        (AscendDeviceType.A5, None),
+        (AscendDeviceType._310P, None),
+    ],
+)
+def test_gdn_fixed_spec_recurrent_fallback_policy(device_type, expected_min_query_len):
+    profile = get_hardware_profile(device_type)
+    assert profile.gdn_fixed_spec_recurrent_fallback_min_query_len == expected_min_query_len
+
+
+@pytest.mark.parametrize(
+    "device_type,expected_precision",
+    [
+        (AscendDeviceType.A2, 0),
+        (AscendDeviceType.A3, 0),
+        (AscendDeviceType.A5, 1),
+        (AscendDeviceType._310P, 0),
+    ],
+)
+def test_minimax_m3_gbsa_bf16_softmax_precision_policy(device_type, expected_precision):
+    assert get_hardware_profile(device_type).minimax_m3_gbsa_bf16_softmax_precision == expected_precision
 
 
 def test_current_hardware_profile_uses_device_config() -> None:

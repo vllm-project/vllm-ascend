@@ -1,0 +1,104 @@
+test_name: "glm-5.2-w8a8c8-mtp-a5"
+model: "Eco-Tech/GLM-5.2-W8A8C8-mxfp8"
+num_nodes: 2
+npu_per_node: 8
+dp_load_balancing: internal
+
+# The multi-node harness discovers LOCAL_IP, MASTER_IP and communication NICs.
+# Model weights must be cached on both A5 nodes before this offline CI runs.
+env_common: &env_common
+  VLLM_USE_MODELSCOPE: "true"
+  SERVER_PORT: "8080"
+  HCCL_DFS_CONFIG: "task_exception:off,inconsistent_check:off"
+  HCCL_ALGO: "level0:fullmesh"
+  HCCL_EXEC_TIMEOUT: "1800"
+  HCCL_CONNECT_TIMEOUT: "1800"
+  HCCL_BUFFSIZE: "1200"
+  VLLM_RPC_TIMEOUT: "3600000"
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
+  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+  VLLM_ASCEND_ENABLE_PREFETCH_MLP: "1"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "10"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
+  TASK_QUEUE_ENABLE: "1"
+  VLLM_PP_LAYER_PARTITION: "42,36"
+  VLLM_USE_FASTOKENS: "1"
+  VLLM_DISABLE_COMPILE_CACHE: "1"
+  VLLM_USE_V2_MODEL_RUNNER: "0"
+
+deployment:
+  - envs:
+      <<: *env_common
+    server_cmd: >
+      vllm serve Eco-Tech/GLM-5.2-W8A8C8-mxfp8
+      --host 0.0.0.0
+      --port $SERVER_PORT
+      --tensor-parallel-size 8
+      --enable-expert-parallel
+      --pipeline-parallel-size 2
+      --distributed-executor-backend mp
+      --master-addr $MASTER_IP
+      --master-port 7060
+      --nnodes 2
+      --node-rank 0
+      --seed 1024
+      --max-model-len 135000
+      --max-num-batched-tokens 16384
+      --gpu-memory-utilization 0.9
+      --max-num-seqs 500
+      --trust-remote-code
+      --quantization ascend
+      --enable-auto-tool-choice
+      --tool-call-parser glm47
+      --reasoning-parser glm47
+      --async-scheduling
+      --enable-prefix-caching
+      --speculative-config '{"num_speculative_tokens":5,"method":"deepseek_mtp","enforce_eager":true}'
+      --kv-cache-dtype fp8
+      --attention-config '{"indexer_kv_dtype":"fp8"}'
+      --additional-config '{"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"enable_dsa_cp":true,"enable_flashcomm1":true,"enable_fused_mc2":2}'
+  - envs:
+      <<: *env_common
+    server_cmd: >
+      vllm serve Eco-Tech/GLM-5.2-W8A8C8-mxfp8
+      --host 0.0.0.0
+      --port $SERVER_PORT
+      --tensor-parallel-size 8
+      --enable-expert-parallel
+      --pipeline-parallel-size 2
+      --distributed-executor-backend mp
+      --master-addr $MASTER_IP
+      --master-port 7060
+      --nnodes 2
+      --node-rank 1
+      --headless
+      --seed 1024
+      --max-model-len 135000
+      --max-num-batched-tokens 16384
+      --gpu-memory-utilization 0.9
+      --max-num-seqs 500
+      --trust-remote-code
+      --quantization ascend
+      --enable-auto-tool-choice
+      --tool-call-parser glm47
+      --reasoning-parser glm47
+      --async-scheduling
+      --enable-prefix-caching
+      --speculative-config '{"num_speculative_tokens":5,"method":"deepseek_mtp","enforce_eager":true}'
+      --kv-cache-dtype fp8
+      --attention-config '{"indexer_kv_dtype":"fp8"}'
+      --additional-config '{"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"enable_dsa_cp":true,"enable_flashcomm1":true,"enable_fused_mc2":2}'
+
+benchmarks:
+  acc_gsm8k:
+    case_type: accuracy
+    dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/gsm8k
+    request_conf: vllm_api_general_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+    max_out_len: 10240
+    batch_size: 32
+    temperature: 0
+    baseline: 95
+    threshold: 5

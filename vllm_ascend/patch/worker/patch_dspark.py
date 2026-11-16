@@ -32,6 +32,8 @@ DSpark drafts can use different quantization schemes from their targets:
 
 This compatibility patch can be removed once upstream supports loading the
 same-checkpoint drafts that need the target quantization scheme.
+
+Mark draft reconstruction so disabled drafts can inherit the target collection phase.
 """
 
 from contextlib import AbstractContextManager, nullcontext
@@ -45,6 +47,7 @@ import vllm.v1.worker.gpu.spec_decode.dspark.utils as dspark_utils
 import vllm.v1.worker.gpu.spec_decode.eagle.utils as eagle_utils
 from vllm.distributed.parallel_state import get_pp_group
 
+from vllm_ascend.ascend_config import draft_config_context
 from vllm_ascend.worker.v2.pp_transport import resolve_spec_pp_support
 
 _original_get_draft_quant_config = model_utils.get_draft_quant_config
@@ -86,7 +89,7 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
         partition_mask = cast(AbstractContextManager[None], nullcontext())
         if spec_pp_support is not None:
             partition_mask = patch.object(vllm_envs, "VLLM_PP_LAYER_PARTITION", None)
-        with partition_mask:
+        with partition_mask, draft_config_context():
             return _original_load_dspark_model(target_model, vllm_config)
     finally:
         eagle_utils.maybe_share_target_embed = _original_maybe_share_target_embed

@@ -13,7 +13,7 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.speculative import SpeculativeConfig
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group, is_v1_kv_transfer_group
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+from vllm.model_executor.layers.attention.mla_attention import MLAAttention, MLACommonMetadataBuilder
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import MLAAttentionImpl
@@ -258,31 +258,7 @@ def needs_layer_aware_fia_graph_replay() -> bool:
 
 
 def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
-    scheduler_config = vllm_config.scheduler_config
-    cache_config = vllm_config.cache_config
-    model_config = vllm_config.model_config
-
-    chunked_prefill_workspace_size = min(
-        # Make sure there is enough for 8 full length request or at least
-        # 4 pages of cache per request
-        max(8 * model_config.max_model_len, 4 * scheduler_config.max_num_seqs * cache_config.block_size),
-        # For long-context models try not to over-allocate limiting
-        # kv-cache space, limiting it to 128k tokens,
-        # which would result in the workspace being:
-        #   2*(576)*(128*1024) = 288mb
-        # (assuming 576 MLA head dim, and fp16)
-        # which would result in up-projected context being
-        #   2*(192*128)*(128*1024) = 6gb
-        # (assuming 192 QK head dim, 128 heads, and fp16)
-        128 * 1024,
-    )
-
-    chunked_prefill_workspace_size = max(
-        chunked_prefill_workspace_size,
-        scheduler_config.max_num_seqs * cache_config.block_size,
-    )
-
-    return chunked_prefill_workspace_size
+    return MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(vllm_config)
 
 
 def using_paged_attention(runtime_shape: int | None, vllm_config: VllmConfig, head_size: int | None = None) -> bool:
@@ -349,18 +325,6 @@ def uses_pcp_sharded_layout(common_attn_metadata: "AscendCommonAttentionMetadata
 
 
 @dataclass
-class AscendDCPMetadata:
-    """Per-batch metadata required by decode context parallelism."""
-
-    num_computed_tokens_of_dcp: list[list[int]] | torch.Tensor | None = None
-    query_lens_cpu: torch.Tensor = None
-    max_query_len: int = 0
-    dcp_mtp_attn_mask: torch.Tensor = None
-    draft_cp_seq_len: torch.Tensor | None = None
-    draft_base_seq_lens: torch.Tensor | None = None
-
-
-@dataclass
 class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     """
     Per-batch attention metadata, shared across layers and backends.
@@ -401,10 +365,8 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # Total number of tokens including padding, used for padding operations.
     num_input_tokens: int = 0
 
-    # Metadata for Decode Context Parallelism (DCP) operations.
-    context_parallel_metadata: AscendDCPMetadata | None = None
     # Per-request / per-token request identity used by the Sparse KV offload
-    # resident LRU (adler32-hashed request ids and token->request mapping).
+    # resident LRU (request incarnation owners and token->request mapping).
     req_ids_tensor: torch.Tensor | None = None
     token_to_req: torch.Tensor | None = None
     # CPU views of runner-owned CpuGpuBuffers; never exact sequence lengths.
@@ -465,7 +427,6 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             attn_state=self.attn_state,
             graph_pad_size=-1,  # It should be -1 when not run in fullgraph mode.
             num_input_tokens=self.num_input_tokens,
-            context_parallel_metadata=self.context_parallel_metadata,
             seq_lens_cpu_upper_bound=self.seq_lens_cpu_upper_bound[:num_actual_reqs]
             if self.seq_lens_cpu_upper_bound is not None
             else None,
@@ -531,8 +492,6 @@ def split_decodes_and_prefills(
     """
     Assuming a reordered batch, finds the boundary between prefill and decode
     requests.
-    DCP metadata may carry a stable CPU copy of query lengths for asynchronous
-    speculative-decoding updates.
 
     The batch is expected to be ordered as:
     decode -> short_extend -> long_extend -> prefill
@@ -555,10 +514,7 @@ def split_decodes_and_prefills(
         num_decode_tokens: The number of tokens in the decode requests.
         num_prefill_tokens: The number of tokens in the prefill requests.
     """
-    dcp_metadata = common_attn_metadata.context_parallel_metadata
-    query_lens_dcp = dcp_metadata.query_lens_cpu if dcp_metadata else None
-    max_query_len_dcp = dcp_metadata.max_query_len if dcp_metadata else 0
-    max_query_len = common_attn_metadata.max_query_len if max_query_len_dcp == 0 else max_query_len_dcp
+    max_query_len = common_attn_metadata.max_query_len
     num_reqs = common_attn_metadata.num_reqs
     if num_reqs == 0:
         return 0, 0, 0, 0
@@ -578,8 +534,7 @@ def split_decodes_and_prefills(
     ):
         return num_reqs, 0, num_tokens, 0
 
-    query_lens_sharded = query_start_loc[1:] - query_start_loc[:-1]
-    query_lens = query_lens_sharded if query_lens_dcp is None else query_lens_dcp
+    query_lens = query_start_loc[1:] - query_start_loc[:-1]
     if query_lens[0].item() > decode_threshold:
         return 0, num_reqs, 0, num_tokens
 

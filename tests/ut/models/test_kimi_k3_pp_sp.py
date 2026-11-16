@@ -269,7 +269,7 @@ def runtime(monkeypatch):
         monkeypatch.setattr(torch.ops.vllm, name, namespace[f"_{name}"], raising=False)
     monkeypatch.setattr(torch.ops._C_ascend, "attn_res_fwd", attn_res_fwd_cpu, raising=False)
     load_definitions(
-        "vllm_ascend/models/kimi_k3.py",
+        "vllm_ascend/models/kimi_k3/kimi_k3.py",
         {"AscendKimiLinearModel", "AscendKimiDecoderLayer", "AscendKimiMLP"},
         namespace,
         bases={
@@ -480,7 +480,7 @@ def test_draft_mapper_reuses_upstream_rules(owns_embed):
         "AutoWeightsLoader": lambda model: SimpleNamespace(load_weights=load_weights),
     }
     load_definitions(
-        "vllm_ascend/models/kimi_k3_dspark.py",
+        "vllm_ascend/models/kimi_k3/kimi_k3_dspark.py",
         {"AscendK3DSparkForCausalLM"},
         namespace,
         bases={"AscendK3DSparkForCausalLM": "BaseModel"},

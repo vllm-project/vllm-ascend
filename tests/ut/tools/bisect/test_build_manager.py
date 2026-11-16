@@ -11,6 +11,9 @@ def _build_manager(tmp_path: Path, *, native_check: str = "per-commit") -> Build
     return BuildManager(
         BisectOptions(
             repo_dir=tmp_path,
+            work_dir=str(tmp_path / "work_dir"),  # override the /root/.cache default:
+            # CI runs as root so the default works there, but a non-root local
+            # run hits PermissionError on stat(/root/.cache) -> 9 test failures.
             assume_built_head=False,
             native_check=native_check,
         )
@@ -43,9 +46,9 @@ def test_decide_skips_when_target_is_already_built(tmp_path: Path):
     ("changed_files", "expected_rebuild", "expected_reinstall"),
     [
         (["vllm_ascend/worker/model_runner.py"], False, False),
-        (["requirements-dev.txt"], False, True),
+        (["requirements-dev.txt"], False, False),
         (["csrc/attention/op.cpp"], True, False),
-        (["csrc/attention/op.cpp", "requirements-dev.txt"], True, True),
+        (["csrc/attention/op.cpp", "requirements-dev.txt"], True, False),
         (["pyproject.toml"], True, False),
     ],
 )

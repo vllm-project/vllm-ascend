@@ -90,6 +90,7 @@ def _make_pp_layer_count_worker(pp_rank, pp_size=2, initial_num_layers=4, use_la
     }
 
     worker.tp_rank = 0
+    worker.pcp_rank = 0
     worker.dcp_size = 1
     worker.put_step = 1
     # _is_layerwise_save_owner gates the save path; attention groups never use
@@ -97,6 +98,7 @@ def _make_pp_layer_count_worker(pp_rank, pp_size=2, initial_num_layers=4, use_la
     worker.kv_role = "kv_producer"
     worker.consumer_is_to_put = False
     worker.group_uses_align_state = [False] * num_groups
+    worker.sharded_mamba_group_ids = set()
     worker.grouped_block_size = [16] * num_groups
     worker.hash_block_size = 16
     worker.cache_coordinator = None

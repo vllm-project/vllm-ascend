@@ -8,20 +8,21 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator import (
     TargetDependentARSpeculator,
 )
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
-from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAMetadata
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
 from vllm_ascend.distributed.eplb.tensor_ops import make_allgather_mask
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
-from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
     AscendTargetDependentARSpeculator,
     gather,
@@ -32,10 +33,7 @@ from vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator import (
 def test_calc_next_seq_lens_cpu():
     """Test calculation of the next CPU sequence lengths."""
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
-    if vllm_version_is("0.32.0"):
-        speculator.max_model_len = 100
-    else:
-        speculator.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=100))
+    speculator.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=100))
     seq_lens_cpu = torch.tensor([10, 20, 98, 66], dtype=torch.int32)
     result = speculator._calc_next_seq_lens_cpu(seq_lens_cpu, num_reqs=3, num_reqs_padded=4, step=3)
     expected = torch.tensor([13, 23, 100, 0], dtype=torch.int32)
@@ -112,17 +110,6 @@ def test_maybe_remove_d2t_for_non_eagle3():
     assert draft_model.draft_id_to_target_id is mapping
 
 
-def test_draft_prefill_attn_groups():
-    """Test selection of draft prefill attention groups."""
-    speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
-    speculator.attn_groups = object()
-    speculator.target_attn_groups = object()
-    speculator.replicated_pcp = True
-    assert speculator.draft_prefill_attn_groups is speculator.attn_groups
-    speculator.replicated_pcp = False
-    assert speculator.draft_prefill_attn_groups is speculator.target_attn_groups
-
-
 def test_load_model_disables_mm_inputs_for_pp():
     """Test disabling multimodal inputs when pipeline parallelism is enabled."""
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
@@ -179,33 +166,14 @@ def test_init_cudagraph_manager_keeps_graph_mode():
     parent_init.assert_called_once_with(CUDAGraphMode.FULL)
 
 
-def test_run_model_broadcasts_replicated_hidden_states():
-    """Test broadcasting hidden states for replicated PCP."""
-    speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
-    speculator.replicated_pcp = True
-    last_hidden_states = torch.tensor([1])
-    hidden_states = torch.tensor([2])
-    expected = (torch.tensor([3]), torch.tensor([4]))
-    with (
-        patch.object(
-            TargetDependentARSpeculator,
-            "_run_model",
-            return_value=(last_hidden_states, hidden_states),
-        ) as parent_run_model,
-        patch.object(AscendPCPManager, "broadcast_replicated_hidden_states", return_value=expected) as broadcast,
-    ):
-        result = speculator._run_model(3, None, None, None)
-    parent_run_model.assert_called_once_with(3, None, None, None, CUDAGraphMode.NONE, None)
-    broadcast.assert_called_once_with(last_hidden_states, hidden_states, 3, replicated_pcp=True)
-    assert result is expected
-
-
 def test_generate_draft_updates_attn_metadata():
     """Test updating attention metadata during draft generation."""
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
     attn_metadata = {"layer.0": MagicMock()}
     speculator._update_decode_attn_metadata = MagicMock()
-    with patch.object(TargetDependentARSpeculator, "_generate_draft") as parent_generate:
+    with patch.object(
+        TargetDependentARSpeculator, "_generate_draft" if vllm_version_is("0.33.0") else "_decode"
+    ) as parent_generate:
         # main always passes the per-batch step count; there is no fallback to
         # the configured count.
         speculator._generate_draft(2, 4, attn_metadata, None, None, num_speculative_steps=3)
@@ -221,7 +189,7 @@ def test_generate_draft_skips_update_without_attn_metadata():
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
     speculator.num_speculative_steps = 3
     speculator._update_decode_attn_metadata = MagicMock()
-    with patch.object(TargetDependentARSpeculator, "_generate_draft"):
+    with patch.object(TargetDependentARSpeculator, "_generate_draft" if vllm_version_is("0.33.0") else "_decode"):
         speculator._generate_draft(2, 4, None, None, None)
     speculator._update_decode_attn_metadata.assert_not_called()
 
@@ -268,7 +236,6 @@ def test_prefill_filters_target_only_metadata():
     attn_metadata = {"draft": draft_metadata, "target": target_metadata}
     slot_mappings = {"draft": torch.tensor([1])}
     speculator.draft_attn_layer_names = {"draft"}
-    speculator._prepare_replicated_prefill_attn = MagicMock(return_value=(attn_metadata, slot_mappings))
     with patch.object(TargetDependentARSpeculator, "_prefill") as parent_prefill:
         speculator._prefill(2, 4, attn_metadata, slot_mappings, None)
     expected_args = [
@@ -280,26 +247,56 @@ def test_prefill_filters_target_only_metadata():
         CUDAGraphMode.NONE,
         None,
     ]
-    if not vllm_version_is("0.32.0"):
-        # vLLM main added `skip_sample` and forwards it to the upstream _prefill.
-        expected_args.append(False)
+    # vLLM main added `skip_sample` and forwards it to the upstream _prefill.
+    expected_args.append(False)
     parent_prefill.assert_called_once_with(*expected_args)
 
 
-def test_prefill_forwards_skip_sample_on_main():
-    """main's propose passes `skip_sample`; the override must forward it upstream."""
+@pytest.mark.parametrize("runtime_mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL])
+def test_prefill_preserves_mla_query_lengths_from_caller(runtime_mode):
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
+    speculator.draft_attn_layer_names = {"draft"}
+    speculator._lmhead_pad_size_context = MagicMock(side_effect=lambda **kwargs: nullcontext())
+    metadata = AscendMLAMetadata.__new__(AscendMLAMetadata)
+    metadata.num_decode_tokens = 2
+    metadata.decode = SimpleNamespace(actual_seq_lengths_q=[2, 4, 6, 8], seq_lens_list=[10, 0, 0, 0])
+    slot_mappings = {"draft": object()}
+    metadata.slot_mapping = slot_mappings["draft"]
+    with patch.object(TargetDependentARSpeculator, "_prefill") as parent_prefill:
+        speculator._prefill(1, 8, {"draft": metadata}, slot_mappings, None, runtime_mode)
+
+    parent_prefill.assert_called_once()
+    forwarded = parent_prefill.call_args.args[2]["draft"]
+    assert forwarded is metadata
+    assert metadata.decode.actual_seq_lengths_q == [2, 4, 6, 8]
+    assert parent_prefill.call_args.args[3] is slot_mappings
+
+
+@pytest.mark.parametrize("skip_sample", [False, True])
+def test_prefill_forwards_skip_sample_on_main(skip_sample):
+    """Preserve upstream prefill arguments inside the LMHead padding scope."""
+    speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
+    speculator.method = "mtp"
+    speculator.max_num_reqs = 8
+    speculator.num_speculative_steps = 3
+    speculator.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=1))
     draft_metadata = object()
     attn_metadata = {"draft": draft_metadata}
     speculator.draft_attn_layer_names = {"draft"}
-    speculator._prepare_replicated_prefill_attn = MagicMock(return_value=(attn_metadata, None))
-    with patch.object(TargetDependentARSpeculator, "_prefill") as parent_prefill:
-        speculator._prefill(2, 4, attn_metadata, None, None, skip_sample=True)
-    if vllm_version_is("0.32.0"):
-        assert "skip_sample" not in parent_prefill.call_args.kwargs
-        assert len(parent_prefill.call_args.args) == 7
-    else:
-        assert parent_prefill.call_args.args[-1] is True
+
+    def parent(*args):
+        assert speculator._lmhead_pad_size == 2
+
+    module = "vllm_ascend.worker.v2.spec_decode."
+    with (
+        patch(module + "lmhead_tp_utils.lmhead_tp_enable", return_value=True),
+        patch.object(TargetDependentARSpeculator, "_prefill", side_effect=parent) as parent_prefill,
+    ):
+        speculator._prefill(2, 4, attn_metadata, None, None, skip_sample=skip_sample)
+    expected_args = [2, 4, attn_metadata, None, None, CUDAGraphMode.NONE, None]
+    expected_args.append(skip_sample)
+    parent_prefill.assert_called_once_with(*expected_args)
+    assert speculator._lmhead_pad_size is None
 
 
 def test_build_uniform_attn_metadata_sets_decode_only():
@@ -440,12 +437,9 @@ def test_build_draft_attn_metadatas_prefill():
     draft_metadata = object()
     speculator.model_state = SimpleNamespace(attn_metadata={"draft": draft_metadata, "target": object()})
     speculator.draft_attn_layer_names = {"draft"}
-    prepared = {"draft": object()}
-    speculator._prepare_replicated_prefill_attn = MagicMock(return_value=(prepared, None))
+    # Draft prefill replays with the target's (rank-local under PCP) metadata.
     result = speculator.build_draft_attn_metadatas(4, 8, True)
-    assert result == [prepared]
-    filtered = speculator._prepare_replicated_prefill_attn.call_args.args[0]
-    assert filtered == {"draft": draft_metadata}
+    assert result == [{"draft": draft_metadata}]
 
 
 def test_build_draft_attn_metadatas_decode_updates_each_step():
@@ -512,10 +506,7 @@ def test_update_decode_attn_metadata_gqa():
     """Test updating decode attention metadata for GQA."""
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
     speculator.attn_architecture = "GQA"
-    if vllm_version_is("0.32.0"):
-        speculator.max_model_len = 32
-    else:
-        speculator.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=32))
+    speculator.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=32))
     speculator.use_dcp = False
     metadata = SimpleNamespace(
         seq_lens_cpu=torch.zeros(4, dtype=torch.int32),
@@ -554,10 +545,7 @@ def test_build_fia_params_decode():
     speculator.draft_attn_layer_names = {"draft"}
     speculator.input_batch = SimpleNamespace(num_reqs=2, seq_lens_np=np.array([10, 29]))
     speculator.num_speculative_steps = 3
-    if vllm_version_is("0.32.0"):
-        speculator.max_model_len = 30
-    else:
-        speculator.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=30))
+    speculator.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=30))
     result = speculator.build_fia_params(3, {"draft": metadata}, False)
     assert len(result) == 2
     assert result[0]["actual_seq_lengths"] == [1, 2, 3]
@@ -610,11 +598,11 @@ def test_capture_single_step_only_captures_prefill():
     speculator.target_input_buffers = object()
     speculator.block_tables = object()
     speculator.target_attn_groups = object()
-    speculator.replicated_pcp = False
     speculator.kv_cache_config = object()
+    speculator.pcp_manager = None
     speculator.num_speculative_steps = 1
     with patch(
-        "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator.disable_target_pcp_for_replicated_draft",
+        "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator.build_attn_metadata_wrapper",
         return_value=nullcontext(),
     ):
         speculator.capture()
@@ -639,19 +627,13 @@ def test_capture_multi_step_captures_decode():
     speculator.block_tables = object()
     speculator.target_attn_groups = object()
     speculator.attn_groups = object()
-    speculator.replicated_pcp = False
     speculator.kv_cache_config = object()
+    speculator.pcp_manager = None
     speculator.num_speculative_steps = 3
     speculator._eplb_source_is_padding = torch.zeros(8, dtype=torch.bool)
-    with (
-        patch(
-            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator.disable_target_pcp_for_replicated_draft",
-            return_value=nullcontext(),
-        ),
-        patch(
-            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator.build_attn_metadata_wrapper",
-            return_value=nullcontext(),
-        ),
+    with patch(
+        "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator.build_attn_metadata_wrapper",
+        return_value=nullcontext(),
     ):
         speculator.capture()
     assert speculator._eplb_source_is_padding.all()
@@ -659,52 +641,38 @@ def test_capture_multi_step_captures_decode():
     speculator.decode_cudagraph_manager.capture.assert_called_once()
 
 
-def test_propose_replicated_pcp_disables_dp_sync():
-    """Test replicated PCP disables DP synchronization during propose."""
-    speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
-    speculator.replicated_pcp = True
-    speculator.pcp_manager = None
-    input_batch = object()
-    args = [object() for _ in range(10)]
-    dp_sync = object()
-    expected = object()
-    with (
-        patch(
-            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator.disable_target_pcp_for_replicated_draft",
-            return_value=nullcontext(),
-        ),
-        patch(
-            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator.build_attn_metadata_wrapper",
-            return_value=nullcontext(),
-        ),
-        patch(
-            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator.torch_gather_wrapper",
-            return_value=nullcontext(),
-        ),
-        patch.object(TargetDependentARSpeculator, "propose", return_value=expected) as parent_propose,
-    ):
-        # vLLM #60754 renamed `dp_sync` -> `dp_sync_state` on main.
-        dp_sync_kwarg = "dp_sync_state"
-        result = speculator.propose(input_batch, *args, **{dp_sync_kwarg: dp_sync})
-    assert speculator.input_batch is input_batch
-    assert parent_propose.call_args.args[11] is None
-    assert result is expected
-
-
-def test_propose_accepts_main_dp_sync_state_and_num_speculative_tokens():
+@pytest.mark.parametrize(
+    "adaptive,dummy,sync_uniform,clear_uniform",
+    [
+        (True, True, 6, True),
+        (True, False, 6, False),
+        (False, True, 6, False),
+        (False, False, 6, False),
+        (True, True, None, False),
+    ],
+)
+def test_propose_accepts_main_dp_sync_state_and_num_speculative_tokens(adaptive, dummy, sync_uniform, clear_uniform):
     # vLLM #60754 renamed the DP-sync argument to `dp_sync_state` on main and
     # vLLM #60335 added `num_speculative_tokens`; both are keyword-only upstream.
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
-    speculator.replicated_pcp = False
+    speculator.dp_size = 2
+    speculator.pcp_manager = None
+    speculator.enable_adaptive_verification = adaptive
     input_batch = object()
-    args = [object() for _ in range(10)]
-    dp_sync = object()
+    attn_metadata = {"draft": object()}
+    args = [object() for _ in range(9)]
+    sync_kwargs = dict(
+        num_tokens_across_dp=torch.tensor([8, 8]),
+        uniform_token_count=sync_uniform,
+        eager=False,
+        num_reqs=1,
+        skip_drafts=True,
+    )
+    if not vllm_version_is("0.33.0"):
+        sync_kwargs["max_query_len"] = 6
+    dp_sync = DPSyncState(**sync_kwargs)
     expected = object()
     with (
-        patch(
-            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator.disable_target_pcp_for_replicated_draft",
-            return_value=nullcontext(),
-        ),
         patch(
             "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator.build_attn_metadata_wrapper",
             return_value=nullcontext(),
@@ -715,55 +683,20 @@ def test_propose_accepts_main_dp_sync_state_and_num_speculative_tokens():
         ),
         patch.object(TargetDependentARSpeculator, "propose", return_value=expected) as parent_propose,
     ):
-        result = speculator.propose(input_batch, *args, dp_sync_state=dp_sync, num_speculative_tokens=2)
+        result = speculator.propose(
+            input_batch, attn_metadata, *args, dp_sync_state=dp_sync, dummy_run=dummy, num_speculative_tokens=2
+        )
     assert result is expected
-    assert parent_propose.call_args.args[11] is dp_sync
+    assert parent_propose.call_args.args[1] == attn_metadata
+    forwarded = parent_propose.call_args.args[11]
+    assert (forwarded is dp_sync) is (not clear_uniform)
+    assert forwarded.uniform_token_count == (None if clear_uniform else sync_uniform)
+    assert dp_sync.uniform_token_count == sync_uniform
+    assert forwarded.num_tokens_across_dp is dp_sync.num_tokens_across_dp
+    assert (forwarded.num_reqs, forwarded.eager, forwarded.skip_drafts) == (1, False, True)
+    if not vllm_version_is("0.33.0"):
+        assert forwarded.max_query_len == 6
     assert parent_propose.call_args.kwargs.get("num_speculative_tokens") == 2
-
-
-def test_propose_consumes_restored_global_inputs():
-    # PCP restoration owns the real token extent and request boundaries.
-    # Draft consumes that view without copying or trimming the input buffers.
-    speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
-    speculator.replicated_pcp = True
-    speculator.pcp_manager = SimpleNamespace(is_decode_sharded=True)
-    input_batch = SimpleNamespace(
-        num_reqs=3,
-        num_tokens=12,
-        num_tokens_after_padding=12,
-        query_start_loc=torch.tensor([0, 4, 8, 12]),
-        query_start_loc_np=np.array([0, 4, 8, 12]),
-        input_ids=torch.arange(16),
-        positions=torch.arange(16),
-        is_padding=torch.arange(16) >= 12,
-    )
-    hidden = torch.randn(12, 8)
-    auxiliary = [torch.randn(12, 4)]
-    args = [object(), object(), hidden, auxiliary, *[object() for _ in range(6)]]
-    with (
-        patch(
-            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator.disable_target_pcp_for_replicated_draft",
-            return_value=nullcontext(),
-        ),
-        patch(
-            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator.build_attn_metadata_wrapper",
-            return_value=nullcontext(),
-        ),
-        patch(
-            "vllm_ascend.worker.v2.spec_decode.target_dependent_ar.speculator.torch_gather_wrapper",
-            return_value=nullcontext(),
-        ),
-        patch.object(TargetDependentARSpeculator, "propose") as parent_propose,
-    ):
-        speculator.propose(input_batch, *args)
-    draft_batch = parent_propose.call_args.args[0]
-    assert draft_batch is input_batch
-    assert draft_batch.num_tokens_after_padding == 12
-    assert draft_batch.input_ids.shape[0] == draft_batch.positions.shape[0] == draft_batch.is_padding.shape[0] == 16
-    assert input_batch.positions.shape[0] == 16
-    assert draft_batch.query_start_loc[-1] == draft_batch.query_start_loc_np[-1] == 12
-    assert parent_propose.call_args.args[3] is hidden
-    assert parent_propose.call_args.args[4] is auxiliary
 
 
 def test_init_dcp_disabled():
@@ -801,11 +734,7 @@ def test_init_dcp_enabled():
     dcp_manager_cls.assert_called_once_with(
         dcp_world_size=2,
         dcp_rank=1,
-        max_buffer_num_tokens=128,
-        max_num_reqs=16,
-        device=torch.device("cpu"),
         vllm_config=speculator.draft_vllm_config,
-        use_async_scheduling=True,
     )
 
 
@@ -813,10 +742,7 @@ def test_update_decode_attn_metadata_mla_with_dcp():
     """Test MLA decode metadata updates with DCP enabled."""
     speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
     speculator.attn_architecture = "MLA"
-    if vllm_version_is("0.32.0"):
-        speculator.max_model_len = 32
-    else:
-        speculator.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=32))
+    speculator.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=32))
     speculator.use_dcp = True
 
     local_seq_lens = torch.tensor([6, 11, 0], dtype=torch.int32)
@@ -911,3 +837,28 @@ def test_eplb_draft_mask_tracks_prefill_decode_and_dummy_replay():
     speculator._eplb_dummy_run = True
     speculator.on_prefill_begin(1)
     assert mask.all()
+
+
+@pytest.mark.parametrize("num_reqs,num_tokens", [(1, 4), (2, 8), (4, 16)])
+def test_generate_draft_capture_uses_request_rows(num_reqs, num_tokens):
+    speculator = AscendTargetDependentARSpeculator.__new__(AscendTargetDependentARSpeculator)
+    speculator.method = "mtp"
+    speculator.max_num_reqs = 8
+    speculator.num_speculative_steps = 3
+    speculator.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(decode_context_parallel_size=1))
+
+    def parent(*args):
+        assert speculator._lmhead_pad_size == num_reqs
+
+    module = "vllm_ascend.worker.v2.spec_decode."
+    # #60989 renamed the native single-step draft entry point on main.
+    parent_method = "_generate_draft" if vllm_version_is("0.33.0") else "_decode"
+    with (
+        patch(module + "lmhead_tp_utils.lmhead_tp_enable", return_value=True),
+        patch.object(TargetDependentARSpeculator, parent_method, side_effect=parent) as generate,
+    ):
+        speculator._generate_draft(num_reqs, num_tokens, None, None, None)
+    expected = [num_reqs, num_tokens, None, None, None, CUDAGraphMode.NONE]
+    expected.append(None)
+    generate.assert_called_once_with(*expected)
+    assert speculator._lmhead_pad_size is None
