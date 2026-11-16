@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GLM-5.3-Flash KDA layer with separate convolutions and a bounded safe gate."""
 
+from typing import TYPE_CHECKING
+
 import torch
 from torch import nn
 from transformers import Glm5NextTextConfig
@@ -23,10 +25,8 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.models.kimi_k3.nvidia.ops.recoverssm import KDARecoverSSMRecords
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
-
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.utils import (
     maybe_save_kv_layer_to_connector,
@@ -40,6 +40,9 @@ from vllm_ascend.models.glm5next.ops.kda import KDA_MAX_RECURRENT_TOKENS, chunk_
 from vllm_ascend.models.glm5next.recoverssm_config import use_glm_recoverssm
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNHostMetadataBackend
 from vllm_ascend.ops.triton.kda.recoverssm import kda_recoverssm_verify
+
+if TYPE_CHECKING:
+    from vllm.models.kimi_k3.nvidia.ops.recoverssm import KDARecoverSSMRecords
 
 
 class Glm5NextGDNHostMetadataBackend(AscendGDNHostMetadataBackend):
@@ -369,7 +372,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         set_weight_attrs(self.A_log, {"weight_loader": self._a_log_weight_loader})
         self.recoverssm_records: KDARecoverSSMRecords | None = None
         if self.use_recoverssm:
-            self.recoverssm_records = KDARecoverSSMRecords.allocate(
+            # Importing Kimi's package can load FLA and initialize an NPU.
+            # Defer it until the worker has selected its device.
+            from vllm.models.kimi_k3.nvidia.ops.recoverssm import KDARecoverSSMRecords as KDARecords
+
+            self.recoverssm_records = KDARecords.allocate(
                 vllm_config.scheduler_config.max_num_seqs,
                 self.local_num_heads,
                 self.num_spec + 1,
