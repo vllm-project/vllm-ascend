@@ -148,6 +148,7 @@ def handle():
         begin_forward=Mock(),
         eager_host_mirror=False,
         max_num_reqs=2,
+        max_swap_rows=16,
         request_state_indices=torch.tensor([7, 9], dtype=torch.int32),
         is_group_leader=True,
     )
