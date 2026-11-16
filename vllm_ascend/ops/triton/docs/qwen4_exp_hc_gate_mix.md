@@ -140,7 +140,10 @@ The suite uses the real Qwen4Exp operator shape, `hc_count=4`,
   than `1`;
 - NPUGraph replay after refreshing both input buffers; and
 - a forced `WIDE_OFFSETS=True` launch checked bitwise against the legacy
-  kernel.
+  kernel; and
+- compile reuse across exact-row and row-tail batch counts. Within each class,
+  changing the row count must not create an additional compiled variant; the
+  two classes may compile once each because `EVEN_ROWS` is a constexpr.
 
 CPU dispatch and hardware-capability tests remain in the unit-test suite with
 mocked Triton launch entry points:

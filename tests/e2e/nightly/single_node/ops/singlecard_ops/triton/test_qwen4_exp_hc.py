@@ -6,6 +6,7 @@ import torch
 from vllm.triton_utils import HAS_TRITON, triton
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.ops.triton.qwen4_exp import hc as hc_module
 from vllm_ascend.ops.triton.qwen4_exp.hc import (
     _HC_GATE_MIX_BLOCK_SIZE,
     _HC_GATE_MIX_ROWS_PER_BLOCK,
@@ -153,3 +154,41 @@ def test_hc_gate_mix_row_block_wide_offsets_matches_legacy() -> None:
     torch.npu.synchronize()
 
     torch.testing.assert_close(actual, legacy, atol=0, rtol=0)
+
+
+@torch.inference_mode()
+def test_hc_gate_mix_row_counts_reuse_compilation(monkeypatch: pytest.MonkeyPatch) -> None:
+    max_rows = 2057
+    x_backing = _make_input(max_rows, HYPER_HIDDEN_SIZE, row_strided=True)
+    gate_backing = _make_input(max_rows, HYPER_HIDDEN_SIZE, row_strided=True)
+
+    isolated_kernel = triton.jit(
+        _hc_gate_mix_row_block_kernel.fn,
+        do_not_specialize=_hc_gate_mix_row_block_kernel.do_not_specialize,
+    )
+    compile_events = []
+    original_compile = isolated_kernel._do_compile
+
+    def record_compile(*args, **kwargs):
+        compile_events.append(args[0])
+        return original_compile(*args, **kwargs)
+
+    monkeypatch.setattr(isolated_kernel, "_do_compile", record_compile)
+    monkeypatch.setattr(hc_module, "_hc_gate_mix_row_block_kernel", isolated_kernel)
+
+    for expected_compile_count, row_counts in enumerate(
+        (
+            (1024, 1032, 2048, 2056),
+            (1025, 1033, 2057),
+        ),
+        start=1,
+    ):
+        for rows in row_counts:
+            x = x_backing[:rows]
+            gate = gate_backing[:rows]
+            actual = hc_gate_mix(x, gate, HC_COUNT)
+            legacy = _legacy_gate_mix(x, gate)
+            torch.npu.synchronize()
+
+            torch.testing.assert_close(actual, legacy, atol=0, rtol=0)
+            assert len(compile_events) == expected_compile_count, (rows, compile_events)
