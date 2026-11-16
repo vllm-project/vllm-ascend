@@ -11,9 +11,10 @@ from copy import copy
 from typing import TYPE_CHECKING, Any
 
 from vllm.logger import logger
-from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import MambaSpec, SlidingWindowSpec, UniformTypeKVCacheSpecs
 
 from vllm_ascend.ascend_config import KVPPConfig
+from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ReqMeta,
     block_hash_to_str,
@@ -123,6 +124,46 @@ def validate_pp_groups(kv_cache_config: Any, parallel_config: Any) -> None:
         raise ValueError(
             f"Mooncake layerwise PP requires each stage to own layers in every KV cache group; empty groups: {empty}. "
             "Use a partition covering all groups, or disable layerwise pooling. Draft-only groups are not supported."
+        )
+
+
+def validate_dcp_groups(kv_cache_config: Any) -> None:
+    """Reject cache groups that cannot be sharded across DCP ranks."""
+    if kv_cache_config is None:
+        return None
+    groups = getattr(kv_cache_config, "kv_cache_groups", None) or []
+    if not groups:
+        return None
+    group_block_sizes: list[int] = []
+    for group in groups:
+        spec = group.kv_cache_spec
+        specs = spec.kv_cache_specs.values() if isinstance(spec, UniformTypeKVCacheSpecs) else (spec,)
+        for sub_spec in specs:
+            if isinstance(sub_spec, SlidingWindowSpec):
+                raise ValueError("Mooncake layerwise DCP does not support sliding-window cache groups.")
+            if isinstance(sub_spec, MambaSpec) and getattr(sub_spec, "mamba_cache_mode", None) == "align":
+                raise ValueError("Mooncake layerwise DCP does not support recurrent/align-state cache groups.")
+            if not getattr(sub_spec, "dcp_sharded", False):
+                raise ValueError(
+                    "Mooncake layerwise DCP requires every cache group to be DCP-sharded; "
+                    f"found {type(sub_spec).__name__}."
+                )
+        if not is_prefix_cacheable(spec):
+            continue
+        block_size_signature = group_block_size_signature(group)
+        if len(block_size_signature) != 1:
+            raise ValueError(
+                "Mooncake layerwise DCP requires one block size per cache group; "
+                f"got {block_size_signature} for layers {list(group.layer_names)}."
+            )
+        group_block_sizes.append(block_size_signature[0])
+    if not group_block_sizes:
+        return None
+    smallest_block_size = min(group_block_sizes)
+    if any(size % smallest_block_size for size in group_block_sizes):
+        raise ValueError(
+            "Mooncake layerwise DCP requires every cacheable block size to be a multiple "
+            f"of the smallest block size ({smallest_block_size}); got {sorted(set(group_block_sizes))}."
         )
 
 
