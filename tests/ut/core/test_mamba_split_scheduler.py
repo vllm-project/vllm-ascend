@@ -39,8 +39,8 @@ def _make_scheduler(
         num_speculative_tokens=num_speculative_tokens,
     )
     if config.speculative_config is not None:
-        # Use the real MTP configuration and derived lookahead properties.
-        config.speculative_config.draft_model_config.hf_config.num_nextn_predict_layers = num_speculative_tokens
+        # Current public hybrid checkpoints have one MTP module, even for K > 1.
+        config.speculative_config.draft_model_config.hf_config.num_nextn_predict_layers = 1
         config.speculative_config.disable_eagle_block_drop = not eagle_block_drop
     # BalanceScheduler initializes real runtime reporting; isolate its writes
     # without requiring the source checkout to be writable.
@@ -159,11 +159,11 @@ def test_generic_hybrid_scheduler_keeps_chunks_without_an_alignment_stop(monkeyp
 
 @pytest.mark.parametrize("scheduler_cls", [Scheduler, AsyncScheduler])
 @pytest.mark.parametrize("role", ["kv_consumer", "kv_both"])
-@pytest.mark.parametrize("lookahead", [1, 2, 4])
+@pytest.mark.parametrize("num_speculative_tokens", [1, 2, 4])
 @pytest.mark.parametrize("eagle_block_drop", [False, True])
 @pytest.mark.parametrize("budget", [16, 32])
-def test_mtp_consumer_prefill_keeps_legacy_forward_progress(
-    monkeypatch, tmp_path, scheduler_cls, role, lookahead, eagle_block_drop, budget
+def test_single_module_mtp_consumer_prefill_keeps_checkpoints_and_progress(
+    monkeypatch, tmp_path, scheduler_cls, role, num_speculative_tokens, eagle_block_drop, budget
 ):
     scheduler = _make_scheduler(
         monkeypatch,
@@ -174,21 +174,28 @@ def test_mtp_consumer_prefill_keeps_legacy_forward_progress(
         budget=budget,
         role=role,
         speculative_method="mtp",
-        num_speculative_tokens=lookahead,
+        num_speculative_tokens=num_speculative_tokens,
         eagle_block_drop=eagle_block_drop,
     )
-    assert scheduler.vllm_config.speculative_config.method == "mtp"
-    assert scheduler.num_prefill_lookahead == lookahead
+    config = scheduler.vllm_config.speculative_config
+    assert config.method == "mtp"
+    assert config.draft_model_config.hf_config.num_nextn_predict_layers == 1
+    assert not config.use_multi_module_mtp()
+    assert scheduler.num_prefill_lookahead == 1
     assert scheduler.use_eagle and scheduler.use_eagle_block_drop == eagle_block_drop
     assert scheduler.num_hash_lookahead_tokens == 0
     assert scheduler.need_mamba_block_aligned_split
     assert not scheduler.mamba_has_prefill_checkpoint_blocks
+    split = Mock(wraps=scheduler._mamba_block_aligned_split)
+    monkeypatch.setattr(scheduler, "_mamba_block_aligned_split", split)
     request = create_request(401, num_tokens=49, block_size=16)
 
     intervals = _prefill_intervals(scheduler, request)
 
     assert intervals[-1][1] == 49
-    if budget == 32:
-        assert intervals == [(0, 32), (32, 49)]
-    # Every unfinished prefill leaves the real MTP drafter's prompt runway.
-    assert all(49 - end >= lookahead for _, end in intervals[:-1])
+    assert split.call_count == len(intervals)
+    assert all(end % 16 == 0 for _, end in intervals[:-1])
+    # Without block drop, the final full checkpoint must be materialized.
+    if not eagle_block_drop:
+        assert intervals[-2][1] == 48
+    assert all(49 - end >= 1 for _, end in intervals[:-1])

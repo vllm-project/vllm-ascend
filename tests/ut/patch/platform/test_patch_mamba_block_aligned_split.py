@@ -462,14 +462,16 @@ def test_producer_handles_missing_drop_attributes(monkeypatch):
 
 @pytest.mark.parametrize("uses_sparse_index_kpool", [False, True])
 @pytest.mark.parametrize(("computed", "local", "external"), [(1152, 0, 0), (0, 1152, 0), (0, 0, 1152)])
-def test_mtp_consumer_preserves_legacy_window_after_any_prefix(uses_sparse_index_kpool, computed, local, external):
+def test_single_module_mtp_consumer_keeps_checkpoint_after_any_prefix(
+    uses_sparse_index_kpool, computed, local, external
+):
     scheduler = _scheduler(is_kv_consumer=True, uses_sparse_index_kpool=uses_sparse_index_kpool)
     scheduler.vllm_config.speculative_config = SimpleNamespace(method="mtp")
     scheduler.block_size = scheduler.cache_config.block_size = 1152
     scheduler.use_eagle = scheduler.use_eagle_block_drop = False
     request = _request(num_computed_tokens=computed, num_prompt_tokens=2305, num_tokens=2305)
 
-    assert _mamba_block_aligned_split(scheduler, request, 1153, local, external) == 1153
+    assert _mamba_block_aligned_split(scheduler, request, 1153, local, external) == 1152
 
 
 @pytest.mark.parametrize("uses_sparse_index_kpool", [False, True])
@@ -483,8 +485,8 @@ def test_mtp_consumer_without_computed_prefix_keeps_original_split(uses_sparse_i
     assert _mamba_block_aligned_split(scheduler, request, 2305) == 2304
 
 
-@pytest.mark.parametrize("method", ["eagle", "eagle3"])
-def test_mtp_consumer_bypass_does_not_apply_to_other_eagle_methods(method):
+@pytest.mark.parametrize("method", ["mtp", "eagle", "eagle3", "dspark", "dflash"])
+def test_speculative_consumer_keeps_checkpoint(method):
     scheduler = _scheduler(is_kv_consumer=True)
     scheduler.vllm_config.speculative_config = SimpleNamespace(method=method)
     scheduler.block_size = scheduler.cache_config.block_size = 16
