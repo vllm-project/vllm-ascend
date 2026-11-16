@@ -3,34 +3,87 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
 import torch
 
 from vllm_ascend.models.qwen4_exp import qsa
 
 
-def test_main_uses_ascend_projection_and_draft_uses_upstream(monkeypatch) -> None:
-    assert "_project_qkv_gate" in qsa.AscendQwen4ExpQSAAttention.__dict__
-    assert "_main_fused_norm_rope_eligible" in qsa.AscendQwen4ExpQSAAttention.__dict__
+def _plain_rotary_embedding(dtype: torch.dtype) -> SimpleNamespace:
+    # Position 0 leaves the rotary channels alone, and position 1 rotates by pi/2.
+    cache = torch.zeros((2, 64), dtype=dtype)
+    cache[0, :32] = 1
+    cache[1, 32:] = 1
+    return SimpleNamespace(
+        rotary_dim=64,
+        is_neox_style=True,
+        mrope_section=None,
+        _match_cos_sin_cache_dtype=lambda tensor: cache.to(tensor),
+    )
 
-    upstream_projection = Mock(return_value=("q", "k", "v", "gate"))
-    monkeypatch.setattr(
-        qsa.upstream_qsa.Qwen4ExpQSAAttention,
-        "_project_qkv_gate",
-        upstream_projection,
-    )
-    monkeypatch.setattr(
-        qsa,
-        "get_forward_context",
-        lambda: SimpleNamespace(),
-    )
+
+def _expected_rotary_rows(rows: torch.Tensor) -> torch.Tensor:
+    expected = rows.clone()
+    expected[1, ..., :32] = -rows[1, ..., 32:64]
+    expected[1, ..., 32:64] = rows[1, ..., :32]
+    return expected
+
+
+@pytest.mark.parametrize("layer_name", ["model.layers.3.self_attn", "mtp.layers.48.self_attn"])
+@pytest.mark.parametrize("has_gate", [True, False])
+def test_main_and_draft_project_plain_rope(layer_name: str, has_gate: bool) -> None:
     layer = qsa.AscendQwen4ExpQSAAttention.__new__(qsa.AscendQwen4ExpQSAAttention)
     torch.nn.Module.__init__(layer)
-    layer.layer_name = "mtp.layers.48.self_attn.attn"
-    qkv = torch.empty((2, 8))
-    positions = torch.arange(2)
+    layer.layer_name = layer_name
+    layer.head_dim = 256
+    layer.num_heads = 2
+    layer.num_kv_heads = 1
+    layer.q_size = 512
+    layer.kv_size = 256
+    layer.attn_output_gate = has_gate
+    layer.q_norm = torch.nn.RMSNorm(256, eps=1e-6, dtype=torch.bfloat16)
+    layer.k_norm = torch.nn.RMSNorm(256, eps=1e-6, dtype=torch.bfloat16)
+    layer.rotary_emb = _plain_rotary_embedding(torch.bfloat16)
 
-    assert layer._project_qkv_gate(qkv, positions) == ("q", "k", "v", "gate")
-    upstream_projection.assert_called_once_with(qkv, positions)
+    query = torch.arange(1024, dtype=torch.bfloat16).reshape(2, 2, 256)
+    key = torch.arange(512, dtype=torch.bfloat16).reshape(2, 1, 256) + 1
+    value = key + 100
+    gate = query + 200
+    q_gate = torch.cat((query, gate), dim=-1) if has_gate else query
+    qkv = torch.cat((q_gate.flatten(1), key.flatten(1), value.flatten(1)), dim=-1)
+    positions = torch.tensor([[0, 1], [1, 0], [1, 0]])
+
+    q, k, v, actual_gate = layer._project_qkv_gate(qkv, positions)
+
+    torch.testing.assert_close(q, _expected_rotary_rows(layer.q_norm(query)).flatten(1))
+    torch.testing.assert_close(k, _expected_rotary_rows(layer.k_norm(key)).flatten(1))
+    torch.testing.assert_close(v, value.flatten(1))
+    if has_gate:
+        torch.testing.assert_close(actual_gate, gate.flatten(1))
+    else:
+        assert actual_gate is None
+
+
+def test_indexer_falls_back_for_plain_rope() -> None:
+    indexer = qsa.AscendQSAIndexer.__new__(qsa.AscendQSAIndexer)
+    torch.nn.Module.__init__(indexer)
+    indexer.index_head_dim = 128
+    indexer.index_n_heads = 2
+    indexer.index_kv_heads = 1
+    indexer.rotary_emb = _plain_rotary_embedding(torch.bfloat16)
+    indexer.q_layernorm = torch.nn.RMSNorm(128, eps=1e-6, dtype=torch.bfloat16)
+    indexer.k_layernorm = torch.nn.RMSNorm(128, eps=1e-6, dtype=torch.bfloat16)
+    query = torch.arange(512, dtype=torch.bfloat16).reshape(2, 2, 128)
+    raw_key = torch.arange(256, dtype=torch.bfloat16).reshape(2, 1, 128) + 1
+    indexer.index_qk_proj = Mock(return_value=(torch.cat((query.flatten(1), raw_key.flatten(1)), dim=-1), None))
+    positions = torch.tensor([[0, 1], [1, 0], [1, 0]])
+
+    actual_query, actual_raw_key = indexer.project_qk(torch.empty(2, 1), positions)
+    compressed_key = indexer.normalize_compressed_keys(raw_key, positions.T)
+
+    torch.testing.assert_close(actual_query, _expected_rotary_rows(indexer.q_layernorm(query)))
+    torch.testing.assert_close(actual_raw_key, raw_key)
+    torch.testing.assert_close(compressed_key, _expected_rotary_rows(indexer.k_layernorm(raw_key)))
 
 
 def test_fused_prepare_upstream_abi_materializes_qkv_and_gate(monkeypatch) -> None:

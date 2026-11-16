@@ -116,7 +116,9 @@ def apply_qsa_rope(
     """Apply RoPE using the QSA head width rather than the main Q/K width."""
     rotary_dim = int(rotary_emb.rotary_dim)
     cache = rotary_emb._match_cos_sin_cache_dtype(tensor)  # noqa: SLF001
-    sections = list(getattr(rotary_emb, "mrope_section", []))
+    sections = list(getattr(rotary_emb, "mrope_section", None) or [])
+    if positions.ndim == 2 and not sections:
+        positions = positions[0]
     # Keep the materialized normalization/RoPE boundary portable on Ascend.
     # The CUDA/ROCm variants use a Triton MRoPE gather here; advanced indexing
     # has identical semantics and is graph-capturable by the NPU backend.
@@ -242,7 +244,7 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             first_positions = first_positions[:, 0]
         pooled = pooled.reshape(-1, 1, self.index_head_dim)
         if not self._fused_norm_rope_eligible(pooled, first_positions):
-            raise ValueError("QSA compressed-key fused norm+RoPE ABI is not satisfied")
+            return apply_qsa_rope(self.rotary_emb, first_positions, self.k_layernorm(pooled))
         return self._fused_norm_rope(
             pooled,
             self.k_layernorm,
@@ -304,9 +306,10 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
             dim=-1,
         )
         q = q_raw.reshape(-1, self.index_n_heads, self.index_head_dim)
-        if not self._fused_norm_rope_eligible(q, positions):
-            raise ValueError("QSA query fused norm+RoPE ABI is not satisfied")
-        q = self._fused_norm_rope(q, self.q_layernorm, positions)
+        if self._fused_norm_rope_eligible(q, positions):
+            q = self._fused_norm_rope(q, self.q_layernorm, positions)
+        else:
+            q = apply_qsa_rope(self.rotary_emb, positions, self.q_layernorm(q))
         return q, token_k.reshape(-1, 1, self.index_head_dim)
 
     def _update_and_compress(
@@ -589,8 +592,8 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
             and getattr(self.rotary_emb, "mrope_interleaved", False)
             and section is not None
             and list(section) == [11, 11, 10]
-            and positions.ndim in (1, 2)
-            and (positions.ndim == 1 or positions.shape[0] == 3)
+            and positions.ndim == 2
+            and positions.shape[0] == 3
         )
 
     def _project_qkv_gate(
@@ -606,10 +609,15 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
         # decomposition for MTP.
         # ForwardContext has no draft-model flag. The layer name is fixed when
         # the target or MTP model is built and remains stable during graph replay.
-        if self.layer_name.startswith("mtp."):
-            return super()._project_qkv_gate(qkv, positions)
-        if not self._main_fused_norm_rope_eligible(qkv, positions):
-            raise ValueError("QSA main-attention fused norm+RoPE ABI is not satisfied")
+        if self.layer_name.startswith("mtp.") or not self._main_fused_norm_rope_eligible(qkv, positions):
+            gate_size = self.q_size if self.attn_output_gate else 0
+            q_gate, k, v = qkv.split((self.q_size + gate_size, self.kv_size, self.kv_size), dim=-1)
+            q_gate = q_gate.reshape(-1, self.num_heads, self.head_dim + gate_size // self.num_heads)
+            q, gate = q_gate.split((self.head_dim, gate_size // self.num_heads), dim=-1)
+            k = k.reshape(-1, self.num_kv_heads, self.head_dim)
+            q = apply_qsa_rope(self.rotary_emb, positions, self.q_norm(q.contiguous()))
+            k = apply_qsa_rope(self.rotary_emb, positions, self.k_norm(k.contiguous()))
+            return q.flatten(1), k.flatten(1), v.contiguous(), gate.flatten(1) if gate_size else None
 
         # Preserve valid scheduler positions while mapping padded profiling rows
         # to a safe cache entry, matching the QSA indexer path above.
