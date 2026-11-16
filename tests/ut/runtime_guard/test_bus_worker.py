@@ -141,6 +141,7 @@ def test_async_merged_bus_submit_then_drain_applies_config():
         _pending_merged_bus_dump_jobs=[],
         _pending_merged_bus_can_dump=False,
         _pending_merged_bus_is_first=False,
+        _pending_prev_needs_sample_hooks=None,
         _bus_wave_seq=0,
         _merged_bus_warn_ts=0.0,
         _refund_dropped_dump_arms=MagicMock(),
@@ -202,11 +203,13 @@ def test_async_merged_bus_warns_when_drain_waits():
         _kv_dump_jobs=[],
         _deferred_kv_dump_jobs=[],
         _apply_config_cascade=MagicMock(),
+        needs_sample_phase_hooks=lambda: False,
         _bus_worker=worker,
         _merged_bus_inflight=False,
         _pending_merged_bus_dump_jobs=[],
         _pending_merged_bus_can_dump=False,
         _pending_merged_bus_is_first=False,
+        _pending_prev_needs_sample_hooks=None,
         _bus_wave_seq=0,
         _merged_bus_warn_ts=0.0,
         _refund_dropped_dump_arms=MagicMock(),
@@ -274,6 +277,7 @@ def test_wave_head_submit_failure_refunds_handed_off_jobs():
         _kv_dump_jobs=[job],
         _deferred_kv_dump_jobs=[],
         _apply_config_cascade=MagicMock(),
+        needs_sample_phase_hooks=lambda: False,
         _refund_dropped_dump_arms=lambda jobs: refunded.append(list(jobs)),
         _drop_pending_dump_jobs=MagicMock(),
     )
@@ -322,6 +326,7 @@ def test_drain_timeout_refunds_pending_jobs_and_clears_state():
         _kv_dump_jobs=[job],
         _deferred_kv_dump_jobs=[],
         _apply_config_cascade=MagicMock(),
+        needs_sample_phase_hooks=lambda: False,
         _refund_dropped_dump_arms=lambda jobs: refunded.append(list(jobs)),
         _drop_pending_dump_jobs=MagicMock(),
     )
@@ -361,3 +366,119 @@ def test_drain_timeout_refunds_pending_jobs_and_clears_state():
     finally:
         gate.set()
         worker.stop()
+
+
+def test_tp0_drain_uses_pre_reload_hooks_for_soft_purge():
+    """TP0 bus-worker reload must not make drain see already-False hooks.
+
+    Leader ``build_config_sync_payload`` applies JSON on the bus thread before
+    end-of-wave drain. Capture ``needs_sample_phase_hooks`` at submit so a
+    True→False disable still soft-purges, then a later re-enable starts clean.
+    """
+    from vllm_ascend.observability.runtime_guard.bus_worker import DueBitsBusWorker
+    from vllm_ascend.observability.runtime_guard.state import RequestGuardStore
+
+    RequestGuardStore.reset_for_tests()
+    try:
+        store = RequestGuardStore.get()
+        store.get_or_create("r1")
+        store.set_prompt_token_ids("r1", [1, 2, 3])
+        store.append_output_ids("r1", [9, 9])
+
+        hooks_on = True
+
+        def _hooks() -> bool:
+            return hooks_on
+
+        def _build_payload():
+            # Simulate TP0 reload flipping gates before drain.
+            nonlocal hooks_on
+            hooks_on = False
+            return ({"version": 2.0, "data": {"detector": {}}}, True)
+
+        cfg = MagicMock()
+        cfg.hot_reload_enabled = True
+        cfg.config_due_local.return_value = True
+        cfg.build_config_sync_payload.side_effect = _build_payload
+        cfg.apply_config_sync_payload.return_value = True
+        cfg.report_save_sensitive_info.return_value = False
+        cfg.report_max_prompt_token_ids.return_value = 0
+        cfg.report_max_output_token_ids.return_value = 0
+        cfg.report_decode_token_ids.return_value = False
+        cfg.report_max_per_req.return_value = 0
+        cfg.apply_ascend_log_level = MagicMock()
+
+        worker = DueBitsBusWorker(name="ut-bus-tp0-purge")
+        worker.start()
+        proc = SimpleNamespace(
+            runner=SimpleNamespace(),
+            runtime_config=cfg,
+            detectors=MagicMock(),
+            action_executor=MagicMock(),
+            report_writer=MagicMock(),
+            wave_tracker=MagicMock(),
+            _kv_dump_jobs=[],
+            _deferred_kv_dump_jobs=[],
+            needs_sample_phase_hooks=_hooks,
+            _bus_worker=worker,
+            _merged_bus_inflight=False,
+            _pending_merged_bus_dump_jobs=[],
+            _pending_merged_bus_can_dump=False,
+            _pending_merged_bus_is_first=False,
+            _pending_prev_needs_sample_hooks=None,
+            _bus_wave_seq=0,
+            _merged_bus_warn_ts=0.0,
+            _refund_dropped_dump_arms=MagicMock(),
+            _drop_pending_dump_jobs=MagicMock(),
+        )
+        proc._apply_config_cascade = RuntimeGuardBusMixin._apply_config_cascade.__get__(proc)
+        proc._purge_guard_state_after_detectors_off = (
+            RuntimeGuardBusMixin._purge_guard_state_after_detectors_off.__get__(proc)
+        )
+        proc._prepare_merged_bus_locals = RuntimeGuardBusMixin._prepare_merged_bus_locals.__get__(proc)
+        proc._wave_head_merged_bus = RuntimeGuardBusMixin._wave_head_merged_bus.__get__(proc)
+        proc._drain_merged_bus = RuntimeGuardBusMixin._drain_merged_bus.__get__(proc)
+        proc._apply_merged_bus_result = RuntimeGuardBusMixin._apply_merged_bus_result.__get__(proc)
+
+        group = MagicMock()
+        group.world_size = 2
+        group.is_first_rank = True
+        group.rank_in_group = 0
+        group.cpu_group = object()
+        group.broadcast_object = MagicMock(side_effect=lambda obj, src=0: obj)
+
+        try:
+            with (
+                patch(
+                    "vllm_ascend.observability.runtime_guard.processor_bus.should_dump_kv_on_rank",
+                    return_value=False,
+                ),
+                patch("torch.distributed.broadcast"),
+                patch("torch.distributed.get_process_group_ranks", return_value=[0, 1]),
+            ):
+                assert proc._wave_head_merged_bus(group) is False
+                assert proc._pending_prev_needs_sample_hooks is True
+                deadline = time.time() + 2.0
+                while time.time() < deadline and not worker.poll_ready():
+                    time.sleep(0.01)
+                # Gates already False (TP0 reload), but snapshot keeps soft-purge.
+                assert hooks_on is False
+                assert proc._drain_merged_bus(warn_if_pending=False) is True
+
+            st = store.get_state("r1")
+            assert st is not None
+            assert st.prompt_token_ids == [1, 2, 3]
+            assert st.output_token_ids == []
+            proc.detectors.disable_all.assert_called_once()
+
+            # Re-enable: cumulative IO starts from empty suffix (mid-enable contract).
+            hooks_on = True
+            store.append_output_ids("r1", [42])
+            st2 = store.get_state("r1")
+            assert st2 is not None
+            assert st2.prompt_token_ids == [1, 2, 3]
+            assert st2.output_token_ids == [42]
+        finally:
+            worker.stop()
+    finally:
+        RequestGuardStore.reset_for_tests()

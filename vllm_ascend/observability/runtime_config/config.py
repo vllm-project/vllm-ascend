@@ -501,6 +501,8 @@ class RuntimeConfig:
         # Bug #11 / S8: same-second edits need a content fingerprint. File size
         # alone is insufficient (e.g. window 10→33, true→false keep st_size).
         self._content_digest: str | None = None
+        # Monotonic apply revision (not file mtime). Same-second NFS edits keep
+        # mtime stable; detectors cache this via ``config_version``.
         self._version: float = 0.0
         self._last_reload_ts = 0.0
         self._initial_broadcast_done = False
@@ -633,7 +635,7 @@ class RuntimeConfig:
                     mtime = self.config_path.stat().st_mtime
                 self._apply_loaded(
                     merged,
-                    version=mtime,
+                    file_mtime=mtime,
                     content_digest=self._digest_path(self.config_path),
                     announce=False,
                 )
@@ -661,9 +663,11 @@ class RuntimeConfig:
                 try:
                     mtime = self.config_path.stat().st_mtime
                     self._mtime = mtime
-                    self._version = float(mtime)
                 except OSError:
-                    self._version = 0.0
+                    self._mtime = None
+                # Seed revision so detector caches have a stable baseline; do
+                # not alias revision to mtime (same-second edits must still bump).
+                self._version = 1.0
                 # Mark the pre-bootstrap file as already-reflected so reload()
                 # does not re-apply it before the writer overwrites it with the
                 # effective startup config (otherwise a stale hand-edit leaks in
@@ -704,7 +708,9 @@ class RuntimeConfig:
                 mtime = self.config_path.stat().st_mtime
             self._mtime = mtime
             self._content_digest = None  # bootstrap; set on first reload/save
-            self._version = float(mtime)
+            # Keep the in-memory apply revision; only refresh file mtime.
+            if self._version <= 0.0:
+                self._version = 1.0
             self._bootstrap_persisted = True
             logger.info(
                 "[runtime_config] worker leader persisted path=%s explicit_path=%s (overwrote)",
@@ -729,11 +735,12 @@ class RuntimeConfig:
 
     @property
     def config_version(self) -> float:
-        """Monotonic stamp bumped on file reload / control patch.
+        """Monotonic apply revision (independent of file mtime).
 
         Detectors cache this in :meth:`~ConfigBackedDetector.refresh_from_config`
         so per-step ``_precheck`` can skip re-applying an unchanged section.
-        Curl ``/set_runtime_*`` and hot-reload both advance it before cascade.
+        Hot-reload / broadcast apply advances it whenever leaf content changes,
+        including same-second NFS edits that keep ``st_mtime`` stable.
         """
         return float(self._version)
 
@@ -1293,7 +1300,7 @@ class RuntimeConfig:
             merged = _deep_merge(_DEFAULTS, loaded)
             return self._apply_loaded(
                 merged,
-                version=mtime,
+                file_mtime=mtime,
                 content_digest=digest,
             )
         except Exception as exc:
@@ -1304,17 +1311,28 @@ class RuntimeConfig:
         self,
         merged: dict[str, Any],
         *,
-        version: float,
+        version: float | None = None,
+        file_mtime: float | None = None,
         content_digest: str | None = None,
         announce: bool = True,
     ) -> bool:
+        """Apply merged config; advance ``config_version`` on content change.
+
+        ``file_mtime`` updates the local poll stamp only. ``version`` adopts a
+        leader broadcast revision; otherwise a local content change bumps the
+        monotonic revision so same-mtime NFS edits still refresh detectors.
+        """
         merged = _normalize_config_sections(merged)
         validate_runtime_config(merged)
         changes = _leaf_changes(self._data, merged)
         self._data = merged
         self._invalidate_hot_path_gates()
-        self._mtime = version
-        self._version = version
+        if file_mtime is not None:
+            self._mtime = file_mtime
+        if version is not None:
+            self._version = float(version)
+        elif changes:
+            self._version = float(self._version) + 1.0
         if content_digest is not None:
             self._content_digest = content_digest
         if announce and changes:
