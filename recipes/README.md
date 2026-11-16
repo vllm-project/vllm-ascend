@@ -95,7 +95,7 @@ Static validation does not establish NPU correctness or performance.
 
 The subsequent `Ascend configuration` job checks effective NPU installation and
 serving settings against the PR target branch through the local
-`validate-ascend-recipes.yml` reusable workflow. See the [checker guide](tools/README.md)
+`_recipes_validate_ascend.yaml` reusable workflow. See the [checker guide](tools/README.md)
 for its rules, baseline policy, local commands and coverage limits.
 
 ## Pull request previews

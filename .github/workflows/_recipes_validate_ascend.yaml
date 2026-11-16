@@ -9,7 +9,7 @@ permissions:
 jobs:
   validate:
     name: Validate
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-4-hk
     timeout-minutes: 20
     steps:
       - name: Check out the PR merge revision
