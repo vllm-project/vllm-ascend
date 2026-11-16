@@ -7,13 +7,18 @@ The request-transport boundary assertions require that fix. Validate the
 combined revisions until the prerequisite is merged.
 
 ```bash
-python -m pytest -sv tests/e2e/pull_request/one_card/test_thinking_budget.py
+python -m pytest -sv tests/e2e/pull_request/one_card/test_thinking_budget_state_machine.py
 python -m pytest -sv tests/e2e/pull_request/one_card/test_thinking_budget_generation.py
 python -m pytest -sv tests/e2e/pull_request/one_card/test_thinking_budget_nonbinding.py
 python -m pytest -sv tests/e2e/pull_request/one_card/test_thinking_budget_preemption_constrained.py
 python -m pytest -sv tests/e2e/pull_request/one_card/test_thinking_budget_preemption_natural.py
 python -m pytest -sv tests/e2e/pull_request/one_card/test_thinking_budget_serving.py
 ```
+
+The 12 existing budget cases remain in `test_thinking_budget.py`. This PR
+adds the 94 expanded state-machine cases in a separate file; their function
+bodies and decorators are unchanged from the verified suite. Run the existing
+entry alongside the new files for complete coverage.
 
 The 50 offline cases are split into generation (10), exact nonbinding-budget
 comparisons (8), constrained preemption (16), and natural preemption (16).

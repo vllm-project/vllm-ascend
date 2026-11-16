@@ -9,11 +9,6 @@
 # do not trigger the full CI suite.
 
 estimated_times:
-  tests/e2e/pull_request/one_card/test_thinking_budget_generation.py: 2000
-  tests/e2e/pull_request/one_card/test_thinking_budget_nonbinding.py: 2000
-  tests/e2e/pull_request/one_card/test_thinking_budget_preemption_constrained.py: 3000
-  tests/e2e/pull_request/one_card/test_thinking_budget_preemption_natural.py: 3600
-  tests/e2e/pull_request/one_card/test_thinking_budget_serving.py: 2500
   tests/e2e/pull_request/one_card/test_mc2_local_padding.py: 60
   tests/e2e/pull_request/one_card/test_mla_prolog_head_padding.py: 30
   tests/e2e/pull_request/one_card/model_runner_v2/test_uva_prefix.py: 30
@@ -182,6 +177,12 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_linear_quantization.py: 50
   tests/e2e/pull_request/one_card/test_gumbel_sampling.py: 220
   tests/e2e/pull_request/one_card/test_thinking_budget.py: 80
+  tests/e2e/pull_request/one_card/test_thinking_budget_state_machine.py: 80
+  tests/e2e/pull_request/one_card/test_thinking_budget_generation.py: 2000
+  tests/e2e/pull_request/one_card/test_thinking_budget_nonbinding.py: 2000
+  tests/e2e/pull_request/one_card/test_thinking_budget_preemption_constrained.py: 3000
+  tests/e2e/pull_request/one_card/test_thinking_budget_preemption_natural.py: 3600
+  tests/e2e/pull_request/one_card/test_thinking_budget_serving.py: 2500
   # Conservative scheduling estimate; refine after the first A5 run.
   tests/e2e/pull_request/one_card/test_mla_fp8_decode_layout_a5.py: 180
   tests/e2e/pull_request/one_card/test_glm5next_pooled_cache_write.py: 30
