@@ -2,13 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Bind Kimi's request-indexed RecoverSSM records to Ascend commit kernels."""
 
-from copy import copy
-
-import torch
-from vllm.distributed import get_pcp_group
-
 from vllm_ascend.models.glm5next.recoverssm_metadata import AscendKDARecoverSSMMetadataBuilder
-from vllm_ascend.ops.kda_pcp import KimiKDAHostMetadataBuilder
+from vllm_ascend.ops.kda_pcp import KimiKDAHostMetadataBuilder, init_kda_pcp_buffers, prepare_kda_pcp_config
 from vllm_ascend.ops.triton.kda.recoverssm import KDARecoverSSMCommitContext
 
 
@@ -16,21 +11,9 @@ class AscendKimiKDARecoverSSMMetadataBuilder(AscendKDARecoverSSMMetadataBuilder)
     recoverssm_context: KDARecoverSSMCommitContext | None
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
-        pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
-        if pcp_size > 1:
-            vllm_config = copy(vllm_config)
-            vllm_config.compilation_config = copy(vllm_config.compilation_config)
-            capture_size = vllm_config.compilation_config.max_cudagraph_capture_size
-            if capture_size is not None:
-                vllm_config.compilation_config.max_cudagraph_capture_size = capture_size * pcp_size
+        vllm_config = prepare_kda_pcp_config(vllm_config)
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        self.pcp_size = pcp_size
-        self.pcp_rank = get_pcp_group().rank_in_group if pcp_size > 1 else 0
-        capacity = max(vllm_config.scheduler_config.max_num_batched_tokens, self.decode_cudagraph_max_bs)
-        self._pcp_restore_idx = torch.zeros(capacity * pcp_size, dtype=torch.long, device=device)
-        self._pcp_restore_mask = torch.zeros(capacity * pcp_size, dtype=torch.bool, device=device)
-        self._pcp_local_idx = torch.zeros(capacity, dtype=torch.long, device=device)
-        self._pcp_local_mask = torch.zeros(capacity, dtype=torch.bool, device=device)
+        init_kda_pcp_buffers(self, vllm_config, device)
 
     def build(self, *args, **kwargs):
         metadata = super().build(*args, **kwargs)
