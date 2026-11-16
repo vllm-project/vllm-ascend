@@ -560,7 +560,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             invalid_block_ids=self._invalid_block_ids,
             invalid_block_ids_lock=self._invalid_block_ids_lock,
             load_abort_event=self._layer_load_aborted,
-            raise_on_transfer_failure=self.layerwise_offload or self.num_kv_cache_groups > 1,
         )
         self.kv_recv_thread.save_disabled = self._save_disabled
         if self.kv_send_thread is not None:

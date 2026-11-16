@@ -371,9 +371,7 @@ class TestGVALayerTransferFailures(unittest.TestCase):
 
 
 class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
-    def _make_thread(
-        self, external_slot_release_waiter=None, save_failure_checker=None, raise_on_transfer_failure=True
-    ):
+    def _make_thread(self, external_slot_release_waiter=None, save_failure_checker=None):
         # Plain mock store: the layerwise threads are backend-agnostic.
         # `.store` is attached explicitly to pin batch_copy's return value.
         store = MagicMock()
@@ -406,14 +404,13 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
             group_builders=[builder],
             external_slot_release_waiter=external_slot_release_waiter,
             save_failure_checker=save_failure_checker,
-            raise_on_transfer_failure=raise_on_transfer_failure,
         )
         return thread, load_finished, save_finished, sync_events
 
     def test_gva_load_failure_policy(self):
-        for strict, hybrid in ((False, False), (True, False), (False, True), (True, True)):
-            with self.subTest(strict=strict, hybrid=hybrid):
-                thread, load_finished, _, _ = self._make_thread(raise_on_transfer_failure=strict)
+        for hybrid in (False, True):
+            with self.subTest(hybrid=hybrid):
+                thread, load_finished, _, _ = self._make_thread()
                 thread.m_store.store.batch_copy.return_value = -1
                 request = ReqMeta("r1", block_ids_by_group=[[7], [7]] if hybrid else [[7, 8]], block_hashes=[])
                 task = LayerTransferTask(
