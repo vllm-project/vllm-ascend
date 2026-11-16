@@ -79,7 +79,7 @@ You can choose one or multiple datasets to execute accuracy evaluation.
 
 1. `C-Eval` dataset.
 
-    Take `C-Eval` dataset as an example. You can refer to [Datasets](https://github.com/AISBench/benchmark/tree/master/ais_bench/benchmark/configs/datasets) for more datasets. Each dataset has a `README.md` with detailed download and installation instructions.
+    Take `C-Eval` dataset as an example. You can refer to [Datasets](https://github.com/AISBench/benchmark/tree/master/ais_bench/benchmark/configs/datasets) for more datasets. Each dataset has a `../../../../README_vllm-ascend.md` with detailed download and installation instructions.
 
     Download dataset and install it to specific path.
 

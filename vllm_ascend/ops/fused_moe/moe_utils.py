@@ -42,7 +42,7 @@ _CANN_MEGA_MOE_QUANT_MODE_None = 0
 _CANN_MEGA_MOE_QUANT_MODE_INT8 = 2
 _CANN_MEGA_MOE_QUANT_MODE_MXFP = 4
 # Constants adapt to A5 cann_ops_transformer mega moe operator.
-# which is documented in file mc2/mega_moe/README.md on
+# which is documented in file mc2/mega_moe/README_vllm-ascend.md on
 # repository https://gitcode.com/cann/ops-transformer.git.
 # (23 = FLOAT8_E5M2, 24 = FLOAT8_E4M3FN, 296 = FLOAT4_E2M1).
 _CANN_ACL_FLOAT8_E5M2 = 23

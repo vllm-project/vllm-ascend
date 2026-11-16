@@ -530,7 +530,7 @@ decode step  (start_pos>0):   每步调用 QLI 1 次 (S1=1)   → mask_mode=0, b
 | `tests/pytest/quant_lightning_indexer_v2_golden.py` | `select_candidate_blocks_ref`（numpy+torch 双实现）、`GeneralizedQLIV2` 的 mode=1/2 golden 路径 |
 | `tests/pytest/result_compare_method.py` | `check_result_candidate`（集合比较 + -1 槽核对） |
 | `tests/pytest/qliv2_test_utils.py` | case_name/row 列扩展（candidate 参数入 sidecar） |
-| `README.md`（两算子） | 参数表、约束（block_size 一致性、同 forward 有效期、910b 无 LD 说明） |
+| `../../../../README_vllm-ascend.md`（两算子） | 参数表、约束（block_size 一致性、同 forward 有效期、910b 无 LD 说明） |
 | **A11** arch22 cube/vector：`KeyNd2NzForPA`/`GetKeyScale` 改用 `keyStride0`/`keyDequantScaleStride0`（对齐 arch35，tiling 字段已存在未消费；0 或紧凑值兜底原公式） | key 0 轴非连续 |
 | **A12** op_host tiling.cpp：删除 candidate 的 layout_q=BSND 限制，加 TND 输入校验（cu_seqlens_q 必传） | TND 放行 |
 | **A13** arch22 kernel：验证 TND 下 candidateTopkIndexIn/Out GM offset 与 CleanInvalidOutput 的 TND 输出分支（已有 outputLayout==TND 分支） | TND candidate |

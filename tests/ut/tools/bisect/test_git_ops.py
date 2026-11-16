@@ -42,7 +42,7 @@ def test_matches_any_returns_files_matching_configured_globs():
         "vllm_ascend/worker/model_runner.py",
         "csrc/kernels/attention.cpp",
         "requirements-dev.txt",
-        "docs/README.md",
+        "docs/README_vllm-ascend.md",
     ]
 
     assert git_ops.matches_any(files, ("csrc/**", "requirements*.txt")) == [

@@ -488,8 +488,8 @@ gh pr create --repo vllm-project/vllm-ascend \
 
 | File | Update Required |
 |------|-----------------|
-| `README.md` | Getting Started version, Branch section |
-| `README.zh.md` | Same as above (Chinese) |
+| `../../../README_vllm-ascend.md` | Getting Started version, Branch section |
+| `../../../README_vllm-ascend.zh.md` | Same as above (Chinese) |
 | `docs/source/faqs.md` | Feedback issue link |
 | `docs/source/user_guide/release_notes.md` | Add new release notes |
 | `docs/source/community/versioning_policy.md` | Compatibility matrix, release window |
