@@ -1005,11 +1005,7 @@ def requires_lmhead_dp_sync(vllm_config: VllmConfig) -> bool:
     """V2 reduced LMHead padding requires real, synchronized DP token buckets."""
     # TODO: Merge the requires_lmhead_dp_sync interface into
     # should_skip_allreduce_across_dp_group in a future refactor.
-    return (
-        vllm_config.use_v2_model_runner
-        and vllm_config.parallel_config.decode_context_parallel_size == 1
-        and lmhead_tp_enable()
-    )
+    return vllm_config.parallel_config.decode_context_parallel_size == 1 and lmhead_tp_enable()
 
 
 def lmhead_tp_max_num_logits(max_num_reqs: int, logits_rows_per_req: int) -> int:

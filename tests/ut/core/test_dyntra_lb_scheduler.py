@@ -110,9 +110,8 @@ def create_dyntra_lb_scheduler(
         block_size=block_size,
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
-    # These fixtures assert legacy V1 scheduler output structures. Tests that
-    # exercise V2 opt in explicitly after construction.
-    scheduler.use_v2_model_runner = False
+    # These fixtures assert the scheduler output structures used by the only
+    # supported runner (V2).
     return scheduler
 
 
@@ -1013,7 +1012,6 @@ def test_dyntra_lb_async_v2_sets_pp_decode_cadence():
         vllm_config,
         scheduler_cls=AsyncDyntraLBScheduler,
     )
-    scheduler.use_v2_model_runner = True
     request = create_request(
         request_id=1,
         block_size=vllm_config.cache_config.block_size,

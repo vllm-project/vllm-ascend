@@ -46,7 +46,6 @@ from vllm_ascend.device.hardware_profile import (
     QuantizationBackendFamily,
     get_current_hardware_profile,
 )
-from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
 
 # isort: off
 from vllm_ascend.utils import (
@@ -593,21 +592,9 @@ class NPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        # NOTE: This still monkey-patches VllmConfig by replacing the
-        # use_v2_model_runner property (the "patch way"). It is kept here
-        # because upstream vLLM does not yet expose a platform hook to
-        # make V2 the unconditional platform default. Feature validation is
-        # left to upstream.
-        # TODO(wxsIcey): Remove this once upstream vLLM allows platforms to
-        # override the default runner selection.
-        apply_v2_model_runner_config_patch()
-
         # Lazy import vllm/vllm-ascend to avoid circular import
-        from vllm_ascend.ascend_forward_context import sync_v2_extra_kwargs
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
         from vllm_ascend.logger import configure_ascend_file_logging, configure_ascend_logging
-
-        sync_v2_extra_kwargs(vllm_config)
 
         # 1.Configure logging
         configure_ascend_file_logging()
@@ -725,7 +712,6 @@ class NPUPlatform(Platform):
             get_mc2_mask,
             get_mrv2_in_profile_run,
             select_moe_comm_method,
-            sync_v2_extra_kwargs,
             use_cann_megamoe,
         )
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
@@ -740,16 +726,7 @@ class NPUPlatform(Platform):
 
         if cudagraph_runtime_mode is None:
             cudagraph_runtime_mode = CUDAGraphMode.NONE
-        sync_v2_extra_kwargs(vllm_config)
-        # TODO(Ronald1995): model runner v1 still use ascend_forward_context,
-        # when v1's forward context is refactored, we can remove this branch.
-        # Currently, model runner v2 use the new forward context.
-        # compared to v1, v2's forward context lacks some fields, such as:
-        # is_first_layer, prefetch_mlp_gate_up_proj, prefetch_mlp_gate_down_proj,
-        # prefetch_mlp_enabled, model_instance, is_draft_model.
         dynamic_mx_quant_scale_alg = get_dynamic_mx_quant_scale_alg(vllm_config)
-        if not vllm_config.use_v2_model_runner:
-            return {"dynamic_mx_quant_scale_alg": dynamic_mx_quant_scale_alg}
 
         # is_draft_model will be removed later, so we set it to False temporarily.
         is_draft_model = False
@@ -1115,73 +1092,60 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
     if not isinstance(eplb_config, dict):
         raise TypeError("additional_config.eplb_config must be a dictionary.")
 
-    use_v2_model_runner = bool(getattr(vllm_config, "use_v2_model_runner", False))
-    if use_v2_model_runner:
-        unsupported_eplb_fields = sorted(set(eplb_config) - _V2_EPLB_CONFIG_FIELDS)
-        stair_config = eplb_config.get("stair_config")
-        unsupported_stair_fields = (
-            sorted(set(stair_config) - _V2_STAIR_CONFIG_FIELDS) if isinstance(stair_config, dict) else []
+    unsupported_eplb_fields = sorted(set(eplb_config) - _V2_EPLB_CONFIG_FIELDS)
+    stair_config = eplb_config.get("stair_config")
+    unsupported_stair_fields = (
+        sorted(set(stair_config) - _V2_STAIR_CONFIG_FIELDS) if isinstance(stair_config, dict) else []
+    )
+    if unsupported_eplb_fields or unsupported_stair_fields:
+        ignored_fields = unsupported_eplb_fields + [f"stair_config.{field}" for field in unsupported_stair_fields]
+        logger.warning(
+            "Model Runner V2 EPLB currently supports only these parameters: "
+            "additional_config.eplb_config fields %s; stair_config fields %s. "
+            "The following parameters are unsupported and will be ignored: %s.",
+            sorted(_V2_EPLB_CONFIG_FIELDS),
+            sorted(_V2_STAIR_CONFIG_FIELDS),
+            ignored_fields,
         )
-        if unsupported_eplb_fields or unsupported_stair_fields:
-            ignored_fields = unsupported_eplb_fields + [f"stair_config.{field}" for field in unsupported_stair_fields]
-            logger.warning(
-                "Model Runner V2 EPLB currently supports only these parameters: "
-                "additional_config.eplb_config fields %s; stair_config fields %s. "
-                "The following parameters are unsupported and will be ignored: %s.",
-                sorted(_V2_EPLB_CONFIG_FIELDS),
-                sorted(_V2_STAIR_CONFIG_FIELDS),
-                ignored_fields,
-            )
-            eplb_config = {key: value for key, value in eplb_config.items() if key in _V2_EPLB_CONFIG_FIELDS}
-            if isinstance(stair_config, dict):
-                eplb_config["stair_config"] = {
-                    key: value for key, value in stair_config.items() if key in _V2_STAIR_CONFIG_FIELDS
-                }
-            additional_config = dict(additional_config)
-            additional_config["eplb_config"] = eplb_config
-            vllm_config.additional_config = additional_config
-        if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv(
-            "EXPERT_MAP_RECORD", "false"
-        ).lower() in ("true", "1"):
-            logger.warning(
-                "DYNAMIC_EPLB and EXPERT_MAP_RECORD are Model Runner V1 controls and are ignored by "
-                "Model Runner V2. Use --enable-eplb and --eplb-config for MRv2; "
-                "additional_config.eplb_config supports only %s.",
-                sorted(_V2_EPLB_CONFIG_FIELDS),
-            )
-        load_collection_phase = eplb_config.get("load_collection_phase", "all")
-        # Disabled drafts inherit this target-only setting but never collect
-        # EPLB load. Keep target validation strict and preserve other checks.
-        if (
-            load_collection_phase != "all"
-            and not vllm_config.parallel_config.enable_eplb
-            and not is_draft_config_context()
-        ):
-            raise ValueError("additional_config.eplb_config.load_collection_phase requires --enable-eplb.")
-        if vllm_config.parallel_config.enable_eplb:
-            upstream_eplb_config = vllm_config.parallel_config.eplb_config
-            if upstream_eplb_config.communicator not in (None, "torch_gloo", "hixl"):
-                raise ValueError(
-                    "Async EPLB on Ascend requires the torch_gloo or hixl communicator "
-                    f"but got {upstream_eplb_config.communicator!r}. "
-                    "Set eplb_config.communicator to 'torch_gloo' or 'hixl'."
-                )
-            if not upstream_eplb_config.use_async:
-                logger.warning(
-                    "Synchronous EPLB is not supported on Ascend; "
-                    "parameter=eplb_config.use_async, value=False, "
-                    "action: forcing asynchronous EPLB."
-                )
-                upstream_eplb_config.use_async = True
-            if vllm_config.parallel_config.enable_elastic_ep:
-                raise ValueError("Async EPLB is not supported with elastic EP on Ascend.")
-    elif {"load_collection_phase", "stair_config"} & eplb_config.keys():
-        raise ValueError(
-            "stair_config and load_collection_phase are only supported by Model Runner V2; "
-            "use eplb_heat_collection_stage with Model Runner V1."
+        eplb_config = {key: value for key, value in eplb_config.items() if key in _V2_EPLB_CONFIG_FIELDS}
+        if isinstance(stair_config, dict):
+            eplb_config["stair_config"] = {
+                key: value for key, value in stair_config.items() if key in _V2_STAIR_CONFIG_FIELDS
+            }
+        additional_config = dict(additional_config)
+        additional_config["eplb_config"] = eplb_config
+        vllm_config.additional_config = additional_config
+    if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv(
+        "EXPERT_MAP_RECORD", "false"
+    ).lower() in ("true", "1"):
+        logger.warning(
+            "DYNAMIC_EPLB and EXPERT_MAP_RECORD are Model Runner V1 controls and are ignored by "
+            "Model Runner V2. Use --enable-eplb and --eplb-config for MRv2; "
+            "additional_config.eplb_config supports only %s.",
+            sorted(_V2_EPLB_CONFIG_FIELDS),
         )
-    elif vllm_config.parallel_config.enable_eplb:
-        raise ValueError("Upstream EPLB is only supported by Model Runner V2 on Ascend.")
+    load_collection_phase = eplb_config.get("load_collection_phase", "all")
+    # Disabled drafts inherit this target-only setting but never collect
+    # EPLB load. Keep target validation strict and preserve other checks.
+    if load_collection_phase != "all" and not vllm_config.parallel_config.enable_eplb and not is_draft_config_context():
+        raise ValueError("additional_config.eplb_config.load_collection_phase requires --enable-eplb.")
+    if vllm_config.parallel_config.enable_eplb:
+        upstream_eplb_config = vllm_config.parallel_config.eplb_config
+        if upstream_eplb_config.communicator not in (None, "torch_gloo", "hixl"):
+            raise ValueError(
+                "Async EPLB on Ascend requires the torch_gloo or hixl communicator "
+                f"but got {upstream_eplb_config.communicator!r}. "
+                "Set eplb_config.communicator to 'torch_gloo' or 'hixl'."
+            )
+        if not upstream_eplb_config.use_async:
+            logger.warning(
+                "Synchronous EPLB is not supported on Ascend; "
+                "parameter=eplb_config.use_async, value=False, "
+                "action: forcing asynchronous EPLB."
+            )
+            upstream_eplb_config.use_async = True
+        if vllm_config.parallel_config.enable_elastic_ep:
+            raise ValueError("Async EPLB is not supported with elastic EP on Ascend.")
 
 
 def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
@@ -1362,15 +1326,9 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config: AscendConf
         spec_config = vllm_config.speculative_config
         mixed_mode = CUDAGraphMode.NONE if xlite_config.full_mode else compilation_config.cudagraph_mode.mixed_mode()
         # TODO(SijieFu): properly resolve cudagraph_mode when xlite is enabled
-        decode_mode = (
-            CUDAGraphMode.NONE
-            if spec_config is None or vllm_config.use_v2_model_runner
-            else compilation_config.cudagraph_mode.decode_mode()
-        )
-        if not decode_mode or mixed_mode == decode_mode:
-            compilation_config.cudagraph_mode = cudagraph_mode = mixed_mode
-        else:
-            compilation_config.cudagraph_mode = cudagraph_mode = CUDAGraphMode((decode_mode.value, mixed_mode.value))
+        # The V2 model runner never uses a decode cudagraph mode, so the
+        # resolved mode is simply the mixed mode.
+        compilation_config.cudagraph_mode = cudagraph_mode = mixed_mode
         if spec_config and spec_config.enforce_eager is None and cudagraph_mode:
             spec_config.enforce_eager = enforce_eager
         enforce_eager = enforce_eager or not cudagraph_mode or xlite_config.full_mode or not cudagraph_mode.mixed_mode()
@@ -1666,7 +1624,6 @@ def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
     interleave = parallel_config.cp_kv_cache_interleave_size
     hybrid_kernel_interleave = (
         getattr(model_config, "architecture", None) == "KimiK31ForConditionalGeneration"
-        and vllm_config.use_v2_model_runner
         and cache_config.cache_dtype == "fp8"
         and vllm_config.kv_transfer_config is not None
         and vllm_config.kv_transfer_config.kv_connector in ("MooncakeConnectorV2", "MooncakePullConnector")
@@ -1987,12 +1944,6 @@ def _validate_engram_config(vllm_config: VllmConfig) -> None:
 
 def _validate_parallel_config(vllm_config: VllmConfig) -> None:
     parallel_config = vllm_config.parallel_config
-    if not vllm_config.use_v2_model_runner and parallel_config.prefill_context_parallel_size > 1:
-        raise ValueError(
-            "PCP (Prefill Context Parallelism) is not supported by vLLM Ascend. "
-            "Please set --prefill-context-parallel-size to 1. "
-            f"Got prefill_context_parallel_size={parallel_config.prefill_context_parallel_size}."
-        )
 
     kvpp_config = KVPPConfig.from_vllm_config(vllm_config)
     if kvpp_config.size > 1:
@@ -2152,7 +2103,7 @@ def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> N
 
     # Upstream DFlashSpeculator runs dense DSpark drafts at DCP=1 and the
     # target runner marks their KV groups with dcp_sharded=False.
-    if vllm_config.use_v2_model_runner and speculative_config.use_dspark() and not draft_model_config.use_mla:
+    if speculative_config.use_dspark() and not draft_model_config.use_mla:
         return
 
     # MLA draft models do not use the GQA/MQA head-sharding rules below.

@@ -215,7 +215,6 @@ def _make_vllm_config(
         ),
         speculative_config=speculative_config,
         num_hash_lookahead_tokens=0,
-        use_v2_model_runner=False,
         scheduler_config=SimpleNamespace(
             max_num_seqs=max_num_seqs,
             max_num_batched_tokens=max_num_batched_tokens,
@@ -859,7 +858,6 @@ def test_adaptive_gdn_real_initialization_gate(monkeypatch, backend_cls, host_me
     monkeypatch.setattr(AscendGatedDeltaNetAttention, "_supports_host_metadata_prefill", lambda: host_metadata)
     builder_cls = backend_cls.get_builder_cls()
     config = _make_vllm_config(num_speculative_tokens=num_steps, enable_adaptive_verification=True)
-    config.use_v2_model_runner = True
     group = AttentionGroup(
         backend=backend_cls,
         layer_names=["layer0"],

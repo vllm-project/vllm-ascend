@@ -69,7 +69,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
+from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 from vllm.v1.worker.startup_plan import (
@@ -159,16 +159,8 @@ class NPUWorker(WorkerBase):
                 "In most scenarios, without custom kernels, vllm-ascend will not function correctly."
             )
 
-        # Worker processes receive a pickled VllmConfig, so the platform config
-        # hook (NPUPlatform.check_and_update_config) never runs here. Re-apply the
-        # Ascend V2 model runner overrides so the worker resolves the same
-        # runner version as the engine. Idempotent.
-        from vllm_ascend.ascend_forward_context import sync_v2_extra_kwargs
-        from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
         from vllm_ascend.utils import adapt_patch
 
-        apply_v2_model_runner_config_patch()
-        sync_v2_extra_kwargs(vllm_config)
         adapt_patch()
 
         from vllm_ascend.patch.worker.patch_kda_recoverssm import patch_kda_recoverssm
@@ -222,7 +214,6 @@ class NPUWorker(WorkerBase):
         if "UnquantizedLinearMethod" in WEIGHT_LOADER_V2_SUPPORTED:
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
-        self.use_v2_model_runner = self.vllm_config.use_v2_model_runner
         self._kvpp_cache_allocation_plan: KVPPPhysicalCachePlan | None = None
         self._pp_send_work: list[Handle] = []
 
@@ -825,13 +816,9 @@ class NPUWorker(WorkerBase):
         has_mamba = any(isinstance(spec, MambaSpec) for spec in per_layer_specs)
         model_runner = getattr(self, "model_runner", None)
         layout = self.vllm_config.cache_config.get_resolved_kv_cache_layout()
-        shares_attention_pool = False
-        if getattr(self, "use_v2_model_runner", False):
-            # Load V2 helpers only for V2 workers; V1 retains private allocation
-            # and must keep its original multi-group budget scaling.
-            from vllm_ascend.worker.v2.attn_utils import can_share_full_and_sliding_kv_cache
+        from vllm_ascend.worker.v2.attn_utils import can_share_full_and_sliding_kv_cache
 
-            shares_attention_pool = can_share_full_and_sliding_kv_cache(self.vllm_config, per_layer_specs)
+        shares_attention_pool = can_share_full_and_sliding_kv_cache(self.vllm_config, per_layer_specs)
         # TODO: The Step-3.5/3.7 models will be sunset in the future. Once they
         # are, remove this is_step_model exemption: this line and the
         # `or is_step_model` budget gate below.
@@ -901,10 +888,7 @@ class NPUWorker(WorkerBase):
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and not get_pp_group().is_first_rank:
-            if self.use_v2_model_runner and enable_sp(self.vllm_config):
-                all_gather_group = None
-            else:
-                all_gather_group = get_tp_group()
+            all_gather_group = None if enable_sp(self.vllm_config) else get_tp_group()
             tensor_dict, comm_handles, comm_postprocess = get_pp_group().irecv_tensor_dict(
                 all_gather_group=all_gather_group
             )
@@ -919,7 +903,7 @@ class NPUWorker(WorkerBase):
             self.profiler.step()
 
         output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
-        if self.use_v2_model_runner and self.model_runner.is_pooling_model and output is None:
+        if self.model_runner.is_pooling_model and output is None:
             output = self.model_runner.pool()  # type: ignore
         if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
             return output
@@ -927,32 +911,15 @@ class NPUWorker(WorkerBase):
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config
         assert parallel_config.distributed_executor_backend != ("external_launcher") and not get_pp_group().is_last_rank
-        if self.use_v2_model_runner and enable_sp(self.vllm_config):
-            all_gather_group = None
-        else:
-            all_gather_group = get_tp_group()
+        all_gather_group = None if enable_sp(self.vllm_config) else get_tp_group()
         self._pp_send_work = get_pp_group().isend_tensor_dict(
             output.tensors,
             all_gather_group=all_gather_group,
         )
 
-        # Align with upstream GPUWorker: Model Runner V2 has no
-        # kv_connector_output to propagate from non-last PP ranks. Model Runner
-        # V1 must continue below to handle the PP + KV connector path.
-        if self.use_v2_model_runner:
-            return None
-
-        kv_connector_output = output.kv_connector_output
-        if not kv_connector_output:
-            return None
-
-        # In case of PP with kv transfer, we need to pass through the
-        # kv_connector_output
-        if not kv_connector_output.finished_sending and not kv_connector_output.finished_recving:
-            return EMPTY_MODEL_RUNNER_OUTPUT
-        output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
-        output.kv_connector_output = kv_connector_output
-        return output
+        # Model Runner V2 has no kv_connector_output to propagate from
+        # non-last PP ranks.
+        return None
 
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
@@ -981,7 +948,7 @@ class NPUWorker(WorkerBase):
         with context, empty_cache_context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
 
-        if getattr(self, "use_v2_model_runner", False) and has_ec_transfer():
+        if has_ec_transfer():
             get_ec_transfer().start_worker_services()
 
         if self.vllm_config.weight_transfer_config is not None:
@@ -1386,9 +1353,6 @@ class NPUWorker(WorkerBase):
         model_state = getattr(self.model_runner, "model_state", None)
         encoder_runner = getattr(model_state, "encoder_runner", None)
         manager = getattr(encoder_runner, "cudagraph_manager", None)
-        if manager is None:
-            # Model Runner V1 owns the manager directly.
-            manager = getattr(self.model_runner, "encoder_cudagraph_manager", None)
         if manager is None:
             return None
         return {

@@ -47,7 +47,7 @@ def test_factory_adapts_only_the_returned_router():
         patch.object(
             patch_fused_moe,
             "get_current_vllm_config",
-            return_value=SimpleNamespace(use_v2_model_runner=True),
+            return_value=SimpleNamespace(),
         ),
     ):
         result = patch_fused_moe._ascend_FusedMoE(
@@ -80,11 +80,6 @@ def test_factory_keeps_v1_eplb_on_the_legacy_routing_path():
         patch.object(patch_fused_moe, "_original_FusedMoE", original_factory),
         patch.object(patch_fused_moe, "create_ascend_fused_moe_router", router_factory),
         patch.object(patch_fused_moe, "get_ascend_config", return_value=ascend_config),
-        patch.object(
-            patch_fused_moe,
-            "get_current_vllm_config",
-            return_value=SimpleNamespace(use_v2_model_runner=False),
-        ),
     ):
         result = patch_fused_moe._ascend_FusedMoE(
             num_experts=8,

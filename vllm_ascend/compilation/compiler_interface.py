@@ -76,7 +76,7 @@ def _compute_decode_cudagraph_batch_sizes(vllm_config: VllmConfig) -> list[int]:
     max_num_tokens = vllm_config.scheduler_config.max_num_seqs * uniform_decode_query_len
     compilation_config = vllm_config.compilation_config
     capture_sizes = set(compilation_config.cudagraph_capture_sizes)
-    if vllm_config.use_v2_model_runner and compilation_config.cudagraph_mode.separate_routine():
+    if compilation_config.cudagraph_mode.separate_routine():
         # V2 uniform decode capture rounds token counts up to the query length.
         # With MTP5, for example, configured size 56 captures 60 tokens. Keep
         # the raw sizes as well for routines that do not perform this rounding.

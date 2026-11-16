@@ -43,5 +43,4 @@ def test_qwen3_310p_topk() -> None:
             "cudagraph_capture_sizes": [1, 8],
         },
     ) as vllm_model:
-        assert vllm_model.model.llm_engine.vllm_config.use_v2_model_runner
         vllm_model.generate(example_prompts, sampling_params)

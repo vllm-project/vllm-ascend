@@ -510,79 +510,7 @@
 #
 # ** 17. File: platform/patch_pp_mtp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.outputs.ModelRunnerOutput`
-#    Why:
-#       PP + MTP mixed deployment needs the model runner to return the draft
-#       tokens produced for the same scheduler output. Upstream output objects
-#       do not carry `spec_token_ids` on all supported vLLM revisions.
-#    How：
-#       Add a backward-compatible `spec_token_ids` field to `ModelRunnerOutput`
-#       and `EMPTY_MODEL_RUNNER_OUTPUT` when the field is missing.
-#    Related PR (if no, explain why):
-#       Backport of local vLLM PP+MTP branch changes.
-#    Future Plan:
-#       Remove this patch once the supported vLLM version carries PP-safe
-#       speculative token metadata in `ModelRunnerOutput`.
-#
-#   2. `vllm.v1.engine.core.EngineCore.post_step`
-#      (the patch function lives here; it is applied from
-#      `patch_engine_core._apply_patch`, together with the other
-#      engine-core-level patches)
-#    Why:
-#       With PP batch queue, synchronous scheduling can schedule the next batch
-#       before the previous model output is consumed. Calling `post_step` in that
-#       window updates `request.spec_token_ids` from live request state that may
-#       already belong to the newer schedule step.
-#    How：
-#       In PP + MTP + batch queue + sync scheduling, skip `post_step` after model
-#       execution and let scheduler output processing perform the spec token
-#       writeback from the corresponding `ModelRunnerOutput`.
-#    Related PR (if no, explain why):
-#       Backport of local vLLM PP+MTP branch changes.
-#    Future Plan:
-#       Remove this patch when upstream makes spec token writeback output-owned
-#       for PP batch queue.
-#
-#   3. `vllm.v1.core.sched.scheduler.Scheduler._update_after_schedule`
-#      `vllm.v1.core.sched.scheduler.Scheduler.update_from_output`
-#    Why:
-#       PP async scheduling must not schedule the same decode request again
-#       before the previous output has written sampled/spec tokens back. Without
-#       this request-level in-flight fence, the next step may use stale sampled
-#       tokens and produce incorrect target-model output. Intermediate prefill
-#       chunks do not depend on sampled/spec writeback and should remain
-#       schedulable to keep the PP pipeline filled.
-#    How：
-#       After scheduling, set a temporary decode fence for final prefill/decode
-#       chunks in PP IPC mode. Release the fence in `update_from_output` after
-#       the matching output is processed. For PP + MTP, also filter zero-token
-#       placeholder requests before delegating to upstream scheduler accounting,
-#       then write `request.spec_token_ids` from `model_runner_output.spec_token_ids`.
-#    Related PR (if no, explain why):
-#       Backport of local vLLM PP+MTP branch changes.
-#    Future Plan:
-#       Remove this patch once upstream supports request-level PP async fences
-#       and output-owned spec token writeback.
-#
-#   4. `vllm.v1.core.sched.scheduler.Scheduler._make_cached_request_data`
-#    Why:
-#       Upstream PP async scheduling relies on direct PP-rank GPU broadcast for
-#       sampled-token handoff and omits `new_token_ids` from cached request data.
-#       vLLM Ascend routes PP sampled-token handoff through scheduler IPC, so
-#       non-last PP ranks need the previous sampled token in both sync and async
-#       scheduling. This also avoids copying draft tokens as confirmed tokens in
-#       PP + MTP mixed deployment.
-#    How：
-#       Temporarily build cached request data with sync-PP semantics in PP IPC
-#       mode, then fill the last confirmed output token for requests whose
-#       clamped upstream slice is empty.
-#    Related PR (if no, explain why):
-#       Backport of local vLLM PP+MTP branch changes.
-#    Future Plan:
-#       Remove this patch once upstream provides a scheduler-owned PP sampled
-#       token handoff path that works for both sync and async scheduling.
-#
-#   5. `vllm.config.model.ModelConfig.verify_with_parallel_config`
+#   1. `vllm.config.model.ModelConfig.verify_with_parallel_config`
 #    Why:
 #       Local Eagle/MTP drafters are loaded on the last PP stage rather than
 #       partitioned across all PP ranks. Upstream `ModelConfig.verify_with_parallel_config`
@@ -723,36 +651,6 @@
 #       Remove once xgrammar >= 0.2.9 (which fixes separators handling) is
 #       pinned.
 #
-# ** 20. File: platform/patch_swa_bounded_replay.py (V1 resume)**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.core.sched.output.CachedRequestData` (new field `replay_start`)
-#   2. `vllm.v1.core.sched.scheduler.Scheduler._make_cached_request_data`
-#    Why:
-#       Sliding-window bounded replay (vLLM #56227) rebuilds the sliding-window KV
-#       of a prefix hit by recomputing the hit's last window, and tells the
-#       worker where that run begins through `NewRequestData.replay_start`.
-#       Upstream's V2 model runner folds resumed requests into that same
-#       new-request list, so one field covers them. The V1 runner resumes a
-#       preempted request through `CachedRequestData` instead, and a resumed
-#       request is exactly the one that can be rewound a second time --
-#       preemption clears the computed count, so readmission runs the prefix
-#       lookup again and re-sets the replay start. Without the field on that
-#       payload, the worker would not know to stop writing the replayed
-#       positions and would overwrite blocks still shared with every other
-#       request that hit the same prefix.
-#    How:
-#       Declare `replay_start` on the payload -- msgpack encodes only declared
-#       fields, so an attribute set after construction never crosses the process
-#       boundary -- and fill it from the resumed requests inside the single
-#       method upstream builds that payload in. The field list is redeclared at
-#       import time because msgspec caches it per type. Inert on a pin that
-#       predates the feature, which is probed rather than version-compared.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/56227
-#    Future Plan:
-#       Remove this patch once upstream carries the replay start on the V1
-#       resume path as well, i.e. once `CachedRequestData` declares the field.
-#
 # ** 21. File: platform/patch_torch_accelerator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `torch.accelerator.memory_stats`, `torch.accelerator.memory_reserved`,
@@ -788,35 +686,6 @@
 #       https://github.com/vllm-project/vllm/pull/44105
 #    Future Plan:
 #       Remove this patch once the supported vLLM version contains PR #44105.
-#
-# ** 23. File: platform/patch_use_v2_model_runner.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
-#    Why:
-#       Ascend always uses the V2 runner; Model Runner V1 has been removed, so
-#       nothing selects a runner at runtime any more.
-#    How:
-#       Call apply_v2_model_runner_config_patch() to install a
-#       use_v2_model_runner property that always selects V2. An explicit
-#       VLLM_USE_V2_MODEL_RUNNER=0 raises instead of being ignored.
-#       worker/patch_use_v2_model_runner.py reuses this platform
-#       patch so EngineCore and worker processes share the same behavior.
-#    Related PR (if no, explain why):
-#       1. https://github.com/vllm-project/vllm-ascend/pull/11389
-#       2. https://github.com/vllm-project/vllm-ascend/pull/11692
-#    Future Plan:
-#       Remove this patch once upstream exposes a platform-specific default
-#       runner-selection hook.
-#
-#   2. `vllm.config.parallel.ParallelConfig._validate_parallel_config`
-#    Why:
-#       vLLM 0.28.0 rejected PCP+DP before Ascend MRV2 could validate it.
-#    How:
-#       Removed with the v0.31.0 boundary: the release-only validator override
-#       is no longer applied.
-#    Related PR: https://github.com/vllm-project/vllm/pull/54523
-#    Future Plan:
-#       Re-add only if a supported pin rejects PCP+DP.
 #
 # * Worker Patch:
 # ========#
@@ -1597,23 +1466,6 @@
 #       Define AscendModelState and initialize it in init_model_state.
 #    Future Plan:
 #       remove this when vllm-ascend's attention metadata is align with vllm.
-#
-# ** 28. File: worker/patch_use_v2_model_runner.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
-#    Why:
-#       EngineCore subprocesses only load global/platform patches, while workers
-#       also import this compatibility module. The actual monkey-patch is defined
-#       in `platform/patch_use_v2_model_runner.py` (V2-only selection plus the
-#       Ascend unsupported-feature check).
-#    How：
-#       Reuse the platform patch so EngineCore and worker processes share the
-#       same `use_v2_model_runner` behavior.
-#    Related PR (if no, explain why):
-#       See platform/patch_use_v2_model_runner.py.
-#    Future Plan:
-#       Remove this module together with the platform patch once vllm-ascend
-#       fully supports the v2 model runner.
 #
 # ** 29. File: worker/patch_uva.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

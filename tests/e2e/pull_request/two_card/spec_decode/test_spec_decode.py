@@ -227,7 +227,6 @@ def test_dflash2_v2_acceptance(
         compilation_config=compilation_config,
         enable_prefix_caching=False,
     ) as llm:
-        assert llm.model.llm_engine.vllm_config.use_v2_model_runner
         outputs = llm.model.generate(prompts, sampling_params)
 
         # Reuse this engine for two sequential single-request generations,

@@ -37,10 +37,8 @@ def test_initial_layout_preserves_v1_and_zero_redundancy():
 def test_weight_mapping_ep_size_is_scoped_to_the_call():
     wrapped = _with_expert_mapping_ep_size(
         lambda _model: EXPERT_MAPPING_EP_SIZE.get(),
-        lambda model: model.moe_config.ep_size if model._use_v2_model_runner else 1,
+        lambda model: model.moe_config.ep_size,
     )
-    v2 = SimpleNamespace(moe_config=SimpleNamespace(ep_size=4), _use_v2_model_runner=True)
-    v1 = SimpleNamespace(moe_config=SimpleNamespace(ep_size=4), _use_v2_model_runner=False)
-    assert wrapped(v2) == 4
-    assert wrapped(v1) == 1
+    model = SimpleNamespace(moe_config=SimpleNamespace(ep_size=4))
+    assert wrapped(model) == 4
     assert EXPERT_MAPPING_EP_SIZE.get() == 1

@@ -867,7 +867,6 @@ def test_compressed_qsa_builder_and_cache_use_matching_pages(monkeypatch, manage
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         speculative_config=None,
         num_speculative_tokens=0,
-        use_v2_model_runner=True,
     )
     compressed_group = groups[2]
     spec = compressed_group.kv_cache_spec

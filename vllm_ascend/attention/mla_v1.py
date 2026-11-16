@@ -1031,8 +1031,6 @@ class AscendMLAImpl(MLAAttentionImpl):
 
     def _can_use_flashmla(self) -> bool:
         config = self.vllm_config
-        if not getattr(config, "use_v2_model_runner", False):
-            return False
         if config.speculative_config is not None and config.speculative_config.method != "dspark":
             return False
         if not get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH):
@@ -1355,13 +1353,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         config = self.vllm_config
         # Avoid preparing unused PROLOG weights for FIA drafts under SFA targets.
         if enable_sfa(config) and not self.use_flashmla:
-            return
-        if not config.use_v2_model_runner and (
-            hasattr(config.model_config.hf_config, "compress_ratios")
-            or get_ascend_config().sparse_kv_offload_config.enabled
-        ):
-            # V1 keeps these global cache modes on their legacy writer layout,
-            # including draft layers constructed from the target model config.
             return
         attn_module = config.compilation_config.static_forward_context.get(self.layer_name)
         if not isinstance(attn_module, MLAAttention):

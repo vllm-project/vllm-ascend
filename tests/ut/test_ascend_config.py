@@ -23,7 +23,7 @@ from importlib.util import find_spec as real_find_spec
 from statistics import NormalDist
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import PropertyMock, patch
+from unittest.mock import patch
 
 from vllm.config import DeviceConfig, KVTransferConfig
 from vllm.config import VllmConfig as _VllmConfig
@@ -55,20 +55,6 @@ from vllm_ascend.ascend_config import (
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.utils import clear_enable_sp, enable_sp, shared_expert_dp_enabled
-
-
-def test_shared_engram_requires_v2_runner():
-    config = AscendConfig(
-        shared_engram={"backend": "a3", "endpoint": "127.0.0.1:29500"},
-        sparse_kv_offload_config=SparseKVOffloadConfig(),
-    )
-    vc = SimpleNamespace(use_v2_model_runner=False, engram_config=SimpleNamespace(cpu_offload=True))
-    try:
-        config.derive_and_validate(vc)
-    except ValueError as exc:
-        assert "Model Runner V2" in str(exc)
-    else:
-        raise AssertionError("V1 must reject shared Engram")
 
 
 def test_shared_engram_config_schema():
@@ -1121,7 +1107,6 @@ class TestSparseKVOffloadConfig(TestBase):
                 pipeline_parallel_size=1,
             ),
             kv_transfer_config=KVTransferConfig(kv_connector="SfaRemoteD2HConnector", kv_role="kv_consumer"),
-            use_v2_model_runner=False,
         )
 
         config = SparseKVOffloadConfig.from_additional_config(
@@ -1150,7 +1135,6 @@ class TestSparseKVOffloadConfig(TestBase):
                 pipeline_parallel_size=1,
             ),
             kv_transfer_config=KVTransferConfig(kv_connector="SfaRemoteD2HConnector", kv_role="kv_consumer"),
-            use_v2_model_runner=True,
             speculative_config=None,
         )
 
@@ -1172,7 +1156,6 @@ class TestSparseKVOffloadConfig(TestBase):
                 pipeline_parallel_size=1,
             ),
             kv_transfer_config=KVTransferConfig(kv_connector="SfaRemoteD2HConnector", kv_role="kv_consumer"),
-            use_v2_model_runner=True,
             speculative_config=None,
         )
         fused = SparseKVOffloadConfig.from_additional_config(vllm_config, {"enabled": True, "topk_buffer_size": 4096})
@@ -1191,7 +1174,7 @@ class TestSparseKVOffloadConfig(TestBase):
         )
         self.assertTrue(fused_mtp2.use_fused_copy_sfa)
 
-    def test_remote_dspark_requires_v2_but_does_not_restrict_mtp(self):
+    def test_remote_dspark_does_not_restrict_mtp(self):
         vllm_config = SimpleNamespace(
             model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=2048)),
             parallel_config=SimpleNamespace(
@@ -1200,18 +1183,8 @@ class TestSparseKVOffloadConfig(TestBase):
                 pipeline_parallel_size=1,
             ),
             kv_transfer_config=KVTransferConfig(kv_connector="SfaRemoteD2HConnector", kv_role="kv_consumer"),
-            use_v2_model_runner=False,
             speculative_config=SimpleNamespace(method="dspark", num_speculative_tokens=3),
         )
-        with self.assertRaisesRegex(ValueError, "V2 remote prompt-context initialization"):
-            SparseKVOffloadConfig.from_additional_config(
-                vllm_config,
-                {"enabled": True, "topk_buffer_size": 8192},
-            )
-
-        with self.assertRaisesRegex(ValueError, "V2 remote prompt-context initialization"):
-            SparseKVOffloadConfig.from_additional_config(vllm_config, {"enabled": True})
-        vllm_config.use_v2_model_runner = True
         fused = SparseKVOffloadConfig.from_additional_config(
             vllm_config,
             {"enabled": True, "topk_buffer_size": 8192},
@@ -1219,7 +1192,6 @@ class TestSparseKVOffloadConfig(TestBase):
         self.assertTrue(fused.use_fused_copy_sfa)
         config = SparseKVOffloadConfig.from_additional_config(vllm_config, {"enabled": True})
         self.assertTrue(config.use_fused_copy_sfa)
-        vllm_config.use_v2_model_runner = False
         vllm_config.speculative_config.method = "mtp"
         config = SparseKVOffloadConfig.from_additional_config(
             vllm_config,
@@ -2404,7 +2376,6 @@ class TestKVPPConfig(TestBase):
         for section, field, value, message in restrictions:
             with self.subTest(field=field):
                 config = make_kvpp_config()
-                config.use_v2_model_runner = True
                 setattr(getattr(config, section) if section else config, field, value)
                 # Reach KVPP validation through the real platform entry point.
                 with self.assertRaisesRegex(ValueError, message):
@@ -2439,20 +2410,16 @@ class TestEngramSharedMemoryDefaults(TestBase):
             (1, 2, True),
             (2, 4, True),
         )
-        for use_v2 in (False, True):
-            for dp, pcp, auto_shared in topologies:
-                for shared in (False, True):
-                    with self.subTest(use_v2=use_v2, dp=dp, pcp=pcp, shared=shared):
-                        config = VllmConfig(device_config=DeviceConfig(device="cpu"))
-                        config.parallel_config.data_parallel_size = dp
-                        config.parallel_config.prefill_context_parallel_size = pcp
-                        config.engram_config = SimpleNamespace(cpu_offload=True, dp_shared_memory=shared)
-                        ascend_config = AscendConfig(sparse_kv_offload_config=SparseKVOffloadConfig())
-                        with patch.object(
-                            _VllmConfig, "use_v2_model_runner", new_callable=PropertyMock, return_value=use_v2
-                        ):
-                            ascend_config.derive_and_validate(config)
-                        self.assertEqual(config.engram_config.dp_shared_memory, shared or (use_v2 and auto_shared))
+        for dp, pcp, auto_shared in topologies:
+            for shared in (False, True):
+                with self.subTest(dp=dp, pcp=pcp, shared=shared):
+                    config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+                    config.parallel_config.data_parallel_size = dp
+                    config.parallel_config.prefill_context_parallel_size = pcp
+                    config.engram_config = SimpleNamespace(cpu_offload=True, dp_shared_memory=shared)
+                    ascend_config = AscendConfig(sparse_kv_offload_config=SparseKVOffloadConfig())
+                    ascend_config.derive_and_validate(config)
+                    self.assertEqual(config.engram_config.dp_shared_memory, shared or auto_shared)
 
     def test_dp_shared_memory_not_set_when_cpu_offload_false(self):
         """dp_shared_memory requires cpu_offload=True (upstream constraint).
@@ -2467,22 +2434,18 @@ class TestEngramSharedMemoryDefaults(TestBase):
             (1, 2, True),
             (2, 4, True),
         )
-        for use_v2 in (False, True):
-            for dp, pcp, _auto_shared in topologies:
-                for shared in (False, True):
-                    with self.subTest(use_v2=use_v2, dp=dp, pcp=pcp, shared=shared):
-                        config = VllmConfig(device_config=DeviceConfig(device="cpu"))
-                        config.parallel_config.data_parallel_size = dp
-                        config.parallel_config.prefill_context_parallel_size = pcp
-                        config.engram_config = SimpleNamespace(cpu_offload=False, dp_shared_memory=shared)
-                        ascend_config = AscendConfig(sparse_kv_offload_config=SparseKVOffloadConfig())
-                        with patch.object(
-                            _VllmConfig, "use_v2_model_runner", new_callable=PropertyMock, return_value=use_v2
-                        ):
-                            ascend_config.derive_and_validate(config)
-                        # dp_shared_memory must remain unchanged — never auto-enabled
-                        # when cpu_offload=False, regardless of DP/PCP/V2 topology.
-                        self.assertEqual(config.engram_config.dp_shared_memory, shared)
+        for dp, pcp, _auto_shared in topologies:
+            for shared in (False, True):
+                with self.subTest(dp=dp, pcp=pcp, shared=shared):
+                    config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+                    config.parallel_config.data_parallel_size = dp
+                    config.parallel_config.prefill_context_parallel_size = pcp
+                    config.engram_config = SimpleNamespace(cpu_offload=False, dp_shared_memory=shared)
+                    ascend_config = AscendConfig(sparse_kv_offload_config=SparseKVOffloadConfig())
+                    ascend_config.derive_and_validate(config)
+                    # dp_shared_memory must remain unchanged — never auto-enabled
+                    # when cpu_offload=False, regardless of DP/PCP topology.
+                    self.assertEqual(config.engram_config.dp_shared_memory, shared)
 
     def test_no_engram_config_is_preserved(self):
         config = VllmConfig(device_config=DeviceConfig(device="cpu"))

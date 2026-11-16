@@ -46,7 +46,6 @@ def _make_runner(*args, **kwargs):
     )
     runner.vllm_config = SimpleNamespace(
         kv_transfer_config=None,
-        use_v2_model_runner=False,
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1),
     )
     runner.max_num_tokens = 16
@@ -801,7 +800,6 @@ def test_load_model_original_profiler_counts_post_load_weights(monkeypatch, with
     runner.vllm_config.model_config = runner.model_config
     runner.vllm_config.cache_config = SimpleNamespace(block_size=128)
     runner.vllm_config.compilation_config = runner.compilation_config
-    runner.vllm_config.use_v2_model_runner = True
     runner.compilation_config.static_forward_context = {}
     runner.compilation_config.mode = CompilationMode.NONE
     runner.req_states = Mock()

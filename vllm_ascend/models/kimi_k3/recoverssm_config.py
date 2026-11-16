@@ -40,8 +40,6 @@ def validate_request_indexed_kda_recoverssm(vllm_config: VllmConfig) -> None:
         raise ValueError("Kimi RecoverSSM supports DSpark speculative decoding")
     if getattr(spec, "enable_adaptive_verification", False):
         raise ValueError("Kimi RecoverSSM does not yet support adaptive verification")
-    if not vllm_config.use_v2_model_runner:
-        raise ValueError("Kimi RecoverSSM requires Model Runner V2")
     if vllm_config.mamba_config.enable_stochastic_rounding:
         raise ValueError("Kimi RecoverSSM does not support stochastic rounding")
     cache = vllm_config.cache_config

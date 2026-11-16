@@ -164,7 +164,6 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
 
     def test_v2_eplb_uses_expert_weight_list(self):
         vllm_config = create_mock_vllm_config()
-        vllm_config.use_v2_model_runner = True
         vllm_config.parallel_config.enable_eplb = True
         with (
             patch(

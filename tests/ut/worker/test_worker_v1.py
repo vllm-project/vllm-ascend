@@ -36,9 +36,9 @@ class TestPPSequenceParallelTransport(unittest.TestCase):
         pp_group.return_value.is_first_rank = False
         pp_group.return_value.is_last_rank = False
         pp_group.return_value.irecv_tensor_dict.return_value = ({"hidden_states": torch.ones(2, 4)}, [], [])
-        for sp_enabled, use_v2 in ((False, False), (True, False), (False, True), (True, True)):
+        for sp_enabled in (False, True):
             for forward_pass in (False, True):
-                with self.subTest(sp=sp_enabled, v2=use_v2, forward=forward_pass):
+                with self.subTest(sp=sp_enabled, forward=forward_pass):
                     pp_group.return_value.reset_mock()
                     worker = NPUWorker.__new__(NPUWorker)
                     worker.vllm_config = SimpleNamespace(
@@ -50,7 +50,6 @@ class TestPPSequenceParallelTransport(unittest.TestCase):
                     worker.log_memory_stats = MagicMock()
                     worker._pp_send_work = []
                     worker.profiler = None
-                    worker.use_v2_model_runner = use_v2
                     output = IntermediateTensors({"hidden_states": torch.ones(2, 4)})
                     output.kv_connector_output = None
                     worker.model_runner = MagicMock()
@@ -59,7 +58,7 @@ class TestPPSequenceParallelTransport(unittest.TestCase):
 
                     self.assertIsNone(worker.execute_model(scheduler_output))
 
-                    group = None if use_v2 and sp_enabled else tp_group.return_value
+                    group = None if sp_enabled else tp_group.return_value
                     if forward_pass:
                         pp_group.return_value.irecv_tensor_dict.assert_called_once_with(all_gather_group=group)
                     else:
@@ -904,7 +903,6 @@ class TestNPUWorker(TestBase):
             patch("vllm.v1.worker.mm_encoder_model_runner.MMEncoderModelRunner") as mm_encoder_runner,
         ):
             worker = NPUWorker()
-            worker.use_v2_model_runner = True
             worker.vllm_config = SimpleNamespace(is_mm_encoder_only=True)
             worker.rank = 1
 
@@ -1615,7 +1613,6 @@ class TestNPUWorker(TestBase):
 
             worker = NPUWorker()
             worker.model_runner = MagicMock()
-            worker.use_v2_model_runner = False
             worker.vllm_config = MagicMock()
             worker.vllm_config.parallel_config = MagicMock()
             worker.vllm_config.parallel_config.distributed_executor_backend = "ray"
@@ -1661,7 +1658,6 @@ class TestNPUWorker(TestBase):
 
             worker = NPUWorker()
             worker.model_runner = MagicMock()
-            worker.use_v2_model_runner = False
             worker.vllm_config = MagicMock()
             worker.vllm_config.parallel_config = MagicMock()
             worker.vllm_config.parallel_config.distributed_executor_backend = "ray"
@@ -1711,7 +1707,6 @@ class TestNPUWorker(TestBase):
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
             worker.model_runner = MagicMock()
-            worker.use_v2_model_runner = False
             worker.vllm_config = MagicMock()
             worker.vllm_config.parallel_config = MagicMock()
             worker.vllm_config.parallel_config.distributed_executor_backend = "ray"
@@ -1773,7 +1768,6 @@ class TestNPUWorker(TestBase):
 
             worker = NPUWorker()
             worker.model_runner = MagicMock()
-            worker.use_v2_model_runner = False
             worker.vllm_config = MagicMock()
             worker.vllm_config.parallel_config = MagicMock()
             worker.vllm_config.parallel_config.distributed_executor_backend = "external_launcher"
@@ -2084,7 +2078,6 @@ class TestNPUWorker(TestBase):
             worker.vllm_config.model_config = MagicMock()
             worker.vllm_config.model_config.enable_sleep_mode = True
             worker.vllm_config.kv_transfer_config = None
-            worker.use_v2_model_runner = False
 
             # Setup allocator mock
             mock_allocator = MagicMock()
@@ -2179,7 +2172,6 @@ class TestNPUWorker(TestBase):
             worker.vllm_config.model_config = MagicMock()
             worker.vllm_config.model_config.enable_sleep_mode = False
             worker.vllm_config.kv_transfer_config = None
-            worker.use_v2_model_runner = False
 
             # Create mock kv_cache_config
             mock_kv_cache_config = MagicMock()
@@ -2205,7 +2197,6 @@ class TestNPUWorker(TestBase):
             worker.vllm_config = MagicMock()
             worker.vllm_config.speculative_config = None
             worker.vllm_config.model_config.enable_sleep_mode = False
-            worker.use_v2_model_runner = True
 
             mock_kv_cache_config = MagicMock()
             mock_kv_cache_config.needs_kv_cache_zeroing = True
@@ -2217,68 +2208,6 @@ class TestNPUWorker(TestBase):
                 kv_cache_allocation_context=ANY,
             )
             worker.model_runner._init_kv_zero_meta.assert_called_once_with()
-
-    @patch("vllm_ascend.worker.worker.get_ascend_config")
-    @patch("vllm_ascend.worker.worker.enable_sp", return_value=False)
-    @patch("vllm_ascend.worker.worker.get_pp_group")
-    @patch("vllm_ascend.worker.worker.get_tp_group")
-    @patch("vllm_ascend.worker.worker.EMPTY_MODEL_RUNNER_OUTPUT")
-    def test_execute_model_kv_connector_not_finished(
-        self, mock_empty_output, mock_get_tp_group, mock_get_pp_group, mock_enable_sp, mock_get_ascend_config
-    ):
-        """Test execute_model method - kv_connector_output not finished sending/recving case"""
-        from vllm.sequence import IntermediateTensors
-
-        mock_ascend_config = MagicMock()
-        mock_ascend_config.msmonitor_use_daemon = False
-        mock_get_ascend_config.return_value = mock_ascend_config
-
-        from vllm_ascend.worker.worker import NPUWorker
-
-        # Create worker mock
-        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
-            worker = NPUWorker()
-            worker.model_runner = MagicMock()
-            worker.use_v2_model_runner = False
-            worker.vllm_config = MagicMock()
-            worker.vllm_config.parallel_config = MagicMock()
-            worker.vllm_config.parallel_config.distributed_executor_backend = "ray"
-            worker.profiler = None
-            worker._pp_send_work = []
-
-            # Set as middle rank (not first, not last)
-            mock_pp_group = MagicMock()
-            mock_pp_group.is_first_rank = False
-            mock_pp_group.is_last_rank = False
-            mock_get_pp_group.return_value = mock_pp_group
-
-            # Setup tensor reception data
-            mock_pp_group.irecv_tensor_dict.return_value = ({"tensor": "data"}, None, None)
-            mock_pp_group.isend_tensor_dict.return_value = []
-
-            # Create mock kv_connector_output - both finished_sending and finished_recving are False
-            mock_kv_connector_output = MagicMock()
-            mock_kv_connector_output.finished_sending = False
-            mock_kv_connector_output.finished_recving = False
-
-            # Mock return IntermediateTensors with kv_connector_output
-            mock_intermediate_output = MagicMock(spec=IntermediateTensors)
-            mock_intermediate_output.tensors = {"output_tensor": "data"}
-            mock_intermediate_output.kv_connector_output = mock_kv_connector_output
-            worker.model_runner.execute_model.return_value = mock_intermediate_output
-
-            mock_scheduler_output = MagicMock()
-            mock_scheduler_output.total_num_scheduled_tokens = 1
-
-            # Test execute_model
-            result = worker.execute_model(mock_scheduler_output)
-
-            # Verify tensor reception and sending
-            mock_pp_group.irecv_tensor_dict.assert_called_once()
-            mock_pp_group.isend_tensor_dict.assert_called_once()
-
-            # When both flags are False, return EMPTY_MODEL_RUNNER_OUTPUT directly.
-            self.assertEqual(result, mock_empty_output)
 
     def test_update_config(self):
         """Test update_config delegates to model_runner.update_config"""

@@ -1065,27 +1065,17 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
         assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs) <= len(self.running)
 
         # Construct the scheduler output.
-        if self.use_v2_model_runner:
-            scheduled_new_reqs.extend(scheduled_resumed_reqs)
-            scheduled_resumed_reqs.clear()
-            new_reqs_data = [
-                NewRequestData.from_request(
-                    req,
-                    req_to_new_blocks[req.request_id].get_block_ids(),
-                    req._all_token_ids,
-                    uses_mrope=self.model_uses_mrope,
-                )
-                for req in scheduled_new_reqs
-            ]
-        else:
-            new_reqs_data = [
-                NewRequestData.from_request(
-                    req,
-                    req_to_new_blocks[req.request_id].get_block_ids(),
-                    uses_mrope=self.model_uses_mrope,
-                )
-                for req in scheduled_new_reqs
-            ]
+        scheduled_new_reqs.extend(scheduled_resumed_reqs)
+        scheduled_resumed_reqs.clear()
+        new_reqs_data = [
+            NewRequestData.from_request(
+                req,
+                req_to_new_blocks[req.request_id].get_block_ids(),
+                req._all_token_ids,
+                uses_mrope=self.model_uses_mrope,
+            )
+            for req in scheduled_new_reqs
+        ]
 
         with record_function_or_nullcontext("schedule: make_cached_request_data"):
             cached_reqs_data = self._make_cached_request_data(
@@ -1095,11 +1085,6 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                 scheduled_spec_decode_tokens,
                 req_to_new_blocks,
             )
-
-        # Record the request ids that were scheduled in this step (MRV1-only).
-        if not self.use_v2_model_runner:
-            self.prev_step_scheduled_req_ids.clear()
-            self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
         # Drain every step, including without a connector, to avoid stale
         # Mamba boundary offers. Snapshot exact current block tables for the

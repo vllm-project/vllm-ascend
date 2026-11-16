@@ -118,7 +118,6 @@ def eplb_worker_config(tmp_path):
             "vllm.model_executor.models.ModelRegistry.inspect_model_cls",
             return_value=(model_info, model_info.architecture),
         ),
-        patch("vllm.envs.VLLM_USE_V2_MODEL_RUNNER", True),
         patch("vllm.config.vllm.HAS_TRITON", True),
         patch("vllm.config.parallel.current_platform.is_cuda_alike", return_value=True),
     ):

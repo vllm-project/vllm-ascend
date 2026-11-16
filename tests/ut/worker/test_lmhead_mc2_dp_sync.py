@@ -17,14 +17,11 @@ from vllm_ascend.ops.fused_moe import prepare_finalize
 @pytest.fixture
 def mc2_context(monkeypatch):
     config = SimpleNamespace(
-        use_v2_model_runner=True,
         parallel_config=SimpleNamespace(decode_context_parallel_size=1, prefill_context_parallel_size=1),
     )
     reserved = torch.zeros(8, dtype=torch.bool)
     monkeypatch.setattr(utils, "lmhead_tp_enable", lambda: True)
     monkeypatch.setattr(platform, "is_moe_model", lambda _: True)
-    monkeypatch.setattr(afc, "sync_v2_extra_kwargs", lambda _: None)
-    monkeypatch.setattr(afc, "_USE_V2_EXTRA_KWARGS", True)
     monkeypatch.setattr(afc, "get_mc2_mask", lambda: reserved)
     monkeypatch.setattr(afc, "get_mrv2_in_profile_run", lambda: False)
     monkeypatch.setattr(afc, "select_moe_comm_method", lambda *_, **__: afc.MoECommType.MC2)

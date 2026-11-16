@@ -59,7 +59,7 @@ def test_adaptive_verification_backend_capabilities(
             parallel_drafting=method in ("dflash2", "dspark"),
         )
     )
-    config = SimpleNamespace(speculative_config=speculative_config, use_v2_model_runner=True)
+    config = SimpleNamespace(speculative_config=speculative_config)
     spec = Mock()
     assert builder_cls.get_cudagraph_support(config, spec) is AttentionCGSupport.UNIFORM_BATCH
     assert builder_cls.get_varlen_cudagraph_max_query_len(config, spec) == expected_bound
@@ -219,7 +219,6 @@ def _adaptive_manager_kwargs(groups, enabled=True, steps=3):
         prefill_len=SimpleNamespace(np=np.zeros(2, dtype=np.int32)),
     )
     config = SimpleNamespace(
-        use_v2_model_runner=True,
         speculative_config=SimpleNamespace(num_speculative_tokens=3, parallel_drafting=False),
     )
     return dict(

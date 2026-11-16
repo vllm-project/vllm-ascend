@@ -973,11 +973,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         self.n_redundant_experts = (
             parallel_config.eplb_config.num_redundant_experts if parallel_config.enable_eplb else 0
         )
-        self.use_sequence_parallel = (
-            (parallel_config.pipeline_parallel_size == 1 or vllm_config.use_v2_model_runner)
-            and parallel_config.enable_expert_parallel
-            and parallel_config.tensor_parallel_size > 1
-        )
+        self.use_sequence_parallel = parallel_config.enable_expert_parallel and parallel_config.tensor_parallel_size > 1
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(

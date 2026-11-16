@@ -51,5 +51,4 @@ def test_qwen3_5_mtp_tp1_eager():
         },
         **_quant_kw(),
     ) as vllm_model:
-        assert vllm_model.model.llm_engine.vllm_config.use_v2_model_runner
         vllm_model.generate_greedy(["Hello, my name is"], max_tokens=8)

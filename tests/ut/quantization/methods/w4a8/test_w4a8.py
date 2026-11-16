@@ -34,7 +34,6 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         mock_vllm_config.quant_config = Mock(quant_description={"group_size": 0})
         mock_vllm_config.quant_config.get_name.return_value = ASCEND_QUANTIZATION_METHOD
         mock_vllm_config.parallel_config = Mock(enable_expert_parallel=True, enable_eplb=False)
-        mock_vllm_config.use_v2_model_runner = False
         mock_vllm_config.scheduler_config = Mock(
             max_num_batched_tokens=2048, max_model_len=2048, enable_chunked_prefill=False
         )
@@ -48,13 +47,11 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         mock_vllm_config = Mock()
         mock_vllm_config.quant_config = Mock(quant_description={"group_size": 256})
         mock_vllm_config.parallel_config = Mock(enable_expert_parallel=True)
-        mock_vllm_config.use_v2_model_runner = False
         get_current_vllm_config.return_value = mock_vllm_config
         with self.assertRaisesRegex(ValueError, "no longer supported"):
             AscendW4A8DynamicFusedMoEMethod()
 
         # test init rejects tp>16 when use modelslim weights
-        mock_vllm_config.use_v2_model_runner = True
         mock_vllm_config.quant_config = Mock(quant_description={})
         mock_vllm_config.quant_config.get_name.return_value = ASCEND_QUANTIZATION_METHOD
         mock_vllm_config.parallel_config = Mock(enable_expert_parallel=False)

@@ -133,7 +133,6 @@ def _make_vllm_config(producer=False):
     ec_config.is_ec_producer = producer
     ec_config.is_ec_consumer = not producer
     ec_config.is_encode_only = producer
-    vllm_config.use_v2_model_runner = True
     vllm_config.lora_config = None
     vllm_config.model_config.multimodal_config = None
     ec_config.ec_buffer_device = "cuda"

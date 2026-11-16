@@ -617,6 +617,5 @@ def test_gqa_pcp_pd_model_runner_v2_graph() -> None:
         prefill_pcp_size=2,
         decode_tp_size=1,
         async_scheduling=True,
-        use_model_runner_v2=True,
     )
     assert output == " Alex, and I am"

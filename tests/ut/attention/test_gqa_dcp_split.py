@@ -440,7 +440,6 @@ def test_draft_builder_owns_history_and_padding(rank):
     builder.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(),
         parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=1),
-        use_v2_model_runner=False,
     )
     builder.kv_cache_spec = object()
     builder.device = torch.device("cpu")

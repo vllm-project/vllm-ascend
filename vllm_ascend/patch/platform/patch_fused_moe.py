@@ -36,7 +36,6 @@ from typing import Any
 import torch
 import vllm.model_executor.layers.fused_moe as _fused_moe_pkg
 import vllm.model_executor.layers.fused_moe.layer as _fused_moe_layer
-from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import FusedMoERouter
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -147,7 +146,7 @@ def _ascend_FusedMoE(
             )
         enable_eplb = True
         num_redundant_experts = configured_redundancy or upstream_redundancy
-    enable_router_eplb = enable_eplb and get_current_vllm_config().use_v2_model_runner
+    enable_router_eplb = enable_eplb
     if router is None:
         router = create_ascend_fused_moe_router(
             top_k=top_k,

@@ -21,7 +21,6 @@ def test_invalid_target_is_still_rejected(phase):
         additional_config={"eplb_config": {"load_collection_phase": phase}},
         parallel_config=SimpleNamespace(enable_eplb=False),
         speculative_config=object(),
-        use_v2_model_runner=True,
     )
     with pytest.raises(ValueError, match="requires --enable-eplb"):
         _validate_eplb_config(config)
@@ -44,8 +43,6 @@ def dspark_config(tmp_path, monkeypatch, phase, draft_supports_eplb):
     # Scope platform initialization state and suppress log-file creation only.
     monkeypatch.setattr(ascend_config, "_ASCEND_CONFIG", None)
     monkeypatch.setattr(ascend_config, "_INIT_VLLM_CONFIG", None)
-    monkeypatch.setattr(VllmConfig, "use_v2_model_runner", VllmConfig.use_v2_model_runner)
-    monkeypatch.setattr(VllmConfig, "_validate_v2_model_runner", VllmConfig._validate_v2_model_runner)
     monkeypatch.setattr(ascend_logger, "configure_ascend_file_logging", lambda: None)
     monkeypatch.setenv("PYTORCH_NPU_ALLOC_CONF", "expandable_segments:True")
     # Config reconstruction runs before distributed worker initialization.
@@ -88,7 +85,6 @@ def dspark_config(tmp_path, monkeypatch, phase, draft_supports_eplb):
     draft_model_config.hf_config.model_type = "deepseek_v4" if draft_supports_eplb else "qwen3_moe"
     speculative_config.draft_model_config = draft_model_config
     speculative_config.draft_parallel_config = parallel_config
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     return VllmConfig(
         model_config=model_config,
         parallel_config=parallel_config,

@@ -969,10 +969,9 @@ def test_qkv_iproj_tp_keeps_dp_coordination(monkeypatch, input_proj_tp_size, is_
 @pytest.mark.parametrize("v2", [False, True])
 @pytest.mark.parametrize("lmhead", [False, True])
 @pytest.mark.parametrize("dcp", [1, 2])
-def test_requires_lmhead_dp_sync_is_scoped_to_v2_reduced_padding(monkeypatch, v2, lmhead, dcp):
+def test_requires_lmhead_dp_sync_is_scoped_to_v2_reduced_padding(monkeypatch, lmhead, dcp):
     config = SimpleNamespace(
-        use_v2_model_runner=v2,
         parallel_config=SimpleNamespace(decode_context_parallel_size=dcp),
     )
     monkeypatch.setattr(utils, "lmhead_tp_enable", lambda: lmhead)
-    assert utils.requires_lmhead_dp_sync(config) is (v2 and lmhead and dcp == 1)
+    assert utils.requires_lmhead_dp_sync(config) is (lmhead and dcp == 1)

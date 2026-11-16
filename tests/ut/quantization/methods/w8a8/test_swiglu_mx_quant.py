@@ -16,7 +16,6 @@ from vllm_ascend.quantization.utils import DynamicMXQuantScaleAlg
 def make_method(scale_alg, enable_eplb=False):
     config = SimpleNamespace(
         quant_config=SimpleNamespace(),
-        use_v2_model_runner=True,
         parallel_config=SimpleNamespace(enable_eplb=enable_eplb),
     )
     with (

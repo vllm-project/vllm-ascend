@@ -21,7 +21,6 @@ from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.patch.platform.patch_balance_schedule import BalanceDPEngineCoreProc, _balance_scheduling_enabled
 from vllm_ascend.patch.platform.patch_dyntra_lb_core import DyntraLBDPEngineCoreProc, _get_dyntra_lb_config
 from vllm_ascend.patch.platform.patch_dyntra_lb_core import _print_rank_0 as dyntra_print_rank_0
-from vllm_ascend.patch.platform.patch_pp_mtp import _patch_engine_core as pp_mtp_patch_post_step
 
 _PATCHED = False
 
@@ -56,8 +55,6 @@ def _apply_patch() -> None:
         return
     _PATCHED = True
 
-    # Patch EngineCore.post_step
-    pp_mtp_patch_post_step()
     # Patch EngineCoreProc.run_engine_core
     # And in _run_engine_core_patch_func:
     # 1. Patch EngineCore.__init__ by _apply_profiling_patches
