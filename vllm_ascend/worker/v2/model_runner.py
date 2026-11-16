@@ -73,10 +73,6 @@ from vllm_ascend.attention.fa_v1 import AscendFlashAttentionBackend
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
-from vllm_ascend.core.profiling_chunk_predictor import (
-    _finish_profiling_chunk_timing,
-    _start_profiling_chunk_timing,
-)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.dspark_context import (
     bind_dspark_context_receiver,
     configure_dspark_kv_transfer,
@@ -96,6 +92,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     allocate_kv_offload_topk_profile_buffers,
     init_sparse_kv_offload_manager,
 )
+from vllm_ascend.hisparse.host_mirror import HostMirrorConnector, overlap_target_host_mirror
 from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
 from vllm_ascend.observability.runtime_guard.hooks import (
     runtime_guard_sample_tokens,
@@ -162,7 +159,7 @@ class NPUModelRunner(GPUModelRunner):
         # Adaptive verification uses this flag to apply FIA-specific query
         # boundary and sequence length padding during FULL graph execution.
         self.use_fia = False
-        self._uses_flashmla = False
+        self._target_uses_flashmla = False
         # FusedMoE can be constructed by the parent initializer and reads this
         # capacity while setting up MC2 communication.
         set_potential_max_tokens(vllm_config)
@@ -363,6 +360,8 @@ class NPUModelRunner(GPUModelRunner):
         # Close the per-step msprobe dump cycle on the normal last-PP-rank
         # path (v1 parity: v1 finalizes at the end of sample_tokens).
         self._finalize_dump_data()
+        if isinstance(mirror := getattr(self, "kv_connector", None), HostMirrorConnector):
+            mirror.join_pending()
         return output
 
     def pool(self):
@@ -429,6 +428,17 @@ class NPUModelRunner(GPUModelRunner):
                 kv_cache_allocation_context=kv_cache_allocation_context,
             )
 
+    def _has_target_flashmla_attention(self) -> bool:
+        # Draft attention has its own graph dispatch. Only target layers may
+        # restrict target batches containing decode-like PD prompt tails.
+        draft_layer_names = getattr(self.speculator, "draft_attn_layer_names", ())
+        return any(
+            any(layer_name not in draft_layer_names for layer_name in group.layer_names)
+            and getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None
+            for groups in self.attn_groups
+            for group in groups
+        )
+
     def initialize_kv_cache(
         self,
         kv_cache_config: KVCacheConfig,
@@ -464,11 +474,7 @@ class NPUModelRunner(GPUModelRunner):
             )
         with graph_manager_wrapper(self):
             self._initialize_kv_cache_upstream(kv_cache_config, kv_cache_allocation_context)
-            self._uses_flashmla = any(
-                getattr(group.get_metadata_builder(0), "flashmla_state", None) is not None
-                for groups in self.attn_groups
-                for group in groups
-            )
+            self._target_uses_flashmla = self._has_target_flashmla_attention()
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
                 self.pcp_manager.set_runner_state(self.vllm_config, kv_cache_config, self.input_buffers)
@@ -550,6 +556,8 @@ class NPUModelRunner(GPUModelRunner):
         self.model_state.kvpp_runtime = self.kvpp
 
         self._fill_c8_mxfp_v_scale_caches()
+        if self.vllm_config.attention_config.hisparse_config is not None:
+            self.kv_connector = overlap_target_host_mirror(self)
 
     def _fill_c8_mxfp_v_scale_caches(self) -> None:
         """Initialize C8 V scales and retain views for page reassignment."""
@@ -660,12 +668,8 @@ class NPUModelRunner(GPUModelRunner):
         valid_dummy_state_slots: bool = False,
         randomize_inputs: bool = False,
     ):
-        self._cpp_execution_time_ms = None
-        profiling_config = self.ascend_config.scheduler_config.profiling_chunk_config
-        execution_start_time = _start_profiling_chunk_timing(
-            profiling_config,
-            scheduler_output,
-        )
+        if isinstance(mirror := getattr(self, "kv_connector", None), HostMirrorConnector):
+            mirror.begin_execution(not dummy_run and not is_profile)
 
         # Preemption stores must complete before the parent updates states and
         # reuses or zeroes the preempted requests' physical KV cache blocks.
@@ -735,11 +739,6 @@ class NPUModelRunner(GPUModelRunner):
                 # finalize after sample_tokens(), including non-last PP ranks.
                 self._finalize_dump_data()
 
-        self._cpp_execution_time_ms = _finish_profiling_chunk_timing(
-            profiling_config,
-            execution_start_time,
-        )
-
         return output
 
     def _maybe_send_draft_kv(self, scheduler_output: SchedulerOutput) -> None:
@@ -808,7 +807,7 @@ class NPUModelRunner(GPUModelRunner):
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
-        if self._uses_flashmla and batch_state is not None:
+        if self._target_uses_flashmla and batch_state is not None:
             # The backend order must precede derived inputs and graph dispatch.
             batch_state, uniform_token_count = prepare_flashmla_batch_req_state(batch_state, uniform_token_count)
         return batch_state, uniform_token_count
@@ -1239,28 +1238,6 @@ class NPUModelRunner(GPUModelRunner):
         finally:
             self.input_buffers.dummy_num_tokens = previous_dummy_tokens
 
-    @contextmanager
-    def _cpp_profile_dummy(self, enabled: bool):
-        """Scope the target-only prefill semantics used by CPP profiling."""
-        if not enabled:
-            yield
-            return
-
-        previous_profile_cpp = getattr(self.input_buffers, "profile_cpp", False)
-        previous_speculator = self.speculator
-        previous_max_num_reqs = self.max_num_reqs
-        try:
-            self.input_buffers.profile_cpp = True
-            # CPP profiles only the target prefill, so skip the drafter dummy
-            # run while the profiling marker is active.
-            self.speculator = None
-            self.max_num_reqs = 1
-            yield
-        finally:
-            self.input_buffers.profile_cpp = previous_profile_cpp
-            self.speculator = previous_speculator
-            self.max_num_reqs = previous_max_num_reqs
-
     def _get_pcp_profile_num_tokens(self) -> int:
         """Keep replicated draft requests when profiling PCP-local prefill.
 
@@ -1292,7 +1269,6 @@ class NPUModelRunner(GPUModelRunner):
         context_len: int = 0,
         skip_eplb: bool = False,
         is_profile: bool = False,
-        profile_cpp: bool = False,
         **kwargs,
     ):
         """Balanced dummy routing for adaptive-verification profiling; EPLB
@@ -1311,8 +1287,6 @@ class NPUModelRunner(GPUModelRunner):
             )
         load_balance_ctx = override_mrv2_in_profile_run(True) if profile_adaptive_tail else nullcontext()
         with (
-            # Disable the CPP drafter before entering contexts that inspect it.
-            self._cpp_profile_dummy(profile_cpp),
             # Preserve scheduled query tokens before PIECEWISE graph padding.
             self._preserve_dummy_query_tokens(num_tokens, uniform_decode),
             skip_ring_state_update(skip_ring),
@@ -1358,23 +1332,29 @@ class NPUModelRunner(GPUModelRunner):
         ):
             return True
 
-        if (
-            spec is None
-            or self.speculator is None
-            or spec.method != "dspark"
-            or self.model_config.architecture
+        if spec is None or self.speculator is None or spec.method != "dspark" or spec.draft_model_config is None:
+            return False
+
+        draft_architectures = spec.draft_model_config.architectures or ()
+        use_flashmla = getattr(self.speculator, "use_flashmla", False)
+        # K3.1 SFA/KDA and the FlashMLA draft consume corrected device lengths.
+        # The initialized target producer also covers sharded SFA DCP metadata.
+        kimi_k31_device_lengths = (
+            self.model_config.architecture == "KimiK31ForConditionalGeneration"
+            and "K3DSparkModel" in draft_architectures
+            and use_flashmla
+            and getattr(self.model_state, "device_metadata", None) is not None
+        )
+        if not kimi_k31_device_lengths and (
+            self.model_config.architecture
             not in (
                 "MiniMaxM3SparseForCausalLM",
                 "MiniMaxM3SparseForConditionalGeneration",
                 "GlmMoeDsaForCausalLM",
             )
-            or spec.draft_model_config is None
             or (
-                "Qwen3DSparkModel" not in (spec.draft_model_config.architectures or ())
-                and (
-                    "Glm5DSparkForCausalLM" not in (spec.draft_model_config.architectures or ())
-                    or not getattr(self.speculator, "use_flashmla", False)
-                )
+                "Qwen3DSparkModel" not in draft_architectures
+                and ("Glm5DSparkForCausalLM" not in draft_architectures or not use_flashmla)
             )
         ):
             return False
@@ -1383,7 +1363,7 @@ class NPUModelRunner(GPUModelRunner):
         # rules for hardware, Q dtype and KV dtype. Before set_attn, keep syncing.
         draft_backends = getattr(self.speculator, "attn_backends", {})
         parallel_config = self.parallel_config
-        # Keep parallel, transfer, offload and adaptive paths on host counts.
+        # Keep unverified parallel, offload and adaptive paths on host counts.
         return (
             bool(draft_backends)
             and (
@@ -1392,8 +1372,7 @@ class NPUModelRunner(GPUModelRunner):
             )
             and parallel_config.pipeline_parallel_size == 1
             and parallel_config.prefill_context_parallel_size == 1
-            and parallel_config.decode_context_parallel_size == 1
-            and self.vllm_config.kv_transfer_config is None
+            and (parallel_config.decode_context_parallel_size == 1 or kimi_k31_device_lengths)
             and not self.ascend_config.sparse_kv_offload_config.enabled
             and not spec.enable_adaptive_verification
         )

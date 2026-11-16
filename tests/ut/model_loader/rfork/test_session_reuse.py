@@ -96,11 +96,6 @@ def test_foreign_session_fallback_does_not_touch_stored_session(rfork_helpers, m
     load_config = SimpleNamespace(device=None, model_loader_extra_config={}, rfork_session=stored_session)
     loader = module.RForkModelLoader(load_config)
     _patch_identity_inputs(monkeypatch, module, tp_rank=0, fingerprint="draft-fingerprint")
-    monkeypatch.setattr(
-        module,
-        "get_ascend_config",
-        lambda: SimpleNamespace(eplb_config=SimpleNamespace(dynamic_eplb=False, expert_map_record_path=None)),
-    )
     fallback_model = SimpleNamespace()
 
     def default_loader(*args, **kwargs):

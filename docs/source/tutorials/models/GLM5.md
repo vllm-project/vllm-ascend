@@ -1502,9 +1502,9 @@ Test cases use the notation `input/output`, e.g., `128k/1k` means 128K input tok
 |Dual-Node Co-Located 198K Low Latency (A3)|w8a8c8|Dual-Node Co-Located Node (0/1)|16|1|16|1|16|4096|202752|3|
 |PD 198K High Throughput (A3)|w8a8c8|PD — Server-P Node (PP2, PCP16)|16|1|16|1|64|16384|202752|1|
 |PD 198K High Throughput (A3)|w8a8c8|PD — Server-D Node|16|4|1|4|32|164|202752|3|
-|PD 135K High Throughput (950DT Products)|w4a4|PD — Server-P Node (PCP 8)|8|1|8|1|20|8192|135000|1|
+|PD 135K High Throughput (950DT Products)|w4a4|PD — Server-P Node (PCP 8)|8|1|8|1|8|8192|135000|1|
 |PD 135K High Throughput (950DT Products)|w4a4|PD — Server-D Node|8|1|1|8|60|240|135000|3|
-|PD 135K Low Latency (950DT Products)|w4a4|PD — Server-P Node (PCP 8)|8|1|8|1|20|8192|135000|1|
+|PD 135K Low Latency (950DT Products)|w4a4|PD — Server-P Node (PCP 8)|8|1|8|1|8|8192|135000|1|
 |PD 135K Low Latency (950DT Products)|w4a4|PD — Server-D Node|8|1|1|8|60|240|135000|3|
 
 #### 9.1.2 Table 2: Optimizations Requiring Explicit Enablement
