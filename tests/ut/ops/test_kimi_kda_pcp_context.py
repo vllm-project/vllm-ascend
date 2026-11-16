@@ -13,7 +13,8 @@ from tests.ut.ops.test_gdn_attn_builder import (
     _patch_missing_runtime_cdiv,
     create_common_attn_metadata,
 )
-from vllm_ascend.ops import gdn_attn_builder, kda_pcp
+from vllm_ascend.attention import gdn_attn_builder
+from vllm_ascend.ops import kda_pcp
 
 
 @pytest.mark.parametrize("rank", range(8))

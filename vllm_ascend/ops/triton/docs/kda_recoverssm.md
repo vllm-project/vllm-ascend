@@ -27,15 +27,15 @@
   reconstructs `next_state` through the accepted prefix from those records and
   the original checkpoint. Softplus uses its linear branch above 20.
 - **Algorithm flow** (independent requests and heads, with value-dimension tiles):
-  1. `_kda_recoverssm_verify_kernel` loads a request's checkpoint, advances a
-     register-held recurrence, writes outputs and compact records, and leaves the
-     persistent checkpoint unchanged. Null-page rows produce zero output and do
-     not write records.
-  2. `_prepare_commit_plan_kernel` maps speculative rows to sampler rows, clamps
+  1. `kda.recoverssm._kda_recoverssm_verify_kernel` loads a request's checkpoint,
+     advances a register-held recurrence, writes outputs and compact records, and leaves the persistent
+     checkpoint unchanged. Null-page rows produce zero output and do not write
+     records.
+  2. `prepare_commit_plan` maps speculative rows to sampler rows, clamps
      accepted lengths to the query length and window capacity, and prepares final
      and optional boundary destinations. Null pages and zero accepted lengths
      become no-op plan entries.
-  3. `_compact_conv_state_kernel` copies the accepted convolution history to its
+  3. `compact_conv_state` copies the accepted convolution history to its
      destination. For history length `W` and accepted length `c > 0`, the source
      interval is `[c - 1, c - 1 + W)` and the destination interval is `[0, W)`.
   4. `_commit_kda_state_kernel` traverses the accepted records backwards,
@@ -53,6 +53,16 @@
   configuration and restrictions are documented in the model-specific
   RecoverSSM feature guide; low-level align arguments alone do not establish
   model support.
+
+KDA defines its kernels and commit context in
+[`kda/recoverssm.py`](../kda/recoverssm.py). GDN defines its verify and state
+commit kernels in [`gdn/gdn_recoverssm_commit.py`](../gdn/gdn_recoverssm_commit.py) and binds
+caches and prepares the commit plan in its
+[framework context](../../../attention/recoverssm_gdn.py).
+After validating the inputs, the contexts call
+[`prepare_commit_plan`](../mamba/prepare_commit_plan.py) and
+[`compact_conv_state`](../mamba/compact_conv_state.py). Each wrapper
+computes its grid and launches its private kernel.
 
 ## Parameters
 
