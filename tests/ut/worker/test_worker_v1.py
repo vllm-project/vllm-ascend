@@ -629,7 +629,7 @@ class TestNPUWorker(TestBase):
         from vllm_ascend.worker.worker import NPUWorker
 
         mock_get_config.return_value = SimpleNamespace(
-            rl_config=SimpleNamespace(enabled=True, sleep_mode_extra_cleanup=True)
+            rl_config=SimpleNamespace(enabled=True, sleep_mode_extra_cleanup=True, sleep_mode_graph_reuse=False)
         )
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
@@ -704,6 +704,7 @@ class TestNPUWorker(TestBase):
             rl_config=SimpleNamespace(
                 enabled=False,
                 sleep_mode_extra_cleanup=False,
+                sleep_mode_graph_reuse=False,
             ),
         )
         mock_allocator = MagicMock()
@@ -718,6 +719,32 @@ class TestNPUWorker(TestBase):
 
         mock_allocator.wake_up.assert_called_once_with(tags=["kv_cache"])
         mock_synchronize_device.assert_called_once_with()
+
+    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_restore_error_stops_every_rank_before_graph_recovery(self, config, _allocator):
+        from threading import RLock
+
+        from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
+        from vllm_ascend.worker.worker import NPUWorker
+
+        config.return_value = SimpleNamespace(weight_nz_mode=0, rl_config=SimpleNamespace(sleep_mode_graph_reuse=True))
+        for local_failure in (False, True):
+            worker = NPUWorker.__new__(NPUWorker)
+            manager = SleepWakeupManager.__new__(SleepWakeupManager)
+            manager.transition_lock = RLock()
+            manager.graph_reuse = MagicMock(state="ASLEEP")
+            manager.graph_reuse.unanimous.return_value = False
+            manager.wakeup = MagicMock()
+            worker.sleep_wakeup_manager = manager
+            worker._restore_sleep_allocations = MagicMock()
+            if local_failure:
+                worker._restore_sleep_allocations.side_effect = RuntimeError("allocation restore failed")
+            with self.assertRaisesRegex(RuntimeError, "restart all workers"):
+                worker.wake_up(tags=["weights"])
+            manager.graph_reuse.unanimous.assert_called_once_with(not local_failure)
+            manager.wakeup.assert_not_called()
+            self.assertEqual(manager.graph_reuse.state, "ERROR")
 
     def test_synchronize_device_waits_for_npu_work(self):
         """The barrier must delegate to the NPU synchronize primitive.
@@ -783,7 +810,7 @@ class TestNPUWorker(TestBase):
         ]
         mock_get_config.return_value = SimpleNamespace(
             weight_nz_mode=0,
-            rl_config=SimpleNamespace(enabled=False, sleep_mode_extra_cleanup=True),
+            rl_config=SimpleNamespace(enabled=False, sleep_mode_extra_cleanup=True, sleep_mode_graph_reuse=False),
         )
 
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
@@ -2452,6 +2479,46 @@ class TestNPUWorkerWeightUpdate(TestBase):
         worker.shutdown()
 
         self.assertEqual([call[0] for call in cleanup.mock_calls], ["close_eplb", "shutdown_engine", "shutdown_runner"])
+
+    @patch("vllm_ascend.worker.worker.ensure_ec_transfer_shutdown")
+    @patch("vllm_ascend.worker.worker.ensure_kv_transfer_shutdown")
+    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    def test_reuse_shutdown_releases_physical_memory_after_runner(self, allocator, _kv, _ec):
+        from threading import RLock
+
+        from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
+
+        for fail, reader_fails in ((False, False), (True, False), (False, True), (True, True)):
+            worker = self._make_worker(engine=MagicMock())
+            worker.profiler = None
+            manager = SleepWakeupManager.__new__(SleepWakeupManager)
+            manager.graph_reuse = SimpleNamespace(state="READY")
+            manager.transition_lock = RLock()
+            manager.shutdown = MagicMock()
+            worker.sleep_wakeup_manager = manager
+            cleanup = MagicMock()
+            reader_close = MagicMock()
+            worker.model_runner.model = SimpleNamespace(close_shared_engram=reader_close)
+            cleanup.attach_mock(reader_close, "retire_reader")
+            cleanup.attach_mock(manager.shutdown, "retire_graphs")
+            cleanup.attach_mock(worker.model_runner.shutdown, "shutdown_runner")
+            cleanup.attach_mock(allocator.instance.shutdown, "release_physical")
+            if fail:
+                worker.model_runner.shutdown.side_effect = RuntimeError("runner cleanup failed")
+            if reader_fails:
+                reader_close.side_effect = RuntimeError("reader cleanup failed")
+            if fail:
+                with self.assertRaisesRegex(RuntimeError, "runner cleanup failed"):
+                    worker.shutdown()
+            elif reader_fails:
+                with self.assertRaisesRegex(RuntimeError, "reader cleanup failed"):
+                    worker.shutdown()
+            else:
+                worker.shutdown()
+            self.assertEqual(
+                [call[0] for call in cleanup.mock_calls],
+                ["retire_reader", "retire_graphs", "shutdown_runner", "release_physical"],
+            )
 
     @patch("vllm_ascend.worker.worker.ensure_kv_transfer_shutdown")
     def test_failed_eplb_close_blocks_resource_release(self, mock_kv_shutdown):

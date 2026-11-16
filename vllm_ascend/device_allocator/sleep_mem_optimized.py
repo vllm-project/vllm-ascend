@@ -18,8 +18,11 @@
 
 from __future__ import annotations
 
+import gc
 from collections.abc import Callable, MutableMapping
 from dataclasses import fields
+from functools import wraps
+from threading import RLock
 from typing import Any
 
 import torch
@@ -29,14 +32,79 @@ from vllm.logger import logger
 from vllm.utils.mem_constants import GiB_bytes
 
 from vllm_ascend.compilation import acl_graph
+from vllm_ascend.device_allocator.camem import CaMemAllocator
+from vllm_ascend.device_allocator.graph_reuse import SleepGraphReuse
 from vllm_ascend.utils import SLEEP_LIFECYCLE_ANCHOR_GROUP_NAME
 
 
+def serialized_sleep_transition(method):
+    """Serialize control RPCs, including allocator and buffer restoration."""
+
+    @wraps(method)
+    def wrapped(worker, *args, **kwargs):
+        manager = getattr(worker, "sleep_wakeup_manager", None)
+        if not isinstance(manager, SleepWakeupManager) or manager.graph_reuse is None:
+            return method(worker, *args, **kwargs)
+        with manager.transition_lock:
+            try:
+                return method(worker, *args, **kwargs)
+            except Exception:
+                manager.graph_reuse.state = "ERROR"
+                raise
+
+    return wrapped
+
+
+def serialized_model_execution(method):
+    """Drain enqueued work before sleep and reject work during partial wake."""
+
+    @wraps(method)
+    def wrapped(worker, *args, **kwargs):
+        manager = getattr(worker, "sleep_wakeup_manager", None)
+        if not isinstance(manager, SleepWakeupManager) or manager.graph_reuse is None:
+            # Sleep pools also exist with reuse disabled. Do not instantiate
+            # an allocator for ordinary workers, but never continue inference
+            # after an existing pool's void deleter reported a terminal error.
+            allocator = CaMemAllocator.instance
+            if allocator is not None:
+                allocator._check_memory_state()
+            result = method(worker, *args, **kwargs)
+            if allocator is not None:
+                allocator._check_memory_state()
+            return result
+        with manager.transition_lock:
+            if manager.graph_reuse.state != "READY":
+                raise RuntimeError(f"Inference is unavailable during sleep graph state {manager.graph_reuse.state}")
+            try:
+                # A native void free callback reports terminal failures via a
+                # sticky query instead of unwinding through tensor destruction.
+                # No rank collective is added to the per-step hot path.
+                allocator = CaMemAllocator.get_instance()
+                allocator._check_memory_state()
+                result = method(worker, *args, **kwargs)
+                allocator._check_memory_state()
+                return result
+            except Exception:
+                manager.graph_reuse.state = "ERROR"
+                raise
+
+    return wrapped
+
+
 class SleepWakeupManager:
-    def __init__(self, vllm_config: VllmConfig, worker: Any, model_runner_getter: Callable[[], Any]):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        worker: Any,
+        model_runner_getter: Callable[[], Any],
+        *,
+        graph_reuse_enabled: bool = False,
+    ):
         self.acl_graph = AclGraphSleepWakeupManager(vllm_config, model_runner_getter)
         self.hccl = HcclSleepWakeupManager(vllm_config, worker)
         self._model_runner_getter = model_runner_getter
+        self.transition_lock = RLock()
+        self.graph_reuse = SleepGraphReuse(vllm_config, model_runner_getter) if graph_reuse_enabled else None
 
     @staticmethod
     def _measure_memory_released(cleanup: Callable[[], None]) -> int:
@@ -45,8 +113,36 @@ class SleepWakeupManager:
         free_bytes_after_cleanup = torch.npu.mem_get_info()[0]
         return max(free_bytes_after_cleanup - free_bytes_before_cleanup, 0)
 
-    def sleep(self) -> None:
+    def _discard_sleep_graphs(self) -> None:
+        self.acl_graph.sleep()
+        if self.graph_reuse is not None:
+            gc.collect()
+            self.graph_reuse.resource_owners = ()
+        runner = self._model_runner_getter()
+        manager = getattr(runner, "cudagraph_manager", None)
+        if manager is not None:
+            manager.hidden_states = None
+            manager.aux_hidden_states = []
+            manager.sleep_reuse_capture_ready = False
+        CaMemAllocator.get_instance().release_aclgraph_pool()
+
+    def shutdown(self) -> None:
+        """Retire captured resources before the worker releases its tensors."""
+        if self.graph_reuse is not None:
+            self.graph_reuse.state = "CLOSED"
+            self.graph_reuse.signature = None
+        torch.npu.synchronize()
+        self._discard_sleep_graphs()
+
+    def sleep(self, level: int = 1) -> None:
         model_runner = self._model_runner_getter()
+        if self.graph_reuse is not None:
+            groups = tuple(self.hccl.iter_alive_group_coordinators())
+            if self.graph_reuse.prepare_sleep(level, groups):
+                return
+            self._discard_sleep_graphs()
+            self.hccl.sleep()
+            return
         free_bytes_before_cleanup = torch.npu.mem_get_info()[0]
         if model_runner.use_aclgraph:
             self.acl_graph.sleep()
@@ -59,6 +155,22 @@ class SleepWakeupManager:
         )
 
     def wakeup(self, tags: list[str] | None = None) -> None:
+        reuse = self.graph_reuse
+        if reuse is not None:
+            reuse.note_restored(tags)
+            if not reuse.reusing:
+                self.hccl.wakeup()
+            if reuse.pending_tags:
+                return
+            if reuse.reusing and reuse.can_replay(tuple(self.hccl.iter_alive_group_coordinators())):
+                reuse.finish(True)
+                return
+            if reuse.reusing:
+                self._discard_sleep_graphs()
+            self.acl_graph.wakeup(None)
+            self.hccl.release_lifecycle_anchor()
+            reuse.finish(False)
+            return
         self.hccl.wakeup()
         model_runner = self._model_runner_getter()
         if model_runner.use_aclgraph:
