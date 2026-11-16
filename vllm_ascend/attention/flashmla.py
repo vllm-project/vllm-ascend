@@ -279,7 +279,7 @@ class FlashMLACurrent:
     adapter: FlashMLAImpl
     query: torch.Tensor
     schedule: torch.Tensor
-    cache: torch.Tensor
+    cache: torch.Tensor | tuple[torch.Tensor, torch.Tensor]
     block_table: torch.Tensor
     slots: torch.Tensor
     attn_mask: torch.Tensor
@@ -394,10 +394,14 @@ class FlashMLAMetadataBuilder:
                     device=self.device,
                 ),
                 schedule=torch.empty_like(current_schedule, device=self.device),
-                cache=torch.empty(
-                    (block_columns + rows, FLASHMLA_BLOCK_SIZE, 1, FLASHMLA_QK_DIM),
-                    dtype=self.dtype,
-                    device=self.device,
+                cache=(
+                    current_adapter.allocate_cache(block_columns + rows, device=self.device)
+                    if hasattr(current_adapter, "allocate_cache")
+                    else torch.empty(
+                        (block_columns + rows, FLASHMLA_BLOCK_SIZE, 1, FLASHMLA_QK_DIM),
+                        dtype=self.dtype,
+                        device=self.device,
+                    )
                 ),
                 block_table=torch.zeros((rows, block_columns), **ints),
                 slots=torch.full_like(flash.slots, -1),

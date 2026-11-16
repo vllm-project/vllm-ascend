@@ -1,13 +1,16 @@
-# K3.1 A3 MLA tiling 下沉：接口 mock 与框架接入方案
+# K3.1 A3 MLA tiling 下沉：真实接口与框架接入方案
 
 初版日期：2026-11-13；PR 整理日期：2026-11-14。当前基线：vllm-ascend `76ea9d24f`，包含 #21542。
 PR 分支：`codex/a3-mla-tiling-pr`。评审入口：[Draft PR #21876](https://github.com/vllm-project/vllm-ascend/pull/21876)。
 
 面向同事的简版说明见 [当前方案同步说明](a3_mla_tiling_sink_summary.md)。
 
+2026-11-16 已对齐 `mla-release-261116` 的真实接口；安装、配套补丁及本轮验证记录见
+[真实算子接入说明](a3_mla_native_integration.md)。按用户要求，本轮停止 NPU 验证，硬件验收仍待完成。
+
 ## 1. 目标与交付
 
-针对 K3.1 的 MLA DSpark 草稿，接通设备长度、设备调度 metadata、注意力计算、DCP 结果合并及图缓冲区复用。算子尚未交付，因此使用显式启用的数值 mock，并提供独立的 external provider 适配点。
+针对 K3.1 的 MLA DSpark 草稿，接通设备长度、设备调度 metadata、注意力计算、DCP 结果合并及图缓冲区复用。external provider 已对齐交付的真实接口；数值 mock 保留用于 CPU 框架回归。
 
 交付内容：完整方案、可替换的算子适配层、数值 mock、框架接入、CPU 回归测试、独立数值参考、测试报告和真实算子替换说明。默认配置不改变现有 A3 FIA 或 A5 FlashMLA 行为。
 
@@ -15,7 +18,9 @@ mock 验证接口和框架逻辑，不能证明真实 A3 kernel、ACL graph、HC
 
 ## 2. 固定接口依据
 
-依据用户提供的 MinghuasLab/flash-attention-npu，以及 PR #338 的接口版本 `7d3f7433669b524ce71c4e867b90dc3bc6f41264`：
+当前依据 `defeng2008/flash-attention-npu:mla-release-261116`，版本
+`cc3d5ca2a85d9b5dc2417ebbcabe9d40fdf0c55c`。原 PR #338 的
+`7d3f7433669b524ce71c4e867b90dc3bc6f41264` 仅作为数值 mock 的历史依据：
 
 - `flash_attn_npu_3.flash_attn_npu_interface.flash_attn_with_kvcache`
 - `flash_attn_npu_3.flash_attn_npu_interface.get_scheduler_metadata`
@@ -24,8 +29,8 @@ mock 验证接口和框架逻辑，不能证明真实 A3 kernel、ACL graph、HC
 - 长度：同设备 contiguous int32 `cache_seqlens[B]`、含起始 0 的 `cu_seqlens_q[B+1]`。
 - 显式传入模型的 `softmax_scale`，不能改成按 576 重新计算。
 - `return_softmax_lse=True` 返回四项：out、FP32 LSE、out_accum、lse_accum；TND 主输出为 `[T,H,512]`，LSE 为 `[H,T]`。
-- metadata 是不透明 int32 Tensor；长度、query 分段、mask 等变化时重新生成。
-- 此版本 FP16/BF16 分页容量最多 16384，算子页大小为 16 的倍数且在 16～1024；不能把 128K 长上下文当成已支持。
+- native metadata 是不透明 uint8 Tensor（该版本为 2376 字节）；mock 私有记录仍为 int32。长度、query 分段、mask 等变化时重新生成，不转换 native metadata 的 dtype。
+- 当前框架仍保留 16384 的逻辑容量上限，以及 128 的算子页大小；不把未验证的 128K 长上下文当成已支持。
 - 区分管理块和算子页：K3.1 的 1536-token 管理块由现有 block table/cache view 转成 12 个 128-token 算子页。首版允许这种管理块，传给算子的 `page_size` 始终为 128，并检查实际缓存视图。
 - 没有 `seqused_q` 入参。图补齐必须通过零 KV 长度、有效 token mask 和输出清零适配，不能假装接口有这个参数。
 

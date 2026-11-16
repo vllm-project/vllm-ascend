@@ -594,11 +594,16 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         current = flash.current
         assert current is not None
         assert k_nope is not None and k_pe is not None
+        if isinstance(current.cache, tuple):
+            content_cache, rope_cache = current.cache
+        else:
+            content_cache = current.cache[..., : self.kv_lora_rank]
+            rope_cache = current.cache[..., self.kv_lora_rank :]
         torch_npu.npu_scatter_pa_kv_cache(
             key=k_nope.reshape(-1, 1, self.kv_lora_rank).contiguous(),
             value=k_pe.reshape(-1, 1, self.qk_rope_head_dim).contiguous(),
-            key_cache=current.cache[..., : self.kv_lora_rank],
-            value_cache=current.cache[..., self.kv_lora_rank :],
+            key_cache=content_cache,
+            value_cache=rope_cache,
             slot_mapping=current.slots,
             cache_mode="Norm",
         )
@@ -868,9 +873,10 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             else:
                 current = flash.current
                 assert current is not None
+                current_caches = current.cache if isinstance(current.cache, tuple) else (current.cache,)
+                current_tensors += current_caches
                 current_tensors += (
                     current.query,
-                    current.cache,
                     current.schedule,
                     current.block_table,
                     current.slots,

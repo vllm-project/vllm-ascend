@@ -624,9 +624,13 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
                 ("merge", "main"),
                 ("project", "main"),
             ]
+            current_caches = flash.current.cache if isinstance(flash.current.cache, tuple) else (flash.current.cache,)
+            if provider == "a3":
+                assert len(current_caches) == 2
+                assert all(tensor.is_contiguous() for tensor in current_caches)
             for tensor in (
+                *current_caches,
                 flash.current.query,
-                flash.current.cache,
                 flash.current.schedule,
                 flash.current.block_table,
                 flash.current.slots,

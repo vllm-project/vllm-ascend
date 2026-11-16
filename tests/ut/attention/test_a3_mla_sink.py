@@ -229,24 +229,63 @@ def test_external_provider_is_replaceable_and_never_silently_falls_back(monkeypa
             max_seqlen_q=max_seqlen_q,
             softmax_scale=softmax_scale,
             causal=causal,
-            scheduler_metadata=scheduler_metadata,
+            scheduler_metadata=scheduler_metadata.view(torch.int32),
             num_splits=num_splits,
             return_softmax_lse=return_softmax_lse,
         )
 
-    module = SimpleNamespace(flash_attn_with_kvcache=attention, get_scheduler_metadata=mock_op.get_scheduler_metadata)
+    def metadata(*args, **kwargs):
+        # Simulate the native byte ABI, keeping the numerical mock private.
+        return mock_op.get_scheduler_metadata(*args, **kwargs).view(torch.uint8)
+
+    module = SimpleNamespace(flash_attn_with_kvcache=attention, get_scheduler_metadata=metadata)
     monkeypatch.setattr(sink, "import_module", lambda name: module)
     data = list(case())
     native = sink.A3MLAAdapter.load(data[0].config, "external", "future_a3_operator")
     with pytest.raises(ValueError, match="NPU"):
         native.build_metadata(data[4], data[5], data[6])
     # CPU ABI simulation only; production external mode retains its NPU guard.
-    data[0] = replace(native, is_mock=True)
+    original_check = sink.A3MLAAdapter._check_lengths
+    monkeypatch.setattr(
+        sink.A3MLAAdapter,
+        "_check_lengths",
+        lambda self, *args: original_check(replace(self, is_mock=True), *args),
+    )
+    data[0] = native
+    assert native.build_metadata(data[4], data[5], data[6]).dtype == torch.uint8
     invoke(data)
     assert calls == [(64, 512, 192**-0.5, 1)]
     monkeypatch.setattr(sink, "import_module", lambda name: SimpleNamespace())
     with pytest.raises(ImportError):
         sink.A3MLAAdapter.load(data[0].config, "external", "incomplete")
+
+
+@pytest.mark.parametrize("invalid", ["int32", "noncontiguous", "empty"])
+def test_native_metadata_rejects_invalid_buffers(monkeypatch, invalid):
+    original_check = sink.A3MLAAdapter._check_lengths
+    monkeypatch.setattr(
+        sink.A3MLAAdapter,
+        "_check_lengths",
+        lambda self, *args: original_check(replace(self, is_mock=True), *args),
+    )
+    buffers = {
+        "int32": torch.zeros(594, dtype=torch.int32),
+        "noncontiguous": torch.zeros(4752, dtype=torch.uint8)[::2],
+        "empty": torch.empty(0, dtype=torch.uint8),
+    }
+    adapter = sink.A3MLAAdapter(sink.A3MLAConfig(1, 0.125), None, lambda *args, **kwargs: buffers[invalid])
+    with pytest.raises(ValueError, match="provider metadata"):
+        adapter.build_metadata(torch.zeros(1, dtype=torch.int32), torch.zeros(2, dtype=torch.int32))
+
+
+def test_native_length_contract_does_not_dispatch_cpu_fallback_assert(monkeypatch):
+    device = SimpleNamespace(type="npu")
+    lengths = SimpleNamespace(shape=(2,), dtype=torch.int32, device=device, numel=lambda: 2, is_contiguous=lambda: True)
+    cu = SimpleNamespace(shape=(3,), dtype=torch.int32, device=device, is_contiguous=lambda: True)
+    used = SimpleNamespace(shape=(2,), dtype=torch.int32, device=device)
+    monkeypatch.setattr(torch, "_assert_async", Mock(side_effect=AssertionError("CPU fallback in native hot path")))
+    native = sink.A3MLAAdapter(sink.A3MLAConfig(1, 0.125), None, None)
+    assert native._check_lengths(lengths, cu, used) == 2
 
 
 def ast_symbols(path, names, scope):

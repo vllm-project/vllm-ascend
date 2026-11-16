@@ -1,0 +1,33 @@
+diff --git a/csrc/ascend910/flash_attn_npu_3/flash_api.cpp b/csrc/ascend910/flash_attn_npu_3/flash_api.cpp
+index 0db2d8f..4527ca7 100644
+--- a/csrc/ascend910/flash_attn_npu_3/flash_api.cpp
++++ b/csrc/ascend910/flash_attn_npu_3/flash_api.cpp
+@@ -239,7 +239,12 @@ std::vector<at::Tensor> mha_fwd(
+         TORCH_CHECK(cu_seqlens_q.dtype() == torch::kInt32, "cu_seqlens_q must have dtype int32");
+         TORCH_CHECK(max_seqlen_q_.has_value(), "max_seqlen_q must be provided if cu_seqlens_q is provided");
+         int32_t cuQLast = 0;
+-        if (PackedCuLast(cu_seqlens_q, cuQLast)) {
++        // Explicit scheduler metadata is the device-length API. Its caller
++        // owns the prefix/capacity invariant, just as it owns the metadata's
++        // matching schedule. Reading cu[-1] here would serialize every eager
++        // call on Host, undoing the AICPU tiling path. Keep content validation
++        // for callers that ask this function to construct Host tiling.
++        if (!scheduler_metadata_.has_value() && PackedCuLast(cu_seqlens_q, cuQLast)) {
+             TORCH_CHECK(q.size(0) >= cuQLast, "q has ", q.size(0), " tokens but cu_seqlens_q[-1] is ", cuQLast,
+                         "; packed T must be at least cu_seqlens_q[-1]");
+         }
+diff --git a/flash_attn_npu_3/flash_attn_npu_interface.py b/flash_attn_npu_3/flash_attn_npu_interface.py
+index c339809..dabb6c4 100644
+--- a/flash_attn_npu_3/flash_attn_npu_interface.py
++++ b/flash_attn_npu_3/flash_attn_npu_interface.py
+@@ -1495,6 +1495,10 @@ def flash_attn_with_kvcache(
+             packed TND: the maximum actual KV length), not an overprovisioned bound.
+             The backend checks the buffer's dtype, device, contiguity and byte size;
+             it does not validate its contents against the call's arguments.
++            With explicit metadata, the caller must also guarantee that
++            cu_seqlens_q starts at zero, is nondecreasing, and its last offset
++            is no larger than q.shape[0]. The eager device-length path does
++            not read that offset back to Host for validation.
+             For graph replay, copy updated metadata into the captured buffer on the
+             replay stream (or establish a stream dependency). Keep its address and
+             the captured kernel configuration fixed, including the FlashDecode branch;

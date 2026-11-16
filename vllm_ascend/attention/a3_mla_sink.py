@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""A3 split-Q MLA provider boundary, aligned with flash-attention-npu #338.
+"""A3 split-Q MLA provider boundary for flash-attention-npu's 910 release.
 
 The existing FlashMLA batch builder owns buffers and stream ordering. This
 adapter translates its normalized inputs without imposing the A5 cache ABI.
@@ -68,7 +68,7 @@ def validate_sink_selection(impl, *, mode: str, is_a3: bool, is_draft: bool, all
     if impl.use_pcp or cfg.parallel_config.pipeline_parallel_size != 1:
         raise ValueError("A3 MLA sink does not yet support PCP or PP")
     if cfg.model_config.max_model_len > MAX_CAPACITY:
-        raise ValueError("PR #338 FP16/BF16 contract is limited to 16384 logical KV tokens")
+        raise ValueError("A3 MLA integration is currently limited to 16384 logical KV tokens")
     # AscendMLABackend exposes 128-token kernel pages. Manager blocks (e.g.
     # K3.1's 1536) are expanded by the existing block-table/cache-view layer;
     # they are not the operator's page_size argument.
@@ -85,9 +85,23 @@ class A3MLAAdapter:
     attention_op: Any
     metadata_op: Any
     is_mock: bool = False
-    # Native #338 metadata cannot be capacity-queried with device='meta'.
-    # Bootstrap it from valid zero-length device tensors once per graph capacity.
+    # Bootstrap from zero-length device tensors once per graph capacity;
+    # the provider owns the metadata buffer's shape and byte layout.
     metadata_requires_device_inputs: bool = True
+
+    @property
+    def metadata_dtype(self):
+        # Numerical mock records are private int32 values. The native 910
+        # provider returns opaque bytes; never cast or reinterpret its tiling.
+        return torch.int32 if self.is_mock else torch.uint8
+
+    def allocate_cache(self, pages: int, *, device):
+        """Keep both A3 components packed inside each page, including DCP KV."""
+        shape = (pages, self.config.page_size, 1)
+        return (
+            torch.empty((*shape, LATENT_DIM), dtype=self.config.dtype, device=device),
+            torch.empty((*shape, ROPE_DIM), dtype=self.config.dtype, device=device),
+        )
 
     @classmethod
     def load(cls, config: A3MLAConfig, mode: str, module_name: str = DEFAULT_MODULE):
@@ -122,13 +136,17 @@ class A3MLAAdapter:
                 or seqused_q.device != cache_seqlens.device
             ):
                 raise ValueError("seqused_q must be same-device int32 [B]")
-            allocated = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-            # The native contract has no Q-used argument. Whole dummy segments
-            # are representable; partially used allocated segments are not.
-            torch._assert_async(
-                ((seqused_q == 0) | (seqused_q == allocated)).all(),
-                "A3 MLA does not support partially used Query segments",
-            )
+            # The builder derives used_q from cu differences, or sets a whole
+            # dummy segment to zero. Partial segments are not representable by
+            # this public operator ABI. Keep the numerical assertion in the
+            # mock: aten::_assert_async falls back to CPU on torch_npu 2.10 and
+            # would reintroduce a device-length read in the native hot path.
+            if self.is_mock:
+                allocated = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+                torch._assert_async(
+                    ((seqused_q == 0) | (seqused_q == allocated)).all(),
+                    "A3 MLA does not support partially used Query segments",
+                )
         if not self.is_mock and cache_seqlens.device.type != "npu":
             raise ValueError("native A3 MLA requires NPU tensors")
         return batch
@@ -158,8 +176,13 @@ class A3MLAAdapter:
             causal=cfg.mask_mode == 3,
             num_splits=1,
         )
-        if not isinstance(metadata, torch.Tensor) or metadata.dtype != torch.int32 or metadata.ndim != 1:
-            raise ValueError("A3 provider metadata must be an opaque int32 vector")
+        if (
+            not isinstance(metadata, torch.Tensor)
+            or metadata.dtype != self.metadata_dtype
+            or metadata.ndim != 1
+            or not metadata.is_contiguous()
+        ):
+            raise ValueError(f"A3 provider metadata must be a contiguous opaque {self.metadata_dtype} vector")
         if not metadata.numel() or metadata.device != cache_seqlens.device:
             raise ValueError("A3 provider metadata must be nonempty and remain on the input device")
         return metadata
@@ -206,7 +229,7 @@ class A3MLAAdapter:
             return_softmax_lse=True,
         )
         if not isinstance(result, (tuple, list)) or len(result) != 4:
-            raise ValueError("PR #338 MLA must return (out, lse, out_accum, lse_accum)")
+            raise ValueError("A3 MLA must return (out, lse, out_accum, lse_accum)")
         output, lse, _, _ = result
         expected_output = (q.shape[0], cfg.num_heads, LATENT_DIM)
         if output.shape != expected_output or output.dtype != cfg.dtype or output.device != q.device:
