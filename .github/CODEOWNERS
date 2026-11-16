@@ -3,6 +3,7 @@
 # Infra, CI
 /.gemini @wangxiyuan
 /.github @zhangxinyuehfad
+/.github/CODEOWNERS @wangxiyuan
 /tools @zhangxinyuehfad
 /.gitignore @zhangxinyuehfad
 /.pre-commit-config.yaml @zhangxinyuehfad
