@@ -29,7 +29,7 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 from vllm.model_executor.utils import replace_parameter
 
-from vllm_ascend.a2_mega_moe import a2_prefill_enabled
+from vllm_ascend.a2_mega_moe import a2_prefill_enabled, is_draft_model
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, select_moe_comm_method, use_cann_megamoe
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -699,9 +699,10 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
         lora_context = getattr(self, "_ascend_moe_lora_context", None)
         comm_type = _EXTRA_CTX.moe_comm_type
-        if a2_prefill_enabled(get_ascend_config()) and self._vllm_config.model_config.runner_type == "draft":
+        if a2_prefill_enabled(get_ascend_config()) and is_draft_model(self._vllm_config):
             # MRv2 draft execution can enter with the target's forward config.
-            # Resolve the draft's ordinary route using its own model config.
+            # Internal DSpark configs can still have runner_type="generate".
+            # Resolve their ordinary route using the shared draft predicate.
             comm_type = select_moe_comm_method(
                 _EXTRA_CTX.max_tokens_across_dp,
                 self._vllm_config,

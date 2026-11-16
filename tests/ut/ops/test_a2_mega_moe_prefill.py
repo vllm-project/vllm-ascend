@@ -608,7 +608,23 @@ def test_standalone_precision_check_rejects_large_errors_and_nan():
             check(actual, expected)
 
 
-def test_mrv2_draft_overrides_target_prefill_route_before_prepare():
+def model_config_for_identity(identity):
+    if identity == "replicated":
+        target, prepare = replicated_pcp_harness()
+        return prepare(target)[0]
+    cfg = config()
+    if identity == "draft":
+        cfg.model_config.runner_type = "draft"
+    elif identity == "architecture":
+        cfg.model_config.architectures = ["DeepseekV41DSparkModel"]
+    else:
+        assert identity == "target"
+    return cfg
+
+
+@pytest.mark.parametrize("identity", ["draft", "architecture", "replicated"])
+@pytest.mark.parametrize("quant_type", ["w4a8", "w8a8", "bf16"])
+def test_mrv2_draft_overrides_target_prefill_route_before_prepare(identity, quant_type):
     tree = ast.parse((ROOT / "vllm_ascend/ops/fused_moe/routed_experts.py").read_text())
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "AscendRoutedExperts")
     forward = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "forward_impl")
@@ -622,9 +638,12 @@ def test_mrv2_draft_overrides_target_prefill_route_before_prepare():
         _EXTRA_CTX=context,
         get_ascend_config=lambda: NS(a2_mega_moe_prefill=NS(enabled=True)),
         a2_prefill_enabled=policy.a2_prefill_enabled,
+        is_draft_model=policy.is_draft_model,
         select_moe_comm_method=select,
         get_moe_comm_method=get_comm,
         QuantType=NS(NONE="bf16"),
+        get_current_hardware_profile=lambda: NS(supports=lambda capability: False),
+        HardwareCapability=NS(CANN_MEGAMOE_MXFP="mxfp"),
     )
     exec(
         compile(
@@ -632,15 +651,81 @@ def test_mrv2_draft_overrides_target_prefill_route_before_prepare():
         ),
         ns,
     )
-    cfg = config()
-    cfg.model_config.runner_type = "draft"
+    cfg = model_config_for_identity(identity)
     layer = NS(
         enable_npugraph_ex_static_kernel=False,
         _vllm_config=cfg,
-        quant_type="w4a8",
+        quant_type=quant_type,
         moe_config=NS(is_sequence_parallel=False),
     )
     with pytest.raises(RuntimeError, match="prepared draft"):
         ns[forward.name](layer, hidden_states=torch.ones(32, 8), router_logits=torch.ones(32, 128))
-    select.assert_called_once_with(32, cfg, is_draft_model=True, draft_moe_quant_type="w4a8")
+    select.assert_called_once_with(32, cfg, is_draft_model=True, draft_moe_quant_type=quant_type)
     get_comm.assert_called_once_with("mc2", layer.moe_config)
+
+
+def runner_constructor():
+    """Execute the production constructor with device setup replaced by stubs."""
+    tree = ast.parse((ROOT / "vllm_ascend/ops/fused_moe/fused_moe.py").read_text())
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "AscendMoERunner")
+    init = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "__init__")
+
+    class Base:
+        def __init__(self, layer_name, moe_config, router, routed_experts, *args):
+            self.moe_config = moe_config
+            self.routed_experts = routed_experts
+
+    ns = dict(
+        Base=Base,
+        a2_prefill_enabled=policy.a2_prefill_enabled,
+        is_draft_model=policy.is_draft_model,
+        get_ascend_config=lambda: NS(a2_mega_moe_prefill=NS(enabled=True)),
+        DEEPSEEK_V41_ROUTED_EXPERTS=384,
+        QuantType=NS(W4A8="w4a8"),
+        get_tp_group=Mock(),
+        get_dp_group=Mock(),
+        get_ep_group=Mock(),
+        get_mc2_group=Mock(),
+        setup_moe_comm_method=Mock(),
+        get_moe_comm_method=Mock(return_value=None),
+        MoECommType=NS(FUSED_MC2="fused", ALLTOALL="alltoall"),
+    )
+    cls.bases = [ast.Name(id="Base", ctx=ast.Load())]
+    cls.body = [init]
+    cls.decorator_list = []
+    exec(
+        compile(
+            ast.fix_missing_locations(ast.Module(body=[cls], type_ignores=[])),
+            "runner",
+            "exec",
+            flags=__future__.annotations.compiler_flag,
+        ),
+        ns,
+    )
+    return ns[cls.name], ns
+
+
+@pytest.mark.parametrize("identity", ["target", "draft", "architecture", "replicated"])
+@pytest.mark.parametrize("quant_type", ["w4a8", "w8a8", "bf16"])
+def test_runner_quantization_restriction_applies_only_to_target(identity, quant_type):
+    cls, ns = runner_constructor()
+    routed = NS(quant_type=quant_type, _vllm_config=model_config_for_identity(identity))
+    shape = NS(hidden_dim=5120, num_experts=384, ep_size=16)
+    router = object()
+    if identity == "target" and quant_type != "w4a8":
+        with pytest.raises(ValueError, match="requires dynamic INT8/INT4 W4A8"):
+            cls("test", shape, router, routed)
+        ns["setup_moe_comm_method"].assert_not_called()
+    else:
+        cls("test", shape, router, routed)
+        assert routed.router is router
+        ns["setup_moe_comm_method"].assert_called_once_with(shape)
+
+
+@pytest.mark.parametrize("quant_type", ["w8a8", "bf16"])
+def test_disabled_feature_keeps_existing_target_quantization(quant_type):
+    cls, ns = runner_constructor()
+    ns["get_ascend_config"] = lambda: NS(a2_mega_moe_prefill=NS(enabled=False))
+    routed = NS(quant_type=quant_type, _vllm_config=config())
+    cls("test", NS(hidden_dim=5120, num_experts=384, ep_size=16), object(), routed)
+    ns["setup_moe_comm_method"].assert_called_once()
