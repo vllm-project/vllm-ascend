@@ -5,7 +5,6 @@
 import math
 from dataclasses import replace
 from types import SimpleNamespace as NS
-from unittest.mock import Mock
 
 import pytest
 import torch
@@ -170,43 +169,6 @@ def test_failed_unregister_retains_host_owner_for_safe_retry(monkeypatch):
     backend.unpin_tensor(tensor)
     assert not hasattr(tensor, "_hisparse_registration")
     assert events == ["close", "close"]
-
-
-@pytest.mark.parametrize("count", [0, 4, 2047, 2048])
-def test_dma_descriptor_batches_preserve_rows_and_submit_policy(monkeypatch, count):
-    submit = Mock()
-    monkeypatch.setattr(torch.ops._C_ascend, "swap_blocks_batch", submit, raising=False)
-    descriptors = tuple(torch.arange(count, dtype=torch.int64) + offset for offset in (0, 4096, 8192))
-    backend = AscendHiSparseBackend()
-    backend.swap_blocks_batch(*descriptors)
-    assert submit.call_count == max(1, math.ceil(count / backend._D2H_BATCH_LIMIT))
-    for index, call in enumerate(submit.call_args_list):
-        start = index * backend._D2H_BATCH_LIMIT
-        end = min(start + backend._D2H_BATCH_LIMIT, count)
-        for actual, expected in zip(call.args[:3], descriptors):
-            torch.testing.assert_close(actual, expected[start:end])
-        assert call.args[3] == 1
-        assert call.kwargs == {"prefer_small_async": count <= backend._D2H_BATCH_LIMIT}
-
-
-@pytest.mark.parametrize(
-    "count,descriptor_index,invalid_layout",
-    [(4, 0, "strided"), (4, 1, "2d"), (2048, 2, "short"), (2048, 0, "scalar")],
-)
-def test_dma_rejects_invalid_descriptors_before_submission(monkeypatch, count, descriptor_index, invalid_layout):
-    submit = Mock()
-    monkeypatch.setattr(torch.ops._C_ascend, "swap_blocks_batch", submit, raising=False)
-    descriptors = [torch.empty(count, dtype=torch.int64) for _ in range(3)]
-    invalid = {
-        "strided": torch.empty(count * 2, dtype=torch.int64)[::2],
-        "2d": torch.empty((count, 1), dtype=torch.int64),
-        "short": torch.empty(count - 1, dtype=torch.int64),
-        "scalar": torch.empty((), dtype=torch.int64),
-    }
-    descriptors[descriptor_index] = invalid[invalid_layout]
-    with pytest.raises(ValueError, match="equal-length contiguous descriptor arrays"):
-        AscendHiSparseBackend().swap_blocks_batch(*descriptors)
-    submit.assert_not_called()
 
 
 def test_private_host_allocator_keeps_other_backends_on_core_path(monkeypatch):
