@@ -293,7 +293,7 @@ log_selected_ops
 
   chmod +x -- "${installer_candidates[0]}" || true
   log "running installer: ${installer_candidates[0]}"
-  "${installer_candidates[0]}" --install-path="${custom_ops_install_dir}"
+  "${installer_candidates[0]}" --install-path="${custom_ops_install_dir}" --install-for-all
   # CANN leaves generated vendor script dirs owner-read-only; keep repo-local
   # editable-build artifacts removable by the non-root user who built them.
   if [[ -d "${custom_ops_install_dir}/vendors/custom_transformer/scripts" ]]; then
