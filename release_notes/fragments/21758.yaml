@@ -1,0 +1,5 @@
+pr: 21758
+entries:
+  - category: performance
+    text: Reduced decode-step scheduling bubbles for Qwen3.8-Flash-Next with MTP by avoiding an unnecessary CPU sequence-length synchronization on the supported Ascend QSA path.
+    model: qwen3.8-flash-next
