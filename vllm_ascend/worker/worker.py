@@ -118,6 +118,7 @@ from vllm_ascend.utils import (
 )
 
 
+# Both supported versions resolve grouping through the platform's builder.
 def get_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
@@ -298,6 +299,12 @@ class NPUWorker(WorkerBase):
             model.get_parameter(name).copy_(value)
         self._sleep_saved_parameters.clear()
 
+    def set_metrics_level(self, level: str) -> str:
+        """Set this worker process's MS metric level. Called by collective RPC."""
+        from vllm_ascend.observability.ms_metrics.control import apply_process_metrics_level
+
+        return apply_process_metrics_level(level)
+
     def sleep(self, level: int = 1) -> None:
         self.synchronize_device()
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
@@ -464,6 +471,13 @@ class NPUWorker(WorkerBase):
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
+    def _get_gpu_memory_utilization(self) -> float:
+        utilization = self.cache_config.gpu_memory_utilization
+        # vLLM #56492 defers the default until the KV allocation mode is known.
+        if utilization is None:
+            return self.cache_config.resolved_gpu_memory_utilization
+        return utilization
+
     def _init_device(self):
         # vLLM v0.24.0 (PR #45026) removed automatic per-process device
         # isolation for DP workers. Mirror gpu_worker.py::init_device:
@@ -535,7 +549,7 @@ class NPUWorker(WorkerBase):
 
         # take current memory snapshot
         self.init_snapshot = MemorySnapshot(device=device)
-        self.requested_memory = self.init_snapshot.total_memory * self.cache_config.gpu_memory_utilization
+        self.requested_memory = self.init_snapshot.total_memory * self._get_gpu_memory_utilization()
         if self.init_snapshot.free_memory < self.requested_memory:
             GiB = lambda b: round(b / GiB_bytes, 2)
             raise ValueError(
@@ -543,7 +557,7 @@ class NPUWorker(WorkerBase):
                 f"({GiB(self.init_snapshot.free_memory)}/"
                 f"{GiB(self.init_snapshot.total_memory)} GiB) on startup "
                 f"is less than desired GPU memory utilization "
-                f"({self.cache_config.gpu_memory_utilization}, "
+                f"({self._get_gpu_memory_utilization()}, "
                 f"{GiB(self.requested_memory)} GiB). Decrease GPU memory "
                 f"utilization or reduce GPU memory used by other processes."
             )
@@ -1045,7 +1059,7 @@ class NPUWorker(WorkerBase):
                 f"({format_gib(self.init_snapshot.free_memory)}/"
                 f"{format_gib(self.init_snapshot.total_memory)} GiB) on startup. "
                 f"Desired GPU memory utilization is "
-                f"({self.cache_config.gpu_memory_utilization}, "
+                f"({self._get_gpu_memory_utilization()}, "
                 f"{format_gib(self.requested_memory)} GiB). "
                 f"Actual usage: {format_gib(self.model_runner.model_memory_usage)} GiB "
                 f"for weights, {format_gib(self.peak_activation_memory)} GiB for peak "

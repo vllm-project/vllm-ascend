@@ -9,10 +9,13 @@
 # do not trigger the full CI suite.
 
 estimated_times:
+  tests/e2e/pull_request/one_card/test_sparse_kv_offload_lifecycle.py: 600
   tests/e2e/pull_request/one_card/test_mc2_local_padding.py: 60
   tests/e2e/pull_request/one_card/test_mla_prolog_head_padding.py: 30
   tests/e2e/pull_request/one_card/model_runner_v2/test_uva_prefix.py: 30
   tests/e2e/pull_request/one_card/test_kv_pool_accuracy.py: 410
+  # Initial estimate for four eager/FULL and trace OFF/ON engine starts.
+  tests/e2e/pull_request/one_card/test_kv_trace.py: 600
   tests/e2e/pull_request/one_card/test_flash_attn_precision.py: 30
   tests/e2e/pull_request/one_card/test_swiglu_mx_quant.py: 30
   tests/e2e/pull_request/one_card/test_hisparse_attention.py: 30
@@ -21,6 +24,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/model_runner_v2/test_kvpp_pp.py: 300
   tests/e2e/pull_request/four_card/test_kvpp_pd.py: 230
   tests/e2e/pull_request/two_card/test_kvpp.py: 290
+  tests/e2e/pull_request/two_card/test_qwen3_8_27b_dense_sp.py: 600
   tests/e2e/pull_request/one_card/_310p/test_classification_310p.py: 60
   tests/e2e/pull_request/one_card/_310p/test_dense_model_310p.py: 290
   tests/e2e/pull_request/one_card/_310p/test_qwen35_dense_model_310p.py: 810

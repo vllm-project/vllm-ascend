@@ -146,6 +146,23 @@
 #       engine-core-level customization, or when the feature modules no longer
 #       need an entry-point hook.
 #
+# ** 5b. File: platform/patch_metrics_level.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.engine.core.EngineCore.set_metrics_level`
+#   2. `vllm.entrypoints.serve.register_vllm_serve_api_routers`
+#    Why:
+#       The MS metric level is an integer in each process. A file poll on the
+#       last pipeline stage does not update earlier stages, and the API server
+#       has no command that reaches every worker.
+#    How:
+#       Add `POST /set_metrics_level` on the API server. The handler utility-RPCs
+#       `set_metrics_level` to every EngineCore. That method sets the engine
+#       process level and collective-RPCs the same method on every worker.
+#    Related PR (if no, explain why):
+#       No upstream PR. The command is Ascend MS metric control.
+#    Future Plan:
+#       Drop the monkeypatch if upstream grows a generic runtime-config RPC.
+#
 # ** 6. File: platform/patch_engram_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.engram.EngramConfig.verify_model_config`
@@ -1115,6 +1132,39 @@
 #       patch Qwen3_5GatedDeltaNet._forward_core to use triton ops like `fused_recurrent_gated_delta_rule`.
 #    Future Plan:
 #       Remove this patch when all ops in _forward_core support both Qwen3_5 and Qwen3Next.
+#   2. `vllm.model_executor.models.qwen3_5.Qwen3_5DecoderLayer.__init__` and
+#      `vllm.model_executor.models.qwen3_5.Qwen3_5DecoderLayer.forward`
+#    Why:
+#       Upstream gates sequence parallelism on `use_sequence_parallel_moe`, so
+#       dense Qwen3.5-family checkpoints (Qwen3.5/3.6/3.8-27B dense,
+#       model_type `qwen3_5_text`) cannot run sequence parallel at all. On
+#       Ascend the FlashComm switch (`additional_config.enable_flashcomm1`)
+#       also covers the dense family: hidden states and the residual stay
+#       sequence-sharded across the decoder stack, attention (full and GDN)
+#       gathers before / reduce-scatters after its sequence-parallel output
+#       projection, and the dense MLP gathers around its TP-sharded weights.
+#    How:
+#       `__init__`: after the upstream constructor, raise
+#       `use_attn_reduce_scatter_for_moe` for the dense family when dense SP
+#       is active (this module's `enable_dense_sp` resolves the FlashComm
+#       switch), and flip `o_proj` / GDN `out_proj` / dense `down_proj`
+#       to `reduce_results=False`. Reusing the upstream flag keeps
+#       Qwen3NextModel's entry chunk / exit all-gather and the MTP head's
+#       chunk / gather working unchanged.
+#       `forward`: replicate the upstream layout and, for dense MLPs, wrap
+#       gate_up/down with `sp_all_gather` / `sp_reduce_scatter` (MiniMax-M3 /
+#       DeepSeek-V4 pattern); MoE blocks keep the upstream
+#       `already_sequence_parallel=True` contract.
+#       The module-level patch applications are guarded by
+#       `STANDARD_WORKER_PATCHES` (mirroring `patch/worker/__init__.py`) so
+#       the lazy import from `utils.enable_sp` stays side-effect-free on
+#       devices that exclude this patch (310P).
+#    Related PR (if no, explain why):
+#       No, upstream has no dense-model sequence-parallel switch.
+#    Future Plan:
+#       Contribute the dense-MLP gather/scatter layout upstream once vLLM
+#       grows a dense sequence-parallelism config; until then the patch is
+#       gated on the FlashComm switch and the `qwen3_5_text` model type.
 #
 # ** 15. File: worker/patch_qwen3_dflash.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1529,8 +1579,8 @@
 # ** 25. File: worker/patch_eagle_speculator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.spec_decode.target_dependent_ar.speculator.SpeculatorCudaGraphManager`
-#       (named `vllm.v1.worker.gpu.spec_decode.autoregressive.speculator` before
-#       upstream vLLM #60335; both supported lanes use the new path).
+#   2. `vllm.v1.worker.gpu.spec_decode.autoregressive.speculator.SpeculatorCudaGraphManager`
+#       (vLLM main #60989 constructs the decode manager in the shared AR base).
 #    Why:
 #       The shared v2 autoregressive speculative-decoding path (Eagle/MTP) uses
 #       an upstream CUDA graph manager, which is not usable on Ascend.
@@ -1655,6 +1705,8 @@
 #       before device filtering. Preserve the original dictionary and container
 #       types for model bindings and connector registration; remove the old
 #       first-tensor wrapper in patch_attn_utils.py.
+#       Preserve #55688's ReplaySSM tracker collection for inherited scheduler
+#       block copies when the supported upstream exports that collector.
 #    Related PR (if no, explain why):
 #       No upstream PR linked; this adapts Ascend multi-tensor allocations.
 #    Future Plan:
@@ -1788,3 +1840,24 @@
 # How: initialize the capability-gated per-layer NPU adaptation after upstream init.
 # Related PR: vllm-project/vllm#60050.
 # Future Plan: remove this initialization hook when a shared backend extension supports it.
+
+# ** 36. File: worker/patch_staged_writes.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.block_table.BlockTables.__init__`,
+#      `vllm.v1.worker.gpu.block_table.BlockTables.append_block_ids`
+#    Why:
+#      num_blocks.np is written only in append_block_ids, but upstream flushes
+#      num_blocks.copy_to_uva unconditionally on every step, costing one H2D
+#      copy per decode step even when no block was appended.
+#    How:
+#      Track a dirty flag set by append_block_ids and make the instance-level
+#      num_blocks.copy_to_uva a no-op when clean. apply_staged_writes keeps
+#      calling it, so upstream logic and ordering are untouched. The flag is
+#      cleared only after a successful copy so failed flushes are retried.
+#    Related PR (if no, explain why):
+#      Upstream vllm#62748 already guarded the Sampler staged-write flush
+#      (removed here per review; arrives via main2main). No upstream PR yet
+#      for the num_blocks flush; follow https://github.com/vllm-project/vllm/pull/65880.
+#    Future Plan:
+#      Remove when upstream adds dirty tracking to UvaBackedTensor flushes.
+#
