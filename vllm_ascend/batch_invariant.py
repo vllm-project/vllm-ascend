@@ -108,12 +108,12 @@ def override_envs_for_invariance():
     os.environ["HCCL_DETERMINISTIC"] = "strict"
     os.environ["LCCL_DETERMINISTIC"] = "1"
 
-    # Enable deterministic computation for operators: on the target stack
-    # (torch-npu >= 2.10.0.post7 with CANN 9.2.0) deterministic level 3 guarantees
-    # batch consistency for the operators. Set the torch flag first so that
-    # set_deterministic_level() keeps warn_only=True instead of forcing strict mode.
-    # Do not use `torch.use_deterministic_algorithms` after `torch_npu.npu.set_deterministic_level`
-    # because the latter is already implicitly invoked when calling the former.
+    # NOTE: To enable the batch invariance calculation of operators:
+    # 1) The strict environment requirement for ensuring batch invariance of operators
+    # with deterministic level 3 is that torch-npu must be 2.10.0.post7 or later and CANN
+    # must be 9.2.0 or later (The current main branch already meets this requirement.).
+    # 2) Do not use `torch.use_deterministic_algorithms` after `torch_npu.npu.set_deterministic_level`.
+    # Otherwise, unknown errors may occur. This is mentioned in the `set_deterministic_level` API.
     torch_npu.npu.set_deterministic_level(3)
 
     logger.debug(
