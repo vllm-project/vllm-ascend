@@ -20,7 +20,7 @@ def _require_arch22():
     bootstrap_custom_op_env()
     if not torch.npu.is_available() or get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3):
         pytest.skip("requires A2/A3")
-    import vllm_ascend.vllm_ascend_C  # noqa: F401
+    import vllm_ascend.vllm_ascend_C  # type: ignore[import-not-found, import-untyped]  # noqa: F401
 
 
 @pytest.mark.parametrize("capture", [False, True])

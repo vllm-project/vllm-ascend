@@ -105,6 +105,7 @@ def test_int8_prolog_resident_writes_match_sfa(capture, hisparse):
                 impl, x, refcache, cos, sin, local_slots[:rows], attn_metadata=metadata
             )
             if capture:
+                assert graph is not None
                 graph.replay()
                 actual = captured
             else:

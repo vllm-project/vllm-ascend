@@ -20,7 +20,7 @@ def _require_arch22():
     if get_ascend_device_type() not in (AscendDeviceType.A2, AscendDeviceType.A3):
         pytest.skip("requires the arch22 kernel")
     if not hasattr(torch.ops._C_ascend, "hisparse_resolve_residency"):
-        import vllm_ascend.vllm_ascend_C  # noqa: F401
+        import vllm_ascend.vllm_ascend_C  # type: ignore[import-not-found, import-untyped]  # noqa: F401
     assert hasattr(torch.ops._C_ascend, "hisparse_resolve_residency"), "rebuild the arch22 extension"
 
 
@@ -712,6 +712,7 @@ def test_resident_fast_path_dynamic_graph(state_count, mask_dtype, compact, resi
                 resident_cpu[:, cold_page] = 0
             current_indices = indices_cpu.clone()
             if cold_row is not None:
+                assert cold_page is not None
                 current_indices[cold_row, 0] = cold_page * block
             indices.copy_(current_indices)
             oracle_indices = current_indices.clone()
