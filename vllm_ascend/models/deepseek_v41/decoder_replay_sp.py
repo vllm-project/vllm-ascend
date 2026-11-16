@@ -58,27 +58,47 @@ class SPReplayPlan:
         replay_tokens: int,
         tp_size: int,
         tp_rank: int,
-        device: torch.device,
+        rows: torch.Tensor,
     ) -> "SPReplayPlan":
         original_width = (original_tokens + tp_size - 1) // tp_size
         replay_width = replay_tokens // tp_size
-        rows = np.concatenate(
-            [np.arange(end - kept, end, dtype=np.int64) for end, kept in zip(query_start_loc[1:], kept_lens)]
-        )
-        owners = rows // original_width
-        compact_rows = np.arange(rows.size, dtype=np.int64)
-        owned = owners == tp_rank
-        local_rows = rows[owned] - tp_rank * original_width
-        send_counts = np.bincount(compact_rows[owned] // replay_width, minlength=tp_size).tolist()
-        received_owners = owners[tp_rank * replay_width : (tp_rank + 1) * replay_width]
-        recv_counts = np.bincount(received_owners, minlength=tp_size).tolist()
+        # Retained intervals and original SP shards are ordered. Sweep their
+        # boundaries once: owner_offsets[r] counts retained rows before shard r.
+        # This is O(num_requests + TP), independent of the retained token count.
+        owner_offsets = []
+        req = 0
+        completed_rows = 0
+        for boundary in range(tp_size + 1):
+            original_boundary = boundary * original_width
+            while req < len(kept_lens) and query_start_loc[req + 1] <= original_boundary:
+                completed_rows += int(kept_lens[req])
+                req += 1
+            partial_rows = 0
+            if req < len(kept_lens):
+                kept_start = int(query_start_loc[req + 1] - kept_lens[req])
+                partial_rows = max(0, original_boundary - kept_start)
+            owner_offsets.append(completed_rows + partial_rows)
+
+        begin, end = owner_offsets[tp_rank : tp_rank + 2]
+        replay_begin = tp_rank * replay_width
+        replay_end = replay_begin + replay_width
+        send_counts = [
+            max(0, min(end, (rank + 1) * replay_width) - max(begin, rank * replay_width)) for rank in range(tp_size)
+        ]
+        recv_counts = [
+            max(0, min(replay_end, owner_end) - max(replay_begin, owner_begin))
+            for owner_begin, owner_end in zip(owner_offsets, owner_offsets[1:])
+        ]
+        # _gather already wrote these ordered indices on device. Each original
+        # rank owns one contiguous slice of the valid prefix; exclude padding.
+        local_rows = rows[begin:end] - tp_rank * original_width
         return cls(
-            torch.as_tensor(local_rows, device=device),
+            local_rows,
             send_counts,
             recv_counts,
             original_width,
             replay_width,
-            len(received_owners),
+            sum(recv_counts),
         )
 
     def compact(

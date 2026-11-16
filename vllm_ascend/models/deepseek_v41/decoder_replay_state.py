@@ -359,7 +359,7 @@ class DecoderReplayState:
                 plan.num_tokens,
                 tp.world_size,
                 tp.rank_in_group,
-                self.rows.device,
+                self.rows,
             )
             self.layers.sp_plan = sp_plan
             # Every TP rank already owns the full IDs. Select this decoder

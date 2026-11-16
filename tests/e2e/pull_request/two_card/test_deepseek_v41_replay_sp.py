@@ -23,8 +23,9 @@ def _hccl_replay_worker(rank, init_method):
             offsets = np.insert(np.cumsum(lengths), 0, 0)
             original_width = (sum(lengths) + 1) // 2
             compact_width = (sum(kept) + 1) // 2
-            plan = SPReplayPlan.build(offsets, np.array(kept), sum(lengths), compact_width * 2, 2, rank, device)
             rows = torch.tensor([row for end, count in zip(offsets[1:], kept) for row in range(end - count, end)])
+            device_rows = torch.nn.functional.pad(rows, (0, compact_width * 2 - len(rows))).to(device)
+            plan = SPReplayPlan.build(offsets, np.array(kept), sum(lengths), compact_width * 2, 2, rank, device_rows)
             compact_rows = rows[rank * compact_width : (rank + 1) * compact_width]
             local_rows = rows[(rows >= rank * original_width) & (rows < (rank + 1) * original_width)]
             local_rows -= rank * original_width

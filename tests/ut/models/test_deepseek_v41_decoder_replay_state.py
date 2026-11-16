@@ -88,7 +88,12 @@ def test_sp_replay_plan_aligns_execution_and_preserves_row_ownership(state, monk
     monkeypatch.setattr(replay_mod, "get_tp_group", lambda: SimpleNamespace(world_size=2, rank_in_group=rank))
     source = inputs()
     source.batch.input_ids = source.batch.input_ids.to(ids_dtype)
-    state.rows[:6] = torch.tensor([0, 5, 6, 11, 12, 0])
+    state.rows[:6].fill_(-1)
+
+    def gather(*args, **kwargs):
+        state.rows[:6] = torch.tensor([0, 5, 6, 11, 12, 0])
+
+    state._gather.side_effect = gather
     state.prepare(source, CUDAGraphMode.NONE)
     assert state.num_actual_tokens == 5
     assert state.num_tokens == 6

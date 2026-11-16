@@ -56,15 +56,15 @@ def test_sp_replay_plan_matches_global_selection(tp_size):
         lengths = rng.integers(1, 150, size=7)
         kept = np.minimum(lengths, rng.integers(1, 130, size=7))
         offsets = np.insert(np.cumsum(lengths), 0, 0)
-        original_width = (int(lengths.sum()) + tp_size - 1) // tp_size
-        replay_width = (int(kept.sum()) + tp_size - 1) // tp_size
+        original_tokens = int(lengths.sum()) + int(rng.integers(0, tp_size * 3))
+        original_width = (original_tokens + tp_size - 1) // tp_size
+        replay_width = (int(kept.sum()) + tp_size - 1) // tp_size + int(rng.integers(0, 4))
+        selected = _kept_rows(lengths, kept)
+        padded_rows = torch.nn.functional.pad(selected, (0, replay_width * tp_size - len(selected)))
         plans = [
-            SPReplayPlan.build(
-                offsets, kept, int(lengths.sum()), replay_width * tp_size, tp_size, rank, torch.device("cpu")
-            )
+            SPReplayPlan.build(offsets, kept, original_tokens, replay_width * tp_size, tp_size, rank, padded_rows)
             for rank in range(tp_size)
         ]
-        selected = _kept_rows(lengths, kept)
         source_values = [plan.local_rows + rank * original_width for rank, plan in enumerate(plans)]
         received: list[list[torch.Tensor]] = [[] for _ in plans]
         for source, (plan, values) in enumerate(zip(plans, source_values)):
@@ -77,6 +77,61 @@ def test_sp_replay_plan_matches_global_selection(tp_size):
             )
         # Every retained row is sent exactly once; no discarded or padded rows.
         assert sum(sum(plan.send_counts) for plan in plans) == selected.numel()
+
+
+@pytest.mark.parametrize("tp_size", [1, 2, 4, 8])
+@pytest.mark.parametrize("original_padding", [0, 3])
+@pytest.mark.parametrize(
+    "lengths,kept",
+    [([0, 8, 0, 7, 0], [0, 2, 0, 3, 0]), ([8, 8], [8, 8]), ([16], [1])],
+)
+def test_sp_plan_interval_boundaries_and_padding(tp_size, lengths, kept, original_padding):
+    offsets = np.insert(np.cumsum(lengths), 0, 0)
+    original_tokens = sum(lengths) + original_padding
+    original_width = (original_tokens + tp_size - 1) // tp_size
+    replay_width = (sum(kept) + tp_size - 1) // tp_size + 2
+    rows = _kept_rows(lengths, kept)
+    padded_rows = torch.nn.functional.pad(rows, (0, replay_width * tp_size - len(rows)))
+    for rank in range(tp_size):
+        plan = SPReplayPlan.build(
+            offsets, np.array(kept), original_tokens, replay_width * tp_size, tp_size, rank, padded_rows
+        )
+        owned = (rows >= rank * original_width) & (rows < (rank + 1) * original_width)
+        torch.testing.assert_close(plan.local_rows, rows[owned] - rank * original_width)
+        expected_send = torch.bincount(torch.arange(len(rows))[owned] // replay_width, minlength=tp_size)
+        received = rows[rank * replay_width : (rank + 1) * replay_width]
+        expected_recv = torch.bincount(received // original_width, minlength=tp_size)
+        assert plan.send_counts == expected_send.tolist()
+        assert plan.recv_counts == expected_recv.tolist()
+        assert plan.received_tokens == len(received)
+
+
+def test_sp_plan_reuses_device_rows_without_host_token_expansion(monkeypatch):
+    # A meta tensor represents an existing, very large device index buffer.
+    # Planning must not materialize those tokens on CPU or read device values.
+    offsets = np.array([0, 2**35, 2**35 + 3], dtype=np.int64)
+    kept = np.array([2**34, 3], dtype=np.int64)
+    tp_size = 8
+    replay_tokens = ((int(kept.sum()) + tp_size - 1) // tp_size) * tp_size
+    rows = torch.empty(replay_tokens, dtype=torch.int64, device="meta")
+    forbidden = Mock(side_effect=AssertionError("SP planning must reuse device rows without token expansion"))
+    for name in ("arange", "concatenate", "bincount"):
+        monkeypatch.setattr(np, name, forbidden)
+    for name in ("as_tensor", "tensor", "arange"):
+        monkeypatch.setattr(torch, name, forbidden)
+    for name in ("cpu", "numpy", "tolist", "item"):
+        monkeypatch.setattr(torch.Tensor, name, forbidden)
+    plans = [
+        SPReplayPlan.build(offsets, kept, int(offsets[-1]), replay_tokens, tp_size, rank, rows)
+        for rank in range(tp_size)
+    ]
+    assert sum(sum(plan.send_counts) for plan in plans) == int(kept.sum())
+    for rank, plan in enumerate(plans):
+        assert plan.local_rows.device.type == "meta"
+        assert plan.local_rows.numel() == sum(plan.send_counts)
+        assert plan.recv_counts == [source.send_counts[rank] for source in plans]
+        assert plan.received_tokens == sum(plan.recv_counts)
+    forbidden.assert_not_called()
 
 
 def _sp_replay_worker(rank, world_size, hidden_dtype, init_method):
@@ -100,6 +155,8 @@ def _sp_replay_worker(rank, world_size, hidden_dtype, init_method):
                 offsets = np.insert(np.cumsum(lengths), 0, 0)
                 original_width = (sum(lengths) + world_size - 1) // world_size
                 replay_width = (sum(kept) + world_size - 1) // world_size
+                rows = _kept_rows(lengths, kept)
+                padded_rows = torch.nn.functional.pad(rows, (0, replay_width * world_size - len(rows)))
                 plan = SPReplayPlan.build(
                     offsets,
                     np.array(kept),
@@ -107,10 +164,8 @@ def _sp_replay_worker(rank, world_size, hidden_dtype, init_method):
                     replay_width * world_size,
                     world_size,
                     rank,
-                    torch.device("cpu"),
+                    padded_rows,
                 )
-                rows = _kept_rows(lengths, kept)
-                padded_rows = torch.nn.functional.pad(rows, (0, replay_width * world_size - len(rows)))
                 full_positions = torch.arange(original_width * world_size, dtype=torch.int64)
                 full_ids = full_positions * 7 + 5
                 ids = full_ids[rank * original_width : (rank + 1) * original_width]

@@ -419,7 +419,7 @@ def test_compiled_entry_reads_each_replay_plan_and_peer_context(compiled_replay_
         case.replay.context_factory = decoder_context
         if case.model.use_sequence_parallel:
             case.replay.sp_plan = SPReplayPlan.build(
-                np.array(offsets), np.array(kept), 6, len(rows), 1, 0, torch.device("cpu")
+                np.array(offsets), np.array(kept), 6, len(rows), 1, 0, case.replay.rows
             )
             case.replay.sp_replay_input_ids = torch.tensor(rows)
         output, aux = case.forward()
