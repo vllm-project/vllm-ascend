@@ -873,8 +873,7 @@ class TestNPUWorker(TestBase):
             worker.vllm_config = MagicMock()
             worker.vllm_config.kv_transfer_config = None
             worker.load_config = SimpleNamespace(load_format="auto", model_loader_extra_config={})
-            worker.cache_config = MagicMock()
-            worker.cache_config.gpu_memory_utilization = 0.5
+            worker.cache_config = CacheConfig(gpu_memory_utilization=0.5)
 
             # Test _init_device
             with patch("vllm_ascend.worker.worker.setup_ascend_local_comm_res") as setup_endpoint:

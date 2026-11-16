@@ -325,6 +325,9 @@ def test_cache_failure_obeys_upstream_fallback_policy(valid_config, monkeypatch,
     # This CPU test exercises failure routing, not platform registration. Old
     # vLLM intentionally retains its CUDA-only gate when our adapter is disabled.
     monkeypatch.setattr(ipc_loader, "check_ipc_platform_support", lambda: None)
+    # Newer vLLM records zero-copy fallback by socket path. Keep device UUID
+    # discovery out of this CPU-only failure-routing test.
+    monkeypatch.setattr(loader, "_resolve_socket_path", lambda: "/tmp/ascend-preload-test.sock")
     exception = (
         WeightCacheUnavailableError("unavailable") if failure == "unavailable" else CacheConfigMismatchError("mismatch")
     )
@@ -363,7 +366,11 @@ def test_external_memory_budget_avoids_false_startup_oom(require_external_weight
     from vllm.v1.worker.utils import request_memory
 
     snapshot = SimpleNamespace(total_memory=1000, free_memory=650, device_="npu:0")
-    cache = SimpleNamespace(gpu_memory_utilization=0.9)
+    cache = SimpleNamespace(
+        gpu_memory_utilization=0.9,
+        resolved_gpu_memory_utilization=0.9,
+        enable_extensible_kv_cache=False,
+    )
     assert request_memory(snapshot, cache, external_weight_memory=300) == 600
     with pytest.raises(ValueError, match="Free memory"):
         request_memory(snapshot, cache)
