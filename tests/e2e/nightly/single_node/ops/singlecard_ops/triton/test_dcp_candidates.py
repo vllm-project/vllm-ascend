@@ -125,6 +125,50 @@ def test_sorted_pack_preserves_score_bits_at_local_id_limit(dtype, world, rows):
     assert torch.equal(actual.cpu(), expected)
 
 
+@pytest.mark.parametrize("world", [3, 8])
+def test_owner_prefix_peer_endpoints_match_global_sort(world):
+    """Exercise empty, fully better, partially valid, and tied peer lists."""
+    torch.npu.set_device(0)
+    rows, k, owner, interleave = 6, 2048, 1, 768
+    ids = torch.arange(k, dtype=torch.int32).view(1, 1, 1, k).expand(world, rows, 1, k).clone()
+    scores = torch.full((world, rows, 1, k), -4.0, dtype=torch.float32)
+    descending = torch.linspace(2.0, 0.0, k)
+    scores[owner, :, 0, :] = descending
+    # The first peer is wholly better on row 0, invalid on row 1, and
+    # partially populated with better candidates on row 2.
+    scores[0, 0, 0, :] = 4.0
+    ids[0, 1, 0, :] = -1
+    scores[0, 2, 0, :] = 4.0
+    ids[0, 2, 0, k // 2 :] = -1
+    # Mixed ranges require the regular scan. Equal scores and signed zeros
+    # exercise the ID tie-break at the peer endpoints.
+    scores[0, 3, 0, :] = descending.flip(0)
+    scores[:, 4, 0, :] = 1.0
+    # The last peer ties the owner's head score but has a smaller global ID.
+    # A higher peer head enables the skewed fast path on this row.
+    scores[0, 4, 0, 0] = 2.0
+    ids[owner, 4, 0, :] += 10000
+    scores[:, 5, 0, :] = 0.0
+    scores[0, 5, 0, ::2] = -0.0
+    ids[-1, 5, 0, k // 2 :] = -1
+
+    packed = torch.cat(
+        [
+            pack_local_candidates(ids[rank].npu(), scores[rank].npu(), world, rank, interleave, sort_candidates=True)
+            for rank in range(world)
+        ],
+        dim=0,
+    )
+    actual = merge_packed_candidates(
+        packed, rows, world, k, local_rank=owner, interleave=interleave, presorted=True, owner_sharded=True
+    )
+    global_ids = torch.cat([local_to_global(ids[rank], world, rank, interleave) for rank in range(world)], dim=-1)
+    expected = merge_topk_candidates(
+        global_ids, torch.cat(list(scores), dim=-1), k, local_rank=owner, world_size=world, interleave=interleave
+    )
+    assert torch.equal(actual.cpu(), expected)
+
+
 def test_bf16_candidates_pack_and_global_topk_match_reference():
     world, rows, topk, interleave = 8, 2, 16, 768
     packed, ids, values = [], [], []

@@ -252,8 +252,25 @@ def _merge_owner_prefix(
         lower = tl.where(tl.sum(before_tail.to(tl.float32), 0) == 0.0, upper, 0)
         peer_peak = tl.max(tl.where(peer_valid, peer_score, -float("inf")), 0)
         # A peer head beyond the owner's observed score span hints at skew.
-        # This chooses a probe only; exact counts still establish all bounds.
+        # The hint gates the fast path and selects the initial probe; only
+        # exact endpoint comparisons or counts establish the bounds.
         skewed = (peer_peak - head_score) > (head_score - tail_score)
+        if skewed & (lower < upper):
+            head_id = tl.load(own).to(tl.float32)
+            peer_last_id = tl.load(packed + (peer_rank * ROWS + row) * K * 2 + (K - 1) * 2, head_mask, -1).to(
+                tl.float32
+            )
+            peer_last_score = tl.load(packed + (peer_rank * ROWS + row) * K * 2 + (K - 1) * 2 + 1, head_mask, 0).to(
+                tl.float32, bitcast=True
+            )
+            peer_last_valid = (peer_last_id >= 0) & (tl.abs(peer_last_score) < float("inf"))
+            before_head = peer_last_valid & (
+                (peer_last_score > head_score) | ((peer_last_score == head_score) & (peer_last_id < head_id))
+            )
+            # A valid last peer candidate proves K peer candidates precede
+            # even our best candidate; no owner candidate can be selected.
+            if tl.sum(before_head.to(tl.int32), 0) > 0:
+                lower, upper = 0, 0
         pivot = tl.where(skewed, 0, tl.minimum(tl.full((), K // WORLD, tl.int32), upper - 1))
         # Three interpolation probes are followed by enough bisections for
         # every possible boundary. Estimates affect work only, never selection.
