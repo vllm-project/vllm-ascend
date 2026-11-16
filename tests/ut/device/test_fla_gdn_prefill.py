@@ -31,6 +31,7 @@ from unittest import TestCase, main
 
 import torch
 import vllm  # noqa: F401 - Initialize vLLM before Ascend adaptors.
+
 import vllm_ascend.ops  # noqa: F401 - Break the device_op import cycle.
 
 # Typical A2/A3 GDN prefill shape.
@@ -86,9 +87,7 @@ class TestFlaGdnPrefillAdaptor(TestCase):
             calls.append({"q": q_in, "k": k_in, "v": v_in, "g": g_in, "beta": beta_in, **kwargs})
             return torch.zeros_like(q_in), torch.zeros_like(state)
 
-        BaseDeviceAdaptor.fla_gdn_prefill(
-            q, k, v, g, beta, state, 0.125, make_meta(), fused_fwd
-        )
+        BaseDeviceAdaptor.fla_gdn_prefill(q, k, v, g, beta, state, 0.125, make_meta(), fused_fwd)
         call = calls[0]
 
         self.assertEqual(call["chunk_size"], 64)
@@ -126,9 +125,7 @@ class TestFlaGdnPrefillAdaptor(TestCase):
         gate = torch.randn(BATCH, tokens, HV, HEAD_DIM, dtype=torch.bfloat16)
         raw_beta = torch.randn(BATCH, tokens, HV, dtype=torch.bfloat16)
 
-        BaseDeviceAdaptor.fla_gdn_prefill(
-            q, k, v, gate, raw_beta, make_state(), 0.125, make_meta(), fused_fwd
-        )
+        BaseDeviceAdaptor.fla_gdn_prefill(q, k, v, gate, raw_beta, make_state(), 0.125, make_meta(), fused_fwd)
         self.assertEqual(calls[0]["layout"], "BNSD")
 
     def test_non_contiguous_transpose_uses_bsnd(self):
@@ -152,9 +149,7 @@ class TestFlaGdnPrefillAdaptor(TestCase):
         gate = torch.randn(BATCH, tokens, HV, HEAD_DIM, dtype=torch.bfloat16)
         raw_beta = torch.randn(BATCH, tokens, HV, dtype=torch.bfloat16)
 
-        BaseDeviceAdaptor.fla_gdn_prefill(
-            q, k, v, gate, raw_beta, make_state(), 0.125, make_meta(), fused_fwd
-        )
+        BaseDeviceAdaptor.fla_gdn_prefill(q, k, v, gate, raw_beta, make_state(), 0.125, make_meta(), fused_fwd)
         self.assertEqual(calls[0]["layout"], "BSND")
 
     # ------------------------------------------------------------------ #
@@ -175,9 +170,7 @@ class TestFlaGdnPrefillAdaptor(TestCase):
             return torch.zeros_like(q_in), kwargs["initial_state"].clone()
 
         q, k, v, g, beta = make_inputs()
-        output, final = BaseDeviceAdaptor.fla_gdn_prefill(
-            q, k, v, g, beta, state, 0.125, make_meta(), fused_fwd
-        )
+        output, final = BaseDeviceAdaptor.fla_gdn_prefill(q, k, v, g, beta, state, 0.125, make_meta(), fused_fwd)
         self.assertTrue(torch.equal(final, state))
 
     # ------------------------------------------------------------------ #
@@ -211,9 +204,7 @@ class TestFlaGdnPrefillAdaptor(TestCase):
             torch.testing.assert_close(kwargs["initial_state"], original_state[[1, 3]])
             return torch.zeros_like(q_in), kernel_final
 
-        output, final = BaseDeviceAdaptor.fla_gdn_prefill(
-            q, k, v, gate, raw_beta, state, 0.125, meta, fused_fwd
-        )
+        output, final = BaseDeviceAdaptor.fla_gdn_prefill(q, k, v, gate, raw_beta, state, 0.125, meta, fused_fwd)
 
         expected = original_state.clone()
         expected[[1, 3]] = 99.0
@@ -236,13 +227,11 @@ class TestFlaGdnPrefillAdaptor(TestCase):
 
                     calls = []
 
-                    def fused_fwd(q_in, k_in, v_in, g_in, beta_in, **kwargs):
-                        calls.append({"g": g_in, "beta": beta_in})
+                    def fused_fwd(q_in, k_in, v_in, g_in, beta_in, _calls=calls, **kwargs):
+                        _calls.append({"g": g_in, "beta": beta_in})
                         return torch.zeros_like(q_in), torch.zeros_like(v_in)
 
-                    BaseDeviceAdaptor.fla_gdn_prefill(
-                        q, k, v, g, beta, make_state(), 0.125, make_meta(), fused_fwd
-                    )
+                    BaseDeviceAdaptor.fla_gdn_prefill(q, k, v, g, beta, make_state(), 0.125, make_meta(), fused_fwd)
 
                     self.assertEqual(calls[0]["g"].dtype, torch.float32)
                     self.assertEqual(calls[0]["beta"].dtype, v.dtype)
@@ -325,9 +314,7 @@ class TestFlaGdnPrefillAdaptor(TestCase):
             self.assertEqual(kwargs["cu_seqlens"], (0, 33, 98))
             return qkv.clone(), kwargs["initial_state"] + 1000
 
-        output, final = BaseDeviceAdaptor.fla_gdn_prefill(
-            qkv, qkv, qkv, gate, raw_beta, state, 0.5, meta, fused
-        )
+        output, final = BaseDeviceAdaptor.fla_gdn_prefill(qkv, qkv, qkv, gate, raw_beta, state, 0.5, meta, fused)
         expected_state = original_state.clone()
         expected_state[[1, 3]] += 1000
         torch.testing.assert_close(output, qkv)
