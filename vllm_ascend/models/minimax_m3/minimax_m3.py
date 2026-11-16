@@ -400,8 +400,6 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         if isinstance(idx_cache, (tuple, list)):
             idx_cache = idx_cache[0]
         if self.indexer.index_cache.context_parallel_size > 1:
-            from vllm.distributed import get_tp_group
-
             from vllm_ascend.models.minimax_m3.ops.indexer_dcp import scatter_index_shard
 
             group = get_tp_group()

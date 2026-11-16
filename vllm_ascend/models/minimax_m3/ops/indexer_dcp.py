@@ -67,10 +67,9 @@ def scatter_index_shard(cache: torch.Tensor, updates: torch.Tensor, slots: torch
     )
 
 
-def gather_index_shards(cache: torch.Tensor, tp_group, pages: torch.Tensor | None = None) -> torch.Tensor:
+def gather_index_shards(cache: torch.Tensor, tp_group, pages: torch.Tensor) -> torch.Tensor:
     """Materialize one layer's full index cache for the existing prefill op."""
-    if pages is not None:
-        cache = cache.index_select(0, pages)
+    cache = cache.index_select(0, pages)
     size = tp_group.world_size
     blocks, local_tokens, dim = cache.shape
     gathered = tp_group.all_gather(cache, dim=1)
@@ -85,9 +84,11 @@ def plan_prefill_index_gather(
     valid = (columns[None, :] * block_size < seq_lens_cpu[:, None]) & (block_table_cpu >= 0)
     # Retain a safe page for empty rows and invalid entries. Unused columns
     # must not cause a gather of stale physical pages from an earlier batch.
-    pages = torch.unique(torch.cat((block_table_cpu.new_zeros(1), block_table_cpu[valid])), sorted=True)
+    pages, inverse = torch.unique(
+        torch.cat((block_table_cpu.new_zeros(1), block_table_cpu[valid])), sorted=True, return_inverse=True
+    )
     remapped = torch.zeros_like(block_table_cpu)
-    remapped[valid] = torch.searchsorted(pages, block_table_cpu[valid]).to(remapped.dtype)
+    remapped[valid] = inverse[1:].to(remapped.dtype)
     return pages, remapped
 
 

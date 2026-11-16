@@ -298,7 +298,7 @@ class AscendMiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
         self.kv_cache_dtype = kv_cache_dtype
         self.prefix = prefix
         self.cache_config = cache_config
-        compilation_config = get_current_vllm_config().compilation_config
+        compilation_config = config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
@@ -330,7 +330,6 @@ class AscendMiniMaxM3IndexerPrefillMetadata:
     start_loc: torch.Tensor | None = None
 
     gather_pages: torch.Tensor | None = None
-    gather_block_table: torch.Tensor | None = None
 
 
 @dataclass
@@ -438,26 +437,26 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
                 num_decode_tokens,
                 out=cu_seqlens_q,
             )
-            gather_pages = gather_block_table = None
+            prefill_block_table = block_table[num_decodes:prefill_end]
+            gather_pages = None
             if self.shard_index_cache:
                 from vllm_ascend.models.minimax_m3.ops.indexer_dcp import plan_prefill_index_gather
 
                 # Prefill is eager. Plan the compact gather once per batch and
                 # reuse it in every layer, rather than gathering unused pages
                 # from the entire allocated cache at each attention layer.
-                prefill_table_cpu = block_table[num_decodes:prefill_end].detach().cpu()
+                prefill_table_cpu = prefill_block_table.detach().cpu()
                 pages_cpu, inverse_cpu = plan_prefill_index_gather(
                     prefill_table_cpu, prefill_seq_lens_cpu, self.block_size
                 )
                 gather_pages = pages_cpu.to(device=self.context_len_buffer.device, dtype=torch.int64)
-                gather_block_table = inverse_cpu.to(device=self.context_len_buffer.device, dtype=torch.int32)
+                prefill_block_table = inverse_cpu.to(device=self.context_len_buffer.device, dtype=torch.int32)
             prefill_metadata = AscendMiniMaxM3IndexerPrefillMetadata(
                 gather_pages=gather_pages,
-                gather_block_table=gather_block_table,
                 cu_seqlens_q=cu_seqlens_q,
                 seq_lens=seq_lens[num_decodes:prefill_end],
                 context_lens=prefill_context_lens,
-                block_table=block_table[num_decodes:prefill_end],
+                block_table=prefill_block_table,
                 max_query_len=common_attn_metadata.max_query_len,
                 max_seq_len=common_attn_metadata.max_seq_len,
                 start_loc=prefill_start_loc,
@@ -568,6 +567,9 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
         num_decode_tokens = index_md.num_decode_tokens
         iq = index_query[:num_tokens].view(-1, self.num_index_heads, self.index_head_dim)
         kv = self.index_cache.kv_cache
+        shard_index_cache = self.index_cache.context_parallel_size > 1
+        if shard_index_cache and isinstance(kv, tuple):
+            kv = kv[0]
 
         decode_topk: torch.Tensor | None = None
         prefill_topk: torch.Tensor | None = None
@@ -576,7 +578,7 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
             d = index_md.decode
             assert d is not None
             decode_iq = iq[:num_decode_tokens]
-            if self.index_cache.context_parallel_size > 1:
+            if shard_index_cache:
                 from vllm_ascend.models.minimax_m3.ops.indexer_dcp import (
                     index_shard_scores,
                     reduce_scatter_index_scores,
@@ -584,10 +586,9 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
 
                 group = get_tp_group()
                 full_query = group.all_gather(decode_iq.contiguous(), dim=1)
-                local_cache = kv[0] if isinstance(kv, tuple) else kv
                 scores = index_shard_scores(
                     full_query,
-                    local_cache,
+                    kv,
                     d.block_table,
                     d.seq_lens,
                     d.decode_query_len,
@@ -665,19 +666,16 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
         if index_md.num_prefills > 0:
             p = index_md.prefill
             assert p is not None
-            prefill_block_table = p.block_table
-            if self.index_cache.context_parallel_size > 1:
+            if shard_index_cache:
                 from vllm_ascend.models.minimax_m3.ops.indexer_dcp import gather_index_shards
 
-                local_cache = kv[0] if isinstance(kv, tuple) else kv
-                kv = gather_index_shards(local_cache, get_tp_group(), p.gather_pages)
-                assert p.gather_block_table is not None
-                prefill_block_table = p.gather_block_table
+                assert p.gather_pages is not None
+                kv = gather_index_shards(kv, get_tp_group(), p.gather_pages)
             if _USE_ASCENDC_INDEX_SCORE_PREFILL:
                 prefill_topk = minimax_m3_index_prefill_ascendc(
                     iq[num_decode_tokens:],
                     kv,
-                    prefill_block_table,
+                    p.block_table,
                     p.cu_seqlens_q,
                     p.seq_lens,
                     p.context_lens,
@@ -693,7 +691,7 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
                 score = minimax_m3_index_score(
                     iq[num_decode_tokens:],
                     kv,
-                    prefill_block_table,
+                    p.block_table,
                     p.cu_seqlens_q,
                     p.seq_lens,
                     p.context_lens,
