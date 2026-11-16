@@ -104,15 +104,16 @@ def _make_pp_layer_count_worker(pp_rank, pp_size=2, initial_num_layers=4, use_la
     worker.hash_block_size = 16
     worker.cache_coordinator = None
     worker.use_block_key_layerwise = False
-    # The step entry points dispatch through the data plane; the GVA plane is
-    # the thin delegation matching use_block_key_layerwise=False above.
+    # The step entry points dispatch through the data plane; the GVA plane
+    # owns the layerwise GVA protocol matching use_block_key_layerwise=False
+    # above.
     worker.layerwise_data_plane = "gva"
     worker._data_plane = make_data_plane(worker)
     worker.kv_send_thread = None
     worker.kv_recv_thread = None
     # Supply backend allocation results; keep task and address construction real.
-    worker._prepare_load_gvas = Mock()
-    worker._alloc_gvas_for_save = Mock()
+    worker._data_plane._prepare_load_gvas = Mock()
+    worker._data_plane._alloc_gvas_for_save = Mock()
     worker._masked_runs_cache = {}
     # Builders only need the registered geometry; no real backend client.
     worker.token_database = worker
