@@ -1,4 +1,3 @@
-import json
 import logging
 import os
 import subprocess
@@ -9,8 +8,6 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
-
-import requests
 
 from tests.e2e.common.multi_node.external_dp.external_dp_config import (
     ExternalDPConfig,
@@ -36,6 +33,12 @@ from tests.e2e.common.multi_node.external_dp.utils import (
     write_benchmark_results_json,
 )
 from tests.e2e.common.multi_node.utils import ProxyServer
+from tests.e2e.common.spec_decode import (
+    extract_flag_value,
+    get_speculative_num_tokens,
+    make_chat_warmup_fn,
+    select_acceptance_case,
+)
 from tools.aisbench import run_aisbench_cases
 from tools.profiling.capture import ProfileSpec, ServeManifest, profile_root
 
@@ -108,45 +111,46 @@ def _archive_rank_logs(log_root: Path, current_node_index: int) -> None:
     collect_logs(node_log_dir, output_tar)
 
 
-def _extract_cmd_value(cmd: list[str], flag: str) -> str | None:
-    try:
-        idx = cmd.index(flag)
-        return cmd[idx + 1]
-    except (ValueError, IndexError):
-        return None
-
-
-def _parse_json_flag_ext(cmd: list[str], flag: str) -> dict[str, Any]:
-    val = _extract_cmd_value(cmd, flag)
-    if not val:
-        return {}
-    try:
-        return json.loads(val)
-    except (json.JSONDecodeError, ValueError):
-        return {}
-
-
 def _get_first_server_cmd(config: ExternalDPConfig, ranks: list[RankInfo], all_commands: list) -> list[str]:
     if all_commands:
         return all_commands[0].cmd
     return []
 
 
+def _decode_server_cmd(config: ExternalDPConfig, ranks: list[RankInfo], all_commands: list) -> list[str]:
+    """Return the first decoder rank command, which owns the draft position count."""
+    for rank, command in zip(ranks, all_commands):
+        if rank.role == "decoder":
+            return command.cmd
+    return _get_first_server_cmd(config, ranks, all_commands)
+
+
+def _speculative_num_tokens(config: ExternalDPConfig, ranks: list[RankInfo], all_commands: list) -> int:
+    """Return the draft position count derived from the decode-side configuration."""
+    return get_speculative_num_tokens(_decode_server_cmd(config, ranks, all_commands))
+
+
+def _acceptance_case_index(config: ExternalDPConfig) -> int | None:
+    """Return the accuracy benchmark index that owns the acceptance sampling window."""
+    cases = [(str(case.get("benchmark_name")), case) for case in config.benchmark_cases]
+    return select_acceptance_case(cases, config.acceptance_rate.get("benchmark"))
+
+
 def _build_external_dp_servers(
     config: ExternalDPConfig, ranks: list[RankInfo]
-) -> tuple[ProxyServer, ProxyServer, ProxyServer]:
+) -> tuple[ProxyServer, ProxyServer, list[ProxyServer]]:
     completion_server = ProxyServer(config.routing.proxy_host, config.routing.proxy_port)
 
     if config.is_disaggregated_prefill:
         prefill_ranks = [r for r in ranks if r.role == "prefiller"]
         decode_ranks = [r for r in ranks if r.role == "decoder"]
         tokenize_server = ProxyServer(prefill_ranks[0].host, prefill_ranks[0].port)
-        metrics_server = ProxyServer(decode_ranks[0].host, decode_ranks[0].port)
+        metrics_servers = [ProxyServer(rank.host, rank.port) for rank in decode_ranks]
     else:
         tokenize_server = completion_server
-        metrics_server = completion_server
+        metrics_servers = [completion_server]
 
-    return completion_server, tokenize_server, metrics_server
+    return completion_server, tokenize_server, metrics_servers
 
 
 def _run_chat_completion_ext(
@@ -160,7 +164,7 @@ def _run_chat_completion_ext(
     prompts = config.chat_prompts or ["Hello!"]
     expected = config.expected_response or {}
 
-    max_model_len_str = _extract_cmd_value(first_server_cmd, "--max-model-len")
+    max_model_len_str = extract_flag_value(first_server_cmd, "--max-model-len")
     max_model_len = int(max_model_len_str) if max_model_len_str else None
 
     if isinstance(config.api_keyword_args, list):
@@ -191,30 +195,130 @@ api_keyword_args list length ({len(api_args_list)}) must match prompts length ({
         )
 
 
-def _run_spec_decode_acceptance_ext(
+def _run_aisbench_group_ext(
     config: ExternalDPConfig,
-    metrics_server: ProxyServer,
-    first_server_cmd: list[str],
-    baseline: tuple[int, list[int]] | None = None,
+    cases: list[dict[str, Any]],
+    task_name: str,
+) -> list[Any]:
+    """Run a subset of AISBench cases through the external DP proxy."""
+    if not cases:
+        return []
+    with _heartbeat(
+        task_name,
+        status_fn=lambda: format_http_status("proxy", proxy_server_health_url(config)),
+    ):
+        return run_aisbench_cases(
+            model=config.model,
+            port=config.routing.proxy_port,
+            aisbench_cases=cases,
+            host_ip=config.routing.proxy_host,
+        )
+
+
+def _run_benchmarks_with_acceptance_window_ext(
+    config: ExternalDPConfig,
+    ranks: list[RankInfo],
+    all_commands: list,
+    completion_server: ProxyServer,
+    metrics_servers: list[ProxyServer],
 ) -> None:
-    from tools.spec_decode_metrics import measure_acceptance_rate, validate_acceptance_rates
+    """Sample draft counters around one accuracy benchmark and validate every position."""
+    from tools.spec_decode_metrics import capture_baseline, measure_acceptance_rate, validate_acceptance_rates
 
-    spec_config = _parse_json_flag_ext(first_server_cmd, "--speculative-config")
-    num_speculative_tokens = int(spec_config.get("num_speculative_tokens", 1))
+    cases = config.benchmark_cases
+    bound_index = _acceptance_case_index(config)
+    baseline_val = config.acceptance_rate.get("baseline")
+    tolerance = float(config.acceptance_rate.get("tolerance", 0.05))
+    num_speculative_tokens = _speculative_num_tokens(config, ranks, all_commands)
 
-    acceptance_cfg = config.acceptance_rate or {}
-    baseline_val = acceptance_cfg.get("baseline")
-    tolerance = acceptance_cfg.get("tolerance", 0.05)
+    warmup_fn = make_chat_warmup_fn(completion_server.url_for("v1", "chat", "completions"), config.model)
+
+    def write_results(results: list[Any]) -> None:
+        write_benchmark_results_json(
+            config=config,
+            ranks=ranks,
+            commands=all_commands,
+            results=results,
+        )
+
+    # Unbound configs keep the legacy whole-session sampling window.
+    if bound_index is None:
+        errors: list[Exception] = []
+        spec_baseline = None
+        try:
+            logger.info("Capturing spec_decode baseline")
+            spec_baseline = capture_baseline(metrics_servers, num_speculative_tokens, warmup_fn)
+        except Exception as e:
+            errors.append(e)
+            logger.error("Failed to capture spec decode baseline: %s", e)
+
+        try:
+            results = _run_aisbench_group_ext(config, cases, "Running AISBench")
+        except Exception as e:
+            errors.append(e)
+            logger.error("AISBench run failed: %s", e)
+            results = ["" for _ in cases]
+        write_results(results)
+
+        if spec_baseline is not None and baseline_val is not None:
+            try:
+                _, all_rates = measure_acceptance_rate(metrics_servers, num_speculative_tokens, spec_baseline)
+                validate_acceptance_rates(all_rates, baseline_val, tolerance)
+            except Exception as e:
+                errors.append(e)
+                logger.error("Spec decode acceptance rate validation failed: %s", e)
+
+        if errors:
+            raise errors[0]
+        return
 
     if baseline_val is None:
         logger.warning("acceptance_rate.baseline not set in config, skipping validation")
+        write_results(_run_aisbench_group_ext(config, cases, "Running AISBench"))
         return
 
-    if baseline is None:
-        baseline = (0, [0] * num_speculative_tokens)
+    results: list[Any] = [""] * len(cases)
+    errors: list[Exception] = []
 
-    _, all_rates = measure_acceptance_rate(metrics_server, num_speculative_tokens, baseline)
-    validate_acceptance_rates(all_rates, baseline_val, float(tolerance))
+    def run_group(start_index: int, group: list[dict[str, Any]], task_name: str) -> None:
+        try:
+            group_results = _run_aisbench_group_ext(config, group, task_name)
+        except Exception as e:
+            errors.append(e)
+            logger.error("Benchmark group starting at %d failed: %s", start_index, e)
+            group_results = ["" for _ in group]
+        for offset, result in enumerate(group_results):
+            results[start_index + offset] = result
+
+    run_group(0, cases[:bound_index], "Running AISBench (pre-accuracy)")
+
+    spec_baseline = None
+    try:
+        logger.info("Capturing spec_decode baseline")
+        spec_baseline = capture_baseline(metrics_servers, num_speculative_tokens, warmup_fn)
+    except Exception as e:
+        errors.append(e)
+        logger.error("Failed to capture spec decode baseline: %s", e)
+
+    # The accuracy workload always runs so accuracy evidence is never dropped by a counter failure.
+    run_group(bound_index, cases[bound_index : bound_index + 1], "Running AISBench (accuracy)")
+
+    if spec_baseline is not None:
+        try:
+            logger.info("Validating spec_decode acceptance rate across %d decoder rank(s)", len(metrics_servers))
+            _, all_rates = measure_acceptance_rate(metrics_servers, num_speculative_tokens, spec_baseline)
+            validate_acceptance_rates(all_rates, baseline_val, tolerance)
+        except Exception as e:
+            errors.append(e)
+            logger.error("Spec decode acceptance rate validation failed: %s", e)
+
+    # Remaining benchmarks still run after an acceptance failure so nightly evidence is preserved.
+    run_group(bound_index + 1, cases[bound_index + 1 :], "Running AISBench (post-accuracy)")
+
+    write_results(results)
+
+    if errors:
+        raise errors[0]
 
 
 def test_external_dp() -> None:
@@ -261,32 +365,11 @@ def test_external_dp() -> None:
 
                 all_commands = build_all_server_commands(config, ranks)
                 first_server_cmd = _get_first_server_cmd(config, ranks, all_commands)
-                completion_server, tokenize_server, metrics_server = _build_external_dp_servers(config, ranks)
+                completion_server, tokenize_server, metrics_servers = _build_external_dp_servers(config, ranks)
 
                 if "chat_completion" in config.test_content:
                     logger.info("Running chat_completion tests")
                     _run_chat_completion_ext(config, completion_server, tokenize_server, first_server_cmd)
-
-                spec_baseline = None
-                if "spec_decode_acceptance" in config.test_content:
-                    from tools.spec_decode_metrics import capture_baseline
-
-                    spec_cfg = _parse_json_flag_ext(first_server_cmd, "--speculative-config")
-                    num_spec_tokens = int(spec_cfg.get("num_speculative_tokens", 1))
-
-                    def warmup_fn():
-                        requests.post(
-                            completion_server.url_for("v1", "chat", "completions"),
-                            json={
-                                "model": config.model,
-                                "messages": [{"role": "user", "content": "Hello!"}],
-                                "max_tokens": 16,
-                            },
-                            timeout=120,
-                        )
-
-                    logger.info("Capturing spec_decode baseline")
-                    spec_baseline = capture_baseline(metrics_server, num_spec_tokens, warmup_fn)
 
                 target = f"http://{config.routing.proxy_host}:{config.routing.proxy_port}"
                 logger.info(
@@ -295,27 +378,23 @@ def test_external_dp() -> None:
                     target,
                     _format_benchmark_cases(config),
                 )
-                with _heartbeat(
-                    "Running AISBench",
-                    status_fn=lambda: format_http_status("proxy", proxy_server_health_url(config)),
-                ):
-                    results = run_aisbench_cases(
-                        model=config.model,
-                        port=config.routing.proxy_port,
-                        aisbench_cases=config.benchmark_cases,
-                        host_ip=config.routing.proxy_host,
-                    )
-                logger.info("AISBench completed: results=%d", len(results or []))
-                write_benchmark_results_json(
-                    config=config,
-                    ranks=ranks,
-                    commands=all_commands,
-                    results=results,
-                )
-
                 if "spec_decode_acceptance" in config.test_content:
-                    logger.info("Validating spec_decode acceptance rate")
-                    _run_spec_decode_acceptance_ext(config, metrics_server, first_server_cmd, spec_baseline)
+                    _run_benchmarks_with_acceptance_window_ext(
+                        config=config,
+                        ranks=ranks,
+                        all_commands=all_commands,
+                        completion_server=completion_server,
+                        metrics_servers=metrics_servers,
+                    )
+                else:
+                    results = _run_aisbench_group_ext(config, config.benchmark_cases, "Running AISBench")
+                    logger.info("AISBench completed: results=%d", len(results or []))
+                    write_benchmark_results_json(
+                        config=config,
+                        ranks=ranks,
+                        commands=all_commands,
+                        results=results,
+                    )
 
                 wait_ranks_ready(ranks, timeout=30)
             else:

@@ -3,6 +3,14 @@ model: "Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp"
 num_nodes: 4
 npu_per_node: 16
 dp_load_balancing: external
+test_content:
+  - spec_decode_acceptance
+acceptance_rate:
+  benchmark: acc_aime2025
+  # Provisional 3-position baseline (decode side sets num_speculative_tokens: 3);
+  # re-measure on NPU before enforcing.
+  baseline: [0.90, 0.78, 0.66]
+  tolerance: 0.05
 
 routing:
   type: "disaggregated_prefill"

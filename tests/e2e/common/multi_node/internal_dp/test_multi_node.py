@@ -1,7 +1,5 @@
-import json
 import logging
 import os
-import shlex
 import subprocess
 import sys
 from typing import Any
@@ -20,6 +18,14 @@ from tests.e2e.common.multi_node.internal_dp.multi_node_config import (
     MultiNodeConfig,
     MultiNodeConfigLoader,
     ProxyLauncher,
+)
+from tests.e2e.common.spec_decode import (
+    get_speculative_config,
+    get_speculative_num_tokens,
+    make_chat_warmup_fn,
+    parse_json_flag,
+    select_acceptance_case,
+    split_server_cmd,
 )
 from tests.e2e.conftest import RemoteOpenAIServer
 from tests.e2e.nightly.scripts.result_postprocess import postprocess_benchmark_results
@@ -45,43 +51,41 @@ def _extract_dtype(config: MultiNodeConfig) -> str:
     return "w8a8" if (has_w8a8 and has_quant_ascend) else "bf16"
 
 
-def _cmd_to_list(server_cmd: list[str] | str) -> list[str]:
-    """Normalize server_cmd to a list of argument strings."""
-    if isinstance(server_cmd, str):
-        try:
-            return shlex.split(server_cmd)
-        except ValueError:
-            return server_cmd.split()
-    return list(server_cmd)
+def _decode_server_cmd(config: MultiNodeConfig) -> str:
+    """Return the decode-side command, which owns the draft position count."""
+    if config.disagg_cfg:
+        for node in config.nodes:
+            if config.disagg_cfg.is_decoder(node.index):
+                return node.server_cmd
+    return config.nodes[0].server_cmd
 
 
-def _extract_server_cmd_value(cmd_list: list[str], flag: str) -> str | None:
-    """Return the value following `flag` in a command list, or None."""
-    try:
-        idx = cmd_list.index(flag)
-        return cmd_list[idx + 1]
-    except (ValueError, IndexError):
-        return None
+def _speculative_num_tokens(config: MultiNodeConfig) -> int:
+    """Return the draft position count derived from the decode-side configuration."""
+    return get_speculative_num_tokens(_decode_server_cmd(config))
 
 
-def _parse_json_flag(cmd_list: list[str], flag: str) -> dict[str, Any]:
-    """Extract and JSON-parse the value following `flag` in a command list."""
-    val = _extract_server_cmd_value(cmd_list, flag)
-    if not val:
-        return {}
-    try:
-        return json.loads(val)
-    except (json.JSONDecodeError, ValueError):
-        return {}
+def _spec_metrics_servers(config: MultiNodeConfig) -> list:
+    """Return the metrics endpoints that report draft counters for routed requests."""
+    from tools.spec_decode_metrics import MetricsEndpoint
+
+    if config.disagg_cfg:
+        return [
+            MetricsEndpoint(node.ip, int((node.envs or {}).get("SERVER_PORT", DEFAULT_SERVER_PORT)))
+            for node in config.nodes
+            if config.disagg_cfg.is_decoder(node.index) and not node.headless
+        ]
+    host, port = config.benchmark_endpoint
+    return [MetricsEndpoint(host, port)]
 
 
 def _extract_features(server_cmd: list[str] | str, envs: dict[str, Any]) -> list[str]:
     """Extract enabled feature names from server_cmd and environment variables."""
-    cmd_list = _cmd_to_list(server_cmd)
+    cmd_list = split_server_cmd(server_cmd)
     features: list[str] = []
 
     # Features from --additional-config JSON
-    additional = _parse_json_flag(cmd_list, "--additional-config") or _parse_json_flag(cmd_list, "--additional_config")
+    additional = parse_json_flag(cmd_list, "--additional-config") or parse_json_flag(cmd_list, "--additional_config")
     for config_key, feature_name in _FEATURE_CONFIGS.items():
         if additional.get(config_key):
             features.append(feature_name)
@@ -95,12 +99,12 @@ def _extract_features(server_cmd: list[str] | str, envs: dict[str, Any]) -> list
         features.append("ascend_scheduler")
 
     # Features from --compilation-config JSON
-    compilation = _parse_json_flag(cmd_list, "--compilation-config")
+    compilation = parse_json_flag(cmd_list, "--compilation-config")
     if compilation.get("cudagraph_mode"):
         features.append("aclgraph")
 
     # Features from --speculative-config JSON
-    speculative = _parse_json_flag(cmd_list, "--speculative-config")
+    speculative = get_speculative_config(cmd_list)
     if speculative:
         features.append(speculative.get("method", "speculative"))
 
@@ -161,6 +165,121 @@ def _save_benchmark_results_json(config: MultiNodeConfig, results: list[Any]) ->
         [(key, case_cfg, result) for (key, case_cfg), result in zip(valid_items, results)],
         job_name=job_name or config.test_name,
     )
+
+
+def _acceptance_case_index(config: MultiNodeConfig) -> int | None:
+    """Return the accuracy benchmark index that owns the acceptance sampling window."""
+    cases = [(str(case["benchmark_name"]), case) for case in config.benchmark_cases]
+    return select_acceptance_case(cases, config.acceptance_rate.get("benchmark"))
+
+
+def _run_benchmark_group(config: MultiNodeConfig, host: str, port: int, cases: list[dict[str, Any]]) -> list[Any]:
+    """Run a subset of benchmark cases and return their results."""
+    if not cases:
+        return []
+    return run_aisbench_cases(
+        model=config.model,
+        port=port,
+        aisbench_cases=cases,
+        host_ip=host,
+    )
+
+
+def _run_benchmarks_with_acceptance_window(config: MultiNodeConfig, host: str, port: int) -> None:
+    """Sample draft counters around one accuracy benchmark and validate every position."""
+    from tools.spec_decode_metrics import capture_baseline, measure_acceptance_rate, validate_acceptance_rates
+
+    cases = config.benchmark_cases
+    bound_index = _acceptance_case_index(config)
+    baseline_val = config.acceptance_rate.get("baseline")
+
+    tolerance = float(config.acceptance_rate.get("tolerance", 0.05))
+    num_speculative_tokens = _speculative_num_tokens(config)
+    metrics_servers = _spec_metrics_servers(config)
+
+    warmup_fn = make_chat_warmup_fn(f"http://{host}:{port}/v1/chat/completions", config.model)
+
+    # Unbound configs keep the legacy whole-session sampling window.
+    if bound_index is None:
+        errors: list[Exception] = []
+        spec_baseline = None
+        try:
+            spec_baseline = capture_baseline(metrics_servers, num_speculative_tokens, warmup_fn)
+        except Exception as e:
+            errors.append(e)
+            logger.error("Failed to capture spec decode baseline: %s", e)
+
+        try:
+            results = _run_benchmark_group(config, host, port, cases)
+        except Exception as e:
+            errors.append(e)
+            logger.error("AISBench run failed: %s", e)
+            results = ["" for _ in cases]
+        _save_benchmark_results_json(config, results)
+
+        if spec_baseline is not None and baseline_val is not None:
+            try:
+                _, all_rates = measure_acceptance_rate(metrics_servers, num_speculative_tokens, spec_baseline)
+                validate_acceptance_rates(all_rates, baseline_val, tolerance)
+            except Exception as e:
+                errors.append(e)
+                logger.error("Spec decode acceptance rate validation failed: %s", e)
+
+        if errors:
+            raise errors[0]
+        return
+
+    if baseline_val is None:
+        logger.warning("acceptance_rate.baseline not set in config, skipping validation")
+        _save_benchmark_results_json(config, _run_benchmark_group(config, host, port, cases))
+        return
+
+    results: list[Any] = [""] * len(cases)
+    errors: list[Exception] = []
+
+    def run_group(start_index: int, group: list[dict[str, Any]]) -> None:
+        if not group:
+            return
+        try:
+            group_results = _run_benchmark_group(config, host, port, group)
+        except Exception as e:
+            errors.append(e)
+            logger.error("Benchmark group starting at %d failed: %s", start_index, e)
+            group_results = ["" for _ in group]
+        for offset, result in enumerate(group_results):
+            results[start_index + offset] = result
+
+    run_group(0, cases[:bound_index])
+
+    spec_baseline = None
+    try:
+        spec_baseline = capture_baseline(
+            metrics_servers,
+            num_speculative_tokens,
+            warmup_fn,
+        )
+    except Exception as e:
+        errors.append(e)
+        logger.error("Failed to capture spec decode baseline: %s", e)
+
+    # The accuracy workload always runs so accuracy evidence is never dropped by a counter failure.
+    run_group(bound_index, cases[bound_index : bound_index + 1])
+
+    if spec_baseline is not None:
+        try:
+            _, all_rates = measure_acceptance_rate(metrics_servers, num_speculative_tokens, spec_baseline)
+            validate_acceptance_rates(all_rates, baseline_val, tolerance)
+        except Exception as e:
+            errors.append(e)
+            logger.error("Spec decode acceptance rate validation failed: %s", e)
+
+    # Remaining benchmarks still run after an acceptance failure so nightly evidence is preserved.
+    run_group(bound_index + 1, cases[bound_index + 1 :])
+
+    _save_benchmark_results_json(config, results)
+
+    if errors:
+        raise errors[0]
 
 
 def _configure_profiling(config: MultiNodeConfig, spec: ProfileSpec) -> None:
@@ -230,13 +349,16 @@ async def test_multi_node() -> None:
         host, port = config.benchmark_endpoint
 
         if config.is_master:
-            results = run_aisbench_cases(
-                model=config.model,
-                port=port,
-                aisbench_cases=config.benchmark_cases,
-                host_ip=host,
-            )
-            _save_benchmark_results_json(config, results)
+            if "spec_decode_acceptance" in config.test_content:
+                _run_benchmarks_with_acceptance_window(config, host, port)
+            else:
+                results = run_aisbench_cases(
+                    model=config.model,
+                    port=port,
+                    aisbench_cases=config.benchmark_cases,
+                    host_ip=host,
+                )
+                _save_benchmark_results_json(config, results)
         else:
             # We should keep listening on the master node's server url determining when to exit.
             server.hang_until_terminated(f"http://{host}:{config.server_port}/health")

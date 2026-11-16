@@ -4,6 +4,25 @@ import requests
 from prometheus_client.parser import text_string_to_metric_families
 
 
+class MetricsEndpoint:
+    """Minimal ``url_for`` compatible endpoint for a vLLM metrics server."""
+
+    def __init__(self, host: str, port: int):
+        self.host = host
+        self.port = port
+
+    def url_for(self, *parts: str) -> str:
+        path = "/".join(str(part).strip("/") for part in parts)
+        return f"http://{self.host}:{self.port}/{path}"
+
+
+def metrics_endpoints(server) -> list:
+    """Normalize a single metrics server or an iterable of servers into a list."""
+    if isinstance(server, (list, tuple)):
+        return list(server)
+    return [server]
+
+
 def fetch_metrics(server) -> str:
     """Fetch /metrics endpoint content as text."""
     url = server.url_for("metrics")
@@ -28,6 +47,26 @@ def analysis_metrics(metrics_text: str, num_speculative_tokens: int) -> tuple[in
     return int(num_drafts), num_accepted_tokens_per_pos
 
 
+def _sum_metrics(
+    server,
+    num_speculative_tokens: int,
+) -> tuple[int, list[int]]:
+    """Sum spec-decode counters across all endpoints in ``server``.
+
+    External-DP deployments route one workload across several decoder ranks, so
+    every participating decoder metrics endpoint contributes to the same
+    sampling window.
+    """
+    num_drafts = 0
+    num_accepted_tokens_per_pos = [0] * num_speculative_tokens
+    for endpoint in metrics_endpoints(server):
+        endpoint_drafts, endpoint_accepted = analysis_metrics(fetch_metrics(endpoint), num_speculative_tokens)
+        num_drafts += endpoint_drafts
+        for position, accepted in enumerate(endpoint_accepted):
+            num_accepted_tokens_per_pos[position] += accepted
+    return int(num_drafts), num_accepted_tokens_per_pos
+
+
 def capture_baseline(
     server,
     num_speculative_tokens: int,
@@ -35,13 +74,13 @@ def capture_baseline(
 ) -> tuple[int, list[int]]:
     """Run warmup and capture baseline (num_drafts, num_accepted_tokens_per_pos).
 
+    ``server`` may be a single metrics server or a list of metrics servers.
     Call this BEFORE the actual benchmark/test requests. The returned tuple
     should be passed to measure_acceptance_rate() afterwards.
     """
     if warmup_fn is not None:
         warmup_fn()
-    metrics_text = fetch_metrics(server)
-    return analysis_metrics(metrics_text, num_speculative_tokens)
+    return _sum_metrics(server, num_speculative_tokens)
 
 
 def measure_acceptance_rate(
@@ -52,18 +91,20 @@ def measure_acceptance_rate(
     """Fetch final metrics, subtract baseline, return (pos0_rate, all_rates)."""
     base_drafts, base_accepted = baseline
 
-    metrics_text = fetch_metrics(server)
-    num_drafts, num_accepted_tokens_per_pos = analysis_metrics(metrics_text, num_speculative_tokens)
+    num_drafts, num_accepted_tokens_per_pos = _sum_metrics(server, num_speculative_tokens)
 
     num_drafts -= base_drafts
     for i in range(len(num_accepted_tokens_per_pos)):
         if i < len(base_accepted):
             num_accepted_tokens_per_pos[i] -= base_accepted[i]
 
-    if num_drafts > 0:
-        acceptance_per_pos = [v / num_drafts for v in num_accepted_tokens_per_pos]
-    else:
-        acceptance_per_pos = [0.0] * num_speculative_tokens
+    if num_drafts <= 0:
+        raise AssertionError(
+            "No speculative decoding drafts were observed in the sampling window; "
+            "verify the accuracy workload used the decode-side speculative configuration."
+        )
+
+    acceptance_per_pos = [v / num_drafts for v in num_accepted_tokens_per_pos]
 
     pos0_rate = acceptance_per_pos[0] if acceptance_per_pos else 0.0
     print("-" * 50)

@@ -21,6 +21,14 @@ from tests.e2e.common.single_node.single_node_config import (
     SingleNodeConfig,
     SingleNodeConfigLoader,
 )
+from tests.e2e.common.spec_decode import (
+    extract_flag_value,
+    get_speculative_config,
+    get_speculative_num_tokens,
+    make_chat_warmup_fn,
+    parse_json_flag,
+    select_acceptance_case,
+)
 from tests.e2e.conftest import (
     DisaggEpdProxy,
     DisaggPDProxy,
@@ -67,7 +75,7 @@ async def run_chat_completion_test(config: SingleNodeConfig, server: "RemoteOpen
     prompts = config.prompts if config.prompts else ["Hello!"]
     expected = config.expected_response or {}
 
-    max_model_len_str = _extract_server_cmd_value(_primary_server_cmd(config), "--max-model-len")
+    max_model_len_str = extract_flag_value(_primary_server_cmd(config), "--max-model-len")
     max_model_len = int(max_model_len_str) if max_model_len_str else None
 
     if isinstance(config.api_keyword_args, list):
@@ -262,8 +270,7 @@ async def run_spec_decode_acceptance_test(
 ) -> None:
     from tools.spec_decode_metrics import measure_acceptance_rate, validate_acceptance_rates
 
-    spec_config = _parse_json_flag(_primary_server_cmd(config), "--speculative-config")
-    num_speculative_tokens = int(spec_config.get("num_speculative_tokens", 1))
+    num_speculative_tokens = _speculative_num_tokens(config)
 
     acceptance_cfg = config.extra_config.get("acceptance_rate", {})
     baseline_val = acceptance_cfg.get("baseline")
@@ -276,7 +283,7 @@ async def run_spec_decode_acceptance_test(
     if spec_baseline is None:
         spec_baseline = (0, [0] * num_speculative_tokens)
 
-    _, all_rates = measure_acceptance_rate(server, num_speculative_tokens, spec_baseline)
+    _, all_rates = measure_acceptance_rate(_spec_metrics_servers(config, server), num_speculative_tokens, spec_baseline)
     validate_acceptance_rates(all_rates, baseline_val, float(tolerance))
 
 
@@ -303,45 +310,113 @@ async def _dispatch_tests(config: SingleNodeConfig, server: "RemoteOpenAIServer 
             logger.warning("No handler registered for test content type: %s", test_name)
 
 
+def _make_warmup_fn(config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy") -> Callable[[], None]:
+    """Build a warmup request that initializes spec-decode counters before sampling."""
+    return make_chat_warmup_fn(server.url_for("v1", "chat", "completions"), config.model)
+
+
+def _acceptance_benchmark_key(config: SingleNodeConfig, benchmark_keys: list[str]) -> str | None:
+    """Return the accuracy benchmark that owns the acceptance sampling window."""
+    acceptance_cfg = config.extra_config.get("acceptance_rate", {}) or {}
+    cases = [(key, config.benchmarks[key]) for key in benchmark_keys]
+    bound_index = select_acceptance_case(cases, acceptance_cfg.get("benchmark"))
+    return benchmark_keys[bound_index] if bound_index is not None else None
+
+
+def _run_benchmarks_with_acceptance_window(
+    config: SingleNodeConfig,
+    server: "RemoteOpenAIServer | DisaggEpdProxy",
+    port: int,
+    benchmark_keys: list[str],
+    bound_key: str,
+) -> None:
+    """Sample draft counters around one accuracy benchmark and validate every position."""
+    from tools.spec_decode_metrics import capture_baseline, measure_acceptance_rate, validate_acceptance_rates
+
+    acceptance_cfg = config.extra_config.get("acceptance_rate", {}) or {}
+    baseline_val = acceptance_cfg.get("baseline")
+    tolerance = float(acceptance_cfg.get("tolerance", 0.05))
+    if baseline_val is None:
+        logger.warning("acceptance_rate.baseline not set in config, skipping validation")
+        _run_benchmarks(config, port)
+        return
+
+    num_speculative_tokens = _speculative_num_tokens(config)
+    metrics_servers = _spec_metrics_servers(config, server)
+
+    bound_index = benchmark_keys.index(bound_key)
+    before_keys = benchmark_keys[:bound_index]
+    after_keys = benchmark_keys[bound_index + 1 :]
+
+    results_by_key: dict[str, Any] = {}
+    errors: list[Exception] = []
+
+    def run_group(keys: list[str]) -> None:
+        if not keys:
+            return
+        try:
+            results = _run_aisbench_group(config, port, keys)
+        except Exception as e:
+            errors.append(e)
+            logger.error("Benchmark group %s failed: %s", keys, e)
+            results = ["" for _ in keys]
+        for key, result in zip(keys, results):
+            results_by_key[key] = result
+
+    run_group(before_keys)
+
+    spec_baseline = None
+    try:
+        spec_baseline = capture_baseline(metrics_servers, num_speculative_tokens, _make_warmup_fn(config, server))
+    except Exception as e:
+        errors.append(e)
+        logger.error("Failed to capture spec decode baseline: %s", e)
+
+    # The accuracy workload always runs so accuracy evidence is never dropped by a counter failure.
+    run_group([bound_key])
+
+    if spec_baseline is not None:
+        try:
+            _, all_rates = measure_acceptance_rate(metrics_servers, num_speculative_tokens, spec_baseline)
+            validate_acceptance_rates(all_rates, baseline_val, tolerance)
+        except Exception as e:
+            errors.append(e)
+            logger.error("Spec decode acceptance rate validation failed: %s", e)
+
+    # Remaining benchmarks still run after an acceptance failure so nightly evidence is preserved.
+    run_group(after_keys)
+
+    _finalize_benchmarks(config, benchmark_keys, [results_by_key.get(key, "") for key in benchmark_keys])
+
+    if errors:
+        raise errors[0]
+
+
 async def _run_benchmarks_and_spec_decode(
     config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy", port: int
 ) -> None:
-    """Run benchmarks, with spec decode baseline capture before and acceptance measurement after."""
+    """Run benchmarks, binding acceptance sampling to the configured accuracy workload."""
+    benchmark_keys = [key for key, value in config.benchmarks.items() if value]
+    acceptance_enabled = "spec_decode_acceptance" in config.test_content
+    bound_key = _acceptance_benchmark_key(config, benchmark_keys) if acceptance_enabled and benchmark_keys else None
+
+    if acceptance_enabled and bound_key:
+        _run_benchmarks_with_acceptance_window(config, server, port, benchmark_keys, bound_key)
+        return
+
     spec_baseline = None
-    if "spec_decode_acceptance" in config.test_content:
+    if acceptance_enabled:
         from tools.spec_decode_metrics import capture_baseline
 
-        spec_config = _parse_json_flag(_primary_server_cmd(config), "--speculative-config")
-        num_spec_tokens = int(spec_config.get("num_speculative_tokens", 1))
-
-        chat_url = server.url_for("v1", "chat", "completions")
-
-        def warmup_fn() -> None:
-            requests.post(
-                chat_url,
-                json={
-                    "model": config.model,
-                    "messages": [{"role": "user", "content": "Hello!"}],
-                    "max_tokens": 16,
-                },
-                timeout=120,
-            )
-
-        spec_baseline = capture_baseline(server, num_spec_tokens, warmup_fn)
+        num_spec_tokens = _speculative_num_tokens(config)
+        spec_baseline = capture_baseline(
+            _spec_metrics_servers(config, server), num_spec_tokens, _make_warmup_fn(config, server)
+        )
 
     _run_benchmarks(config, port)
 
-    if "spec_decode_acceptance" in config.test_content:
+    if acceptance_enabled:
         await run_spec_decode_acceptance_test(config, server, spec_baseline)
-
-
-def _extract_server_cmd_value(server_cmd: list[str], flag: str) -> str | None:
-    """Return the value following `flag` in a server_cmd list, or None."""
-    try:
-        idx = server_cmd.index(flag)
-        return server_cmd[idx + 1]
-    except (ValueError, IndexError):
-        return None
 
 
 def _primary_server_cmd(config: SingleNodeConfig) -> list[str]:
@@ -365,10 +440,10 @@ def _pd_ports_by_role(pd_server_cmds: list[list[str]]) -> tuple[list[int], list[
     prefiller_ports: list[int] = []
     decoder_ports: list[int] = []
     for cmd in pd_server_cmds:
-        port = _extract_server_cmd_value(cmd, "--port")
+        port = extract_flag_value(cmd, "--port")
         if port is None:
             raise ValueError(f"PD server cmd must specify --port: {cmd}")
-        kv_config = _parse_json_flag(cmd, "--kv-transfer-config")
+        kv_config = parse_json_flag(cmd, "--kv-transfer-config")
         role = kv_config.get("kv_role")
         if role == "kv_producer":
             prefiller_ports.append(int(port))
@@ -381,6 +456,29 @@ def _pd_ports_by_role(pd_server_cmds: list[list[str]]) -> tuple[list[int], list[
     if not decoder_ports:
         raise ValueError("PD service mode requires at least one kv_consumer instance")
     return prefiller_ports, decoder_ports
+
+
+def _decode_server_cmd(config: SingleNodeConfig) -> list[str]:
+    """Return the decode-side command, which owns the draft position count."""
+    for cmd in config.pd_server_cmds:
+        if parse_json_flag(cmd, "--kv-transfer-config").get("kv_role") == "kv_consumer":
+            return cmd
+    return _primary_server_cmd(config)
+
+
+def _speculative_num_tokens(config: SingleNodeConfig) -> int:
+    """Return the draft position count derived from the decode-side configuration."""
+    return get_speculative_num_tokens(_decode_server_cmd(config))
+
+
+def _spec_metrics_servers(config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy") -> list:
+    """Return the metrics endpoints that report draft counters for routed requests."""
+    from tools.spec_decode_metrics import MetricsEndpoint
+
+    if config.service_mode == "pd":
+        _, decoder_ports = _pd_ports_by_role(config.pd_server_cmds)
+        return [MetricsEndpoint(server.host, port) for port in decoder_ports]
+    return [server]
 
 
 def _extract_hardware(runner: str) -> str:
@@ -416,19 +514,8 @@ def _extract_dtype(config: SingleNodeConfig) -> str:
     """Determine weight dtype: w8a8 if model name contains 'w8a8' and --quantization ascend is set, else bf16."""
     server_cmd: list[str] = _primary_server_cmd(config)
     has_w8a8 = "w8a8" in config.model.lower()
-    has_quant_ascend = _extract_server_cmd_value(server_cmd, "--quantization") == "ascend"
+    has_quant_ascend = extract_flag_value(server_cmd, "--quantization") == "ascend"
     return "w8a8" if (has_w8a8 and has_quant_ascend) else "bf16"
-
-
-def _parse_json_flag(cmd_list: list[str], flag: str) -> dict[str, Any]:
-    """Extract and JSON-parse the value following `flag` in a command list."""
-    val = _extract_server_cmd_value(cmd_list, flag)
-    if not val:
-        return {}
-    try:
-        return json.loads(val)
-    except (json.JSONDecodeError, ValueError):
-        return {}
 
 
 def _extract_features(server_cmd: list[str] | str, envs: dict[str, Any]) -> list[str]:
@@ -444,7 +531,7 @@ def _extract_features(server_cmd: list[str] | str, envs: dict[str, Any]) -> list
     features: list[str] = []
 
     # Features from --additional-config JSON
-    additional = _parse_json_flag(cmd_list, "--additional-config") or _parse_json_flag(cmd_list, "--additional_config")
+    additional = parse_json_flag(cmd_list, "--additional-config") or parse_json_flag(cmd_list, "--additional_config")
     for config_key, feature_name in _FEATURE_CONFIGS.items():
         if additional.get(config_key):
             features.append(feature_name)
@@ -458,12 +545,12 @@ def _extract_features(server_cmd: list[str] | str, envs: dict[str, Any]) -> list
         features.append("ascend_scheduler")
 
     # Features from --compilation-config JSON
-    compilation = _parse_json_flag(cmd_list, "--compilation-config")
+    compilation = parse_json_flag(cmd_list, "--compilation-config")
     if compilation.get("cudagraph_mode"):
         features.append("aclgraph")
 
     # Features from --speculative-config JSON
-    speculative = _parse_json_flag(cmd_list, "--speculative-config")
+    speculative = get_speculative_config(cmd_list)
     if speculative:
         features.append(speculative.get("method", "speculative"))
 
@@ -614,26 +701,42 @@ def _save_benchmark_results_json(config: SingleNodeConfig, benchmark_keys: list[
     )
 
 
-def _run_benchmarks(config: SingleNodeConfig, port: int) -> None:
-    """Run Aisbench benchmarks and process benchmark-dependent custom assertions."""
-    benchmark_keys = [k for k, v in config.benchmarks.items() if v]
+def _run_aisbench_group(config: SingleNodeConfig, port: int, benchmark_keys: list[str]) -> list[Any]:
+    """Run a subset of configured AISBench cases and return their results."""
     aisbench_cases = [
         {**config.benchmarks[k], "benchmark_name": k, "benchmark_artifact_name": f"{config.name}__{k}"}
         for k in benchmark_keys
     ]
     if not aisbench_cases:
-        return
-
-    result = run_aisbench_cases(
+        return []
+    return run_aisbench_cases(
         model=config.model,
         port=port,
         aisbench_cases=aisbench_cases,
     )
 
-    _save_benchmark_results_json(config, benchmark_keys, result)
 
-    if "benchmark_comparisons" in config.test_content:
-        run_benchmark_comparisons(config, result)
+def _finalize_benchmarks(config: SingleNodeConfig, benchmark_keys: list[str], results: list[Any]) -> None:
+    """Persist benchmark results and run benchmark-dependent comparisons."""
+    _save_benchmark_results_json(config, benchmark_keys, results)
+
+    if "benchmark_comparisons" not in config.test_content:
+        return
+    failed_keys = [key for key, result in zip(benchmark_keys, results) if result == ""]
+    if failed_keys:
+        logger.warning("Skipping benchmark comparisons; missing results for: %s", failed_keys)
+        return
+    run_benchmark_comparisons(config, results)
+
+
+def _run_benchmarks(config: SingleNodeConfig, port: int) -> None:
+    """Run Aisbench benchmarks and process benchmark-dependent custom assertions."""
+    benchmark_keys = [k for k, v in config.benchmarks.items() if v]
+    if not benchmark_keys:
+        return
+
+    result = _run_aisbench_group(config, port, benchmark_keys)
+    _finalize_benchmarks(config, benchmark_keys, result)
 
 
 @pytest.mark.asyncio

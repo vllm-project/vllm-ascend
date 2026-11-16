@@ -3,6 +3,14 @@ model: "Eco-Tech/Kimi-K2.6-w4a8"
 num_nodes: 2
 npu_per_node: 16
 dp_load_balancing: external
+test_content:
+  - spec_decode_acceptance
+acceptance_rate:
+  benchmark: acc_aime2025
+  # Provisional 15-position baseline (decode side sets num_speculative_tokens: 15);
+  # re-measure on NPU before enforcing.
+  baseline: [0.90, 0.82, 0.75, 0.69, 0.63, 0.58, 0.53, 0.49, 0.45, 0.41, 0.38, 0.35, 0.32, 0.29, 0.27]
+  tolerance: 0.05
 
 routing:
   type: "disaggregated_prefill"
