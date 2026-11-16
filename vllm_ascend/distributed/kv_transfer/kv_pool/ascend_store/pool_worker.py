@@ -867,17 +867,19 @@ class BaseKVPoolWorker(ABC):
         return invalid_blocks
 
     def wait_for_previous_save(self) -> None:
+        send_thread = self.kv_send_thread
+        if send_thread is not None:
+            send_thread.raise_if_failed()
         save_batch = self._previous_save_batch
         if save_batch is None:
             return
 
-        assert self.kv_send_thread is not None
-        send_thread = self.kv_send_thread
+        assert send_thread is not None
         wait_start = time.perf_counter()
-        while True:
+        while not save_batch.done.wait(timeout=SAVE_BATCH_FAILURE_POLL_INTERVAL_S):
             send_thread.raise_if_failed()
-            if save_batch.done.wait(timeout=SAVE_BATCH_FAILURE_POLL_INTERVAL_S):
-                break
+        # Fatal cleanup also sets done; it does not imply a successful save.
+        send_thread.raise_if_failed()
         elapsed = time.perf_counter() - wait_start
         logger.debug(
             "Previous KV save batch completed after waiting %.3f ms tp_rank=%d",

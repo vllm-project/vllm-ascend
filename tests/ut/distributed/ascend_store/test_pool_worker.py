@@ -38,6 +38,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_conne
     create_kv_pool_worker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+    KVCacheStoreBatch,
     KVCacheStoreSendingThread,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.kv_transfer import LayerBatchBuilder
@@ -53,6 +54,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
     ReqMeta,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
 
 class TestDSparkPrefixRegistration(unittest.TestCase):
@@ -1686,6 +1688,83 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.m_store.exists.return_value = [1, 1, 1, 1]
         result = worker.lookup_scheduler(32, ["h0", "h1"], use_layerwise=False)
         self.assertEqual(result, 32)
+
+
+class TestKVPoolWorkerPreviousSave(unittest.TestCase):
+    def setUp(self):
+        self.worker = KVPoolWorker.__new__(KVPoolWorker)
+        self.worker.tp_rank = 0
+        self.worker._previous_save_batch = None
+        self.worker.kv_send_thread = KVCacheStoreSendingThread(
+            MagicMock(), MagicMock(group_block_len={0: [16]}), 16, 0
+        )
+
+    def test_fatal_cleanup_during_wait_preserves_cause_and_fence(self):
+        sender = self.worker.kv_send_thread
+        batch = KVCacheStoreBatch()
+        sender.request_queue.put(batch)
+        self.worker._previous_save_batch = batch
+        cause = ValueError("unexpected save dispatch failure")
+        wait = batch.done.wait
+
+        def fail_during_wait(timeout):
+            self.assertIsNone(sender._fatal_error)
+            sender._fatal_error = cause
+            sender._handle_request_exception(sender.request_queue.get_nowait())
+            return wait(timeout=timeout)
+
+        # Inject the fatal transition after the entry check, at the wait boundary.
+        with patch.object(batch.done, "wait", side_effect=fail_during_wait):
+            with self.assertRaisesRegex(RuntimeError, "failed during asynchronous transfer") as raised:
+                self.worker.wait_for_previous_save()
+        self.assertIs(raised.exception.__cause__, cause)
+        self.assertTrue(batch.done.is_set())
+        self.assertEqual(sender.request_queue.unfinished_tasks, 0)
+        self.assertIs(self.worker._previous_save_batch, batch)
+
+    def test_fatal_without_previous_batch_is_persistent(self):
+        cause = ValueError("unexpected save dispatch failure")
+        self.worker.kv_send_thread._fatal_error = cause
+
+        for _ in range(2):
+            with self.assertRaisesRegex(RuntimeError, "failed during asynchronous transfer") as raised:
+                self.worker.wait_for_previous_save()
+            self.assertIs(raised.exception.__cause__, cause)
+            self.assertIsNone(self.worker._previous_save_batch)
+
+    def test_successful_completion_clears_previous_batch(self):
+        sender = self.worker.kv_send_thread
+        batch = KVCacheStoreBatch()
+        sender.request_queue.put(batch)
+        self.worker._previous_save_batch = batch
+        wait = batch.done.wait
+
+        def complete_during_wait(timeout):
+            sender._handle_request(sender.request_queue.get_nowait())
+            return wait(timeout=timeout)
+
+        with patch.object(batch.done, "wait", side_effect=complete_during_wait):
+            self.worker.wait_for_previous_save()
+        self.assertTrue(batch.done.is_set())
+        self.assertEqual(sender.request_queue.unfinished_tasks, 0)
+        self.assertIsNone(self.worker._previous_save_batch)
+        self.worker.wait_for_previous_save()
+
+    def test_already_completed_batch_is_cleared(self):
+        batch = KVCacheStoreBatch()
+        batch.done.set()
+        self.worker._previous_save_batch = batch
+
+        self.worker.wait_for_previous_save()
+
+        self.assertIsNone(self.worker._previous_save_batch)
+
+    def test_consumer_without_save_thread(self):
+        worker = make_worker(self, kv_role="kv_consumer")
+        self.assertIsNone(worker.kv_send_thread)
+        self.assertIsNone(worker._previous_save_batch)
+
+        worker.wait_for_previous_save()
 
 
 class TestKVPoolWorkerBuildConnectorWorkerMeta(unittest.TestCase):
