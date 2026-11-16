@@ -1910,7 +1910,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         store.connector_worker = worker
         source = HiSparseConnector.__new__(HiSparseConnector)
 
-        trace = []
+        trace: list[str | bytes] = []
         host_bytes = bytearray([37, 0])
         draft_resident_bytes = bytes([91])
         page_transfer = object()
