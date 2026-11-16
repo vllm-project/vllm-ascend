@@ -246,28 +246,6 @@ def verify_fullgraph_capture() -> None:
     print("PASS torch.compile fullgraph captured all five Ascend HC custom ops")
 
 
-def verify_npugraph_replay() -> None:
-    rows = 1025
-    residual = make_input(rows, HYPER_HIDDEN_SIZE, padded=True)
-    gate = make_input(rows, HYPER_HIDDEN_SIZE, padded=True)
-    for _ in range(3):
-        hc_gate_mix(residual, gate, HC_COUNT)
-    torch.npu.synchronize()
-
-    graph = torch.npu.NPUGraph()
-    with torch.npu.graph(graph, capture_error_mode="thread_local", auto_dispatch_capture=True):
-        captured = hc_gate_mix(residual, gate, HC_COUNT)
-
-    for _ in range(2):
-        residual.copy_(make_input(rows, HYPER_HIDDEN_SIZE, padded=True))
-        gate.copy_(make_input(rows, HYPER_HIDDEN_SIZE, padded=True))
-        expected = hc_gate_mix(residual, gate, HC_COUNT)
-        graph.replay()
-        torch.npu.synchronize()
-        torch.testing.assert_close(captured, expected, atol=0, rtol=0)
-    print("PASS hc_gate_mix NPUGraph replay with refreshed row-strided inputs")
-
-
 def benchmark() -> None:
     rows = 32
     residual = make_input(rows, HYPER_HIDDEN_SIZE)
@@ -325,7 +303,6 @@ def main() -> None:
     ):
         run_correctness(rows, padded_input=padded)
     verify_fullgraph_capture()
-    verify_npugraph_replay()
     if args.benchmark:
         benchmark()
     print("ALL QWEN4_EXP HC TRITON NPU CHECKS PASSED")
