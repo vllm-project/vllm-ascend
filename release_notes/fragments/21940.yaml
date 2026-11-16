@@ -1,4 +1,4 @@
-pr: 21926
+pr: 21940
 entries:
   - category: bugfix
     text: Fixed overlapping registration and incorrect KV transfers in dense Mooncake P/D disaggregation when K/V views share an interleaved backing allocation. Transfers now preserve each peer's physical block stride and copy only the requested KV payload.
