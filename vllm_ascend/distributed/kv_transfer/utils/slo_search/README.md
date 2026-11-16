@@ -2,7 +2,7 @@
 
 `slo_search.py` uses AISBench to find the highest concurrency that meets latency and request success rate requirements, saving latency, throughput, and cache hit metrics for each trial. For example, it can find the highest concurrency and corresponding throughput with **TTFT P90 < 10 s and TPOT P90 < 20 ms**.
 
-The tool requires only the Python 3.9+ standard library. It invokes `aisbench_test.py` from the external [aisbench_auto_tools_prefix](https://github.com/rayn-zzz/aisbench_auto_tools_prefix) project through its CLI:
+The tool requires Python 3.9+ and the `regex` package, which is included in vllm-ascend's requirements. It invokes `aisbench_test.py` from the external [aisbench_auto_tools_prefix](https://github.com/rayn-zzz/aisbench_auto_tools_prefix) project through its CLI:
 
 ```text
 slo_search.py → aisbench_test.py → AISBench → model service
@@ -23,7 +23,7 @@ The following examples use Bash. From the vllm-ascend repository root, enter the
 cd vllm_ascend/distributed/kv_transfer/utils/slo_search
 ```
 
-Replace `/path/to/aisbench_auto_tools_prefix` with your configured external project directory. The searcher and external project can reside in different directories. To use a separate Python environment for benchmarking, specify its interpreter with `--python /path/to/python`.
+Replace `/path/to/aisbench_auto_tools_prefix` with your configured external project directory. The searcher and external project can reside in different directories. Install `regex` into the environment running `slo_search.py`, for example with `uv pip install --python /path/to/search-python regex`. To use a separate Python environment for benchmarking, specify its interpreter with `--python /path/to/python`; this option only controls the external benchmark subprocess.
 
 ## Usage Examples
 

@@ -6,7 +6,7 @@ Example:
       --ttft-limit-ms 10000 --tpot-limit-ms 20 --percentile 90 \
       --max-concurrency 256 -- --input_len 2048 --output_len 1024
 
-Only Python's standard library is required. No project modules are imported.
+Requires the regex package. No project modules are imported.
 """
 
 import argparse
@@ -14,13 +14,14 @@ import csv
 import json
 import math
 import os
-import re
 import signal
 import statistics
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+import regex as re
 
 NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
