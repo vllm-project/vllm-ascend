@@ -1101,10 +1101,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         return (
             envs.VLLM_ASCEND_MISTRAL_FLASHMLA_STRIDED_KV_WRITER
             and self.use_flashmla
-            and self.is_draft_model
+            # DSpARK can keep the target model config while building its draft.
+            and (self.is_draft_model or backends.model_tag == "dspark_head")
             and getattr(self.speculative_config, "method", None) == "dspark"
             and self.dtype == torch.bfloat16
-            and self.use_mla_rope
             and not (self.use_pcp or self.use_dcp)
             and self.kv_a_layernorm is not None
         )
@@ -2038,7 +2038,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         if self._uses_strided_kv_adapter():
             assert self.fused_qkv_a_proj is not None
             device = self.fused_qkv_a_proj.weight.device
-        elif getattr(self, "_flashmla_strided_kv_writer", False):
+        elif getattr(self, "_flashmla_strided_kv_writer", False) and self.use_mla_rope:
+            # Mistral enables draft RoPE after constructing the inner MLA layer.
             # Mistral uses a separate KV-A projection. W_UV is on the layer's
             # execution device by the time the weight-loading hook runs.
             device = self.W_UV.device

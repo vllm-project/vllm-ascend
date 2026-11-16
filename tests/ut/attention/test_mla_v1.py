@@ -1910,7 +1910,38 @@ class TestAscendMLAImpl(TestBase):
                 self.assertFalse(impl.is_draft_model)
                 self.assertTrue(impl.enable_mlapo)
 
-    def _rebuild_impl(self):
+    @patch.object(AscendMLAImpl, "_can_use_flashmla", return_value=True)
+    @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
+    def test_flashmla_strided_writer_accepts_dspark_rope_enabled_after_init(self, mock_config, _mock_flashmla):
+        config = self.impl.vllm_config
+        config.model_config.runner_type = "generate"
+        config.model_config.dtype = torch.bfloat16
+        config.speculative_config = SimpleNamespace(method="dspark")
+        config.scheduler_config.max_num_batched_tokens = 128
+        config.compilation_config.cudagraph_capture_sizes = [32]
+        config.cache_config.block_size = 128
+        mock_config.return_value = config
+
+        for tag, enabled, expected in (
+            ("backbone", True, False),
+            ("dspark_head", False, False),
+            ("dspark_head", True, True),
+        ):
+            with self.subTest(tag=tag, enabled=enabled):
+                with (
+                    patch.object(backends, "model_tag", tag),
+                    patch("vllm_ascend.attention.mla_v1.envs.VLLM_ASCEND_MISTRAL_FLASHMLA_STRIDED_KV_WRITER", enabled),
+                ):
+                    impl = self._rebuild_impl(use_mla_rope=False)
+                self.assertFalse(impl.is_draft_model)
+                impl.W_UV = torch.empty(1)
+                impl._prepare_strided_kv_workspace()
+                self.assertIsNone(impl._strided_kv_workspace)
+                impl.use_mla_rope = True
+                impl._prepare_strided_kv_workspace()
+                self.assertIs(impl._strided_kv_workspace is not None, expected)
+
+    def _rebuild_impl(self, *, use_mla_rope=True):
         """Rebuild the impl from ``setUp`` so tests can tweak projection kwargs."""
         return AscendMLAImpl(
             num_heads=self.impl.num_heads,
@@ -1939,7 +1970,7 @@ class TestAscendMLAImpl(TestBase):
             kv_a_layernorm=self.impl.kv_a_layernorm,
             rotary_emb=self.impl.rotary_emb,
             g_proj=None,
-            use_mla_rope=True,
+            use_mla_rope=use_mla_rope,
         )
 
     @patch("vllm_ascend.attention.mla_v1.enabling_mlapo", return_value=True)
