@@ -2,7 +2,8 @@
 
 ## Contract
 
-`glm5_next_dcp_indexer` selects compressed pools from rank-local paged caches,
+`glm5_next_dcp_indexer` takes a contiguous FP32 weighted query `[T, head_dim]`
+and selects compressed pools from rank-local paged caches,
 merges candidates across DCP, expands selected pools and appends the causal
 incomplete tail. Inputs follow `AscendIndexerKPoolMetadata`: `seq_lens` counts
 **global complete pools**, `positions` contains global token positions,
@@ -20,7 +21,9 @@ score[t, j] = sum_d(qbar[t, d] * key[j, d])
 
 No ReLU is applied. BF16 keys are promoted to FP32 during scoring; FP8 keys use
 a per-pool FP32 descale. The model caller quantizes/dequantizes FP8 queries with
-the same dynamic quantization as its ordinary CANN selection path.
+the same dynamic quantization as its ordinary CANN selection path, rounds head
+weights to BF16, then multiplies and reduces in FP32. The reduced query stays
+FP32 through communication and scoring; it is not quantized again.
 
 ## Ownership and visibility
 
@@ -48,9 +51,13 @@ quantized/A3 paths retain their existing sink-free behavior.
 
 ## PCP composition
 
-With PCP greater than one, use DCP=PCP or DCP=TP*PCP. Before scoring,
-`KPoolPCPQueryLayout` gathers the current query vectors and head weights,
+With PCP greater than one, use DCP=PCP or DCP=TP*PCP. Each rank owns all indexer
+heads for its local tokens and reduces them before communication.
+`KPoolPCPQueryLayout` gathers only the FP32 weighted query in one collective,
 removes padding and duplicate decode rows, and restores global request order.
+This replaces two gathers of `[T_local, heads, head_dim]` queries and
+`[T_local, heads]` weights with one gather of `[T_local, head_dim]`. Pure decode
+keeps its existing replicated query rows and requires no PCP query gather.
 The scorer uses the compressor's global-request metadata with rank-local
 physical cache pages. Only the selected local query rows are copied back into
 the shared Top-K buffer; padded rows contain `-1`.
@@ -86,6 +93,9 @@ columns and nonoverlapping rows. No device `.item()` drives the execution path.
   `tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_glm5_next_dcp_indexer.py`.
 - HCCL candidate exchange under two, four or eight ranks:
   `tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_glm5_next_dcp_indexer.py`.
+  Joint PCP/DCP cases compare reduction before/after gathering with BF16 and
+  actual FP8 query quantization, assert a single FP32 query gather, and cover
+  TP2/PCP2/DCP4 with mixed batches, empty ranks and one/two prompt tokens + MTP5.
 - Model integration with MTP, FlashComm1, prefix caching and RecoverSSM:
   `tests/e2e/pull_request/four_card/test_glm5_3_flash.py -k dcp`.
 

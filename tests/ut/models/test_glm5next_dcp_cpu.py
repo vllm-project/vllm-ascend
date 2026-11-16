@@ -279,9 +279,8 @@ def test_local_topk_keeps_ties_and_pads_empty_owners():
 
     funcs = indexer_functions(_score_local_pools=Kernel(score))
     ids, scores = funcs.select_local_pool_candidates(
-        torch.zeros(2, 2, 8),
+        torch.zeros(2, 8),
         torch.zeros(1, 4, 1, 8),
-        torch.zeros(2, 2),
         SimpleNamespace(
             cum_query_lens=torch.tensor([2]),
             seq_lens=torch.tensor([4]),
@@ -312,9 +311,8 @@ def test_full_graph_padding_uses_device_query_ends():
     )
     owner = torch.full((5, 15), 99, dtype=torch.int32)
     result = funcs.glm5_next_dcp_indexer(
-        torch.zeros(3, 2, 8),
+        torch.zeros(3, 8),
         torch.zeros(1, 4, 1, 8),
-        torch.zeros(3, 2),
         metadata,
         SimpleNamespace(world_size=4, rank_in_group=3),
         topk=8,
@@ -338,9 +336,8 @@ def test_output_rows_cannot_alias():
     funcs = indexer_functions()
     with pytest.raises(ValueError, match="output must cover"):
         funcs.glm5_next_dcp_indexer(
-            torch.zeros(3, 2, 8),
+            torch.zeros(3, 8),
             torch.zeros(1, 4, 1, 8),
-            torch.zeros(3, 2),
             None,
             None,
             topk=8,
@@ -351,6 +348,47 @@ def test_output_rows_cannot_alias():
         )
 
 
+@pytest.mark.parametrize("qbar", [torch.zeros(3, 2, 8), torch.zeros(3, 8).bfloat16(), torch.zeros(3, 16)[:, ::2]])
+def test_weighted_query_contract(qbar):
+    with pytest.raises(ValueError, match="contiguous FP32 weighted query"):
+        indexer_functions().glm5_next_dcp_indexer(
+            qbar, None, None, None, topk=8, pool_size=4, interleave=128, max_model_len=8192
+        )
+
+
+def test_weighted_query_tiles_keep_global_token_offsets():
+    qbar = torch.arange(5 * 8).reshape(5, 8).float()
+    seen = []
+
+    def score(*args):
+        seen.append((args[0].clone(), args[9]))
+        args[7].zero_()
+
+    funcs = indexer_functions(
+        DCP_SCORE_BYTES=2 * 4 * 4,
+        _score_local_pools=Kernel(score),
+        distributed_topk=lambda ids, *args: ids,
+        _expand_pool_indices=Kernel(Mock()),
+    )
+    funcs.glm5_next_dcp_indexer(
+        qbar,
+        torch.zeros(1, 4, 1, 8),
+        SimpleNamespace(
+            cum_query_lens=torch.tensor([5]),
+            positions=torch.arange(5),
+            seq_lens=torch.tensor([16]),
+            block_table=torch.zeros(1, 1, dtype=torch.int32),
+        ),
+        SimpleNamespace(world_size=4, rank_in_group=0),
+        topk=8,
+        pool_size=4,
+        interleave=4,
+        max_model_len=64,
+    )
+    assert [offset for _, offset in seen] == [0, 2, 4]
+    torch.testing.assert_close(torch.cat([tile for tile, _ in seen]), qbar, rtol=0, atol=0)
+
+
 def pcp_functions():
     return load_functions(
         "attention/context_parallel/kpool_pcp.py",
@@ -359,13 +397,21 @@ def pcp_functions():
     )
 
 
-def pcp_batch(pcp, mixed, short):
+def pcp_batch(pcp, mixed, short, remaining_prompt_tokens=None):
     # Two separated prefill chunks per rank, with an optional replicated decode.
     tokens = 1 if short else 17
     chunks = torch.tensor_split(torch.arange(int(mixed), tokens + int(mixed)), 2 * pcp)
     rank_indices = [torch.cat((chunks[r], chunks[2 * pcp - 1 - r])) for r in range(pcp)]
     if mixed:
         rank_indices = [torch.cat((torch.tensor([0]), indices)) for indices in rank_indices]
+    if remaining_prompt_tokens is not None:
+        assert pcp == 2 and not mixed
+        tokens = remaining_prompt_tokens + 5
+        rank_indices = (
+            [torch.arange(6), torch.arange(6)]
+            if remaining_prompt_tokens == 1
+            else [torch.tensor([0, 1, 6]), torch.tensor([2, 3, 4, 5])]
+        )
     width = max(map(len, rank_indices)) + 1
     padded = torch.zeros(pcp, width, dtype=torch.long)
     restore = torch.full((tokens + int(mixed),), -1, dtype=torch.long)
@@ -406,19 +452,52 @@ def test_pcp_queries_align_and_restore_with_empty_ranks(pcp, mixed, short):
         assert (local[len(indices) :] == -1).all()
 
 
-@pytest.mark.parametrize("rank", [0, 1])
-@pytest.mark.parametrize("short", [False, True])
-def test_indexer_joint_pcp_dcp_scores_global_rows_and_keeps_local_shared_buffer(monkeypatch, rank, short):
+@pytest.mark.parametrize("global_rank", range(4))
+@pytest.mark.parametrize("quantized", [False, True], ids=["bf16", "fp8_dequantized"])
+@pytest.mark.parametrize(
+    "mixed,short,remaining_prompt_tokens",
+    [
+        (False, False, None),
+        (True, False, None),
+        (False, True, None),
+        (True, True, None),
+        (False, False, 1),
+        (False, False, 2),
+    ],
+    ids=["prefill", "mixed", "empty_rank", "short_mixed", "prompt1_mtp5", "prompt2_mtp5"],
+)
+def test_tp2_pcp2_dcp4_reduces_query_before_single_gather(
+    monkeypatch, global_rank, quantized, mixed, short, remaining_prompt_tokens
+):
     funcs = pcp_functions()
-    context, rank_indices = pcp_batch(2, False, short)
+    context, rank_indices = pcp_batch(2, mixed, short, remaining_prompt_tokens)
     width = context.padded_gather_idx.numel() // 2
-    global_query = torch.arange(context.global_batch.num_tokens * 16).reshape(-1, 2, 8).float()
-    global_weights = torch.arange(context.global_batch.num_tokens * 2).reshape(-1, 2).float()
+    generator = torch.Generator().manual_seed(21835)
+    global_query = torch.randn(context.global_batch.num_tokens, 64, 128, generator=generator).bfloat16()
+    if quantized:
+        # CPU stand-in for the already-dequantized query supplied by
+        # _forward_cann. Actual npu_dynamic_quant is covered by the HCCL test.
+        scale = global_query.float().abs().amax(-1, keepdim=True) / torch.finfo(torch.float8_e4m3fn).max
+        global_query = (global_query.float() / scale).to(torch.float8_e4m3fn).float() * scale
+    # Non-BF16 values ensure moving the reduction cannot omit weight rounding.
+    global_weights = torch.randn(context.global_batch.num_tokens, 64, generator=generator)
     indices = context.padded_gather_idx
+    rank = global_rank // 2
     group = SimpleNamespace(world_size=2, rank_in_group=rank)
+    dcp_group = SimpleNamespace(world_size=4, rank_in_group=(global_rank % 2) * 2 + rank)
     group.all_gather = Mock(side_effect=[global_query[indices], global_weights[indices]])
     common = SimpleNamespace(num_input_tokens=width, num_actual_tokens=len(rank_indices[rank]))
     layout = funcs.build_kpool_pcp_query_layout(common, context, group)
+    local_indices = indices.view(2, width)[rank]
+    # Reproduce the old gather-then-reduce ordering as the numerical oracle.
+    old_query = funcs.gather_kpool_pcp_queries(global_query[local_indices], layout, group)
+    old_weights = funcs.gather_kpool_pcp_queries(global_weights[local_indices], layout, group).bfloat16()
+    expected_qbar = (old_query.float() * old_weights.float().unsqueeze(-1)).sum(1)
+    local_qbars = [
+        (global_query[rows].float() * global_weights[rows].bfloat16().float().unsqueeze(-1)).sum(1)
+        for rows in indices.view(2, width)
+    ]
+    group.all_gather = Mock(return_value=torch.cat(local_qbars))
     scoring_metadata = SimpleNamespace(positions=torch.arange(context.global_batch.num_tokens))
     metadata = SimpleNamespace(pcp_dcp_query_layout=layout, write_metadata=scoring_metadata)
     global_topk = torch.arange(context.global_batch.num_tokens * 11, dtype=torch.int32).reshape(-1, 1, 11)
@@ -435,22 +514,58 @@ def test_indexer_joint_pcp_dcp_scores_global_rows_and_keeps_local_shared_buffer(
         gather_kpool_pcp_queries=funcs.gather_kpool_pcp_queries,
         restore_kpool_pcp_queries=funcs.restore_kpool_pcp_queries,
         get_pcp_group=lambda: group,
-        get_dcp_group=lambda: group,
+        get_dcp_group=lambda: dcp_group,
     )
     shared = torch.full((width + 1, 15), 99, dtype=torch.int32)
     backend = SimpleNamespace(
         topk_tokens=8, index_kpool=4, _dcp_interleave=128, _max_model_len=8192, topk_indices_buffer=shared
     )
-    local_indices = indices.view(2, width)[rank]
     result = select(backend, global_query[local_indices], global_weights[local_indices], None, metadata, None)
-    torch.testing.assert_close(kernel.call_args.args[0], global_query)
-    torch.testing.assert_close(kernel.call_args.args[2], global_weights.to(torch.bfloat16))
-    assert kernel.call_args.args[3] is scoring_metadata
+    group.all_gather.assert_called_once()
+    sent = group.all_gather.call_args.args[0]
+    assert sent.shape == (width, 128) and sent.dtype == torch.float32
+    torch.testing.assert_close(sent, local_qbars[rank], rtol=0, atol=0)
+    torch.testing.assert_close(kernel.call_args.args[0], expected_qbar, rtol=0, atol=0)
+    assert kernel.call_args.args[2] is scoring_metadata
+    assert kernel.call_args.args[3] is dcp_group
     assert kernel.call_args.kwargs["output_buffer"] is None
     assert result.data_ptr() == shared.data_ptr()
     expected = funcs.restore_kpool_pcp_queries(global_topk, layout, width, fill_value=-1)
     torch.testing.assert_close(result, expected)
     assert (shared[-1] == 99).all() and (shared[:, 11:] == 99).all()
+
+
+@pytest.mark.parametrize("query_dtype", [torch.bfloat16, torch.float32])
+def test_decode_weighted_query_needs_no_pcp_gather(monkeypatch, query_dtype):
+    kernel = Mock(return_value=torch.zeros(3, 1, 11, dtype=torch.int32))
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm_ascend.ops.triton.glm5_next_dcp_indexer",
+        SimpleNamespace(glm5_next_dcp_indexer=kernel),
+    )
+    gather = Mock(side_effect=AssertionError("decode must not gather PCP query rows"))
+    group = SimpleNamespace(world_size=4, rank_in_group=0)
+    select = load_method(
+        "attention/indexer_kpool.py",
+        "Glm5NextKPoolIndexerBackend",
+        "_select_dcp_candidates",
+        gather_kpool_pcp_queries=gather,
+        get_dcp_group=lambda: group,
+    )
+    generator = torch.Generator().manual_seed(21835)
+    query = torch.randn(3, 64, 128, generator=generator).to(query_dtype)
+    weights = torch.randn(3, 64, generator=generator)
+    metadata = SimpleNamespace(pcp_dcp_query_layout=None)
+    shared = torch.empty(3, 11, dtype=torch.int32)
+    backend = SimpleNamespace(
+        topk_tokens=8, index_kpool=4, _dcp_interleave=128, _max_model_len=8192, topk_indices_buffer=shared
+    )
+    assert select(backend, query, weights, None, metadata, None) is kernel.return_value
+    expected = (query.float() * weights.bfloat16().float().unsqueeze(-1)).sum(1)
+    torch.testing.assert_close(kernel.call_args.args[0], expected, rtol=0, atol=0)
+    assert kernel.call_args.args[2] is metadata
+    assert kernel.call_args.kwargs["output_buffer"] is shared
+    gather.assert_not_called()
 
 
 def test_joint_metadata_keeps_local_and_global_requests_separate():

@@ -1010,15 +1010,18 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         num_tokens = query.shape[0]
         layout = metadata.pcp_dcp_query_layout
         scoring_metadata = metadata
+        # Keep the scorer's BF16 weight rounding and FP32 head reduction. FP8
+        # queries have already been quantized/dequantized by _forward_cann.
+        # Each PCP rank owns all indexer heads for its local token rows, so only
+        # the reduced query needs to cross PCP before owner-local pool scoring.
+        qbar = (query.float() * weights.to(torch.bfloat16).float().unsqueeze(-1)).sum(1).contiguous()
         if layout is not None:
-            query = gather_kpool_pcp_queries(query, layout, get_pcp_group())
-            weights = gather_kpool_pcp_queries(weights, layout, get_pcp_group())
+            qbar = gather_kpool_pcp_queries(qbar, layout, get_pcp_group())
             scoring_metadata = metadata.write_metadata
             assert scoring_metadata is not None
         indices = glm5_next_dcp_indexer(
-            query,
+            qbar,
             cache,
-            weights.to(torch.bfloat16),
             scoring_metadata,
             get_dcp_group(),
             topk=self.topk_tokens,

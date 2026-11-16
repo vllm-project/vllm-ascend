@@ -82,9 +82,8 @@ def _score_local_pools(
 
 
 def select_local_pool_candidates(
-    query,
+    qbar,
     cache,
-    weights,
     metadata,
     *,
     world_size,
@@ -97,13 +96,12 @@ def select_local_pool_candidates(
     scale_cache=None,
 ):
     """Return fixed-width local pool IDs/FP32 scores, masking before Top-K."""
-    rows, _, dim = query.shape
-    ids = torch.full((rows, 1, pool_topk), -1, dtype=torch.int32, device=query.device)
-    values = torch.full((rows, 1, pool_topk), -torch.inf, dtype=torch.float32, device=query.device)
+    rows, dim = qbar.shape
+    ids = torch.full((rows, 1, pool_topk), -1, dtype=torch.int32, device=qbar.device)
+    values = torch.full((rows, 1, pool_topk), -torch.inf, dtype=torch.float32, device=qbar.device)
     if rows == 0 or capacity == 0 or metadata.cum_query_lens.numel() == 0:
         return ids, values
-    qbar = (query.float() * weights.float().unsqueeze(-1)).sum(1).contiguous()
-    scores = torch.empty((rows, capacity), dtype=torch.float32, device=query.device)
+    scores = torch.empty((rows, capacity), dtype=torch.float32, device=qbar.device)
     _score_local_pools[(min(rows * triton.cdiv(capacity, DCP_POOL_TILE), TRITON_MAX_PROGRAMS),)](
         qbar,
         cache,
@@ -147,9 +145,8 @@ def select_local_pool_candidates(
 
 
 def glm5_next_dcp_indexer(
-    query,
+    qbar,
     cache,
-    weights,
     metadata,
     group,
     *,
@@ -162,26 +159,29 @@ def glm5_next_dcp_indexer(
 ):
     """Merge pool candidates globally, then expand tokens and append the tail.
 
-    All ranks must have identical query rows. PCP callers first gather queries
-    in global request order, then restore their local rows after selection.
+    qbar is the contiguous FP32 [tokens, head_dim] weighted query. All ranks
+    must have identical rows. PCP callers reduce local heads before gathering
+    qbar in global request order, then restore local rows after selection.
     Main MLA and compressed pools are token-sharded; the small compressor ring
     remains replicated.
     Tensor contents may change on replay, including request lengths/pages.
     """
     if pool_size <= 1 or topk <= 0 or topk % pool_size or interleave <= 0 or interleave % pool_size:
         raise ValueError("KPool DCP requires pool-aligned topk and positive token interleave.")
-    if query.shape[-1] != triton.next_power_of_2(query.shape[-1]):
+    if qbar.ndim != 2 or qbar.dtype != torch.float32 or not qbar.is_contiguous():
+        raise ValueError("KPool DCP requires a contiguous FP32 weighted query with shape [tokens, head_dim].")
+    if qbar.shape[-1] != triton.next_power_of_2(qbar.shape[-1]):
         raise ValueError("KPool DCP requires a power-of-two indexer head dimension.")
     if cache.dtype == torch.float8_e4m3fn and scale_cache is None:
         raise ValueError("FP8 KPool DCP requires the per-pool scale cache.")
-    tokens = query.shape[0]
+    tokens = qbar.shape[0]
     width = topk + pool_size - 1
     if output_buffer is None:
-        output = torch.empty((tokens, width), dtype=torch.int32, device=query.device)
+        output = torch.empty((tokens, width), dtype=torch.int32, device=qbar.device)
     else:
         if (
             output_buffer.dtype != torch.int32
-            or output_buffer.device != query.device
+            or output_buffer.device != qbar.device
             or output_buffer.ndim != 2
             or output_buffer.shape[0] < tokens
             or output_buffer.shape[1] < width
@@ -206,9 +206,8 @@ def glm5_next_dcp_indexer(
     for start in range(0, tokens, query_tile):
         end = min(start + query_tile, tokens)
         local_ids, scores = select_local_pool_candidates(
-            query[start:end],
+            qbar[start:end],
             cache,
-            weights[start:end],
             metadata,
             world_size=group.world_size,
             rank=group.rank_in_group,

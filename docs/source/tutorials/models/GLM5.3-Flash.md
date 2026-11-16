@@ -2173,8 +2173,10 @@ For example, a four-device engine can use TP2/PCP2/DCP2 or TP2/PCP2/DCP4:
 --cp-kv-cache-interleave-size 128
 ```
 
-PCP prefill queries and head weights are gathered in original request order
-before candidate exchange. Main attention uses the same global query order
+For PCP prefill, each rank reduces its local indexer heads using the dynamic
+weights before gathering one FP32 weighted query in original request order.
+The reduction preserves BF16 weight rounding and runs after FP8 query
+quantization/dequantization when enabled. Main attention uses the same global query order
 and restores each PCP rank's local rows after merging softmax statistics.
 Padding and replicated decode rows are removed from the global query view;
 an empty local rank still participates in the collectives. Historical MLA

@@ -126,9 +126,8 @@ def test_sharded_pool_selection_and_graph_replay(world, interleave, topk, quanti
         packs = []
         for rank, (query, cache, weights, scales, metadata, capacity) in enumerate(devices):
             indices, scores = select_local_pool_candidates(
-                query,
+                (query.float() * weights.float().unsqueeze(-1)).sum(1).contiguous(),
                 cache,
-                weights,
                 metadata,
                 world_size=world,
                 rank=rank,
@@ -145,9 +144,8 @@ def test_sharded_pool_selection_and_graph_replay(world, interleave, topk, quanti
             group = SimpleNamespace(world_size=world, rank_in_group=rank, all_gather=lambda packed, dim: gathered)
             results.append(
                 glm5_next_dcp_indexer(
-                    query,
+                    (query.float() * weights.float().unsqueeze(-1)).sum(1).contiguous(),
                     cache,
-                    weights,
                     metadata,
                     group,
                     topk=topk,
