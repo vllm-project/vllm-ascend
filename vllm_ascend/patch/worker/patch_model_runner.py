@@ -103,6 +103,10 @@ def initialize_kv_cache(
         vllm_config=self.vllm_config,
         target_layer_names=target_attn_layer_names,
         additional_attn_cg_support=additional_attn_cg_support,
+        # Batch-sharded sampling builds its host-side all-to-all plan from
+        # per-request logit counts, so it needs the device-side admitted draft
+        # split whenever the adaptive budget binds.
+        copy_admitted_drafts_to_host=self.batch_sharder is not None,
     )
 
     block_tables_kwargs = {}
