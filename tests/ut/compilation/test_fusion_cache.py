@@ -142,6 +142,8 @@ def test_fusion_dependency_changes_invalidate_compiler_hash(tmp_path, monkeypatc
     from pathlib import Path
     from types import SimpleNamespace
 
+    import torch_npu
+
     import vllm_ascend.compilation.compiler_interface as interface
     from vllm_ascend.ascend_config import AscendCompilationConfig
 
@@ -163,6 +165,7 @@ def test_fusion_dependency_changes_invalidate_compiler_hash(tmp_path, monkeypatc
         lambda: SimpleNamespace(ascend_compilation_config=AscendCompilationConfig(enable_npugraph_ex=False)),
     )
     monkeypatch.setattr(interface, "get_current_hardware_profile", lambda: SimpleNamespace(capabilities=[]))
+    monkeypatch.setattr(torch_npu, "__version__", "test-version", raising=False)
     compiler = interface.AscendCompiler()
     before = compiler.compute_hash(None)
     (copied / "unrelated.py").write_text("UNRELATED = True\n")
@@ -175,8 +178,11 @@ def test_fusion_dependency_changes_invalidate_compiler_hash(tmp_path, monkeypatc
 def test_npugraph_hash_does_not_read_fusion_sources(monkeypatch):
     from types import SimpleNamespace
 
+    import torch_npu
+
     import vllm_ascend.compilation.compiler_interface as interface
 
+    monkeypatch.setattr(torch_npu, "__version__", "test-version", raising=False)
     config = SimpleNamespace(enable_npugraph_ex=True, enable_static_kernel=False, enable_super_kernel=False)
     monkeypatch.setattr(interface, "get_ascend_config", lambda: SimpleNamespace(ascend_compilation_config=config))
     with patch.object(interface.Path, "read_bytes", side_effect=AssertionError("unrelated fusion source")):

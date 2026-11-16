@@ -14,7 +14,7 @@ from pathlib import Path
 def run_worker(mode, root):
     result = subprocess.run(
         [sys.executable, str(Path(__file__).resolve()), mode, str(root)],
-        env=dict(os.environ, OMP_NUM_THREADS="1"),
+        env=dict(os.environ, OMP_NUM_THREADS="1", TRITON_CACHE_DIR=str(root / "triton")),
         capture_output=True,
         text=True,
         timeout=300,
