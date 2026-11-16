@@ -28,7 +28,7 @@ Register an `AscendTritonJitKernel` instance inside the runner's active window. 
 
 ### 1. Define the warmup domain
 
-List the supported dtypes, constexpr values, scalar specialization classes, layouts and compilation options. Generate keys for reachable variants, including applicable out-of-graph paths. See [JIT specialization and recompilation](triton_operators.md#jit-specialization-and-recompilation).
+List the supported dtypes, constexpr values, scalar specialization classes, layouts and compilation options. Generate keys for reachable variants, including applicable out-of-graph paths. See [JIT specialization and recompilation](../contribution/triton_operators.md#jit-specialization-and-recompilation).
 
 ### 2. Implement the Ascend wrapper
 
