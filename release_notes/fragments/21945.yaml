@@ -1,0 +1,4 @@
+pr: 21945
+entries:
+  - category: bugfix
+    text: Fixed Qwen3.8-Flash-Next startup when QSA raw-key cache layers use different page widths.
