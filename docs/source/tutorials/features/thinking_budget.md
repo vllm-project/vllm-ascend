@@ -151,8 +151,7 @@ speculation with `min_p` or `logit_bias` is rejected during request validation.
 ```bash
 python -m pytest -sv tests/ut/worker/v2/test_thinking_budget.py \
     tests/ut/worker/v2/test_thinking_budget_validation.py
-python -m pytest -sv tests/e2e/pull_request/one_card/test_thinking_budget.py \
-    tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_thinking_budget.py
+python -m pytest -sv tests/e2e/pull_request/one_card/test_thinking_budget.py
 ```
 
 V2 request lifecycle coverage targets `AscendRequestState` and upstream
@@ -163,10 +162,12 @@ and incremental marker scans, including isolation of inactive request slots.
 It uses contiguous production request-state allocations within the existing
 int32 history-address range. It checks committed and in-flight token loads,
 disabled budgets, missing markers, and isolation of inactive slots.
-The operator test can be explicitly selected for PR CI:
+The `/e2e` command accepts only `pull_request` paths. The existing budget-test
+entry point re-exports the canonical nightly operator cases, so this command
+runs both the operator and existing budget checks:
 
 ```text
-/e2e tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_thinking_budget.py
+/e2e tests/e2e/pull_request/one_card/test_thinking_budget.py
 ```
 
 Broader real-model generation, nonbinding-output, preemption and OpenAI-serving
