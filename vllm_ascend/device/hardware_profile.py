@@ -419,6 +419,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             native_weight_formats=_STANDARD_WEIGHT_FORMATS,
             capabilities=frozenset(
                 {
+                    HardwareCapability.ATB_EXTENSIONS,
                     HardwareCapability.COMPATIBILITY_OP_IMPLEMENTATIONS,
                     HardwareCapability.DISTRIBUTED_COMMUNICATION_ADAPTATION,
                     HardwareCapability.FUSED_MOE_COMPATIBILITY,

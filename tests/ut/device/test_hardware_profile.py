@@ -73,6 +73,7 @@ _EXPECTED_CAPABILITIES = {
     },
     AscendDeviceType._310P: frozenset(
         {
+            HardwareCapability.ATB_EXTENSIONS,
             HardwareCapability.COMPATIBILITY_OP_IMPLEMENTATIONS,
             HardwareCapability.DISTRIBUTED_COMMUNICATION_ADAPTATION,
             HardwareCapability.FUSED_MOE_COMPATIBILITY,
@@ -277,6 +278,13 @@ def test_gdn_fixed_spec_recurrent_fallback_policy(device_type, expected_min_quer
 )
 def test_minimax_m3_gbsa_bf16_softmax_precision_policy(device_type, expected_precision):
     assert get_hardware_profile(device_type).minimax_m3_gbsa_bf16_softmax_precision == expected_precision
+
+
+def test_310p_eager_atb_registration_does_not_enable_matmul_warmup() -> None:
+    profile = get_hardware_profile(AscendDeviceType._310P)
+
+    assert profile.supports(HardwareCapability.ATB_EXTENSIONS)
+    assert not profile.supports(HardwareCapability.ATB_WARMUP)
 
 
 def test_current_hardware_profile_uses_device_config() -> None:
