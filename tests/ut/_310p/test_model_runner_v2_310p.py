@@ -4,7 +4,7 @@
 import sys
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
 import pytest
@@ -1250,6 +1250,44 @@ def test_attention_metadata_uses_preexpanded_310p_block_table(_pin_memory, for_c
 
     assert received_metadata.block_table_tensor is kernel_block_table
     assert received_metadata.block_table_tensor.tolist() == [[14, 15]]
+
+
+def test_initialize_kv_cache_marks_310p_target_and_draft_groups(monkeypatch) -> None:
+    target_group = SimpleNamespace()
+    draft_group = SimpleNamespace()
+    target_groups = [[target_group]]
+    runner = MagicMock()
+    runner.device = torch.device("cpu")
+    runner.max_model_len = 512
+    runner.speculator = MagicMock(spec=model_runner_module.DraftModelSpeculator)
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=256))],
+        needs_kv_cache_zeroing=False,
+    )
+
+    def set_draft_attn(model_state, config, block_tables, input_buffers, attn_groups):
+        assert block_tables is runner.block_tables
+        assert attn_groups is target_groups
+        runner.speculator.attn_groups = [[draft_group]]
+
+    def init_draft_graph(cudagraph_mode):
+        assert target_group.block_table_is_kernel_granular
+        assert draft_group.block_table_is_kernel_granular
+
+    runner.speculator.set_attn.side_effect = set_draft_attn
+    runner.speculator.init_cudagraph_manager.side_effect = init_draft_graph
+    monkeypatch.setattr(model_runner_module, "init_attn_backend", Mock(return_value=(target_groups, MagicMock(), [128])))
+    monkeypatch.setattr(model_runner_module, "Ascend310PBlockTables", Mock())
+    monkeypatch.setattr(model_runner_module, "initialize_mamba_ssu_backend", Mock())
+    monkeypatch.setattr(model_runner_module, "ModelAclGraphManager310", Mock())
+    monkeypatch.setattr(model_runner_module, "check_attention_cp_compatibility", Mock())
+    monkeypatch.setattr(model_runner_module, "get_shared_kv_cache_layers", Mock(return_value={}))
+    monkeypatch.setattr(model_runner_module, "bind_kv_cache", Mock())
+    monkeypatch.setattr(model_runner_module, "get_kv_connector", Mock())
+
+    NPUModelRunner310V2.initialize_kv_cache(runner, kv_cache_config)
+
+    runner.speculator.init_cudagraph_manager.assert_called_once()
 
 
 def test_kv_cache_allocation_uses_separate_nz_k_and_v() -> None:
