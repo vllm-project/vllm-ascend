@@ -1,0 +1,104 @@
+test_name: "GLM-5.2-W8A8C8-A3-PP-Mooncake"
+model: "Eco-Tech/GLM-5.2-w8a8c8"
+num_nodes: 2
+npu_per_node: 16
+dp_load_balancing: internal
+
+kv_pool:
+      type: "mooncake"
+      master_port: 50088
+      metrics_port: 50089
+      config:
+        metadata_server: "P2PHANDSHAKE"
+        protocol: "ascend"
+        device_name: ""
+        global_segment_size: "1GB"
+        preferred_segment: false
+        prefer_alloc_in_same_node: true
+        enable_ssd_offload: false
+
+env_common: &env_common
+  HCCL_BUFFSIZE: "200"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  PYTHONHASHSEED: "0"
+  HCCL_IF_BASE_PORT: "44567"
+  VLLM_USE_V2_MODEL_RUNNER: "1"
+  ASCEND_ENABLE_USE_FABRIC_MEM: "1"
+  LD_LIBRARY_PATH: "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:${LD_LIBRARY_PATH}"
+  SERVER_PORT: "${PORT}"
+
+# node 0: PP master (node-rank 0, 唯一 API server)
+deployment:
+  - envs:
+      <<: *env_common
+    server_cmd: >
+      vllm serve Eco-Tech/GLM-5.2-w8a8c8
+      --host 0.0.0.0
+      --port $SERVER_PORT
+      --master-port 7060
+      --nnodes 2
+      --node-rank 0
+      --api-server-count 1
+      --enable-expert-parallel
+      --tensor-parallel-size 16
+      --pipeline-parallel-size 2
+      --data-parallel-size 1
+      --seed 1024
+      --tool-call-parser glm47
+      --reasoning-parser glm45
+      --enable-auto-tool-choice
+      --max-num-seqs 12
+      --max-model-len 135000
+      --max-num-batched-tokens 8192
+      --trust-remote-code
+      --gpu-memory-utilization 0.92
+      --quantization ascend
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true, "multistream_overlap_shared_expert": true, "enable_flashcomm1": true, "enable_fused_mc2": 0}'
+      --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
+      --kv-transfer-config
+      '{"kv_connector": "AscendStoreConnector", "kv_role": "kv_both", "kv_load_failure_policy": "recompute", "kv_connector_extra_config": {"lookup_rpc_port": "0", "backend": "mooncake"}}'
+
+  - envs:
+      <<: *env_common
+    server_cmd: >
+      vllm serve Eco-Tech/GLM-5.2-w8a8c8
+      --host 0.0.0.0
+      --port $SERVER_PORT
+      --master-port 7060
+      --nnodes 2
+      --node-rank 1
+      --headless
+      --enable-expert-parallel
+      --tensor-parallel-size 16
+      --pipeline-parallel-size 2
+      --data-parallel-size 1
+      --seed 1024
+      --tool-call-parser glm47
+      --reasoning-parser glm45
+      --enable-auto-tool-choice
+      --max-num-seqs 12
+      --max-model-len 135000
+      --max-num-batched-tokens 8192
+      --trust-remote-code
+      --gpu-memory-utilization 0.92
+      --quantization ascend
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true, "multistream_overlap_shared_expert": true, "enable_flashcomm1": true, "enable_fused_mc2": 0}'
+      --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
+      --kv-transfer-config
+      '{"kv_connector": "AscendStoreConnector", "kv_role": "kv_both", "kv_load_failure_policy": "recompute", "kv_connector_extra_config": {"lookup_rpc_port": "0", "backend": "mooncake"}}'
+
+benchmarks:
+  acc:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gpqa
+    request_conf: vllm_api_general_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+    max_out_len: 2048
+    batch_size: 60
+    baseline: 91.2
+    temperature: 0.6
+    top_p: 0.95
+    threshold: 10
