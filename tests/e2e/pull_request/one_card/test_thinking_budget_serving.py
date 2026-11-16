@@ -18,6 +18,40 @@ BUDGETS = [None, -1, 0, 1, 2, 3, 4, 16, 64, 128]
 REQUEST_TIMEOUT = 300
 PROBABILISTIC_MAX_OUTPUT_TOKENS = 2048
 KV_CACHE_BYTES = 2 * 1024**3
+METRICS_POLL_ATTEMPTS = 15
+METRICS_REQUEST_TIMEOUT = 10
+METRICS_POLL_INTERVAL = 1
+
+
+def _wait_for_spec_metrics(url: str) -> dict[str, float]:
+    counters: dict[str, float] = {}
+    last_error: requests.RequestException | None = None
+    for attempt in range(METRICS_POLL_ATTEMPTS):
+        try:
+            metrics = requests.get(url, timeout=METRICS_REQUEST_TIMEOUT)
+            metrics.raise_for_status()
+        except (requests.ConnectionError, requests.Timeout, requests.HTTPError) as error:
+            # Retry transient transport/server errors, but surface bad URLs,
+            # authentication failures and other client errors immediately.
+            if isinstance(error, requests.HTTPError) and (error.response is None or error.response.status_code < 500):
+                raise
+            last_error = error
+        else:
+            counters = {}
+            for line in metrics.text.splitlines():
+                if line.startswith("vllm:spec_decode_num_"):
+                    name = line.split("{", 1)[0].split()[0]
+                    counters[name] = counters.get(name, 0) + float(line.split()[-1])
+            drafted = counters.get("vllm:spec_decode_num_draft_tokens_total", 0)
+            accepted = counters.get("vllm:spec_decode_num_accepted_tokens_total", 0)
+            if drafted > accepted > 0:
+                return counters
+        if attempt + 1 < METRICS_POLL_ATTEMPTS:
+            time.sleep(METRICS_POLL_INTERVAL)
+    raise AssertionError(
+        f"Speculative metrics did not satisfy drafted > accepted > 0 after "
+        f"{METRICS_POLL_ATTEMPTS} attempts; counters={counters}; last_request_error={last_error!r}"
+    ) from last_error
 
 
 @pytest.mark.parametrize("enforce_eager", [True, False])
@@ -215,19 +249,5 @@ def test_thinking_budget_serving(enforce_eager, speculative, tmp_path):
             }
             response = requests.post(url, json=repeat_body, timeout=REQUEST_TIMEOUT)
             assert response.status_code == 200, response.text
-            counters: dict[str, float] = {}
-            for _ in range(15):
-                metrics = requests.get(server.url_for("metrics"), timeout=10)
-                metrics.raise_for_status()
-                counters = {}
-                for line in metrics.text.splitlines():
-                    if line.startswith("vllm:spec_decode_num_") and not line.startswith("#"):
-                        name = line.split("{", 1)[0].split()[0]
-                        counters[name] = counters.get(name, 0) + float(line.split()[-1])
-                drafted = counters.get("vllm:spec_decode_num_draft_tokens_total", 0)
-                accepted = counters.get("vllm:spec_decode_num_accepted_tokens_total", 0)
-                if drafted > accepted > 0:
-                    break
-                time.sleep(1)
-            assert drafted > accepted > 0, counters
+            counters = _wait_for_spec_metrics(server.url_for("metrics"))
             print(json.dumps({"spec_metrics": counters, "eager": enforce_eager}))
