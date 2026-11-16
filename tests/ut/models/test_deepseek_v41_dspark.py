@@ -414,9 +414,40 @@ def test_context_kv_fuses_selected_layers_without_projecting_intermediates(monke
     DeepseekV41DSparkModel.precompute_and_store_context_kv(model, torch.ones(2, 4), torch.arange(2), slots)
     assert fused.call_count == 1
     assert fused.call_args.args[-1] == [0, 2]
+    assert fused.call_args.kwargs == {"partial_rope": True}
     assert fused.call_args.args[0].stride() == (12, 4, 1)
     model._project_shared_kv.assert_not_called()
     model._store_standard_swa_kv.assert_not_called()
+
+
+def test_context_kv_uses_per_layer_path_above_fused_token_limit(monkeypatch):
+    monkeypatch.setattr(deepseek_v41_dspark_module.ascend_envs, "VLLM_ASCEND_DSPARK_CONTEXT_KV_FUSION", True)
+    monkeypatch.setattr(deepseek_v41_dspark_module, "get_cos_and_sin_dsa", lambda *a, **kw: "rope")
+    can_fuse = MagicMock(return_value=True)
+    fused = MagicMock()
+    monkeypatch.setattr(deepseek_v41_dspark_module, "can_fuse_dspark_context_kv", can_fuse)
+    monkeypatch.setattr(deepseek_v41_dspark_module, "fused_dspark_context_kv", fused)
+    num_tokens = deepseek_v41_dspark_module.MAX_FUSED_CONTEXT_TOKENS + 1
+    layers = {
+        str(i): SimpleNamespace(self_attn=SimpleNamespace(rotary_emb=SimpleNamespace(layername=str(i))))
+        for i in range(3)
+    }
+    model = SimpleNamespace(
+        context_wkv_proj=lambda x: torch.zeros(num_tokens, 12, dtype=torch.bfloat16),
+        num_dspark_layers=3,
+        config=SimpleNamespace(head_dim=4),
+        layers=layers,
+        _project_shared_kv=MagicMock(),
+        _store_standard_swa_kv=MagicMock(),
+    )
+    slots = [torch.arange(num_tokens), None, torch.arange(num_tokens)]
+    DeepseekV41DSparkModel.precompute_and_store_context_kv(
+        model, torch.ones(num_tokens, 4), torch.arange(num_tokens), slots
+    )
+    can_fuse.assert_not_called()
+    fused.assert_not_called()
+    assert model._project_shared_kv.call_count == 2
+    assert model._store_standard_swa_kv.call_count == 2
 
 
 def test_context_kv_fusion_rejects_cpu_and_single_layer():

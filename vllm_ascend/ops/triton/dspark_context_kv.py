@@ -30,6 +30,7 @@ def _store_layer(
     ROPE_DIM: tl.constexpr,
     SLOT_PAIRS: tl.constexpr,
     EPS: tl.constexpr,
+    PARTIAL_ROPE: tl.constexpr,
 ):
     dim = tl.arange(0, HEAD_DIM)
     x = tl.load(kv + token * KV_TOKEN + dim).to(tl.float32)
@@ -37,17 +38,28 @@ def _store_layer(
     norm = tl.rsqrt(tl.sum(x * x, 0) / HEAD_DIM + EPS)
     # The original RMSNorm materializes a BF16 row before rotary_mul.
     value = (x * norm * w).to(kv.dtype.element_ty).to(tl.float32)
-    mate = tl.where((dim - NOPE_DIM) % 2 == 0, dim + 1, dim - 1)
-    mate = tl.minimum(tl.maximum(mate, 0), HEAD_DIM - 1)
-    paired = tl.gather(value, mate, 0)
-    c = tl.load(
-        cos + token * COS_TOKEN + tl.minimum(tl.maximum(dim - NOPE_DIM, 0), ROPE_DIM - 1), dim >= NOPE_DIM, other=1
-    ).to(tl.float32)
-    s = tl.load(
-        sin + token * SIN_TOKEN + tl.minimum(tl.maximum(dim - NOPE_DIM, 0), ROPE_DIM - 1), dim >= NOPE_DIM, other=0
-    ).to(tl.float32)
-    rotated = value * c + tl.where((dim - NOPE_DIM) % 2 == 0, -paired, paired) * s
-    output = tl.where(dim >= NOPE_DIM, rotated, value).to(kv.dtype.element_ty)
+    if PARTIAL_ROPE:
+        rope_dim = tl.arange(0, ROPE_DIM)
+        rope_x = tl.load(kv + token * KV_TOKEN + NOPE_DIM + rope_dim).to(tl.float32)
+        rope_w = tl.load(weight + NOPE_DIM + rope_dim).to(tl.float32)
+        rope_value = (rope_x * norm * rope_w).to(kv.dtype.element_ty).to(tl.float32)
+        mate = tl.where(rope_dim % 2 == 0, rope_dim + 1, rope_dim - 1)
+        paired = tl.gather(rope_value, mate, 0)
+        c = tl.load(cos + token * COS_TOKEN + rope_dim).to(tl.float32)
+        s = tl.load(sin + token * SIN_TOKEN + rope_dim).to(tl.float32)
+        rotated = rope_value * c + tl.where(rope_dim % 2 == 0, -paired, paired) * s
+    else:
+        mate = tl.where((dim - NOPE_DIM) % 2 == 0, dim + 1, dim - 1)
+        mate = tl.minimum(tl.maximum(mate, 0), HEAD_DIM - 1)
+        paired = tl.gather(value, mate, 0)
+        c = tl.load(
+            cos + token * COS_TOKEN + tl.minimum(tl.maximum(dim - NOPE_DIM, 0), ROPE_DIM - 1), dim >= NOPE_DIM, other=1
+        ).to(tl.float32)
+        s = tl.load(
+            sin + token * SIN_TOKEN + tl.minimum(tl.maximum(dim - NOPE_DIM, 0), ROPE_DIM - 1), dim >= NOPE_DIM, other=0
+        ).to(tl.float32)
+        rotated = value * c + tl.where((dim - NOPE_DIM) % 2 == 0, -paired, paired) * s
+        output = tl.where(dim >= NOPE_DIM, rotated, value).to(kv.dtype.element_ty)
     if SLOT_PAIRS:
         block = tl.load(slots + token * SLOT_TOKEN).to(tl.int64)
         offset = tl.load(slots + token * SLOT_TOKEN + SLOT_COORD).to(tl.int64)
@@ -57,17 +69,37 @@ def _store_layer(
         offset = slot % BLOCK_SIZE
     valid = (block >= 0) & (block < NUM_BLOCKS) & (offset >= 0) & (offset < BLOCK_SIZE)
     if valid:
-        tl.store(cache + block * CACHE_BLOCK + offset * CACHE_TOKEN + dim, output)
+        cache_row = cache + block * CACHE_BLOCK + offset * CACHE_TOKEN
+        if PARTIAL_ROPE:
+            tl.store(cache_row + dim, value.to(kv.dtype.element_ty), dim < NOPE_DIM)
+            tl.store(cache_row + NOPE_DIM + rope_dim, rotated.to(kv.dtype.element_ty))
+        else:
+            tl.store(cache_row + dim, output)
 
 
 @triton.jit(do_not_specialize=["num_tokens"])
 def _dspark_context_kv_kernel(
     kv,
-    weights,
-    cosines,
-    sines,
-    caches,
-    slots,
+    weight0,
+    weight1,
+    weight2,
+    weight3,
+    cos0,
+    cos1,
+    cos2,
+    cos3,
+    sin0,
+    sin1,
+    sin2,
+    sin3,
+    cache0,
+    cache1,
+    cache2,
+    cache3,
+    slots0,
+    slots1,
+    slots2,
+    slots3,
     num_tokens,
     KV_TOKEN: tl.constexpr,
     KV_LAYER: tl.constexpr,
@@ -86,7 +118,15 @@ def _dspark_context_kv_kernel(
     ROPE_DIM: tl.constexpr,
     NUM_LAYERS: tl.constexpr,
     LAYER_INDICES: tl.constexpr,
+    PARTIAL_ROPE: tl.constexpr,
 ):
+    # Triton-Ascend's launcher requires tensor pointers as separate arguments.
+    # Only the first NUM_LAYERS entries are used; unused entries are None.
+    weights = (weight0, weight1, weight2, weight3)
+    cosines = (cos0, cos1, cos2, cos3)
+    sines = (sin0, sin1, sin2, sin3)
+    caches = (cache0, cache1, cache2, cache3)
+    slots = (slots0, slots1, slots2, slots3)
     layer = tl.program_id(1)
     for token in range(tl.program_id(0), num_tokens, tl.num_programs(0)):
         for i in tl.static_range(NUM_LAYERS):
@@ -113,6 +153,7 @@ def _dspark_context_kv_kernel(
                     ROPE_DIM,
                     SLOT_PAIRS[i],
                     EPS[i],
+                    PARTIAL_ROPE,
                 )
 
 
@@ -153,7 +194,9 @@ def can_fuse_dspark_context_kv(kv, layers, slot_mappings, rope) -> bool:
             or attn.kv_norm.weight.stride(0) != 1
             or attn.kv_norm.weight.device != kv.device
             or attn.nope_head_dim + attn.rope_head_dim != kv.shape[2]
+            or attn.rope_head_dim == 0
             or attn.rope_head_dim % 2 != 0
+            or attn.rope_head_dim & (attn.rope_head_dim - 1)
             or attn.nope_head_dim != nope_dim
             or attn.rope_head_dim != rope_dim
             or kv.shape[2] & (kv.shape[2] - 1)
@@ -179,7 +222,7 @@ def can_fuse_dspark_context_kv(kv, layers, slot_mappings, rope) -> bool:
     return True
 
 
-def fused_dspark_context_kv(kv, layers, slot_mappings, rope, layer_indices) -> None:
+def fused_dspark_context_kv(kv, layers, slot_mappings, rope, layer_indices, *, partial_rope: bool = False) -> None:
     """Process all draft layers in one launch without allocating KV intermediates."""
     attns = [layer.self_attn for layer in layers]
     caches = [attn.dsa_attn.swa_cache_layer.kv_cache[0] for attn in attns]
@@ -188,13 +231,23 @@ def fused_dspark_context_kv(kv, layers, slot_mappings, rope, layer_indices) -> N
     sines = [sin[attn.rotary_emb.layername] for attn in attns]
     init_device_properties_triton()
     programs = min(kv.shape[0], max(1, get_vectorcore_num() // len(layers)))
-    _dspark_context_kv_kernel[(programs, len(layers))](
-        kv,
+    # Keep each pointer as its own launch argument. Tuple-valued tensor
+    # arguments are flattened by the compiler but not by this Ascend launcher.
+    pointer_args = (
         tuple(attn.kv_norm.weight for attn in attns),
         tuple(cosines),
         tuple(sines),
         tuple(caches),
         tuple(slot_mappings),
+    )
+    padded_pointers = tuple(pointer + (None,) * (4 - len(layers)) for pointer in pointer_args)
+    _dspark_context_kv_kernel[(programs, len(layers))](
+        kv,
+        *padded_pointers[0],
+        *padded_pointers[1],
+        *padded_pointers[2],
+        *padded_pointers[3],
+        *padded_pointers[4],
         kv.shape[0],
         kv.stride(0),
         kv.stride(1),
@@ -213,4 +266,5 @@ def fused_dspark_context_kv(kv, layers, slot_mappings, rope, layer_indices) -> N
         attns[0].rope_head_dim,
         len(layers),
         tuple(layer_indices),
+        partial_rope,
     )

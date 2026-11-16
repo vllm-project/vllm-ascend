@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """NPU comparison of fused DSpark context KV against the eager operator chain."""
 
+import importlib
 from types import SimpleNamespace
 
 import pytest
@@ -9,12 +10,15 @@ import torch_npu
 
 from vllm_ascend.attention.dsa_v41 import scatter_cache_sk
 from vllm_ascend.ops.triton.dspark_context_kv import can_fuse_dspark_context_kv, fused_dspark_context_kv
+from vllm_ascend.utils import bootstrap_custom_op_env
 
 
-@pytest.mark.parametrize("num_tokens", [1, 16, 256, 2048])
+@pytest.mark.parametrize("num_tokens", [1, 16, 256, 2048, 4096])
 @pytest.mark.parametrize("paired_slots", [False, True])
 @pytest.mark.parametrize("active_indices", [(0, 1, 2), (0, 2)])
 def test_dspark_context_kv_matches_per_layer_reference(num_tokens, paired_slots, active_indices):
+    bootstrap_custom_op_env()
+    importlib.import_module("vllm_ascend.vllm_ascend_C")
     torch.manual_seed(4)
     num_layers, head_dim, nope_dim, block_size = 3, 512, 448, 128
     num_blocks = (num_tokens * num_layers + block_size - 1) // block_size
@@ -81,4 +85,7 @@ def test_dspark_context_kv_matches_per_layer_reference(num_tokens, paired_slots,
         assert not can_fuse_dspark_context_kv(kv, active_layers, active_mappings, rope)
         layers[0].self_attn.kv_norm.bias_loaded = False
     fused_dspark_context_kv(kv, active_layers, active_mappings, rope, active_indices)
+    torch.testing.assert_close(fused_storage, reference_storage, rtol=5e-3, atol=5e-2)
+    fused_storage.fill_(-7)
+    fused_dspark_context_kv(kv, active_layers, active_mappings, rope, active_indices, partial_rope=True)
     torch.testing.assert_close(fused_storage, reference_storage, rtol=5e-3, atol=5e-2)
