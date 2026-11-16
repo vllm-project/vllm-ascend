@@ -443,6 +443,7 @@ def test_propose_forwards_arguments_to_parent(monkeypatch, batch_as_keyword):
     spec = object.__new__(SuffixSpeculator)
     batch = SimpleNamespace(num_reqs=1)
     kwargs = dict(temperature=object(), num_speculative_tokens=3, future_option=object())
+    args: tuple[object, ...]
     if batch_as_keyword:
         args = ()
         kwargs["attn_metadata"] = object()

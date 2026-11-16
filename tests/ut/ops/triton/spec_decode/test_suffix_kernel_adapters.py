@@ -5,14 +5,16 @@ from types import SimpleNamespace
 
 from vllm_ascend.ops.triton.spec_decode import suffix as ops
 
+KernelCall = tuple[str, tuple[int, ...], tuple[object, ...], dict[str, object]]
+
 
 class RecordingKernel:
-    def __init__(self, name, calls):
+    def __init__(self, name: str, calls: list[KernelCall]):
         self.name = name
         self.calls = calls
 
-    def __getitem__(self, grid):
-        def launch(*args, **kwargs):
+    def __getitem__(self, grid: tuple[int, ...]):
+        def launch(*args: object, **kwargs: object) -> None:
             self.calls.append((self.name, grid, args, kwargs))
 
         return launch
@@ -31,7 +33,7 @@ def test_launch_adapter_forwards_grid_and_arguments():
 
 
 def test_observer_adapter_translates_grid_and_consumes_previous_drafts(monkeypatch):
-    calls = []
+    calls: list[KernelCall] = []
     monkeypatch.setattr(ops, "_suffix_observe_kernel", RecordingKernel("observe", calls))
     monkeypatch.setattr(ops, "_suffix_clear_observed_kernel", RecordingKernel("clear", calls))
     adapter = ops.SuffixKernelLaunchAdapter(ops.launch_suffix_observe)
@@ -46,7 +48,7 @@ def test_observer_adapter_translates_grid_and_consumes_previous_drafts(monkeypat
 
 
 def test_empty_observer_does_not_launch(monkeypatch):
-    calls = []
+    calls: list[KernelCall] = []
     monkeypatch.setattr(ops, "_suffix_observe_kernel", RecordingKernel("observe", calls))
     monkeypatch.setattr(ops, "_suffix_clear_observed_kernel", RecordingKernel("clear", calls))
     ops.launch_suffix_observe((0,), None, None, None, None, None, None, K=3, K_PO2=4)
@@ -54,7 +56,7 @@ def test_empty_observer_does_not_launch(monkeypatch):
 
 
 def test_ingestion_launcher_uses_tensor_stride_and_document_count(monkeypatch):
-    calls = []
+    calls: list[KernelCall] = []
     monkeypatch.setattr(ops, "_suffix_ingest_kernel", RecordingKernel("ingest", calls))
     adapter = ops.SuffixKernelLaunchAdapter(ops.launch_suffix_ingest)
     token_ids = SimpleNamespace(shape=(4, 2048), stride=lambda axis: 2056)
