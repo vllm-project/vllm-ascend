@@ -52,6 +52,15 @@ from ..base import (
 from ..registry import register_scheme
 
 
+_SCALEFIX_ENV = "VLLM_ASCEND_ONLINE_WEIGHT_QUANT"
+
+
+def _online_weight_quant_enabled() -> bool:
+    import os
+
+    return os.environ.get(_SCALEFIX_ENV, "0") == "1"
+
+
 @register_scheme("W8A8_MXFP8", "linear")
 class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
     """Linear method for Ascend W8A8_MXFP8 (Microscaling FP8) quantization.
@@ -81,7 +90,8 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         self.dynamic_mx_quant_scale_alg = get_dynamic_mx_quant_scale_alg(vllm_config)
 
     def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
-        params_dict = {"weight": torch.empty(output_size, input_size, dtype=torch.float8_e4m3fn)}
+        weight_dtype = torch.bfloat16 if _online_weight_quant_enabled() else torch.float8_e4m3fn
+        params_dict = {"weight": torch.empty(output_size, input_size, dtype=weight_dtype)}
         return params_dict
 
     def get_pergroup_param(
@@ -240,6 +250,23 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         if getattr(layer, "_mxfp8_transformed", False):
             return
 
+        bf16_loaded = layer.weight.data.dtype == torch.bfloat16
+        if _online_weight_quant_enabled() and bf16_loaded:
+            weight = layer.weight.data.to(torch.bfloat16).contiguous()
+            quantized, scale = torch_npu.npu_dynamic_mx_quant(
+                weight, axis=-1, dst_type=torch.float8_e4m3fn
+            )
+            layer.weight.data = quantized
+            layer.weight_scale.data = scale.flatten(-2, -1).squeeze(-1).to(
+                layer.weight_scale.data.dtype
+            )
+            logger.info(
+                "[SCALEFIX] online-quantized %s: weight %s, scale %s",
+                getattr(layer, "prefix", type(layer).__name__),
+                tuple(layer.weight.data.shape),
+                tuple(layer.weight_scale.data.shape),
+            )
+
         # Store the unpadded shapes expected by the checkpoint loader.
         if not hasattr(layer, "_mxfp8_original_shapes"):
             layer._mxfp8_original_shapes = {
@@ -390,11 +417,12 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
     ) -> dict[str, Any]:
         param_dict = {}
+        weight_dtype = torch.bfloat16 if _online_weight_quant_enabled() else torch.float8_e4m3fn
         param_dict["w13_weight"] = torch.empty(
-            num_experts, 2 * intermediate_size_per_partition, hidden_sizes, dtype=torch.float8_e4m3fn
+            num_experts, 2 * intermediate_size_per_partition, hidden_sizes, dtype=weight_dtype
         )
         param_dict["w2_weight"] = torch.empty(
-            num_experts, hidden_sizes, intermediate_size_per_partition, dtype=torch.float8_e4m3fn
+            num_experts, hidden_sizes, intermediate_size_per_partition, dtype=weight_dtype
         )
         return param_dict
 
@@ -516,6 +544,32 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         # Check if already transformed to avoid double transformation
         if getattr(layer, "_mxfp8_transformed", False):
             return
+
+        if _online_weight_quant_enabled():
+            for weight_name in ("w13_weight", "w2_weight"):
+                weight_param = getattr(layer, weight_name)
+                if weight_param.data.dtype != torch.bfloat16:
+                    continue
+                scale_param = getattr(layer, f"{weight_name}_scale")
+                quantized_parts, scale_parts = [], []
+                for expert in weight_param.data.unbind(dim=0):
+                    quantized, scale = torch_npu.npu_dynamic_mx_quant(
+                        expert.contiguous(), axis=-1, dst_type=torch.float8_e4m3fn
+                    )
+                    quantized_parts.append(quantized)
+                    scale_parts.append(scale.flatten(-2, -1).squeeze(-1))
+                new_weight = torch.stack(
+                    [part.view(torch.uint8) for part in quantized_parts]
+                ).view(torch.float8_e4m3fn)
+                new_scale = torch.stack(scale_parts)
+                weight_param.data = new_weight
+                scale_param.data = new_scale.to(scale_param.data.dtype)
+                logger.info(
+                    "[SCALEFIX] online-quantized MoE %s: weight %s, scale %s",
+                    weight_name,
+                    tuple(new_weight.shape),
+                    tuple(new_scale.shape),
+                )
 
         # Store original shapes for RL weight reloading
         # Only store on first call (when shapes are in original format)
