@@ -147,6 +147,22 @@ def _deepseek_v41_weight_source(case: WeightUpdateModelCase, device: torch.devic
 # `pytest_model_cases` selects a non-matrix case for `npu_ipc` with
 # `packed=False` and drops it from every other lane, so the packed buffer
 # lifecycle cannot mask a reload regression here.
+#
+# Scope.  The lane covers the host/UVA table across a level-2 sleep -> wake ->
+# weight transfer -> KV-cache wake cycle, plus the value update of every
+# non-Engram parameter: the payload is regenerated per round, so the post-update
+# generation has to reproduce a reference started from the same payload.
+#
+# It does NOT cover an Engram *value* update, and passing this lane must not be
+# read as evidence that one lands.  `AscendParallelEngramEmbedding._weight_loader`
+# deliberately ignores `loaded_weight` and re-reads the rows from the indexed
+# shard bound by `bind_checkpoint` - that streaming is what keeps a
+# 22.89 GiB-per-rank table off the device - while `iter_full()` regenerates the
+# same fixed-seed payload every round (W0 == W1 == W2) and the oracle compares
+# against the startup reference.  A transfer that never landed therefore still
+# matches.  Covering it needs distinct per-round payloads, a loader that consumes
+# the transferred tensor inside the reload window, and a per-round reference;
+# tracked separately.
 DEEPSEEK_V41_ENGRAM_CASE = WeightUpdateModelCase(
     id="deepseek-v4.1-flash-engram-cpu-offload",
     # V4.1 cannot be enumerated through Transformers, so the lane is served from
