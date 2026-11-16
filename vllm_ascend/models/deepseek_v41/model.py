@@ -1105,7 +1105,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 "safetensors",
             ) or vllm_config.load_config.safetensors_load_strategy not in (None, "lazy"):
                 raise ValueError("shared_engram requires lazy safetensors loading")
-            from .engram.shared_rdma import RemoteReader, capacity_for_batch
+            from .engram.shared_rdma import RemoteReader, ShardedRemoteReader, capacity_for_batch
 
             max_tokens = max(
                 vllm_config.scheduler_config.max_num_batched_tokens,
@@ -1116,17 +1116,23 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 remote_engram.capacity, max_tokens, layer_head_counts, get_tensor_model_parallel_world_size()
             )
 
-            remote_reader = RemoteReader(
+            reader_cls = ShardedRemoteReader if remote_engram.endpoints else RemoteReader
+            remote_reader = reader_cls(
                 self.engram_weight_root,
-                remote_engram.endpoint,
+                remote_engram.endpoints or remote_engram.endpoint,
                 capacity=capacity,
                 library_path=remote_engram.library_path,
                 listen_port=remote_engram.listen_port,
                 local_comm_res=remote_engram.local_comm_res,
             )
+            if not remote_engram.endpoints and remote_reader.shard != {"index": 0, "count": 1}:
+                remote_reader.close()
+                raise ValueError("single-owner Engram endpoint points to a sharded owner")
         self._engram_remote_reader = remote_reader
         shared_pool_endpoint = (
-            shared_config.endpoint if shared_config is not None and shared_config.backend == "a3" else None
+            (shared_config.endpoints or shared_config.endpoint)
+            if shared_config is not None and shared_config.backend == "a3"
+            else None
         )
         shared_pool_identity = None
         if shared_pool_endpoint:

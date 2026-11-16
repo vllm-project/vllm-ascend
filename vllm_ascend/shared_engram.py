@@ -14,7 +14,13 @@ from safetensors import safe_open
 
 # Initialize the normal operator registry before Engram's DeviceOperator import.
 import vllm_ascend.ops  # noqa: F401
-from vllm_ascend.models.deepseek_v41.engram.shared_pool import SharedPoolOwner, checkpoint_identity, parse_endpoint
+from vllm_ascend.models.deepseek_v41.engram.shared_pool import (
+    CHUNK_ROWS,
+    SharedPoolOwner,
+    checkpoint_identity,
+    parse_endpoint,
+    shard_range,
+)
 
 
 def load_tables(owner, model, stop):
@@ -36,20 +42,27 @@ def load_tables(owner, model, stop):
     for layer, rows in shapes:
         weight_key = f"layers.{layer}.engram.embed.weight"
         scale_key = f"layers.{layer}.engram.embed.scale"
-        codes = owner.add(weight_key, rows, width, torch.int8)
-        scales = owner.add(scale_key, rows, width // 32, torch.float32)
+        first, last = shard_range(rows, owner.shard_index, owner.shard_count)
+        chunks = (rows + CHUNK_ROWS - 1) // CHUNK_ROWS
+        space_rows = min(rows, ((chunks + owner.shard_count - 1) // owner.shard_count) * CHUNK_ROWS)
+        codes = owner.add(
+            weight_key, last - first, width, torch.int8, total_rows=rows, first_row=first, space_rows=space_rows
+        )
+        scales = owner.add(
+            scale_key, last - first, width // 32, torch.float32, total_rows=rows, first_row=first, space_rows=space_rows
+        )
         with (
             safe_open(root / index[weight_key], framework="pt", device="cpu") as weights,
             safe_open(root / index[scale_key], framework="pt", device="cpu") as scale_file,
         ):
             weight = weights.get_slice(weight_key)
             scale = scale_file.get_slice(scale_key)
-            for start in range(0, rows, 65536):
+            for start in range(first, last, 65536):
                 if stop.is_set():
                     raise InterruptedError("Shared Engram loading cancelled")
-                end = min(start + 65536, rows)
-                codes.publish(start, weight[start:end])
-                scales.publish(start, scale[start:end].float())
+                end = min(start + 65536, last)
+                codes.publish(start - first, weight[start:end])
+                scales.publish(start - first, scale[start:end].float())
         print(json.dumps(dict(stage="LAYER_LOADED", layer=layer, rows=rows)), flush=True)
 
 
@@ -61,6 +74,9 @@ def main():
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--store-url", help="MemFabric BM store URL; default: an available port on endpoint host")
     parser.add_argument("--max-consumers", type=int, default=64, help="Maximum simultaneous consumer workers")
+    parser.add_argument("--shard-index", type=int, default=0)
+    parser.add_argument("--shard-count", type=int, default=1)
+    parser.add_argument("--generation", help="Shared unique generation for sharded owners")
     args = parser.parse_args()
     parse_endpoint(args.endpoint)
     torch.npu.set_device(args.device)
@@ -72,7 +88,10 @@ def main():
         checkpoint_identity(args.model),
         device=f"npu:{args.device}",
         store_url=args.store_url,
-        world_size=args.max_consumers + 1,
+        world_size=args.max_consumers + args.shard_count,
+        shard_index=args.shard_index,
+        shard_count=args.shard_count,
+        generation=args.generation,
     )
     try:
         load_tables(owner, args.model, stop)

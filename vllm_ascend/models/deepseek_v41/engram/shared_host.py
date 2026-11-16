@@ -93,8 +93,13 @@ class MappedHostBuffer:
     once at attachment. No copy API is used on lookup or publication paths.
     """
 
-    def __init__(self, runtime, object_id, rows, width, dtype, *, owner, owner_rank=None):
-        if rows <= 0 or width <= 0 or dtype not in (torch.int8, torch.float32):
+    def __init__(self, runtime, object_id, rows, width, dtype, *, owner, owner_rank=None, space_rows=None):
+        if (
+            rows <= 0
+            or width <= 0
+            or dtype not in (torch.int8, torch.float32)
+            or (space_rows is not None and space_rows < rows)
+        ):
             raise ValueError("Shared Engram requires positive INT8/FP32 dimensions")
         if not 0 <= object_id < 64 or object_id in runtime.objects:
             raise ValueError("Duplicate or invalid MemFabric Engram object id")
@@ -103,6 +108,7 @@ class MappedHostBuffer:
         self.owner, self.device = owner, runtime.device
         self.row_bytes = width * torch.empty((), dtype=dtype).element_size()
         self.size = ((rows * self.row_bytes + GIB - 1) // GIB) * GIB
+        self.space_size = (((space_rows or rows) * self.row_bytes + GIB - 1) // GIB) * GIB
         self.closed = False
         self._ready = False
         self._left = True
@@ -113,7 +119,7 @@ class MappedHostBuffer:
                 self.handle = runtime.bm.create2(
                     object_id,
                     self.size if owner else 0,
-                    self.size,
+                    self.space_size,
                     data_op_type=runtime.bm.BmDataOpType.SDMA,
                     flags=DRAM_MAP_HOST_VA,
                 )
@@ -140,12 +146,15 @@ class MappedHostBuffer:
                 raise
         self._ready = True
 
-    def device_pointer(self, offset, size=1):
-        pointer = self.handle.gva_to_va(self.gva + offset, self.runtime.bm.BmMemType.LOCAL_DEVICE)
+    def device_pointer(self, offset, size=1, *, owner_rank=None):
+        gva = self.gva if owner_rank is None else self.handle.peer_rank_ptr(owner_rank, self.runtime.bm.BmMemType.HOST)
+        if not gva:
+            raise RuntimeError("MemFabric did not provide the Engram owner rank pointer")
+        pointer = self.handle.gva_to_va(gva + offset, self.runtime.bm.BmMemType.LOCAL_DEVICE)
         if not pointer:
             raise RuntimeError("MemFabric DRAM is not directly NPU-addressable; use a reachable A3 supernode")
         if size > 1:
-            last = self.handle.gva_to_va(self.gva + offset + size - 1, self.runtime.bm.BmMemType.LOCAL_DEVICE)
+            last = self.handle.gva_to_va(gva + offset + size - 1, self.runtime.bm.BmMemType.LOCAL_DEVICE)
             if last != pointer + size - 1:
                 raise RuntimeError("MemFabric NPU range is not contiguous within an Engram lookup chunk")
         return pointer

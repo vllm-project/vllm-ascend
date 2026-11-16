@@ -84,3 +84,21 @@ Set `VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS` high enough for readers to close; the
 Focused tests cover protocol bounds, checkpoint compatibility, loading under a non-CPU default device, packed-row handling, batched ID ordering and both supported scale representations. Full-size checkpoint row probes cover both Engram layers, nonzero head offsets and invalid-ID masking. End-to-end validation must additionally preserve the intended P/D topology, decoder graph configuration, KVPool capacity and production request distribution.
 
 Report unique table bytes, owner/staging memory, device buffers and task reservations separately. DP-shared native host mappings must not be multiplied by the worker count. Process PSS may omit driver-managed Host allocations. Restoring a larger KVPool can increase total configured DRAM even while eliminating duplicated Engram tables. Small lookup microbenchmarks alone do not establish serving throughput or SLO equivalence.
+
+## Static multi-owner placement
+
+To distribute tables across owners, start each owner with the same checkpoint
+and `--shard-count N`, and give it a distinct `--shard-index` in `[0, N)`.
+Use distinct control and HIXL endpoints for each owner. After every owner
+reports `POOL_READY`, pass their control endpoints in shard-index order:
+
+```json
+{"shared_engram":{"backend":"a2","endpoints":["OWNER0:29500","OWNER1:29500"]}}
+```
+
+Use `"backend":"a5"` with the A5 communication resources described above.
+Consumers validate the checkpoint and shard layout, select rows from their
+owner and restore the original order. A worker uses one HIXL receive buffer
+and transport for the ordered owners. The capacity limit still applies to each
+request. Stop consumers before owners. All owners are required for the life of
+the deployment; there is no automatic failover.

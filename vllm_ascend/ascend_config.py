@@ -474,7 +474,8 @@ class SharedEngramConfig:
 
     model_config = ConfigDict(extra="forbid")
     backend: Literal["a2", "a3", "a5"]
-    endpoint: str
+    endpoint: str | None = None
+    endpoints: list[str] | None = None
     capacity: int = 65536
     library_path: str | None = None
     listen_port: int | None = None
@@ -493,9 +494,15 @@ class SharedEngramConfig:
 
     @model_validator(mode="after")
     def _validate(self):
-        host, separator, port = self.endpoint.rpartition(":")
-        if not separator or not host or not port.isdigit() or not 0 < int(port) < 65536:
-            raise ValueError("shared Engram endpoint must be host:port")
+        if bool(self.endpoint) == bool(self.endpoints):
+            raise ValueError("set exactly one of shared Engram endpoint or endpoints")
+        endpoints = self.endpoints or [self.endpoint]
+        if len(set(endpoints)) != len(endpoints):
+            raise ValueError("shared Engram endpoints must be distinct")
+        for endpoint in endpoints:
+            host, separator, port = endpoint.rpartition(":")
+            if not separator or not host or not port.isdigit() or not 0 < int(port) < 65536:
+                raise ValueError("shared Engram endpoint must be host:port")
         if not 0 < self.capacity <= 262144:
             raise ValueError("shared Engram capacity must be in [1, 262144]")
         if self.listen_port is not None and not 0 < self.listen_port < 65536:

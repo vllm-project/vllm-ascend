@@ -116,7 +116,7 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         storage_dtype: torch.dtype = torch.int8,
         local_vmm: bool = False,
         remote_reader=None,
-        shared_pool_endpoint: str | None = None,
+        shared_pool_endpoint: str | list[str] | None = None,
         shared_pool_identity: str | None = None,
         shared_pool_key: str | None = None,
     ) -> None:
@@ -240,11 +240,18 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         pool_endpoint, identity, key = self._shared_pool_spec
         if pool_endpoint:
             from .common import warmup_shared_engram_aicpu
-            from .shared_pool import SharedPoolClient
+            from .shared_pool import ShardedPoolClient, SharedPoolClient
 
             assert identity is not None and key is not None
             warmup_shared_engram_aicpu()
-            client = SharedPoolClient(pool_endpoint, identity, device=device)
+            client_cls = ShardedPoolClient if isinstance(pool_endpoint, list) else SharedPoolClient
+            client = client_cls(pool_endpoint, identity, device=device)
+            if isinstance(pool_endpoint, str) and client.manifest.get("shard", {"index": 0, "count": 1}) != {
+                "index": 0,
+                "count": 1,
+            }:
+                client.close()
+                raise ValueError("single-owner Engram endpoint points to a sharded owner")
             self._shared_pool_client = client
             try:
                 self._codes_uva = codes = client.view(
