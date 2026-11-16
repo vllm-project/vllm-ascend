@@ -30,6 +30,7 @@ def binding(monkeypatch):
         monkeypatch.setattr(namespace, name, value, raising=False)
     source = Path(__file__).resolve().parents[3] / "vllm_ascend/ops/lightning_indexer_v2.py"
     spec = importlib.util.spec_from_file_location("li_v2_contract", source)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module, indexer, metadata, legacy_indexer, legacy_metadata

@@ -5,6 +5,7 @@ import importlib.util
 import sys
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -15,21 +16,22 @@ import torch
 def selector(monkeypatch):
     # Load the real selector without importing vLLM or a Triton NPU runtime.
     # Only device kernels and the external stride utility are replaced.
-    bindings = ModuleType("vllm_ascend.ops.lightning_indexer_v2")
+    bindings: Any = ModuleType("vllm_ascend.ops.lightning_indexer_v2")
     bindings.lightning_indexer_v2_metadata = Mock(return_value=torch.empty(2048, dtype=torch.int32))
     bindings.lightning_indexer_v2 = Mock(
         side_effect=lambda q, *args, **kwargs: (torch.zeros(q.shape[0], 1, 512, dtype=torch.int32), torch.empty(0))
     )
-    packing = ModuleType("vllm_ascend.ops.triton.qwen4_exp.qsa")
+    packing: Any = ModuleType("vllm_ascend.ops.triton.qwen4_exp.qsa")
     packing.pack_qsa_group_indices_npu = Mock(side_effect=lambda *args: args[-1].fill_(7))
-    preparation = ModuleType("vllm_ascend.ops.triton.qwen4_exp.lightning_prepare")
+    preparation: Any = ModuleType("vllm_ascend.ops.triton.qwen4_exp.lightning_prepare")
     preparation.prepare_qsa_lightning_inputs = Mock(side_effect=AssertionError("V2 must not enter the V1 preparation"))
-    utilities = ModuleType("vllm.utils.torch_utils")
+    utilities: Any = ModuleType("vllm.utils.torch_utils")
     utilities.canonicalize_singleton_dim_strides = Mock(side_effect=lambda tensor: tensor)
     for module in (bindings, packing, preparation, utilities):
         monkeypatch.setitem(sys.modules, module.__name__, module)
     source = Path(__file__).resolve().parents[4] / "vllm_ascend/models/qwen4_exp/lightning_indexer.py"
     spec = importlib.util.spec_from_file_location("qsa_liv2_contract", source)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module, bindings, packing, utilities
