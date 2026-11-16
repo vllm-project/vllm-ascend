@@ -3932,6 +3932,7 @@ class SelectiveNativeGraph {
         for (size_t layer_index = 0; layer_index < layer_count_; ++layer_index) {
           auto layer = layer_binding(layer_index);
           const int64_t stage = tp_world_ > 1 ? tp_begin_stage(layer_index, replay_epoch) : 0;
+          size_t packed_rows = 0;
           layer.destinations_host.zero_();
           layer.lengths_host.zero_();
           for (int64_t row = 0; row < rows_; ++row) {
@@ -3958,24 +3959,53 @@ class SelectiveNativeGraph {
                         "selective native staging must be bytes");
             auto one = layer;
             one.pages = layer.pages.view({rows_, page_columns_})[row];
-            one.stage_host_k = layer.stage_host_k.view({-1}).narrow(0, row * width_ * k_bytes, width_ * k_bytes);
-            one.stage_host_v = layer.stage_host_v.view({-1}).narrow(0, row * width_ * v_bytes, width_ * v_bytes);
+            one.stage_host_k = layer.stage_host_k.view({-1}).narrow(0, packed_rows * k_bytes, width_ * k_bytes);
+            one.stage_host_v = layer.stage_host_v.view({-1}).narrow(0, packed_rows * v_bytes, width_ * v_bytes);
             std::vector<SelectiveGroupLayerTransfer> one_layer{one};
             selective_gather_group_rows(one_layer, result[1], result[2], meta[10], meta[11], meta[7],
                                         width_, k_bytes, v_bytes, tp_rank_ == 0, row, rows_);
             const auto count = static_cast<size_t>(result[1].numel());
             if (count) {
-              auto dk = layer.stage_device_k.view({-1}).narrow(0, row * width_ * k_bytes, width_ * k_bytes);
-              auto dv = layer.stage_device_v.view({-1}).narrow(0, row * width_ * v_bytes, width_ * v_bytes);
-              check_acl(aclrtMemcpyAsync(dk.data_ptr(), selective_tensor_bytes(dk), one.stage_host_k.data_ptr(),
-                                         count * k_bytes, ACL_MEMCPY_HOST_TO_DEVICE, worker_), "group K H2D");
-              check_acl(aclrtMemcpyAsync(dv.data_ptr(), selective_tensor_bytes(dv), one.stage_host_v.data_ptr(),
-                                         count * v_bytes, ACL_MEMCPY_HOST_TO_DEVICE, worker_), "group V H2D");
+              auto* destinations = layer.destinations_host.data_ptr<int64_t>();
+              const auto* lengths = layer.lengths_host.data_ptr<int32_t>();
+              for (int64_t i = 0; i < count; ++i) {
+                const auto k_index = row * width_ + i;
+                const auto v_index = rows_ * width_ + k_index;
+                const auto k_length = lengths[k_index];
+                const auto v_length = lengths[v_index];
+                const auto k_destination = destinations[k_index];
+                const auto v_destination = destinations[v_index];
+                TORCH_CHECK(k_length > 0 && static_cast<size_t>(k_length) <= k_bytes && k_destination != 0 &&
+                            v_length > 0 && static_cast<size_t>(v_length) <= v_bytes && v_destination != 0,
+                            "invalid selective variable-length scatter descriptor");
+                const auto k_base = reinterpret_cast<uintptr_t>(layer.hot_k.data_ptr());
+                const auto v_base = reinterpret_cast<uintptr_t>(layer.hot_v.data_ptr());
+                TORCH_CHECK(static_cast<uintptr_t>(k_destination) >= k_base &&
+                            static_cast<uintptr_t>(v_destination) >= v_base &&
+                            (k_destination - k_base) % k_bytes == 0 &&
+                            (v_destination - v_base) % v_bytes == 0,
+                            "invalid selective scatter row alignment");
+                destinations[packed_rows + i] = (k_destination - k_base) / k_bytes;
+                destinations[rows_ * width_ + packed_rows + i] = (v_destination - v_base) / v_bytes;
+              }
             }
+            packed_rows += count;
           }
-          if (tp_world_ > 1) tp_publish_stage(stage, layer_index);
+          const size_t capacity = static_cast<size_t>(rows_) * width_;
+          for (size_t part = 0; part < 2; ++part)
+            std::fill_n(layer.destinations_host.data_ptr<int64_t>() + part * capacity + packed_rows,
+                        capacity - packed_rows, int64_t{-1});
+          if (packed_rows) {
+            // Compact all requests before SDMA; one contiguous transfer per K/V plane.
+            check_acl(aclrtMemcpyAsync(layer.stage_device_k.data_ptr(), selective_tensor_bytes(layer.stage_device_k),
+                layer.stage_host_k.data_ptr(), packed_rows * (selective_tensor_bytes(layer.stage_host_k) / capacity),
+                ACL_MEMCPY_HOST_TO_DEVICE, worker_), "group packed K H2D");
+            check_acl(aclrtMemcpyAsync(layer.stage_device_v.data_ptr(), selective_tensor_bytes(layer.stage_device_v),
+                layer.stage_host_v.data_ptr(), packed_rows * (selective_tensor_bytes(layer.stage_host_v) / capacity),
+                ACL_MEMCPY_HOST_TO_DEVICE, worker_), "group packed V H2D");
+          }
           copy_h2d(layer.destinations_device, layer.destinations_host);
-          copy_h2d(layer.lengths_device, layer.lengths_host);
+          if (tp_world_ > 1) tp_publish_stage(stage, layer_index);
           if (tp_world_ > 1) {
             check_acl(aclrtSynchronizeStreamWithTimeout(worker_, 3000), "selective TP H2D completion");
             tp_store(SELECTIVE_TP_ACK_BASE + tp_rank_, stage);

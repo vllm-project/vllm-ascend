@@ -671,7 +671,19 @@ class NPUModelRunner(GPUModelRunner):
         if manager is None:
             return
         manager.register_kv_caches(kv_caches)
-        if not self.ascend_config.sparse_kv_offload_config.use_fused_copy_sfa:
+        sparse_config = self.ascend_config.sparse_kv_offload_config
+        # Native and eager planners cannot share hot-slot state after graph replay starts.
+        if (
+            sparse_config.selective_offload
+            and sparse_config.topk == sparse_config.topk_buffer_size
+            and self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+            and self.compilation_config.max_cudagraph_capture_size >= self.max_num_reqs
+            and self.speculative_config is None
+            and not self.vllm_config.parallel_config.use_ubatching
+        ):
+            manager._selective_native_shared_exchange_requested = True
+            manager.enable_selective_native_experiment()
+        if not sparse_config.use_fused_copy_sfa:
             return
 
         from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl

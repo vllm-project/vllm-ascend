@@ -1637,20 +1637,19 @@ class SparseKVOffloadManager:
             self.selective_prefetch_ready[layer_id].record()
 
     def enable_selective_native_experiment(self) -> None:
-        """Enable the native group path for an isolated MRV2 integration test."""
+        """Enable the native group path before MRV2 admits requests."""
         model_state = getattr(self, "_selective_model_state", None)
         local_error = None
         try:
             if self.topk != self.topk_buffer_size or self.use_fused_copy_sfa:
-                raise RuntimeError("Native selective integration probe requires TopK=hot capacity")
+                raise RuntimeError("Native selective KV requires TopK=hot capacity")
             if self.max_model_len >= 1 << 31:
-                raise RuntimeError("Native selective integration probe requires int32 token indices")
+                raise RuntimeError("Native selective KV requires int32 token indices")
             if model_state is not None and (model_state._selective_request_ids or model_state._offload_live_req_ids):
                 raise RuntimeError("Native selective experiment must be enabled before admitting requests")
             max_rows = self.topk_buffers_k[0].shape[0]
             device = self.topk_buffers_k[0].device
             self._selective_native_rows = torch.arange(max_rows, dtype=torch.int64, device=device)
-            self._selective_native_offsets = torch.arange(max_rows * self.topk, dtype=torch.int64, device=device)
         except Exception as error:
             local_error = str(error)
         if self.tp_size > 1:
@@ -1709,6 +1708,7 @@ class SparseKVOffloadManager:
                 raise
         if model_state is not None:
             model_state._selective_native_experiment = True
+        logger.info("Native selective KV graph path enabled with dynamic worker transfers")
 
     def _prepare_selective_native_kv(self, layers, topk_indices) -> None:
         from vllm_ascend.compilation.updatable_graph import _ACTIVE_GRAPH
@@ -1774,8 +1774,6 @@ class SparseKVOffloadManager:
         coordinator = self._selective_native_tp_groups.get(layer_ids) if self.tp_size > 1 else None
         if self.tp_size > 1 and coordinator is None:
             raise RuntimeError("Native selective TP group does not match the registered layer roles")
-        offsets = self._selective_native_offsets[: rows * width]
-        count = self.selective_copy_counts[rows - 1]
         for layer_id, layer_metadata, _ in layers:
             pages_d = layer_metadata.block_table[:rows].to(torch.int32).contiguous()
             pages_h = torch.empty(pages_d.shape, dtype=torch.int32, pin_memory=True)
@@ -1800,9 +1798,7 @@ class SparseKVOffloadManager:
                 pages_d, pages_h, host_k, host_v, hot_k, hot_v, stage_k_h, stage_v_h,
                 stage_k_d, stage_v_d, dest_h, dest_d, length_h, length_d,
             ])
-            sources = torch.cat((offsets * self.token_size_bytes_k + stage_k_d.data_ptr(),
-                                 offsets * self.token_size_bytes_v + stage_v_d.data_ptr()))
-            scatter.append((layer_id, sources, dest_d, length_d))
+            scatter.append(layer_id)
         pinned = [topk_h, meta_h, physical_h, block_h]
         for offset in range(0, len(layer_buffers), 14):
             indices = (1, 6, 7, 10, 12) if coordinator is None else (1, 10, 12)
@@ -1810,7 +1806,7 @@ class SparseKVOffloadManager:
         pinned_bytes = sum(tensor.numel() * tensor.element_size() for tensor in pinned)
         logger.info("Native selective experimental group %s per-graph pinned buffers: %.2f MiB",
                     layer_ids, pinned_bytes / (1 << 20))
-        device_buffers = [topk_d, meta_d, physical_d, block_d, *(entry[1] for entry in scatter)]
+        device_buffers = [topk_d, meta_d, physical_d, block_d]
         for offset in range(0, len(layer_buffers), 14):
             device_buffers.extend(layer_buffers[offset + index] for index in (8, 9, 11, 13))
         device_bytes = sum(tensor.numel() * tensor.element_size() for tensor in device_buffers)
@@ -1832,11 +1828,19 @@ class SparseKVOffloadManager:
         graph_identity = ops.selective_native_graph_identity(handle)
         if len(record) > 1 and ops.selective_native_graph_identity(record[0]) != graph_identity:
             raise RuntimeError("Native selective handles do not belong to the same captured graph")
-        for index, (layer_id, sources, destinations, lengths) in enumerate(scatter):
+        for index, layer_id in enumerate(scatter):
+            entry = layer_buffers[index * 14 : (index + 1) * 14]
+            # Reinterpret bytes so the cache-store kernel preserves every KV dtype.
+            for part, (hot, stage) in enumerate(zip(entry[4:6], entry[8:10])):
+                row_bytes = stage.shape[-1]
+                torch.ops._C_ascend.npu_scatter_nd_update_sk(
+                    hot.view(torch.int8).view(-1, row_bytes),
+                    entry[11][part].view(-1, 1),
+                    stage.view(torch.int8).view(-1, row_bytes),
+                )
             self.selective_physical[layer_id, :rows, 0, :].copy_(physical_d)
-            self.copy_sfa_kv(sources, destinations.flatten(), lengths.flatten(), count)
             if index == len(scatter) - 1:
-                # The last ready event also joins the completion marker to the main stream.
+                # Wake the worker only after all captured cache stores finish.
                 ops.selective_native_scatter_done(handle, anchor)
             self.selective_prefetch_ready[layer_id].record()
 

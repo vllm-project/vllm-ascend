@@ -1,16 +1,50 @@
-from unittest.mock import MagicMock, patch
-from types import SimpleNamespace
 import threading
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.config.compilation import CUDAGraphMode
 
+from vllm_ascend.compilation.updatable_graph import _ACTIVE_GRAPH
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     _SELECTIVE_NATIVE_TP_QUARANTINE,
     SelectiveNativeTPCoordinator,
     SparseKVOffloadManager,
 )
-from vllm_ascend.compilation.updatable_graph import _ACTIVE_GRAPH
+from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+
+
+@pytest.mark.parametrize("selective,capacity,native,fallback", [
+    (True, 2048, True, None), (True, 4096, False, None), (False, 2048, False, None),
+    (True, 2048, False, "eager"), (True, 2048, False, "partial_coverage"),
+    (True, 2048, False, "speculative"), (True, 2048, False, "ubatching"),
+])
+def test_runner_registers_native_path_before_requests(selective, capacity, native, fallback):
+    manager = MagicMock()
+    config = SimpleNamespace(selective_offload=selective, topk=2048, topk_buffer_size=capacity,
+                             use_fused_copy_sfa=False)
+    runner = SimpleNamespace(
+        sparse_kv_offload_manager=manager,
+        ascend_config=SimpleNamespace(sparse_kv_offload_config=config),
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=CUDAGraphMode.NONE if fallback == "eager" else CUDAGraphMode.FULL_DECODE_ONLY,
+            max_cudagraph_capture_size=2 if fallback == "partial_coverage" else 4,
+        ),
+        max_num_reqs=4,
+        speculative_config=object() if fallback == "speculative" else None,
+        vllm_config=SimpleNamespace(parallel_config=SimpleNamespace(use_ubatching=fallback == "ubatching")),
+    )
+    native = native and fallback is None
+    caches = {"layer": object()}
+    NPUModelRunner._register_sparse_kv_caches(runner, caches)
+    manager.register_kv_caches.assert_called_once_with(caches)
+    assert manager.enable_selective_native_experiment.call_count == int(native)
+    if native:
+        assert manager._selective_native_shared_exchange_requested is True
+        assert [call[0] for call in manager.method_calls] == [
+            "register_kv_caches", "enable_selective_native_experiment",
+        ]
 
 
 def make_manager():
@@ -356,13 +390,12 @@ def test_two_graphs_share_group_state_but_not_staging(num_layers):
         manager.topk_buffers_v.append(torch.empty_like(manager.topk_buffers_v[0]))
     manager.selective_physical = torch.empty((num_layers, 2, 1, 4), dtype=torch.int32)
     manager._selective_native_rows = torch.arange(2, dtype=torch.int64)
-    manager._selective_native_offsets = torch.arange(8, dtype=torch.int64)
     manager.selective_copy_counts = torch.tensor([8, 16], dtype=torch.int32)
     trace = []
     manager.selective_prefetch_ready = [SimpleNamespace(record=lambda: trace.append("ready0")),
                                         SimpleNamespace(record=lambda: trace.append("ready1"))][:num_layers]
     manager.offload_layer_names = ["model.layers.1.attn", "model.layers.2.attn"][:num_layers]
-    manager.copy_sfa_kv = MagicMock(side_effect=lambda *args: trace.append("scatter"))
+    manager.copy_sfa_kv = MagicMock()
     metadata = SimpleNamespace(
         req_ids_tensor=torch.tensor([1 << 32, 0]),
         selective_tail_rows=torch.tensor([[-1, 0], [-1, 0]]),
@@ -376,11 +409,21 @@ def test_two_graphs_share_group_state_but_not_staging(num_layers):
         kwargs.pop("pin_memory", None)
         return empty(*args, **kwargs)
 
+    def cache_store(destination, indices, source):
+        assert destination.dtype == source.dtype == torch.int8
+        assert destination.shape == (16, 2) and source.shape == (8, 2)
+        assert indices.shape == (8, 1) and indices.dtype == torch.int64
+        assert destination.data_ptr() in {
+            tensor.data_ptr() for tensor in manager.topk_buffers_k + manager.topk_buffers_v
+        }
+        trace.append("store")
+
     with (
         patch.object(torch, "empty", side_effect=cpu_empty),
         patch.object(torch.ops._C_ascend, "selective_group_native_create", side_effect=[11, 12], create=True) as create,
         patch.object(torch.ops._C_ascend, "selective_native_capture", create=True),
         patch.object(torch.ops._C_ascend, "selective_native_graph_identity", return_value=17, create=True),
+        patch.object(torch.ops._C_ascend, "npu_scatter_nd_update_sk", side_effect=cache_store, create=True),
         patch.object(torch.ops._C_ascend, "selective_native_scatter_done", create=True,
                      side_effect=lambda *args: trace.append("scatter_done")),
     ):
@@ -395,9 +438,10 @@ def test_two_graphs_share_group_state_but_not_staging(num_layers):
     assert first[1][6] is not second[1][6]  # Host staging belongs to each graph.
     assert first[0][2][:, 0].tolist() == [1 << 32, 0]
     assert first[0][2][:, 4].tolist() == [8, 0]
-    expected = (["scatter", "scatter_done", "ready0"] if num_layers == 1 else
-                ["scatter", "ready0", "scatter", "scatter_done", "ready1"])
+    expected = (["store", "store", "scatter_done", "ready0"] if num_layers == 1 else
+                ["store", "store", "ready0", "store", "store", "scatter_done", "ready1"])
     assert trace == expected * 2
+    manager.copy_sfa_kv.assert_not_called()
 
 
 def test_tp_stop_collective_failure_keeps_graph_and_quarantines():
