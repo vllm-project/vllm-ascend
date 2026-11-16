@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
+import builtins
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -10,11 +11,30 @@ from vllm_ascend.ops.triton.spec_decode import suffix as ops
 from vllm_ascend.patch.worker import patch_triton
 
 
+@pytest.fixture
+def mock_suffix_import(monkeypatch):
+    module_name = "vllm.v1.worker.gpu.spec_decode.suffix.speculator"
+    original_import = builtins.__import__
+
+    def install(load_suffix):
+        def import_with_suffix(name, *args, **kwargs):
+            if name != module_name:
+                return original_import(name, *args, **kwargs)
+            # A dotted import without a from-list returns the top-level module.
+            module = load_suffix()
+            for part in reversed(module_name.split(".")[1:]):
+                module = SimpleNamespace(**{part: module})
+            return module
+
+        monkeypatch.setattr(builtins, "__import__", import_with_suffix)
+
+    return install
+
+
 @pytest.mark.parametrize("repeat", [False, True])
-def test_suffix_patch_installs_persistent_launch_adapters(monkeypatch, repeat):
+def test_suffix_patch_installs_persistent_launch_adapters(monkeypatch, mock_suffix_import, repeat):
     module = SimpleNamespace()
-    import_module = MagicMock(return_value=module)
-    monkeypatch.setattr(patch_triton, "import_module", import_module)
+    mock_suffix_import(lambda: module)
     launch = MagicMock()
     monkeypatch.setattr(ops, "launch_suffix_observe", launch)
     patch_triton.patch_suffix_kernels()
@@ -28,9 +48,9 @@ def test_suffix_patch_installs_persistent_launch_adapters(monkeypatch, repeat):
     assert module._suffix_ingest_kernel.launch is ops.launch_suffix_ingest
 
 
-def test_suffix_bindings_remain_installed_after_launch_failure(monkeypatch):
+def test_suffix_bindings_remain_installed_after_launch_failure(monkeypatch, mock_suffix_import):
     module = SimpleNamespace()
-    monkeypatch.setattr(patch_triton, "import_module", lambda name: module)
+    mock_suffix_import(lambda: module)
     launch = MagicMock(side_effect=RuntimeError("launch failed"))
     monkeypatch.setattr(ops, "launch_suffix_observe", launch)
     patch_triton.patch_suffix_kernels()
@@ -44,18 +64,18 @@ def test_suffix_bindings_remain_installed_after_launch_failure(monkeypatch):
     "missing",
     ["vllm.v1.worker.gpu.spec_decode.suffix", "vllm.v1.worker.gpu.spec_decode.suffix.speculator"],
 )
-def test_older_runtime_without_suffix_does_not_block_other_methods(monkeypatch, missing):
-    def import_missing(name):
+def test_older_runtime_without_suffix_does_not_block_other_methods(mock_suffix_import, missing):
+    def import_missing():
         raise ModuleNotFoundError(name=missing)
 
-    monkeypatch.setattr(patch_triton, "import_module", import_missing)
+    mock_suffix_import(import_missing)
     patch_triton.patch_suffix_kernels()
 
 
-def test_suffix_patch_does_not_hide_unrelated_dependency_failure(monkeypatch):
-    def import_missing(name):
+def test_suffix_patch_does_not_hide_unrelated_dependency_failure(mock_suffix_import):
+    def import_missing():
         raise ModuleNotFoundError("Missing runtime dependency", name="unrelated_dependency")
 
-    monkeypatch.setattr(patch_triton, "import_module", import_missing)
+    mock_suffix_import(import_missing)
     with pytest.raises(ModuleNotFoundError, match="Missing runtime dependency"):
         patch_triton.patch_suffix_kernels()
