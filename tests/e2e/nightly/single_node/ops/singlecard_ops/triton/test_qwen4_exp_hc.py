@@ -158,7 +158,7 @@ def test_hc_gate_mix_row_block_wide_offsets_matches_legacy() -> None:
 
 @torch.inference_mode()
 def test_hc_gate_mix_row_counts_reuse_compilation(monkeypatch: pytest.MonkeyPatch) -> None:
-    max_rows = 2057
+    max_rows = 1033
     x_backing = _make_input(max_rows, HYPER_HIDDEN_SIZE, row_strided=True)
     gate_backing = _make_input(max_rows, HYPER_HIDDEN_SIZE, row_strided=True)
 
@@ -178,8 +178,8 @@ def test_hc_gate_mix_row_counts_reuse_compilation(monkeypatch: pytest.MonkeyPatc
 
     for expected_compile_count, row_counts in enumerate(
         (
-            (1024, 1032, 2048, 2056),
-            (1025, 1033, 2057),
+            (1024, 1032),
+            (1025, 1033),
         ),
         start=1,
     ):

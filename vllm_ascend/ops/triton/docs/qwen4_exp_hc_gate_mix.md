@@ -52,9 +52,9 @@ Source: `vllm_ascend/ops/triton/qwen4_exp/hc.py` (public wrapper:
 | Parameter | Input/Output/Attribute | Description | Data type | Data format |
 | --- | --- | --- | --- | --- |
 | `x` | Input | Hidden states with shape `[rows, hc_count * group_dim]`; the validated model shape is `[rows, 10240]` | BF16 is declared and tested; output preserves the input dtype | ND, unit inner stride, arbitrary row stride |
-| `gate` | Input | Gate values with the same shape and strides as `x` | Same as `x` | ND, unit inner stride, arbitrary row stride |
+| `gate` | Input | Gate values with the same shape as `x`; its row stride is supplied independently | Same as `x` | ND, unit inner stride, padded row stride |
 | `hc_count` | Attribute | Number of HC streams; compile-time constant `H` in the kernel. The validated model value is `4` | Integer | Scalar |
-| Return value | Output | Newly allocated tensor with shape `[rows, hc_count * group_dim // hc_count]`; the validated model shape is `[rows, 2560]` | Same as `x` | Contiguous 2-D ND |
+| Return value | Output | Newly allocated tensor with shape `[rows, group_dim]`; the validated model shape is `[rows, 2560]` | Same as `x` | Contiguous 2-D ND |
 | `rows` | Internal runtime attribute | Number of flattened token rows. It controls the launch grid and tail masks and is marked `do_not_specialize` | Integer | Scalar |
 | `stride_x_row`, `stride_gate_row`, `stride_output_row` | Internal runtime attributes | Element strides between adjacent input and output rows | Integer | Scalar |
 | `GROUP_DIM` | Internal compile-time attribute | Number of columns per HC stream; validated model value is `2560` | Integer | Scalar |
@@ -79,8 +79,8 @@ Source: `vllm_ascend/ops/triton/qwen4_exp/hc.py` (public wrapper:
   `QWEN4EXP_HC_GATE_MIX_ROW_BLOCK`. Other rows and profiles retain the one-row
   kernel. The 1024-row cutoff is conservative for the measured A2 and A5
   crossover points.
-- For a contiguous width-10,240 row, the first row whose byte-independent
-  element offset can exceed `INT32_MAX` is 209,715. The host selects
+- For a contiguous width-10,240 row, the first row whose element offset can
+  exceed `INT32_MAX` is 209,715. The host selects
   `WIDE_OFFSETS=True` for that range. The int64 branch is compiled and checked
   against the legacy kernel on A2, A3, and A5 without allocating a multi-token
   tensor above `INT32_MAX` elements.
@@ -91,10 +91,13 @@ Source: `vllm_ascend/ops/triton/qwen4_exp/hc.py` (public wrapper:
   covered by the nightly test.
 - `rows`, `GROUP_DIM`, `HC_COUNT`, `ROWS_PER_BLOCK`, `BLOCK_SIZE`,
   `EVEN_ROWS`, `EVEN_BLOCK`, and `WIDE_OFFSETS` are the main JIT keys.
-  `rows` is marked `do_not_specialize`; changing only the launch grid or tensor
-  contents does not create another compiled variant. Normal model execution
-  uses one shape variant for an exact row tile and one for a row tail, plus the
-  rare wide-offset variant when required.
+  `rows` is marked `do_not_specialize` and the nightly compile-reuse test
+  records compile events to verify that exact-row and row-tail classes each
+  reuse one variant as the row count changes. A forced wide-offset case covers
+  that separate constexpr branch.
+- No dedicated warmup registration is added. This existing model-specific path
+  uses the same wrapper at compilation and runtime; normal startup or graph
+  capture prepares the bounded launch variants used by serving.
 
 ## Origin and Differences
 
@@ -113,6 +116,8 @@ Source: `vllm_ascend/ops/triton/qwen4_exp/hc.py` (public wrapper:
       exceeds int32 range.
     - CUDA PDL hooks from the upstream implementation are intentionally omitted
       because triton-ascend launches on an NPU stream.
+- **Replacement plan**: This is a permanent performance specialization of the
+  existing operator. A temporary replacement or removal plan is N/A.
 - **Production integration**: `vllm_ascend/models/qwen4_exp/model.py` replaces
   `upstream_hc.hc_gate_mix` with this operator before the upstream Qwen4Exp
   model classes are imported. The custom op is registered as
@@ -138,12 +143,12 @@ The suite uses the real Qwen4Exp operator shape, `hc_count=4`,
 - the unified BF16 reference tolerance (`rtol=2^-6`, `atol=2^-6`), requiring
   at least 99 percent of elements to pass and maximum absolute error no greater
   than `1`;
-- NPUGraph replay after refreshing both input buffers; and
+- NPUGraph replay after refreshing both input buffers;
 - a forced `WIDE_OFFSETS=True` launch checked bitwise against the legacy
-  kernel; and
+  kernel;
 - compile reuse across exact-row and row-tail batch counts. Within each class,
-  changing the row count must not create an additional compiled variant; the
-  two classes may compile once each because `EVEN_ROWS` is a constexpr.
+  the test changes row counts that exercise both divisible-by-16 and non-16
+  specialization classes and verifies that no additional variant compiles.
 
 CPU dispatch and hardware-capability tests remain in the unit-test suite with
 mocked Triton launch entry points:
