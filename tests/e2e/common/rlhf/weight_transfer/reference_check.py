@@ -21,7 +21,7 @@ from tests.e2e.common.rlhf.weight_transfer.weight_source import (
 UPDATE_ROUNDS = 2
 
 
-FULL_DECODE_ONLY_CONFIG = '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+FULL_DECODE_ONLY_CONFIG = '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1]}'
 
 
 def _common_serve_args(
