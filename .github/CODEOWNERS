@@ -105,7 +105,7 @@
 /vllm_ascend/ops/triton/eplb.py @freyfwt
 /vllm_ascend/ops/triton/batch_invariant @Ronald1995
 /vllm_ascend/ops/triton/msa @CXY-Katrina
-/vllm_ascend/ops/triton/kda/recoverssm.py @drslark
+/vllm_ascend/ops/triton/kda/recoverssm.py @drslark @chenxi-hh
 /vllm_ascend/ops/triton/docs/kda_recoverssm.md @drslark @chenxi-hh
 /vllm_ascend/ops/fused_moe @weijinqian0 @Tflowers-0129 @ZT-AIA @zhenwenqi2024 @linfeng-yuan
 /vllm_ascend/ops/fused_moe/eplb.py @freyfwt
