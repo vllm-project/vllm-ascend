@@ -378,13 +378,15 @@ vLLM Ascend revision.
     - `--no-swa-bounded-replay` disables SWA bounded replay in this example.
     - `enable_flashcomm1: false` keeps FlashComm disabled for this A3 configuration.
       Decoder bounded replay also supports SP/FlashComm1 with model runner V2,
-      PCP size 1, and eager Prefill (`NONE` or `FULL_DECODE_ONLY`). Each SP rank
+      PCP size 1, and `NONE` or `FULL_DECODE_ONLY` graph mode. Prefill runs outside
+      ACL Graph capture. Each SP rank
       selects its retained rows locally and exchanges only compact states for
       the layers after the last KV source. Decode rows and requests requiring
-      prompt logprobs retain their full query spans. Active replay batches,
-      including untrimmed DP peers, bypass `torch.compile`; ordinary Decode and
-      warmup use the configured compilation path with all model layers visible
-      to the compiler. SP replay does not support
+      prompt logprobs retain their full query spans. The decoder custom op reads
+      the current replay plan at runtime, including the context for untrimmed
+      DP peers. The layers before it remain in the `torch.compile` graph;
+      the decoder tail stays opaque to FX optimization, as in non-SP replay.
+      Ordinary Decode retains its configured ACL Graph mode. SP replay does not support
       adaptive verification, PP, DCP, microbatching, or LoRA.
     - `enable_fused_mc2` and `enable_shared_expert_dp` enable the A3 MoE and
         communication optimizations

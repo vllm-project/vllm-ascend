@@ -263,8 +263,18 @@ def test_untrimmed_replica_enters_decoder_context_without_gathering():
     assert torch.equal(buffer, torch.arange(6))
 
 
+@pytest.fixture
+def replay_cpu_kernel():
+    library = torch.library.Library("vllm", "IMPL", "CPU")
+    library.impl("dsv41_decoder_replay_forward", replay_mod.dsv41_decoder_replay_forward)
+    try:
+        yield
+    finally:
+        library._destroy()
+
+
 @pytest.fixture(params=[False, True], ids=["non_sp", "sp"])
-def compiled_replay_model(monkeypatch, request):
+def compiled_replay_model(monkeypatch, request, replay_cpu_kernel):
     # Dynamo initializes accelerator stream state before tracing. This fixture
     # uses only CPU tensors, even when the suite registers a mock NPU backend.
     monkeypatch.setattr(torch.accelerator, "is_available", lambda: False)
@@ -295,10 +305,13 @@ def compiled_replay_model(monkeypatch, request):
     model.end_layer = 3
     model.start_layer = 0
     model.decoder_replay_start = 1
+    model.decoder_replay_layer_name = "decoder_replay"
     model.aux_hidden_state_layers = (1, 3)
     replay = replay_mod.AscendDecoderReplayLayers(2, model._run_replay_layers, [])
     replay.sequence_parallel = model.use_sequence_parallel
     model.decoder_replay_layers = replay
+    forward_context = SimpleNamespace(no_compile_layers={model.decoder_replay_layer_name: replay})
+    monkeypatch.setattr(replay_mod, "get_forward_context", lambda: forward_context)
     # One-rank SP isolates the compile dispatch. Multi-rank data movement is
     # covered separately by the real Gloo tests.
     monkeypatch.setattr(model_mod, "is_forward_context_available", lambda: False)
@@ -313,8 +326,8 @@ def compiled_replay_model(monkeypatch, request):
         graphs.append(graph)
         return graph.forward
 
-    # Match vLLM's unguarded dispatch: runtime state changes must be handled
-    # outside the compiled entry, without relying on Dynamo recompilation.
+    # Match vLLM's unguarded dispatch: the custom op must read runtime state
+    # without relying on guards or recompilation of the surrounding graph.
     compiled = torch.compile(
         model.forward,
         backend=backend,
@@ -326,8 +339,7 @@ def compiled_replay_model(monkeypatch, request):
         compiled_calls.append(True)
         return compiled(*args, **kwargs)
 
-    # Model the decorated backbone's __call__ with a real compiled callable;
-    # the outer production forward chooses __call__ versus raw forward.
+    # Use the production outer forward with a real compiled backbone entry.
     monkeypatch.setattr(DeepseekV41Model, "__call__", compiled_entry)
     causal = SimpleNamespace(model=model)
     embeddings = torch.arange(18, dtype=torch.float32).reshape(6, 3)
@@ -352,7 +364,7 @@ def compiled_replay_model(monkeypatch, request):
 
 
 @pytest.mark.parametrize("replay_enabled", [False, True])
-def test_decode_compiles_every_layer_including_decoder_tail(compiled_replay_model, replay_enabled):
+def test_decode_keeps_encoder_in_graph_with_opaque_replay_tail(compiled_replay_model, replay_enabled):
     case = compiled_replay_model
     if not replay_enabled:
         case.model.decoder_replay_layers = None
@@ -361,11 +373,12 @@ def test_decode_compiles_every_layer_including_decoder_tail(compiled_replay_mode
     torch.testing.assert_close(aux[0], case.embeddings)
     torch.testing.assert_close(aux[1], case.embeddings * 6)
     assert len(case.graphs) == 1
-    # Check the graph contents, not just that compile() returned the right
-    # values: an opaque replay op must not swallow the two late linear layers.
+    # The prefix stays visible to FX; only the decoder tail is opaque when
+    # bounded replay is enabled, matching the existing non-SP implementation.
     linears = [node for node in case.graphs[0].graph.nodes if node.target == torch.nn.functional.linear]
-    assert len(linears) == len(case.model.layers)
-    assert all("decoder_replay" not in str(node.target) for node in case.graphs[0].graph.nodes)
+    replay_ops = [node for node in case.graphs[0].graph.nodes if "dsv41_decoder_replay_forward" in str(node.target)]
+    assert len(linears) == (case.model.decoder_replay_start if replay_enabled else len(case.model.layers))
+    assert len(replay_ops) == int(replay_enabled)
 
 
 def test_capture_engram_inputs_keep_compiled_entry(compiled_replay_model):
@@ -382,10 +395,10 @@ def test_capture_engram_inputs_keep_compiled_entry(compiled_replay_model):
     torch.testing.assert_close(output, case.embeddings * 24)
     assert entered == [([0, 6], 6)]
     assert len(case.calls) == 1
-    assert sum(node.target == torch.nn.functional.linear for node in case.graphs[0].graph.nodes) == 3
+    assert sum(node.target == torch.nn.functional.linear for node in case.graphs[0].graph.nodes) == 1
 
 
-def test_replay_plans_bypass_compiled_entry_then_return_to_decode(compiled_replay_model):
+def test_compiled_entry_reads_each_replay_plan_and_peer_context(compiled_replay_model):
     case = compiled_replay_model
     case.forward()  # compile ordinary warmup/decode with no replay plan
     contexts = []
@@ -398,7 +411,9 @@ def test_replay_plans_bypass_compiled_entry_then_return_to_decode(compiled_repla
         finally:
             contexts.append("exit")
 
-    for offsets, kept, rows in (([0, 6], [2], [4, 5]), ([0, 1, 6], [1, 2], [0, 4, 5])):
+    for call_count, (offsets, kept, rows) in enumerate(
+        (([0, 6], [2], [4, 5]), ([0, 1, 6], [1, 2], [0, 4, 5])), start=2
+    ):
         case.replay.rows = torch.tensor(rows)
         case.replay.num_actual_rows = len(rows)
         case.replay.context_factory = decoder_context
@@ -412,27 +427,29 @@ def test_replay_plans_bypass_compiled_entry_then_return_to_decode(compiled_repla
         torch.testing.assert_close(output, expected)
         torch.testing.assert_close(aux[0], case.embeddings)
         torch.testing.assert_close(aux[1], expected / 4)
-        assert len(case.calls) == 1
+        assert len(case.calls) == call_count
+        assert len(case.graphs) == 1
     assert contexts == ["enter", "exit", "enter", "exit"]
 
     # An untrimmed DP peer must enter its decoder context too, even without
-    # local rows to compact. It must not reuse the original compiled metadata.
+    # local rows to compact. The same compiled prefix enters the custom op,
+    # which resolves the current context rather than the warmup metadata.
     case.replay.rows = None
     case.replay.sp_plan = None
     output, _ = case.forward()
     torch.testing.assert_close(output, case.embeddings * 24)
-    assert len(case.calls) == 1
+    assert len(case.calls) == 4
     assert contexts[-2:] == ["enter", "exit"]
 
     # prepare() clears this context for the next ordinary decode/capture.
     case.replay.context_factory = None
     output, _ = case.forward()
     torch.testing.assert_close(output, case.embeddings * 24)
-    assert len(case.calls) == 2
+    assert len(case.calls) == 5
     assert len(case.graphs) == 1
 
 
-def test_model_replays_only_layers_after_kv_sources(monkeypatch):
+def test_model_replays_only_layers_after_kv_sources(monkeypatch, replay_cpu_kernel):
     seen = []
 
     class Layer:
@@ -464,6 +481,7 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch):
     model.start_layer = 0
     model.needs_moe_input_ids = False
     model.decoder_replay_start = 1
+    model.decoder_replay_layer_name = "decoder_replay"
     model.aux_hidden_state_layers = (1, 3)
     replay = replay_mod.AscendDecoderReplayLayers(
         2, model._run_replay_layers, [], write_batch_kv=model.layers[1].write_kv
@@ -472,6 +490,8 @@ def test_model_replays_only_layers_after_kv_sources(monkeypatch):
     replay.num_actual_rows = 2
     replay.context_factory = nullcontext
     model.decoder_replay_layers = replay
+    forward_context = SimpleNamespace(no_compile_layers={model.decoder_replay_layer_name: replay})
+    monkeypatch.setattr(replay_mod, "get_forward_context", lambda: forward_context)
 
     output, aux = DeepseekV41Model.forward(
         model,

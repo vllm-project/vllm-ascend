@@ -62,6 +62,8 @@ def _sp_replay_worker(rank, world_size, init_method):
     dist.init_process_group(
         "gloo", init_method=init_method, rank=rank, world_size=world_size, timeout=timedelta(seconds=45)
     )
+    library = torch.library.Library("vllm", "IMPL", "CPU")
+    library.impl("dsv41_decoder_replay_forward", layers_mod.dsv41_decoder_replay_forward)
     try:
         tp = SimpleNamespace(world_size=world_size, rank_in_group=rank, device_group=dist.group.WORLD)
         cases = [
@@ -122,9 +124,13 @@ def _sp_replay_worker(rank, world_size, init_method):
                 replay.rows = padded_rows
                 replay.num_actual_rows = len(rows)
                 replay.context_factory = nullcontext
+                context = SimpleNamespace(no_compile_layers={"decoder_replay": replay})
+                patch.setattr(layers_mod, "get_forward_context", lambda context=context: context)
                 with pytest.MonkeyPatch.context() as exchange_patch:
                     exchange_patch.setattr(dist, "all_to_all_single", exchange)
-                    output, output_mix, aux = replay(hidden, mix, full_ids, ids)
+                    output, output_mix, aux = torch.ops.vllm.dsv41_decoder_replay_forward(
+                        hidden, mix, full_ids, ids, 1, "decoder_replay"
+                    )
                 expected = torch.zeros_like(hidden)
                 expected_mix = torch.zeros_like(mix)
                 local_selected = rows[(rows >= rank * original_width) & (rows < (rank + 1) * original_width)]
@@ -150,6 +156,7 @@ def _sp_replay_worker(rank, world_size, init_method):
                 expected_mask[: len(local_compact_rows)] = local_compact_rows % 5 == 0
                 assert torch.equal(compact_mask, expected_mask)
     finally:
+        library._destroy()
         dist.destroy_process_group()
 
 
@@ -178,6 +185,8 @@ def _sp_dp_replay_worker(rank, init_method):
         dist.all_gather(outputs, tensor, group=tp.device_group)
         return torch.cat(outputs, dim=dim)
 
+    library = torch.library.Library("vllm", "IMPL", "CPU")
+    library.impl("dsv41_decoder_replay_forward", layers_mod.dsv41_decoder_replay_forward)
     try:
         with pytest.MonkeyPatch.context() as patch:
             # copy_to_gpu() reads PIN_MEMORY independently of the buffer's
@@ -202,6 +211,8 @@ def _sp_dp_replay_worker(rank, init_method):
             )
             layers = layers_mod.AscendDecoderReplayLayers(2, lambda hidden, mix, pos, ids: (hidden + 1, mix + 2), [])
             layers.sequence_parallel = True
+            op_context = SimpleNamespace(no_compile_layers={"decoder_replay": layers})
+            patch.setattr(layers_mod, "get_forward_context", lambda: op_context)
             state = replay_mod.DecoderReplayState(config, layers, torch.device("cpu"))
             state.slots = torch.empty(1, 32, dtype=torch.int64)
 
@@ -286,7 +297,9 @@ def _sp_dp_replay_worker(rank, init_method):
                     ids = torch.arange(tp_rank * 9, (tp_rank + 1) * 9)
                     hidden = ids.float().reshape(-1, 1, 1)
                     mix = ids.float().reshape(-1, 1)
-                    output, output_mix = layers(hidden, mix, torch.arange(18), ids)
+                    output, output_mix = torch.ops.vllm.dsv41_decoder_replay_forward(
+                        hidden, mix, torch.arange(18), ids, 0, "decoder_replay"
+                    )
                     local_kept = torch.isin(ids, rows)
                     expected_hidden = torch.where(local_kept[:, None, None], hidden + 1, 0)
                     expected_mix = torch.where(local_kept[:, None], mix + 2, 0)
@@ -295,6 +308,7 @@ def _sp_dp_replay_worker(rank, init_method):
                     assert current[0] is outer
                     assert torch.equal(mask, saved_mask)
     finally:
+        library._destroy()
         dist.destroy_process_group()
 
 
