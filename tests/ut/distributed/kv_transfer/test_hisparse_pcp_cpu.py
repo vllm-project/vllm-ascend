@@ -8,6 +8,8 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 import torch
+
+pytest.importorskip("vllm.v1.hisparse.backend")
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import HiSparseConnectorWorker
 from vllm.v1.hisparse.runtime import HiSparseCacheHandle
 from vllm.v1.kv_cache_interface import HiSparseHotSpec, HiSparseResidentSpec
@@ -204,6 +206,40 @@ def test_sharded_decode_keeps_gathered_resident_and_host_rows(capture):
     assert meta.hisparse_write_req_id_per_token.tolist() == [0, 0, -1, 0, 1, -1]
     assert connector._pending_load_kwargs["request_state_indices"].tolist() == [7, 9]
     assert meta.hisparse_request_state_indices.tolist() == [7, 7, 9]
+
+
+def test_host_mirror_mapping_shared_across_groups_and_scheduling_steps():
+    connector, cache, meta, local, batch, manager = make_connector()
+    follower, draft = handle(), handle()
+    follower.runtime.is_group_leader = False
+    draft.draft_layer = True
+    cache.index_group_caches.append(follower)
+    worker = connector.kv_connector.connector_worker
+    worker.cache_handles.extend([follower, draft])
+    worker._group_leaders.append(("draft", draft))
+    worker._per_layer_mirrored = set()
+    worker._submitted_mirror_layers = set()
+    scheduler = NS(kv_connector_metadata=object(), has_sync_kv_loads=True)
+    # Remove/reorder requests and reuse their persistent state slots between steps.
+    for requests, states, starts, indices, expected in [
+        (["A", "B"], [7, 9], [0, 4, 7], [0, 3, 0, 1, 4, 0], [0, 0, -1, 0, 1, -1]),
+        (["B", "C"], [9, 7], [0, 3, 7], [4, 0, 0, 3, 1, 0], [1, 0, -1, 1, 0, -1]),
+        (["C", "A"], [7, 9], [0, 2, 7], [0, 2, 0, 1, 4, 0], [0, 1, -1, 0, 1, -1]),
+    ]:
+        batch.req_ids = requests
+        batch.idx_mapping.copy_(torch.tensor(states))
+        batch.query_start_loc.copy_(torch.tensor(starts))
+        manager._padded_gather_idx.copy_(torch.tensor(indices))
+        draft_meta = metadata(decode=False)
+        draft_meta.hisparse_num_write_tokens = meta.hisparse_num_write_tokens
+        draft_meta.hisparse_write_has_prefill = True
+        connector._build_load_kwargs(scheduler, local, {"layer0": meta, "draft": draft_meta})
+        connector.prepare_host_mirror()
+        for member in worker.cache_handles:
+            assert member.req_id_per_token is meta.hisparse_write_req_id_per_token
+            assert member.req_id_per_token.tolist() == expected
+        HiSparseConnectorWorker._clear_forward_mirror_state(worker)
+        assert all(member.req_id_per_token is None for member in worker.cache_handles)
 
 
 def test_draft_switches_between_global_decode_and_local_prefill_layouts():
