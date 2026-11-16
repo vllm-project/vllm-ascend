@@ -124,6 +124,14 @@ another captured metadata view. The mapped PCP context replaces only the
 role's global block table consumed by MLA; the scheduler's shared context stays
 unchanged.
 
+The scheduler's token budget is global before PCP partitioning. The slot array
+passed to the mapper, however, follows the rank-major gathered layout, including
+replicated requests and padding. For example, with PCP=2 and DCP>1, four decode
+tokens can occupy eight slots: the second rank's duplicate entries remain in
+the array even when masked to `-1`. Slot-buffer capacity therefore includes the
+PCP factor; it does not increase the scheduler's token budget. Both local and
+global mapping buffers currently use this conservative capacity bound.
+
 Mooncake mixed pools use group-aware transfer metadata instead of the legacy
 single-group replicated-indexer expansion. Dense wire IDs are still converted
 to physical packed pages at the final copy boundary. Row copy/zero and native
@@ -181,6 +189,18 @@ effect. Combined packed/RecoverSSM NPU execution, graph replay and P/D
 equivalence require hardware validation.
 
 ## Validation and upstream integration
+
+The feature branch is synchronized with Ascend main's main2main update #21005,
+which pins vLLM `ba15685ab7f4f5fbed8630bbb7441f8837e76fbe` and retains the
+`v0.33.0` release lane. Both versions provide the grouping and block-count
+helpers in `kv_cache_planning`; the retired `v0.32.0` import branches are removed.
+The new main keeps the resolved token-size union in `cudagraph_capture_sizes`,
+so the packed metadata buffer sizing still covers split prefill/decode graphs.
+Ascend's synchronized allocation and binding hooks handle main's `allocate`
+argument and the changed ReplaySSM tracker ownership. Extensible KV allocation
+remains unsupported on Ascend. This synchronization was checked statically;
+runtime testing remains stopped, and the results below belong to the older
+revision rather than the updated main2main baseline.
 
 CPU tests cover no draft, three and five draft layers, per-role mapped addresses,
 raw state views, buffer reuse, row copying cycles, zeroing metadata, P/D copies

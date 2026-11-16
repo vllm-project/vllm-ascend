@@ -2,25 +2,27 @@
 
 ## Feature Introduction
 
-Fine-Grained Tensor Parallelism (Fine-grained TP) extends standard tensor parallelism with **independent tensor-parallel sizes for different model components** — embedding, LM head, attention output projection (o_proj), and MLP blocks — configured via the `finegrained_tp_config` parameter. Instead of a single global `tensor_parallel_size`, each component is sharded along the data-parallel (DP) axis with its own size, reducing per-device weight memory. The feature supports MoE models only.
+Fine-Grained Tensor Parallelism (Fine-grained TP) extends standard tensor parallelism with **independent tensor-parallel sizes for different model components** — embedding, LM head, attention output projection (o_proj), MLP blocks, and QKV input projection (QKV IProj) — configured via the `finegrained_tp_config` parameter. Instead of a single global `tensor_parallel_size`, each component is sharded along the data-parallel (DP) axis with its own size, reducing per-device weight memory. The feature supports MoE models only.
 
 In the measured DeepSeek-R1-W8A8 deployment below, the four knobs together saved **9.72 GB per card** with a net TPOT improvement (see [Experimental Results](#experimental-results)). In decode-heavy workloads, where GEMMs are memory-bound, the smaller per-device weights also reduce the weight-read volume per step for the sharded GEMM modules (LM head, o_proj, and MLP).
 
 ### Working Principle
 
-All four knobs shard weights over a process group built along the DP axis, and every rank of that group joins the exchange on every engine step. The four components fall into two families with different exchange contracts, and the family a knob belongs to determines where it can run:
+All knobs shard weights over a process group built along the DP axis, and every rank of that group joins the exchange on every engine step.
 
 - **embedding / LM head (fixed-capacity exchanges)**: the exchange always runs at a fixed, deployment-wide capacity regardless of the real per-step token count, and the padding tail is trimmed afterwards. For embedding, the op pads token IDs to `max(potential_max_tokens, max_num_batched_tokens)` before an `all_gather`, looks up its vocabulary shard, and `reduce_scatter`s the embeddings back to the original owners — prefill-sized steps included. For the LM head, the runner pads the sampled hidden-state rows to `max_num_reqs * decode_query_len` before `all_gather → vocab-sharded GEMM → all_to_all`, and idle DP ranks join through a dummy `compute_logits` at the same capacity. Because the collective shapes never depend on the step, these knobs work in eager and graph mode, in both prefill and decode.
 - **o_proj / MLP (per-step exchanges that require decode-shaped steps)**: the exchange is sized by the actual step. MLP runs plain `all_gather` (gate_up) / `reduce_scatter` (down) whose shapes follow the real token count, so every rank in the group must forward the same number of tokens on every step. o_proj pads to a static capacity — `potential_max_tokens`, the deployment-wide step bound (the largest cudagraph capture size, and at least the largest decode-shaped step) — and fails explicitly beyond it. These knobs are supported only in graph-dispatched P/D decode deployments, where steps stay decode-shaped and aligned across the DP group — see the [preconditions](#preconditions-for-o_proj--mlp-tp) and the runtime guard against eagerly dispatched steps.
+- **QKV IProj (per-step exchanges with padding)** shards the GLM-5.3-Flash KDA Q/K/V and beta projection weights by head. Each rank pads its hidden states to a shared capacity from the DP token counts before `all_gather`, including idle ranks. After projection, `all_to_all` restores the full set of heads on each request's DP owner and overlaps with the local forget and gate up-projections. Each owner runs the recurrent core and keeps its convolution and recurrent state. Configure output projection TP independently with `oproj_tensor_parallel_size`.
 
 ### Usage Scenarios
 
-Fine-grained TP is designed for the **decode instance** of PD separation, where models are typically deployed in all-DP mode. The four knobs are freely combinable — on a PD decode node all four can be enabled together (this is the configuration measured in [Experimental Results](#experimental-results)); each knob only needs to satisfy its own family's constraints.
+Fine-grained TP is designed for the **decode instance** of PD separation, where models are typically deployed in all-DP mode. Embedding, LM head, o_proj and MLP TP can be enabled together on a PD decode node, as measured in [Experimental Results](#experimental-results).
 
 | Scenario | Components that can be enabled | Applicable Conditions |
 |----------|-------------------------------|------------------------|
 | MoE serving with embedding / LM head TP — a standalone instance (optionally stacked with standard TP) or a PD decode node | embedding / LM head | MoE model, sizes evenly divide `data_parallel_size` |
-| P/D-disaggregated decode (D) node with all four knobs | o_proj / MLP / embedding / LM head | The o_proj / MLP knobs require the full [preconditions for o_proj / MLP TP](#preconditions-for-o_proj--mlp-tp) |
+| P/D-disaggregated decode (D) node | o_proj / MLP / embedding / LM head | The o_proj / MLP knobs require the full [preconditions for o_proj / MLP TP](#preconditions-for-o_proj--mlp-tp) |
+| GLM-5.3-Flash P/D-disaggregated decode node | QKV IProj | See [preconditions for QKV IProj TP](#preconditions-for-qkv-iproj-tp) |
 
 #### Component & Execution Mode Support
 
@@ -30,6 +32,7 @@ Fine-grained TP is designed for the **decode instance** of PD separation, where 
 | **o_proj**    | ❌     | ✅     | ❌       | ✅      |
 | **mlp**       | ❌     | ✅     | ❌       | ✅      |
 | **LM head**   | ✅     | ✅     | ✅       | ✅      |
+| **QKV IProj** | ✅     | ✅     | ❌       | ✅      |
 
 ```{note}
 - o_proj / MLP TP cannot be combined with standard TP and require `tensor_parallel_size == 1`; embedding / LM head TP can — see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement).
@@ -41,9 +44,9 @@ Fine-grained TP is designed for the **decode instance** of PD separation, where 
 | Category | Description |
 |----------|-------------|
 | Model | MoE models only — see [Models](#models) for how to check a checkpoint |
-| Deployment Scenario | embedding / LM head TP: standalone MoE serving (optionally stacked with standard TP) or PD decode nodes; o_proj / MLP TP: P/D-disaggregated decode nodes only |
-| Standard TP | o_proj / MLP TP cannot be combined with standard TP (`tensor_parallel_size == 1` required, enforced at config load); embedding / LM head TP can be combined with standard TP; see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement) |
-| Feature Mutual Exclusion | Pipeline parallelism (`pipeline_parallel_size > 1`) cannot be combined with any of the four knobs; `prefill_context_parallel_size > 1` cannot be combined with o_proj / MLP TP; PCP embedding / LM-head weight sharding (`enable_pcp_embedding_lmhead_weight_sharding`, on by default when PCP > 1) cannot be combined with embedding / LM head TP |
+| Deployment Scenario | Embedding and LM head TP support standalone MoE serving or PD decode nodes. o_proj, MLP and QKV IProj TP require a PD decode node. |
+| Standard TP | o_proj, MLP and QKV IProj TP require `tensor_parallel_size == 1`. Embedding and LM head TP can be combined with standard TP. See [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement). |
+| Feature Mutual Exclusion | Pipeline parallelism (`pipeline_parallel_size > 1`) cannot be combined with fine-grained TP. o_proj, MLP and QKV IProj TP require `prefill_context_parallel_size == 1`. PCP embedding and LM head weight sharding (`enable_pcp_embedding_lmhead_weight_sharding`, on by default when PCP > 1) cannot be combined with embedding or LM head TP. |
 | Hardware | No config-enforced hardware restriction; the performance data in this guide was measured on Atlas A2 (see [Experimental Results](#experimental-results)) |
 
 #### Models
@@ -68,6 +71,14 @@ Within a qualifying MoE model, `mlp_tensor_parallel_size` shards the dense MLP l
 - `prefill_context_parallel_size == 1`.
 
 If the largest cudagraph capture size does not cover the largest decode-shaped step (`min(max_num_batched_tokens, max_num_seqs * (1 + num_speculative_tokens))`), both `oproj_tensor_parallel_size` and `mlp_tensor_parallel_size` are **disabled automatically at startup with a warning**, and the deployment still starts without them; raise `max_cudagraph_capture_size` to re-enable. At runtime, a step dispatched outside the captured graphs fails loudly with an explicit error instead of silently hanging the cross-DP collectives.
+
+#### Preconditions for QKV IProj TP
+
+Set `qkv_iproj_tensor_parallel_size` above `1` when the deployment meets these conditions.
+
+- GLM-5.3-Flash on a P/D-disaggregated decode node (`kv_role = kv_consumer`).
+- `tensor_parallel_size == 1`, `prefill_context_parallel_size == 1` and `pipeline_parallel_size == 1`.
+- A QKV IProj TP size that evenly divides both `data_parallel_size` and the KDA head count.
 
 #### LM Head TP and Speculative Decoding
 
@@ -96,6 +107,7 @@ Fine-grained TP shards the configured layer **across the data-parallel (DP) dime
 | Component | Behavior with `tensor_parallel_size > 1` |
 |-----------|------------------------------------------|
 | `o_proj` / `mlp` | **Cannot be combined — rejected at config load.** For `o_proj`, the DSA attention output is reshaped with `n_local_groups = n_groups // tp_size` (standard TP), while the wo_a/wo_b weights are sharded by the OTP group (DP dimension); the two axes no longer align (for MLP, the combination is simply untested). Both knobs require `tensor_parallel_size == 1`. |
+| QKV IProj | Requires `tensor_parallel_size == 1`. See [preconditions for QKV IProj TP](#preconditions-for-qkv-iproj-tp). |
 | `embedding` / LM head | **Can be combined.** With a knob enabled, these modules always resolve to the fine-grained plan: their weights are sharded by the fine-grained (DP-axis, fixed `tp_idx`) group — `vocab / fine_grained_size` per rank — replacing the standard TP sharding of these modules instead of composing with it. Scenario 1 shows a stacked example. |
 
 ## Feature Usage
@@ -120,7 +132,7 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
 
 embedding / LM head TP are the two knobs that can be combined with standard `tensor_parallel_size` (o_proj / MLP TP cannot — see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement)); stacking them with standard TP splits the dense weights across TP ranks as usual, giving a standalone instance more KV headroom per card. For decode-throughput production deployments, the recommended topology is still the P/D-disaggregated decode node shown in Scenario 2.
 
-#### Scenario 2 — all four knobs on a P/D-disaggregated decode node
+#### Scenario 2 — o_proj, MLP, embedding and LM head TP on a P/D-disaggregated decode node
 
 ```bash
 vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
@@ -169,6 +181,19 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
 Scenario 2 must run in graph mode (do not pass `--enforce-eager`), and its prefill node keeps a plain producer configuration (e.g. `MooncakeConnectorV1` with `kv_role = kv_producer`). See the [Preempt Offload Guide](preempt_offload_connector.md) for the `PreemptOffloadConnector` parameters and the P/D disaggregation tutorials for the end-to-end deployment.
 ```
 
+#### Scenario 3 — QKV IProj TP on a GLM-5.3-Flash decode node
+
+On a GLM-5.3-Flash decode node with DP8, EP8, TP1, PCP1 and PP1, include the following settings in `--additional-config`.
+
+```bash
+--additional-config '{
+    "finegrained_tp_config": {
+        "qkv_iproj_tensor_parallel_size": 8,
+        "oproj_tensor_parallel_size": 1
+    }
+}'
+```
+
 ### Verifying the Feature
 
 After the instance starts, check which knobs passed startup validation:
@@ -189,6 +214,12 @@ After the instance starts, check which knobs passed startup validation:
 
    ```text
    finegrained_tp_config enabled: oproj_tensor_parallel_size=8, mlp_tensor_parallel_size=8, lmhead_tensor_parallel_size=8, embedding_tensor_parallel_size=8
+   ```
+
+   Scenario 3 logs this entry.
+
+   ```text
+   finegrained_tp_config enabled: qkv_iproj_tensor_parallel_size=8
    ```
 
    Only the knobs that passed the startup checks are listed; the format is `knob=size` (for the interplay with `tensor_parallel_size`, see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement)).
@@ -221,6 +252,7 @@ All knobs live under `finegrained_tp_config` inside `--additional-config`. The d
 | `mlp_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | TP size of the MLP (feed-forward) blocks. Values > 1 require the [o_proj / MLP preconditions](#preconditions-for-o_proj--mlp-tp). |
 | `lmhead_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | TP size of the LM head. |
 | `embedding_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` | TP size of the token embedding table. |
+| `qkv_iproj_tensor_parallel_size` | int | 1 | No | a divisor of `data_parallel_size` and the KDA head count | TP size of the QKV input projection. Values > 1 require the [QKV IProj preconditions](#preconditions-for-qkv-iproj-tp). |
 
 ## Experimental Results
 

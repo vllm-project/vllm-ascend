@@ -15,6 +15,7 @@ import vllm.envs as envs_vllm
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
+from vllm.v1.core.kv_cache_planning import may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -25,12 +26,6 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.models.kimi_k3.cache_config import make_kimi_cache_groups
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.32.0"):
-    from vllm.v1.core.kv_cache_utils import may_override_num_blocks
-else:
-    from vllm.v1.core.kv_cache_planning import may_override_num_blocks
 
 # All three Ascend MLA/indexer backends consume 128-token kernel pages.
 KIMI_KERNEL_BLOCK_SIZE = 128
@@ -253,6 +248,8 @@ def _map_packed_sfa_addresses(builder, key, table, slots, spec, row_bytes):
         max_rows = max([segments * cfg.scheduler_config.max_num_seqs + 1, *capture_sizes])
         lookahead = cfg.speculative_config.num_speculative_tokens if cfg.speculative_config is not None else 0
         max_cols = cdiv(cfg.model_config.max_model_len + lookahead, spec.block_size) * pages
+        # PCP slots retain rank-major replicated/padded entries, so their
+        # length can exceed the global scheduled-token budget.
         max_tokens = max([cfg.scheduler_config.max_num_batched_tokens, *capture_sizes]) * pcp_size
         buffers = (
             torch.empty((max_rows, max_cols), dtype=table.dtype, device=table.device),
