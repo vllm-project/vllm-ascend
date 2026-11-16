@@ -4,3 +4,7 @@ entries:
     text: Added an experimental opt-in CANN MegaMoE prefill backend for DeepSeek V4.1 Flash W4A8 on A2 DP2/TP1/PCP8 P workers, with coordinated EP16 selection and ordinary draft/fallback execution.
     model: DeepSeek-V4.1-Flash
     hardware: [A2]
+  - category: bugfix
+    text: Fixed A2 MegaMoE prefill startup with DSpark replicated PCP draft configuration, preserving the target topology checks and ordinary draft execution.
+    model: DeepSeek-V4.1-Flash
+    hardware: [A2]

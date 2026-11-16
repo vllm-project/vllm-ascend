@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from vllm.config import VllmConfig, replace
 from vllm.logger import logger
 
+from vllm_ascend.a2_mega_moe import rebuild_replicated_pcp_draft
 from vllm_ascend.ascend_config import validate_additional_config_bool
 
 if TYPE_CHECKING:
@@ -155,8 +156,9 @@ def prepare_replicated_pcp_config(
         # Temporarily disable DCP during reconstruction to avoid validating the
         # target model with PCP=1; restoring DCP below does not rerun DCP checks
         # or recompute DCP-dependent settings.
-        vllm_config = replace(
+        vllm_config = rebuild_replicated_pcp_draft(
             vllm_config,
+            replace,
             parallel_config=replace(
                 target_parallel_config,
                 prefill_context_parallel_size=1,

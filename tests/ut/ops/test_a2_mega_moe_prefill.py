@@ -5,15 +5,18 @@
 import __future__
 
 import ast
+import dataclasses
 import importlib.util
 import sys
 from pathlib import Path
 from types import SimpleNamespace as NS
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
 import torch
-from pydantic import ValidationError
+from pydantic import ValidationError, model_validator
+from pydantic.dataclasses import dataclass as validated_dataclass
 
 ROOT = Path(__file__).resolve().parents[3]
 spec = importlib.util.spec_from_file_location("a2_prefill_policy", ROOT / "vllm_ascend/a2_mega_moe.py")
@@ -101,6 +104,140 @@ def test_target_allows_existing_dspark_and_draft_is_excluded():
     cfg.parallel_config.prefill_context_parallel_size = 1
     assert policy.is_draft_model(cfg)
     validate(cfg)
+
+
+def replicated_pcp_harness():
+    """Re-enter the real feature validator when the actual PCP helper replaces VllmConfig."""
+
+    @validated_dataclass
+    class ValidatedConfig:
+        model_config: Any
+        parallel_config: Any
+        kv_transfer_config: Any
+        engram_config: Any
+        additional_config: Any
+        use_v2_model_runner: bool = True
+        lora_config: Any = None
+
+        @model_validator(mode="after")
+        def validate_config(self):
+            validate(self)
+            return self
+
+    original = config()
+    parallel_values = vars(original.parallel_config) | {"eplb_config": NS(num_redundant_experts=0)}
+    parallel_cls = dataclasses.make_dataclass("Parallel", [(key, Any) for key in parallel_values])
+    target = ValidatedConfig(
+        model_config=original.model_config,
+        parallel_config=parallel_cls(**parallel_values),
+        kv_transfer_config=original.kv_transfer_config,
+        engram_config=NS(dp_shared_memory=True),
+        additional_config={"enable_fused_mc2": 2, "a2_mega_moe_prefill": {"enabled": True}},
+    )
+    ns = dict(
+        replace=dataclasses.replace,
+        dataclass_replace=dataclasses.replace,
+        logger=NS(warning_once=Mock()),
+    )
+    ns["rebuild_replicated_pcp_draft"] = policy.rebuild_replicated_pcp_draft
+    functions("vllm_ascend/worker/v2/spec_decode/pcp_utils.py", ["prepare_replicated_pcp_config"], ns)
+    return target, ns["prepare_replicated_pcp_config"]
+
+
+def test_dspark_pcp_reconstruction_keeps_target_enabled_and_draft_ordinary():
+    target, prepare = replicated_pcp_harness()
+    draft, replicated = prepare(target)
+    assert replicated and draft.parallel_config.prefill_context_parallel_size == 1
+    # This intermediate config still has target identity, as in the reported stack.
+    assert draft.model_config is target.model_config
+    assert draft.model_config.runner_type == "generate"
+    assert policy.is_draft_model(draft)
+    assert not policy.is_draft_model(target)
+    assert target.parallel_config.prefill_context_parallel_size == 8
+    assert target.additional_config["a2_mega_moe_prefill"]["enabled"] is True
+    assert draft.additional_config["a2_mega_moe_prefill"]["enabled"] is True
+    validate(target)
+    validate(draft)
+
+
+def test_real_pcp1_target_still_fails_after_dspark_reconstruction():
+    target, prepare = replicated_pcp_harness()
+    prepare(target)
+    wrong_parallel = dataclasses.replace(target.parallel_config, prefill_context_parallel_size=1)
+    with pytest.raises(ValidationError, match="DP2/TP1/PCP8"):
+        dataclasses.replace(target, parallel_config=wrong_parallel)
+
+
+def test_replicated_pcp_scope_is_reset_after_failure():
+    target, _ = replicated_pcp_harness()
+    draft_parallel = dataclasses.replace(target.parallel_config, prefill_context_parallel_size=1)
+
+    def fail(source, **changes):
+        candidate = NS(model_config=source.model_config, parallel_config=draft_parallel)
+        assert policy.is_draft_model(candidate)
+        assert not policy.is_draft_model(source)
+        raise RuntimeError("failed reconstruction")
+
+    with pytest.raises(RuntimeError, match="failed reconstruction"):
+        policy.rebuild_replicated_pcp_draft(target, fail)
+    with pytest.raises(ValidationError, match="DP2/TP1/PCP8"):
+        dataclasses.replace(target, parallel_config=draft_parallel)
+
+
+def test_nested_replicated_pcp_scopes_restore_outer_source():
+    target, _ = replicated_pcp_harness()
+    other, prepare_other = replicated_pcp_harness()
+    draft_parallel = dataclasses.replace(target.parallel_config, prefill_context_parallel_size=1)
+
+    def rebuild(source, **changes):
+        candidate = NS(model_config=source.model_config, parallel_config=draft_parallel)
+        assert policy.is_draft_model(candidate)
+        other_draft, _ = prepare_other(other)
+        assert policy.is_draft_model(other_draft)
+        assert policy.is_draft_model(candidate)
+        assert not policy.is_draft_model(other)
+        return dataclasses.replace(source, parallel_config=draft_parallel)
+
+    draft = policy.rebuild_replicated_pcp_draft(target, rebuild)
+    assert policy.is_draft_model(draft)
+    assert not policy.is_draft_model(target)
+    assert not policy.is_draft_model(other)
+
+
+@pytest.mark.parametrize("additional", [None, {}, {"a2_mega_moe_prefill": {"enabled": False}}])
+def test_replicated_pcp_without_opt_in_preserves_existing_behavior(additional):
+    target = config()
+    target.additional_config = additional
+    draft = NS(model_config=target.model_config, parallel_config=NS(prefill_context_parallel_size=1))
+
+    def rebuild(source, **changes):
+        assert source is target
+        assert changes == {"parallel_config": draft.parallel_config}
+        assert not policy.is_draft_model(draft)
+        return draft
+
+    result = policy.rebuild_replicated_pcp_draft(target, rebuild, parallel_config=draft.parallel_config)
+    assert result is draft
+    assert not policy.is_draft_model(result)
+
+
+def test_internal_dspark_config_uses_ordinary_backend():
+    target, prepare = replicated_pcp_harness()
+    draft, _ = prepare(target)
+    ns = dict(
+        a2_prefill_enabled=policy.a2_prefill_enabled,
+        is_a2_draft_model=policy.is_draft_model,
+        get_ascend_config=lambda: NS(a2_mega_moe_prefill=NS(enabled=True), enable_fused_mc2=1),
+        get_current_hardware_profile=lambda: NS(moe_comm_policy="a2", supports=lambda capability: True),
+        MoECommPolicy=NS(CAPACITY_AND_EXPERT_DENSITY="a2"),
+        HardwareCapability=NS(CANN_MEGAMOE="megamoe"),
+        is_mega_moe_supported=lambda: True,
+        is_moe_model=lambda cfg: True,
+        get_ep_group=lambda: NS(world_size=16),
+    )
+    functions("vllm_ascend/ascend_forward_context.py", ["use_cann_megamoe"], ns)
+    assert ns["use_cann_megamoe"](target)
+    assert not ns["use_cann_megamoe"](draft)
 
 
 @pytest.mark.parametrize(

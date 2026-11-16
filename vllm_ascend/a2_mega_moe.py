@@ -2,12 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU policy for the opt-in DeepSeek V4.1 A2 prefill backend."""
 
+from collections.abc import Callable
+from contextvars import ContextVar
 from typing import Any, Literal
 
 from pydantic import ConfigDict, Field
 from pydantic.dataclasses import dataclass
 
 DEEPSEEK_V41_ROUTED_EXPERTS = 384
+# Only active during synchronous VllmConfig reconstruction. Context-local state
+# keeps concurrent/nested draft construction isolated and is reset on failure.
+_REPLICATED_PCP_SOURCE: ContextVar[Any] = ContextVar("a2_replicated_pcp_source", default=None)
 
 
 @dataclass(config=ConfigDict(extra="forbid", frozen=True))
@@ -21,9 +26,40 @@ def a2_prefill_enabled(ascend_config: Any) -> bool:
 
 
 def is_draft_model(config: Any) -> bool:
+    if getattr(config, "_ascend_a2_replicated_pcp_draft", False) is True:
+        return True
+    source = _REPLICATED_PCP_SOURCE.get()
+    if (
+        source is not None
+        and config is not source
+        and config.model_config is source.model_config
+        and source.parallel_config.prefill_context_parallel_size > 1
+        and config.parallel_config.prefill_context_parallel_size == 1
+    ):
+        return True
     model = config.model_config
     architectures = getattr(model, "architectures", None) or [getattr(model, "architecture", None)]
     return getattr(model, "runner_type", None) == "draft" or "DeepseekV41DSparkModel" in architectures
+
+
+def rebuild_replicated_pcp_draft(source: Any, rebuild: Callable[..., Any], **changes: Any) -> Any:
+    """Identify the internal PCP=1 draft before its model identity is replaced.
+
+    Preserve the target's enabled additional_config: AscendConfig is shared by
+    target and draft in a worker. Disabling that flag could disable the target.
+    """
+    additional = getattr(source, "additional_config", None)
+    settings = additional.get("a2_mega_moe_prefill", {}) if isinstance(additional, dict) else {}
+    enabled = settings.get("enabled", False) if isinstance(settings, dict) else getattr(settings, "enabled", False)
+    if enabled is not True:
+        return rebuild(source, **changes)
+    token = _REPLICATED_PCP_SOURCE.set(source)
+    try:
+        draft = rebuild(source, **changes)
+    finally:
+        _REPLICATED_PCP_SOURCE.reset(token)
+    draft._ascend_a2_replicated_pcp_draft = True
+    return draft
 
 
 def validate_a2_mega_moe_prefill(config: Any, *, dynamic_eplb: bool, redundant_experts: int, mix_placement: bool):
