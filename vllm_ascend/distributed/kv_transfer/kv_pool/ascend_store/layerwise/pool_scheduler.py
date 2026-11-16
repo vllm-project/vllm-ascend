@@ -17,6 +17,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.layerwis
     get_layerwise_kv_cache_specs,
     get_layerwise_reuse_config,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.transfer_mode import (
+    KVPoolTransferMode,
+    resolve_kv_pool_transfer_mode,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
     RequestTracker,
@@ -36,6 +40,8 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         kv_cache_config: KVCacheConfig | None = None,
     ) -> None:
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        self.transfer_mode = resolve_kv_pool_transfer_mode(vllm_config, use_layerwise)
+        self.use_cross_layer = self.transfer_mode is KVPoolTransferMode.CROSS_LAYER
         backend_name, self.layerwise_backend = resolve_backend(extra_config)
         self.layerwise_data_plane = (
             self.layerwise_backend.layerwise_data_plane if self.layerwise_backend is not None else None
@@ -52,7 +58,7 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
         super().__init__(vllm_config, use_layerwise, kv_cache_config)
         self.sharded_mamba_group_ids = get_sharded_mamba_group_ids(kv_cache_config)
         self.load_async = False
-        if self.use_layerwise_transfer:
+        if self.use_layerwise_transfer and not self.use_cross_layer:
             self._init_layerwise_offload(vllm_config, kv_cache_config, extra_config)
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
         self.layerwise_keys = (
@@ -79,13 +85,13 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
             raise ValueError("AscendStore private KV state requires Mooncake block-key or non-layerwise transfer")
 
     def _process_hit_without_alloc(self, store_skip_tokens: int) -> bool:
-        return store_skip_tokens > 0
+        return not getattr(self, "use_cross_layer", False) and store_skip_tokens > 0
 
     def _async_load_enabled(self) -> bool:
         return False
 
     def _init_layerwise_offload(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig, extra_config) -> Any:
-        reuse_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config)
+        reuse_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config, vllm_config=vllm_config)
         if kv_cache_config is not None and reuse_config is not None:
             reuse_layout = build_layerwise_reuse_layout(
                 get_layerwise_kv_cache_specs(kv_cache_config),

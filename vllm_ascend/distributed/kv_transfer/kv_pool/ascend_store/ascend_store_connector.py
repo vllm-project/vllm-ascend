@@ -35,11 +35,18 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_backend_class,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.dspark_prefix_cache import DSparkPrefixKeys
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.cross_layer import (
+    CrossLayerKVPoolWorker,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_scheduler import (
     LayerwiseKVPoolScheduler,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.pool_worker import (
     LayerwiseKVPoolWorker,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise.transfer_mode import (
+    KVPoolTransferMode,
+    resolve_kv_pool_transfer_mode,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.lookup_key import LookupKeyServer
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
@@ -72,7 +79,13 @@ def create_kv_pool_worker(
     use_layerwise: bool,
     kv_cache_config: KVCacheConfig | None = None,
 ) -> BaseKVPoolWorker:
-    worker_class = LayerwiseKVPoolWorker if use_layerwise else KVPoolWorker
+    mode = resolve_kv_pool_transfer_mode(vllm_config, use_layerwise)
+    if mode is KVPoolTransferMode.CROSS_LAYER:
+        worker_class = CrossLayerKVPoolWorker
+    elif mode is KVPoolTransferMode.PHYSICAL_LAYER:
+        worker_class = LayerwiseKVPoolWorker
+    else:
+        worker_class = KVPoolWorker
     return worker_class(
         vllm_config,
         use_layerwise,
@@ -136,11 +149,14 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.use_layerwise = extra_config.get("use_layerwise", False)
+        self.transfer_mode = resolve_kv_pool_transfer_mode(vllm_config)
+        self.use_cross_layer = self.transfer_mode is KVPoolTransferMode.CROSS_LAYER
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
         self.backend_name = extra_config.get("backend", "mooncake").lower()
         self.backend_class = get_backend_class(self.backend_name) if self.use_layerwise else None
         self.layerwise_data_plane = self.backend_class.layerwise_data_plane if self.backend_class is not None else None
         self.use_block_key_layerwise = self.use_layerwise and self.layerwise_data_plane == "block_key"
+        logger.info("KV pool transfer mode: %s", self.transfer_mode.value)
         self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "save_decode_cache", False
         )
@@ -172,9 +188,11 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         # align pre-copy is deferred behind this connector's layerwise loads.
         self._mamba_state: Any = None
         self._loaded_layer: int | None = None
-        self.requires_mamba_state_copy_after_layer_load = self.use_layerwise
+        self.requires_mamba_state_copy_after_layer_load = self.use_classic_layerwise
         # Opt in only for synchronous bulk loads, not background retrieval.
-        self.requires_mamba_state_copy_after_load = not self.use_layerwise and not extra_config.get("load_async", False)
+        self.requires_mamba_state_copy_after_load = not self.use_classic_layerwise and (
+            self.use_cross_layer or not extra_config.get("load_async", False)
+        )
 
         self.connector_scheduler: BaseKVPoolScheduler | None = None
         self.connector_worker: BaseKVPoolWorker | None = None
@@ -193,6 +211,11 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             if not self.use_layerwise and vllm_config.parallel_config.rank == 0:
                 self.lookup_server = LookupKeyServer(self.connector_worker, vllm_config)
 
+    @property
+    def use_classic_layerwise(self) -> bool:
+        """Physical-layer hooks are independent of the public opt-in."""
+        return self.use_layerwise and not getattr(self, "use_cross_layer", False)
+
     def configure_dspark_prefix_cache(self, vllm_config: VllmConfig) -> bool:
         """Opt the SFA DSpark producer into joint external prefix reuse.
 
@@ -200,7 +223,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         alone does not identify its SFA PD sibling. Other serving paths do not
         change their keys or layerwise hook layout.
         """
-        if not self.use_layerwise or self.layerwise_data_plane != "gva" or self.kv_role != "kv_producer":
+        if not self.use_classic_layerwise or self.layerwise_data_plane != "gva" or self.kv_role != "kv_producer":
             return False
         keys = DSparkPrefixKeys.from_config(vllm_config)
         if keys is None:
@@ -356,7 +379,9 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
     def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
         super().bind_connector_metadata(connector_metadata)
-        if self.use_layerwise:
+        if getattr(self, "use_cross_layer", False) and isinstance(self.connector_worker, CrossLayerKVPoolWorker):
+            self.connector_worker.prepare_cross_layer_step(connector_metadata)
+        if self.use_classic_layerwise:
             assert self.connector_worker is not None
             # Layerwise hooks need this step's tasks before target forward.
             # If scheduler_output.has_sync_kv_loads is False (e.g. save-only
@@ -368,6 +393,8 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
+        if not self.use_classic_layerwise:
+            self._mamba_copy_bufs = None
         metadata = self._get_connector_metadata()
         self._current_step_has_real_forward = forward_context is not None
         logger.debug(
@@ -387,13 +414,18 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
     def wait_for_layer_load_ready(self, layer_name: str) -> None:
         """Let KVPP observe a layer's loads without advancing attention hooks."""
-        if not self.use_layerwise:
+        if not self.use_classic_layerwise:
             return
         assert self.connector_worker is not None
         cast(LayerwiseKVPoolWorker, self.connector_worker).wait_for_layer_load_ready(layer_name)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
-        if not self.use_layerwise:
+        if getattr(self, "use_cross_layer", False):
+            worker = self.connector_worker
+            assert isinstance(worker, CrossLayerKVPoolWorker)
+            worker.wait_for_cross_layer_load(worker._extract_physical_layer_index(layer_name))
+            return
+        if not self.use_classic_layerwise:
             return
         assert self.connector_worker is not None
         # PLE and attention can share one physical layer. Load its groups once,
@@ -438,18 +470,27 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             # A load-only consumer does not publish KV.
             return
         assert self.connector_worker is not None
+        if getattr(self, "use_cross_layer", False):
+            worker = cast(CrossLayerKVPoolWorker, self.connector_worker)
+            worker.on_cross_layer_save_trigger(worker._extract_physical_layer_index(layer_name))
+            return
         cast(LayerwiseKVPoolWorker, self.connector_worker).save_kv_layer(self._get_connector_metadata())
+
+    def finish_forward(self) -> None:
+        if getattr(self, "use_cross_layer", False) and isinstance(self.connector_worker, CrossLayerKVPoolWorker):
+            self.connector_worker.finish_cross_layer_loads()
+        super().finish_forward()
 
     def wait_for_save(self):
         if not self.can_put:
             # A load-only consumer has no store thread to wait for.
             return
 
-        if self.use_layerwise:
+        if self.use_classic_layerwise:
             return
 
         assert self.connector_worker is not None
-        cast(KVPoolWorker, self.connector_worker).wait_for_save(self._get_connector_metadata())
+        self.connector_worker.wait_for_save(self._get_connector_metadata())
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
@@ -467,7 +508,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         done_sending, done_recving = self.get_finished(finished_req_ids)
         assert self.connector_worker is not None
         failed = self.connector_worker.get_failed_requests()
-        if self.connector_worker.load_async and not self.use_layerwise:
+        if self.connector_worker.load_async and not self.use_classic_layerwise:
             done_recving |= failed
         return KVConnectorTransferResults(
             finished_sending=done_sending, finished_recving=done_recving, failed_recving=failed
@@ -513,7 +554,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             return None
         if self.backend_name != "mooncake":
             return None
-        if self.use_layerwise:
+        if self.use_classic_layerwise:
             logger.error("AscendStoreConnector reset_cache does not support Mooncake layerwise.")
             return False
         assert self.connector_scheduler is not None

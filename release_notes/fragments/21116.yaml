@@ -1,0 +1,52 @@
+pr: 21116
+entries:
+  - category: feature
+    text: >-
+      The existing use_layerwise option now automatically selects the experimental
+      cross_layer strategy for compatible shared-source models such as
+      DeepSeek-V4.1 on Model Runner V2 with TP or PCP, while DS4 retains the
+      physical-layer path.
+      Explicit V1 and PIECEWISE configurations are rejected for cross-layer KV;
+      use --enforce-eager.
+    model: deepseek-v4.1
+  - category: feature
+    text: >-
+      Experimental cross-layer target KV loads and ready-layer saves can overlap
+      computation with DeepSeek-V4.1 DSpark on Model Runner V2.
+      Draft and replay-cut saves plus GVA publication retain the final-step fence.
+    model: deepseek-v4.1
+  - category: other
+    text: >-
+      Shared-source scheduling reuses Memcache GVA keys, hit queries,
+      descriptor builders and layerwise transfer threads, including ranged
+      saves with final-step publication and standard connector interfaces for
+      mixed or nested MultiConnector deployments.
+      Source layers derive from model parameters without a new public switch;
+      Mooncake retains its block-key path.
+  - category: bugfix
+    text: >-
+      Size shared-source Memcache GVA objects from each cache group's registered
+      descriptors instead of the full model layer count, retaining eligible
+      SWA and draft data when bounded replay is disabled. Fresh pool objects
+      are required when switching from the previous allocation layout.
+    model: deepseek-v4.1
+  - category: bugfix
+    text: >-
+      Reuse read leases for shared prefix keys within a layerwise Memcache load
+      step and refresh every matching cache address under the lease, preventing
+      leaked leases and stale addresses for repeated keys.
+  - category: feature
+    text: >-
+      Composite attention save boundaries now also reach connectors that
+      declare supports_composite_kv_saves, so the Mooncake V2 layerwise push
+      child of the same MultiConnector receives per-layer KV readiness for
+      DeepSeek-V4.1 alongside the shared-KV store; pool-hit prefixes are no
+      longer published to the decode side before their layerwise load
+      completes.
+    model: deepseek-v4.1
+  - category: bugfix
+    text: >-
+      AscendMultiConnector now drains every child connector's finish_forward
+      and wait_for_save before surfacing the first failure, and the
+      MooncakeLayerwiseConnector factory name is taken over from upstream vLLM
+      so plugin startup keeps working after vllm#62504 lands.

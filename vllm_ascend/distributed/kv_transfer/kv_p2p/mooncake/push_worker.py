@@ -239,6 +239,7 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             self._layer_names_by_index: dict[tuple[str, int], list[str]] = {}
             for name, layer_index in self._layer_index_by_name.items():
                 self._layer_names_by_index.setdefault(layer_index, []).append(name)
+            self._register_composite_layer_aliases()
             # Layer numbers do not establish execution order across models.
             # Multiple namespaces finalize at wait_for_save after draft execution.
             namespaces = {namespace for namespace, _ in self._layer_names_by_index}
@@ -261,6 +262,50 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
             self.shutdown()
             raise
 
+    def _register_composite_layer_aliases(self) -> None:
+        """Map model-ready boundaries to this worker's registered cache owners."""
+        self._uses_composite_kv_ready_events = False
+        self._composite_kv_aliases: set[str] = set()
+        self._declared_layer_indices: set[tuple[str, int]] = set()
+        self._deferred_layer_indices: set[tuple[str, int]] = set()
+        draft_names = set(getattr(self.kv_cache_config, "dspark_draft_layer_names", ()) or ())
+        context = self.vllm_config.compilation_config.static_forward_context
+        for alias, layer in context.items():
+            cache_names = getattr(layer, "kv_transfer_cache_names", None)
+            if cache_names is None:
+                continue
+            if (
+                not isinstance(cache_names, (tuple, list))
+                or not cache_names
+                or any(not isinstance(name, str) for name in cache_names)
+            ):
+                raise ValueError(f"Invalid cache ownership declaration for {alias!r}")
+            declared_names = set(cache_names)
+            if len(declared_names) != len(cache_names):
+                raise ValueError(f"Duplicate cache ownership declaration for {alias!r}")
+            missing = declared_names.difference(self._layer_indices)
+            if missing:
+                raise ValueError(f"Composite layer {alias!r} has unregistered caches: {sorted(missing)}")
+            indices = {self._layer_index_by_name[name] for name in cache_names}
+            if len(indices) != 1:
+                raise ValueError(f"Composite layer {alias!r} spans multiple physical layer namespaces")
+            layer_index = next(iter(indices))
+            if declared_names != set(self._layer_names_by_index[layer_index]):
+                raise ValueError(f"Composite layer {alias!r} must own its complete physical cache group")
+            if alias in self._layer_index_by_name or layer_index in self._declared_layer_indices:
+                raise ValueError(f"Conflicting physical cache alias: {alias!r}")
+            self._layer_index_by_name[alias] = layer_index
+            self._composite_kv_aliases.add(alias)
+            self._declared_layer_indices.add(layer_index)
+            self._uses_composite_kv_ready_events = True
+            is_draft = any(name in draft_names or ".mtp." in f".{name}" for name in cache_names)
+            if is_draft or getattr(layer, "kv_transfer_save_at_step_end", False) is True:
+                self._deferred_layer_indices.add(layer_index)
+        if self._uses_composite_kv_ready_events:
+            # Draft and unmapped namespaces may be overwritten after target
+            # forward. Keep ordinary physical hooks from publishing them early.
+            self._deferred_layer_indices.update(set(self._layer_names_by_index) - self._declared_layer_indices)
+
     def start_load_kv(self, metadata: MooncakeConnectorMetadata) -> None:
         if self.kv_transfer_config.is_kv_producer:
             # The previous step's wait_for_save has joined its WRITE tasks.
@@ -269,8 +314,14 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
                 state.metadata = request
                 if not state.destinations:
                     self._prepare_destinations(state, request)
-                # A prefix hit is already resident before this forward.
-                if not state.available_layers and request.num_computed_tokens:
+                # Composite models may be restoring an adopted external hit.
+                # Only a model-ready event (after the existing load gate), or
+                # the post-finish_forward fallback, can publish those bytes.
+                if (
+                    not self._uses_composite_kv_ready_events
+                    and not state.available_layers
+                    and request.num_computed_tokens
+                ):
                     event = torch.npu.Event()
                     event.record()
                     state.available_layers = {
@@ -755,7 +806,10 @@ class MooncakePushConnectorWorker(MooncakeBaseConnectorWorker):
         if not self.kv_transfer_config.is_kv_producer or not self._prefilling_request_ids:
             return
         layer_index = self._layer_index_by_name.get(layer_name)
-        if layer_index is None:
+        if layer_index is None or layer_index in self._deferred_layer_indices:
+            return
+        if layer_index in self._declared_layer_indices and layer_name not in self._composite_kv_aliases:
+            # One physical cache's callback cannot declare the whole owner ready.
             return
         # Share one fence across the physical layer's caches and requests.
         # Duplicate hooks with no new tokens do not record another device event.

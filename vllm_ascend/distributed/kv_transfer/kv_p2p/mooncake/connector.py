@@ -260,6 +260,8 @@ class MooncakePullConnector(MooncakeBaseConnector):
 class MooncakePushConnector(MooncakeBaseConnector):
     """Layerwise Push facade with role-specific initialization."""
 
+    supports_composite_kv_saves = True
+
     def __init__(
         self,
         vllm_config: VllmConfig,
