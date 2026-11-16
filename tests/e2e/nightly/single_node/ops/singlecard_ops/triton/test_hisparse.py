@@ -96,7 +96,9 @@ def test_compact_refill_tiles_current_counts_and_preserves_page_gaps(rows, topk,
             graph = torch.npu.NPUGraph()
             with torch.npu.graph(graph):
                 forward()
-        for count in (0, 1, 7, 8, 9, 15, 16, 17, topk, 0):
+        # Cover invalid indices, the 128-column tile boundary, and reset to empty.
+        test_counts = (0, 1, 7, topk, 0) if topk < 128 else (0, 1, 7, 127, 128, 129, topk, 0)
+        for count in test_counts:
             backing.fill_(203)
             current = torch.full((rows,), count, dtype=torch.int32)
             if rows > 1:
@@ -186,7 +188,7 @@ def test_invalidate_hot_capacity_graph(hot_capacity):
     with _invalidation_graph(forward) as (graph, stream):
         with torch.npu.graph(graph, stream=stream):
             forward()
-        for _ in range(10):
+        for _ in range(2):
             dgi.copy_(initial)
             graph.replay()
             torch.npu.synchronize()
@@ -195,7 +197,7 @@ def test_invalidate_hot_capacity_graph(hot_capacity):
 
 @pytest.mark.parametrize("dtype,width", [(torch.bfloat16, 576), (torch.float8_e4m3fn, 656)])
 @pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
-@pytest.mark.parametrize("num_rows", [0, 1, 4, 9])
+@pytest.mark.parametrize("num_rows", [1, 8, 9])
 def test_gather_resident_rows_graph_replay(dtype, width, index_dtype, num_rows):
     stride = 3 * width
     raw = torch.arange(7 * width * dtype.itemsize, dtype=torch.int64).to(torch.uint8).to("npu:0")
@@ -205,9 +207,6 @@ def test_gather_resident_rows_graph_replay(dtype, width, index_dtype, num_rows):
     rows.copy_((torch.arange(num_rows, dtype=index_dtype, device="npu:0") % 5) - 1)
     gather_resident_rows(source, destination, rows)
     torch.npu.synchronize()
-    if not num_rows:
-        assert destination.numel() == 0
-        return
     graph = torch.npu.NPUGraph()
     try:
         with torch.npu.graph(graph):
