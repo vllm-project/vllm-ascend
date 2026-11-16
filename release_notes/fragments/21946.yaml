@@ -1,0 +1,4 @@
+pr: 21946
+entries:
+  - category: performance
+    text: Avoided full-capacity MTP hidden-state copies when DeepSeek V4.1 is compiled, reducing decode latency for speculative decoding on Ascend.
