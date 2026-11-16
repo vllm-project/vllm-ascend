@@ -1,12 +1,3 @@
-# DeepSeek-V4.1-Flash W4A8 / A3 / 2 节点 PD 分离
-# 依据：社区文档 docs/source/tutorials/models/DeepSeek-V4.1-Flash.md（v0.30.0）A3 PD 模板
-#       + PR #20764 的 A3 serving configuration
-# 说明：本文件替换原 DeepSeek-V4.1-Flash-w8a8-PD-MRV2 用例（同一 PR 内 git mv 改名）。
-#
-# 节点布局：node0 = Prefill（DP4 × PCP4 × TP1），node1 = Decode（DP16 × TP1）
-# 连接器：MooncakeHybridConnector，无 KV 池、无显式 engine_id
-# 与旧 W8A8 用例的差异：换 W4A8(1017) 权重、P 侧开 swa-bounded-replay + prefix caching、
-#                        D 侧关 prefix caching / swa-bounded-replay、HCCL_BUFFSIZE 4096
 test_name: "DeepSeek-V4.1-Flash-w4a8-PD-MRV2"
 model: "Eco-Tech/DeepSeek-V4.1-Flash-1017-w4a8"
 num_nodes: 2
@@ -45,8 +36,6 @@ env_common: &env_common
   SERVER_PORT: "${PORT}"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
   VLLM_RPC_TIMEOUT: "3600000"
-  # PR #21146 写 36000，main 现有 MRV2 用例是 360000；两者都是"实际不超时"语义。
-  # 这里跟 main 对齐，避免同族两个数。
   VLLM_ENGINE_READY_TIMEOUT_S: "360000"
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
   HCCL_EXEC_TIMEOUT: "204"
@@ -75,7 +64,6 @@ env_decode: &env_decode
   HCCL_BUFFSIZE: "4096"
 
 templates:
-  # ------------------------------------------------------------------ Prefill
   - node_index: 0
     envs:
       <<: *env_prefill
@@ -133,7 +121,6 @@ templates:
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_producer", "kv_port": "30000", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 1}, "decode": {"dp_size": 16, "tp_size": 1}}}'
 
-  # ------------------------------------------------------------------- Decode
   - node_index: 1
     envs:
       <<: *env_decode
@@ -202,7 +189,6 @@ benchmarks:
     max_out_len: 65536
     batch_size: 32
     baseline: 88
-    # 与 #21146 保持一致取 5；按 GPQA n=198、p=0.88 的 3σ 应为 7（5 只有 2.17σ）
     threshold: 5
     temperature: 1
     thinking: true
@@ -217,7 +203,6 @@ benchmarks:
     max_out_len: 1024
     batch_size: 64
     request_rate: 2.7
-    # 占位值，继承自 #21146；首次跑通后必须用 CI 3~5 次均值替换
     baseline: 1800
     threshold: 0.95
     tpot_threshold: 50
@@ -243,7 +228,6 @@ benchmarks:
     max_out_len: 1024
     batch_size: 64
     request_rate: 2.5
-    # 占位值，同上
     baseline: 1800
     threshold: 0.95
     tpot_threshold: 50
