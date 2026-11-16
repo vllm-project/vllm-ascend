@@ -114,10 +114,8 @@ class MemoryGVAStore:
         return 0
 
 
-def make_shared_worker(test, *, bounded=False, draft=False):
+def make_shared_worker(test, *, bounded=False, draft=False, num_layers=12, sources=(2, 8)):
     """Register real CPU cache views with the production GVA worker and queue threads."""
-    num_layers = 12
-    sources = (2, 8)
     names = [
         name
         for source in sources
@@ -257,6 +255,95 @@ class TestSharedSourceLayerwise(unittest.TestCase):
                     torch.testing.assert_close(cache[1], expected[name][1])
                     self.assertEqual(int(cache[0].sum()), 0)
                 self.assertFalse(store.leases)
+
+    def test_source_triggered_submission_preserves_swa_order_and_tail(self):
+        for bounded in (False, True):
+            with self.subTest(bounded=bounded):
+                worker, store, _ = make_shared_worker(
+                    self, bounded=bounded, draft=True, num_layers=24, sources=(2, 8, 14, 20)
+                )
+                save_prefix(worker)
+                # Shared sources determine the schedule, not this window setting.
+                worker.num_prefetch_layers = 1
+                expected = (
+                    [(0, 2), (2, 8), (8, 14), (14, 20), (23, 24)]
+                    if bounded
+                    else [(0, layer) for layer in range(3)]
+                    + [(2, layer) for layer in range(3, 9)]
+                    + [(8, layer) for layer in range(9, 15)]
+                    + [(14, layer) for layer in range(15, 21)]
+                    + [(20, 21), (21, 22), (22, 23), (23, 24)]
+                )
+                for _ in range(2):
+                    submitted = []
+                    enqueue = worker.kv_recv_thread.add_request
+
+                    def record(task, worker=worker, submitted=submitted, enqueue=enqueue):
+                        submitted.append((worker.current_layer, task.layer_id))
+                        enqueue(task)
+
+                    meta = metadata(worker, load=True, save=False)
+                    worker.prepare_layerwise_step(meta)
+                    with patch.object(worker.kv_recv_thread, "add_request", side_effect=record):
+                        for layer in range(worker.num_layers):
+                            forward_layer(worker, meta)
+                    worker.get_finished(set(), meta)
+                    self.assertEqual(submitted, expected)
+                    self.assertFalse(store.leases)
+
+    def test_source_load_waits_for_current_layer_not_whole_segment(self):
+        for blocked_layer in (2, 8):
+            with self.subTest(blocked_layer=blocked_layer):
+                worker, store, caches = make_shared_worker(self, bounded=True)
+                save_prefix(worker)
+                store.block_address = caches[f"model.layers.{blocked_layer}.attn.long_kv_cache"][1].data_ptr()
+                meta = metadata(worker, load=True, save=False)
+                worker.prepare_layerwise_step(meta)
+                passed_empty_layers = threading.Event()
+                done = threading.Event()
+                errors = []
+
+                def forward(worker, meta, passed_empty_layers, done, errors):
+                    try:
+                        for layer in range(3):
+                            forward_layer(worker, meta)
+                            if layer == 1:
+                                passed_empty_layers.set()
+                    except Exception as exc:
+                        errors.append(exc)
+                    finally:
+                        done.set()
+
+                thread = threading.Thread(target=forward, args=(worker, meta, passed_empty_layers, done, errors))
+                thread.start()
+                try:
+                    self.assertTrue(store.blocked.wait(3))
+                    self.assertTrue(passed_empty_layers.wait(3))
+                    if blocked_layer == 2:
+                        self.assertFalse(done.is_set())
+                    else:
+                        self.assertTrue(done.wait(3))
+                    self.assertFalse(worker.layer_load_finished_events[blocked_layer].is_set())
+                finally:
+                    store.resume.set()
+                    thread.join(3)
+                self.assertTrue(done.is_set())
+                self.assertFalse(errors)
+                for layer in range(3, worker.num_layers):
+                    forward_layer(worker, meta)
+                worker.get_finished(set(), meta)
+
+    def test_non_shared_model_keeps_configured_prefetch_window(self):
+        worker, _, _ = make_shared_worker(self)
+        worker.has_shared_kv = False
+        worker.num_prefetch_layers = 2
+        worker.layer_load_tasks = [[object()] for _ in range(worker.num_layers)]
+        with patch.object(worker.kv_recv_thread, "add_request") as enqueue:
+            worker._submit_ready_layer_loads()
+            self.assertEqual([call.args[0].layer_id for call in enqueue.call_args_list], [0, 1, 2])
+            worker.current_layer = 1
+            worker._submit_ready_layer_loads()
+            self.assertEqual([call.args[0].layer_id for call in enqueue.call_args_list], [0, 1, 2, 3])
 
     def test_cut_cache_only_load_is_idempotent_and_saves_after_final_write(self):
         worker, store, caches = make_shared_worker(self, bounded=True)

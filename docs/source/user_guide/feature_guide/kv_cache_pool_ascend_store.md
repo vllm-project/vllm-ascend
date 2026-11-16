@@ -74,6 +74,17 @@ is not supported because later layers still consume the source layers' KV.
 Do not configure `layerwise_num_shared_buffers` for this model; the existing
 GVA layout uses independent buffers by default.
 
+Load submission follows the model's source layers instead of the numeric
+`layerwise_prefetch_layers` window. For zero-based source layers `[2, 8, 14, 20]`,
+layer 0 submits layers 0-2, layer 2 submits 3-8, layer 8 submits 9-14, and layer 14
+submits 15-20. Tasks within each segment enter the existing receive queue in
+layer order. With bounded replay disabled, they include the intervening SWA
+loads; with it enabled, empty tasks are skipped. From the final source onward,
+submission covers the current and next layer, including registered draft caches.
+Each layer waits only for its own load completion. This schedule is derived from
+`kv_source_layer_ids` and needs no additional setting. Other models retain their
+existing prefetch-window behavior.
+
 The transfer sequence keeps every model layer. Layers without registered KV
 have empty tasks; source KV, index caches, SWA, and registered draft caches
 retain their existing cache-group addressing. For bounded replay, the cut

@@ -2302,7 +2302,18 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             )
             return True
 
-        window_end = min(self.current_layer + self.num_prefetch_layers, self.num_layers - 1)
+        if getattr(self, "has_shared_kv", False):
+            source_layers = self.hf_config.kv_source_layer_ids
+            window_end = self.current_layer
+            if self.current_layer >= source_layers[-1]:
+                # Keep tail SWA and draft loads one layer ahead.
+                window_end += 1
+            elif self.current_layer == 0 or self.current_layer in source_layers:
+                # Submit the intervening SWA before the next shared source.
+                window_end = next(layer for layer in source_layers if layer > self.current_layer)
+        else:
+            window_end = self.current_layer + self.num_prefetch_layers
+        window_end = min(window_end, self.num_layers - 1)
         while self.next_layer_to_submit <= window_end:
             layer_id = self.next_layer_to_submit
             self.next_layer_to_submit += 1

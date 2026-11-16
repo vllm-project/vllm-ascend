@@ -4,7 +4,9 @@ entries:
     text: >-
       Added DeepSeek V4.1 Memcache layerwise pooling through the existing GVA
       transfer path, including shared-source KV, draft caches, and Mooncake V2
-      composite push readiness. Requires Model Runner V2 and eager execution.
+      composite push readiness. Source-layer boundaries schedule loads in layer
+      order, including SWA when bounded replay is disabled, without a prefetch
+      parameter. Requires Model Runner V2 and eager execution.
     model: deepseek-v4.1
   - category: bugfix
     text: >-
