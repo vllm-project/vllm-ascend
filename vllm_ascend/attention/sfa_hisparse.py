@@ -436,7 +436,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
             latent = self.kv_a_layernorm(values)
             rope = values[:, self.kv_lora_rank :]
         cache = self.hisparse_cache
-        destination, mapping, num_rows = hisparse_write_target(cache, attn_metadata, values.shape[0], slots.numel())
+        destination, mapping, num_rows = cache.write_target(values.shape[0], slots.numel())
         num_valid_rows = attn_metadata.query_start_loc[-1:]
         cache_ops.scatter_packed_kv(latent[:num_rows], rope[:num_rows], destination, mapping, num_valid_rows)
         # The common connector mirrors resident rows after this write. Draft
