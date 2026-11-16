@@ -399,7 +399,6 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
             dcp_size=1,
             page_size_bytes=16,
             ready_event=threading.Event(),
-            get_event=threading.Event(),
             layer_load_finished_events=load_finished,
             layer_save_finished_events=save_finished,
             sync_save_events=sync_events,

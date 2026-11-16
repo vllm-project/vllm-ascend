@@ -80,9 +80,6 @@ class LayerwiseKVPoolScheduler(BaseKVPoolScheduler):
     def _process_hit_without_alloc(self, store_skip_tokens: int) -> bool:
         return store_skip_tokens > 0
 
-    def _async_load_enabled(self) -> bool:
-        return False
-
     def _init_layerwise_offload(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig, extra_config) -> Any:
         reuse_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config, vllm_config=vllm_config)
         if kv_cache_config is not None and reuse_config is not None:

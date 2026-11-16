@@ -2,16 +2,13 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any
 
 import numpy as np
-import torch
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionComputeStartGate
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     PoolKey,
     ReqMeta,
-    normalize_block_ids_by_group,
 )
 
 
@@ -175,58 +172,3 @@ class LayerLoadTask:
     transfer_tasks: list[LayerTransferTask]
     layer_id: int
     attention_start_gate: AttentionComputeStartGate | None = None
-
-
-@dataclass(init=False)
-class LayerMultiBlockReqMeta:
-    req_id: str
-    keys: list[LayerPoolKey]
-    starts: list[int]
-    ends: list[int]
-    block_ids_by_group: list[list[int]]
-    layer_id: int
-    block_hashes: Sequence[Any] = field(default_factory=list)
-    is_last_chunk: bool | None = True
-    current_event: torch.npu.Event | None = None
-    token_ids: list[int] | None = None
-    original_block_size: list[int] | int | None = None
-    kv_cache_group_id: int = 0
-
-    def __init__(
-        self,
-        req_id: str,
-        keys: list[LayerPoolKey],
-        starts: list[int],
-        ends: list[int],
-        block_ids_by_group: list[list[int]] | None = None,
-        layer_id: int = 0,
-        is_last_chunk: bool | None = True,
-        current_event: torch.npu.Event | None = None,
-        block_ids: list[int] | list[list[int]] | None = None,
-        token_ids: list[int] | None = None,
-        original_block_size: list[int] | int | None = None,
-        block_hashes: Sequence[Any] | None = None,
-        kv_cache_group_id: int = 0,
-    ) -> None:
-        self.req_id = req_id
-        self.keys = keys
-        self.starts = starts
-        self.ends = ends
-        if block_ids_by_group is None:
-            block_ids_by_group = normalize_block_ids_by_group(block_ids or [])
-        self.block_ids_by_group = block_ids_by_group
-        self.layer_id = layer_id
-        self.is_last_chunk = is_last_chunk
-        self.current_event = current_event
-        self.token_ids = token_ids
-        self.original_block_size = original_block_size
-        self.block_hashes = [] if block_hashes is None else block_hashes
-        self.kv_cache_group_id = kv_cache_group_id
-
-    @property
-    def block_ids(self) -> list[int]:
-        return self.block_ids_by_group[0] if self.block_ids_by_group else []
-
-    @block_ids.setter
-    def block_ids(self, block_ids: list[int] | list[list[int]]) -> None:
-        self.block_ids_by_group = normalize_block_ids_by_group(block_ids)

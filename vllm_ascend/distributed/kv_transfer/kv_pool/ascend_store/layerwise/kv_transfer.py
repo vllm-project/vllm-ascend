@@ -844,7 +844,6 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         dcp_size: int,
         page_size_bytes: int,
         ready_event: threading.Event,
-        get_event: threading.Event,
         layer_load_finished_events: list[threading.Event],
         layer_save_finished_events: list[threading.Event],
         sync_save_events: list[torch.npu.Event],
@@ -870,7 +869,6 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             ready_event,
             name="KVCacheStoreLayerRecvingThread",
         )
-        self.get_event = get_event
         self.layer_load_finished_events = layer_load_finished_events
         self.layer_save_finished_events = layer_save_finished_events
         self.sync_save_events = sync_save_events
@@ -1012,7 +1010,6 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             if not self.layer_load_finished_events[layer_id].is_set():
                 self.layer_load_finished_events[layer_id].set()
             self.request_queue.task_done()
-            self.get_event.set()
 
     def _get_h2d_stagger_delay_us(self, layer_id: int) -> int:
         if self.h2d_stagger_us <= 0:
@@ -1044,7 +1041,6 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         finally:
             self.layer_load_finished_events[data.layer_id].set()
             self.request_queue.task_done()
-            self.get_event.set()
 
     def _copy_gva_layers(self, data: LayerLoadTask) -> bool:
         # Layerwise threads only run when the worker-side
