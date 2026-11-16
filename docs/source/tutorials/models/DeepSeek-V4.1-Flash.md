@@ -375,22 +375,8 @@ vLLM Ascend revision.
         Decode path while Prefill remains outside the captured graph.
     - `--safetensors-load-strategy lazy` avoids eagerly materializing the whole
         checkpoint during loading.
-    - `--no-swa-bounded-replay` disables SWA bounded replay in this example.
+    - `--no-swa-bounded-replay` disables SWA bounded replay.
     - `enable_flashcomm1: false` keeps FlashComm disabled for this A3 configuration.
-      Decoder bounded replay also supports SP/FlashComm1 with model runner V2,
-      PCP size 1, and `NONE` or `FULL_DECODE_ONLY` graph mode. Prefill runs outside
-      ACL Graph capture. Each SP rank selects its retained rows locally and packs
-      hidden states and pre-mix without numerical conversion. One AlltoAllV enters the compact decoder
-      and one returns its results to the original owners. Routing IDs and
-      padding masks are selected locally from the runner's replicated batch
-      metadata. These counts exclude the layers' own collectives.
-      Decode rows and requests requiring prompt logprobs retain their full query
-      spans. The decoder custom op reads
-      the current replay plan at runtime, including the context for untrimmed
-      DP peers. The layers before it remain in the `torch.compile` graph;
-      the decoder tail stays opaque to FX optimization, as in non-SP replay.
-      Ordinary Decode retains its configured ACL Graph mode. SP replay does not support
-      adaptive verification, PP, DCP, microbatching, or LoRA.
     - `enable_fused_mc2` and `enable_shared_expert_dp` enable the A3 MoE and
         communication optimizations
         used by this configuration. `enable_cpu_binding` pins worker processes to
@@ -1227,8 +1213,7 @@ vLLM Ascend revision.
         - `enable_cpu_binding: true` enables Ascend-native CPU affinity for worker
         processes and runtime threads.
         - `enable_fused_mc2: 2` selects the MegaMoE path on Prefill.
-        - `enable_flashcomm1: false` disables FlashComm because combining SP and
-          PCP is not supported by decoder bounded replay.
+        - `enable_flashcomm1: false` disables FlashComm for compatibility with SWA bounded replay.
         - `multistream_overlap_shared_expert: false` disables shared-expert
         multistream overlap on Prefill, where MegaMoE is enabled.
 
