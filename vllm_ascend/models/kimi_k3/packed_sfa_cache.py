@@ -129,13 +129,9 @@ def packed_sfa_cache_groups(config, specs):
     groups = make_kimi_cache_groups(
         histories[0], recurrent, recurrent_group_size=max_group_size, uniform_recurrent=False
     )
-    if groups is None:
-        raise ValueError("Packed history layers must share full-attention semantics.")
     history_groups = [groups[0]]
     for history in histories[1:]:
         uniform = UniformTypeKVCacheSpecs.from_specs(history)
-        if uniform is None:
-            raise ValueError("Packed history layers must share full-attention semantics.")
         history_groups.append(KVCacheGroupSpec(list(history), uniform))
     history_groups = [
         replace(g, is_eagle_group=any(s.non_causal_multi_token_decode for s in g.kv_cache_spec.kv_cache_specs.values()))
