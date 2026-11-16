@@ -2,20 +2,32 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Ascend CSA region summaries, compressed once when a region closes.
 
-Adapted from the CUDA implementation in
+Adapted from the upstream Triton implementation in
 ``vllm.models.step5.nvidia.ops.summary_update``: the ring addressing is the
 upstream deterministic layout (one ring per request inside its KV block, slot
 = block_table[req] * rows_per_block + position % capacity), so the update
-kernels only store open-region rows and summarize closed regions. The CUDA
-``libdevice`` exponential is replaced with ``tl.exp``; the FP8 e4m3 summary
-store (``fp32 -> bfloat16 -> e4m3`` double rounding) is bit-identical on
-triton-ascend, verified against the torch reference.
+kernels only store open-region rows and summarize closed regions. The FP8 e4m3
+summary store (``fp32 -> bfloat16 -> e4m3`` double rounding) is bit-identical
+on triton-ascend, verified against the torch reference.
 """
 
 import torch
 from vllm.triton_utils import tl, triton
 
-libdevice = tl.extra.cann.libdevice
+# Fixed Step5 DSA summary layout, shared by the kernels below (passed in as
+# constexpr) and their wrappers. The proxy head dim is 256 lanes; one 1 KiB
+# ring row packs [key | z] as 2 * PROXY_DIM bf16 elements.
+PROXY_DIM = 256
+RING_ROW_ELEMENTS = 2 * PROXY_DIM
+# Tokens per summarized region (region_size in the Step5 config).
+REGION_SIZE = 8
+# Metadata row layout: [region, first_row, REGION_SIZE member row ids].
+METADATA_WIDTH = 2 + REGION_SIZE
+# Online-softmax denominator floor from the CUDA reference; keeps the
+# summary division finite when every weight underflows to zero.
+DENOMINATOR_FLOOR = 1e-20
+# Largest top_k the indexer region-score operator supports (csrc README).
+MAX_TOPK = 512
 
 
 @triton.jit
@@ -26,40 +38,40 @@ def _append_current_region_kernel(
     counts_ptr,
     tokens,
     region_size,
-    topk: tl.constexpr,
-    block_k: tl.constexpr,
-    block_t: tl.constexpr,
+    TOPK: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    BLOCK_T: tl.constexpr,
 ):
-    """Pack ``block_t`` rows of one group, streaming ``topk`` in chunks."""
+    """Pack ``BLOCK_T`` rows of one group, streaming ``TOPK`` in chunks."""
     group = tl.program_id(0)
     tile = tl.program_id(1)
-    row = tile * block_t + tl.arange(0, block_t)
+    row = tile * BLOCK_T + tl.arange(0, BLOCK_T)
     row_mask = row < tokens
     rows = group * tokens + row
 
-    live = tl.zeros((block_t,), dtype=tl.int32)
-    for k0 in range(0, topk, block_k):
-        col = k0 + tl.arange(0, block_k)
-        mask = row_mask[:, None] & (col < topk)[None, :]
+    live = tl.zeros((BLOCK_T,), dtype=tl.int32)
+    for k0 in range(0, TOPK, BLOCK_K):
+        col = k0 + tl.arange(0, BLOCK_K)
+        mask = row_mask[:, None] & (col < TOPK)[None, :]
         ids = tl.load(
-            ids_ptr + rows[:, None] * topk + col[None, :],
+            ids_ptr + rows[:, None] * TOPK + col[None, :],
             mask=mask,
             other=-1,
         )
         live += tl.sum((ids != -1).to(tl.int32), axis=1)
         tl.store(
-            wide_ptr + rows[:, None] * (topk + 1) + col[None, :],
+            wide_ptr + rows[:, None] * (TOPK + 1) + col[None, :],
             ids,
             mask=mask,
         )
 
-    pad = tl.full((block_t,), -1, dtype=tl.int32)
-    tl.store(wide_ptr + rows * (topk + 1) + topk, pad, mask=row_mask)
+    pad = tl.full((BLOCK_T,), -1, dtype=tl.int32)
+    tl.store(wide_ptr + rows * (TOPK + 1) + TOPK, pad, mask=row_mask)
 
     positions = tl.load(positions_ptr + row, mask=row_mask, other=0)
     current = (positions // region_size).to(tl.int32)
-    slot = tl.minimum(live, topk)
-    tl.store(wide_ptr + rows * (topk + 1) + slot, current, mask=row_mask)
+    slot = tl.minimum(live, TOPK)
+    tl.store(wide_ptr + rows * (TOPK + 1) + slot, current, mask=row_mask)
 
     tl.store(counts_ptr + rows, live + 1, mask=row_mask)
 
@@ -89,7 +101,9 @@ def append_current_region(
     tokens = rows // groups
     wide = torch.empty((groups, tokens, topk + 1), device=ids.device, dtype=ids.dtype)
     counts = torch.empty((groups, tokens), device=ids.device, dtype=torch.int32)
-    block_k = triton.next_power_of_2(min(topk, 512))
+    block_k = triton.next_power_of_2(min(topk, MAX_TOPK))
+    # Cap the per-program tile at 64 rows / ~8K elements so a single program
+    # never spans an unreasonable share of the id tensor.
     block_t = max(1, min(64, 8192 // block_k))
     grid = (groups, triton.cdiv(tokens, block_t))
     _append_current_region_kernel[grid](
@@ -99,13 +113,14 @@ def append_current_region(
         counts,
         tokens,
         region_size,
-        topk=topk,
-        block_k=block_k,
-        block_t=block_t,
+        TOPK=topk,
+        BLOCK_K=block_k,
+        BLOCK_T=block_t,
     )
     return wide, counts
 
 
+# TODO: The kernels below will be removed once triton-ascend is compatible with upstream implementations
 @triton.jit
 def _maximum(x, y):
     return tl.maximum(x, y, propagate_nan=tl.PropagateNan.ALL)
@@ -115,7 +130,7 @@ def _maximum(x, y):
 def _accumulate(numerator, denominator, maximum, key, z):
     updated_max = _maximum(maximum, tl.reduce(z, 0, _maximum))
     scale = tl.where(denominator > 0, tl.exp(maximum - updated_max), 0)
-    weight = libdevice.exp(z - updated_max)
+    weight = tl.exp(z - updated_max)
     return (
         numerator * scale + weight * key,
         denominator * scale + weight,
@@ -125,33 +140,47 @@ def _accumulate(numerator, denominator, maximum, key, z):
 
 @triton.jit
 def _store_summary(
-    Mean,
+    mean_ptr,
     slot,
     dim,
     numerator,
     denominator,
-    MEAN_BLOCK: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
+    PROXY_DIM: tl.constexpr,
+    REGION_SIZE: tl.constexpr,
+    DENOMINATOR_FLOOR: tl.constexpr,
+    MEAN_BLOCK_STRIDE: tl.constexpr,
+    BLOCK_TOKENS: tl.constexpr,
 ):
-    """Write the summary of the region holding KV ``slot``; blocks of ``Mean``
-    are ``MEAN_BLOCK`` bytes apart."""
-    summary = tl.div_rn(numerator, _maximum(denominator, 1e-20)).to(tl.bfloat16)
+    """Write the summary of the region holding KV ``slot``; summary blocks
+    start ``MEAN_BLOCK_STRIDE`` bytes apart and hold ``BLOCK_TOKENS`` tokens."""
+    summary = tl.div_rn(numerator, _maximum(denominator, DENOMINATOR_FLOOR)).to(tl.bfloat16)
     summary_fp8 = summary.to(tl.float8e4nv).to(tl.uint8, bitcast=True)
-    # Slot buffers are int32 on Ascend; the byte offset can exceed 2 GiB.
-    address = slot.to(tl.int64) // BLOCK_SIZE * MEAN_BLOCK + slot % BLOCK_SIZE // 8 * 256
-    tl.store(Mean + address + dim, summary_fp8)
+    # Slots and ring bases arrive as int64 (vLLM slot_mapping and the ring
+    # metadata are int64 end to end); the cast only guards against a future
+    # int32 buffer, whose late-block byte offsets could exceed 2 GiB.
+    address = slot.to(tl.int64) // BLOCK_TOKENS * MEAN_BLOCK_STRIDE + slot % BLOCK_TOKENS // REGION_SIZE * PROXY_DIM
+    tl.store(mean_ptr + address + dim, summary_fp8)
 
 
 @triton.jit
-def _replay_ring(Ring, base, first, last, dim, RING_CAPACITY: tl.constexpr):
+def _replay_ring(
+    ring_ptr,
+    base,
+    first,
+    last,
+    dim,
+    PROXY_DIM: tl.constexpr,
+    RING_ROW_ELEMENTS: tl.constexpr,
+    RING_CAPACITY: tl.constexpr,
+):
     """Accumulate the ring rows at positions ``[first, last)`` in order."""
-    numerator = tl.zeros((256,), tl.float32)
-    denominator = tl.zeros((256,), tl.float32)
-    maximum = tl.max(tl.full((256,), -float("inf"), tl.float32), 0)
+    numerator = tl.zeros((PROXY_DIM,), tl.float32)
+    denominator = tl.zeros((PROXY_DIM,), tl.float32)
+    maximum = tl.max(tl.full((PROXY_DIM,), -float("inf"), tl.float32), 0)
     for position in range(first, last):
-        row = Ring + (base + position % RING_CAPACITY) * 512
+        row = ring_ptr + (base + position % RING_CAPACITY) * RING_ROW_ELEMENTS
         key = tl.load(row + dim).to(tl.float32)
-        z = tl.load(row + 256 + dim).to(tl.float32)
+        z = tl.load(row + PROXY_DIM + dim).to(tl.float32)
         numerator, denominator, maximum = _accumulate(numerator, denominator, maximum, key, z)
         # Serializes the replay loop: the vectorizer cannot prove safety for
         # cross-iteration vectorization when the trip count is a runtime
@@ -162,40 +191,46 @@ def _replay_ring(Ring, base, first, last, dim, RING_CAPACITY: tl.constexpr):
 
 @triton.jit
 def _update_decode(
-    Key,
-    Z,
-    Slots,
-    Positions,
-    RingBase,
-    Mean,
-    Ring,
-    KEY_STRIDE: tl.constexpr,
-    Z_STRIDE: tl.constexpr,
+    key_ptr,
+    z_ptr,
+    slots_ptr,
+    positions_ptr,
+    ring_base_ptr,
+    mean_ptr,
+    ring_ptr,
+    KEY_ROW_STRIDE: tl.constexpr,
+    Z_ROW_STRIDE: tl.constexpr,
     RING_CAPACITY: tl.constexpr,
-    MEAN_BLOCK: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
+    MEAN_BLOCK_STRIDE: tl.constexpr,
+    BLOCK_TOKENS: tl.constexpr,
+    PROXY_DIM: tl.constexpr,
+    REGION_SIZE: tl.constexpr,
+    RING_ROW_ELEMENTS: tl.constexpr,
+    DENOMINATOR_FLOOR: tl.constexpr,
 ):
     """Store an open-region row, or summarize the region this row closes.
 
-    The close folds the region's 7 earlier ring rows plus this row as flat
-    masked tiles; loops carrying 256-wide tensors with scalar guards inside
-    defeat the Ascend vectorizer (see _update_prefill).
+    The close folds the region's other ``REGION_SIZE - 1`` ring rows plus
+    this row as flat masked tiles; loops carrying 256-wide tensors with
+    scalar guards inside defeat the Ascend vectorizer (see _update_prefill).
     """
     row = tl.program_id(0)
-    slot = tl.load(Slots + row)
-    base = tl.load(RingBase + row)
+    slot = tl.load(slots_ptr + row)
+    base = tl.load(ring_base_ptr + row)
     if (slot >= 0) & (base >= 0):
-        position = tl.load(Positions + row)
-        dim = tl.arange(0, 256)
-        key = tl.load(Key + row * KEY_STRIDE + dim).to(tl.float32)
-        z = tl.load(Z + row * Z_STRIDE + dim).to(tl.float32)
-        if position % 8 == 7:
-            offset = tl.arange(0, 8)
-            carry = offset.to(tl.int64) < 7
-            ring_off = (base.to(tl.int64) + (position - 7 + offset.to(tl.int64)) % RING_CAPACITY) * 512
-            rkey = tl.load(Ring + ring_off[:, None] + dim[None, :], mask=carry[:, None], other=0.0).to(tl.float32)
+        position = tl.load(positions_ptr + row)
+        dim = tl.arange(0, PROXY_DIM)
+        key = tl.load(key_ptr + row * KEY_ROW_STRIDE + dim).to(tl.float32)
+        z = tl.load(z_ptr + row * Z_ROW_STRIDE + dim).to(tl.float32)
+        if position % REGION_SIZE == REGION_SIZE - 1:
+            offset = tl.arange(0, REGION_SIZE)
+            carry = offset.to(tl.int64) < REGION_SIZE - 1
+            ring_off = (
+                base.to(tl.int64) + (position - (REGION_SIZE - 1) + offset.to(tl.int64)) % RING_CAPACITY
+            ) * RING_ROW_ELEMENTS
+            rkey = tl.load(ring_ptr + ring_off[:, None] + dim[None, :], mask=carry[:, None], other=0.0).to(tl.float32)
             rz = tl.load(
-                Ring + ring_off[:, None] + 256 + dim[None, :],
+                ring_ptr + ring_off[:, None] + PROXY_DIM + dim[None, :],
                 mask=carry[:, None],
                 other=-float("inf"),
             ).to(tl.float32)
@@ -204,20 +239,33 @@ def _update_decode(
             cweight = tl.exp(z - maximum)
             numerator = tl.sum(rweight * rkey, 0) + cweight * key
             denominator = tl.sum(rweight, 0) + cweight
-            _store_summary(Mean, slot, dim, numerator, denominator, MEAN_BLOCK, BLOCK_SIZE)
+            _store_summary(
+                mean_ptr,
+                slot,
+                dim,
+                numerator,
+                denominator,
+                PROXY_DIM,
+                REGION_SIZE,
+                DENOMINATOR_FLOOR,
+                MEAN_BLOCK_STRIDE,
+                BLOCK_TOKENS,
+            )
         else:
-            ring_row = Ring + (base.to(tl.int64) + position % RING_CAPACITY) * 512
+            ring_row = ring_ptr + (base.to(tl.int64) + position % RING_CAPACITY) * RING_ROW_ELEMENTS
             tl.store(ring_row + dim, key.to(tl.bfloat16))
-            tl.store(ring_row + 256 + dim, z.to(tl.bfloat16))
+            tl.store(ring_row + PROXY_DIM + dim, z.to(tl.bfloat16))
 
 
 def summary_layout(mean: torch.Tensor) -> tuple[int, int]:
-    """(bytes between blocks, tokens per block) of a ``[B, R, 256]` cache."""
-    assert mean.stride(1) == 256 and mean.stride(2) == 1
-    return mean.stride(0), mean.shape[1] * 8
+    """(bytes between blocks, tokens per block) of a ``[B, R, 256]`` cache."""
+    assert mean.stride(1) == PROXY_DIM and mean.stride(2) == 1
+    return mean.stride(0), mean.shape[1] * REGION_SIZE
 
 
 def update_decode(key, z, slots, positions, ring_base, mean, ring, capacity):
+    # num_warps=4 with fp fusion disabled is the launch configuration the
+    # bit-exactness against the torch reference was verified with.
     if slots.numel():
         _update_decode[(slots.numel(),)](
             key,
@@ -231,6 +279,10 @@ def update_decode(key, z, slots, positions, ring_base, mean, ring, capacity):
             z.stride(0),
             capacity,
             *summary_layout(mean),
+            PROXY_DIM,
+            REGION_SIZE,
+            RING_ROW_ELEMENTS,
+            DENOMINATOR_FLOOR,
             num_warps=4,
             enable_fp_fusion=False,
         )
@@ -238,43 +290,67 @@ def update_decode(key, z, slots, positions, ring_base, mean, ring, capacity):
 
 @triton.jit
 def _update_verify(
-    Key,
-    Z,
-    Slots,
-    QueryStart,
-    SeqLens,
-    RingBase,
-    Mean,
-    Ring,
+    key_ptr,
+    z_ptr,
+    slots_ptr,
+    query_start_ptr,
+    seq_lens_ptr,
+    ring_base_ptr,
+    mean_ptr,
+    ring_ptr,
     KEY_ROW_STRIDE: tl.constexpr,
     KEY_DIM_STRIDE: tl.constexpr,
     Z_ROW_STRIDE: tl.constexpr,
     Z_DIM_STRIDE: tl.constexpr,
     RING_CAPACITY: tl.constexpr,
-    MEAN_BLOCK: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
+    MEAN_BLOCK_STRIDE: tl.constexpr,
+    BLOCK_TOKENS: tl.constexpr,
+    PROXY_DIM: tl.constexpr,
+    REGION_SIZE: tl.constexpr,
+    RING_ROW_ELEMENTS: tl.constexpr,
+    DENOMINATOR_FLOOR: tl.constexpr,
 ):
     # One program per request: its rows update the same open region in order.
     request = tl.program_id(0)
-    start = tl.load(QueryStart + request)
-    end = tl.load(QueryStart + request + 1)
+    start = tl.load(query_start_ptr + request)
+    end = tl.load(query_start_ptr + request + 1)
     if start < end:
-        base = tl.load(RingBase + start)
-        seq = tl.load(SeqLens + request)
-        dim = tl.arange(0, 256)
+        base = tl.load(ring_base_ptr + start)
+        seq = tl.load(seq_lens_ptr + request)
+        dim = tl.arange(0, PROXY_DIM)
         for row in range(start, end):
-            slot = tl.load(Slots + row)
+            slot = tl.load(slots_ptr + row)
             if (slot >= 0) & (base >= 0):
                 position = seq - (end - row)
-                ring_row = Ring + (base + position % RING_CAPACITY) * 512
-                key = tl.load(Key + row * KEY_ROW_STRIDE + dim * KEY_DIM_STRIDE)
-                z = tl.load(Z + row * Z_ROW_STRIDE + dim * Z_DIM_STRIDE)
+                ring_row = ring_ptr + (base + position % RING_CAPACITY) * RING_ROW_ELEMENTS
+                key = tl.load(key_ptr + row * KEY_ROW_STRIDE + dim * KEY_DIM_STRIDE)
+                z = tl.load(z_ptr + row * Z_ROW_STRIDE + dim * Z_DIM_STRIDE)
                 tl.store(ring_row + dim, key.to(tl.bfloat16))
-                tl.store(ring_row + 256 + dim, z.to(tl.bfloat16))
-                if position % 8 == 7:
+                tl.store(ring_row + PROXY_DIM + dim, z.to(tl.bfloat16))
+                if position % REGION_SIZE == REGION_SIZE - 1:
                     tl.debug_barrier()
-                    numerator, denominator, _ = _replay_ring(Ring, base, position - 7, position + 1, dim, RING_CAPACITY)
-                    _store_summary(Mean, slot, dim, numerator, denominator, MEAN_BLOCK, BLOCK_SIZE)
+                    numerator, denominator, _ = _replay_ring(
+                        ring_ptr,
+                        base,
+                        position - (REGION_SIZE - 1),
+                        position + 1,
+                        dim,
+                        PROXY_DIM,
+                        RING_ROW_ELEMENTS,
+                        RING_CAPACITY,
+                    )
+                    _store_summary(
+                        mean_ptr,
+                        slot,
+                        dim,
+                        numerator,
+                        denominator,
+                        PROXY_DIM,
+                        REGION_SIZE,
+                        DENOMINATOR_FLOOR,
+                        MEAN_BLOCK_STRIDE,
+                        BLOCK_TOKENS,
+                    )
             tl.debug_barrier()
 
 
@@ -297,6 +373,10 @@ def update_verify(key, z, slots, query_start_loc, seq_lens, ring_base, mean, rin
             z.stride(2),
             capacity,
             *summary_layout(mean),
+            PROXY_DIM,
+            REGION_SIZE,
+            RING_ROW_ELEMENTS,
+            DENOMINATOR_FLOOR,
             num_warps=4,
             enable_fp_fusion=False,
         )
@@ -304,31 +384,33 @@ def update_verify(key, z, slots, query_start_loc, seq_lens, ring_base, mean, rin
 
 @triton.jit
 def _build_prefill_groups(
-    Slots,
-    Positions,
-    Owners,
-    QueryStart,
-    Metadata,
+    slots_ptr,
+    positions_ptr,
+    owners_ptr,
+    query_start_ptr,
+    metadata_ptr,
     POSITION_STRIDE: tl.constexpr,
+    REGION_SIZE: tl.constexpr,
+    METADATA_WIDTH: tl.constexpr,
 ):
     # One program per token row. A group is the run of one request's rows in
     # an eight-token region; its first row writes the metadata, others -1.
     row = tl.program_id(0)
-    output = Metadata + row.to(tl.int64) * 10
-    owner = tl.load(Owners + row)
-    start = tl.load(QueryStart + owner)
-    end = tl.load(QueryStart + owner + 1)
-    position = tl.load(Positions + row * POSITION_STRIDE)
-    head = (row == start) | (position % 8 == 0)
-    offset = tl.arange(0, 8)
-    step = offset - position % 8
+    output = metadata_ptr + row.to(tl.int64) * METADATA_WIDTH
+    owner = tl.load(owners_ptr + row)
+    start = tl.load(query_start_ptr + owner)
+    end = tl.load(query_start_ptr + owner + 1)
+    position = tl.load(positions_ptr + row * POSITION_STRIDE)
+    head = (row == start) | (position % REGION_SIZE == 0)
+    offset = tl.arange(0, REGION_SIZE)
+    step = offset - position % REGION_SIZE
     rows = row + step
     in_group = head & (step >= 0) & (rows < end)
-    slot = tl.load(Slots + rows, in_group, other=-1)
+    slot = tl.load(slots_ptr + rows, in_group, other=-1)
     valid = in_group & (slot >= 0)
-    first = tl.min(tl.where(valid, offset, 8), 0)
-    region = tl.max(tl.where(valid, slot // 8, -1), 0)
-    tl.store(output, tl.where(first < 8, region, -1))
+    first = tl.min(tl.where(valid, offset, REGION_SIZE), 0)
+    region = tl.max(tl.where(valid, slot // REGION_SIZE, -1), 0)
+    tl.store(output, tl.where(first < REGION_SIZE, region, -1))
     tl.store(output + 1, first)
     tl.store(output + 2 + offset, tl.where(valid, rows, -1).to(tl.int64))
 
@@ -338,7 +420,7 @@ def build_prefill_groups(slots, positions, owners, query_start_loc) -> torch.Ten
     round trip (the Ascend builder computes the same grouping on device
     instead of staging pinned host plans asynchronously)."""
     rows = slots.shape[0]
-    metadata = torch.empty((rows, 10), dtype=torch.int64, device=slots.device)
+    metadata = torch.empty((rows, METADATA_WIDTH), dtype=torch.int64, device=slots.device)
     if rows:
         _build_prefill_groups[(rows,)](
             slots,
@@ -347,31 +429,38 @@ def build_prefill_groups(slots, positions, owners, query_start_loc) -> torch.Ten
             query_start_loc,
             metadata,
             positions.stride(0),
+            REGION_SIZE,
+            METADATA_WIDTH,
         )
     return metadata
 
 
 @triton.jit
 def _update_prefill(
-    Key,
-    Z,
-    Metadata,
-    Positions,
-    RingBase,
-    Mean,
-    Ring,
+    key_ptr,
+    z_ptr,
+    metadata_ptr,
+    positions_ptr,
+    ring_base_ptr,
+    mean_ptr,
+    ring_ptr,
     POSITION_STRIDE: tl.constexpr,
     KEY_ROW_STRIDE: tl.constexpr,
     KEY_DIM_STRIDE: tl.constexpr,
     Z_ROW_STRIDE: tl.constexpr,
     Z_DIM_STRIDE: tl.constexpr,
     RING_CAPACITY: tl.constexpr,
-    MEAN_BLOCK: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
+    MEAN_BLOCK_STRIDE: tl.constexpr,
+    BLOCK_TOKENS: tl.constexpr,
+    PROXY_DIM: tl.constexpr,
+    REGION_SIZE: tl.constexpr,
+    RING_ROW_ELEMENTS: tl.constexpr,
+    METADATA_WIDTH: tl.constexpr,
+    DENOMINATOR_FLOOR: tl.constexpr,
 ):
-    metadata = Metadata + tl.program_id(0) * 10
+    metadata = metadata_ptr + tl.program_id(0) * METADATA_WIDTH
     # Only a group holding its region's eighth row closes the region.
-    if (tl.load(metadata) >= 0) & (tl.load(metadata + 9) >= 0):
+    if (tl.load(metadata) >= 0) & (tl.load(metadata + METADATA_WIDTH - 1) >= 0):
         region = tl.load(metadata)
         # Rows before ``first`` were stored by an earlier step (in the
         # ring); rows of this chunk follow. Both folds are flat (8, 256)
@@ -380,24 +469,24 @@ def _update_prefill(
         # reference NPU kernels fold the same math as masked tiles.
         first = tl.load(metadata + 1)
         head = tl.load(metadata + 2 + first)
-        position = tl.load(Positions + head * POSITION_STRIDE)
-        base = tl.load(RingBase + head)
-        dim = tl.arange(0, 256)
-        offset = tl.arange(0, 8)
+        position = tl.load(positions_ptr + head * POSITION_STRIDE)
+        base = tl.load(ring_base_ptr + head)
+        dim = tl.arange(0, PROXY_DIM)
+        offset = tl.arange(0, REGION_SIZE)
         carry = offset.to(tl.int64) < first
-        ring_row = (base.to(tl.int64) + (position - first + offset.to(tl.int64)) % RING_CAPACITY) * 512
-        rkey = tl.load(Ring + ring_row[:, None] + dim[None, :], mask=carry[:, None], other=0.0).to(tl.float32)
-        rz = tl.load(Ring + ring_row[:, None] + 256 + dim[None, :], mask=carry[:, None], other=-float("inf")).to(
-            tl.float32
-        )
+        ring_row = (base.to(tl.int64) + (position - first + offset.to(tl.int64)) % RING_CAPACITY) * RING_ROW_ELEMENTS
+        rkey = tl.load(ring_ptr + ring_row[:, None] + dim[None, :], mask=carry[:, None], other=0.0).to(tl.float32)
+        rz = tl.load(
+            ring_ptr + ring_row[:, None] + PROXY_DIM + dim[None, :], mask=carry[:, None], other=-float("inf")
+        ).to(tl.float32)
         rows = tl.load(metadata + 2 + offset)
         valid = rows >= 0
         safe = tl.where(valid, rows, 0)
         key = tl.load(
-            Key + safe[:, None] * KEY_ROW_STRIDE + dim[None, :] * KEY_DIM_STRIDE, mask=valid[:, None], other=0.0
+            key_ptr + safe[:, None] * KEY_ROW_STRIDE + dim[None, :] * KEY_DIM_STRIDE, mask=valid[:, None], other=0.0
         ).to(tl.float32)
         z = tl.load(
-            Z + safe[:, None] * Z_ROW_STRIDE + dim[None, :] * Z_DIM_STRIDE, mask=valid[:, None], other=-float("inf")
+            z_ptr + safe[:, None] * Z_ROW_STRIDE + dim[None, :] * Z_DIM_STRIDE, mask=valid[:, None], other=-float("inf")
         ).to(tl.float32)
         maximum = tl.maximum(
             tl.max(tl.where(carry[:, None], rz, -float("inf"))),
@@ -409,28 +498,41 @@ def _update_prefill(
         cweight = tl.exp(z - maximum)
         numerator = tl.sum(rweight * rkey, 0) + tl.sum(cweight * key, 0)
         denominator = tl.sum(rweight, 0) + tl.sum(cweight, 0)
-        _store_summary(Mean, region * 8, dim, numerator, denominator, MEAN_BLOCK, BLOCK_SIZE)
+        _store_summary(
+            mean_ptr,
+            region * REGION_SIZE,
+            dim,
+            numerator,
+            denominator,
+            PROXY_DIM,
+            REGION_SIZE,
+            DENOMINATOR_FLOOR,
+            MEAN_BLOCK_STRIDE,
+            BLOCK_TOKENS,
+        )
 
 
 @triton.jit
 def _write_ring(
-    Key,
-    Z,
-    RingSlots,
-    Ring,
+    key_ptr,
+    z_ptr,
+    ring_slots_ptr,
+    ring_ptr,
     KEY_ROW_STRIDE: tl.constexpr,
     KEY_DIM_STRIDE: tl.constexpr,
     Z_ROW_STRIDE: tl.constexpr,
     Z_DIM_STRIDE: tl.constexpr,
+    PROXY_DIM: tl.constexpr,
+    RING_ROW_ELEMENTS: tl.constexpr,
 ):
     row = tl.program_id(0)
-    slot = tl.load(RingSlots + row)
+    slot = tl.load(ring_slots_ptr + row)
     if slot >= 0:
-        dim = tl.arange(0, 256)
-        key = tl.load(Key + row * KEY_ROW_STRIDE + dim * KEY_DIM_STRIDE)
-        z = tl.load(Z + row * Z_ROW_STRIDE + dim * Z_DIM_STRIDE)
-        tl.store(Ring + slot * 512 + dim, key.to(tl.bfloat16))
-        tl.store(Ring + slot * 512 + 256 + dim, z.to(tl.bfloat16))
+        dim = tl.arange(0, PROXY_DIM)
+        key = tl.load(key_ptr + row * KEY_ROW_STRIDE + dim * KEY_DIM_STRIDE)
+        z = tl.load(z_ptr + row * Z_ROW_STRIDE + dim * Z_DIM_STRIDE)
+        tl.store(ring_ptr + slot * RING_ROW_ELEMENTS + dim, key.to(tl.bfloat16))
+        tl.store(ring_ptr + slot * RING_ROW_ELEMENTS + PROXY_DIM + dim, z.to(tl.bfloat16))
 
 
 def update_prefill(key, z, metadata, positions, ring_base, ring_slots, mean, ring, capacity):
@@ -455,7 +557,12 @@ def update_prefill(key, z, metadata, positions, ring_base, ring_slots, mean, rin
         *strides,
         capacity,
         *summary_layout(mean),
+        PROXY_DIM,
+        REGION_SIZE,
+        RING_ROW_ELEMENTS,
+        METADATA_WIDTH,
+        DENOMINATOR_FLOOR,
         num_warps=4,
         enable_fp_fusion=False,
     )
-    _write_ring[(ring_slots.shape[0],)](key, z, ring_slots, ring, *strides, num_warps=4)
+    _write_ring[(ring_slots.shape[0],)](key, z, ring_slots, ring, *strides, PROXY_DIM, RING_ROW_ELEMENTS, num_warps=4)

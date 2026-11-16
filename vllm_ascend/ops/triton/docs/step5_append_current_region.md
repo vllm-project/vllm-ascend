@@ -52,7 +52,7 @@
 
 - `ids` rows must be ascending with `-1` only as tail padding (the
   `IndexerRegionScore` `sort_mode=1` contract); `live` would be
-  mis-computed otherwise (any `-1` counts as dead).
+  miss-computed otherwise (any `-1` counts as dead).
 - The selection pool must be strictly below `floor(position / region_size)`
   (guaranteed by the fused indexer's causal top-k) — otherwise the appended
   current region could break the row's ascending order.
@@ -73,14 +73,15 @@
 
 ## Origin and Differences
 
-- **Origin**: Ascend adaptation of the current-region append that the CUDA
-  pack kernels (`decode_pack_from_ids` / `prefill_pack_from_ids` in
-  vLLM's Step5 sparse path) performed for the Triton sparse-attention
-  chain, repurposed as the id front-end for the aclnn
-  `GenericBlockSparseAttention` operator (which takes `topk + 1` wide ids
-  and per-row counts directly).
-- **Differences**: the CUDA path packed per-region `valid` counts for its
-  own Triton attention kernels; here the count is the operator's
+- **Origin**: Ascend adaptation of the current-region append that this
+  repo's earlier Triton pack kernels (`decode_pack_from_ids` /
+  `prefill_pack_from_ids`, since removed in favor of the aclnn operator)
+  performed for the Triton sparse-attention chain, repurposed as the id
+  front-end for the aclnn `GenericBlockSparseAttention` operator (which
+  takes `topk + 1` wide ids and per-row counts directly).
+- **Differences**: the earlier Ascend Triton path packed per-region `valid`
+  counts for its own Triton attention kernels; here the count is the
+  operator's
   `sparse_block_count` (`live + 1`) and the causal truncation moved into the
   operator (`mask_mode=CAUSAL` with right-aligned varlen), so this kernel is
   a pure integer pack. The AICPU scheduling metadata is built separately

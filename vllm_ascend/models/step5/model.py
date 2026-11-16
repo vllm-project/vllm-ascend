@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Ascend Step5 model for vLLM 0.33 / MRV2.
+"""Ascend Step5 model.
 
 The model skeleton (projections, MoE wiring, weight loading, MTP metadata,
 the decoder-layer residual flow) is inherited from the upstream
@@ -55,10 +55,6 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
 )
-from vllm.models.step5.nvidia.config import (
-    Step5SparseConfig,
-    get_step5_sparse_config,
-)
 from vllm.models.step5.nvidia.layernorm import (
     Step5IndexerLayerNorm,
     Step5RMSNorm,
@@ -101,6 +97,18 @@ from vllm_ascend.models.step5.sparse_attention import (
 from vllm_ascend.ops.triton.step5.fused_qknorm_rope import (
     fused_qknorm_rope,
 )
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.33.0"):
+    from vllm.models.step5.nvidia.config import (  # type: ignore[import-not-found]
+        Step5SparseConfig,
+        get_step5_sparse_config,
+    )
+else:
+    from vllm.models.step5.common.config import (  # type: ignore[import-not-found]
+        Step5SparseConfig,
+        get_step5_sparse_config,
+    )
 
 
 def _kv_cache_torch_dtype(cache_config, vllm_config) -> torch.dtype:

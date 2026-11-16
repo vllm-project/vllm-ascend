@@ -2,7 +2,7 @@
 """Single-operator accuracy tests for the Step5 CSA summary-update Triton ops.
 
 Covers update_decode, update_verify, build_prefill_groups and update_prefill
-from vllm_ascend/models/step5/ops/summary_update.py against pure-torch
+from vllm_ascend/ops/triton/step5/summary_update.py against pure-torch
 references that mirror the kernels' numerics:
 
 * ring rows are bf16 stores of bf16 inputs -> compared bit-exact;
@@ -56,9 +56,7 @@ class SummaryState:
         self.ring = (torch.randn(num_ring_rows, ROW_ELEMS, device=device) * 3).to(torch.bfloat16)
         # Optionally strided blocks (stride(0) > regions*256) to exercise the
         # MEAN_BLOCK addressing path.
-        self._mean_full = torch.zeros(
-            blocks, regions_per_block + pad_regions, PROXY, dtype=torch.uint8, device=device
-        )
+        self._mean_full = torch.zeros(blocks, regions_per_block + pad_regions, PROXY, dtype=torch.uint8, device=device)
         self.mean = self._mean_full[:, :regions_per_block]
         self.regions_per_block = regions_per_block
 
@@ -85,9 +83,7 @@ class SummaryState:
 
     def write_summary(self, slot, numerator, denominator):
         address = self.summary_address(slot)
-        self._mean_full.view(-1)[address : address + PROXY] = quantize_summary(
-            numerator, denominator
-        )
+        self._mean_full.view(-1)[address : address + PROXY] = quantize_summary(numerator, denominator)
 
     def store_ring_row(self, slot, key, z):
         self.ring[slot, :PROXY] = key
@@ -102,11 +98,9 @@ def check_summaries(state, ref_state, touched_slots):
     actual = state._mean_full.view(-1)
     reference = ref_state._mean_full.view(-1)
     if not touched_slots:
-        assert torch.equal(actual, reference)
+        torch.testing.assert_close(actual, reference, rtol=0, atol=0, msg="summaries changed without any close")
         return
-    addresses = torch.tensor(
-        [ref_state.summary_address(s) for s in touched_slots], device=actual.device
-    )
+    addresses = torch.tensor([ref_state.summary_address(s) for s in touched_slots], device=actual.device)
     lanes = torch.arange(PROXY, device=actual.device)
     flat_idx = (addresses[:, None] + lanes[None, :]).view(-1)
     a = actual[flat_idx].view(torch.float8_e4m3fn).float()
@@ -117,7 +111,7 @@ def check_summaries(state, ref_state, touched_slots):
     # Untouched bytes identical.
     mask = torch.ones_like(actual, dtype=torch.bool)
     mask[flat_idx] = False
-    assert torch.equal(actual[mask], reference[mask])
+    torch.testing.assert_close(actual[mask], reference[mask], rtol=0, atol=0, msg="untouched summary bytes changed")
 
 
 def random_rows(rows, device, groups=1):
@@ -210,11 +204,14 @@ def test_update_decode(blocks_pad):
     update_decode(key, z, slots, positions, ring_base, state.mean, state.ring, state.capacity)
 
     touched = ref_update_decode(key, z, slots, positions, ring_base, ref_state)
-    assert torch.equal(state.ring, ref_state.ring), "ring stores are not bit-exact"
+    torch.testing.assert_close(state.ring, ref_state.ring, rtol=0, atol=0, msg="ring stores are not bit-exact")
     check_summaries(state, ref_state, touched)
 
     gc.collect()
     torch.npu.empty_cache()
+
+
+# ---------------------------------------------------------------- update_verify
 
 
 def ref_update_verify(key, z, slots, query_start_loc, seq_lens, ring_base, state):
@@ -296,12 +293,10 @@ def test_update_verify(draft_tokens):
     ring_base = torch.tensor([r["base"] for r in rows], dtype=torch.int64, device=device)
     key, z = random_rows(len(rows), device)
 
-    update_verify(
-        key, z, slots, query_start_loc, seq_lens, ring_base, state.mean, state.ring, state.capacity
-    )
+    update_verify(key, z, slots, query_start_loc, seq_lens, ring_base, state.mean, state.ring, state.capacity)
 
     touched = ref_update_verify(key, z, slots, query_start_loc, seq_lens, ring_base, ref_state)
-    assert torch.equal(state.ring, ref_state.ring), "ring stores are not bit-exact"
+    torch.testing.assert_close(state.ring, ref_state.ring, rtol=0, atol=0, msg="ring stores are not bit-exact")
     check_summaries(state, ref_state, touched)
 
     gc.collect()
@@ -434,10 +429,8 @@ def test_build_prefill_groups_and_update_prefill(blocks_pad):
     key, z = random_rows(len(slots), device)
 
     metadata = build_prefill_groups(slots_t, positions_t, owners_t, query_start_loc)
-    metadata_ref = ref_build_prefill_groups(
-        slots_t.cpu(), positions_t.cpu(), owners_t.cpu(), query_start_loc.cpu()
-    )
-    assert torch.equal(metadata.cpu(), metadata_ref), "grouping metadata mismatch"
+    metadata_ref = ref_build_prefill_groups(slots_t.cpu(), positions_t.cpu(), owners_t.cpu(), query_start_loc.cpu())
+    torch.testing.assert_close(metadata.cpu(), metadata_ref, rtol=0, atol=0, msg="grouping metadata mismatch")
 
     update_prefill(
         key,
@@ -451,10 +444,8 @@ def test_build_prefill_groups_and_update_prefill(blocks_pad):
         state.capacity,
     )
 
-    touched = ref_update_prefill(
-        key, z, metadata, positions_t, ring_base_t, ring_slots_t, ref_state
-    )
-    assert torch.equal(state.ring, ref_state.ring), "ring stores are not bit-exact"
+    touched = ref_update_prefill(key, z, metadata, positions_t, ring_base_t, ring_slots_t, ref_state)
+    torch.testing.assert_close(state.ring, ref_state.ring, rtol=0, atol=0, msg="ring stores are not bit-exact")
     check_summaries(state, ref_state, touched)
 
     gc.collect()
@@ -483,9 +474,7 @@ def test_summary_update_empty_batches():
         state.ring,
         state.capacity,
     )
-    metadata = build_prefill_groups(
-        empty_i64, empty_i64, empty_i64, torch.zeros(1, dtype=torch.int64, device=device)
-    )
+    metadata = build_prefill_groups(empty_i64, empty_i64, empty_i64, torch.zeros(1, dtype=torch.int64, device=device))
     assert metadata.shape == (0, 10)
     update_prefill(
         key,

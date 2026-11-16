@@ -2,6 +2,7 @@
 
 ## Description
 
+- **This will be removed once triton-ascend is compatible with upstream implementations**
 - **Function**: Folds the `K+1` verified tokens of an MTP (speculative
   decoding) step per request into the CSA state, **in position order within
   each request**: each row is stored into the request's ring row, and any
@@ -81,17 +82,19 @@
 
 ## Origin and Differences
 
-- **Origin**: Adapted from the CUDA Triton implementation
+- **Origin**: Adapted from the upstream Triton implementation
   `vllm.models.step5.nvidia.ops.summary_update._update_verify` /
   `update_verify`; the kernel body and the sequential replay semantics are
   carried over verbatim.
 - **Differences**:
     - `_replay_ring` adds `tl.debug_barrier()` per iteration (comment in the
       source): the Ascend vectorizer cannot prove cross-iteration safety for
-      a runtime trip count, so the loop is explicitly serialized. The CUDA
+      a runtime trip count, so the loop is explicitly serialized. The upstream
       version relies on the loop-carried dependency alone.
-    - Summary address arithmetic is widened to int64 (int32 slot buffers on
-      Ascend; byte offsets beyond 2 GiB).
+    - Address arithmetic keeps the int64 width of the slot and ring-base
+      tensors (vLLM slot_mapping and the ring metadata are int64 end to
+      end); the explicit casts are no-op guards against a future int32
+      buffer, whose byte offsets could exceed 2 GiB.
     - `libdevice` from `tl.extra.cann` instead of `tl.extra.cuda`
       (functionally the same `expf`).
 

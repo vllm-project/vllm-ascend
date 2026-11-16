@@ -2,6 +2,7 @@
 
 ## Description
 
+- **This will be removed after qkv_rmsnorm_rope_simt supports head_dim=192**
 - **Function**: Splits the fused Step5 attention QKV projection `[ q | k | v ]`,
   applies per-head RMSNorm (optional zero-centered Gemma bias) to Q and K,
   NeoX-style RoPE to the normed Q and K, and copies V through untouched, all
@@ -103,19 +104,20 @@
 ## Origin and Differences
 
 - **Origin**: Adapted from the Step5 eager pre-attention chain in vLLM
-  (`qkv.split -> q_norm/k_norm -> rotary_emb`) and the CUDA fused
-  counterpart `vllm.models.step5.nvidia.ops.qkv_indexer_norm_rope._prepare_main`
-  (same packed-QKV split, per-head RMSNorm, NeoX RoPE and V copy at
-  `DIM=192`).
+  (`qkv.split -> q_norm/k_norm -> rotary_emb`) and the upstream Triton fused
+  counterpart `vllm.models.step5.nvidia.ops.indexer_norm_rope` (same
+  per-head RMSNorm + NeoX RoPE fusion, with the indexer-side cache updates
+  folded into the same launch).
 - **Differences**:
-    - No cache insertion: the CUDA `_prepare_main` also writes K/V into
-      their paged caches inside the same kernel; on Ascend the cache writes
-      stay on the existing attention backend path, so this kernel returns
-      K/V tensors instead.
-    - The CUDA kernel reproduces the native QK kernel's sequential-FMA /
-      XOR-tree reduction; this is an Ascend SIMD implementation (vector tree
+    - No cache insertion: the upstream `indexer_norm_rope` also folds the
+      indexer cache updates into the same kernel (`UPDATE_CSA`); on Ascend
+      the cache writes stay on the existing attention backend path, so this
+      kernel returns K/V tensors instead.
+    - The upstream Triton kernel reproduces the native QK kernel's
+      sequential-FMA / XOR-tree reduction (preserving its CuTeDSL
+      numerics); this is an Ascend SIMD implementation (vector tree
       reduction), numerically equivalent within RMSNorm+RoPE tolerance but
-      not bit-identical to the CUDA reference.
+      not bit-identical to the upstream reference.
     - Rotation angles are always read from the caller's `cos/sin` cache. (An
       earlier revision baked `theta=1e4` into the kernel, which corrupted
       layers configured with a different `rope_theta`, e.g. `1e7`; reading

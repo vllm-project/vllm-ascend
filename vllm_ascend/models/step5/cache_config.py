@@ -15,12 +15,10 @@ layer.
 
 This module mirrors the upstream layout on Ascend instead:
 
-* one envelope-sized backing: every group's layers start at byte 0 (the
-  CSA ring stack one 4 KiB page in, keeping per-class start addresses
-  disjoint for the recycled-block zeroer), and since all groups draw
-  block ids from one exclusive pool the aliased per-id spans never
-  collide -- the pool cost per block id is the widest group (the
-  envelope), not the sum of per-page-size backings;
+* one envelope-sized backing: every group's layers start at byte 0, and
+  since all groups draw block ids from one exclusive pool the aliased
+  per-id spans never collide -- the pool cost per block id is the widest
+  group (the envelope), not the sum of per-page-size backings;
 * the sparse summary keeps its real 4 KiB page but shares the DSA
   layer's group and block ids, like upstream ``Step5SparseSummaryCache``
   ("shares the DSA layer's KV cache group and block IDs, and is prefix
@@ -28,8 +26,11 @@ This module mirrors the upstream layout on Ascend instead:
   carries both the main KV page and the summary page, so a request costs
   one id set instead of two and the two hash chains cannot diverge;
 * the CSA tail ring keeps its own ``CircularBufferSpec`` group (one
-  scratch bucket per request, not prefix cacheable) and free-rides
-  inside the same envelope because its ids are exclusive with the rest.
+  scratch bucket per request, not prefix cacheable), sized with the main
+  page bytes so it shares the attention groups' stride class and
+  free-rides inside the same envelope: per-id byte spans align to one
+  grid, so spans of different groups can only intersect at identical
+  block ids, which the exclusive pool already forbids.
 
 The planner-side cost model matches the physical allocation through
 ``get_step5_pool_bytes_per_block``, the same hook the GLM/DSV4 multi-tensor
@@ -54,13 +55,6 @@ from vllm.v1.kv_cache_interface import (
 _STEP5_RING_SUFFIX = ".csa_tail_ring"
 _STEP5_SUMMARY_SUFFIX = ".sparse_summary_cache"
 _STEP5_AUX_SUFFIXES = (_STEP5_RING_SUFFIX, _STEP5_SUMMARY_SUFFIX)
-
-# The recycled-block zeroer keeps one stride per start address, so page
-# classes must never share a start address inside the aliased backing.
-# Shifting the ring stack by one 4 KiB page lands its layer starts on odd
-# multiples of 4 KiB while the 96 KiB / 4 KiB summary classes start on even
-# multiples (96 KiB = 24 x 4 KiB), keeping the starts disjoint.
-_STEP5_RING_STACK_SHIFT_BYTES = 4096
 
 
 def _layer_specs(group: KVCacheGroupSpec) -> list[tuple[str, KVCacheSpec]]:
@@ -330,8 +324,6 @@ def get_step5_kv_cache_config_from_groups(
     backing_size = envelope * num_blocks
     for group in kv_cache_groups:
         byte_offset = 0
-        if all(name.endswith(_STEP5_RING_SUFFIX) for name in group.layer_names):
-            byte_offset = _STEP5_RING_STACK_SHIFT_BYTES * num_blocks
         for layer_name, spec in _layer_specs(group):
             layer_stride = spec.page_size_bytes * num_blocks
             if byte_offset + layer_stride > backing_size:

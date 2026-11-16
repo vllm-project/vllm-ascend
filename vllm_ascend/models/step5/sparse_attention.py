@@ -44,11 +44,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
-from vllm.v1.kv_cache_interface import (
-    AttentionSpec,
-    CircularBufferSpec,
-    KVCacheSpec,
-)
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
 from vllm_ascend.models.step5.ops.generic_block_sparse_attention import (
@@ -66,8 +62,8 @@ from vllm_ascend.ops.triton.step5.summary_update import (
 from vllm_ascend.utils import vllm_version_is
 
 if vllm_version_is("0.33.0"):
-    from vllm.models.step5.nvidia.csa_tail_ring import Step5CSATailRing
-    from vllm.models.step5.nvidia.sparse_summary_cache import (
+    from vllm.models.step5.nvidia.csa_tail_ring import Step5CSATailRing  # type: ignore[import-not-found]
+    from vllm.models.step5.nvidia.sparse_summary_cache import (  # type: ignore[import-not-found]
         Step5SparseSummaryBackend,
         Step5SparseSummaryCacheLayer,
         Step5SparseSummaryMetadataBuilder,
@@ -81,45 +77,19 @@ else:
     )
 
 
-_RING_ROW_BYTES = 1024  # mirrors vllm.models.step5.nvidia.csa_tail_ring._ROW_BYTES
-
-
 class AscendStep5CSATailRing(Step5CSATailRing):
-    """Tail ring sized to its own 32 KiB page instead of the main KV page.
+    """Tail ring on the main KV page, sized exactly as upstream sizes it.
 
-    Upstream borrows the main page (96 KiB here, capacity 96 rows) because
-    its block-outermost planner packs the ring into a per-request state
-    bucket beside the main pages. The Ascend layer-outer planner gives each
-    page size its own backing (vllm_ascend.models.step5.cache_config), so
-    the ring only needs to cover ``7 + num_speculative_tokens`` 1 KiB rows
-    (10 with MTP draft-3); a 32 KiB page holds 32 rows with headroom for
-    replay windows. ``bind_kv_cache`` re-derives capacity and
-    ``rows_per_block`` from the bound tensor, so nothing else changes.
+    The inherited spec keeps the ring's ``CircularBufferSpec`` on the main
+    layer's page bytes (96 KiB here, capacity 96 rows for the required
+    ``7 + num_speculative_tokens``), so the ring group and the attention
+    groups share one stride class inside the single envelope backing
+    (vllm_ascend.models.step5.cache_config): every per-id byte span is
+    aligned to the same grid, so spans of different groups can only
+    intersect at identical block ids, which the exclusive id pool already
+    forbids. The recycled-block zeroer likewise sees one whole-page stride
+    per start address, so no per-class stack shift is needed.
     """
-
-    ring_page_bytes = 16 * 1024
-
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        main = self._static_forward_context[self.main_layer_name]
-        main_spec = main.get_kv_cache_spec(vllm_config)
-        page_bytes = self.ring_page_bytes
-        rows = page_bytes // _RING_ROW_BYTES
-        if page_bytes % _RING_ROW_BYTES or rows < self.required_rows:
-            raise ValueError(
-                f"Step5 CSA tail ring needs {self.required_rows} rows of "
-                f"{_RING_ROW_BYTES} bytes in one {page_bytes}-byte KV page."
-            )
-        self.capacity = rows
-        # Declare the main block size so the ring does not coarsen the hybrid
-        # prefix-cache alignment; the page holds ``rows`` 1 KiB rows.
-        return CircularBufferSpec(
-            block_size=main_spec.block_size,
-            num_kv_heads=1,
-            head_size=page_bytes // (main_spec.block_size * torch.bfloat16.itemsize),
-            head_size_v=0,
-            dtype=torch.bfloat16,
-            block_stride_alignment=_RING_ROW_BYTES,
-        )
 
 
 class AscendStep5SparseSummaryCacheLayer(Step5SparseSummaryCacheLayer):
@@ -509,7 +479,7 @@ class AscendStep5DSAMetadataBuilder(AttentionMetadataBuilder[AscendStep5DSAMetad
                 block_table,
                 prefill_metadata.max_query_len,
                 path="prefill",
-                graph_shape=graph_shape,
+                graph_shape=False,
             )
 
         decode_metadata: AscendStep5DSADecodeMetadata | None = None
@@ -521,7 +491,18 @@ class AscendStep5DSAMetadataBuilder(AttentionMetadataBuilder[AscendStep5DSAMetad
             gbsa_metadata = None
             if active_decodes > 0:
                 decode_seq_lens = seq_lens[:active_decodes]
-                if decode_query_len == 1:
+                if graph_shape:
+                    rows = num_input_tokens // decode_query_len
+                    gbsa_seq_lens = seq_lens[:rows].clamp_min(1)
+                    total = rows * decode_query_len
+                    row_base = (gbsa_seq_lens.to(torch.int64) - decode_query_len).clamp_min(0)
+                    positions = row_base.repeat_interleave(decode_query_len) + (
+                        torch.arange(total, device=seq_lens.device, dtype=torch.int64) % decode_query_len
+                    )
+                    cu_seq_lens = query_start_loc[: rows + 1]
+                    seqused_kv = gbsa_seq_lens
+                    max_query_len = decode_query_len
+                elif decode_query_len == 1:
                     # Plain decode: one query per request at its own position.
                     positions = decode_seq_lens.to(torch.int64) - 1
                     cu_seq_lens = torch.arange(active_decodes + 1, device=seq_lens.device, dtype=torch.int64)
@@ -768,7 +749,7 @@ class AscendStep5DSAImpl(AttentionImplBase[AscendStep5DSAMetadata]):
         cu_seq_lens = torch.arange(n + 1, device=index_q.device, dtype=torch.int32)
         positions = seq_lens_i32.to(torch.int64) - 1
         actual_kv_lengths = seq_lens_i32
-        _scores, ids = indexer_score_topk(
+        ids = indexer_score_topk(
             index_q[:n],
             weights[:n],
             self.summary_cache.mean.view(torch.float8_e4m3fn).unsqueeze(2),
@@ -833,7 +814,7 @@ class AscendStep5DSAImpl(AttentionImplBase[AscendStep5DSAMetadata]):
         cu_seqlens_q = md.query_start_loc_int64[: num_decodes + 1]
         actual_kv_lengths = seq_lens
         summary_md = self._summary_metadata()
-        _scores, ids = indexer_score_topk(
+        ids = indexer_score_topk(
             index_q[:total_tokens],
             weights[:total_tokens],
             self.summary_cache.mean.view(torch.float8_e4m3fn).unsqueeze(2),
@@ -905,7 +886,7 @@ class AscendStep5DSAImpl(AttentionImplBase[AscendStep5DSAMetadata]):
         )
         actual_kv_lengths = p.seq_lens[:num_reqs].to(torch.int32)
         summary_md = self._summary_metadata()
-        _scores, ids = indexer_score_topk(
+        ids = indexer_score_topk(
             index_q[:num_query_tokens],
             weights[:num_query_tokens],
             self.summary_cache.mean.view(torch.float8_e4m3fn).unsqueeze(2),
@@ -998,3 +979,17 @@ class AscendStep5DSAImpl(AttentionImplBase[AscendStep5DSAMetadata]):
                     token_offset=start,
                 )
         return output
+
+    @staticmethod
+    def update_graph_params(
+        update_stream,
+        forward_context,
+        num_tokens,
+        vllm_config=None,
+        speculative_config=None,
+        draft_attn_metadatas=None,
+    ):
+        # This backend's graph-visible state is refreshed by the metadata builder each step
+        # (copy_ into the addresses baked at capture); the impl itself owns
+        # no graph-private tensors, so there is nothing to update here.
+        pass

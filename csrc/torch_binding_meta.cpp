@@ -1774,6 +1774,30 @@ void hisparse_resolve_residency_meta(
     const std::optional<at::Tensor>&, const std::optional<at::Tensor>&, const std::optional<at::Tensor>&,
     int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {}
 
+void npu_indexer_region_score_ids_out_meta(
+    const at::Tensor &query, const at::Tensor &weights, const at::Tensor &keySummary,
+    const at::Tensor &actualKvLengths, const at::Tensor &blockTable, const at::Tensor &cuSeqLens,
+    int64_t maxRegionLen, int64_t topK, int64_t regionSize, double headScale,
+    int64_t cacheMode, int64_t maskMode, int64_t sortMode, const at::Tensor &selectedIds)
+{
+    TORCH_CHECK(cacheMode == 1 && maskMode == 3 && sortMode == 1,
+        "only cache_mode=1, mask_mode=3 and sort_mode=1 are supported");
+    TORCH_CHECK(query.dim() == 4 && query.sym_size(1) > 0 &&
+        (query.sym_size(1) == 1 || query.sym_size(1) % 4 == 0) && query.sym_size(2) >= 4 &&
+        query.sym_size(2) <= 128 && query.sym_size(2) % 4 == 0 && query.sym_size(3) == 256,
+        "query must be [T,G,H,256], G=1 or a positive multiple of 4, H=4..128 in steps of 4");
+    TORCH_CHECK(maxRegionLen >= 0 && maxRegionLen <= 16777216 && topK > 0 && topK <= 512 &&
+        regionSize > 0, "invalid indexer_region_score attributes");
+    TORCH_CHECK(selectedIds.dim() == 3 && selectedIds.sym_size(0) == query.sym_size(1) &&
+        selectedIds.sym_size(1) == query.sym_size(0) && selectedIds.sym_size(2) == topK &&
+        selectedIds.scalar_type() == at::kInt && selectedIds.device() == query.device(),
+        "selected_region_ids must be INT32 [G,T,top_k] on the query device");
+    const at::Tensor *inputs[] = {&weights, &keySummary, &actualKvLengths, &blockTable, &cuSeqLens};
+    for (const auto *input : inputs) {
+        TORCH_CHECK(input->device() == query.device(), "all inputs must be on the query device");
+    }
+}
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -1901,6 +1925,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     // hisparse_resolve_residency mutates caller-owned buffers and returns no
     // values, so the meta registration is a no-op.
     ops.impl("hisparse_resolve_residency", &vllm_ascend::meta::hisparse_resolve_residency_meta);
+    // indexer_region_score
+    ops.impl("npu_indexer_region_score.ids_out", &vllm_ascend::meta::npu_indexer_region_score_ids_out_meta);
 }
 }
 #endif

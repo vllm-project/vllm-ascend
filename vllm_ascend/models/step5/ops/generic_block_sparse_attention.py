@@ -41,13 +41,8 @@ serving, and the operator's consistent-count fast path does not apply.
 from __future__ import annotations
 
 import torch
-from cann_ops_transformer.ops.attention.generic_block_sparse_attention import (
-    generic_block_sparse_attention,
-    generic_block_sparse_attention_metadata,
-)
 
 from vllm_ascend.ops.triton.step5.summary_update import append_current_region
-
 
 _SPARSE_PATTERN_PER_GROUP_PER_TOKEN = 4
 _MASK_CAUSAL = 1
@@ -101,6 +96,10 @@ def gbsa_sparse_attention_metadata(
     Must be called with the same layout / mask / quant attributes as the
     subsequent ``gbsa_sparse_attention`` calls that consume the result.
     """
+    from cann_ops_transformer.ops.attention.generic_block_sparse_attention import (
+        generic_block_sparse_attention_metadata,
+    )
+
     groups, tokens = counts.shape
     idx_shape = torch.zeros((groups, tokens, topk + 1), dtype=torch.int32, device=counts.device)
     return generic_block_sparse_attention_metadata(
@@ -167,6 +166,8 @@ def gbsa_sparse_attention(
         ``out`` shaped ``[total_q, num_heads, head_dim]``, same dtype as
         ``query``.
     """
+    from cann_ops_transformer.ops.attention.generic_block_sparse_attention import generic_block_sparse_attention
+
     idx, counts = append_current_region(ids, positions, groups=num_kv_groups, region_size=region_size)
     common = dict(
         cu_seqlens_q=cu_seqlens_q.to(torch.int64),

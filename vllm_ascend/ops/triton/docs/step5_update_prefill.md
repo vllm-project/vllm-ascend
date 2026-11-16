@@ -2,6 +2,7 @@
 
 ## Description
 
+- **This will be removed once triton-ascend is compatible with upstream implementations**
 - **Function**: Folds a prefill chunk's indexer rows into the CSA state in
   two launches: `_update_prefill` closes every region whose eighth row is in
   this chunk (replaying the region's earlier rows — whether stored by an
@@ -83,18 +84,20 @@
 
 ## Origin and Differences
 
-- **Origin**: Adapted from the CUDA Triton implementation
+- **Origin**: Adapted from the upstream Triton implementation
   `vllm.models.step5.nvidia.ops.summary_update._update_prefill` /
   `_write_ring` / `update_prefill` (same grouping contract, launch order and
   close rule).
 - **Differences**:
-    - The CUDA close replays the carry rows with the serial `_replay_ring`
+    - The upstream close replays the carry rows with the serial `_replay_ring`
       and folds the chunk rows one-by-one through `_accumulate` with
       `tl.where` guards; on Ascend both folds are flattened into masked
       `(8, 256)` tiles (max first, then weighted sums) — mathematically
       equivalent, vectorizer-friendly.
-    - int64 ring/summary address arithmetic (int32 slot buffers on Ascend;
-      offsets beyond 2 GiB) and `tl.extra.cann` libdevice.
+    - Ring/summary address arithmetic keeps the int64 width of the slot and
+      ring-base tensors (vLLM slot_mapping and the ring metadata are int64
+      end to end); the explicit casts are no-op guards against a future
+      int32 buffer. `libdevice` comes from `tl.extra.cann`.
 
 ## Test Cases
 

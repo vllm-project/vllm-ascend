@@ -2,6 +2,7 @@
 
 ## Description
 
+- **This will be removed once triton-ascend is compatible with upstream implementations**
 - **Function**: Folds one decode step's indexer rows into the Step5 CSA
   (sparse attention) state: each token's `[index_k | index_z]` row is either
   stored into its request's tail ring (open region), or — when the token's
@@ -78,19 +79,20 @@
 
 ## Origin and Differences
 
-- **Origin**: Adapted from the CUDA Triton implementation
+- **Origin**: Adapted from the upstream Triton implementation
   `vllm.models.step5.nvidia.ops.summary_update._update_decode` /
   `update_decode` (same ring/summary layout and close semantics).
 - **Differences**:
-    - The CUDA close path calls the serial `_replay_ring` + `_accumulate`
+    - The upstream close path calls the serial `_replay_ring` + `_accumulate`
       helpers; on Ascend the same math is folded as one flat masked
       `(8, 256)` tile, because loops carrying 256-wide tensors with scalar
       guards inside defeat the Ascend vectorizer. The fold is a
       mathematically equivalent single-pass online softmax (max first, then
       weighted sums) instead of sequential rescaling.
-    - Summary address arithmetic is computed in int64 (`slot.to(tl.int64)`,
-      `base.to(tl.int64)`): slot buffers are int32-range on Ascend but the
-      byte offset of a late block can exceed 2 GiB.
+    - Slot and ring-base tensors arrive as int64 (vLLM's slot_mapping and
+      the ring metadata are int64 end to end), so the `slot.to(tl.int64)` /
+      `base.to(tl.int64)` casts are no-op guards against a future int32
+      buffer, whose late-block byte offsets could exceed 2 GiB.
     - `libdevice` comes from `tl.extra.cann` instead of `tl.extra.cuda`.
 
 ## Test Cases

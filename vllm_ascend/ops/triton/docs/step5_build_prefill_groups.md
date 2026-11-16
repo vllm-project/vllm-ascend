@@ -2,6 +2,7 @@
 
 ## Description
 
+- **This will be removed once triton-ascend is compatible with upstream implementations**
 - **Function**: Computes, entirely on device, the prefill summary-update
   grouping metadata: which rows of a prefill chunk belong to one eight-token
   region of one request, which of those rows are the group's first (carry
@@ -65,7 +66,7 @@
 
 ## Origin and Differences
 
-- **Origin**: Carried over from the CUDA Triton implementation
+- **Origin**: Carried over from the upstream Triton implementation
   `vllm.models.step5.nvidia.ops.summary_update._build_prefill_groups` /
   `build_prefill_groups` (identical body and output contract).
 - **Differences**: none in semantics; on Ascend the value is the call

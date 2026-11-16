@@ -21,9 +21,6 @@ contract is satisfied by a zero-copy reshape of the operator output.
 from __future__ import annotations
 
 import torch
-from cann_ops_transformer.ops.attention.indexer_region_score import (
-    indexer_region_score,
-)
 
 
 def indexer_score_topk(
@@ -40,7 +37,7 @@ def indexer_score_topk(
     # Weights arrive pre-scaled by H**-0.5 (model.py scales them before the
     # attention call), so no extra scaling is applied here.
     head_scale: float = 1.0,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
     """Fused score + topk + sort via aclnnIndexerRegionScore.
 
     Args:
@@ -63,9 +60,7 @@ def indexer_score_topk(
         region_size: tokens per region (8).
 
     Returns:
-        (scores [G*T, max_region_len] fp32, ids [G*T, topk] int32) — both
-        group-major 2D views of the operator's [G,T,...] outputs, ready for
-        the Triton pack kernels. ``ids`` rows hold logical region ids in
+        (ids [G*T, topk] int32) — ``ids`` rows hold logical region ids in
         ascending order with ``-1`` tail padding, the exact contract of
         ``region_topk_ids`` / ``topk_select_new`` outputs. With ``top_k > 0``
         only the causally visible score columns are defined (the operator
@@ -73,22 +68,22 @@ def indexer_score_topk(
         columns must not be consumed as scores.
     """
     tokens, groups = index_q.shape[:2]
-    scores, ids = indexer_region_score(
+    ids = index_q.new_empty((groups, tokens, topk), dtype=torch.int32)
+    torch.ops._C_ascend.npu_indexer_region_score.ids_out(
         index_q.to(torch.float8_e4m3fn),
         weights,
-        paged_key_summary=mean_cache,
-        block_table=block_table,
-        cu_seq_lens=cu_seq_lens,
-        actual_kv_lengths=actual_kv_lengths,
-        mask_mode=3,
+        mean_cache,
+        actual_kv_lengths,
+        block_table,
+        cu_seq_lens,
+        max_region_len=max_region_len,
+        top_k=topk,
+        region_size=region_size,
         head_scale=head_scale,
         cache_mode=1,
-        max_region_len=max_region_len,
-        region_size=region_size,
-        top_k=topk,
+        mask_mode=3,
         sort_mode=1,
+        selected_region_ids=ids,
     )
-    return (
-        scores.reshape(groups * tokens, scores.shape[-1]),
-        ids.reshape(groups * tokens, topk),
-    )
+
+    return ids.reshape(groups * tokens, topk)

@@ -28,17 +28,16 @@ MAX_ABS_ERR = 1.0
 
 def build_rope_cache(max_pos, rotary_pairs, theta, device):
     """NeoX cos/sin cache halves, cos_sin_cache.chunk(2, dim=-1) layout."""
-    inv_freq = theta ** (
-        -torch.arange(0, rotary_pairs, dtype=torch.float32, device=device) / rotary_pairs
-    )
+    inv_freq = theta ** (-torch.arange(0, rotary_pairs, dtype=torch.float32, device=device) / rotary_pairs)
     pos = torch.arange(max_pos, dtype=torch.float32, device=device)
     freqs = torch.outer(pos, inv_freq)
     cache = torch.cat([freqs.cos(), freqs.sin()], dim=-1).to(torch.bfloat16)
     return cache[:, :rotary_pairs].contiguous(), cache[:, rotary_pairs:].contiguous()
 
 
-def torch_ref(qkv, q_weight, k_weight, cos, sin, positions, *, num_q_heads,
-              num_kv_heads, rotary_pairs, eps, norm_weight_bias):
+def torch_ref(
+    qkv, q_weight, k_weight, cos, sin, positions, *, num_q_heads, num_kv_heads, rotary_pairs, eps, norm_weight_bias
+):
     tokens = qkv.shape[0]
     qkv_f = qkv.float()
 
@@ -46,13 +45,9 @@ def torch_ref(qkv, q_weight, k_weight, cos, sin, positions, *, num_q_heads,
         inv_rms = torch.rsqrt((x_f * x_f).sum(-1) / HEAD_DIM + eps)
         return (x_f * inv_rms.unsqueeze(-1) * (weight.float() + norm_weight_bias)).to(torch.bfloat16)
 
-    q = norm_heads(
-        qkv_f[:, : num_q_heads * HEAD_DIM].view(tokens, num_q_heads, HEAD_DIM), q_weight
-    )
+    q = norm_heads(qkv_f[:, : num_q_heads * HEAD_DIM].view(tokens, num_q_heads, HEAD_DIM), q_weight)
     k = norm_heads(
-        qkv_f[:, num_q_heads * HEAD_DIM : (num_q_heads + num_kv_heads) * HEAD_DIM].view(
-            tokens, num_kv_heads, HEAD_DIM
-        ),
+        qkv_f[:, num_q_heads * HEAD_DIM : (num_q_heads + num_kv_heads) * HEAD_DIM].view(tokens, num_kv_heads, HEAD_DIM),
         k_weight,
     )
     v = qkv[:, (num_q_heads + num_kv_heads) * HEAD_DIM :].clone()
@@ -65,8 +60,7 @@ def torch_ref(qkv, q_weight, k_weight, cos, sin, positions, *, num_q_heads,
         x1 = x[..., :rotary_pairs]
         x2 = x[..., rotary_pairs : 2 * rotary_pairs]
         rotated = torch.cat(
-            [(x1 * cos_f - x2 * sin_f).to(torch.bfloat16),
-             (x1 * sin_f + x2 * cos_f).to(torch.bfloat16)],
+            [(x1 * cos_f - x2 * sin_f).to(torch.bfloat16), (x1 * sin_f + x2 * cos_f).to(torch.bfloat16)],
             dim=-1,
         )
         return torch.cat([rotated, x_bf16[..., 2 * rotary_pairs :]], dim=-1)
@@ -80,13 +74,8 @@ def assert_bf16_close(actual, ref, name):
     diff = (a - r).abs()
     within = diff <= ATOL + RTOL * r.abs()
     frac = within.float().mean().item()
-    assert frac >= 0.99, (
-        f"{name}: only {frac:.4%} elements within BF16 tolerance "
-        f"(max abs err {diff.max().item():.6f})"
-    )
-    assert diff.max().item() <= MAX_ABS_ERR, (
-        f"{name}: max abs err {diff.max().item():.6f} exceeds {MAX_ABS_ERR}"
-    )
+    assert frac >= 0.99, f"{name}: only {frac:.4%} elements within BF16 tolerance (max abs err {diff.max().item():.6f})"
+    assert diff.max().item() <= MAX_ABS_ERR, f"{name}: max abs err {diff.max().item():.6f} exceeds {MAX_ABS_ERR}"
 
 
 @pytest.mark.skipif(
@@ -110,9 +99,7 @@ def assert_bf16_close(actual, ref, name):
     ],
 )
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])
-def test_fused_qknorm_rope_accuracy(
-    num_q_heads, num_kv_heads, rotary_pairs, tokens, theta, bias, eps
-):
+def test_fused_qknorm_rope_accuracy(num_q_heads, num_kv_heads, rotary_pairs, tokens, theta, bias, eps):
     torch.manual_seed(0)
     device = "npu"
     max_pos = 8192
@@ -156,7 +143,7 @@ def test_fused_qknorm_rope_accuracy(
     assert_bf16_close(q, q_ref, "q")
     assert_bf16_close(k, k_ref, "k")
     # V passthrough must retain the original bits.
-    assert torch.equal(v, v_ref), "v passthrough is not bit-exact"
+    torch.testing.assert_close(v, v_ref, rtol=0, atol=0, msg="v passthrough is not bit-exact")
 
     gc.collect()
     torch.npu.empty_cache()
