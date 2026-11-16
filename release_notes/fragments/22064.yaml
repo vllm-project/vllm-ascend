@@ -1,0 +1,10 @@
+pr: 22064
+entries:
+  - category: bugfix
+    text: >-
+      Fixed Kimi-K3 BF16 checkpoint loading and live weight updates by refreshing
+      the derived KDA convolution buffer after projection loading while preserving
+      captured graph storage. Text-only serving now sizes KDA state from the
+      nested text configuration.
+    model: Kimi-K3
+    hardware: [A3]
