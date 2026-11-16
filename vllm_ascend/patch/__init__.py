@@ -303,14 +303,13 @@
 #       Ascend cache layouts need platform-specific materialization and memory
 #       accounting.
 #    How:
-#       Both supported versions select AscendKVCacheConfigBuilder through
-#       NPUPlatform. Its default materialization delegates to the patched
-#       planning functions. They record the reuse plan's backing size before
-#       spec collapse so Core can budget and the scheduler can enable offload.
+#       Cache materialization records the reuse backing size for Core budgeting
+#       and AscendStore scheduler initialization.
 #    Related PR:
 #       https://github.com/vllm-project/vllm/pull/53558
 #    Future Plan:
-#       Remove when vLLM supports these layouts through the builder API.
+#       Remove once the upstream builder API can materialize Ascend layouts,
+#       account for their physical memory costs, and pass reuse metadata to the scheduler.
 #
 #   2. `vllm.v1.core.kv_cache_planning.get_kv_cache_config_from_groups`
 #      `vllm.v1.core.kv_cache_planning._pool_bytes_per_block`
