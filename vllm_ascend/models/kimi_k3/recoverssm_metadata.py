@@ -7,8 +7,8 @@ from copy import copy
 import torch
 from vllm.distributed import get_pcp_group
 
-from vllm_ascend.ops.kda_pcp import KimiKDAHostMetadataBuilder
 from vllm_ascend.models.glm5next.recoverssm_metadata import AscendKDARecoverSSMMetadataBuilder
+from vllm_ascend.ops.kda_pcp import KimiKDAHostMetadataBuilder
 from vllm_ascend.ops.triton.kda.recoverssm import KDARecoverSSMCommitContext
 
 
