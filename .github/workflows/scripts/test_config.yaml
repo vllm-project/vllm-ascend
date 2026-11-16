@@ -32,8 +32,9 @@
 # A3 scheduling policy: accuracy and model E2E tests run on the dedicated 560T
 # labels (``linux-aarch64-a3-800i-N``). The generic ``linux-aarch64-a3-2``
 # pool is reserved for ``tests/e2e/pull_request/two_card/ops``, whose cases
-# are single-card operator tests packed into one pytest process on one runner.
-# That bucket is not split by estimated time.
+# are single-card operator tests. One runner keeps the whole set, and the run
+# script starts one pytest process per card on that machine. The bucket is not
+# split by estimated time.
 # ``select_tests.py`` keeps that partition on ``linux-aarch64-a3-2`` when a
 # full-suite or accuracy run remaps other A3 labels onto 800i.
 
@@ -166,8 +167,7 @@ partition:
   a3-2:
     runner_label: linux-aarch64-a3-800i-2
     count: 5
-  # Every operator file shares one pytest process on one runner, so this
-  # bucket is not split by estimated time.
+  # One A3 2-card runner. The run script pins one pytest process to each card.
   a3-2-ops:
     runner_label: linux-aarch64-a3-2
     count: 1
