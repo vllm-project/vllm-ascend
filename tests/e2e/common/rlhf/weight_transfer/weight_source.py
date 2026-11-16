@@ -203,6 +203,9 @@ class FixedRandomWeightSource(WeightSource):
         self._num_experts = int(getattr(meta_config, "n_routed_experts", 0) or 0)
         del meta_model
 
+        if case.checkpoint_parameter_adapter is not None:
+            parameters = case.checkpoint_parameter_adapter(meta_config, parameters)
+
         assert parameters, f"{case.id}: reduced meta model contains no parameters"
         names = [name for name, _, _ in parameters]
         assert len(set(names)) == len(names), f"{case.id}: generated checkpoint parameter names are not unique"

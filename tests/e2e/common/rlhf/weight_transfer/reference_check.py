@@ -105,6 +105,7 @@ def reference_serve_args(
     return [
         "--tokenizer",
         case.model,
+        *case.extra_server_args,
         "--served-model-name",
         case.model,
         *_common_serve_args(
@@ -269,6 +270,17 @@ def assert_weight_update_matches_reference(
 class WeightUpdateTestWorkerExtension:
     """Read real worker parameters through the development collective RPC."""
 
+    def draft_model_architecture(self):
+        return type(self.get_draft_model()).__name__
+
+    def snapshot_draft_context_projections(self):
+        model = self.get_draft_model().model
+        return {
+            name: hashlib.sha256(value.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes()).hexdigest()
+            for name in ("_fused_kv_weight", "_k_norm_weights", "_hidden_norm_weight")
+            if isinstance(value := getattr(model, name, None), torch.Tensor)
+        }
+
     def snapshot_weight_update_models(self):
         result = {}
         for name, model in (("target", self.get_model()), ("draft", self.get_draft_model())):
@@ -300,23 +312,27 @@ def parameter_addresses(snapshot):
     return {model: {name: value["data_ptr"] for name, value in params.items()} for model, params in snapshot.items()}
 
 
-def draft_serve_args(checkpoint: Path, case, port: int, *, enforce_eager: bool, live: bool) -> list[str]:
+def draft_serve_args(checkpoint: Path, speculative_case, port: int, *, enforce_eager: bool, live: bool) -> list[str]:
+    case = speculative_case.target
     args = [
         "--tokenizer",
         case.model,
+        *case.extra_server_args,
         "--served-model-name",
         case.id,
         "--dtype",
         "bfloat16",
         "--max-model-len",
-        "64",
+        "128",
         "--max-num-seqs",
         "2",
         "--max-num-batched-tokens",
-        "64",
+        "128",
         "--no-enable-prefix-caching",
         "--gpu-memory-utilization",
         "0.2",
+        "--kv-cache-memory-bytes",
+        str(128 * 2**20),
         "--distributed-executor-backend",
         "mp",
         "--port",
@@ -326,9 +342,10 @@ def draft_serve_args(checkpoint: Path, case, port: int, *, enforce_eager: bool, 
         "--speculative-config",
         json.dumps(
             {
-                "method": "draft_model",
+                "method": speculative_case.method,
                 "model": str(checkpoint / "draft"),
-                "num_speculative_tokens": 2,
+                "num_speculative_tokens": speculative_case.num_speculative_tokens,
+                "draft_sample_method": speculative_case.draft_sample_method,
             }
         ),
         "--worker-extension-cls",

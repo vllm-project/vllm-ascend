@@ -33,7 +33,7 @@ from safetensors.torch import load_file
 from transformers import Qwen3Config
 
 from tests.e2e.common.rlhf.weight_transfer import reference_check as utils
-from tests.e2e.common.rlhf.weight_transfer.case import MODEL_CASES, WeightUpdateModelCase
+from tests.e2e.common.rlhf.weight_transfer.case import DRAFT_MODEL_CASES, MODEL_CASES, WeightUpdateModelCase
 from tests.e2e.common.rlhf.weight_transfer.reference_check import (
     live_update_serve_args,
     reference_serve_args,
@@ -373,13 +373,83 @@ def test_reduced_checkpoint_is_independently_loadable(random_weight_cases, tmp_p
 
 
 def test_draft_reference_and_hccl_lane_keep_identical_model_settings(tmp_path):
-    from tests.e2e.common.rlhf.weight_transfer.case import QWEN3_DRAFT_TARGET_CASE
+    from tests.e2e.common.rlhf.weight_transfer.case import QWEN3_EAGLE3_CASE
     from tests.e2e.common.rlhf.weight_transfer.reference_check import draft_serve_args
 
     for eager in (True, False):
-        reference = _flag_map(
-            draft_serve_args(tmp_path, QWEN3_DRAFT_TARGET_CASE, PORT, enforce_eager=eager, live=False)
-        )
-        lane = _flag_map(draft_serve_args(tmp_path, QWEN3_DRAFT_TARGET_CASE, PORT, enforce_eager=eager, live=True))
+        reference = _flag_map(draft_serve_args(tmp_path, QWEN3_EAGLE3_CASE, PORT, enforce_eager=eager, live=False))
+        lane = _flag_map(draft_serve_args(tmp_path, QWEN3_EAGLE3_CASE, PORT, enforce_eager=eager, live=True))
         assert lane.pop("--weight-transfer-config") == '{"backend": "hccl"}'
         assert lane == reference
+
+
+@pytest.mark.parametrize("architecture,expected_q_width", [("Eagle3Qwen3ForCausalLM", 16), ("DFlashDraftModel", 8)])
+def test_qwen3_speculative_adapter_preserves_real_decoder_and_adds_projections(architecture, expected_q_width):
+    from types import SimpleNamespace
+
+    from tests.e2e.common.rlhf.weight_transfer.checkpoint_adapters import qwen3_draft_parameters
+
+    config = SimpleNamespace(architectures=[architecture], hidden_size=8, num_hidden_layers=1)
+    parameters = [
+        ("model.embed_tokens.weight", (32, 8), torch.bfloat16),
+        ("lm_head.weight", (32, 8), torch.bfloat16),
+        ("model.layers.0.self_attn.q_proj.weight", (8, 8), torch.bfloat16),
+    ]
+    adapted = {name: (shape, dtype) for name, shape, dtype in qwen3_draft_parameters(config, parameters)}
+    assert "embed_tokens.weight" not in adapted and "lm_head.weight" not in adapted
+    assert adapted["layers.0.self_attn.q_proj.weight"][0] == (8, expected_q_width)
+    assert adapted["fc.weight"][0] == (8, 24)
+    assert ("layers.0.hidden_norm.weight" if architecture.startswith("Eagle3") else "hidden_norm.weight") in adapted
+
+
+def test_next_mtp_adapter_selects_one_prediction_module():
+    from types import SimpleNamespace
+
+    from tests.e2e.common.rlhf.weight_transfer.checkpoint_adapters import qwen3_next_mtp_parameters
+
+    parameters = [(f"model.layers.{i}.self_attn.q_proj.weight", (8, 8), torch.bfloat16) for i in (0, 1)]
+    adapted = {name: shape for name, shape, _ in qwen3_next_mtp_parameters(SimpleNamespace(hidden_size=8), parameters)}
+    assert adapted["mtp.layers.0.self_attn.q_proj.weight"] == (8, 8)
+    assert not any("layers.1." in name for name in adapted)
+    assert adapted["mtp.fc.weight"] == (8, 16)
+    assert all(f"mtp.{name}.weight" in adapted for name in ["norm", "pre_fc_norm_hidden", "pre_fc_norm_embedding"])
+
+
+def test_v4_dspark_adapter_keeps_hc_and_markov_confidence_shapes():
+    from types import SimpleNamespace
+
+    from tests.e2e.common.rlhf.weight_transfer.checkpoint_adapters import deepseek_v4_dspark_parameters
+
+    config = SimpleNamespace(
+        hidden_size=8, hc_mult=4, dspark_markov_rank=2, vocab_size=32, dspark_target_layer_ids=[0, 1, 2]
+    )
+    parameters = [
+        ("model.layers.0.self_attn.wkv.weight", (4, 8), torch.bfloat16),
+        ("layers.0.hc_attn_fn", (8, 32), torch.float32),
+        ("model.layers.1.self_attn.wkv.weight", (4, 8), torch.bfloat16),
+    ]
+    adapted = {name: (shape, dtype) for name, shape, dtype in deepseek_v4_dspark_parameters(config, parameters)}
+    assert adapted["mtp.0.attn.wkv.weight"][0] == (4, 8)
+    assert adapted["mtp.0.hc_attn_fn"] == ((8, 32), torch.float32)
+    assert adapted["mtp.0.main_proj.weight"][0] == (8, 24)
+    assert adapted["mtp.0.markov_head.markov_w1.weight"][0] == (32, 2)
+    assert adapted["mtp.0.confidence_head.proj.weight"] == ((1, 10), torch.float32)
+    assert "mtp.0.confidence_head.proj.bias" not in adapted
+
+
+@pytest.mark.parametrize("speculative_case", DRAFT_MODEL_CASES, ids=lambda case: case.id)
+def test_four_draft_cases_select_the_actual_speculative_method(speculative_case, tmp_path):
+    import json
+
+    from tests.e2e.common.rlhf.weight_transfer.reference_check import draft_serve_args
+
+    for eager in (True, False):
+        reference = _flag_map(draft_serve_args(tmp_path, speculative_case, PORT, enforce_eager=eager, live=False))
+        lane = _flag_map(draft_serve_args(tmp_path, speculative_case, PORT, enforce_eager=eager, live=True))
+        assert lane.pop("--weight-transfer-config") == '{"backend": "hccl"}'
+        assert lane == reference
+        spec = json.loads(lane["--speculative-config"])
+        assert spec["method"] == speculative_case.method
+        assert spec["method"] != "draft_model"
+        assert spec["draft_sample_method"] == speculative_case.draft_sample_method
+        assert speculative_case.draft.checkpoint_parameter_adapter is not None
