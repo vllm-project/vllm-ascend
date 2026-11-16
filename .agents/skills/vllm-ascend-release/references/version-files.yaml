@@ -11,7 +11,7 @@
 # - 'action' entries require manual intervention
 
 files:
-  - path: README.md
+  - path: README_vllm-ascend.md
     description: Main README with getting started instructions
     updates:
       - pattern: "pip install vllm-ascend==X.X.X"
@@ -19,7 +19,7 @@ files:
       - pattern: "vllm-ascend:vX.X.X"
         replacement: "vllm-ascend:{version}"
 
-  - path: README.zh.md
+  - path: README_vllm-ascend.zh.md
     description: Chinese README
     updates:
       - pattern: "pip install vllm-ascend==X.X.X"
@@ -83,8 +83,8 @@ files:
 # Files should be updated in this order to ensure consistency
 update_order:
   1: mkdocs.yml
-  2: README.md
-  3: README.zh.md
+  2: README_vllm-ascend.md
+  3: README_vllm-ascend.zh.md
   4: docs/source/faqs.md
   5: docs/source/user_guide/release_notes.md
   6: docs/source/community/versioning_policy.md

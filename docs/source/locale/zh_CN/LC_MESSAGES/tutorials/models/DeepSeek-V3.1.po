@@ -627,11 +627,11 @@ msgstr ""
 
 msgid ""
 "- `Quantization method`: "
-"[msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/example/DeepSeek/README.md)."
+"[msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/example/DeepSeek/README_vllm-ascend.md)."
 " You can use this method to quantize the model."
 msgstr ""
 "- "
-"`量化方法`：[msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/example/DeepSeek/README.md)。您可以使用该方法对模型进行量化。"
+"`量化方法`：[msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/example/DeepSeek/README_vllm-ascend.md)。您可以使用该方法对模型进行量化。"
 
 msgid ""
 ">**Path description**: Download the model weights to a directory of your "

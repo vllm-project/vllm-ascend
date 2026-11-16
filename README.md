@@ -9,117 +9,86 @@
 vLLM Ascend Plugin
 </h3>
 
-<div align="center">
-
-[![DeepWiki](https://img.shields.io/badge/DeepWiki-Ask_AI-_.svg?style=flat&color=0052D9&labelColor=000000&logo=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACwAAAAyCAYAAAAnWDnqAAAAAXNSR0IArs4c6QAAA05JREFUaEPtmUtyEzEQhtWTQyQLHNak2AB7ZnyXZMEjXMGeK/AIi+QuHrMnbChYY7MIh8g01fJoopFb0uhhEqqcbWTp06/uv1saEDv4O3n3dV60RfP947Mm9/SQc0ICFQgzfc4CYZoTPAswgSJCCUJUnAAoRHOAUOcATwbmVLWdGoH//PB8mnKqScAhsD0kYP3j/Yt5LPQe2KvcXmGvRHcDnpxfL2zOYJ1mFwrryWTz0advv1Ut4CJgf5uhDuDj5eUcAUoahrdY/56ebRWeraTjMt/00Sh3UDtjgHtQNHwcRGOC98BJEAEymycmYcWwOprTgcB6VZ5JK5TAJ+fXGLBm3FDAmn6oPPjR4rKCAoJCal2eAiQp2x0vxTPB3ALO2CRkwmDy5WohzBDwSEFKRwPbknEggCPB/imwrycgxX2NzoMCHhPkDwqYMr9tRcP5qNrMZHkVnOjRMWwLCcr8ohBVb1OMjxLwGCvjTikrsBOiA6fNyCrm8V1rP93iVPpwaE+gO0SsWmPiXB+jikdf6SizrT5qKasx5j8ABbHpFTx+vFXp9EnYQmLx02h1QTTrl6eDqxLnGjporxl3NL3agEvXdT0WmEost648sQOYAeJS9Q7bfUVoMGnjo4AZdUMQku50McDcMWcBPvr0SzbTAFDfvJqwLzgxwATnCgnp4wDl6Aa+Ax283gghmj+vj7feE2KBBRMW3FzOpLOADl0Isb5587h/U4gGvkt5v60Z1VLG8BhYjbzRwyQZemwAd6cCR5/XFWLYZRIMpX39AR0tjaGGiGzLVyhse5C9RKC6ai42ppWPKiBagOvaYk8lO7DajerabOZP46Lby5wKjw1HCRx7p9sVMOWGzb/vA1hwiWc6jm3MvQDTogQkiqIhJV0nBQBTU+3okKCFDy9WwferkHjtxib7t3xIUQtHxnIwtx4mpg26/HfwVNVDb4oI9RHmx5WGelRVlrtiw43zboCLaxv46AZeB3IlTkwouebTr1y2NjSpHz68WNFjHvupy3q8TFn3Hos2IAk4Ju5dCo8B3wP7VPr/FGaKiG+T+v+TQqIrOqMTL1VdWV1DdmcbO8KXBz6esmYWYKPwDL5b5FA1a0hwapHiom0r/cKaoqr+27/XcrS5UwSMbQAAAABJRU5ErkJggg==)](https://deepwiki.com/vllm-project/vllm-ascend)
-
-</div>
-
 <p align="center">
-| <a href="https://www.hiascend.com/en/"><b>About Ascend</b></a> | <a href="https://docs.vllm.ai/projects/ascend/en/latest/"><b>Documentation</b></a> | <a href="https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/"><b>Support Matrix</b></a> | <a href="https://slack.vllm.ai"><b>#SIG-Ascend</b></a> | <a href="https://discuss.vllm.ai/c/hardware-support/vllm-ascend-support"><b>Users Forum</b></a> | <a href="https://tinyurl.com/vllm-ascend-meeting"><b>Weekly Meeting</b></a> |
-</p>
-
-<p align="center">
-<a ><b>English</b></a> | <a href="README.zh.md"><b>中文</b></a>
+| <a href="https://www.hiascend.com/en/"><b>关于昇腾</b></a> | <a href="https://docs.vllm.ai/projects/ascend/en/latest/"><b>官方文档</b></a> | <a href="https://slack.vllm.ai"><b>#sig-ascend</b></a> | <a href="https://discuss.vllm.ai/c/hardware-support/vllm-ascend-support"><b>用户论坛</b></a> | <a href="https://tinyurl.com/vllm-ascend-meeting"><b>社区例会</b></a> |
 </p>
 
 ---
-*Latest News* 🔥
+*消息* 🔥
 
-- [2026/09] We released the new release candidate [v0.26.0rc1](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.26.0rc1)! Please follow the [official guide](https://docs.vllm.ai/projects/ascend/en/v0.26.0rc1/) to start using vLLM Ascend Plugin on Ascend.
-- [2026/08] We released the new official version [v0.23.0](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.23.0)! Please follow the [official guide](https://docs.vllm.ai/projects/ascend/en/v0.23.0/) to start using vLLM Ascend Plugin on Ascend.
-- [2026/05] We released the new official version [v0.18.0](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.18.0)! Please follow the [official guide](https://docs.vllm.ai/projects/ascend/en/v0.18.0/) to start using vLLM Ascend Plugin on Ascend.
-- [2026/02] We released the new official version [v0.13.0](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.13.0)! Please follow the [official guide](https://docs.vllm.ai/projects/ascend/en/v0.13.0/) to start using vLLM Ascend Plugin on Ascend.
+- [2026/10] 正式创建了[v0.30.0版本](https://github.com/vllm-router/vllm-ascend/tree/main)，可以部署vLLM边云协同功能。
+- [2026/10] 正式创建了[v0.23.0云侧复用版本](https://github.com/vllm-data-comm/vllm-ascend/tree/release/v0.23.0_share-cloud_T)，可以部署vLLM边云协同的云侧复用功能。
+- [2026/10] 正式创建了[v0.23.0多实例版本](https://github.com/vllm-data-comm/vllm-ascend/tree/release/v0.23.0_share-edge_T)，可以部署vLLM边云协同的多实例功能。
+- [2026/10] 正式创建了[v0.23.0基础版本](https://github.com/vllm-data-comm/vllm-ascend/tree/release/v0.23.0)，可以部署vLLM一边一云的边云协同基础功能。
+- [2026/09] 正式创建了[vllm-data-comm/vllm-ascend](https://github.com/vllm-data-comm/vllm-ascend)仓库，让vLLM边云协同可以无缝运行在Ascend NPU。
 
 <details>
-<summary>More</summary>
+<summary>更多内容</summary>
 
-- [2025/12] We released the new official version [v0.11.0](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.11.0)! Please follow the [official guide](https://docs.vllm.ai/projects/ascend/en/v0.11.0/) to start using vLLM Ascend Plugin on Ascend.
-- [2025/09] We released the new official version [v0.9.1](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.9.1)! Please follow the [official guide](https://docs.vllm.ai/projects/ascend/en/v0.9.1/tutorials/large_scale_ep.html) to start deploying large-scale Expert Parallelism (EP) on Ascend.
-- [2025/08] We hosted the [vLLM Beijing Meetup](https://mp.weixin.qq.com/s/7n8OYNrCC_I9SJaybHA_-Q) with vLLM and Tencent! Please find the [meetup slides](https://drive.google.com/drive/folders/1Pid6NSFLU43DZRi0EaTcPgXsAzDvbBqF).
-- [2025/06] [User stories](https://docs.vllm.ai/projects/ascend/en/latest/community/user_stories/index.html) page is now live! It kicks off with LLaMA-Factory/verl/TRL/GPUStack to demonstrate how vLLM Ascend assists Ascend users in enhancing their experience across fine-tuning, evaluation, reinforcement learning (RL), and deployment scenarios.
-- [2025/06] [Contributors](https://docs.vllm.ai/projects/ascend/en/latest/community/contributors.html) page is now live! All contributions deserve to be recorded, thanks for all contributors.
-- [2025/05] We've released the first official version [v0.7.3](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.7.3)! We collaborated with the vLLM community to publish a blog post sharing our practice: [Introducing vLLM Hardware Plugin, Best Practice from Ascend NPU](https://blog.vllm.ai/2025/05/12/hardware-plugin.html).
-- [2025/03] We hosted the [vLLM Beijing Meetup](https://mp.weixin.qq.com/s/VtxO9WXa5fC-mKqlxNUJUQ) with vLLM team! Please find the [meetup slides](https://drive.google.com/drive/folders/1Pid6NSFLU43DZRi0EaTcPgXsAzDvbBqF).
-- [2025/02] vLLM community officially created [vllm-project/vllm-ascend](https://github.com/vllm-project/vllm-ascend) repo for running vLLM seamlessly on the Ascend NPU.
-- [2024/12] We are working with the vLLM community to support [[RFC]: Hardware pluggable](https://github.com/vllm-project/vllm/issues/11162).
-
+- [2026/10] 正式创建了[v0.30.0版本](https://github.com/vllm-router/vllm-ascend/tree/main)，可以部署vLLM边云协同功能。
+- [2026/10] 正式创建了[v0.23.0云侧复用版本](https://github.com/vllm-data-comm/vllm-ascend/tree/release/v0.23.0_share-cloud_T)，可以部署vLLM边云协同的云侧复用功能。
+- [2026/10] 正式创建了[v0.23.0多实例版本](https://github.com/vllm-data-comm/vllm-ascend/tree/release/v0.23.0_share-edge_T)，可以部署vLLM边云协同的多实例功能。
+- [2026/10] 正式创建了[v0.23.0基础版本](https://github.com/vllm-data-comm/vllm-ascend/tree/release/v0.23.0)，可以部署vLLM一边一云的边云协同基础功能。
+- [2026/09] 正式创建了[vllm-data-comm/vllm-ascend](https://github.com/vllm-data-comm/vllm-ascend)仓库，让vLLM边云协同可以无缝运行在Ascend NPU。
+- 
 </details>
 
 ---
 
-## Overview
+## 总览
 
-vLLM Ascend (`vllm-ascend`) is a community maintained hardware plugin for running vLLM seamlessly on the Ascend NPU.
+vLLM 昇腾插件 (`vllm-ascend`) 是一个由社区维护的让vLLM在Ascend NPU无缝运行的后端插件。
 
-It is the recommended approach for supporting the Ascend backend within the vLLM community. It adheres to the principles outlined in the [[RFC]: Hardware pluggable](https://github.com/vllm-project/vllm/issues/11162), providing a hardware-pluggable interface that decouples the integration of the Ascend NPU with vLLM.
+此插件是 vLLM 社区中支持昇腾后端的推荐方式。它遵循[[RFC]: Hardware pluggable](https://github.com/vllm-project/vllm/issues/11162)所述原则：通过解耦的方式提供了vLLM对Ascend NPU的支持。
 
-By using vLLM Ascend plugin, popular open-source models, including Transformer-like, Mixture-of-Experts (MoE), Embedding, Multi-modal LLMs can run seamlessly on the Ascend NPU.
+使用 vLLM 昇腾插件，可以让类Transformer、混合专家(MOE)、嵌入、多模态等流行的大语言模型在 Ascend NPU 上无缝运行。
 
-For detailed information on supported models and features, please refer to the [support matrix](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/).
 
-## DeepWiki
+## 准备
 
-[**DeepWiki**](https://deepwiki.com/vllm-project/vllm-ascend) is a dynamic knowledge base collaboratively maintained by the community and AI, designed to provide you with deeper technical insights beyond conventional documentation. If official documentation serves as a "quick start" guide to help you get going, the DeepWiki is your technical companion for "deep understanding". Here, you can explore: core architecture and design principles, key source code interpretations, technical context, and decision-making logic.
+- 硬件：Atlas 800I A2系列、Atlas 800I A3 I系列
+- 操作系统：Linux
+- 软件：
+    - Python == 3.12 
+    - CANN == 9.2.1 (Ascend HDK 版本详见 版本说明)
+    - PyTorch == 2.10.0, TorchNPU == 2.10.0.post7 
+    - vLLM (与vllm-ascend版本一致)
 
-Whether you are a performance tuner looking to deploy vLLM-Ascend in production or a contributor aiming to build upon it for secondary development, DeepWiki offers invaluable references for you. Welcome to explore now and join us in delving deep into the technical core of vLLM-Ascend.
+## 开始使用
 
-## Prerequisites
+推荐您使用以下版本快速开始使用：
 
-- Hardware: Atlas 800I A2 Inference series, Atlas A2 Training series, Atlas 800I A3 Inference series, Atlas A3 Training series, Atlas 300I Duo (Experimental)
-- OS: Linux
-- Software:
-    - Python >= 3.10, < 3.13
-    - CANN == 9.1.0 (For Ascend HDK version, please refer to the [Release Notes](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910/softwareinst/releasenote/9.1.0/release-notes.md))
-    - PyTorch == 2.10.0, TorchNPU == 2.10.0.post4
-    - vLLM (the same version as vllm-ascend)
+| Version    | Release type | Doc                                                    |
+|------------|--------------|--------------------------------------------------------|
+| v0.30.0 | 最新RC版本   | 请查看[快速入门](docs/cloud-edge/quick_start.md)和[安装指南](docs/cloud-edge/install.md)了解更多 |
 
-## Accessing Ascend NPU
+## 支持模型
+图例说明
+- ✅ = 支持的模型/功能
+- 🔵 = 实验性支持的模型/功能
+- ❌ = 不支持的模型/功能
+- 🟡 = 未经测试或验证
 
-If you need to access Ascend NPU computing resources for development or testing, please visit the [HiDevLab - Online Development](https://hidevlab.huawei.com/online-develop-intro) page on the Huawei HiDevLab platform to apply for and use them.
+| 模型              | 支持情况 | 备注 | BF16 | 支持的硬件 | W8A8 | 分<br/>块<br/>预<br/>填<br/>充 | 自<br/>动<br/>前<br/>缀<br/>缓<br/>存 | LoRA | 投<br/>机<br/>解<br/>码 | 异<br/>步<br/>调<br/>度 | 张<br/>量<br/>并<br/>行 | 流<br/>水<br/>线<br/>并<br/>行 | 专<br/>家<br/>并<br/>行 | 数<br/>据<br/>并<br/>行 | 与填充<br/>-<br/>解码分离 | 分段<br/>AclGraph | 全图<br/>AclGraph | max-model-len | MLP<br/>权重<br/>预取 |
+|-------------------|----------|------|------|------------|------|--------------------------------|---------------------------------------|------|-------------------------|-------------------------|-------------------------|--------------------------------|-------------------------|-------------------------|---------------------------|-------------------|-------------------|---------------|-----------------------|
+| DeepSeek V4-Flash | ✅       |      | ✅   | A2/A3      | ✅   | ✅                             | ✅                                    |      | ✅                      | ✅                      | ✅                      |                                | ✅                      | ✅                      | ✅                        |                   | ✅                | 1M            |                       |
+| GLM-5.2           | 🔵       |      | ✅   | A2/A3      | ✅   | ✅                             | ✅                                    |      | ✅                      | ✅                      | ✅                      | ✅                             | ✅                      | ✅                      | ✅                        | ✅                | ✅                | 200k          |                       |
+[更多](docs/cloud-edge/model_support_lists.md)
 
-## Getting Started
+## 贡献
 
-Please use the following recommended versions to get started quickly:
+请参考[CONTRIBUTING](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/contribution/index.html)文档了解更多关于开发环境搭建、功能测试以及 PR 提交规范的信息。
 
-| Version    | Release type | Doc                                  |
-|------------|--------------|--------------------------------------|
-| v0.26.0rc1 | Release candidate | See [QuickStart](https://docs.vllm.ai/projects/ascend/en/v0.26.0rc1/quick_start.html) and [Installation](https://docs.vllm.ai/projects/ascend/en/v0.26.0rc1/installation.html) for more details |
-| v0.23.0 | Latest stable version | See [QuickStart](https://docs.vllm.ai/projects/ascend/en/v0.23.0/quick_start.html) and [Installation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/installation.html) for more details |
+我们欢迎并重视任何形式的贡献与合作：
 
-## Branch
+- 请通过[Issue](https://github.com/vllm-project/vllm-ascend/issues)来告知我们您遇到的任何Bug。
+- 请通过[用户论坛](https://discuss.vllm.ai/c/hardware-support/vllm-ascend-support)来交流使用问题和寻求帮助。
 
-vllm-ascend has a main branch and a dev branch.
+## 社区例会
 
-- **main**: main branch, corresponds to the vLLM main branch, and is continuously monitored for quality through Ascend CI.
-- **releases/vX.Y.Z**: development branch, created alongside new releases of vLLM. For example, `releases/v0.13.0` is the dev branch for vLLM `v0.13.0` version.
+- vLLM Ascend 每周社区例会: <https://tinyurl.com/vllm-ascend-meeting>
+- 每周三下午，15:00 - 16:00 (UTC+8, [查看您的时区](https://dateful.com/convert/gmt8?t=15))
 
-Below are the maintained branches:
+## 许可证
 
-| Branch           | Status       | Note                                 |
-|------------------|--------------|--------------------------------------|
-| main             | Maintained   | CI commitment for vLLM main branch and vLLM v0.30.0 tag |
-| releases/v0.13.0 | Maintained   | Only bug fixes are allowed, and no new release tags anymore. |
-| releases/v0.18.0 | Maintained   | CI commitment for vLLM 0.18.0 version |
-| releases/v0.23.0 | Maintained   | CI commitment for vLLM 0.23.0 version |
-| rfc/<feature-name> | Maintained   | [Feature branches](https://docs.vllm.ai/projects/ascend/en/latest/community/versioning_policy.html#feature-branches) for collaboration |
-
-Please refer to [Versioning policy](https://docs.vllm.ai/projects/ascend/en/latest/community/versioning_policy.html) for more details.
-
-## Contributing
-
-See [CONTRIBUTING](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/contribution/index.html) for more details, which is a step-by-step guide to help you set up the development environment, build and test.
-
-We welcome and value any contributions and collaborations:
-
-- Please let us know if you encounter a bug by [filing an issue](https://github.com/vllm-project/vllm-ascend/issues)
-- Please use [User forum](https://discuss.vllm.ai/c/hardware-support/vllm-ascend-support) for usage questions and help.
-
-## Weekly Meeting
-
-- vLLM Ascend Weekly Meeting: <https://tinyurl.com/vllm-ascend-meeting>
-- Wednesday, 15:00 - 16:00 (UTC+8, [Convert to your timezone](https://dateful.com/convert/gmt8?t=15))
-
-## License
-
-Apache License 2.0, as found in the [LICENSE](./LICENSE) file.
+Apache 许可证 2.0，如 [LICENSE](LICENSE) 文件中所示。

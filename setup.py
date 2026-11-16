@@ -430,9 +430,9 @@ def get_path(*filepath) -> str:
 
 def read_readme() -> str:
     """Read the README file if present."""
-    p = get_path("README.md")
+    p = get_path("README_vllm-ascend.md")
     if os.path.isfile(p):
-        with open(get_path("README.md"), encoding="utf-8") as f:
+        with open(get_path("README_vllm-ascend.md"), encoding="utf-8") as f:
             return f.read()
     else:
         return ""

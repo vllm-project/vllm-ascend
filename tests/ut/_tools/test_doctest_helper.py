@@ -129,7 +129,7 @@ def test_select_doctests_by_marker_group(helper, monkeypatch, group_name, expect
             {"quickstart": ["a2", "310p"], "installation": ["pip"]},
         ),
         (set(), True, {"quickstart": ["a2", "310p"], "installation": ["pip"]}),
-        ({"README.md"}, False, {"quickstart": [], "installation": []}),
+        ({"README_vllm-ascend.md"}, False, {"quickstart": [], "installation": []}),
     ],
 )
 def test_select_doctests_by_path_or_release(helper, monkeypatch, paths, release_changed, expected):

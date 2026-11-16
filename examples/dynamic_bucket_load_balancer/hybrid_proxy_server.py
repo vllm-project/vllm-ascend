@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Dynamic bucketing-based hybrid load balance proxy server.
-# See README.md in this directory for the tutorial and usage.
+# See README_vllm-ascend.md in this directory for the tutorial and usage.
 
 import argparse
 import asyncio
