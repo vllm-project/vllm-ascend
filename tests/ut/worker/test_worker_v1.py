@@ -2093,6 +2093,7 @@ class TestNPUWorker(TestBase):
             worker.vllm_config.model_config.enable_sleep_mode = True
             worker.vllm_config.kv_transfer_config = None
             worker.use_v2_model_runner = False
+            worker.cache_config = MagicMock()
 
             # Setup allocator mock
             mock_allocator = MagicMock()
@@ -2188,6 +2189,7 @@ class TestNPUWorker(TestBase):
             worker.vllm_config.model_config.enable_sleep_mode = False
             worker.vllm_config.kv_transfer_config = None
             worker.use_v2_model_runner = False
+            worker.cache_config = MagicMock()
 
             # Create mock kv_cache_config
             mock_kv_cache_config = MagicMock()
@@ -2214,6 +2216,7 @@ class TestNPUWorker(TestBase):
             worker.vllm_config.speculative_config = None
             worker.vllm_config.model_config.enable_sleep_mode = False
             worker.use_v2_model_runner = True
+            worker.cache_config = MagicMock()
 
             mock_kv_cache_config = MagicMock()
             mock_kv_cache_config.needs_kv_cache_zeroing = True

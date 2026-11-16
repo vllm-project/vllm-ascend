@@ -1425,6 +1425,14 @@ class NPUWorker(GPUWorker):
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate NPU KV cache with the specified kv_cache_config."""
+        # Mirror core Worker.initialize_from_config, which sets this
+        # first so the post-profiling block count "is available to the
+        # warmup stage". KV connectors read ``cache_config.num_gpu_blocks``
+        # when registering their caches (e.g. MooncakeStoreConnector in
+        # ``register_kv_caches``, reached from initialize_kv_cache below);
+        # without the mirror the attribute stays None on this path and
+        # such connectors crash with an AssertionError.
+        self.cache_config.num_gpu_blocks = kv_cache_config.num_blocks
         speculator = getattr(self.model_runner, "speculator", None)
         speculative = self.vllm_config.speculative_config
         if (
