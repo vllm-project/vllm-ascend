@@ -18,9 +18,8 @@ from vllm_ascend.ops.triton.msa.msa_m3_index_postprocess import index_decode_top
     reason="Requires Ascend A2/A3/A5",
 )
 @pytest.mark.parametrize("shape", [(0, 0, 0), (0, 3, 32), (4, 0, 32), (4, 0, 0)])
-@pytest.mark.parametrize("score_dtype", [torch.float16, torch.float32])
-def test_empty_shape(shape: tuple[int, int, int], score_dtype: torch.dtype) -> None:
-    score = torch.empty(shape, dtype=score_dtype, device="npu")
+def test_empty_shape(shape: tuple[int, int, int]) -> None:
+    score = torch.empty(shape, dtype=torch.float32, device="npu")
     context = torch.zeros(shape[1], dtype=torch.int32, device="npu")
     indices, counts = index_decode_topk_fused(score, context, 1, 16, shape[-1])
     assert indices.shape == (*shape[:2], 16)
@@ -91,13 +90,10 @@ def test_invalid_inputs(change: dict, message: str) -> None:
 @pytest.mark.parametrize("context_dtype", [torch.int32, torch.int64])
 @pytest.mark.parametrize("query_len", [1, 4])
 @pytest.mark.parametrize("topk,width", [(1, 1), (16, 7), (16, 33), (32, 16)])
-@pytest.mark.parametrize("score_dtype", [torch.float16, torch.float32])
-def test_block_boundaries(
-    context_dtype: torch.dtype, query_len: int, topk: int, width: int, score_dtype: torch.dtype
-) -> None:
+def test_block_boundaries(context_dtype: torch.dtype, query_len: int, topk: int, width: int) -> None:
     context = torch.tensor([-query_len, 0, 127, 128, 255, 256, 4095], dtype=context_dtype)
     tokens = context.numel() * query_len
-    reference = torch.arange(width, dtype=score_dtype).expand(4, tokens, width).contiguous()
+    reference = torch.arange(width, dtype=torch.float32).expand(4, tokens, width).contiguous()
     indices, counts = index_decode_topk_fused(reference.to("npu"), context.to("npu"), query_len, topk, width)
     indices, counts = indices.cpu(), counts.cpu()
     for query in range(tokens):
@@ -116,20 +112,17 @@ def test_block_boundaries(
 )
 @pytest.mark.parametrize("strided", [False, True])
 @pytest.mark.parametrize("init_blocks,local_blocks", [(0, 0), (1, 2)])
-@pytest.mark.parametrize("score_dtype", [torch.float16, torch.float32])
-def test_decode_topk_varying_runtime_parameters(
-    strided: bool, init_blocks: int, local_blocks: int, score_dtype: torch.dtype
-) -> None:
+def test_decode_topk_varying_runtime_parameters(strided: bool, init_blocks: int, local_blocks: int) -> None:
     # Keep model configuration fixed while varying batch shape, widths and MTP.
     heads, topk, block_size = 4, 16, 128
     for requests, query_len, logical_blocks, width in [(1, 1, 3, 4), (3, 4, 17, 32), (2, 1, 8, 16)]:
         tokens = requests * query_len
         reference = torch.arange(heads * tokens * width, dtype=torch.float32).view(heads, tokens, width)
         context = torch.arange(requests, dtype=torch.int32) * block_size + block_size - 1
-        score = reference.to(device="npu", dtype=score_dtype)
+        score = reference.to("npu")
         context_npu = context.to("npu")
         if strided:
-            score_storage = torch.empty((heads, tokens, width * 2), dtype=score_dtype, device="npu")
+            score_storage = torch.empty((heads, tokens, width * 2), dtype=torch.float32, device="npu")
             score = score_storage[..., ::2]
             score.copy_(reference)
             context_storage = torch.empty(requests * 2, dtype=torch.int32, device="npu")

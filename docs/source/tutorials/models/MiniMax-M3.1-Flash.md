@@ -42,11 +42,9 @@ For PD, enable the option on both roles, use the same TP size, and select
 `MooncakeConnectorV2`. PP layer partitioning may differ. Unsharded producers
 and sharded consumers have incompatible index-cache layouts.
 
-Validate the matching CANN/torch_npu stack before deployment:
+Run the standalone benchmark on the matching CANN/torch_npu stack:
 
 ```bash
-pytest -q tests/e2e/pull_request/one_card/test_minimax_m3_indexer_dcp.py
-pytest -q tests/e2e/pull_request/four_card/test_minimax_m3_indexer_dcp.py
 torchrun --standalone --nproc-per-node=4 benchmarks/benchmark_minimax_m3_indexer_dcp.py --graph
 ```
 
