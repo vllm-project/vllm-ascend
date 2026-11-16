@@ -58,7 +58,8 @@ def test_failed_startup_is_not_cached(helper):
 
 
 @pytest.mark.parametrize("failed", [False, True])
-def test_real_allocator_orders_startup_before_client_creation(monkeypatch, failed):
+@pytest.mark.parametrize("sharded", [False, True])
+def test_real_allocator_orders_startup_before_client_creation(monkeypatch, failed, sharded):
     calls = []
     package = ModuleType("_allocator_order_test")
     package.__path__ = []
@@ -71,6 +72,8 @@ def test_real_allocator_orders_startup_before_client_creation(monkeypatch, faile
             raise RuntimeError("scheduler startup failed")
 
     class Client:
+        manifest = {"shard": {"index": 0, "count": 1}}
+
         def __init__(self, *args, **kwargs):
             calls.append("client")
 
@@ -81,8 +84,16 @@ def test_real_allocator_orders_startup_before_client_creation(monkeypatch, faile
         def close(self):
             calls.append("close")
 
+    class ShardedClient:
+        def __init__(self, *args, **kwargs):
+            calls.append("sharded-client")
+
+        view = Client.view
+        close = Client.close
+
     monkeypatch.setattr(common, "warmup_shared_engram_aicpu", warm, raising=False)
     monkeypatch.setattr(pool, "SharedPoolClient", Client, raising=False)
+    monkeypatch.setattr(pool, "ShardedPoolClient", ShardedClient, raising=False)
     monkeypatch.setitem(sys.modules, common.__name__, common)
     monkeypatch.setitem(sys.modules, pool.__name__, pool)
     owner = next(
@@ -109,7 +120,7 @@ def test_real_allocator_orders_startup_before_client_creation(monkeypatch, faile
         dim=256,
         block_size=32,
         storage_dtype=torch.int8,
-        _shared_pool_spec=("pool", "identity", "table"),
+        _shared_pool_spec=(["pool0", "pool1"] if sharded else "pool", "identity", "table"),
     )
     if failed:
         with pytest.raises(RuntimeError, match="scheduler startup"):
@@ -117,4 +128,4 @@ def test_real_allocator_orders_startup_before_client_creation(monkeypatch, faile
         assert calls == ["aicpu"]
     else:
         namespace["_allocate_weights"](embedding)
-        assert calls == ["aicpu", "client", "table.weight", "table.scale"]
+        assert calls == ["aicpu", "sharded-client" if sharded else "client", "table.weight", "table.scale"]
