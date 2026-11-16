@@ -397,7 +397,9 @@ def run_pool_hit_sequence(
 
 AB_TTFT_LIMIT = 1.08
 AB_THROUGHPUT_LIMIT = 0.92
-AB_SAMPLES = 10
+# 20 measured samples: the nearest-rank p95 then selects the 19th sample instead
+# of the maximum, so a single outlier no longer defines the reported p95.
+AB_SAMPLES = 20
 AB_WARMUP = 2
 # Leave time for worker processes and NPU memory to be reclaimed between legs.
 AB_LEG_GAP_SECONDS = 10
