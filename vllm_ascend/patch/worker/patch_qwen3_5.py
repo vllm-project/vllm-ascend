@@ -36,6 +36,7 @@ from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention, initialize_packed_conv_weight
 from vllm_ascend.ops.gdn_checkpoint import initialize_gdn_checkpoints
+from vllm_ascend.ops.layernorm import get_gemma_rms_norm_weight
 
 _GDN_PATCH_TARGET = _GDNBaseCls
 _GDN_ORIGINAL_INIT = _GDN_PATCH_TARGET.__init__
@@ -61,8 +62,8 @@ class AscendQwen3NextAttention(Qwen3NextAttention):
 
             q, k, v, gate = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
                 qkv=qkv,
-                q_weight=1.0 + self.q_norm.weight,
-                k_weight=1.0 + self.k_norm.weight,
+                q_weight=get_gemma_rms_norm_weight(self.q_norm),
+                k_weight=get_gemma_rms_norm_weight(self.k_norm),
                 cos_sin=cos_sin,
                 num_q_heads=self.num_heads,
                 num_kv_heads=self.num_kv_heads,

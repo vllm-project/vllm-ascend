@@ -997,7 +997,8 @@ class BaseDeviceAdaptor:
         return Ad
 
     @staticmethod
-    def npu_gemma_rms_norm(x, weight, variance_epsilon):
+    def npu_gemma_rms_norm(x, weight, variance_epsilon, *, effective_weight=None):
+        # The native Gemma kernel consumes raw weights and handles the offset.
         x, _ = torch.ops._C_ascend.npu_gemma_rms_norm(x, weight, variance_epsilon)
         return x
 
@@ -2040,8 +2041,10 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         return Ad
 
     @staticmethod
-    def npu_gemma_rms_norm(x, weight, variance_epsilon):
-        x, _ = torch_npu.npu_rms_norm(x, 1.0 + weight, variance_epsilon)
+    def npu_gemma_rms_norm(x, weight, variance_epsilon, *, effective_weight=None):
+        if effective_weight is None:
+            effective_weight = 1.0 + weight
+        x, _ = torch_npu.npu_rms_norm(x, effective_weight, variance_epsilon)
         return x
 
     @staticmethod

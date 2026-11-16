@@ -303,3 +303,24 @@ def test_clipped_swiglu_kernel_selection_per_adaptor(adaptor, uses_fused_kernel)
     gate = torch.clamp(x[..., :d], max=limit)
     up = torch.clamp(x[..., d:], min=-limit, max=limit)
     torch.testing.assert_close(out, gate * torch.sigmoid(alpha * gate) * (up + beta))
+
+
+@pytest.mark.parametrize("prepared", [False, True])
+def test_a5_gemma_norm_consumes_effective_weight(prepared):
+    x = torch.randn(2, 8, dtype=torch.bfloat16)
+    raw_weight = torch.randn(8, dtype=torch.bfloat16)
+    effective_weight = 1.0 + raw_weight if prepared else None
+    with mock.patch("vllm_ascend.device.device_op.torch_npu.npu_rms_norm", create=True, return_value=(x, None)) as op:
+        assert A5DeviceAdaptor.npu_gemma_rms_norm(x, raw_weight, 1e-6, effective_weight=effective_weight) is x
+    gamma = op.call_args.args[1]
+    if prepared:
+        assert gamma is effective_weight
+    torch.testing.assert_close(gamma, 1.0 + raw_weight, rtol=0, atol=0)
+
+
+def test_native_gemma_norm_keeps_raw_weight_contract():
+    x = torch.randn(2, 8, dtype=torch.bfloat16)
+    raw_weight = torch.randn(8, dtype=torch.bfloat16)
+    with mock.patch.object(torch.ops._C_ascend, "npu_gemma_rms_norm", create=True, return_value=(x, None)) as op:
+        assert BaseDeviceAdaptor.npu_gemma_rms_norm(x, raw_weight, 1e-6, effective_weight=1.0 + raw_weight) is x
+    assert op.call_args.args[1] is raw_weight
