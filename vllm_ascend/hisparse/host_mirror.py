@@ -122,7 +122,7 @@ class _DirectMirrorSources:
             and tuple(
                 index
                 for index, cache in enumerate(worker.cache_handles)
-                if getattr(cache, "num_write_tokens", cache.num_actual_tokens) and index not in worker._draft_layers
+                if cache.num_actual_tokens and index not in worker._draft_layers
             )
             == self._targets
         )
@@ -172,10 +172,16 @@ class HostMirrorConnector:
         return self._connector.pre_forward(scheduler_output, input_batch, attn_metadata=attn_metadata)
 
     def finish_forward(self) -> None:
+        from vllm_ascend.hisparse.pcp import PCPHiSparseConnector
+
         eligible = self._eligible_forward
         self._eligible_forward = False
         worker = self._worker
-        if not eligible or self._connector._disabled or not self._sources.can_defer(worker):
+        if not eligible or self._connector._disabled:
+            return self._connector.finish_forward()
+        if isinstance(self._connector, PCPHiSparseConnector):
+            self._connector.prepare_host_mirror()
+        if not self._sources.can_defer(worker):
             return self._connector.finish_forward()
 
         compute_stream = torch.accelerator.current_stream()

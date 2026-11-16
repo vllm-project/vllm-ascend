@@ -26,7 +26,7 @@ from vllm_ascend.attention.sfa_v1 import (
 )
 from vllm_ascend.hisparse import cache_ops
 from vllm_ascend.hisparse.c8 import C8_ROW_BYTES
-from vllm_ascend.hisparse.pcp import prepare_pcp_query_metadata
+from vllm_ascend.hisparse.pcp import hisparse_write_target, prepare_pcp_query_metadata, prepare_pcp_query_states
 
 # Bound the temporary D2D packing workspace independently of prefill length.
 _ATTENTION_CHUNK_ROWS = 32
@@ -39,8 +39,18 @@ def finish_hisparse_kv_update(cache, metadata) -> None:
     Preserve the device KV writes in those forwards, but leave Host mirror
     submission to the real connector step after graph replay.
     """
-    if not getattr(metadata, "hisparse_for_capture", False):
+    if getattr(metadata, "hisparse_for_capture", False):
+        return
+    has_prefill = getattr(metadata, "hisparse_write_has_prefill", None)
+    if has_prefill is None:
         cache.finish_kv_update()
+    elif (
+        not cache.dummy_batch
+        and has_prefill
+        and cache.submit_layer_mirror is not None
+        and get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.FULL
+    ):
+        cache.submit_layer_mirror()
 
 
 class _PrefillColumnSelection(TorchFunctionMode):
@@ -347,7 +357,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
                 attn_metadata=attn_metadata,
             )
         cache = self.hisparse_cache
-        destination, mapping, _ = cache.write_target(rows, slot_mapping.numel())
+        destination, mapping, _ = hisparse_write_target(cache, attn_metadata, rows, slot_mapping.numel())
         result = super()._sfa_preprocess_prolog_v3(
             hidden_states,
             (destination.unsqueeze(2),),
@@ -367,7 +377,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
         # collective has the same rank-major ordering as gathered slot mapping.
         gathered = get_pcp_group().all_gather(packed, dim=0)
         cache = self.hisparse_cache
-        destination, mapping, count = cache.write_target(gathered.shape[0], gathered.shape[0])
+        destination, mapping, count = hisparse_write_target(cache, attn_metadata, gathered.shape[0], gathered.shape[0])
         payload = gathered[:count].view(torch.uint8)
         cache_ops.scatter_packed_kv(
             payload,
@@ -390,6 +400,8 @@ class AscendHiSparseImpl(AscendSFAImpl):
             # graph capture, including dummy forwards without attention metadata.
             self._kv_workspace(hidden_states.dtype)
         self.index_group.prepare_for_batch(self.index_group_index, attn_metadata)
+        if self.index_group_index == 0:
+            prepare_pcp_query_states(self.hisparse_cache, attn_metadata)
         return super().forward(layer_name, hidden_states, kv_cache, attn_metadata, output)
 
     def _exec_kv_local(self, kv_no_split, cos, sin, kv_cache, slots, attn_metadata):
@@ -401,7 +413,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
             rows = latent.numel() // self.kv_lora_rank
             packed = pack_c8_components(latent.contiguous(), rope.contiguous(), scales.contiguous())
             cache = self.hisparse_cache
-            destination, mapping, count = cache.write_target(rows, slots.numel())
+            destination, mapping, count = hisparse_write_target(cache, attn_metadata, rows, slots.numel())
             packed = packed[:count]
             # Reuse the existing byte-capable scatter; no fused C8 kernel or
             # payload conversion is needed for the baseline data path.
@@ -433,7 +445,7 @@ class AscendHiSparseImpl(AscendSFAImpl):
             latent = self.kv_a_layernorm(values)
             rope = values[:, self.kv_lora_rank :]
         cache = self.hisparse_cache
-        destination, mapping, num_rows = cache.write_target(values.shape[0], slots.numel())
+        destination, mapping, num_rows = hisparse_write_target(cache, attn_metadata, values.shape[0], slots.numel())
         num_valid_rows = attn_metadata.query_start_loc[-1:]
         cache_ops.scatter_packed_kv(latent[:num_rows], rope[:num_rows], destination, mapping, num_valid_rows)
         # The common connector mirrors resident rows after this write. Draft

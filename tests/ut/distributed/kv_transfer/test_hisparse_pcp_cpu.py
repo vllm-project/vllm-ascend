@@ -13,28 +13,22 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import HiSpars
 from vllm.v1.hisparse.runtime import HiSparseCacheHandle
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
-from vllm_ascend.hisparse.pcp import PCPHiSparseConnector, get_pcp_write_request_ids, prepare_pcp_query_metadata
-from vllm_ascend.patch.worker.patch_hisparse import install_pcp_cache_layout
-
-install_pcp_cache_layout()
-
-
-def test_cache_layout_install_is_idempotent():
-    prepare = HiSparseCacheHandle._prepare_for_batch
-    mirror = HiSparseConnectorWorker._enqueue_host_mirror
-    install_pcp_cache_layout()
-    assert HiSparseCacheHandle._prepare_for_batch is prepare
-    assert HiSparseConnectorWorker._enqueue_host_mirror is mirror
+from vllm_ascend.hisparse.pcp import (
+    PCPHiSparseConnector,
+    get_pcp_write_request_ids,
+    hisparse_write_target,
+    prepare_pcp_query_metadata,
+    prepare_pcp_query_states,
+)
 
 
 @pytest.mark.parametrize("pcp_world_size", [1, 2, 4, 8])
 @pytest.mark.parametrize("initial_capacity", [4, 128])
 @pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
 def test_pcp_host_staging_is_sized_before_capture(monkeypatch, initial_capacity, dtype, pcp_world_size):
-    from vllm_ascend.patch.worker import patch_hisparse
+    from vllm_ascend.hisparse import pcp
 
     cache = handle()
-    cache.num_write_tokens = 6
     staging = NS(slots=torch.empty(initial_capacity, dtype=dtype))
     original = staging.slots
     worker = NS(
@@ -54,14 +48,11 @@ def test_pcp_host_staging_is_sized_before_capture(monkeypatch, initial_capacity,
         kwargs.pop("pin_memory")
         return allocate(size, **kwargs)
 
-    monkeypatch.setattr(patch_hisparse.torch, "empty", pinned_empty)
-    patch_hisparse.prepare_pcp_mirror_staging(worker)
+    monkeypatch.setattr(pcp.torch, "empty", pinned_empty)
+    pcp.prepare_pcp_mirror_staging(worker)
     capacity = 8 * pcp_world_size + 2 * (3 + 1)
     assert staging.slots.numel() >= capacity
     assert staging.slots.dtype == dtype
-    assert cache.num_write_tokens == 0
-    assert cache.write_req_id_per_token is None
-    assert cache.write_has_prefill is False
     if initial_capacity < capacity:
         assert allocations == [(capacity, {"dtype": dtype, "pin_memory": True})]
     else:
@@ -70,13 +61,19 @@ def test_pcp_host_staging_is_sized_before_capture(monkeypatch, initial_capacity,
 
 def test_forward_clear_removes_gathered_write_metadata():
     cache = handle()
-    cache._prepare_for_batch(gathered_metadata()[0])
+    meta, *_ = gathered_metadata()
+    cache._prepare_for_batch(meta)
+    connector = PCPHiSparseConnector.__new__(PCPHiSparseConnector)
+    connector.kv_connector = NS(connector_worker=NS(_group_leaders=[("layer0", cache)]))
+    connector._pcp_attn_metadata = {"layer0": meta}
+    connector.prepare_host_mirror()
+    assert cache.num_actual_tokens == 6
     worker = NS(cache_handles=[cache], _per_layer_mirrored={0}, _submitted_mirror_layers={0})
     HiSparseConnectorWorker._clear_forward_mirror_state(worker)
     assert not worker._per_layer_mirrored and not worker._submitted_mirror_layers
-    assert cache.num_actual_tokens == cache.num_write_tokens == 0
-    assert cache.req_id_per_token is cache.write_req_id_per_token is None
-    assert not cache.write_has_prefill
+    assert cache.num_actual_tokens == 0
+    assert cache.req_id_per_token is None
+    assert not cache.host_mirror_required
 
 
 def test_zero_local_queries_still_allow_target_mirror_defer():
@@ -85,7 +82,7 @@ def test_zero_local_queries_still_allow_target_mirror_defer():
     worker = NS(
         resident_caches=[object()],
         host_caches=[object()],
-        cache_handles=[NS(num_actual_tokens=0, num_write_tokens=6)],
+        cache_handles=[NS(num_actual_tokens=6)],
         _dma_submitted=False,
         _per_layer_mirrored=set(),
         _submitted_mirror_layers=set(),
@@ -209,6 +206,7 @@ def test_global_write_ids_and_local_dual_chunk_states_are_distinct():
     cache = handle()
     canonical_states = cache.runtime.request_state_indices
     cache._prepare_for_batch(meta)
+    prepare_pcp_query_states(cache, meta)
     assert canonical_states.tolist() == [7, 9]
     assert cache.runtime.request_state_indices.tolist() == [7, 7, 9]
 
@@ -218,7 +216,8 @@ def test_write_target_keeps_gathered_tail_and_masks_padding(prefill):
     meta, *_ = gathered_metadata(prefill=prefill)
     cache = handle()
     cache._prepare_for_batch(meta)
-    _, slots, count = cache.write_target(6, 6)
+    prepare_pcp_query_states(cache, meta)
+    _, slots, count = hisparse_write_target(cache, meta, 6, 6)
     assert count == 6  # local queries=3, max requests=2 must not truncate KV.
     assert slots.tolist() == [10, 11, -1, 12, 13, -1]
     assert cache.host_mirror_required == prefill
@@ -231,18 +230,19 @@ def test_non_pcp_write_target_preserves_request_cap():
 
 
 def test_zero_local_queries_still_publish_global_prefill(monkeypatch):
-    import vllm.v1.hisparse.runtime as runtime_module
     from vllm.config.compilation import CUDAGraphMode
+
+    import vllm_ascend.attention.sfa_hisparse as module
 
     meta, *_ = gathered_metadata(local_tokens=0, prefill=True)
     cache = handle()
     cache.submit_layer_mirror = Mock()
     cache._prepare_for_batch(meta)
-    monkeypatch.setattr(runtime_module, "get_forward_context", lambda: NS(cudagraph_runtime_mode=CUDAGraphMode.NONE))
+    prepare_pcp_query_states(cache, meta)
+    monkeypatch.setattr(module, "get_forward_context", lambda: NS(cudagraph_runtime_mode=CUDAGraphMode.NONE))
     assert cache.num_actual_tokens == 0
-    assert cache.num_write_tokens == 6
     assert cache.host_mirror_required
-    cache.finish_kv_update()
+    module.finish_hisparse_kv_update(cache, meta)
     cache.submit_layer_mirror.assert_called_once()
 
 
@@ -255,7 +255,9 @@ def make_connector():
     cache.runtime.hot_block_table = original_tables[1]
     cache.block_table = torch.tensor([[901], [902]])
     underlying = NS(
-        connector_worker=NS(cache_handles=[cache]), handle_preemptions=Mock(), bind_connector_metadata=Mock()
+        connector_worker=NS(cache_handles=[cache], _group_leaders=[("layer0", cache)]),
+        handle_preemptions=Mock(),
+        bind_connector_metadata=Mock(),
     )
     active = ActiveKVConnector.__new__(ActiveKVConnector)
     active.kv_connector = underlying
@@ -274,6 +276,83 @@ def make_connector():
         active, manager, NS(slot_mappings=original_slots, input_block_tables=original_tables), 0
     )
     return connector, cache, meta, local, global_batch, manager
+
+
+@pytest.mark.parametrize("local_tokens", [0, 3])
+@pytest.mark.parametrize("overlap", [False, True])
+def test_connector_reuses_core_mirror_and_clear_after_local_queries(monkeypatch, local_tokens, overlap):
+    import vllm.v1.worker.gpu.kv_connector as connector_module
+
+    from vllm_ascend.hisparse.host_mirror import HostMirrorConnector
+
+    connector, cache, _, local, batch, _ = make_connector()
+    meta, *_ = gathered_metadata(local_tokens=local_tokens, prefill=True)
+    del connector._start_load_kv
+    worker = connector.kv_connector.connector_worker
+    worker.is_host_writer = True
+    worker._draft_layers = set()
+    worker._per_layer_mirrored = set()
+    worker._submitted_mirror_layers = set()
+    worker._enqueue_row_dma = Mock()
+    worker._invalidate_written_slots = Mock()
+
+    def start_load(context, **kwargs):
+        cache.runtime.request_state_indices = kwargs["request_state_indices"]
+        cache.prepare_group_for_batch(kwargs["attn_metadata"]["layer0"])
+
+    def finish():
+        HiSparseConnectorWorker._enqueue_host_mirror(worker)
+        HiSparseConnectorWorker._clear_forward_mirror_state(worker)
+
+    connector.kv_connector.start_load_kv = Mock(side_effect=start_load)
+    connector.kv_connector.finish_forward = Mock(side_effect=finish)
+    monkeypatch.setattr(connector_module, "is_forward_context_available", lambda: True)
+    monkeypatch.setattr(connector_module, "get_forward_context", lambda: NS())
+    scheduler = NS(kv_connector_metadata=object(), has_sync_kv_loads=True)
+    connector.pre_forward(scheduler, local, {"layer0": meta})
+    assert connector._pending_load_kwargs is None
+    assert batch.idx_mapping.tolist() == [7, 9]
+    assert cache.runtime.request_state_indices.tolist() == [7, 7, 9]
+    # FULL replay skips Python attention.forward: Core's query classification
+    # must still see local rows until the connector's Host mirror boundary.
+    assert cache.num_actual_tokens == local_tokens
+    assert cache.num_decode_tokens == 0
+    if overlap:
+        sources = NS(can_defer=Mock(return_value=False))
+        wrapper = HostMirrorConnector(connector, worker, None, sources)
+        wrapper._eligible_forward = True
+        wrapper.finish_forward()
+        sources.can_defer.assert_called_once_with(worker)
+    else:
+        connector.finish_forward()
+    worker._enqueue_row_dma.assert_called_once_with((0,), ready_event=None)
+    assert worker._invalidate_written_slots.call_args.args[2].tolist() == [0, 0, -1, 0, 1, -1]
+    assert cache.num_actual_tokens == 0 and cache.req_id_per_token is None
+    assert not cache.host_mirror_required
+
+
+def test_query_binding_preserves_group_counts_and_enables_early_mirror():
+    leader, follower = handle(), handle()
+    leader.index_group_caches = [leader, follower]
+    meta, *_ = gathered_metadata(local_tokens=0, prefill=True)
+    leader.prepare_group_for_batch(meta)
+    prepare_pcp_query_states(leader, meta)
+    for cache in leader.index_group_caches:
+        assert cache.num_actual_tokens == 0 and cache.num_decode_tokens == 0
+        assert cache.runtime.request_state_indices is meta.hisparse_request_state_indices
+        assert cache.host_mirror_required
+    # Exercise the original early-DMA gate, rather than substituting its body.
+    ready = Mock()
+    worker = NS(
+        cache_handles=[leader],
+        _slot_mapping_staging=None,
+        _per_layer_mirrored=set(),
+        _submitted_mirror_layers=set(),
+        _layer_ready_events=[ready],
+        _enqueue_row_dma=Mock(),
+    )
+    HiSparseConnectorWorker._enqueue_layer_mirror(worker, 0)
+    worker._enqueue_row_dma.assert_called_once_with((0,), ready_event=ready)
 
 
 def test_connector_stages_canonical_requests_and_gathered_slot_rows():
@@ -350,6 +429,7 @@ def test_capture_and_real_forward_keep_query_and_scatter_input_addresses():
     # Capture and real forwards are both prepared by the metadata builder.
     prepare_pcp_query_metadata(meta, states, valid_rows, torch.zeros(3, dtype=torch.int64), 2)
     cache._prepare_for_batch(meta)
+    prepare_pcp_query_states(cache, meta)
     captured_states = cache.runtime.request_state_indices
     captured_slots = cache.slot_mapping
     prepare_pcp_query_metadata(meta, states, valid_rows, local.idx_mapping, 2)
@@ -403,8 +483,9 @@ def test_connector_eager_reads_metadata_from_forward_context(monkeypatch):
     assert meta.hisparse_num_write_tokens == 6
     assert meta.hisparse_num_valid_write_rows.tolist() == [6]
     cache._prepare_for_batch(meta)
+    prepare_pcp_query_states(cache, meta)
     assert cache.runtime.request_state_indices.tolist() == [7, 7, 9]
-    assert cache.write_target(6, 6)[2] == 6
+    assert hisparse_write_target(cache, meta, 6, 6)[2] == 6
 
 
 def test_worker_mirrors_global_rows_without_any_local_queries():
@@ -414,6 +495,7 @@ def test_worker_mirrors_global_rows_without_any_local_queries():
     cache.mirror_slot_mapping = torch.tensor([30, 33, -1, 31, 34, -1])
     worker = NS(
         cache_handles=[cache],
+        _group_leaders=[("layer0", cache)],
         is_host_writer=True,
         _draft_layers=set(),
         _per_layer_mirrored=set(),
@@ -421,11 +503,51 @@ def test_worker_mirrors_global_rows_without_any_local_queries():
         _enqueue_row_dma=Mock(),
         _invalidate_written_slots=Mock(),
     )
+    connector = PCPHiSparseConnector.__new__(PCPHiSparseConnector)
+    connector.kv_connector = NS(connector_worker=worker)
+    connector._pcp_attn_metadata = {"layer0": meta}
+    assert cache.num_actual_tokens == 0
+    connector.prepare_host_mirror()
     HiSparseConnectorWorker._enqueue_host_mirror(worker)
     worker._enqueue_row_dma.assert_called_once_with((0,), ready_event=None)
     args = worker._invalidate_written_slots.call_args.args
     assert args[1].tolist() == [30, 33, -1, 31, 34, -1]
     assert args[2].tolist() == [0, 0, -1, 0, 1, -1]
+
+
+def test_attention_binds_query_group_once_before_followers(monkeypatch):
+    from vllm_ascend.attention import sfa_hisparse
+    from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
+
+    leader, follower = handle(), handle()
+    leader.index_group_caches = follower.index_group_caches = [leader, follower]
+    meta, *_ = gathered_metadata(local_tokens=0, prefill=True)
+
+    def prepare_for_batch(index, metadata):
+        if index == 0:
+            leader.prepare_group_for_batch(metadata)
+
+    group = NS(prepare_for_batch=Mock(side_effect=prepare_for_batch))
+    bind = Mock(wraps=prepare_pcp_query_states)
+    monkeypatch.setattr(sfa_hisparse, "prepare_pcp_query_states", bind)
+    forward = Mock(return_value=object())
+    monkeypatch.setattr(AscendSFAImpl, "forward", forward)
+    for index, cache in enumerate([leader, follower]):
+        impl = sfa_hisparse.AscendHiSparseImpl.__new__(sfa_hisparse.AscendHiSparseImpl)
+        impl.enable_sparse_sfa_c8 = True
+        impl.pcp_enabled = False
+        impl.qk_rope_head_dim = 0
+        impl._c8_length_workspace = Mock()
+        impl.index_group = group
+        impl.index_group_index = index
+        impl.hisparse_cache = cache
+        assert impl.forward(f"layer{index}", None, None, meta) is forward.return_value
+        assert cache.runtime.request_state_indices is meta.hisparse_request_state_indices
+        assert cache.host_mirror_required
+
+    bind.assert_called_once_with(leader, meta)
+    assert group.prepare_for_batch.call_count == 2
+    assert forward.call_count == 2
 
 
 def test_c8_scatter_covers_gathered_tail(monkeypatch):
@@ -459,7 +581,7 @@ def test_c8_scatter_covers_gathered_tail(monkeypatch):
     monkeypatch.setattr(cache_ops, "scatter_packed_kv", scatter)
     impl._exec_kv_local(None, None, None, None, impl.hisparse_cache.slot_mapping, meta)
     torch.testing.assert_close(impl.hisparse_cache.view.cache[3], packed[4])
-    impl.hisparse_cache.finish_kv_update.assert_called_once()
+    impl.hisparse_cache.finish_kv_update.assert_not_called()
 
 
 def test_pcp_reuses_supported_c8_prolog(monkeypatch):
@@ -489,7 +611,7 @@ def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, cap
     impl.is_pcp_decode_sharded = True
     impl.hisparse_cache = handle()
     impl.hisparse_cache.finish_kv_update = Mock()
-    meta, *_ = gathered_metadata()
+    meta, *_ = gathered_metadata(prefill=True)
     meta.num_input_tokens = 3
     meta.hisparse_for_capture = capture
     num_write_rows = meta.num_input_tokens * pcp_world_size
@@ -497,6 +619,10 @@ def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, cap
     meta.hisparse_num_valid_write_rows.fill_(num_write_rows)
     meta.hisparse_write_req_id_per_token = torch.zeros(num_write_rows, dtype=torch.int32)
     impl.hisparse_cache._prepare_for_batch(meta)
+    impl.hisparse_cache.submit_layer_mirror = Mock()
+    from vllm.config.compilation import CUDAGraphMode
+
+    monkeypatch.setattr(module, "get_forward_context", lambda: NS(cudagraph_runtime_mode=CUDAGraphMode.NONE))
     impl.hisparse_cache.slot_mapping = torch.arange(num_write_rows) + 10
     impl.hisparse_cache.slot_mapping[2::3] = -1
     impl.hisparse_cache.view.cache = torch.zeros(num_write_rows, 656, dtype=torch.uint8)
@@ -534,7 +660,8 @@ def test_pcp_prolog_gathers_local_scratch_before_resident_write(monkeypatch, cap
     impl._sync_pcp_kv_cache((), meta)
     expected = [10 * rank + row if row else 0 for rank in range(pcp_world_size) for row in (1, 2, 0)]
     assert impl.hisparse_cache.view.cache[:, 0].tolist() == expected
-    assert impl.hisparse_cache.finish_kv_update.call_count == (0 if capture else 1)
+    impl.hisparse_cache.finish_kv_update.assert_not_called()
+    assert impl.hisparse_cache.submit_layer_mirror.call_count == (0 if capture else 1)
 
 
 def test_native_packed_store_does_not_write_host_source():
