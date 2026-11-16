@@ -442,6 +442,23 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.ascend_mc2_mask: torch.Tensor | None = None
         if not self._use_v2_model_runner:
             self.init_eplb(n_shared_experts)
+        if ascend_config.enable_moonep:
+            if (
+                self.dynamic_eplb or ascend_config.eplb_config.dynamic_eplb or self.mix_placement
+                or getattr(vllm_config.parallel_config, "enable_eplb", False)
+                or getattr(self, "expert_placement_strategy", "linear") != "linear"
+            ):
+                raise NotImplementedError("MoonEP requires dynamic EPLB and mix placement to be disabled")
+            if getattr(self.moe_config, "has_bias", False):
+                raise NotImplementedError("MoonEP Slot does not support expert bias")
+            if getattr(self.quant_method, "use_expert_weight_list", False):
+                raise NotImplementedError("MoonEP Slot requires unsplit per-layer expert tensors")
+            from vllm_ascend.ops.fused_moe.moonep_comm import register_moonep_layer
+
+            register_moonep_layer(
+                E=self.moe_config.num_experts, K=self.top_k,
+                H=self.hidden_size, nle=self.local_num_experts, layer=self,
+            )
         self.return_with_event = False
 
         runner_type = getattr(vllm_config.model_config, "runner_type", None)

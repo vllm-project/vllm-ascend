@@ -64,6 +64,7 @@ from vllm_ascend.ascend_forward_context import (
     select_moe_comm_method,
     set_mc2_mask,
     set_mc2_tokens_capacity,
+    set_moonep_tokens_capacity,
 )
 from vllm_ascend.attention.attention_c8_mxfp import (
     AscendC8MXFPAttentionBackendImpl,
@@ -290,6 +291,8 @@ class NPUModelRunner(GPUModelRunner):
         # TODO: remove set_cos_and_sin (together with update_cos_sin) when mla can properly handle cos/sin internally
         set_cos_and_sin(vllm_config, self.max_num_reqs, self.decode_query_len, self.dtype, self.device)
         set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.decode_query_len)
+        if getattr(self.ascend_config, "enable_moonep", False):
+            set_moonep_tokens_capacity(vllm_config)
         set_mc2_mask(vllm_config, self.device)
         set_potential_max_tokens(vllm_config)
 
@@ -333,6 +336,12 @@ class NPUModelRunner(GPUModelRunner):
             with track_host_offload_owners() as owners:
                 try:
                     super().load_model(load_dummy_weights, *args, **kwargs)
+                    if getattr(get_ascend_config(), "enable_moonep", False):
+                        from vllm_ascend.ops.fused_moe.moonep_balance import maybe_install_pf_stream
+                        from vllm_ascend.ops.fused_moe.moonep_comm import ensure_runtime_initialized
+
+                        ensure_runtime_initialized()
+                        maybe_install_pf_stream(self.model)
                 except BaseException:
                     # self.model may not exist yet. Close every recorded owner
                     # without collectives and retain failures for shutdown retry.

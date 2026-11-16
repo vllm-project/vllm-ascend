@@ -664,6 +664,7 @@ class AscendConfig:
         )
     )
     enable_prefill_mc2: bool = False
+    enable_moonep: bool = False
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
     kv_trace: KVTraceConfig = dataclasses.field(default_factory=KVTraceConfig)

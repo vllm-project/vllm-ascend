@@ -10,6 +10,7 @@ from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parall
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
 from vllm_ascend.device.hardware_profile import (
     HardwareCapability,
@@ -44,6 +45,7 @@ class MoECommType(Enum):
     MC2 = 1
     ALLTOALL = 2
     FUSED_MC2 = 3
+    SHMEM = 4
 
 
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
@@ -320,6 +322,36 @@ def get_mc2_tokens_capacity():
     return _mc2_tokens_capacity
 
 
+# MoonEP dispatch capacity (S): the static per-rank token capacity of the
+# ascend-moonep Buffer. Set from the scheduler's max_num_batched_tokens so that
+# every per-step MoE call fits inside the pre-allocated symmetric memory.
+_moonep_tokens_capacity: int | None = None
+
+
+def set_moonep_tokens_capacity(vllm_config) -> None:
+    """Set the MoonEP static per-rank token capacity S.
+
+    Steps never exceed ``max_num_batched_tokens`` (the scheduler batches one
+    step at a time), so sizing the symmetric buffers to that value guarantees
+    dispatch never overflows, at the cost of a per-rank symmetric footprint of
+    O(S*K*H). Only meaningful when ``enable_moonep`` is on.
+    """
+    global _moonep_tokens_capacity
+    if _moonep_tokens_capacity is not None:
+        return
+    max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+    # Decode / profile / capture steps may run with more tokens than the
+    # scheduler batch cap when prefill chunking is off; cover the graph
+    # capture sizes as well.
+    if vllm_config.compilation_config.cudagraph_capture_sizes:
+        max_num_tokens = max(max_num_tokens, vllm_config.compilation_config.max_cudagraph_capture_size)
+    _moonep_tokens_capacity = int(max_num_tokens)
+
+
+def get_moonep_tokens_capacity():
+    return _moonep_tokens_capacity
+
+
 def set_mc2_mask(vllm_config, device):
     global _reserved_mc2_mask
     if _reserved_mc2_mask is not None:
@@ -438,6 +470,13 @@ def select_moe_comm_method(
     if not is_moe_model(vllm_config):
         return None
 
+    moonep_enabled = getattr(get_ascend_config(), "enable_moonep", False)
+    if moonep_enabled:
+        if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group().world_size <= 1:
+            raise RuntimeError("MoonEP requires expert parallel over more than one rank")
+        if getattr(vllm_config, "lora_config", None) is not None:
+            raise NotImplementedError("MoonEP Slot does not support MoE LoRA")
+
     mc2_tokens_capacity = get_mc2_tokens_capacity()
     moe_comm_policy = get_current_hardware_profile().moe_comm_policy
     lora_config = getattr(vllm_config, "lora_config", None)
@@ -459,6 +498,14 @@ def select_moe_comm_method(
             is_draft_model,
             draft_moe_quant_type,
         )
+    if moonep_enabled:
+        capacity = get_moonep_tokens_capacity()
+        keep_mc2 = envs.MOONEP_KEEP_MC2 and moe_comm_type in (MoECommType.MC2, MoECommType.FUSED_MC2)
+        if not keep_mc2:
+            if capacity is None or num_tokens > capacity:
+                raise RuntimeError(f"MoonEP step has {num_tokens} tokens, SHMEM capacity is {capacity}")
+            moe_comm_type = MoECommType.SHMEM
+
     logger.debug(
         "MoE comm method selected: policy=%s, method=%s, num_tokens=%d, mc2_capacity=%s, "
         "is_draft_model=%s, draft_moe_quant_type=%r",

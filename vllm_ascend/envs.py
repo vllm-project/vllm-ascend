@@ -45,10 +45,89 @@ def _bool_env(name: str, default: bool) -> bool:
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
 
+def _moonep_prefetch_side_stream_overlap() -> str:
+    value = os.getenv("MOONEP_PREFETCH_SIDE_STREAM_OVERLAP", "dispatch")
+    if value not in ("none", "dispatch", "dispatch|home_gemm1"):
+        raise ValueError(
+            "MOONEP_PREFETCH_SIDE_STREAM_OVERLAP must be none, dispatch, "
+            "or dispatch|home_gemm1"
+        )
+    return value
+
+
+def _moonep_cached_redundant_expert_count() -> int:
+    value = int(os.getenv("MOONEP_CACHED_REDUNDANT_EXPERT_COUNT", "0"))
+    if value < 0:
+        raise ValueError(f"MOONEP_CACHED_REDUNDANT_EXPERT_COUNT must be >= 0, got {value}")
+    return value
+
+
+def _moonep_shmem_bootstrap_type() -> str:
+    value = os.getenv("MOONEP_SHMEM_BOOTSTRAP_TYPE", "ipport")
+    if value not in ("ipport", "uid"):
+        raise ValueError(
+            f"MOONEP_SHMEM_BOOTSTRAP_TYPE must be ipport or uid, got {value!r}"
+        )
+    return value
+
+
+def _moonep_transport_type() -> str:
+    value = os.getenv("MOONEP_TRANSPORT_TYPE", "mte")
+    if value not in ("mte", "udma"):
+        raise ValueError(
+            f"MOONEP_TRANSPORT_TYPE must be mte or udma, got {value!r}"
+        )
+    return value
+
+
 # begin-env-vars-definition
 
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # Existing MoonEP configuration; defaults match moonep_v0.23.0.
+    # MoonEP dispatch/combine/weight-prefetch transport; planning stays native.
+    # Non-sensitive; exact lowercase mte (default) or udma. Read at startup,
+    # without whitespace/case normalization or fallback to the removed flag.
+    "MOONEP_TRANSPORT_TYPE": _moonep_transport_type,
+    # SHMEM ipport bootstrap's TCP port only; IP comes from vLLM's DP master.
+    # Non-sensitive; integer, default 28765. Read only for the ipport branch;
+    # preserve existing integer parsing without adding port-range validation.
+    "MOONEP_SHMEM_BOOTSTRAP_PORT": lambda: int(os.getenv("MOONEP_SHMEM_BOOTSTRAP_PORT", "28765")),
+    # SHMEM startup bootstrap: ipport (default, TCP config store) or uid.
+    # Non-sensitive; exact lowercase values only, no whitespace normalization.
+    "MOONEP_SHMEM_BOOTSTRAP_TYPE": _moonep_shmem_bootstrap_type,
+    # Manual MoonEP pool token-capacity tiers: comma-separated integers.
+    # Non-sensitive; unset/empty selects automatic generation. Parsing, sorting,
+    # deduplication and maximum-capacity handling stay in the ladder builder.
+    "MOONEP_POOL_TOKEN_CAPACITY_TIERS": lambda: os.getenv("MOONEP_POOL_TOKEN_CAPACITY_TIERS"),
+    # Automatic pool tier-count target, integer, default 32. Non-sensitive.
+    # Existing base tiers and maximum capacity are retained; not a hard limit.
+    "MOONEP_POOL_MAX_TIER_COUNT": lambda: int(os.getenv("MOONEP_POOL_MAX_TIER_COUNT", "32")),
+    # MoonEP automatic capacity-ladder memory estimate, in MiB despite the MB
+    # suffix. Non-sensitive; integer, default 2048; <=0 disables the budget.
+    # Per-shape ladder heuristic, not a total device-memory allocation limit.
+    "MOONEP_POOL_MEMORY_BUDGET_MB": lambda: int(os.getenv("MOONEP_POOL_MEMORY_BUDGET_MB", "2048")),
+    # Persistent remote-expert cache capacity per EP rank and MoE layer.
+    # Non-sensitive; integer >=0, default 0 disables caching. No E/R or Slot
+    # capacity upper bound; available memory still limits actual allocation.
+    "MOONEP_CACHED_REDUNDANT_EXPERT_COUNT": _moonep_cached_redundant_expert_count,
+    # MoonEP prefetch overlap: none, dispatch (default), dispatch|home_gemm1.
+    # Non-sensitive; set before worker startup. Home GEMM1 requires cache off
+    # and an already-supported Home GEMM backend/operator library.
+    "MOONEP_PREFETCH_SIDE_STREAM_OVERLAP": _moonep_prefetch_side_stream_overlap,
+    # MoonEP small-step policy: when enable_moonep is on, keep the steps whose
+    # SoC-default selection is MC2 (num_tokens <= mc2_tokens_capacity) on MC2 and
+    # replace only the all-gather / all-to-all selections with SHMEM. Default
+    # off: every step within the SHMEM capacity S goes to MoonEP. MC2 needs the
+    # HCCL UB_MEM link, which a cross-UB-domain card group does not have
+    # (aclnnMoeDistributeDispatchV4 561000), so enable this only on one UB domain.
+    "MOONEP_KEEP_MC2": lambda: bool(int(os.getenv("MOONEP_KEEP_MC2", "0"))),
+    # Redundant expert prefetch slots per EP rank, not the persistent cache size.
+    # Unset is resolved per layer as E/EP; the current planner requires B == E/EP.
+    # Runtime accepts integer values in [1, E/EP] before that planner check.
+    # Non-sensitive. This does not change the SDK's B parameter.
+    "MOONEP_REDUNDANT_EXPERT_SLOT_COUNT": lambda: os.getenv("MOONEP_REDUNDANT_EXPERT_SLOT_COUNT", None),
+
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.
