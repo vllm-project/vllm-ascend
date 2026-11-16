@@ -1626,11 +1626,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             if request.load_spec is None or not request.load_spec.can_load:
                 continue
             cached_tokens = request.load_spec.kvpool_cached_tokens
-            if (
-                not getattr(self, "has_shared_kv", False)
-                and not getattr(self, "use_eagle", False)
-                and request.load_spec.kvpool_store_skip_tokens is not None
-            ):
+            if not getattr(self, "use_eagle", False) and request.load_spec.kvpool_store_skip_tokens is not None:
                 cached_tokens = request.load_spec.kvpool_store_skip_tokens
             if (
                 getattr(self, "use_eagle", False)
@@ -1823,11 +1819,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             if request.load_spec is None or not request.load_spec.can_load:
                 continue
             cached_tokens = request.load_spec.kvpool_cached_tokens
-            if (
-                not getattr(self, "has_shared_kv", False)
-                and not getattr(self, "use_eagle", False)
-                and request.load_spec.kvpool_store_skip_tokens is not None
-            ):
+            if not getattr(self, "use_eagle", False) and request.load_spec.kvpool_store_skip_tokens is not None:
                 cached_tokens = request.load_spec.kvpool_store_skip_tokens
             if (
                 getattr(self, "use_eagle", False)

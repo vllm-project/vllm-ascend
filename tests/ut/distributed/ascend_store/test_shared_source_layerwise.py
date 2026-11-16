@@ -303,14 +303,26 @@ class TestSharedSourceLayerwise(unittest.TestCase):
         self.assertTrue(worker._save_disabled.is_set())
         self.assertFalse(meta.requests[0].can_save)
 
-    def test_load_uses_adopted_hit_not_unrecomputed_tail(self):
-        worker, store, _ = make_shared_worker(self, bounded=True)
-        save_prefix(worker)
-        meta = metadata(worker, load=True, save=False)
-        meta.requests[0].load_spec.kvpool_store_skip_tokens = 32
-        worker.prepare_layerwise_step(meta)
-        self.assertEqual(meta.requests[0].load_spec.kvpool_store_skip_tokens, 32)
-        self.assertEqual(worker.layer_load_tasks[2][0].block_ranges[0].end_block, 1)
+    def test_load_reuses_gva_hit_policy(self):
+        for use_eagle in (False, True):
+            with self.subTest(use_eagle=use_eagle):
+                worker, store, _ = make_shared_worker(self, bounded=True)
+                save_prefix(worker)
+                worker.use_eagle = use_eagle
+                meta = metadata(worker, load=True, save=False)
+                # The last token is recomputed; the pool contains a full block.
+                meta.requests[0].load_spec.kvpool_cached_tokens = 15
+                meta.requests[0].load_spec.kvpool_store_skip_tokens = 16
+                worker.prepare_layerwise_step(meta)
+                if use_eagle:
+                    self.assertFalse(worker.layer_load_tasks[2])
+                else:
+                    self.assertEqual(worker.layer_load_tasks[2][0].block_ranges[0].end_block, 1)
+                copies_before_load = len(store.copies)
+                for layer in range(worker.num_layers):
+                    forward_layer(worker, meta)
+                self.assertEqual(len(store.copies) > copies_before_load, not use_eagle)
+                worker.get_finished(set(), meta)
 
     def test_shared_prefix_acquires_one_lease_per_step(self):
         worker, store, _ = make_shared_worker(self, bounded=True)
