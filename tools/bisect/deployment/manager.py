@@ -37,7 +37,6 @@ from pathlib import Path
 
 import regex as re
 
-from tools.bisect import git_ops
 from tools.bisect.build_analyzer import analyze_commit, plan_transition
 from tools.bisect.build_analyzer.base_apply import apply_base_delta, target_environment
 from tools.bisect.build_analyzer.base_image import (
@@ -57,14 +56,14 @@ from tools.bisect.build_analyzer.ir import BuildAnalysis, BuildSyntaxError
 from tools.bisect.build_analyzer.planner import TransitionPlan, plan_target_image_transition
 from tools.bisect.build_analyzer.registry_image import RegistryImageResolver
 from tools.bisect.build_analyzer.replay_cleanup import protect_replay_cleanup
-from tools.bisect.config import (
+from tools.bisect.deployment import git_ops
+from tools.bisect.deployment.git_ops import GitError
+from tools.bisect.execution.process_output import run_streaming
+from tools.bisect.orchestration.config import (
     BUILD_DEF_GLOBS,
     NATIVE_GLOBS,
     BisectOptions,
 )
-from tools.bisect.git_ops import GitError
-from tools.bisect.process_output import run_streaming
-from tools.bisect.version_compat import VersionAdaptationError
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +138,27 @@ class BuildManager:
         self._analysis_cache[commit] = analysis
         return analysis
 
-    def _transition_plan(self, target_commit: str) -> TransitionPlan | None:
+    def export_state(self) -> dict:
+        """Export the prepared environment baseline for the next node request."""
+        return {
+            "installed_commit": self.installed_commit,
+            "last_built_commit": self.last_built_commit,
+            "test_environment": self.test_environment,
+            "build_env_baseline": dict(self._build_env_baseline),
+            "unknown_build_env": sorted(self._unknown_build_env),
+        }
+
+    def restore_state(self, state: dict) -> None:
+        """Restore our baseline only while the repository still matches it."""
+        if state["installed_commit"] != git_ops.current_commit(self.repo):
+            raise BuildError("Target checkout changed outside this session")
+        self.installed_commit = state["installed_commit"]
+        self.last_built_commit = state["last_built_commit"]
+        self.test_environment = state["test_environment"]
+        self._build_env_baseline = dict(state["build_env_baseline"])
+        self._unknown_build_env = set(state["unknown_build_env"])
+
+    def transition_plan(self, target_commit: str) -> TransitionPlan | None:
         if not self.opt.soc:
             return None
         key = self.installed_commit, target_commit
@@ -186,7 +205,7 @@ class BuildManager:
                 "a previous environment transition failed; restart with --force-initial-build "
                 "for full target initialization, or use a matching container"
             )
-        transition = self._transition_plan(target_commit)
+        transition = self.transition_plan(target_commit)
         if transition and any(action.kind.startswith("image-") for action in transition.actions):
             return BuildDecision(True, False, [], "target image replay requires rebuilding native extensions")
         if self.installed_commit is not None:
@@ -249,7 +268,7 @@ class BuildManager:
         """
         target_commit = git_ops.resolve_commit(self.repo, target_commit)
         decision = self.decide(target_commit)
-        plan = self._transition_plan(target_commit)
+        plan = self.transition_plan(target_commit)
         base_delta = (
             self._base_delta_cache.get((self.installed_commit, target_commit)) if self.installed_commit else None
         )
@@ -646,4 +665,4 @@ class BuildTransitionError(BuildError):
 # agent. One shared tuple so every catch site (master runner, worker agent,
 # orchestrator trial loop) stays in lockstep -- a missed copy leaves the other
 # side waiting out the full barrier timeout on every remaining round.
-DEPLOY_ERRORS = (BuildError, GitError, VersionAdaptationError)
+DEPLOY_ERRORS = (BuildError, GitError)

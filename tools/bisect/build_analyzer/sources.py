@@ -25,10 +25,10 @@ from pathlib import Path
 import regex as re
 import tomllib
 
+from tools.bisect.build_analyzer.build_sources import NIGHTLY_DOCKERFILE_DIR, ROOT_DOCKERFILES, normalize_build_soc
 from tools.bisect.build_analyzer.ir import BuildAnalysis, BuildSyntaxError, Operation
 from tools.bisect.build_analyzer.package_effects import package_effects, package_outcomes
 from tools.bisect.build_analyzer.semantics import analyze_build
-from tools.bisect.build_recipe import NIGHTLY_DOCKERFILE_DIR, ROOT_DOCKERFILES, normalize_build_soc
 
 
 def _read_text(repo: Path, commit: str, path: str) -> str | None:

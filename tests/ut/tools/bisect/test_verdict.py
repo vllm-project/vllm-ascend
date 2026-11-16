@@ -2,7 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from tools.bisect.verdict import RunOutcome, evaluate
+from tools.bisect.testing.nightly_verdict import evaluate
+from tools.bisect.testing.outcome import RunOutcome
 
 
 def test_evaluate_zero_exit_checks_benchmark_json(tmp_path: Path):

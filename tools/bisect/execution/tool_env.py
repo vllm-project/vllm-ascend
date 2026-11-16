@@ -21,9 +21,9 @@ import sys
 import venv
 from pathlib import Path
 
-from tools.bisect.config import DEFAULT_WORK_DIR
+from tools.bisect.orchestration.config import DEFAULT_WORK_DIR
 
-_ANALYZER_REQUIREMENTS = Path(__file__).parent / "build_analyzer" / "requirements.txt"
+_ANALYZER_REQUIREMENTS = Path(__file__).resolve().parents[1] / "build_analyzer" / "requirements.txt"
 _PIP_INDEX_URL = "https://mirrors.huaweicloud.com/repository/pypi/simple"
 
 

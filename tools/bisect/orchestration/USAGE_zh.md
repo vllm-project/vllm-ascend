@@ -139,23 +139,16 @@ python -m tools.bisect.auto_bisect \
 
 > bad 端点(==HEAD)因为容器已构建好,默认是 `already built` 直接跳过编译。
 
-### 6.1 依赖版本适配(自动)
+### 6.1 配套切换
 
-二分工具从每个 `vllm-ascend` commit 的固定文件读取 nightly 依赖版本:
+`deployment/manager.py` 使用构建分析器读取基线和目标 commit 的 Dockerfile 调用链及依赖文件。
+差异分析和规划器生成目标所需的安装、编译与环境动作，执行器按目标构建顺序执行。
+基础镜像变化时，先重放目标镜像，再全量重放目标构建链。
+安装源和 shell 上下文来自构建链。规划阻断项作为 warning 打印，必需动作执行失败会中止切换。
+具体输入和规则见 [BUILD_RECIPE.md](../build_analyzer/BUILD_RECIPE.md)。
 
-| 包 | 版本文件 | 读取内容 | 二分时是否切换 |
-|---|---|---|---|
-| vLLM | `.github/vllm-release-tag.commit` | vLLM release tag | 是 |
-| torch-npu | `requirements.txt`(回退 `pyproject.toml`) | `torch-npu` 的版本约束 | 是 |
-
-工具先比较 good 和 bad 两端的 vLLM、torch-npu 版本:
-
-- 两端版本相同**且环境实际版本与该 pin 一致**:该包后续不再检查;
-- 两端版本不同,**或环境实际版本与两端共同的 pin 不一致**(nightly 镜像自带构建,不保证跟随 pin):每次切换到候选 commit 后读取候选 commit 的版本文件,若运行环境版本不同则先切换依赖,再运行 nightly;
-
-vLLM 切换优先使用配置的 vLLM 源码目录(nightly 默认 `/vllm-workspace/vllm`) checkout 对应 release tag 并重新 editable 安装;找不到源码目录时回退到 pip 安装对应 release。torch-npu 使用 pip 强制重装目标版本。切换失败会将本轮标记为 `SKIP`,不会把环境问题误判成测试失败。
-
-vLLM 的安装沿用 Dockerfile 的 PyTorch CPU 额外索引。Dockerfile 中单独安装 torch-npu 的步骤已注释;二分工具切换 torch-npu 时默认使用华为云 PyPI 镜像。若运行环境已设置 `PIP_INDEX_URL` 或 `PIP_EXTRA_INDEX_URL`,则保留已有设置;可在启动二分工具前设置这两个变量以覆盖默认源。
+通用命令配置见 [testing/README.md](../testing/README.md)，已有集群执行入口见
+[execution/README.md](../execution/README.md)。
 
 ---
 
@@ -167,7 +160,7 @@ vLLM 的安装沿用 Dockerfile 的 PyTorch CPU 额外索引。Dockerfile 中单
 - 退出码 `0` 但 `benchmark_results/` 里**任一 case 的 json `pass_fail=fail`**(精度/性能未达基线)→ **FAIL**;
 - 退出码 `0` 且无回归 → **PASS**;
 - 退出码 `2/3/4/5` 或超时(收集失败、conftest ImportError、环境问题等)→ **SKIP**;
-- 依赖版本切换失败(见 6.1)→ **SKIP**(带明确原因);
+- 环境准备失败可能记为 **SKIP**，必需 action 执行失败会中止二分，详见本轮日志;
 - SKIP 不作为二分信号,类似 `git bisect skip`。
 
 端点校验:开跑前先确认 bad 复现失败、good 确实通过;若任一端点是 SKIP(环境跑不起来 / 依赖切换失败),会**明确报错并中止**而不是给错误结论。

@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from tools.bisect.state import BisectState
+from tools.bisect.orchestration.state import BisectState
 
 
 def test_bisect_state_save_and_load_round_trips(tmp_path: Path):

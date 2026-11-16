@@ -15,9 +15,13 @@
 """Constants and data models shared across the bisect tool."""
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from tools.bisect.execution.targets import ExecutionTargets
+    from tools.bisect.testing.definition import TestEntry
 
 # --------------------------------------------------------------------------- #
 # Scene / verdict vocabulary
@@ -37,12 +41,11 @@ Verdict = Literal["PASS", "FAIL", "SKIP"]
 # Paths
 # --------------------------------------------------------------------------- #
 # Repository root (……/vllm-ascend). This file lives at
-# tools/bisect/config.py -> 2 parents up is the repo root.
-REPO_ROOT = Path(__file__).resolve().parents[2]
+# tools/bisect/orchestration/config.py -> 3 parents up is the repo root.
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 # Nightly launch entries we reuse instead of re-implementing.
 SINGLE_NODE_TEST_PATH = "tests/e2e/common/single_node/test_single_node.py"
-MULTI_NODE_RUN_SH = "tests/e2e/common/multi_node/run.sh"
 
 # The "good table" lives on a fixed nightly path (PVC / shared cache). It is a
 # plain CSV so it can be eyeballed and edited by hand. Override with
@@ -51,7 +54,7 @@ DEFAULT_GOOD_TABLE = os.getenv(
     "BISECT_GOOD_TABLE",
     "/root/.cache/nightly_bisect/good_table.csv",
 )
-SAMPLE_GOOD_TABLE = str(Path(__file__).resolve().parent / "good_table.sample.csv")
+SAMPLE_GOOD_TABLE = str(Path(__file__).resolve().parents[1] / "testing" / "good_table.sample.csv")
 
 # Where per-run artifacts (logs, state, final report) are written.
 DEFAULT_WORK_DIR = os.getenv("BISECT_WORK_DIR", "/root/.cache/nightly_bisect/runs")
@@ -92,13 +95,6 @@ BUILD_DEF_GLOBS = (
     "pyproject.toml",
     "setup.cfg",
     "CMakeLists.txt",
-)
-
-# A change to any of these triggers a dependency reinstall (separate from the
-# native rebuild, see BuildManager).
-REQUIREMENTS_GLOBS = (
-    "requirements*.txt",
-    "requirements/*.txt",
 )
 
 
@@ -154,9 +150,13 @@ class BisectInput:
     good_commit: str | None = None  # explicit good; else looked up in the table
     good_vllm_commit: str | None = None  # paired vLLM commit of the good row
 
+    test_entry: "TestEntry | None" = None
+
     @property
     def case_key(self) -> str:
         """Stable key (scene + whole yaml) for state/work-dir/report."""
+        if self.test_entry is not None:
+            return f"{self.scene}::command-{self.test_entry.identity}"
         return f"{self.scene}::{self.config_yaml}"
 
 
@@ -167,7 +167,6 @@ class BisectOptions:
     repo_dir: Path = REPO_ROOT
     soc: str | None = None
     mock_tests: bool = False  # prepare candidates but simulate test verdicts
-    vllm_dir: Path = field(default_factory=lambda: Path("/vllm-workspace/vllm"))
     work_dir: str = DEFAULT_WORK_DIR
     coord_dir: str = DEFAULT_COORD_DIR
     good_table_path: str = DEFAULT_GOOD_TABLE
@@ -176,17 +175,6 @@ class BisectOptions:
     # Verify the endpoints before searching (good must PASS, bad must FAIL).
     verify_good: bool = True
     verify_bad: bool = True
-    # Match the nightly install path when a candidate needs rebuilding.
-    pip_install_cmd: list[str] = field(
-        default_factory=lambda: [
-            "python3",
-            "-m",
-            "pip",
-            "install",
-            "-e",
-            ".",
-        ]
-    )
     # The nightly container is already built+installed at its current HEAD (the
     # bad commit that just failed). Treating HEAD as the established build
     # baseline makes the bad endpoint a checkout-only (no rebuild / no slow
@@ -215,6 +203,7 @@ class BisectOptions:
     run_scoped_coord: bool = False
     # Per-trial pytest timeout (seconds).
     trial_timeout_s: float = 7200.0
+    execution_targets: "ExecutionTargets | None" = None
 
     @property
     def is_master(self) -> bool:

@@ -14,12 +14,15 @@
 # This file is a part of the vllm-ascend project.
 """Stream child output to the console and the trial log."""
 
+import contextlib
+import os
 import queue
+import signal
 import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import TextIO
+from typing import IO, TextIO
 
 
 def run_streaming(
@@ -29,12 +32,16 @@ def run_streaming(
     env: dict[str, str] | None,
     output: TextIO | None = None,
     timeout: float | None = None,
+    stdin: IO[bytes] | None = None,
+    isolate_process_group: bool = False,
 ) -> subprocess.CompletedProcess:
     """Tee merged stdout/stderr without making output reads defeat the timeout."""
     process = subprocess.Popen(
         command,
         cwd=cwd,
         env=env,
+        stdin=stdin,
+        start_new_session=isolate_process_group and os.name == "posix",
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -72,8 +79,17 @@ def run_streaming(
                 output.flush()
             tail = (tail + line)[-4000:]
         remaining = None if deadline is None else max(0, deadline - time.monotonic())
-        return subprocess.CompletedProcess(command, process.wait(timeout=remaining), stdout=tail)
+        result = subprocess.CompletedProcess(command, process.wait(timeout=remaining), stdout=tail)
+        return result
     except BaseException:
-        process.kill()
+        if isolate_process_group and os.name == "posix":
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
         process.wait()
         raise
+    finally:
+        if isolate_process_group and os.name == "posix":
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)

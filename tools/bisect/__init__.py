@@ -12,12 +12,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
-"""Auto-Bisect tooling for nightly E2E test failures.
-
-Given a failing nightly test case, this package binary-searches the
-``vllm-ascend`` commit history between the last-known-good commit and the
-currently failing commit to pinpoint the first bad commit (and the PR it
-belongs to). It deliberately reuses the existing nightly launch entries
-(``test_single_node.py`` / ``common/multi_node/run.sh``) so that the bisect
-reproduces the exact nightly environment.
-"""
+"""Bisect commit history using environment preparation and repeatable test entries."""

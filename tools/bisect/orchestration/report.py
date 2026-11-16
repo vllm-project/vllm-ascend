@@ -17,7 +17,7 @@
 import json
 from pathlib import Path
 
-from tools.bisect.config import BisectInput, Candidate, TrialResult
+from tools.bisect.orchestration.config import BisectInput, Candidate, TrialResult
 
 # ANSI colors (mirrors the style used in common/multi_node/run.sh).
 _GREEN = "\033[0;32m"
@@ -100,6 +100,7 @@ def write_report_json(
         "case_key": inp.case_key,
         "scene": inp.scene,
         "config_yaml": inp.config_yaml,
+        "test_entry_identity": inp.test_entry.identity if inp.test_entry else None,
         "name": inp.name,
         "good": _cand(good),
         "bad": _cand(bad),

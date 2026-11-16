@@ -5,7 +5,7 @@ case fails, by binary-searching the `vllm-ascend` history between the last
 known-good commit and the failing commit. It reuses the existing nightly launch
 entries so the bisect reproduces the real nightly environment.
 
-> 中文使用指南见 [`USAGE_zh.md`](./USAGE_zh.md)。
+> 中文使用指南见 [`USAGE_zh.md`](orchestration/USAGE_zh.md)。
 
 ## How it works
 
@@ -50,23 +50,17 @@ trigger (case FAIL)
   limitation: this is a "has ever joined" check, not liveness -- a worker that
   dies mid-run keeps its markers and the remaining rounds degrade to per-round
   SKIPs (liveness/heartbeat detection is future work).
-* **Dependency adaptation**: the tool reads vLLM from
-  `.github/vllm-release-tag.commit`, torch-npu from `requirements.txt` (with
-  `pyproject.toml` as fallback). If the good and bad endpoints declare the same
-  vLLM and torch-npu versions AND the installed environment matches that common pin, no version
-  checks run. Otherwise -- endpoint versions differ, or the installed
-  environment drifts from the pin (nightly images carry their own build) --
-  every candidate is adapted before pytest: vLLM is checked
-  out from the configured vLLM source directory (default
-  `/vllm-workspace/vllm`) and torch-npu is reinstalled with pip.
-  vLLM installs use the PyTorch CPU extra index, as in the Dockerfile.
-  torch-npu installs use the Huawei Cloud PyPI mirror because the Dockerfile's
-  standalone torch-npu install is disabled. Existing `PIP_INDEX_URL` and
-  `PIP_EXTRA_INDEX_URL` settings take precedence.
-  The hardware-specific dependency inputs and build order are recorded in
-  [`BUILD_RECIPE.md`](./BUILD_RECIPE.md). The adapter replays package and nightly
-  requirements changes, switches AISBench tags, and checks the vLLM source
-  checkout. Changed CANN images or unsupported Docker build steps become SKIP.
+* **Environment preparation**: `deployment/manager.py` analyzes the installed
+  and target commit's Dockerfile build chains, including local dependency
+  files. The planner produces installation, rebuild and environment actions
+  in target build order. Changed base images trigger target-image replay and
+  full target build replay. Package indexes and shell context come from the
+  build chain. Planner blockers are logged as warnings, while required action
+  failures abort the transition. See [the build recipe](build_analyzer/BUILD_RECIPE.md).
+
+Command-based reproduction entries are described in
+[testing](./testing/README.md). Explicit existing execution targets are described
+in [execution](./execution/README.md).
 
 ## Status tables (good source, read-only)
 
@@ -154,7 +148,7 @@ generation for the good-table key),
 `--config-base-path`
 (internal/external DP configs), `--native-check {per-commit,since-build}`,
 `--force-initial-build`, `--fail-confirm-retries`, `--no-verify-good`,
-`--no-verify-bad`, `--trial-timeout-s`. Full reference: see `USAGE_zh.md` §9.
+`--no-verify-bad`, `--trial-timeout-s`. Full reference: see `orchestration/USAGE_zh.md` §9.
 
 ## Outputs
 
