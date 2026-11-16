@@ -26,7 +26,8 @@ def make_loader(monkeypatch, rotation_path=None):
     model = SimpleNamespace(
         rotation_path=rotation_path,
         config=SimpleNamespace(num_attention_heads=8, num_hidden_layers=43),
-        model=SimpleNamespace(num_dspark_layers=3, get_expert_mapping=lambda: []),
+        num_redundant_experts=0,
+        model=SimpleNamespace(num_dspark_layers=3, get_expert_mapping=lambda *, num_redundant_experts: []),
         named_parameters=lambda: params.items(),
     )
     model._remap_dspark_name = MethodType(dspark.DSparkDeepseekV4ForCausalLM._remap_dspark_name, model)
