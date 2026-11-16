@@ -334,6 +334,28 @@ def test_draft_layer_in_non_zero_group_uses_that_group(tmp_path: Path):
     assert torch.equal(draft_snap.payload["tensor"][0], draft[3])
 
 
+def test_expand_manager_block_ids_kernel_ratio():
+    from vllm_ascend.observability.runtime_guard.dump import expand_manager_block_ids
+
+    assert expand_manager_block_ids([1, 3], 1) == [1, 3]
+    assert expand_manager_block_ids([1], 2) == [2, 3]
+    assert expand_manager_block_ids([0, 1], 2) == [0, 1, 2, 3]
+
+
+def test_manager_block_ids_expanded_when_blocks_per_kv_gt_1():
+    from vllm_ascend.observability.runtime_guard.dump import block_ids_for_request
+
+    runner = SimpleNamespace(
+        requests={"r1": SimpleNamespace(block_ids=([1],))},
+        block_tables=SimpleNamespace(blocks_per_kv_block=[2]),
+        input_batch=None,
+        execute_model_state=None,
+        req_states=None,
+        kv_cache_config=None,
+    )
+    assert block_ids_for_request(runner, "r1", kv_cache_group=0) == [2, 3]
+
+
 def test_snapshot_skips_empty_block_ids(tmp_path: Path):
     runner = SimpleNamespace(
         kv_caches={"layers.0": torch.randn(8, 16, 4)},
