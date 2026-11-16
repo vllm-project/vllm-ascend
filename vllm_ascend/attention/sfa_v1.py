@@ -71,10 +71,12 @@ from vllm_ascend.quantization.methods.kv_cache.turboquant.latent import TurboQua
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
     ACL_FORMAT_FRACTAL_NZ,
+    AscendDeviceType,
     dispose_layer,
     enable_pcp_o_proj_weight_sharding,
     enable_sfa_dcp_replicated_indexer,
     enable_sp,
+    get_ascend_device_type,
     is_mtp_layer,
     is_rl_weight_update_enabled,
     maybe_trans_nz,
@@ -546,7 +548,13 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         self.nope = layer.qk_rope_head_dim == 0
         self.use_rope = not getattr(vllm_config.model_config.hf_text_config, "mla_use_nope", False)
         self.nope_states: dict[int | None, SparseMLAMetadataState] = {}
-        self.allow_a3_device_lengths = getattr(get_ascend_config(), "a3_mla_sink_mode", "disabled") != "disabled"
+        self.allow_a3_device_lengths = (
+            get_ascend_device_type() == AscendDeviceType.A3
+            and vllm_config.model_config.hf_config.model_type == "kimi_k31"
+            and getattr(vllm_config, "use_v2_model_runner", False)
+            and vllm_config.speculative_config is not None
+            and vllm_config.speculative_config.method == "dspark"
+        )
 
         self.use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
         self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(vllm_config)

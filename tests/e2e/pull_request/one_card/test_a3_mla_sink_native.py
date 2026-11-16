@@ -3,8 +3,8 @@
 """Real A3 operator/adapter tests; run with --noconftest for isolated bring-up.
 
 Select a device with ASCEND_RT_VISIBLE_DEVICES before starting pytest. These
-tests require the flash-attention-npu 910 MLA release; no numerical mock is
-used. They do not replace a K3.1 model or multi-rank serving test.
+tests require the flash-attention-npu 910 MLA release. They do not replace a
+K3.1 model or multi-rank serving test.
 """
 
 import ast
@@ -52,7 +52,7 @@ def make_case(sink, dtype, qlens, klens, causal, *, heads=8, scale=192**-0.5, pa
         max_seqlen_k=columns * page,
         dtype=dtype,
     )
-    adapter = sink.A3MLAAdapter.load(config, "external")
+    adapter = sink.A3MLAAdapter.load(config)
     q_cpu = (torch.randn(tokens, heads, 576) * 0.2).to(dtype)
     cache_cpu = (torch.randn(pages, page, 1, 576) * 0.2).to(dtype)
     table_cpu = torch.arange(pages - 1, -1, -1, dtype=torch.int32).reshape(batch, columns)
@@ -114,7 +114,13 @@ def compare(actual, expected):
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize(
     "qlens,klens,padded",
-    [((1,), (129,), False), ((3, 1), (257, 9), True), ((3, 1, 0), (2, 0, 0), True), ((1,), (16384,), False)],
+    [
+        ((1,), (129,), False),
+        ((3, 1), (257, 9), True),
+        ((3, 1, 0), (2, 0, 0), True),
+        ((1,), (16384,), False),
+        ((1,), (32769,), False),
+    ],
 )
 def test_native_matches_fp64(sink, dtype, causal, qlens, klens, padded):
     adapter, data, oracle = make_case(sink, dtype, qlens, klens, causal, padded=padded)

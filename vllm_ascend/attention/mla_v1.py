@@ -31,7 +31,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.attention.a3_mla_sink import A3MLAAdapter, A3MLAConfig, validate_sink_selection
+from vllm_ascend.attention.a3_mla_sink import A3MLAAdapter, A3MLAConfig, get_a3_mla_ops, supports_a3_mla
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
@@ -1032,25 +1032,17 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.mlapo_weight_quant_mode = 3
         self._mlapo_uses_native_weights = False
         self.use_flashmla: bool = self._can_use_flashmla()
-        a3_mode = getattr(ascend_config, "a3_mla_sink_mode", "disabled")
-        self.use_a3_mla_sink = validate_sink_selection(
-            self,
-            mode=a3_mode,
-            is_a3=a3_mode != "disabled" and get_ascend_device_type() == AscendDeviceType.A3,
-            is_draft=backends.model_tag == "dspark_head",
-            allow_graph=getattr(ascend_config, "a3_mla_sink_allow_graph", False),
+        self.use_a3_mla_sink = (
+            supports_a3_mla(
+                self,
+                is_a3=get_ascend_device_type() == AscendDeviceType.A3,
+                is_draft=backends.model_tag == "dspark_head",
+            )
+            and get_a3_mla_ops() is not None
         )
         self.a3_mla_adapter = None
         if self.use_a3_mla_sink:
-            self.a3_mla_adapter = A3MLAAdapter.load(
-                A3MLAConfig(self.num_heads, self.scale, return_softmax_lse=self.use_dcp, dtype=self.dtype),
-                ascend_config.a3_mla_sink_mode,
-                ascend_config.a3_mla_sink_module,
-            )
-            logger.warning_once(
-                "A3 MLA sink provider=%s is explicitly enabled; native graph/model validation is required.",
-                ascend_config.a3_mla_sink_mode,
-            )
+            self.a3_mla_adapter = A3MLAAdapter.load(A3MLAConfig(self.num_heads, self.scale, dtype=self.dtype))
         self._flashmla_writer_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
 
     def _can_use_flashmla(self) -> bool:

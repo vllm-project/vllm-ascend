@@ -17,9 +17,20 @@ ROPE_DIM = 64
 LATENT_DIM = 512
 QK_DIM = ROPE_DIM + LATENT_DIM
 PAGE_SIZE = 128
-MAX_CAPACITY = 16384
-DEFAULT_MODULE = "flash_attn_npu_3.flash_attn_npu_interface"
-MOCK_MODULE = "vllm_ascend.attention.a3_mla_mock"
+OPERATOR_MODULE = "flash_attn_npu_3.flash_attn_npu_interface"
+
+
+def get_a3_mla_ops():
+    """Select before cache allocation, following the A5 package availability policy."""
+    try:
+        module = import_module(OPERATOR_MODULE)
+    except ModuleNotFoundError as exc:
+        if exc.name in ("flash_attn_npu_3", OPERATOR_MODULE):
+            return None
+        raise
+    attention = getattr(module, "flash_attn_with_kvcache", None)
+    metadata = getattr(module, "get_scheduler_metadata", None)
+    return (attention, metadata) if callable(attention) and callable(metadata) else None
 
 
 @dataclass(frozen=True)
@@ -27,15 +38,13 @@ class A3MLAConfig:
     num_heads: int
     softmax_scale: float
     mask_mode: int = 3
-    layout_kv: str = "PA_BBND"
-    return_softmax_lse: bool = False
     page_size: int = PAGE_SIZE
     max_seqlen_k: int = PAGE_SIZE
     max_seqlen_q: int = 1
     dtype: torch.dtype = torch.bfloat16
 
     def __post_init__(self):
-        if self.num_heads <= 0 or self.mask_mode not in (0, 3) or self.layout_kv != "PA_BBND":
+        if self.num_heads <= 0 or self.mask_mode not in (0, 3):
             raise ValueError("A3 MLA requires positive heads, plain/causal mask and ND paged cache")
         if not math.isfinite(self.softmax_scale):
             raise ValueError("softmax_scale must be finite")
@@ -43,40 +52,34 @@ class A3MLAConfig:
             raise ValueError("A3 MLA supports FP16/BF16")
         if not 16 <= self.page_size <= 1024 or self.page_size % 16:
             raise ValueError("A3 MLA page size must be a multiple of 16 in [16, 1024]")
-        if not 0 < self.max_seqlen_k <= MAX_CAPACITY or self.max_seqlen_k % self.page_size:
-            raise ValueError("A3 MLA logical KV capacity must be page-aligned and at most 16384")
+        if self.max_seqlen_k <= 0 or self.max_seqlen_k % self.page_size:
+            raise ValueError("A3 MLA logical KV capacity must be positive and page-aligned")
         if self.max_seqlen_q < 0:
             raise ValueError("query capacity must be nonnegative")
 
 
-def validate_sink_selection(impl, *, mode: str, is_a3: bool, is_draft: bool, allow_graph: bool) -> bool:
+def supports_a3_mla(impl, *, is_a3: bool, is_draft: bool) -> bool:
     """Static selection before cache allocation; no tensor-content reads."""
-    if mode not in ("disabled", "mock", "external"):
-        raise ValueError("a3_mla_sink_mode must be disabled, mock or external")
-    if mode == "disabled" or not is_a3 or not is_draft:
+    if not is_a3 or not is_draft:
         return False
     cfg = impl.vllm_config
     if cfg.model_config.hf_config.model_type != "kimi_k31":
         return False
     spec = cfg.speculative_config
     if not getattr(cfg, "use_v2_model_runner", False) or spec is None or spec.method != "dspark":
-        raise ValueError("A3 MLA sink requires K3.1 DSpark on Model Runner V2")
+        return False
     if impl.num_kv_heads != 1 or impl.kv_lora_rank != LATENT_DIM or impl.qk_rope_head_dim != ROPE_DIM:
-        raise ValueError("A3 MLA sink requires compressed MLA 64/512 and one KV head")
+        return False
     if impl.fa_quant_layer or impl.dtype not in (torch.float16, torch.bfloat16) or impl.enable_kv_nz:
-        raise ValueError("A3 MLA sink requires unquantized FP16/BF16 ND KV")
+        return False
     if impl.use_pcp or cfg.parallel_config.pipeline_parallel_size != 1:
-        raise ValueError("A3 MLA sink does not yet support PCP or PP")
-    if cfg.model_config.max_model_len > MAX_CAPACITY:
-        raise ValueError("A3 MLA integration is currently limited to 16384 logical KV tokens")
+        return False
+    if cfg.kv_transfer_config is not None:
+        return False
     # AscendMLABackend exposes 128-token kernel pages. Manager blocks (e.g.
     # K3.1's 1536) are expanded by the existing block-table/cache-view layer;
     # they are not the operator's page_size argument.
-    if cfg.cache_config.block_size <= 0 or cfg.cache_config.block_size % PAGE_SIZE:
-        raise ValueError("A3 MLA integration requires 128-aligned manager blocks")
-    if not (cfg.model_config.enforce_eager or spec.enforce_eager or allow_graph):
-        raise ValueError("A3 MLA graph use requires explicit a3_mla_sink_allow_graph validation opt-in")
-    return True
+    return cfg.cache_config.block_size > 0 and cfg.cache_config.block_size % PAGE_SIZE == 0
 
 
 @dataclass(frozen=True)
@@ -84,16 +87,9 @@ class A3MLAAdapter:
     config: A3MLAConfig
     attention_op: Any
     metadata_op: Any
-    is_mock: bool = False
     # Bootstrap from zero-length device tensors once per graph capacity;
     # the provider owns the metadata buffer's shape and byte layout.
     metadata_requires_device_inputs: bool = True
-
-    @property
-    def metadata_dtype(self):
-        # Numerical mock records are private int32 values. The native 910
-        # provider returns opaque bytes; never cast or reinterpret its tiling.
-        return torch.int32 if self.is_mock else torch.uint8
 
     def allocate_cache(self, pages: int, *, device):
         """Keep both A3 components packed inside each page, including DCP KV."""
@@ -104,15 +100,13 @@ class A3MLAAdapter:
         )
 
     @classmethod
-    def load(cls, config: A3MLAConfig, mode: str, module_name: str = DEFAULT_MODULE):
-        if mode not in ("mock", "external"):
-            raise ValueError("an A3 provider must explicitly be mock or external")
-        module = import_module(MOCK_MODULE if mode == "mock" else module_name)
-        attention = getattr(module, "flash_attn_with_kvcache", None)
-        metadata = getattr(module, "get_scheduler_metadata", None)
-        if not callable(attention) or not callable(metadata):
-            raise ImportError("A3 provider must export flash_attn_with_kvcache and get_scheduler_metadata")
-        return cls(config, attention, metadata, is_mock=mode == "mock")
+    def load(cls, config: A3MLAConfig):
+        ops = get_a3_mla_ops()
+        if ops is None:
+            raise ImportError(
+                "A3 MLA requires flash_attn_with_kvcache and get_scheduler_metadata in " + OPERATOR_MODULE
+            )
+        return cls(config, *ops)
 
     def for_capacity(self, columns: int, tokens: int):
         return replace(
@@ -121,6 +115,8 @@ class A3MLAAdapter:
 
     def _check_lengths(self, cache_seqlens, cu_seqlens_q, seqused_q):
         batch = cache_seqlens.numel()
+        if batch == 0:
+            raise ValueError("A3 MLA requires a nonempty batch")
         if cache_seqlens.shape != (batch,) or cache_seqlens.dtype != torch.int32:
             raise ValueError("cache_seqlens must be int32 [B]")
         if cu_seqlens_q.shape != (batch + 1,) or cu_seqlens_q.dtype != torch.int32:
@@ -138,16 +134,9 @@ class A3MLAAdapter:
                 raise ValueError("seqused_q must be same-device int32 [B]")
             # The builder derives used_q from cu differences, or sets a whole
             # dummy segment to zero. Partial segments are not representable by
-            # this public operator ABI. Keep the numerical assertion in the
-            # mock: aten::_assert_async falls back to CPU on torch_npu 2.10 and
-            # would reintroduce a device-length read in the native hot path.
-            if self.is_mock:
-                allocated = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-                torch._assert_async(
-                    ((seqused_q == 0) | (seqused_q == allocated)).all(),
-                    "A3 MLA does not support partially used Query segments",
-                )
-        if not self.is_mock and cache_seqlens.device.type != "npu":
+            # this public operator ABI. Do not read device values here:
+            # aten::_assert_async falls back to CPU on torch_npu 2.10.
+        if cache_seqlens.device.type != "npu":
             raise ValueError("native A3 MLA requires NPU tensors")
         return batch
 
@@ -178,11 +167,11 @@ class A3MLAAdapter:
         )
         if (
             not isinstance(metadata, torch.Tensor)
-            or metadata.dtype != self.metadata_dtype
+            or metadata.dtype != torch.uint8
             or metadata.ndim != 1
             or not metadata.is_contiguous()
         ):
-            raise ValueError(f"A3 provider metadata must be a contiguous opaque {self.metadata_dtype} vector")
+            raise ValueError("A3 provider metadata must be a contiguous opaque uint8 vector")
         if not metadata.numel() or metadata.device != cache_seqlens.device:
             raise ValueError("A3 provider metadata must be nonempty and remain on the input device")
         return metadata
@@ -195,12 +184,9 @@ class A3MLAAdapter:
         cfg = self.config
         if q.ndim != 3 or q.shape[1:] != (cfg.num_heads, QK_DIM) or q.dtype != cfg.dtype:
             raise ValueError("normalized A3 Query must be TND [T,H,576] with the configured dtype")
-        if isinstance(k_cache, tuple) and len(k_cache) == 2:
-            v_cache, rope_cache = k_cache
-        elif isinstance(k_cache, torch.Tensor) and k_cache.ndim == 4 and k_cache.shape[-1] == QK_DIM:
-            v_cache, rope_cache = k_cache[..., :LATENT_DIM], k_cache[..., LATENT_DIM:]
-        else:
-            raise ValueError("A3 MLA requires (content_cache, rope_cache) or a fused 576-wide cache")
+        if not isinstance(k_cache, tuple) or len(k_cache) != 2:
+            raise ValueError("A3 MLA requires (content_cache, rope_cache)")
+        v_cache, rope_cache = k_cache
         if v_cache.ndim != 4 or v_cache.shape[1:] != (cfg.page_size, 1, LATENT_DIM):
             raise ValueError("A3 content cache must be ND [pages,128,1,512]")
         if rope_cache.shape != (*v_cache.shape[:3], ROPE_DIM):
