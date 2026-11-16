@@ -403,6 +403,24 @@ jobs:
             --markdown-report ./tests/diff_coverage.md
           cat ./tests/diff_coverage.md >> "${GITHUB_STEP_SUMMARY}"
 
+      - name: Generate PR coverage comment
+        if: ${{ matrix.group.npu_type == 'cpu' && inputs.enable-coverage != true }}
+        run: |
+           python3 .github/workflows/scripts/coverage_comment.py \
+            --input ./tests/diff_coverage.md \
+            --output ./tests/coverage_comment.md \
+            --summary-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      - name: Upload diff coverage report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            ./tests/diff_coverage.md
+            ./tests/coverage_comment.md
+          if-no-files-found: ignore
+
       - name: Upload coverage data
         if: ${{ !cancelled() && inputs.enable-coverage }}
         continue-on-error: true
