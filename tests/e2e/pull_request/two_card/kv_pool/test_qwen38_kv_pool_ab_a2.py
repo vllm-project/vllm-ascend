@@ -58,9 +58,7 @@ repo's validated RoCE Store path (``ASCEND_GLOBAL_RESOURCE_CONFIG`` with
 ``HCCL_INTRA_ROCE_ENABLE=1``) and keeps ``ASCEND_ENABLE_USE_FABRIC_MEM``
 unset; the devices themselves still have to expose working RoCE endpoints
 (``/etc/hccn.conf`` visible in the container, per-NPU RoCE IP and link up).
-``tools/probe_mooncake_te_roce.py`` reproduces the bare TransferEngine
-handshake without vLLM to separate a missing host RoCE configuration from a
-misconfigured test environment. The official A2 environment also reserves 2MB
+The official A2 environment also reserves 2MB
 hugepages, but no scenario consumes them (all four scenarios were verified
 passing with ``nr_hugepages=0`` on A2), so their absence only prints a note.
 The memcache tier-3 legs need the raw UBS IO block device above (the test
