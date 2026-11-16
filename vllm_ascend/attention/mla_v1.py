@@ -1033,7 +1033,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         config = self.vllm_config
         if not getattr(config, "use_v2_model_runner", False):
             return False
-        if config.speculative_config is not None and config.speculative_config.method != "dspark":
+        if config.speculative_config is not None and config.speculative_config.method not in ("dspark", "dflash"):
             return False
         if not get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH):
             return False

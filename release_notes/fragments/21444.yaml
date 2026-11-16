@@ -1,0 +1,4 @@
+pr: 21444
+entries:
+  - category: performance
+    text: Keep Qwen3.8 DFlash2 draft tiling and runner lengths on device, reducing host synchronization during speculative decoding.

@@ -159,6 +159,10 @@ def test_flashmla_dspark_target_model_gate(monkeypatch, dcp_size, model_type, ex
         monkeypatch.setattr(mla_v1, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: False))
         assert not AscendMLAImpl._can_use_flashmla(impl)
         monkeypatch.setattr(mla_v1, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: True))
+    # MLA DFlash2 drafts (e.g. Kimi-K3.1-Dflash2-Preview) share the DSpark
+    # FlashMLA draft path.
+    config.speculative_config.method = "dflash"
+    assert AscendMLAImpl._can_use_flashmla(impl) is expected_flashmla
     config.speculative_config.method = "eagle"
     assert not AscendMLAImpl._can_use_flashmla(impl)
 
