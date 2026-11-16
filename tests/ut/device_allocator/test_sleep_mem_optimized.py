@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from vllm_ascend.device_allocator.sleep_mem_optimized import (
     AclGraphSleepWakeupManager,
     HcclSleepWakeupManager,
@@ -60,6 +62,7 @@ def test_acl_graph_reset_graph_params_clears_list_values_only():
 def test_acl_graph_wakeup_waits_for_kv_cache_tag():
     model_runner = MagicMock()
     manager = AclGraphSleepWakeupManager(MagicMock(), lambda: model_runner)
+    manager._needs_recapture = True
 
     manager.wakeup(tags=["weights"])
     model_runner.capture_model.assert_not_called()
@@ -360,10 +363,12 @@ def test_sleep_wakeup_releases_anchor_after_aclgraph_recapture():
     manager.hccl.wakeup = MagicMock(side_effect=lambda: calls.append("hccl"))
     manager.acl_graph.wakeup = MagicMock(side_effect=lambda tags: calls.append("acl"))
     manager.hccl.release_lifecycle_anchor = MagicMock(side_effect=lambda: calls.append("release"))
+    manager._asleep = True
 
     manager.wakeup()
 
     assert calls == ["hccl", "acl", "release"]
+    assert manager._asleep is False
 
 
 def test_staged_wakeup_keeps_anchor_until_kv_cache_recapture():
@@ -372,9 +377,181 @@ def test_staged_wakeup_keeps_anchor_until_kv_cache_recapture():
     manager.hccl.wakeup = MagicMock()
     manager.acl_graph.wakeup = MagicMock()
     manager.hccl.release_lifecycle_anchor = MagicMock()
+    manager._asleep = True
 
     manager.wakeup(tags=["weights"])
     manager.hccl.release_lifecycle_anchor.assert_not_called()
+    assert manager._asleep is True
 
     manager.wakeup(tags=["kv_cache"])
     manager.hccl.release_lifecycle_anchor.assert_called_once_with()
+    assert manager._asleep is False
+
+
+def _graph_manager(name: str):
+    return SimpleNamespace(graphs={name: object()}, _graphs_captured=True)
+
+
+def test_sleep_releases_target_spec_and_encoder_graph_managers():
+    class EncoderManager:
+        def __init__(self):
+            self.graphs = {"budget": object()}
+            self.cleared = False
+
+        def clear(self):
+            self.cleared = True
+            self.graphs.clear()
+
+    target = _graph_manager("target")
+    spec = SimpleNamespace(
+        cudagraph_manager=_graph_manager("mtp"),
+        prefill_cudagraph_manager=_graph_manager("prefill"),
+        decode_cudagraph_manager=_graph_manager("decode"),
+        query_cudagraph_manager=_graph_manager("query"),
+    )
+    encoder = EncoderManager()
+    model_runner = SimpleNamespace(
+        cudagraph_manager=target,
+        speculator=spec,
+        model_state=SimpleNamespace(encoder_runner=SimpleNamespace(cudagraph_manager=encoder)),
+    )
+    manager = AclGraphSleepWakeupManager(MagicMock(), lambda: model_runner)
+
+    with (
+        patch.object(AclGraphSleepWakeupManager, "_clear_breakable_graphs") as clear_breakable,
+        patch.object(manager, "reset_all_graph_params"),
+        patch.object(manager, "clear_all_attention_workspaces"),
+    ):
+        manager.sleep()
+
+    assert target.graphs == {}
+    assert target._graphs_captured is False
+    for graph_manager in (
+        spec.cudagraph_manager,
+        spec.prefill_cudagraph_manager,
+        spec.decode_cudagraph_manager,
+        spec.query_cudagraph_manager,
+    ):
+        assert graph_manager.graphs == {}
+        assert graph_manager._graphs_captured is False
+    assert encoder.cleared is True
+    assert encoder.graphs == {}
+    clear_breakable.assert_called_once_with()
+
+
+def test_sleep_is_idempotent():
+    model_runner = SimpleNamespace(cudagraph_manager=_graph_manager("target"))
+    manager = AclGraphSleepWakeupManager(MagicMock(), lambda: model_runner)
+
+    with (
+        patch.object(manager, "reset_all_graph_params") as reset_params,
+        patch.object(manager, "clear_all_attention_workspaces") as clear_workspaces,
+        patch.object(AclGraphSleepWakeupManager, "_clear_breakable_graphs"),
+    ):
+        manager.sleep()
+        manager.sleep()
+
+    assert reset_params.call_count == 1
+    assert clear_workspaces.call_count == 1
+    assert manager._needs_recapture is True
+
+
+def test_sleep_releases_graphs_before_clearing_workspaces():
+    calls: list[str] = []
+    manager = AclGraphSleepWakeupManager(MagicMock(), lambda: MagicMock())
+    manager.reset_model_runner_graph_manager = MagicMock(side_effect=lambda _: calls.append("graphs"))
+    manager.reset_all_graph_params = MagicMock(side_effect=lambda: calls.append("params"))
+    manager.clear_all_attention_workspaces = MagicMock(side_effect=lambda: calls.append("workspaces"))
+
+    manager.sleep()
+
+    assert calls == ["graphs", "params", "workspaces"]
+
+
+def test_reset_model_runner_graph_manager_clears_breakable_registry():
+    with patch.object(AclGraphSleepWakeupManager, "_clear_breakable_graphs") as clear_breakable:
+        AclGraphSleepWakeupManager.reset_model_runner_graph_manager(SimpleNamespace())
+
+    clear_breakable.assert_called_once_with()
+
+
+def test_wakeup_without_sleep_is_noop():
+    model_runner = MagicMock()
+    manager = AclGraphSleepWakeupManager(MagicMock(), lambda: model_runner)
+
+    manager.wakeup()
+
+    model_runner.capture_model.assert_not_called()
+    assert manager._needs_recapture is False
+
+
+def test_wakeup_retries_after_recapture_failure():
+    model_runner = MagicMock()
+    manager = AclGraphSleepWakeupManager(MagicMock(), lambda: model_runner)
+    manager._needs_recapture = True
+    model_runner.capture_model.side_effect = [RuntimeError("capture failed"), None]
+
+    with patch(
+        "vllm_ascend.device_allocator.sleep_mem_optimized.set_current_vllm_config",
+        return_value=nullcontext(),
+    ):
+        with pytest.raises(RuntimeError, match="capture failed"):
+            manager.wakeup()
+        assert manager._needs_recapture is True
+
+        manager.wakeup()
+
+    assert manager._needs_recapture is False
+    assert model_runner.capture_model.call_count == 2
+
+
+def test_capture_size_keys_survive_sleep_and_accept_new_workspaces():
+    params = DummyGraphParams(
+        events={4: ["event"], 8: ["event"]},
+        workspaces={4: object(), 8: object()},
+        extra_handles={4: ["handle"], 8: ["handle"]},
+        metadata={4: ("keep",), 8: ("keep",)},
+    )
+
+    AclGraphSleepWakeupManager.clear_attention_workspaces(params)
+    AclGraphSleepWakeupManager.reset_graph_params(params)
+
+    assert set(params.workspaces) == {4, 8}
+    assert params.workspaces == {4: None, 8: None}
+    assert params.events == {4: [], 8: []}
+    assert params.extra_handles == {4: [], 8: []}
+    assert params.metadata == {4: ("keep",), 8: ("keep",)}
+
+    params.workspaces[4] = object()
+    params.workspaces[8] = object()
+    assert set(params.workspaces) == {4, 8}
+
+
+def test_sleep_wakeup_manager_skips_duplicate_sleep():
+    model_runner = MagicMock(use_aclgraph=True)
+    manager = SleepWakeupManager(MagicMock(), MagicMock(), lambda: model_runner)
+    manager.acl_graph.sleep = MagicMock()
+    manager.hccl.sleep = MagicMock()
+
+    with patch(
+        "vllm_ascend.device_allocator.sleep_mem_optimized.torch.npu.mem_get_info",
+        side_effect=[(10, 20), (12, 20)],
+    ):
+        manager.sleep()
+        manager.sleep()
+
+    manager.acl_graph.sleep.assert_called_once_with()
+    manager.hccl.sleep.assert_called_once_with()
+    assert manager._asleep is True
+
+
+def test_sleep_wakeup_manager_wakeup_without_sleep_is_noop():
+    model_runner = MagicMock(use_aclgraph=True)
+    manager = SleepWakeupManager(MagicMock(), MagicMock(), lambda: model_runner)
+    manager.hccl.wakeup = MagicMock()
+    manager.acl_graph.wakeup = MagicMock()
+
+    manager.wakeup()
+
+    manager.hccl.wakeup.assert_not_called()
+    manager.acl_graph.wakeup.assert_not_called()

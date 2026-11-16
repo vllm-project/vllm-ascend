@@ -388,10 +388,20 @@ def set_graph_params(aclgraph_capture_sizes: list[int]):
     )
 
 
+def _update_graph_params_workspaces(params: GraphParams | None, num_tokens: int, workspace: Any, label: str) -> None:
+    if params is None:
+        return
+    if num_tokens not in params.workspaces:
+        raise RuntimeError(
+            f"{label} has no capture-size key {num_tokens}; "
+            f"available keys: {sorted(params.workspaces)}. "
+            "Capture-size keys are fixed when the graph parameters are initialized."
+        )
+    params.workspaces[num_tokens] = workspace
+
+
 def update_graph_params_workspaces(num_tokens: int, workspace: torch.Tensor):
-    global _graph_params
-    if _graph_params is not None:
-        _graph_params.workspaces[num_tokens] = workspace
+    _update_graph_params_workspaces(_graph_params, num_tokens, workspace, "GraphParams")
 
 
 def get_graph_params():
@@ -414,9 +424,7 @@ def set_draft_graph_params(aclgraph_capture_sizes: list[int]):
 
 
 def update_draft_graph_params_workspaces(num_tokens: int, workspace: Any):
-    global _draft_graph_params
-    if _draft_graph_params is not None:
-        _draft_graph_params.workspaces[num_tokens] = workspace
+    _update_graph_params_workspaces(_draft_graph_params, num_tokens, workspace, "DraftGraphParams")
 
 
 def get_draft_graph_params():
@@ -439,9 +447,9 @@ def set_draft_graph_prefill_params(aclgraph_capture_sizes: list[int]):
 
 
 def update_draft_graph_prefill_params_workspaces(num_tokens: int, workspace: Any):
-    global _draft_graph_prefill_params
-    if _draft_graph_prefill_params is not None:
-        _draft_graph_prefill_params.workspaces[num_tokens] = workspace
+    _update_graph_params_workspaces(
+        _draft_graph_prefill_params, num_tokens, workspace, "DraftGraphPrefillParams"
+    )
 
 
 def get_draft_graph_prefill_params():

@@ -37,6 +37,7 @@ class SleepWakeupManager:
         self.acl_graph = AclGraphSleepWakeupManager(vllm_config, model_runner_getter)
         self.hccl = HcclSleepWakeupManager(vllm_config, worker)
         self._model_runner_getter = model_runner_getter
+        self._asleep = False
 
     @staticmethod
     def _measure_memory_released(cleanup: Callable[[], None]) -> int:
@@ -46,6 +47,9 @@ class SleepWakeupManager:
         return max(free_bytes_after_cleanup - free_bytes_before_cleanup, 0)
 
     def sleep(self) -> None:
+        if self._asleep:
+            logger.info("Sleep mode cleanup already applied; skipping duplicate sleep().")
+            return
         model_runner = self._model_runner_getter()
         free_bytes_before_cleanup = torch.npu.mem_get_info()[0]
         if model_runner.use_aclgraph:
@@ -57,8 +61,12 @@ class SleepWakeupManager:
             "Sleep mode released HCCL and attention workspace memory: %.3f GiB.",
             free_mem / GiB_bytes,
         )
+        self._asleep = True
 
     def wakeup(self, tags: list[str] | None = None) -> None:
+        if not self._asleep:
+            logger.info("wakeup() called without a preceding sleep(); skipping wake recovery.")
+            return
         self.hccl.wakeup()
         model_runner = self._model_runner_getter()
         if model_runner.use_aclgraph:
@@ -68,12 +76,29 @@ class SleepWakeupManager:
             # staged level-2 wakeup, weights are restored first and recapture
             # happens only after the KV cache is restored.
             self.hccl.release_lifecycle_anchor()
+            self._asleep = False
 
 
 class AclGraphSleepWakeupManager:
+    # Capture-size keys are intentionally kept across sleep; these managers own
+    # the captured graph objects that must be dropped before wake-time
+    # recapture. Speculative decoding and multimodal encoders add their own
+    # managers on the speculator / model_state instead of the runner itself.
+    _GRAPH_MANAGER_ATTRS = (
+        "cudagraph_manager",
+        "prefill_cudagraph_manager",
+        "decode_cudagraph_manager",
+        "query_cudagraph_manager",
+    )
+
     def __init__(self, vllm_config: VllmConfig, model_runner_getter: Callable[[], Any]):
         self.vllm_config = vllm_config
         self._model_runner_getter = model_runner_getter
+        # True after graph workspaces/managers have been released. wakeup()
+        # only recaptures when this flag is set, which makes repeated
+        # sleep()/wakeup() calls idempotent and prevents an accidental
+        # capture when wakeup() is called without a preceding sleep().
+        self._needs_recapture = False
 
     @staticmethod
     def clear_attention_workspaces(params) -> None:
@@ -109,29 +134,106 @@ class AclGraphSleepWakeupManager:
             wrapper.concrete_aclgraph_entries.clear()
             wrapper.first_run_finished = False
 
-    @staticmethod
-    def reset_model_runner_graph_manager(model_runner: Any) -> None:
-        manager = getattr(model_runner, "cudagraph_manager", None)
-        if manager is None:
-            return
-        if hasattr(manager, "graphs"):
-            manager.graphs.clear()
+    @classmethod
+    def _iter_graph_managers(cls, model_runner: Any):
+        """Yield every manager that may own captured ACL graphs.
+
+        ``model_runner.cudagraph_manager`` only covers the target decoder.
+        Speculative decoding keeps prefill/decode/query managers on the
+        speculator, and multimodal models keep an encoder manager on
+        ``model_state.encoder_runner``.  Missing attributes are expected for
+        model/config combinations that do not use that graph mode.
+        """
+        seen: set[int] = set()
+
+        def visit(owner: Any):
+            if owner is None:
+                return
+            for attr in cls._GRAPH_MANAGER_ATTRS:
+                manager = getattr(owner, attr, None)
+                if manager is None or id(manager) in seen:
+                    continue
+                seen.add(id(manager))
+                yield manager
+
+        yield from visit(model_runner)
+        yield from visit(getattr(model_runner, "speculator", None))
+        model_state = getattr(model_runner, "model_state", None)
+        yield from visit(getattr(model_state, "encoder_runner", None))
+
+    @classmethod
+    def _release_graph_manager(cls, manager: Any) -> None:
+        """Drop captured graphs owned by one manager, keeping its metadata."""
+        # Encoder managers own extra per-budget FIA state (encoder graph
+        # params, update stream), so use their dedicated clear() hook.  Their
+        # class names are stable across the supported vLLM versions; relying
+        # on the concrete vLLM import here would also pull in CUDA-only code.
+        if manager.__class__.__name__.startswith("Encoder"):
+            clear = getattr(manager, "clear", None)
+            if callable(clear):
+                clear()
+                return
+        graphs = getattr(manager, "graphs", None)
+        if graphs is not None:
+            graphs.clear()
         if hasattr(manager, "_graphs_captured"):
             manager._graphs_captured = False
 
+    @staticmethod
+    def _clear_breakable_graphs() -> None:
+        """Clear the class-level registry used by breakable piecewise graphs."""
+        try:
+            from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
+        except ImportError:  # older vLLM without breakable cudagraph support
+            return
+        clear = getattr(BreakableCUDAGraphWrapper, "clear_all_graphs", None)
+        if callable(clear):
+            clear()
+
+    @classmethod
+    def reset_model_runner_graph_manager(cls, model_runner: Any) -> None:
+        for manager in cls._iter_graph_managers(model_runner):
+            cls._release_graph_manager(manager)
+        cls._clear_breakable_graphs()
+
     def sleep(self) -> None:
-        self.clear_all_attention_workspaces()
+        if self._needs_recapture:
+            logger.info("ACL graph workspaces already released; skipping duplicate sleep().")
+            return
+        model_runner = self._model_runner_getter()
+        # Graph objects own the pool segments that back the attention
+        # workspaces (the workspace dicts only hold weak handles). Drop the
+        # graphs first, then clear the weak handles and replay metadata so a
+        # replay can never observe a graph whose workspace was already None.
+        self.reset_model_runner_graph_manager(model_runner)
         self.reset_all_graph_params()
-        self.reset_model_runner_graph_manager(self._model_runner_getter())
+        self.clear_all_attention_workspaces()
+        self._needs_recapture = True
 
     def wakeup(self, tags: list[str] | None = None) -> None:
+        if not self._needs_recapture:
+            # wakeup() without a preceding sleep(), or a duplicate wakeup:
+            # there is nothing to recapture and calling capture_model() here
+            # would trip the "graph already captured" assertion.
+            return
         if tags is not None and "kv_cache" not in tags:
             # Level-2 wakeup restores weights before external weight loading;
             # recapture graphs only after KV cache is restored.
             return
         model_runner = self._model_runner_getter()
-        with set_current_vllm_config(self.vllm_config):
-            model_runner.capture_model()
+        try:
+            with set_current_vllm_config(self.vllm_config):
+                model_runner.capture_model()
+        except Exception:
+            # Drop partially captured graphs before leaving _needs_recapture
+            # set.  A retry wakeup() starts from a clean manager state instead
+            # of tripping the "graph already captured" assertion.
+            logger.exception("ACL graph recapture failed during wakeup(); rolling back partial graphs.")
+            self.reset_model_runner_graph_manager(model_runner)
+            self.reset_all_graph_params()
+            self.clear_all_attention_workspaces()
+            raise
+        self._needs_recapture = False
 
 
 class HcclSleepWakeupManager:

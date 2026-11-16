@@ -49,6 +49,7 @@ from vllm_ascend.compilation.acl_graph import (
     set_graph_params,
     update_draft_graph_params_workspaces,
     update_full_graph_params,
+    update_graph_params_workspaces,
 )
 from vllm_ascend.compilation.updatable_graph import GraphUpdateTask
 from vllm_ascend.device_allocator.sleep_mem_optimized import AclGraphSleepWakeupManager
@@ -948,6 +949,18 @@ class TestSleepGraphParams(TestBase):
         self.assertEqual(set(graph_params.workspaces), {4, 8})
         self.assertIsNone(graph_params.workspaces[4])
         self.assertIsNone(graph_params.workspaces[8])
+
+    def test_update_graph_params_workspaces_rejects_unknown_capture_size(self):
+        graph_params = GraphParams(
+            events={4: []},
+            workspaces={4: None},
+            handles={4: []},
+            attn_params={4: []},
+        )
+
+        with patch("vllm_ascend.compilation.acl_graph._graph_params", graph_params):
+            with pytest.raises(RuntimeError, match="no capture-size key 8"):
+                update_graph_params_workspaces(8, torch.empty(1))
 
     def test_reset_graph_params_for_sleep_clears_registered_wrappers(self):
         wrapper = MagicMock()

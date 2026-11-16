@@ -12,6 +12,7 @@ from vllm.v1.worker.utils import AttentionGroup, KVBlockZeroer
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params,
+    get_draft_graph_prefill_params,
     get_graph_params,
     weak_ref_workspaces,
 )
@@ -219,6 +220,7 @@ def torch_npu_graph_wrapper(*args, **kwargs):
     finally:
         weak_ref_workspaces(get_graph_params())
         weak_ref_workspaces(get_draft_graph_params())
+        weak_ref_workspaces(get_draft_graph_prefill_params())
 
 
 def prepare_v41_source_rope(runner: "NPUModelRunner") -> None:

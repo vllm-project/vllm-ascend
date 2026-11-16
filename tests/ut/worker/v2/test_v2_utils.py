@@ -23,6 +23,7 @@ def test_v2_utils_context_managers_switch_and_restore():
         patch.object(v2_utils, "weak_ref_workspaces") as weak_ref,
         patch.object(v2_utils, "get_graph_params", return_value="graph"),
         patch.object(v2_utils, "get_draft_graph_params", return_value="draft"),
+        patch.object(v2_utils, "get_draft_graph_prefill_params", return_value="draft_prefill"),
         patch.object(
             v2_utils,
             "get_ascend_config",
@@ -52,4 +53,5 @@ def test_v2_utils_context_managers_switch_and_restore():
             pass
         weak_ref.assert_any_call("graph")
         weak_ref.assert_any_call("draft")
-        assert weak_ref.call_count == 2
+        weak_ref.assert_any_call("draft_prefill")
+        assert weak_ref.call_count == 3
