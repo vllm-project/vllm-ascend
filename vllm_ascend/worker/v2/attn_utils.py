@@ -1784,6 +1784,11 @@ def _reshape_kv_cache_v2(
 
                 attn_impl = vllm_config.compilation_config.static_forward_context[layer_name].impl
                 if attn_impl.use_flashmla:
+                    if kernel_block_size != kv_cache_spec.block_size:
+                        raise ValueError(
+                            f"FlashMLA layer {layer_name} requires its native {kv_cache_spec.block_size}-token page, "
+                            f"but the KV group selected {kernel_block_size}. Check mixed attention backends."
+                        )
                     # FlashMLA consumes one token-fused tensor with
                     # [nope | rope] in the trailing 576 lanes of every token.
                     fused_cache = make_page_strided_cache_view(

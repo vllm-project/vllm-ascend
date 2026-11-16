@@ -60,7 +60,6 @@ def fused_cache():
     ],
 )
 def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, heads):
-    split = dcp and causal and speculative
     history, raw = fused_cache()
     before = raw.clone()
     slots = torch.tensor([0, 128, -1, -1])
@@ -70,7 +69,6 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, h
     attention_output[:, -1, :4] = torch.tensor([7.0, torch.nan, torch.inf, -torch.inf])
     flash = SimpleNamespace(
         slots=slots,
-        current=object() if split else None,
         query=torch.empty(tokens, heads, 576),
         adapter=SimpleNamespace(attention=Mock(return_value=(attention_output, None))),
         block_table=object(),
@@ -82,6 +80,7 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, h
         token_live=torch.tensor([True, True, True, False]),
     )
     metadata = SimpleNamespace(
+        causal=causal,
         num_actual_tokens=3,
         num_decodes=1,
         num_prefills=0,
@@ -128,6 +127,7 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, h
         pcp_enabled=False,
         is_pcp_decode_sharded=False,
         dcp_enabled=dcp,
+        speculative_config=SimpleNamespace(method="dspark") if speculative else None,
         enable_mlapo=False,
         _dcp_current_kv_buffers=(torch.empty(1, 128, 1, 512), torch.empty(1, 128, 1, 64), torch.arange(128)),
         get_num_actual_tokens=lambda m: m.num_actual_tokens,
@@ -158,7 +158,9 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, h
 
     def prolog(hidden, cos, sin, dest, indices, *, quantize_query):
         assert quantize_query
-        torch.testing.assert_close(indices, torch.arange(tokens) if split else slots)
+        # Fused FlashMLA reads current rows from the owner cache; there is no
+        # separate replicated-current attention workspace to populate.
+        torch.testing.assert_close(indices, slots)
         keys = torch.arange(tokens).float()[:, None, None].expand(tokens, 1, 512) + 2
         scatter(key=keys, value=keys[..., :64] + 10, key_cache=dest[0], value_cache=dest[1], slot_mapping=indices)
         q, pe = torch.ones(tokens, 16, 512), torch.full((tokens, 16, 64), 2.0)
@@ -207,13 +209,7 @@ def test_external_forward_reuses_upstream_dcp_prolog(dcp, causal, speculative, h
     assert consumed.k.untyped_storage().data_ptr() == history.untyped_storage().data_ptr()
     if dcp:
         impl._dcp_all_gather_fragments.assert_called_once()
-    if split:
-        # Row 2 is valid but nonlocal; row 3 is padding. Both are excluded
-        # from local history; the complete current chunk remains available.
-        torch.testing.assert_close(consumed.current_k_nope[:, 0, 0], torch.arange(tokens).float() + 2)
-        torch.testing.assert_close(consumed.current_k_pe[:, 0, 0], torch.arange(tokens).float() + 12)
-    else:
-        assert consumed.current_k_nope is None and consumed.current_k_pe is None
+    assert consumed.current_k_nope is None and consumed.current_k_pe is None
     torch.testing.assert_close(history[:2, 0, 0, 0], torch.tensor([2.0, 3.0]))
     changed = torch.zeros_like(raw, dtype=torch.bool)
     for block in (0, 1):

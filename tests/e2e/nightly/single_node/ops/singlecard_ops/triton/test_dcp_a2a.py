@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from statistics import median
+
 import pytest
 import torch
 
@@ -68,6 +70,7 @@ def _check_a5_batching_case(
     output_stride: int,
     local_stride: int,
     run_combine: bool,
+    has_local: bool = True,
 ) -> None:
     """Compare one A5 shape with scalar kernels and check its dispatch."""
     if not dcp_a2a.is_950():
@@ -84,6 +87,8 @@ def _check_a5_batching_case(
         ..., ::local_stride
     ]
     local_lse = torch.randn(num_tokens, local_heads, 1, device="npu", dtype=torch.float32)
+    if not has_local:
+        local_output = local_lse = None
 
     monkeypatch.setattr(dcp_a2a, "is_950", lambda: False)
     scalar_send = pack_dcp_output_lse(output, lse, dcp_size, 1)
@@ -132,10 +137,10 @@ def _check_a5_batching_case(
         torch.testing.assert_close(batched_combined, scalar_combined, atol=2e-2, rtol=2e-2)
         rank_values = batched_send[..., :head_dim].permute(0, 2, 1, 3)
         rank_lse = decoded_lse.squeeze(-1).permute(0, 2, 1)
-        expected_combined = _reference_merge(
-            torch.cat((rank_values, local_output.unsqueeze(0))),
-            torch.cat((rank_lse, local_lse[..., 0].unsqueeze(0))),
-        )
+        if has_local:
+            rank_values = torch.cat((rank_values, local_output.unsqueeze(0)))
+            rank_lse = torch.cat((rank_lse, local_lse[..., 0].unsqueeze(0)))
+        expected_combined = _reference_merge(rank_values, rank_lse)
         torch.testing.assert_close(batched_combined, expected_combined, atol=2e-2, rtol=2e-2)
         combine_rows = num_tokens * local_heads
         min_rows_per_core = 8 if dcp_size <= 2 and head_dim > 256 else 4
@@ -143,7 +148,7 @@ def _check_a5_batching_case(
             dcp_size <= 8
             and head_dim <= 512
             and combine_rows >= min_rows_per_core * vector_cores
-            and (dcp_size > 2 or head_dim <= 256 or local_stride == 1)
+            and (not has_local or dcp_size > 2 or head_dim <= 256 or local_stride == 1)
         )
         assert combine_spy.calls == int(expected_combine_batch)
 
@@ -152,6 +157,7 @@ def _check_a5_batching_case(
     ("num_tokens", "num_heads", "head_dim", "dcp_size", "output_stride", "local_stride", "run_combine"),
     _A5_FIXED_CASES,
 )
+@pytest.mark.parametrize("has_local", [False, True])
 def test_a5_generalized_batching_matches_scalar_path(
     monkeypatch: pytest.MonkeyPatch,
     num_tokens: int,
@@ -161,10 +167,11 @@ def test_a5_generalized_batching_matches_scalar_path(
     output_stride: int,
     local_stride: int,
     run_combine: bool,
+    has_local: bool,
 ) -> None:
     """Keep business shapes fixed on every A5 variant."""
     _check_a5_batching_case(
-        monkeypatch, num_tokens, num_heads, head_dim, dcp_size, output_stride, local_stride, run_combine
+        monkeypatch, num_tokens, num_heads, head_dim, dcp_size, output_stride, local_stride, run_combine, has_local
     )
 
 
@@ -179,7 +186,8 @@ def test_a5_generalized_batching_matches_scalar_path(
     ],
 )
 @torch.inference_mode()
-def test_a5_core_relative_batching_boundaries(monkeypatch: pytest.MonkeyPatch, case: str) -> None:
+@pytest.mark.parametrize("has_local", [False, True])
+def test_a5_core_relative_batching_boundaries(monkeypatch: pytest.MonkeyPatch, case: str, has_local: bool) -> None:
     if not dcp_a2a.is_950():
         pytest.skip("The batched DCP kernels are enabled only on A5")
     dcp_a2a.init_device_properties_triton()
@@ -200,7 +208,81 @@ def test_a5_core_relative_batching_boundaries(monkeypatch: pytest.MonkeyPatch, c
         # when the token count is odd.
         assert num_tokens * 12 % 8 != 0
         assert num_tokens * 4 % 8 != 0
-    _check_a5_batching_case(monkeypatch, num_tokens, 12, 512, 3, 1, 1, True)
+    _check_a5_batching_case(monkeypatch, num_tokens, 12, 512, 3, 1, 1, True, has_local)
+
+
+@pytest.mark.parametrize("num_tokens", [64, 160, 320])
+@torch.inference_mode()
+def test_a5_flashmla_combine_without_local_precision_and_timing(monkeypatch, record_property, num_tokens):
+    """Time only combine, outside packing/communication, on K3 DCP8 shapes."""
+    if not dcp_a2a.is_950():
+        pytest.skip("requires A5")
+    dcp_a2a.init_device_properties_triton()
+    vector_cores = dcp_a2a.get_vectorcore_num()
+    if num_tokens * 12 < 4 * vector_cores:
+        pytest.skip("shape is below the batched combine dispatch threshold on this device")
+    torch.manual_seed(947)
+    values = torch.randn(8, num_tokens, 12, 512, device="npu", dtype=torch.bfloat16)
+    lse = torch.randn(8, num_tokens, 12, 1, device="npu") * 5
+    # Zero-weight shards must ignore NaN outputs. Include all-empty and
+    # single-valid rows as well as FP32 statistics above the FP16 range.
+    lse[:, 0, 0] = -torch.inf
+    values[:, 0, 0] = torch.nan
+    lse[1:, 1, 0] = torch.inf
+    values[1:, 1, 0] = torch.nan
+    lse[0, 2, 0] = torch.nan
+    values[0, 2, 0] = torch.nan
+    lse[:, 3, 0, 0] = 70_000.0 + torch.arange(8, device="npu") * 0.25
+    recv = torch.stack([pack_dcp_output_lse(values[r], lse[r], 1, 1)[0] for r in range(8)])
+    expected = _reference_merge(values, lse[..., 0])
+    scalar_kernel = dcp_a2a._fused_dcp_lse_combine_kernel
+    batched_kernel = dcp_a2a._fused_dcp_lse_combine_batched_kernel
+    launches = {}
+
+    class CaptureLaunch:
+        def __init__(self, name, kernel):
+            self.name, self.kernel = name, kernel
+
+        def __getitem__(self, grid):
+            launch = self.kernel[grid]
+
+            def run(*args, **kwargs):
+                launches[self.name] = lambda: launch(*args, **kwargs)
+                return launch(*args, **kwargs)
+
+            return run
+
+    monkeypatch.setattr(dcp_a2a, "_fused_dcp_lse_combine_kernel", CaptureLaunch("scalar", scalar_kernel))
+    monkeypatch.setattr(dcp_a2a, "_fused_dcp_lse_combine_batched_kernel", CaptureLaunch("batched", batched_kernel))
+    monkeypatch.setattr(dcp_a2a, "is_950", lambda: False)
+    scalar = fused_dcp_lse_combine(recv, 512, 1)
+    monkeypatch.setattr(dcp_a2a, "is_950", lambda: True)
+    batched = fused_dcp_lse_combine(recv, 512, 1)
+    assert set(launches) == {"scalar", "batched"}
+    torch.testing.assert_close(batched, expected, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(batched, scalar, atol=2e-2, rtol=2e-2)
+    assert torch.count_nonzero(batched[0, 0]).item() == 0
+
+    # Reuse allocated outputs and compiled kernels. NPU events exclude host
+    # reference work; alternating order reduces systematic warm-cache bias.
+    samples = {name: [] for name in launches}
+    for launch in launches.values():
+        for _ in range(5):
+            launch()
+    for iteration in range(6):
+        order = ("scalar", "batched") if iteration % 2 == 0 else ("batched", "scalar")
+        for name in order:
+            start, end = torch.npu.Event(enable_timing=True), torch.npu.Event(enable_timing=True)
+            start.record()
+            for _ in range(20):
+                launches[name]()
+            end.record()
+            end.synchronize()
+            samples[name].append(start.elapsed_time(end) / 20)
+    timings = {name: median(times) for name, times in samples.items()}
+    for name, ms in timings.items():
+        record_property(f"combine_{name}_ms", ms)
+    print(f"FlashMLA combine T={num_tokens}, H=12, DCP=8: {timings}")
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])

@@ -419,7 +419,9 @@ def fused_dcp_lse_combine(
     vector_cores = get_vectorcore_num()
     grid_size = total_rows if total_rows < vector_cores else vector_cores
     # Wider tiles need a bounded DCP and more rows on small-DCP cases.
-    # Strided local features regress for DCP 1-2 when D > 256.
+    # Strided local features regress for DCP 1-2 when D > 256. FlashMLA
+    # supplies all contributions through recv, so it has no local stride
+    # restriction and must not be excluded from batching just for that.
     batched = (
         is_950()
         and recv.dtype == torch.bfloat16
@@ -427,19 +429,17 @@ def fused_dcp_lse_combine(
         and scatter_dim == 1
         and head_dim <= 512
         and total_rows >= (8 if dcp_size <= 2 and head_dim > 256 else 4) * vector_cores
-        and local_output is not None
-        and (dcp_size > 2 or head_dim <= 256 or local_output.stride(-1) == 1)
+        and (local_output is None or dcp_size > 2 or head_dim <= 256 or local_output.stride(-1) == 1)
         and not return_lse
     )
     if batched:
-        assert local_output is not None and local_lse is not None
         _fused_dcp_lse_combine_batched_kernel[(grid_size,)](
             recv,
             output,
-            local_output,
-            local_lse,
-            *local_output.stride(),
-            *local_lse.stride()[:2],
+            local_output if local_output is not None else recv,
+            local_lse if local_lse is not None else recv,
+            *(local_output.stride() if local_output is not None else (0, 0, 0)),
+            *(local_lse.stride()[:2] if local_lse is not None else (0, 0)),
             *recv.stride(),
             *output.stride(),
             head_dim,
@@ -448,6 +448,7 @@ def fused_dcp_lse_combine(
             DCP_SIZE=dcp_size,
             BLOCK_D=triton.next_power_of_2(head_dim),
             BLOCK_ROWS=8,
+            HAS_LOCAL=local_output is not None,
         )
         return output
     _fused_dcp_lse_combine_kernel[(grid_size,)](

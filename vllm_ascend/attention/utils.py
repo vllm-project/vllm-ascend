@@ -41,9 +41,8 @@ from vllm_ascend.utils import (
 ATTENTION_UPDATE_MAX_INPUTS = 16
 SFA_QSFA_TILE_SIZE = 128
 MLAPO_MAX_SUPPORTED_TOKENS = 1024
-# FlashMLA's A5 kernel accepts these per-rank query-head counts (N1). Other
-# MLA models keep the FIA-compatible component-major cache layout on A5.
-# N1 is the post-TP local head count, not the global model configuration.
+# The paged FlashMLA cache is laid out for a fixed set of per-rank Q head-group
+# widths. Other MLA models keep the FIA-compatible component-major cache layout.
 MLA_FLASH_SUPPORTED_Q_HEADS = frozenset((8, 12, 64, 96))
 
 
@@ -89,37 +88,77 @@ def supports_strided_mla_cache(
 
 @lru_cache(maxsize=1)
 def _has_flashmla_module() -> bool:
-    """Whether the CANN ops-transformer distribution is discoverable."""
+    """Whether the default CANN ops-transformer package is discoverable."""
     return find_spec("cann_ops_transformer") is not None
 
 
 def get_flashmla_ops() -> tuple[Callable, Callable] | None:
-    """Find the two FlashMLA APIs in the active CANN operator package.
+    """Load the BF16/FP16 APIs exported by cann_ops_transformer.ops.
 
-    An absent package or API permits FIA selection before KV cache allocation.
-    Import failures inside an installed package remain errors rather than
-    silently selecting a different cache layout.
+    Import only after selecting the worker device. The default package owns
+    registration and entry-point overrides; do not require a separate custom
+    distribution or bypass its public exports with an unrelated dispatcher
+    handle. An absent package permits FIA selection before cache allocation.
+    An installed but incompatible package is an error.
     """
     if not _has_flashmla_module():
         return None
 
     try:
-        ops = import_module("cann_ops_transformer.ops")
+        namespace = import_module("cann_ops_transformer.ops")
     except ModuleNotFoundError as exc:
-        if exc.name in ("cann_ops_transformer", "cann_ops_transformer.ops"):
+        if exc.name == "cann_ops_transformer":
             return None
         raise
 
-    attention_op = getattr(ops, "flash_mla", None)
-    metadata_op = getattr(ops, "flash_mla_metadata", None)
-    if attention_op is None and metadata_op is None:
-        attention_op = getattr(ops, "flash_mla_with_kvcache", None)
-        metadata_op = getattr(ops, "flash_mla_with_kvcache_metadata", None)
-    assert attention_op is not None
-    assert metadata_op is not None
-    if callable(attention_op) and callable(metadata_op):
-        return attention_op, metadata_op
-    return None
+    required_args = {
+        "flash_mla": {
+            "block_table",
+            "cache_seqlens",
+            "cu_seqlens_q",
+            "seqused_q",
+            "attn_mask",
+            "metadata",
+            "head_dim_v",
+            "softmax_scale",
+            "mask_mode",
+            "max_seqlen_q",
+            "max_seqlen_kv",
+            "layout_q",
+            "layout_kv",
+            "layout_out",
+            "return_softmax_lse",
+        },
+        "flash_mla_metadata": {
+            "num_heads_q",
+            "num_heads_kv",
+            "cu_seqlens_q",
+            "seqused_q",
+            "max_seqlen_q",
+            "max_seqlen_kv",
+            "head_dim_qk",
+            "head_dim_v",
+            "mask_mode",
+            "layout_q",
+            "enable_dcp",
+            "cp_world",
+            "cp_rank",
+            "cp_kv_cache_interleave_size",
+            "casusal_seqlens_kv_global",
+        },
+    }
+    operators = []
+    for name, required in required_args.items():
+        packet = getattr(namespace, name, None)
+        operator = getattr(packet, "default", None)
+        schema = getattr(operator, "_schema", None)
+        if not callable(operator) or schema is None:
+            raise RuntimeError(f"cann_ops_transformer.ops must export the registered {name} operator")
+        missing = required - {argument.name for argument in schema.arguments}
+        if missing:
+            raise RuntimeError(f"cann_ops_transformer has an incompatible {name} schema; missing {sorted(missing)}")
+        operators.append(operator)
+    return operators[0], operators[1]
 
 
 class PreprocessType(enum.Enum):

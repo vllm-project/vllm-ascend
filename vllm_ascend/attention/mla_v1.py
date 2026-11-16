@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.distributed import get_dcp_group
 from vllm.distributed.parallel_state import get_pcp_group
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import (
@@ -39,6 +40,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
 from vllm_ascend.attention.flashmla import (
     FLASHMLA_BLOCK_SIZE,
     FLASHMLA_QK_DIM,
+    FLASHMLA_SUPPORTED_BLOCK_SIZES,
     FLASHMLA_V_DIM,
     FlashMLADecode,
     FlashMLAMetadataBuilder,
@@ -158,6 +160,28 @@ class AscendMLAAttention(MLAAttention):
     """
 
     supports_pcp_dcp: ClassVar[bool] = True
+
+    def get_attn_backend(self) -> type[AttentionBackend]:
+        if getattr(self.impl, "use_flashmla", False):
+            return AscendFlashMLABackend
+        return super().get_attn_backend()
+
+
+class AscendFlashMLABackend(AscendMLABackend):
+    """Expose native FlashMLA pages to allocation, block tables and writers.
+
+    FIA and sparse backends retain their existing 128-token page contract.
+    A mixed KV group must support this layer's full page instead of silently
+    splitting it into pages that disagree with the DCP metadata interleave.
+    """
+
+    @staticmethod
+    def get_supported_kernel_block_sizes(kv_cache_spec: AttentionSpec | None = None) -> list[int]:
+        if kv_cache_spec is not None:
+            if kv_cache_spec.block_size not in FLASHMLA_SUPPORTED_BLOCK_SIZES:
+                raise ValueError(f"Unsupported FlashMLA cache block size: {kv_cache_spec.block_size}")
+            return [kv_cache_spec.block_size]
+        return list(FLASHMLA_SUPPORTED_BLOCK_SIZES)
 
 
 @dataclass
@@ -371,7 +395,11 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         if True in flashmla_choices:
             impl = static_forward_context[layer_names[0]].impl
             self.flashmla_state = FlashMLAMetadataBuilder(
-                impl, device, scheduler_config.max_num_seqs, self.attn_mask_builder.get_splitfuse_attn_mask()
+                impl,
+                device,
+                scheduler_config.max_num_seqs,
+                self.attn_mask_builder.get_splitfuse_attn_mask(),
+                cache_block_size=kv_cache_spec.block_size,
             )
 
     def _build_external_flashmla(self, common_prefix_len, common, *, retain_for_graph: bool = False):
@@ -1023,7 +1051,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.use_mla_rope = kwargs.get("use_mla_rope", True)
         self.vllm_config = get_current_vllm_config()
         self.pcp_enabled = self.vllm_config.parallel_config.prefill_context_parallel_size > 1
-        self.dcp_enabled = self.vllm_config.parallel_config.decode_context_parallel_size > 1
+        # DCP group size and this rank's 0-based index. FlashMLA metadata takes
+        # them directly instead of deriving the local boundary in Python.
+        self.dcp_size = self.vllm_config.parallel_config.decode_context_parallel_size
+        self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_size > 1 else 0
+        self.dcp_enabled = self.dcp_size > 1
         self.is_pcp_decode_sharded = is_pcp_decode_sharding_enabled(self.vllm_config)
         self.kv_a_proj_with_mqa = kwargs.get("kv_a_proj_with_mqa")
         self.kv_a_layernorm = kwargs.get("kv_a_layernorm")
@@ -1064,6 +1096,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             return False
         if config.speculative_config is not None and config.speculative_config.method != "dspark":
             return False
+        # The unquantized FlashMLA contract: a supported Q head-group width,
+        # one KV head, a 576-dim fused QK head (512 nope + 64 rope), a 512-dim
+        # latent Value, unquantized BF16/FP16 KV and no external NZ conversion.
         if not get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH):
             return False
         if self.num_heads not in MLA_FLASH_SUPPORTED_Q_HEADS or self.num_kv_heads != 1:
@@ -1073,11 +1108,22 @@ class AscendMLAImpl(MLAAttentionImpl):
         if self.fa_quant_layer or self.dtype not in (torch.bfloat16, torch.float16) or self.enable_kv_nz:
             return False
         dcp_size = config.parallel_config.decode_context_parallel_size
-        # History sees all Q heads in the DCP group; current uses local heads.
+        # Each rank attends its KV shard with all of its own Q heads, so the
+        # group width is what the operator must support under DCP.
         if self.pcp_enabled or self.num_heads * dcp_size not in MLA_FLASH_SUPPORTED_Q_HEADS:
             return False
+        # The native reader uses the configured manager page. DCP metadata
+        # must describe that same page size (128-aligned, up to 1024).
+        cache_block_size = config.cache_config.block_size
+        if cache_block_size not in FLASHMLA_SUPPORTED_BLOCK_SIZES:
+            return False
+        if dcp_size > 1 and config.parallel_config.cp_kv_cache_interleave_size != cache_block_size:
+            return False
+        # Only connectors implementing the shared-page contract are eligible;
+        # producer and consumer must still select matching cache layouts.
         if not supports_component_major_mla_pd(config) or enable_sfa(config):
             return False
+        # Without the external pair, keep the existing FIA backend.
         return get_flashmla_ops() is not None
 
     @staticmethod
@@ -1369,10 +1415,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         if self._flashmla_writer_buffers is not None:
             return
         capacity = self.vllm_config.scheduler_config.max_num_batched_tokens
-        block_size = self.vllm_config.cache_config.block_size
+        # PROLOG's dense current-row workspace is independent of the reader
+        # page. Scatter uses the persistent cache's actual page size and slots.
+        block_size = FLASHMLA_BLOCK_SIZE
         if not self.use_mla_rope:
             capacity = min(capacity, MLAPO_MAX_SUPPORTED_TOKENS)
-            block_size = FLASHMLA_BLOCK_SIZE
         shape = (cdiv(capacity, block_size), block_size, self.num_kv_heads)
         self._flashmla_writer_buffers = (
             torch.empty((*shape, self.kv_lora_rank), dtype=self.dtype, device=self.W_UV.device),
@@ -1979,8 +2026,11 @@ class AscendMLAImpl(MLAAttentionImpl):
             and 0 < num_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
         ):
             return False
+        cache_block_size = kv_cache[0].shape[1]
+        if cache_block_size not in FLASHMLA_SUPPORTED_BLOCK_SIZES:
+            return False
         for cache, width in zip(kv_cache, (self.kv_lora_rank, self.qk_rope_head_dim)):
-            if cache.dtype != torch.bfloat16 or cache.shape[1:] != (FLASHMLA_BLOCK_SIZE, self.num_kv_heads, width):
+            if cache.dtype != torch.bfloat16 or cache.shape[1:] != (cache_block_size, self.num_kv_heads, width):
                 return False
         buffers = getattr(self, "_dcp_current_kv_buffers", None) if self.dcp_enabled else self._flashmla_writer_buffers
         if buffers is None or num_tokens > buffers[2].numel():
@@ -3098,9 +3148,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         return_current_kv = self._decode_requires_current_kv(attn_metadata)
         scatter_history = return_current_kv or flash_mlapo
         if return_current_kv or (flash_mlapo and self.dcp_enabled):
-            # DCP attention needs every current row, while the paged cache keeps
-            # only this rank's history. Use the existing prolog cache outputs for
-            # the current chunk, then scatter its rank-owned rows to history.
+            # DCP current rows are staged outside the paged history cache, so take
+            # them from the existing prolog cache outputs and scatters this rank's
+            # own rows into the paged cache, which the single FlashMLA call then
+            # reads at the end of its local range.
             assert self._dcp_current_kv_buffers is not None
             current_nope_cache, current_pe_cache, current_indices = self._dcp_current_kv_buffers
             assert bsz <= current_indices.numel()

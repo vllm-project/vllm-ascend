@@ -69,7 +69,7 @@ from vllm_ascend.attention.attention_c8_mxfp import (
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.flashmla import prepare_flashmla_batch_req_state
-from vllm_ascend.attention.mla_v1 import AscendMLABackend, all_mla_use_flashmla
+from vllm_ascend.attention.mla_v1 import AscendFlashMLABackend, AscendMLABackend, all_mla_use_flashmla
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
@@ -522,7 +522,7 @@ class NPUModelRunner(GPUModelRunner):
         # is used for adaptive verification handling.
         draft_layer_names: set[str] = getattr(self.speculator, "draft_attn_layer_names", set())
         self.use_fia = any(
-            (group.backend is AscendAttentionBackend or group.backend is AscendMLABackend)
+            group.backend in (AscendAttentionBackend, AscendMLABackend, AscendFlashMLABackend)
             and any(layer_name not in draft_layer_names for layer_name in group.layer_names)
             for groups in self.attn_groups
             for group in groups

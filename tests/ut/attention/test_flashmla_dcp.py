@@ -38,34 +38,78 @@ def local_lengths(lengths, *, dcp_size, dcp_rank, cp_kv_cache_interleave_size):
     return base + (lengths % (tile * dcp_size) - dcp_rank * tile).clamp(0, tile)
 
 
-def scatter_current(*, key, value, key_cache, value_cache, slot_mapping, cache_mode):
-    assert cache_mode == "Norm"
-    for token, slot in enumerate(slot_mapping.tolist()):
-        if slot >= 0:
-            key_cache[slot // 128, slot % 128].copy_(key[token])
-            value_cache[slot // 128, slot % 128].copy_(value[token])
+def unpack_schedule(schedule, batch_size):
+    """Decode the CPU emulator's protocol, not the external operator's ABI."""
+    heads, enable_dcp, world, rank, interleave = schedule[:5].tolist()
+    lengths, cu, used, global_lengths = schedule[5:].split((batch_size, batch_size + 1, batch_size, batch_size))
+    return SimpleNamespace(
+        heads=heads,
+        enable_dcp=bool(enable_dcp),
+        world=world,
+        rank=rank,
+        interleave=interleave,
+        lengths=lengths,
+        cu=cu,
+        used=used,
+        global_lengths=global_lengths,
+    )
+
+
+def check_schedule(flash):
+    plan = unpack_schedule(flash.schedule, flash.cache_lens.numel())
+    assert plan.heads == flash.query.shape[1]
+    torch.testing.assert_close(plan.lengths, flash.cache_lens)
+    torch.testing.assert_close(plan.cu, flash.cu)
+    torch.testing.assert_close(plan.used, flash.used_q)
+    if flash.global_cache_lens is None:
+        assert not plan.enable_dcp and plan.world == 1 and plan.rank == 0
+        assert not plan.global_lengths.any()
+    else:
+        assert plan.enable_dcp
+        torch.testing.assert_close(plan.global_lengths, flash.global_cache_lens)
+    return plan
 
 
 def paged_attention(query, cache, **kwargs):
-    """CPU replacement for the external op, with its NTD/NT return contract."""
+    """CPU replacement for the custom op's TND output and NT LSE contract."""
+    assert kwargs["layout_q"] == "TND"
+    assert kwargs["layout_kv"] == "PA_BBND"
+    assert kwargs["layout_out"] == "TND"
+    if kwargs["mask_mode"] != 4:
+        assert "win_left" not in kwargs and "win_right" not in kwargs
     heads, tokens = query.shape[1], query.shape[0]
     output = torch.zeros(heads, tokens, 512, dtype=query.dtype)
     lse = torch.full((heads, tokens), torch.inf, dtype=torch.float32)
     cu, used = kwargs["cu_seqlens_q"], kwargs["seqused_q"]
+    plan = unpack_schedule(kwargs["metadata"], kwargs["cache_seqlens"].numel())
+    assert plan.heads == heads
+    torch.testing.assert_close(plan.lengths, kwargs["cache_seqlens"])
+    torch.testing.assert_close(plan.cu, cu)
+    torch.testing.assert_close(plan.used, used)
     for request, length in enumerate(kwargs["cache_seqlens"].tolist()):
         qlen = int(used[request])
         if not length or not qlen:
             continue
         indices = torch.arange(length)
-        blocks = kwargs["block_table"][request, indices // 128].long()
-        keys = cache[blocks, indices % 128, 0].double()
+        blocks = kwargs["block_table"][request, indices // cache.shape[1]].long()
+        keys = cache[blocks, indices % cache.shape[1], 0].double()
+        global_positions = (indices // plan.interleave * plan.world + plan.rank) * plan.interleave
+        global_positions += indices % plan.interleave
         for offset in range(qlen):
             token = int(cu[request]) + offset
-            visible = length - qlen + offset + 1 if kwargs["mask_mode"] == 3 else length
-            scores = query[token].double() @ keys[:visible].T * kwargs["softmax_scale"]
-            output[:, token] = (scores.softmax(-1) @ keys[:visible, :512]).to(query.dtype)
+            if plan.enable_dcp:
+                assert kwargs["mask_mode"] == 0
+                visible_keys = keys[global_positions <= int(plan.global_lengths[request]) - qlen + offset]
+            elif kwargs["mask_mode"] == 3:
+                visible_keys = keys[: length - qlen + offset + 1]
+            else:
+                visible_keys = keys
+            if not visible_keys.shape[0]:
+                continue
+            scores = query[token].double() @ visible_keys.T * kwargs["softmax_scale"]
+            output[:, token] = (scores.softmax(-1) @ visible_keys[:, :512]).to(query.dtype)
             lse[:, token] = scores.logsumexp(-1).float()
-    return output, lse
+    return output.transpose(0, 1).contiguous(), lse
 
 
 def combine_outputs(recv, head_dim, *, scatter_dim, local_output=None, local_lse=None):
@@ -92,19 +136,6 @@ def runtime(monkeypatch):
     events: list[tuple[str, ...]] = []
     recorded_streams = []
     active_stream = ["main"]
-    current_query_storages: set[int] = set()
-    original_copy = torch.Tensor.copy_
-
-    def copy_tensor(destination, *args, **kwargs):
-        if destination.untyped_storage().data_ptr() in current_query_storages:
-            events.append(("query_copy", active_stream[0]))
-        return original_copy(destination, *args, **kwargs)
-
-    monkeypatch.setattr(torch.Tensor, "copy_", copy_tensor)
-
-    def scatter(**kwargs):
-        events.append(("scatter", active_stream[0]))
-        return scatter_current(**kwargs)
 
     class Stream:
         def __init__(self, name):
@@ -164,14 +195,35 @@ def runtime(monkeypatch):
     install("vllm_ascend.ops.rotary_embedding", get_cos_and_sin_mla=rope)
     api = load("vllm_ascend.attention.flashmla", "vllm_ascend/attention/flashmla.py")
 
-    def schedule(lengths, *, cu_seqlens_q, seqused_q, **kwargs):
-        return torch.cat((lengths, cu_seqlens_q, seqused_q))
+    def schedule(
+        lengths,
+        *,
+        cu_seqlens_q,
+        seqused_q,
+        num_heads_q,
+        enable_dcp,
+        cp_world,
+        cp_rank,
+        cp_kv_cache_interleave_size,
+        casusal_seqlens_kv_global,
+        **kwargs,
+    ):
+        assert (casusal_seqlens_kv_global is not None) == enable_dcp
+        if enable_dcp:
+            assert 128 <= cp_kv_cache_interleave_size <= 1024
+            assert cp_kv_cache_interleave_size % 128 == 0
+        else:
+            assert (cp_world, cp_rank, cp_kv_cache_interleave_size) == (1, 0, 128)
+        header = lengths.new_zeros(5)
+        for index, value in enumerate((num_heads_q, enable_dcp, cp_world, cp_rank, cp_kv_cache_interleave_size)):
+            header[index] = int(value)
+        global_lengths = torch.zeros_like(lengths) if casusal_seqlens_kv_global is None else casusal_seqlens_kv_global
+        return torch.cat((header, lengths, cu_seqlens_q, seqused_q, global_lengths))
 
     metadata_op = Mock(side_effect=schedule)
 
     def attention(query, cache, **kwargs):
-        kind = "current" if kwargs["mask_mode"] == 3 else "history"
-        events.append((kind, active_stream[0]))
+        events.append(("attention", active_stream[0]))
         return paged_attention(query, cache, **kwargs)
 
     attention_op = Mock(side_effect=attention)
@@ -181,7 +233,7 @@ def runtime(monkeypatch):
         classmethod(lambda cls, config: cls(config, attention_op, metadata_op)),
     )
 
-    def builder(*, size=8, rank=0, interleave=1, heads=8, dtype=torch.float16, use_rope=False, speculative=True):
+    def builder(*, size=8, rank=0, interleave=128, heads=8, dtype=torch.float16, use_rope=False, speculative=True):
         impl = SimpleNamespace(
             num_heads=heads,
             scale=0.125,
@@ -195,7 +247,11 @@ def runtime(monkeypatch):
             ),
         )
         return api.FlashMLAMetadataBuilder(
-            impl, torch.device("cpu"), 8, torch.triu(torch.ones(2048, 2048, dtype=torch.int8), diagonal=1)
+            impl,
+            torch.device("cpu"),
+            8,
+            torch.triu(torch.ones(2048, 2048, dtype=torch.int8), diagonal=1),
+            cache_block_size=interleave,
         )
 
     class AttentionKind(Enum):
@@ -205,7 +261,9 @@ def runtime(monkeypatch):
     context = SimpleNamespace(capturing=False, is_draft_model=False, is_draft_model_prefill=False)
     scope = {
         "torch": torch,
-        "torch_npu": SimpleNamespace(npu_scatter_pa_kv_cache=scatter),
+        "torch_npu": SimpleNamespace(
+            npu_scatter_pa_kv_cache=Mock(side_effect=AssertionError("FlashMLA must not stage a current cache"))
+        ),
         "record_attention_compute_start": Mock(),
         "fused_dcp_lse_combine": combine_outputs,
         "AscendMLAMetadata": object,
@@ -222,7 +280,6 @@ def runtime(monkeypatch):
         name: load_method("vllm_ascend/attention/context_parallel/mla_cp.py", "AscendMlaDCPImpl", name, scope)
         for name in (
             "_forward_external_flashmla",
-            "_prepare_dcp_flashmla_current",
             "_run_dcp_flashmla_attention",
             "_forward_decode_split_attention",
         )
@@ -254,7 +311,6 @@ def runtime(monkeypatch):
         events=events,
         active_stream=active_stream,
         recorded_streams=recorded_streams,
-        current_query_storages=current_query_storages,
     )
 
 
@@ -278,53 +334,48 @@ def common(lengths, queries, *, tokens=None, causal=True):
 @pytest.mark.parametrize(
     "causal,speculative,interleave,rank",
     [
-        (True, True, 1, 0),
-        (True, True, 4, 1),
+        (True, True, 512, 0),
+        (True, True, 896, 1),
         (True, True, 128, 7),
-        (True, False, 4, 1),
+        (True, False, 768, 1),
         (False, True, 128, 7),
-        (False, False, 1, 0),
+        (False, False, 896, 0),
     ],
 )
-def test_visibility_uses_global_history_before_sharding(runtime, causal, speculative, interleave, rank):
+def test_metadata_uses_full_local_lengths_in_both_causal_modes(runtime, causal, speculative, interleave, rank):
     builder = runtime.builder(rank=rank, interleave=interleave, speculative=speculative)
-    split = causal and speculative
     lengths = [1031, 3, 132, 0]
     queries = [4, 3, 2, 1] if speculative else [1, 1, 1, 1]
     inputs = common(lengths, queries, tokens=16, causal=causal)
     flash = builder.build(inputs, 4, sum(queries), False)
     expected = []
-    for length, query in zip(lengths, queries):
-        visible = max(0, length - query) if split else length
-        expected.append(sum(token // interleave % 8 == rank for token in range(visible)))
+    for length in lengths:
+        expected.append(sum(token // interleave % 8 == rank for token in range(length)))
     assert flash.cache_lens[:4].tolist() == expected
     assert not flash.cache_lens[4:].any()
     assert flash.query.shape == (16, 64, 576)
     assert flash.adapter.config.mask_mode == 0
     assert flash.adapter.config.return_softmax_lse
-    torch.testing.assert_close(flash.schedule, torch.cat((flash.cache_lens, flash.cu, flash.used_q)))
-    if split:
-        assert flash.current is not None
-        assert flash.current.query.shape == (16, 8, 576)
-        assert flash.current.slots.tolist() == [0, 1, 2, 3, 128, 129, 130, 256, 257] + [-1] * 7
-        assert flash.current.adapter.config.mask_mode == 3
-        torch.testing.assert_close(flash.current.schedule, torch.cat((flash.used_q, flash.cu, flash.used_q)))
+    plan = check_schedule(flash)
+    assert plan.enable_dcp is causal
+    if causal:
+        assert plan.world == 8 and plan.rank == rank
+        assert flash.global_cache_lens[:4].tolist() == lengths
+        assert not flash.global_cache_lens[4:].any()
     else:
-        assert flash.current is None
+        assert flash.global_cache_lens is None
+    device_calls = [call for call in runtime.metadata_op.call_args_list if call.args[0].device.type != "meta"]
+    assert len(device_calls) == 1
 
 
 def addresses(flash):
     tensors = {key: value for key, value in vars(flash).items() if isinstance(value, torch.Tensor)}
-    if flash.current is not None:
-        tensors.update(
-            {f"current.{key}": value for key, value in vars(flash.current).items() if isinstance(value, torch.Tensor)}
-        )
     return {key: value.data_ptr() for key, value in tensors.items()}
 
 
 @pytest.mark.parametrize("causal,rank", [(True, 3), (False, 7)])
 def test_metadata_refresh_reuses_device_rank(runtime, monkeypatch, causal, rank):
-    builder = runtime.builder(rank=rank, interleave=4)
+    builder = runtime.builder(rank=rank, interleave=512)
     rank_tensors = []
 
     def partition(lengths, *, dcp_size, dcp_rank, cp_kv_cache_interleave_size):
@@ -350,19 +401,17 @@ def test_metadata_refresh_reuses_device_rank(runtime, monkeypatch, causal, rank)
         with monkeypatch.context() as guard:
             guard.setattr(torch, "tensor", Mock(side_effect=AssertionError("tensor construction during refresh")))
             flash = builder.build(inputs, 2, 4, False, retain_for_graph=True)
-        visible = [length - 2 if causal else length for length in lengths]
-        expected = [sum(token // 4 % 8 == rank for token in range(length)) for length in visible]
+        expected = [sum(token // 512 % 8 == rank for token in range(length)) for length in lengths]
         assert flash.cache_lens[:2].tolist() == expected
     assert len(rank_tensors) == 3
     assert all(tensor is rank_tensors[0] for tensor in rank_tensors)
 
 
 @pytest.mark.parametrize("speculative,rank", [(False, 0), (True, 7)])
-def test_single_token_replay_keeps_configured_split_and_buffer_addresses(runtime, monkeypatch, speculative, rank):
+def test_single_token_replay_keeps_one_schedule_and_buffer_addresses(runtime, monkeypatch, speculative, rank):
     builder = runtime.builder(rank=rank, speculative=speculative, use_rope=True)
     inputs = common([9, 1], [1, 1], tokens=4)
     flash = builder.build(inputs, 2, 2, False, retain_for_graph=True)
-    assert (flash.current is not None) is speculative
     pointers = addresses(flash)
     schedule = flash.schedule.clone()
     runtime.metadata_op.reset_mock()
@@ -380,8 +429,7 @@ def test_single_token_replay_keeps_configured_split_and_buffer_addresses(runtime
         same = builder.build(inputs, 2, 2, False)
 
     assert same is flash
-    visible = 16 if speculative else 17
-    expected_length = sum(token % 8 == rank for token in range(visible))
+    expected_length = sum(token // 128 % 8 == rank for token in range(17))
     assert flash.cache_lens.tolist() == [expected_length, 0, 0, 0, 0]
     assert flash.used_q.tolist() == [1, 0, 0, 0, 0]
     assert flash.token_live.tolist() == [True, False, False, False]
@@ -389,23 +437,25 @@ def test_single_token_replay_keeps_configured_split_and_buffer_addresses(runtime
     assert flash.positions.tolist() == [8, 9, 0, 0]
     torch.testing.assert_close(flash.cos[:, 0, 0, 0], flash.positions.to(flash.cos.dtype))
     torch.testing.assert_close(flash.sin, -flash.cos)
-    if flash.current is not None:
-        assert flash.current.slots.tolist() == [0, -1, -1, -1]
-        torch.testing.assert_close(flash.current.schedule, torch.cat((flash.used_q, flash.cu, flash.used_q)))
+    assert flash.global_cache_lens.tolist() == [17, 0, 0, 0, 0]
     assert flash.adapter.config.num_heads == 64
     assert flash.adapter.config.mask_mode == 0
     assert flash.adapter.config.return_softmax_lse
-    assert runtime.metadata_op.call_count == (2 if speculative else 1)
+    runtime.metadata_op.assert_called_once()
     assert addresses(flash) == pointers
-    assert (flash.current is not None) is speculative
-    torch.testing.assert_close(flash.schedule, torch.cat((flash.cache_lens, flash.cu, flash.used_q)))
+    check_schedule(flash)
 
 
-def test_current_pages_cross_physical_blocks_and_eager_does_not_retain(runtime):
-    builder = runtime.builder()
-    flash = builder.build(common([260, 133], [130, 129]), 2, 259, True)
-    assert flash.current.slots.tolist() == list(range(130)) + list(range(256, 385))
-    assert flash.current.block_table[:2, :2].tolist() == [[0, 1], [2, 3]]
+def test_long_queries_reuse_persistent_pages_and_eager_does_not_retain(runtime):
+    builder = runtime.builder(interleave=128)
+    inputs = common([260, 133], [130, 129])
+    flash = builder.build(inputs, 2, 259, True)
+    assert flash.cu.tolist() == [0, 130, 259, 259]
+    assert flash.used_q.tolist() == [130, 129, 0]
+    assert flash.cache_lens.tolist() == [128, 128, 0]
+    assert flash.global_cache_lens.tolist() == [260, 133, 0]
+    torch.testing.assert_close(flash.block_table[:2], inputs.block_table_tensor)
+    check_schedule(flash)
     assert builder.buffers == {}
 
 
@@ -413,57 +463,56 @@ def test_current_pages_cross_physical_blocks_and_eager_does_not_retain(runtime):
 def test_dcp_one_keeps_original_single_attention_contract(runtime, causal):
     builder = runtime.builder(size=1)
     flash = builder.build(common([9], [2], tokens=4, causal=causal), 1, 2, False)
-    assert flash.current is None
+    assert flash.global_cache_lens is None
     assert flash.query.shape == (4, 8, 576)
     assert flash.cache_lens.tolist() == [9, 0, 0, 0, 0]
     assert flash.adapter.config.mask_mode == (3 if causal else 0)
     assert not flash.adapter.config.return_softmax_lse
+    assert not check_schedule(flash).enable_dcp
 
 
 @pytest.mark.parametrize(
-    "causal,speculative,interleave,dtype,capturing",
+    "causal,speculative,interleave,dtype,capturing,local_heads",
     [
-        (True, False, 1, torch.float16, False),
-        (True, False, 128, torch.bfloat16, True),
-        (True, True, 4, torch.float16, False),
-        (True, True, 128, torch.bfloat16, True),
-        (False, True, 1, torch.bfloat16, False),
-        (False, True, 4, torch.float16, True),
+        (True, False, 512, torch.float16, False, 8),
+        (True, False, 128, torch.bfloat16, True, 8),
+        (True, True, 896, torch.float16, False, 8),
+        (True, True, 128, torch.bfloat16, True, 8),
+        (False, True, 768, torch.bfloat16, False, 8),
+        (False, True, 896, torch.float16, True, 8),
+        (True, True, 128, torch.bfloat16, False, 12),
+        (False, True, 128, torch.bfloat16, True, 12),
     ],
 )
 def test_forward_matches_dense_with_strided_history_and_empty_ranks(
-    runtime, monkeypatch, causal, speculative, interleave, dtype, capturing
+    runtime, monkeypatch, causal, speculative, interleave, dtype, capturing, local_heads
 ):
     runtime.context.capturing = capturing
     torch.manual_seed(41)
-    size, local_heads, tokens = 8, 8, 5
-    split = causal and speculative
+    size, tokens = 8, 5
     queries = [3, 1] if speculative else [1, 1]
-    histories = [257, 0]
+    histories = [2 * interleave - 2, 0]
     lengths = [history + query for history, query in zip(histories, queries)]
     keys = [torch.randn(length, 576, dtype=dtype) * 0.2 for length in lengths]
     query = torch.randn(tokens, size * local_heads, 576, dtype=dtype) * 0.2
-    current_kv = torch.zeros(tokens, 1, 576, dtype=dtype)
-    start = 0
-    for sequence, qlen in zip(keys, queries):
-        current_kv[start : start + qlen, 0] = sequence[-qlen:]
-        start += qlen
     flashes, caches, partials = [], [], []
     for rank in range(size):
-        builder = runtime.builder(rank=rank, interleave=interleave, dtype=dtype, speculative=speculative)
+        builder = runtime.builder(
+            rank=rank, interleave=interleave, heads=local_heads, dtype=dtype, speculative=speculative
+        )
         inputs = common(lengths, queries, tokens=tokens, causal=causal)
         inputs.block_table_tensor.copy_(torch.tensor([[1, 3, 5], [2, 4, 6]]))
         flash = builder.build(inputs, 2, sum(queries), False)
         # Nonzero storage offset and padding between physical pages.
-        stride = 128 * 576 + 32
+        stride = interleave * 576 + 32
         backing = torch.full((8 * stride + 64,), 17.0, dtype=dtype)
-        cache = backing.as_strided((8, 128, 1, 576), (stride, 576, 576, 1), 32)
+        cache = backing.as_strided((8, interleave, 1, 576), (stride, 576, 576, 1), 32)
         for request, sequence in enumerate(keys):
             owners = torch.arange(sequence.shape[0]) // interleave % size
             local = sequence[owners == rank]
             for index, row in enumerate(local):
-                block = int(inputs.block_table_tensor[request, index // 128])
-                cache[block, index % 128, 0].copy_(row)
+                block = int(inputs.block_table_tensor[request, index // interleave])
+                cache[block, index % interleave, 0].copy_(row)
         flash.query.copy_(query)
         partials.append(
             flash.adapter.attention(
@@ -496,7 +545,8 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
         ):
             assert (world_size, scatter_dim, group, defer_combine) == (size, 1, "cpu-dcp", True)
             runtime.events.append(("exchange", runtime.active_stream[0]))
-            assert output.shape == (tokens, 64, 512) and lse.shape == (tokens, 64, 1)
+            assert output.shape == (tokens, size * local_heads, 512)
+            assert lse.shape == (tokens, size * local_heads, 1)
             expected_output, expected_lse = partials[rank]
             torch.testing.assert_close(output, expected_output.transpose(0, 1))
             torch.testing.assert_close(lse, expected_lse.transpose(0, 1).unsqueeze(-1))
@@ -508,9 +558,8 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
         monkeypatch.setattr(torch.ops.vllm, "dcp_a2a_fused", exchange, raising=False)
 
         def combine(recv, head_dim, *, scatter_dim, local_output=None, local_lse=None):
-            assert runtime.events[-1] == (("wait", "main", "attn") if split else ("exchange", "main"))
-            assert (local_output is not None) == split
-            assert (local_lse is not None) == split
+            assert runtime.events[-1] == ("exchange", "main")
+            assert local_output is None and local_lse is None
             runtime.events.append(("merge", runtime.active_stream[0]))
             return combine_outputs(
                 recv, head_dim, scatter_dim=scatter_dim, local_output=local_output, local_lse=local_lse
@@ -538,16 +587,13 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
         preprocessed = SimpleNamespace(
             ql_nope=query[..., :512],
             q_pe=query[..., 512:],
-            current_k_nope=current_kv[..., :512] if split else None,
-            current_k_pe=current_kv[..., 512:] if split else None,
+            current_k_nope=None,
+            current_k_pe=None,
         )
         cache, backing, snapshot = caches[rank]
         runtime.events.clear()
         runtime.recorded_streams.clear()
         runtime.attention_op.reset_mock()
-        runtime.current_query_storages.clear()
-        if split:
-            runtime.current_query_storages.add(flash.current.query.untyped_storage().data_ptr())
         # Production external metadata has no FIA CPU length mirrors.
         decode = SimpleNamespace(cp_history_seq_len=None, actual_seq_lengths_q=None)
         result = runtime.forward(impl, preprocessed, cache, SimpleNamespace(external_flashmla=flash, decode=decode))
@@ -555,49 +601,16 @@ def test_forward_matches_dense_with_strided_history_and_empty_ranks(
         impl._run_dcp_mtp_split_attention_op.assert_not_called()
         combined.assert_called_once()
         impl._v_up_proj_batch_major.assert_called_once()
-        assert runtime.attention_op.call_count == (2 if split else 1)
-        if split:
-            assert runtime.events == [
-                ("history", "main"),
-                ("scatter", "main"),
-                ("query_copy", "main"),
-                ("query_copy", "main"),
-                ("record", "main"),
-                ("wait", "attn", "main"),
-                ("current", "attn"),
-                ("record", "attn"),
-                ("exchange", "main"),
-                ("wait", "main", "attn"),
-                ("merge", "main"),
-                ("project", "main"),
-            ]
-            for tensor in (
-                flash.current.query,
-                flash.current.cache,
-                flash.current.schedule,
-                flash.current.block_table,
-                flash.current.slots,
-                flash.current.attn_mask,
-                flash.cu,
-                flash.used_q,
-                flash.token_live,
-            ):
-                assert any(held is tensor and stream.name == "attn" for held, stream in runtime.recorded_streams)
-            outputs_on_main = [tensor for tensor, stream in runtime.recorded_streams if stream.name == "main"]
-            assert [tuple(tensor.shape) for tensor in outputs_on_main] == [
-                (tokens, local_heads, 512),
-                (tokens, local_heads, 1),
-            ]
-        else:
-            assert runtime.events == [("history", "main"), ("exchange", "main"), ("merge", "main"), ("project", "main")]
-            assert not runtime.recorded_streams
+        runtime.attention_op.assert_called_once()
+        assert runtime.events == [("attention", "main"), ("exchange", "main"), ("merge", "main"), ("project", "main")]
+        assert not runtime.recorded_streams
         tolerance = 8e-4 if dtype == torch.bfloat16 else 1e-4
         # Unused query outputs are outside the attention result contract.
         torch.testing.assert_close(
             result[flash.token_live].double(), expected[flash.token_live, owned], atol=tolerance, rtol=0.02
         )
         assert torch.equal(backing, snapshot)  # Forward never repacks or writes persistent history.
-        cache_call = runtime.attention_op.call_args_list[-2 if split else -1]
+        cache_call = runtime.attention_op.call_args
         assert cache_call.args[1] is cache
     runtime.scope["get_graph_params"].assert_not_called()
     runtime.scope["torch_npu"]._npu_fused_infer_attention_score_get_max_workspace.assert_not_called()
@@ -621,7 +634,7 @@ def test_external_dcp_graph_skips_fia_parameter_updates(draft):
 @pytest.mark.parametrize("bad_lse", ["layout", "dtype"])
 def test_dcp_rejects_incompatible_lse_contract(runtime, bad_lse):
     flash = runtime.builder().build(common([1], [1]), 1, 1, False)
-    output = torch.zeros(64, 1, 512, dtype=torch.float16)
+    output = torch.zeros(1, 64, 512, dtype=torch.float16)
     lse = torch.zeros(1, 64) if bad_lse == "layout" else torch.zeros(64, 1, dtype=torch.float16)
     runtime.attention_op.side_effect = None
     runtime.attention_op.return_value = output, lse
@@ -637,23 +650,133 @@ def test_dcp_rejects_incompatible_lse_contract(runtime, bad_lse):
         )
 
 
-def test_causal_target_and_noncausal_draft_do_not_share_schedules(runtime):
-    builder = runtime.builder()
-    target = builder.build(common([9], [2], tokens=4), 1, 2, False, retain_for_graph=True)
-    draft = builder.build(common([9], [2], tokens=4, causal=False), 1, 2, False, retain_for_graph=True)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("size,heads", [(1, 12), (8, 12)])
+def test_custom_output_layout_is_adapted_without_reordering_heads(runtime, dtype, size, heads):
+    flash = runtime.builder(size=size, heads=heads, dtype=dtype).build(common([3], [3]), 1, 3, False)
+    gathered_heads = heads * size
+    # T != H and distinct token/head values detect accidental double transposes.
+    output = torch.arange(3 * gathered_heads, dtype=torch.float32).reshape(3, gathered_heads, 1)
+    output = output.expand(-1, -1, 512).to(dtype).contiguous()
+    lse = torch.arange(gathered_heads * 3, dtype=torch.float32).reshape(gathered_heads, 3)
+    runtime.attention_op.side_effect = None
+    runtime.attention_op.return_value = output, lse
+    result, stats = flash.adapter.attention(
+        flash.query,
+        torch.zeros(1, 128, 1, 576, dtype=dtype),
+        block_table=flash.block_table,
+        cache_seqlens=flash.cache_lens,
+        cu_seqlens_q=flash.cu,
+        seqused_q=flash.used_q,
+        metadata=flash.schedule,
+        attn_mask=flash.attn_mask,
+    )
+    torch.testing.assert_close(result, output.transpose(0, 1))
+    assert result.data_ptr() == output.data_ptr()
+    assert stats is lse
+    assert runtime.attention_op.call_args.kwargs["layout_out"] == "TND"
+
+
+def test_custom_operator_rejects_old_output_layout(runtime):
+    flash = runtime.builder().build(common([3], [3]), 1, 3, False)
+    runtime.attention_op.side_effect = None
+    runtime.attention_op.return_value = torch.zeros(64, 3, 512, dtype=torch.float16), torch.zeros(64, 3)
+    with pytest.raises(ValueError, match="output requires shape"):
+        flash.adapter.attention(
+            flash.query,
+            torch.zeros(1, 128, 1, 576, dtype=torch.float16),
+            block_table=flash.block_table,
+            cache_seqlens=flash.cache_lens,
+            cu_seqlens_q=flash.cu,
+            seqused_q=flash.used_q,
+            metadata=flash.schedule,
+        )
+
+
+def test_causal_target_and_noncausal_draft_preserve_different_visibility(runtime):
+    builder = runtime.builder(interleave=128, heads=12)
+    target = builder.build(common([130], [4]), 1, 4, False, retain_for_graph=True)
+    draft = builder.build(common([130], [4], causal=False), 1, 4, False, retain_for_graph=True)
     assert target is not draft
     assert target.schedule.data_ptr() != draft.schedule.data_ptr()
-    assert target.current is not None and draft.current is None
-    assert target.cache_lens[0] == 1 and draft.cache_lens[0] == 2
+    assert target.adapter is not draft.adapter
+    assert target.cache_lens[0] == draft.cache_lens[0] == 128
+    assert target.global_cache_lens[0] == 130 and draft.global_cache_lens is None
+    assert check_schedule(target).enable_dcp
+    assert not check_schedule(draft).enable_dcp
+    assert target.adapter.config.return_softmax_lse and draft.adapter.config.return_softmax_lse
+
+    # Rank 0 owns global positions 0..127; queries are at 126..129.
+    # Zero Q gives uniform scores, so query 126 must average 0..126 for
+    # causal attention and all 0..127 for the noncausal draft.
+    cache = torch.zeros(1, 128, 1, 576, dtype=torch.float16)
+    cache[0, :, 0, 0] = torch.arange(128)
+    for flash, expected_first in ((target, 63.0), (draft, 63.5)):
+        flash.query.zero_()
+        output, lse = flash.adapter.attention(
+            flash.query,
+            cache,
+            block_table=flash.block_table,
+            cache_seqlens=flash.cache_lens,
+            cu_seqlens_q=flash.cu,
+            seqused_q=flash.used_q,
+            metadata=flash.schedule,
+        )
+        torch.testing.assert_close(output[:, 0, 0], torch.full((96,), expected_first, dtype=output.dtype))
+        torch.testing.assert_close(output[:, 1:, 0], torch.full((96, 3), 63.5, dtype=output.dtype))
+        visible_lengths = torch.tensor([127 if flash is target else 128, 128, 128, 128], dtype=torch.float32)
+        torch.testing.assert_close(lse, visible_lengths.log().expand(96, -1))
+
+
+@pytest.mark.parametrize("block_size", [512, 896])
+@pytest.mark.parametrize("rank", range(4))
+def test_128k_example_keeps_partial_last_page_out_of_lengths(runtime, block_size, rank):
+    global_length = 128 * 1024
+    builder = runtime.builder(size=4, rank=rank, heads=24, interleave=block_size)
+    flash = builder.build(common([global_length], [8]), 1, 8, False)
+    expected = sum(
+        min(block_size, global_length - block * block_size)
+        for block in range(rank, (global_length + block_size - 1) // block_size, 4)
+    )
+    assert flash.cache_lens[0] == expected
+    assert flash.global_cache_lens[0] == global_length
+    plan = check_schedule(flash)
+    assert (plan.heads, plan.world, plan.rank, plan.interleave) == (96, 4, rank, block_size)
+
+
+@pytest.mark.parametrize("block_size", [512, 768, 896])
+def test_config_rejects_metadata_page_mismatch(runtime, block_size):
+    with pytest.raises(ValueError, match="interleave must equal"):
+        runtime.api.FlashMLAConfig(
+            96,
+            0.125,
+            mask_mode=0,
+            enable_dcp=True,
+            cp_world=8,
+            cp_kv_cache_interleave_size=128,
+            cache_block_size=block_size,
+        )
+    with pytest.raises(ValueError, match="disabled DCP"):
+        runtime.api.FlashMLAConfig(
+            96, 0.125, mask_mode=0, cp_kv_cache_interleave_size=block_size, cache_block_size=block_size
+        )
 
 
 @pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("rank", range(8))
-def test_dcp8_rejection_refresh_ignores_optimistic_cpu_lengths(runtime, monkeypatch, causal, rank):
-    builder = runtime.builder(rank=rank, interleave=768)
+@pytest.mark.parametrize("interleave", [128, 512, 768, 896])
+def test_dcp8_rejection_refresh_ignores_optimistic_cpu_lengths(runtime, monkeypatch, causal, rank, interleave):
+    builder = runtime.builder(rank=rank, interleave=interleave)
     # Cover an interleave boundary and a complete eight-rank stripe. The last
     # row is idle graph padding with a nonzero query extent and zero length.
-    history_lengths = [767, 768, 769, 6143, 6144, 6145]
+    history_lengths = [
+        interleave - 1,
+        interleave,
+        interleave + 1,
+        8 * interleave - 1,
+        8 * interleave,
+        8 * interleave + 1,
+    ]
     upper_bounds = [length + 4 for length in history_lengths] + [0]
     inputs = common(upper_bounds, [4] * 7, tokens=32, causal=causal)
     inputs.block_table_tensor = torch.arange(16, dtype=torch.int32).expand(7, -1).clone()
@@ -674,10 +797,14 @@ def test_dcp8_rejection_refresh_ignores_optimistic_cpu_lengths(runtime, monkeypa
             same = builder.build(inputs, 7, 28, False)
         assert same is flash
         assert addresses(flash) == pointers
-        visible = [length - 4 if causal else length for length in exact[:-1]]
-        expected = [sum(token // 768 % 8 == rank for token in range(length)) for length in visible]
+        expected = [sum(token // interleave % 8 == rank for token in range(length)) for length in exact[:-1]]
         assert flash.cache_lens[:7].tolist() == expected + [0]
         assert not flash.cache_lens[7:].any()
         assert flash.used_q[:7].tolist() == [4] * 6 + [0]
-        torch.testing.assert_close(flash.schedule, torch.cat((flash.cache_lens, flash.cu, flash.used_q)))
+        if causal:
+            assert flash.global_cache_lens[:7].tolist() == exact
+            assert not flash.global_cache_lens[7:].any()
+        else:
+            assert flash.global_cache_lens is None
+        check_schedule(flash)
         assert inputs.seq_lens_cpu is stale_host_lengths
