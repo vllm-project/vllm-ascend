@@ -52,14 +52,22 @@ Environment knobs:
   ``TP_SIZE``, one per DRAM-enabled local service).
 
 Host / runner prerequisites (official KV pool guide): the mooncake legs run
-the HIXL RoCE direct mode (``HCCL_INTRA_ROCE_ENABLE=1``, set by the test).
-The official A2 environment also reserves 2MB hugepages, but no scenario
-consumes them (all four scenarios were verified passing with
-``nr_hugepages=0`` on A2), so their absence only prints a note. The memcache
-tier-3 legs need the raw UBS IO block device above (the test skips with
-provisioning steps when it is missing).
+the HIXL RoCE direct mode. The test arms the three transport knobs of the
+repo's validated RoCE Store path (``ASCEND_GLOBAL_RESOURCE_CONFIG`` with
+``protocol_desc=["roce:device"]``, ``HCCL_INTRA_PCIE_ENABLE=0``,
+``HCCL_INTRA_ROCE_ENABLE=1``) and keeps ``ASCEND_ENABLE_USE_FABRIC_MEM``
+unset; the devices themselves still have to expose working RoCE endpoints
+(``/etc/hccn.conf`` visible in the container, per-NPU RoCE IP and link up).
+``tools/probe_mooncake_te_roce.py`` reproduces the bare TransferEngine
+handshake without vLLM to separate a missing host RoCE configuration from a
+misconfigured test environment. The official A2 environment also reserves 2MB
+hugepages, but no scenario consumes them (all four scenarios were verified
+passing with ``nr_hugepages=0`` on A2), so their absence only prints a note.
+The memcache tier-3 legs need the raw UBS IO block device above (the test
+skips with provisioning steps when it is missing).
 """
 
+import json
 import math
 import os
 import shutil
@@ -153,6 +161,21 @@ MOONCAKE_SSD_OFFLOAD_ROOT = os.environ.get("QWEN38_POOL_SSD_ROOT", "")
 # put returns -200). 64MiB is the largest bucket observed to write reliably.
 MOONCAKE_OFFLOAD_BUCKET_SIZE_LIMIT_BYTES = int(
     os.environ.get("QWEN38_POOL_OFFLOAD_BUCKET_BYTES", str(64 * 1024 * 1024))
+)
+# The A2 store legs need the same three transport knobs the repo's only
+# validated RoCE Store path uses
+# (tests/e2e/pull_request/four_card/test_ec_mooncake_cross_encoder_store.py):
+# pin the Store engine to device RoCE, disable the PCIe intra-server path and
+# select RoCE direct mode. Without the explicit descriptor HIXL derives its
+# endpoint list from the visible devices (AutoGenEndpointList) and reports
+# "Device roce endpoint is unavailable" on a slice whose device RoCE is not
+# configured, which is how the first a2b3-2 CI run failed.
+STORE_ROCE_RESOURCE_CONFIG = json.dumps(
+    {
+        "comm_resource_config": {"protocol_desc": ["roce:device"]},
+        "store": {"comm_resource_config": {"protocol_desc": ["roce:device"]}},
+    },
+    separators=(",", ":"),
 )
 
 AB_MODE = os.environ.get("KV_POOL_AB_MODE", "gate")
@@ -366,6 +389,9 @@ def _leg(
                 # reserves 200000 2MB hugepages (a production-environment
                 # guideline; the single-node legs keep the loopback route and
                 # were verified passing with no reserved hugepages at all).
+                # The RoCE trio below mirrors the repo's validated RoCE Store
+                # path so the Store engine pins its device RoCE endpoints
+                # instead of letting HIXL auto-derive them.
                 # Without RoCE direct mode the default HCCS P2P channel fails
                 # cross-rank with DisableP2P=17 / IPC import 107000 (put error
                 # -800). ASCEND_ENABLE_USE_FABRIC_MEM must stay unset: fabric
@@ -373,7 +399,16 @@ def _leg(
                 # value still reads as "set" to the engine, which then fails
                 # its hugepage-reserve path on A2.
                 os.environ.pop("ASCEND_ENABLE_USE_FABRIC_MEM", None)
-                stack.enter_context(patch.dict(os.environ, {"HCCL_INTRA_ROCE_ENABLE": "1"}))
+                stack.enter_context(
+                    patch.dict(
+                        os.environ,
+                        {
+                            "ASCEND_GLOBAL_RESOURCE_CONFIG": STORE_ROCE_RESOURCE_CONFIG,
+                            "HCCL_INTRA_PCIE_ENABLE": "0",
+                            "HCCL_INTRA_ROCE_ENABLE": "1",
+                        },
+                    )
+                )
                 mooncake_config = _mooncake_pool_config(tier_ssd, case_name)
                 ssd_root = mooncake_config.config.get("ssd_offload_path")
                 if ssd_root:
