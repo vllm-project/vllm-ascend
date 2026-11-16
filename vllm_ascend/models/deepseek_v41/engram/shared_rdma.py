@@ -285,6 +285,7 @@ class RemoteReader:
             else:
                 self.engine, self.buffer, self.registration = transport.engine, transport.buffer, transport.registration
 
+            assert self.engine is not None
             self.engine.check(self.engine.lib.engram_hixl_connect(self.engine.handle, self.peer))
         except BaseException:
             # Keep registered local memory alive if initialization did not complete.
@@ -427,7 +428,7 @@ class ShardedRemoteReader:
     def __init__(self, model, endpoints, *, capacity, library_path=None, listen_port=None, local_comm_res=None):
         if len(endpoints) < 2:
             raise ValueError("sharded Engram requires at least two owners")
-        self.readers = []
+        self.readers: list[RemoteReader] = []
         self._closing = False
         self.capacity = capacity
         self._last_use = None
@@ -501,6 +502,7 @@ class ShardedRemoteReader:
                         size = len(ids) * spec["row_bytes"]
                         if size:
                             values = torch.empty((len(ids), output.shape[-1]), dtype=output.dtype, device=output.device)
+                            assert reader.buffer is not None
                             dequantize_packed_engram(
                                 reader.buffer[offset : offset + size],
                                 values,
@@ -554,6 +556,7 @@ class ShardedRemoteReader:
         try:
             if self._last_use is not None:
                 self._last_use.synchronize()
+            assert self.readers[0].engine is not None
             self.readers[0].engine.close()
         except BaseException:
             for reader in self.readers:

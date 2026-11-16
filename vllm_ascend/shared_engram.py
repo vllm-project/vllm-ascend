@@ -40,7 +40,7 @@ def load_tables(owner, model, stop):
                     raise ValueError(f"Unsupported shared Engram checkpoint layout: {key}")
     packed = None
     if owner.shard_count > 1:
-        specs = []
+        specs: list[tuple[str, int, int, torch.dtype]] = []
         for layer, rows in shapes:
             specs.extend(
                 (

@@ -37,6 +37,9 @@ class MemfabricRuntime:
     references: int
     objects: set[int]
     rank: int
+    _packed_mapping: MappedHostBuffer | None
+    _packed_spec: Any
+    _packed_refs: int
 
     @classmethod
     def acquire(cls, generation, store_url, world_size, device, *, owner):
@@ -57,6 +60,9 @@ class MemfabricRuntime:
             runtime.mf, runtime.bm, runtime.spec = mf, bm, spec
             runtime.device, runtime.references = device, 1
             runtime.objects = set()
+            runtime._packed_mapping = None
+            runtime._packed_spec = None
+            runtime._packed_refs = 0
             runtime.check(mf.initialize(), "initialize")
             config = bm.BmConfig()
             config.dynamic_world_size = True
