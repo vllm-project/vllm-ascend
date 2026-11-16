@@ -63,14 +63,15 @@ from vllm.forward_context import get_forward_context
 
 from vllm_ascend import envs
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, get_moonep_tokens_capacity
-from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult, MoECommMethod
 from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
     MoETokenDispatchInput,
     MoETokenDispatchOutput,
+    TMoECombineMetadata,
 )
-from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import TMoECombineMetadata
+from vllm_ascend.ops.fused_moe.moe_comm_method import FusedExpertsResult, MoECommMethod
 from vllm_ascend.ops.fused_moe.prepare_finalize import PrepareAndFinalizeWithAll2All
 from vllm_ascend.ops.fused_moe.token_dispatcher import MoETokenDispatcher
+
 
 @dataclass
 class MoonEPCombineMetadata:
@@ -105,6 +106,7 @@ _SLOT_TLS = threading.local()  # per-layer balance state during fused_experts
 
 # Planning, dispatch and combine always use the real token count. Buffer
 # capacity remains independent of the rows included in routing and computation.
+
 
 def _early_layers(model):
     """Enumerate decoder layers for the real-plan prefetch hook; no routing prediction."""
@@ -230,8 +232,7 @@ def _moonep_slot_count(E: int, epn: int) -> int:
 def register_moonep_layer(*, E: int, K: int, H: int, nle: int, layer=None) -> None:
     """Record one MoE layer for MoonEP. Cheap; only called when enabled."""
     with _registry_lock:
-        _moonep_layer_registry.append(
-            {"E": int(E), "K": int(K), "H": int(H), "nle": int(nle), "layer": layer})
+        _moonep_layer_registry.append({"E": int(E), "K": int(K), "H": int(H), "nle": int(nle), "layer": layer})
 
 
 def _registry_keys() -> set[tuple]:
@@ -285,8 +286,7 @@ def _warmup_aicpu_custom_scheduler() -> bool:
         op = getattr(torch.ops._C_ascend, _AICPU_WARMUP_OP)
     except Exception:  # noqa: BLE001 - 别的模型/版本可能没有这个算子
         print(
-            f"[moonep-init r{rank}] stage=aicpu-warmup skipped "
-            f"(op {_AICPU_WARMUP_OP} not registered)",
+            f"[moonep-init r{rank}] stage=aicpu-warmup skipped (op {_AICPU_WARMUP_OP} not registered)",
             flush=True,
         )
         return False
@@ -362,9 +362,7 @@ class _MoonEPRuntime:
         from ascend_moonep import Buffer, ShmemRuntime
 
         if ShmemRuntime.is_initialized():
-            raise RuntimeError(
-                "MoonEP: ascend_moonep ShmemRuntime already initialized outside the MoonEP runtime."
-            )
+            raise RuntimeError("MoonEP: ascend_moonep ShmemRuntime already initialized outside the MoonEP runtime.")
         ep_group = get_ep_group()
         group = ep_group.device_group
         R = ep_group.world_size
@@ -387,9 +385,7 @@ class _MoonEPRuntime:
         # Validate + create every Buffer *before* the single collective init.
         for E, K, H, nle in keys:
             if E % R != 0:
-                raise ValueError(
-                    f"MoonEP: num_experts E={E} must be divisible by EP size R={R}."
-                )
+                raise ValueError(f"MoonEP: num_experts E={E} must be divisible by EP size R={R}.")
             if nle != E // R:
                 raise NotImplementedError(
                     f"MoonEP: local experts {nle} != E/R = {E // R}; only plain contiguous "
@@ -405,8 +401,14 @@ class _MoonEPRuntime:
             capacities = _moonep_pool_capacities(int(capacity), cost_per_token=K * H * 2)
             self._buffers[(E, K, H)] = {
                 cap: Buffer(
-                    int(cap), H, K, E, R,
-                    token_padding=1, B=_moonep_slot_count(E, E // R), group=group,
+                    int(cap),
+                    H,
+                    K,
+                    E,
+                    R,
+                    token_padding=1,
+                    B=_moonep_slot_count(E, E // R),
+                    group=group,
                     explicitly_destroy=True,
                     # Keep the SDK's num_sms default. Planning selects its own
                     # block count and sizes its workspace consistently; only
@@ -427,8 +429,7 @@ class _MoonEPRuntime:
                 "hidden": torch.zeros(capacity, H, dtype=torch.bfloat16, device=dev),
                 "route": torch.zeros(capacity, K, dtype=torch.float32, device=dev),
                 "topk": torch.zeros(capacity, K, dtype=torch.int32, device=dev),
-                "combine_route": torch.zeros(
-                    capacity, ((K + 7) // 8) * 8, dtype=torch.float32, device=dev),
+                "combine_route": torch.zeros(capacity, ((K + 7) // 8) * 8, dtype=torch.float32, device=dev),
             }
         from vllm_ascend.ops.fused_moe.moonep_balance import _build_slot_states
 
@@ -461,8 +462,7 @@ class _MoonEPRuntime:
             # dispatch）。standalone torchrun 无此问题，可用 MOONEP_SHMEM_BOOTSTRAP_TYPE=uid 覆盖。
             bootstrap = envs.MOONEP_SHMEM_BOOTSTRAP_TYPE
             print(
-                f"[moonep-init r{get_ep_group().rank_in_group}] stage=shmem-init-enter "
-                f"bootstrap_type={bootstrap}",
+                f"[moonep-init r{get_ep_group().rank_in_group}] stage=shmem-init-enter bootstrap_type={bootstrap}",
                 flush=True,
             )
             if bootstrap == "ipport":
@@ -474,8 +474,9 @@ class _MoonEPRuntime:
                 # All nodes must connect to the same rank-0 config store.
                 # Use vLLM's existing cluster address; keep loopback valid for
                 # single-node deployments, but reject it for a multi-node group.
-                from vllm.config import get_current_vllm_config
                 import ipaddress
+
+                from vllm.config import get_current_vllm_config
 
                 parallel = get_current_vllm_config().parallel_config
                 bootstrap_ip = parallel.data_parallel_master_ip
@@ -490,7 +491,8 @@ class _MoonEPRuntime:
                     if loopback:
                         raise RuntimeError(
                             "Multi-node MoonEP requires --data-parallel-address "
-                            "to be reachable from every node, not loopback")
+                            "to be reachable from every node, not loopback"
+                        )
                 ShmemRuntime.init_with_ip_port(
                     group=group,
                     ip_port=f"tcp://{bootstrap_ip}:{port}",
@@ -500,37 +502,30 @@ class _MoonEPRuntime:
                     prefetch_overlap=prefetch_overlap,
                 )
             else:
-                ShmemRuntime.init_with_buffer(
-                    group=group, enable_udma=use_udma,
-                    prefetch_overlap=prefetch_overlap)
+                ShmemRuntime.init_with_buffer(group=group, enable_udma=use_udma, prefetch_overlap=prefetch_overlap)
             print(f"[moonep-init r{get_ep_group().rank_in_group}] stage=shmem-init-done", flush=True)
         qp_layout = ShmemRuntime.require_udma_prefetch_overlap() if prefetch_overlap else None
         if qp_layout is not None:
-            print(f"[moonep-udma-qp] allocated={qp_layout[0]} "
-                  f"dispatch_count={qp_layout[1]} prefetch_qp={qp_layout[2]}", flush=True)
+            print(
+                f"[moonep-udma-qp] allocated={qp_layout[0]} dispatch_count={qp_layout[1]} prefetch_qp={qp_layout[2]}",
+                flush=True,
+            )
         # Check effective context flags once at initialization. Planning is
         # native in this SDK; the other three stages support UDMA.
         expected_backends = {
-            "planning": False, "dispatch": use_udma,
-            "combine": use_udma, "prefetch": use_udma,
+            "planning": False,
+            "dispatch": use_udma,
+            "combine": use_udma,
+            "prefetch": use_udma,
         }
         for (experts, topk, hidden), pool in self._buffers.items():
             for cap, buffer in pool.items():
                 ctx = buffer._require_ctx()
                 ctx["udma_prefetch_overlap_ready"] = qp_layout is not None
-                actual = {
-                    name: bool(ctx[f"_{name}_use_udma"])
-                    for name in expected_backends
-                }
+                actual = {name: bool(ctx[f"_{name}_use_udma"]) for name in expected_backends}
                 if actual != expected_backends:
-                    raise RuntimeError(
-                        f"MoonEP backend mismatch: requested={expected_backends}, "
-                        f"effective={actual}"
-                    )
-                backends = " ".join(
-                    f"{name}={'udma' if enabled else 'mte'}"
-                    for name, enabled in actual.items()
-                )
+                    raise RuntimeError(f"MoonEP backend mismatch: requested={expected_backends}, effective={actual}")
+                backends = " ".join(f"{name}={'udma' if enabled else 'mte'}" for name, enabled in actual.items())
                 print(
                     f"[moonep-backend r{get_ep_group().rank_in_group}] "
                     f"E={experts} K={topk} H={hidden} S={cap} {backends}",
@@ -583,6 +578,7 @@ def ensure_runtime_initialized() -> None:
     # [env-audit] 一次性诊断：worker 进程运行时实际看到的 MoonEP 开关集合
     # （/proc/environ 只反映 exec 时刻，运行时可能有重注入，故在初始化点直接打印）。
     import os as _os_audit
+
     print(
         "[moonep-env-audit] "
         + " ".join(
@@ -612,16 +608,16 @@ def _geometry(E: int, K: int, H: int) -> dict:
     if geo is None:
         ep_group = get_ep_group()
         pool = _MOONEP_RUNTIME._buffers[(E, K, H)]
-        geo = {"rank": ep_group.rank_in_group,
-               "world": ep_group.world_size,
-               "epn": E // ep_group.world_size,
-               "caps": sorted(pool),
-               "s_max": max(pool),
-               "B": int(pool[max(pool)]._require_ctx()["B"])}
+        geo = {
+            "rank": ep_group.rank_in_group,
+            "world": ep_group.world_size,
+            "epn": E // ep_group.world_size,
+            "caps": sorted(pool),
+            "s_max": max(pool),
+            "B": int(pool[max(pool)]._require_ctx()["B"]),
+        }
         _GEO_CACHE[(E, K, H)] = geo
     return geo
-
-
 
 
 # Pre-allocated scratch for the per-layer hot path (space-for-time). The hot
@@ -677,10 +673,7 @@ def _select_buffer_for_step(E: int, K: int, H: int, tokens: int):
         need = max(int(step_tokens), MOONEP_MIN_DISPATCH_TOKENS)
         capacity = next((c for c in geo["caps"] if c >= need), s_max)
     if capacity < tokens:
-        raise RuntimeError(
-            f"MoonEP: step has {tokens} tokens but the selected capacity is "
-            f"{capacity} (s_max={s_max})."
-        )
+        raise RuntimeError(f"MoonEP: step has {tokens} tokens but the selected capacity is {capacity} (s_max={s_max}).")
     return pool[capacity], capacity
 
 
@@ -713,7 +706,12 @@ def _moonep_dispatch_transport(quant, hidden_states) -> str:
 
     if FLOAT8_E8M0FNU_DTYPE is None:
         raise NotImplementedError("MXFP8 dispatch requires E8M0 scale dtype support")
-    if mxfp.per_token_scale_dtype not in (None, FLOAT8_E8M0FNU_DTYPE):
+    # torch-npu quant methods pass the backend's format identifier, whereas
+    # tensor-facing callers may use the native torch dtype. Both denote E8M0;
+    # an arbitrary uint8 carrier dtype alone does not declare a scale format.
+
+    npu_e8m0_format = getattr(torch_npu, "float8_e8m0fnu", None)
+    if mxfp.per_token_scale_dtype not in (None, FLOAT8_E8M0FNU_DTYPE, npu_e8m0_format):
         raise NotImplementedError("W4A8MXFP dispatch requires group32 E8M0 activation scales")
     # Keep the SDK as the authority for wire geometry. Unsupported W4A8MXFP
     # shapes fail here; there is no BF16 retry or exception-driven fallback.
@@ -730,7 +728,6 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         self.num_experts = int(kwargs.get("num_experts", 0))
         self.num_local_experts = int(kwargs.get("num_local_experts", 0))
         self._logged_transports: set[tuple] = set()
-
 
     def token_dispatch(
         self,
@@ -754,7 +751,7 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
             raise ValueError(f"MoonEP: invalid geometry K={K}, E={E}")
 
         s_max = get_moonep_tokens_capacity()
-        if s_max is None or T > s_max:
+        if s_max is None or T > s_max:  # noqa: SIM300 - retain the original token-bound check
             raise RuntimeError(
                 f"MoonEP: step has {T} tokens > static capacity S={s_max}. "
                 "Raise --max-num-batched-tokens or disable enable_moonep."
@@ -785,7 +782,12 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         dispatch_scale = None
         if use_mxfp8:
             h_nvs, dispatch_scale, w_nvs, cu, plan = buffer.dispatch_mxfp8(
-                hidden_states, route_c, topk_c, tpe, num_tokens=T, wire_storage=hidden_c,
+                hidden_states,
+                route_c,
+                topk_c,
+                tpe,
+                num_tokens=T,
+                wire_storage=hidden_c,
             )
         else:
             # zero_copy=True returns a view of the symmetric shard the dispatch
@@ -795,8 +797,12 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
             # shard; both are on the current stream, so the GMM has finished
             # reading before that copy is enqueued.
             h_nvs, w_nvs, cu, plan = buffer.dispatch(
-                hidden_c, route_c, topk_c, tpe,
-                zero_copy=True, inter_rank_sync=True,
+                hidden_c,
+                route_c,
+                topk_c,
+                tpe,
+                zero_copy=True,
+                inter_rank_sync=True,
                 num_tokens=T,
                 reuse_outputs=True,
             )
@@ -804,8 +810,10 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         log_key = (quant_type, H)
         if log_key not in self._logged_transports:
             reason = "W4A8MXFP_E4M3_group32" if use_mxfp8 else "existing_BF16_dispatch_path"
-            print(f"[moonep-dispatch-auto] quant_type={quant_type} transport={transport} "
-                  f"H={H} reason={reason}", flush=True)
+            print(
+                f"[moonep-dispatch-auto] quant_type={quant_type} transport={transport} H={H} reason={reason}",
+                flush=True,
+            )
             self._logged_transports.add(log_key)
 
         # Per-local-expert row counts = cu diff over this rank's owned global
@@ -822,10 +830,10 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         counts = sc["counts"]
         cu_pad = sc["cu_pad"]
         n_cu = int(cu.numel())
-        cu_pad[1:n_cu + 1].copy_(cu)                 # int32 -> int64 cast
-        torch.sub(cu_pad[1:n_cu + 1], cu_pad[:n_cu], out=counts[:n_cu])
+        cu_pad[1 : n_cu + 1].copy_(cu)  # int32 -> int64 cast
+        torch.sub(cu_pad[1 : n_cu + 1], cu_pad[:n_cu], out=counts[:n_cu])
         own_counts = sc["own"]
-        own_counts[:epn].copy_(counts[rank * epn:(rank + 1) * epn])
+        own_counts[:epn].copy_(counts[rank * epn : (rank + 1) * epn])
         own_counts = own_counts[:epn]
         # Rows for prefetched Slot experts stay local and follow home rows.
         slot_counts = counts[E:].contiguous()
@@ -849,7 +857,7 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         state = getattr(_SLOT_TLS, "state", None)
         return MoETokenDispatchOutput(
             hidden_states=hidden_trim,
-            dynamic_scale=dispatch_scale[:hidden_trim.shape[0]] if dispatch_scale is not None else None,
+            dynamic_scale=dispatch_scale[: hidden_trim.shape[0]] if dispatch_scale is not None else None,
             group_list=local_counts,
             group_list_type=1,  # count mode
             combine_metadata=MoonEPCombineMetadata(
@@ -884,10 +892,14 @@ class TokenDispatcherWithMoonEP(MoETokenDispatcher[TMoECombineMetadata]):
         # Do not materialize a mask, a sum scalar, or a BF16 clean tensor.
         combine_input = hidden_states
         out, _, _ = buffer.combine_weighted(
-            plan=combine_metadata.plan, hidden_nvsh=combine_input,
+            plan=combine_metadata.plan,
+            hidden_nvsh=combine_input,
             source_topk_weights_sk=combine_metadata.source_topk_weights_sk,
-            num_tokens=T, inter_rank_sync=True,
-            fused_publish=True, row_counts=row_counts)
+            num_tokens=T,
+            inter_rank_sync=True,
+            fused_publish=True,
+            row_counts=row_counts,
+        )
         return out[:T].view(combine_metadata.hidden_shape)
 
 
@@ -909,8 +921,8 @@ class MoonEPCommImpl(MoECommMethod):
         return PrepareAndFinalizeWithAll2All(self.moe_config)
 
     def fused_experts(self, fused_experts_input, quant_method=None):
-        from vllm_ascend.ops.fused_moe.moonep_balance import run_slot_forward
         from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import build_token_dispatch_input
+        from vllm_ascend.ops.fused_moe.moonep_balance import run_slot_forward
 
         layer = fused_experts_input.layer
         if layer is None or quant_method is None:
@@ -923,7 +935,12 @@ class MoonEPCommImpl(MoECommMethod):
         from vllm_ascend.ops.fused_moe.moonep_balance import select_prefetch_layer
 
         select_prefetch_layer(layer)
-        before_dispatch_evt = torch.npu.current_stream().record_event()
+        record_stage_events = bool(getattr(layer, "return_with_event", False))
+        if record_stage_events:
+            from vllm_ascend.ascend_config import get_ascend_config
+
+            record_stage_events = bool(get_ascend_config().multistream_overlap_shared_expert)
+        before_dispatch_evt = torch.npu.current_stream().record_event() if record_stage_events else None
         _SLOT_TLS.state = state
         try:
             disp = self.token_dispatcher.token_dispatch(
@@ -931,11 +948,17 @@ class MoonEPCommImpl(MoECommMethod):
             )
             meta = disp.combine_metadata
             mlp_rows, before_gmm2_evt = run_slot_forward(
-                state=meta.state, buffer=meta.buffer, plan=meta.plan,
-                token_dispatch_output=disp, fused_experts_input=fused_experts_input,
-                use_fusion_ops=None, moe_config=self.moe_config, quant_method=quant_method,
+                state=meta.state,
+                buffer=meta.buffer,
+                plan=meta.plan,
+                token_dispatch_output=disp,
+                fused_experts_input=fused_experts_input,
+                use_fusion_ops=None,
+                moe_config=self.moe_config,
+                quant_method=quant_method,
+                record_before_gmm2=record_stage_events,
             )
-            before_combine_evt = torch.npu.current_stream().record_event()
+            before_combine_evt = torch.npu.current_stream().record_event() if record_stage_events else None
             routed_out = self.token_dispatcher.token_combine(mlp_rows, meta)
         finally:
             _SLOT_TLS.state = None

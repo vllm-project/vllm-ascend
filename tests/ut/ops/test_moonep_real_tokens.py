@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """CPU regressions for real token bounds at the SDK dispatch/combine boundary."""
+
 import ast
 import importlib.util
 import os
@@ -13,6 +14,7 @@ from unittest.mock import patch
 import torch
 
 SOURCE = Path(__file__).resolve().parents[3] / "vllm_ascend/ops/fused_moe/moonep_comm.py"
+E8M0_FORMAT_ID = 293  # host-only representation of the backend metadata identifier
 
 
 def dispatch_test_modules():
@@ -27,7 +29,8 @@ def dispatch_test_modules():
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         modules[key] = module
-    modules["vllm_ascend.device.mxfp_compat"] = SimpleNamespace(FLOAT8_E8M0FNU_DTYPE=getattr(torch, "float8_e8m0fnu", torch.uint8))
+    # Host-only stand-in for the torch-npu format identifier, not a tensor dtype.
+    modules["torch_npu"] = SimpleNamespace(float8_e8m0fnu=E8M0_FORMAT_ID)
     return modules
 
 
@@ -35,20 +38,28 @@ def dispatch_test_quant(modules, transport):
     quant_type = modules["vllm_ascend.quantization.quant_type"].QuantType
     return SimpleNamespace(
         quant_type=quant_type.W4A8MXFP if transport == "mxfp8" else quant_type.NONE,
-        mxfp=SimpleNamespace(act_quant_type=torch.float8_e4m3fn, per_token_scale_dtype=torch.uint8),
+        mxfp=SimpleNamespace(
+            act_quant_type=torch.float8_e4m3fn,
+            per_token_scale_dtype=modules["torch_npu"].float8_e8m0fnu,
+        ),
     )
 
 
 def load_method(name, namespace):
+    namespace.setdefault("torch_npu", SimpleNamespace(float8_e8m0fnu=E8M0_FORMAT_ID))
     tree = ast.parse(SOURCE.read_text())
-    cls = next(node for node in tree.body if isinstance(node, ast.ClassDef)
-               and node.name == "TokenDispatcherWithMoonEP")
+    cls = next(
+        node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "TokenDispatcherWithMoonEP"
+    )
     method = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == name)
     method.returns = None
     for argument in method.args.args:
         argument.annotation = None
-    helpers = [node for node in tree.body if isinstance(node, ast.FunctionDef)
-               and node.name == "_moonep_dispatch_transport"] if name == "token_dispatch" else []
+    helpers = (
+        [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_moonep_dispatch_transport"]
+        if name == "token_dispatch"
+        else []
+    )
     exec(compile(ast.Module(body=helpers + [method], type_ignores=[]), str(SOURCE), "exec"), namespace)
     return namespace[name]
 
@@ -86,7 +97,9 @@ class RealTokenBoundsTest(unittest.TestCase):
 
         buffer = Buffer()
         namespace = {
-            "torch": torch, "time": time, "os": os,
+            "torch": torch,
+            "time": time,
+            "os": os,
             "_EXTRA_CTX": SimpleNamespace(capturing=False),
             "get_moonep_tokens_capacity": lambda: capacity,
             "_select_buffer_for_step": lambda *args: (buffer, capacity),
@@ -96,7 +109,9 @@ class RealTokenBoundsTest(unittest.TestCase):
         }
         dispatch = load_method("token_dispatch", namespace)
         dispatcher = SimpleNamespace(
-            num_experts=experts, top_k=topk, _logged_transports=set(),
+            num_experts=experts,
+            top_k=topk,
+            _logged_transports=set(),
             _tstats=lambda *args: None,
         )
         modules = dispatch_test_modules()
@@ -108,12 +123,15 @@ class RealTokenBoundsTest(unittest.TestCase):
         )
         # Old launchers can still export these names. They must not change the
         # actual token bound or make the dispatcher populate capacity-tail rows.
-        environment = {"MOONEP_REAL_T": "0", "MOONEP_PAD_ROTATE": "1",
-                       "MOONEP_PAD_EXPERT0": "1", "MOONEP_PAD_CUT": "1",
-                       "MOONEP_SLOT_MODE": old_slot}
-        with patch.dict(os.environ, environment), patch.dict(sys.modules, modules):
-            with self.assertRaises(DispatchReached):
-                dispatch(dispatcher, inputs)
+        environment = {
+            "MOONEP_REAL_T": "0",
+            "MOONEP_PAD_ROTATE": "1",
+            "MOONEP_PAD_EXPERT0": "1",
+            "MOONEP_PAD_CUT": "1",
+            "MOONEP_SLOT_MODE": old_slot,
+        }
+        with patch.dict(os.environ, environment), patch.dict(sys.modules, modules), self.assertRaises(DispatchReached):
+            dispatch(dispatcher, inputs)
         self.assertEqual(calls[0]["num_tokens"], tokens)
         self.assertTrue(torch.equal(pads["topk"][:tokens], inputs.topk_ids))
         self.assertTrue(torch.all(pads["topk"][tokens:] == 999))
@@ -141,13 +159,20 @@ class RealTokenBoundsTest(unittest.TestCase):
                 return torch.ones(capacity, hidden, dtype=torch.bfloat16), None, None
 
         namespace = {
-            "torch": torch, "time": time, "MoonEPCombineMetadata": Metadata,
+            "torch": torch,
+            "time": time,
+            "MoonEPCombineMetadata": Metadata,
         }
         combine = load_method("token_combine", namespace)
         metadata = Metadata(
-            num_tokens=tokens, hidden_shape=(tokens, hidden), source_topk_weights_sk=torch.ones(capacity, 8),
-            w_trim=torch.ones(rows), buffer=Buffer(), tail_masked=True,
-            group_list=torch.tensor([2, 1], dtype=torch.int64), plan=object(),
+            num_tokens=tokens,
+            hidden_shape=(tokens, hidden),
+            source_topk_weights_sk=torch.ones(capacity, 8),
+            w_trim=torch.ones(rows),
+            buffer=Buffer(),
+            tail_masked=True,
+            group_list=torch.tensor([2, 1], dtype=torch.int64),
+            plan=object(),
         )
         activations = torch.ones(rows, hidden, dtype=torch.bfloat16)
         activations[3:].fill_(float("nan"))

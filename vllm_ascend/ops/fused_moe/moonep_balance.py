@@ -53,6 +53,7 @@ validation unconditionally; this does not quantize BF16 model weights.
 
 from __future__ import annotations
 
+import atexit as _atexit_sc
 import dataclasses
 import threading
 from dataclasses import dataclass
@@ -61,10 +62,10 @@ import torch
 
 from vllm_ascend import envs
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.ops.fused_moe.moonep_mlp import apply_slot_mlp
-from vllm_ascend.ops.fused_moe.moonep_home_gemm import home_gemm_apply_mlp
-from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import build_mlp_compute_input
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEFusedExpertsInput, MoEWeights
+from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import build_mlp_compute_input
+from vllm_ascend.ops.fused_moe.moonep_home_gemm import home_gemm_apply_mlp
+from vllm_ascend.ops.fused_moe.moonep_mlp import apply_slot_mlp
 
 # prefetch kernel 的 UB 约束（ascend-moonep/kernels/prefetch.cpp:100-105）：
 # ``elements_per_row`` 就是载体的 Hp，且要求 ub_bytes / sizeof(bfloat16) / Hp >= 1
@@ -95,11 +96,12 @@ def _dump_slot_cache_stats() -> None:
     hits = sum(v[0] for v in _SLOT_CACHE_STATS.values())
     misses = sum(v[1] for v in _SLOT_CACHE_STATS.values())
     tot = max(hits + misses, 1)
-    print(f"[slot-cache] layers={len(_SLOT_CACHE_STATS)} hits={hits} misses={misses} "
-          f"hit_rate={hits / tot:.3f} prefetch_skipped={_PF_SKIPPED[0]}", flush=True)
+    print(
+        f"[slot-cache] layers={len(_SLOT_CACHE_STATS)} hits={hits} misses={misses} "
+        f"hit_rate={hits / tot:.3f} prefetch_skipped={_PF_SKIPPED[0]}",
+        flush=True,
+    )
 
-
-import atexit as _atexit_sc
 
 _atexit_sc.register(_dump_slot_cache_stats)
 
@@ -154,12 +156,12 @@ def _flat_bytes(t: torch.Tensor, nbytes: int) -> torch.Tensor:
     expert owns one dense ``row_bytes`` block, which makes the payload a dense
     range starting at ``data_ptr()``.
     """
-    return _sym_tensor(t.data_ptr(), (int(nbytes),), torch.uint8, t.device,
-                       nbytes=int(nbytes))
+    return _sym_tensor(t.data_ptr(), (int(nbytes),), torch.uint8, t.device, nbytes=int(nbytes))
 
 
-def _sym_tensor(ptr, shape, dtype, device, *, stride=None, storage_offset=0,
-                nbytes=None, npu_format=None) -> torch.Tensor:
+def _sym_tensor(
+    ptr, shape, dtype, device, *, stride=None, storage_offset=0, nbytes=None, npu_format=None
+) -> torch.Tensor:
     """Build a non-owning tensor over an existing device address.
 
     Counterpart of the library's ``buffer_c.create_sym_tensor_from_ptr`` (pure
@@ -189,9 +191,9 @@ def _sym_tensor(ptr, shape, dtype, device, *, stride=None, storage_offset=0,
     if npu_format is not None:
         metadata["npu_format"] = int(npu_format)
     storage = torch_npu._C._construct_storage_from_data_pointer(
-        metadata["data_ptr"], metadata["device"], metadata["nbytes"])
-    return torch_npu._C._construct_NPU_Tensor_From_Storage_And_Metadata(
-        metadata, storage)
+        metadata["data_ptr"], metadata["device"], metadata["nbytes"]
+    )
+    return torch_npu._C._construct_NPU_Tensor_From_Storage_And_Metadata(metadata, storage)
 
 
 def _contiguous_strides(shape) -> tuple[int, ...]:
@@ -229,8 +231,7 @@ def _carrier_shape(row_bytes: int, natural: tuple[int, int] | None = None) -> tu
     return (elems // cols, cols)
 
 
-def _make_spec(name: str, ref: torch.Tensor, *, is_nz: bool,
-               natural: tuple[int, int] | None = None) -> _PayloadSpec:
+def _make_spec(name: str, ref: torch.Tensor, *, is_nz: bool, natural: tuple[int, int] | None = None) -> _PayloadSpec:
     import torch_npu
 
     experts = int(ref.shape[0])
@@ -238,7 +239,8 @@ def _make_spec(name: str, ref: torch.Tensor, *, is_nz: bool,
     if experts <= 0 or row_bytes <= 0:
         raise NotImplementedError(
             f"MoonEP slot mode: {name} has an empty/unstrided layout "
-            f"(shape={tuple(ref.shape)} stride={tuple(ref.stride())}).")
+            f"(shape={tuple(ref.shape)} stride={tuple(ref.stride())})."
+        )
     # The packed [epn+B] alias assumes one dense block per expert; NZ padding
     # would silently shift every row after the first. Both sides in bytes --
     # for 1-byte payloads the element count happens to match, for bf16 it does not.
@@ -247,7 +249,8 @@ def _make_spec(name: str, ref: torch.Tensor, *, is_nz: bool,
         raise NotImplementedError(
             f"MoonEP slot mode: {name} has per-expert padding "
             f"(numel/experts={numel_per_expert} != stride(0)*element_size={row_bytes}); "
-            "the packed [epn+B] alias needs one contiguous block per expert.")
+            "the packed [epn+B] alias needs one contiguous block per expert."
+        )
     nbytes = experts * row_bytes
     # The weight may be a slice of a larger table (the harnesses build ranks from
     # `full[rank*epn:(rank+1)*epn]`), so it need not start at the storage head --
@@ -259,7 +262,8 @@ def _make_spec(name: str, ref: torch.Tensor, *, is_nz: bool,
         raise NotImplementedError(
             f"MoonEP slot mode: {name} payload runs past its storage "
             f"(storage_offset*element_size={offset_bytes} + nbytes={nbytes} > "
-            f"storage_nbytes={int(storage.nbytes())}).")
+            f"storage_nbytes={int(storage.nbytes())})."
+        )
     return _PayloadSpec(
         name=name,
         ref=ref,
@@ -281,19 +285,14 @@ def _infer_F(layer, H: int) -> int:
     """
     w13 = layer.w13_weight
     if w13.dim() != 3 or int(w13.shape[2]) % 2:
-        raise NotImplementedError(
-            f"MoonEP slot mode: unexpected w13 shape {tuple(w13.shape)}.")
+        raise NotImplementedError(f"MoonEP slot mode: unexpected w13 shape {tuple(w13.shape)}.")
     F = int(w13.shape[2]) // 2
     if w13.dtype == torch.bfloat16:
         if int(w13.shape[1]) != H:
-            raise NotImplementedError(
-                f"MoonEP slot mode: bf16 w13 should be [epn, H={H}, 2F], got "
-                f"{tuple(w13.shape)}."
-            )
+            raise NotImplementedError(f"MoonEP slot mode: bf16 w13 should be [epn, H={H}, 2F], got {tuple(w13.shape)}.")
         if tuple(layer.w2_weight.shape) != (int(w13.shape[0]), F, H):
             raise NotImplementedError(
-                f"MoonEP slot mode: bf16 w2 should be [epn, F={F}, H={H}], got "
-                f"{tuple(layer.w2_weight.shape)}."
+                f"MoonEP slot mode: bf16 w2 should be [epn, F={F}, H={H}], got {tuple(layer.w2_weight.shape)}."
             )
         return F
     if int(w13.shape[1]) * 2 != H:
@@ -303,15 +302,12 @@ def _infer_F(layer, H: int) -> int:
         )
     scale13 = getattr(layer, "w13_weight_scale", None)
     if scale13 is None:
-        raise NotImplementedError(
-            "MoonEP slot mode with quantized weights requires w13_weight_scale."
-        )
+        raise NotImplementedError("MoonEP slot mode with quantized weights requires w13_weight_scale.")
     # DS leaves the scale 4-D after process_weights_after_loading:
     # [epn, H/(2*group), 2F, 2] — cross-check 2F on its own axis.
     if scale13.dim() == 4 and int(scale13.shape[2]) != 2 * F:
         raise NotImplementedError(
-            f"MoonEP slot mode: w13_weight_scale {tuple(scale13.shape)} disagrees "
-            f"with w13's 2F={2 * F}."
+            f"MoonEP slot mode: w13_weight_scale {tuple(scale13.shape)} disagrees with w13's 2F={2 * F}."
         )
     return F
 
@@ -328,8 +324,7 @@ def _payload_specs(layer, H: int, F: int) -> list[_PayloadSpec]:
     scale2 = getattr(layer, "w2_weight_scale", None)
     if scale13 is None or scale2 is None:
         raise NotImplementedError(
-            "MoonEP slot mode with quantized weights requires both "
-            "w13_weight_scale and w2_weight_scale on the layer."
+            "MoonEP slot mode with quantized weights requires both w13_weight_scale and w2_weight_scale on the layer."
         )
     for name, weight in (("w13", w13), ("w2", w2)):
         if int(weight.element_size()) != 1:
@@ -363,16 +358,14 @@ def _layer_weight_layout(layer, E: int, H: int) -> _LayerWeightLayout:
     epn = int(w13.shape[0])
     configured_slot_count = envs.MOONEP_REDUNDANT_EXPERT_SLOT_COUNT
     B = int(epn if configured_slot_count is None else configured_slot_count)
-    if B < 1 or B > epn:
+    if B < 1 or B > epn:  # noqa: SIM300 - retain the original Slot-bound check
         raise ValueError(f"MOONEP_REDUNDANT_EXPERT_SLOT_COUNT must be in [1, {epn}], got {B}")
     F = _infer_F(layer, H)
     return _LayerWeightLayout(E, H, F, epn, B, _payload_specs(layer, H, F))
 
 
-def _slot_pool_key(E: int, H: int, F: int, B: int, rank: int, dev: int,
-                   specs: list[_PayloadSpec]) -> tuple:
-    return (E, H, F, B, rank, dev,
-            tuple((spec.name, *spec.carrier) for spec in specs))
+def _slot_pool_key(E: int, H: int, F: int, B: int, rank: int, dev: int, specs: list[_PayloadSpec]) -> tuple:
+    return (E, H, F, B, rank, dev, tuple((spec.name, *spec.carrier) for spec in specs))
 
 
 def _build_slot_states(entries, rank: int, dev: int) -> list:
@@ -392,8 +385,13 @@ def _build_slot_states(entries, rank: int, dev: int) -> list:
     for layer, layout, key in layers:
         cache_index = indices.get(key, 0)
         state = _LayerWeightState(
-            layer, layout, rank, dev, layer_index=len(states),
-            cache_layer_index=cache_index, cache_layer_count=counts[key],
+            layer,
+            layout,
+            rank,
+            dev,
+            layer_index=len(states),
+            cache_layer_index=cache_index,
+            cache_layer_count=counts[key],
         )
         states.append(state)
         indices[key] = cache_index + 1
@@ -415,8 +413,9 @@ class _SharedSlots:
     _pools: dict[tuple, dict] = {}
 
     @classmethod
-    def get(cls, E: int, H: int, F: int, B: int, rank: int, dev: int,
-            specs: list[_PayloadSpec], *, cache_layers: int) -> dict:
+    def get(
+        cls, E: int, H: int, F: int, B: int, rank: int, dev: int, specs: list[_PayloadSpec], *, cache_layers: int
+    ) -> dict:
         if cache_layers < 1:
             raise ValueError("MoonEP Slot cache requires at least one registered layer per pool")
         key = _slot_pool_key(E, H, F, B, rank, dev, specs)
@@ -441,8 +440,8 @@ class _SharedSlots:
                     for spec in specs:
                         rows, cols = spec.carrier
                         c, _, _ = create_vmm_physical(
-                            [cache_layers, _CACHED_EXPERT_COUNT, rows, cols],
-                            torch.bfloat16, dev)
+                            [cache_layers, _CACHED_EXPERT_COUNT, rows, cols], torch.bfloat16, dev
+                        )
                         c.zero_()
                         cache[spec.name] = c
                 # full [E+B] projections need home chunks; built per layer, so
@@ -455,8 +454,17 @@ class _SharedSlots:
 class _LayerWeightState:
     """Home mirrors + full projections + packed [epn+B] aliases for ONE MoE layer."""
 
-    def __init__(self, layer, layout: _LayerWeightLayout, rank: int, dev: int, *,
-                 layer_index: int, cache_layer_index: int, cache_layer_count: int):
+    def __init__(
+        self,
+        layer,
+        layout: _LayerWeightLayout,
+        rank: int,
+        dev: int,
+        *,
+        layer_index: int,
+        cache_layer_index: int,
+        cache_layer_count: int,
+    ):
         from ascend_moonep.buffer_c import (
             attach_local_source_vas,
             create_full_projection_tensor,
@@ -470,13 +478,11 @@ class _LayerWeightState:
         self.E, self.H, self.F, self.epn, self.B = E, H, F, epn, B
         self._specs = layout.specs
 
-        shared = _SharedSlots.get(
-            E, H, F, B, rank, dev, self._specs, cache_layers=cache_layer_count)
+        shared = _SharedSlots.get(E, H, F, B, rank, dev, self._specs, cache_layers=cache_layer_count)
         for spec in self._specs:
             cached = shared["cache"].get(spec.name)
             if _CACHED_EXPERT_COUNT > 0 and (
-                cached is None or tuple(cached.shape) != (
-                    cache_layer_count, _CACHED_EXPERT_COUNT, *spec.carrier)
+                cached is None or tuple(cached.shape) != (cache_layer_count, _CACHED_EXPERT_COUNT, *spec.carrier)
             ):
                 raise RuntimeError("MoonEP Slot cache allocation does not match registered layers")
         self.slots: dict[str, torch.Tensor] = {}
@@ -507,13 +513,15 @@ class _LayerWeightState:
         self.caches = dict(shared.get("cache") or {})
         self.cache_experts = [-1] * max(_CACHED_EXPERT_COUNT, 1)
         self.cache_next = 0
-        self.cache_stats = [0, 0]      # [hits, misses] over used slots
+        self.cache_stats = [0, 0]  # [hits, misses] over used slots
         self._vmm_tensors = list(self.homes.values())
         # Read-only metadata is stable for the life of this layer's aliases.
         self._prefetch_views = [self.fulls[spec.name] for spec in self._specs]
         self._compute_weights = MoEWeights(
-            w1=self.aliases["w13"], w2=self.aliases["w2"],
-            w1_scale=self.aliases.get("w13_scale"), w2_scale=self.aliases.get("w2_scale"),
+            w1=self.aliases["w13"],
+            w2=self.aliases["w2"],
+            w1_scale=self.aliases.get("w13_scale"),
+            w2_scale=self.aliases.get("w2_scale"),
         )
         self._shared = shared
         self._home_gmm_runner = None
@@ -554,11 +562,11 @@ class _LayerWeightState:
                 print(
                     "[moonep-release] quantized payloads mirror into bf16 byte "
                     "carriers, not weight-shaped tensors; release skipped.",
-                    flush=True)
+                    flush=True,
+                )
             return
         released = 0
-        for name, src_attr, spec_name in (("w13_weight", "_w13_src", "w13"),
-                                          ("w2_weight", "_w2_src", "w2")):
+        for name, src_attr, spec_name in (("w13_weight", "_w13_src", "w13"), ("w2_weight", "_w2_src", "w2")):
             src = getattr(self, src_attr, None)
             home = self.homes.get(spec_name)
             if src is None or home is None:
@@ -574,7 +582,8 @@ class _LayerWeightState:
                 raise RuntimeError(
                     f"MoonEP release: {name} shape/dtype changed "
                     f"({tuple(layer_param.shape)} {layer_param.dtype} vs "
-                    f"{tuple(home.shape)} {home.dtype}); refusing to swap")
+                    f"{tuple(home.shape)} {home.dtype}); refusing to swap"
+                )
             released += home.numel() * home.element_size()
             # in-place storage swap: the Parameter object (and therefore the
             # runtime's id()-keyed state lookup) is preserved
@@ -584,7 +593,8 @@ class _LayerWeightState:
             print(
                 f"[moonep-release] {type(self._layer).__name__}: vllm weight copies "
                 f"released, home chunks now back the layer ({released / 2**20:.0f} MB)",
-                flush=True)
+                flush=True,
+            )
 
     def prefetch_views(self) -> list[torch.Tensor]:
         """The [E+B] projection descriptors handed to the prefetch kernel."""
@@ -613,18 +623,18 @@ class _LayerWeightState:
             # them would leave the layer pointing at unmapped memory
             raise RuntimeError(
                 "MoonEP: refusing to destroy weight state whose home chunks back "
-                "the layer after source-storage handoff.")
+                "the layer after source-storage handoff."
+            )
         for tensor in self._vmm_tensors:
             alloc = getattr(tensor, "_vmm_allocation", None)
             if alloc is not None:
-                try:
+                try:  # noqa: SIM105 - retain the existing best-effort cleanup
                     alloc.destroy()
                 except Exception:
                     pass
 
 
-def _packed_alias(home: torch.Tensor, slot: torch.Tensor, dev: int,
-                  spec: _PayloadSpec) -> torch.Tensor:
+def _packed_alias(home: torch.Tensor, slot: torch.Tensor, dev: int, spec: _PayloadSpec) -> torch.Tensor:
     """Zero-copy [epn+B] alias: home at rows 0..epn, slot after.
 
     The alias mirrors ``spec.ref`` field by field — NZ payloads are built with
@@ -642,6 +652,7 @@ def _packed_alias(home: torch.Tensor, slot: torch.Tensor, dev: int,
         acl_vmm_set_access,
         acl_vmm_unmap,
     )
+
     try:
         from ascend_moonep.buffer_c import acl_vmm_access_device_id
     except ImportError:  # 上游 buffer_c（无重映射修复）：逻辑号即物理号
@@ -672,39 +683,48 @@ def _packed_alias(home: torch.Tensor, slot: torch.Tensor, dev: int,
             acl_vmm_map(va, int(alloc.size), alloc.mem_handle, 0)
             # set_access 的 location.id 要物理号，其余 VMM 接口要逻辑号
             # （docs/cross_repo_fixes.md §3）；buffer_c 里的同类调用都做了这一步。
-            acl_vmm_set_access(
-                va, int(alloc.size), acl_vmm_access_device_id(int(dev)))
+            acl_vmm_set_access(va, int(alloc.size), acl_vmm_access_device_id(int(dev)))
             segments.append((va, int(alloc.size), alloc.mem_handle))
     except Exception:
         for va, _, _ in segments:
-            try:
+            try:  # noqa: SIM105 - retain the existing best-effort cleanup
                 acl_vmm_unmap(va)
             except Exception:
                 pass
-        try:
+        try:  # noqa: SIM105 - retain the existing best-effort cleanup
             acl_vmm_release(base)
         except Exception:
             pass
         raise
     device = torch.device(f"npu:{int(dev)}")
     if spec.is_nz:
-        cast = _sym_tensor(base, (n_rows, int(ref.shape[2]), int(ref.shape[1])),
-                           ref.dtype, device, nbytes=n_rows * row,
-                           npu_format=spec.npu_format)
+        cast = _sym_tensor(
+            base,
+            (n_rows, int(ref.shape[2]), int(ref.shape[1])),
+            ref.dtype,
+            device,
+            nbytes=n_rows * row,
+            npu_format=spec.npu_format,
+        )
         tensor = cast.transpose(1, 2)
     else:
         # Within-row strides come from the reference, but the row base is the
         # alias head: the reference's own storage_offset (a `full[rank*epn:...]`
         # slice carries one) must not shift the alias into the slot segment.
         stride = (int(ref.stride(0)),) + tuple(int(s) for s in ref.stride()[1:])
-        tensor = _sym_tensor(base, (n_rows,) + tuple(int(d) for d in ref.shape[1:]),
-                             ref.dtype, device, stride=stride,
-                             nbytes=n_rows * row, npu_format=spec.npu_format)
+        tensor = _sym_tensor(
+            base,
+            (n_rows,) + tuple(int(d) for d in ref.shape[1:]),
+            ref.dtype,
+            device,
+            stride=stride,
+            nbytes=n_rows * row,
+            npu_format=spec.npu_format,
+        )
     expected_shape = (n_rows,) + tuple(int(d) for d in ref.shape[1:])
     # stride(0) is in elements, row_bytes in bytes: only equal for 1-byte payloads.
     stride0_bytes = int(tensor.stride(0)) * int(ref.element_size())
-    if (tensor.shape != expected_shape or stride0_bytes != row
-            or int(tensor.data_ptr()) != base):
+    if tensor.shape != expected_shape or stride0_bytes != row or int(tensor.data_ptr()) != base:
         raise RuntimeError(
             f"MoonEP slot mode: {spec.name} alias mismatch shape={tuple(tensor.shape)} "
             f"(want {expected_shape}) stride0={stride0_bytes}B (want {row}B) "
@@ -753,8 +773,9 @@ def maybe_install_pf_stream(model) -> None:
     """
     if _PREFETCH_OVERLAP == "none" or _PF["done"]:
         return
-    from vllm_ascend.ascend_config import get_ascend_config
     from vllm.distributed.parallel_state import get_ep_group
+
+    from vllm_ascend.ascend_config import get_ascend_config
 
     if not get_ascend_config().enable_moonep:
         return
@@ -781,8 +802,7 @@ def maybe_install_pf_stream(model) -> None:
         for blk in layers:
             blk.register_forward_pre_hook(_pre, with_kwargs=True)
         _PF["done"] = True
-        print(f"[pf-stream] pre-hook installed on {len(layers)} decoder layers",
-              flush=True)
+        print(f"[pf-stream] pre-hook installed on {len(layers)} decoder layers", flush=True)
     except Exception as exc:  # noqa: BLE001
         print(f"[pf-stream] install failed: {exc}", flush=True)
 
@@ -807,17 +827,19 @@ def _prepare_slot_cache(state, plan):
             misses.append((expert, i))
     if hits:
         experts_to_copy = plan.experts_to_copy.clone()
-        experts_to_copy[rank] = torch.tensor(
-            masked, dtype=experts_to_copy.dtype, device=experts_to_copy.device)
+        experts_to_copy[rank] = torch.tensor(masked, dtype=experts_to_copy.dtype, device=experts_to_copy.device)
         plan = dataclasses.replace(plan, experts_to_copy=experts_to_copy)
     first_hit = state.cache_stats[0] == 0 and bool(hits)
     state.cache_stats[0] += len(hits)
     state.cache_stats[1] += len(misses)
     _SLOT_CACHE_STATS[id(state)] = state.cache_stats
     if first_hit:
-        print(f"[slot-cache-active r{rank}] layer={state.layer_index} "
-              f"capacity={_CACHED_EXPERT_COUNT} hits={len(hits)} misses={len(misses)} "
-              f"payloads={','.join(state.caches)}", flush=True)
+        print(
+            f"[slot-cache-active r{rank}] layer={state.layer_index} "
+            f"capacity={_CACHED_EXPERT_COUNT} hits={len(hits)} misses={len(misses)} "
+            f"payloads={','.join(state.caches)}",
+            flush=True,
+        )
     return plan, (hits, misses), not misses
 
 
@@ -835,17 +857,21 @@ def _pf_stream_hook(buffer):
     dispatch 完成 —— 没有重叠。只有在本钩子这个时间点，主 stream 上排在最前面的
     才是 planning。
     """
+
     def _after(plan):
         ctx = buffer._require_ctx()
         # Check before any stream/event submission. Never silently run an old
         # UDMA runtime on shared QP0 when overlap is requested.
-        if (_PREFETCH_OVERLAP != "none" and ctx.get("_prefetch_use_udma", False)
-                and not ctx.get("udma_prefetch_overlap_ready", False)):
+        if (
+            _PREFETCH_OVERLAP != "none"
+            and ctx.get("_prefetch_use_udma", False)
+            and not ctx.get("udma_prefetch_overlap_ready", False)
+        ):
             raise RuntimeError("UDMA prefetch overlap requires dedicated QP initialization")
         try:
             key = _PF.get("cur_key")
             state = _pf_state_for(key) if key is not None else None
-            if state is None:      # 本层第一次跑，还没建权重状态
+            if state is None:  # 本层第一次跑，还没建权重状态
                 return
             import torch_npu
 
@@ -865,8 +891,7 @@ def _pf_stream_hook(buffer):
                     _pf_prefetch(buffer, state, plan_use)
             # Keep the prepared decision and completion event together on this
             # Buffer; forward must not re-read the plan or count hits twice.
-            ctx["slot_prefetch_ready"] = (
-                state, plan_use, cache_plan, skip_prefetch, side.record_event())
+            ctx["slot_prefetch_ready"] = (state, plan_use, cache_plan, skip_prefetch, side.record_event())
             if _PF_STREAMED[0] == 0:
                 from vllm.distributed.parallel_state import get_ep_group
 
@@ -895,7 +920,9 @@ def run_slot_forward(
     token_dispatch_output,
     fused_experts_input: MoEFusedExpertsInput,
     use_fusion_ops: bool | None,
-    moe_config=None, quant_method=None
+    moe_config=None,
+    quant_method=None,
+    record_before_gmm2: bool = False,
 ):
     """Prefetch remote slot weights, then run the grouped GEMMs on the aliases.
 
@@ -917,15 +944,17 @@ def run_slot_forward(
         )
     home_overlap = _PREFETCH_OVERLAP == "dispatch|home_gemm1"
     if home_overlap and _CACHED_EXPERT_COUNT > 0:
-        raise RuntimeError("Home GEMM overlap currently requires cache disabled (MOONEP_CACHED_REDUNDANT_EXPERT_COUNT=0)")
+        raise RuntimeError(
+            "Home GEMM overlap currently requires cache disabled (MOONEP_CACHED_REDUNDANT_EXPERT_COUNT=0)"
+        )
     plan_use = plan
     # Install before the next dispatch; first use safely takes the main-stream
     # path. When the hook ran, reuse its cache decision and completion event.
     prefetched = None
     if _PREFETCH_OVERLAP != "none":
         _pf_ctx = buffer._require_ctx()
-        if _pf_ctx.get('after_planning_hook') is None:
-            _pf_ctx['after_planning_hook'] = _pf_stream_hook(buffer)
+        if _pf_ctx.get("after_planning_hook") is None:
+            _pf_ctx["after_planning_hook"] = _pf_stream_hook(buffer)
         prefetched = _pf_ctx.pop("slot_prefetch_ready", None)
     pf_ev = None
     if prefetched is not None:
@@ -978,20 +1007,26 @@ def run_slot_forward(
         runner = state.home_gmm_runner()
         rows, before_gmm2_evt = home_gemm_apply_mlp(
             mlp_compute_input=mlp_compute_input,
-            home_experts=state.epn, intermediate_size=state.F,
-            range_kernel=runner, prefetch_ready=pf_ev,
+            home_experts=state.epn,
+            intermediate_size=state.F,
+            range_kernel=runner,
+            prefetch_ready=pf_ev,
+            record_before_gmm2=record_before_gmm2,
         )
         if pf_ev is not None and not runner.activation_logged:
             from vllm.distributed.parallel_state import get_ep_group
 
             rank = get_ep_group().rank_in_group
             transport = "udma" if buffer._require_ctx().get("_prefetch_use_udma", False) else "mte"
-            print(f"[home-gemm-active r{rank}] overlap={_PREFETCH_OVERLAP} split=gemm1 home={state.epn} "
-                  f"slots={state.B} prefetch={transport} backend={mlp_compute_input.quant.quant_type} "
-                  f"library={runner.library_path}", flush=True)
+            print(
+                f"[home-gemm-active r{rank}] overlap={_PREFETCH_OVERLAP} split=gemm1 home={state.epn} "
+                f"slots={state.B} prefetch={transport} backend={mlp_compute_input.quant.quant_type} "
+                f"library={runner.library_path}",
+                flush=True,
+            )
             runner.activation_logged = True
     else:
-        rows, before_gmm2_evt = apply_slot_mlp(mlp_compute_input, quant_method)
+        rows, before_gmm2_evt = apply_slot_mlp(mlp_compute_input, quant_method, record_before_gmm2=record_before_gmm2)
     return rows, before_gmm2_evt
 
 

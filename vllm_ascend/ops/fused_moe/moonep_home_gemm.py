@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Home GEMM1 overlaps remote weight prefetch; Slot GEMM1 joins before use."""
+
 from __future__ import annotations
 
 import torch
@@ -25,12 +26,12 @@ def _bf16_activation(gate_up, activation, limit):
     if activation == MoEActivation.SWIGLUOAI:
         return AscendSwigluOAIAndMul.swiglu_oai_forward(gate_up)
     if activation == MoEActivation.SWIGLUSTEP:
-        return AscendSwigluStepAndMul.swiglustep_forward(gate_up, limit=7.0)
+        return AscendSwigluStepAndMul.swiglustep_forward(gate_up, limit=limit or 7.0)
     if activation in (MoEActivation.GELU, MoEActivation.GELU_TANH):
         gate, up = gate_up.chunk(2, dim=-1)
-        return torch.nn.functional.gelu(
-            gate, approximate="tanh" if activation == MoEActivation.GELU_TANH else "none"
-        ) * up
+        return (
+            torch.nn.functional.gelu(gate, approximate="tanh" if activation == MoEActivation.GELU_TANH else "none") * up
+        )
     if limit > 0:
         gate, up = gate_up.chunk(2, dim=-1)
         gate.clamp_(max=limit)
@@ -39,8 +40,13 @@ def _bf16_activation(gate_up, activation, limit):
 
 
 def home_gemm_apply_mlp(
-    *, mlp_compute_input: MoEMlpComputeInput, home_experts: int,
-    intermediate_size: int, range_kernel, prefetch_ready=None,
+    *,
+    mlp_compute_input: MoEMlpComputeInput,
+    home_experts: int,
+    intermediate_size: int,
+    range_kernel,
+    prefetch_ready=None,
+    record_before_gmm2: bool = False,
 ):
     """Only GEMM1 is split. Both launches write one original-order output.
 
@@ -49,8 +55,11 @@ def home_gemm_apply_mlp(
     """
     mci = mlp_compute_input
     if mci.activation not in (
-        MoEActivation.SILU, MoEActivation.SWIGLUOAI, MoEActivation.SWIGLUSTEP,
-        MoEActivation.GELU, MoEActivation.GELU_TANH,
+        MoEActivation.SILU,
+        MoEActivation.SWIGLUOAI,
+        MoEActivation.SWIGLUSTEP,
+        MoEActivation.GELU,
+        MoEActivation.GELU_TANH,
     ):
         raise NotImplementedError(f"Home GEMM activation is not adapted: {mci.activation}")
     if mci.group_list_type != 1:
@@ -58,8 +67,10 @@ def home_gemm_apply_mlp(
     if mci.lora_context is not None:
         raise NotImplementedError("Home GEMM range does not support MoE LoRA")
     weights = mci.weights
-    if any(getattr(weights, name) is not None for name in
-           ("w1_bias", "w2_bias", "w1_scale_bias", "w2_scale_bias", "w1_offset", "w2_offset")):
+    if any(
+        getattr(weights, name) is not None
+        for name in ("w1_bias", "w2_bias", "w1_scale_bias", "w2_scale_bias", "w1_offset", "w2_offset")
+    ):
         raise NotImplementedError("Home GEMM range does not support bias/antiquant offsets")
     x = mci.hidden_states
     counts = mci.group_list
@@ -87,7 +98,9 @@ def home_gemm_apply_mlp(
             raise ValueError("Missing MXFP quantization parameters")
         if mci.dynamic_scale is None:
             quant_x, x_scale = DeviceOperator.npu_dynamic_quant(
-                hidden_states=x, dynamic_scale=None, act_quant_type=torch.float8_e4m3fn,
+                hidden_states=x,
+                dynamic_scale=None,
+                act_quant_type=torch.float8_e4m3fn,
                 use_mxfp_quant=True,
             )
             dispose_tensor(x)
@@ -102,20 +115,33 @@ def home_gemm_apply_mlp(
         range_kernel.mxfp4(quant_x, w1, w1_scale, x_scale, counts, gate_up, home_experts, groups)
         dispose_tensor(quant_x)
         hidden, hidden_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
-            gate_up, topk_weight=None, group_index=None, dst_type=torch.float8_e4m3fn,
-            quant_mode=2, clamp_value=mci.swiglu_limit,
+            gate_up,
+            topk_weight=None,
+            group_index=None,
+            dst_type=torch.float8_e4m3fn,
+            quant_mode=2,
+            clamp_value=mci.swiglu_limit,
         )
         hidden_scale = DeviceOperator.maybe_normalize_mxfp_scale_layout(hidden_scale)
         dispose_tensor(gate_up)
         mxfp = mci.quant.mxfp
-        before_gmm2_evt = main.record_event()
+        before_gmm2_evt = main.record_event() if record_before_gmm2 else None
         rows = DeviceOperator.npu_grouped_matmul_gmm2(
-            hidden_states=hidden, weight=w2, weight_scale=w2_scale,
-            per_token_scale=hidden_scale, group_list=counts, group_list_type=1,
-            input_dtype=torch.bfloat16, act_quant_type=torch.float8_e4m3fn,
-            weight_quant_type=mxfp.weight_quant_type, scale_type=mxfp.scale_dtype,
-            per_token_scale_type=mxfp.per_token_scale_dtype, use_bf16=mxfp.use_bf16,
-            use_mxfp_quant=True, bias=None, fallback_output_dtype=torch.bfloat16,
+            hidden_states=hidden,
+            weight=w2,
+            weight_scale=w2_scale,
+            per_token_scale=hidden_scale,
+            group_list=counts,
+            group_list_type=1,
+            input_dtype=torch.bfloat16,
+            act_quant_type=torch.float8_e4m3fn,
+            weight_quant_type=mxfp.weight_quant_type,
+            scale_type=mxfp.scale_dtype,
+            per_token_scale_type=mxfp.per_token_scale_dtype,
+            use_bf16=mxfp.use_bf16,
+            use_mxfp_quant=True,
+            bias=None,
+            fallback_output_dtype=torch.bfloat16,
             mxfp_quant_dtype=QuantType.W4A8MXFP,
         )
         return rows, before_gmm2_evt
@@ -129,9 +155,13 @@ def home_gemm_apply_mlp(
     hidden = _bf16_activation(gate_up, mci.activation, mci.swiglu_limit)
     if mci.topk_scales is not None:
         hidden *= mci.topk_scales
-    before_gmm2_evt = main.record_event()
+    before_gmm2_evt = main.record_event() if record_before_gmm2 else None
     rows = torch_npu.npu_grouped_matmul(
-        x=[hidden], weight=[w2], split_item=2, group_list_type=1,
-        group_type=0, group_list=counts,
+        x=[hidden],
+        weight=[w2],
+        split_item=2,
+        group_list_type=1,
+        group_type=0,
+        group_list=counts,
     )[0]
     return rows, before_gmm2_evt
