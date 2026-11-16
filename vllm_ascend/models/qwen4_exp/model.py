@@ -16,10 +16,12 @@
 
 from vllm.config import VllmConfig
 from vllm.model_executor.models.qwen3_vl import Qwen3VLDummyInputsBuilder
+from vllm.models.qwen4_exp.common.qsa_cache import QSAStateBackend
 from vllm.models.qwen4_exp.amd import (
     hyperconnection as upstream_hc,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.v1.attention.backends.short_conv_attn import PleShortConvAttentionBackend
 
 from vllm_ascend.models.qwen3_5_vl import (
     AscendQwen3_5VLProcessor,
@@ -56,6 +58,17 @@ from vllm.models.qwen4_exp.amd import model as upstream_model  # noqa: E402
 from .qsa import AscendQwen4ExpQSAAttention  # noqa: E402
 
 upstream_model.Qwen4ExpQSAAttention = AscendQwen4ExpQSAAttention
+
+
+def _supports_aux_cache_batch_invariance(_cls: type) -> bool:
+    return True
+
+
+# The QSA and PLE layers return these upstream backend classes directly.
+# Declare their Ascend capability here so the runner sees the same class identities.
+QSAStateBackend.supports_batch_invariance = classmethod(_supports_aux_cache_batch_invariance)
+PleShortConvAttentionBackend.supports_batch_invariance = classmethod(_supports_aux_cache_batch_invariance)
+
 
 
 class AscendQwen4ExpModel(upstream_model.Qwen4ExpModel):
