@@ -56,27 +56,6 @@ For native A5 C8, replace the two dtype options with:
 --attention-config '{"indexer_kv_dtype":"fp8","hisparse_config":{"eager_host_mirror":true}}'
 ```
 
-### Prefill Context Parallelism
-
-For native C8 on an eight-device Ascend 950 node, add the following to the
-Model Runner V2 C8 command above:
-
-```bash
---tensor-parallel-size 4 \
---prefill-context-parallel-size 2 \
---enable-expert-parallel \
---attention-config '{"indexer_kv_dtype":"fp8","hisparse_config":{"eager_host_mirror":true,"device_buffer_size":10240}}' \
---kv-transfer-config '{"kv_connector":"HiSparseConnector","kv_role":"kv_both","kv_connector_extra_config":{"host_pool_gib":64}}'
-```
-
-Use the direct `HiSparseConnector` with private per-rank Host pools. PCP partitions
-prefill and gathers packed C8 KV before Resident writes and Host mirroring.
-Decode requests are replicated across PCP ranks and write Resident directly
-without a KV gather. HiSparse disables PCP decode request sharding.
-
-When using speculative decoding, size `device_buffer_size` to hold the
-deduplicated union of KV rows selected across all verification tokens of a request.
-
 ### Verifying the Feature
 
 Send a request and check the server's metrics endpoint for the HiSparse miss
