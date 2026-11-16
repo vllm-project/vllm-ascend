@@ -826,6 +826,7 @@ def test_invalid_bm_object_rejected_before_mapping(pool_module, owner):
 def test_sharded_clients_share_one_mapping_and_keep_leases_on_failed_last_close(pool_module, monkeypatch):
     pool = pool_module
     monkeypatch.setattr(pool, "CHUNK_ROWS", 4)
+    monkeypatch.setattr(pool, "GIB", 4)
     monkeypatch.setattr(
         torch,
         "npu",
@@ -855,8 +856,8 @@ def test_sharded_clients_share_one_mapping_and_keep_leases_on_failed_last_close(
                         "dtype": "int8",
                         "owner_rank": i,
                         "object_id": 0,
-                        "byte_offset": j * rows,
-                        "rank_bytes": 2 * rows,
+                        "byte_offset": j * (4 if i == 0 else 8),
+                        "rank_bytes": 2 * (4 if i == 0 else 8),
                         "space_bytes": 16,
                     }
                     for j, key in enumerate(("layer1", "layer2"))
@@ -869,7 +870,7 @@ def test_sharded_clients_share_one_mapping_and_keep_leases_on_failed_last_close(
 
     class Buffer:
         def __init__(self, runtime, object_id, rows, width, dtype, **kwargs):
-            self.rows, self.space_size, self.fail = rows, pool.GIB, False
+            self.rows, self.space_size, self.fail = rows, 16, False
             events.append("map")
 
         def device_pointer(self, offset, size, *, owner_rank):
@@ -888,7 +889,7 @@ def test_sharded_clients_share_one_mapping_and_keep_leases_on_failed_last_close(
     other = second.view("layer2", 3, 10, rows=11, width=1, dtype=torch.int8)
     assert view.row_offset == other.row_offset == 3
     assert view.ptrs.tolist() == [1000, 2000, 2004]
-    assert other.ptrs.tolist() == [1004, 2007, 2011]
+    assert other.ptrs.tolist() == [1004, 2008, 2012]
     assert events == ["map"] and runtime._packed_refs == 2
     first.close()
     assert runtime._packed_refs == 1 and events == ["map", "lease released", "lease released"]
@@ -969,3 +970,36 @@ def test_sharded_owners_use_common_object_id_and_release_real_leases(pool_module
     finally:
         for owner in reversed(owners):
             owner.close(timeout=2)
+
+
+def test_packed_tensor_chunks_never_cross_gib_slabs(pool_module, monkeypatch):
+    pool = pool_module
+    monkeypatch.setattr(pool.MemfabricRuntime, "acquire", lambda *args, **kwargs: types.SimpleNamespace(rank=0))
+    owner = pool.SharedPoolOwner(
+        free_endpoint(),
+        "model",
+        device="npu:0",
+        store_url="tcp://127.0.0.1:12345",
+        world_size=3,
+        shard_index=1,
+        shard_count=2,
+        generation="group",
+    )
+    specs = [
+        ("codes1", pool.CHUNK_ROWS + 17, 256, torch.int8),
+        ("scales1", pool.CHUNK_ROWS + 17, 8, torch.float32),
+        ("codes2", 3 * pool.CHUNK_ROWS + 3, 256, torch.int8),
+        ("scales2", 3 * pool.CHUNK_ROWS + 3, 8, torch.float32),
+    ]
+    try:
+        owner.add_packed(specs)
+        for meta in owner.manifest["tensors"].values():
+            assert meta["byte_offset"] % pool.GIB == 0
+            row_bytes = meta["width"] * (1 if meta["dtype"] == "int8" else 4)
+            for row in range(0, meta["rows"], pool.CHUNK_ROWS):
+                start = meta["byte_offset"] + row * row_bytes
+                end = start + min(pool.CHUNK_ROWS, meta["rows"] - row) * row_bytes - 1
+                assert start // pool.GIB == end // pool.GIB
+    finally:
+        owner.runtime = None
+        owner.close(timeout=2)

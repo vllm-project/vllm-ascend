@@ -211,7 +211,9 @@ in `--additional-config` alongside the Engram options above. Endpoint order
 must match shard indices. The consumer validates all owners before importing
 mappings. Every table needs at least one 4,194,304-row chunk per owner. Each
 owner packs its table ranges into one BM object, and model layers share the
-consumer mapping. Sharding can increase physical allocation due to BM's GiB rounding.
+consumer mapping. Each tensor begins on a GiB boundary so lookup chunks stay
+within one mapped slab. This padding and BM allocation rounding increase the
+physical memory required.
 
 Stop all consumers first, then nonzero owners, and finally shard 0. A missing or
 failed owner makes the group unavailable; restart the complete group with a new

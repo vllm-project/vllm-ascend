@@ -80,6 +80,10 @@ def _receive(wire):
     return value
 
 
+def _align_gib(size):
+    return (size + GIB - 1) // GIB * GIB
+
+
 def shard_range(rows, index, count):
     chunks = (rows + CHUNK_ROWS - 1) // CHUNK_ROWS
     if type(index) is not int or type(count) is not int or count < 1 or not 0 <= index < count or chunks < count:
@@ -244,8 +248,8 @@ class SharedPoolOwner:
                 first_row=first,
                 byte_offset=rank_bytes,
             )
-            rank_bytes += (last - first) * row_bytes
-            space_bytes += max_rows * row_bytes
+            rank_bytes += _align_gib((last - first) * row_bytes)
+            space_bytes += _align_gib(max_rows * row_bytes)
         if not metadata:
             raise ValueError("Packed Engram requires at least one tensor")
         settings = self.manifest["memfabric"]
@@ -437,8 +441,8 @@ class ShardedPoolClient:
                     row_bytes = meta["width"] * torch.empty((), dtype=DTYPES[meta["dtype"]]).element_size()
                     chunks = (meta["total_rows"] + CHUNK_ROWS - 1) // CHUNK_ROWS
                     max_rows = min(meta["total_rows"], ((chunks + len(endpoints) - 1) // len(endpoints)) * CHUNK_ROWS)
-                    offset += (last - first) * row_bytes
-                    capacity += max_rows * row_bytes
+                    offset += _align_gib((last - first) * row_bytes)
+                    capacity += _align_gib(max_rows * row_bytes)
                 if any(
                     meta["rank_bytes"] != offset or meta["space_bytes"] != capacity
                     for meta in manifest["tensors"].values()
@@ -488,7 +492,7 @@ class ShardedPoolClient:
                 elif (
                     primary.runtime._packed_spec != self._packed_spec
                     or mapping.rows != meta["rank_bytes"]
-                    or mapping.space_size != ((meta["space_bytes"] + GIB - 1) // GIB * GIB)
+                    or mapping.space_size != _align_gib(meta["space_bytes"])
                 ):
                     raise ValueError("shared Engram packed mapping layout mismatch")
                 primary.runtime._packed_refs += 1
