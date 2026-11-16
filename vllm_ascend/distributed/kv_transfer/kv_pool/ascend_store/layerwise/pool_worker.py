@@ -824,17 +824,13 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
     def _make_mooncake_layerwise_key(self, block_hash_or_tail: str) -> str:
         return self._make_layerwise_full_key(0, block_hash_or_tail)
 
-    def _layerwise_execution_full_key(self, request: ReqMeta, group_id: int, block_index: int, block_hash: str) -> str:
-        end_token = (block_index + 1) * self.grouped_block_size[group_id]
-        return f"{self._make_layerwise_partial_key(request, group_id, block_index, end_token)}@full@{block_hash}"
-
     def _get_layerwise_load_snapshot(
         self,
         request: ReqMeta,
         group_id: int,
         cached_tokens: int,
         block_hashes: Sequence[BlockHash],
-    ) -> tuple[int, Callable[[int, bool], tuple[str, bool] | None]] | None:
+    ) -> tuple[int, Callable[[int], tuple[str, bool] | None]] | None:
         reused_groups = getattr(self, "_reused_layers_by_group", None)
         if reused_groups is not None and group_id not in reused_groups:
             # Resident pages remain available for the running request.
@@ -844,34 +840,25 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         uses_align_state = self.group_uses_align_state[group_id]
         snapshot = self._snapshot_keys.get(request.req_id, {}).get(group_id, {})
 
-        def get_saved_key(block_idx: int, is_partial: bool) -> tuple[str, bool] | None:
-            end = min((block_idx + 1) * block_size, cached_tokens)
+        def get_saved_key(block_idx: int) -> tuple[str, bool] | None:
+            block_end = (block_idx + 1) * block_size
+            end = min(block_end, cached_tokens)
+            # An aligned Mamba endpoint uses the single-page transfer slot
+            # even when its complete state is stored under a public key.
+            public_key = None
+            if end == block_end and block_idx < len(block_hashes):
+                public_key = self._make_layerwise_full_key(group_id, block_hash_to_str(block_hashes[block_idx]))
             saved = snapshot.get(block_idx)
             if saved is not None and (saved[0] == end or (not uses_align_state and saved[0] > end)):
                 key = saved[1]
-                if is_partial or block_idx >= len(block_hashes):
-                    return key, False
-                full_key = self._make_layerwise_full_key(group_id, block_hash_to_str(block_hashes[block_idx]))
-                return key, key == full_key
-            if (
-                block_idx >= len(block_hashes)
-                or is_partial
-                or self._uses_execution_full_key(request, group_id, block_idx)
-            ):
+                # A hash can become available after the preceding save.
+                return key, key == public_key
+            if public_key is None:
                 logger.error("No saved KV page for request %s group %d block %d", request.req_id, group_id, block_idx)
                 return None
-            return self._make_layerwise_full_key(group_id, block_hash_to_str(block_hashes[block_idx])), True
+            return public_key, True
 
         return (0 if uses_align_state else cached_tokens // block_size), get_saved_key
-
-    def _uses_execution_full_key(self, request: ReqMeta, group_id: int, block_index: int) -> bool:
-        start = request.layerwise_recompute_start_token
-        return (
-            self.layerwise_offload
-            and not self.group_uses_align_state[group_id]
-            and start is not None
-            and block_index >= start // self.grouped_block_size[group_id]
-        )
 
     def _layerwise_key_batches(self, keys: list[str]) -> list[list[str]]:
         batch_size = self.layerwise_max_transfer_blocks if self.layerwise_max_transfer_blocks > 0 else max(1, len(keys))
@@ -1380,7 +1367,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             all_group_block_ids: list[np.ndarray] = []
             all_group_save_keys: list[str] = []
             request.partial_save_gva_per_group = [0] * self.num_kv_cache_groups
-            request.public_save_blocks = {}
             for group_id in range(self.num_kv_cache_groups):
                 block_ids_by_group = (
                     request.block_ids_by_group_np[group_id]
@@ -1437,21 +1423,13 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 ]
                 candidate_keys: list[str] = []
                 candidate_public_keys: set[str] = set()
-                publication_keys: dict[int, str] = {}
                 for block_idx in candidate_blocks:
                     if block_idx >= len(group_block_hashes):
                         key = self._make_layerwise_partial_key(request, group_id, block_idx, request.target_token_len)
                     else:
                         block_hash = block_hash_to_str(group_block_hashes[block_idx])
                         key = self._make_layerwise_full_key(group_id, block_hash)
-                        if keep_snapshot and (
-                            self.group_uses_align_state[group_id]
-                            or self._uses_execution_full_key(request, group_id, block_idx)
-                        ):
-                            publication_keys[block_idx] = key
-                            key = self._layerwise_execution_full_key(request, group_id, block_idx, block_hash)
-                        else:
-                            candidate_public_keys.add(key)
+                        candidate_public_keys.add(key)
                     candidate_keys.append(key)
                 partial_key = None
                 if keep_snapshot and partial_block_index is not None and partial_block_index < len(block_ids_by_group):
@@ -1519,31 +1497,6 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                                 public_allocated.add(key)
                     if self.layerwise_offload and any(gva <= 0 for gva in transfer_gvas):
                         return False
-
-                # An immutable public key may contain a different execution's
-                # rounding. Keep our exact pages for intra-request restore,
-                # while publishing missing public pages through the same queue.
-                public_blocks = list(publication_keys)
-                public_keys = list(publication_keys.values())
-                missing_public = self._pool_keys_missing(public_keys, fail_open=False) - public_allocated
-                public_blocks = [idx for idx, key in zip(public_blocks, public_keys) if key in missing_public]
-                public_keys = [key for key in public_keys if key in missing_public]
-                if public_blocks:
-                    allocated = self.m_store.batch_alloc(
-                        public_keys, [alloc_size] * len(public_keys), LAYERWISE_READ_LEASE_TTL_MS
-                    )
-                    if (
-                        allocated is None
-                        or len(allocated) != len(public_keys)
-                        or any(not 0 < gva < MEMCACHE_SSD_HIT_GVA for gva in allocated)
-                    ):
-                        return False
-                    request.public_save_blocks[group_id] = (
-                        block_ids_by_group[public_blocks],
-                        np.asarray(allocated, dtype=np.int64),
-                    )
-                    all_group_save_keys.extend(public_keys)
-                    public_allocated.update(public_keys)
 
                 if partial_key is not None:
                     # Partial keys are request-scoped: allocate fresh each step.
@@ -2119,7 +2072,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             for block_idx in block_indices:
                 is_partial = block_idx == partial_block_index
                 if get_saved_key is not None:
-                    saved_key = get_saved_key(block_idx, is_partial)
+                    saved_key = get_saved_key(block_idx)
                     if saved_key is None:
                         return None
                     key, is_public = saved_key

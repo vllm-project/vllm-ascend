@@ -813,10 +813,6 @@ class RequestTracker:
     # Namespace for request-scoped snapshots; renewed after preemption/reuse.
     layerwise_request_id: str | None = None
 
-    # Public prefix pages loaded before this execution may be reused unchanged.
-    # Newly computed pages need an execution-local identity until the request ends.
-    layerwise_recompute_start_token: int | None = None
-
     # The number of tokens that has been savd
     num_saved_tokens: int = 0
 
@@ -942,8 +938,6 @@ class ReqMeta:
 
     block_hashes: list[BlockHash]
     layerwise_request_id: str | None = None
-    layerwise_recompute_start_token: int | None = None
-    public_save_blocks: dict[int, tuple[np.ndarray, np.ndarray]] = field(default_factory=dict)
     needs_private_snapshot: bool = True
 
     # First token that has not been saved before this metadata was built.
@@ -1013,15 +1007,12 @@ class ReqMeta:
         load_last_block_key: str | None = None,
         load_keys: list[str] | None = None,
         layerwise_request_id: str | None = None,
-        layerwise_recompute_start_token: int | None = None,
         needs_private_snapshot: bool = True,
     ) -> None:
         if token_len_chunk is None:
             token_len_chunk = 0 if save_end_token is None else save_end_token
         self.req_id = req_id
         self.layerwise_request_id = layerwise_request_id
-        self.layerwise_recompute_start_token = layerwise_recompute_start_token
-        self.public_save_blocks = {}
         self.needs_private_snapshot = needs_private_snapshot
         self.token_len_chunk = token_len_chunk
         self.save_end_token = token_len_chunk if save_end_token is None else save_end_token
@@ -1128,12 +1119,6 @@ class ReqMeta:
             block_hashes = []
         target_token_len = tracker.token_len
         previous_saved_tokens = tracker.num_saved_tokens
-        if save_partial_block and tracker.layerwise_recompute_start_token is None:
-            tracker.layerwise_recompute_start_token = (
-                load_spec.kvpool_cached_tokens
-                if load_spec is not None and load_spec.can_load and not load_spec.layerwise_previous_step
-                else previous_saved_tokens
-            )
 
         # For save operation: do not save if the following condition is met
         # 1. has already been saved before (num_saved_tokens > 0)
@@ -1214,7 +1199,6 @@ class ReqMeta:
         return ReqMeta(
             req_id=tracker.req_id,
             layerwise_request_id=tracker.layerwise_request_id,
-            layerwise_recompute_start_token=tracker.layerwise_recompute_start_token,
             token_len_chunk=num_tokens_to_save,
             save_end_token=num_tokens_to_save,
             target_token_len=target_token_len,
