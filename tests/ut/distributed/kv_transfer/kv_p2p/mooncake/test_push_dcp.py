@@ -8,11 +8,10 @@ from unittest.mock import Mock
 import msgspec
 import pytest
 
+from tests.ut.kv_offload.mooncake_v2 import test_push_sending
+from tests.ut.kv_offload.mooncake_v2.test_push_sending import drive, multi_cache_remote, remote_metadata, target_params
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import push_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import MooncakeConnectorMetadata
-
-from . import test_push_sending
-from .test_push_sending import drive, multi_cache_remote, remote_metadata, target_params
 
 worker = test_push_sending.worker
 

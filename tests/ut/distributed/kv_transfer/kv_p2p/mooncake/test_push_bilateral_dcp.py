@@ -9,10 +9,10 @@ from unittest.mock import Mock
 
 import pytest
 
+from tests.ut.kv_offload.mooncake_v2 import test_push_sending
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker, push_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import MooncakeConnectorMetadata
 
-from . import test_push_sending
 from .test_push_dcp import configure, metadata
 
 worker = test_push_sending.worker
