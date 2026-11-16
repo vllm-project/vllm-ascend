@@ -124,16 +124,6 @@ def test_v41_draft_routes_to_v41():
             "get_dsv41_packed_cache_ops",
             return_value=draft_backend,
         ),
-        # Draft construction selects the PCP implementation from the current
-        # vLLM config. This test only checks the non-PCP class.
-        patch(
-            "vllm_ascend.attention.context_parallel.dsa_v41_cp.is_pcp_enabled",
-            return_value=False,
-        ),
-        patch(
-            "vllm_ascend.attention.dsa_v41.get_ascend_config",
-            return_value=SimpleNamespace(multistream_dsv4_dsa_overlap=False),
-        ),
     ):
         draft = DeepseekV41DSparkAttention(vllm_config=config, prefix="mtp.0.self_attn")
     assert type(draft.v41_impl) is AscendDSAV41Impl
