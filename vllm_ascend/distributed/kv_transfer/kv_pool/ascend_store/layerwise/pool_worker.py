@@ -99,7 +99,8 @@ PARTIAL_LEASE_RETRY_INTERVAL_S = 0.001
 SAVE_BATCH_FAILURE_POLL_INTERVAL_S = 1.0
 
 
-_LoadGroup = tuple[np.ndarray, list[int], list[str], bool]
+# (GVA output array, request block indices, pool keys, last key uses the tail GVA)
+_GroupLoadPlan = tuple[np.ndarray, list[int], list[str], bool]
 
 
 class LayerwiseKVPoolWorker(BaseKVPoolWorker):
@@ -1924,7 +1925,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
             gvas[key_indices[key]] = address
         return gvas
 
-    def _plan_load_gvas_for_request(self, request: ReqMeta) -> list[_LoadGroup] | None:
+    def _plan_load_gvas_for_request(self, request: ReqMeta) -> list[_GroupLoadPlan] | None:
         assert request.load_spec is not None
         cached_tokens = request.load_spec.kvpool_cached_tokens
         if not getattr(self, "use_eagle", False) and request.load_spec.kvpool_store_skip_tokens is not None:
@@ -1939,7 +1940,7 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
         block_hashes = request.block_hashes
         request.load_masks = self._compute_reachable_load_masks(request, cached_tokens)
 
-        groups: list[_LoadGroup] = []
+        groups: list[_GroupLoadPlan] = []
         restore_previous_step = self.layerwise_offload and request.load_spec.layerwise_previous_step
         for group_id in range(self.num_kv_cache_groups):
             if group_id not in self.cacheable_group_ids:
