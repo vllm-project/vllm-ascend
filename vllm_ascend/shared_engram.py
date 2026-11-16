@@ -15,7 +15,6 @@ from safetensors import safe_open
 # Initialize the normal operator registry before Engram's DeviceOperator import.
 import vllm_ascend.ops  # noqa: F401
 from vllm_ascend.models.deepseek_v41.engram.shared_pool import (
-    CHUNK_ROWS,
     SharedPoolOwner,
     checkpoint_identity,
     parse_endpoint,
@@ -39,18 +38,24 @@ def load_tables(owner, model, stop):
                 source = file.get_slice(key)
                 if source.get_shape() != [rows, columns] or source.get_dtype() not in allowed:
                     raise ValueError(f"Unsupported shared Engram checkpoint layout: {key}")
+    packed = None
+    if owner.shard_count > 1:
+        specs = []
+        for layer, rows in shapes:
+            specs.extend(
+                (
+                    (f"layers.{layer}.engram.embed.weight", rows, width, torch.int8),
+                    (f"layers.{layer}.engram.embed.scale", rows, width // 32, torch.float32),
+                )
+            )
+        packed = owner.add_packed(specs)
     for layer, rows in shapes:
         weight_key = f"layers.{layer}.engram.embed.weight"
         scale_key = f"layers.{layer}.engram.embed.scale"
         first, last = shard_range(rows, owner.shard_index, owner.shard_count)
-        chunks = (rows + CHUNK_ROWS - 1) // CHUNK_ROWS
-        space_rows = min(rows, ((chunks + owner.shard_count - 1) // owner.shard_count) * CHUNK_ROWS)
-        codes = owner.add(
-            weight_key, last - first, width, torch.int8, total_rows=rows, first_row=first, space_rows=space_rows
-        )
-        scales = owner.add(
-            scale_key, last - first, width // 32, torch.float32, total_rows=rows, first_row=first, space_rows=space_rows
-        )
+        if packed is None:
+            codes = owner.add(weight_key, rows, width, torch.int8)
+            scales = owner.add(scale_key, rows, width // 32, torch.float32)
         with (
             safe_open(root / index[weight_key], framework="pt", device="cpu") as weights,
             safe_open(root / index[scale_key], framework="pt", device="cpu") as scale_file,
@@ -61,8 +66,15 @@ def load_tables(owner, model, stop):
                 if stop.is_set():
                     raise InterruptedError("Shared Engram loading cancelled")
                 end = min(start + 65536, last)
-                codes.publish(start - first, weight[start:end])
-                scales.publish(start - first, scale[start:end].float())
+                if packed is None:
+                    codes.publish(start - first, weight[start:end])
+                    scales.publish(start - first, scale[start:end].float())
+                else:
+                    for key, source in ((weight_key, weight[start:end]), (scale_key, scale[start:end].float())):
+                        source = source.contiguous().view(torch.int8).reshape(-1, 1)
+                        meta = owner.manifest["tensors"][key]
+                        row_bytes = meta["width"] * (1 if meta["dtype"] == "int8" else 4)
+                        packed.publish(meta["byte_offset"] + (start - first) * row_bytes, source)
         print(json.dumps(dict(stage="LAYER_LOADED", layer=layer, rows=rows)), flush=True)
 
 
