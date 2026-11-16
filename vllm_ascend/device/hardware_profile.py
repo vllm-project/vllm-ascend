@@ -173,7 +173,7 @@ class HardwareCapability(Enum):
     PAGED_ATTENTION = auto()
     # Use eight-row Qwen4Exp HC gate-mix tiles for large prefill batches.
     # A2, A3, and A5 validated parity and a performance benefit at the
-    # 1024-row dispatch threshold; other profiles retain one-row dispatch.
+    # 2048-row dispatch threshold; other profiles retain one-row dispatch.
     QWEN4EXP_HC_GATE_MIX_ROW_BLOCK = auto()
     # Inspect PCIe topology to distinguish 310P Root-Complex and endpoint deployments.
     RC_DEVICE_DISCOVERY = auto()

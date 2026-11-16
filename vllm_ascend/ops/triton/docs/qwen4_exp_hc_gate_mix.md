@@ -23,7 +23,7 @@ Source: `vllm_ascend/ops/triton/qwen4_exp/hc.py` (public wrapper:
 - **Algorithm flow**:
     1. The Python wrapper validates the shape, divisibility, and inner-stride
        contract and allocates `[rows, group_dim]` output storage.
-    2. For `rows >= 1024` on an enabled hardware profile, the wrapper launches
+    2. For `rows >= 2048` on an enabled hardware profile, the wrapper launches
        `_hc_gate_mix_row_block_kernel` with grid
        `(cdiv(rows, 8), cdiv(group_dim, 512))`.
     3. Each row-block program owns an `8 x 512` tile. It initializes one FP32
@@ -75,10 +75,10 @@ Source: `vllm_ascend/ops/triton/qwen4_exp/hc.py` (public wrapper:
   does not mutate `x` or `gate`.
 - The validated input dtype is BF16, matching the Qwen4Exp model path. The
   tested shape is `hc_count=4`, `group_dim=2560`, and hidden width `10240`.
-- The row-block path requires `rows >= 1024` and
+- The row-block path requires `rows >= 2048` and
   `QWEN4EXP_HC_GATE_MIX_ROW_BLOCK`. Other rows and profiles retain the one-row
-  kernel. The 1024-row cutoff is conservative for the measured A2 and A5
-  crossover points.
+  kernel. The 2048-row cutoff avoids the host-bound launch range observed in
+  integrated A3 measurements while retaining the large-prefill gains.
 - For a contiguous width-10,240 row, the first row whose element offset can
   exceed `INT32_MAX` is 209,715. The host selects
   `WIDE_OFFSETS=True` for that range. The int64 branch is compiled and checked
@@ -136,7 +136,7 @@ pytest -q \
 The suite uses the real Qwen4Exp operator shape, `hc_count=4`,
 `group_dim=2560`, and BF16 inputs. It covers:
 
-- rows `1023`, `1024`, and `1025`, including the dispatch boundary;
+- rows `2047`, `2048`, and `2049`, including the dispatch boundary;
 - a non-contiguous, row-strided tail input;
 - bitwise output parity between the row-block and legacy kernels with
   `rtol=0, atol=0`;
@@ -159,7 +159,7 @@ pytest -q \
   tests/ut/device/test_hardware_profile.py
 ```
 
-These tests cover the `1023/1024/1025` threshold, capability-present and
+These tests cover the `2047/2048/2049` threshold, capability-present and
 capability-absent dispatch, A2/A3/A5 capability assignment, and the
 `WIDE_OFFSETS` launch argument.
 
@@ -171,7 +171,7 @@ import torch_npu  # noqa: F401
 
 from vllm_ascend.ops.triton.qwen4_exp.hc import hc_gate_mix
 
-rows = 1024
+rows = 2048
 hc_count = 4
 group_dim = 2560
 x = torch.randn((rows, hc_count * group_dim), device="npu", dtype=torch.bfloat16)

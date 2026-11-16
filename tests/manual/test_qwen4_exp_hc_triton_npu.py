@@ -298,8 +298,9 @@ def main() -> None:
         (17, False),
         (7, True),
         (257, False),
-        (1024, False),
-        (1025, True),
+        (2047, False),
+        (2048, False),
+        (2049, True),
     ):
         run_correctness(rows, padded_input=padded)
     verify_fullgraph_capture()

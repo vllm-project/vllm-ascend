@@ -26,9 +26,9 @@ class _KernelRecorder:
 @pytest.mark.parametrize(
     ("rows", "row_block_supported", "expected_kernel"),
     (
-        (1023, True, "legacy"),
-        (1024, True, "row_block"),
-        (1025, True, "row_block"),
+        (2047, True, "legacy"),
+        (2048, True, "row_block"),
+        (2049, True, "row_block"),
         (1024, False, "legacy"),
     ),
 )
@@ -120,7 +120,7 @@ def test_hc_gate_mix_passes_wide_offset_flag(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(hc, "_hc_gate_mix_needs_wide_offsets", lambda *_: True)
     monkeypatch.setattr(hc, "get_current_hardware_profile", lambda: profile)
 
-    x = torch.empty((1024, 40), dtype=torch.bfloat16)
+    x = torch.empty((2048, 40), dtype=torch.bfloat16)
     hc._hc_gate_mix(x, torch.empty_like(x), 4)
 
     _, _, kwargs = row_block.launches[0]

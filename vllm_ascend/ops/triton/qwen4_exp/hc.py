@@ -185,7 +185,7 @@ def _hc_gate_mix_kernel(
 
 _HC_GATE_MIX_BLOCK_SIZE = 512
 _HC_GATE_MIX_ROWS_PER_BLOCK = 8
-_HC_GATE_MIX_ROW_BLOCK_MIN_ROWS = 1024
+_HC_GATE_MIX_ROW_BLOCK_MIN_ROWS = 2048
 _INT32_MAX = torch.iinfo(torch.int32).max
 
 

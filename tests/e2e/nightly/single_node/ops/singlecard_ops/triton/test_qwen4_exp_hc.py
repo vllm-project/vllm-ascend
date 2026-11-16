@@ -90,9 +90,9 @@ def _wide_row_block_gate_mix(x: torch.Tensor, gate: torch.Tensor) -> torch.Tenso
 @pytest.mark.parametrize(
     ("rows", "row_strided"),
     (
-        (1023, False),
-        (1024, False),
-        (1025, True),
+        (2047, False),
+        (2048, False),
+        (2049, True),
     ),
 )
 @torch.inference_mode()
@@ -111,7 +111,7 @@ def test_hc_gate_mix_row_block_matches_legacy_kernel(rows: int, row_strided: boo
 
 @torch.inference_mode()
 def test_hc_gate_mix_row_block_npugraph_replay() -> None:
-    rows = 1025
+    rows = 2049
     x = _make_input(rows, HYPER_HIDDEN_SIZE, row_strided=True)
     gate = _make_input(rows, HYPER_HIDDEN_SIZE, row_strided=True)
     for _ in range(3):
@@ -146,7 +146,7 @@ def test_hc_gate_mix_row_block_wide_offsets_matches_legacy() -> None:
 
 @torch.inference_mode()
 def test_hc_gate_mix_row_counts_reuse_compilation(monkeypatch: pytest.MonkeyPatch) -> None:
-    max_rows = 1033
+    max_rows = 2057
     x_backing = _make_input(max_rows, HYPER_HIDDEN_SIZE, row_strided=True)
     gate_backing = _make_input(max_rows, HYPER_HIDDEN_SIZE, row_strided=True)
 
@@ -166,8 +166,8 @@ def test_hc_gate_mix_row_counts_reuse_compilation(monkeypatch: pytest.MonkeyPatc
 
     for expected_compile_count, row_counts in enumerate(
         (
-            (1024, 1032),
-            (1025, 1033),
+            (2048, 2056),
+            (2049, 2057),
         ),
         start=1,
     ):
