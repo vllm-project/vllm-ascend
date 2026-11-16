@@ -2,11 +2,64 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Query-row partitioning for the replicated V4.1 index K cache."""
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+
+
+V41_FULL_INDEXER_SHARD: ContextVar[bool | None] = ContextVar("v41_full_indexer_shard", default=None)
+# Small PCP-local batches may not save enough scoring time to pay for the gather.
+MIN_PCP_INDEXER_ROWS_PER_TP_RANK = 2
+
+
+@contextmanager
+def v41_full_indexer_sharding(enabled: bool | None):
+    token = V41_FULL_INDEXER_SHARD.set(enabled)
+    try:
+        yield
+    finally:
+        V41_FULL_INDEXER_SHARD.reset(token)
+
+
+def uses_v41_full_indexer_variants(config: "VllmConfig") -> bool:
+    from vllm.config.compilation import CUDAGraphMode
+
+    from vllm_ascend.utils import is_deepseek_v41
+
+    model = getattr(config, "model_config", None)
+    parallel = config.parallel_config
+    return (
+        model is not None
+        and is_deepseek_v41(model.hf_config)
+        and config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+        and parallel.tensor_parallel_size > 1
+        and parallel.decode_context_parallel_size == 1
+        and config.lora_config is None
+    )
+
+
+def should_shard_v41_full_decode(
+    num_rows: int, tp_size: int, history: np.ndarray, topk: int, *, pcp_min_query_rows: int | None = None
+) -> bool:
+    if num_rows < tp_size:
+        return False
+    if pcp_min_query_rows is not None:
+        # The last TP shard starts latest in the padded FULL layout. It must
+        # still have enough real queries even on the smallest PCP group.
+        last_shard_rows = num_rows // tp_size
+        min_rows = MIN_PCP_INDEXER_ROWS_PER_TP_RANK
+        if last_shard_rows < min_rows or pcp_min_query_rows < num_rows - last_shard_rows + min_rows:
+            return False
+    # Use the C2 history requirement for both C1 and C2 indexer sources.
+    return history.size > 0 and bool((history >= 2 * topk).all())
 
 
 @dataclass(frozen=True)
@@ -42,9 +95,11 @@ def plan_indexer_rows(
         return None
     width, extra = divmod(num_rows, tp_size)
     equal_sizes = tuple(width + (rank < extra) for rank in range(tp_size))
-    if full_graph or query_offsets is None or seq_lens is None:
+    if full_graph:
         # The FULL graph must choose exactly the same layout at capture and replay.
         return IndexerRowPartition(equal_sizes, tp_rank)
+    if query_offsets is None or seq_lens is None:
+        return None
     if query_offsets[-1] < num_rows or len(seq_lens) + 1 != len(query_offsets):
         return None
 
