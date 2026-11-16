@@ -68,6 +68,11 @@ The adapter adds the following contracts:
   and device block count do not change this logical-format identity.
 - Public load metadata is batched across groups and requests. Private keys remain
   scoped to their request, and every successful lease acquisition is released.
+- Save metadata is planned for all groups of a request before querying the pool.
+  Existence checks keep separate policies for private and public keys; allocations
+  batch different group sizes together, bounded by `layerwise_max_transfer_blocks`.
+  Returned addresses are scattered back to the original group and block positions.
+  Addresses are reacquired on each step, and publication still waits for DMA.
 
 The adapter reuses the common planner, allocation, transfer threads, and reuse
 fences. It does not bypass save completion or enable speculative overwrite.
@@ -82,6 +87,7 @@ pytest -q \
   tests/ut/distributed/ascend_store/test_dsv4_layerwise_runtime.py \
   tests/ut/distributed/ascend_store/test_dsv4_prefix_offload.py \
   tests/ut/distributed/ascend_store/test_dsv4_transfer_registration.py \
+  tests/ut/distributed/ascend_store/test_layerwise_save_batching.py \
   tests/ut/distributed/ascend_store/test_reuse_snapshot_blocks.py \
   tests/ut/distributed/ascend_store/test_pool_worker.py
 ```

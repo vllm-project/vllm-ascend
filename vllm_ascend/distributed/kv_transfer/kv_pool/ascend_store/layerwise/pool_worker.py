@@ -5,6 +5,7 @@ import threading
 import time
 from collections.abc import Callable, Generator, Iterable, Sequence
 from contextlib import suppress
+from dataclasses import dataclass
 from itertools import chain
 from typing import Any, cast
 
@@ -102,6 +103,17 @@ SAVE_BATCH_FAILURE_POLL_INTERVAL_S = 1.0
 
 _LoadGroup = tuple[np.ndarray, list[int], list[str], bool]
 _LoadPlan = tuple[ReqMeta, list[_LoadGroup], dict[str, None]]
+
+
+@dataclass
+class _SaveGroupPlan:
+    """Request-local targets; never retain pool addresses across steps."""
+
+    block_ids: np.ndarray
+    keys: dict[int, str]
+    public_keys: set[str]
+    publication_keys: dict[int, str]
+    partial_key: str | None
 
 
 class LayerwiseKVPoolWorker(BaseKVPoolWorker):
@@ -1368,263 +1380,204 @@ class LayerwiseKVPoolWorker(BaseKVPoolWorker):
                 request.can_save = False
                 request.save_keys = []
 
+    def _plan_save_group(self, request: ReqMeta, group_id: int) -> _SaveGroupPlan:
+        """Select snapshot/public targets without issuing any pool RPCs."""
+        block_ids_by_group = (
+            request.block_ids_by_group_np[group_id]
+            if request.block_ids_by_group_np is not None and group_id < len(request.block_ids_by_group_np)
+            else request.block_ids_np
+        )
+        if block_ids_by_group is None:
+            raise RuntimeError(f"Block IDs are not initialized for request {request.req_id}")
+        block_ids_by_group = np.asarray(block_ids_by_group, dtype=np.int64)
+        save_owner = self._is_layerwise_save_owner(group_id)
+        keep_snapshot = self.layerwise_offload and request.needs_private_snapshot
+        if group_id not in self.cacheable_group_ids or (not save_owner and not keep_snapshot):
+            return _SaveGroupPlan(block_ids_by_group, {}, set(), {}, None)
+        effective_block_size = self.grouped_block_size[group_id]
+        group_block_hashes = get_block_hashes(request.block_hashes, effective_block_size, self.hash_block_size)
+
+        save_start_block = request.save_start_token // effective_block_size
+        partial_block_index = get_partial_block_index(
+            request.target_token_len, effective_block_size, len(group_block_hashes), self.layerwise_offload
+        )
+        save_end_block = self._layerwise_save_full_end(request, group_id, effective_block_size, partial_block_index)
+        if (
+            request.load_spec is not None
+            and request.load_spec.can_load
+            and not request.load_spec.layerwise_previous_step
+        ):
+            pool_hit_tokens = (
+                request.load_spec.kvpool_store_skip_tokens
+                if request.load_spec.kvpool_store_skip_tokens is not None
+                else request.load_spec.kvpool_cached_tokens
+            )
+            hit_full_blocks = pool_hit_tokens // effective_block_size
+            save_start_block = max(save_start_block, hit_full_blocks)
+        group_store_mask = (
+            request.store_masks[group_id]
+            if request.store_masks is not None and group_id < len(request.store_masks)
+            else None
+        )
+        end_limit = min(save_end_block, len(block_ids_by_group))
+        if not (
+            self.layerwise_offload and request.needs_private_snapshot and not self.group_uses_align_state[group_id]
+        ):
+            end_limit = min(end_limit, len(group_block_hashes))
+        candidate_blocks = [
+            block_idx
+            for block_idx in range(save_start_block, end_limit)
+            if group_store_mask is None or block_idx >= len(group_store_mask) or group_store_mask[block_idx]
+        ]
+        candidate_keys: list[str] = []
+        candidate_public_keys: set[str] = set()
+        publication_keys: dict[int, str] = {}
+        for block_idx in candidate_blocks:
+            if block_idx >= len(group_block_hashes):
+                key = self._make_layerwise_partial_key(request, group_id, block_idx, request.target_token_len)
+            else:
+                block_hash = block_hash_to_str(group_block_hashes[block_idx])
+                key = self._make_layerwise_full_key(group_id, block_hash)
+                if keep_snapshot and (
+                    self.group_uses_align_state[group_id] or self._uses_execution_full_key(request, group_id, block_idx)
+                ):
+                    publication_keys[block_idx] = key
+                    key = self._layerwise_execution_full_key(request, group_id, block_idx, block_hash)
+                else:
+                    candidate_public_keys.add(key)
+            candidate_keys.append(key)
+        partial_key = None
+        if (
+            keep_snapshot
+            and partial_block_index is not None
+            and partial_block_index < len(block_ids_by_group)
+            and block_ids_by_group[partial_block_index] != 0
+        ):
+            partial_key = self._make_layerwise_partial_key(
+                request, group_id, partial_block_index, request.target_token_len
+            )
+        if keep_snapshot:
+            pages = self._snapshot_keys.setdefault(request.req_id, {}).setdefault(group_id, {})
+            # Released window pages no longer belong to this request.
+            for index in list(pages):
+                if index >= len(block_ids_by_group) or block_ids_by_group[index] == 0:
+                    del pages[index]
+            if self.group_uses_align_state[group_id] and (candidate_blocks or partial_key is not None):
+                pages.clear()
+            pages.update(
+                (index, (min((index + 1) * effective_block_size, request.target_token_len), key))
+                for index, key in zip(candidate_blocks, candidate_keys)
+            )
+            if partial_key is not None:
+                pages[partial_block_index] = (request.target_token_len, partial_key)
+        if not save_owner:
+            # All TP ranks track snapshot identity, but only owners allocate.
+            return _SaveGroupPlan(block_ids_by_group, {}, set(), {}, None)
+        return _SaveGroupPlan(
+            block_ids_by_group,
+            dict(zip(candidate_blocks, candidate_keys, strict=True)),
+            candidate_public_keys,
+            publication_keys,
+            partial_key,
+        )
+
+    def _allocate_save_groups(self, plans: list[_SaveGroupPlan], public_allocated: set[str]) -> dict[str, int] | None:
+        """Batch existence/allocation across groups, with each key's own size.
+
+        Public pages need a definite miss to avoid overwriting a published
+        prefix. Private execution snapshots keep the existing fail-open rule.
+        Addresses are reacquired every step; no cross-step GVA cache is used.
+        """
+        private_keys: list[str] = []
+        public_keys: list[str] = []
+        publication_keys: set[str] = set()
+        for plan in plans:
+            for key in plan.keys.values():
+                if self.layerwise_offload and key in plan.public_keys:
+                    public_keys.append(key)
+                else:
+                    private_keys.append(key)
+            public_keys.extend(plan.publication_keys.values())
+            publication_keys.update(plan.publication_keys.values())
+        # Already selected public pages will be published by this step's
+        # existing writer; another request must not allocate/write them again.
+        missing = self._pool_keys_missing([key for key in private_keys if key not in public_allocated])
+        missing.update(
+            self._pool_keys_missing([key for key in public_keys if key not in public_allocated], fail_open=False)
+        )
+        sizes: dict[str, int] = {}
+        for group_id, plan in enumerate(plans):
+            if not plan.keys and not plan.publication_keys and plan.partial_key is None:
+                continue
+            size = self._global_group_alloc_size(group_id)
+            for key in chain(plan.keys.values(), plan.publication_keys.values()):
+                if key in missing:
+                    if key in sizes and sizes[key] != size:
+                        raise ValueError("A layerwise save key cannot have different allocation sizes")
+                    sizes[key] = size
+            if plan.partial_key is not None:
+                sizes[plan.partial_key] = size
+        addresses: dict[str, int] = {}
+        for keys in self._layerwise_key_batches(list(sizes)):
+            values = self.m_store.batch_alloc(keys, [sizes[key] for key in keys], LAYERWISE_READ_LEASE_TTL_MS)
+            if values is None or len(values) != len(keys):
+                return None
+            allocation_error_logged = False
+            for key, value in zip(keys, values, strict=True):
+                # An SSD sentinel is not a writable address. Public publication
+                # requires a writable allocation; retain the old private-page
+                # policy and never cast UINT64_MAX to a signed device address.
+                if value <= 0:
+                    if not allocation_error_logged:
+                        logger.error("Memcache save allocation failed key=%s gva=%s", key, value)
+                        allocation_error_logged = True
+                    if self.layerwise_offload:
+                        return None
+                if key in publication_keys and not 0 < value < MEMCACHE_SSD_HIT_GVA:
+                    logger.error("Memcache save allocation failed key=%s gva=%s", key, value)
+                    return None
+                addresses[key] = value if 0 < value < MEMCACHE_SSD_HIT_GVA else 0
+        return addresses
+
     def _alloc_gvas_for_save_for_request(
         self, requests: list[ReqMeta], public_allocated: set[str] | None = None
     ) -> bool | None:
-        """Allocate per-group GVA on the worker side right before batch_copy.
-
-        For multi-group models, iterates all KV cache groups and allocates
-        per-group GVAs. Key format: model@group_id@hash@head_or_tp_rank
-        (multi-group) or model@hash@head_or_tp_rank (single-group, backward
-        compat with PR #11585).
-
-        batch_alloc is idempotent, so every write target is allocated fresh
-        within the step and no cross-step GVA cache is kept. Blocks already
-        committed in the pool are filtered out with a medium-agnostic
-        exists check to avoid re-transferring them.
-        """
-        if not self.use_layerwise_transfer:
-            return None
-        if not self.can_put:
+        """Plan first, batch pool RPCs, then scatter addresses to original groups."""
+        if not self.use_layerwise_transfer or not self.can_put:
             return None
         if public_allocated is None:
             public_allocated = set()
         for request in requests:
-            if request.can_save is None or not request.can_save:
+            if not request.can_save:
                 continue
-            block_hashes = request.block_hashes
-
-            all_group_gvas: list[np.ndarray] = []
-            all_group_block_ids: list[np.ndarray] = []
-            all_group_save_keys: list[str] = []
             request.partial_save_gva_per_group = [0] * self.num_kv_cache_groups
             request.public_save_blocks = {}
-            for group_id in range(self.num_kv_cache_groups):
-                block_ids_by_group = (
-                    request.block_ids_by_group_np[group_id]
-                    if (request.block_ids_by_group_np is not None and group_id < len(request.block_ids_by_group_np))
-                    else request.block_ids_np
-                )
-                if block_ids_by_group is None:
-                    raise RuntimeError(f"Block IDs are not initialized for request {request.req_id}")
-                save_owner = self._is_layerwise_save_owner(group_id)
-                keep_snapshot = self.layerwise_offload and request.needs_private_snapshot
-                if group_id not in self.cacheable_group_ids or (not save_owner and not keep_snapshot):
-                    all_group_gvas.append(np.zeros(len(block_ids_by_group), dtype=np.int64))
-                    all_group_block_ids.append(np.asarray(block_ids_by_group, dtype=np.int64))
-                    continue
-                effective_block_size = self.grouped_block_size[group_id]
-                alloc_size = self._global_group_alloc_size(group_id)
-                group_block_hashes = get_block_hashes(block_hashes, effective_block_size, self.hash_block_size)
-
-                save_start_block = request.save_start_token // effective_block_size
-                partial_block_index = get_partial_block_index(
-                    request.target_token_len, effective_block_size, len(group_block_hashes), self.layerwise_offload
-                )
-                save_end_block = self._layerwise_save_full_end(
-                    request, group_id, effective_block_size, partial_block_index
-                )
-                if (
-                    request.load_spec is not None
-                    and request.load_spec.can_load
-                    and not request.load_spec.layerwise_previous_step
-                ):
-                    pool_hit_tokens = (
-                        request.load_spec.kvpool_store_skip_tokens
-                        if request.load_spec.kvpool_store_skip_tokens is not None
-                        else request.load_spec.kvpool_cached_tokens
-                    )
-                    hit_full_blocks = pool_hit_tokens // effective_block_size
-                    save_start_block = max(save_start_block, hit_full_blocks)
-                group_store_mask = (
-                    request.store_masks[group_id]
-                    if request.store_masks is not None and group_id < len(request.store_masks)
-                    else None
-                )
-                end_limit = min(save_end_block, len(block_ids_by_group))
-                if not (
-                    self.layerwise_offload
-                    and request.needs_private_snapshot
-                    and not self.group_uses_align_state[group_id]
-                ):
-                    end_limit = min(end_limit, len(group_block_hashes))
-                candidate_blocks = [
-                    block_idx
-                    for block_idx in range(save_start_block, end_limit)
-                    if group_store_mask is None or block_idx >= len(group_store_mask) or group_store_mask[block_idx]
-                ]
-                candidate_keys: list[str] = []
-                candidate_public_keys: set[str] = set()
-                publication_keys: dict[int, str] = {}
-                for block_idx in candidate_blocks:
-                    if block_idx >= len(group_block_hashes):
-                        key = self._make_layerwise_partial_key(request, group_id, block_idx, request.target_token_len)
-                    else:
-                        block_hash = block_hash_to_str(group_block_hashes[block_idx])
-                        key = self._make_layerwise_full_key(group_id, block_hash)
-                        if keep_snapshot and (
-                            self.group_uses_align_state[group_id]
-                            or self._uses_execution_full_key(request, group_id, block_idx)
-                        ):
-                            publication_keys[block_idx] = key
-                            key = self._layerwise_execution_full_key(request, group_id, block_idx, block_hash)
-                        else:
-                            candidate_public_keys.add(key)
-                    candidate_keys.append(key)
-                partial_key = None
-                if (
-                    keep_snapshot
-                    and partial_block_index is not None
-                    and partial_block_index < len(block_ids_by_group)
-                    and block_ids_by_group[partial_block_index] != 0
-                ):
-                    partial_key = self._make_layerwise_partial_key(
-                        request, group_id, partial_block_index, request.target_token_len
-                    )
-                if keep_snapshot:
-                    pages = self._snapshot_keys.setdefault(request.req_id, {}).setdefault(group_id, {})
-                    # Released window pages no longer belong to this request.
-                    for index in list(pages):
-                        if index >= len(block_ids_by_group) or block_ids_by_group[index] == 0:
-                            del pages[index]
-                    if self.group_uses_align_state[group_id] and (candidate_blocks or partial_key is not None):
-                        pages.clear()
-                    pages.update(
-                        (index, (min((index + 1) * effective_block_size, request.target_token_len), key))
-                        for index, key in zip(candidate_blocks, candidate_keys)
-                    )
-                    if partial_key is not None:
-                        pages[partial_block_index] = (request.target_token_len, partial_key)
-                if not save_owner:
-                    all_group_gvas.append(np.zeros(len(block_ids_by_group), dtype=np.int64))
-                    all_group_block_ids.append(np.asarray(block_ids_by_group, dtype=np.int64))
-                    continue
-                # Skip blocks already committed in the pool. The exists check
-                # is medium-agnostic on purpose: a committed block (DRAM or
-                # SSD) does not need re-saving, and the load path rewarms
-                # SSD blocks on read.
-                if self.layerwise_offload:
-                    private_keys = [key for key in candidate_keys if key not in candidate_public_keys]
-                    missing_keys = self._pool_keys_missing(private_keys)
-                    missing_keys.update(self._pool_keys_missing(list(candidate_public_keys), fail_open=False))
-                else:
-                    missing_keys = self._pool_keys_missing(candidate_keys)
-                missing_keys.difference_update(public_allocated)
-                transfer_blocks = [
-                    block_idx for block_idx, key in zip(candidate_blocks, candidate_keys) if key in missing_keys
-                ]
-
-                # batch_alloc is idempotent: allocating an existing key
-                # returns its current, client-registered GVA. Every write
-                # target is therefore allocated fresh within this step; no
-                # cross-step GVA cache is kept.
-                block_gvas: list[int] = []
-                if transfer_blocks:
-                    transfer_keys = [key for key in candidate_keys if key in missing_keys]
-                    transfer_gvas = self.m_store.batch_alloc(
-                        transfer_keys, [alloc_size] * len(transfer_keys), LAYERWISE_READ_LEASE_TTL_MS
-                    )
-                    if transfer_gvas is None or len(transfer_gvas) != len(transfer_keys):
-                        return False
-                    if any(gva <= 0 for gva in transfer_gvas):
-                        logger.error(
-                            "alloc_gvas FAIL: req=%s group=%d alloc_size=%d alloc_keys=%d gvas_sample=%s fail_count=%d",
-                            request.req_id,
-                            group_id,
-                            alloc_size,
-                            len(transfer_keys),
-                            transfer_gvas[:5],
-                            sum(1 for g in transfer_gvas if g <= 0),
-                        )
-                    # 0 means allocation failed; UINT64_MAX means a readable
-                    # SSD hit. Filter both before converting GVAs to np.int64.
-                    block_gvas = [gva if 0 < gva < MEMCACHE_SSD_HIT_GVA else 0 for gva in transfer_gvas]
-                    for key, gva in zip(transfer_keys, block_gvas):
-                        if gva > 0:
-                            all_group_save_keys.append(key)
-                            if key in candidate_public_keys:
-                                public_allocated.add(key)
-                    if self.layerwise_offload and any(gva <= 0 for gva in transfer_gvas):
-                        return False
-
-                # An immutable public key may contain a different execution's
-                # rounding. Keep our exact pages for intra-request restore,
-                # while publishing missing public pages through the same queue.
-                public_blocks = list(publication_keys)
-                public_keys = list(publication_keys.values())
-                missing_public = self._pool_keys_missing(public_keys, fail_open=False) - public_allocated
-                public_blocks = [idx for idx, key in zip(public_blocks, public_keys) if key in missing_public]
-                public_keys = [key for key in public_keys if key in missing_public]
-                if public_blocks:
-                    allocated = self.m_store.batch_alloc(
-                        public_keys, [alloc_size] * len(public_keys), LAYERWISE_READ_LEASE_TTL_MS
-                    )
-                    if (
-                        allocated is None
-                        or len(allocated) != len(public_keys)
-                        or any(not 0 < gva < MEMCACHE_SSD_HIT_GVA for gva in allocated)
-                    ):
-                        return False
-                    request.public_save_blocks[group_id] = (
-                        block_ids_by_group[public_blocks],
-                        np.asarray(allocated, dtype=np.int64),
-                    )
-                    all_group_save_keys.extend(public_keys)
-                    public_allocated.update(public_keys)
-
-                if partial_key is not None:
-                    # Partial keys are request-scoped: allocate fresh each step.
-                    allocated = self.m_store.batch_alloc(
-                        [partial_key],
-                        [alloc_size],
-                        LAYERWISE_READ_LEASE_TTL_MS,
-                    )
-                    if not allocated or len(allocated) != 1:
-                        return False
-                    partial_gva = allocated[0]
-                    if 0 < partial_gva < MEMCACHE_SSD_HIT_GVA:
-                        all_group_save_keys.append(partial_key)
-                    elif partial_gva <= 0:
-                        logger.error(
-                            "alloc_gvas: partial allocation failed req=%s group=%d block=%d gva=%d",
-                            request.req_id,
-                            group_id,
-                            partial_block_index,
-                            partial_gva,
-                        )
-                    if self.layerwise_offload and partial_gva <= 0:
-                        return False
-                    request.partial_save_gva_per_group[group_id] = (
-                        partial_gva if 0 < partial_gva < MEMCACHE_SSD_HIT_GVA else 0
-                    )
-
-                logger.debug(
-                    "alloc_gvas: req=%s group=%d eff_bs=%d save_blocks=[%d,%d) "
-                    "transfer_keys=%d committed=%d masked=%s alloc_size=%d",
-                    request.req_id,
-                    group_id,
-                    effective_block_size,
-                    save_start_block,
-                    save_end_block,
-                    len(transfer_blocks),
-                    len(candidate_blocks) - len(transfer_blocks),
-                    group_store_mask is not None,
-                    alloc_size,
-                )
-
-                # Pad block_gvas to match block_ids length (fill 0 for non-transferred blocks)
-                full_gvas = [0] * len(block_ids_by_group)
-                for blk_idx, gva in zip(transfer_blocks, block_gvas):
-                    if blk_idx < len(full_gvas):
-                        full_gvas[blk_idx] = gva
-
+            plans = [self._plan_save_group(request, group_id) for group_id in range(self.num_kv_cache_groups)]
+            addresses = self._allocate_save_groups(plans, public_allocated)
+            if addresses is None:
+                return False
+            all_group_gvas: list[np.ndarray] = []
+            for group_id, plan in enumerate(plans):
+                full_gvas = [0] * len(plan.block_ids)
+                for index, key in plan.keys.items():
+                    full_gvas[index] = addresses.get(key, 0)
                 all_group_gvas.append(np.asarray(full_gvas, dtype=np.int64))
-                all_group_block_ids.append(np.asarray(block_ids_by_group, dtype=np.int64))
-
+                public_blocks = [index for index, key in plan.publication_keys.items() if addresses.get(key, 0)]
+                if public_blocks:
+                    request.public_save_blocks[group_id] = (
+                        plan.block_ids[public_blocks],
+                        np.asarray(
+                            [addresses[plan.publication_keys[index]] for index in public_blocks], dtype=np.int64
+                        ),
+                    )
+                if plan.partial_key is not None:
+                    request.partial_save_gva_per_group[group_id] = addresses.get(plan.partial_key, 0)
+                public_allocated.update(key for key in plan.public_keys if addresses.get(key, 0))
+                public_allocated.update(key for key in plan.publication_keys.values() if addresses.get(key, 0))
             if all_group_gvas:
-                request.save_keys = all_group_save_keys
+                request.save_keys = [key for key, address in addresses.items() if address]
                 request.block_gvas_by_group_np = all_group_gvas
-                request.block_ids_by_group_np = all_group_block_ids
+                request.block_ids_by_group_np = [plan.block_ids for plan in plans]
                 request.block_gvas_np = all_group_gvas[0]
                 request.gva_block_offset = 0
         return None

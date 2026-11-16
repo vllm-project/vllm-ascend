@@ -7,6 +7,8 @@ entries:
       and compressor-state caches. Cache format v2 excludes overlapping A5
       indexer transfer views and starts a separate namespace from earlier
       experimental cache objects.
+      Save preparation batches pool queries and mixed-size allocations across
+      cache groups while preserving snapshot ownership and publication fences.
     model: deepseek-v4
   - category: bugfix
     text: >-
