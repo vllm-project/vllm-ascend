@@ -1,0 +1,6 @@
+pr: 22014
+entries:
+  - category: performance
+    text: >-
+      Added persistent compilation caching for the FX fusion backend to reduce
+      repeated compilation during warm restarts with enable_npugraph_ex=false.
