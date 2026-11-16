@@ -129,7 +129,8 @@ _A3_560T_LABEL_MAP = {
 _A3_OPS_PARTITION = "a3-2-ops"
 _OPS_TEST_PREFIX = "tests/e2e/pull_request/two_card/ops/"
 # Used only if the operator partition is given more than one group. The
-# configured count is 1, so these files are not split by estimated time.
+# configured count is 1, so scheduling does not split these files. The run
+# script places one pytest process on each card of that runner.
 _OPS_ESTIMATED_SECONDS = 45.0
 
 # Populated by _load_runner_mapping(). Ordered list of
