@@ -222,14 +222,15 @@ def get_pr_files(pr_number: int) -> list[str]:
 
 
 def get_pr_reviews(pr_number: int) -> dict[str, str]:
-    """Latest review state per user, ignoring dismissals.
+    """Latest review state per user, treating dismissals as approvals.
 
-    The repo ruleset auto-dismisses reviews on every push (and the gate
-    authors are not repo admins, so that setting cannot be turned off).
-    Ignoring DISMISSED here means an approval survives pushes: an owner
-    approves once and the gate stays satisfied while they leave it in
-    place. To withdraw an approval, an owner submits a new review that
-    requests changes (which blocks the gate) instead of dismissing.
+    The repo ruleset auto-dismisses reviews on every push, and GitHub
+    overwrites the review's state to DISMISSED in the API - the original
+    APPROVED state is unrecoverable. Per repo policy, approvals survive
+    pushes, so a DISMISSED review is counted as an approval: owners approve
+    once and stay approved while they leave the review in place. To withdraw
+    an approval, an owner submits a new review that requests changes (which
+    blocks the gate) instead of dismissing.
     """
     data = gh_api("repos/{owner}/{repo}/pulls/{pr}/reviews", pr=pr_number)
     latest: dict[str, str] = {}
@@ -240,8 +241,7 @@ def get_pr_reviews(pr_number: int) -> dict[str, str]:
             continue
         state = review["state"]
         if state == "DISMISSED":
-            # Keep the previous state: approvals survive pushes (see above).
-            continue
+            state = "APPROVED"
         if state in ("APPROVED", "CHANGES_REQUESTED"):
             latest[user] = state
     return latest

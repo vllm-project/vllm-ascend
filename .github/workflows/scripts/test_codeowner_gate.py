@@ -416,12 +416,21 @@ class TestDismissalSurvivesPush:
     are ignored and the previous state persists."""
 
     def test_approval_survives_dismissal(self, monkeypatch):
+        # GitHub rewrites the review state to DISMISSED on push; the gate
+        # must treat a dismissed review as an approval (repo policy).
         data = [
             {"user": {"login": "alice"}, "state": "APPROVED"},
             {"user": {"login": "alice"}, "state": "DISMISSED"},  # auto-dismiss on push
         ]
         monkeypatch.setattr(gate, "gh_api", lambda endpoint, **kw: data)
         assert gate.get_pr_reviews(1) == {"alice": "APPROVED"}
+
+    def test_dismissed_only_review_counts_as_approval(self, monkeypatch):
+        # The API no longer exposes the original APPROVED record once
+        # dismissed; the DISMISSED entry is all we have.
+        data = [{"user": {"login": "bob"}, "state": "DISMISSED"}]
+        monkeypatch.setattr(gate, "gh_api", lambda endpoint, **kw: data)
+        assert gate.get_pr_reviews(1) == {"bob": "APPROVED"}
 
     def test_changes_requested_overrides_approval(self, monkeypatch):
         data = [
